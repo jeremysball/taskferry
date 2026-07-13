@@ -62,11 +62,28 @@ running; see Limitations.
 ### `opencode_result(task_id)`
 
 Once a task is `done` or `crashed`, parses its log (opencode's own
-`--format json` NDJSON event stream, one JSON object per line) for `type:
-"text"` events and concatenates their `part.text` into the final assistant
-message. Also returns `sessionId`, `tokens`, and `cost` pulled from the
-`step_finish` event. Returns a polite "still running" message instead of a
-partial result if called too early.
+`--format json` NDJSON event stream, one JSON object per line) into two
+fields:
+
+- `message`: only the model's final turn, the `text` events belonging to
+  the messageID whose `step_finish` reason was `"stop"`. This is the actual
+  answer, not narration from earlier steps.
+- `narration`: every `text` event across every step, in order, separated by
+  blank lines. Useful when a run does several tool calls with commentary in
+  between and you want the fuller picture, not just the closing line.
+
+A single-step run (no tool calls) has `message === narration`. Also returns
+`sessionId`, `tokens`, and `cost` pulled from the `step_finish` events.
+Returns a polite "still running" message instead of a partial result if
+called too early.
+
+Naively joining every `text` event regardless of step (an earlier version
+of this tool did exactly that) glues "I'm about to run `ls`" directly onto
+the real answer with no separator, since opencode's steps look like `text`
+(narration) → `tool_use` → `step_finish` (`reason: "tool-calls"`) → `text`
+(answer) → `step_finish` (`reason: "stop"`). Verified by hand: a prompt
+asking opencode to `ls` and report a count produced two `text` events, one
+per step; `message` now returns only the second.
 
 ### `opencode_list()`
 

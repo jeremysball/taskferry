@@ -165,10 +165,20 @@ export function result(taskId) {
     return { taskId, status: "running", message: "task is still running; poll opencode_status first" };
   }
 
-  const textParts = [];
+  // opencode's own steps look like: text (narration) -> tool_use -> step_finish
+  // (reason "tool-calls") -> text -> step_finish (reason "stop"), one messageID
+  // per step. Naively joining every text event across every step glues
+  // "I'm about to run ls" onto the actual answer with no separator -- neither
+  // a clean final answer nor a real transcript. Only the messageID whose step
+  // ended in reason "stop" is the model's actual final turn; everything
+  // earlier is intermediate narration, kept separately as `narration` so
+  // nothing is silently dropped, but not returned as `message`.
   let sessionId = task.sessionId;
   let tokens = null;
   let cost = null;
+  const textByMessageId = new Map();
+  const textOrder = [];
+  let finalMessageId = null;
 
   let raw = "";
   try {
@@ -187,13 +197,25 @@ export function result(taskId) {
     }
     if (evt.sessionID) sessionId = evt.sessionID;
     if (evt.type === "text" && evt.part && typeof evt.part.text === "string") {
-      textParts.push(evt.part.text);
+      const mid = evt.part.messageID;
+      if (!textByMessageId.has(mid)) {
+        textByMessageId.set(mid, []);
+        textOrder.push(mid);
+      }
+      textByMessageId.get(mid).push(evt.part.text);
     }
     if (evt.type === "step_finish" && evt.part) {
       if (evt.part.tokens) tokens = evt.part.tokens;
       if (typeof evt.part.cost === "number") cost = evt.part.cost;
+      if (evt.part.reason === "stop") finalMessageId = evt.part.messageID;
     }
   }
+
+  // Fall back to the last messageID seen if no explicit "stop" step_finish
+  // was found (e.g. a crashed run that never reached one).
+  const targetId = finalMessageId ?? textOrder[textOrder.length - 1];
+  const message = targetId && textByMessageId.has(targetId) ? textByMessageId.get(targetId).join("") : "";
+  const narration = textOrder.map((mid) => textByMessageId.get(mid).join("")).join("\n\n");
 
   return {
     taskId,
@@ -204,7 +226,8 @@ export function result(taskId) {
     sessionId,
     tokens,
     cost,
-    message: textParts.join(""),
+    message,
+    narration,
     logPath: task.logPath,
   };
 }

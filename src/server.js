@@ -63,7 +63,7 @@ server.registerTool(
   {
     title: "Fetch opencode task result",
     description:
-      "Return the final assistant message and metadata (tokens, cost, session id) for a finished task, parsed from opencode's own --format json event stream. Errors politely if the task is still running.",
+      "Return the final assistant message and metadata (tokens, cost, session id) for a finished task, parsed from opencode's own --format json event stream. `message` is only the model's last turn (after all tool calls finish); `narration` includes intermediate step narration too, in order. Errors politely if the task is still running.",
     inputSchema: {
       task_id: z.string().describe("Task id returned by opencode_dispatch."),
     },

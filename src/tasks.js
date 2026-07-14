@@ -658,6 +658,45 @@ export function createTaskManager({
     });
   }
 
+  async function advisor({ prompt, directory, model, variant, session_id, timeout_ms } = {}) {
+    ensureStateLoaded();
+    if (!model || typeof model !== "string") {
+      throw new Error("error: model is required\nhelp: taskferry_advisor requires a provider/model string, e.g. \"openai/gpt-5.6-sol\"");
+    }
+    const resolved = resolveAdvisorSession(session_id);
+    const dispatched = dispatch({ prompt, directory, model, variant, sessionId: resolved.sessionId });
+    const settled = await poll(dispatched.id, timeout_ms != null ? { timeoutMs: timeout_ms } : {});
+
+    const resetFields = resolved.reset ? { previous_session_id: resolved.previousSessionId } : {};
+
+    if (settled.status === "running" || settled.status === "queued") {
+      const logSessionId = settled.sessionId || readSessionIdFromLog(dispatched.logPath);
+      if (logSessionId) touchAdvisorSession(logSessionId);
+      return {
+        status: "running",
+        task_id: dispatched.id,
+        session_id: logSessionId ?? null,
+        session_reset: resolved.reset,
+        ...resetFields,
+        note: `still running — call taskferry_poll or taskferry_advisor again with session_id "${logSessionId ?? dispatched.id}" to continue`,
+      };
+    }
+
+    const detail = result(dispatched.id, { fields: ["message", "sessionId", "tokens", "cost", "exitCode", "signal", "spawnError"] });
+    if (detail.sessionId) touchAdvisorSession(detail.sessionId);
+
+    return {
+      status: detail.status,
+      task_id: dispatched.id,
+      session_id: detail.sessionId ?? null,
+      session_reset: resolved.reset,
+      ...resetFields,
+      message: detail.message,
+      ...(detail.status === "done" ? { tokens: detail.tokens, cost: detail.cost } : {}),
+      ...(detail.status !== "done" ? { exitCode: detail.exitCode, signal: detail.signal, spawnError: detail.spawnError } : {}),
+    };
+  }
+
   function settleWaiters(taskId) {
     const list = waiters.get(taskId);
     if (!list) return;
@@ -889,9 +928,8 @@ export function createTaskManager({
     result,
     tail,
     summarize: summarizeTask,
+    advisor,
     paths: { STATE_DIR: stateDir, LOG_DIR, SUMMARY_DIR, TASKS_FILE },
-    __resolveAdvisorSessionForTest: resolveAdvisorSession,
-    __touchAdvisorSessionForTest: touchAdvisorSession,
   };
 }
 

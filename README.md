@@ -68,7 +68,7 @@ rolling five-second window start immediately; later tasks return
 - `TASKFERRY_DISPATCH_WINDOW_MS`: rolling-window duration in
   milliseconds. Defaults to `5000`.
 
-### `taskferry_wait(task_id, timeout_ms?, tail_chars?)`
+### `taskferry_poll(task_id, timeout_ms?, tail_chars?)`
 
 Blocks until the task's real `exit` event fires, or `timeout_ms` elapses
 (capped at 45000 regardless of what's passed, to stay under Claude Code's
@@ -80,6 +80,28 @@ instead of looping on `taskferry_status` yourself. If it returns with
 `tail_chars` to include the trailing parsed narration from a task that is
 still running after the timeout, plus its full character count and whether
 the tail was truncated.
+
+### `taskferry_advisor(prompt, directory, model, variant?, session_id?, timeout_ms?)`
+
+A blocking "ask a bigger model" call: dispatches like `taskferry_dispatch`,
+then polls internally and returns the answer inline instead of requiring a
+separate `taskferry_poll` round-trip. Use it the way a weaker model consults
+a stronger one for planning or hard-debugging help mid-task, not for
+open-ended background work (use `taskferry_dispatch` for that).
+
+- `model` is required, with no default (unlike `taskferry_dispatch`); the
+  caller picks the advisor.
+- Capped at 45000ms like `taskferry_poll`. If it times out before the
+  advisor answers, the response is `status: "running"` plus `task_id` and
+  `session_id`; call `taskferry_poll` or `taskferry_advisor` again (with
+  that `session_id`) to continue.
+- `session_id` resumes a prior advisor exchange. If that session has gone
+  idle past `TASKFERRY_ADVISOR_SESSION_TTL_MS` (default 30 minutes) or is
+  unrecognized (e.g. a typo, or from before a server restart), a fresh
+  session starts automatically instead of erroring; the response's
+  `session_reset` is `true` and `previous_session_id` holds the id that
+  wasn't reused. This avoids ever silently resuming a conversation whose
+  prompt cache has gone cold.
 
 ### `taskferry_cancel(task_id, grace_ms?)`
 
@@ -178,7 +200,7 @@ rejected as of mid-2026:
   channels are a separate registration path. Worth revisiting if this tool
   needs true async push later, but out of scope for now.
 
-`taskferry_wait` is the practical middle ground: one blocking call that
+`taskferry_poll` is the practical middle ground: one blocking call that
 resolves the moment the task's exit event fires, capped well under Claude
 Code's MCP tool-call timeout so it degrades to a clean "still running"
 rather than an error. It gets Agent-tool-like ergonomics (dispatch, then
@@ -346,7 +368,7 @@ against a different directory:
 ```bash
 node src/smoke-test.js          # dispatch, poll status, fetch result; expects PONG
 node src/cancel-smoke-test.js   # dispatch a sleep, cancel it, confirm the process group is gone
-node src/wait-smoke-test.js     # taskferry_wait resolving early and hitting its cap
+node src/poll-smoke-test.js     # taskferry_poll resolving early and hitting its cap
 ```
 
 Each prints a `... SMOKE TEST PASSED` or `FAILED` line and exits

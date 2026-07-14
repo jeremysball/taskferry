@@ -13,7 +13,7 @@ import { createTaskManager } from "./tasks.js";
 // runs synchronously in the constructor, same as the old module-level code
 // did at import time). `tasksFixture` may be an array or `(logDir) => array`
 // for fixtures whose logPath needs to point inside the real log dir.
-function makeManager({ tasksFixture = [], logs = {}, spawnFn, killFn, listModelsFn, verifySummaryAgentFn, maxDispatchesPerWindow, dispatchWindowMs } = {}) {
+function makeManager({ tasksFixture = [], logs = {}, spawnFn, killFn, listModelsFn, verifySummaryAgentFn, maxDispatchesPerWindow, dispatchWindowMs, advisorSessionTtlMs } = {}) {
   const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-test-"));
   const logDir = path.join(stateDir, "logs");
   fs.mkdirSync(logDir, { recursive: true });
@@ -32,6 +32,7 @@ function makeManager({ tasksFixture = [], logs = {}, spawnFn, killFn, listModels
     verifySummaryAgentFn: verifySummaryAgentFn ?? (async () => {}),
     ...(maxDispatchesPerWindow != null ? { maxDispatchesPerWindow } : {}),
     ...(dispatchWindowMs != null ? { dispatchWindowMs } : {}),
+    ...(advisorSessionTtlMs != null ? { advisorSessionTtlMs } : {}),
   });
 }
 
@@ -144,7 +145,7 @@ describe("dispatch() lifecycle, driven through an injected spawnFn (no real open
     const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
     assert.equal(dispatched.status, "running");
     assert.equal(dispatched.pid, 555);
-    assert.match(dispatched.next, /taskferry_wait or taskferry_status/);
+    assert.match(dispatched.next, /taskferry_poll or taskferry_status/);
 
     child.emit("exit", 0, null);
 
@@ -257,7 +258,7 @@ describe("dispatch queue", () => {
 
     mgr.dispatch({ prompt: "first", directory: os.tmpdir() });
     const queued = mgr.dispatch({ prompt: "second", directory: os.tmpdir() });
-    const waiting = mgr.wait(queued.id, { timeoutMs: 100 });
+    const waiting = mgr.poll(queued.id, { timeoutMs: 100 });
     mgr.cancel(queued.id);
 
     assert.equal((await waiting).status, "cancelled");
@@ -349,9 +350,9 @@ describe("unknown task_id (status/cancel/wait/result share one error path)", () 
     assert.throws(() => mgr.result("nope"), /error: unknown task_id: nope/);
   });
 
-  test("wait() throws synchronously (not a rejected promise) for an unknown id", () => {
+  test("poll() throws synchronously (not a rejected promise) for an unknown id", () => {
     const mgr = makeManager();
-    assert.throws(() => mgr.wait("nope"), /error: unknown task_id: nope/);
+    assert.throws(() => mgr.poll("nope"), /error: unknown task_id: nope/);
   });
 });
 
@@ -409,10 +410,10 @@ describe("status() log activity (tells a stuck-before-first-event task apart fro
   });
 });
 
-describe("wait()", () => {
+describe("poll()", () => {
   test("resolves immediately for a non-running task", async () => {
     const mgr = makeManager({ tasksFixture: [baseTask({ id: "t1", status: "crashed", exitCode: 1 })] });
-    const settled = await mgr.wait("t1", { timeoutMs: 50 });
+    const settled = await mgr.poll("t1", { timeoutMs: 50 });
     assert.equal(settled.status, "crashed");
     assert.equal(settled.exitCode, 1);
   });
@@ -422,7 +423,7 @@ describe("wait()", () => {
     const mgr = makeManager({ spawnFn: () => child });
     const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
 
-    const waitPromise = mgr.wait(dispatched.id, { timeoutMs: 5000 });
+    const waitPromise = mgr.poll(dispatched.id, { timeoutMs: 5000 });
     child.emit("exit", 0, null);
     const settled = await waitPromise;
     assert.equal(settled.status, "done");
@@ -433,7 +434,7 @@ describe("wait()", () => {
     const mgr = makeManager({ spawnFn: () => child });
     const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
 
-    const settled = await mgr.wait(dispatched.id, { timeoutMs: 20 });
+    const settled = await mgr.poll(dispatched.id, { timeoutMs: 20 });
     assert.equal(settled.status, "running");
     assert.equal("outputTail" in settled, false);
   });
@@ -448,11 +449,222 @@ describe("wait()", () => {
       JSON.stringify({ type: "text", part: { messageID: "m1", text: output } })
     );
 
-    const settled = await mgr.wait(dispatched.id, { timeoutMs: 20, tailChars: 6 });
+    const settled = await mgr.poll(dispatched.id, { timeoutMs: 20, tailChars: 6 });
     assert.equal(settled.status, "running");
     assert.equal(settled.outputTail, " chunk");
     assert.equal(settled.outputTailTotalChars, output.length);
     assert.equal(settled.outputTailTruncated, true);
+  });
+});
+
+describe("advisor()", () => {
+  test("requires a model", async () => {
+    const mgr = makeManager();
+    await assert.rejects(
+      () => mgr.advisor({ prompt: "hi", directory: os.tmpdir() }),
+      /error: model is required/
+    );
+  });
+
+  test("dispatches with the given model/variant and resolves inline once the task finishes", async () => {
+    const child = fakeChild();
+    let captured = null;
+    const mgr = makeManager({
+      spawnFn: (cmd, args, opts) => {
+        captured = args;
+        return child;
+      },
+    });
+
+    const advisorPromise = mgr.advisor({
+      prompt: "how should I shard this counter?",
+      directory: os.tmpdir(),
+      model: "openai/gpt-5.6-sol",
+      variant: "max",
+      timeout_ms: 5000,
+    });
+
+    assert.deepEqual(captured, [
+      "run", "--dir", os.tmpdir(), "--auto", "--format", "json",
+      "-m", "openai/gpt-5.6-sol", "--variant", "max", "--", "how should I shard this counter?",
+    ]);
+
+    // Simulate opencode writing its result log, then exiting.
+    const row1 = mgr.list().tasks[0];
+    const dispatched = { id: row1.id, logPath: path.join(mgr.paths.LOG_DIR, `${row1.id}.ndjson`) };
+    fs.writeFileSync(
+      dispatched.logPath,
+      [
+        JSON.stringify({ type: "text", part: { messageID: "m1", text: "Shard by key, sum on read." } }),
+        JSON.stringify({ type: "step_finish", part: { messageID: "m1", reason: "stop", tokens: { total: 50 }, cost: 0.002 } }),
+        JSON.stringify({ sessionID: "ses_new" }),
+      ].join("\n")
+    );
+    child.emit("exit", 0, null);
+
+    const advised = await advisorPromise;
+    assert.equal(advised.status, "done");
+    assert.equal(advised.message, "Shard by key, sum on read.");
+    assert.deepEqual(advised.tokens, { total: 50 });
+    assert.equal(advised.cost, 0.002);
+    assert.equal(advised.session_id, "ses_new");
+    assert.equal(advised.session_reset, false);
+    assert.equal("previous_session_id" in advised, false);
+  });
+
+  test("returns status: running with a task_id and session_id when the timeout elapses first", async () => {
+    const child = fakeChild();
+    const mgr = makeManager({ spawnFn: () => child });
+
+    const advisorPromise = mgr.advisor({
+      prompt: "long question",
+      directory: os.tmpdir(),
+      model: "openai/gpt-5.6-sol",
+      timeout_ms: 20,
+    });
+    const row2 = mgr.list().tasks[0];
+    const dispatched = { id: row2.id, logPath: path.join(mgr.paths.LOG_DIR, `${row2.id}.ndjson`) };
+    fs.writeFileSync(dispatched.logPath, JSON.stringify({ sessionID: "ses_midrun" }));
+
+    const advised = await advisorPromise;
+    assert.equal(advised.status, "running");
+    assert.equal(advised.task_id, dispatched.id);
+    assert.equal(advised.session_id, "ses_midrun");
+    assert.match(advised.note, /taskferry_poll or taskferry_advisor again with session_id/);
+  });
+
+  test("when the timeout elapses before opencode has written a session id, the note points at taskferry_poll with task_id instead of fabricating a session_id", async () => {
+    const child = fakeChild();
+    const mgr = makeManager({ spawnFn: () => child });
+
+    const advisorPromise = mgr.advisor({
+      prompt: "long question",
+      directory: os.tmpdir(),
+      model: "openai/gpt-5.6-sol",
+      timeout_ms: 20,
+    });
+    // No log file written at all -- opencode hasn't emitted a session id yet.
+
+    const advised = await advisorPromise;
+    assert.equal(advised.status, "running");
+    assert.equal(advised.session_id, null);
+    assert.match(advised.note, /taskferry_poll with task_id/);
+    assert.equal(advised.note.includes('session_id ""'), false);
+  });
+
+  test("a dispatch validation error is reported under taskferry_advisor, not taskferry_dispatch", async () => {
+    const mgr = makeManager();
+    await assert.rejects(
+      () => mgr.advisor({ prompt: "", directory: os.tmpdir(), model: "openai/gpt-5.6-sol" }),
+      (err) => {
+        assert.match(err.message, /taskferry_advisor requires a non-empty prompt string/);
+        assert.equal(err.message.includes("taskferry_dispatch"), false);
+        return true;
+      }
+    );
+  });
+
+  test("a fresh session_id within the TTL is passed through to dispatch (--continue --session)", async () => {
+    const child = fakeChild();
+    let captured = null;
+    const mgr = makeManager({
+      advisorSessionTtlMs: 60000,
+      spawnFn: (cmd, args) => {
+        captured = args;
+        return child;
+      },
+    });
+
+    // First call establishes ses_live in the registry via its own result.
+    const firstPromise = mgr.advisor({ prompt: "q1", directory: os.tmpdir(), model: "openai/gpt-5.6-sol" });
+    const firstRow = mgr.list().tasks[0];
+    const firstTask = { id: firstRow.id, logPath: path.join(mgr.paths.LOG_DIR, `${firstRow.id}.ndjson`) };
+    fs.writeFileSync(
+      firstTask.logPath,
+      [
+        JSON.stringify({ type: "text", part: { messageID: "m1", text: "answer one" } }),
+        JSON.stringify({ type: "step_finish", part: { messageID: "m1", reason: "stop" } }),
+        JSON.stringify({ sessionID: "ses_live" }),
+      ].join("\n")
+    );
+    child.emit("exit", 0, null);
+    const first = await firstPromise;
+    assert.equal(first.session_id, "ses_live");
+
+    // Second call resumes ses_live -- still fresh, no reset.
+    const secondPromise = mgr.advisor({
+      prompt: "q2 follow-up",
+      directory: os.tmpdir(),
+      model: "openai/gpt-5.6-sol",
+      session_id: "ses_live",
+    });
+    assert.equal(captured.includes("--continue"), true);
+    assert.equal(captured[captured.indexOf("--session") + 1], "ses_live");
+
+    const secondTask = mgr.list().tasks[0];
+    const secondTaskLog = path.join(mgr.paths.LOG_DIR, `${secondTask.id}.ndjson`);
+    fs.writeFileSync(
+      secondTaskLog,
+      [
+        JSON.stringify({ type: "text", part: { messageID: "m2", text: "answer two" } }),
+        JSON.stringify({ type: "step_finish", part: { messageID: "m2", reason: "stop" } }),
+        JSON.stringify({ sessionID: "ses_live" }),
+      ].join("\n")
+    );
+    child.emit("exit", 0, null);
+    const second = await secondPromise;
+    assert.equal(second.session_reset, false);
+    assert.equal(second.session_id, "ses_live");
+  });
+
+  test("an expired session_id starts fresh and reports session_reset", async () => {
+    const child = fakeChild();
+    let captured = null;
+    const mgr = makeManager({
+      advisorSessionTtlMs: 10,
+      spawnFn: (cmd, args) => {
+        captured = args;
+        return child;
+      },
+    });
+
+    const advisorPromise = mgr.advisor({
+      prompt: "resuming after a nap",
+      directory: os.tmpdir(),
+      model: "openai/gpt-5.6-sol",
+      session_id: "ses_long_gone",
+    });
+
+    assert.equal(captured.includes("--continue"), false);
+
+    const row4 = mgr.list().tasks[0];
+    const dispatched = { id: row4.id, logPath: path.join(mgr.paths.LOG_DIR, `${row4.id}.ndjson`) };
+    fs.writeFileSync(
+      dispatched.logPath,
+      [
+        JSON.stringify({ type: "text", part: { messageID: "m1", text: "starting fresh" } }),
+        JSON.stringify({ type: "step_finish", part: { messageID: "m1", reason: "stop" } }),
+        JSON.stringify({ sessionID: "ses_brand_new" }),
+      ].join("\n")
+    );
+    child.emit("exit", 0, null);
+
+    const advised = await advisorPromise;
+    assert.equal(advised.session_reset, true);
+    assert.equal(advised.previous_session_id, "ses_long_gone");
+    assert.equal(advised.session_id, "ses_brand_new");
+  });
+
+  test("a crashed advisor task surfaces exitCode/spawnError, not a thrown error", async () => {
+    const child = fakeChild();
+    const mgr = makeManager({ spawnFn: () => child });
+
+    const advisorPromise = mgr.advisor({ prompt: "hi", directory: os.tmpdir(), model: "openai/gpt-5.6-sol" });
+    child.emit("exit", 1, null);
+
+    const advised = await advisorPromise;
+    assert.equal(advised.status, "crashed");
+    assert.equal(advised.exitCode, 1);
   });
 });
 

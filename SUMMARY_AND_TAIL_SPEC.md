@@ -7,7 +7,7 @@ Add two observation tools for work delegated through `taskferry_dispatch`:
 - `taskferry_tail` gives an immediate, bounded view of the newest model text.
 - `taskferry_summary` creates a short, semantic progress report from the task's observed narration.
 
-The tools complement existing interfaces. `taskferry_status` remains the source of lifecycle state, `taskferry_wait` remains the blocking lifecycle primitive, and `taskferry_result` remains the full completed-task result.
+The tools complement existing interfaces. `taskferry_status` remains the source of lifecycle state, `taskferry_poll` remains the blocking lifecycle primitive, and `taskferry_result` remains the full completed-task result.
 
 ## Design Decisions
 
@@ -15,7 +15,7 @@ The tools complement existing interfaces. `taskferry_status` remains the source 
 
 "Text" means the most recent parsed `type: "text"` event, not a reconstructed multi-event model turn. This matches the command's purpose: immediate access to the last emitted text without reading an unbounded log. Text limits are Unicode code points, not JavaScript UTF-16 code units.
 
-`taskferry_summary` is asynchronous. A semantic summary requires a model call, which may exceed an MCP client's request timeout. It runs under a dedicated, tool-denied OpenCode agent using `opencode-go/deepseek-v4-flash`, and immediately returns that task's identifier. The caller waits for and reads it using the existing `taskferry_wait` and `taskferry_result` tools.
+`taskferry_summary` is asynchronous. A semantic summary requires a model call, which may exceed an MCP client's request timeout. It runs under a dedicated, tool-denied OpenCode agent using `opencode-go/deepseek-v4-flash`, and immediately returns that task's identifier. The caller waits for and reads it using the existing `taskferry_poll` and `taskferry_result` tools.
 
 The exact DeepSeek model ID was verified with `opencode models` on 2026-07-13.
 
@@ -44,7 +44,7 @@ truncated: true
 
 `text` is the entire latest text event when it is no longer than `chars`; otherwise it is its final `chars` Unicode code points. `textTotalChars` reports the complete event length. `truncated` is true exactly when content was omitted.
 
-The `status` is captured with the log read. It may change immediately afterward, so it is advisory; callers requiring an authoritative terminal state use `taskferry_wait` or `taskferry_status`.
+The `status` is captured with the log read. It may change immediately afterward, so it is advisory; callers requiring an authoritative terminal state use `taskferry_poll` or `taskferry_status`.
 
 When a known task has emitted no text events, return a successful, definitive empty result:
 
@@ -54,7 +54,7 @@ status: running
 text: none observed yet
 textTotalChars: 0
 truncated: false
-help[1]: Run taskferry_wait with task_id "oc_..." to wait for task output
+help[1]: Run taskferry_poll with task_id "oc_..." to wait for task output
 ```
 
 An unknown task follows the existing shared `error:` and `help:` response path. An invalid `chars` value is a usage error, before reading the log.
@@ -104,7 +104,7 @@ summaryTask:
   id: oc_summary
   status: queued | running
   model: opencode-go/deepseek-v4-flash
-next: Run taskferry_wait with task_id "oc_summary", then taskferry_result with task_id "oc_summary"
+next: Run taskferry_poll with task_id "oc_summary", then taskferry_result with task_id "oc_summary"
 ```
 
 The summary task uses the normal task manager lifecycle. It appears in `taskferry_list`, can be waited on, and can be cancelled. `taskferry_result` returns the report in its existing `message` field. If a server restart changes an active summary task to `unknown`, it is unavailable: `taskferry_result` must return a definitive incomplete-state response rather than parse partial text.
@@ -195,5 +195,5 @@ message: The final assistant turn only.
 
 - Streaming text or push notifications.
 - A persistent incremental summary that mutates as the source task runs.
-- Replacing `taskferry_wait`, `taskferry_result`, or full narration retrieval.
+- Replacing `taskferry_poll`, `taskferry_result`, or full narration retrieval.
 - Automatic summarization, which would create unexpected model calls and external data transfer.

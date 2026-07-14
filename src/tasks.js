@@ -10,7 +10,7 @@ const DEFAULT_STATE_DIR =
   path.join(process.env.XDG_STATE_HOME || path.join(os.homedir(), ".local", "state"), "taskferry");
 
 // The MCP tool-call default timeout in Claude Code is 60s (MCP_TOOL_TIMEOUT).
-// Cap the internal wait below that so a long task returns a clean
+// Cap the internal poll below that so a long task returns a clean
 // "still running" instead of the whole tool call erroring out from the
 // client side with no result at all.
 const MAX_WAIT_MS = 45000;
@@ -56,6 +56,10 @@ const DEFAULT_DISPATCH_WINDOW_MS = positiveInteger(
   Number(process.env.TASKFERRY_DISPATCH_WINDOW_MS),
   5000
 );
+const DEFAULT_ADVISOR_SESSION_TTL_MS = positiveInteger(
+  Number(process.env.TASKFERRY_ADVISOR_SESSION_TTL_MS),
+  30 * 60 * 1000
+);
 
 // Factory rather than a module-level singleton, so tests can construct an
 // isolated instance with an injected spawnFn/killFn (no real `opencode`
@@ -79,12 +83,14 @@ export function createTaskManager({
   stateDir = DEFAULT_STATE_DIR,
   maxDispatchesPerWindow = DEFAULT_MAX_DISPATCHES_PER_WINDOW,
   dispatchWindowMs = DEFAULT_DISPATCH_WINDOW_MS,
+  advisorSessionTtlMs = DEFAULT_ADVISOR_SESSION_TTL_MS,
 } = {}) {
   const LOG_DIR = path.join(stateDir, "logs");
   const SUMMARY_DIR = path.join(stateDir, "summaries");
   const TASKS_FILE = path.join(stateDir, "tasks.json");
   const dispatchLimit = positiveInteger(maxDispatchesPerWindow, DEFAULT_MAX_DISPATCHES_PER_WINDOW);
   const dispatchWindow = positiveInteger(dispatchWindowMs, DEFAULT_DISPATCH_WINDOW_MS);
+  const advisorTtl = positiveInteger(advisorSessionTtlMs, DEFAULT_ADVISOR_SESSION_TTL_MS);
   for (const dir of [stateDir, LOG_DIR, SUMMARY_DIR]) {
     fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
     fs.chmodSync(dir, 0o700);
@@ -105,11 +111,18 @@ export function createTaskManager({
   // persist(), and a Timeout isn't serializable data.
   const escalationTimers = new Map();
 
-  // Pending taskferry_wait callbacks, keyed by task id. Lets a single MCP tool
+  // Pending taskferry_poll callbacks, keyed by task id. Lets a single MCP tool
   // call block until the child's exit event fires (or a timeout elapses)
   // instead of the caller round-tripping taskferry_status in a loop. Not
   // persisted or shared across a server restart, same as the tasks map itself.
   const waiters = new Map();
+
+  // Advisor session recency, keyed by opencode session id. Process-lifetime
+  // only, same as `tasks` and `waiters` -- a taskferry restart means every
+  // session id is "unknown," which resolveAdvisorSession() treats identically
+  // to "expired" rather than special-casing it. Prevents taskferry_advisor
+  // from silently resuming a conversation whose prompt cache has gone cold.
+  const advisorSessions = new Map();
 
   // Queued launches retain full prompts only in memory. Persisted queued tasks
   // become unknown on restart, just like running tasks, rather than launching
@@ -182,6 +195,19 @@ export function createTaskManager({
     return new Error(`error: unknown task_id: ${taskId}\nhelp: run taskferry_list to see valid task ids`);
   }
 
+  function resolveAdvisorSession(sessionId) {
+    if (!sessionId) return { sessionId: undefined, reset: false, previousSessionId: undefined };
+    const lastUsedAt = advisorSessions.get(sessionId);
+    if (lastUsedAt != null && Date.now() - lastUsedAt <= advisorTtl) {
+      return { sessionId, reset: false, previousSessionId: undefined };
+    }
+    return { sessionId: undefined, reset: true, previousSessionId: sessionId };
+  }
+
+  function touchAdvisorSession(sessionId) {
+    if (sessionId) advisorSessions.set(sessionId, Date.now());
+  }
+
   function dispatch({ prompt, directory, model, variant, sessionId }) {
     ensureStateLoaded();
     if (!prompt || typeof prompt !== "string") {
@@ -228,8 +254,8 @@ export function createTaskManager({
     return {
       ...summary,
       next: task.status === "queued"
-        ? `Task is queued; run taskferry_wait or taskferry_status with task_id "${id}" to check when it starts`
-        : `Run taskferry_wait or taskferry_status with task_id "${id}" to check progress`,
+        ? `Task is queued; run taskferry_poll or taskferry_status with task_id "${id}" to check when it starts`
+        : `Run taskferry_poll or taskferry_status with task_id "${id}" to check progress`,
     };
   }
 
@@ -374,7 +400,7 @@ export function createTaskManager({
       sourceLogBytes: snapshot.sourceLogBytes,
       summaryInputBytes: snapshot.inputBytes,
       summaryTask: { id, status: task.status, model: task.model },
-      next: `Run taskferry_wait with task_id "${id}", then taskferry_result with task_id "${id}"`,
+      next: `Run taskferry_poll with task_id "${id}", then taskferry_result with task_id "${id}"`,
     };
   }
 
@@ -553,7 +579,7 @@ export function createTaskManager({
   // bytes but no parseable event yet" from "at least one event landed". A
   // caller polling taskferry_status on a task that's been "running" for a
   // long time can use this to tell a genuinely stuck process apart from one
-  // that's just slow, without waiting out a full taskferry_wait timeout.
+  // that's just slow, without waiting out a full taskferry_poll timeout.
   const LOG_ACTIVITY_SCAN_BYTES = 64 * 1024;
   function logActivity(logPath) {
     let stat;
@@ -596,7 +622,7 @@ export function createTaskManager({
     return { ...summarize(task), ...logActivity(task.logPath) };
   }
 
-  function wait(taskId, { timeoutMs = MAX_WAIT_MS, tailChars } = {}) {
+  function poll(taskId, { timeoutMs = MAX_WAIT_MS, tailChars } = {}) {
     ensureStateLoaded();
     const task = tasks.get(taskId);
     if (!task) throw noSuchTask(taskId);
@@ -630,6 +656,52 @@ export function createTaskManager({
       if (!waiters.has(taskId)) waiters.set(taskId, []);
       waiters.get(taskId).push(settle);
     });
+  }
+
+  async function advisor({ prompt, directory, model, variant, session_id, timeout_ms } = {}) {
+    ensureStateLoaded();
+    if (!model || typeof model !== "string") {
+      throw new Error("error: model is required\nhelp: taskferry_advisor requires a provider/model string, e.g. \"openai/gpt-5.6-sol\"");
+    }
+    const resolved = resolveAdvisorSession(session_id);
+    let dispatched;
+    try {
+      dispatched = dispatch({ prompt, directory, model, variant, sessionId: resolved.sessionId });
+    } catch (err) {
+      throw new Error(err.message.replaceAll("taskferry_dispatch", "taskferry_advisor"));
+    }
+    const settled = await poll(dispatched.id, timeout_ms != null ? { timeoutMs: timeout_ms } : {});
+
+    const resetFields = resolved.reset ? { previous_session_id: resolved.previousSessionId } : {};
+
+    if (settled.status === "running" || settled.status === "queued") {
+      const logSessionId = settled.sessionId || readSessionIdFromLog(dispatched.logPath);
+      if (logSessionId) touchAdvisorSession(logSessionId);
+      return {
+        status: "running",
+        task_id: dispatched.id,
+        session_id: logSessionId ?? null,
+        session_reset: resolved.reset,
+        ...resetFields,
+        note: logSessionId
+          ? `still running; call taskferry_poll or taskferry_advisor again with session_id "${logSessionId}" to continue`
+          : `still running; call taskferry_poll with task_id "${dispatched.id}" to continue (no session_id yet)`,
+      };
+    }
+
+    const detail = result(dispatched.id, { fields: ["message", "sessionId", "tokens", "cost", "exitCode", "signal", "spawnError"] });
+    if (detail.sessionId) touchAdvisorSession(detail.sessionId);
+
+    return {
+      status: detail.status,
+      task_id: dispatched.id,
+      session_id: detail.sessionId ?? null,
+      session_reset: resolved.reset,
+      ...resetFields,
+      message: detail.message,
+      ...(detail.status === "done" ? { tokens: detail.tokens, cost: detail.cost } : {}),
+      ...(detail.status !== "done" ? { exitCode: detail.exitCode, signal: detail.signal, spawnError: detail.spawnError } : {}),
+    };
   }
 
   function settleWaiters(taskId) {
@@ -738,7 +810,7 @@ export function createTaskManager({
         text: "none observed yet",
         textTotalChars: 0,
         truncated: false,
-        help: `Run taskferry_wait with task_id "${taskId}" to wait for task output`,
+        help: `Run taskferry_poll with task_id "${taskId}" to wait for task output`,
       };
     }
     const codePoints = Array.from(text);
@@ -854,7 +926,18 @@ export function createTaskManager({
     }, fields);
   }
 
-  return { dispatch, cancel, status, wait, list, result, tail, summarize: summarizeTask, paths: { STATE_DIR: stateDir, LOG_DIR, SUMMARY_DIR, TASKS_FILE } };
+  return {
+    dispatch,
+    cancel,
+    status,
+    poll,
+    list,
+    result,
+    tail,
+    summarize: summarizeTask,
+    advisor,
+    paths: { STATE_DIR: stateDir, LOG_DIR, SUMMARY_DIR, TASKS_FILE },
+  };
 }
 
 // The one real instance the MCP server uses: real spawn, real process.kill,

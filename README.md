@@ -1,4 +1,4 @@
-# opencode-cc-tool
+# taskferry
 
 An MCP server that gives Claude Code a first-class tool for dispatching work
 to the `opencode` CLI: launch a background task, get a task handle back
@@ -33,14 +33,14 @@ log text.
 
 Every tool below returns [TOON](https://toonformat.dev/) (Token-Oriented
 Object Notation), not JSON — ~40% fewer tokens for the same data, and the
-tabular form (`opencode_list`) reads as a compact header-plus-rows table
+tabular form (`taskferry_list`) reads as a compact header-plus-rows table
 instead of a repeated-keys array. Follows the
 [AXI](https://github.com/kunchenguid/axi) design principles for
 agent-facing CLIs/tools: minimal per-row schemas, explicit empty states,
 `error:`/`help:` pairs on failure, and a `next` hint on responses where the
 follow-up call isn't obvious.
 
-### `opencode_dispatch(prompt, directory, model?, variant?, session_id?)`
+### `taskferry_dispatch(prompt, directory, model?, variant?, session_id?)`
 
 Queues `opencode run --dir <directory> --auto --format json -- <prompt>` for
 background execution, with stdout and stderr redirected to a private per-task
@@ -59,29 +59,29 @@ rolling five-second window start immediately; later tasks return
   `high`.
 - `session_id`: resume an existing opencode session (`--continue --session
   <id>`) instead of starting fresh. Get session ids from a prior
-  `opencode_result` or `opencode_status` response.
+  `taskferry_result` or `taskferry_status` response.
 
 #### Launch rate
 
-- `OPENCODE_CC_TOOL_MAX_DISPATCHES_PER_WINDOW`: maximum task launches per
+- `TASKFERRY_MAX_DISPATCHES_PER_WINDOW`: maximum task launches per
   rolling window. Defaults to `2`.
-- `OPENCODE_CC_TOOL_DISPATCH_WINDOW_MS`: rolling-window duration in
+- `TASKFERRY_DISPATCH_WINDOW_MS`: rolling-window duration in
   milliseconds. Defaults to `5000`.
 
-### `opencode_wait(task_id, timeout_ms?, tail_chars?)`
+### `taskferry_wait(task_id, timeout_ms?, tail_chars?)`
 
 Blocks until the task's real `exit` event fires, or `timeout_ms` elapses
 (capped at 45000 regardless of what's passed, to stay under Claude Code's
 own 60s default MCP tool-call timeout), then returns the same status shape
-as `opencode_status`. This is the closest available analog to the built-in
+as `taskferry_status`. This is the closest available analog to the built-in
 Agent tool's auto-resume behavior: call once, get blocked, get a result,
-instead of looping on `opencode_status` yourself. If it returns with
+instead of looping on `taskferry_status` yourself. If it returns with
 `status: "queued"` or `"running"`, the task simply outlived the cap; call it again. Pass
 `tail_chars` to include the trailing parsed narration from a task that is
 still running after the timeout, plus its full character count and whether
 the tail was truncated.
 
-### `opencode_cancel(task_id, grace_ms?)`
+### `taskferry_cancel(task_id, grace_ms?)`
 
 Stops a running task: sends `SIGTERM` to the task's whole process group
 (not just the `opencode` process, so a subprocess it's mid-way through
@@ -91,7 +91,7 @@ already finished is a no-op that returns a `note` instead of an error. The
 task's status becomes `"cancelled"` once its exit event lands, distinct
 from `"crashed"`.
 
-### `opencode_status(task_id)`
+### `taskferry_status(task_id)`
 
 Returns `{ status: "queued" | "running" | "done" | "crashed" | "cancelled" |
 "unknown", exitCode, signal, logPath, ... }`. `status` comes from the child
@@ -99,7 +99,7 @@ process's actual exit event (`child.on("exit", ...)`), not from parsing
 output. `"unknown"` appears only if the server process restarted while the
 task was still running; see Limitations.
 
-### `opencode_tail(task_id, chars?)`
+### `taskferry_tail(task_id, chars?)`
 
 Returns the final `chars` Unicode code points of the newest parsed `text`
 event for a task. It reads the local task log only and never sends content to
@@ -107,21 +107,21 @@ a model. `chars` defaults to 1000 and has a maximum of 65536. The response
 includes the complete event length and `truncated` so callers know whether the
 suffix omitted earlier content.
 
-### `opencode_summary(task_id, max_words?)`
+### `taskferry_summary(task_id, max_words?)`
 
 Captures a bounded snapshot of observed task narration and starts a separate
 summary task using `opencode-go/deepseek-v4-flash` by default. The summary is
 asynchronous: wait for the returned `summaryTask.id`, then call
-`opencode_result` on that ID.
+`taskferry_result` on that ID.
 
 The snapshot is sent to the configured model provider. Do not summarize logs
 containing secrets you do not want to send to that provider. The summary child
 uses a private attachment, runs outside the source workspace, disables plugins,
-and denies every agent tool. Set `OPENCODE_CC_TOOL_SUMMARY_MODEL` to select an
+and denies every agent tool. Set `TASKFERRY_SUMMARY_MODEL` to select an
 available replacement model. `max_words` is a target between 75 and 300 words;
 it defaults to 200.
 
-### `opencode_result(task_id, full?, fields?)`
+### `taskferry_result(task_id, full?, fields?)`
 
 Once a task is `done` or `crashed`, parses its log (opencode's own
 `--format json` NDJSON event stream, one JSON object per line) into two
@@ -152,7 +152,7 @@ the real answer with no separator, since opencode's steps look like `text`
 asking opencode to `ls` and report a count produced two `text` events, one
 per step; `message` now returns only the second.
 
-### `opencode_list()`
+### `taskferry_list()`
 
 Lists every task known to this server process, newest first.
 
@@ -178,7 +178,7 @@ rejected as of mid-2026:
   channels are a separate registration path. Worth revisiting if this tool
   needs true async push later, but out of scope for now.
 
-`opencode_wait` is the practical middle ground: one blocking call that
+`taskferry_wait` is the practical middle ground: one blocking call that
 resolves the moment the task's exit event fires, capped well under Claude
 Code's MCP tool-call timeout so it degrades to a clean "still running"
 rather than an error. It gets Agent-tool-like ergonomics (dispatch, then
@@ -195,15 +195,16 @@ research-preview feature.
   Confirmed by hand: `opencode run --format json -- "Reply with the word
   PONG and nothing else."` produced clean NDJSON on stdout and empty
   stderr on success.
-- **State directory.** Defaults to `~/.opencode-cc-tool`, computed via
+- **State directory.** Defaults to `$XDG_STATE_HOME/taskferry` (or
+  `~/.local/state/taskferry` if `XDG_STATE_HOME` is unset), computed via
   `os.homedir()` rather than hardcoded, overridable with
-  `OPENCODE_CC_TOOL_STATE_DIR`. Holds `tasks.json` (task metadata) and
+  `TASKFERRY_STATE_DIR`. Holds `tasks.json` (task metadata) and
   `logs/<task_id>.ndjson` (raw opencode output per task).
 - **Not tmux, but `detached: true`, for a narrower reason than survival.**
   The server holds a direct reference to the child and listens on its
   `exit` event regardless of `detached`; that part doesn't need detaching.
-  `detached: true` matters for `opencode_cancel`: it makes the child its
-  own process group leader (`pgid === pid`), so `opencode_cancel` can
+  `detached: true` matters for `taskferry_cancel`: it makes the child its
+  own process group leader (`pgid === pid`), so `taskferry_cancel` can
   signal the whole group with `process.kill(-pid, ...)` and reach a
   subprocess `opencode` spawned (e.g. a bash command it's running), not
   just the `opencode` process itself. Without `detached: true`, the child
@@ -235,14 +236,14 @@ research-preview feature.
 ## Setup
 
 ```bash
-cd /workspace/opencode-cc-tool
+cd /path/to/taskferry
 npm install
 ```
 
 ## Register with Claude Code
 
 ```bash
-claude mcp add opencode-cc-tool -- node /workspace/opencode-cc-tool/src/server.js
+claude mcp add taskferry -- node /path/to/taskferry/src/server.js
 ```
 
 Use `-s user` instead of the default `-s local` scope to make it available
@@ -250,14 +251,14 @@ in every project, or `-s project` to check a `.mcp.json` entry into a
 specific repo. To override the state directory:
 
 ```bash
-claude mcp add opencode-cc-tool -e OPENCODE_CC_TOOL_STATE_DIR=/some/path -- node /workspace/opencode-cc-tool/src/server.js
+claude mcp add taskferry -e TASKFERRY_STATE_DIR=/some/path -- node /path/to/taskferry/src/server.js
 ```
 
 Verify registration:
 
 ```bash
 claude mcp list
-claude mcp get opencode-cc-tool
+claude mcp get taskferry
 ```
 
 ## Testing
@@ -317,9 +318,9 @@ package's own root if no argument is given; pass one explicitly to run
 against a different directory:
 
 ```bash
-node src/smoke-test.js /workspace/opencode-cc-tool         # dispatch, poll status, fetch result; expects PONG
-node src/cancel-smoke-test.js /workspace/opencode-cc-tool  # dispatch a sleep, cancel it, confirm the process group is gone
-node src/wait-smoke-test.js /workspace/opencode-cc-tool    # opencode_wait resolving early and hitting its cap
+node src/smoke-test.js          # dispatch, poll status, fetch result; expects PONG
+node src/cancel-smoke-test.js   # dispatch a sleep, cancel it, confirm the process group is gone
+node src/wait-smoke-test.js     # taskferry_wait resolving early and hitting its cap
 ```
 
 Each prints a `... SMOKE TEST PASSED` or `FAILED` line and exits

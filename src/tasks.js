@@ -6,8 +6,8 @@ import os from "node:os";
 import { promisify } from "node:util";
 
 const DEFAULT_STATE_DIR =
-  process.env.OPENCODE_CC_TOOL_STATE_DIR ||
-  path.join(os.homedir(), ".opencode-cc-tool");
+  process.env.TASKFERRY_STATE_DIR ||
+  path.join(process.env.XDG_STATE_HOME || path.join(os.homedir(), ".local", "state"), "taskferry");
 
 // The MCP tool-call default timeout in Claude Code is 60s (MCP_TOOL_TIMEOUT).
 // Cap the internal wait below that so a long task returns a clean
@@ -18,8 +18,8 @@ const MAX_WAIT_MS = 45000;
 const NARRATION_PREVIEW_CHARS = 2000;
 const TAIL_READ_BYTES = 1024 * 1024;
 const SUMMARY_INPUT_BYTES = 96 * 1024;
-const SUMMARY_MODEL = process.env.OPENCODE_CC_TOOL_SUMMARY_MODEL || "opencode-go/deepseek-v4-flash";
-const SUMMARY_AGENT = "opencode-cc-summary";
+const SUMMARY_MODEL = process.env.TASKFERRY_SUMMARY_MODEL || "opencode-go/deepseek-v4-flash";
+const SUMMARY_AGENT = "taskferry-summary";
 const SUMMARY_PREFLIGHT_TIMEOUT_MS = 10000;
 const RESULT_FIELDS = new Set(["message", "narration", "tokens", "cost", "sessionId", "exitCode", "signal", "spawnError", "logPath"]);
 const execFileAsync = promisify(execFile);
@@ -49,11 +49,11 @@ function summaryEnvironment() {
 }
 
 const DEFAULT_MAX_DISPATCHES_PER_WINDOW = positiveInteger(
-  Number(process.env.OPENCODE_CC_TOOL_MAX_DISPATCHES_PER_WINDOW),
+  Number(process.env.TASKFERRY_MAX_DISPATCHES_PER_WINDOW),
   2
 );
 const DEFAULT_DISPATCH_WINDOW_MS = positiveInteger(
-  Number(process.env.OPENCODE_CC_TOOL_DISPATCH_WINDOW_MS),
+  Number(process.env.TASKFERRY_DISPATCH_WINDOW_MS),
   5000
 );
 
@@ -93,21 +93,21 @@ export function createTaskManager({
   // In-memory state is the source of truth for queued and running tasks while this server
   // process is alive: process exit is delivered via the 'exit' event on our
   // own child_process handle, which only exists in the process that spawned
-  // it. tasks.json is a best-effort record for opencode_list/debugging across
+  // it. tasks.json is a best-effort record for taskferry_list/debugging across
   // a server restart, not a re-attach mechanism. A restarted server has no
   // handle to a child spawned by its previous instance, so any task still
   // "running" in the file when we reload it is relabeled "unknown" rather
   // than reported as a stale, possibly-wrong "running".
   const tasks = new Map();
 
-  // Escalation timers for opencode_cancel, keyed by task id. Kept out of the
+  // Escalation timers for taskferry_cancel, keyed by task id. Kept out of the
   // task object itself: task objects get JSON.stringify'd wholesale in
   // persist(), and a Timeout isn't serializable data.
   const escalationTimers = new Map();
 
-  // Pending opencode_wait callbacks, keyed by task id. Lets a single MCP tool
+  // Pending taskferry_wait callbacks, keyed by task id. Lets a single MCP tool
   // call block until the child's exit event fires (or a timeout elapses)
-  // instead of the caller round-tripping opencode_status in a loop. Not
+  // instead of the caller round-tripping taskferry_status in a loop. Not
   // persisted or shared across a server restart, same as the tasks map itself.
   const waiters = new Map();
 
@@ -169,7 +169,7 @@ export function createTaskManager({
     };
   }
 
-  // Minimal per-row schema for opencode_list: an agent scanning a task list
+  // Minimal per-row schema for taskferry_list: an agent scanning a task list
   // needs id/status/model/startedAt to decide what to poll next, not the full
   // detail (directory, pid, logPath, ...) that summarize() carries for a
   // single-task lookup.
@@ -179,13 +179,13 @@ export function createTaskManager({
   }
 
   function noSuchTask(taskId) {
-    return new Error(`error: unknown task_id: ${taskId}\nhelp: run opencode_list to see valid task ids`);
+    return new Error(`error: unknown task_id: ${taskId}\nhelp: run taskferry_list to see valid task ids`);
   }
 
   function dispatch({ prompt, directory, model, variant, sessionId }) {
     ensureStateLoaded();
     if (!prompt || typeof prompt !== "string") {
-      throw new Error("error: prompt is required\nhelp: opencode_dispatch requires a non-empty prompt string");
+      throw new Error("error: prompt is required\nhelp: taskferry_dispatch requires a non-empty prompt string");
     }
     if (!directory || !path.isAbsolute(directory)) {
       throw new Error(`error: directory must be an absolute path (got ${JSON.stringify(directory)})\nhelp: pass the full path, e.g. "/workspace/my-repo"`);
@@ -228,8 +228,8 @@ export function createTaskManager({
     return {
       ...summary,
       next: task.status === "queued"
-        ? `Task is queued; run opencode_wait or opencode_status with task_id "${id}" to check when it starts`
-        : `Run opencode_wait or opencode_status with task_id "${id}" to check progress`,
+        ? `Task is queued; run taskferry_wait or taskferry_status with task_id "${id}" to check when it starts`
+        : `Run taskferry_wait or taskferry_status with task_id "${id}" to check progress`,
     };
   }
 
@@ -238,11 +238,11 @@ export function createTaskManager({
       try {
         modelsCache = { expiresAt: Date.now() + 5 * 60 * 1000, output: await listModelsFn() };
       } catch (err) {
-        throw new Error(`error: could not list available OpenCode models: ${err.message}\nhelp: verify that opencode is installed and authenticated, then retry opencode_summary`);
+        throw new Error(`error: could not list available OpenCode models: ${err.message}\nhelp: verify that opencode is installed and authenticated, then retry taskferry_summary`);
       }
     }
     if (!modelsCache.output.split("\n").some((line) => line.trim() === model)) {
-      throw new Error(`error: summary model is unavailable: ${model}\nhelp: set OPENCODE_CC_TOOL_SUMMARY_MODEL to an installed model, then retry opencode_summary`);
+      throw new Error(`error: summary model is unavailable: ${model}\nhelp: set TASKFERRY_SUMMARY_MODEL to an installed model, then retry taskferry_summary`);
     }
   }
 
@@ -252,7 +252,7 @@ export function createTaskManager({
       await verifySummaryAgentFn(env);
       summaryAgentVerifiedUntil = Date.now() + 5 * 60 * 1000;
     } catch (err) {
-      throw new Error(`error: summary agent isolation check failed: ${err.message}\nhelp: verify that OpenCode denies the summary agent's tools before retrying opencode_summary`);
+      throw new Error(`error: summary agent isolation check failed: ${err.message}\nhelp: verify that OpenCode denies the summary agent's tools before retrying taskferry_summary`);
     }
   }
 
@@ -311,7 +311,7 @@ export function createTaskManager({
     const source = tasks.get(taskId);
     if (!source) throw noSuchTask(taskId);
     if (!Number.isSafeInteger(maxWords) || maxWords < 75 || maxWords > 300) {
-      throw new Error("error: max_words must be an integer from 75 through 300\nhelp: run opencode_summary with max_words between 75 and 300");
+      throw new Error("error: max_words must be an integer from 75 through 300\nhelp: run taskferry_summary with max_words between 75 and 300");
     }
     const snapshot = readNarrationExcerpt(source.logPath);
     const capturedAt = new Date().toISOString();
@@ -321,7 +321,7 @@ export function createTaskManager({
         sourceTaskId: taskId,
         sourceStatus,
         summary: "no model text observed yet",
-        help: `Run opencode_tail with task_id "${taskId}" after the task emits output`,
+        help: `Run taskferry_tail with task_id "${taskId}" after the task emits output`,
       };
     }
     const env = summaryEnvironment();
@@ -374,7 +374,7 @@ export function createTaskManager({
       sourceLogBytes: snapshot.sourceLogBytes,
       summaryInputBytes: snapshot.inputBytes,
       summaryTask: { id, status: task.status, model: task.model },
-      next: `Run opencode_wait with task_id "${id}", then opencode_result with task_id "${id}"`,
+      next: `Run taskferry_wait with task_id "${id}", then taskferry_result with task_id "${id}"`,
     };
   }
 
@@ -509,7 +509,7 @@ export function createTaskManager({
       return { ...summarize(task), note: `task is already ${task.status}; nothing to cancel` };
     }
     if (task.pid == null) {
-      throw new Error(`error: task ${taskId} has no pid on record; cannot signal it\nhelp: run opencode_status to inspect its recorded state`);
+      throw new Error(`error: task ${taskId} has no pid on record; cannot signal it\nhelp: run taskferry_status to inspect its recorded state`);
     }
 
     task.cancelRequested = true;
@@ -687,7 +687,7 @@ export function createTaskManager({
     const task = tasks.get(taskId);
     if (!task) throw noSuchTask(taskId);
     if (!Number.isSafeInteger(chars) || chars <= 0 || chars > 65536) {
-      throw new Error("error: chars must be a positive integer no greater than 65536\nhelp: run opencode_tail with chars between 1 and 65536");
+      throw new Error("error: chars must be a positive integer no greater than 65536\nhelp: run taskferry_tail with chars between 1 and 65536");
     }
     const text = readLastText(task.logPath);
     if (!text) {
@@ -697,7 +697,7 @@ export function createTaskManager({
         text: "none observed yet",
         textTotalChars: 0,
         truncated: false,
-        help: `Run opencode_wait with task_id "${taskId}" to wait for task output`,
+        help: `Run taskferry_wait with task_id "${taskId}" to wait for task output`,
       };
     }
     const codePoints = Array.from(text);
@@ -730,7 +730,7 @@ export function createTaskManager({
       }
     }
     if (task.status === "running" || task.status === "queued") {
-      return projectResult({ taskId, status: task.status, message: `task is still ${task.status}; poll opencode_status first` }, fields);
+      return projectResult({ taskId, status: task.status, message: `task is still ${task.status}; poll taskferry_status first` }, fields);
     }
     if (task.status === "unknown" && task.summaryOf) {
       return projectResult({
@@ -808,7 +808,7 @@ export function createTaskManager({
       narrationTotalChars: fullNarration.length,
       narrationTruncated: truncated,
       ...(task.summaryOf ? { summaryOf: task.summaryOf } : {}),
-      ...(truncated ? { next: `Run opencode_result with full: true on task_id "${taskId}" to see the complete narration` } : {}),
+      ...(truncated ? { next: `Run taskferry_result with full: true on task_id "${taskId}" to see the complete narration` } : {}),
       logPath: task.logPath,
     }, fields);
   }

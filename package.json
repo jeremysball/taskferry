@@ -1,10 +1,10 @@
 {
-  "name": "opencode-cc-tool",
+  "name": "taskferry",
   "version": "1.0.0",
   "description": "MCP server exposing a first-class background-dispatch tool for the opencode CLI",
   "main": "src/server.js",
   "bin": {
-    "opencode-cc-tool": "src/server.js"
+    "taskferry": "src/server.js"
   },
   "scripts": {
     "start": "node src/server.js",

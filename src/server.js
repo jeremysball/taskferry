@@ -10,16 +10,16 @@ function toon(value) {
 }
 
 const server = new McpServer({
-  name: "opencode-cc-tool",
+  name: "taskferry",
   version: "0.1.0",
 });
 
 server.registerTool(
-  "opencode_dispatch",
+  "taskferry_dispatch",
   {
-    title: "Dispatch opencode task",
+    title: "Dispatch taskferry task",
     description:
-      "Queue an `opencode run` for background execution as a directly-spawned child process (no tmux, no shared visibility into the orchestration layer) and return a task_id immediately. The server starts at most two tasks in each rolling five-second window by default. Poll with opencode_status, then read opencode_result once done.",
+      "Queue an `opencode run` for background execution as a directly-spawned child process (no tmux, no shared visibility into the orchestration layer) and return a task_id immediately. The server starts at most two tasks in each rolling five-second window by default. After dispatching, call taskferry_wait to block until the task finishes or times out; if it times out, call taskferry_tail to read the latest output and report the task's current status to the user. Once the task is done, call taskferry_result to fetch the final result.",
     inputSchema: {
       prompt: z.string().describe("The message/prompt to send to opencode."),
       directory: z
@@ -48,13 +48,13 @@ server.registerTool(
 );
 
 server.registerTool(
-  "opencode_cancel",
+  "taskferry_cancel",
   {
-    title: "Cancel a queued or running opencode task",
+    title: "Cancel a queued or running taskferry task",
     description:
       "Cancel a queued task before it starts, or stop a running task by sending SIGTERM to its whole process group (opencode and any subprocess it spawned), escalating to SIGKILL after a grace period if it hasn't exited. A finished task's status is unaffected and returns a note instead of an error.",
     inputSchema: {
-      task_id: z.string().describe("Task id returned by opencode_dispatch."),
+      task_id: z.string().describe("Task id returned by taskferry_dispatch."),
       grace_ms: z
         .number()
         .optional()
@@ -68,13 +68,13 @@ server.registerTool(
 );
 
 server.registerTool(
-  "opencode_wait",
+  "taskferry_wait",
   {
-    title: "Block until an opencode task finishes",
+    title: "Block until a taskferry task finishes",
     description:
-      "Block on a queued or running task until it exits (or a timeout) and return its status once settled. The closest analog to the built-in Agent tool's auto-resume behavior available over plain MCP request/response, without a poll loop. Capped internally at 45s so the call returns cleanly instead of hitting Claude Code's own MCP tool-call timeout; if status is still queued or running when it returns, call opencode_wait again.",
+      "Block on a queued or running task until it exits (or a timeout) and return its status once settled. The closest analog to the built-in Agent tool's auto-resume behavior available over plain MCP request/response, without a poll loop. Capped internally at 45s so the call returns cleanly instead of hitting Claude Code's own MCP tool-call timeout; if status is still queued or running when it returns, call taskferry_wait again. Pass tail_chars to get the trailing narration when the task is still running after the timeout; then call taskferry_tail to read more and report the task's current progress to the user. Always inform the user of the task's status after calling this tool.",
     inputSchema: {
-      task_id: z.string().describe("Task id returned by opencode_dispatch."),
+      task_id: z.string().describe("Task id returned by taskferry_dispatch."),
       timeout_ms: z
         .number()
         .optional()
@@ -84,7 +84,7 @@ server.registerTool(
         .int()
         .positive()
         .optional()
-        .describe("When the wait times out and the task is still running, return this many trailing narration characters."),
+        .describe("When the wait times out and the task is still running, return this many trailing narration characters. Use this to report progress to the user while the task continues."),
     },
   },
   async ({ task_id, timeout_ms, tail_chars }) => {
@@ -97,13 +97,13 @@ server.registerTool(
 );
 
 server.registerTool(
-  "opencode_status",
+  "taskferry_status",
   {
-    title: "Check opencode task status",
+    title: "Check taskferry task status",
     description:
       "Return structured status for a dispatched task: queued | running | done | crashed | cancelled | unknown, plus exit code and log path once finished. Backed by the child process's real exit event, not log string-matching.",
     inputSchema: {
-      task_id: z.string().describe("Task id returned by opencode_dispatch."),
+      task_id: z.string().describe("Task id returned by taskferry_dispatch."),
     },
   },
   async ({ task_id }) => {
@@ -113,13 +113,13 @@ server.registerTool(
 );
 
 server.registerTool(
-  "opencode_tail",
+  "taskferry_tail",
   {
-    title: "Read the latest opencode text",
+    title: "Read the latest taskferry text",
     description:
-      "Return the last requested Unicode code points of the most recent parsed text event for a task. Reads locally and never sends task content to a model.",
+      "Return the last requested Unicode code points of the most recent parsed text event for a task. Reads locally and never sends task content to a model. Use this after taskferry_wait times out to check what the task is doing, then report its progress to the user.",
     inputSchema: {
-      task_id: z.string().describe("Task id returned by opencode_dispatch."),
+      task_id: z.string().describe("Task id returned by taskferry_dispatch."),
       chars: z.number().int().positive().max(65536).optional().describe("Number of Unicode code points to return. Defaults to 1000; maximum 65536."),
     },
   },
@@ -127,13 +127,13 @@ server.registerTool(
 );
 
 server.registerTool(
-  "opencode_summary",
+  "taskferry_summary",
   {
-    title: "Summarize observed opencode progress",
+    title: "Summarize observed taskferry progress",
     description:
       "Capture a bounded snapshot of a task's narration and queue an isolated summary task. The snapshot is sent to the configured summary-model provider; do not use this tool for narration containing secrets you do not want to send there.",
     inputSchema: {
-      task_id: z.string().describe("Task id returned by opencode_dispatch."),
+      task_id: z.string().describe("Task id returned by taskferry_dispatch."),
       max_words: z.number().int().min(75).max(300).optional().describe("Target summary length. Defaults to 200 words; valid range is 75 through 300."),
     },
   },
@@ -141,13 +141,13 @@ server.registerTool(
 );
 
 server.registerTool(
-  "opencode_result",
+  "taskferry_result",
   {
-    title: "Fetch opencode task result",
+    title: "Fetch taskferry task result",
     description:
       "Return the final assistant message and metadata (tokens, cost, session id) for a finished task, parsed from opencode's own --format json event stream. `message` is only the model's last turn (after all tool calls finish); `narration` includes intermediate step narration too, in order, truncated to 2000 chars by default. Errors politely if the task is still running.",
     inputSchema: {
-      task_id: z.string().describe("Task id returned by opencode_dispatch."),
+      task_id: z.string().describe("Task id returned by taskferry_dispatch."),
       full: z
         .boolean()
         .optional()
@@ -166,9 +166,9 @@ server.registerTool(
 );
 
 server.registerTool(
-  "opencode_list",
+  "taskferry_list",
   {
-    title: "List opencode tasks",
+    title: "List taskferry tasks",
     description: "List all known tasks (this server process's lifetime) with their statuses, newest first.",
     inputSchema: {},
   },

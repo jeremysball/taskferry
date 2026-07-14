@@ -144,7 +144,7 @@ describe("dispatch() lifecycle, driven through an injected spawnFn (no real open
     const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
     assert.equal(dispatched.status, "running");
     assert.equal(dispatched.pid, 555);
-    assert.match(dispatched.next, /opencode_wait or opencode_status/);
+    assert.match(dispatched.next, /taskferry_wait or taskferry_status/);
 
     child.emit("exit", 0, null);
 
@@ -335,7 +335,7 @@ describe("unknown task_id (status/cancel/wait/result share one error path)", () 
     const mgr = makeManager();
     assert.throws(
       () => mgr.status("nope"),
-      /error: unknown task_id: nope\nhelp: run opencode_list to see valid task ids/
+      /error: unknown task_id: nope\nhelp: run taskferry_list to see valid task ids/
     );
   });
 

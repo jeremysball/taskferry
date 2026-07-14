@@ -20,9 +20,9 @@ console.log("== tools/list ==");
 const toolList = await client.listTools();
 console.log(toolList.tools.map((t) => t.name).join(", "));
 
-console.log("\n== opencode_dispatch ==");
+console.log("\n== taskferry_dispatch ==");
 const dispatchRes = await client.callTool({
-  name: "opencode_dispatch",
+  name: "taskferry_dispatch",
   arguments: {
     prompt: "Reply with the word PONG and nothing else.",
     directory: dirArg,
@@ -33,23 +33,23 @@ const dispatched = decode(dispatchRes.content[0].text);
 console.log(dispatched);
 const taskId = dispatched.id;
 
-console.log("\n== polling opencode_status ==");
+console.log("\n== polling taskferry_status ==");
 let last = null;
 for (let i = 0; i < 40; i++) {
-  const statusRes = await client.callTool({ name: "opencode_status", arguments: { task_id: taskId } });
+  const statusRes = await client.callTool({ name: "taskferry_status", arguments: { task_id: taskId } });
   last = decode(statusRes.content[0].text);
   console.log(`[t+${i * 2}s]`, last.status);
   if (last.status !== "running" && last.status !== "queued") break;
   await new Promise((r) => setTimeout(r, 2000));
 }
 
-console.log("\n== opencode_result ==");
-const resultRes = await client.callTool({ name: "opencode_result", arguments: { task_id: taskId } });
+console.log("\n== taskferry_result ==");
+const resultRes = await client.callTool({ name: "taskferry_result", arguments: { task_id: taskId } });
 const result = decode(resultRes.content[0].text);
 console.log(result);
 
-console.log("\n== opencode_list ==");
-const listRes = await client.callTool({ name: "opencode_list", arguments: {} });
+console.log("\n== taskferry_list ==");
+const listRes = await client.callTool({ name: "taskferry_list", arguments: {} });
 console.log(decode(listRes.content[0].text));
 
 await client.close();

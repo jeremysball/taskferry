@@ -267,6 +267,8 @@ export function createTaskManager({
   watchdogPollMs = DEFAULT_WATCHDOG_POLL_MS,
   keySlotsSpec = process.env.TASKFERRY_KEY_SLOTS,
   providerKeyEnvName = process.env.TASKFERRY_PROVIDER_KEY_ENV || null,
+  summaryKeySlot = process.env.TASKFERRY_SUMMARY_KEY_SLOT || null,
+  summaryProviderKeyEnvName = process.env.TASKFERRY_SUMMARY_PROVIDER_KEY_ENV || null,
 } = {}) {
   const LOG_DIR = path.join(stateDir, "logs");
   const SUMMARY_DIR = path.join(stateDir, "summaries");
@@ -279,6 +281,27 @@ export function createTaskManager({
   const noOutputTimeout = positiveInteger(noOutputTimeoutMs, DEFAULT_NO_OUTPUT_TIMEOUT_MS);
   const watchdogPoll = positiveInteger(watchdogPollMs, DEFAULT_WATCHDOG_POLL_MS);
   const keySlots = parseKeySlots(keySlotsSpec);
+
+  function summaryEnvironment() {
+    const env = { ...process.env };
+    delete env.OPENCODE_CONFIG;
+    delete env.OPENCODE_CONFIG_DIR;
+    delete env.OPENCODE_CONFIG_CONTENT;
+    env.OPENCODE_CONFIG_CONTENT = SUMMARY_AGENT_CONFIG;
+    if (summaryKeySlot && summaryProviderKeyEnvName) {
+      const sourceEnvVar = keySlots.get(summaryKeySlot);
+      if (!sourceEnvVar) {
+        throw new Error(`error: TASKFERRY_SUMMARY_KEY_SLOT "${summaryKeySlot}" is not a configured key slot\nhelp: add it to TASKFERRY_KEY_SLOTS or fix TASKFERRY_SUMMARY_KEY_SLOT`);
+      }
+      const value = process.env[sourceEnvVar];
+      if (!value) {
+        throw new Error(`error: summary key slot "${summaryKeySlot}" source variable ${sourceEnvVar} is not set\nhelp: set ${sourceEnvVar} and restart the taskferry MCP server`);
+      }
+      env[summaryProviderKeyEnvName] = value;
+    }
+    return env;
+  }
+
   for (const dir of [stateDir, LOG_DIR, SUMMARY_DIR]) {
     fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
     fs.chmodSync(dir, 0o700);

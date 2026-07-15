@@ -13,7 +13,7 @@ import { createTaskManager } from "./tasks.js";
 // runs synchronously in the constructor, same as the old module-level code
 // did at import time). `tasksFixture` may be an array or `(logDir) => array`
 // for fixtures whose logPath needs to point inside the real log dir.
-function makeManager({ tasksFixture = [], logs = {}, spawnFn, killFn, listModelsFn, verifySummaryAgentFn, maxDispatchesPerWindow, dispatchWindowMs, advisorSessionTtlMs, maxConcurrentTasks, noOutputTimeoutMs, watchdogPollMs, keySlotsSpec, providerKeyEnvName } = {}) {
+function makeManager({ tasksFixture = [], logs = {}, spawnFn, killFn, listModelsFn, verifySummaryAgentFn, maxDispatchesPerWindow, dispatchWindowMs, advisorSessionTtlMs, maxConcurrentTasks, noOutputTimeoutMs, watchdogPollMs, keySlotsSpec, providerKeyEnvName, summaryKeySlot, summaryProviderKeyEnvName } = {}) {
   const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-test-"));
   const logDir = path.join(stateDir, "logs");
   fs.mkdirSync(logDir, { recursive: true });
@@ -38,6 +38,8 @@ function makeManager({ tasksFixture = [], logs = {}, spawnFn, killFn, listModels
     ...(watchdogPollMs != null ? { watchdogPollMs } : {}),
     ...(keySlotsSpec != null ? { keySlotsSpec } : {}),
     ...(providerKeyEnvName != null ? { providerKeyEnvName } : {}),
+    ...(summaryKeySlot != null ? { summaryKeySlot } : {}),
+    ...(summaryProviderKeyEnvName != null ? { summaryProviderKeyEnvName } : {}),
   });
 }
 
@@ -1140,6 +1142,37 @@ describe("summarize()", () => {
     assert.match(snapshot.narration, /TAIL_MARKER/);
     assert.match(snapshot.narration, /bytes omitted from source log/);
     child.emit("exit", 0, null);
+  });
+});
+
+describe("key slots (summary tasks)", () => {
+  test("a configured summary key slot is injected into the summary child's env, independent of the source task's own key_slot", async () => {
+    process.env.AXI_TEST_SUMMARY_SOURCE = "sk-summary-secret";
+    let capturedEnv = null;
+    const mgr = makeManager({
+      tasksFixture: (logDir) => [{ ...baseTask({ id: "src1", status: "done", logPath: path.join(logDir, "src1.ndjson") }) }],
+      logs: { "src1.ndjson": JSON.stringify({ type: "text", part: { messageID: "m1", text: "did the thing" } }) + "\n" },
+      spawnFn: (cmd, args, opts) => { capturedEnv = opts.env; return fakeChild(); },
+      keySlotsSpec: "summary-slot:AXI_TEST_SUMMARY_SOURCE",
+      summaryKeySlot: "summary-slot",
+      summaryProviderKeyEnvName: "DEEPSEEK_API_KEY",
+    });
+    await mgr.summarize("src1");
+    assert.equal(capturedEnv.DEEPSEEK_API_KEY, "sk-summary-secret");
+    delete process.env.AXI_TEST_SUMMARY_SOURCE;
+  });
+
+  test("an unset summary key slot source variable fails the summary request before spawning", async () => {
+    delete process.env.AXI_TEST_SUMMARY_UNSET;
+    const mgr = makeManager({
+      tasksFixture: (logDir) => [{ ...baseTask({ id: "src1", status: "done", logPath: path.join(logDir, "src1.ndjson") }) }],
+      logs: { "src1.ndjson": JSON.stringify({ type: "text", part: { messageID: "m1", text: "did the thing" } }) + "\n" },
+      spawnFn: () => { throw new Error("must not spawn"); },
+      keySlotsSpec: "summary-slot:AXI_TEST_SUMMARY_UNSET",
+      summaryKeySlot: "summary-slot",
+      summaryProviderKeyEnvName: "DEEPSEEK_API_KEY",
+    });
+    await assert.rejects(() => mgr.summarize("src1"), /error: summary key slot "summary-slot" source variable AXI_TEST_SUMMARY_UNSET is not set/);
   });
 });
 

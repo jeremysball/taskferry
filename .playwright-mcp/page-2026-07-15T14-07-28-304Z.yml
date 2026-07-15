@@ -1,0 +1,943 @@
+- generic [active] [ref=f32e1]:
+  - blockquote [ref=f32e2]:
+    - heading [level=2] [ref=f32e3]: Documentation Index
+    - paragraph [ref=f32e4]:
+      - text: "Fetch the complete documentation index at:"
+      - link [ref=f32e5] [cursor=pointer]:
+        - /url: /docs/llms.txt
+        - text: /docs/llms.txt
+    - paragraph [ref=f32e6]: Use this file to discover all available pages before exploring further.
+  - generic [ref=f32e7]:
+    - link "Skip to main content" [ref=f32e8] [cursor=pointer]:
+      - /url: "#content-area"
+    - generic [ref=f32e9]:
+      - generic [ref=f32e10]:
+        - banner [ref=f32e11]:
+          - generic [ref=f32e14]:
+            - generic [ref=f32e17]:
+              - link "Recraft home page light logo" [ref=f32e19] [cursor=pointer]:
+                - /url: /docs
+                - generic [ref=f32e20]: Recraft home page
+                - img "light logo" [ref=f32e21]
+              - generic [ref=f32e22]:
+                - button "Open search" [ref=f32e23] [cursor=pointer]:
+                  - generic [ref=f32e24]: Search...
+                  - generic [ref=f32e29]: ⌘K
+                - button "Toggle assistant panel" [ref=f32e30] [cursor=pointer]:
+                  - generic [ref=f32e34]: Ask Assistant
+              - generic [ref=f32e35]:
+                - navigation "Main" [ref=f32e36]:
+                  - list [ref=f32e37]:
+                    - listitem [ref=f32e38]:
+                      - link "Get help" [ref=f32e39] [cursor=pointer]:
+                        - /url: "https://www.recraft.ai/contact "
+                    - listitem [ref=f32e41]:
+                      - link "Log in" [ref=f32e42] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/auth/login
+                    - listitem [ref=f32e44]:
+                      - link "Sign up" [ref=f32e45] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/auth/login
+                - button "Change theme preference" [ref=f32e52] [cursor=pointer]
+            - generic [ref=f32e58]:
+              - link "Recraft models" [ref=f32e59] [cursor=pointer]:
+                - /url: /docs
+              - link "Recraft Studio" [ref=f32e61] [cursor=pointer]:
+                - /url: /docs/recraft-studio/overview
+              - link "API" [ref=f32e63] [cursor=pointer]:
+                - /url: /docs/api-reference/getting-started
+              - link "MCP" [ref=f32e65] [cursor=pointer]:
+                - /url: /docs/mcp-reference/getting-started
+              - link "Trust and security" [ref=f32e67] [cursor=pointer]:
+                - /url: /docs/trust-and-security/compliance-and-certifications
+              - link "Prompt engineering guide" [ref=f32e69] [cursor=pointer]:
+                - /url: /docs/prompt-engineering-guide/introduction
+              - link "Support and FAQ" [ref=f32e71] [cursor=pointer]:
+                - /url: /docs/support-and-faq/contact-support
+        - generic [ref=f32e73]:
+          - navigation "Pages" [ref=f32e74]:
+            - generic [ref=f32e78]:
+              - heading "API" [level=3] [ref=f32e80]
+              - list [ref=f32e81]:
+                - listitem [ref=f32e82]:
+                  - link "Getting started" [ref=f32e83] [cursor=pointer]:
+                    - /url: /docs/api-reference/getting-started
+                - listitem [ref=f32e87]:
+                  - link "Endpoints" [ref=f32e88] [cursor=pointer]:
+                    - /url: /docs/api-reference/endpoints
+                - listitem [ref=f32e92]:
+                  - link "Examples" [ref=f32e93] [cursor=pointer]:
+                    - /url: /docs/api-reference/examples
+                - listitem [ref=f32e97]:
+                  - link "Styles" [ref=f32e98] [cursor=pointer]:
+                    - /url: /docs/api-reference/styles
+                - listitem [ref=f32e102]:
+                  - link "Pricing" [ref=f32e103] [cursor=pointer]:
+                    - /url: /docs/api-reference/pricing
+                - listitem [ref=f32e107]:
+                  - link "Appendix" [ref=f32e108] [cursor=pointer]:
+                    - /url: /docs/api-reference/appendix
+                - listitem [ref=f32e112]:
+                  - link "Swagger" [ref=f32e113] [cursor=pointer]:
+                    - /url: /docs/api-reference/swagger
+          - main [ref=f32e117]:
+            - generic [ref=f32e118]:
+              - navigation [ref=f32e122]:
+                - heading [level=2] [ref=f32e123]:
+                  - button "On this page" [ref=f32e124] [cursor=pointer]
+                - list [ref=f32e128]:
+                  - listitem [ref=f32e129]:
+                    - link "Using of styles" [ref=f32e130] [cursor=pointer]:
+                      - /url: "#using-of-styles"
+                  - listitem [ref=f32e131]:
+                    - link "List of styles" [ref=f32e132] [cursor=pointer]:
+                      - /url: "#list-of-styles"
+                  - listitem [ref=f32e133]:
+                    - link "Recraft V3" [ref=f32e134] [cursor=pointer]:
+                      - /url: "#recraft-v3"
+                  - listitem [ref=f32e135]:
+                    - link "Recraft V3 Vector" [ref=f32e136] [cursor=pointer]:
+                      - /url: "#recraft-v3-vector"
+                  - listitem [ref=f32e137]:
+                    - link "Recraft V2" [ref=f32e138] [cursor=pointer]:
+                      - /url: "#recraft-v2"
+                  - listitem [ref=f32e139]:
+                    - link "Recraft V2 Vector" [ref=f32e140] [cursor=pointer]:
+                      - /url: "#recraft-v2-vector"
+              - generic [ref=f32e141]:
+                - generic [ref=f32e143]:
+                  - link "API" [ref=f32e146] [cursor=pointer]:
+                    - /url: /docs/api-reference/getting-started
+                  - generic [ref=f32e147]:
+                    - heading "Styles" [level=1] [ref=f32e148]
+                    - generic [ref=f32e149]:
+                      - button "Copy page" [ref=f32e150] [cursor=pointer]
+                      - button "More actions" [ref=f32e156] [cursor=pointer]
+                - generic [ref=f32e159]:
+                  - generic [ref=f32e160]:
+                    - strong [ref=f32e161]: "Note:"
+                    - text: Styles are
+                    - strong [ref=f32e162]: not yet supported for V4 models
+                    - text: .
+                  - generic [ref=f32e163]: Styles define the visual appearance and aesthetic of generated images, including textures, visual effects, colors, composition, and overall artistic feel. Recraft offers both predefined curated styles and the ability to create custom styles.
+                  - generic [ref=f32e164]:
+                    - text: "Recraft styles are organized into groups: realistic, digital illustrations, vector illustrations, icons, etc. Please refer to the examples below for visual references. To generate an image, you may provide a specific style name, such as"
+                    - code [ref=f32e165]: Recraft V3 Raw
+                    - text: ","
+                    - code [ref=f32e166]: Photorealism
+                    - text: ", or"
+                    - code [ref=f32e167]: Vector art
+                    - text: . If a style name is supported by multiple models, the API defaults to Recraft V3 (if supported, to Recraft V2 otherwise). To use a specific version, explicitly pair the style with the model parameter (e.g.,
+                    - code [ref=f32e168]: Photorealism
+                    - text: with
+                    - code [ref=f32e169]: recraftv3
+                    - text: or
+                    - code [ref=f32e170]: Vector art
+                    - text: with
+                    - code [ref=f32e171]: recraftv2_vector
+                    - text: ).
+                  - generic [ref=f32e172]:
+                    - text: Refer to the
+                    - link "List of Styles" [ref=f32e173] [cursor=pointer]:
+                      - /url: /docs/api-reference/styles#list-of-styles
+                    - text: for compatibility across V2 / V3 models.
+                  - generic [ref=f32e174]: "Examples:"
+                  - group [ref=f32e175]:
+                    - paragraph [ref=f32e180] [cursor=pointer]: Photorealism
+                  - group [ref=f32e181]:
+                    - paragraph [ref=f32e186] [cursor=pointer]: Illustration
+                  - group [ref=f32e187]:
+                    - paragraph [ref=f32e192] [cursor=pointer]: Vector art
+                  - group [ref=f32e193]:
+                    - paragraph [ref=f32e198] [cursor=pointer]: Icon
+                  - generic [ref=f32e199]:
+                    - code [ref=f32e200]: Photorealism
+                    - text: and
+                    - code [ref=f32e201]: Illustration
+                    - text: images are generated in raster formats such as PNG, WEBP, or JPG. These formats use pixels to represent details, making them ideal for photos and complex artwork. On the other hand,
+                    - code [ref=f32e202]: Vector art
+                    - text: and
+                    - code [ref=f32e203]: Icon
+                    - text: are generated in the SVG format. Unlike raster images, SVGs are made of mathematical paths and shapes, allowing them to scale to any size without losing quality.
+                  - heading "Navigate to header Using of styles" [level=3] [ref=f32e204]:
+                    - link "Navigate to header" [ref=f32e205] [cursor=pointer]:
+                      - /url: "#using-of-styles"
+                    - generic [ref=f32e210] [cursor=pointer]: Using of styles
+                  - generic [ref=f32e211]:
+                    - text: The
+                    - code [ref=f32e212]: style
+                    - text: "parameter accepts the name of any curated style provided by Recraft. Examples include but not limited to:"
+                  - list [ref=f32e213]:
+                    - listitem [ref=f32e214]:
+                      - text: "Recraft V4.1, Recraft V4.1 Vector, Recraft V4.1 Pro, Recraft V4.1 Vector Pro:"
+                      - strong [ref=f32e215]: styles are not supported
+                    - listitem [ref=f32e216]:
+                      - text: "Recraft V4.1 Utility, Recraft V4.1 Utility Vector, Recraft V4.1 Utility Pro, Recraft V4.1 Utility Vector Pro:"
+                      - strong [ref=f32e217]: styles are not supported
+                    - listitem [ref=f32e218]:
+                      - text: "Recraft V4, Recraft V4 Vector, Recraft V4 Pro, Recraft V4 Vector Pro:"
+                      - strong [ref=f32e219]: styles are not supported
+                    - listitem [ref=f32e220]:
+                      - text: "Recraft V3:"
+                      - link [ref=f32e221] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/b9af225b-6b98-43d0-a4b3-16343641e852
+                        - code [ref=f32e222]: Recraft V3 Raw
+                      - text: ","
+                      - link [ref=f32e223] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/6b98805f-9342-4d1e-9b53-bcb6b6d20ea1
+                        - code [ref=f32e224]: Photorealism
+                      - text: ","
+                      - link [ref=f32e225] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/3eb71874-5e13-4386-a74b-e42119186b0a
+                        - code [ref=f32e226]: Illustration
+                      - text: ","
+                      - link [ref=f32e227] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/e4eb5a3f-1b8b-4f5c-bada-bf6c2451cb17
+                        - code [ref=f32e228]: Enterprise
+                      - text: ","
+                      - link [ref=f32e229] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/17027120-cf06-465f-a4d0-2e44ad8dee0d
+                        - code [ref=f32e230]: Hand-drawn
+                      - text: ","
+                      - link [ref=f32e231] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/84789d26-1153-4faf-a1d1-c3e94d7a0035
+                        - code [ref=f32e232]: Punk Graphic
+                      - text: ", etc"
+                    - listitem [ref=f32e233]:
+                      - text: "Recraft V3 Vector:"
+                      - link [ref=f32e234] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/773902ac-683a-4042-86a3-fe714eee345a
+                        - code [ref=f32e235]: Vector art
+                      - text: ","
+                      - link [ref=f32e236] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/19942671-ffa4-4867-9bbe-f5e4503dcc93
+                        - code [ref=f32e237]: Line art
+                      - text: ","
+                      - link [ref=f32e238] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/ce1f9161-a8dc-488f-9ff1-3f41082887b5
+                        - code [ref=f32e239]: Engraving
+                      - text: ", etc"
+                    - listitem [ref=f32e240]:
+                      - text: "Recraft V2:"
+                      - link [ref=f32e241] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/5a99ae89-3f14-433b-abb2-a1d8074b1ab1
+                        - code [ref=f32e242]: Photorealism
+                      - text: ","
+                      - link [ref=f32e243] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/b8772060-8802-4f3c-b051-73349b1017a5
+                        - code [ref=f32e244]: Illustration
+                      - text: ","
+                      - link [ref=f32e245] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/4659b2d6-a580-4287-849e-96190d7dbf30
+                        - code [ref=f32e246]: 3D render
+                      - text: ","
+                      - link [ref=f32e247] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/f8f1bc1c-1ae7-43ea-a36f-c81049feee01
+                        - code [ref=f32e248]: Kawaii
+                      - text: ", etc"
+                    - listitem [ref=f32e249]:
+                      - text: "Recraft V2 Vector:"
+                      - link [ref=f32e250] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/807ce9bc-7e36-4efa-a6cb-11cda1cecd19
+                        - code [ref=f32e251]: Vector art
+                      - text: ","
+                      - link [ref=f32e252] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/645cb7ca-4be3-4d90-9f16-e9c26f6812f1
+                        - code [ref=f32e253]: Icon
+                      - text: ","
+                      - link [ref=f32e254] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/a2ba0c04-e40d-4210-8ed2-46d3537c546c
+                        - code [ref=f32e255]: Doodle
+                      - text: ", etc"
+                  - generic [ref=f32e256]:
+                    - text: For the complete list of available styles organized by model and category, see the
+                    - link "List of Styles" [ref=f32e257] [cursor=pointer]:
+                      - /url: /docs/api-reference/styles#list-of-styles
+                    - text: . Some styles with identical names exist across multiple models (e.g.,
+                    - code [ref=f32e258]: Photorealism
+                    - text: is available in Recraft V2, and Recraft V3 models). Use the
+                    - code [ref=f32e259]: model
+                    - text: parameter to explicitly specify which model version to use.
+                  - generic [ref=f32e260]:
+                    - text: The
+                    - code [ref=f32e261]: style_id
+                    - text: "parameter accepts:"
+                  - list [ref=f32e262]:
+                    - listitem [ref=f32e263]: style IDs created via the API;
+                    - listitem [ref=f32e264]:
+                      - text: "style IDs from the Recraft web platform, accessible if :"
+                      - list [ref=f32e265]:
+                        - listitem [ref=f32e266]: you own the style;
+                        - listitem [ref=f32e267]: the style is publicly available;
+                        - listitem [ref=f32e268]: the style was explicitly shared to your account.
+                  - generic [ref=f32e269]: To obtain a style ID from the web platform, open any style in the Styles panel and click the three-dot menu to copy the style ID.
+                  - generic [ref=f32e270]:
+                    - text: The
+                    - code [ref=f32e271]: style
+                    - text: and
+                    - code [ref=f32e272]: style_id
+                    - text: "parameters cannot be used together. Specify one or the other, not both. If neither parameter is provided, the default style for the selected model will be used:"
+                  - list [ref=f32e273]:
+                    - listitem [ref=f32e274]:
+                      - text: "Recraft V3:"
+                      - link [ref=f32e275] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/b9af225b-6b98-43d0-a4b3-16343641e852
+                        - code [ref=f32e276]: Recraft V3 Raw
+                      - text: ;
+                    - listitem [ref=f32e277]:
+                      - text: "Recraft V3 Vector:"
+                      - link [ref=f32e278] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/773902ac-683a-4042-86a3-fe714eee345a
+                        - code [ref=f32e279]: Vector art
+                      - text: ;
+                    - listitem [ref=f32e280]:
+                      - text: "Recraft V2:"
+                      - link [ref=f32e281] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/5a99ae89-3f14-433b-abb2-a1d8074b1ab1
+                        - code [ref=f32e282]: Photorealism
+                      - text: ;
+                    - listitem [ref=f32e283]:
+                      - text: "Recraft V2 Vector:"
+                      - link [ref=f32e284] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/807ce9bc-7e36-4efa-a6cb-11cda1cecd19
+                        - code [ref=f32e285]: Vector art
+                      - text: .
+                  - generic [ref=f32e286]: "Model compatibility:"
+                  - list [ref=f32e287]:
+                    - listitem [ref=f32e288]: custom styles created on the web platform are compatible with the model specified during creation;
+                    - listitem [ref=f32e289]: custom styles created via the API are compatible with Recraft V3 and Recraft V3 Vector models only.
+                  - heading "Navigate to header List of styles" [level=3] [ref=f32e290]:
+                    - link "Navigate to header" [ref=f32e291] [cursor=pointer]:
+                      - /url: "#list-of-styles"
+                    - generic [ref=f32e296] [cursor=pointer]: List of styles
+                  - generic [ref=f32e297]:
+                    - text: To generate an image, you may provide a specific style name, such as
+                    - code [ref=f32e298]: Recraft V3 Raw
+                    - text: ","
+                    - code [ref=f32e299]: Photorealism
+                    - text: ", or"
+                    - code [ref=f32e300]: Vector art
+                    - text: .
+                  - generic [ref=f32e301]:
+                    - text: If a style name is supported by multiple models, the API defaults to Recraft V3 (if supported, to Recraft V2 otherwise). To use a specific version, explicitly pair the style with the model parameter (e.g.,
+                    - code [ref=f32e302]: Photorealism
+                    - text: with
+                    - code [ref=f32e303]: recraftv3
+                    - text: or
+                    - code [ref=f32e304]: Vector art
+                    - text: with
+                    - code [ref=f32e305]: recraftv2_vector
+                    - text: ).
+                  - heading "Navigate to header Recraft V3" [level=4] [ref=f32e306]:
+                    - link "Navigate to header" [ref=f32e307] [cursor=pointer]:
+                      - /url: "#recraft-v3"
+                    - generic [ref=f32e312] [cursor=pointer]: Recraft V3
+                  - list [ref=f32e313]:
+                    - listitem [ref=f32e314]:
+                      - text: "Photorealistic styles:"
+                      - link [ref=f32e315] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/6b98805f-9342-4d1e-9b53-bcb6b6d20ea1
+                        - code [ref=f32e316]: Photorealism
+                      - text: ","
+                      - link [ref=f32e317] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/e4eb5a3f-1b8b-4f5c-bada-bf6c2451cb17
+                        - code [ref=f32e318]: Enterprise
+                      - text: ","
+                      - link [ref=f32e319] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/90cf050a-5985-4ca8-b255-d370831701ca
+                        - code [ref=f32e320]: Natural light
+                      - text: ","
+                      - link [ref=f32e321] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/b8f16786-5794-47fd-b2b3-5f607d919d1c
+                        - code [ref=f32e322]: Studio photo
+                      - text: ","
+                      - link [ref=f32e323] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/d0c61ed6-5f6c-4332-af27-e6a5fc2bde64
+                        - code [ref=f32e324]: HDR
+                      - text: ","
+                      - link [ref=f32e325] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/41501ef8-26a6-4d1c-946c-d8b659ff11c3
+                        - code [ref=f32e326]: Hard flash
+                      - text: ","
+                      - link [ref=f32e327] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/ca56e01b-a128-477f-b2f3-13a7191c8e91
+                        - code [ref=f32e328]: Motion blur
+                      - text: ","
+                      - link [ref=f32e329] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/7babd38f-dc87-4ccf-99de-d8834f8900f5
+                        - code [ref=f32e330]: Black & white
+                      - text: ","
+                      - link [ref=f32e331] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/d92bef4c-605e-451d-a93f-a8d78f14effa
+                        - code [ref=f32e332]: Evening light
+                      - text: ","
+                      - link [ref=f32e333] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/889bee89-edce-4104-b572-df38c58e8659
+                        - code [ref=f32e334]: Faded Nostalgia
+                      - text: ","
+                      - link [ref=f32e335] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/51536681-7ee0-4604-bbb3-3a9e45e2b59f
+                        - code [ref=f32e336]: Forest life
+                      - text: ","
+                      - link [ref=f32e337] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/3ab91eeb-203f-4e00-865b-1e64c7854f08
+                        - code [ref=f32e338]: Mystic Naturalism
+                      - text: ","
+                      - link [ref=f32e339] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/45f34903-6da9-4468-966d-11314d845b41
+                        - code [ref=f32e340]: Natural Tones
+                      - text: ","
+                      - link [ref=f32e341] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/06401905-a828-4652-a962-7026693c8cf7
+                        - code [ref=f32e342]: Organic Calm
+                      - text: ","
+                      - link [ref=f32e343] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/336eabc6-da87-4a1e-a567-c3dd17bf5e79
+                        - code [ref=f32e344]: Real-Life Glow
+                      - text: ","
+                      - link [ref=f32e345] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/2a4176f2-be17-49c5-b8b7-7a3bdd11a277
+                        - code [ref=f32e346]: Retro Realism
+                      - text: ","
+                      - link [ref=f32e347] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/226190a0-5c43-4e0c-98a0-1a4ba63800cd
+                        - code [ref=f32e348]: Retro Snapshot
+                      - text: ","
+                      - link [ref=f32e349] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/c61a727c-a9a8-40a5-a289-fdaf3a59eae1
+                        - code [ref=f32e350]: Urban Drama
+                      - text: ","
+                      - link [ref=f32e351] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/ba5e9c0c-4a20-492d-924d-a758b52b102d
+                        - code [ref=f32e352]: Village Realism
+                      - text: ","
+                      - link [ref=f32e353] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/db207d41-37bf-46ae-9e12-3201167c4cbe
+                        - code [ref=f32e354]: Warm Folk
+                      - text: ","
+                      - link [ref=f32e355] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/57ed072c-3e0e-4df5-baba-83a6e87048b8
+                        - code [ref=f32e356]: Product photo
+                      - text: ;
+                    - listitem [ref=f32e357]:
+                      - text: "Illustration styles:"
+                      - link [ref=f32e358] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/3eb71874-5e13-4386-a74b-e42119186b0a
+                        - code [ref=f32e359]: Illustration
+                      - text: ","
+                      - link [ref=f32e360] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/17027120-cf06-465f-a4d0-2e44ad8dee0d
+                        - code [ref=f32e361]: Hand-drawn
+                      - text: ","
+                      - link [ref=f32e362] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/245b724f-8a24-4bde-aba4-21d41295074d
+                        - code [ref=f32e363]: Grain
+                      - text: ","
+                      - link [ref=f32e364] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/6319466c-2bda-4b13-88ba-3e4e82aba55e
+                        - code [ref=f32e365]: Bold Sketch
+                      - text: ","
+                      - link [ref=f32e366] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/8a5273c5-12cf-48de-8217-0f879b881398
+                        - code [ref=f32e367]: Pencil sketch
+                      - text: ","
+                      - link [ref=f32e368] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/a56d7265-ed27-4e0d-827b-2692d0b46fba
+                        - code [ref=f32e369]: Retro Pop
+                      - text: ","
+                      - link [ref=f32e370] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/f5145ada-d0d5-46d9-adda-d38fdf0b80d9
+                        - code [ref=f32e371]: Clay
+                      - text: ","
+                      - link [ref=f32e372] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/7be82d9c-ad40-483e-b235-389043675ad2
+                        - code [ref=f32e373]: Risograph
+                      - text: ","
+                      - link [ref=f32e374] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/75ee357c-ff80-4fbe-99ae-44d3310155fe
+                        - code [ref=f32e375]: Color engraving
+                      - text: ","
+                      - link [ref=f32e376] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/aa32a571-eeeb-48bc-bc51-5792e9f49eb4
+                        - code [ref=f32e377]: Pixel art
+                      - text: ","
+                      - link [ref=f32e378] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/2b6d8781-7ab6-43dc-b870-891cc072246d
+                        - code [ref=f32e379]: Antiquarian
+                      - text: ","
+                      - link [ref=f32e380] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/1703ae77-b491-47e2-a25d-9dd6c28c2ffa
+                        - code [ref=f32e381]: Bold fantasy
+                      - text: ","
+                      - link [ref=f32e382] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/ecd1de2b-02b7-43ce-9780-2ea91deb38f4
+                        - code [ref=f32e383]: Child book
+                      - text: ","
+                      - link [ref=f32e384] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/6e403112-b52d-408b-8f78-539657229ade
+                        - code [ref=f32e385]: Cover
+                      - text: ","
+                      - link [ref=f32e386] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/7cccbbd2-c282-4ef6-a37f-889d1c503b74
+                        - code [ref=f32e387]: Crosshatch
+                      - text: ","
+                      - link [ref=f32e388] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/f0999093-d0dc-4718-adba-a038a60ff6b2
+                        - code [ref=f32e389]: Digital engraving
+                      - text: ","
+                      - link [ref=f32e390] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/e2d8e964-ea62-43f4-a269-a47dd8728fe5
+                        - code [ref=f32e391]: Expressionism
+                      - text: ","
+                      - link [ref=f32e392] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/eac001dc-5c63-4e6b-8d1f-390cbe5d2040
+                        - code [ref=f32e393]: Freehand details
+                      - text: ","
+                      - link [ref=f32e394] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/824645a6-dc5b-4ad2-95c2-90bb6db5fbe1
+                        - code [ref=f32e395]: Grain 2.0
+                      - text: ","
+                      - link [ref=f32e396] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/88b9e740-728c-4d00-9725-6d820859f6b7
+                        - code [ref=f32e397]: Graphic intensity
+                      - text: ","
+                      - link [ref=f32e398] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/98cef725-f770-498b-a90e-2eb4ab03cddb
+                        - code [ref=f32e399]: Hard Comics
+                      - text: ","
+                      - link [ref=f32e400] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/9a3edce0-424f-49c5-b372-61b0f589426c
+                        - code [ref=f32e401]: Long shadow
+                      - text: ","
+                      - link [ref=f32e402] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/6aa86245-e03f-432d-8b57-5fe5bfdb60cf
+                        - code [ref=f32e403]: Modern Folk
+                      - text: ","
+                      - link [ref=f32e404] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/da5cc27d-0389-4b5c-8a0d-fe5b76937214
+                        - code [ref=f32e405]: Multicolor
+                      - text: ","
+                      - link [ref=f32e406] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/1feb869d-edcc-4b6b-b6d0-413e9560f2dd
+                        - code [ref=f32e407]: Neon Calm
+                      - text: ","
+                      - link [ref=f32e408] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/956a5ac8-401f-4e5f-a034-ec458c371598
+                        - code [ref=f32e409]: Noir
+                      - text: ","
+                      - link [ref=f32e410] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/4ce80d17-2e82-4f07-8ee7-c20931174da9
+                        - code [ref=f32e411]: Nostalgic pastel
+                      - text: ","
+                      - link [ref=f32e412] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/87cf0b6b-a495-4436-8598-897a71bf5db6
+                        - code [ref=f32e413]: Outline details
+                      - text: ","
+                      - link [ref=f32e414] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/9819278f-d0fe-4331-b7d4-37b0cf69150a
+                        - code [ref=f32e415]: Pastel gradient
+                      - text: ","
+                      - link [ref=f32e416] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/149f13db-53ac-4c3e-8eb7-d5d44af04405
+                        - code [ref=f32e417]: Pastel sketch
+                      - text: ","
+                      - link [ref=f32e418] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/c5c3026e-66e5-412e-b87a-101512d745ac
+                        - code [ref=f32e419]: Pop art
+                      - text: ","
+                      - link [ref=f32e420] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/99c21c89-7de0-46dc-b447-e519be2c47f0
+                        - code [ref=f32e421]: Pop renaissance
+                      - text: ","
+                      - link [ref=f32e422] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/c42616cd-f2c2-459c-a745-6f0ac86589d7
+                        - code [ref=f32e423]: Street art
+                      - text: ","
+                      - link [ref=f32e424] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/c0c1b91e-8b46-4243-8f0b-fdea56c43701
+                        - code [ref=f32e425]: Tablet sketch
+                      - text: ","
+                      - link [ref=f32e426] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/acf7c4d0-ac61-4fb4-a3fa-d3a1fde6c014
+                        - code [ref=f32e427]: Urban Glow
+                      - text: ","
+                      - link [ref=f32e428] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/ce069e6f-09bc-482b-9a05-fabf6658f27f
+                        - code [ref=f32e429]: Urban sketching
+                      - text: ","
+                      - link [ref=f32e430] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/e3838b40-dbac-450c-a06c-2c52b3b790c7
+                        - code [ref=f32e431]: Young adult book
+                      - text: ","
+                      - link [ref=f32e432] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/b2449e5b-6954-453e-a168-c6e743dafd9a
+                        - code [ref=f32e433]: Young adult book 2
+                      - text: ","
+                      - link [ref=f32e434] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/a054fca2-259e-449e-9b25-a7b2ec7a9aa3
+                        - code [ref=f32e435]: Seamless Digital
+                      - text: ;
+                    - listitem [ref=f32e436]:
+                      - text: "Emblem styles:"
+                      - link [ref=f32e437] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/1c2f96d5-c2cf-4311-909f-44190a8ea153
+                        - code [ref=f32e438]: Prestige Emblem
+                      - text: ","
+                      - link [ref=f32e439] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/a4681bb8-4e6b-47c6-ae61-d4dcdf9b9dbc
+                        - code [ref=f32e440]: Pop Graphic
+                      - text: ","
+                      - link [ref=f32e441] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/dac4f551-db80-4cdd-8778-8d6ad4fa992b
+                        - code [ref=f32e442]: Stamp
+                      - text: ","
+                      - link [ref=f32e443] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/84789d26-1153-4faf-a1d1-c3e94d7a0035
+                        - code [ref=f32e444]: Punk Graphic
+                      - text: ","
+                      - link [ref=f32e445] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/7faff2e0-bdce-4a2b-aea5-471f7fb88f5e
+                        - code [ref=f32e446]: Vintage Emblem
+                      - text: ;
+                  - heading "Navigate to header Recraft V3 Vector" [level=4] [ref=f32e447]:
+                    - link "Navigate to header" [ref=f32e448] [cursor=pointer]:
+                      - /url: "#recraft-v3-vector"
+                    - generic [ref=f32e453] [cursor=pointer]: Recraft V3 Vector
+                  - list [ref=f32e454]:
+                    - listitem [ref=f32e455]:
+                      - text: "Vector styles:"
+                      - link [ref=f32e456] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/773902ac-683a-4042-86a3-fe714eee345a
+                        - code [ref=f32e457]: Vector art
+                      - text: ","
+                      - link [ref=f32e458] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/19942671-ffa4-4867-9bbe-f5e4503dcc93
+                        - code [ref=f32e459]: Line art
+                      - text: ","
+                      - link [ref=f32e460] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/455a5cff-6d70-4d9a-945f-9256f279f50e
+                        - code [ref=f32e461]: Linocut
+                      - text: ","
+                      - link [ref=f32e462] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/7119b64b-b99d-4929-a418-3ead12ca1847
+                        - code [ref=f32e463]: Color blobs
+                      - text: ","
+                      - link [ref=f32e464] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/ce1f9161-a8dc-488f-9ff1-3f41082887b5
+                        - code [ref=f32e465]: Engraving
+                      - text: ","
+                      - link [ref=f32e466] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/e33777c2-e1d3-4b16-bcdb-c7335e67a138
+                        - code [ref=f32e467]: Bold stroke
+                      - text: ","
+                      - link [ref=f32e468] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/e5aeb587-cac5-45ab-887f-bbc933a3d756
+                        - code [ref=f32e469]: Chemistry
+                      - text: ","
+                      - link [ref=f32e470] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/f5907d95-d032-4f70-a035-308bf8326ff3
+                        - code [ref=f32e471]: Colored stencil
+                      - text: ","
+                      - link [ref=f32e472] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/f14175ea-077f-4d8d-b1cb-e568ed906324
+                        - code [ref=f32e473]: Cosmics
+                      - text: ","
+                      - link [ref=f32e474] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/9ab9c49c-a934-4c83-af04-de6665a8d992
+                        - code [ref=f32e475]: Cutout
+                      - text: ","
+                      - link [ref=f32e476] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/94b499fd-6408-48d1-8160-87661e93767c
+                        - code [ref=f32e477]: Depressive
+                      - text: ","
+                      - link [ref=f32e478] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/59133ee8-2fc5-4225-bcd9-6934d21bcac8
+                        - code [ref=f32e479]: Editorial
+                      - text: ","
+                      - link [ref=f32e480] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/782e2222-dbd8-46e0-bcec-1179d6c0e511
+                        - code [ref=f32e481]: Emotional flat
+                      - text: ","
+                      - link [ref=f32e482] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/1e018a0b-3299-445d-8812-06fd2f24eafa
+                        - code [ref=f32e483]: Marker outline
+                      - text: ","
+                      - link [ref=f32e484] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/6c19cde9-52a6-40b3-9cc9-d81fe1fdd387
+                        - code [ref=f32e485]: Mosaic
+                      - text: ","
+                      - link [ref=f32e486] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/70192033-8db6-49af-b08b-f0e0043dddb8
+                        - code [ref=f32e487]: Naivector
+                      - text: ","
+                      - link [ref=f32e488] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/857c6d5e-4039-45c1-8e31-12cfa25fa638
+                        - code [ref=f32e489]: Roundish flat
+                      - text: ","
+                      - link [ref=f32e490] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/8eafc64b-6483-46ca-858c-ef509ded10b5
+                        - code [ref=f32e491]: Segmented Colors
+                      - text: ","
+                      - link [ref=f32e492] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/3ddad82f-d3c0-432e-ab7e-d9ed441a73c0
+                        - code [ref=f32e493]: Sharp contrast
+                      - text: ","
+                      - link [ref=f32e494] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/f8300e4a-1b2f-4ad6-abbe-7e7180b87f30
+                        - code [ref=f32e495]: Thin
+                      - text: ","
+                      - link [ref=f32e496] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/b331f7bc-4ef6-4d17-a042-bae020cab91f
+                        - code [ref=f32e497]: Vector Photo
+                      - text: ","
+                      - link [ref=f32e498] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/85243d3e-dfd8-4f8b-83d7-456e72491814
+                        - code [ref=f32e499]: Vivid shapes
+                      - text: ","
+                      - link [ref=f32e500] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/2e8f425e-b1a4-4c38-8f07-977bd8c2caf5
+                        - code [ref=f32e501]: Seamless Vector
+                      - text: ;
+                  - heading "Navigate to header Recraft V2" [level=4] [ref=f32e502]:
+                    - link "Navigate to header" [ref=f32e503] [cursor=pointer]:
+                      - /url: "#recraft-v2"
+                    - generic [ref=f32e508] [cursor=pointer]: Recraft V2
+                  - list [ref=f32e509]:
+                    - listitem [ref=f32e510]:
+                      - text: "Photorealistic styles:"
+                      - link [ref=f32e511] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/5a99ae89-3f14-433b-abb2-a1d8074b1ab1
+                        - code [ref=f32e512]: Photorealism
+                      - text: ","
+                      - link [ref=f32e513] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/35ceb30e-50f5-46d4-9372-e95d8458a380
+                        - code [ref=f32e514]: Enterprise
+                      - text: ","
+                      - link [ref=f32e515] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/030886da-f6b9-4730-a1c1-4ce54a610a81
+                        - code [ref=f32e516]: Natural light
+                      - text: ","
+                      - link [ref=f32e517] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/0295270b-e050-45ad-8711-e29d1ac87d10
+                        - code [ref=f32e518]: Studio photo
+                      - text: ","
+                      - link [ref=f32e519] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/07d689f1-ee16-49c4-a103-befb59bd7032
+                        - code [ref=f32e520]: HDR
+                      - text: ","
+                      - link [ref=f32e521] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/4cb07726-d352-48cf-8f9b-b06eed4e0563
+                        - code [ref=f32e522]: Hard flash
+                      - text: ","
+                      - link [ref=f32e523] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/cee8bee7-2085-4aca-91d5-2e3939f11dc8
+                        - code [ref=f32e524]: Motion blur
+                      - text: ","
+                      - link [ref=f32e525] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/6fefbfcf-9c93-4bce-8b31-bcbd86327d66
+                        - code [ref=f32e526]: Black & white
+                      - text: ","
+                      - link [ref=f32e527] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/570c6fb3-1b01-4da0-afc9-0cd9997ffcc2
+                        - code [ref=f32e528]: Product photo
+                      - text: ;
+                    - listitem [ref=f32e529]:
+                      - text: "Illustration styles:"
+                      - link [ref=f32e530] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/b8772060-8802-4f3c-b051-73349b1017a5
+                        - code [ref=f32e531]: Illustration
+                      - text: ","
+                      - link [ref=f32e532] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/4659b2d6-a580-4287-849e-96190d7dbf30
+                        - code [ref=f32e533]: 3D render
+                      - text: ","
+                      - link [ref=f32e534] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/077aeb2b-fca1-49e6-805b-6174bf55ee1a
+                        - code [ref=f32e535]: Glow
+                      - text: ","
+                      - link [ref=f32e536] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/568daa6a-9631-44e7-a615-ce547146ae52
+                        - code [ref=f32e537]: Watercolor
+                      - text: ","
+                      - link [ref=f32e538] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/a389a8b9-1209-463f-b816-0c08eb4f93c4
+                        - code [ref=f32e539]: Hand-drawn
+                      - text: ","
+                      - link [ref=f32e540] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/f8f1bc1c-1ae7-43ea-a36f-c81049feee01
+                        - code [ref=f32e541]: Kawaii
+                      - text: ","
+                      - link [ref=f32e542] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/9fe2962e-ac66-4d41-8ff4-38dbdfc79835
+                        - code [ref=f32e543]: Grain
+                      - text: ","
+                      - link [ref=f32e544] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/41ef6ca6-8797-4cf1-87c6-522f425f2059
+                        - code [ref=f32e545]: Bold Sketch
+                      - text: ","
+                      - link [ref=f32e546] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/f6e787d5-80cc-415e-b68d-860a0d25dafb
+                        - code [ref=f32e547]: Pencil sketch
+                      - text: ","
+                      - link [ref=f32e548] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/a28c4388-81fd-497c-a7ea-a44013636071
+                        - code [ref=f32e549]: Retro Pop
+                      - text: ","
+                      - link [ref=f32e550] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/c7aaa207-769f-4449-bdc4-c9d8cbcdbb09
+                        - code [ref=f32e551]: Clay
+                      - text: ","
+                      - link [ref=f32e552] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/902997d1-72a5-4951-81b8-042732f32d26
+                        - code [ref=f32e553]: Risograph
+                      - text: ","
+                      - link [ref=f32e554] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/1f9a9d70-2d71-4b85-9106-646bbddf1fd0
+                        - code [ref=f32e555]: Psychedelic
+                      - text: ","
+                      - link [ref=f32e556] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/655b577f-a89f-4015-8a95-12b8daa2414b
+                        - code [ref=f32e557]: Seamless Digital
+                      - text: ","
+                      - link [ref=f32e558] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/a36fc277-4f70-445b-bc1a-c50412c8c439
+                        - code [ref=f32e559]: Color engraving
+                      - text: ","
+                      - link [ref=f32e560] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/7c8c1d97-17c8-44b4-a252-2808d44795a6
+                        - code [ref=f32e561]: Pixel art
+                      - text: ","
+                      - link [ref=f32e562] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/5e86f847-766c-4479-a6a0-645a54d77e06
+                        - code [ref=f32e563]: 80's
+                      - text: ","
+                      - link [ref=f32e564] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/85770603-257a-4588-a9e7-73064991c1b7
+                        - code [ref=f32e565]: Voxel art
+                      - text: ;
+                  - heading "Navigate to header Recraft V2 Vector" [level=4] [ref=f32e566]:
+                    - link "Navigate to header" [ref=f32e567] [cursor=pointer]:
+                      - /url: "#recraft-v2-vector"
+                    - generic [ref=f32e572] [cursor=pointer]: Recraft V2 Vector
+                  - list [ref=f32e573]:
+                    - listitem [ref=f32e574]:
+                      - text: "Vector styles:"
+                      - link [ref=f32e575] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/807ce9bc-7e36-4efa-a6cb-11cda1cecd19
+                        - code [ref=f32e576]: Vector art
+                      - text: ","
+                      - link [ref=f32e577] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/da8ce568-08d9-4bfb-9ef0-2984ec6391e3
+                        - code [ref=f32e578]: Line art
+                      - text: ","
+                      - link [ref=f32e579] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/3fc31d5e-a4ea-436c-be1a-787ec1cc76d8
+                        - code [ref=f32e580]: Linocut
+                      - text: ","
+                      - link [ref=f32e581] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/6cdae472-693d-478a-91fc-83eaf7c91a0c
+                        - code [ref=f32e582]: Cartoon
+                      - text: ","
+                      - link [ref=f32e583] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/bcfabc0a-dec4-479b-962f-b306609e90ee
+                        - code [ref=f32e584]: Flat 2.0
+                      - text: ","
+                      - link [ref=f32e585] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/2dc79001-283c-4c1e-ac01-49a95e21175c
+                        - code [ref=f32e586]: Color blobs
+                      - text: ","
+                      - link [ref=f32e587] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/6caa7c53-ad06-4d3b-827d-5bb81e782659
+                        - code [ref=f32e588]: Vector Kawaii
+                      - text: ","
+                      - link [ref=f32e589] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/1eb016d9-46d0-4b4e-bf1d-76296f43b471
+                        - code [ref=f32e590]: Doodle Line art
+                      - text: ","
+                      - link [ref=f32e591] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/22e6d2f6-7951-49c4-aaaa-b7db63cb880a
+                        - code [ref=f32e592]: Seamless Vector
+                      - text: ","
+                      - link [ref=f32e593] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/100ae2cf-358a-46d2-ab13-dda7079c0460
+                        - code [ref=f32e594]: Engraving
+                      - text: ;
+                    - listitem [ref=f32e595]:
+                      - text: "Icon styles:"
+                      - link [ref=f32e596] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/645cb7ca-4be3-4d90-9f16-e9c26f6812f1
+                        - code [ref=f32e597]: Icon
+                      - text: ","
+                      - link [ref=f32e598] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/5cf68b22-c903-48c5-882b-16872ef2d124
+                        - code [ref=f32e599]: Outline
+                      - text: ","
+                      - link [ref=f32e600] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/be9ebb8f-312a-4d8e-b7ba-8276b05a2108
+                        - code [ref=f32e601]: Pictogram
+                      - text: ","
+                      - link [ref=f32e602] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/7513cd33-5b71-4e04-8fed-becdd2672b4a
+                        - code [ref=f32e603]: Colored outline
+                      - text: ","
+                      - link [ref=f32e604] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/a2ba0c04-e40d-4210-8ed2-46d3537c546c
+                        - code [ref=f32e605]: Doodle
+                      - text: ","
+                      - link [ref=f32e606] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/1c5ca809-1bce-4b1c-8b14-79a5bc6df150
+                        - code [ref=f32e607]: Colored shape
+                      - text: ","
+                      - link [ref=f32e608] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/a7272add-907f-49f0-860d-d8b6d2dd0995
+                        - code [ref=f32e609]: Gradient outline
+                      - text: ","
+                      - link [ref=f32e610] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/bdb513fc-cf7f-4e0f-be45-ef18bd693d03
+                        - code [ref=f32e611]: Offset doodle
+                      - text: ","
+                      - link [ref=f32e612] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/65dcb522-d206-4561-bf93-9ae650f73136
+                        - code [ref=f32e613]: Gradient shape
+                      - text: ","
+                      - link [ref=f32e614] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/d700cad3-94da-4204-b753-dbb75487edfc
+                        - code [ref=f32e615]: Broken line
+                      - text: ","
+                      - link [ref=f32e616] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/styles/5a905231-9aee-4d4b-a0bb-eda7e79a0e95
+                        - code [ref=f32e617]: Offset fill
+                      - text: ;
+                - generic [ref=f32e618]:
+                  - link "Examples" [ref=f32e619] [cursor=pointer]:
+                    - /url: /docs/api-reference/examples
+                  - link "Pricing" [ref=f32e623] [cursor=pointer]:
+                    - /url: /docs/api-reference/pricing
+                - generic [ref=f32e628]:
+                  - textbox "Ask a question..." [ref=f32e629]
+                  - generic: ⌘I
+                  - button "Send message" [disabled] [ref=f32e630]
+                - generic [ref=f32e634]:
+                  - generic [ref=f32e635]:
+                    - link "instagram" [ref=f32e636] [cursor=pointer]:
+                      - /url: https://www.instagram.com/recraftai
+                    - link "github" [ref=f32e639] [cursor=pointer]:
+                      - /url: https://github.com/recraft-ai/ComfyUI-RecraftAI
+                    - link "linkedin" [ref=f32e642] [cursor=pointer]:
+                      - /url: https://www.linkedin.com/company/recraftai
+                  - link "Powered by This documentation is built and hosted on Mintlify, a developer documentation platform" [ref=f32e647] [cursor=pointer]:
+                    - /url: https://www.mintlify.com?utm_campaign=poweredBy&utm_medium=referral&utm_source=recraft
+                    - generic [ref=f32e648]: Powered by
+                    - generic [ref=f32e658]: This documentation is built and hosted on Mintlify, a developer documentation platform
+      - generic:
+        - generic [ref=f32e660]:
+          - generic [ref=f32e661]: Assistant
+          - generic [ref=f32e666]:
+            - button [ref=f32e667] [cursor=pointer]
+            - button [ref=f32e673] [cursor=pointer]
+        - generic [ref=f32e677]: Responses are generated using AI and may contain mistakes.
+        - generic [ref=f32e680]:
+          - textbox [ref=f32e681]:
+            - /placeholder: Ask a question...
+          - generic [ref=f32e682]:
+            - button [ref=f32e683] [cursor=pointer]
+            - button [disabled] [ref=f32e686]

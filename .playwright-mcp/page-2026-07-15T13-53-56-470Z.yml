@@ -1,0 +1,319 @@
+- generic [ref=e1]:
+  - generic [ref=e5]:
+    - link [ref=e6] [cursor=pointer]:
+      - /url: /assets
+      - generic [ref=e7]: fal Assets is now live!
+    - button [ref=e20] [cursor=pointer]
+  - generic [ref=e23]:
+    - generic [ref=e24]:
+      - generic [ref=e27]:
+        - link [ref=e30] [cursor=pointer]:
+          - /url: /
+        - generic [ref=e36]:
+          - generic [ref=e37]:
+            - link [ref=e38] [cursor=pointer]:
+              - /url: https://docs.fal.ai
+              - text: Docs
+            - button [ref=e39] [cursor=pointer]
+          - link [ref=e42] [cursor=pointer]:
+            - /url: /login?returnTo=/models/fal-ai/recraft/v4.1/text-to-vector
+            - text: Log-in
+          - link [ref=e43] [cursor=pointer]:
+            - /url: /login?returnTo=/models/fal-ai/recraft/v4.1/text-to-vector
+            - text: Sign-up
+      - main [ref=e45]:
+        - generic [ref=e47]:
+          - generic [ref=e48]:
+            - generic [ref=e52]:
+              - generic [ref=e53]:
+                - generic [ref=e54]:
+                  - heading [level=1] [ref=e55]:
+                    - generic [ref=e57]:
+                      - generic [ref=e58]: fal-ai/
+                      - text: recraft/v4.1/text-to-vector
+                  - button [ref=e59] [cursor=pointer]
+                - button [ref=e68] [cursor=pointer]: Text to Vector
+              - generic [ref=e73]: Recraft V4.1 Vector turns prompts into fully editable SVGs with structured layers and clean geometry. Built for logos, icons, and illustration systems, it produces artwork that goes straight from generation into Figma or Illustrator.
+              - generic [ref=e74]:
+                - generic [ref=e75]: Inference
+                - generic [ref=e81]: Commercial use
+                - generic [ref=e85]: Partner
+            - generic [ref=e89]:
+              - link [ref=e90] [cursor=pointer]:
+                - /url: /api/openapi/queue/openapi.json?endpoint_id=fal-ai/recraft/v4.1/text-to-vector
+                - generic [ref=e96]: Schema
+              - generic [ref=e97]:
+                - link [ref=e98] [cursor=pointer]:
+                  - /url: /models/fal-ai/recraft/v4.1/text-to-vector/llms.txt
+                  - generic [ref=e101]: LLMs
+                - button [ref=e102] [cursor=pointer]
+          - generic [ref=e107]:
+            - link [ref=e108] [cursor=pointer]:
+              - /url: /models/fal-ai/recraft/v4.1/text-to-vector
+              - text: Playground
+            - link [ref=e109] [cursor=pointer]:
+              - /url: /models/fal-ai/recraft/v4.1/text-to-vector/api
+              - text: API
+            - link [ref=e110] [cursor=pointer]:
+              - /url: /models/fal-ai/recraft/v4.1/text-to-vector/examples
+              - text: Examples
+        - generic [ref=e112]:
+          - generic [ref=e114]:
+            - generic [ref=e116]:
+              - heading [level=3] [ref=e118]: Input
+              - combobox [ref=e119] [cursor=pointer]:
+                - generic: Form
+            - generic [ref=e123]:
+              - generic [ref=e125]:
+                - generic [ref=e126]:
+                  - generic [ref=e127]: Prompt*
+                  - generic [ref=e130]:
+                    - generic: Editorial illustration of a person reading under a giant lamp, flat color, soft shadows
+                    - textbox [ref=e131]:
+                      - /placeholder: Write your prompt here...
+                      - text: Editorial illustration of a person reading under a giant lamp, flat color, soft shadows
+                - generic [ref=e133]:
+                  - generic [ref=e134]:
+                    - generic [ref=e135]: Additional Settings
+                    - button [ref=e137] [cursor=pointer]:
+                      - generic [ref=e138]: More
+                  - paragraph [ref=e141]: Customize your input with more control.
+              - generic [ref=e144]:
+                - button [ref=e145] [cursor=pointer]: Reset
+                - link [ref=e147] [cursor=pointer]:
+                  - /url: /login?returnTo=%2Fmodels%2Ffal-ai%2Frecraft%2Fv4.1%2Ftext-to-vector%3FrestoreInputKey%3Dfal-ai%2Frecraft%2Fv4.1%2Ftext-to-vector
+                  - text: Sign in to run
+          - generic [ref=e148]:
+            - generic [ref=e149]:
+              - generic [ref=e151]:
+                - generic [ref=e152]:
+                  - heading [level=3] [ref=e153]: Result
+                  - generic [ref=e154]: Idle
+                - group [ref=e156]:
+                  - radio [checked] [ref=e157] [cursor=pointer]:
+                    - generic [ref=e162]: Preview
+                  - radio [ref=e163] [cursor=pointer]:
+                    - generic [ref=e169]: JSON
+              - generic [ref=e173]:
+                - link [ref=e180] [cursor=pointer]:
+                  - /url: https://v3b.fal.media/files/b/0a9a2a9f/MA64UDW4a3zoHYZBHzzgU_image.svg
+                - generic [ref=e183]:
+                  - heading [level=4] [ref=e184]: What would you like to do next?
+                  - link [ref=e186] [cursor=pointer]:
+                    - /url: https://v3b.fal.media/files/b/0a9a2a9f/MA64UDW4a3zoHYZBHzzgU_image.svg
+                    - text: Download
+              - paragraph [ref=e192]:
+                - text: Your request will cost
+                - generic [ref=e193]: $0.08
+                - text: per image.
+            - generic [ref=e195] [cursor=pointer]:
+              - heading [level=3] [ref=e196]: Logs
+              - button [ref=e198]: Show
+    - contentinfo [ref=e202]:
+      - generic [ref=e203]:
+        - heading [level=2] [ref=e204]: Ready to transform your enterprise with AI?
+        - link [ref=e205] [cursor=pointer]:
+          - /url: /enterprise#contact-sales
+          - text: Contact Sales
+      - generic [ref=e206]:
+        - generic [ref=e207]:
+          - heading [level=4] [ref=e208]: Learn more
+          - generic [ref=e209]:
+            - link [ref=e210] [cursor=pointer]:
+              - /url: https://status.fal.ai
+              - text: Status
+            - link [ref=e211] [cursor=pointer]:
+              - /url: /about
+              - text: About Us
+            - link [ref=e212] [cursor=pointer]:
+              - /url: https://docs.fal.ai
+              - text: Documentation
+            - link [ref=e213] [cursor=pointer]:
+              - /url: /legal/trust-and-safety
+              - text: Trust & Safety
+            - link [ref=e214] [cursor=pointer]:
+              - /url: /careers
+              - text: Careers
+            - link [ref=e215] [cursor=pointer]:
+              - /url: /pricing
+              - text: Pricing
+            - link [ref=e216] [cursor=pointer]:
+              - /url: https://blog.fal.ai
+              - text: Blog
+            - link [ref=e217] [cursor=pointer]:
+              - /url: /enterprise
+              - text: Enterprise
+            - link [ref=e218] [cursor=pointer]:
+              - /url: mailto:support@fal.ai
+              - text: Get in touch
+            - link [ref=e219] [cursor=pointer]:
+              - /url: /report-content
+              - text: Report Content
+            - link [ref=e220] [cursor=pointer]:
+              - /url: /grants
+              - text: Grants
+            - link [ref=e221] [cursor=pointer]:
+              - /url: /events
+              - text: Events
+            - link [ref=e222] [cursor=pointer]:
+              - /url: /legal
+              - text: Legal
+            - button [ref=e223] [cursor=pointer]: Your Privacy Choices
+            - link [ref=e225] [cursor=pointer]:
+              - /url: /learn
+              - text: Learn
+            - link [ref=e226] [cursor=pointer]:
+              - /url: /gen-media-report-volume-1
+              - text: Gen Media Report 2026
+        - generic [ref=e227]:
+          - heading [level=4] [ref=e228]: Image Models
+          - link [ref=e229] [cursor=pointer]:
+            - /url: /seedream-5.0
+            - text: Seedream 5.0
+          - link [ref=e230] [cursor=pointer]:
+            - /url: /gpt-image-2
+            - text: GPT Image 2
+          - link [ref=e231] [cursor=pointer]:
+            - /url: /models/fal-ai/flux-2-flex
+            - text: Flux 2
+          - link [ref=e232] [cursor=pointer]:
+            - /url: /nano-banana-2
+            - text: Nano Banana 2
+          - link [ref=e233] [cursor=pointer]:
+            - /url: /ideogram-4
+            - text: Ideogram 4
+          - link [ref=e234] [cursor=pointer]:
+            - /url: /krea-2
+            - text: Krea 2
+          - link [ref=e235] [cursor=pointer]:
+            - /url: /models/fal-ai/nano-banana-pro/edit
+            - text: Nano Banana Pro
+          - link [ref=e236] [cursor=pointer]:
+            - /url: /qwen-image-2.0
+            - text: Qwen Image 2.0
+          - link [ref=e237] [cursor=pointer]:
+            - /url: /explore
+            - text: Explore More
+        - generic [ref=e238]:
+          - heading [level=4] [ref=e239]: Video Models
+          - link [ref=e240] [cursor=pointer]:
+            - /url: /seedance-2.0
+            - text: Seedance 2.0
+          - link [ref=e241] [cursor=pointer]:
+            - /url: /gemini-omni
+            - text: Gemini Omni
+          - link [ref=e242] [cursor=pointer]:
+            - /url: /models/fal-ai/kling-video/o3/standard/image-to-video
+            - text: Kling 3.0
+          - link [ref=e243] [cursor=pointer]:
+            - /url: /models/fal-ai/veo3.1
+            - text: Veo 3.1
+          - link [ref=e244] [cursor=pointer]:
+            - /url: /grok-imagine-video-1.5
+            - text: Grok Imagine 1.5
+          - link [ref=e245] [cursor=pointer]:
+            - /url: /happyhorse-1.0
+            - text: HappyHorse 1.0
+          - link [ref=e246] [cursor=pointer]:
+            - /url: /wan-2.7
+            - text: Wan 2.7
+          - link [ref=e247] [cursor=pointer]:
+            - /url: /ltx-2.3
+            - text: LTX 2.3
+          - link [ref=e248] [cursor=pointer]:
+            - /url: /pixverse-v6
+            - text: PixVerse V6
+        - generic [ref=e249]:
+          - heading [level=4] [ref=e250]: Labs
+          - link [ref=e251] [cursor=pointer]:
+            - /url: /explore/black-forest-labs
+            - text: Black Forest Labs
+          - link [ref=e252] [cursor=pointer]:
+            - /url: /explore/google
+            - text: Google
+          - link [ref=e253] [cursor=pointer]:
+            - /url: /explore/openai
+            - text: OpenAI
+          - link [ref=e254] [cursor=pointer]:
+            - /url: /explore/xai
+            - text: xAI
+          - link [ref=e255] [cursor=pointer]:
+            - /url: /explore/alibaba
+            - text: Alibaba
+          - link [ref=e256] [cursor=pointer]:
+            - /url: /explore/kling
+            - text: Kling
+          - link [ref=e257] [cursor=pointer]:
+            - /url: /explore/bytedance
+            - text: ByteDance
+          - link [ref=e258] [cursor=pointer]:
+            - /url: /explore/elevenlabs
+            - text: ElevenLabs
+        - generic [ref=e259]:
+          - heading [level=4] [ref=e260]: Playgrounds
+          - link [ref=e261] [cursor=pointer]:
+            - /url: /sandbox
+            - text: Sandbox
+          - link [ref=e262] [cursor=pointer]:
+            - /url: /workflows
+            - text: Workflows
+          - link [ref=e263] [cursor=pointer]:
+            - /url: /models/fal-ai/flux-lora-fast-training
+            - text: Training
+          - link [ref=e264] [cursor=pointer]:
+            - /url: /tools/background-remover
+            - text: Background Remover
+        - generic [ref=e265]:
+          - heading [level=4] [ref=e266]: Socials
+          - link [ref=e267] [cursor=pointer]:
+            - /url: https://discord.gg/fal-ai
+            - text: Discord
+          - link [ref=e268] [cursor=pointer]:
+            - /url: https://github.com/fal-ai
+            - text: GitHub
+          - link [ref=e269] [cursor=pointer]:
+            - /url: https://www.reddit.com/r/fal/
+            - text: Reddit
+          - link [ref=e270] [cursor=pointer]:
+            - /url: https://twitter.com/fal
+            - text: Twitter
+          - link [ref=e271] [cursor=pointer]:
+            - /url: https://www.linkedin.com/company/features-and-labels/
+            - text: LinkedIn
+          - link [ref=e272] [cursor=pointer]:
+            - /url: https://www.youtube.com/@Fal.AI.Official
+            - text: YouTube
+          - link [ref=e273] [cursor=pointer]:
+            - /url: https://www.instagram.com/madeonfal
+            - text: Instagram
+          - link [ref=e274] [cursor=pointer]:
+            - /url: https://www.tiktok.com/@madeonfal
+            - text: TikTok
+      - generic [ref=e276]:
+        - text: Features and Labels, 2026. All Rights Reserved.
+        - link [ref=e277] [cursor=pointer]:
+          - /url: /legal/terms-of-service
+          - text: Terms of Service
+        - text: and
+        - link [ref=e278] [cursor=pointer]:
+          - /url: /legal/privacy-policy
+          - text: Privacy Policy
+        - text: .
+  - complementary [active] [ref=e291]:
+    - dialog [ref=e292]:
+      - generic [ref=e293]:
+        - heading "Your Privacy Choices" [level=2] [ref=e294]
+        - button "Close" [ref=e296] [cursor=pointer]
+      - generic [ref=e300]:
+        - generic [ref=e301]: We use cookies and other tracking technologies, and allow our advertising partners to use similar technologies, so we can, among other things, show you ads promoting fal on other sites and services and better understand your online activity. Some of these activities may be considered “sales,” “sharing,” or “targeted advertising” under applicable laws.
+        - generic [ref=e303]: You can opt out of having your personal information used or disclosed for these purposes via cookies by clicking the opt out button. You can also opt out by visiting our sites with a legally recognized opt-out preference signal enabled, such as the Global Privacy Control.
+        - generic [ref=e305]: You will need to renew your opt-out choice if you visit our site from a new device or browser, or if you clear your cookies because your opt-out choice will be linked to your browser only.
+        - strong [ref=e309]: Opt out of cookie-based sales, sharing, or targeted advertising by clicking Opt out
+      - generic [ref=e310]:
+        - link "Privacy Policy" [ref=e311] [cursor=pointer]:
+          - /url: https://fal.ai/legal/privacy-policy
+        - link "Terms of service" [ref=e312] [cursor=pointer]:
+          - /url: https://fal.ai/legal/terms-of-service
+      - button "Accept All" [ref=e313] [cursor=pointer]
+      - button "Reject All" [ref=e314] [cursor=pointer]
+  - alert [ref=e315]

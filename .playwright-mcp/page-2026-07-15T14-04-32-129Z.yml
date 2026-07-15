@@ -1,0 +1,18 @@
+- banner [ref=f9e2]:
+  - button "Skip to content" [ref=f9e3] [cursor=pointer]
+  - button "Accessibility Feedback" [ref=f9e6] [cursor=pointer]
+  - generic [ref=f9e9]:
+    - link [ref=f9e10] [cursor=pointer]:
+      - /url: /?FORM=Z9FD1
+      - heading "Back to Bing search" [level=1] [ref=f9e11]
+    - search [ref=f9e12]:
+      - button "Search" [ref=f9e15] [cursor=pointer]
+      - searchbox "Enter your search here - Search suggestions will show as you type" [ref=f9e16]: site:fal.ai/models/recraft Recraft fal.ai SVG
+      - button "Search using an image" [ref=f9e19] [cursor=pointer]
+  - complementary "Account Rewards and Preferences" [ref=f9e21]:
+    - button "Microsoft Rewards"
+    - link "Sign in" [ref=f9e22] [cursor=pointer]:
+      - /url: javascript:void(0)
+  - generic [ref=f9e24]:
+    - generic [ref=f9e25]: One last step
+    - generic [ref=f9e26]: Please solve the challenge below to continue

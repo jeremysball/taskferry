@@ -1,0 +1,54 @@
+- main [ref=f2e2]:
+  - generic [ref=f2e3]:
+    - generic [ref=f2e4]:
+      - paragraph [ref=f2e5]: Recraft workflow audit / Taskferry
+      - heading "Style search made a scene. Shape control made a mark." [level=1] [ref=f2e6]
+    - paragraph [ref=f2e7]: One inspected V3 baseline against one live, constrained V4.1 vector preview. API success alone does not count as acceptance.
+  - region "Before and after comparison" [ref=f2e8]:
+    - article [ref=f2e9]:
+      - generic [ref=f2e10]:
+        - paragraph [ref=f2e11]: Before / V3 style workflow
+        - generic [ref=f2e12]: Rejected
+      - img "Underconstrained V3 result with a large illustrated scene and many route-like details" [ref=f2e14]
+      - generic [ref=f2e15]:
+        - paragraph [ref=f2e16]: Underconstrained prompt
+        - heading "Illustration prior took over" [level=2] [ref=f2e17]
+        - paragraph [ref=f2e18]: A vague route concept plus a V3 style prior produced a full composition instead of a compact identity mark.
+        - list [ref=f2e19]:
+          - listitem [ref=f2e20]:
+            - generic [ref=f2e21]: x
+            - generic [ref=f2e22]: Full-canvas colored background and landscape-like composition
+          - listitem [ref=f2e23]:
+            - generic [ref=f2e24]: x
+            - generic [ref=f2e25]: Many pins, nodes, paths, and decorative objects
+          - listitem [ref=f2e26]:
+            - generic [ref=f2e27]: x
+            - generic [ref=f2e28]: Gradients, fine detail, and no single readable silhouette
+    - article [ref=f2e29]:
+      - generic [ref=f2e30]:
+        - paragraph [ref=f2e31]: After / V4.1 vector preview
+        - generic [ref=f2e32]: Accepted
+      - img "Compact navy geometric Taskferry monogram centered on a white square" [ref=f2e34]
+      - generic [ref=f2e35]:
+        - paragraph [ref=f2e36]: Constrained structural prompt
+        - heading "One silhouette, then inspect" [level=2] [ref=f2e37]
+        - paragraph [ref=f2e38]: One live V4.1 preview produced a centered, flat monogram with a white-only canvas and no illustration drift.
+        - list [ref=f2e39]:
+          - listitem [ref=f2e40]:
+            - generic [ref=f2e41]: +
+            - generic [ref=f2e42]: Compact, centered, simple, and readable at 24 px
+          - listitem [ref=f2e43]:
+            - generic [ref=f2e44]: +
+            - generic [ref=f2e45]: One navy shape on white; no gradient, texture, or scene
+          - listitem [ref=f2e46]:
+            - generic [ref=f2e47]: +
+            - generic [ref=f2e48]: No extra objects, wordmark, badge, boat, helm, route, or radar
+  - region "Visual acceptance gate" [ref=f2e49]:
+    - img "24 pixel after preview" [ref=f2e51]
+    - generic [ref=f2e52]:
+      - heading "Visual acceptance gate" [level=2] [ref=f2e53]
+      - paragraph [ref=f2e54]: Checked at full size and 24 px. The white canvas is acceptable; an opaque colored background would fail.
+    - generic [ref=f2e55]: Pass
+  - generic [ref=f2e56]:
+    - generic [ref=f2e57]: "before.svg: inspected interrupted-run artifact"
+    - generic [ref=f2e58]: "after.svg: live V4.1 text-to-vector generation"

@@ -1,0 +1,183 @@
+- generic [active] [ref=f33e1]:
+  - blockquote [ref=f33e2]:
+    - heading [level=2] [ref=f33e3]: Documentation Index
+    - paragraph [ref=f33e4]:
+      - text: "Fetch the complete documentation index at:"
+      - link [ref=f33e5] [cursor=pointer]:
+        - /url: /docs/llms.txt
+        - text: /docs/llms.txt
+    - paragraph [ref=f33e6]: Use this file to discover all available pages before exploring further.
+  - generic [ref=f33e7]:
+    - link "Skip to main content" [ref=f33e8] [cursor=pointer]:
+      - /url: "#content-area"
+    - generic [ref=f33e9]:
+      - generic [ref=f33e10]:
+        - banner [ref=f33e11]:
+          - generic [ref=f33e14]:
+            - generic [ref=f33e17]:
+              - link "Recraft home page light logo" [ref=f33e19] [cursor=pointer]:
+                - /url: /docs
+                - generic [ref=f33e20]: Recraft home page
+                - img "light logo" [ref=f33e21]
+              - generic [ref=f33e22]:
+                - button "Open search" [ref=f33e23] [cursor=pointer]:
+                  - generic [ref=f33e24]: Search...
+                  - generic [ref=f33e29]: ⌘K
+                - button "Toggle assistant panel" [ref=f33e30] [cursor=pointer]:
+                  - generic [ref=f33e34]: Ask Assistant
+              - generic [ref=f33e35]:
+                - navigation "Main" [ref=f33e36]:
+                  - list [ref=f33e37]:
+                    - listitem [ref=f33e38]:
+                      - link "Get help" [ref=f33e39] [cursor=pointer]:
+                        - /url: "https://www.recraft.ai/contact "
+                    - listitem [ref=f33e41]:
+                      - link "Log in" [ref=f33e42] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/auth/login
+                    - listitem [ref=f33e44]:
+                      - link "Sign up" [ref=f33e45] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/auth/login
+                - button "Change theme preference" [ref=f33e52] [cursor=pointer]
+            - generic [ref=f33e58]:
+              - link "Recraft models" [ref=f33e59] [cursor=pointer]:
+                - /url: /docs
+              - link "Recraft Studio" [ref=f33e61] [cursor=pointer]:
+                - /url: /docs/recraft-studio/overview
+              - link "API" [ref=f33e63] [cursor=pointer]:
+                - /url: /docs/api-reference/getting-started
+              - link "MCP" [ref=f33e65] [cursor=pointer]:
+                - /url: /docs/mcp-reference/getting-started
+              - link "Trust and security" [ref=f33e67] [cursor=pointer]:
+                - /url: /docs/trust-and-security/compliance-and-certifications
+              - link "Prompt engineering guide" [ref=f33e69] [cursor=pointer]:
+                - /url: /docs/prompt-engineering-guide/introduction
+              - link "Support and FAQ" [ref=f33e71] [cursor=pointer]:
+                - /url: /docs/support-and-faq/contact-support
+        - generic [ref=f33e73]:
+          - navigation "Pages" [ref=f33e74]:
+            - generic [ref=f33e77]:
+              - generic [ref=f33e78]:
+                - heading "Overview" [level=3] [ref=f33e80]
+                - list [ref=f33e81]:
+                  - listitem [ref=f33e82]:
+                    - link "Prompting for image generation" [ref=f33e83] [cursor=pointer]:
+                      - /url: /docs/prompt-engineering-guide/introduction
+                  - listitem [ref=f33e87]:
+                    - link "Prompting with Recraft V4" [ref=f33e88] [cursor=pointer]:
+                      - /url: /docs/prompt-engineering-guide/prompting-with-recraft-v4
+              - generic [ref=f33e92]:
+                - heading "Core principles" [level=3] [ref=f33e94]
+                - list [ref=f33e95]:
+                  - listitem [ref=f33e96]:
+                    - link "Subject" [ref=f33e97] [cursor=pointer]:
+                      - /url: /docs/prompt-engineering-guide/core-principles/subject
+                  - listitem [ref=f33e101]:
+                    - link "Composition" [ref=f33e102] [cursor=pointer]:
+                      - /url: /docs/prompt-engineering-guide/core-principles/composition
+                  - listitem [ref=f33e106]:
+                    - link "Context" [ref=f33e107] [cursor=pointer]:
+                      - /url: /docs/prompt-engineering-guide/core-principles/context
+              - generic [ref=f33e111]:
+                - heading "Artistic principles" [level=3] [ref=f33e113]
+                - list [ref=f33e114]:
+                  - listitem [ref=f33e115]:
+                    - link "Medium" [ref=f33e116] [cursor=pointer]:
+                      - /url: /docs/prompt-engineering-guide/artistic-principles/medium
+                  - listitem [ref=f33e120]:
+                    - link "Style" [ref=f33e121] [cursor=pointer]:
+                      - /url: /docs/prompt-engineering-guide/artistic-principles/style
+                  - listitem [ref=f33e125]:
+                    - link "Vibe" [ref=f33e126] [cursor=pointer]:
+                      - /url: /docs/prompt-engineering-guide/artistic-principles/vibe
+                  - listitem [ref=f33e130]:
+                    - link "Attributes" [ref=f33e131] [cursor=pointer]:
+                      - /url: /docs/prompt-engineering-guide/artistic-principles/attributes
+              - generic [ref=f33e135]:
+                - heading "Prompt depth and control" [level=3] [ref=f33e137]
+                - list [ref=f33e138]:
+                  - listitem [ref=f33e139]:
+                    - link "Level of detail" [ref=f33e140] [cursor=pointer]:
+                      - /url: /docs/prompt-engineering-guide/depth-and-control/level-of-detail
+              - generic [ref=f33e144]:
+                - heading "Visual formats" [level=3] [ref=f33e146]
+                - list [ref=f33e147]:
+                  - listitem [ref=f33e148]:
+                    - link "Photorealism" [ref=f33e149] [cursor=pointer]:
+                      - /url: /docs/prompt-engineering-guide/visual-formats/photorealism
+                  - listitem [ref=f33e153]:
+                    - link "Illustration" [ref=f33e154] [cursor=pointer]:
+                      - /url: /docs/prompt-engineering-guide/visual-formats/illustration
+                  - listitem [ref=f33e158]:
+                    - link "Vector art" [ref=f33e159] [cursor=pointer]:
+                      - /url: /docs/prompt-engineering-guide/visual-formats/vector-art
+                  - listitem [ref=f33e163]:
+                    - link "Graphic design" [ref=f33e164] [cursor=pointer]:
+                      - /url: /docs/prompt-engineering-guide/visual-formats/graphic-design
+                  - listitem [ref=f33e168]:
+                    - link "Logos and icons" [ref=f33e169] [cursor=pointer]:
+                      - /url: /docs/prompt-engineering-guide/visual-formats/logos-and-icons
+              - generic [ref=f33e173]:
+                - heading "Prompt templates" [level=3] [ref=f33e175]
+                - list [ref=f33e176]:
+                  - listitem [ref=f33e177]:
+                    - link "Universal prompt template" [ref=f33e178] [cursor=pointer]:
+                      - /url: /docs/prompt-engineering-guide/prompt-templates/universal
+              - generic [ref=f33e182]:
+                - heading "Summary" [level=3] [ref=f33e184]
+                - list [ref=f33e185]:
+                  - listitem [ref=f33e186]:
+                    - link "Closing notes" [ref=f33e187] [cursor=pointer]:
+                      - /url: /docs/prompt-engineering-guide/closing-notes
+          - main [ref=f33e191]:
+            - generic [ref=f33e194]:
+              - generic [ref=f33e196]:
+                - link "Overview" [ref=f33e199] [cursor=pointer]:
+                  - /url: /docs/prompt-engineering-guide/introduction
+                - generic [ref=f33e200]:
+                  - heading "Prompting for image generation" [level=1] [ref=f33e201]
+                  - generic [ref=f33e202]:
+                    - button "Copy page" [ref=f33e203] [cursor=pointer]
+                    - button "More actions" [ref=f33e209] [cursor=pointer]
+              - generic [ref=f33e212]:
+                - img "Cover image with several Recraft AI-generated images" [ref=f33e216]
+                - generic [ref=f33e217]: AI image generation allows you to create visuals using natural language instead of manual tools. With just a brief description, the model interprets your prompt and generates an image based on that input.
+                - generic [ref=f33e218]: For many users, the challenge is not producing an image, it is producing the right one. Even when your idea feels clear, the output can still look unexpected or misaligned with your intention.
+                - generic [ref=f33e219]: Effective prompting is not about memorizing magic keywords. It is about understanding how models interpret language and how simple adjustments to clarity and structure can guide the results.
+                - generic [ref=f33e220]: This guide introduces Recraft’s recommended prompting approach, built around a set of core components that help you communicate your creative idea more precisely.
+                - generic [ref=f33e221]:
+                  - text: The
+                  - strong [ref=f33e222]: core principles
+                  - text: cover what every strong prompt needs at a minimum. The
+                  - strong [ref=f33e223]: artistic principles
+                  - text: are optional layers that enhance creativity, visual richness, and stylistic identity. Once these elements are clear, you can choose the image style you want to work in and decide whether your prompt should be brief or highly detailed.
+              - link "Prompting with Recraft V4" [ref=f33e225] [cursor=pointer]:
+                - /url: /docs/prompt-engineering-guide/prompting-with-recraft-v4
+              - generic [ref=f33e230]:
+                - textbox "Ask a question..." [ref=f33e231]
+                - generic: ⌘I
+                - button "Send message" [disabled] [ref=f33e232]
+              - generic [ref=f33e236]:
+                - generic [ref=f33e237]:
+                  - link "instagram" [ref=f33e238] [cursor=pointer]:
+                    - /url: https://www.instagram.com/recraftai
+                  - link "github" [ref=f33e241] [cursor=pointer]:
+                    - /url: https://github.com/recraft-ai/ComfyUI-RecraftAI
+                  - link "linkedin" [ref=f33e244] [cursor=pointer]:
+                    - /url: https://www.linkedin.com/company/recraftai
+                - link "Powered by This documentation is built and hosted on Mintlify, a developer documentation platform" [ref=f33e249] [cursor=pointer]:
+                  - /url: https://www.mintlify.com?utm_campaign=poweredBy&utm_medium=referral&utm_source=recraft
+                  - generic [ref=f33e250]: Powered by
+                  - generic [ref=f33e260]: This documentation is built and hosted on Mintlify, a developer documentation platform
+      - generic:
+        - generic [ref=f33e262]:
+          - generic [ref=f33e263]: Assistant
+          - generic [ref=f33e268]:
+            - button [ref=f33e269] [cursor=pointer]
+            - button [ref=f33e275] [cursor=pointer]
+        - generic [ref=f33e279]: Responses are generated using AI and may contain mistakes.
+        - generic [ref=f33e282]:
+          - textbox [ref=f33e283]:
+            - /placeholder: Ask a question...
+          - generic [ref=f33e284]:
+            - button [ref=f33e285] [cursor=pointer]
+            - button [disabled] [ref=f33e288]

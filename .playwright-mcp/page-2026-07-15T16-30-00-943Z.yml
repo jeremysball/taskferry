@@ -1,0 +1,29 @@
+- generic [active] [ref=e1]:
+  - 'heading "taskferry — round 4: async round-trip concepts" [level=1] [ref=e2]'
+  - paragraph [ref=e3]: "Rounds 1–3 (ferry, helm, route-glyph T) converged into a dead end — either too literal (boat/helm collides with unrelated icons) or over-narrowed onto one idea. This round pivots to concepts built around what taskferry actually does: fire a task, poll it, watch it, get a result back. Opus's picks: return loop and tethered probe. Watchdog arc added as a third — it's the one feature no competing tool's mark claims."
+  - generic [ref=e4]:
+    - generic [ref=e5]:
+      - img "Return loop concept" [ref=e7]
+      - generic [ref=e8]:
+        - heading "1. Return loop" [level=2] [ref=e9]
+        - paragraph [ref=e10]: Two curved arrows forming an open loop — thicker outgoing arrow, thinner dashed return arrow, gap left open so it reads as motion, not a closed ring. Encodes the dispatch-and-result round trip directly.
+        - generic [ref=e11]: line_art
+        - generic [ref=e12]: indigo / near-black
+    - generic [ref=e13]:
+      - img "Tethered probe concept" [ref=e15]
+      - generic [ref=e16]:
+        - heading "2. Tethered probe" [level=2] [ref=e17]
+        - paragraph [ref=e18]: One large node linked by a dashed line to a smaller offset node — a task tethered to a distant process it's polling. Captures the wait/poll mechanic specifically.
+        - generic [ref=e19]: line_art
+        - generic [ref=e20]: navy / amber
+    - generic [ref=e21]:
+      - img "Watchdog arc concept" [ref=e23]
+      - generic [ref=e24]:
+        - heading "3. Watchdog arc" [level=2] [ref=e25]
+        - paragraph [ref=e26]: A single open arc swept above a small dot — one continuous stroke, a radar-sweep reading of "watching over work." The one distinctive taskferry feature (the watchdog) that no other mark claims.
+        - generic [ref=e27]: thin
+        - generic [ref=e28]: teal on charcoal
+  - contentinfo [ref=e29]:
+    - text: Generated with the
+    - code [ref=e30]: recraft-prompting
+    - text: skill. Say which number(s) to refine — palette swap, stroke weight, badge framing — and I'll iterate the prompt, not just re-roll.

@@ -1,0 +1,95 @@
+- generic [active] [ref=f3e1]:
+  - generic [ref=f3e2]:
+    - generic [ref=f3e3]:
+      - generic [ref=f3e4]: Lavish
+      - generic [ref=f3e5]: Editor
+    - button "Annotate" [pressed] [ref=f3e6] [cursor=pointer]
+    - button "More" [ref=f3e11] [cursor=pointer]
+  - generic [ref=f3e16]:
+    - iframe [ref=f3e18]:
+      - main [ref=f4e2]:
+        - generic [ref=f4e3]:
+          - generic [ref=f4e4]:
+            - paragraph [ref=f4e5]: Taskferry / Mascot manifest 01
+            - heading "Choose the courier." [level=1] [ref=f4e6]
+            - paragraph [ref=f4e7]: "Taskferry moves background agent work without losing the thread. These otters turn that promise into a mark: alert, water-smart, and built to carry a task through rough systems."
+          - complementary "Brand constraints" [ref=f4e8]:
+            - paragraph [ref=f4e9]: Route class
+            - strong [ref=f4e10]: CLEVER / RELIABLE
+            - paragraph [ref=f4e11]: Flat vector. Heavy line. No robot face. No baby mascot energy.
+        - generic [ref=f4e12]: Three routes. One dispatch line.
+        - region "Taskferry otter concepts" [ref=f4e14]:
+          - article [ref=f4e15]:
+            - generic [ref=f4e16]:
+              - generic [ref=f4e17]:
+                - paragraph [ref=f4e18]: Route 01 / intent visible
+                - heading "Signal otter" [level=2] [ref=f4e19]
+                - paragraph [ref=f4e20]: A dispatch pennant makes the task visible before it moves.
+              - generic [ref=f4e21]: FERRY FLAG
+            - img "Otter carrying a lime dispatch pennant" [ref=f4e23]
+            - paragraph [ref=f4e31]: "Route signal: pennant + tail wake"
+            - generic [ref=f4e32]:
+              - generic [ref=f4e33]:
+                - paragraph [ref=f4e34]: Light lockup
+                - generic [ref=f4e35]: taskferry
+              - paragraph [ref=f4e42]: Dark favicon
+          - article [ref=f4e48]:
+            - generic [ref=f4e49]:
+              - generic [ref=f4e50]:
+                - paragraph [ref=f4e51]: Route 02 / movement visible
+                - heading "Wake otter" [level=2] [ref=f4e52]
+                - paragraph [ref=f4e53]: The wake becomes a routing glyph before it becomes a mascot.
+              - generic [ref=f4e54]: FLOW MARK
+            - img "Otter moving through an electric lime wake" [ref=f4e56]
+            - paragraph [ref=f4e64]: "Route signal: interlocking wake paths"
+            - generic [ref=f4e65]:
+              - generic [ref=f4e66]:
+                - paragraph [ref=f4e67]: Light lockup
+                - generic [ref=f4e68]: taskferry
+              - paragraph [ref=f4e74]: Dark favicon
+          - article [ref=f4e80]:
+            - generic [ref=f4e81]:
+              - generic [ref=f4e82]:
+                - paragraph [ref=f4e83]: Route 03 / custody visible
+                - heading "Cargo otter" [level=2] [ref=f4e84]
+                - paragraph [ref=f4e85]: A sealed task canister makes delivery and completion the hero.
+              - generic [ref=f4e86]: TASK POD
+            - img "Otter carrying a sealed orange task canister" [ref=f4e88]
+            - paragraph [ref=f4e97]: "Route signal: sealed canister + completion check"
+            - generic [ref=f4e98]:
+              - generic [ref=f4e99]:
+                - paragraph [ref=f4e100]: Light lockup
+                - generic [ref=f4e101]: taskferry
+              - paragraph [ref=f4e108]: Dark favicon
+        - region [ref=f4e115]:
+          - generic [ref=f4e116]:
+            - generic [ref=f4e117]:
+              - paragraph [ref=f4e118]: Human dispatch required
+              - heading "Choose the mark that should cross the harbor." [level=2] [ref=f4e119]
+            - generic [ref=f4e120]:
+              - group "Choose one direction" [ref=f4e121]:
+                - generic [ref=f4e123]:
+                  - generic [ref=f4e124]:
+                    - radio "Signal otter"
+                    - generic [ref=f4e125] [cursor=pointer]: Signal otter
+                  - generic [ref=f4e126]:
+                    - radio "Wake otter"
+                    - generic [ref=f4e127] [cursor=pointer]: Wake otter
+                  - generic [ref=f4e128]:
+                    - radio "Cargo otter"
+                    - generic [ref=f4e129] [cursor=pointer]: Cargo otter
+                  - button "Queue selection" [ref=f4e130] [cursor=pointer]
+              - paragraph [ref=f4e131]
+    - complementary [ref=f3e19]:
+      - heading "Conversation" [level=2] [ref=f3e20]
+      - generic [ref=f3e21]: Agent hasn't sent a message yet. Click an element in the artifact to annotate, or type below to start.
+      - generic [ref=f3e23]:
+        - generic [ref=f3e24]: Your agent is not listening. If this persists, ask your agent to poll for updates from Lavish.
+        - textbox "Write a message for the agent..." [ref=f3e25]
+        - generic [ref=f3e26]:
+          - button "Send & End" [ref=f3e27] [cursor=pointer]
+          - button "Send to Agent" [ref=f3e32] [cursor=pointer]
+  - generic [ref=f3e34]:
+    - generic [ref=f3e35]: Checking layout.One moment.
+    - paragraph [ref=f3e36]: Lavish is waiting for fonts and final geometry before revealing this artifact.
+    - button "Show anyway" [ref=f3e37] [cursor=pointer]

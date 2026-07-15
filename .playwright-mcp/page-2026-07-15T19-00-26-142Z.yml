@@ -1,0 +1,73 @@
+- main [ref=f2e2]:
+  - generic [ref=f2e3]:
+    - generic [ref=f2e4]:
+      - paragraph [ref=f2e5]: Taskferry / Mascot manifest 01
+      - heading "Choose the courier." [level=1] [ref=f2e6]
+      - paragraph [ref=f2e7]: "Taskferry moves background agent work without losing the thread. These otters turn that promise into a mark: alert, water-smart, and built to carry a task through rough systems."
+    - complementary "Brand constraints" [ref=f2e8]:
+      - paragraph [ref=f2e9]: Route class
+      - strong [ref=f2e10]: CLEVER / RELIABLE
+      - paragraph [ref=f2e11]: Flat vector. Heavy line. No robot face. No baby mascot energy.
+  - generic [ref=f2e12]: Three routes. One dispatch line.
+  - region "Taskferry otter concepts" [ref=f2e14]:
+    - article [ref=f2e15]:
+      - generic [ref=f2e16]:
+        - generic [ref=f2e17]:
+          - paragraph [ref=f2e18]: Route 01 / intent visible
+          - heading "Signal otter" [level=2] [ref=f2e19]
+          - paragraph [ref=f2e20]: A dispatch pennant makes the task visible before it moves.
+        - generic [ref=f2e21]: FERRY FLAG
+      - img "Side-profile river otter with whiskers, paws, and a long tapering tail carrying a lime dispatch pennant" [ref=f2e23]
+      - paragraph [ref=f2e35]: "Route signal: pennant + tail wake"
+      - generic [ref=f2e36]:
+        - generic [ref=f2e37]:
+          - paragraph [ref=f2e38]: Light lockup
+          - generic [ref=f2e39]: taskferry
+        - paragraph [ref=f2e46]: Dark favicon
+    - article [ref=f2e52]:
+      - generic [ref=f2e53]:
+        - generic [ref=f2e54]:
+          - paragraph [ref=f2e55]: Route 02 / movement visible
+          - heading "Wake otter" [level=2] [ref=f2e56]
+          - paragraph [ref=f2e57]: The wake becomes a routing glyph before it becomes a mascot.
+        - generic [ref=f2e58]: FLOW MARK
+      - img "Swimming river otter with whiskers, paws, and a long tapering tail cutting through an electric lime wake" [ref=f2e60]
+      - paragraph [ref=f2e73]: "Route signal: interlocking wake paths"
+      - generic [ref=f2e74]:
+        - generic [ref=f2e75]:
+          - paragraph [ref=f2e76]: Light lockup
+          - generic [ref=f2e77]: taskferry
+        - paragraph [ref=f2e83]: Dark favicon
+    - article [ref=f2e89]:
+      - generic [ref=f2e90]:
+        - generic [ref=f2e91]:
+          - paragraph [ref=f2e92]: Route 03 / custody visible
+          - heading "Cargo otter" [level=2] [ref=f2e93]
+          - paragraph [ref=f2e94]: A sealed task canister makes delivery and completion the hero.
+        - generic [ref=f2e95]: TASK POD
+      - img "River otter with whiskers, paws, and a long tapering tail carrying a sealed orange task canister" [ref=f2e97]
+      - paragraph [ref=f2e110]: "Route signal: sealed canister + completion check"
+      - generic [ref=f2e111]:
+        - generic [ref=f2e112]:
+          - paragraph [ref=f2e113]: Light lockup
+          - generic [ref=f2e114]: taskferry
+        - paragraph [ref=f2e121]: Dark favicon
+  - region [ref=f2e128]:
+    - generic [ref=f2e129]:
+      - generic [ref=f2e130]:
+        - paragraph [ref=f2e131]: Human dispatch required
+        - heading "Choose the mark that should cross the harbor." [level=2] [ref=f2e132]
+      - generic [ref=f2e133]:
+        - group "Choose one direction" [ref=f2e134]:
+          - generic [ref=f2e136]:
+            - generic [ref=f2e137]:
+              - radio "Signal otter"
+              - generic [ref=f2e138] [cursor=pointer]: Signal otter
+            - generic [ref=f2e139]:
+              - radio "Wake otter"
+              - generic [ref=f2e140] [cursor=pointer]: Wake otter
+            - generic [ref=f2e141]:
+              - radio "Cargo otter"
+              - generic [ref=f2e142] [cursor=pointer]: Cargo otter
+            - button "Queue selection" [ref=f2e143] [cursor=pointer]
+        - paragraph [ref=f2e144]

@@ -1,0 +1,83 @@
+[    1866ms] [LOG] [PostHog.js] [FeatureFlags] Flag overrides set {flags: Object} @ https://fal.ai/_next/static/chunks/17apn5baoyh-4.js?dpl=c81089807d466c7c49272-production:0
+[    1866ms] [LOG] [PostHog.js] [FeatureFlags] Payload overrides set {payloads: Object} @ https://fal.ai/_next/static/chunks/17apn5baoyh-4.js?dpl=c81089807d466c7c49272-production:0
+[    2910ms] [ERROR] Failed to load resource: the server responded with a status of 403 () @ https://api.cr-proxy.com/v1/site/65d28bca-be9a-4bf3-815b-274c55cc7df6/batch:0
+[    3525ms] [WARNING] No available adapters. @ https://fal.ai/models/fal-ai/recraft/v4.1/text-to-vector:0
+[   17784ms] [ERROR] Failed to load resource: the server responded with a status of 403 () @ https://api.cr-proxy.com/v1/site/65d28bca-be9a-4bf3-815b-274c55cc7df6/batch:0
+[   18458ms] [LOG] [PostHog.js] [FeatureFlags] Flag overrides set {flags: Object} @ https://fal.ai/_next/static/chunks/17apn5baoyh-4.js?dpl=c81089807d466c7c49272-production:0
+[   18459ms] [LOG] [PostHog.js] [FeatureFlags] Payload overrides set {payloads: Object} @ https://fal.ai/_next/static/chunks/17apn5baoyh-4.js?dpl=c81089807d466c7c49272-production:0
+[   19203ms] [WARNING] No available adapters. @ https://fal.ai/models/fal-ai/recraft/v4/text-to-image:0
+[   19204ms] [WARNING] [.WebGL-0x1e44000efc00]GL Driver Message (OpenGL, Performance, GL_CLOSE_PATH_NV, High): GPU stall due to ReadPixels @ https://fal.ai/models/fal-ai/recraft/v4/text-to-image:0
+[   19625ms] [ERROR] Failed to load resource: the server responded with a status of 403 () @ https://api.cr-proxy.com/v1/site/65d28bca-be9a-4bf3-815b-274c55cc7df6/batch:0
+[   20108ms] [LOG] [PostHog.js] [FeatureFlags] Flag overrides set {flags: Object} @ https://fal.ai/_next/static/chunks/17apn5baoyh-4.js?dpl=c81089807d466c7c49272-production:0
+[   20108ms] [LOG] [PostHog.js] [FeatureFlags] Payload overrides set {payloads: Object} @ https://fal.ai/_next/static/chunks/17apn5baoyh-4.js?dpl=c81089807d466c7c49272-production:0
+[   20784ms] [WARNING] No available adapters. @ https://fal.ai/models/fal-ai/recraft/v4.1/text-to-image:0
+[   21142ms] [ERROR] Failed to load resource: the server responded with a status of 403 () @ https://api.cr-proxy.com/v1/site/65d28bca-be9a-4bf3-815b-274c55cc7df6/batch:0
+[   21212ms] [ERROR] Failed to load resource: the server responded with a status of 403 () @ https://api.cr-proxy.com/v1/site/65d28bca-be9a-4bf3-815b-274c55cc7df6/batch:0
+[   21755ms] [LOG] [PostHog.js] [FeatureFlags] Flag overrides set {flags: Object} @ https://fal.ai/_next/static/chunks/17apn5baoyh-4.js?dpl=c81089807d466c7c49272-production:0
+[   21756ms] [LOG] [PostHog.js] [FeatureFlags] Payload overrides set {payloads: Object} @ https://fal.ai/_next/static/chunks/17apn5baoyh-4.js?dpl=c81089807d466c7c49272-production:0
+[   22335ms] [WARNING] No available adapters. @ https://fal.ai/models/fal-ai/recraft/v4.1/text-to-vector:0
+[   22630ms] [ERROR] Failed to load resource: the server responded with a status of 403 () @ https://api.cr-proxy.com/v1/site/65d28bca-be9a-4bf3-815b-274c55cc7df6/batch:0
+[   22729ms] [ERROR] Failed to load resource: the server responded with a status of 403 () @ https://api.cr-proxy.com/v1/site/65d28bca-be9a-4bf3-815b-274c55cc7df6/batch:0
+[   23307ms] [LOG] [PostHog.js] [FeatureFlags] Flag overrides set {flags: Object} @ https://fal.ai/_next/static/chunks/17apn5baoyh-4.js?dpl=c81089807d466c7c49272-production:0
+[   23308ms] [LOG] [PostHog.js] [FeatureFlags] Payload overrides set {payloads: Object} @ https://fal.ai/_next/static/chunks/17apn5baoyh-4.js?dpl=c81089807d466c7c49272-production:0
+[   23866ms] [WARNING] No available adapters. @ https://fal.ai/models/fal-ai/recraft/vectorize:0
+[   24139ms] [ERROR] Failed to load resource: the server responded with a status of 403 () @ https://api.cr-proxy.com/v1/site/65d28bca-be9a-4bf3-815b-274c55cc7df6/batch:0
+[   24325ms] [ERROR] Failed to load resource: the server responded with a status of 403 () @ https://api.cr-proxy.com/v1/site/65d28bca-be9a-4bf3-815b-274c55cc7df6/batch:0
+[   24836ms] [LOG] [PostHog.js] [FeatureFlags] Flag overrides set {flags: Object} @ https://fal.ai/_next/static/chunks/17apn5baoyh-4.js?dpl=c81089807d466c7c49272-production:0
+[   24837ms] [LOG] [PostHog.js] [FeatureFlags] Payload overrides set {payloads: Object} @ https://fal.ai/_next/static/chunks/17apn5baoyh-4.js?dpl=c81089807d466c7c49272-production:0
+[   25487ms] [WARNING] No available adapters. @ https://fal.ai/models/fal-ai/recraft/v3/image-to-image:0
+[   25751ms] [ERROR] Failed to load resource: the server responded with a status of 403 () @ https://api.cr-proxy.com/v1/site/65d28bca-be9a-4bf3-815b-274c55cc7df6/batch:0
+[   25886ms] [ERROR] Failed to load resource: the server responded with a status of 403 () @ https://api.cr-proxy.com/v1/site/65d28bca-be9a-4bf3-815b-274c55cc7df6/batch:0
+[   27024ms] [LOG] [PostHog.js] [FeatureFlags] Flag overrides set {flags: Object} @ https://fal.ai/_next/static/chunks/17apn5baoyh-4.js?dpl=c81089807d466c7c49272-production:0
+[   27025ms] [LOG] [PostHog.js] [FeatureFlags] Payload overrides set {payloads: Object} @ https://fal.ai/_next/static/chunks/17apn5baoyh-4.js?dpl=c81089807d466c7c49272-production:0
+[   27618ms] [WARNING] No available adapters. @ https://fal.ai/models/fal-ai/recraft/v4.1/pro/text-to-vector:0
+[   27898ms] [ERROR] Failed to load resource: the server responded with a status of 403 () @ https://api.cr-proxy.com/v1/site/65d28bca-be9a-4bf3-815b-274c55cc7df6/batch:0
+[   28088ms] [ERROR] Failed to load resource: the server responded with a status of 403 () @ https://api.cr-proxy.com/v1/site/65d28bca-be9a-4bf3-815b-274c55cc7df6/batch:0
+[   28637ms] [LOG] [PostHog.js] [FeatureFlags] Flag overrides set {flags: Object} @ https://fal.ai/_next/static/chunks/17apn5baoyh-4.js?dpl=c81089807d466c7c49272-production:0
+[   28637ms] [LOG] [PostHog.js] [FeatureFlags] Payload overrides set {payloads: Object} @ https://fal.ai/_next/static/chunks/17apn5baoyh-4.js?dpl=c81089807d466c7c49272-production:0
+[   29184ms] [WARNING] No available adapters. @ https://fal.ai/models/fal-ai/recraft/v4.1/pro/text-to-image:0
+[   29472ms] [ERROR] Failed to load resource: the server responded with a status of 403 () @ https://api.cr-proxy.com/v1/site/65d28bca-be9a-4bf3-815b-274c55cc7df6/batch:0
+[   39030ms] [ERROR] Failed to load resource: the server responded with a status of 403 () @ https://api.cr-proxy.com/v1/site/65d28bca-be9a-4bf3-815b-274c55cc7df6/batch:0
+[   39880ms] [LOG] [PostHog.js] [FeatureFlags] Flag overrides set {flags: Object} @ https://fal.ai/_next/static/chunks/17apn5baoyh-4.js?dpl=c81089807d466c7c49272-production:0
+[   39881ms] [LOG] [PostHog.js] [FeatureFlags] Payload overrides set {payloads: Object} @ https://fal.ai/_next/static/chunks/17apn5baoyh-4.js?dpl=c81089807d466c7c49272-production:0
+[   40691ms] [WARNING] No available adapters. @ https://fal.ai/models/fal-ai/recraft/v4/pro/text-to-image:0
+[   40982ms] [ERROR] Failed to load resource: the server responded with a status of 403 () @ https://api.cr-proxy.com/v1/site/65d28bca-be9a-4bf3-815b-274c55cc7df6/batch:0
+[   41289ms] [LOG] [PostHog.js] [FeatureFlags] Flag overrides set {flags: Object} @ https://fal.ai/_next/static/chunks/17apn5baoyh-4.js?dpl=c81089807d466c7c49272-production:0
+[   41290ms] [LOG] [PostHog.js] [FeatureFlags] Payload overrides set {payloads: Object} @ https://fal.ai/_next/static/chunks/17apn5baoyh-4.js?dpl=c81089807d466c7c49272-production:0
+[   41986ms] [WARNING] No available adapters. @ https://fal.ai/models/fal-ai/recraft/v4/text-to-vector:0
+[   42278ms] [ERROR] Failed to load resource: the server responded with a status of 403 () @ https://api.cr-proxy.com/v1/site/65d28bca-be9a-4bf3-815b-274c55cc7df6/batch:0
+[   42564ms] [LOG] [PostHog.js] [FeatureFlags] Flag overrides set {flags: Object} @ https://fal.ai/_next/static/chunks/17apn5baoyh-4.js?dpl=c81089807d466c7c49272-production:0
+[   42565ms] [LOG] [PostHog.js] [FeatureFlags] Payload overrides set {payloads: Object} @ https://fal.ai/_next/static/chunks/17apn5baoyh-4.js?dpl=c81089807d466c7c49272-production:0
+[   43265ms] [WARNING] No available adapters. @ https://fal.ai/models/fal-ai/recraft/v4.1/pro/text-to-image:0
+[   43550ms] [ERROR] Failed to load resource: the server responded with a status of 403 () @ https://api.cr-proxy.com/v1/site/65d28bca-be9a-4bf3-815b-274c55cc7df6/batch:0
+[   43881ms] [LOG] [PostHog.js] [FeatureFlags] Flag overrides set {flags: Object} @ https://fal.ai/_next/static/chunks/17apn5baoyh-4.js?dpl=c81089807d466c7c49272-production:0
+[   43882ms] [LOG] [PostHog.js] [FeatureFlags] Payload overrides set {payloads: Object} @ https://fal.ai/_next/static/chunks/17apn5baoyh-4.js?dpl=c81089807d466c7c49272-production:0
+[   44567ms] [WARNING] No available adapters. @ https://fal.ai/models/fal-ai/recraft/v4.1/pro/text-to-vector:0
+[   44881ms] [ERROR] Failed to load resource: the server responded with a status of 403 () @ https://api.cr-proxy.com/v1/site/65d28bca-be9a-4bf3-815b-274c55cc7df6/batch:0
+[   45615ms] [LOG] [PostHog.js] [FeatureFlags] Flag overrides set {flags: Object} @ https://fal.ai/_next/static/chunks/17apn5baoyh-4.js?dpl=c81089807d466c7c49272-production:0
+[   45616ms] [LOG] [PostHog.js] [FeatureFlags] Payload overrides set {payloads: Object} @ https://fal.ai/_next/static/chunks/17apn5baoyh-4.js?dpl=c81089807d466c7c49272-production:0
+[   46276ms] [WARNING] No available adapters. @ https://fal.ai/models/fal-ai/recraft/v4.1/utility/text-to-image:0
+[   46562ms] [ERROR] Failed to load resource: the server responded with a status of 403 () @ https://api.cr-proxy.com/v1/site/65d28bca-be9a-4bf3-815b-274c55cc7df6/batch:0
+[   47224ms] [LOG] [PostHog.js] [FeatureFlags] Flag overrides set {flags: Object} @ https://fal.ai/_next/static/chunks/17apn5baoyh-4.js?dpl=c81089807d466c7c49272-production:0
+[   47225ms] [LOG] [PostHog.js] [FeatureFlags] Payload overrides set {payloads: Object} @ https://fal.ai/_next/static/chunks/17apn5baoyh-4.js?dpl=c81089807d466c7c49272-production:0
+[   47902ms] [WARNING] No available adapters. @ https://fal.ai/models/fal-ai/recraft/v4.1/utility/pro/text-to-image:0
+[   48219ms] [ERROR] Failed to load resource: the server responded with a status of 403 () @ https://api.cr-proxy.com/v1/site/65d28bca-be9a-4bf3-815b-274c55cc7df6/batch:0
+[   48549ms] [LOG] [PostHog.js] [FeatureFlags] Flag overrides set {flags: Object} @ https://fal.ai/_next/static/chunks/17apn5baoyh-4.js?dpl=c81089807d466c7c49272-production:0
+[   48549ms] [LOG] [PostHog.js] [FeatureFlags] Payload overrides set {payloads: Object} @ https://fal.ai/_next/static/chunks/17apn5baoyh-4.js?dpl=c81089807d466c7c49272-production:0
+[   48772ms] [WARNING] Could not find image in result @ https://fal.ai/_next/static/chunks/0yd4vjvcw2ud3.js?dpl=c81089807d466c7c49272-production:0
+[   49145ms] [WARNING] No available adapters. @ https://fal.ai/models/fal-ai/recraft/upscale/crisp:0
+[   49440ms] [ERROR] Failed to load resource: the server responded with a status of 403 () @ https://api.cr-proxy.com/v1/site/65d28bca-be9a-4bf3-815b-274c55cc7df6/batch:0
+[   50012ms] [LOG] [PostHog.js] [FeatureFlags] Flag overrides set {flags: Object} @ https://fal.ai/_next/static/chunks/17apn5baoyh-4.js?dpl=c81089807d466c7c49272-production:0
+[   50012ms] [LOG] [PostHog.js] [FeatureFlags] Payload overrides set {payloads: Object} @ https://fal.ai/_next/static/chunks/17apn5baoyh-4.js?dpl=c81089807d466c7c49272-production:0
+[   50259ms] [WARNING] Could not find image in result @ https://fal.ai/_next/static/chunks/0yd4vjvcw2ud3.js?dpl=c81089807d466c7c49272-production:0
+[   50620ms] [WARNING] No available adapters. @ https://fal.ai/models/fal-ai/recraft/upscale/creative:0
+[   51025ms] [ERROR] Failed to load resource: the server responded with a status of 403 () @ https://api.cr-proxy.com/v1/site/65d28bca-be9a-4bf3-815b-274c55cc7df6/batch:0
+[   51910ms] [LOG] [PostHog.js] [FeatureFlags] Flag overrides set {flags: Object} @ https://fal.ai/_next/static/chunks/17apn5baoyh-4.js?dpl=c81089807d466c7c49272-production:0
+[   51911ms] [LOG] [PostHog.js] [FeatureFlags] Payload overrides set {payloads: Object} @ https://fal.ai/_next/static/chunks/17apn5baoyh-4.js?dpl=c81089807d466c7c49272-production:0
+[   52720ms] [WARNING] No available adapters. @ https://fal.ai/models/fal-ai/recraft/v3/text-to-image:0
+[   53398ms] [ERROR] Failed to load resource: the server responded with a status of 403 () @ https://api.cr-proxy.com/v1/site/65d28bca-be9a-4bf3-815b-274c55cc7df6/batch:0
+[   53815ms] [LOG] [PostHog.js] [FeatureFlags] Flag overrides set {flags: Object} @ https://fal.ai/_next/static/chunks/17apn5baoyh-4.js?dpl=c81089807d466c7c49272-production:0
+[   53815ms] [LOG] [PostHog.js] [FeatureFlags] Payload overrides set {payloads: Object} @ https://fal.ai/_next/static/chunks/17apn5baoyh-4.js?dpl=c81089807d466c7c49272-production:0
+[   54947ms] [WARNING] No available adapters. @ https://fal.ai/models/fal-ai/recraft/v3/create-style:0
+[   55425ms] [ERROR] Failed to load resource: the server responded with a status of 403 () @ https://api.cr-proxy.com/v1/site/65d28bca-be9a-4bf3-815b-274c55cc7df6/batch:0
+[   70503ms] [ERROR] Failed to load resource: the server responded with a status of 403 () @ https://api.cr-proxy.com/v1/site/65d28bca-be9a-4bf3-815b-274c55cc7df6/batch:0

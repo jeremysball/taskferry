@@ -1,1 +1,10 @@
-encourage the model to utilize the next: fields
+- ensure everything is merged in
+- poll does not need to return the id in response. it is 
+  already supplied by the caller. I also want to implement
+  the whole "nothing changed, don't repeat" for more stuff 
+- would love a little webui / dataviz / admin panel <---- where we put keys 
+- remove old ids from the list tool
+
+prompting: 
+- dont use poll when status will do 
+- encourage the model to utilize the next: fields

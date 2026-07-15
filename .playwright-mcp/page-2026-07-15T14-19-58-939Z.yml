@@ -1,0 +1,457 @@
+- generic [ref=e1]:
+  - generic [ref=e5]:
+    - link [ref=e6] [cursor=pointer]:
+      - /url: /assets
+      - generic [ref=e7]: fal Assets is now live!
+    - button [ref=e20] [cursor=pointer]
+  - generic [ref=e23]:
+    - generic [ref=e24]:
+      - generic [ref=e27]:
+        - link [ref=e30] [cursor=pointer]:
+          - /url: /
+        - generic [ref=e36]:
+          - generic [ref=e37]:
+            - link [ref=e38] [cursor=pointer]:
+              - /url: https://docs.fal.ai
+              - text: Docs
+            - button [ref=e39] [cursor=pointer]
+          - link [ref=e42] [cursor=pointer]:
+            - /url: /login?returnTo=/explore/search
+            - text: Log-in
+          - link [ref=e43] [cursor=pointer]:
+            - /url: /login?returnTo=/explore/search
+            - text: Sign-up
+      - main [ref=e45]:
+        - main [ref=e46]:
+          - generic [ref=e48]:
+            - generic [ref=e49]:
+              - textbox [ref=e52]:
+                - /placeholder: Search by model, task, category and more
+                - text: recraft
+              - button [ref=e53] [cursor=pointer]
+            - generic [ref=e56]:
+              - generic [ref=e57]: "Try:"
+              - link [ref=e58] [cursor=pointer]:
+                - /url: /explore/search?q=newest image to video models
+                - generic [ref=e59]: Newest image to video models
+              - link [ref=e62] [cursor=pointer]:
+                - /url: /explore/search?q=flux kontext
+                - generic [ref=e63]: Flux Kontext
+              - link [ref=e67] [cursor=pointer]:
+                - /url: /explore/search?q=generate 3d model
+                - generic [ref=e68]: Generate 3D model
+              - link [ref=e71] [cursor=pointer]:
+                - /url: /explore/search?q=create music
+                - generic [ref=e72]: Create music
+              - link [ref=e76] [cursor=pointer]:
+                - /url: /explore/search?q=remove background
+                - generic [ref=e77]: Remove background
+              - link [ref=e80] [cursor=pointer]:
+                - /url: /explore/search?q=upscale
+                - generic [ref=e81]: Upscale
+              - link [ref=e89] [cursor=pointer]:
+                - /url: /explore/search?q=training
+                - generic [ref=e90]: Training
+              - link [ref=e94] [cursor=pointer]:
+                - /url: /explore/search?q=try on clothing
+                - generic [ref=e95]: Try on clothing
+          - generic [ref=e98]:
+            - generic [ref=e102]:
+              - generic [ref=e103]:
+                - generic [ref=e104]: Category
+                - generic [ref=e106]:
+                  - generic [ref=e107] [cursor=pointer]:
+                    - checkbox [ref=e108]
+                    - generic [ref=e109]:
+                      - generic [ref=e110]: Image to Image
+                      - generic [ref=e111]: "4"
+                  - generic [ref=e112] [cursor=pointer]:
+                    - checkbox [ref=e113]
+                    - generic [ref=e114]:
+                      - generic [ref=e115]: Text to Image
+                      - generic [ref=e116]: "12"
+                  - generic [ref=e117] [cursor=pointer]:
+                    - checkbox [ref=e118]
+                    - generic [ref=e119]:
+                      - generic [ref=e120]: Training
+                      - generic [ref=e121]: "1"
+              - generic [ref=e122]:
+                - generic [ref=e123]: Filter by tag
+                - searchbox [ref=e129]
+              - generic [ref=e131]:
+                - generic [ref=e133]:
+                  - generic [ref=e134]: Show deprecated
+                  - switch [ref=e135] [cursor=pointer]
+                - generic [ref=e137]:
+                  - generic [ref=e138]: Favorites only
+                  - switch [ref=e139] [cursor=pointer]
+            - generic [ref=e140]:
+              - generic [ref=e141]:
+                - group [ref=e143]:
+                  - radio [ref=e144] [cursor=pointer]
+                  - radio [checked] [ref=e147] [cursor=pointer]
+                - generic [ref=e150]:
+                  - generic [ref=e151]: Showing 17 of 17 results
+                  - combobox [ref=e152] [cursor=pointer]:
+                    - generic: Per page:28
+                  - combobox [ref=e155] [cursor=pointer]:
+                    - generic: Sort:Trending
+              - generic [ref=e159]:
+                - link [ref=e160] [cursor=pointer]:
+                  - /url: /models/fal-ai/recraft/v4/text-to-image
+                  - generic [ref=e164]:
+                    - generic [ref=e165]: recraft/v4/text-to-image
+                    - paragraph [ref=e167]: Recraft V4 was developed with designers to bring true visual taste to AI image generation. Built for brand systems and production-ready workflows, it goes beyond prompt accuracy delivering stronger composition, refined lighting, realistic materials, and a cohesive aesthetic. The result is imagery shaped by professional design judgment, ready for immediate real-world use without additional post-processing.
+                    - generic [ref=e168]: text-to-image
+                - link [ref=e178] [cursor=pointer]:
+                  - /url: /models/fal-ai/recraft/v4/pro/text-to-image
+                  - generic [ref=e182]:
+                    - generic [ref=e183]: recraft/v4/pro/text-to-image
+                    - paragraph [ref=e185]: Recraft V4 was developed with designers to bring true visual taste to AI image generation. Built for brand systems and production-ready workflows, it goes beyond prompt accuracy — delivering stronger composition, refined lighting, realistic materials, and a cohesive aesthetic. The result is imagery shaped by professional design judgment, ready for immediate real-world use without additional post-processing.
+                    - generic [ref=e186]: text-to-image
+                - link [ref=e196] [cursor=pointer]:
+                  - /url: /models/fal-ai/recraft/v4.1/text-to-image
+                  - generic [ref=e200]:
+                    - generic [ref=e201]: recraft/v4.1/text-to-image
+                    - paragraph [ref=e203]: Recraft V4.1 builds on the design-first foundation of V4 with sharper prompt control and cleaner composition. Tuned for brand systems and editorial work, it delivers production-ready raster images that hold up next to a designer's hand.
+                    - generic [ref=e204]:
+                      - generic [ref=e205]: stylized
+                      - generic [ref=e206]: transform
+                      - generic [ref=e207]: typography
+                    - generic [ref=e208]: text-to-image
+                - link [ref=e218] [cursor=pointer]:
+                  - /url: /models/fal-ai/recraft/v4.1/text-to-vector
+                  - generic [ref=e222]:
+                    - generic [ref=e223]: recraft/v4.1/text-to-vector
+                    - paragraph [ref=e225]: Recraft V4.1 Vector turns prompts into fully editable SVGs with structured layers and clean geometry. Built for logos, icons, and illustration systems, it produces artwork that goes straight from generation into Figma or Illustrator.
+                    - generic [ref=e226]:
+                      - generic [ref=e227]: stylized
+                      - generic [ref=e228]: transform
+                      - generic [ref=e229]: typography
+                    - generic [ref=e230]: text-to-image
+                - link [ref=e240] [cursor=pointer]:
+                  - /url: /models/fal-ai/recraft/v4/text-to-vector
+                  - generic [ref=e244]:
+                    - generic [ref=e245]: recraft/v4/text-to-vector
+                    - paragraph [ref=e247]: Recraft V4 was developed with designers to bring true visual taste to AI image generation. Built for brand systems and production-ready workflows, it goes beyond prompt accuracy — delivering stronger composition, refined lighting, realistic materials, and a cohesive aesthetic. The result is imagery shaped by professional design judgment, ready for immediate real-world use without additional post-processing.
+                    - generic [ref=e248]: text-to-vector
+                    - generic [ref=e250]: text-to-image
+                - link [ref=e260] [cursor=pointer]:
+                  - /url: /models/fal-ai/recraft/v4.1/pro/text-to-image
+                  - generic [ref=e264]:
+                    - generic [ref=e265]: recraft/v4.1/pro/text-to-image
+                    - paragraph [ref=e267]: Recraft V4.1 Pro pushes the V4.1 model into high-resolution territory — up to 2048×2048 and ultra-wide formats. Made for hero imagery, campaign work, and print, it preserves the same design taste at sizes ready for the final deliverable.
+                    - generic [ref=e268]:
+                      - generic [ref=e269]: stylized
+                      - generic [ref=e270]: transform
+                      - generic [ref=e271]: typography
+                    - generic [ref=e272]: text-to-image
+                - link [ref=e282] [cursor=pointer]:
+                  - /url: /models/fal-ai/recraft/v4/pro/text-to-vector
+                  - generic [ref=e286]:
+                    - generic [ref=e287]: recraft/v4/pro/text-to-vector
+                    - paragraph [ref=e289]: Recraft V4 was developed with designers to bring true visual taste to AI image generation. Built for brand systems and production-ready workflows, it goes beyond prompt accuracy — delivering stronger composition, refined lighting, realistic materials, and a cohesive aesthetic. The result is imagery shaped by professional design judgment, ready for immediate real-world use without additional post-processing.
+                    - generic [ref=e290]: text-to-vector
+                    - generic [ref=e292]: text-to-image
+                - link [ref=e302] [cursor=pointer]:
+                  - /url: /models/fal-ai/recraft/v4.1/pro/text-to-vector
+                  - generic [ref=e306]:
+                    - generic [ref=e307]: recraft/v4.1/pro/text-to-vector
+                    - paragraph [ref=e309]: Recraft V4.1 Pro Vector generates large-format, fully editable SVGs with the structural clarity professional illustrators expect. Built for poster art, complex brand assets, and detailed scene illustration, it scales without losing geometric integrity.
+                    - generic [ref=e310]:
+                      - generic [ref=e311]: stylized
+                      - generic [ref=e312]: transform
+                      - generic [ref=e313]: typography
+                    - generic [ref=e314]: text-to-image
+                - link [ref=e324] [cursor=pointer]:
+                  - /url: /models/fal-ai/recraft/v4.1/utility/text-to-image
+                  - generic [ref=e328]:
+                    - generic [ref=e329]: recraft/v4.1/utility/text-to-image
+                    - paragraph [ref=e331]: Recraft V4.1 Utility is a faster, lighter variant of V4.1 made for high-volume creative workflows. Ideal for ideation, A/B exploration, and content pipelines, it keeps Recraft's design sensibility while optimizing for throughput and cost.
+                    - generic [ref=e332]:
+                      - generic [ref=e333]: stylized
+                      - generic [ref=e334]: transform
+                      - generic [ref=e335]: typography
+                    - generic [ref=e336]: text-to-image
+                - link [ref=e346] [cursor=pointer]:
+                  - /url: /models/fal-ai/recraft/v4.1/utility/pro/text-to-image
+                  - generic [ref=e350]:
+                    - generic [ref=e351]: recraft/v4.1/utility/pro/text-to-image
+                    - paragraph [ref=e353]: Recraft V4.1 Utility Pro pairs the high-resolution output of V4.1 Pro with a faster, cost-efficient runtime. Designed for studios shipping large-format work at scale, it makes premium-quality raster generation viable across full creative pipelines.
+                    - generic [ref=e354]:
+                      - generic [ref=e355]: stylized
+                      - generic [ref=e356]: transform
+                      - generic [ref=e357]: typography
+                    - generic [ref=e358]: text-to-image
+                - link [ref=e368] [cursor=pointer]:
+                  - /url: /models/fal-ai/recraft/v3/text-to-image
+                  - generic [ref=e373]:
+                    - generic [ref=e374]: recraft/v3/text-to-image
+                    - paragraph [ref=e376]: Recraft V3 is a text-to-image model with the ability to generate long texts, vector art, images in brand style, and much more. As of today, it is SOTA in image generation, proven by Hugging Face's industry-leading Text-to-Image Benchmark by Artificial Analysis.
+                    - generic [ref=e377]:
+                      - generic [ref=e378]: vector
+                      - generic [ref=e379]: typography
+                      - generic [ref=e380]: style
+                    - generic [ref=e381]: text-to-image
+                - link [ref=e391] [cursor=pointer]:
+                  - /url: /models/fal-ai/recraft/upscale/crisp
+                  - generic [ref=e396]:
+                    - generic [ref=e397]: recraft/upscale/crisp
+                    - paragraph [ref=e399]: Enhances a given raster image using 'crisp upscale' tool, boosting resolution with a focus on refining small details and faces.
+                    - generic [ref=e400]: upscaling
+                    - generic [ref=e402]: image-to-image
+                - link [ref=e412] [cursor=pointer]:
+                  - /url: /models/fal-ai/recraft/vectorize
+                  - generic [ref=e417]:
+                    - generic [ref=e418]: recraft/vectorize
+                    - paragraph [ref=e420]: Converts a given raster image to SVG format using Recraft model.
+                    - generic [ref=e421]:
+                      - generic [ref=e422]: stylized
+                      - generic [ref=e423]: transform
+                    - generic [ref=e424]: image-to-image
+                - link [ref=e434] [cursor=pointer]:
+                  - /url: /models/fal-ai/recraft/upscale/creative
+                  - generic [ref=e439]:
+                    - generic [ref=e440]: recraft/upscale/creative
+                    - paragraph [ref=e442]: Enhances a given raster image using the 'creative upscale' tool, increasing image resolution, making the image sharper and cleaner.
+                    - generic [ref=e443]: upscaling
+                    - generic [ref=e445]: image-to-image
+                - link [ref=e455] [cursor=pointer]:
+                  - /url: /models/fal-ai/recraft/v3/image-to-image
+                  - generic [ref=e460]:
+                    - generic [ref=e461]: recraft/v3/image-to-image
+                    - paragraph [ref=e463]: Recraft V3 is a text-to-image model with the ability to generate long texts, vector art, images in brand style, and much more. As of today, it is SOTA in image generation, proven by Hugging Face's industry-leading Text-to-Image Benchmark by Artificial Analysis.
+                    - generic [ref=e464]:
+                      - generic [ref=e465]: vector
+                      - generic [ref=e466]: typography
+                      - generic [ref=e467]: style
+                    - generic [ref=e468]: image-to-image
+                - link [ref=e478] [cursor=pointer]:
+                  - /url: /models/fal-ai/recraft-20b
+                  - generic [ref=e483]:
+                    - generic [ref=e484]: recraft-20b
+                    - paragraph [ref=e486]: Recraft 20b is a new and affordable text-to-image model.
+                    - generic [ref=e487]:
+                      - generic [ref=e488]: image generation
+                      - generic [ref=e489]: vector art
+                      - generic [ref=e490]: typograph
+                    - generic [ref=e491]: text-to-image
+                - link [ref=e501] [cursor=pointer]:
+                  - /url: /models/fal-ai/recraft/v3/create-style
+                  - generic [ref=e506]:
+                    - generic [ref=e507]: recraft/v3/create-style
+                    - paragraph [ref=e509]: Recraft V3 Create Style is capable of creating unique styles for Recraft V3 based on your images.
+                    - generic [ref=e510]:
+                      - generic [ref=e511]: style
+                      - generic [ref=e512]: vector
+                      - generic [ref=e513]: personalization
+                    - generic [ref=e514]: training
+    - contentinfo [ref=e522]:
+      - generic [ref=e523]:
+        - heading [level=2] [ref=e524]: Ready to transform your enterprise with AI?
+        - link [ref=e525] [cursor=pointer]:
+          - /url: /enterprise#contact-sales
+          - text: Contact Sales
+      - generic [ref=e526]:
+        - generic [ref=e527]:
+          - heading [level=4] [ref=e528]: Learn more
+          - generic [ref=e529]:
+            - link [ref=e530] [cursor=pointer]:
+              - /url: https://status.fal.ai
+              - text: Status
+            - link [ref=e531] [cursor=pointer]:
+              - /url: /about
+              - text: About Us
+            - link [ref=e532] [cursor=pointer]:
+              - /url: https://docs.fal.ai
+              - text: Documentation
+            - link [ref=e533] [cursor=pointer]:
+              - /url: /legal/trust-and-safety
+              - text: Trust & Safety
+            - link [ref=e534] [cursor=pointer]:
+              - /url: /careers
+              - text: Careers
+            - link [ref=e535] [cursor=pointer]:
+              - /url: /pricing
+              - text: Pricing
+            - link [ref=e536] [cursor=pointer]:
+              - /url: https://blog.fal.ai
+              - text: Blog
+            - link [ref=e537] [cursor=pointer]:
+              - /url: /enterprise
+              - text: Enterprise
+            - link [ref=e538] [cursor=pointer]:
+              - /url: mailto:support@fal.ai
+              - text: Get in touch
+            - link [ref=e539] [cursor=pointer]:
+              - /url: /report-content
+              - text: Report Content
+            - link [ref=e540] [cursor=pointer]:
+              - /url: /grants
+              - text: Grants
+            - link [ref=e541] [cursor=pointer]:
+              - /url: /events
+              - text: Events
+            - link [ref=e542] [cursor=pointer]:
+              - /url: /legal
+              - text: Legal
+            - button [ref=e543] [cursor=pointer]: Your Privacy Choices
+            - link [ref=e545] [cursor=pointer]:
+              - /url: /learn
+              - text: Learn
+            - link [ref=e546] [cursor=pointer]:
+              - /url: /gen-media-report-volume-1
+              - text: Gen Media Report 2026
+        - generic [ref=e547]:
+          - heading [level=4] [ref=e548]: Image Models
+          - link [ref=e549] [cursor=pointer]:
+            - /url: /seedream-5.0
+            - text: Seedream 5.0
+          - link [ref=e550] [cursor=pointer]:
+            - /url: /gpt-image-2
+            - text: GPT Image 2
+          - link [ref=e551] [cursor=pointer]:
+            - /url: /models/fal-ai/flux-2-flex
+            - text: Flux 2
+          - link [ref=e552] [cursor=pointer]:
+            - /url: /nano-banana-2
+            - text: Nano Banana 2
+          - link [ref=e553] [cursor=pointer]:
+            - /url: /ideogram-4
+            - text: Ideogram 4
+          - link [ref=e554] [cursor=pointer]:
+            - /url: /krea-2
+            - text: Krea 2
+          - link [ref=e555] [cursor=pointer]:
+            - /url: /models/fal-ai/nano-banana-pro/edit
+            - text: Nano Banana Pro
+          - link [ref=e556] [cursor=pointer]:
+            - /url: /qwen-image-2.0
+            - text: Qwen Image 2.0
+          - link [ref=e557] [cursor=pointer]:
+            - /url: /explore
+            - text: Explore More
+        - generic [ref=e558]:
+          - heading [level=4] [ref=e559]: Video Models
+          - link [ref=e560] [cursor=pointer]:
+            - /url: /seedance-2.0
+            - text: Seedance 2.0
+          - link [ref=e561] [cursor=pointer]:
+            - /url: /gemini-omni
+            - text: Gemini Omni
+          - link [ref=e562] [cursor=pointer]:
+            - /url: /models/fal-ai/kling-video/o3/standard/image-to-video
+            - text: Kling 3.0
+          - link [ref=e563] [cursor=pointer]:
+            - /url: /models/fal-ai/veo3.1
+            - text: Veo 3.1
+          - link [ref=e564] [cursor=pointer]:
+            - /url: /grok-imagine-video-1.5
+            - text: Grok Imagine 1.5
+          - link [ref=e565] [cursor=pointer]:
+            - /url: /happyhorse-1.0
+            - text: HappyHorse 1.0
+          - link [ref=e566] [cursor=pointer]:
+            - /url: /wan-2.7
+            - text: Wan 2.7
+          - link [ref=e567] [cursor=pointer]:
+            - /url: /ltx-2.3
+            - text: LTX 2.3
+          - link [ref=e568] [cursor=pointer]:
+            - /url: /pixverse-v6
+            - text: PixVerse V6
+        - generic [ref=e569]:
+          - heading [level=4] [ref=e570]: Labs
+          - link [ref=e571] [cursor=pointer]:
+            - /url: /explore/black-forest-labs
+            - text: Black Forest Labs
+          - link [ref=e572] [cursor=pointer]:
+            - /url: /explore/google
+            - text: Google
+          - link [ref=e573] [cursor=pointer]:
+            - /url: /explore/openai
+            - text: OpenAI
+          - link [ref=e574] [cursor=pointer]:
+            - /url: /explore/xai
+            - text: xAI
+          - link [ref=e575] [cursor=pointer]:
+            - /url: /explore/alibaba
+            - text: Alibaba
+          - link [ref=e576] [cursor=pointer]:
+            - /url: /explore/kling
+            - text: Kling
+          - link [ref=e577] [cursor=pointer]:
+            - /url: /explore/bytedance
+            - text: ByteDance
+          - link [ref=e578] [cursor=pointer]:
+            - /url: /explore/elevenlabs
+            - text: ElevenLabs
+        - generic [ref=e579]:
+          - heading [level=4] [ref=e580]: Playgrounds
+          - link [ref=e581] [cursor=pointer]:
+            - /url: /sandbox
+            - text: Sandbox
+          - link [ref=e582] [cursor=pointer]:
+            - /url: /workflows
+            - text: Workflows
+          - link [ref=e583] [cursor=pointer]:
+            - /url: /models/fal-ai/flux-lora-fast-training
+            - text: Training
+          - link [ref=e584] [cursor=pointer]:
+            - /url: /tools/background-remover
+            - text: Background Remover
+        - generic [ref=e585]:
+          - heading [level=4] [ref=e586]: Socials
+          - link [ref=e587] [cursor=pointer]:
+            - /url: https://discord.gg/fal-ai
+            - text: Discord
+          - link [ref=e588] [cursor=pointer]:
+            - /url: https://github.com/fal-ai
+            - text: GitHub
+          - link [ref=e589] [cursor=pointer]:
+            - /url: https://www.reddit.com/r/fal/
+            - text: Reddit
+          - link [ref=e590] [cursor=pointer]:
+            - /url: https://twitter.com/fal
+            - text: Twitter
+          - link [ref=e591] [cursor=pointer]:
+            - /url: https://www.linkedin.com/company/features-and-labels/
+            - text: LinkedIn
+          - link [ref=e592] [cursor=pointer]:
+            - /url: https://www.youtube.com/@Fal.AI.Official
+            - text: YouTube
+          - link [ref=e593] [cursor=pointer]:
+            - /url: https://www.instagram.com/madeonfal
+            - text: Instagram
+          - link [ref=e594] [cursor=pointer]:
+            - /url: https://www.tiktok.com/@madeonfal
+            - text: TikTok
+      - generic [ref=e596]:
+        - text: Features and Labels, 2026. All Rights Reserved.
+        - link [ref=e597] [cursor=pointer]:
+          - /url: /legal/terms-of-service
+          - text: Terms of Service
+        - text: and
+        - link [ref=e598] [cursor=pointer]:
+          - /url: /legal/privacy-policy
+          - text: Privacy Policy
+        - text: .
+  - alert [ref=e611]
+  - complementary [active] [ref=e612]:
+    - dialog [ref=e613]:
+      - generic [ref=e614]:
+        - heading "Your Privacy Choices" [level=2] [ref=e615]
+        - button "Close" [ref=e617] [cursor=pointer]
+      - generic [ref=e621]:
+        - generic [ref=e622]: We use cookies and other tracking technologies, and allow our advertising partners to use similar technologies, so we can, among other things, show you ads promoting fal on other sites and services and better understand your online activity. Some of these activities may be considered “sales,” “sharing,” or “targeted advertising” under applicable laws.
+        - generic [ref=e624]: You can opt out of having your personal information used or disclosed for these purposes via cookies by clicking the opt out button. You can also opt out by visiting our sites with a legally recognized opt-out preference signal enabled, such as the Global Privacy Control.
+        - generic [ref=e626]: You will need to renew your opt-out choice if you visit our site from a new device or browser, or if you clear your cookies because your opt-out choice will be linked to your browser only.
+        - strong [ref=e630]: Opt out of cookie-based sales, sharing, or targeted advertising by clicking Opt out
+      - generic [ref=e631]:
+        - link "Privacy Policy" [ref=e632] [cursor=pointer]:
+          - /url: https://fal.ai/legal/privacy-policy
+        - link "Terms of service" [ref=e633] [cursor=pointer]:
+          - /url: https://fal.ai/legal/terms-of-service
+      - button "Accept All" [ref=e634] [cursor=pointer]
+      - button "Reject All" [ref=e635] [cursor=pointer]
+  - iframe

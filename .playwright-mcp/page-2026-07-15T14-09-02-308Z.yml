@@ -1,0 +1,2588 @@
+- generic [active] [ref=f34e1]:
+  - blockquote [ref=f34e2]:
+    - heading [level=2] [ref=f34e3]: Documentation Index
+    - paragraph [ref=f34e4]:
+      - text: "Fetch the complete documentation index at:"
+      - link [ref=f34e5] [cursor=pointer]:
+        - /url: /docs/llms.txt
+        - text: /docs/llms.txt
+    - paragraph [ref=f34e6]: Use this file to discover all available pages before exploring further.
+  - generic [ref=f34e7]:
+    - link "Skip to main content" [ref=f34e8] [cursor=pointer]:
+      - /url: "#content-area"
+    - generic [ref=f34e9]:
+      - generic [ref=f34e10]:
+        - banner [ref=f34e11]:
+          - generic [ref=f34e14]:
+            - generic [ref=f34e17]:
+              - link "Recraft home page light logo" [ref=f34e19] [cursor=pointer]:
+                - /url: /docs
+                - generic [ref=f34e20]: Recraft home page
+                - img "light logo" [ref=f34e21]
+              - generic [ref=f34e22]:
+                - button "Open search" [ref=f34e23] [cursor=pointer]:
+                  - generic [ref=f34e24]: Search...
+                  - generic [ref=f34e29]: ⌘K
+                - button "Toggle assistant panel" [ref=f34e30] [cursor=pointer]:
+                  - generic [ref=f34e34]: Ask Assistant
+              - generic [ref=f34e35]:
+                - navigation "Main" [ref=f34e36]:
+                  - list [ref=f34e37]:
+                    - listitem [ref=f34e38]:
+                      - link "Get help" [ref=f34e39] [cursor=pointer]:
+                        - /url: "https://www.recraft.ai/contact "
+                    - listitem [ref=f34e41]:
+                      - link "Log in" [ref=f34e42] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/auth/login
+                    - listitem [ref=f34e44]:
+                      - link "Sign up" [ref=f34e45] [cursor=pointer]:
+                        - /url: https://www.recraft.ai/auth/login
+                - button "Change theme preference" [ref=f34e52] [cursor=pointer]
+            - generic [ref=f34e58]:
+              - link "Recraft models" [ref=f34e59] [cursor=pointer]:
+                - /url: /docs
+              - link "Recraft Studio" [ref=f34e61] [cursor=pointer]:
+                - /url: /docs/recraft-studio/overview
+              - link "API" [ref=f34e63] [cursor=pointer]:
+                - /url: /docs/api-reference/getting-started
+              - link "MCP" [ref=f34e65] [cursor=pointer]:
+                - /url: /docs/mcp-reference/getting-started
+              - link "Trust and security" [ref=f34e67] [cursor=pointer]:
+                - /url: /docs/trust-and-security/compliance-and-certifications
+              - link "Prompt engineering guide" [ref=f34e69] [cursor=pointer]:
+                - /url: /docs/prompt-engineering-guide/introduction
+              - link "Support and FAQ" [ref=f34e71] [cursor=pointer]:
+                - /url: /docs/support-and-faq/contact-support
+        - generic [ref=f34e73]:
+          - navigation "Pages" [ref=f34e74]:
+            - generic [ref=f34e78]:
+              - heading "API" [level=3] [ref=f34e80]
+              - list [ref=f34e81]:
+                - listitem [ref=f34e82]:
+                  - link "Getting started" [ref=f34e83] [cursor=pointer]:
+                    - /url: /docs/api-reference/getting-started
+                - listitem [ref=f34e87]:
+                  - link "Endpoints" [ref=f34e88] [cursor=pointer]:
+                    - /url: /docs/api-reference/endpoints
+                - listitem [ref=f34e92]:
+                  - link "Examples" [ref=f34e93] [cursor=pointer]:
+                    - /url: /docs/api-reference/examples
+                - listitem [ref=f34e97]:
+                  - link "Styles" [ref=f34e98] [cursor=pointer]:
+                    - /url: /docs/api-reference/styles
+                - listitem [ref=f34e102]:
+                  - link "Pricing" [ref=f34e103] [cursor=pointer]:
+                    - /url: /docs/api-reference/pricing
+                - listitem [ref=f34e107]:
+                  - link "Appendix" [ref=f34e108] [cursor=pointer]:
+                    - /url: /docs/api-reference/appendix
+                - listitem [ref=f34e112]:
+                  - link "Swagger" [ref=f34e113] [cursor=pointer]:
+                    - /url: /docs/api-reference/swagger
+          - main [ref=f34e117]:
+            - generic [ref=f34e118]:
+              - navigation [ref=f34e122]:
+                - heading [level=2] [ref=f34e123]:
+                  - button "On this page" [ref=f34e124] [cursor=pointer]
+                - list [ref=f34e128]:
+                  - listitem [ref=f34e129]:
+                    - link "Authentication" [ref=f34e130] [cursor=pointer]:
+                      - /url: "#authentication"
+                    - list [ref=f34e131]:
+                      - listitem [ref=f34e132]:
+                        - link "OpenAI Python library" [ref=f34e133] [cursor=pointer]:
+                          - /url: "#openai-python-library"
+                  - listitem [ref=f34e134]:
+                    - 'link "Image inputs: multipart or JSON" [ref=f34e135] [cursor=pointer]':
+                      - /url: "#image-inputs-multipart-or-json"
+                  - listitem [ref=f34e136]:
+                    - link "Generate image" [ref=f34e137] [cursor=pointer]:
+                      - /url: "#generate-image"
+                    - list [ref=f34e138]:
+                      - listitem [ref=f34e139]:
+                        - link "Example" [ref=f34e140] [cursor=pointer]:
+                          - /url: "#example"
+                      - listitem [ref=f34e141]:
+                        - link "Parameters" [ref=f34e142] [cursor=pointer]:
+                          - /url: "#parameters"
+                  - listitem [ref=f34e143]:
+                    - link "Create style" [ref=f34e144] [cursor=pointer]:
+                      - /url: "#create-style"
+                    - list [ref=f34e145]:
+                      - listitem [ref=f34e146]:
+                        - link "Example" [ref=f34e147] [cursor=pointer]:
+                          - /url: "#example-2"
+                      - listitem [ref=f34e148]:
+                        - link "Output" [ref=f34e149] [cursor=pointer]:
+                          - /url: "#output"
+                      - listitem [ref=f34e150]:
+                        - link "Request body" [ref=f34e151] [cursor=pointer]:
+                          - /url: "#request-body"
+                  - listitem [ref=f34e152]:
+                    - link "Image to image" [ref=f34e153] [cursor=pointer]:
+                      - /url: "#image-to-image"
+                    - list [ref=f34e154]:
+                      - listitem [ref=f34e155]:
+                        - link "Example" [ref=f34e156] [cursor=pointer]:
+                          - /url: "#example-3"
+                      - listitem [ref=f34e157]:
+                        - link "Parameters" [ref=f34e158] [cursor=pointer]:
+                          - /url: "#parameters-2"
+                  - listitem [ref=f34e159]:
+                    - link "Image inpainting" [ref=f34e160] [cursor=pointer]:
+                      - /url: "#image-inpainting"
+                    - list [ref=f34e161]:
+                      - listitem [ref=f34e162]:
+                        - link "Example" [ref=f34e163] [cursor=pointer]:
+                          - /url: "#example-4"
+                      - listitem [ref=f34e164]:
+                        - link "Parameters" [ref=f34e165] [cursor=pointer]:
+                          - /url: "#parameters-3"
+                  - listitem [ref=f34e166]:
+                    - link "Image outpainting" [ref=f34e167] [cursor=pointer]:
+                      - /url: "#image-outpainting"
+                    - list [ref=f34e168]:
+                      - listitem [ref=f34e169]:
+                        - link "Example" [ref=f34e170] [cursor=pointer]:
+                          - /url: "#example-5"
+                      - listitem [ref=f34e171]:
+                        - link "Parameters" [ref=f34e172] [cursor=pointer]:
+                          - /url: "#parameters-4"
+                  - listitem [ref=f34e173]:
+                    - link "Replace background" [ref=f34e174] [cursor=pointer]:
+                      - /url: "#replace-background"
+                    - list [ref=f34e175]:
+                      - listitem [ref=f34e176]:
+                        - link "Example" [ref=f34e177] [cursor=pointer]:
+                          - /url: "#example-6"
+                      - listitem [ref=f34e178]:
+                        - link "Parameters" [ref=f34e179] [cursor=pointer]:
+                          - /url: "#parameters-5"
+                  - listitem [ref=f34e180]:
+                    - link "Generate background" [ref=f34e181] [cursor=pointer]:
+                      - /url: "#generate-background"
+                    - list [ref=f34e182]:
+                      - listitem [ref=f34e183]:
+                        - link "Example" [ref=f34e184] [cursor=pointer]:
+                          - /url: "#example-7"
+                      - listitem [ref=f34e185]:
+                        - link "Parameters" [ref=f34e186] [cursor=pointer]:
+                          - /url: "#parameters-6"
+                  - listitem [ref=f34e187]:
+                    - link "Vectorize image" [ref=f34e188] [cursor=pointer]:
+                      - /url: "#vectorize-image"
+                    - list [ref=f34e189]:
+                      - listitem [ref=f34e190]:
+                        - link "Example" [ref=f34e191] [cursor=pointer]:
+                          - /url: "#example-8"
+                      - listitem [ref=f34e192]:
+                        - link "Parameters" [ref=f34e193] [cursor=pointer]:
+                          - /url: "#parameters-7"
+                  - listitem [ref=f34e194]:
+                    - link "Remove background" [ref=f34e195] [cursor=pointer]:
+                      - /url: "#remove-background"
+                    - list [ref=f34e196]:
+                      - listitem [ref=f34e197]:
+                        - link "Example" [ref=f34e198] [cursor=pointer]:
+                          - /url: "#example-9"
+                      - listitem [ref=f34e199]:
+                        - link "Parameters" [ref=f34e200] [cursor=pointer]:
+                          - /url: "#parameters-8"
+                  - listitem [ref=f34e201]:
+                    - link "Crisp upscale" [ref=f34e202] [cursor=pointer]:
+                      - /url: "#crisp-upscale"
+                    - list [ref=f34e203]:
+                      - listitem [ref=f34e204]:
+                        - link "Example" [ref=f34e205] [cursor=pointer]:
+                          - /url: "#example-10"
+                      - listitem [ref=f34e206]:
+                        - link "Request body" [ref=f34e207] [cursor=pointer]:
+                          - /url: "#request-body-2"
+                  - listitem [ref=f34e208]:
+                    - link "Creative upscale" [ref=f34e209] [cursor=pointer]:
+                      - /url: "#creative-upscale"
+                    - list [ref=f34e210]:
+                      - listitem [ref=f34e211]:
+                        - link "Example" [ref=f34e212] [cursor=pointer]:
+                          - /url: "#example-11"
+                      - listitem [ref=f34e213]:
+                        - link "Request body" [ref=f34e214] [cursor=pointer]:
+                          - /url: "#request-body-3"
+                  - listitem [ref=f34e215]:
+                    - link "Erase region" [ref=f34e216] [cursor=pointer]:
+                      - /url: "#erase-region"
+                    - list [ref=f34e217]:
+                      - listitem [ref=f34e218]:
+                        - link "Example" [ref=f34e219] [cursor=pointer]:
+                          - /url: "#example-12"
+                      - listitem [ref=f34e220]:
+                        - link "Request body" [ref=f34e221] [cursor=pointer]:
+                          - /url: "#request-body-4"
+                  - listitem [ref=f34e222]:
+                    - link "Remix image" [ref=f34e223] [cursor=pointer]:
+                      - /url: "#remix-image"
+                    - list [ref=f34e224]:
+                      - listitem [ref=f34e225]:
+                        - link "Example" [ref=f34e226] [cursor=pointer]:
+                          - /url: "#example-13"
+                      - listitem [ref=f34e227]:
+                        - link "Parameters" [ref=f34e228] [cursor=pointer]:
+                          - /url: "#parameters-9"
+                  - listitem [ref=f34e229]:
+                    - link "Explore" [ref=f34e230] [cursor=pointer]:
+                      - /url: "#explore"
+                    - list [ref=f34e231]:
+                      - listitem [ref=f34e232]:
+                        - link "Example" [ref=f34e233] [cursor=pointer]:
+                          - /url: "#example-14"
+                      - listitem [ref=f34e234]:
+                        - link "Parameters" [ref=f34e235] [cursor=pointer]:
+                          - /url: "#parameters-10"
+                  - listitem [ref=f34e236]:
+                    - link "Explore similar" [ref=f34e237] [cursor=pointer]:
+                      - /url: "#explore-similar"
+                    - list [ref=f34e238]:
+                      - listitem [ref=f34e239]:
+                        - link "Example" [ref=f34e240] [cursor=pointer]:
+                          - /url: "#example-15"
+                      - listitem [ref=f34e241]:
+                        - link "Parameters" [ref=f34e242] [cursor=pointer]:
+                          - /url: "#parameters-11"
+                  - listitem [ref=f34e243]:
+                    - link "Enhance prompt" [ref=f34e244] [cursor=pointer]:
+                      - /url: "#enhance-prompt"
+                    - list [ref=f34e245]:
+                      - listitem [ref=f34e246]:
+                        - link "Example" [ref=f34e247] [cursor=pointer]:
+                          - /url: "#example-16"
+                      - listitem [ref=f34e248]:
+                        - link "Parameters" [ref=f34e249] [cursor=pointer]:
+                          - /url: "#parameters-12"
+                  - listitem [ref=f34e250]:
+                    - link "Get user information" [ref=f34e251] [cursor=pointer]:
+                      - /url: "#get-user-information"
+                    - list [ref=f34e252]:
+                      - listitem [ref=f34e253]:
+                        - link "Example" [ref=f34e254] [cursor=pointer]:
+                          - /url: "#example-17"
+                      - listitem [ref=f34e255]:
+                        - link "Output" [ref=f34e256] [cursor=pointer]:
+                          - /url: "#output-2"
+                  - listitem [ref=f34e257]:
+                    - link "Auxiliary" [ref=f34e258] [cursor=pointer]:
+                      - /url: "#auxiliary"
+                    - list [ref=f34e259]:
+                      - listitem [ref=f34e260]:
+                        - link "Controls" [ref=f34e261] [cursor=pointer]:
+                          - /url: "#controls"
+                      - listitem [ref=f34e262]:
+                        - link "Colors" [ref=f34e263] [cursor=pointer]:
+                          - /url: "#colors"
+                      - listitem [ref=f34e264]:
+                        - link "Text Layout" [ref=f34e265] [cursor=pointer]:
+                          - /url: "#text-layout"
+              - generic [ref=f34e266]:
+                - generic [ref=f34e268]:
+                  - link "API" [ref=f34e271] [cursor=pointer]:
+                    - /url: /docs/api-reference/getting-started
+                  - generic [ref=f34e272]:
+                    - heading "Endpoints" [level=1] [ref=f34e273]
+                    - generic [ref=f34e274]:
+                      - button "Copy page" [ref=f34e275] [cursor=pointer]
+                      - button "More actions" [ref=f34e281] [cursor=pointer]
+                - generic [ref=f34e284]:
+                  - generic [ref=f34e285]: Dig into the details of the Recraft API endpoints.
+                  - heading "Navigate to header Authentication" [level=2] [ref=f34e286]:
+                    - link "Navigate to header" [ref=f34e287] [cursor=pointer]:
+                      - /url: "#authentication"
+                    - generic [ref=f34e292] [cursor=pointer]: Authentication
+                  - generic [ref=f34e293]:
+                    - text: We use
+                    - link "Bearer" [ref=f34e294] [cursor=pointer]:
+                      - /url: https://swagger.io/docs/specification/authentication/bearer-authentication/
+                    - text: API tokens for authentication. To access your API key, log in to Recraft and
+                    - link "enter your profile" [ref=f34e295] [cursor=pointer]:
+                      - /url: https://app.recraft.ai/profile/api
+                    - text: ". All requests should include your API key in an Authorization HTTP header as follows:"
+                    - code [ref=f34e296]: "Authorization: Bearer RECRAFT_API_TOKEN"
+                  - heading "Navigate to header OpenAI Python library" [level=3] [ref=f34e297]:
+                    - link "Navigate to header" [ref=f34e298] [cursor=pointer]:
+                      - /url: "#openai-python-library"
+                    - generic [ref=f34e303] [cursor=pointer]: OpenAI Python library
+                  - generic [ref=f34e304]: "Future examples will be shown using OpenAI Python library, for example, once installed, you can use the following code to be authenticated:"
+                  - generic [ref=f34e305]:
+                    - generic [ref=f34e306]:
+                      - button "Copy the contents from the code block" [ref=f34e308] [cursor=pointer]
+                      - button "Ask Assistant" [ref=f34e313] [cursor=pointer]
+                    - code [ref=f34e320]:
+                      - generic [ref=f34e321]: from openai import OpenAI
+                      - generic [ref=f34e322]: client = OpenAI(
+                      - generic [ref=f34e323]: base_url='https://external.api.recraft.ai/v1',
+                      - generic [ref=f34e324]: api_key=<RECRAFT_API_TOKEN>,
+                      - generic [ref=f34e325]: )
+                  - generic [ref=f34e326]:
+                    - text: Since the Recraft API follows REST principles, you can interact with it using any standard HTTP client such as
+                    - code [ref=f34e327]: curl
+                    - text: ", as well as your preferred programming language or library."
+                  - 'heading "Navigate to header Image inputs: multipart or JSON" [level=2] [ref=f34e328]':
+                    - link "Navigate to header" [ref=f34e329] [cursor=pointer]:
+                      - /url: "#image-inputs-multipart-or-json"
+                    - generic [ref=f34e334] [cursor=pointer]: "Image inputs: multipart or JSON"
+                  - generic [ref=f34e335]:
+                    - text: Every endpoint that takes an image (or mask) as input accepts the request in
+                    - strong [ref=f34e336]: two interchangeable formats
+                    - text: ":"
+                  - list [ref=f34e337]:
+                    - listitem [ref=f34e338]:
+                      - strong [ref=f34e339]:
+                        - code [ref=f34e340]: multipart/form-data
+                      - text: — upload the binary file directly using form fields (
+                      - code [ref=f34e341]: image
+                      - text: ","
+                      - code [ref=f34e342]: mask
+                      - text: ","
+                      - code [ref=f34e343]: file
+                      - text: ", …). This is convenient for local files."
+                    - listitem [ref=f34e344]:
+                      - strong [ref=f34e345]:
+                        - code [ref=f34e346]: application/json
+                      - text: — pass the image
+                      - emphasis [ref=f34e347]: by reference
+                      - text: instead of uploading bytes. Each file field has a JSON counterpart that accepts a
+                      - strong [ref=f34e348]: public URL
+                      - text: or a
+                      - strong [ref=f34e349]:
+                        - link "data URL" [ref=f34e350] [cursor=pointer]:
+                          - /url: https://developer.mozilla.org/en-US/docs/Web/URI/Schemes/data
+                      - text: (a
+                      - code [ref=f34e351]: data:image/...;base64,...
+                      - text: string).
+                  - generic [ref=f34e352]: "The mapping between the multipart file fields and their JSON counterparts:"
+                  - region "Scrollable table" [ref=f34e353]:
+                    - table [ref=f34e355]:
+                      - rowgroup [ref=f34e356]:
+                        - row [ref=f34e357]:
+                          - columnheader "Multipart field" [ref=f34e358]
+                          - columnheader "JSON field" [ref=f34e359]
+                          - columnheader "Type" [ref=f34e360]
+                      - rowgroup [ref=f34e361]:
+                        - row [ref=f34e362]:
+                          - cell [ref=f34e363]:
+                            - code [ref=f34e364]: image
+                          - cell [ref=f34e365]:
+                            - code [ref=f34e366]: image_url
+                          - cell "string — URL or data URL of the input image" [ref=f34e367]
+                        - row [ref=f34e368]:
+                          - cell [ref=f34e369]:
+                            - code [ref=f34e370]: mask
+                          - cell [ref=f34e371]:
+                            - code [ref=f34e372]: mask_url
+                          - cell "string — URL or data URL of the mask image" [ref=f34e373]
+                        - row [ref=f34e374]:
+                          - cell [ref=f34e375]:
+                            - code [ref=f34e376]: file
+                          - cell [ref=f34e377]:
+                            - code [ref=f34e378]: image_url
+                          - cell "string — URL or data URL of the input image" [ref=f34e379]
+                        - row [ref=f34e380]:
+                          - cell [ref=f34e381]:
+                            - code [ref=f34e382]: files
+                            - text: (Create style)
+                          - cell [ref=f34e383]:
+                            - code [ref=f34e384]: image_urls
+                          - cell "array of strings — URLs or data URLs of the input images" [ref=f34e385]
+                  - generic [ref=f34e386]: All other parameters are identical between the two formats. Use JSON when your image is already hosted somewhere (just send the URL) or when a JSON body fits your client better; use multipart to upload local files directly. The examples below show both variants where applicable.
+                  - heading "Navigate to header Generate image" [level=2] [ref=f34e387]:
+                    - link "Navigate to header" [ref=f34e388] [cursor=pointer]:
+                      - /url: "#generate-image"
+                    - generic [ref=f34e393] [cursor=pointer]: Generate image
+                  - generic [ref=f34e394]: Creates an image given a prompt.
+                  - generic [ref=f34e395]:
+                    - generic [ref=f34e396]:
+                      - button "Copy the contents from the code block" [ref=f34e398] [cursor=pointer]
+                      - button "Ask Assistant" [ref=f34e403] [cursor=pointer]
+                    - code [ref=f34e410]:
+                      - generic [ref=f34e411]: POST https://external.api.recraft.ai/v1/images/generations
+                  - generic [ref=f34e412]:
+                    - text: In addition to the general endpoint above, two specialized variants accept the same request body but constrain the allowed
+                    - code [ref=f34e413]: model
+                    - text: and
+                    - code [ref=f34e414]: style
+                    - text: "values to a single output type:"
+                  - generic [ref=f34e415]:
+                    - generic [ref=f34e416]:
+                      - button "Copy the contents from the code block" [ref=f34e418] [cursor=pointer]
+                      - button "Ask Assistant" [ref=f34e423] [cursor=pointer]
+                    - code [ref=f34e430]:
+                      - generic [ref=f34e431]: POST https://external.api.recraft.ai/v1/images/generations/raster
+                      - generic [ref=f34e432]: POST https://external.api.recraft.ai/v1/images/generations/vector
+                  - list [ref=f34e433]:
+                    - listitem [ref=f34e434]:
+                      - strong [ref=f34e435]:
+                        - code [ref=f34e436]: /generations/raster
+                      - text: — only raster models (any model from the list above whose name does
+                      - strong [ref=f34e437]: not
+                      - text: end in
+                      - code [ref=f34e438]: _vector
+                      - text: ) and raster styles are accepted. Requests using a vector model or vector style are rejected.
+                    - listitem [ref=f34e439]:
+                      - strong [ref=f34e440]:
+                        - code [ref=f34e441]: /generations/vector
+                      - text: — only vector models (any model from the list above whose name ends in
+                      - code [ref=f34e442]: _vector
+                      - text: ) and vector styles are accepted. Requests using a raster model or raster style are rejected.
+                  - generic [ref=f34e443]:
+                    - text: Use these variants when you want the server to enforce the output type — for example, in an agent or workflow that must produce only raster (or only vector) images. The base
+                    - code [ref=f34e444]: /generations
+                    - text: endpoint remains available and accepts any supported model or style.
+                  - heading "Navigate to header Example" [level=3] [ref=f34e445]:
+                    - link "Navigate to header" [ref=f34e446] [cursor=pointer]:
+                      - /url: "#example"
+                    - generic [ref=f34e451] [cursor=pointer]: Example
+                  - generic [ref=f34e452]:
+                    - generic [ref=f34e453]:
+                      - button "Copy the contents from the code block" [ref=f34e455] [cursor=pointer]
+                      - button "Ask Assistant" [ref=f34e460] [cursor=pointer]
+                    - code [ref=f34e467]:
+                      - generic [ref=f34e468]: response = client.images.generate(
+                      - generic [ref=f34e469]: prompt='race car on a track',
+                      - generic [ref=f34e470]: )
+                      - generic [ref=f34e471]: print(response.data[0].url)
+                  - heading "Navigate to header Parameters" [level=3] [ref=f34e472]:
+                    - link "Navigate to header" [ref=f34e473] [cursor=pointer]:
+                      - /url: "#parameters"
+                    - generic [ref=f34e478] [cursor=pointer]: Parameters
+                  - region "Scrollable table" [ref=f34e479]:
+                    - table [ref=f34e481]:
+                      - rowgroup [ref=f34e482]:
+                        - row [ref=f34e483]:
+                          - columnheader "Parameter" [ref=f34e484]
+                          - columnheader "Type" [ref=f34e485]
+                          - columnheader "Description" [ref=f34e486]
+                          - columnheader "Compatibility" [ref=f34e487]
+                      - rowgroup [ref=f34e488]:
+                        - row [ref=f34e489]:
+                          - cell "prompt (required)" [ref=f34e490]
+                          - cell "string" [ref=f34e491]
+                          - cell "A text description of the desired image(s)." [ref=f34e492]
+                          - cell [ref=f34e493]:
+                            - text: Maximum prompt length depends on model, refer to
+                            - link "Appendix" [ref=f34e494] [cursor=pointer]:
+                              - /url: /docs/api-reference/appendix#maximum-prompt-length
+                        - row [ref=f34e495]:
+                          - cell "n" [ref=f34e496]
+                          - cell "integer or null, default is 1" [ref=f34e497]
+                          - cell "The number of images to generate, must be between 1 and 6." [ref=f34e498]
+                          - cell "All models" [ref=f34e499]
+                        - row [ref=f34e500]:
+                          - cell "model" [ref=f34e501]
+                          - cell [ref=f34e502]:
+                            - text: string or null, default is
+                            - code [ref=f34e503]: recraftv4_1
+                          - cell "The model to use for image generation." [ref=f34e504]
+                          - cell [ref=f34e505]:
+                            - text: "Must be one of:"
+                            - code [ref=f34e506]: recraftv4_1
+                            - code [ref=f34e507]: recraftv4_1_vector
+                            - code [ref=f34e508]: recraftv4_1_pro
+                            - code [ref=f34e509]: recraftv4_1_pro_vector
+                            - code [ref=f34e510]: recraftv4_1_utility
+                            - code [ref=f34e511]: recraftv4_1_utility_vector
+                            - code [ref=f34e512]: recraftv4_1_utility_pro
+                            - code [ref=f34e513]: recraftv4_1_utility_pro_vector
+                            - code [ref=f34e514]: recraftv4
+                            - code [ref=f34e515]: recraftv4_vector
+                            - code [ref=f34e516]: recraftv4_pro
+                            - code [ref=f34e517]: recraftv4_pro_vector
+                            - code [ref=f34e518]: recraftv3
+                            - code [ref=f34e519]: recraftv3_vector
+                            - code [ref=f34e520]: recraftv2
+                            - code [ref=f34e521]: recraftv2_vector
+                        - row [ref=f34e522]:
+                          - cell "style" [ref=f34e523]
+                          - cell "string or null" [ref=f34e524]
+                          - cell [ref=f34e525]:
+                            - text: The style of the generated images, refer to
+                            - link "Styles" [ref=f34e526] [cursor=pointer]:
+                              - /url: /docs/api-reference/styles
+                            - text: .
+                          - cell "V2 / V3 styles" [ref=f34e527]
+                        - row [ref=f34e528]:
+                          - cell "style_id" [ref=f34e529]
+                          - cell "UUID or null" [ref=f34e530]
+                          - cell [ref=f34e531]:
+                            - text: Use a style as visual reference, refer to
+                            - link "Styles" [ref=f34e532] [cursor=pointer]:
+                              - /url: /docs/api-reference/styles
+                            - text: .
+                          - cell "V2 / V3 styles" [ref=f34e533]
+                        - row [ref=f34e534]:
+                          - cell "size" [ref=f34e535]
+                          - cell "string or null" [ref=f34e536]
+                          - cell [ref=f34e537]:
+                            - text: The size of the generated images in
+                            - code [ref=f34e538]: WxH
+                            - text: or
+                            - code [ref=f34e539]: w:h
+                            - text: format. If not specified, the size is auto-selected based on the prompt.
+                          - cell [ref=f34e540]:
+                            - text: Depends on model, supported values are published in
+                            - link "Appendix" [ref=f34e541] [cursor=pointer]:
+                              - /url: /docs/api-reference/appendix#list-of-supported-image-sizes
+                        - row [ref=f34e542]:
+                          - cell "negative_prompt" [ref=f34e543]
+                          - cell "string or null" [ref=f34e544]
+                          - cell "A text description of undesired elements on an image." [ref=f34e545]
+                          - cell "V2 / V3 models" [ref=f34e546]
+                        - row [ref=f34e547]:
+                          - cell "random_seed" [ref=f34e548]
+                          - cell "integer or null" [ref=f34e549]
+                          - cell "Seed for reproducible generation." [ref=f34e550]
+                          - cell "All models" [ref=f34e551]
+                        - row [ref=f34e552]:
+                          - cell "response_format" [ref=f34e553]
+                          - cell [ref=f34e554]:
+                            - text: string or null, default is
+                            - code [ref=f34e555]: url
+                          - cell [ref=f34e556]:
+                            - text: The format in which the generated images are returned. Must be one of
+                            - code [ref=f34e557]: url
+                            - text: or
+                            - code [ref=f34e558]: b64_json
+                            - text: .
+                          - cell "All models" [ref=f34e559]
+                        - row [ref=f34e560]:
+                          - cell "text_layout" [ref=f34e561]
+                          - cell "Array of objects or null" [ref=f34e562]
+                          - cell [ref=f34e563]:
+                            - text: Refer to
+                            - link "Text Layout" [ref=f34e564] [cursor=pointer]:
+                              - /url: "#text-layout"
+                            - text: .
+                          - cell "V3 models only" [ref=f34e565]
+                        - row [ref=f34e566]:
+                          - cell "controls" [ref=f34e567]
+                          - cell "object or null" [ref=f34e568]
+                          - cell [ref=f34e569]:
+                            - text: A set of custom parameters to tweak generation process, refer to
+                            - link "Controls" [ref=f34e570] [cursor=pointer]:
+                              - /url: "#controls"
+                            - text: .
+                          - cell "All models, partially supported for V4" [ref=f34e571]
+                  - generic [ref=f34e572]:
+                    - strong [ref=f34e573]: "Hint:"
+                    - text: if OpenAI Python Library is used, non-standard parameters can be passed using the
+                    - code [ref=f34e574]: extra_body
+                    - text: "argument. For example:"
+                  - generic [ref=f34e575]:
+                    - generic [ref=f34e576]:
+                      - button "Copy the contents from the code block" [ref=f34e578] [cursor=pointer]
+                      - button "Ask Assistant" [ref=f34e583] [cursor=pointer]
+                    - code [ref=f34e590]:
+                      - generic [ref=f34e591]: response = client.images.generate(
+                      - generic [ref=f34e592]: prompt='race car on a track',
+                      - generic [ref=f34e593]: "extra_body={"
+                      - generic [ref=f34e594]: "'style_id': style_id,"
+                      - generic [ref=f34e595]: "'controls': {"
+                      - generic [ref=f34e596]: ...
+                      - generic [ref=f34e597]: "}"
+                      - generic [ref=f34e598]: "}"
+                      - generic [ref=f34e599]: )
+                      - generic [ref=f34e600]: print(response.data[0].url)
+                  - heading "Navigate to header Create style" [level=2] [ref=f34e601]:
+                    - link "Navigate to header" [ref=f34e602] [cursor=pointer]:
+                      - /url: "#create-style"
+                    - generic [ref=f34e607] [cursor=pointer]: Create style
+                  - generic [ref=f34e608]: Upload a set of images to create a style reference.
+                  - generic [ref=f34e609]:
+                    - generic [ref=f34e610]:
+                      - button "Copy the contents from the code block" [ref=f34e612] [cursor=pointer]
+                      - button "Ask Assistant" [ref=f34e617] [cursor=pointer]
+                    - code [ref=f34e624]:
+                      - generic [ref=f34e625]: POST https://external.api.recraft.ai/v1/styles
+                  - heading "Navigate to header Example" [level=3] [ref=f34e626]:
+                    - link "Navigate to header" [ref=f34e627] [cursor=pointer]:
+                      - /url: "#example-2"
+                    - generic [ref=f34e632] [cursor=pointer]: Example
+                  - generic [ref=f34e633]:
+                    - generic [ref=f34e634]:
+                      - tablist [ref=f34e636]:
+                        - tab "Multipart" [selected] [ref=f34e637] [cursor=pointer]
+                        - tab "JSON" [ref=f34e640] [cursor=pointer]
+                      - generic [ref=f34e642]:
+                        - button "Copy the contents from the code block" [ref=f34e644] [cursor=pointer]
+                        - button "Ask Assistant" [ref=f34e649] [cursor=pointer]
+                    - tabpanel "Multipart" [ref=f34e654]:
+                      - code [ref=f34e658]:
+                        - generic [ref=f34e659]: response = client.post(
+                        - generic [ref=f34e660]: path='/styles',
+                        - generic [ref=f34e661]: cast_to=object,
+                        - generic [ref=f34e662]: "options={'headers': {'Content-Type': 'multipart/form-data'}},"
+                        - generic [ref=f34e663]: "body={'style': 'digital_illustration'},"
+                        - generic [ref=f34e664]: "files={'file1': open('image.png', 'rb')},"
+                        - generic [ref=f34e665]: )
+                        - generic [ref=f34e666]: print(response['id'])
+                  - heading "Navigate to header Output" [level=3] [ref=f34e667]:
+                    - link "Navigate to header" [ref=f34e668] [cursor=pointer]:
+                      - /url: "#output"
+                    - generic [ref=f34e673] [cursor=pointer]: Output
+                  - generic [ref=f34e674]:
+                    - generic [ref=f34e675]:
+                      - button "Copy the contents from the code block" [ref=f34e677] [cursor=pointer]
+                      - button "Ask Assistant" [ref=f34e682] [cursor=pointer]
+                    - code [ref=f34e689]:
+                      - generic [ref=f34e690]: "{"
+                      - generic [ref=f34e691]: "\"id\": \"229b2a75-05e4-4580-85f9-b47ee521a00d\","
+                      - generic [ref=f34e692]: "\"style\": \"digital_illustration\","
+                      - generic [ref=f34e693]: "\"creation_time\": \"2024-01-01T00:00:00Z\","
+                      - generic [ref=f34e694]: "\"is_private\": true,"
+                      - generic [ref=f34e695]: "\"credits\": 40"
+                      - generic [ref=f34e696]: "}"
+                  - heading "Navigate to header Request body" [level=3] [ref=f34e697]:
+                    - link "Navigate to header" [ref=f34e698] [cursor=pointer]:
+                      - /url: "#request-body"
+                    - generic [ref=f34e703] [cursor=pointer]: Request body
+                  - generic [ref=f34e704]: Upload a set of images to create a style reference.
+                  - region "Scrollable table" [ref=f34e705]:
+                    - table [ref=f34e707]:
+                      - rowgroup [ref=f34e708]:
+                        - row [ref=f34e709]:
+                          - columnheader "Parameter" [ref=f34e710]
+                          - columnheader "Type" [ref=f34e711]
+                          - columnheader "Description" [ref=f34e712]
+                      - rowgroup [ref=f34e713]:
+                        - row [ref=f34e714]:
+                          - cell "style (required)" [ref=f34e715]
+                          - cell "string" [ref=f34e716]
+                          - cell [ref=f34e717]:
+                            - text: "The base style of the generated images, should be one of:"
+                            - code [ref=f34e718]: any
+                            - text: ","
+                            - code [ref=f34e719]: realistic_image
+                            - text: ","
+                            - code [ref=f34e720]: digital_illustration
+                            - text: ","
+                            - code [ref=f34e721]: vector_illustration
+                            - text: ","
+                            - code [ref=f34e722]: icon
+                            - text: ","
+                            - code [ref=f34e723]: logo_raster
+                        - row [ref=f34e724]:
+                          - cell "files" [ref=f34e725]
+                          - cell "files" [ref=f34e726]
+                          - cell [ref=f34e727]:
+                            - strong [ref=f34e728]: (multipart only)
+                            - text: Images in PNG, JPG, or WEBP format for use as style references, sent as multipart file parts (any field name). The max number of images is 5. Total size of all images is limited to 5 MB (each file must also be under the 10 MB upload limit). Required unless
+                            - code [ref=f34e729]: source_styles
+                            - text: is provided.
+                        - row [ref=f34e730]:
+                          - cell "image_urls" [ref=f34e731]
+                          - cell "array of strings" [ref=f34e732]
+                          - cell [ref=f34e733]:
+                            - strong [ref=f34e734]: (JSON only)
+                            - text: URLs or data URLs of the reference images, the JSON-body counterpart of
+                            - code [ref=f34e735]: files
+                            - text: . Same image format, count, and size limits apply. Required unless
+                            - code [ref=f34e736]: source_styles
+                            - text: is provided.
+                        - row [ref=f34e737]:
+                          - cell "model" [ref=f34e738]
+                          - cell "string or null" [ref=f34e739]
+                          - cell [ref=f34e740]:
+                            - text: The transform model the style is created for, e.g.
+                            - code [ref=f34e741]: recraftv3
+                            - text: ","
+                            - code [ref=f34e742]: recraftv3_vector
+                            - text: .
+                        - row [ref=f34e743]:
+                          - cell "image_weights" [ref=f34e744]
+                          - cell "array of numbers or null" [ref=f34e745]
+                          - cell "Per-image weights; the number of weights must match the number of uploaded images." [ref=f34e746]
+                        - row [ref=f34e747]:
+                          - cell "source_styles" [ref=f34e748]
+                          - cell "array of UUIDs or null" [ref=f34e749]
+                          - cell "Existing style IDs to mix into the new style. May be used instead of, or together with, uploaded images." [ref=f34e750]
+                        - row [ref=f34e751]:
+                          - cell "source_style_weights" [ref=f34e752]
+                          - cell "array of numbers or null" [ref=f34e753]
+                          - cell [ref=f34e754]:
+                            - text: Per-source-style weights; the number of weights must match the number of
+                            - code [ref=f34e755]: source_styles
+                            - text: .
+                        - row [ref=f34e756]:
+                          - cell "prompt" [ref=f34e757]
+                          - cell "string or null" [ref=f34e758]
+                          - cell "Optional text prompt associated with the style." [ref=f34e759]
+                        - row [ref=f34e760]:
+                          - cell "mix_policy" [ref=f34e761]
+                          - cell "string or null" [ref=f34e762]
+                          - cell [ref=f34e763]:
+                            - text: How sources are mixed when combining images/source styles. Must be one of
+                            - code [ref=f34e764]: PaletteMatch
+                            - text: ","
+                            - code [ref=f34e765]: MaxWeight
+                            - text: .
+                  - heading "Navigate to header Image to image" [level=2] [ref=f34e766]:
+                    - link "Navigate to header" [ref=f34e767] [cursor=pointer]:
+                      - /url: "#image-to-image"
+                    - generic [ref=f34e772] [cursor=pointer]: Image to image
+                  - generic [ref=f34e773]: Image-to-image operation tool allows you to create images similar to a given image, preserving certain aspects like composition, color, or subject identity while altering others based on the prompt. This can be used to create variations of the image or images that have similar composition to existing image. Use prompt to describe the new image and strength to define similarity level.
+                  - generic [ref=f34e774]:
+                    - emphasis [ref=f34e775]:
+                      - strong [ref=f34e776]: Note
+                    - text: ": This operation is available with Recraft V3 and Recraft V4 models (raster and vector)."
+                  - generic [ref=f34e777]:
+                    - generic [ref=f34e778]:
+                      - button "Copy the contents from the code block" [ref=f34e780] [cursor=pointer]
+                      - button "Ask Assistant" [ref=f34e785] [cursor=pointer]
+                    - code [ref=f34e792]:
+                      - generic [ref=f34e793]: POST https://external.api.recraft.ai/v1/images/imageToImage
+                  - heading "Navigate to header Example" [level=3] [ref=f34e794]:
+                    - link "Navigate to header" [ref=f34e795] [cursor=pointer]:
+                      - /url: "#example-3"
+                    - generic [ref=f34e800] [cursor=pointer]: Example
+                  - generic [ref=f34e801]:
+                    - generic [ref=f34e802]:
+                      - tablist [ref=f34e804]:
+                        - tab "Multipart" [selected] [ref=f34e805] [cursor=pointer]
+                        - tab "JSON" [ref=f34e808] [cursor=pointer]
+                      - generic [ref=f34e810]:
+                        - button "Copy the contents from the code block" [ref=f34e812] [cursor=pointer]
+                        - button "Ask Assistant" [ref=f34e817] [cursor=pointer]
+                    - tabpanel "Multipart" [ref=f34e822]:
+                      - code [ref=f34e826]:
+                        - generic [ref=f34e827]: response = client.post(
+                        - generic [ref=f34e828]: path='/images/imageToImage',
+                        - generic [ref=f34e829]: cast_to=object,
+                        - generic [ref=f34e830]: "options={'headers': {'Content-Type': 'multipart/form-data'}},"
+                        - generic [ref=f34e831]: "files={"
+                        - generic [ref=f34e832]: "'image': open('image.png', 'rb'),"
+                        - generic [ref=f34e833]: "},"
+                        - generic [ref=f34e834]: "body={"
+                        - generic [ref=f34e835]: "'prompt': 'winter',"
+                        - generic [ref=f34e836]: "'strength': 0.2,"
+                        - generic [ref=f34e837]: "},"
+                        - generic [ref=f34e838]: )
+                        - generic [ref=f34e839]: print(response['data'][0]['url'])
+                  - heading "Navigate to header Parameters" [level=3] [ref=f34e840]:
+                    - link "Navigate to header" [ref=f34e841] [cursor=pointer]:
+                      - /url: "#parameters-2"
+                    - generic [ref=f34e846] [cursor=pointer]: Parameters
+                  - generic [ref=f34e847]:
+                    - text: In JSON mode, replace the
+                    - code [ref=f34e848]: image
+                    - text: file with
+                    - code [ref=f34e849]: image_url
+                    - text: (a URL or data URL of the input image); all other parameters are the same.
+                  - region "Scrollable table" [ref=f34e850]:
+                    - table [ref=f34e852]:
+                      - rowgroup [ref=f34e853]:
+                        - row [ref=f34e854]:
+                          - columnheader "Parameter" [ref=f34e855]
+                          - columnheader "Type" [ref=f34e856]
+                          - columnheader "Description" [ref=f34e857]
+                          - columnheader "Compatibility" [ref=f34e858]
+                      - rowgroup [ref=f34e859]:
+                        - row [ref=f34e860]:
+                          - cell "image (required)" [ref=f34e861]
+                          - cell "file" [ref=f34e862]
+                          - cell [ref=f34e863]:
+                            - strong [ref=f34e864]: (multipart)
+                            - text: An image to modify, must be less than 10 MB in size, have resolution less than 16 MP, and max dimension less than 4096 pixels. PNG, JPG, WEBP, or SVG. The output format is determined by the selected model.
+                          - cell [ref=f34e865]
+                        - row [ref=f34e866]:
+                          - cell "image_url (required)" [ref=f34e867]
+                          - cell "string" [ref=f34e868]
+                          - cell [ref=f34e869]:
+                            - strong [ref=f34e870]: (JSON)
+                            - text: URL or data URL of the input image, the JSON-body counterpart of
+                            - code [ref=f34e871]: image
+                            - text: . Same format and size limits apply.
+                          - cell [ref=f34e872]
+                        - row [ref=f34e873]:
+                          - cell "prompt (required)" [ref=f34e874]
+                          - cell "string" [ref=f34e875]
+                          - cell "A text description of areas to change." [ref=f34e876]
+                          - cell [ref=f34e877]:
+                            - text: refer to
+                            - link "Appendix" [ref=f34e878] [cursor=pointer]:
+                              - /url: /docs/api-reference/appendix#maximum-prompt-length
+                        - row [ref=f34e879]:
+                          - cell "strength (required)" [ref=f34e880]
+                          - cell "float" [ref=f34e881]
+                          - cell [ref=f34e882]:
+                            - text: Defines the difference with the original image, should lie in
+                            - code [ref=f34e883]: "[0, 1]"
+                            - text: ", where"
+                            - code [ref=f34e884]: "0"
+                            - text: means almost identical, and
+                            - code [ref=f34e885]: "1"
+                            - text: means minimal similarity.
+                          - cell [ref=f34e886]
+                        - row [ref=f34e887]:
+                          - cell "n" [ref=f34e888]
+                          - cell "integer or null, default is 1" [ref=f34e889]
+                          - cell "The number of images to generate, must be between 1 and 6." [ref=f34e890]
+                          - cell [ref=f34e891]
+                        - row [ref=f34e892]:
+                          - cell "model" [ref=f34e893]
+                          - cell [ref=f34e894]:
+                            - text: string or null, default is
+                            - code [ref=f34e895]: recraftv4_1
+                          - cell "The model to use for image generation." [ref=f34e896]
+                          - cell [ref=f34e897]:
+                            - text: "Must be one of the Recraft V3 / V4 models:"
+                            - code [ref=f34e898]: recraftv3
+                            - text: ","
+                            - code [ref=f34e899]: recraftv3_vector
+                            - text: ","
+                            - code [ref=f34e900]: recraftv4
+                            - text: ","
+                            - code [ref=f34e901]: recraftv4_vector
+                            - text: ","
+                            - code [ref=f34e902]: recraftv4_pro
+                            - text: ","
+                            - code [ref=f34e903]: recraftv4_pro_vector
+                            - text: ","
+                            - code [ref=f34e904]: recraftv4_1
+                            - text: ","
+                            - code [ref=f34e905]: recraftv4_1_vector
+                            - text: ","
+                            - code [ref=f34e906]: recraftv4_1_pro
+                            - text: ","
+                            - code [ref=f34e907]: recraftv4_1_pro_vector
+                            - text: ","
+                            - code [ref=f34e908]: recraftv4_1_utility
+                            - text: ","
+                            - code [ref=f34e909]: recraftv4_1_utility_vector
+                            - text: ","
+                            - code [ref=f34e910]: recraftv4_1_utility_pro
+                            - text: ","
+                            - code [ref=f34e911]: recraftv4_1_utility_pro_vector
+                        - row [ref=f34e912]:
+                          - cell "style" [ref=f34e913]
+                          - cell "string or null" [ref=f34e914]
+                          - cell [ref=f34e915]:
+                            - text: The style of the generated images, refer to
+                            - link "Styles" [ref=f34e916] [cursor=pointer]:
+                              - /url: /docs/api-reference/styles
+                            - text: .
+                          - cell "V3 / V4 styles" [ref=f34e917]
+                        - row [ref=f34e918]:
+                          - cell "style_id" [ref=f34e919]
+                          - cell "UUID or null" [ref=f34e920]
+                          - cell [ref=f34e921]:
+                            - text: Use a style as visual reference, refer to
+                            - link "Styles" [ref=f34e922] [cursor=pointer]:
+                              - /url: /docs/api-reference/styles
+                            - text: .
+                          - cell "V3 / V4 styles" [ref=f34e923]
+                        - row [ref=f34e924]:
+                          - cell "random_seed" [ref=f34e925]
+                          - cell "integer or null" [ref=f34e926]
+                          - cell "Seed for reproducible generation." [ref=f34e927]
+                          - cell [ref=f34e928]
+                        - row [ref=f34e929]:
+                          - cell "response_format" [ref=f34e930]
+                          - cell [ref=f34e931]:
+                            - text: string or null, default is
+                            - code [ref=f34e932]: url
+                          - cell [ref=f34e933]:
+                            - text: The format in which the generated images are returned. Must be one of
+                            - code [ref=f34e934]: url
+                            - text: or
+                            - code [ref=f34e935]: b64_json
+                            - text: .
+                          - cell [ref=f34e936]
+                        - row [ref=f34e937]:
+                          - cell "negative_prompt" [ref=f34e938]
+                          - cell "string or null" [ref=f34e939]
+                          - cell "A text description of undesired elements on an image." [ref=f34e940]
+                          - cell [ref=f34e941]
+                        - row [ref=f34e942]:
+                          - cell "text_layout" [ref=f34e943]
+                          - cell "Array of objects or null" [ref=f34e944]
+                          - cell [ref=f34e945]:
+                            - text: Refer to
+                            - link "Text Layout" [ref=f34e946] [cursor=pointer]:
+                              - /url: "#text-layout"
+                            - text: .
+                          - cell [ref=f34e947]
+                        - row [ref=f34e948]:
+                          - cell "controls" [ref=f34e949]
+                          - cell "object or null" [ref=f34e950]
+                          - cell [ref=f34e951]:
+                            - text: A set of custom parameters to tweak generation process, refer to
+                            - link "Controls" [ref=f34e952] [cursor=pointer]:
+                              - /url: "#controls"
+                            - text: .
+                          - cell [ref=f34e953]
+                  - heading "Navigate to header Image inpainting" [level=2] [ref=f34e954]:
+                    - link "Navigate to header" [ref=f34e955] [cursor=pointer]:
+                      - /url: "#image-inpainting"
+                    - generic [ref=f34e960] [cursor=pointer]: Image inpainting
+                  - generic [ref=f34e961]: Inpainting lets you regenerate specific parts of an image while keeping the rest intact. This is useful for correcting details, replacing elements, or making creative changes without starting from scratch. It uses a mask to identify the areas to be filled in, where white pixels represent the regions to inpaint, and black pixels indicate the areas to keep intact, i.e. the white pixels are filled based on the input provided in the prompt.
+                  - generic [ref=f34e962]:
+                    - emphasis [ref=f34e963]:
+                      - strong [ref=f34e964]: Note
+                    - text: ": This operation is available with Recraft V3, Recraft V3 Vector models only."
+                  - generic [ref=f34e965]:
+                    - generic [ref=f34e966]:
+                      - button "Copy the contents from the code block" [ref=f34e968] [cursor=pointer]
+                      - button "Ask Assistant" [ref=f34e973] [cursor=pointer]
+                    - code [ref=f34e980]:
+                      - generic [ref=f34e981]: POST https://external.api.recraft.ai/v1/images/inpaint
+                  - heading "Navigate to header Example" [level=3] [ref=f34e982]:
+                    - link "Navigate to header" [ref=f34e983] [cursor=pointer]:
+                      - /url: "#example-4"
+                    - generic [ref=f34e988] [cursor=pointer]: Example
+                  - generic [ref=f34e989]:
+                    - generic [ref=f34e990]:
+                      - tablist [ref=f34e992]:
+                        - tab "Multipart" [selected] [ref=f34e993] [cursor=pointer]
+                        - tab "JSON" [ref=f34e996] [cursor=pointer]
+                      - generic [ref=f34e998]:
+                        - button "Copy the contents from the code block" [ref=f34e1000] [cursor=pointer]
+                        - button "Ask Assistant" [ref=f34e1005] [cursor=pointer]
+                    - tabpanel "Multipart" [ref=f34e1010]:
+                      - code [ref=f34e1014]:
+                        - generic [ref=f34e1015]: response = client.post(
+                        - generic [ref=f34e1016]: path='/images/inpaint',
+                        - generic [ref=f34e1017]: cast_to=object,
+                        - generic [ref=f34e1018]: "options={'headers': {'Content-Type': 'multipart/form-data'}},"
+                        - generic [ref=f34e1019]: "files={"
+                        - generic [ref=f34e1020]: "'image': open('image.png', 'rb'),"
+                        - generic [ref=f34e1021]: "'mask': open('mask.png', 'rb'),"
+                        - generic [ref=f34e1022]: "},"
+                        - generic [ref=f34e1023]: "body={"
+                        - generic [ref=f34e1024]: "'prompt': 'winter',"
+                        - generic [ref=f34e1025]: "},"
+                        - generic [ref=f34e1026]: )
+                        - generic [ref=f34e1027]: print(response['data'][0]['url'])
+                  - heading "Navigate to header Parameters" [level=3] [ref=f34e1028]:
+                    - link "Navigate to header" [ref=f34e1029] [cursor=pointer]:
+                      - /url: "#parameters-3"
+                    - generic [ref=f34e1034] [cursor=pointer]: Parameters
+                  - generic [ref=f34e1035]:
+                    - text: The request can be sent either as
+                    - code [ref=f34e1036]: multipart/form-data
+                    - text: (uploading the
+                    - code [ref=f34e1037]: image
+                    - text: and
+                    - code [ref=f34e1038]: mask
+                    - text: files) or as
+                    - code [ref=f34e1039]: application/json
+                    - text: (passing
+                    - code [ref=f34e1040]: image_url
+                    - text: and
+                    - code [ref=f34e1041]: mask_url
+                    - text: instead). The image must be in PNG, JPG, WEBP, or SVG format and the mask in PNG, JPG, or WEBP. The image must be no more than 10 MB in size, have resolution no more than 16 MP, max dimension no more than 4096 pixels and min dimension no less than 256 pixels. The output format (raster or vector) is determined by the selected model.
+                  - region "Scrollable table" [ref=f34e1042]:
+                    - table [ref=f34e1044]:
+                      - rowgroup [ref=f34e1045]:
+                        - row [ref=f34e1046]:
+                          - columnheader "Parameter" [ref=f34e1047]
+                          - columnheader "Type" [ref=f34e1048]
+                          - columnheader "Description" [ref=f34e1049]
+                          - columnheader "Compatibility" [ref=f34e1050]
+                      - rowgroup [ref=f34e1051]:
+                        - row [ref=f34e1052]:
+                          - cell "image (required)" [ref=f34e1053]
+                          - cell "file" [ref=f34e1054]
+                          - cell "An image to modify, must be less than 10 MB in size, have resolution less than 16 MP, and max dimension less than 4096 pixels." [ref=f34e1055]
+                          - cell [ref=f34e1056]
+                        - row [ref=f34e1057]:
+                          - cell "mask (required)" [ref=f34e1058]
+                          - cell "file" [ref=f34e1059]
+                          - cell [ref=f34e1060]:
+                            - text: An image encoded in
+                            - strong [ref=f34e1061]: grayscale color mode
+                            - text: ", used to define the specific regions of an image that need modification. The white pixels represent the parts of the image that will be inpainted, while black pixels indicate the parts of the image that will remain unchanged. Should have exactly the same size as the image. Each pixel of the image should be either pure black (value"
+                            - code [ref=f34e1062]: "0"
+                            - text: ) or pure white (value
+                            - code [ref=f34e1063]: "255"
+                            - text: ).
+                          - cell [ref=f34e1064]
+                        - row [ref=f34e1065]:
+                          - cell "prompt (required)" [ref=f34e1066]
+                          - cell "string" [ref=f34e1067]
+                          - cell "A text description of areas to change." [ref=f34e1068]
+                          - cell [ref=f34e1069]:
+                            - text: refer to
+                            - link "Appendix" [ref=f34e1070] [cursor=pointer]:
+                              - /url: /docs/api-reference/appendix#maximum-prompt-length
+                        - row [ref=f34e1071]:
+                          - cell "n" [ref=f34e1072]
+                          - cell "integer or null, default is 1" [ref=f34e1073]
+                          - cell "The number of images to generate, must be between 1 and 6." [ref=f34e1074]
+                          - cell [ref=f34e1075]
+                        - row [ref=f34e1076]:
+                          - cell "model" [ref=f34e1077]
+                          - cell [ref=f34e1078]:
+                            - text: string or null, default is
+                            - code [ref=f34e1079]: recraftv3
+                          - cell "The model to use for image generation." [ref=f34e1080]
+                          - cell [ref=f34e1081]:
+                            - text: "Must be one of:"
+                            - code [ref=f34e1082]: recraftv3
+                            - text: ","
+                            - code [ref=f34e1083]: recraftv3_vector
+                        - row [ref=f34e1084]:
+                          - cell "style" [ref=f34e1085]
+                          - cell "string or null" [ref=f34e1086]
+                          - cell [ref=f34e1087]:
+                            - text: The style of the generated images, refer to
+                            - link "Styles" [ref=f34e1088] [cursor=pointer]:
+                              - /url: /docs/api-reference/styles
+                            - text: .
+                          - cell "V3 styles only" [ref=f34e1089]
+                        - row [ref=f34e1090]:
+                          - cell "style_id" [ref=f34e1091]
+                          - cell "UUID or null" [ref=f34e1092]
+                          - cell [ref=f34e1093]:
+                            - text: Use a style as visual reference, refer to
+                            - link "Styles" [ref=f34e1094] [cursor=pointer]:
+                              - /url: /docs/api-reference/styles
+                            - text: .
+                          - cell "V3 styles only" [ref=f34e1095]
+                        - row [ref=f34e1096]:
+                          - cell "response_format" [ref=f34e1097]
+                          - cell [ref=f34e1098]:
+                            - text: string or null, default is
+                            - code [ref=f34e1099]: url
+                          - cell [ref=f34e1100]:
+                            - text: The format in which the generated images are returned. Must be one of
+                            - code [ref=f34e1101]: url
+                            - text: or
+                            - code [ref=f34e1102]: b64_json
+                            - text: .
+                          - cell [ref=f34e1103]
+                        - row [ref=f34e1104]:
+                          - cell "negative_prompt" [ref=f34e1105]
+                          - cell "string or null" [ref=f34e1106]
+                          - cell "A text description of undesired elements on an image." [ref=f34e1107]
+                          - cell [ref=f34e1108]
+                        - row [ref=f34e1109]:
+                          - cell "text_layout" [ref=f34e1110]
+                          - cell "Array of objects or null" [ref=f34e1111]
+                          - cell [ref=f34e1112]:
+                            - text: Refer to
+                            - link "Text Layout" [ref=f34e1113] [cursor=pointer]:
+                              - /url: "#text-layout"
+                            - text: .
+                          - cell [ref=f34e1114]
+                        - row [ref=f34e1115]:
+                          - cell "controls" [ref=f34e1116]
+                          - cell "object or null" [ref=f34e1117]
+                          - cell [ref=f34e1118]:
+                            - text: A set of custom parameters to tweak generation process, refer to
+                            - link "Controls" [ref=f34e1119] [cursor=pointer]:
+                              - /url: "#controls"
+                            - text: .
+                          - cell [ref=f34e1120]
+                  - heading "Navigate to header Image outpainting" [level=2] [ref=f34e1121]:
+                    - link "Navigate to header" [ref=f34e1122] [cursor=pointer]:
+                      - /url: "#image-outpainting"
+                    - generic [ref=f34e1127] [cursor=pointer]: Image outpainting
+                  - generic [ref=f34e1128]: Outpainting extends an image beyond its original boundaries by generating new content around it. This is useful for changing the aspect ratio, adding scenery, or zooming out to reveal more of the scene while keeping the original image intact.
+                  - generic [ref=f34e1129]:
+                    - text: The area to be generated can be specified either by per-side pixel margins via
+                    - code [ref=f34e1130]: expand_left
+                    - text: ","
+                    - code [ref=f34e1131]: expand_right
+                    - text: ","
+                    - code [ref=f34e1132]: expand_top
+                    - text: ","
+                    - code [ref=f34e1133]: expand_bottom
+                    - text: (which extend the image by the given amount on each side), or by a target
+                    - code [ref=f34e1134]: size
+                    - text: (which places the source image inside the resulting image of the given dimensions); these two options cannot be used together. After that, it is also possible to specify
+                    - code [ref=f34e1135]: zoom_out_percentage
+                    - text: ", which scales the source image down relative to the resulting image by the given percentage and can be combined with either option or used on its own. At least one of"
+                    - code [ref=f34e1136]: size
+                    - text: ","
+                    - code [ref=f34e1137]: expand_*
+                    - text: ", or"
+                    - code [ref=f34e1138]: zoom_out_percentage
+                    - text: must be specified.
+                  - generic [ref=f34e1139]:
+                    - emphasis [ref=f34e1140]:
+                      - strong [ref=f34e1141]: Note
+                    - text: ": This operation is available with Recraft V3, Recraft V3 Vector models only."
+                  - generic [ref=f34e1142]:
+                    - generic [ref=f34e1143]:
+                      - button "Copy the contents from the code block" [ref=f34e1145] [cursor=pointer]
+                      - button "Ask Assistant" [ref=f34e1150] [cursor=pointer]
+                    - code [ref=f34e1157]:
+                      - generic [ref=f34e1158]: POST https://external.api.recraft.ai/v1/images/outpaint
+                  - heading "Navigate to header Example" [level=3] [ref=f34e1159]:
+                    - link "Navigate to header" [ref=f34e1160] [cursor=pointer]:
+                      - /url: "#example-5"
+                    - generic [ref=f34e1165] [cursor=pointer]: Example
+                  - generic [ref=f34e1166]:
+                    - generic [ref=f34e1167]:
+                      - tablist [ref=f34e1169]:
+                        - tab "Multipart" [selected] [ref=f34e1170] [cursor=pointer]
+                        - tab "JSON" [ref=f34e1173] [cursor=pointer]
+                      - generic [ref=f34e1175]:
+                        - button "Copy the contents from the code block" [ref=f34e1177] [cursor=pointer]
+                        - button "Ask Assistant" [ref=f34e1182] [cursor=pointer]
+                    - tabpanel "Multipart" [ref=f34e1187]:
+                      - code [ref=f34e1191]:
+                        - generic [ref=f34e1192]: response = client.post(
+                        - generic [ref=f34e1193]: path='/images/outpaint',
+                        - generic [ref=f34e1194]: cast_to=object,
+                        - generic [ref=f34e1195]: "options={'headers': {'Content-Type': 'multipart/form-data'}},"
+                        - generic [ref=f34e1196]: "files={"
+                        - generic [ref=f34e1197]: "'image': open('image.png', 'rb'),"
+                        - generic [ref=f34e1198]: "},"
+                        - generic [ref=f34e1199]: "body={"
+                        - generic [ref=f34e1200]: "'prompt': 'a mountain landscape',"
+                        - generic [ref=f34e1201]: "'size': '16:9',"
+                        - generic [ref=f34e1202]: "'zoom_out_percentage': 25.0,"
+                        - generic [ref=f34e1203]: "},"
+                        - generic [ref=f34e1204]: )
+                        - generic [ref=f34e1205]: print(response['data'][0]['url'])
+                  - heading "Navigate to header Parameters" [level=3] [ref=f34e1206]:
+                    - link "Navigate to header" [ref=f34e1207] [cursor=pointer]:
+                      - /url: "#parameters-4"
+                    - generic [ref=f34e1212] [cursor=pointer]: Parameters
+                  - generic [ref=f34e1213]:
+                    - text: The request can be sent either as
+                    - code [ref=f34e1214]: multipart/form-data
+                    - text: (uploading the
+                    - code [ref=f34e1215]: image
+                    - text: file) or as
+                    - code [ref=f34e1216]: application/json
+                    - text: (passing
+                    - code [ref=f34e1217]: image_url
+                    - text: — a URL or data URL — instead). The input image must be in PNG, JPG, WEBP, or SVG format. The image must be no more than 10 MB in size, have resolution no more than 16 MP, max dimension no more than 4096 pixels and min dimension no less than 256 pixels. The resulting image dimensions (after applying
+                    - code [ref=f34e1218]: expand_*
+                    - text: ) must not exceed 4096 pixels on either side. The output format (raster or vector) is determined by the selected model.
+                  - region "Scrollable table" [ref=f34e1219]:
+                    - table [ref=f34e1221]:
+                      - rowgroup [ref=f34e1222]:
+                        - row [ref=f34e1223]:
+                          - columnheader "Parameter" [ref=f34e1224]
+                          - columnheader "Type" [ref=f34e1225]
+                          - columnheader "Description" [ref=f34e1226]
+                          - columnheader "Compatibility" [ref=f34e1227]
+                      - rowgroup [ref=f34e1228]:
+                        - row [ref=f34e1229]:
+                          - cell "image (required)" [ref=f34e1230]
+                          - cell "file" [ref=f34e1231]
+                          - cell "An image to extend, must be less than 10 MB in size, have resolution less than 16 MP, and max dimension less than 4096 pixels." [ref=f34e1232]
+                          - cell [ref=f34e1233]
+                        - row [ref=f34e1234]:
+                          - cell "prompt (required)" [ref=f34e1235]
+                          - cell "string" [ref=f34e1236]
+                          - cell "A text description of the content to generate in the extended area." [ref=f34e1237]
+                          - cell [ref=f34e1238]:
+                            - text: refer to
+                            - link "Appendix" [ref=f34e1239] [cursor=pointer]:
+                              - /url: /docs/api-reference/appendix#maximum-prompt-length
+                        - row [ref=f34e1240]:
+                          - cell "expand_left" [ref=f34e1241]
+                          - cell "integer or null" [ref=f34e1242]
+                          - cell [ref=f34e1243]:
+                            - text: Number of pixels to add to the left side of the image, must be in range
+                            - code [ref=f34e1244]: "[0, 4096]"
+                            - text: . Cannot be combined with
+                            - code [ref=f34e1245]: size
+                            - text: .
+                          - cell [ref=f34e1246]
+                        - row [ref=f34e1247]:
+                          - cell "expand_right" [ref=f34e1248]
+                          - cell "integer or null" [ref=f34e1249]
+                          - cell [ref=f34e1250]:
+                            - text: Number of pixels to add to the right side of the image, must be in range
+                            - code [ref=f34e1251]: "[0, 4096]"
+                            - text: . Cannot be combined with
+                            - code [ref=f34e1252]: size
+                            - text: .
+                          - cell [ref=f34e1253]
+                        - row [ref=f34e1254]:
+                          - cell "expand_top" [ref=f34e1255]
+                          - cell "integer or null" [ref=f34e1256]
+                          - cell [ref=f34e1257]:
+                            - text: Number of pixels to add to the top side of the image, must be in range
+                            - code [ref=f34e1258]: "[0, 4096]"
+                            - text: . Cannot be combined with
+                            - code [ref=f34e1259]: size
+                            - text: .
+                          - cell [ref=f34e1260]
+                        - row [ref=f34e1261]:
+                          - cell "expand_bottom" [ref=f34e1262]
+                          - cell "integer or null" [ref=f34e1263]
+                          - cell [ref=f34e1264]:
+                            - text: Number of pixels to add to the bottom side of the image, must be in range
+                            - code [ref=f34e1265]: "[0, 4096]"
+                            - text: . Cannot be combined with
+                            - code [ref=f34e1266]: size
+                            - text: .
+                          - cell [ref=f34e1267]
+                        - row [ref=f34e1268]:
+                          - cell "size" [ref=f34e1269]
+                          - cell "string or null" [ref=f34e1270]
+                          - cell [ref=f34e1271]:
+                            - text: The size of the resulting outpainted image in
+                            - code [ref=f34e1272]: WxH
+                            - text: or
+                            - code [ref=f34e1273]: w:h
+                            - text: format. The source image is placed inside the resulting image. Cannot be combined with
+                            - code [ref=f34e1274]: expand_*
+                            - text: .
+                          - cell [ref=f34e1275]:
+                            - text: Depends on model, supported values are published in
+                            - link "Appendix" [ref=f34e1276] [cursor=pointer]:
+                              - /url: /docs/api-reference/appendix#list-of-supported-image-sizes
+                        - row [ref=f34e1277]:
+                          - cell "zoom_out_percentage" [ref=f34e1278]
+                          - cell [ref=f34e1279]:
+                            - text: float or null, default is
+                            - code [ref=f34e1280]: "0"
+                          - cell [ref=f34e1281]:
+                            - text: Percentage by which the source image is scaled down before outpainting, must be in range
+                            - code [ref=f34e1282]: "[0, 100)"
+                            - text: . Higher values produce more surrounding context. Can be used on its own or combined with
+                            - code [ref=f34e1283]: size
+                            - text: or
+                            - code [ref=f34e1284]: expand_*
+                            - text: .
+                          - cell [ref=f34e1285]
+                        - row [ref=f34e1286]:
+                          - cell "n" [ref=f34e1287]
+                          - cell "integer or null, default is 1" [ref=f34e1288]
+                          - cell "The number of images to generate, must be between 1 and 6." [ref=f34e1289]
+                          - cell [ref=f34e1290]
+                        - row [ref=f34e1291]:
+                          - cell "model" [ref=f34e1292]
+                          - cell [ref=f34e1293]:
+                            - text: string or null, default is
+                            - code [ref=f34e1294]: recraftv3
+                          - cell "The model to use for image generation." [ref=f34e1295]
+                          - cell [ref=f34e1296]:
+                            - text: "Must be one of:"
+                            - code [ref=f34e1297]: recraftv3
+                            - text: ","
+                            - code [ref=f34e1298]: recraftv3_vector
+                        - row [ref=f34e1299]:
+                          - cell "style" [ref=f34e1300]
+                          - cell "string or null" [ref=f34e1301]
+                          - cell [ref=f34e1302]:
+                            - text: The style of the content generated in the extended area, refer to
+                            - link "Styles" [ref=f34e1303] [cursor=pointer]:
+                              - /url: /docs/api-reference/styles
+                            - text: .
+                          - cell "V3 styles only" [ref=f34e1304]
+                        - row [ref=f34e1305]:
+                          - cell "style_id" [ref=f34e1306]
+                          - cell "UUID or null" [ref=f34e1307]
+                          - cell [ref=f34e1308]:
+                            - text: Use a style as visual reference for the content generated in the extended area, refer to
+                            - link "Styles" [ref=f34e1309] [cursor=pointer]:
+                              - /url: /docs/api-reference/styles
+                            - text: .
+                          - cell "V3 styles only" [ref=f34e1310]
+                        - row [ref=f34e1311]:
+                          - cell "response_format" [ref=f34e1312]
+                          - cell [ref=f34e1313]:
+                            - text: string or null, default is
+                            - code [ref=f34e1314]: url
+                          - cell [ref=f34e1315]:
+                            - text: The format in which the generated images are returned. Must be one of
+                            - code [ref=f34e1316]: url
+                            - text: or
+                            - code [ref=f34e1317]: b64_json
+                            - text: .
+                          - cell [ref=f34e1318]
+                        - row [ref=f34e1319]:
+                          - cell "negative_prompt" [ref=f34e1320]
+                          - cell "string or null" [ref=f34e1321]
+                          - cell "A text description of undesired elements on an image." [ref=f34e1322]
+                          - cell [ref=f34e1323]
+                        - row [ref=f34e1324]:
+                          - cell "text_layout" [ref=f34e1325]
+                          - cell "Array of objects or null" [ref=f34e1326]
+                          - cell [ref=f34e1327]:
+                            - text: Refer to
+                            - link "Text Layout" [ref=f34e1328] [cursor=pointer]:
+                              - /url: "#text-layout"
+                            - text: .
+                          - cell [ref=f34e1329]
+                        - row [ref=f34e1330]:
+                          - cell "controls" [ref=f34e1331]
+                          - cell "object or null" [ref=f34e1332]
+                          - cell [ref=f34e1333]:
+                            - text: A set of custom parameters to tweak generation process, refer to
+                            - link "Controls" [ref=f34e1334] [cursor=pointer]:
+                              - /url: "#controls"
+                            - text: .
+                          - cell [ref=f34e1335]
+                  - heading "Navigate to header Replace background" [level=2] [ref=f34e1336]:
+                    - link "Navigate to header" [ref=f34e1337] [cursor=pointer]:
+                      - /url: "#replace-background"
+                    - generic [ref=f34e1342] [cursor=pointer]: Replace background
+                  - generic [ref=f34e1343]: Replace Background operation detects background of an image and modifies it according to given prompt.
+                  - generic [ref=f34e1344]:
+                    - emphasis [ref=f34e1345]:
+                      - strong [ref=f34e1346]: Note
+                    - text: ": This operation is available with Recraft V3, Recraft V3 Vector models only."
+                  - generic [ref=f34e1347]:
+                    - generic [ref=f34e1348]:
+                      - button "Copy the contents from the code block" [ref=f34e1350] [cursor=pointer]
+                      - button "Ask Assistant" [ref=f34e1355] [cursor=pointer]
+                    - code [ref=f34e1362]:
+                      - generic [ref=f34e1363]: POST https://external.api.recraft.ai/v1/images/replaceBackground
+                  - heading "Navigate to header Example" [level=3] [ref=f34e1364]:
+                    - link "Navigate to header" [ref=f34e1365] [cursor=pointer]:
+                      - /url: "#example-6"
+                    - generic [ref=f34e1370] [cursor=pointer]: Example
+                  - generic [ref=f34e1371]:
+                    - generic [ref=f34e1372]:
+                      - tablist [ref=f34e1374]:
+                        - tab "Multipart" [selected] [ref=f34e1375] [cursor=pointer]
+                        - tab "JSON" [ref=f34e1378] [cursor=pointer]
+                      - generic [ref=f34e1380]:
+                        - button "Copy the contents from the code block" [ref=f34e1382] [cursor=pointer]
+                        - button "Ask Assistant" [ref=f34e1387] [cursor=pointer]
+                    - tabpanel "Multipart" [ref=f34e1392]:
+                      - code [ref=f34e1396]:
+                        - generic [ref=f34e1397]: response = client.post(
+                        - generic [ref=f34e1398]: path='/images/replaceBackground',
+                        - generic [ref=f34e1399]: cast_to=object,
+                        - generic [ref=f34e1400]: "options={'headers': {'Content-Type': 'multipart/form-data'}},"
+                        - generic [ref=f34e1401]: "files={"
+                        - generic [ref=f34e1402]: "'image': open('image.png', 'rb'),"
+                        - generic [ref=f34e1403]: "},"
+                        - generic [ref=f34e1404]: "body={"
+                        - generic [ref=f34e1405]: "'prompt': 'winter',"
+                        - generic [ref=f34e1406]: "},"
+                        - generic [ref=f34e1407]: )
+                        - generic [ref=f34e1408]: print(response['data'][0]['url'])
+                  - heading "Navigate to header Parameters" [level=3] [ref=f34e1409]:
+                    - link "Navigate to header" [ref=f34e1410] [cursor=pointer]:
+                      - /url: "#parameters-5"
+                    - generic [ref=f34e1415] [cursor=pointer]: Parameters
+                  - generic [ref=f34e1416]:
+                    - text: The request can be sent either as
+                    - code [ref=f34e1417]: multipart/form-data
+                    - text: (uploading the
+                    - code [ref=f34e1418]: image
+                    - text: file) or as
+                    - code [ref=f34e1419]: application/json
+                    - text: (passing
+                    - code [ref=f34e1420]: image_url
+                    - text: — a URL or data URL — instead). The input image must be in PNG, JPG, WEBP, or SVG format. The image must be no more than 10 MB in size, have resolution no more than 16 MP, max dimension no more than 4096 pixels and min dimension no less than 256 pixels. The output format (raster or vector) is determined by the selected model.
+                  - region "Scrollable table" [ref=f34e1421]:
+                    - table [ref=f34e1423]:
+                      - rowgroup [ref=f34e1424]:
+                        - row [ref=f34e1425]:
+                          - columnheader "Parameter" [ref=f34e1426]
+                          - columnheader "Type" [ref=f34e1427]
+                          - columnheader "Description" [ref=f34e1428]
+                          - columnheader "Compatibility" [ref=f34e1429]
+                      - rowgroup [ref=f34e1430]:
+                        - row [ref=f34e1431]:
+                          - cell "image (required)" [ref=f34e1432]
+                          - cell "file" [ref=f34e1433]
+                          - cell [ref=f34e1434]:
+                            - strong [ref=f34e1435]: (multipart)
+                            - text: An image to modify, must be less than 10 MB in size, have resolution less than 16 MP, and max dimension less than 4096 pixels.
+                          - cell [ref=f34e1436]
+                        - row [ref=f34e1437]:
+                          - cell "image_url (required)" [ref=f34e1438]
+                          - cell "string" [ref=f34e1439]
+                          - cell [ref=f34e1440]:
+                            - strong [ref=f34e1441]: (JSON)
+                            - text: URL or data URL of the input image, the JSON-body counterpart of
+                            - code [ref=f34e1442]: image
+                            - text: .
+                          - cell [ref=f34e1443]
+                        - row [ref=f34e1444]:
+                          - cell "prompt (required)" [ref=f34e1445]
+                          - cell "string" [ref=f34e1446]
+                          - cell "A text description of areas to change." [ref=f34e1447]
+                          - cell [ref=f34e1448]:
+                            - text: refer to
+                            - link "Appendix" [ref=f34e1449] [cursor=pointer]:
+                              - /url: /docs/api-reference/appendix#maximum-prompt-length
+                        - row [ref=f34e1450]:
+                          - cell "n" [ref=f34e1451]
+                          - cell "integer or null, default is 1" [ref=f34e1452]
+                          - cell "The number of images to generate, must be between 1 and 6." [ref=f34e1453]
+                          - cell [ref=f34e1454]
+                        - row [ref=f34e1455]:
+                          - cell "model" [ref=f34e1456]
+                          - cell [ref=f34e1457]:
+                            - text: string or null, default is
+                            - code [ref=f34e1458]: recraftv3
+                          - cell "The model to use for image generation." [ref=f34e1459]
+                          - cell [ref=f34e1460]:
+                            - text: "Must be one of:"
+                            - code [ref=f34e1461]: recraftv3
+                            - text: ","
+                            - code [ref=f34e1462]: recraftv3_vector
+                        - row [ref=f34e1463]:
+                          - cell "style" [ref=f34e1464]
+                          - cell "string or null" [ref=f34e1465]
+                          - cell [ref=f34e1466]:
+                            - text: The style of the generated images, refer to
+                            - link "Styles" [ref=f34e1467] [cursor=pointer]:
+                              - /url: /docs/api-reference/styles
+                            - text: .
+                          - cell "V3 styles only" [ref=f34e1468]
+                        - row [ref=f34e1469]:
+                          - cell "style_id" [ref=f34e1470]
+                          - cell "UUID or null" [ref=f34e1471]
+                          - cell [ref=f34e1472]:
+                            - text: Use a style as visual reference, refer to
+                            - link "Styles" [ref=f34e1473] [cursor=pointer]:
+                              - /url: /docs/api-reference/styles
+                            - text: .
+                          - cell "V3 styles only" [ref=f34e1474]
+                        - row [ref=f34e1475]:
+                          - cell "response_format" [ref=f34e1476]
+                          - cell [ref=f34e1477]:
+                            - text: string or null, default is
+                            - code [ref=f34e1478]: url
+                          - cell [ref=f34e1479]:
+                            - text: The format in which the generated images are returned. Must be one of
+                            - code [ref=f34e1480]: url
+                            - text: or
+                            - code [ref=f34e1481]: b64_json
+                            - text: .
+                          - cell [ref=f34e1482]
+                        - row [ref=f34e1483]:
+                          - cell "negative_prompt" [ref=f34e1484]
+                          - cell "string or null" [ref=f34e1485]
+                          - cell "A text description of undesired elements on an image." [ref=f34e1486]
+                          - cell [ref=f34e1487]
+                        - row [ref=f34e1488]:
+                          - cell "text_layout" [ref=f34e1489]
+                          - cell "Array of objects or null" [ref=f34e1490]
+                          - cell [ref=f34e1491]:
+                            - text: Refer to
+                            - link "Text Layout" [ref=f34e1492] [cursor=pointer]:
+                              - /url: "#text-layout"
+                            - text: .
+                          - cell [ref=f34e1493]
+                        - row [ref=f34e1494]:
+                          - cell "controls" [ref=f34e1495]
+                          - cell "object or null" [ref=f34e1496]
+                          - cell [ref=f34e1497]:
+                            - text: A set of custom parameters to tweak generation process, refer to
+                            - link "Controls" [ref=f34e1498] [cursor=pointer]:
+                              - /url: "#controls"
+                            - text: .
+                          - cell [ref=f34e1499]
+                  - heading "Navigate to header Generate background" [level=2] [ref=f34e1500]:
+                    - link "Navigate to header" [ref=f34e1501] [cursor=pointer]:
+                      - /url: "#generate-background"
+                    - generic [ref=f34e1506] [cursor=pointer]: Generate background
+                  - generic [ref=f34e1507]: Generate Background operation generates a background for a given image, based on a prompt and a mask that specifies the regions to fill.
+                  - generic [ref=f34e1508]:
+                    - emphasis [ref=f34e1509]:
+                      - strong [ref=f34e1510]: Note
+                    - text: ": This operation is available with Recraft V3, Recraft V3 Vector models only."
+                  - generic [ref=f34e1511]:
+                    - generic [ref=f34e1512]:
+                      - button "Copy the contents from the code block" [ref=f34e1514] [cursor=pointer]
+                      - button "Ask Assistant" [ref=f34e1519] [cursor=pointer]
+                    - code [ref=f34e1526]:
+                      - generic [ref=f34e1527]: POST https://external.api.recraft.ai/v1/images/generateBackground
+                  - heading "Navigate to header Example" [level=3] [ref=f34e1528]:
+                    - link "Navigate to header" [ref=f34e1529] [cursor=pointer]:
+                      - /url: "#example-7"
+                    - generic [ref=f34e1534] [cursor=pointer]: Example
+                  - generic [ref=f34e1535]:
+                    - generic [ref=f34e1536]:
+                      - tablist [ref=f34e1538]:
+                        - tab "Multipart" [selected] [ref=f34e1539] [cursor=pointer]
+                        - tab "JSON" [ref=f34e1542] [cursor=pointer]
+                      - generic [ref=f34e1544]:
+                        - button "Copy the contents from the code block" [ref=f34e1546] [cursor=pointer]
+                        - button "Ask Assistant" [ref=f34e1551] [cursor=pointer]
+                    - tabpanel "Multipart" [ref=f34e1556]:
+                      - code [ref=f34e1560]:
+                        - generic [ref=f34e1561]: response = client.post(
+                        - generic [ref=f34e1562]: path='/images/generateBackground',
+                        - generic [ref=f34e1563]: cast_to=object,
+                        - generic [ref=f34e1564]: "options={'headers': {'Content-Type': 'multipart/form-data'}},"
+                        - generic [ref=f34e1565]: "files={"
+                        - generic [ref=f34e1566]: "'image': open('image.png', 'rb'),"
+                        - generic [ref=f34e1567]: "'mask': open('mask.png', 'rb'),"
+                        - generic [ref=f34e1568]: "},"
+                        - generic [ref=f34e1569]: "body={"
+                        - generic [ref=f34e1570]: "'prompt': 'winter',"
+                        - generic [ref=f34e1571]: "},"
+                        - generic [ref=f34e1572]: )
+                        - generic [ref=f34e1573]: print(response['data'][0]['url'])
+                  - heading "Navigate to header Parameters" [level=3] [ref=f34e1574]:
+                    - link "Navigate to header" [ref=f34e1575] [cursor=pointer]:
+                      - /url: "#parameters-6"
+                    - generic [ref=f34e1580] [cursor=pointer]: Parameters
+                  - generic [ref=f34e1581]:
+                    - text: The request can be sent either as
+                    - code [ref=f34e1582]: multipart/form-data
+                    - text: (uploading the
+                    - code [ref=f34e1583]: image
+                    - text: and
+                    - code [ref=f34e1584]: mask
+                    - text: files) or as
+                    - code [ref=f34e1585]: application/json
+                    - text: (passing
+                    - code [ref=f34e1586]: image_url
+                    - text: and
+                    - code [ref=f34e1587]: mask_url
+                    - text: instead). The image must be in PNG, JPG, WEBP, or SVG format and the mask in PNG, JPG, or WEBP. The image must be no more than 10 MB in size, have resolution no more than 16 MP, max dimension no more than 4096 pixels and min dimension no less than 256 pixels. The output format (raster or vector) is determined by the selected model.
+                  - region "Scrollable table" [ref=f34e1588]:
+                    - table [ref=f34e1590]:
+                      - rowgroup [ref=f34e1591]:
+                        - row [ref=f34e1592]:
+                          - columnheader "Parameter" [ref=f34e1593]
+                          - columnheader "Type" [ref=f34e1594]
+                          - columnheader "Description" [ref=f34e1595]
+                          - columnheader "Compatibility" [ref=f34e1596]
+                      - rowgroup [ref=f34e1597]:
+                        - row [ref=f34e1598]:
+                          - cell "image (required)" [ref=f34e1599]
+                          - cell "file" [ref=f34e1600]
+                          - cell "An image to modify, must be less than 10 MB in size, have resolution less than 16 MP, and max dimension less than 4096 pixels." [ref=f34e1601]
+                          - cell [ref=f34e1602]
+                        - row [ref=f34e1603]:
+                          - cell "mask (required)" [ref=f34e1604]
+                          - cell "file" [ref=f34e1605]
+                          - cell [ref=f34e1606]:
+                            - text: An image encoded in
+                            - strong [ref=f34e1607]: grayscale color mode
+                            - text: ", used to define the specific regions of an image that need modification. The white pixels represent the parts of the image that will be inpainted, while black pixels indicate the parts of the image that will remain unchanged. Should have exactly the same size as the image. Each pixel of the image should be either pure black (value"
+                            - code [ref=f34e1608]: "0"
+                            - text: ) or pure white (value
+                            - code [ref=f34e1609]: "255"
+                            - text: ).
+                          - cell [ref=f34e1610]
+                        - row [ref=f34e1611]:
+                          - cell "prompt (required)" [ref=f34e1612]
+                          - cell "string" [ref=f34e1613]
+                          - cell "A text description of areas to change." [ref=f34e1614]
+                          - cell [ref=f34e1615]:
+                            - text: refer to
+                            - link "Appendix" [ref=f34e1616] [cursor=pointer]:
+                              - /url: /docs/api-reference/appendix#maximum-prompt-length
+                        - row [ref=f34e1617]:
+                          - cell "n" [ref=f34e1618]
+                          - cell "integer or null, default is 1" [ref=f34e1619]
+                          - cell "The number of images to generate, must be between 1 and 6." [ref=f34e1620]
+                          - cell [ref=f34e1621]
+                        - row [ref=f34e1622]:
+                          - cell "model" [ref=f34e1623]
+                          - cell [ref=f34e1624]:
+                            - text: string or null, default is
+                            - code [ref=f34e1625]: recraftv3
+                          - cell "The model to use for image generation." [ref=f34e1626]
+                          - cell [ref=f34e1627]:
+                            - text: "Must be one of:"
+                            - code [ref=f34e1628]: recraftv3
+                            - text: ","
+                            - code [ref=f34e1629]: recraftv3_vector
+                        - row [ref=f34e1630]:
+                          - cell "style" [ref=f34e1631]
+                          - cell "string or null" [ref=f34e1632]
+                          - cell [ref=f34e1633]:
+                            - text: The style of the generated images, refer to
+                            - link "Styles" [ref=f34e1634] [cursor=pointer]:
+                              - /url: /docs/api-reference/styles
+                            - text: .
+                          - cell "V3 styles only" [ref=f34e1635]
+                        - row [ref=f34e1636]:
+                          - cell "style_id" [ref=f34e1637]
+                          - cell "UUID or null" [ref=f34e1638]
+                          - cell [ref=f34e1639]:
+                            - text: Use a style as visual reference, refer to
+                            - link "Styles" [ref=f34e1640] [cursor=pointer]:
+                              - /url: /docs/api-reference/styles
+                            - text: .
+                          - cell "V3 styles only" [ref=f34e1641]
+                        - row [ref=f34e1642]:
+                          - cell "response_format" [ref=f34e1643]
+                          - cell [ref=f34e1644]:
+                            - text: string or null, default is
+                            - code [ref=f34e1645]: url
+                          - cell [ref=f34e1646]:
+                            - text: The format in which the generated images are returned. Must be one of
+                            - code [ref=f34e1647]: url
+                            - text: or
+                            - code [ref=f34e1648]: b64_json
+                            - text: .
+                          - cell [ref=f34e1649]
+                        - row [ref=f34e1650]:
+                          - cell "negative_prompt" [ref=f34e1651]
+                          - cell "string or null" [ref=f34e1652]
+                          - cell "A text description of undesired elements on an image." [ref=f34e1653]
+                          - cell [ref=f34e1654]
+                        - row [ref=f34e1655]:
+                          - cell "text_layout" [ref=f34e1656]
+                          - cell "Array of objects or null" [ref=f34e1657]
+                          - cell [ref=f34e1658]:
+                            - text: Refer to
+                            - link "Text Layout" [ref=f34e1659] [cursor=pointer]:
+                              - /url: "#text-layout"
+                            - text: .
+                          - cell [ref=f34e1660]
+                        - row [ref=f34e1661]:
+                          - cell "controls" [ref=f34e1662]
+                          - cell "object or null" [ref=f34e1663]
+                          - cell [ref=f34e1664]:
+                            - text: A set of custom parameters to tweak generation process, refer to
+                            - link "Controls" [ref=f34e1665] [cursor=pointer]:
+                              - /url: "#controls"
+                            - text: .
+                          - cell [ref=f34e1666]
+                  - heading "Navigate to header Vectorize image" [level=2] [ref=f34e1667]:
+                    - link "Navigate to header" [ref=f34e1668] [cursor=pointer]:
+                      - /url: "#vectorize-image"
+                    - generic [ref=f34e1673] [cursor=pointer]: Vectorize image
+                  - generic [ref=f34e1674]: Converts a given raster image to SVG format.
+                  - generic [ref=f34e1675]:
+                    - generic [ref=f34e1676]:
+                      - button "Copy the contents from the code block" [ref=f34e1678] [cursor=pointer]
+                      - button "Ask Assistant" [ref=f34e1683] [cursor=pointer]
+                    - code [ref=f34e1690]:
+                      - generic [ref=f34e1691]: POST https://external.api.recraft.ai/v1/images/vectorize
+                  - heading "Navigate to header Example" [level=3] [ref=f34e1692]:
+                    - link "Navigate to header" [ref=f34e1693] [cursor=pointer]:
+                      - /url: "#example-8"
+                    - generic [ref=f34e1698] [cursor=pointer]: Example
+                  - generic [ref=f34e1699]:
+                    - generic [ref=f34e1700]:
+                      - tablist [ref=f34e1702]:
+                        - tab "Multipart" [selected] [ref=f34e1703] [cursor=pointer]
+                        - tab "JSON" [ref=f34e1706] [cursor=pointer]
+                      - generic [ref=f34e1708]:
+                        - button "Copy the contents from the code block" [ref=f34e1710] [cursor=pointer]
+                        - button "Ask Assistant" [ref=f34e1715] [cursor=pointer]
+                    - tabpanel "Multipart" [ref=f34e1720]:
+                      - code [ref=f34e1724]:
+                        - generic [ref=f34e1725]: response = client.post(
+                        - generic [ref=f34e1726]: path='/images/vectorize',
+                        - generic [ref=f34e1727]: cast_to=object,
+                        - generic [ref=f34e1728]: "options={'headers': {'Content-Type': 'multipart/form-data'}},"
+                        - generic [ref=f34e1729]: "files={'file': open('image.png', 'rb')},"
+                        - generic [ref=f34e1730]: )
+                        - generic [ref=f34e1731]: print(response['image']['url'])
+                  - heading [level=3] [ref=f34e1732]:
+                    - link "Navigate to header" [ref=f34e1733] [cursor=pointer]:
+                      - /url: "#parameters-7"
+                    - strong [ref=f34e1739] [cursor=pointer]: Parameters
+                  - generic [ref=f34e1740]:
+                    - text: The request can be sent either as
+                    - code [ref=f34e1741]: multipart/form-data
+                    - text: (uploading the image as the
+                    - code [ref=f34e1742]: file
+                    - text: field) or as
+                    - code [ref=f34e1743]: application/json
+                    - text: (passing
+                    - code [ref=f34e1744]: image_url
+                    - text: — a URL or data URL — instead). The input image must be in PNG, JPG, or WEBP format. The image must be no more than 10 MB in size, have resolution no more than 16 MP, max dimension no more than 4096 pixels and min dimension no less than 256 pixels.
+                  - region "Scrollable table" [ref=f34e1745]:
+                    - table [ref=f34e1747]:
+                      - rowgroup [ref=f34e1748]:
+                        - row [ref=f34e1749]:
+                          - columnheader "Parameter" [ref=f34e1750]
+                          - columnheader "Type" [ref=f34e1751]
+                          - columnheader "Description" [ref=f34e1752]
+                      - rowgroup [ref=f34e1753]:
+                        - row [ref=f34e1754]:
+                          - cell "response_format" [ref=f34e1755]
+                          - cell [ref=f34e1756]:
+                            - text: string or null, default is
+                            - code [ref=f34e1757]: url
+                          - cell [ref=f34e1758]:
+                            - text: The format in which the generated images are returned. Must be one of
+                            - code [ref=f34e1759]: url
+                            - text: or
+                            - code [ref=f34e1760]: b64_json
+                            - text: .
+                  - heading "Navigate to header Remove background" [level=2] [ref=f34e1761]:
+                    - link "Navigate to header" [ref=f34e1762] [cursor=pointer]:
+                      - /url: "#remove-background"
+                    - generic [ref=f34e1767] [cursor=pointer]: Remove background
+                  - generic [ref=f34e1768]: Removes background of a given image. Accepts raster (PNG, JPG, WEBP) or SVG input. When the input is an SVG, the result is returned as an SVG (vector output); raster input returns a raster image.
+                  - generic [ref=f34e1769]:
+                    - generic [ref=f34e1770]:
+                      - button "Copy the contents from the code block" [ref=f34e1772] [cursor=pointer]
+                      - button "Ask Assistant" [ref=f34e1777] [cursor=pointer]
+                    - code [ref=f34e1784]:
+                      - generic [ref=f34e1785]: POST https://external.api.recraft.ai/v1/images/removeBackground
+                  - heading "Navigate to header Example" [level=3] [ref=f34e1786]:
+                    - link "Navigate to header" [ref=f34e1787] [cursor=pointer]:
+                      - /url: "#example-9"
+                    - generic [ref=f34e1792] [cursor=pointer]: Example
+                  - generic [ref=f34e1793]:
+                    - generic [ref=f34e1794]:
+                      - tablist [ref=f34e1796]:
+                        - tab "Multipart" [selected] [ref=f34e1797] [cursor=pointer]
+                        - tab "JSON" [ref=f34e1800] [cursor=pointer]
+                      - generic [ref=f34e1802]:
+                        - button "Copy the contents from the code block" [ref=f34e1804] [cursor=pointer]
+                        - button "Ask Assistant" [ref=f34e1809] [cursor=pointer]
+                    - tabpanel "Multipart" [ref=f34e1814]:
+                      - code [ref=f34e1818]:
+                        - generic [ref=f34e1819]: response = client.post(
+                        - generic [ref=f34e1820]: path='/images/removeBackground',
+                        - generic [ref=f34e1821]: cast_to=object,
+                        - generic [ref=f34e1822]: "options={'headers': {'Content-Type': 'multipart/form-data'}},"
+                        - generic [ref=f34e1823]: "files={'file': open('image.png', 'rb')},"
+                        - generic [ref=f34e1824]: )
+                        - generic [ref=f34e1825]: print(response['image']['url'])
+                  - heading [level=3] [ref=f34e1826]:
+                    - link "Navigate to header" [ref=f34e1827] [cursor=pointer]:
+                      - /url: "#parameters-8"
+                    - strong [ref=f34e1833] [cursor=pointer]: Parameters
+                  - generic [ref=f34e1834]:
+                    - text: The request can be sent either as
+                    - code [ref=f34e1835]: multipart/form-data
+                    - text: (uploading the image as the
+                    - code [ref=f34e1836]: file
+                    - text: field) or as
+                    - code [ref=f34e1837]: application/json
+                    - text: (passing
+                    - code [ref=f34e1838]: image_url
+                    - text: — a URL or data URL — instead). The input image must be in PNG, JPG, WEBP, or SVG format. The image must be no more than 10 MB in size, have resolution no more than 16 MP, max dimension no more than 4096 pixels and min dimension no less than 256 pixels. SVG inputs smaller than the 256 px minimum are scaled up before processing; SVGs exceeding the max dimension/resolution, and unsafe SVGs, are rejected.
+                  - region "Scrollable table" [ref=f34e1839]:
+                    - table [ref=f34e1841]:
+                      - rowgroup [ref=f34e1842]:
+                        - row [ref=f34e1843]:
+                          - columnheader "Parameter" [ref=f34e1844]
+                          - columnheader "Type" [ref=f34e1845]
+                          - columnheader "Description" [ref=f34e1846]
+                      - rowgroup [ref=f34e1847]:
+                        - row [ref=f34e1848]:
+                          - cell "response_format" [ref=f34e1849]
+                          - cell [ref=f34e1850]:
+                            - text: string or null, default is
+                            - code [ref=f34e1851]: url
+                          - cell [ref=f34e1852]:
+                            - text: The format in which the generated images are returned. Must be one of
+                            - code [ref=f34e1853]: url
+                            - text: or
+                            - code [ref=f34e1854]: b64_json
+                            - text: .
+                  - heading "Navigate to header Crisp upscale" [level=2] [ref=f34e1855]:
+                    - link "Navigate to header" [ref=f34e1856] [cursor=pointer]:
+                      - /url: "#crisp-upscale"
+                    - generic [ref=f34e1861] [cursor=pointer]: Crisp upscale
+                  - generic [ref=f34e1862]: Enhances a given raster image using ‘crisp upscale’ tool, increasing image resolution, making the image sharper and cleaner.
+                  - generic [ref=f34e1863]:
+                    - generic [ref=f34e1864]:
+                      - button "Copy the contents from the code block" [ref=f34e1866] [cursor=pointer]
+                      - button "Ask Assistant" [ref=f34e1871] [cursor=pointer]
+                    - code [ref=f34e1878]:
+                      - generic [ref=f34e1879]: POST https://external.api.recraft.ai/v1/images/crispUpscale
+                  - heading "Navigate to header Example" [level=3] [ref=f34e1880]:
+                    - link "Navigate to header" [ref=f34e1881] [cursor=pointer]:
+                      - /url: "#example-10"
+                    - generic [ref=f34e1886] [cursor=pointer]: Example
+                  - generic [ref=f34e1887]:
+                    - generic [ref=f34e1888]:
+                      - tablist [ref=f34e1890]:
+                        - tab "Multipart" [selected] [ref=f34e1891] [cursor=pointer]
+                        - tab "JSON" [ref=f34e1894] [cursor=pointer]
+                      - generic [ref=f34e1896]:
+                        - button "Copy the contents from the code block" [ref=f34e1898] [cursor=pointer]
+                        - button "Ask Assistant" [ref=f34e1903] [cursor=pointer]
+                    - tabpanel "Multipart" [ref=f34e1908]:
+                      - code [ref=f34e1912]:
+                        - generic [ref=f34e1913]: response = client.post(
+                        - generic [ref=f34e1914]: path='/images/crispUpscale',
+                        - generic [ref=f34e1915]: cast_to=object,
+                        - generic [ref=f34e1916]: "options={'headers': {'Content-Type': 'multipart/form-data'}},"
+                        - generic [ref=f34e1917]: "files={'file': open('image.png', 'rb')},"
+                        - generic [ref=f34e1918]: )
+                        - generic [ref=f34e1919]: print(response['image']['url'])
+                  - heading "Navigate to header Request body" [level=3] [ref=f34e1920]:
+                    - link "Navigate to header" [ref=f34e1921] [cursor=pointer]:
+                      - /url: "#request-body-2"
+                    - generic [ref=f34e1926] [cursor=pointer]: Request body
+                  - generic [ref=f34e1927]:
+                    - text: The request can be sent either as
+                    - code [ref=f34e1928]: multipart/form-data
+                    - text: (uploading the image as the
+                    - code [ref=f34e1929]: file
+                    - text: field) or as
+                    - code [ref=f34e1930]: application/json
+                    - text: (passing
+                    - code [ref=f34e1931]: image_url
+                    - text: — a URL or data URL — instead). The input image must be in PNG, JPG, or WEBP format. The image must be no more than 10 MB in size, have resolution no more than 16 MP, max dimension no more than 4096 pixels and min dimension no less than 32 pixels.
+                  - region "Scrollable table" [ref=f34e1932]:
+                    - table [ref=f34e1934]:
+                      - rowgroup [ref=f34e1935]:
+                        - row [ref=f34e1936]:
+                          - columnheader "Parameter" [ref=f34e1937]
+                          - columnheader "Type" [ref=f34e1938]
+                          - columnheader "Description" [ref=f34e1939]
+                      - rowgroup [ref=f34e1940]:
+                        - row [ref=f34e1941]:
+                          - cell "response_format" [ref=f34e1942]
+                          - cell [ref=f34e1943]:
+                            - text: string or null, default is
+                            - code [ref=f34e1944]: url
+                          - cell [ref=f34e1945]:
+                            - text: The format in which the generated images are returned. Must be one of
+                            - code [ref=f34e1946]: url
+                            - text: or
+                            - code [ref=f34e1947]: b64_json
+                            - text: .
+                  - heading "Navigate to header Creative upscale" [level=2] [ref=f34e1948]:
+                    - link "Navigate to header" [ref=f34e1949] [cursor=pointer]:
+                      - /url: "#creative-upscale"
+                    - generic [ref=f34e1954] [cursor=pointer]: Creative upscale
+                  - generic [ref=f34e1955]: Enhances a given raster image using ‘creative upscale’ tool, boosting resolution with a focus on refining small details and faces.
+                  - generic [ref=f34e1956]:
+                    - generic [ref=f34e1957]:
+                      - button "Copy the contents from the code block" [ref=f34e1959] [cursor=pointer]
+                      - button "Ask Assistant" [ref=f34e1964] [cursor=pointer]
+                    - code [ref=f34e1971]:
+                      - generic [ref=f34e1972]: POST https://external.api.recraft.ai/v1/images/creativeUpscale
+                  - heading "Navigate to header Example" [level=3] [ref=f34e1973]:
+                    - link "Navigate to header" [ref=f34e1974] [cursor=pointer]:
+                      - /url: "#example-11"
+                    - generic [ref=f34e1979] [cursor=pointer]: Example
+                  - generic [ref=f34e1980]:
+                    - generic [ref=f34e1981]:
+                      - tablist [ref=f34e1983]:
+                        - tab "Multipart" [selected] [ref=f34e1984] [cursor=pointer]
+                        - tab "JSON" [ref=f34e1987] [cursor=pointer]
+                      - generic [ref=f34e1989]:
+                        - button "Copy the contents from the code block" [ref=f34e1991] [cursor=pointer]
+                        - button "Ask Assistant" [ref=f34e1996] [cursor=pointer]
+                    - tabpanel "Multipart" [ref=f34e2001]:
+                      - code [ref=f34e2005]:
+                        - generic [ref=f34e2006]: response = client.post(
+                        - generic [ref=f34e2007]: path='/images/creativeUpscale',
+                        - generic [ref=f34e2008]: cast_to=object,
+                        - generic [ref=f34e2009]: "options={'headers': {'Content-Type': 'multipart/form-data'}},"
+                        - generic [ref=f34e2010]: "files={'file': open('image.png', 'rb')},"
+                        - generic [ref=f34e2011]: )
+                        - generic [ref=f34e2012]: print(response['image']['url'])
+                  - heading "Navigate to header Request body" [level=3] [ref=f34e2013]:
+                    - link "Navigate to header" [ref=f34e2014] [cursor=pointer]:
+                      - /url: "#request-body-3"
+                    - generic [ref=f34e2019] [cursor=pointer]: Request body
+                  - generic [ref=f34e2020]:
+                    - text: The request can be sent either as
+                    - code [ref=f34e2021]: multipart/form-data
+                    - text: (uploading the image as the
+                    - code [ref=f34e2022]: file
+                    - text: field) or as
+                    - code [ref=f34e2023]: application/json
+                    - text: (passing
+                    - code [ref=f34e2024]: image_url
+                    - text: — a URL or data URL — instead). The input image must be in PNG, JPG, or WEBP format. The image must be no more than 10 MB in size, have resolution no more than 16 MP, max dimension no more than 4096 pixels and min dimension no less than 256 pixels.
+                  - region "Scrollable table" [ref=f34e2025]:
+                    - table [ref=f34e2027]:
+                      - rowgroup [ref=f34e2028]:
+                        - row [ref=f34e2029]:
+                          - columnheader "Parameter" [ref=f34e2030]
+                          - columnheader "Type" [ref=f34e2031]
+                          - columnheader "Description" [ref=f34e2032]
+                      - rowgroup [ref=f34e2033]:
+                        - row [ref=f34e2034]:
+                          - cell "response_format" [ref=f34e2035]
+                          - cell [ref=f34e2036]:
+                            - text: string or null, default is
+                            - code [ref=f34e2037]: url
+                          - cell [ref=f34e2038]:
+                            - text: The format in which the generated images are returned. Must be one of
+                            - code [ref=f34e2039]: url
+                            - text: or
+                            - code [ref=f34e2040]: b64_json
+                            - text: .
+                  - heading "Navigate to header Erase region" [level=2] [ref=f34e2041]:
+                    - link "Navigate to header" [ref=f34e2042] [cursor=pointer]:
+                      - /url: "#erase-region"
+                    - generic [ref=f34e2047] [cursor=pointer]: Erase region
+                  - generic [ref=f34e2048]: Erases a region of a given raster image following a given mask, where white pixels represent the regions to erase, and black pixels indicate the areas to keep intact.
+                  - generic [ref=f34e2049]:
+                    - generic [ref=f34e2050]:
+                      - button "Copy the contents from the code block" [ref=f34e2052] [cursor=pointer]
+                      - button "Ask Assistant" [ref=f34e2057] [cursor=pointer]
+                    - code [ref=f34e2064]:
+                      - generic [ref=f34e2065]: POST https://external.api.recraft.ai/v1/images/eraseRegion
+                  - heading "Navigate to header Example" [level=3] [ref=f34e2066]:
+                    - link "Navigate to header" [ref=f34e2067] [cursor=pointer]:
+                      - /url: "#example-12"
+                    - generic [ref=f34e2072] [cursor=pointer]: Example
+                  - generic [ref=f34e2073]:
+                    - generic [ref=f34e2074]:
+                      - tablist [ref=f34e2076]:
+                        - tab "Multipart" [selected] [ref=f34e2077] [cursor=pointer]
+                        - tab "JSON" [ref=f34e2080] [cursor=pointer]
+                      - generic [ref=f34e2082]:
+                        - button "Copy the contents from the code block" [ref=f34e2084] [cursor=pointer]
+                        - button "Ask Assistant" [ref=f34e2089] [cursor=pointer]
+                    - tabpanel "Multipart" [ref=f34e2094]:
+                      - code [ref=f34e2098]:
+                        - generic [ref=f34e2099]: response = client.post(
+                        - generic [ref=f34e2100]: path='/images/eraseRegion',
+                        - generic [ref=f34e2101]: cast_to=object,
+                        - generic [ref=f34e2102]: "options={'headers': {'Content-Type': 'multipart/form-data'}},"
+                        - generic [ref=f34e2103]: "files={'image': open('image.png', 'rb'), 'mask': open('mask.png', 'rb')},"
+                        - generic [ref=f34e2104]: )
+                        - generic [ref=f34e2105]: print(response['image']['url'])
+                  - heading "Navigate to header Request body" [level=3] [ref=f34e2106]:
+                    - link "Navigate to header" [ref=f34e2107] [cursor=pointer]:
+                      - /url: "#request-body-4"
+                    - generic [ref=f34e2112] [cursor=pointer]: Request body
+                  - generic [ref=f34e2113]:
+                    - text: The request can be sent either as
+                    - code [ref=f34e2114]: multipart/form-data
+                    - text: (uploading the
+                    - code [ref=f34e2115]: image
+                    - text: and
+                    - code [ref=f34e2116]: mask
+                    - text: files) or as
+                    - code [ref=f34e2117]: application/json
+                    - text: (passing
+                    - code [ref=f34e2118]: image_url
+                    - text: and
+                    - code [ref=f34e2119]: mask_url
+                    - text: instead). The image must be in PNG, JPG, WEBP, or SVG format and the mask in PNG, JPG, or WEBP. The images must be no more than 10 MB in size, have resolution no more than 16 MP, max dimension no more than 4096 pixels and min dimension no less than 256 pixels. The mask and image must have the same dimensions. When the input is an SVG, the result is returned as an SVG; a raster input returns a raster image.
+                  - region "Scrollable table" [ref=f34e2120]:
+                    - table [ref=f34e2122]:
+                      - rowgroup [ref=f34e2123]:
+                        - row [ref=f34e2124]:
+                          - columnheader "Parameter" [ref=f34e2125]
+                          - columnheader "Type" [ref=f34e2126]
+                          - columnheader "Description" [ref=f34e2127]
+                      - rowgroup [ref=f34e2128]:
+                        - row [ref=f34e2129]:
+                          - cell "image (required)" [ref=f34e2130]
+                          - cell "file" [ref=f34e2131]
+                          - cell [ref=f34e2132]:
+                            - strong [ref=f34e2133]: (multipart)
+                            - text: An image to modify, must be less than 10 MB in size, have resolution less than 16 MP, and max dimension less than 4096 pixels.
+                        - row [ref=f34e2134]:
+                          - cell "image_url (required)" [ref=f34e2135]
+                          - cell "string" [ref=f34e2136]
+                          - cell [ref=f34e2137]:
+                            - strong [ref=f34e2138]: (JSON)
+                            - text: URL or data URL of the input image, the JSON-body counterpart of
+                            - code [ref=f34e2139]: image
+                            - text: .
+                        - row [ref=f34e2140]:
+                          - cell "mask (required)" [ref=f34e2141]
+                          - cell "file" [ref=f34e2142]
+                          - cell [ref=f34e2143]:
+                            - strong [ref=f34e2144]: (multipart)
+                            - text: An image encoded in
+                            - strong [ref=f34e2145]: grayscale color mode
+                            - text: ", used to define the specific regions of the image to be erased. The white pixels represent the parts of the image that will be erased, while black pixels indicate the parts of the image that will remain unchanged. Should have exactly the same size as the image. Each pixel of the image should be either pure black (value"
+                            - code [ref=f34e2146]: "0"
+                            - text: ) or pure white (value
+                            - code [ref=f34e2147]: "255"
+                            - text: ).
+                        - row [ref=f34e2148]:
+                          - cell "mask_url (required)" [ref=f34e2149]
+                          - cell "string" [ref=f34e2150]
+                          - cell [ref=f34e2151]:
+                            - strong [ref=f34e2152]: (JSON)
+                            - text: URL or data URL of the mask image, the JSON-body counterpart of
+                            - code [ref=f34e2153]: mask
+                            - text: .
+                        - row [ref=f34e2154]:
+                          - cell "response_format" [ref=f34e2155]
+                          - cell [ref=f34e2156]:
+                            - text: string or null, default is
+                            - code [ref=f34e2157]: url
+                          - cell [ref=f34e2158]:
+                            - text: The format in which the generated images are returned. Must be one of
+                            - code [ref=f34e2159]: url
+                            - text: or
+                            - code [ref=f34e2160]: b64_json
+                            - text: .
+                  - heading "Navigate to header Remix image" [level=2] [ref=f34e2161]:
+                    - link "Navigate to header" [ref=f34e2162] [cursor=pointer]:
+                      - /url: "#remix-image"
+                    - generic [ref=f34e2167] [cursor=pointer]: Remix image
+                  - generic [ref=f34e2168]: Remix generates new versions of an image while keeping the overall concept intact. Each remix introduces slight differences in elements like character appearance, object position, or scene composition. The Remix function does not use a prompt. Instead, it uses the visual content of the original image to generate alternatives in different aspect ratios.
+                  - generic [ref=f34e2169]:
+                    - generic [ref=f34e2170]:
+                      - button "Copy the contents from the code block" [ref=f34e2172] [cursor=pointer]
+                      - button "Ask Assistant" [ref=f34e2177] [cursor=pointer]
+                    - code [ref=f34e2184]:
+                      - generic [ref=f34e2185]: POST https://external.api.recraft.ai/v1/images/variateImage
+                  - heading "Navigate to header Example" [level=3] [ref=f34e2186]:
+                    - link "Navigate to header" [ref=f34e2187] [cursor=pointer]:
+                      - /url: "#example-13"
+                    - generic [ref=f34e2192] [cursor=pointer]: Example
+                  - generic [ref=f34e2193]:
+                    - generic [ref=f34e2194]:
+                      - tablist [ref=f34e2196]:
+                        - tab "Multipart" [selected] [ref=f34e2197] [cursor=pointer]
+                        - tab "JSON" [ref=f34e2200] [cursor=pointer]
+                      - generic [ref=f34e2202]:
+                        - button "Copy the contents from the code block" [ref=f34e2204] [cursor=pointer]
+                        - button "Ask Assistant" [ref=f34e2209] [cursor=pointer]
+                    - tabpanel "Multipart" [ref=f34e2214]:
+                      - code [ref=f34e2218]:
+                        - generic [ref=f34e2219]: response = client.post(
+                        - generic [ref=f34e2220]: path='/images/variateImage',
+                        - generic [ref=f34e2221]: cast_to=object,
+                        - generic [ref=f34e2222]: "options={'headers': {'Content-Type': 'multipart/form-data'}},"
+                        - generic [ref=f34e2223]: "files={'image': open('image.png', 'rb')},"
+                        - generic [ref=f34e2224]: "body={'size': '1024x1024'}"
+                        - generic [ref=f34e2225]: )
+                        - generic [ref=f34e2226]: print(response['data'][0]['url'])
+                  - heading "Navigate to header Parameters" [level=3] [ref=f34e2227]:
+                    - link "Navigate to header" [ref=f34e2228] [cursor=pointer]:
+                      - /url: "#parameters-9"
+                    - generic [ref=f34e2233] [cursor=pointer]: Parameters
+                  - generic [ref=f34e2234]:
+                    - text: The request can be sent either as
+                    - code [ref=f34e2235]: multipart/form-data
+                    - text: (uploading the
+                    - code [ref=f34e2236]: image
+                    - text: file) or as
+                    - code [ref=f34e2237]: application/json
+                    - text: (passing
+                    - code [ref=f34e2238]: image_url
+                    - text: — a URL or data URL — instead). The input image must be in PNG, JPG, WEBP, or SVG format. The image must not exceed 10 MB in size, with a maximum resolution of 16 MP, a maximum dimension of 4096 px, and a minimum dimension of 256 px. The output format (raster or vector) is determined by the selected model.
+                  - region "Scrollable table" [ref=f34e2239]:
+                    - table [ref=f34e2241]:
+                      - rowgroup [ref=f34e2242]:
+                        - row [ref=f34e2243]:
+                          - columnheader "Parameter" [ref=f34e2244]
+                          - columnheader "Type" [ref=f34e2245]
+                          - columnheader "Description" [ref=f34e2246]
+                      - rowgroup [ref=f34e2247]:
+                        - row [ref=f34e2248]:
+                          - cell "image (required)" [ref=f34e2249]
+                          - cell "file" [ref=f34e2250]
+                          - cell [ref=f34e2251]:
+                            - strong [ref=f34e2252]: (multipart)
+                            - text: The input image in PNG, WEBP, JPEG, or SVG format.
+                        - row [ref=f34e2253]:
+                          - cell "image_url (required)" [ref=f34e2254]
+                          - cell "string" [ref=f34e2255]
+                          - cell [ref=f34e2256]:
+                            - strong [ref=f34e2257]: (JSON)
+                            - text: URL or data URL of the input image, the JSON-body counterpart of
+                            - code [ref=f34e2258]: image
+                            - text: .
+                        - row [ref=f34e2259]:
+                          - cell "size (required)" [ref=f34e2260]
+                          - cell "string" [ref=f34e2261]
+                          - cell [ref=f34e2262]:
+                            - text: The size of the generated images in
+                            - code [ref=f34e2263]: WxH
+                            - text: or
+                            - code [ref=f34e2264]: w:h
+                            - text: format, supported values are published in
+                            - link "Appendix" [ref=f34e2265] [cursor=pointer]:
+                              - /url: /docs/api-reference/appendix#list-of-supported-image-sizes
+                            - text: .
+                        - row [ref=f34e2266]:
+                          - cell "n" [ref=f34e2267]
+                          - cell "integer or null, default is 1" [ref=f34e2268]
+                          - cell "Number of variations to generate [1–6]." [ref=f34e2269]
+                        - row [ref=f34e2270]:
+                          - cell "model" [ref=f34e2271]
+                          - cell "string or null" [ref=f34e2272]
+                          - cell "The model to use for generation. The output format (raster or vector) is determined by the selected model." [ref=f34e2273]
+                        - row [ref=f34e2274]:
+                          - cell "random_seed" [ref=f34e2275]
+                          - cell "integer or null" [ref=f34e2276]
+                          - cell "Optional random seed for reproducibility." [ref=f34e2277]
+                        - row [ref=f34e2278]:
+                          - cell "response_format" [ref=f34e2279]
+                          - cell [ref=f34e2280]:
+                            - text: string or null, default is
+                            - code [ref=f34e2281]: url
+                          - cell [ref=f34e2282]:
+                            - text: The format in which the generated images are returned. Must be one of
+                            - code [ref=f34e2283]: url
+                            - text: or
+                            - code [ref=f34e2284]: b64_json
+                            - text: .
+                  - heading "Navigate to header Explore" [level=2] [ref=f34e2285]:
+                    - link "Navigate to header" [ref=f34e2286] [cursor=pointer]:
+                      - /url: "#explore"
+                    - generic [ref=f34e2291] [cursor=pointer]: Explore
+                  - generic [ref=f34e2292]: Generates a set of images based on a prompt, designed for visual exploration and discovery of diverse results.
+                  - generic [ref=f34e2293]:
+                    - generic [ref=f34e2294]:
+                      - button "Copy the contents from the code block" [ref=f34e2296] [cursor=pointer]
+                      - button "Ask Assistant" [ref=f34e2301] [cursor=pointer]
+                    - code [ref=f34e2308]:
+                      - generic [ref=f34e2309]: POST https://external.api.recraft.ai/v1/images/explore
+                  - heading "Navigate to header Example" [level=3] [ref=f34e2310]:
+                    - link "Navigate to header" [ref=f34e2311] [cursor=pointer]:
+                      - /url: "#example-14"
+                    - generic [ref=f34e2316] [cursor=pointer]: Example
+                  - generic [ref=f34e2317]:
+                    - generic [ref=f34e2318]:
+                      - button "Copy the contents from the code block" [ref=f34e2320] [cursor=pointer]
+                      - button "Ask Assistant" [ref=f34e2325] [cursor=pointer]
+                    - code [ref=f34e2332]:
+                      - generic [ref=f34e2333]: response = client.post(
+                      - generic [ref=f34e2334]: path='/images/explore',
+                      - generic [ref=f34e2335]: cast_to=object,
+                      - generic [ref=f34e2336]: "body={"
+                      - generic [ref=f34e2337]: "'prompt': 'race car on a track',"
+                      - generic [ref=f34e2338]: "},"
+                      - generic [ref=f34e2339]: )
+                      - generic [ref=f34e2340]: print(response['data'][0]['url'])
+                  - heading "Navigate to header Parameters" [level=3] [ref=f34e2341]:
+                    - link "Navigate to header" [ref=f34e2342] [cursor=pointer]:
+                      - /url: "#parameters-10"
+                    - generic [ref=f34e2347] [cursor=pointer]: Parameters
+                  - region "Scrollable table" [ref=f34e2348]:
+                    - table [ref=f34e2350]:
+                      - rowgroup [ref=f34e2351]:
+                        - row [ref=f34e2352]:
+                          - columnheader "Parameter" [ref=f34e2353]
+                          - columnheader "Type" [ref=f34e2354]
+                          - columnheader "Description" [ref=f34e2355]
+                      - rowgroup [ref=f34e2356]:
+                        - row [ref=f34e2357]:
+                          - cell "prompt (required)" [ref=f34e2358]
+                          - cell "string" [ref=f34e2359]
+                          - cell [ref=f34e2360]:
+                            - text: A text description of the desired image(s). Maximum prompt length depends on model, refer to
+                            - link "Appendix" [ref=f34e2361] [cursor=pointer]:
+                              - /url: /docs/api-reference/appendix#maximum-prompt-length
+                            - text: .
+                        - row [ref=f34e2362]:
+                          - cell "model" [ref=f34e2363]
+                          - cell [ref=f34e2364]:
+                            - text: string or null, default is
+                            - code [ref=f34e2365]: recraftv4_1
+                          - cell [ref=f34e2366]:
+                            - text: "The model to use for image generation. Must be one of:"
+                            - code [ref=f34e2367]: recraftv4_1
+                            - text: ","
+                            - code [ref=f34e2368]: recraftv4_1_vector
+                            - text: ","
+                            - code [ref=f34e2369]: recraftv4_1_pro
+                            - text: ","
+                            - code [ref=f34e2370]: recraftv4_1_pro_vector
+                            - text: ","
+                            - code [ref=f34e2371]: recraftv4
+                            - text: ","
+                            - code [ref=f34e2372]: recraftv4_vector
+                            - text: ","
+                            - code [ref=f34e2373]: recraftv4_pro
+                            - text: ","
+                            - code [ref=f34e2374]: recraftv4_pro_vector
+                            - text: .
+                        - row [ref=f34e2375]:
+                          - cell "style" [ref=f34e2376]
+                          - cell "string or null" [ref=f34e2377]
+                          - cell [ref=f34e2378]:
+                            - text: The style of the generated images, refer to
+                            - link "Styles" [ref=f34e2379] [cursor=pointer]:
+                              - /url: /docs/api-reference/styles
+                            - text: .
+                        - row [ref=f34e2380]:
+                          - cell "style_id" [ref=f34e2381]
+                          - cell "UUID or null" [ref=f34e2382]
+                          - cell [ref=f34e2383]:
+                            - text: Use a style as visual reference, refer to
+                            - link "Styles" [ref=f34e2384] [cursor=pointer]:
+                              - /url: /docs/api-reference/styles
+                            - text: .
+                        - row [ref=f34e2385]:
+                          - cell "size" [ref=f34e2386]
+                          - cell [ref=f34e2387]:
+                            - text: string or null, default is
+                            - code [ref=f34e2388]: 1:1
+                          - cell [ref=f34e2389]:
+                            - text: The size of the generated images in
+                            - code [ref=f34e2390]: WxH
+                            - text: or
+                            - code [ref=f34e2391]: w:h
+                            - text: format. Depends on model, supported values are published in
+                            - link "Appendix" [ref=f34e2392] [cursor=pointer]:
+                              - /url: /docs/api-reference/appendix#list-of-supported-image-sizes
+                            - text: .
+                        - row [ref=f34e2393]:
+                          - cell "response_format" [ref=f34e2394]
+                          - cell [ref=f34e2395]:
+                            - text: string or null, default is
+                            - code [ref=f34e2396]: url
+                          - cell [ref=f34e2397]:
+                            - text: The format in which the generated images are returned. Must be one of
+                            - code [ref=f34e2398]: url
+                            - text: or
+                            - code [ref=f34e2399]: b64_json
+                            - text: .
+                        - row [ref=f34e2400]:
+                          - cell "controls" [ref=f34e2401]
+                          - cell "object or null" [ref=f34e2402]
+                          - cell [ref=f34e2403]:
+                            - text: A set of custom parameters to tweak generation process, refer to
+                            - link "Controls" [ref=f34e2404] [cursor=pointer]:
+                              - /url: "#controls"
+                            - text: . Supports
+                            - code [ref=f34e2405]: prompt_to_image
+                            - text: controls.
+                  - heading "Navigate to header Explore similar" [level=2] [ref=f34e2406]:
+                    - link "Navigate to header" [ref=f34e2407] [cursor=pointer]:
+                      - /url: "#explore-similar"
+                    - generic [ref=f34e2412] [cursor=pointer]: Explore similar
+                  - generic [ref=f34e2413]:
+                    - text: Start from an image you already created and generate new images that are visually similar to the given source image. The source image
+                    - strong [ref=f34e2414]: must
+                    - text: be one previously generated via the Explore endpoint. The
+                    - code [ref=f34e2415]: similarity
+                    - text: parameter controls how closely the results should resemble the source.
+                  - generic [ref=f34e2416]:
+                    - generic [ref=f34e2417]:
+                      - button "Copy the contents from the code block" [ref=f34e2419] [cursor=pointer]
+                      - button "Ask Assistant" [ref=f34e2424] [cursor=pointer]
+                    - code [ref=f34e2431]:
+                      - generic [ref=f34e2432]: POST https://external.api.recraft.ai/v1/images/explore/similar
+                  - heading "Navigate to header Example" [level=3] [ref=f34e2433]:
+                    - link "Navigate to header" [ref=f34e2434] [cursor=pointer]:
+                      - /url: "#example-15"
+                    - generic [ref=f34e2439] [cursor=pointer]: Example
+                  - generic [ref=f34e2440]:
+                    - generic [ref=f34e2441]:
+                      - button "Copy the contents from the code block" [ref=f34e2443] [cursor=pointer]
+                      - button "Ask Assistant" [ref=f34e2448] [cursor=pointer]
+                    - code [ref=f34e2455]:
+                      - generic [ref=f34e2456]: response = client.post(
+                      - generic [ref=f34e2457]: path='/images/explore/similar',
+                      - generic [ref=f34e2458]: cast_to=object,
+                      - generic [ref=f34e2459]: "body={"
+                      - generic [ref=f34e2460]: "'source_image_id': 'c18a1988-45e7-4c00-82c4-4ad7d3dbce3a',"
+                      - generic [ref=f34e2461]: "'similarity': 5,"
+                      - generic [ref=f34e2462]: "},"
+                      - generic [ref=f34e2463]: )
+                      - generic [ref=f34e2464]: print(response['data'][0]['url'])
+                  - heading "Navigate to header Parameters" [level=3] [ref=f34e2465]:
+                    - link "Navigate to header" [ref=f34e2466] [cursor=pointer]:
+                      - /url: "#parameters-11"
+                    - generic [ref=f34e2471] [cursor=pointer]: Parameters
+                  - region "Scrollable table" [ref=f34e2472]:
+                    - table [ref=f34e2474]:
+                      - rowgroup [ref=f34e2475]:
+                        - row [ref=f34e2476]:
+                          - columnheader "Parameter" [ref=f34e2477]
+                          - columnheader "Type" [ref=f34e2478]
+                          - columnheader "Description" [ref=f34e2479]
+                      - rowgroup [ref=f34e2480]:
+                        - row [ref=f34e2481]:
+                          - cell "source_image_id (required)" [ref=f34e2482]
+                          - cell "UUID" [ref=f34e2483]
+                          - cell "The ID of the source image to use as a visual reference for exploration." [ref=f34e2484]
+                        - row [ref=f34e2485]:
+                          - cell "similarity (required)" [ref=f34e2486]
+                          - cell "integer" [ref=f34e2487]
+                          - cell [ref=f34e2488]:
+                            - text: Defines how closely the generated images should resemble the source image. The value should be between
+                            - code [ref=f34e2489]: "1"
+                            - text: and
+                            - code [ref=f34e2490]: "5"
+                            - text: ":"
+                            - code [ref=f34e2491]: "1"
+                            - text: — a little bit similar,
+                            - code [ref=f34e2492]: "2"
+                            - text: — moderately similar,
+                            - code [ref=f34e2493]: "3"
+                            - text: — quite similar,
+                            - code [ref=f34e2494]: "4"
+                            - text: — very similar,
+                            - code [ref=f34e2495]: "5"
+                            - text: — extremely similar.
+                        - row [ref=f34e2496]:
+                          - cell "response_format" [ref=f34e2497]
+                          - cell [ref=f34e2498]:
+                            - text: string or null, default is
+                            - code [ref=f34e2499]: url
+                          - cell [ref=f34e2500]:
+                            - text: The format in which the generated images are returned. Must be one of
+                            - code [ref=f34e2501]: url
+                            - text: or
+                            - code [ref=f34e2502]: b64_json
+                            - text: .
+                  - heading "Navigate to header Enhance prompt" [level=2] [ref=f34e2503]:
+                    - link "Navigate to header" [ref=f34e2504] [cursor=pointer]:
+                      - /url: "#enhance-prompt"
+                    - generic [ref=f34e2509] [cursor=pointer]: Enhance prompt
+                  - generic [ref=f34e2510]: Expands a short prompt into a richer, more detailed description with added visual context, style cues, and composition details. Use the enhanced prompt in any image generation endpoint to produce more vivid and accurate results.
+                  - generic [ref=f34e2511]:
+                    - generic [ref=f34e2512]:
+                      - button "Copy the contents from the code block" [ref=f34e2514] [cursor=pointer]
+                      - button "Ask Assistant" [ref=f34e2519] [cursor=pointer]
+                    - code [ref=f34e2526]:
+                      - generic [ref=f34e2527]: POST https://external.api.recraft.ai/v1/prompts/enhance
+                  - heading "Navigate to header Example" [level=3] [ref=f34e2528]:
+                    - link "Navigate to header" [ref=f34e2529] [cursor=pointer]:
+                      - /url: "#example-16"
+                    - generic [ref=f34e2534] [cursor=pointer]: Example
+                  - generic [ref=f34e2535]:
+                    - generic [ref=f34e2536]:
+                      - button "Copy the contents from the code block" [ref=f34e2538] [cursor=pointer]
+                      - button "Ask Assistant" [ref=f34e2543] [cursor=pointer]
+                    - code [ref=f34e2550]:
+                      - generic [ref=f34e2551]: response = client.post(
+                      - generic [ref=f34e2552]: path='/prompts/enhance',
+                      - generic [ref=f34e2553]: cast_to=object,
+                      - generic [ref=f34e2554]: "body={'prompt': 'race car on a track'},"
+                      - generic [ref=f34e2555]: )
+                      - generic [ref=f34e2556]: print(response['enhanced_prompt'])
+                  - heading "Navigate to header Parameters" [level=3] [ref=f34e2557]:
+                    - link "Navigate to header" [ref=f34e2558] [cursor=pointer]:
+                      - /url: "#parameters-12"
+                    - generic [ref=f34e2563] [cursor=pointer]: Parameters
+                  - region "Scrollable table" [ref=f34e2564]:
+                    - table [ref=f34e2566]:
+                      - rowgroup [ref=f34e2567]:
+                        - row [ref=f34e2568]:
+                          - columnheader "Parameter" [ref=f34e2569]
+                          - columnheader "Type" [ref=f34e2570]
+                          - columnheader "Description" [ref=f34e2571]
+                      - rowgroup [ref=f34e2572]:
+                        - row [ref=f34e2573]:
+                          - cell "prompt (required)" [ref=f34e2574]
+                          - cell "string" [ref=f34e2575]
+                          - cell [ref=f34e2576]:
+                            - text: The original prompt to enhance. Must not be empty and must not exceed
+                            - code [ref=f34e2577]: "2000"
+                            - text: characters.
+                  - heading "Navigate to header Get user information" [level=2] [ref=f34e2578]:
+                    - link "Navigate to header" [ref=f34e2579] [cursor=pointer]:
+                      - /url: "#get-user-information"
+                    - generic [ref=f34e2584] [cursor=pointer]: Get user information
+                  - generic [ref=f34e2585]: Returns information of the current user including credits balance.
+                  - generic [ref=f34e2586]:
+                    - generic [ref=f34e2587]:
+                      - button "Copy the contents from the code block" [ref=f34e2589] [cursor=pointer]
+                      - button "Ask Assistant" [ref=f34e2594] [cursor=pointer]
+                    - code [ref=f34e2601]:
+                      - generic [ref=f34e2602]: GET https://external.api.recraft.ai/v1/users/me
+                  - heading "Navigate to header Example" [level=3] [ref=f34e2603]:
+                    - link "Navigate to header" [ref=f34e2604] [cursor=pointer]:
+                      - /url: "#example-17"
+                    - generic [ref=f34e2609] [cursor=pointer]: Example
+                  - generic [ref=f34e2610]:
+                    - generic [ref=f34e2611]:
+                      - button "Copy the contents from the code block" [ref=f34e2613] [cursor=pointer]
+                      - button "Ask Assistant" [ref=f34e2618] [cursor=pointer]
+                    - code [ref=f34e2625]:
+                      - generic [ref=f34e2626]: response = client.get(path='/users/me', cast_to=object)
+                      - generic [ref=f34e2627]: print(response)
+                  - heading "Navigate to header Output" [level=3] [ref=f34e2628]:
+                    - link "Navigate to header" [ref=f34e2629] [cursor=pointer]:
+                      - /url: "#output-2"
+                    - generic [ref=f34e2634] [cursor=pointer]: Output
+                  - generic [ref=f34e2635]:
+                    - generic [ref=f34e2636]:
+                      - button "Copy the contents from the code block" [ref=f34e2638] [cursor=pointer]
+                      - button "Ask Assistant" [ref=f34e2643] [cursor=pointer]
+                    - code [ref=f34e2650]:
+                      - generic [ref=f34e2651]: "{"
+                      - generic [ref=f34e2652]: "\"credits\": 1000,"
+                      - generic [ref=f34e2653]: "\"email\": \"test@example.com\","
+                      - generic [ref=f34e2654]: "\"id\": \"c18a1988-45e7-4c00-82c4-4ad7d3dbce3a\","
+                      - generic [ref=f34e2655]: "\"name\": \"Recraft Test\""
+                      - generic [ref=f34e2656]: "}"
+                  - heading "Navigate to header Auxiliary" [level=2] [ref=f34e2657]:
+                    - link "Navigate to header" [ref=f34e2658] [cursor=pointer]:
+                      - /url: "#auxiliary"
+                    - generic [ref=f34e2663] [cursor=pointer]: Auxiliary
+                  - heading "Navigate to header Controls" [level=3] [ref=f34e2664]:
+                    - link "Navigate to header" [ref=f34e2665] [cursor=pointer]:
+                      - /url: "#controls"
+                    - generic [ref=f34e2670] [cursor=pointer]: Controls
+                  - generic [ref=f34e2671]: The generation process can be adjusted with a number of tweaks.
+                  - region "Scrollable table" [ref=f34e2672]:
+                    - table [ref=f34e2674]:
+                      - rowgroup [ref=f34e2675]:
+                        - row [ref=f34e2676]:
+                          - columnheader "Parameter" [ref=f34e2677]
+                          - columnheader "Type" [ref=f34e2678]
+                          - columnheader "Description" [ref=f34e2679]
+                          - columnheader "Compatibility" [ref=f34e2680]
+                      - rowgroup [ref=f34e2681]:
+                        - row [ref=f34e2682]:
+                          - cell "colors" [ref=f34e2683]
+                          - cell "array of color definitions" [ref=f34e2684]
+                          - cell "An array of preferable colors." [ref=f34e2685]
+                          - cell "All models" [ref=f34e2686]
+                        - row [ref=f34e2687]:
+                          - cell "background_color" [ref=f34e2688]
+                          - cell "color definition" [ref=f34e2689]
+                          - cell "Use the given color as a desired background color." [ref=f34e2690]
+                          - cell "All models" [ref=f34e2691]
+                        - row [ref=f34e2692]:
+                          - cell "artistic_level" [ref=f34e2693]
+                          - cell "integer or null" [ref=f34e2694]
+                          - cell [ref=f34e2695]:
+                            - text: Defines the artistic tone of your image. At a simple level, the person looks straight at the camera in a static and clean style. Dynamic and eccentric levels introduce movement and creativity. The value should be in the range
+                            - code [ref=f34e2696]: "[0..5]"
+                            - text: .
+                          - cell "V3 models only" [ref=f34e2697]
+                        - row [ref=f34e2698]:
+                          - cell "no_text" [ref=f34e2699]
+                          - cell "bool" [ref=f34e2700]
+                          - cell "Do not embed text layouts." [ref=f34e2701]
+                          - cell "V3 models only" [ref=f34e2702]
+                  - heading "Navigate to header Colors" [level=4] [ref=f34e2703]:
+                    - link "Navigate to header" [ref=f34e2704] [cursor=pointer]:
+                      - /url: "#colors"
+                    - generic [ref=f34e2709] [cursor=pointer]: Colors
+                  - generic [ref=f34e2710]: Color type is defined as an object with the following fields
+                  - region "Scrollable table" [ref=f34e2711]:
+                    - table [ref=f34e2713]:
+                      - rowgroup [ref=f34e2714]:
+                        - row [ref=f34e2715]:
+                          - columnheader "Parameter" [ref=f34e2716]
+                          - columnheader "Description" [ref=f34e2717]
+                      - rowgroup [ref=f34e2718]:
+                        - row [ref=f34e2719]:
+                          - cell "rgb (required)" [ref=f34e2720]
+                          - cell [ref=f34e2721]:
+                            - text: An array of 3 integer values in range of
+                            - code [ref=f34e2722]: 0...255
+                            - text: defining RGB color model.
+                        - row [ref=f34e2723]:
+                          - cell "weight" [ref=f34e2724]
+                          - cell [ref=f34e2725]:
+                            - text: An optional number in range
+                            - code [ref=f34e2726]: 0.0...1.0
+                            - text: indicating the relative preference of this color. The sum of weights across all
+                            - code [ref=f34e2727]: colors
+                            - text: must not exceed
+                            - code [ref=f34e2728]: "1.0"
+                            - text: .
+                  - strong [ref=f34e2730]: Example
+                  - generic [ref=f34e2731]:
+                    - generic [ref=f34e2732]:
+                      - button "Copy the contents from the code block" [ref=f34e2734] [cursor=pointer]
+                      - button "Ask Assistant" [ref=f34e2739] [cursor=pointer]
+                    - code [ref=f34e2746]:
+                      - generic [ref=f34e2747]: response = client.images.generate(
+                      - generic [ref=f34e2748]: prompt='race car on a track',
+                      - generic [ref=f34e2749]: "extra_body={"
+                      - generic [ref=f34e2750]: "'controls': {"
+                      - generic [ref=f34e2751]: "'colors': ["
+                      - generic [ref=f34e2752]: "{'rgb': [0, 255, 0]}"
+                      - generic [ref=f34e2753]: "]"
+                      - generic [ref=f34e2754]: "}"
+                      - generic [ref=f34e2755]: "}"
+                      - generic [ref=f34e2756]: )
+                      - generic [ref=f34e2757]: print(response.data[0].url)
+                  - heading "Navigate to header Text Layout" [level=3] [ref=f34e2758]:
+                    - link "Navigate to header" [ref=f34e2759] [cursor=pointer]:
+                      - /url: "#text-layout"
+                    - generic [ref=f34e2764] [cursor=pointer]: Text Layout
+                  - generic [ref=f34e2765]: Text layout is used to define spatial and textual attributes for individual text elements. Each text element consists of an individual word and its bounding box (bbox).
+                  - generic [ref=f34e2766]: This feature is supported by Recraft V3 and Recraft V3 Vector models only.
+                  - region "Scrollable table" [ref=f34e2767]:
+                    - table [ref=f34e2769]:
+                      - rowgroup [ref=f34e2770]:
+                        - row [ref=f34e2771]:
+                          - columnheader "Parameter" [ref=f34e2772]
+                          - columnheader "Description" [ref=f34e2773]
+                      - rowgroup [ref=f34e2774]:
+                        - row [ref=f34e2775]:
+                          - cell "text (required)" [ref=f34e2776]
+                          - cell "A single word containing only supported characters." [ref=f34e2777]
+                        - row [ref=f34e2778]:
+                          - cell "bbox (required)" [ref=f34e2779]
+                          - cell "A bounding box representing a 4-angled polygon. Each point in the polygon is defined by relative coordinates." [ref=f34e2780]
+                  - generic [ref=f34e2781]:
+                    - strong [ref=f34e2782]: Bounding box
+                    - text: ": The bounding box (bbox) is a list of 4 points representing a 4-angled figure (not necessarily a rectangle). Each point specifies its coordinates relative to the layout dimensions, where (0, 0) is the top-left corner, (1, 1) is the bottom-right corner."
+                  - generic [ref=f34e2783]:
+                    - strong [ref=f34e2784]: Coordinates
+                    - text: ": Coordinates are"
+                    - strong [ref=f34e2785]: relative
+                    - text: to the layout dimensions. Coordinates can extend beyond the [0, 1] range, such values indicate that the shape will be cropped.
+                  - generic [ref=f34e2786]:
+                    - strong [ref=f34e2787]: Points
+                    - text: ": The bounding box must always have"
+                    - strong [ref=f34e2788]: exactly 4 points
+                    - text: . Each point is an array of two floats [x, y] representing the relative position.
+                  - strong [ref=f34e2790]: Supported characters
+                  - generic [ref=f34e2791]:
+                    - text: The
+                    - code [ref=f34e2792]: text
+                    - text: "field must contain a single word composed only of the following characters:"
+                  - generic [ref=f34e2793]:
+                    - generic [ref=f34e2794]:
+                      - button "Copy the contents from the code block" [ref=f34e2796] [cursor=pointer]
+                      - button "Ask Assistant" [ref=f34e2801] [cursor=pointer]
+                    - code [ref=f34e2808]:
+                      - generic [ref=f34e2809]: "! \" # $ % & ' ( ) * + , - . /"
+                      - generic [ref=f34e2810]: 0 1 2 3 4 5 6 7 8 9
+                      - generic [ref=f34e2811]: ": ; < > ? @"
+                      - generic [ref=f34e2812]: A B C D E F G H I J K L M N O P Q R S T U V W X Y Z
+                      - generic [ref=f34e2813]: "_ { }"
+                      - generic [ref=f34e2814]: Ø Đ Ħ Ł Ŋ Ŧ
+                      - generic [ref=f34e2815]: Α Β Ε Ζ Η Ι Κ Μ Ν Ο Ρ Τ Υ Χ
+                      - generic [ref=f34e2816]: І
+                      - generic [ref=f34e2817]: А В Е К М Н О Р С Т У Х
+                      - generic [ref=f34e2818]: ß ẞ
+                  - generic [ref=f34e2820]: Any character not listed above will result in validation errors.
+                  - strong [ref=f34e2822]: Example
+                  - generic [ref=f34e2823]:
+                    - generic [ref=f34e2824]:
+                      - button "Copy the contents from the code block" [ref=f34e2826] [cursor=pointer]
+                      - button "Ask Assistant" [ref=f34e2831] [cursor=pointer]
+                    - code [ref=f34e2838]:
+                      - generic [ref=f34e2839]: response = client.images.generate(
+                      - generic [ref=f34e2840]: prompt="cute red panda with a sign",
+                      - generic [ref=f34e2841]: style="Illustration",
+                      - generic [ref=f34e2842]: "extra_body={"
+                      - generic [ref=f34e2843]: "\"text_layout\": ["
+                      - generic [ref=f34e2844]: "{"
+                      - generic [ref=f34e2845]: "\"text\": \"Recraft\","
+                      - generic [ref=f34e2846]: "\"bbox\": [[0.3, 0.45], [0.6, 0.45], [0.6, 0.55], [0.3, 0.55]],"
+                      - generic [ref=f34e2847]: "},"
+                      - generic [ref=f34e2848]: "{"
+                      - generic [ref=f34e2849]: "\"text\": \"AI\","
+                      - generic [ref=f34e2850]: "\"bbox\": [[0.62, 0.45], [0.70, 0.45], [0.70, 0.55], [0.62, 0.55]],"
+                      - generic [ref=f34e2851]: "},"
+                      - generic [ref=f34e2852]: "]"
+                      - generic [ref=f34e2853]: "},"
+                      - generic [ref=f34e2854]: )
+                      - generic [ref=f34e2855]: print(response.data[0].url)
+                - generic [ref=f34e2856]:
+                  - link "Getting started" [ref=f34e2857] [cursor=pointer]:
+                    - /url: /docs/api-reference/getting-started
+                  - link "Examples" [ref=f34e2861] [cursor=pointer]:
+                    - /url: /docs/api-reference/examples
+                - generic [ref=f34e2866]:
+                  - textbox "Ask a question..." [ref=f34e2867]
+                  - generic: ⌘I
+                  - button "Send message" [disabled] [ref=f34e2868]
+                - generic [ref=f34e2872]:
+                  - generic [ref=f34e2873]:
+                    - link "instagram" [ref=f34e2874] [cursor=pointer]:
+                      - /url: https://www.instagram.com/recraftai
+                    - link "github" [ref=f34e2877] [cursor=pointer]:
+                      - /url: https://github.com/recraft-ai/ComfyUI-RecraftAI
+                    - link "linkedin" [ref=f34e2880] [cursor=pointer]:
+                      - /url: https://www.linkedin.com/company/recraftai
+                  - link "Powered by This documentation is built and hosted on Mintlify, a developer documentation platform" [ref=f34e2885] [cursor=pointer]:
+                    - /url: https://www.mintlify.com?utm_campaign=poweredBy&utm_medium=referral&utm_source=recraft
+                    - generic [ref=f34e2886]: Powered by
+                    - generic [ref=f34e2896]: This documentation is built and hosted on Mintlify, a developer documentation platform
+      - generic:
+        - generic [ref=f34e2898]:
+          - generic [ref=f34e2899]: Assistant
+          - generic [ref=f34e2904]:
+            - button [ref=f34e2905] [cursor=pointer]
+            - button [ref=f34e2911] [cursor=pointer]
+        - generic [ref=f34e2915]: Responses are generated using AI and may contain mistakes.
+        - generic [ref=f34e2918]:
+          - textbox [ref=f34e2919]:
+            - /placeholder: Ask a question...
+          - generic [ref=f34e2920]:
+            - button [ref=f34e2921] [cursor=pointer]
+            - button [disabled] [ref=f34e2924]

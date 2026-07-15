@@ -185,6 +185,23 @@ function errMessage(err) {
   return err instanceof Error ? err.message : String(err);
 }
 
+function parseKeySlots(spec) {
+  const slots = new Map();
+  if (!spec) return slots;
+  for (const entry of spec.split(",")) {
+    const trimmed = entry.trim();
+    if (!trimmed) continue;
+    const sepIndex = trimmed.indexOf(":");
+    const name = sepIndex === -1 ? "" : trimmed.slice(0, sepIndex).trim();
+    const sourceEnvVar = sepIndex === -1 ? "" : trimmed.slice(sepIndex + 1).trim();
+    if (!name || !sourceEnvVar) {
+      throw new Error(`error: malformed TASKFERRY_KEY_SLOTS entry: ${JSON.stringify(trimmed)}\nhelp: use the form name:ENV_VAR_NAME, comma-separated`);
+    }
+    slots.set(name, sourceEnvVar);
+  }
+  return slots;
+}
+
 const DEFAULT_MAX_DISPATCHES_PER_WINDOW = positiveInteger(
   Number(process.env.TASKFERRY_MAX_DISPATCHES_PER_WINDOW),
   2
@@ -248,6 +265,8 @@ export function createTaskManager({
   advisorSessionTtlMs = DEFAULT_ADVISOR_SESSION_TTL_MS,
   noOutputTimeoutMs = DEFAULT_NO_OUTPUT_TIMEOUT_MS,
   watchdogPollMs = DEFAULT_WATCHDOG_POLL_MS,
+  keySlotsSpec = process.env.TASKFERRY_KEY_SLOTS,
+  providerKeyEnvName = process.env.TASKFERRY_PROVIDER_KEY_ENV || null,
 } = {}) {
   const LOG_DIR = path.join(stateDir, "logs");
   const SUMMARY_DIR = path.join(stateDir, "summaries");
@@ -259,6 +278,7 @@ export function createTaskManager({
   const advisorTtl = positiveInteger(advisorSessionTtlMs, DEFAULT_ADVISOR_SESSION_TTL_MS);
   const noOutputTimeout = positiveInteger(noOutputTimeoutMs, DEFAULT_NO_OUTPUT_TIMEOUT_MS);
   const watchdogPoll = positiveInteger(watchdogPollMs, DEFAULT_WATCHDOG_POLL_MS);
+  const keySlots = parseKeySlots(keySlotsSpec);
   for (const dir of [stateDir, LOG_DIR, SUMMARY_DIR]) {
     fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
     fs.chmodSync(dir, 0o700);
@@ -384,10 +404,11 @@ export function createTaskManager({
    * @returns {TaskSummary}
    */
   function summarize(task) {
-    const { promptPreview, promptTotalChars, id, status, directory, model, sessionId, pid, startedAt, endedAt, exitCode, signal, logPath, cancelRequested, failureReason } = task;
+    const { promptPreview, promptTotalChars, id, status, directory, model, sessionId, pid, startedAt, endedAt, exitCode, signal, logPath, cancelRequested, failureReason, keySlot } = task;
     return {
       id, status, directory, model, sessionId, pid, startedAt, endedAt, exitCode, signal, logPath,
       failureReason: failureReason ?? null,
+      keySlot: keySlot ?? null,
       promptPreview,
       ...(promptTotalChars != null ? { promptTotalChars } : {}),
       ...(task.summaryOf ? { summaryOf: task.summaryOf } : {}),
@@ -434,6 +455,22 @@ export function createTaskManager({
     if (sessionId) advisorSessions.set(sessionId, Date.now());
   }
 
+  function resolveKeySlot(keySlot) {
+    if (keySlot == null) return { keySlot: null, keyEnvValue: null };
+    if (!providerKeyEnvName) {
+      throw new Error("error: key_slot given but TASKFERRY_PROVIDER_KEY_ENV is not configured\nhelp: set TASKFERRY_PROVIDER_KEY_ENV on the server before using key_slot");
+    }
+    if (!keySlots.has(keySlot)) {
+      throw new Error(`error: unknown key_slot: ${keySlot}\nhelp: configured slots are: ${Array.from(keySlots.keys()).join(", ") || "(none configured)"}`);
+    }
+    const sourceEnvVar = keySlots.get(keySlot);
+    const value = process.env[sourceEnvVar];
+    if (!value) {
+      throw new Error(`error: key_slot "${keySlot}" source variable ${sourceEnvVar} is not set\nhelp: set ${sourceEnvVar} and restart the taskferry MCP server`);
+    }
+    return { keySlot, keyEnvValue: value };
+  }
+
   /**
    * @param {object} params
    * @param {string} params.prompt
@@ -441,9 +478,10 @@ export function createTaskManager({
    * @param {string} [params.model]
    * @param {string} [params.variant]
    * @param {string|undefined} [params.sessionId]
+   * @param {string|null} [params.keySlot]
    * @returns {TaskSummary & {next: string}}
    */
-  function dispatch({ prompt, directory, model, variant, sessionId }) {
+  function dispatch({ prompt, directory, model, variant, sessionId, keySlot }) {
     ensureStateLoaded();
     if (!prompt || typeof prompt !== "string") {
       throw new Error("error: prompt is required\nhelp: taskferry_dispatch requires a non-empty prompt string");
@@ -454,6 +492,8 @@ export function createTaskManager({
     if (!fs.existsSync(directory) || !fs.statSync(directory).isDirectory()) {
       throw new Error(`error: directory does not exist: ${directory}\nhelp: check the path or create the directory first`);
     }
+
+    const resolvedKeySlot = resolveKeySlot(keySlot);
 
     const id = `oc_${Date.now().toString(36)}_${randomUUID().slice(0, 8)}`;
     const logPath = path.join(LOG_DIR, `${id}.ndjson`);
@@ -480,10 +520,11 @@ export function createTaskManager({
       spawnError: null,
       cancelRequested: false,
       failureReason: null,
+      keySlot: resolvedKeySlot.keySlot,
     };
     tasks.set(id, task);
     persistTask(task.id);
-    pendingLaunches.set(id, { prompt, directory, model: resolvedModel, variant: task.variant, sessionId });
+    pendingLaunches.set(id, { prompt, directory, model: resolvedModel, variant: task.variant, sessionId, keyEnvValue: resolvedKeySlot.keyEnvValue });
     launchQueue.push(id);
     launchQueuedTasks();
 
@@ -720,11 +761,16 @@ export function createTaskManager({
       fs.chmodSync(task.logPath, 0o600);
       // No tmux: the child has no shared session to introspect. It is its own
       // process group so cancellation can stop any subprocesses it creates.
+      const spawnEnv = isSummary
+        ? launch.env
+        : launch.keyEnvValue != null
+          ? { ...process.env, [providerKeyEnvName]: launch.keyEnvValue }
+          : undefined;
       const child = spawnFn("opencode", args, {
         cwd: isSummary ? SUMMARY_DIR : dispatchLaunch.directory,
         stdio: ["ignore", logFd, logFd],
         detached: true,
-        ...(isSummary ? { env: summaryLaunch.env } : {}),
+        ...(spawnEnv ? { env: spawnEnv } : {}),
       });
       fs.closeSync(logFd);
       logFd = null;

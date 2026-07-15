@@ -100,10 +100,14 @@ server.registerTool(
         .string()
         .optional()
         .describe("Resume an existing opencode session id instead of starting fresh (passes --continue --session)."),
+      key_slot: z
+        .string()
+        .optional()
+        .describe("Name of a preconfigured provider key slot (see TASKFERRY_KEY_SLOTS on the server) to use for this task instead of the server's default credentials."),
     },
   },
-  async ({ prompt, directory, model, variant, session_id }) => {
-    const task = tasks.dispatch({ prompt, directory, model, variant, sessionId: session_id });
+  async ({ prompt, directory, model, variant, session_id, key_slot }) => {
+    const task = tasks.dispatch({ prompt, directory, model, variant, sessionId: session_id, keySlot: key_slot });
     return toon(task);
   }
 );

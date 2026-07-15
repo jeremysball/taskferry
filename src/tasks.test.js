@@ -13,7 +13,7 @@ import { createTaskManager } from "./tasks.js";
 // runs synchronously in the constructor, same as the old module-level code
 // did at import time). `tasksFixture` may be an array or `(logDir) => array`
 // for fixtures whose logPath needs to point inside the real log dir.
-function makeManager({ tasksFixture = [], logs = {}, spawnFn, killFn, listModelsFn, verifySummaryAgentFn, maxDispatchesPerWindow, dispatchWindowMs, advisorSessionTtlMs, maxConcurrentTasks, noOutputTimeoutMs, watchdogPollMs } = {}) {
+function makeManager({ tasksFixture = [], logs = {}, spawnFn, killFn, listModelsFn, verifySummaryAgentFn, maxDispatchesPerWindow, dispatchWindowMs, advisorSessionTtlMs, maxConcurrentTasks, noOutputTimeoutMs, watchdogPollMs, keySlotsSpec, providerKeyEnvName } = {}) {
   const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-test-"));
   const logDir = path.join(stateDir, "logs");
   fs.mkdirSync(logDir, { recursive: true });
@@ -36,6 +36,8 @@ function makeManager({ tasksFixture = [], logs = {}, spawnFn, killFn, listModels
     ...(maxConcurrentTasks != null ? { maxConcurrentTasks } : {}),
     ...(noOutputTimeoutMs != null ? { noOutputTimeoutMs } : {}),
     ...(watchdogPollMs != null ? { watchdogPollMs } : {}),
+    ...(keySlotsSpec != null ? { keySlotsSpec } : {}),
+    ...(providerKeyEnvName != null ? { providerKeyEnvName } : {}),
   });
 }
 
@@ -1138,5 +1140,58 @@ describe("summarize()", () => {
     assert.match(snapshot.narration, /TAIL_MARKER/);
     assert.match(snapshot.narration, /bytes omitted from source log/);
     child.emit("exit", 0, null);
+  });
+});
+
+describe("key slots (dispatch)", () => {
+  test("dispatch with an unconfigured key_slot throws before spawning anything", () => {
+    const mgr = makeManager({ spawnFn: () => { throw new Error("must not spawn"); } });
+    assert.throws(
+      () => mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), keySlot: "primary" }),
+      /error: key_slot given but TASKFERRY_PROVIDER_KEY_ENV is not configured/
+    );
+  });
+
+  test("dispatch with a key_slot name not in the registry throws before spawning anything", () => {
+    const mgr = makeManager({
+      spawnFn: () => { throw new Error("must not spawn"); },
+      keySlotsSpec: "primary:SOME_SOURCE_VAR",
+      providerKeyEnvName: "OPENCODE_GO_API_KEY",
+    });
+    assert.throws(
+      () => mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), keySlot: "backup" }),
+      /error: unknown key_slot: backup/
+    );
+  });
+
+  test("dispatch with a configured key_slot whose source env var is unset throws before spawning anything", () => {
+    delete process.env.AXI_TEST_UNSET_KEY_SOURCE;
+    const mgr = makeManager({
+      spawnFn: () => { throw new Error("must not spawn"); },
+      keySlotsSpec: "primary:AXI_TEST_UNSET_KEY_SOURCE",
+      providerKeyEnvName: "OPENCODE_GO_API_KEY",
+    });
+    assert.throws(
+      () => mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), keySlot: "primary" }),
+      /error: key_slot "primary" source variable AXI_TEST_UNSET_KEY_SOURCE is not set/
+    );
+  });
+
+  test("a valid key_slot passes only the configured target env var to the spawned child, and only the slot name is persisted", () => {
+    process.env.AXI_TEST_KEY_SOURCE = "sk-super-secret-value";
+    let capturedOpts = null;
+    const mgr = makeManager({
+      spawnFn: (cmd, args, opts) => { capturedOpts = opts; return fakeChild(); },
+      keySlotsSpec: "primary:AXI_TEST_KEY_SOURCE,backup:AXI_TEST_KEY_SOURCE",
+      providerKeyEnvName: "OPENCODE_GO_API_KEY",
+    });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), keySlot: "primary" });
+    assert.equal(dispatched.keySlot, "primary");
+    assert.equal(capturedOpts.env.OPENCODE_GO_API_KEY, "sk-super-secret-value");
+
+    const onDisk = fs.readFileSync(mgr.paths.TASKS_FILE, "utf8");
+    assert.ok(!onDisk.includes("sk-super-secret-value"), "the raw key value must never reach tasks.json");
+    assert.ok(onDisk.includes('"keySlot": "primary"'));
+    delete process.env.AXI_TEST_KEY_SOURCE;
   });
 });

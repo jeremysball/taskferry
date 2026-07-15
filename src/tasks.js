@@ -927,7 +927,10 @@ export function createTaskManager({
     }
 
     task.cancelRequested = true;
-    task.failureReason = null;
+    // Don't clobber a failureReason the watchdog already set (e.g. it fired
+    // provider_usage_exhausted just before this cancel() call arrived) --
+    // failureReason starts null at task creation, so leaving it alone here
+    // preserves that diagnostic instead of erasing it under "cancelled".
     stopRunningWatcher(taskId);
     const existingTimer = escalationTimers.get(taskId);
     if (existingTimer) {

@@ -10,7 +10,11 @@
     "start": "node src/server.js",
     "test": "npm run test:unit",
     "test:unit": "node --test src/tasks.test.js src/server.test.js",
-    "test:integration": "node src/smoke-test.js && node src/cancel-smoke-test.js && node src/poll-smoke-test.js"
+    "test:integration": "node src/smoke-test.js && node src/cancel-smoke-test.js && node src/poll-smoke-test.js",
+    "lint": "eslint .",
+    "typecheck": "tsc --noEmit",
+    "check": "git ls-files '*.js' | xargs -P4 -I{} node --check {} && npm run lint && npm run typecheck",
+    "prepare": "git config core.hooksPath .githooks || true"
   },
   "keywords": [],
   "type": "module",
@@ -18,5 +22,12 @@
     "@modelcontextprotocol/sdk": "^1.29.0",
     "@toon-format/toon": "^2.3.0",
     "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@types/node": "^26.1.1",
+    "eslint": "^10.7.0",
+    "globals": "^17.7.0",
+    "typescript": "^7.0.2"
   }
 }

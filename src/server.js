@@ -5,8 +5,69 @@ import { encode } from "@toon-format/toon";
 import { z } from "zod";
 import { defaultTaskManager as tasks } from "./tasks.js";
 
+/** @typedef {import("./tasks.js").TaskStatus} TaskStatus */
+/** @typedef {import("./tasks.js").ResultDetail} ResultDetail */
+
+/**
+ * @param {unknown} value
+ * @returns {{content: [{type: "text", text: string}]}}
+ */
 function toon(value) {
   return { content: [{ type: "text", text: encode(value) }] };
+}
+
+// taskferry_poll/taskferry_status get hit repeatedly in a poll loop against
+// the same task, but directory/model/sessionId/logPath/promptPreview are
+// static per task and were already returned once by taskferry_dispatch.
+// Default to the fields that actually change between polls; `full: true`
+// opts back into the complete detail record.
+/**
+ * @param {TaskStatus} detail
+ * @param {{full?: boolean}} [options]
+ * @returns {Partial<TaskStatus>}
+ */
+function leanStatus(detail, { full = false } = {}) {
+  if (full) return detail;
+  const { id, status, startedAt, exitCode, signal, logBytesWritten, logLastWriteAt, logHasEvent, outputTail, outputTailTotalChars, outputTailTruncated } = detail;
+  /** @type {Partial<TaskStatus>} */
+  const lean = { id, status, startedAt };
+  if (status !== "running" && status !== "queued") {
+    lean.exitCode = exitCode;
+    lean.signal = signal;
+  }
+  if (logBytesWritten !== undefined) {
+    lean.logBytesWritten = logBytesWritten;
+    lean.logLastWriteAt = logLastWriteAt;
+    lean.logHasEvent = logHasEvent;
+  }
+  if (outputTail !== undefined) {
+    lean.outputTail = outputTail;
+    lean.outputTailTotalChars = outputTailTotalChars;
+    lean.outputTailTruncated = outputTailTruncated;
+  }
+  lean.next =
+    status === "running" || status === "queued"
+      ? `Run taskferry_poll or taskferry_status with task_id "${id}" to check progress; pass full: true for directory/model/log path details`
+      : `Run taskferry_result with task_id "${id}" to see the final message; pass full: true here for directory/model/log path details`;
+  return lean;
+}
+
+// taskferry_result includes `narration` (every intermediate step, message
+// included) alongside `message` (just the final step) by default, which
+// pays for the final answer's text twice. Omit narration unless the caller
+// asked for specific fields or explicitly opted into `full` detail.
+/**
+ * @param {ResultDetail} detail
+ * @param {{full?: boolean, fields?: string[]}} [options]
+ * @returns {ResultDetail}
+ */
+function leanResult(detail, { full = false, fields } = {}) {
+  if (full || fields || !detail.narrationTotalChars) return detail;
+  const { narration: _narration, narrationTruncated: _narrationTruncated, ...rest } = detail;
+  return {
+    ...rest,
+    next: `Run taskferry_result with full: true, or fields including narration, on task_id "${detail.taskId}" to see intermediate step narration (${detail.narrationTotalChars} chars total)`,
+  };
 }
 
 const server = new McpServer({
@@ -72,7 +133,7 @@ server.registerTool(
   {
     title: "Block until a taskferry task finishes",
     description:
-      "Block on a queued or running task until it exits (or a timeout) and return its status once settled. The closest analog to the built-in Agent tool's auto-resume behavior available over plain MCP request/response, without a poll loop. Capped internally at 45s so the call returns cleanly instead of hitting Claude Code's own MCP tool-call timeout; if status is still queued or running when it returns, call taskferry_poll again. Pass tail_chars to get the trailing narration when the task is still running after the timeout; then call taskferry_tail to read more and report the task's current progress to the user. Always inform the user of the task's status after calling this tool.",
+      "Block on a queued or running task until it exits (or a timeout) and return its status once settled. The closest analog to the built-in Agent tool's auto-resume behavior available over plain MCP request/response, without a poll loop. Capped internally at 45s so the call returns cleanly instead of hitting Claude Code's own MCP tool-call timeout; if status is still queued or running when it returns, call taskferry_poll again. Pass tail_chars to get the trailing narration when the task is still running after the timeout; then call taskferry_tail to read more and report the task's current progress to the user. Always inform the user of the task's status after calling this tool. Returns a lean status by default (id, status, exitCode/signal once settled); pass full: true for directory/model/sessionId/logPath/promptPreview too — those don't change between polls of the same task, so they're worth fetching once rather than on every poll.",
     inputSchema: {
       task_id: z.string().describe("Task id returned by taskferry_dispatch."),
       timeout_ms: z
@@ -85,14 +146,18 @@ server.registerTool(
         .positive()
         .optional()
         .describe("When the poll times out and the task is still running, return this many trailing narration characters. Use this to report progress to the user while the task continues."),
+      full: z
+        .boolean()
+        .optional()
+        .describe("Return the complete detail record (directory, model, sessionId, logPath, promptPreview, ...) instead of the lean default. Defaults to false."),
     },
   },
-  async ({ task_id, timeout_ms, tail_chars }) => {
+  async ({ task_id, timeout_ms, tail_chars, full }) => {
     const s = await tasks.poll(task_id, {
       ...(timeout_ms != null ? { timeoutMs: timeout_ms } : {}),
       ...(tail_chars != null ? { tailChars: tail_chars } : {}),
     });
-    return toon(s);
+    return toon(leanStatus(s, { full: !!full }));
   }
 );
 
@@ -142,14 +207,18 @@ server.registerTool(
   {
     title: "Check taskferry task status",
     description:
-      "Return structured status for a dispatched task: queued | running | done | crashed | cancelled | unknown, plus exit code and log path once finished. Backed by the child process's real exit event, not log string-matching. Also reports logBytesWritten, logLastWriteAt, and logHasEvent so a task stuck at 'running' with no log activity (e.g. hung on a usage-limit retry) can be told apart from one that's actively producing output.",
+      "Return structured status for a dispatched task: queued | running | done | crashed | cancelled | unknown, plus exit code once finished. Backed by the child process's real exit event, not log string-matching. Also reports logBytesWritten, logLastWriteAt, and logHasEvent so a task stuck at 'running' with no log activity (e.g. hung on a usage-limit retry) can be told apart from one that's actively producing output. Returns a lean status by default; pass full: true for directory/model/sessionId/logPath/promptPreview too — those don't change between checks of the same task.",
     inputSchema: {
       task_id: z.string().describe("Task id returned by taskferry_dispatch."),
+      full: z
+        .boolean()
+        .optional()
+        .describe("Return the complete detail record (directory, model, sessionId, logPath, promptPreview, ...) instead of the lean default. Defaults to false."),
     },
   },
-  async ({ task_id }) => {
+  async ({ task_id, full }) => {
     const s = tasks.status(task_id);
-    return toon(s);
+    return toon(leanStatus(s, { full: !!full }));
   }
 );
 
@@ -186,23 +255,23 @@ server.registerTool(
   {
     title: "Fetch taskferry task result",
     description:
-      "Return the final assistant message and metadata (tokens, cost, session id) for a finished task, parsed from opencode's own --format json event stream. `message` is only the model's last turn (after all tool calls finish); `narration` includes intermediate step narration too, in order, truncated to 2000 chars by default. Errors politely if the task is still running.",
+      "Return the final assistant message and metadata (tokens, cost, session id) for a finished task, parsed from opencode's own --format json event stream. `message` is only the model's last turn (after all tool calls finish) and is included by default; `narration` includes intermediate step narration too, in order (message's text repeated at its tail), and is omitted by default since it duplicates message — request it via fields: [\"narration\"] or full: true when you need the intermediate steps, truncated to 2000 chars unless full: true. Errors politely if the task is still running.",
     inputSchema: {
       task_id: z.string().describe("Task id returned by taskferry_dispatch."),
       full: z
         .boolean()
         .optional()
-        .describe("Return the complete, untruncated narration instead of the 2000-char preview. Defaults to false."),
+        .describe("Include narration, untruncated, alongside the default fields. Defaults to false."),
       fields: z
         .array(z.enum(["message", "narration", "tokens", "cost", "sessionId", "exitCode", "signal", "spawnError", "logPath"]))
         .min(1)
         .optional()
-        .describe("Return only these result fields, plus taskId and status. Omit for the full backward-compatible result."),
+        .describe("Return only these result fields, plus taskId and status. Omit for the default result (message and metadata, no narration)."),
     },
   },
   async ({ task_id, full, fields }) => {
     const r = tasks.result(task_id, { full: !!full, ...(fields ? { fields } : {}) });
-    return toon(r);
+    return toon(leanResult(r, { full: !!full, fields }));
   }
 );
 

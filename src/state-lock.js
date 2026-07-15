@@ -6,6 +6,15 @@ import { randomUUID } from "node:crypto";
 // here because tasks.js's own state writes are already synchronous
 // (fs.writeFileSync/renameSync) and only ever held for the duration of a
 // single small JSON read-modify-write.
+//
+// Known limitation: the ownership token (read at release, compared, then
+// unlinked) narrows but doesn't eliminate a TOCTOU race in stale-lock
+// reclamation -- a holder stuck past `staleMs` could theoretically have its
+// lock reclaimed by another process in the microsecond window between the
+// read and the unlink. Plain fs syscalls have no atomic compare-and-delete;
+// closing this fully would require a real locking primitive (e.g. flock)
+// instead of a plain lock file. Accepted as residual risk: it only matters
+// once a holder has already overrun staleMs, which is itself anomalous.
 export function withFileLock(lockPath, fn, { staleMs = 10000, retryMs = 25, timeoutMs = 5000 } = {}) {
   const deadline = Date.now() + timeoutMs;
   const ownershipToken = `${process.pid}-${Date.now()}-${randomUUID()}`;

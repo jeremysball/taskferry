@@ -431,7 +431,7 @@ describe("no-output watchdog", () => {
     });
   });
 
-  test("a running child that writes a parseable log event before the deadline is left alone", async () => {
+  test("a running child that keeps writing parseable log events before each deadline is left alone", async () => {
     const child = fakeChild(7002);
     const killed = [];
     const mgr = makeManager({
@@ -441,14 +441,37 @@ describe("no-output watchdog", () => {
       watchdogPollMs: 5,
     });
     const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
-    fs.writeFileSync(mgr.status(dispatched.id).logPath, JSON.stringify({ type: "text", part: { messageID: "m1", text: "working..." } }) + "\n");
+    const logPath = mgr.status(dispatched.id).logPath;
+    const interval = setInterval(() => {
+      fs.appendFileSync(logPath, JSON.stringify({ type: "text", part: { messageID: "m1", text: "still working..." } }) + "\n");
+    }, 10);
 
     await new Promise((r) => setTimeout(r, 60));
+    clearInterval(interval);
     assert.deepEqual(killed, []);
     assert.equal(mgr.status(dispatched.id).status, "running");
 
     child.emit("exit", 0, null);
     assert.equal(mgr.status(dispatched.id).failureReason, null);
+  });
+
+  test("a running child that goes silent again after early output is eventually stopped (GLM-5.2 review finding)", async () => {
+    const child = fakeChild(7003);
+    const killed = [];
+    const mgr = makeManager({
+      spawnFn: () => child,
+      killFn: (pid, signal) => killed.push({ pid, signal }),
+      noOutputTimeoutMs: 20,
+      watchdogPollMs: 5,
+    });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+    fs.writeFileSync(mgr.status(dispatched.id).logPath, JSON.stringify({ type: "text", part: { messageID: "m1", text: "working..." } }) + "\n");
+
+    await new Promise((r) => setTimeout(r, 70));
+    assert.ok(killed.some((k) => k.signal === "SIGTERM"), "watchdog must eventually fire after the last activity, not just the start");
+
+    child.emit("exit", null, "SIGTERM");
+    assert.equal(mgr.status(dispatched.id).failureReason, "no_output_timeout");
   });
 });
 
@@ -1401,5 +1424,30 @@ describe("key slots (dispatch)", () => {
     assert.equal("AXI_TEST_KEY_PRIMARY" in capturedOpts.env, false);
     assert.equal("AXI_TEST_KEY_BACKUP" in capturedOpts.env, false);
     assert.equal("OPENCODE_GO_API_KEY" in capturedOpts.env, false);
+  });
+
+  test("dispatch without key_slot keeps the ambient provider key when a slot's source var shares its name (GLM-5.2 review finding)", (t) => {
+    // The documented setup registers the server's default key as a slot too
+    // (TASKFERRY_PROVIDER_KEY_ENV and one slot's source both named
+    // OPENCODE_GO_API_KEY) so it can also be picked explicitly. Without the
+    // fix, environmentWithoutKeySlotSources() strips that variable even when
+    // no key_slot was requested, leaving the child with no key at all.
+    process.env.OPENCODE_GO_API_KEY = "sk-default-secret-value";
+    process.env.AXI_TEST_KEY_BACKUP = "sk-backup-secret-value";
+    t.after(() => {
+      delete process.env.OPENCODE_GO_API_KEY;
+      delete process.env.AXI_TEST_KEY_BACKUP;
+    });
+    let capturedOpts = null;
+    const mgr = makeManager({
+      spawnFn: (cmd, args, opts) => { capturedOpts = opts; return fakeChild(); },
+      keySlotsSpec: "primary:OPENCODE_GO_API_KEY,backup:AXI_TEST_KEY_BACKUP",
+      providerKeyEnvName: "OPENCODE_GO_API_KEY",
+    });
+
+    mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+
+    assert.equal(capturedOpts.env.OPENCODE_GO_API_KEY, "sk-default-secret-value");
+    assert.equal("AXI_TEST_KEY_BACKUP" in capturedOpts.env, false);
   });
 });

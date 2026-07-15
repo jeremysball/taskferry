@@ -150,9 +150,9 @@ const PROVIDER_EXHAUSTION_PATTERNS = [
 // rate-limit-handling code, narrating "the server returned 429, retry
 // with backoff"); scanning the whole raw log killed tasks mid-run on that
 // false-positive surface (GLM-5.2 review of 0d944df..4e75129, finding 1).
-/** @param {string} rawLogText */
-function detectProviderExhaustion(rawLogText) {
-  for (const line of rawLogText.split("\n")) {
+/** @param {string[]} lines */
+function detectProviderExhaustion(lines) {
+  for (const line of lines) {
     if (!line.trim()) continue;
     let evt;
     try {
@@ -321,7 +321,19 @@ export function createTaskManager({
   /** @param {string|null|undefined} keyEnvValue */
   function dispatchEnvironment(keyEnvValue) {
     const env = environmentWithoutKeySlotSources();
-    if (keyEnvValue != null && providerKeyEnvName) env[providerKeyEnvName] = keyEnvValue;
+    if (keyEnvValue != null && providerKeyEnvName) {
+      env[providerKeyEnvName] = keyEnvValue;
+    } else if (providerKeyEnvName && process.env[providerKeyEnvName] != null) {
+      // No key_slot was requested for this task. environmentWithoutKeySlotSources()
+      // strips every registered slot *source* var, which silently erases the
+      // server's own ambient provider key whenever a slot happens to source
+      // from that same variable name (the natural setup: TASKFERRY_PROVIDER_KEY_ENV
+      // doubles as one slot's source, e.g. both named OPENCODE_GO_API_KEY).
+      // Restore the ambient value here so an unslotted dispatch still gets a
+      // key instead of failing deep in the opencode child with no diagnostic
+      // (GLM-5.2 review of 0d944df..4e75129, finding 2).
+      env[providerKeyEnvName] = process.env[providerKeyEnvName];
+    }
     return env;
   }
 
@@ -1002,24 +1014,51 @@ export function createTaskManager({
 
   /** @param {Task} task */
   function startRunningWatcher(task) {
-    const startedAtMs = Date.now();
+    let lastActivityMs = Date.now();
+    // Tracks how much of the log this watcher has already scanned, so each
+    // tick reads and regexes only the bytes appended since the last one
+    // instead of the whole file (O(1) amortized per tick, not O(n) per tick
+    // / O(n²) over a long-running task). `carry` holds a trailing partial
+    // line from the previous read until it's completed by the next chunk.
+    let bytesRead = 0;
+    let carry = "";
     const timer = setInterval(() => {
       const current = tasks.get(task.id);
       if (!current || current.status !== "running") {
         stopRunningWatcher(task.id);
         return;
       }
-      let raw;
+      let size;
       try {
-        raw = fs.readFileSync(current.logPath, "utf8");
+        size = fs.statSync(current.logPath).size;
       } catch {
-        raw = "";
+        size = 0;
       }
-      if (raw && detectProviderExhaustion(raw)) {
-        failRunningTask(current, "provider_usage_exhausted");
-        return;
+      if (size < bytesRead) {
+        // Log shrank or was replaced out from under us; rescan from scratch.
+        bytesRead = 0;
+        carry = "";
       }
-      if (!raw.trim() && Date.now() - startedAtMs >= noOutputTimeout) {
+      if (size > bytesRead) {
+        const chunkSize = size - bytesRead;
+        const buf = Buffer.alloc(chunkSize);
+        const fd = fs.openSync(current.logPath, "r");
+        try {
+          fs.readSync(fd, buf, 0, chunkSize, bytesRead);
+        } finally {
+          fs.closeSync(fd);
+        }
+        bytesRead = size;
+        lastActivityMs = Date.now();
+        const text = carry + buf.toString("utf8");
+        const lines = text.split("\n");
+        carry = lines.pop() ?? "";
+        if (detectProviderExhaustion(lines)) {
+          failRunningTask(current, "provider_usage_exhausted");
+          return;
+        }
+      }
+      if (Date.now() - lastActivityMs >= noOutputTimeout) {
         failRunningTask(current, "no_output_timeout");
       }
     }, watchdogPoll);

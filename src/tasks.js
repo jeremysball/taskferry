@@ -5,6 +5,7 @@ import path from "node:path";
 import os from "node:os";
 import { promisify } from "node:util";
 import { createTaskEvents } from "./events.js";
+import { createActivityCache, readActivitySnapshot } from "./activity.js";
 import { withFileLock } from "./state-lock.js";
 
 /**
@@ -190,6 +191,11 @@ function positiveInteger(value, fallback) {
   return Number.isSafeInteger(value) && value > 0 ? value : fallback;
 }
 
+/** @param {unknown} value @param {number} fallback @returns {number} */
+function nonNegativeInteger(value, fallback) {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : fallback;
+}
+
 /**
  * @param {unknown} err
  * @returns {string|undefined}
@@ -270,6 +276,10 @@ const WATCHDOG_KILL_GRACE_MS = 5000;
  * @param {string|null} [options.providerKeyEnvName]
  * @param {string|null} [options.summaryKeySlot]
  * @param {string|null} [options.summaryProviderKeyEnvName]
+ * @param {boolean} [options.activitySummariesEnabled]
+ * @param {number} [options.activityMinIntervalMs]
+ * @param {string} [options.activitySummaryModel]
+ * @param {number} [options.activityMaxWords]
  * @param {(event: object) => void} [options.onEvent]
  */
 // Factory rather than a module-level singleton, so tests can construct an
@@ -302,6 +312,10 @@ export function createTaskManager({
   providerKeyEnvName = process.env.TASKFERRY_PROVIDER_KEY_ENV || null,
   summaryKeySlot = process.env.TASKFERRY_SUMMARY_KEY_SLOT || null,
   summaryProviderKeyEnvName = process.env.TASKFERRY_SUMMARY_PROVIDER_KEY_ENV || null,
+  activitySummariesEnabled = process.env.TASKFERRY_ACTIVITY_SUMMARIES !== "0",
+  activityMinIntervalMs = Number(process.env.TASKFERRY_ACTIVITY_MIN_INTERVAL_MS),
+  activitySummaryModel = SUMMARY_MODEL,
+  activityMaxWords = 200,
   onEvent,
 } = {}) {
   const LOG_DIR = path.join(stateDir, "logs");
@@ -315,7 +329,13 @@ export function createTaskManager({
   const noOutputTimeout = positiveInteger(noOutputTimeoutMs, DEFAULT_NO_OUTPUT_TIMEOUT_MS);
   const watchdogPoll = positiveInteger(watchdogPollMs, DEFAULT_WATCHDOG_POLL_MS);
   const keySlots = parseKeySlots(keySlotsSpec);
-  const taskEvents = createTaskEvents(onEvent);
+  const activityInterval = nonNegativeInteger(activityMinIntervalMs, 60000);
+  const activityWords = positiveInteger(activityMaxWords, 200);
+  let eventSequence = 0;
+  const taskEvents = createTaskEvents((event) => {
+    eventSequence = Math.max(eventSequence, /** @type {{sequence: number}} */ (event).sequence);
+    if (onEvent) onEvent(event);
+  });
 
   function environmentWithoutKeySlotSources() {
     const env = { ...process.env };
@@ -419,8 +439,48 @@ export function createTaskManager({
   let runningCount = 0;
   let modelsCache = { expiresAt: 0, output: "" };
   let summaryAgentVerifiedUntil = 0;
+  let activitySummarySubscriptions = 0;
   /** @type {Error|null} */
   let stateLoadError = null;
+
+  const activityCache = createActivityCache({
+    summariesEnabled: false,
+    minIntervalMs: activityInterval,
+    summaryModel: activitySummaryModel,
+    maxWords: activityWords,
+    snapshot: (task) => readActivitySnapshot(task.logPath || ""),
+    summarize: ({ task, maxWords }) => summarizeActivity(task.id, maxWords),
+  });
+
+  /**
+   * @param {Task} task
+   * @param {{force?: boolean}} [options]
+   */
+  function scheduleActivity(task, { force = false } = {}) {
+    if (typeof onEvent !== "function" || task.internal) return;
+    const scheduledStatus = task.status;
+    const scheduledDirectory = task.directory;
+    void activityCache.refresh(task, { force }).then(/** @param {{activity: string, outputWatermark: number, summaryFailed: boolean, cached: boolean}|null} result */ (result) => {
+      if (!result) return;
+      if (scheduledStatus === "running" && task.status !== scheduledStatus) return;
+      const event = {
+        sequence: ++eventSequence,
+        type: "task.activity",
+        taskId: task.id,
+        directory: scheduledDirectory,
+        status: scheduledStatus,
+        previousStatus: null,
+        occurredAt: new Date().toISOString(),
+        activity: result.activity,
+        outputWatermark: result.outputWatermark,
+      };
+      try {
+        onEvent(event);
+      } catch {
+        // Activity is advisory and cannot interrupt task lifecycle.
+      }
+    });
+  }
 
   function loadPersisted() {
     try {
@@ -670,6 +730,49 @@ export function createTaskManager({
   }
 
   /**
+   * @param {string} taskId
+   * @param {number} maxWords
+   * @returns {Promise<string>}
+   */
+  async function summarizeActivity(taskId, maxWords) {
+    try {
+      const started = await summarizeTask(taskId, { maxWords, allowPromptFallback: true });
+      if (!started.summaryTask?.id) return "";
+      const settled = await poll(started.summaryTask.id, { timeoutMs: MAX_WAIT_MS });
+      if (settled.status !== "done") return "";
+      const detail = result(started.summaryTask.id, { fields: ["message"] });
+      return typeof detail.message === "string" ? detail.message : "";
+    } catch {
+      return "";
+    }
+  }
+
+  /** @param {string} taskId @param {number} maxWords @returns {Promise<object>} */
+  async function activitySummary(taskId, maxWords) {
+    ensureStateLoaded();
+    const source = tasks.get(taskId);
+    if (!source) throw noSuchTask(taskId);
+    if (!Number.isSafeInteger(maxWords) || maxWords < 75 || maxWords > 300) {
+      throw new Error("error: max_words must be an integer from 75 through 300\nhelp: run taskferry summary with max_words between 75 and 300");
+    }
+    const result = await activityCache.refresh(source, { force: true, includeSummary: activitySummariesEnabled, maxWords });
+    if (!result) throw new Error("error: activity summary was not refreshed\nhelp: retry the activity summary request");
+    return {
+      sourceTaskId: taskId,
+      sourceStatus: source.status,
+      activity: result.activity,
+      outputWatermark: result.outputWatermark,
+      summaryFailed: result.summaryFailed,
+    };
+  }
+
+  /** @param {string} taskId @param {{maxWords?: number, style?: string}} [options] */
+  function summarizeRequest(taskId, options = {}) {
+    if (options.style === "activity") return activitySummary(taskId, options.maxWords ?? activityWords);
+    return summarizeTask(taskId, options);
+  }
+
+  /**
    * @param {string} logPath
    * @returns {{narration: string, sourceLogBytes: number, inputBytes: number}}
    */
@@ -732,9 +835,9 @@ export function createTaskManager({
 
   /**
    * @param {string} taskId
-   * @param {{maxWords?: number}} [options]
+   * @param {{maxWords?: number, allowPromptFallback?: boolean}} [options]
    */
-  async function summarizeTask(taskId, { maxWords = 200 } = {}) {
+  async function summarizeTask(taskId, { maxWords = 200, allowPromptFallback = false } = {}) {
     ensureStateLoaded();
     const source = tasks.get(taskId);
     if (!source) throw noSuchTask(taskId);
@@ -744,13 +847,18 @@ export function createTaskManager({
     const snapshot = readNarrationExcerpt(source.logPath);
     const capturedAt = new Date().toISOString();
     const sourceStatus = source.status;
-    if (!snapshot.narration) {
+    if (!snapshot.narration && !allowPromptFallback) {
       return {
         sourceTaskId: taskId,
         sourceStatus,
         summary: "no model text observed yet",
         help: `Run taskferry_tail with task_id "${taskId}" after the task emits output`,
       };
+    }
+    if (!snapshot.narration) {
+      const prompt = source.promptPreview || "No model output observed yet.";
+      snapshot.narration = `Task prompt: ${prompt}`;
+      snapshot.inputBytes = Buffer.byteLength(snapshot.narration);
     }
     const env = summaryEnvironment();
     await Promise.all([summaryModelAvailable(SUMMARY_MODEL, env), verifySummaryAgent(env)]);
@@ -886,6 +994,7 @@ export function createTaskManager({
           // In-memory child settlement is authoritative; a failed best-effort
           // state write must not strand the concurrency slot.
         }
+        scheduleActivity(task, { force: true });
         try {
           cleanUpSnapshot();
         } finally {
@@ -930,6 +1039,7 @@ export function createTaskManager({
       task.pid = child.pid ?? null;
       runningCount++;
       persistTask(task.id);
+      scheduleActivity(task, { force: true });
       startRunningWatcher(task);
       child.unref();
     } catch (err) {
@@ -939,6 +1049,7 @@ export function createTaskManager({
       task.endedAt = new Date().toISOString();
       if (child?.pid != null) sendSignal(child.pid, "SIGKILL");
       persistTask(task.id);
+      scheduleActivity(task, { force: true });
       cleanUpSnapshot();
       settleWaiters(task.id);
     }
@@ -968,6 +1079,7 @@ export function createTaskManager({
       task.status = "cancelled";
       task.endedAt = new Date().toISOString();
       persistTask(task.id);
+      scheduleActivity(task, { force: true });
       settleWaiters(taskId);
       if (!launchQueue.length && launchTimer) {
         clearTimeout(launchTimer);
@@ -1093,6 +1205,7 @@ export function createTaskManager({
           })) {
             lastActivityMs = Date.now();
           }
+          void scheduleActivity(current);
         }
       } catch {
         // A rotated or removed log is retried on the next watcher tick.
@@ -1562,7 +1675,11 @@ export function createTaskManager({
     list,
     result,
     tail,
-    summarize: summarizeTask,
+    summarize: summarizeRequest,
+    setActivitySummarySubscriptions: /** @param {number} count */ (count) => {
+      activitySummarySubscriptions = Math.max(0, Number.isSafeInteger(count) ? count : 0);
+      activityCache.setSummariesEnabled(activitySummariesEnabled && activitySummarySubscriptions > 0);
+    },
     advisor,
     paths: { STATE_DIR: stateDir, LOG_DIR, SUMMARY_DIR, TASKS_FILE },
   };

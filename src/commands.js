@@ -90,6 +90,7 @@ export async function runCommand(command, options, { client, io = process, signa
       const summary = await client.request("task.summary", {
         taskId: options.taskId,
         ...(options.maxWords === undefined ? {} : { maxWords: options.maxWords }),
+        ...(options.style === "activity" ? { style: options.style } : {}),
       });
       return options.style === "report" ? summary : { style: options.style, ...summary };
     }
@@ -137,7 +138,7 @@ async function watchCommand(options, { client, io, signal, cwd }) {
       return;
     }
     signal?.addEventListener("abort", stop, { once: true });
-    Promise.resolve(client.subscribe({ directory }, (event) => {
+    Promise.resolve(client.subscribe({ directory, ...(options.summaries ? { summaries: true } : {}) }, (event) => {
       io.stdout.write(`${formatWatchEvent(event, options.format)}\n`);
     })).catch((error) => {
       if (settled) return;

@@ -115,7 +115,14 @@ export function removeStaleSocketIfUnchanged(socketPath, checkedIdentity, runtim
       if (error.code === "ENOENT") return false;
       throw error;
     }
-    if (currentIdentity.dev !== checkedIdentity.dev || currentIdentity.ino !== checkedIdentity.ino) return false;
+    // dev+ino alone can collide: an unlink immediately followed by a create
+    // can reuse the freed inode number on some filesystems. ctimeMs (set
+    // fresh on every create/rename) closes that race.
+    if (
+      currentIdentity.dev !== checkedIdentity.dev ||
+      currentIdentity.ino !== checkedIdentity.ino ||
+      currentIdentity.ctimeMs !== checkedIdentity.ctimeMs
+    ) return false;
     fs.unlinkSync(socketPath);
     return true;
   });

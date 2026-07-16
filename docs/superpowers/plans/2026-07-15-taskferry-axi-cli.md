@@ -19,6 +19,7 @@
 - Reject unknown commands, arguments, and flags before contacting the daemon.
 - Default workspace-scoped commands to the current working directory.
 - Normalize workspace paths with `fs.realpathSync`.
+- Scope every workspace-filtered command strictly by the realpath of the working directory, never by git repository identity (common-dir, origin URL, or branch name). Two git worktrees of the same repository are distinct workspaces: a task dispatched from one is invisible to `list`/`status`/`watch`/`context` run from another, even though they share history. Do not add a repo-level or branch-level grouping concept anywhere (CLI, daemon, or integrations) — worktree isolation falls directly out of existing directory scoping and must stay that way, with no added surface for the model to reason about.
 - Store state under `TASKFERRY_STATE_DIR`, then `XDG_STATE_HOME`, then `~/.local/state/taskferry`.
 - Store sockets under `TASKFERRY_RUNTIME_DIR`, then `XDG_RUNTIME_DIR/taskferry`, then the taskferry state directory's `run/` subdirectory.
 - Create state and runtime directories with mode `0700`; create files and the socket with mode `0600`.

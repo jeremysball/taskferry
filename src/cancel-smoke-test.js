@@ -1,35 +1,37 @@
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { decode } from "@toon-format/toon";
-import { execSync } from "node:child_process";
+import { execFileSync, execSync } from "node:child_process";
+import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const serverEntry = path.join(__dirname, "server.js");
+const cliEntry = path.join(__dirname, "cli.js");
 
-const transport = new StdioClientTransport({ command: process.execPath, args: [serverEntry] });
-const client = new Client({ name: "cancel-smoke-test", version: "0.0.1" });
-await client.connect(transport);
-
+const root = fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-cancel-smoke-"));
+const env = {
+  ...process.env,
+  TASKFERRY_STATE_DIR: path.join(root, "state"),
+  TASKFERRY_RUNTIME_DIR: path.join(root, "run"),
+};
 const dirArg = process.argv[2] || path.join(__dirname, "..");
 
-console.log("== taskferry_dispatch (long-running: sleep 60 via bash) ==");
-const dispatchRes = await client.callTool({
-  name: "taskferry_dispatch",
-  arguments: {
-    prompt: "Run 'sleep 60' via bash, then reply SLEEP_DONE. Do not shorten the sleep duration.",
-    directory: dirArg,
-    model: "opencode-go/minimax-m3",
-  },
-});
-const dispatched = decode(dispatchRes.content[0].text);
-console.log(dispatched);
-const taskId = dispatched.id;
-const pid = dispatched.pid;
+function taskferry(args) {
+  const output = execFileSync(process.execPath, [cliEntry, ...args], { env, encoding: "utf8" });
+  return decode(output);
+}
 
-console.log("\n== waiting 5s for opencode to actually start the sleep subprocess ==");
-await new Promise((r) => setTimeout(r, 5000));
+function daemonPid() {
+  return taskferry(["doctor", "--full"]).pid;
+}
+
+function stopDaemon() {
+  try {
+    process.kill(daemonPid(), "SIGTERM");
+  } catch {
+    // already gone
+  }
+}
 
 function psTree(pgid) {
   try {
@@ -39,36 +41,57 @@ function psTree(pgid) {
   }
 }
 
+let ok = true;
+function check(label, condition) {
+  console.log(`${condition ? "PASS" : "FAIL"} ${label}`);
+  if (!condition) ok = false;
+}
+
+console.log("== dispatch (long-running: sleep 60 via bash) ==");
+const dispatched = taskferry([
+  "dispatch",
+  "--prompt", "Run 'sleep 60' via bash, then reply SLEEP_DONE. Do not shorten the sleep duration.",
+  "--directory", dirArg,
+  "--model", "opencode-go/minimax-m3",
+]);
+console.log(dispatched);
+const taskId = dispatched.id;
+
+console.log("\n== waiting 5s for opencode to actually start the sleep subprocess ==");
+await new Promise((r) => setTimeout(r, 5000));
+
+const statusBeforeCancel = taskferry(["status", taskId, "--full"]);
+const pid = statusBeforeCancel.pid;
 console.log("process group before cancel:");
 console.log(psTree(pid) || "(empty)");
+check("task has a recorded pid before cancel", Number.isInteger(pid));
 
-console.log("\n== taskferry_cancel ==");
-const cancelRes = await client.callTool({
-  name: "taskferry_cancel",
-  arguments: { task_id: taskId, grace_ms: 4000 },
-});
-console.log(decode(cancelRes.content[0].text));
+console.log("\n== cancel ==");
+const cancelResult = taskferry(["cancel", taskId, "--grace-ms", "4000"]);
+console.log(cancelResult);
 
-console.log("\n== polling taskferry_status until settled ==");
+console.log("\n== waiting for settlement (taskferry wait) ==");
 let last = null;
-for (let i = 0; i < 20; i++) {
-  const statusRes = await client.callTool({ name: "taskferry_status", arguments: { task_id: taskId } });
-  last = decode(statusRes.content[0].text);
-  console.log(`[t+${i}s]`, last.status, last.signal ? `signal=${last.signal}` : "");
-  if (last.status !== "running" && last.status !== "queued") break;
-  await new Promise((r) => setTimeout(r, 1000));
+for (let i = 0; i < 3 && (!last || last.status === "running" || last.status === "queued"); i++) {
+  last = taskferry(["wait", taskId, "--timeout-ms", "10000"]);
+  console.log(`[attempt ${i + 1}]`, last.status, last.signal ? `signal=${last.signal}` : "");
 }
 
 console.log("\nprocess group after cancel settled:");
-console.log(psTree(pid) || "(empty, good)");
+const remaining = psTree(pid);
+console.log(remaining || "(empty, good)");
 
-await client.close();
+const groupGone = remaining === "";
+check("task settled as cancelled", last?.status === "cancelled");
+check("the complete process group was killed", groupGone);
 
-const groupGone = psTree(pid) === "";
-if (last.status === "cancelled" && groupGone) {
+stopDaemon();
+fs.rmSync(root, { recursive: true, force: true });
+
+if (ok) {
   console.log("\nCANCEL SMOKE TEST PASSED");
   process.exit(0);
 } else {
-  console.log(`\nCANCEL SMOKE TEST FAILED (status=${last.status}, groupGone=${groupGone})`);
+  console.log(`\nCANCEL SMOKE TEST FAILED (status=${last?.status}, groupGone=${groupGone})`);
   process.exit(1);
 }

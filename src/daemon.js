@@ -115,7 +115,14 @@ export function removeStaleSocketIfUnchanged(socketPath, checkedIdentity, runtim
       if (error.code === "ENOENT") return false;
       throw error;
     }
-    if (currentIdentity.dev !== checkedIdentity.dev || currentIdentity.ino !== checkedIdentity.ino) return false;
+    // dev+ino alone can collide: an unlink immediately followed by a create
+    // can reuse the freed inode number on some filesystems. ctimeMs (set
+    // fresh on every create/rename) closes that race.
+    if (
+      currentIdentity.dev !== checkedIdentity.dev ||
+      currentIdentity.ino !== checkedIdentity.ino ||
+      currentIdentity.ctimeMs !== checkedIdentity.ctimeMs
+    ) return false;
     fs.unlinkSync(socketPath);
     return true;
   });
@@ -186,7 +193,10 @@ async function invoke(manager, request) {
     case "task.tail":
       return manager.tail(params.taskId, params.chars === undefined ? undefined : { chars: params.chars });
     case "task.summary":
-      return manager.summarize(params.taskId, params.maxWords === undefined ? undefined : { maxWords: params.maxWords });
+      return manager.summarize(params.taskId, {
+        ...(params.maxWords === undefined ? {} : { maxWords: params.maxWords }),
+        ...(params.style === undefined ? {} : { style: params.style }),
+      });
     case "task.advisor":
       return manager.advisor({
         prompt: params.prompt,
@@ -254,6 +264,10 @@ export async function startDaemon({
     }
   };
   const manager = taskManagerFactory({ ...taskManagerOptions, stateDir, onEvent });
+  const updateSummarySubscriptions = () => {
+    if (typeof manager.setActivitySummarySubscriptions !== "function") return;
+    manager.setActivitySummarySubscriptions(Array.from(subscriptions.values()).filter((subscription) => subscription.summaries).length);
+  };
   const server = net.createServer((socket) => {
     clients.add(socket);
     socket.setEncoding("utf8");
@@ -264,6 +278,7 @@ export async function startDaemon({
       for (const [subscriptionId, subscription] of subscriptions) {
         if (subscription.socket === socket) subscriptions.delete(subscriptionId);
       }
+      updateSummarySubscriptions();
     };
     socket.on("close", cleanup);
     socket.on("error", cleanup);
@@ -302,7 +317,12 @@ export async function startDaemon({
           try {
             if (request.method === "event.subscribe") {
               const subscriptionId = randomUUID();
-              subscriptions.set(subscriptionId, { socket, directory: normalizeDirectory(request.params.directory) });
+              subscriptions.set(subscriptionId, {
+                socket,
+                directory: normalizeDirectory(request.params.directory),
+                summaries: request.params.summaries === true,
+              });
+              updateSummarySubscriptions();
               writeMessage(socket, successResponse(request.id, { subscriptionId }));
               return;
             }

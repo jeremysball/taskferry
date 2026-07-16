@@ -1,0 +1,251 @@
+# CLI Reference
+
+Every command emits [TOON](https://toonformat.dev/) (Token-Oriented Object
+Notation) on stdout, never JSON: roughly 40% fewer tokens than JSON for the
+same data, and a tabular form for list-shaped results instead of a repeated
+key array. Diagnostics go to stderr. Exit codes distinguish three outcomes:
+
+| Exit code | Meaning |
+|---|---|
+| `0` | Success, including idempotent no-ops (e.g. cancelling an already-finished task) |
+| `1` | Operational error (daemon unreachable, task not found, spawn failure) |
+| `2` | Usage error (bad flags, missing required arguments, unknown command) |
+
+Run `taskferry --help` for the command list, or `taskferry <command> --help`
+for a single command's usage, options, and examples as TOON.
+
+## `taskferry` (no arguments)
+
+Shows a live view of the current workspace: task counts by status, the task
+list, and contextual next-step suggestions.
+
+```
+$ taskferry
+bin: ~/.local/bin/taskferry
+description: Manage background OpenCode tasks in the current workspace.
+workspace: /workspace/my-repo
+counts:
+  queued: 0
+  running: 1
+  done: 3
+  crashed: 0
+  cancelled: 0
+  unknown: 0
+tasks[4]{id,status,model,startedAt}:
+  ...
+next[2]: Run taskferry status <id> for activity,Run taskferry wait <id> to wait for settlement
+```
+
+With no tasks in the workspace, `tasks` reads `"none found in this
+workspace"` and `next` suggests `dispatch` instead.
+
+## `taskferry dispatch --prompt <text> [options]`
+
+Queues `opencode run --dir <directory> --auto --format json -- <prompt>` as
+a background child process and returns a task summary immediately.
+
+| Flag | Notes |
+|---|---|
+| `--prompt <text>` | Required |
+| `--directory <path>` | Defaults to the current workspace; must be an absolute, existing directory |
+| `--model <id>` | `provider/model`, e.g. `opencode-go/minimax-m3`. Run `opencode models` to list installed models. Defaults to `openai/gpt-5.6-luna` at variant `high` |
+| `--variant <name>` | Reasoning-effort override (`high`, `max`, `minimal`, ...), applied only alongside `--model` |
+| `--session-id <id>` | Resume an existing OpenCode session (`--continue --session <id>`) instead of starting fresh; get session ids from a prior `result` or `status --full` |
+| `--key-slot <name>` | Use a configured provider-key slot instead of the daemon's ambient key; see [security.md](security.md) |
+
+```
+$ taskferry dispatch --prompt "Fix the failing tests" --directory /workspace/my-repo
+id: oc_mrn4ipkp_19450105
+status: running
+directory: /workspace/my-repo
+model: openai/gpt-5.6-luna
+...
+next: Run taskferry wait or taskferry status with task id "oc_mrn4ipkp_19450105" to check progress
+```
+
+At most `TASKFERRY_MAX_CONCURRENT_TASKS` tasks (default 4) run at once;
+extra dispatches return `status: "queued"` and start FIFO as running tasks
+finish, are cancelled, fail to spawn, or hit the no-output watchdog. See
+[daemon.md](daemon.md) for queueing, the watchdog, and rate limiting.
+
+## `taskferry wait <id> [options]`
+
+Blocks until the task's real `exit` event fires, or `--timeout-ms` elapses
+(capped at 45000ms internally regardless of what's passed), then returns the
+same status shape as `taskferry status`.
+
+| Flag | Notes |
+|---|---|
+| `--timeout-ms <number>` | Maximum wait in milliseconds |
+| `--tail-chars <number>` | Include this many trailing narration characters if the task is still running when the timeout elapses |
+| `--full` | Include directory, model, session id, log path, and prompt preview |
+
+If it returns `status: "queued"` or `"running"`, the task simply outlived
+the cap; call `wait` again. This command was named `poll` before the AXI
+CLI; `taskferry poll` now fails with a rename notice.
+
+```
+$ taskferry wait oc_mrn4ipkp_19450105 --timeout-ms 30000
+id: oc_mrn4ipkp_19450105
+status: done
+startedAt: 2026-07-16T06:24:06.650Z
+exitCode: 0
+signal: null
+next: Run taskferry result with task id "oc_mrn4ipkp_19450105" to see the final message; pass --full here for directory/model/log path details
+```
+
+## `taskferry advisor --prompt <text> --model <id> [options]`
+
+A blocking "ask a bigger model" call: dispatches like `dispatch`, then waits
+internally and returns the answer inline instead of a separate `wait`
+round-trip. Use it the way a weaker model consults a stronger one for
+planning or hard-debugging help mid-task, not for open-ended background work
+(use `dispatch` for that).
+
+| Flag | Notes |
+|---|---|
+| `--prompt <text>` | Required |
+| `--model <id>` | Required, no default; the caller picks the advisor |
+| `--directory <path>` | Defaults to the current workspace |
+| `--variant <name>` | Optional reasoning-effort override |
+| `--session-id <id>` | Resume a prior advisor exchange |
+| `--timeout-ms <number>` | Maximum wait in milliseconds, capped at 45000ms like `wait` |
+
+If it times out before the advisor answers, the response is `status:
+"running"` plus `id` and `sessionId`; call `wait` or `advisor` again (with
+that `sessionId`) to continue. If a resumed `session_id` has gone idle past
+`TASKFERRY_ADVISOR_SESSION_TTL_MS` (default 30 minutes) or is unrecognized
+(a typo, or from before a daemon restart), a fresh session starts
+automatically instead of erroring; the response's `session_reset` is `true`
+and `previous_session_id` holds the id that wasn't reused.
+
+## `taskferry cancel <id> [--grace-ms <number>]`
+
+Stops a running task: sends `SIGTERM` to the task's whole process group
+(not just the `opencode` process, so a subprocess it's mid-way through
+running, like a long bash command, dies too), escalating to `SIGKILL` after
+`--grace-ms` (default 5000) if it hasn't exited. Calling it on a task that
+already finished is a no-op that returns a `note` instead of an error, exit
+code `0`. The task's status becomes `"cancelled"` once its exit event
+lands, distinct from `"crashed"`.
+
+## `taskferry status <id> [--full]`
+
+Returns `{ status: "queued" | "running" | "done" | "crashed" | "cancelled" |
+"unknown", exitCode, signal, ... }`. `status` comes from the child process's
+actual exit event, not from parsing output. `"unknown"` appears only if the
+daemon restarted while the task was still running; see
+[daemon.md](daemon.md#recovery).
+
+Lean fields by default; pass `--full` for directory, model, session id, log
+path, and prompt preview. `failureReason` is `null` unless the task was
+stopped by the no-output watchdog (`"no_output_timeout"`) or
+provider-usage-exhaustion detection (`"provider_usage_exhausted"`).
+`keySlot` echoes the `--key-slot` name the task was dispatched with, or
+`null`.
+
+## `taskferry tail <id> [--chars <number>]`
+
+Returns the final `--chars` Unicode code points of the newest parsed `text`
+event for a task, reading the local task log only (never sends content to a
+model). Defaults to 1000, maximum 65536. The response includes the complete
+event length and `truncated` so callers know whether the suffix omitted
+earlier content.
+
+## `taskferry summary <id> [options]`
+
+Produces a bounded report or activity summary for a task.
+
+| Flag | Notes |
+|---|---|
+| `--style report\|activity` | Default `report` |
+| `--max-words <number>` | Target length from 75 through 300, default 200 |
+| `--wait` | Wait for the task to settle before summarizing |
+
+`--style report` starts a separate, asynchronous summary task using
+`opencode-go/deepseek-v4-flash` by default: wait for the returned
+`summaryTask.id`, then run `taskferry result` on that id. `--style activity`
+returns a synchronous, cached activity snapshot instead (the same mechanism
+`taskferry watch --summaries` uses); see [security.md](security.md) for what
+gets sent to the summary model and how to disable it.
+
+## `taskferry result <id> [options]`
+
+Once a task is `done` or `crashed`, parses its log (OpenCode's own
+`--format json` NDJSON event stream) into `message` (the model's final turn
+only) and `narration` (every `text` event across every step, in order).
+A single-step run (no tool calls) has `message === narration`. Also returns
+`sessionId`, `tokens`, and `cost`. Returns a polite "still running" message
+instead of a partial result if called too early.
+
+| Flag | Notes |
+|---|---|
+| `--full` | Include untruncated narration; only valid when `narration` is in `--fields` |
+| `--fields <comma-list>` | Project only the fields you need: `message`, `narration`, `tokens`, `cost`, `sessionId`, `exitCode`, `signal`, `spawnError`, `failureReason`, `keySlot`, `logPath` |
+
+```
+$ taskferry result oc_mrn4ipkp_19450105
+taskId: oc_mrn4ipkp_19450105
+status: done
+exitCode: 0
+sessionId: ses_0966726c8ffeMJPzDyL5PxWd9G
+tokens: {total: 24853, input: 22916, output: 31, ...}
+cost: 0.00702636
+message: PONG
+next: Run taskferry result --full or --fields narration with task id "oc_mrn4ipkp_19450105" to see intermediate step narration (4 chars total)
+```
+
+## `taskferry list [options]`
+
+Lists tasks scoped to a workspace, newest first, with counts by status.
+
+| Flag | Notes |
+|---|---|
+| `--directory <path>` | Workspace to inspect, defaults to the current workspace |
+| `--all` | Include tasks from every workspace; cannot combine with `--directory` |
+| `--limit <number>` | Limit displayed rows while preserving the full counts |
+
+## `taskferry watch [options]`
+
+Streams task state events for a workspace until interrupted (`Ctrl-C`,
+SIGTERM), then exits cleanly with code `0`.
+
+| Flag | Notes |
+|---|---|
+| `--directory <path>` | Workspace to watch, defaults to the current workspace |
+| `--format toon\|claude-monitor\|ndjson` | Stream format, default `toon` |
+| `--summaries` | Request live activity summaries (a secondary model call); see [security.md](security.md) |
+
+`ndjson` emits one JSON object per line, for scripting. `claude-monitor`
+emits `Taskferry(<status> · <id>): <activity>` lines, the format Claude
+Code's monitor surface uses (`integrations/claude/monitors/monitors.json`).
+
+## `taskferry context [options]`
+
+Prints compact current-workspace context for an agent session-start hook:
+task counts and rows, nothing else.
+
+| Flag | Notes |
+|---|---|
+| `--directory <path>` | Workspace to inspect, defaults to the current workspace |
+| `--format toon\|claude-hook\|codex-hook` | Default `toon`; the two hook formats wrap the TOON payload in the target agent's expected envelope |
+
+## `taskferry doctor [--full]`
+
+Checks daemon health and installation details: connects (auto-starting the
+daemon if needed), and reports `{ healthy, pid }`. `--full` adds `version`,
+`cliVersion`, and `protocolVersion`. See
+[troubleshooting.md](troubleshooting.md).
+
+## `taskferry --version` / `taskferry -V`
+
+Prints `{ name: "taskferry", version, protocolVersion }`.
+
+## Retired names
+
+`taskferry setup` does not exist; install the native agent integration for
+your client instead (see `docs/integrations/`). Any `taskferry_<name>` MCP
+tool name, `poll`, or an underscore/camelCase flag from the MCP era (e.g.
+`--task-id`, `--timeout_ms`) fails with exit code `2` and a `help:` line
+naming the current CLI equivalent. See
+[migrating-from-mcp.md](migrating-from-mcp.md) for the full table.

@@ -1,0 +1,30 @@
+{
+  "description": "Inject current workspace context at session start and before each user turn",
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|clear|compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "if command -v taskferry >/dev/null 2>&1; then if context=\"$(taskferry context --format codex-hook)\"; then printf '%s\\n' \"$context\"; else printf '%s\\n' '{\"additionalContext\":\"taskferry context failed. Run taskferry doctor to diagnose.\"}'; fi; else printf '%s\\n' '{\"additionalContext\":\"taskferry is unavailable. Install taskferry and ensure it is on PATH, then restart Codex.\"}'; fi",
+            "timeout": 10,
+            "statusMessage": "Loading Taskferry workspace context"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "if command -v taskferry >/dev/null 2>&1; then if context=\"$(taskferry context --format codex-hook)\"; then printf '%s\\n' \"$context\"; else printf '%s\\n' '{\"additionalContext\":\"taskferry context failed. Run taskferry doctor to diagnose.\"}'; fi; else printf '%s\\n' '{\"additionalContext\":\"taskferry is unavailable. Install taskferry and ensure it is on PATH, then restart Codex.\"}'; fi",
+            "timeout": 10,
+            "statusMessage": "Refreshing Taskferry workspace context"
+          }
+        ]
+      }
+    ]
+  }
+}

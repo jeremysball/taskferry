@@ -1,0 +1,19 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "taskferry",
+  "description": "Native Claude Code integration for the Taskferry AXI CLI",
+  "owner": {
+    "name": "Taskferry"
+  },
+  "plugins": [
+    {
+      "name": "taskferry",
+      "description": "Background OpenCode task execution through the Taskferry AXI CLI",
+      "version": "2.0.0",
+      "source": "./integrations/claude",
+      "author": {
+        "name": "Taskferry"
+      }
+    }
+  ]
+}

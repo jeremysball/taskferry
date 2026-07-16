@@ -115,9 +115,10 @@ function validParams(method, params) {
         && isNonEmptyString(params.taskId)
         && optional(params.chars, (value) => positiveInteger(value) && value <= 65536);
     case "task.summary":
-      return hasOnly(params, ["taskId", "maxWords"])
+      return hasOnly(params, ["taskId", "maxWords", "style"])
         && isNonEmptyString(params.taskId)
-        && optional(params.maxWords, (value) => Number.isSafeInteger(value) && value >= 75 && value <= 300);
+        && optional(params.maxWords, (value) => Number.isSafeInteger(value) && value >= 75 && value <= 300)
+        && optional(params.style, (value) => value === "report" || value === "activity");
     case "task.advisor":
       return hasOnly(params, ["prompt", "directory", "model", "variant", "sessionId", "timeoutMs"])
         && isNonEmptyString(params.prompt)
@@ -127,8 +128,11 @@ function validParams(method, params) {
         && optional(params.sessionId, isNonEmptyString)
         && optional(params.timeoutMs, nonNegativeInteger);
     case "task.context":
-    case "event.subscribe":
       return hasOnly(params, ["directory"]) && isAbsolutePath(params.directory);
+    case "event.subscribe":
+      return hasOnly(params, ["directory", "summaries"])
+        && isAbsolutePath(params.directory)
+        && optional(params.summaries, (value) => typeof value === "boolean");
     default:
       return false;
   }

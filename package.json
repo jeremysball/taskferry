@@ -1,16 +1,19 @@
 {
   "name": "taskferry",
   "version": "2.0.0",
-  "description": "MCP server exposing a first-class background-dispatch tool for the opencode CLI",
-  "main": "src/server.js",
+  "description": "AXI CLI and local daemon for background OpenCode tasks",
+  "main": "src/cli.js",
+  "exports": "./src/opencode-plugin.js",
   "bin": {
-    "taskferry": "src/server.js"
+    "taskferry": "src/cli.js"
   },
   "scripts": {
-    "start": "node src/server.js",
+    "start": "node src/cli.js",
     "test": "npm run test:unit",
-    "test:unit": "node --test src/tasks.test.js src/server.test.js",
+    "test:unit": "node --test src/tasks.test.js src/events.test.js src/protocol.test.js src/state-lock.test.js src/daemon.test.js src/args.test.js src/cli.test.js src/integrations.test.js src/opencode-plugin.test.js src/activity.test.js",
     "test:integration": "node src/smoke-test.js && node src/cancel-smoke-test.js && node src/poll-smoke-test.js",
+    "skill:generate": "node scripts/generate-skill.js",
+    "skill:check": "node scripts/generate-skill.js --check",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
     "check": "git ls-files '*.js' | xargs -P4 -I{} node --check {} && npm run lint && npm run typecheck",
@@ -19,9 +22,7 @@
   "keywords": [],
   "type": "module",
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.29.0",
-    "@toon-format/toon": "^2.3.0",
-    "zod": "^4.4.3"
+    "@toon-format/toon": "^2.3.0"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",

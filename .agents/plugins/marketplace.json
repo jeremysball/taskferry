@@ -1,0 +1,22 @@
+{
+  "name": "taskferry",
+  "interface": {
+    "displayName": "Taskferry"
+  },
+  "plugins": [
+    {
+      "name": "taskferry",
+      "displayName": "Taskferry",
+      "source": {
+        "source": "local",
+        "path": "./integrations/codex"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Development & Workflow",
+      "description": "Background OpenCode task execution through the Taskferry AXI CLI"
+    }
+  ]
+}

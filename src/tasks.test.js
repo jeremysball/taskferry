@@ -13,7 +13,7 @@ import { createTaskManager } from "./tasks.js";
 // runs synchronously in the constructor, same as the old module-level code
 // did at import time). `tasksFixture` may be an array or `(logDir) => array`
 // for fixtures whose logPath needs to point inside the real log dir.
-function makeManager({ tasksFixture = [], logs = {}, spawnFn, killFn, listModelsFn, verifySummaryAgentFn, maxDispatchesPerWindow, dispatchWindowMs, advisorSessionTtlMs, maxConcurrentTasks, noOutputTimeoutMs, watchdogPollMs, keySlotsSpec, providerKeyEnvName, summaryKeySlot, summaryProviderKeyEnvName, onEvent } = {}) {
+function makeManager({ tasksFixture = [], logs = {}, spawnFn, killFn, listModelsFn, verifySummaryAgentFn, maxDispatchesPerWindow, dispatchWindowMs, advisorSessionTtlMs, maxConcurrentTasks, noOutputTimeoutMs, watchdogPollMs, maxWaitMs, keySlotsSpec, providerKeyEnvName, summaryKeySlot, summaryProviderKeyEnvName, onEvent } = {}) {
   const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-test-"));
   const logDir = path.join(stateDir, "logs");
   fs.mkdirSync(logDir, { recursive: true });
@@ -37,6 +37,7 @@ function makeManager({ tasksFixture = [], logs = {}, spawnFn, killFn, listModels
     ...(maxConcurrentTasks != null ? { maxConcurrentTasks } : {}),
     ...(noOutputTimeoutMs != null ? { noOutputTimeoutMs } : {}),
     ...(watchdogPollMs != null ? { watchdogPollMs } : {}),
+    ...(maxWaitMs != null ? { maxWaitMs } : {}),
     ...(keySlotsSpec != null ? { keySlotsSpec } : {}),
     ...(providerKeyEnvName != null ? { providerKeyEnvName } : {}),
     ...(summaryKeySlot != null ? { summaryKeySlot } : {}),
@@ -872,6 +873,36 @@ describe("poll()", () => {
     assert.equal(settled.outputTailTotalChars, output.length);
     assert.equal(settled.outputTailTruncated, true);
   });
+
+  test("with no options, resolves only once the task settles (no default 45s timer)", async () => {
+    const child = fakeChild();
+    const mgr = makeManager({ spawnFn: () => child });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+
+    const waitPromise = mgr.poll(dispatched.id);
+    let settledYet = false;
+    void waitPromise.then(() => { settledYet = true; });
+
+    // 100ms is well past the 20-50ms the small-value tests above use, so a
+    // resolved promise here would prove the old 45s default was still in
+    // place. With the default removed, the promise must still be pending.
+    await new Promise((r) => setTimeout(r, 100));
+    assert.equal(settledYet, false, "poll() with no options must not resolve before the task settles");
+
+    child.emit("exit", 0, null);
+    const settled = await waitPromise;
+    assert.equal(settled.status, "done");
+  });
+
+  test("with { timeoutMs: N }, still returns 'running' after Nms when the task hasn't settled (explicit override path)", async () => {
+    const child = fakeChild();
+    const mgr = makeManager({ spawnFn: () => child });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+
+    const settled = await mgr.poll(dispatched.id, { timeoutMs: 30 });
+    assert.equal(settled.status, "running");
+    assert.equal("outputTail" in settled, false);
+  });
 });
 
 describe("advisor()", () => {
@@ -1082,6 +1113,26 @@ describe("advisor()", () => {
     const advised = await advisorPromise;
     assert.equal(advised.status, "crashed");
     assert.equal(advised.exitCode, 1);
+  });
+
+  test("with no timeout_ms, against an injected small maxWaitMs, still returns the bounded 'still running' + resumable session_id shape", async () => {
+    const child = fakeChild();
+    const mgr = makeManager({ spawnFn: () => child, maxWaitMs: 30 });
+
+    const advisorPromise = mgr.advisor({
+      prompt: "long question",
+      directory: os.tmpdir(),
+      model: "openai/gpt-5.6-sol",
+    });
+    const row = mgr.list().tasks[0];
+    const dispatched = { id: row.id, logPath: path.join(mgr.paths.LOG_DIR, `${row.id}.ndjson`) };
+    fs.writeFileSync(dispatched.logPath, JSON.stringify({ sessionID: "ses_midrun" }));
+
+    const advised = await advisorPromise;
+    assert.equal(advised.status, "running");
+    assert.equal(advised.task_id, dispatched.id);
+    assert.equal(advised.session_id, "ses_midrun");
+    assert.match(advised.note, /taskferry_poll or taskferry_advisor again with session_id/);
   });
 });
 

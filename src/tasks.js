@@ -271,6 +271,7 @@ const WATCHDOG_KILL_GRACE_MS = 5000;
  * @param {number} [options.advisorSessionTtlMs]
  * @param {number} [options.noOutputTimeoutMs]
  * @param {number} [options.watchdogPollMs]
+ * @param {number} [options.maxWaitMs]
  * @param {string} [options.keySlotsSpec]
  * @param {string|null} [options.providerKeyEnvName]
  * @param {string|null} [options.summaryKeySlot]
@@ -307,6 +308,7 @@ export function createTaskManager({
   advisorSessionTtlMs = DEFAULT_ADVISOR_SESSION_TTL_MS,
   noOutputTimeoutMs = DEFAULT_NO_OUTPUT_TIMEOUT_MS,
   watchdogPollMs = DEFAULT_WATCHDOG_POLL_MS,
+  maxWaitMs = MAX_WAIT_MS,
   keySlotsSpec = process.env.TASKFERRY_KEY_SLOTS,
   providerKeyEnvName = process.env.TASKFERRY_PROVIDER_KEY_ENV || null,
   summaryKeySlot = process.env.TASKFERRY_SUMMARY_KEY_SLOT || null,
@@ -327,6 +329,7 @@ export function createTaskManager({
   const advisorTtl = positiveInteger(advisorSessionTtlMs, DEFAULT_ADVISOR_SESSION_TTL_MS);
   const noOutputTimeout = positiveInteger(noOutputTimeoutMs, DEFAULT_NO_OUTPUT_TIMEOUT_MS);
   const watchdogPoll = positiveInteger(watchdogPollMs, DEFAULT_WATCHDOG_POLL_MS);
+  const maxWait = positiveInteger(maxWaitMs, MAX_WAIT_MS);
   const keySlots = parseKeySlots(keySlotsSpec);
   const activityInterval = nonNegativeInteger(activityMinIntervalMs, 60000);
   const activityWords = positiveInteger(activityMaxWords, 200);
@@ -1313,11 +1316,10 @@ export function createTaskManager({
    * @param {{timeoutMs?: number, tailChars?: number}} [options]
    * @returns {Promise<TaskStatus>}
    */
-  function poll(taskId, { timeoutMs = MAX_WAIT_MS, tailChars } = {}) {
+  function poll(taskId, { timeoutMs, tailChars } = {}) {
     ensureStateLoaded();
     const task = tasks.get(taskId);
     if (!task) throw noSuchTask(taskId);
-    const cappedMs = Math.min(timeoutMs, MAX_WAIT_MS);
     if (task.status !== "running" && task.status !== "queued") {
       return Promise.resolve(summarize(task));
     }
@@ -1343,7 +1345,7 @@ export function createTaskManager({
           outputTailTruncated: output.length > tailChars,
         });
       };
-      const timer = setTimeout(() => settle(true), cappedMs);
+      const timer = timeoutMs != null ? setTimeout(() => settle(true), timeoutMs) : undefined;
       if (!waiters.has(taskId)) waiters.set(taskId, []);
       /** @type {Array<(timedOut?: boolean) => void>} */ (waiters.get(taskId)).push(settle);
     });
@@ -1371,7 +1373,7 @@ export function createTaskManager({
     } catch (err) {
       throw new Error(errMessage(err).replaceAll("taskferry_dispatch", "taskferry_advisor"), { cause: err });
     }
-    const settled = await poll(dispatched.id, timeout_ms != null ? { timeoutMs: timeout_ms } : {});
+    const settled = await poll(dispatched.id, { timeoutMs: timeout_ms ?? maxWait });
 
     const resetFields = resolved.reset ? { previous_session_id: resolved.previousSessionId } : {};
 

@@ -1,4 +1,4 @@
-import { test, describe } from "node:test";
+import { test, describe, mock } from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import fs from "node:fs";
@@ -875,33 +875,52 @@ describe("poll()", () => {
   });
 
   test("with no options, resolves only once the task settles (no default 45s timer)", async () => {
+    mock.timers.enable({ apis: ["setTimeout"] });
     const child = fakeChild();
     const mgr = makeManager({ spawnFn: () => child });
     const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
 
-    const waitPromise = mgr.poll(dispatched.id);
-    let settledYet = false;
-    void waitPromise.then(() => { settledYet = true; });
+    try {
+      const waitPromise = mgr.poll(dispatched.id);
+      let settledYet = false;
+      void waitPromise.then(() => { settledYet = true; });
 
-    // 100ms is well past the 20-50ms the small-value tests above use, so a
-    // resolved promise here would prove the old 45s default was still in
-    // place. With the default removed, the promise must still be pending.
-    await new Promise((r) => setTimeout(r, 100));
-    assert.equal(settledYet, false, "poll() with no options must not resolve before the task settles");
+      // Advance beyond the old default instead of waiting a short real-time interval.
+      mock.timers.tick(45001);
+      await Promise.resolve();
+      assert.equal(settledYet, false, "poll() with no options must not resolve before the task settles");
 
-    child.emit("exit", 0, null);
-    const settled = await waitPromise;
-    assert.equal(settled.status, "done");
+      child.emit("exit", 0, null);
+      const settled = await waitPromise;
+      assert.equal(settled.status, "done");
+    } finally {
+      mock.timers.reset();
+    }
   });
 
   test("with { timeoutMs: N }, still returns 'running' after Nms when the task hasn't settled (explicit override path)", async () => {
+    mock.timers.enable({ apis: ["setTimeout"] });
     const child = fakeChild();
     const mgr = makeManager({ spawnFn: () => child });
     const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
 
-    const settled = await mgr.poll(dispatched.id, { timeoutMs: 30 });
-    assert.equal(settled.status, "running");
-    assert.equal("outputTail" in settled, false);
+    try {
+      const waitPromise = mgr.poll(dispatched.id, { timeoutMs: 50000 });
+      let settledYet = false;
+      void waitPromise.then(() => { settledYet = true; });
+
+      // The old implementation clamped this value to 45000ms.
+      mock.timers.tick(45001);
+      await Promise.resolve();
+      assert.equal(settledYet, false, "timeoutMs above the old cap must not settle at 45000ms");
+
+      mock.timers.tick(4999);
+      const settled = await waitPromise;
+      assert.equal(settled.status, "running");
+      assert.equal("outputTail" in settled, false);
+    } finally {
+      mock.timers.reset();
+    }
   });
 });
 

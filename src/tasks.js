@@ -122,9 +122,8 @@ const DEFAULT_STATE_DIR =
   process.env.TASKFERRY_STATE_DIR ||
   path.join(process.env.XDG_STATE_HOME || path.join(os.homedir(), ".local", "state"), "taskferry");
 
-// Cap how long `taskferry wait` blocks a single call so a long task returns
-// a clean "still running" instead of leaving a caller blocked indefinitely;
-// callers loop `wait` past this cap for longer tasks.
+// Default timeout for advisor() and the internal activity-summary poll.
+// Regular taskferry wait calls have no implicit timeout.
 const MAX_WAIT_MS = 45000;
 
 const NARRATION_PREVIEW_CHARS = 2000;

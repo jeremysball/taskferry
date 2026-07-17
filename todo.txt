@@ -11,23 +11,23 @@ Instructions:
 TIER 0: BLOCKED — FIX PREMISE BEFORE ANY WORK STARTS
 =====================================================
 
-[_] Setup wrapper-script fix (replace broken symlink premise)
-    Status: blocked on premise rewrite
-    Details: import.meta.url === argv[1] guard in src/cli.js makes symlinks
-             silently no-op (exit 0, no output). Fix: install a shell wrapper
-             at ~/.local/bin/taskferry instead of a symlink:
-               #!/bin/sh
-               exec node /path/to/taskferry/src/cli.js "$@"
-    Plan: 2026-07-16-taskferry-setup.md (task 1 needs redesign, then 2-3)
+[X] Setup wrapper-script fix (replace broken symlink premise)
+    Status: shipped — merged from feat/taskferry-setup (b208bc2)
+    Details: fixed at the root instead of routing around it with a wrapper
+             script. src/cli.js now resolves process.argv[1] through
+             fs.realpathSync before comparing to import.meta.url, so a
+             symlinked entrypoint (~/.local/bin/taskferry) resolves and runs
+             main() correctly instead of silently exiting 0. Regression test
+             spawns the CLI through a real symlink. Also brought in
+             src/setup.js (local install bootstrap) and doc updates.
 
-[_] Watchdog two-phase no-output timeout
-    Status: blocked on invalid test scenario
-    Details: 120s pre-output budget, 300s post-output latch, per-task tracking.
-             Task 2's daemon re-adoption test is invalid — loadPersisted()
-             relabels active tasks "unknown" on restart and
-             startRunningWatcher() only starts on new dispatch, so the tested
-             scenario can't occur as written. Rewrite Task 2, then implement 1 & 3.
-    Plan: 2026-07-16-watchdog-output-escalation.md (task 2 invalid)
+[X] Watchdog two-phase no-output timeout
+    Status: shipped — merged from worktree-wait-hang-and-plan-fixes
+             (a371a13, b36158d)
+    Details: post-output no-output timeout option plumbed through, watchdog
+             escalates after the first log event instead of using one flat
+             timeout for the whole task lifetime. 127 lines of new tests
+             covering the escalation path.
 
 
 TIER VR: VERY REQUESTED — TOP PRIORITY
@@ -94,13 +94,15 @@ TIER DOCKER: BUNDLED INTO FUTURE DEPLOYMENT LAYER
     Details: key storage/management folded into Docker volume + env config
 
 [X] Wait timeout clamp removal
-    Status: shipped — src/tasks.js poll() no longer defaults to MAX_WAIT_MS
+    Status: shipped — merged from worktree-wait-hang-and-plan-fixes (8cd5201),
+             superseding an earlier simpler fix (35287ee) directly on main
     Details: `taskferry wait` with no --timeout-ms now blocks until real
              settlement; passing --timeout-ms still opts into an early
-             return at that many ms. MAX_WAIT_MS retained only to bound the
-             internal summary-task poll() call (src/tasks.js:742), unrelated
-             to caller-facing wait. Tests added in tasks.test.js. Docs fixed
-             in docs/cli-reference.md (wait + advisor sections).
+             return at that many ms. maxWaitMs is now an injectable factory
+             option (defaults to MAX_WAIT_MS) rather than a hardcoded
+             constant, and advisor()'s poll() call site now honors
+             timeout_ms too. Tests added in tasks.test.js. Docs fixed in
+             docs/cli-reference.md (wait + advisor sections).
 
 [_] Doctor --full environmental output
     Status: deferred — bundled with Docker tier (goes with key management)

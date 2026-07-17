@@ -95,7 +95,7 @@ function marketplaceHas(checkoutDirectory, listOutput) {
   return listOutput.includes(checkoutDirectory) || listOutput.includes("taskferry");
 }
 
-function pluginInstalled(installedJson) {
+export function pluginInstalled(installedJson) {
   let parsed;
   try {
     parsed = JSON.parse(installedJson);

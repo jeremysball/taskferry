@@ -9,6 +9,19 @@ import {
   projectContext,
   projectList,
 } from "./output.js";
+import { defaultRunCommand as defaultShellRunner, pluginInstalled } from "./setup.js";
+
+// Checked from `doctor` so a missing Claude plugin install surfaces as an
+// explicit warning instead of silent absence: without it, `claude-monitor`
+// notifications (see docs/cli-reference.md) never fire and nothing else says
+// why. `runShellCommand` is injected (default: a real `claude` invocation) so
+// tests can stub it without spawning a subprocess.
+function checkClaudeIntegration(runShellCommand) {
+  const probe = runShellCommand("claude", ["plugin", "list", "--json"]);
+  if (probe.error) return { installed: false, reason: "claude CLI not found" };
+  if (probe.status !== 0) return { installed: false, reason: "claude plugin list failed" };
+  return { installed: pluginInstalled(probe.stdout || "") };
+}
 
 export function normalizeDirectory(directory) {
   let normalized;
@@ -30,7 +43,7 @@ export function normalizeDirectory(directory) {
   return normalized;
 }
 
-export async function runCommand(command, options, { client, io = process, signal, executablePath, cwd = process.cwd() } = {}) {
+export async function runCommand(command, options, { client, io = process, signal, executablePath, cwd = process.cwd(), runShellCommand = defaultShellRunner } = {}) {
   switch (command) {
     case "home": {
       const directory = normalizeDirectory(options.directory || cwd);
@@ -145,7 +158,16 @@ export async function runCommand(command, options, { client, io = process, signa
     }
     case "doctor": {
       const health = await client.request("system.health", {});
-      return options.full ? { ...health, cliVersion: "2.0.0", protocolVersion: 1 } : health;
+      const claude = checkClaudeIntegration(runShellCommand);
+      const warnings = claude.installed
+        ? []
+        : [`Claude plugin not installed (${claude.reason || "not found in claude plugin list"}): claude-monitor notifications won't fire. Run taskferry setup to install it.`];
+      return {
+        ...health,
+        ...(options.full ? { cliVersion: "2.0.0", protocolVersion: 1 } : {}),
+        integrations: { claude },
+        ...(warnings.length ? { warnings } : {}),
+      };
     }
     default:
       throw new Error(`unknown command: ${command}`);

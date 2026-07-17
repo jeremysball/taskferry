@@ -249,8 +249,13 @@ task counts and rows, nothing else.
 
 Checks daemon health and installation details: connects (auto-starting the
 daemon if needed), and reports `{ healthy, pid }`. `--full` adds `version`,
-`cliVersion`, and `protocolVersion`. See
-[troubleshooting.md](troubleshooting.md).
+`cliVersion`, and `protocolVersion`.
+
+Also reports `integrations.claude.installed`, checked locally via `claude
+plugin list --json` (not a daemon RPC). When it's `false`, a `warnings` array
+explains that `claude-monitor` notifications (see `taskferry watch --format
+claude-monitor` above) won't fire, and points at `taskferry setup` to install
+the plugin. See [troubleshooting.md](troubleshooting.md).
 
 ## `taskferry --version` / `taskferry -V`
 

@@ -326,3 +326,56 @@ test("watch --task-id resolves immediately for an already-settled task instead o
   assert.equal(result.event.status, "crashed");
   assert.equal(client.closed.value, true);
 });
+
+test("doctor warns when the claude plugin is not installed", async () => {
+  const client = fakeClient();
+  client.request = async (method) => {
+    if (method === "system.health") return { healthy: true, pid: 1 };
+    throw new Error(`unexpected request: ${method}`);
+  };
+  const runShellCommand = (command, args) => {
+    assert.equal(command, "claude");
+    assert.deepEqual(args, ["plugin", "list", "--json"]);
+    return { status: 0, stdout: JSON.stringify([{ id: "superpowers@claude-plugins-official" }]), stderr: "", error: undefined };
+  };
+
+  const result = await runCommand("doctor", {}, { client, runShellCommand });
+
+  assert.deepEqual(result.integrations, { claude: { installed: false } });
+  assert.equal(result.warnings.length, 1);
+  assert.match(result.warnings[0], /claude-monitor notifications won't fire/);
+  assert.match(result.warnings[0], /taskferry setup/);
+});
+
+test("doctor has no warnings when the claude plugin is installed", async () => {
+  const client = fakeClient();
+  client.request = async (method) => {
+    if (method === "system.health") return { healthy: true, pid: 1 };
+    throw new Error(`unexpected request: ${method}`);
+  };
+  const runShellCommand = () => ({
+    status: 0,
+    stdout: JSON.stringify([{ id: "taskferry@taskferry" }]),
+    stderr: "",
+    error: undefined,
+  });
+
+  const result = await runCommand("doctor", {}, { client, runShellCommand });
+
+  assert.deepEqual(result.integrations, { claude: { installed: true } });
+  assert.equal(result.warnings, undefined);
+});
+
+test("doctor reports the claude plugin as not installed when the claude CLI is missing", async () => {
+  const client = fakeClient();
+  client.request = async (method) => {
+    if (method === "system.health") return { healthy: true, pid: 1 };
+    throw new Error(`unexpected request: ${method}`);
+  };
+  const runShellCommand = () => ({ status: null, stdout: "", stderr: "", error: { code: "ENOENT" } });
+
+  const result = await runCommand("doctor", {}, { client, runShellCommand });
+
+  assert.deepEqual(result.integrations, { claude: { installed: false, reason: "claude CLI not found" } });
+  assert.equal(result.warnings.length, 1);
+});

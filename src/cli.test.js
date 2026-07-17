@@ -250,12 +250,33 @@ test("doctor is a structured health check and --full preserves extra daemon fiel
   const { client, calls } = fakeClient({
     "system.health": { healthy: true, pid: 123, version: 1, socketPath: "/tmp/taskferry.sock" },
   });
-  const result = await runCli(["doctor", "--full"], { io: capture.io, connectClient: async () => client });
+  const runShellCommand = () => ({
+    status: 0,
+    stdout: JSON.stringify([{ id: "taskferry@taskferry" }]),
+    stderr: "",
+    error: undefined,
+  });
+  const result = await runCli(["doctor", "--full"], { io: capture.io, connectClient: async () => client, runShellCommand });
 
   assert.equal(result.exitCode, 0);
   assert.equal(capture.output().value.healthy, true);
   assert.equal(capture.output().value.socketPath, "/tmp/taskferry.sock");
+  assert.deepEqual(capture.output().value.integrations, { claude: { installed: true } });
+  assert.equal(capture.output().value.warnings, undefined);
   assert.deepEqual(calls, [{ method: "system.health", params: {} }]);
+});
+
+test("doctor surfaces a warning when the claude plugin is missing", async () => {
+  const capture = capturedIo();
+  const { client } = fakeClient({
+    "system.health": { healthy: true, pid: 123 },
+  });
+  const runShellCommand = () => ({ status: null, stdout: "", stderr: "", error: { code: "ENOENT" } });
+  const result = await runCli(["doctor"], { io: capture.io, connectClient: async () => client, runShellCommand });
+
+  assert.equal(result.exitCode, 0);
+  assert.deepEqual(capture.output().value.integrations, { claude: { installed: false, reason: "claude CLI not found" } });
+  assert.equal(capture.output().value.warnings.length, 1);
 });
 
 test("summary --wait reports a not-settled note instead of summarizing when the task is still active", async () => {

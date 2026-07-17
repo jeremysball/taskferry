@@ -15,6 +15,7 @@ export async function runCli(argv = process.argv.slice(2), {
   connectClient: connectClientFn,
   setup: setupFn = runSetup,
   signal,
+  runShellCommand,
 } = {}) {
   let parsed;
   try {
@@ -79,6 +80,7 @@ export async function runCli(argv = process.argv.slice(2), {
       signal,
       executablePath,
       cwd,
+      runShellCommand,
     });
     if (parsed.command !== "watch" && value !== undefined) writeToon(value, io);
     return { exitCode: 0, value };

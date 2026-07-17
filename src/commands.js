@@ -129,6 +129,8 @@ export async function runCommand(command, options, { client, io = process, signa
   }
 }
 
+const TERMINAL_STATUSES = new Set(["done", "crashed", "cancelled", "unknown"]);
+
 function streamTaskEvents({ client, io, signal, directory, taskId, summaries, format }) {
   let settle;
   let abortHandler;
@@ -147,6 +149,10 @@ function streamTaskEvents({ client, io, signal, directory, taskId, summaries, fo
     signal?.addEventListener("abort", abortHandler, { once: true });
     Promise.resolve(client.subscribe({ directory, ...(summaries ? { summaries: true } : {}) }, (event) => {
       if (taskId && event.taskId !== taskId) return;
+      if (taskId && TERMINAL_STATUSES.has(event.status)) {
+        settle({ directory, watching: false, event });
+        return;
+      }
       io.stdout.write(`${formatWatchEvent(event, format)}\n`);
     })).catch((error) => {
       if (settled) return;
@@ -166,6 +172,7 @@ async function watchCommand(options, { client, io, signal, cwd }) {
     io,
     signal,
     directory,
+    taskId: options.taskId,
     summaries: options.summaries,
     format: options.format,
   }).finally(() => {

@@ -11,5 +11,5 @@
     "lib": ["es2023"],
     "types": ["node"]
   },
-  "include": ["src/tasks.js", "src/server.js"]
+  "include": ["src/tasks.js"]
 }

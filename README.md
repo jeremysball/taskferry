@@ -66,6 +66,7 @@ for the full process model.
 | `taskferry watch` | Stream workspace task events |
 | `taskferry context` | Compact context for a session-start hook |
 | `taskferry doctor` | Installation and daemon health |
+| `taskferry setup` | Install CLI and native integration symlinks (one-time, on a fresh checkout or after `git pull`) |
 | `taskferry --version` | Package and protocol versions |
 
 Full flags, defaults, and TOON examples for every command:
@@ -80,16 +81,49 @@ invisible to `taskferry list` run from another.
 
 ## Install
 
+Taskferry installs itself from a local checkout, not a published npm
+package. It requires Unix domain sockets, so it is not supported on
+Windows.
+
 ```bash
-git clone <this repo> taskferry
+git clone https://github.com/jeremysball/taskferry.git
 cd taskferry
-npm install
-npm install -g .     # or: npm link — puts `taskferry` on PATH
+node src/cli.js setup
 taskferry --version
 ```
 
-There is no `taskferry setup` command. Install the native integration for
-whichever agent you're using instead:
+`node src/cli.js setup` is the one-time bootstrap: it runs `npm install`
+in the checkout, then creates two managed symlinks — `~/.local/bin/taskferry`
+pointing at `src/cli.js`, and
+`$XDG_CONFIG_HOME/opencode/plugins/taskferry.js` (default
+`~/.config/opencode/plugins/taskferry.js`) pointing at
+`src/opencode-plugin.js`. It also registers the native agent integration
+for whichever client is on `PATH` (Claude Code, Codex). If `~/.local/bin`
+is not yet on your `PATH`, the result tells you to add it:
+
+```bash
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+### Updating an existing checkout
+
+```bash
+git pull
+taskferry setup
+```
+
+`taskferry setup` re-runs `npm install` and refreshes both symlinks, so
+`taskferry` keeps resolving to the current `src/cli.js` after each
+update. It is idempotent: re-running it on an already-current install is
+safe and reports the same state.
+
+The `setup` command never replaces a symlink at either location unless it
+can prove the existing one is one it created (a self-managed target whose
+underlying file is part of the taskferry checkout). An unrelated
+symlink, a regular file, or a directory at that path is left alone, and
+`setup` exits with `refusing to replace unmanaged path: <path>`.
+
+The native integration each agent uses is documented separately:
 
 - [docs/integrations/claude-code.md](docs/integrations/claude-code.md)
 - [docs/integrations/opencode.md](docs/integrations/opencode.md)

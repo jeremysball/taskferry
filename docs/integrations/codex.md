@@ -8,25 +8,41 @@ taskferry tasks by refreshing context at two points in the conversation.
 
 Like the Claude Code integration, both hook commands start with `command -v
 taskferry >/dev/null 2>&1` and fall back to a plain-text notice if the
-binary isn't found:
-
-```bash
-cd /path/to/taskferry
-npm install
-npm install -g .        # or: npm link
-taskferry --version     # confirm it resolves on PATH
-```
+binary isn't found. Running `taskferry setup` once from the taskferry
+checkout puts the CLI on `PATH` and registers the Codex marketplace in
+the same step — see the [Install section in the README](../README.md#install)
+for the full bootstrap.
 
 ## Install
 
+From the taskferry checkout, run:
+
 ```bash
-codex plugin marketplace add /path/to/taskferry
-codex plugin install taskferry@taskferry
+taskferry setup
 ```
 
-The marketplace catalog is `.agents/plugins/marketplace.json` at the
-repository root; the plugin itself lives under `integrations/codex/`
+When the `codex` CLI is on `PATH`, `taskferry setup` adds the checkout
+as a Codex marketplace (if it is not already registered) or calls
+`codex plugin marketplace upgrade taskferry` if it is. The marketplace
+catalog is `.agents/plugins/marketplace.json` at the repository root;
+the plugin itself lives under `integrations/codex/`
 (`integrations/codex/.codex-plugin/plugin.json`).
+
+Unlike the Claude Code leg, the Codex leg of `setup` cannot install or
+upgrade the plugin itself — Codex desktop drives that through its own
+UI. `setup` exits with `status: "desktop-install-required"` and prints:
+
+```
+next: Open Codex desktop, install Taskferry from its marketplace, then
+review and trust its hooks.
+```
+
+In Codex desktop:
+
+1. Open the marketplace, find Taskferry, and install it.
+2. Open the `/hooks` interface and review the Taskferry hooks before
+   trusting them. The hooks run `taskferry context --format codex-hook`
+   (see [What it does](#what-it-does)), and the trust decision is yours.
 
 Codex requires reviewing and trusting plugin hooks through `/hooks` before
 they run. If hooks are disabled in your Codex configuration, enable them
@@ -44,9 +60,12 @@ hook-driven context, and trust the taskferry hooks specifically through
 
 ## Update
 
-Re-run `codex plugin marketplace add /path/to/taskferry` after updating the
-checkout (or updating the installed `taskferry` package), then restart
-Codex.
+After `git pull` (or any other change to the checkout), re-run `taskferry
+setup` from inside it. With `codex` on `PATH`, the Codex leg re-adds the
+marketplace if it has gone missing or runs `codex plugin marketplace
+upgrade taskferry`; the actual plugin install on the Codex desktop side
+still has to be refreshed there, and the `/hooks` trust decision does not
+need to be redone. Restart Codex so it picks up the refreshed plugin.
 
 ## Remove
 

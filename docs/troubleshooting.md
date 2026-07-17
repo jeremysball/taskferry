@@ -134,11 +134,28 @@ see [security.md](security.md#provider-key-slots).
 ## Claude Code / Codex hook shows "taskferry is unavailable"
 
 The hook's `command -v taskferry` check failed — the binary isn't on the
-`PATH` the agent's hook subprocess runs with. Confirm `taskferry --version`
-works in a fresh shell, then confirm the agent itself was started with that
-same `PATH` (a GUI-launched app often has a different `PATH` than a
-terminal). See [integrations/claude-code.md](integrations/claude-code.md)
-or [integrations/codex.md](integrations/codex.md).
+`PATH` the agent's hook subprocess runs with. From inside the taskferry
+checkout, run:
+
+```bash
+taskferry setup
+```
+
+`setup` creates the `~/.local/bin/taskferry` symlink and prints the
+exact `PATH` line to add if `~/.local/bin` is not yet on it:
+
+```bash
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+Add that line to your shell rc (or run it in the shell that starts the
+agent) and confirm `taskferry --version` resolves in a fresh shell. If
+the hook still reports the binary as missing, confirm the agent itself
+was started with that same `PATH` — a GUI-launched app often inherits a
+different `PATH` than a terminal, so the export needs to be visible to
+the agent's launcher, not just the shell you ran it from. See
+[integrations/claude-code.md](integrations/claude-code.md) or
+[integrations/codex.md](integrations/codex.md).
 
 ## Watch stream never shows an event
 

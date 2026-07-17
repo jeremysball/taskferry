@@ -8,24 +8,26 @@ session-start hook and a monitor entry, both of which shell out to the
 
 The plugin's hook and monitor commands both start with `command -v taskferry
 >/dev/null 2>&1` and degrade to a plain-text notice if that check fails.
-Install the CLI first:
-
-```bash
-cd /path/to/taskferry
-npm install
-npm install -g .        # or: npm link
-taskferry --version     # confirm it resolves on PATH
-```
+Running `taskferry setup` once from the taskferry checkout puts the CLI
+on `PATH` and registers the marketplace/plugin in the same step — see
+the [Install section in the README](../README.md#install) for the full
+bootstrap.
 
 ## Install
 
-Add this repository as a Claude Code plugin marketplace, then install the
-plugin from it:
+From the taskferry checkout, run:
 
 ```bash
-claude plugin marketplace add /path/to/taskferry
-claude plugin install taskferry@taskferry
+taskferry setup
 ```
+
+When the `claude` CLI is on `PATH`, `taskferry setup` adds the checkout
+as a Claude Code marketplace (if it is not already registered) and
+either installs the `taskferry@taskferry` plugin at user scope or
+updates it if it is already installed. When `claude` is not on `PATH`,
+the Claude Code leg of `setup` reports `status: "unavailable"` and the
+rest of the bootstrap (CLI symlink, OpenCode plugin symlink, Codex
+marketplace if `codex` is present) still runs.
 
 The marketplace catalog is `.claude-plugin/marketplace.json` at the
 repository root; the plugin itself lives under `integrations/claude/`
@@ -35,10 +37,13 @@ monitor entry.
 
 ## Update
 
-Plugins installed from a local marketplace path pick up changes on the
-marketplace's next refresh. Re-run `claude plugin marketplace add
-/path/to/taskferry` (or update the checkout in place, if you installed from
-a git-tracked path) and restart Claude Code.
+After `git pull` (or any other change to the checkout), re-run `taskferry
+setup` from inside it. With `claude` on `PATH`, the Claude Code leg
+re-adds the marketplace if it has gone missing and calls `claude plugin
+update taskferry@taskferry` for the user-scoped install; without
+`claude` on `PATH`, the rest of the bootstrap still runs but the
+Claude-specific step is skipped. Restart Claude Code so it picks up the
+newly refreshed plugin.
 
 ## Remove
 

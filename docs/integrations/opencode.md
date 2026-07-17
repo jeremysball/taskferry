@@ -7,36 +7,51 @@ single JS module OpenCode loads directly through its own plugin config.
 
 ## Install
 
+From the taskferry checkout, run:
+
 ```bash
-cd /path/to/taskferry
-npm install
-npm install -g .   # or: npm link — publishes the "taskferry" package name
+taskferry setup
 ```
 
-Then add the package name to the OpenCode project or global config's
-`plugin` array (`opencode.json` or the equivalent OpenCode config file):
+`taskferry setup` creates (or refreshes) a single file symlink at
+`$XDG_CONFIG_HOME/opencode/plugins/taskferry.js` (default
+`~/.config/opencode/plugins/taskferry.js`) that resolves to the
+checkout's `src/opencode-plugin.js`. OpenCode auto-loads any module at
+that path on startup, so no edits to `opencode.json` or any other config
+are required.
 
-```json
-{
-  "plugin": ["taskferry"]
-}
-```
-
-OpenCode resolves `"taskferry"` to the package's declared `exports` entry
-(`./src/opencode-plugin.js`), which default-exports the plugin factory.
+The symlink is self-managed: `taskferry setup` only replaces the file
+at that path when the existing symlink's target is one it created (a
+`src/opencode-plugin.js` inside a checkout whose `package.json` is
+`taskferry`). An unrelated symlink, a regular file, or a directory at
+that path is left alone and `setup` exits with `refusing to replace
+unmanaged path: <path>`. The same command also creates the CLI
+symlink at `~/.local/bin/taskferry` and registers the Claude Code and
+Codex integrations when their CLIs are on `PATH` — see the
+[Install section in the README](../README.md#install) for the full
+bootstrap.
 
 ## Update
 
-Update the installed package (`npm update -g taskferry`, or re-run `npm
-install -g .` from a fresh checkout) and restart OpenCode so it reloads the
-plugin module.
+After `git pull` (or any other change to the checkout), re-run
+`taskferry setup` from inside it. The OpenCode leg of `setup` is
+idempotent: when the symlink already resolves to the checkout's
+`src/opencode-plugin.js`, it is left in place; when it is missing,
+stale, or points at a different file, it is replaced. Restart OpenCode
+so it reloads the freshly linked module.
 
 ## Remove
 
-Remove `"taskferry"` from the `plugin` array in your OpenCode config and
-restart OpenCode. This does not stop the daemon or affect other
-integrations sharing it — see
-[daemon.md](../daemon.md#stopping-the-daemon) to stop that separately.
+Delete the symlink (and the daemon's state if you no longer need it):
+
+```bash
+rm "$XDG_CONFIG_HOME/opencode/plugins/taskferry.js"
+# (or: rm ~/.config/opencode/plugins/taskferry.js)
+```
+
+This does not stop the daemon or affect other integrations sharing it —
+see [daemon.md](../daemon.md#stopping-the-daemon) to stop that
+separately.
 
 ## What it does
 

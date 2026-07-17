@@ -241,11 +241,80 @@ daemon if needed), and reports `{ healthy, pid }`. `--full` adds `version`,
 
 Prints `{ name: "taskferry", version, protocolVersion }`.
 
+## `taskferry setup`
+
+The one-time, idempotent bootstrap for a taskferry checkout. Runs `npm
+install` in the checkout, then creates (or refreshes) the two managed
+symlinks Taskferry needs on disk:
+
+- `~/.local/bin/taskferry` → `<checkout>/src/cli.js`
+- `$XDG_CONFIG_HOME/opencode/plugins/taskferry.js` (default
+  `~/.config/opencode/plugins/taskferry.js`) → `<checkout>/src/opencode-plugin.js`
+
+After that, it registers or refreshes the native agent integration for
+whichever client CLI is on `PATH` (`claude`, `codex`). The command
+deliberately does not connect to the daemon, so it is usable to
+bootstrap a fresh or repaired install even when the daemon or
+dependencies are currently broken.
+
+### Symlink safety
+
+Both symlinks are self-managed: `setup` only replaces a path at the
+target location when that path already is a symlink whose target
+resolves to a file in a taskferry checkout (a `package.json` named
+`taskferry`). Anything else — a regular file, a directory, a symlink
+to an unrelated target, a stale file from an older install — is left
+alone, and `setup` exits with `error: refusing to replace unmanaged
+path: <path>` and `help: fix the reported dependency or filesystem
+problem, then rerun node src/cli.js setup` on stderr. Re-running
+`setup` on a current install is a no-op; you can put it in your
+post-`git pull` flow without guarding it.
+
+### Output shape
+
+On success, `setup` prints a single TOON document:
+
+```
+cli:
+  path: /home/user/.local/bin/taskferry
+  source: /workspace/taskferry/src/cli.js
+opencode:
+  path: /home/user/.config/opencode/plugins/taskferry.js
+  source: /workspace/taskferry/src/opencode-plugin.js
+dependencies: installed
+path: available
+integrations:
+  claude: {status: installed}
+  codex: {status: desktop-install-required,next: "Open Codex desktop, install Taskferry from its marketplace, then review and trust its hooks."}
+```
+
+Field-by-field:
+
+| Field | Outcome |
+|---|---|
+| `cli.path`, `cli.source` | Resolved symlink destination and its target after `setup` ran |
+| `opencode.path`, `opencode.source` | Same for the OpenCode plugin symlink |
+| `dependencies` | Always `"installed"` on a successful run (the `npm install` step) |
+| `path` | `"available"` if `~/.local/bin` is already on `PATH`, otherwise `"missing"` with a sibling `pathInstruction: 'export PATH="$HOME/.local/bin:$PATH"'` field |
+| `integrations.claude.status` | `"installed"` (CLI on `PATH` and the user-scoped plugin is registered, possibly already installed and now updated), or `"unavailable"` (no `claude` binary, nothing done for Claude) |
+| `integrations.codex.status` | `"desktop-install-required"` with a `next` string telling the user to install the plugin through Codex desktop and trust its hooks via `/hooks`, or `"unavailable"` (no `codex` binary) |
+
+The Codex leg cannot install or upgrade the plugin itself — Codex
+desktop drives that through its own UI — so the `desktop-install-required`
+`next` field is the only place the user has to step in after `setup`
+finishes. See [integrations/codex.md](integrations/codex.md) for the
+manual Codex desktop flow.
+
+### Exit codes
+
+| Code | Meaning |
+|---|---|
+| `0` | Symlinks and any auto-installable integration succeeded; on Windows `setup` is rejected with `error: taskferry setup requires Unix domain sockets and is unavailable on Windows` (exit `1`) |
+| `1` | `npm install` failed, a managed symlink could not be created, an integration command failed, or the platform is Windows |
+
 ## Retired names
 
-`taskferry setup` does not exist; install the native agent integration for
-your client instead (see `docs/integrations/`). Any `taskferry_<name>` MCP
-tool name, `poll`, or an underscore/camelCase flag from the MCP era (e.g.
-`--task-id`, `--timeout_ms`) fails with exit code `2` and a `help:` line
-naming the current CLI equivalent. See
-[migrating-from-mcp.md](migrating-from-mcp.md) for the full table.
+`taskferry_<name>` MCP tool names, `poll`, and underscore/camelCase
+flags from the MCP era (e.g. `--task-id`, `--timeout_ms`) fail with
+exit code `2` and a `help:` line naming the current CLI equivalent.
+See [migrating-from-mcp.md](migrating-from-mcp.md) for the full table.

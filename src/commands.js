@@ -148,6 +148,19 @@ export async function runCommand(command, options, { client, io = process, signa
 
 const TERMINAL_STATUSES = new Set(["done", "crashed", "cancelled", "unknown"]);
 
+function terminalEventFromStatus(detail) {
+  return {
+    type: "task.state",
+    taskId: detail.id,
+    directory: detail.directory,
+    status: detail.status,
+    previousStatus: null,
+    occurredAt: new Date().toISOString(),
+    activity: null,
+    outputWatermark: null,
+  };
+}
+
 function streamTaskEvents({ client, io, signal, directory, taskId, summaries, format }) {
   let settle;
   let abortHandler;
@@ -170,7 +183,19 @@ function streamTaskEvents({ client, io, signal, directory, taskId, summaries, fo
       if (taskId && TERMINAL_STATUSES.has(event.status)) {
         settle({ directory, watching: false, event });
       }
-    })).catch((error) => {
+    })).then(() => {
+      // Subscriptions only broadcast future transitions (no snapshot replay), so a task
+      // that was already terminal before subscribing, or that settled in the gap between
+      // resolving task.status above and the subscription actually registering, would
+      // otherwise never deliver a terminal event and hang forever.
+      if (!taskId || settled) return;
+      return client.request("task.status", { taskId }).then((detail) => {
+        if (settled || !TERMINAL_STATUSES.has(detail.status)) return;
+        const event = terminalEventFromStatus(detail);
+        io.stdout.write(`${formatWatchEvent(event, format)}\n`);
+        settle({ directory, watching: false, event });
+      });
+    }).catch((error) => {
       if (settled) return;
       settled = true;
       reject(error);

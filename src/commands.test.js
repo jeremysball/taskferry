@@ -119,20 +119,19 @@ test("watch --task-id resolves --directory from the task when omitted, and exits
 test("wait --summarize streams summaries then returns the same shape as plain wait", async () => {
   const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-commands-test-")));
   let deliver;
-  const statusCalls = [];
+  let currentStatus = "running";
   const client = fakeClient({
     onSubscribe: (_params, onEvent) => {
       deliver = onEvent;
     },
   });
-  client.request = async (method, params) => {
+  client.request = async (method) => {
     if (method === "task.status") {
-      statusCalls.push(params.taskId);
-      return statusCalls.length === 1
-        ? { directory: root }
+      return currentStatus === "running"
+        ? { directory: root, status: currentStatus }
         : {
             id: "oc_5",
-            status: "done",
+            status: currentStatus,
             startedAt: "2026-07-17T00:00:00.000Z",
             exitCode: 0,
             signal: null,
@@ -153,6 +152,7 @@ test("wait --summarize streams summaries then returns the same shape as plain wa
   await new Promise((resolve) => setImmediate(resolve));
 
   deliver({ sequence: 1, type: "task.state", taskId: "oc_5", directory: root, status: "running", activity: "reading files" });
+  currentStatus = "done";
   deliver({ sequence: 2, type: "task.state", taskId: "oc_5", directory: root, status: "done" });
 
   const result = await pending;
@@ -168,4 +168,62 @@ test("wait --summarize streams summaries then returns the same shape as plain wa
     signal: null,
     next: 'Run taskferry result with task id "oc_5" to see the final message; pass --full here for directory/model/log path details',
   });
+});
+
+test("wait --summarize resolves immediately for an already-settled task instead of hanging", async () => {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-commands-test-")));
+  const client = fakeClient({
+    onSubscribe: () => {
+      // No terminal event will ever be delivered on this subscription: the task
+      // was already terminal before the subscribe call, so nothing broadcasts.
+    },
+  });
+  client.request = async (method, params) => {
+    if (method === "task.status") {
+      return {
+        id: params.taskId,
+        status: "done",
+        startedAt: "2026-07-17T00:00:00.000Z",
+        exitCode: 0,
+        signal: null,
+        directory: root,
+      };
+    }
+    throw new Error(`unexpected request: ${method}`);
+  };
+  const io = fakeIo();
+
+  const result = await runCommand("wait", { taskId: "oc_6", timeoutMs: undefined, tailChars: undefined, full: false, summarize: true }, {
+    client,
+    io,
+  });
+
+  assert.equal(result.id, "oc_6");
+  assert.equal(result.status, "done");
+});
+
+test("watch --task-id resolves immediately for an already-settled task instead of hanging", async () => {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-commands-test-")));
+  const client = fakeClient({
+    onSubscribe: () => {
+      // No terminal event will ever be delivered: the task was already terminal
+      // before the subscription registered.
+    },
+  });
+  client.request = async (method, params) => {
+    if (method === "task.status") {
+      return { id: params.taskId, status: "crashed", directory: root };
+    }
+    throw new Error(`unexpected request: ${method}`);
+  };
+  const io = fakeIo();
+
+  const result = await runCommand("watch", { directory: undefined, format: "toon", summaries: false, taskId: "oc_7" }, {
+    client,
+    io,
+    cwd: root,
+  });
+
+  assert.equal(result.event.status, "crashed");
+  assert.equal(client.closed.value, true);
 });

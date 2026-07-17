@@ -73,7 +73,11 @@ test("rejects unknown flags and extra positional arguments before daemon access"
     return true;
   });
   assert.throws(() => parseArgs(["status", "one", "two"]), /unexpected argument: two/);
-  assert.throws(() => parseArgs(["setup"]), /setup is not available/);
+  assert.deepEqual(parseArgs(["setup"]), {
+    command: "setup",
+    options: {},
+    help: false,
+  });
   assert.throws(() => parseArgs(["dispatch", "--prompt", "x", "--full"]), /unknown flag --full/);
   assert.throws(() => parseArgs(["list", "--wait"]), /unknown flag --wait/);
 });

@@ -1,33 +1,61 @@
 #!/usr/bin/env node
 
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs, UsageError } from "./args.js";
-import { normalizeDirectory, runCommand } from "./commands.js";
-import { connectClient } from "./client.js";
-import { writeError, writeToon } from "./output.js";
+import { runSetup } from "./setup.js";
 
 export async function runCli(argv = process.argv.slice(2), {
   io = process,
   cwd = process.cwd(),
   env = process.env,
   executablePath = process.argv[1],
-  connectClient: connectClientFn = connectClient,
+  connectClient: connectClientFn,
+  setup: setupFn = runSetup,
   signal,
 } = {}) {
   let parsed;
   try {
     parsed = parseArgs(argv, { cwd });
   } catch (error) {
+    const { writeError } = await import("./output.js");
     writeError(error, io);
     return { exitCode: error instanceof UsageError ? 2 : 1 };
   }
 
   if (parsed.help) {
+    const { writeToon } = await import("./output.js");
     writeToon(parsed.helpText, io);
     return { exitCode: 0 };
   }
+
+  if (parsed.command === "setup") {
+    try {
+      const value = setupFn({
+        checkoutDirectory: path.resolve(path.dirname(fileURLToPath(import.meta.url)), ".."),
+        cliPath: fileURLToPath(import.meta.url),
+        homeDirectory: os.homedir(),
+        env,
+      });
+      const { writeToon } = await import("./output.js");
+      writeToon(value, io);
+      return { exitCode: 0, value };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      io.stderr.write(`error: ${message}\n`);
+      io.stderr.write("help: fix the reported dependency or filesystem problem, then rerun node src/cli.js setup\n");
+      return { exitCode: 1 };
+    }
+  }
+
+  const [{ normalizeDirectory, runCommand }, { connectClient: defaultConnectClient }, { writeError, writeToon }] = await Promise.all([
+    import("./commands.js"),
+    import("./client.js"),
+    import("./output.js"),
+  ]);
+  const connectClient = connectClientFn || defaultConnectClient;
 
   let client;
   try {
@@ -43,7 +71,7 @@ export async function runCli(argv = process.argv.slice(2), {
       || (parsed.command === "list" && !parsed.options.all)) {
       parsed.options.directory = normalizeDirectory(parsed.options.directory || cwd);
     }
-    client = await connectClientFn({ env });
+    client = await connectClient({ env });
     const value = await runCommand(parsed.command, parsed.options, {
       client,
       io,
@@ -77,7 +105,8 @@ async function main() {
 }
 
 if (process.argv[1] && resolveInvokedPath(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  main().catch((error) => {
+  main().catch(async (error) => {
+    const { writeError } = await import("./output.js");
     writeError(error);
     process.exitCode = 1;
   });

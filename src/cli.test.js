@@ -292,6 +292,23 @@ test("summary --wait proceeds to summarize once task.wait reports a settled stat
   ]);
 });
 
+test("runs setup without connecting to the daemon", async () => {
+  const capture = capturedIo();
+  let called = false;
+  const result = await runCli(["setup"], {
+    io: capture.io,
+    setup: () => {
+      called = true;
+      return { cli: { path: "/home/test/.local/bin/taskferry" }, path: "available" };
+    },
+    connectClient: async () => { throw new Error("setup must not connect"); },
+  });
+
+  assert.equal(result.exitCode, 0);
+  assert.equal(called, true);
+  assert.equal(capture.output().value.path, "available");
+});
+
 test("executes main() when invoked through a symlink to src/cli.js", (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-cli-symlink-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));

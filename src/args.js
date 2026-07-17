@@ -127,6 +127,12 @@ const commandSpecs = {
     options: { "--full": "include complete health details" },
     examples: ['taskferry doctor', 'taskferry doctor --full'],
   },
+  setup: {
+    usage: "taskferry setup",
+    description: "Install dependencies and create the CLI and OpenCode plugin symlinks without contacting the daemon.",
+    options: {},
+    examples: ['taskferry setup', 'node src/cli.js setup'],
+  },
 };
 
 export class UsageError extends Error {
@@ -252,6 +258,8 @@ function defaultOptions(command, cwd) {
       return { directory: cwd, format: "toon" };
     case "doctor":
       return { full: false };
+    case "setup":
+      return {};
     default:
       return {};
   }
@@ -271,7 +279,6 @@ export function parseArgs(argv, { cwd = process.cwd() } = {}) {
     if (rest.length) throw usageError(`unexpected argument: ${rest[0]}`);
     return { command: "version", options: {}, help: false };
   }
-  if (command === "setup") throw new UsageError("setup is not available", "Taskferry has no setup command; install the native agent integration for your client");
   if (command.startsWith("taskferry_")) throw migrationError(command, rest);
   if (command === "poll") throw new UsageError("poll was renamed to wait", "Use `taskferry wait <id>`");
   if (!commandSpecs[command]) throw new UsageError(`unknown command: ${command}`, "Run `taskferry --help` to see available commands");

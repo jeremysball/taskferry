@@ -1,0 +1,96 @@
+TASKFERRY TODO — MASTER TRACKER
+================================
+
+Instructions:
+- Mark items complete with [X]
+- Denote plan status: (plan) = has plan, (spec) = spec only, (none) = needs design
+- If has plan, just write (plan) — it implies spec too
+- Keep this file updated before/after each session
+
+
+TIER 1: CORE RELIABILITY & OBSERVABILITY
+========================================
+
+[_] Fix watchdog premise & implement two-phase no-output timeout
+    Status: blocked on broken test scenario rewrite
+    Details: 120s pre-output budget, 300s post-output latch, per-task tracking
+    Plan: 2026-07-16-watchdog-output-escalation.md (tasks 1-3, task 2 invalid)
+
+[_] Failure detail field + error classification (4-bucket system)
+    Status: unplanned
+    Details: auth_failed, payment_required, rate_limited, no_output_timeout
+    Alongside: failureReason; surface from wait/status/result --full
+    Plan: (none) — needs design before implementation
+
+[_] Resume command hints on no_output_timeout crash
+    Status: unplanned
+    Details: prefill `--session-id` in `next` hint when task dies
+    Plan: (none) — needs design
+
+[_] Final marker validation + empty message handling
+    Status: unplanned
+    Details: enforce `Status:` line; detect & flag done with empty final output
+    Plan: (none) — needs design
+
+
+TIER 2: USER EXPERIENCE & FEATURES
+==================================
+
+[_] LLM progress summaries (watch --summarize)
+    Status: unplanned
+    Details: optional flag on wait/status to show "what's happening now" via small model
+    Configurable model/provider, cheap short completion over narration tail
+    Plan: (none) — needs design
+
+[_] Tool & agent selection for dispatch
+    Status: unplanned
+    Details: currently always uses `opencode run --auto`, no caller control
+    Need: args for --tools and --agent on dispatch command
+    Plan: (none) — needs design
+
+[_] Doctor --full environmental output
+    Status: unplanned
+    Details: report daemon source path, key-slot names, provider environment targets
+    Deduplicated with todo-07-15.txt:25 / todo-07-16.txt:77-80
+    Plan: (none) — needs design
+
+
+TIER 3: INFRASTRUCTURE (FUTURE)
+===============================
+
+[_] Setup wrapper-script fix (replace broken symlink premise)
+    Status: blocked on premise rewrite
+    Details: create ~/.local/bin/taskferry as shell wrapper, not symlink
+    Plan: 2026-07-16-taskferry-setup.md (task 1 needs redesign, then 2-3)
+
+[_] Docker key management & wait timeout clamp removal
+    Status: deferred to Docker-based deployment layer
+    Details: admin UI/key panel → Docker volume + env config; wait clamp removal separate
+    Plan: (none) — handled outside taskferry core
+
+
+TIER 4: NOT DOING
+=================
+
+[_] Polling interval control — skip, use defaults
+[_] Task interleaving — dream category, probably never
+[_] Credential redaction — server-only use, not worth it
+[_] Brand prototype merge decision — deferred
+
+
+COMPLETED (REMOVED FROM PLANS)
+==============================
+
+[X] dispatch-reliability — 8/10 tasks shipped, task 10 verification-only
+[X] taskferry-advisor — full implementation on main
+[X] taskferry-axi-cli — full implementation on main
+[X] Skill generation — `npm run skill:generate` / `npm run skill:check` working
+
+
+NOTES
+=====
+
+- VR tier (very requested): watchdog, failure detail, error classification, resume hints, marker validation, empty message handling
+- Docker tier (with key mgmt): doctor full output, wait clamp removal
+- Progress summaries & tool/agent selection are separate prioritized features
+- Setup & watchdog premises must be fixed before implementation can begin

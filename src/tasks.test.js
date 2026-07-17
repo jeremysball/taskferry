@@ -1644,6 +1644,27 @@ describe("key slots (summary tasks)", () => {
     });
     await assert.rejects(() => mgr.summarize("src1"), /error: summary key slot "summary-slot" source variable AXI_TEST_SUMMARY_UNSET is not set/);
   });
+
+  test("summarize without a summary key_slot keeps the ambient summary provider key when a slot's source var shares its name (GLM-5.2 review of PR #23, finding 4)", async (t) => {
+    process.env.DEEPSEEK_API_KEY = "sk-default-summary-secret";
+    process.env.AXI_TEST_SUMMARY_BACKUP = "sk-backup-secret";
+    t.after(() => {
+      delete process.env.DEEPSEEK_API_KEY;
+      delete process.env.AXI_TEST_SUMMARY_BACKUP;
+    });
+    let capturedEnv = null;
+    const mgr = makeManager({
+      tasksFixture: (logDir) => [{ ...baseTask({ id: "src1", status: "done", logPath: path.join(logDir, "src1.ndjson") }) }],
+      logs: { "src1.ndjson": JSON.stringify({ type: "text", part: { messageID: "m1", text: "did the thing" } }) + "\n" },
+      spawnFn: (cmd, args, opts) => { capturedEnv = opts.env; return fakeChild(); },
+      listModelsFn: () => "opencode-go/deepseek-v4-flash\n",
+      keySlotsSpec: "primary:DEEPSEEK_API_KEY,backup:AXI_TEST_SUMMARY_BACKUP",
+      summaryProviderKeyEnvName: "DEEPSEEK_API_KEY",
+    });
+    await mgr.summarize("src1");
+    assert.equal(capturedEnv.DEEPSEEK_API_KEY, "sk-default-summary-secret");
+    assert.equal("AXI_TEST_SUMMARY_BACKUP" in capturedEnv, false);
+  });
 });
 
 describe("key slots (dispatch)", () => {

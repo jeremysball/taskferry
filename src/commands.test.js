@@ -202,6 +202,42 @@ test("wait --summarize resolves immediately for an already-settled task instead 
   assert.equal(result.status, "done");
 });
 
+test("wait --summarize skips the trailing task.status RPC on abort and reports the last known state", async () => {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-commands-test-")));
+  const controller = new AbortController();
+  let deliver;
+  let statusCalls = 0;
+  const client = fakeClient({
+    onSubscribe: (_params, onEvent) => {
+      deliver = onEvent;
+    },
+  });
+  client.request = async (method, params) => {
+    if (method === "task.status") {
+      statusCalls++;
+      return { id: params.taskId, status: "running", startedAt: "2026-07-17T00:00:00.000Z", directory: root };
+    }
+    throw new Error(`unexpected request: ${method}`);
+  };
+  const io = fakeIo();
+
+  const pending = runCommand("wait", { taskId: "oc_8", timeoutMs: undefined, tailChars: undefined, full: false, summarize: true }, {
+    client,
+    io,
+    signal: controller.signal,
+  });
+
+  await new Promise((resolve) => setImmediate(resolve));
+  deliver({ sequence: 1, type: "task.state", taskId: "oc_8", directory: root, status: "running", activity: "reading files" });
+  const callsBeforeAbort = statusCalls;
+  controller.abort();
+
+  const result = await pending;
+  assert.equal(result.id, "oc_8");
+  assert.equal(result.status, "running");
+  assert.equal(statusCalls, callsBeforeAbort, "no additional task.status RPC should fire after abort");
+});
+
 test("watch --task-id resolves immediately for an already-settled task instead of hanging", async () => {
   const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-commands-test-")));
   const client = fakeClient({

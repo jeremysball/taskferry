@@ -61,7 +61,7 @@ export async function runCommand(command, options, { client, io = process, signa
         // lifecycle, and the trailing task.status RPC below needs the same
         // open connection. (Unlike watchCommand, which closes after its single stream.)
         const initial = await client.request("task.status", { taskId: options.taskId });
-        await streamTaskEvents({
+        const streamed = await streamTaskEvents({
           client,
           io,
           signal,
@@ -70,6 +70,12 @@ export async function runCommand(command, options, { client, io = process, signa
           summaries: true,
           format: "toon",
         });
+        if (signal?.aborted) {
+          // The trailing task.status RPC below isn't cancellable (client.request has no
+          // abort support), so on a stalled daemon it would delay exit past the user's
+          // Ctrl-C. Skip it and report the last known state instead.
+          return leanStatus(streamed.event ? { ...initial, status: streamed.event.status } : initial, { full: options.full });
+        }
         const detail = await client.request("task.status", { taskId: options.taskId });
         return leanStatus(detail, { full: options.full });
       }

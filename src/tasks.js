@@ -387,6 +387,13 @@ export function createTaskManager({
         throw new Error(`error: summary key slot "${summaryKeySlot}" source variable ${sourceEnvVar} is not set\nhelp: set ${sourceEnvVar}, then stop the taskferry daemon (kill the pid from \`taskferry doctor --full\`) so the next command starts a fresh one with the new environment`);
       }
       env[summaryProviderKeyEnvName] = value;
+    } else if (summaryProviderKeyEnvName && process.env[summaryProviderKeyEnvName] != null) {
+      // No summary key_slot was requested. environmentWithoutKeySlotSources() strips
+      // every registered slot *source* var, which silently erases the ambient summary
+      // provider key whenever a slot happens to source from that same variable name.
+      // Restore it so the summary child still gets a key instead of failing deep in
+      // the opencode child with no diagnostic (GLM-5.2 review of PR #23, finding 4).
+      env[summaryProviderKeyEnvName] = process.env[summaryProviderKeyEnvName];
     }
     env.TASKFERRY_CHILD = "1";
     return env;

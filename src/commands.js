@@ -57,6 +57,9 @@ export async function runCommand(command, options, { client, io = process, signa
       });
     case "wait": {
       if (options.summarize) {
+        // do not close the client here: cli.js's top-level finally owns the
+        // lifecycle, and the trailing task.status RPC below needs the same
+        // open connection. (Unlike watchCommand, which closes after its single stream.)
         const initial = await client.request("task.status", { taskId: options.taskId });
         await streamTaskEvents({
           client,

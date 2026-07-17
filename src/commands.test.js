@@ -117,6 +117,7 @@ test("watch --task-id resolves --directory from the task when omitted, and exits
 });
 
 test("wait --summarize streams summaries then returns the same shape as plain wait", async () => {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-commands-test-")));
   let deliver;
   const statusCalls = [];
   const client = fakeClient({
@@ -128,8 +129,17 @@ test("wait --summarize streams summaries then returns the same shape as plain wa
     if (method === "task.status") {
       statusCalls.push(params.taskId);
       return statusCalls.length === 1
-        ? { directory: "/workspace/project" }
-        : { id: "oc_5", status: "done", startedAt: "2026-07-17T00:00:00.000Z", exitCode: 0, signal: null };
+        ? { directory: root }
+        : {
+            id: "oc_5",
+            status: "done",
+            startedAt: "2026-07-17T00:00:00.000Z",
+            exitCode: 0,
+            signal: null,
+            directory: root,
+            model: "anthropic/claude-3",
+            prompt: "summarize the latest activity",
+          };
     }
     throw new Error(`unexpected request: ${method}`);
   };
@@ -142,12 +152,20 @@ test("wait --summarize streams summaries then returns the same shape as plain wa
 
   await new Promise((resolve) => setImmediate(resolve));
 
-  deliver({ sequence: 1, type: "task.state", taskId: "oc_5", directory: "/workspace/project", status: "running", activity: "reading files" });
-  deliver({ sequence: 2, type: "task.state", taskId: "oc_5", directory: "/workspace/project", status: "done" });
+  deliver({ sequence: 1, type: "task.state", taskId: "oc_5", directory: root, status: "running", activity: "reading files" });
+  deliver({ sequence: 2, type: "task.state", taskId: "oc_5", directory: root, status: "done" });
 
   const result = await pending;
   assert.equal(result.id, "oc_5");
   assert.equal(result.status, "done");
   assert.equal(io.lines.length, 2, "both the running and done events should print");
   assert.equal(client.closed.value, false, "wait must not close the client itself; cli.js closes it");
+  assert.deepEqual(result, {
+    id: "oc_5",
+    status: "done",
+    startedAt: "2026-07-17T00:00:00.000Z",
+    exitCode: 0,
+    signal: null,
+    next: 'Run taskferry result with task id "oc_5" to see the final message; pass --full here for directory/model/log path details',
+  });
 });

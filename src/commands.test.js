@@ -258,7 +258,7 @@ test("status surfaces a resume hint when a crashed task has a salvageable sessio
   const result = await runCommand("status", { taskId: "oc_7", full: false }, { client });
   assert.equal(
     result.next,
-    'Session "ses_abc123" may be salvageable; resume with taskferry dispatch --session-id "ses_abc123" --directory "/workspace/project" --prompt "<continuation prompt>"'
+    'Session \'ses_abc123\' may be salvageable; resume with taskferry dispatch --session-id \'ses_abc123\' --directory \'/workspace/project\' --prompt "<continuation prompt>"'
   );
 });
 

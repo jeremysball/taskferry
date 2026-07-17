@@ -4,6 +4,10 @@ import { encode } from "@toon-format/toon";
 
 const HINT_KEYS = new Set(["help", "next", "note", "message"]);
 
+function shellQuote(value) {
+  return `'${String(value).replaceAll("'", "'\\''")}'`;
+}
+
 function migrateHint(text) {
   return text
     .replaceAll("taskferry_dispatch", "taskferry dispatch")
@@ -87,7 +91,7 @@ export function leanStatus(detail, { full = false } = {}) {
   lean.next = status === "running" || status === "queued"
     ? `Run taskferry wait or taskferry status with task id "${id}" to check progress; pass --full for directory/model/log path details`
     : status === "crashed" && detail.sessionId
-      ? `Session "${detail.sessionId}" may be salvageable; resume with taskferry dispatch --session-id "${detail.sessionId}" --directory "${detail.directory}" --prompt "<continuation prompt>"`
+      ? `Session ${shellQuote(detail.sessionId)} may be salvageable; resume with taskferry dispatch --session-id ${shellQuote(detail.sessionId)} --directory ${shellQuote(detail.directory)} --prompt "<continuation prompt>"`
       : `Run taskferry result with task id "${id}" to see the final message; pass --full here for directory/model/log path details`;
   return lean;
 }

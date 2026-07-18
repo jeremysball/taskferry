@@ -93,7 +93,7 @@ All `TASKFERRY_*` vars the daemon or CLI reads, gathered in one place
 | `TASKFERRY_SUMMARY_MODEL` | `opencode/hy3-free` | Model behind `summary --style report` |
 | `TASKFERRY_SUMMARY_KEY_SLOT` / `TASKFERRY_SUMMARY_PROVIDER_KEY_ENV` | — | Key-slot wiring specific to the summary model |
 | `TASKFERRY_ACTIVITY_SUMMARIES` | — | Enables `watch --summaries` / activity-style model calls |
-| `TASKFERRY_ACTIVITY_MIN_INTERVAL_MS` | `60000` | Throttle between activity-summary model calls |
+| `TASKFERRY_SUMMARIZER_TIMEOUT_MS` | `180000` | Throttle between activity-summary model calls |
 | `TASKFERRY_ADVISOR_SESSION_TTL_MS` | `1800000` (30 min) | Advisor session idle expiry before auto-reset |
 | `TASKFERRY_CHILD` | — | Set on the daemon's own spawned children; see `docs/security.md` |
 

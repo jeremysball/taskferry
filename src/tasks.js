@@ -5,7 +5,7 @@ import path from "node:path";
 import os from "node:os";
 import { promisify } from "node:util";
 import { createTaskEvents } from "./events.js";
-import { createActivityCache, readActivitySnapshot } from "./activity.js";
+import { createActivityCache, readActivitySnapshot, DEFAULT_SUMMARIZER_TIMEOUT_MS } from "./activity.js";
 import { withFileLock } from "./state-lock.js";
 
 /**
@@ -374,7 +374,7 @@ const WATCHDOG_KILL_GRACE_MS = 5000;
  * @param {string|null} [options.summaryKeySlot]
  * @param {string|null} [options.summaryProviderKeyEnvName]
  * @param {boolean} [options.activitySummariesEnabled]
- * @param {number} [options.activityMinIntervalMs]
+ * @param {number} [options.summarizerTimeoutMs]
  * @param {string} [options.activitySummaryModel]
  * @param {number} [options.activityMaxWords]
  * @param {(event: object) => void} [options.onEvent]
@@ -423,7 +423,7 @@ export function createTaskManager({
   summaryKeySlot = process.env.TASKFERRY_SUMMARY_KEY_SLOT || null,
   summaryProviderKeyEnvName = process.env.TASKFERRY_SUMMARY_PROVIDER_KEY_ENV || null,
   activitySummariesEnabled = process.env.TASKFERRY_ACTIVITY_SUMMARIES !== "0",
-  activityMinIntervalMs = Number(process.env.TASKFERRY_ACTIVITY_MIN_INTERVAL_MS),
+  summarizerTimeoutMs = Number(process.env.TASKFERRY_SUMMARIZER_TIMEOUT_MS),
   activitySummaryModel = SUMMARY_MODEL,
   activityMaxWords = Number(process.env.TASKFERRY_ACTIVITY_MAX_WORDS) || 75,
   onEvent,
@@ -441,7 +441,7 @@ export function createTaskManager({
   const watchdogPoll = positiveInteger(watchdogPollMs, DEFAULT_WATCHDOG_POLL_MS);
   const maxWait = positiveInteger(maxWaitMs, MAX_WAIT_MS);
   const keySlots = parseKeySlots(keySlotsSpec);
-  const activityInterval = nonNegativeInteger(activityMinIntervalMs, 60000);
+  const summarizerTimeout = nonNegativeInteger(summarizerTimeoutMs, DEFAULT_SUMMARIZER_TIMEOUT_MS);
   const activityWords = positiveInteger(activityMaxWords, 75);
   let eventSequence = 0;
   const taskEvents = createTaskEvents((event) => {
@@ -566,7 +566,7 @@ export function createTaskManager({
 
   const activityCache = createActivityCache({
     summariesEnabled: false,
-    minIntervalMs: activityInterval,
+    summarizerTimeoutMs: summarizerTimeout,
     summaryModel: activitySummaryModel,
     maxWords: activityWords,
     snapshot: (task) => readActivitySnapshot(task.logPath || ""),

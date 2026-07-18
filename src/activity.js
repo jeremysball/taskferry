@@ -5,7 +5,7 @@ import fs from "node:fs";
 /** @typedef {{activity: string, outputWatermark: number, summaryFailed: boolean, cached: boolean}} ActivityResult */
 
 export const ACTIVITY_REFRESH_BYTES = 4096;
-export const DEFAULT_ACTIVITY_MIN_INTERVAL_MS = 60000;
+export const DEFAULT_SUMMARIZER_TIMEOUT_MS = 180000;
 export const DEFAULT_ACTIVITY_SNAPSHOT_BYTES = 96 * 1024;
 export const DEFAULT_ACTIVITY_MAX_CHARS = 4000;
 
@@ -150,7 +150,7 @@ export function activityCacheKey(task, outputWatermark, summaryModel, maxWords, 
 /**
  * @param {object} [options]
  * @param {boolean} [options.summariesEnabled]
- * @param {number} [options.minIntervalMs]
+ * @param {number} [options.summarizerTimeoutMs]
  * @param {number} [options.refreshBytes]
  * @param {string} [options.summaryModel]
  * @param {number} [options.maxWords]
@@ -160,7 +160,7 @@ export function activityCacheKey(task, outputWatermark, summaryModel, maxWords, 
  */
 export function createActivityCache({
   summariesEnabled = true,
-  minIntervalMs = DEFAULT_ACTIVITY_MIN_INTERVAL_MS,
+  summarizerTimeoutMs = DEFAULT_SUMMARIZER_TIMEOUT_MS,
   refreshBytes = ACTIVITY_REFRESH_BYTES,
   summaryModel = "opencode/hy3-free",
   maxWords = 200,
@@ -192,7 +192,7 @@ export function createActivityCache({
     const previous = lastRefresh.get(task.id);
     if (!force && previous) {
       if (task.status === "running" && outputWatermark - previous.outputWatermark < refreshBytes) return Promise.resolve(null);
-      if (now() - previous.refreshedAt < minIntervalMs) return Promise.resolve(null);
+      if (now() - previous.refreshedAt < summarizerTimeoutMs) return Promise.resolve(null);
     }
     lastRefresh.set(task.id, { outputWatermark, refreshedAt: now() });
 

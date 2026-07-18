@@ -69,7 +69,7 @@ describe("task activity events", () => {
       spawnFn: () => child,
       killFn: () => {},
       activitySummariesEnabled: false,
-      activityMinIntervalMs: 0,
+      summarizerTimeoutMs: 0,
       onEvent: (event) => events.push(event),
     });
 
@@ -101,7 +101,7 @@ describe("task activity events", () => {
       spawnFn: () => child,
       killFn: () => {},
       activitySummariesEnabled: false,
-      activityMinIntervalMs: 0,
+      summarizerTimeoutMs: 0,
       noOutputTimeoutMs: 500,
       watchdogPollMs: 5,
       onEvent: (event) => events.push(event),
@@ -134,7 +134,7 @@ describe("task activity events", () => {
       },
       killFn: () => {},
       activitySummariesEnabled: true,
-      activityMinIntervalMs: 0,
+      summarizerTimeoutMs: 0,
       onEvent: (event) => events.push(event),
       listModelsFn: () => "opencode/hy3-free\n",
       verifySummaryAgentFn: async () => {},
@@ -173,7 +173,7 @@ describe("activity summary cache", () => {
     let calls = 0;
     const cache = createActivityCache({
       summariesEnabled: true,
-      minIntervalMs: 0,
+      summarizerTimeoutMs: 0,
       snapshot: () => ({ text: "Checking the daemon", outputWatermark: 10 }),
       summarize: async () => {
         calls++;
@@ -196,7 +196,7 @@ describe("activity summary cache", () => {
     let calls = 0;
     const cache = createActivityCache({
       summariesEnabled: true,
-      minIntervalMs: 0,
+      summarizerTimeoutMs: 0,
       snapshot: () => ({ text: "same output", outputWatermark: 20 }),
       summarize: async () => {
         calls++;
@@ -214,7 +214,7 @@ describe("activity summary cache", () => {
   test("falls back to sanitized local activity when the secondary model fails", async () => {
     const cache = createActivityCache({
       summariesEnabled: true,
-      minIntervalMs: 0,
+      summarizerTimeoutMs: 0,
       snapshot: () => ({ text: "Ran\n\u001b[2mtests\u001b[0m", outputWatermark: 30 }),
       summarize: async () => { throw new Error("provider unavailable"); },
     });
@@ -231,7 +231,7 @@ describe("activity summary cache", () => {
     let watermark = 10;
     const cache = createActivityCache({
       summariesEnabled: true,
-      minIntervalMs: 0,
+      summarizerTimeoutMs: 0,
       snapshot: () => ({ text: "growing narration", outputWatermark: watermark }),
       summarize: async ({ previousActivity }) => {
         seenPreviousActivity.push(previousActivity);

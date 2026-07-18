@@ -97,7 +97,7 @@ task whose log contains secrets you don't want sent there. Specifics:
   before it's sent for summarization.
 - **Cached.** A snapshot is reused rather than resummarized until the log
   has grown by at least 4 KiB (`ACTIVITY_REFRESH_BYTES`) *and* at least
-  `TASKFERRY_ACTIVITY_MIN_INTERVAL_MS` (default 60000ms) has passed since
+  `TASKFERRY_SUMMARIZER_TIMEOUT_MS` (default 180000ms) has passed since
   the last refresh for that task — bounding both the token cost and the
   request rate of watching a busy task.
 - **Isolated.** The report-style summary child uses a private attachment,

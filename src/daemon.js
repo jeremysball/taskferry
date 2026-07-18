@@ -7,6 +7,7 @@ import { randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { createTaskManager } from "./tasks.js";
+import { loadConfig } from "./config.js";
 import { withFileLock } from "./state-lock.js";
 import {
   PROTOCOL_VERSION,
@@ -426,7 +427,7 @@ export async function startDaemon({
 }
 
 async function main() {
-  const daemon = await startDaemon();
+  const daemon = await startDaemon({ taskManagerOptions: { config: loadConfig() } });
   const stop = async () => {
     await daemon.close();
     process.exit(0);

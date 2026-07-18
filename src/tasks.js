@@ -306,7 +306,7 @@ const DEFAULT_NO_OUTPUT_TIMEOUT_MS = positiveInteger(
 );
 const DEFAULT_POST_OUTPUT_NO_OUTPUT_TIMEOUT_MS = positiveInteger(
   Number(process.env.TASKFERRY_POST_OUTPUT_NO_OUTPUT_TIMEOUT_MS),
-  300000
+  600000
 );
 const DEFAULT_WATCHDOG_POLL_MS = positiveInteger(
   Number(process.env.TASKFERRY_WATCHDOG_POLL_MS),

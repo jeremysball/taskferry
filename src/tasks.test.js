@@ -615,6 +615,55 @@ describe("active-task concurrency cap (regressions)", () => {
   });
 });
 
+describe("config file precedence (maxConcurrentTasks)", () => {
+  function managerWithLimit(t, { env, config }) {
+    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-cfg-precedence-"));
+    const children = [];
+    const originalEnv = process.env.TASKFERRY_MAX_CONCURRENT_TASKS;
+    if (env === undefined) delete process.env.TASKFERRY_MAX_CONCURRENT_TASKS;
+    else process.env.TASKFERRY_MAX_CONCURRENT_TASKS = env;
+    t.after(() => {
+      if (originalEnv === undefined) delete process.env.TASKFERRY_MAX_CONCURRENT_TASKS;
+      else process.env.TASKFERRY_MAX_CONCURRENT_TASKS = originalEnv;
+    });
+    const manager = createTaskManager({
+      stateDir,
+      spawnFn: () => {
+        const child = fakeChild();
+        children.push(child);
+        return child;
+      },
+      killFn: () => {},
+      config,
+    });
+    t.after(() => {
+      for (const child of children) child.emit("exit", null, "SIGTERM");
+    });
+    return manager;
+  }
+
+  test("env var wins over config when both are set", (t) => {
+    const mgr = managerWithLimit(t, { env: "1", config: { maxConcurrentTasks: 5 } });
+    mgr.dispatch({ prompt: "a", directory: process.cwd(), model: "m" });
+    const second = mgr.dispatch({ prompt: "b", directory: process.cwd(), model: "m" });
+    assert.equal(mgr.status(second.id).status, "queued");
+  });
+
+  test("config value used when env var is unset", (t) => {
+    const mgr = managerWithLimit(t, { env: undefined, config: { maxConcurrentTasks: 1 } });
+    mgr.dispatch({ prompt: "a", directory: process.cwd(), model: "m" });
+    const second = mgr.dispatch({ prompt: "b", directory: process.cwd(), model: "m" });
+    assert.equal(mgr.status(second.id).status, "queued");
+  });
+
+  test("built-in default used when both env and config are unset", (t) => {
+    const mgr = managerWithLimit(t, { env: undefined, config: {} });
+    for (let i = 0; i < 4; i++) mgr.dispatch({ prompt: `p${i}`, directory: process.cwd(), model: "m" });
+    const fifth = mgr.dispatch({ prompt: "p5", directory: process.cwd(), model: "m" });
+    assert.equal(mgr.status(fifth.id).status, "queued");
+  });
+});
+
 describe("no-output watchdog", () => {
   test("a running child with no parseable log event past the deadline is stopped and marked crashed with failureReason", async () => {
     const child = fakeChild(7001);

@@ -139,7 +139,7 @@ const MAX_WAIT_MS = 45000;
 const NARRATION_PREVIEW_CHARS = 2000;
 const TAIL_READ_BYTES = 1024 * 1024;
 const SUMMARY_INPUT_BYTES = 96 * 1024;
-const SUMMARY_MODEL = process.env.TASKFERRY_SUMMARY_MODEL || "opencode/hy3-free";
+const DEFAULT_SUMMARY_MODEL = "opencode/hy3-free";
 const SUMMARY_AGENT = "taskferry-summary";
 const SUMMARY_PREFLIGHT_TIMEOUT_MS = 10000;
 const RESULT_FIELDS = new Set(["message", "narration", "tokens", "cost", "sessionId", "exitCode", "signal", "spawnError", "failureReason", "failureDetail", "keySlot", "logPath", "incomplete", "finalMarker"]);
@@ -325,30 +325,15 @@ export function parseKeySlots(spec) {
   return slots;
 }
 
-const DEFAULT_MAX_DISPATCHES_PER_WINDOW = positiveInteger(
-  Number(process.env.TASKFERRY_MAX_DISPATCHES_PER_WINDOW),
-  2
-);
-const DEFAULT_DISPATCH_WINDOW_MS = positiveInteger(
-  Number(process.env.TASKFERRY_DISPATCH_WINDOW_MS),
-  5000
-);
-const DEFAULT_MAX_CONCURRENT_TASKS = positiveInteger(
-  Number(process.env.TASKFERRY_MAX_CONCURRENT_TASKS),
-  4
-);
-const DEFAULT_ADVISOR_SESSION_TTL_MS = positiveInteger(
-  Number(process.env.TASKFERRY_ADVISOR_SESSION_TTL_MS),
-  30 * 60 * 1000
-);
-const DEFAULT_NO_OUTPUT_TIMEOUT_MS = positiveInteger(
-  Number(process.env.TASKFERRY_NO_OUTPUT_TIMEOUT_MS),
-  256000
-);
-const DEFAULT_POST_OUTPUT_NO_OUTPUT_TIMEOUT_MS = positiveInteger(
-  Number(process.env.TASKFERRY_POST_OUTPUT_NO_OUTPUT_TIMEOUT_MS),
-  400000
-);
+const DEFAULT_MAX_DISPATCHES_PER_WINDOW = 2;
+const DEFAULT_DISPATCH_WINDOW_MS = 5000;
+const DEFAULT_MAX_CONCURRENT_TASKS = 4;
+const DEFAULT_ADVISOR_SESSION_TTL_MS = 30 * 60 * 1000;
+const DEFAULT_NO_OUTPUT_TIMEOUT_MS = 256000;
+const DEFAULT_POST_OUTPUT_NO_OUTPUT_TIMEOUT_MS = 400000;
+// TASKFERRY_WATCHDOG_POLL_MS is internal plumbing with no config-file
+// equivalent (see docs/superpowers/specs/2026-07-18-config-file-design.md),
+// so this one constant keeps reading process.env directly.
 const DEFAULT_WATCHDOG_POLL_MS = positiveInteger(
   Number(process.env.TASKFERRY_WATCHDOG_POLL_MS),
   2000
@@ -362,6 +347,7 @@ const WATCHDOG_KILL_GRACE_MS = 5000;
  * @param {(env?: NodeJS.ProcessEnv) => Promise<string>} [options.listModelsFn]
  * @param {(env: NodeJS.ProcessEnv) => Promise<void>} [options.verifySummaryAgentFn]
  * @param {string} [options.stateDir]
+ * @param {Record<string, unknown>} [options.config]
  * @param {number} [options.maxDispatchesPerWindow]
  * @param {number} [options.dispatchWindowMs]
  * @param {number} [options.maxConcurrentTasks]
@@ -411,22 +397,49 @@ export function createTaskManager({
     }
   },
   stateDir = DEFAULT_STATE_DIR,
-  maxDispatchesPerWindow = DEFAULT_MAX_DISPATCHES_PER_WINDOW,
-  dispatchWindowMs = DEFAULT_DISPATCH_WINDOW_MS,
-  maxConcurrentTasks = DEFAULT_MAX_CONCURRENT_TASKS,
-  advisorSessionTtlMs = DEFAULT_ADVISOR_SESSION_TTL_MS,
-  noOutputTimeoutMs = DEFAULT_NO_OUTPUT_TIMEOUT_MS,
-  postOutputNoOutputTimeoutMs = DEFAULT_POST_OUTPUT_NO_OUTPUT_TIMEOUT_MS,
+  config = {},
+  maxDispatchesPerWindow = positiveInteger(
+    Number(process.env.TASKFERRY_MAX_DISPATCHES_PER_WINDOW),
+    positiveInteger(/** @type {number} */ (config.maxDispatchesPerWindow), DEFAULT_MAX_DISPATCHES_PER_WINDOW)
+  ),
+  dispatchWindowMs = positiveInteger(
+    Number(process.env.TASKFERRY_DISPATCH_WINDOW_MS),
+    positiveInteger(/** @type {number} */ (config.dispatchWindowMs), DEFAULT_DISPATCH_WINDOW_MS)
+  ),
+  maxConcurrentTasks = positiveInteger(
+    Number(process.env.TASKFERRY_MAX_CONCURRENT_TASKS),
+    positiveInteger(/** @type {number} */ (config.maxConcurrentTasks), DEFAULT_MAX_CONCURRENT_TASKS)
+  ),
+  advisorSessionTtlMs = positiveInteger(
+    Number(process.env.TASKFERRY_ADVISOR_SESSION_TTL_MS),
+    positiveInteger(/** @type {number} */ (config.advisorSessionTtlMs), DEFAULT_ADVISOR_SESSION_TTL_MS)
+  ),
+  noOutputTimeoutMs = positiveInteger(
+    Number(process.env.TASKFERRY_NO_OUTPUT_TIMEOUT_MS),
+    positiveInteger(/** @type {number} */ (config.noOutputTimeoutMs), DEFAULT_NO_OUTPUT_TIMEOUT_MS)
+  ),
+  postOutputNoOutputTimeoutMs = positiveInteger(
+    Number(process.env.TASKFERRY_POST_OUTPUT_NO_OUTPUT_TIMEOUT_MS),
+    positiveInteger(/** @type {number} */ (config.postOutputNoOutputTimeoutMs), DEFAULT_POST_OUTPUT_NO_OUTPUT_TIMEOUT_MS)
+  ),
   watchdogPollMs = DEFAULT_WATCHDOG_POLL_MS,
   maxWaitMs = MAX_WAIT_MS,
-  keySlotsSpec = process.env.TASKFERRY_KEY_SLOTS,
-  providerKeyEnvName = process.env.TASKFERRY_PROVIDER_KEY_ENV || null,
-  summaryKeySlot = process.env.TASKFERRY_SUMMARY_KEY_SLOT || null,
-  summaryProviderKeyEnvName = process.env.TASKFERRY_SUMMARY_PROVIDER_KEY_ENV || null,
-  activitySummariesEnabled = process.env.TASKFERRY_ACTIVITY_SUMMARIES !== "0",
-  summarizerTimeoutMs = Number(process.env.TASKFERRY_SUMMARIZER_TIMEOUT_MS),
-  activitySummaryModel = SUMMARY_MODEL,
-  activityMaxWords = Number(process.env.TASKFERRY_ACTIVITY_MAX_WORDS) || 75,
+  keySlotsSpec = process.env.TASKFERRY_KEY_SLOTS ?? /** @type {string|undefined} */ (config.keySlots),
+  providerKeyEnvName = process.env.TASKFERRY_PROVIDER_KEY_ENV || /** @type {string|undefined} */ (config.providerKeyEnv) || null,
+  summaryKeySlot = process.env.TASKFERRY_SUMMARY_KEY_SLOT || /** @type {string|undefined} */ (config.summaryKeySlot) || null,
+  summaryProviderKeyEnvName = process.env.TASKFERRY_SUMMARY_PROVIDER_KEY_ENV || /** @type {string|undefined} */ (config.summaryProviderKeyEnv) || null,
+  activitySummariesEnabled = process.env.TASKFERRY_ACTIVITY_SUMMARIES !== undefined
+    ? process.env.TASKFERRY_ACTIVITY_SUMMARIES !== "0"
+    : (/** @type {boolean|undefined} */ (config.activitySummariesEnabled) ?? true),
+  summarizerTimeoutMs = nonNegativeInteger(
+    Number(process.env.TASKFERRY_SUMMARIZER_TIMEOUT_MS),
+    nonNegativeInteger(/** @type {number} */ (config.summarizerTimeoutMs), DEFAULT_SUMMARIZER_TIMEOUT_MS)
+  ),
+  activitySummaryModel = process.env.TASKFERRY_SUMMARY_MODEL || /** @type {string|undefined} */ (config.summaryModel) || DEFAULT_SUMMARY_MODEL,
+  activityMaxWords = positiveInteger(
+    Number(process.env.TASKFERRY_ACTIVITY_MAX_WORDS),
+    positiveInteger(/** @type {number} */ (config.activityMaxWords), 75)
+  ),
   onEvent,
 } = {}) {
   const LOG_DIR = path.join(stateDir, "logs");
@@ -1118,7 +1131,7 @@ export function createTaskManager({
       snapshot.inputBytes = Buffer.byteLength(snapshot.narration);
     }
     const env = summaryEnvironment();
-    await Promise.all([summaryModelAvailable(SUMMARY_MODEL, env), verifySummaryAgent(env)]);
+    await Promise.all([summaryModelAvailable(activitySummaryModel, env), verifySummaryAgent(env)]);
 
     const id = `oc_${Date.now().toString(36)}_${randomUUID().slice(0, 8)}`;
     const logPath = path.join(LOG_DIR, `${id}.ndjson`);
@@ -1147,7 +1160,7 @@ export function createTaskManager({
       id,
       status: "queued",
       directory: fs.realpathSync(SUMMARY_DIR),
-      model: SUMMARY_MODEL,
+      model: activitySummaryModel,
       variant: null,
       sessionId: null,
       pid: null,
@@ -1169,7 +1182,7 @@ export function createTaskManager({
     persistTask(task.id);
     pendingLaunches.set(id, {
       kind: "summary",
-      model: SUMMARY_MODEL,
+      model: activitySummaryModel,
       snapshotPath,
       env,
       ...(resolvedSummarySessionId ? { summarySessionId: resolvedSummarySessionId } : {}),

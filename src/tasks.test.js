@@ -4,7 +4,7 @@ import { EventEmitter } from "node:events";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { createTaskManager } from "./tasks.js";
+import { createTaskManager, summaryAgentDeniedBash } from "./tasks.js";
 
 // Builds an isolated task manager backed by a temp state dir and, unless
 // overridden, fake spawnFn/killFn so no test ever touches a real `opencode`
@@ -1717,6 +1717,20 @@ describe("tail()", () => {
   test("validates the requested suffix length", () => {
     const mgr = makeManager({ tasksFixture: [baseTask({ id: "t1" })] });
     assert.throws(() => mgr.tail("t1", { chars: 0 }), /chars must be a positive integer/);
+  });
+});
+
+describe("summaryAgentDeniedBash", () => {
+  test("recognizes opencode's real denial message on stderr", () => {
+    assert.equal(summaryAgentDeniedBash("", "Tool bash is disabled for agent taskferry-summary\n"), true);
+  });
+
+  test("recognizes a 'denied' message on stdout", () => {
+    assert.equal(summaryAgentDeniedBash("bash tool denied\n", ""), true);
+  });
+
+  test("is false when neither stream mentions disabled/denied (e.g. bash actually ran)", () => {
+    assert.equal(summaryAgentDeniedBash("ok\n", ""), false);
   });
 });
 

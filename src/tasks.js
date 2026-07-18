@@ -138,6 +138,15 @@ const SUMMARY_PREFLIGHT_TIMEOUT_MS = 10000;
 const RESULT_FIELDS = new Set(["message", "narration", "tokens", "cost", "sessionId", "exitCode", "signal", "spawnError", "failureReason", "failureDetail", "keySlot", "logPath"]);
 const execFileAsync = promisify(execFile);
 
+/**
+ * @param {string} stdout
+ * @param {string} stderr
+ * @returns {boolean}
+ */
+export function summaryAgentDeniedBash(stdout, stderr) {
+  return /disabled|denied/i.test(`${stdout}\n${stderr}`);
+}
+
 // Ordered most-specific-first: real provider error text often combines
 // more than one signal (e.g. "Rate limit exceeded, check your quota"), so
 // the first bucket in this order that matches wins, rather than whichever
@@ -349,12 +358,23 @@ export function createTaskManager({
   killFn = (pid, signal) => process.kill(pid, signal),
   listModelsFn = async (env) => (await execFileAsync("opencode", ["models"], { encoding: "utf8", timeout: SUMMARY_PREFLIGHT_TIMEOUT_MS, env })).stdout,
   verifySummaryAgentFn = async (env) => {
-    const { stdout, stderr } = await execFileAsync(
-      "opencode",
-      ["debug", "agent", SUMMARY_AGENT, "--pure", "--tool", "bash", "--params", JSON.stringify({ command: "true" })],
-      { encoding: "utf8", timeout: SUMMARY_PREFLIGHT_TIMEOUT_MS, env }
-    );
-    if (!/disabled|denied/i.test(`${stdout}\n${stderr}`)) {
+    // opencode exits non-zero when it correctly refuses the bash call (the
+    // expected, passing outcome), so execFileAsync's promise rejects on the
+    // happy path too. The proof text ("disabled"/"denied") lands on the
+    // rejected error's stdout/stderr, not in a resolved value — inspect both.
+    let stdout;
+    let stderr;
+    try {
+      ({ stdout = "", stderr = "" } = await execFileAsync(
+        "opencode",
+        ["debug", "agent", SUMMARY_AGENT, "--pure", "--tool", "bash", "--params", JSON.stringify({ command: "true" })],
+        { encoding: "utf8", timeout: SUMMARY_PREFLIGHT_TIMEOUT_MS, env }
+      ));
+    } catch (err) {
+      stdout = /** @type {{stdout?: string}} */ (err).stdout || "";
+      stderr = /** @type {{stderr?: string}} */ (err).stderr || "";
+    }
+    if (!summaryAgentDeniedBash(stdout, stderr)) {
       throw new Error("summary agent allowed bash");
     }
   },

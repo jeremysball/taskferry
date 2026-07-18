@@ -108,8 +108,8 @@ monitoring — it doesn't.
 ## Using taskferry as an external worker backend
 
 The plugin bundles the canonical taskferry skill at
-`integrations/codex/skills/taskferry/SKILL.md` (generated from
-`skills/taskferry/SKILL.md` via `npm run skill:generate`), so a
+`integrations/codex/skills/using-taskferry/SKILL.md` (generated from
+`skills/using-taskferry/SKILL.md` via `npm run skill:generate`), so a
 Codex-driven `subagent-driven-development` lifecycle can dispatch
 implementer, fixer, and reviewer work through `taskferry dispatch` / `wait`
 / `result` the same way Claude Code does. The hooks above only provide

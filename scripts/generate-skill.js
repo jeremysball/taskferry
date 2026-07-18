@@ -3,10 +3,10 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const skillRelativePath = path.join("skills", "taskferry", "SKILL.md");
+const skillRelativePath = path.join("skills", "using-taskferry", "SKILL.md");
 const generatedRelativePaths = [
-  path.join("integrations", "claude", "skills", "taskferry", "SKILL.md"),
-  path.join("integrations", "codex", "skills", "taskferry", "SKILL.md"),
+  path.join("integrations", "claude", "skills", "using-taskferry", "SKILL.md"),
+  path.join("integrations", "codex", "skills", "using-taskferry", "SKILL.md"),
 ];
 
 function canonicalSkill(root) {

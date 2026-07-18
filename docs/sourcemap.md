@@ -52,7 +52,7 @@ obviously belong to args parsing or output formatting, start there.
 | `output.js` | 174 | TOON encoding, `leanStatus`/`leanResult`/`projectList`/`homeView`, hint-string MCP-name migration. |
 | `opencode-plugin.js` | 174 | OpenCode's native plugin surface: toasts on task state transitions by polling `client.js` directly. |
 | `setup.js` | 210 | `taskferry setup`: npm install, managed symlinks, per-client integration registration (see `docs/superpowers/specs/2026-07-16-taskferry-setup-design.md`). |
-| `scripts/generate-skill.js` | — | Regenerates `integrations/*/skills/taskferry/SKILL.md` from `skills/taskferry/SKILL.md`; `--check` fails on drift. |
+| `scripts/generate-skill.js` | — | Regenerates `integrations/*/skills/using-taskferry/SKILL.md` from `skills/using-taskferry/SKILL.md`; `--check` fails on drift. |
 
 Every `*.js` above has a co-located `*.test.js` (`node --test`, no
 framework); `smoke-test.js`/`cancel-smoke-test.js`/`poll-smoke-test.js` are
@@ -71,7 +71,7 @@ not part of the default `npm test`).
 | Per-agent (Claude Code/Codex/OpenCode) setup | `docs/integrations/*.md` |
 | Open design questions, past decisions | `docs/superpowers/specs/*.md`, `docs/superpowers/plans/*.md` |
 | What's left to build, what's blocked, what's deliberately skipped | `todo.txt` (repo root) |
-| The canonical agent-facing skill (regenerate after any CLI-surface change) | `skills/taskferry/SKILL.md`, then `npm run skill:generate` |
+| The canonical agent-facing skill (regenerate after any CLI-surface change) | `skills/using-taskferry/SKILL.md`, then `npm run skill:generate` |
 
 ## Env vars
 
@@ -107,3 +107,8 @@ All `TASKFERRY_*` vars the daemon or CLI reads, gathered in one place
 - A `SKILL.md` edit not showing up in `integrations/claude/skills/...` —
   run `npm run skill:generate`; the distributed copies are generated, not
   hand-edited.
+- Editing `~/.claude/skills/using-taskferry/SKILL.md` directly does nothing for
+  this repo — it's a separate manual copy for global availability outside
+  the plugin (see `docs/integrations/claude-code.md`), not synced from or
+  to the canonical `skills/using-taskferry/SKILL.md`. Edit the canonical file,
+  run `npm run skill:generate`, then re-copy to `~/.claude/skills/` by hand.

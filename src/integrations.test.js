@@ -288,9 +288,9 @@ test("Codex lifecycle hooks emit workspace context with an isolated CODEX_HOME",
 });
 
 test("distributed skills are generated from the canonical source", () => {
-  const canonical = fs.readFileSync(path.join(root, "skills", "taskferry", "SKILL.md"), "utf8");
-  assert.equal(fs.readFileSync(path.join(claudeRoot, "skills", "taskferry", "SKILL.md"), "utf8"), canonical);
-  assert.equal(fs.readFileSync(path.join(codexRoot, "skills", "taskferry", "SKILL.md"), "utf8"), canonical);
+  const canonical = fs.readFileSync(path.join(root, "skills", "using-taskferry", "SKILL.md"), "utf8");
+  assert.equal(fs.readFileSync(path.join(claudeRoot, "skills", "using-taskferry", "SKILL.md"), "utf8"), canonical);
+  assert.equal(fs.readFileSync(path.join(codexRoot, "skills", "using-taskferry", "SKILL.md"), "utf8"), canonical);
 
   const result = spawnSync(process.execPath, ["scripts/generate-skill.js", "--check"], {
     cwd: root,
@@ -300,7 +300,7 @@ test("distributed skills are generated from the canonical source", () => {
 });
 
 test("skill check detects a stale generated copy", () => {
-  const generated = path.join(codexRoot, "skills", "taskferry", "SKILL.md");
+  const generated = path.join(codexRoot, "skills", "using-taskferry", "SKILL.md");
   const original = fs.readFileSync(generated, "utf8");
 
   try {
@@ -312,16 +312,16 @@ test("skill check detects a stale generated copy", () => {
 
     assert.notEqual(result.status, 0);
     assert.match(result.stderr, /stale/i);
-    assert.match(result.stderr, /integrations\/codex\/skills\/taskferry\/SKILL\.md/);
+    assert.match(result.stderr, /integrations\/codex\/skills\/using-taskferry\/SKILL\.md/);
   } finally {
     fs.writeFileSync(generated, original);
   }
 });
 
 test("bundled skill teaches the AXI worker contract without extra plugin surfaces", () => {
-  const skill = fs.readFileSync(path.join(claudeRoot, "skills", "taskferry", "SKILL.md"), "utf8");
+  const skill = fs.readFileSync(path.join(claudeRoot, "skills", "using-taskferry", "SKILL.md"), "utf8");
 
-  assert.match(skill, /^name: taskferry$/m);
+  assert.match(skill, /^name: using-taskferry$/m);
   assert.match(skill, /^description: .+$/m);
   assert.match(skill, /taskferry dispatch/);
   assert.match(skill, /taskferry wait/);

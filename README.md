@@ -135,8 +135,8 @@ Migrating from the old MCP server?
 
 ## As Subagent-Driven Development's worker backend
 
-The `taskferry` Agent Skill (`skills/taskferry/SKILL.md`, bundled into both
-native plugins and distributable to `~/.claude/skills/taskferry/`) is
+The `taskferry` Agent Skill (`skills/using-taskferry/SKILL.md`, bundled into both
+native plugins and distributable to `~/.claude/skills/using-taskferry/`) is
 built to be the external-worker execution layer for a
 `subagent-driven-development`-style lifecycle: that lifecycle owns task
 briefs, worktrees, and the review loop, while taskferry owns model

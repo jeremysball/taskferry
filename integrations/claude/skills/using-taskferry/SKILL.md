@@ -1,5 +1,5 @@
 ---
-name: taskferry
+name: using-taskferry
 description: Dispatch and validate background OpenCode work through taskferry's AXI CLI inside subagent-driven-development.
 ---
 
@@ -13,7 +13,11 @@ execution. Taskferry is not an alternative lifecycle.
 ## Worker Contract
 
 - Select the worker model, variant, and optional key slot explicitly when the task
-  needs them.
+  needs them: `taskferry dispatch --prompt "$(cat "$prompt_file")" --directory
+  "<worktree>" --model <provider/model> --variant <name> --key-slot <name>`.
+- State the exact `provider/model` slug (and variant/key-slot, if set) being
+  dispatched in your response to the user, not just in the shell command — the
+  user shouldn't have to read the command to know what's running.
 - Start fresh sessions for each separate implementation task and each reviewer.
 - Resume only the implementer session for a fix to that same task.
 - Keep the task brief and directory explicit so the worker operates in the intended
@@ -53,11 +57,36 @@ Do not pass `--timeout-ms` to `taskferry wait`. The process exits on its own the
 moment the task settles; a timeout only makes the caller re-issue `wait` in a
 polling loop for no benefit.
 
+For a long-running task, prefer `taskferry wait <id> --summarize` over a bare
+`wait`: it streams periodic one-line summaries of the task's narration tail
+while blocking, then returns the same settlement status a plain `wait` would.
+This gives visibility into what the worker is doing without polling `tail` by
+hand. To watch one specific task's live event stream instead of the whole
+workspace's, use `taskferry watch --task-id <id>` rather than an unscoped
+`taskferry watch`; add `--summaries` to get condensed activity summaries in
+that stream instead of raw events.
+
 Read the final result and request an independent review when needed:
 
 ```sh
 taskferry result <id>
 taskferry advisor --prompt "$(cat "$prompt_file")" --model <provider/model> --directory "<worktree>"
+```
+
+Pull only the fields you actually need from a result instead of the full payload
+with `taskferry result <id> --fields message,tokens,cost` (or any subset of
+`message,narration,tokens,cost,sessionId,exitCode,signal,failureReason,failureDetail,keySlot,logPath`)
+— cheaper than `--full` when you don't need untruncated narration. To continue
+an advisor conversation instead of starting a fresh one (e.g. a follow-up
+question after its first answer), pass the same `--session-id` the first
+`advisor` call returned.
+
+If the raw narration is long enough that reading it directly would blow the
+context budget, condense it first instead of pulling it whole:
+
+```sh
+taskferry summary <id> --style report          # a bounded final report
+taskferry summary <id> --style activity --wait # a short "what's happening now" while it's still running
 ```
 
 Use a distinct prompt file for each concurrent task. Remove it with the runtime's
@@ -94,10 +123,17 @@ the task failed:
   less exhaustive `--variant`, switch model/provider, or shorten the prompt so
   the worker produces its first tool call sooner.
 
-Use `taskferry cancel <id>` for work that should stop. Use `taskferry list` or
-`taskferry context --format toon` to inspect workspace-scoped state. The CLI emits
-structured data, errors, and help as TOON on stdout, keeps diagnostics on stderr,
-and uses exit codes to distinguish success, operational failure, and usage errors.
+Use `taskferry cancel <id>` for work that should stop; it sends SIGTERM and
+escalates to SIGKILL after a grace period (default 5000ms, override with
+`--grace-ms <number>` for a worker that needs longer to unwind, e.g. mid
+long-running command). Use `taskferry list` or `taskferry context --format toon`
+to inspect workspace-scoped state, and `taskferry doctor --full` if something
+about the daemon itself seems wrong (dead socket, stale process, health check
+failing) before assuming a task-level problem. `doctor` also warns if the
+Claude plugin isn't installed, since that silently disables `claude-monitor`
+live-activity notifications with no other symptom. The CLI emits structured data,
+errors, and help as TOON on stdout, keeps diagnostics on stderr, and uses exit
+codes to distinguish success, operational failure, and usage errors.
 
 ## Codex Installation And Hooks
 

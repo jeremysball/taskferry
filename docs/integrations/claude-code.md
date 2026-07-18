@@ -77,8 +77,8 @@ want it gone too (see [daemon.md](../daemon.md#stopping-the-daemon)).
   summary, not just local narration — see
   [security.md](../security.md#activity-summaries) for what that costs and
   how to disable it.
-- **Skill** (`integrations/claude/skills/taskferry/SKILL.md`): a generated
-  copy of the canonical `skills/taskferry/SKILL.md` (`npm run
+- **Skill** (`integrations/claude/skills/using-taskferry/SKILL.md`): a generated
+  copy of the canonical `skills/using-taskferry/SKILL.md` (`npm run
   skill:generate`; `npm run skill:check` fails the build if it drifts),
   bundled into the plugin so installing it also gives Claude Code the
   taskferry worker-backend skill directly, without a separate manual copy
@@ -97,7 +97,7 @@ for you.
 A `subagent-driven-development` lifecycle dispatches implementer, fixer,
 and reviewer work through `taskferry dispatch` / `wait` / `result` instead
 of the built-in Agent tool, using the bundled taskferry skill described
-above (or a copy in `~/.claude/skills/taskferry/` for global availability
+above (or a copy in `~/.claude/skills/using-taskferry/` for global availability
 outside this plugin). The skill is what makes taskferry the SDD lifecycle's
 worker backend; this plugin's hook and monitor only provide ambient context
 and monitoring inside a live Claude Code session. See

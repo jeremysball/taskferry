@@ -285,30 +285,7 @@ git commit -m "feat(config): add config.js for loading and validating config.jso
 
 - [ ] **Step 1: Write the failing precedence tests**
 
-Read `src/tasks.test.js:1-40` first to match its existing `createManager`-style helper before adding these tests near the top-level `describe` blocks. Add:
-
-```js
-describe("config precedence", () => {
-  test("env var overrides a config value", () => {
-    const originalEnv = process.env.TASKFERRY_MAX_CONCURRENT_TASKS;
-    process.env.TASKFERRY_MAX_CONCURRENT_TASKS = "9";
-    try {
-      const mgr = createTaskManager({
-        stateDir: fs.mkdtempSync(path.join(os.tmpdir(), "axi-cfg-test-")),
-        spawnFn: () => fakeChild(),
-        killFn: () => {},
-        config: { maxConcurrentTasks: 3 },
-      });
-      assert.equal(mgr.__test_maxConcurrentTasks?.() ?? mgr.limits?.maxConcurrentTasks, undefined); // placeholder, see note below
-    } finally {
-      if (originalEnv === undefined) delete process.env.TASKFERRY_MAX_CONCURRENT_TASKS;
-      else process.env.TASKFERRY_MAX_CONCURRENT_TASKS = originalEnv;
-    }
-  });
-});
-```
-
-Stop — the placeholder assertion above does not compile against real exports. `createTaskManager` doesn't expose its internal `concurrencyLimit`. Use dispatch-queueing behavior instead, which is already how the existing suite verifies `maxConcurrentTasks` (see `src/tasks.test.js:423-460` for the pattern: dispatch more tasks than the limit and assert how many stay `queued`). Read that existing test block now, then write these three tests immediately below it, following the same `mgr1`/`mgr2`-style setup:
+Read `src/tasks.test.js:1-40` (imports/helpers) and `src/tasks.test.js:423-460` first — the latter is the existing pattern for verifying `maxConcurrentTasks`: dispatch more tasks than the limit and assert how many stay `queued`. `createTaskManager` doesn't expose its internal concurrency limit directly, so tests must observe it through dispatch-queueing behavior, matching that existing pattern. Add these three tests immediately below that existing block, following the same `mgr`-style setup:
 
 ```js
 describe("config file precedence (maxConcurrentTasks)", () => {

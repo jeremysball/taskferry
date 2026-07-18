@@ -96,7 +96,7 @@ Vars marked "config.json" also have a config-file equivalent — see
 | `TASKFERRY_PROVIDER_KEY_ENV` | — | yes | Source env var a key slot copies from |
 | `TASKFERRY_SUMMARY_MODEL` | `opencode/hy3-free` | yes | Model behind `summary --style report` |
 | `TASKFERRY_SUMMARY_KEY_SLOT` / `TASKFERRY_SUMMARY_PROVIDER_KEY_ENV` | — | yes | Key-slot wiring specific to the summary model |
-| `TASKFERRY_ACTIVITY_SUMMARIES` | — | yes | Enables `watch --summaries` / activity-style model calls |
+| `TASKFERRY_ACTIVITY_SUMMARIES` | `true` | yes | Enables `watch --summaries` / activity-style model calls |
 | `TASKFERRY_SUMMARIZER_TIMEOUT_MS` | `180000` | yes | Throttle between activity-summary model calls |
 | `TASKFERRY_ACTIVITY_MAX_WORDS` | `75` | yes | Max words in an activity-style summary |
 | `TASKFERRY_ADVISOR_SESSION_TTL_MS` | `1800000` (30 min) | yes | Advisor session idle expiry before auto-reset |

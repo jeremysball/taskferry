@@ -75,4 +75,5 @@ subcommand yet; hand-edit the file.
 A malformed file, an unrecognized key, or a wrong-typed value throws
 immediately when the daemon starts (or auto-starts on the first
 `taskferry` command), with a two-line `error: ...` / `help: ...` message
-naming the file and the offending key.
+naming the file. Unrecognized keys and wrong-typed values name the
+offending key; malformed JSON reports the parse error instead.

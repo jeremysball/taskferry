@@ -22,6 +22,22 @@ export default [
     },
   },
 
+  // Maintainability rules: flag files/functions that have grown hard to
+  // hold in your head (or in an agent's context window) in one pass.
+  // Warnings, not errors -- they inform without blocking a commit, since
+  // fixing them usually means a real refactor, not a one-line change.
+  {
+    files: ["**/*.js"],
+    ignores: ["**/*.test.js", "**/*-test.js"],
+    rules: {
+      complexity: ["warn", 15],
+      "max-depth": ["warn", 4],
+      "max-params": ["warn", 5],
+      "max-lines-per-function": ["warn", { max: 80, skipBlankLines: true, skipComments: true }],
+      "max-lines": ["warn", { max: 400, skipBlankLines: true, skipComments: true }],
+    },
+  },
+
   {
     files: ["**/*.js"],
     languageOptions: {

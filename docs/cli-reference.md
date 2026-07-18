@@ -173,7 +173,7 @@ Produces a bounded report or activity summary for a task.
 | `--wait` | Wait for the task to settle before summarizing |
 
 `--style report` starts a separate, asynchronous summary task using
-`opencode-go/deepseek-v4-flash` by default: wait for the returned
+`opencode/hy3-free` by default: wait for the returned
 `summaryTask.id`, then run `taskferry result` on that id. `--style activity`
 returns a synchronous, cached activity snapshot instead (the same mechanism
 `taskferry watch --summaries` uses); see [security.md](security.md) for what

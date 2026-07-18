@@ -28,7 +28,7 @@ function makeManager({ tasksFixture = [], logs = {}, spawnFn, killFn, listModels
     stateDir,
     spawnFn: spawnFn ?? (() => { throw new Error("spawnFn was not injected for this test"); }),
     killFn: killFn ?? (() => { throw new Error("killFn was not injected for this test"); }),
-    listModelsFn: listModelsFn ?? (() => "opencode-go/deepseek-v4-flash\n"),
+    listModelsFn: listModelsFn ?? (() => "opencode/hy3-free\n"),
     verifySummaryAgentFn: verifySummaryAgentFn ?? (async () => {}),
     ...(onEvent != null ? { onEvent } : {}),
     ...(maxDispatchesPerWindow != null ? { maxDispatchesPerWindow } : {}),
@@ -1832,7 +1832,7 @@ describe("key slots (summary tasks)", () => {
       spawnFn: (cmd, args, opts) => { capturedEnv = opts.env; return fakeChild(); },
       listModelsFn: (env) => {
         modelsEnv = env;
-        return "opencode-go/deepseek-v4-flash\n";
+        return "opencode/hy3-free\n";
       },
       keySlotsSpec: "summary-slot:AXI_TEST_SUMMARY_PRIMARY,backup:AXI_TEST_SUMMARY_BACKUP",
       summaryKeySlot: "summary-slot",
@@ -1872,7 +1872,7 @@ describe("key slots (summary tasks)", () => {
       tasksFixture: (logDir) => [{ ...baseTask({ id: "src1", status: "done", logPath: path.join(logDir, "src1.ndjson") }) }],
       logs: { "src1.ndjson": JSON.stringify({ type: "text", part: { messageID: "m1", text: "did the thing" } }) + "\n" },
       spawnFn: (cmd, args, opts) => { capturedEnv = opts.env; return fakeChild(); },
-      listModelsFn: () => "opencode-go/deepseek-v4-flash\n",
+      listModelsFn: () => "opencode/hy3-free\n",
       keySlotsSpec: "primary:DEEPSEEK_API_KEY,backup:AXI_TEST_SUMMARY_BACKUP",
       summaryProviderKeyEnvName: "DEEPSEEK_API_KEY",
     });

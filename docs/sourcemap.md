@@ -89,7 +89,7 @@ All `TASKFERRY_*` vars the daemon or CLI reads, gathered in one place
 | `TASKFERRY_WATCHDOG_POLL_MS` | `2000` | Watchdog check interval |
 | `TASKFERRY_KEY_SLOTS` | — | Named provider-key slot registry; see `docs/security.md` |
 | `TASKFERRY_PROVIDER_KEY_ENV` | — | Source env var a key slot copies from |
-| `TASKFERRY_SUMMARY_MODEL` | `opencode-go/deepseek-v4-flash` | Model behind `summary --style report` |
+| `TASKFERRY_SUMMARY_MODEL` | `opencode/hy3-free` | Model behind `summary --style report` |
 | `TASKFERRY_SUMMARY_KEY_SLOT` / `TASKFERRY_SUMMARY_PROVIDER_KEY_ENV` | — | Key-slot wiring specific to the summary model |
 | `TASKFERRY_ACTIVITY_SUMMARIES` | — | Enables `watch --summaries` / activity-style model calls |
 | `TASKFERRY_ACTIVITY_MIN_INTERVAL_MS` | `60000` | Throttle between activity-summary model calls |

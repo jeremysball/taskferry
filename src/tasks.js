@@ -132,7 +132,7 @@ const MAX_WAIT_MS = 45000;
 const NARRATION_PREVIEW_CHARS = 2000;
 const TAIL_READ_BYTES = 1024 * 1024;
 const SUMMARY_INPUT_BYTES = 96 * 1024;
-const SUMMARY_MODEL = process.env.TASKFERRY_SUMMARY_MODEL || "opencode-go/deepseek-v4-flash";
+const SUMMARY_MODEL = process.env.TASKFERRY_SUMMARY_MODEL || "opencode/hy3-free";
 const SUMMARY_AGENT = "taskferry-summary";
 const SUMMARY_PREFLIGHT_TIMEOUT_MS = 10000;
 const RESULT_FIELDS = new Set(["message", "narration", "tokens", "cost", "sessionId", "exitCode", "signal", "spawnError", "failureReason", "failureDetail", "keySlot", "logPath"]);
@@ -306,7 +306,7 @@ const DEFAULT_NO_OUTPUT_TIMEOUT_MS = positiveInteger(
 );
 const DEFAULT_POST_OUTPUT_NO_OUTPUT_TIMEOUT_MS = positiveInteger(
   Number(process.env.TASKFERRY_POST_OUTPUT_NO_OUTPUT_TIMEOUT_MS),
-  300000
+  600000
 );
 const DEFAULT_WATCHDOG_POLL_MS = positiveInteger(
   Number(process.env.TASKFERRY_WATCHDOG_POLL_MS),

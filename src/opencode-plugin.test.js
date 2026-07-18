@@ -217,7 +217,7 @@ test("sets TASKFERRY_CHILD for dispatch and summary children", async () => {
     killFn: () => {},
     maxDispatchesPerWindow: 100,
     dispatchWindowMs: 60000,
-    listModelsFn: async () => "opencode-go/deepseek-v4-flash\n",
+    listModelsFn: async () => "opencode/hy3-free\n",
     verifySummaryAgentFn: async () => {},
   });
   const task = manager.dispatch({ prompt: "dispatch", directory: stateDir });

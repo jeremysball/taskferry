@@ -82,7 +82,7 @@ taskferry dispatch --prompt "review this diff" --directory /repo --key-slot back
 
 `taskferry watch --summaries` and `taskferry summary --style activity` both
 run a bounded snapshot of a task's recent narration through a secondary
-model (`opencode-go/deepseek-v4-flash` by default, overridable with
+model (`opencode/hy3-free` by default, overridable with
 `TASKFERRY_SUMMARY_MODEL`) to produce a short human-readable status line.
 `taskferry summary --style report` (the default `summary` style) does the
 same thing at larger scale: a full asynchronous OpenCode subtask that reads

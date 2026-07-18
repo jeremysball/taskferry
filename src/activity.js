@@ -141,7 +141,7 @@ export function createActivityCache({
   summariesEnabled = true,
   minIntervalMs = DEFAULT_ACTIVITY_MIN_INTERVAL_MS,
   refreshBytes = ACTIVITY_REFRESH_BYTES,
-  summaryModel = "opencode-go/deepseek-v4-flash",
+  summaryModel = "opencode/hy3-free",
   maxWords = 200,
   snapshot = (task) => readActivitySnapshot(task.logPath || ""),
   summarize = async ({ snapshot: current }) => current.text,

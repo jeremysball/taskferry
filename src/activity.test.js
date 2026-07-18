@@ -119,7 +119,7 @@ describe("task activity events", () => {
       activitySummariesEnabled: true,
       activityMinIntervalMs: 0,
       onEvent: (event) => events.push(event),
-      listModelsFn: () => "opencode-go/deepseek-v4-flash\n",
+      listModelsFn: () => "opencode/hy3-free\n",
       verifySummaryAgentFn: async () => {},
     });
     manager.setActivitySummarySubscriptions(1);

@@ -26,6 +26,7 @@ import { withFileLock } from "./state-lock.js";
  * @property {string} model
  * @property {string|null} variant
  * @property {string|null} sessionId
+ * @property {string|null} originSessionId
  * @property {number|null} pid
  * @property {string} startedAt
  * @property {string|null} endedAt
@@ -52,6 +53,7 @@ import { withFileLock } from "./state-lock.js";
  * @property {string} directory
  * @property {string} model
  * @property {string|null} sessionId
+ * @property {string|null} originSessionId
  * @property {number|null} pid
  * @property {string} startedAt
  * @property {string|null} endedAt
@@ -603,6 +605,7 @@ export function createTaskManager({
         type: "task.activity",
         taskId: task.id,
         directory: scheduledDirectory,
+        originSessionId: task.originSessionId ?? null,
         status: scheduledStatus,
         previousStatus: null,
         occurredAt: new Date().toISOString(),
@@ -697,9 +700,9 @@ export function createTaskManager({
    * @returns {TaskSummary}
    */
   function summarize(task) {
-    const { promptPreview, promptTotalChars, id, status, directory, model, sessionId, pid, startedAt, endedAt, exitCode, signal, logPath, cancelRequested, keySlot, incomplete, finalMarker } = task;
+    const { promptPreview, promptTotalChars, id, status, directory, model, sessionId, originSessionId, pid, startedAt, endedAt, exitCode, signal, logPath, cancelRequested, keySlot, incomplete, finalMarker } = task;
     return {
-      id, status, directory, model, sessionId, pid, startedAt, endedAt, exitCode, signal, logPath,
+      id, status, directory, model, sessionId, originSessionId, pid, startedAt, endedAt, exitCode, signal, logPath,
       ...failureFields(task),
       keySlot: keySlot ?? null,
       promptPreview,
@@ -781,13 +784,14 @@ export function createTaskManager({
    * @param {string} params.directory
    * @param {string} [params.model]
    * @param {string} [params.variant]
-   * @param {string|undefined} [params.sessionId]
-   * @param {string|null} [params.keySlot]
+ * @param {string|undefined} [params.sessionId]
+ * @param {string|undefined} [params.originSessionId]
+ * @param {string|null} [params.keySlot]
    * @param {boolean} [params.internal]
    * @param {string|null} [params.finalMarker]
    * @returns {TaskSummary & {next: string}}
    */
-  function dispatch({ prompt, directory, model, variant, sessionId, keySlot, internal = false, finalMarker = null }) {
+  function dispatch({ prompt, directory, model, variant, sessionId, keySlot, internal = false, finalMarker = null, originSessionId }) {
     ensureStateLoaded();
     if (!prompt || typeof prompt !== "string") {
       throw new Error("error: prompt is required\nhelp: taskferry_dispatch requires a non-empty prompt string");
@@ -826,6 +830,7 @@ export function createTaskManager({
       model: resolvedModel,
       variant: usingDefaultModel ? "high" : variant || null,
       sessionId: sessionId || null,
+      originSessionId: originSessionId || null,
       pid: null,
       startedAt: new Date().toISOString(),
       endedAt: null,
@@ -1163,6 +1168,7 @@ export function createTaskManager({
       model: activitySummaryModel,
       variant: null,
       sessionId: null,
+      originSessionId: null,
       pid: null,
       startedAt: capturedAt,
       endedAt: null,

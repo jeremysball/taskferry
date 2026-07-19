@@ -272,6 +272,20 @@ describe("output-completeness check at settlement time (issue #35)", () => {
     fs.writeFileSync(logPath, lines.map((line) => JSON.stringify(line)).join("\n"));
   }
 
+  test("task.activity events carry the dispatching task's originSessionId", async () => {
+    const events = [];
+    const child = fakeChild();
+    const mgr = makeManager({ spawnFn: () => child, onEvent: (event) => events.push(event) });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), originSessionId: "sess-xyz" });
+    writeLog(dispatched.logPath, [
+      { type: "text", part: { messageID: "m1", text: "working" } },
+    ]);
+    child.emit("exit", 0, null);
+    await new Promise((resolve) => setImmediate(resolve));
+    const activityEvent = events.find((event) => event.type === "task.activity");
+    assert.equal(activityEvent?.originSessionId, "sess-xyz");
+  });
+
   test("a clean done task with a final message is not flagged incomplete", () => {
     const child = fakeChild();
     const mgr = makeManager({ spawnFn: () => child });
@@ -412,6 +426,19 @@ describe("output-completeness check at settlement time (issue #35)", () => {
         return true;
       }
     );
+  });
+
+  test("dispatch stores originSessionId on the task and its summary", () => {
+    const mgr = makeManager({ spawnFn: () => fakeChild() });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), originSessionId: "sess-abc" });
+    assert.equal(dispatched.originSessionId, "sess-abc");
+    assert.equal(mgr.status(dispatched.id).originSessionId, "sess-abc");
+  });
+
+  test("dispatch without originSessionId stores null", () => {
+    const mgr = makeManager({ spawnFn: () => fakeChild() });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+    assert.equal(dispatched.originSessionId, null);
   });
 
   test("incomplete and finalMarker survive a daemon restart via tasks.json", () => {

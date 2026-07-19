@@ -2,25 +2,14 @@ import { spawn, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import net from "node:net";
-import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { withFileLock } from "./state-lock.js";
 import { PROTOCOL_VERSION, encodeMessage } from "./protocol.js";
 import { loadConfig } from "./config.js";
+import { resolveRuntimeDir, resolveStateDir } from "./paths.js";
 
 const DAEMON_ENTRY = fileURLToPath(new URL("./daemon.js", import.meta.url));
-
-function stateDirectory(env) {
-  return env.TASKFERRY_STATE_DIR
-    || path.join(env.XDG_STATE_HOME || path.join(os.homedir(), ".local", "state"), "taskferry");
-}
-
-function runtimeDirectory(env, stateDir) {
-  if (env.TASKFERRY_RUNTIME_DIR) return env.TASKFERRY_RUNTIME_DIR;
-  if (env.XDG_RUNTIME_DIR) return path.join(env.XDG_RUNTIME_DIR, "taskferry");
-  return path.join(stateDir, "run");
-}
 
 const HEALTH_PROBE = String.raw`
 const net = require("node:net");
@@ -66,8 +55,8 @@ function spawnDaemon({ env, stateDir, runtimeDir, socketPath }) {
 
 export function ensureDaemonStarted({
   env = process.env,
-  stateDir = stateDirectory(env),
-  runtimeDir = runtimeDirectory(env, stateDir),
+  stateDir = resolveStateDir(env),
+  runtimeDir = resolveRuntimeDir({ env, stateDir }),
   socketPath = env.TASKFERRY_SOCKET_PATH || path.join(runtimeDir, "daemon.sock"),
   startupTimeoutMs = 5000,
   retryDelayMs = 25,
@@ -257,8 +246,8 @@ function delay(ms) {
 
 export async function connectClient({
   env = process.env,
-  stateDir = stateDirectory(env),
-  runtimeDir = runtimeDirectory(env, stateDir),
+  stateDir = resolveStateDir(env),
+  runtimeDir = resolveRuntimeDir({ env, stateDir }),
   socketPath = env.TASKFERRY_SOCKET_PATH || path.join(runtimeDir, "daemon.sock"),
   autoStart = true,
   startupTimeoutMs = 5000,
@@ -300,5 +289,3 @@ export async function connectClient({
     + `help: check ${runtimeDir} permissions and daemon startup diagnostics, then retry`
   );
 }
-
-export const createClient = connectClient;

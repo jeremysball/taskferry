@@ -1,7 +1,6 @@
 #!/usr/bin/env node
 import fs from "node:fs";
 import net from "node:net";
-import os from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
@@ -9,6 +8,7 @@ import { fileURLToPath } from "node:url";
 import { createTaskManager } from "./tasks.js";
 import { loadConfig } from "./config.js";
 import { withFileLock } from "./state-lock.js";
+import { resolveRuntimeDir, resolveStateDir } from "./paths.js";
 import {
   PROTOCOL_VERSION,
   ProtocolError,
@@ -36,18 +36,7 @@ function sourceSignature(dir = SOURCE_DIR) {
   return max;
 }
 
-export function resolveStateDir(env = process.env) {
-  return env.TASKFERRY_STATE_DIR
-    || path.join(env.XDG_STATE_HOME || path.join(os.homedir(), ".local", "state"), "taskferry");
-}
-
-export function resolveRuntimeDir({ env = process.env, stateDir = resolveStateDir(env) } = {}) {
-  if (env.TASKFERRY_RUNTIME_DIR) return env.TASKFERRY_RUNTIME_DIR;
-  if (env.XDG_RUNTIME_DIR) return path.join(env.XDG_RUNTIME_DIR, "taskferry");
-  return path.join(stateDir, "run");
-}
-
-export function resolveSocketPath(options = {}) {
+function resolveSocketPath(options = {}) {
   return options.socketPath || options.env?.TASKFERRY_SOCKET_PATH || path.join(resolveRuntimeDir(options), "daemon.sock");
 }
 

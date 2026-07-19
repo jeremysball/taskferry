@@ -1,14 +1,15 @@
 import fs from "node:fs";
+import { formatToolEventForNarration } from "./narration-format.js";
 
 /** @typedef {{id: string, status: string, logPath?: string, prompt?: string, promptPreview?: string}} ActivityTask */
 /** @typedef {{text: string, narration?: string, outputWatermark: number, sourceLogBytes: number, inputBytes: number}} ActivitySnapshot */
 /** @typedef {{activity: string, outputWatermark: number, summaryFailed: boolean, cached: boolean}} ActivityResult */
 /** @typedef {{text: string|null, sessionId: string|null}} SummarizeOutcome */
 
-export const ACTIVITY_REFRESH_BYTES = 4096;
+const ACTIVITY_REFRESH_BYTES = 4096;
 export const DEFAULT_SUMMARIZER_TIMEOUT_MS = 180000;
-export const DEFAULT_ACTIVITY_SNAPSHOT_BYTES = 96 * 1024;
-export const DEFAULT_ACTIVITY_MAX_CHARS = 4000;
+const DEFAULT_ACTIVITY_SNAPSHOT_BYTES = 96 * 1024;
+const DEFAULT_ACTIVITY_MAX_CHARS = 4000;
 
 /** @param {Buffer} buffer @param {string} side @returns {string} */
 function decodeUtf8(buffer, side) {
@@ -16,24 +17,6 @@ function decodeUtf8(buffer, side) {
   if (side === "head" && text.endsWith("\ufffd")) text = text.slice(0, -1);
   if (side === "tail" && text.startsWith("\ufffd")) text = text.slice(1);
   return text;
-}
-
-const TOOL_EVENT_TRUNCATE_CHARS = 500;
-
-/** @param {string} text @param {number} [max] @returns {string} */
-function truncateForNarration(text, max = TOOL_EVENT_TRUNCATE_CHARS) {
-  return text.length > max ? `${text.slice(0, max)}…[truncated]` : text;
-}
-
-/** @param {{tool?: string, state?: {input?: unknown, output?: unknown}}} part @returns {string} */
-function formatToolEventForNarration(part) {
-  const input = part.state?.input;
-  const inputText = typeof input === "string" ? input : JSON.stringify(input ?? {});
-  const output = part.state?.output;
-  const label = `[tool:${part.tool || "unknown"}]`;
-  const inputPart = truncateForNarration(inputText);
-  if (typeof output !== "string" || !output) return `${label} ${inputPart}`;
-  return `${label} ${inputPart} -> ${truncateForNarration(output)}`;
 }
 
 /** @param {string} raw @returns {string} */

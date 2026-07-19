@@ -2,11 +2,15 @@ import { execFile, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import os from "node:os";
 import { promisify } from "node:util";
 import { createTaskEvents } from "./events.js";
 import { createActivityCache, readActivitySnapshot, readDeltaNarration, DEFAULT_SUMMARIZER_TIMEOUT_MS } from "./activity.js";
 import { withFileLock } from "./state-lock.js";
+import { resolveStateDir } from "./paths.js";
+import { RESULT_FIELDS } from "./protocol.js";
+import { formatToolEventForNarration } from "./narration-format.js";
+import { errCode } from "./errors.js";
+import { isNonNegativeInteger, isPositiveInteger } from "./numbers.js";
 
 /**
  * @typedef {object} SummaryOf
@@ -130,9 +134,7 @@ import { withFileLock } from "./state-lock.js";
  * @property {string|null} [finalMarker]
  */
 
-const DEFAULT_STATE_DIR =
-  process.env.TASKFERRY_STATE_DIR ||
-  path.join(process.env.XDG_STATE_HOME || path.join(os.homedir(), ".local", "state"), "taskferry");
+const DEFAULT_STATE_DIR = resolveStateDir(process.env);
 
 // Default timeout for advisor() and the internal activity-summary poll.
 // Regular taskferry wait calls have no implicit timeout.
@@ -144,7 +146,6 @@ const SUMMARY_INPUT_BYTES = 96 * 1024;
 const DEFAULT_SUMMARY_MODEL = "opencode/hy3-free";
 const SUMMARY_AGENT = "taskferry-summary";
 const SUMMARY_PREFLIGHT_TIMEOUT_MS = 10000;
-const RESULT_FIELDS = new Set(["message", "narration", "tokens", "cost", "sessionId", "exitCode", "signal", "spawnError", "failureReason", "failureDetail", "keySlot", "logPath", "incomplete", "finalMarker"]);
 const execFileAsync = promisify(execFile);
 
 /**
@@ -257,20 +258,12 @@ const SUMMARY_AGENT_CONFIG = JSON.stringify({
  * @returns {number}
  */
 function positiveInteger(value, fallback) {
-  return Number.isSafeInteger(value) && value > 0 ? value : fallback;
+  return isPositiveInteger(value) ? value : fallback;
 }
 
 /** @param {unknown} value @param {number} fallback @returns {number} */
 function nonNegativeInteger(value, fallback) {
-  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : fallback;
-}
-
-/**
- * @param {unknown} err
- * @returns {string|undefined}
- */
-function errCode(err) {
-  return err && typeof err === "object" && "code" in err ? String(/** @type {{code: unknown}} */ (err).code) : undefined;
+  return isNonNegativeInteger(value) ? value : fallback;
 }
 
 /**
@@ -279,31 +272,6 @@ function errCode(err) {
  */
 function errMessage(err) {
   return err instanceof Error ? err.message : String(err);
-}
-
-const TOOL_EVENT_TRUNCATE_CHARS = 500;
-
-/**
- * @param {string} text
- * @param {number} [max]
- * @returns {string}
- */
-function truncateForNarration(text, max = TOOL_EVENT_TRUNCATE_CHARS) {
-  return text.length > max ? `${text.slice(0, max)}…[truncated]` : text;
-}
-
-/**
- * @param {{tool?: string, state?: {input?: unknown, output?: unknown}}} part
- * @returns {string}
- */
-function formatToolEventForNarration(part) {
-  const input = part.state?.input;
-  const inputText = typeof input === "string" ? input : JSON.stringify(input ?? {});
-  const output = part.state?.output;
-  const label = `[tool:${part.tool || "unknown"}]`;
-  const inputPart = truncateForNarration(inputText);
-  if (typeof output !== "string" || !output) return `${label} ${inputPart}`;
-  return `${label} ${inputPart} -> ${truncateForNarration(output)}`;
 }
 
 /**
@@ -1069,8 +1037,7 @@ export function createTaskManager({
     // by passing `null` explicitly -- a `null` here means "ignore whatever is
     // cached and treat this turn as a brand-new session", while an undefined
     // here means "use the cache's current state for this task."
-    const summarySessionId = options.summarySessionId === undefined ? undefined : options.summarySessionId;
-    const lastSummarizedWatermark = options.lastSummarizedWatermark === undefined ? undefined : options.lastSummarizedWatermark;
+    const { summarySessionId, lastSummarizedWatermark } = options;
     ensureStateLoaded();
     const source = tasks.get(taskId);
     if (!source) throw noSuchTask(taskId);

@@ -5,9 +5,10 @@ import fs from "node:fs";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
-import { removeStaleSocketIfUnchanged, resolveRuntimeDir, startDaemon } from "./daemon.js";
+import { removeStaleSocketIfUnchanged, startDaemon } from "./daemon.js";
 import { connectClient, ensureDaemonStarted } from "./client.js";
 import { withFileLock } from "./state-lock.js";
+import { resolveRuntimeDir } from "./paths.js";
 
 function temporaryPaths(t) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-daemon-test-"));

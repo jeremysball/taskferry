@@ -1,13 +1,6 @@
 import fs from "node:fs";
 import { randomUUID } from "node:crypto";
-
-/**
- * @param {unknown} err
- * @returns {string|undefined}
- */
-function errCode(err) {
-  return err && typeof err === "object" && "code" in err ? String(/** @type {{code: unknown}} */ (err).code) : undefined;
-}
+import { errCode } from "./errors.js";
 
 // A synchronous, cross-process exclusive lock backed by an exclusively-created
 // file. Blocks the event loop via Atomics.wait while contended -- acceptable

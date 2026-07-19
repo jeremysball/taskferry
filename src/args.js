@@ -1,19 +1,4 @@
-const RESULT_FIELDS = new Set([
-  "message",
-  "narration",
-  "tokens",
-  "cost",
-  "sessionId",
-  "exitCode",
-  "signal",
-  "spawnError",
-  "failureReason",
-  "failureDetail",
-  "keySlot",
-  "logPath",
-  "incomplete",
-  "finalMarker",
-]);
+import { RESULT_FIELDS } from "./protocol.js";
 
 const commandSpecs = {
   dispatch: {

@@ -10,7 +10,7 @@
   "scripts": {
     "start": "node src/cli.js",
     "test": "npm run test:unit",
-    "test:unit": "node --test src/tasks.test.js src/events.test.js src/protocol.test.js src/state-lock.test.js src/daemon.test.js src/args.test.js src/cli.test.js src/commands.test.js src/integrations.test.js src/opencode-plugin.test.js src/activity.test.js src/output.test.js src/setup.test.js src/config.test.js",
+    "test:unit": "env -u TASKFERRY_CHILD node --test src/tasks.test.js src/events.test.js src/protocol.test.js src/state-lock.test.js src/daemon.test.js src/args.test.js src/cli.test.js src/commands.test.js src/integrations.test.js src/opencode-plugin.test.js src/activity.test.js src/output.test.js src/setup.test.js src/config.test.js",
     "test:integration": "node src/smoke-test.js && node src/cancel-smoke-test.js && node src/poll-smoke-test.js",
     "skill:generate": "node scripts/generate-skill.js",
     "skill:check": "node scripts/generate-skill.js --check",

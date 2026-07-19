@@ -1,4 +1,5 @@
 import path from "node:path";
+import { isNonNegativeInteger, isPositiveInteger } from "./numbers.js";
 
 export const PROTOCOL_VERSION = 1;
 
@@ -17,7 +18,7 @@ export const RPC_METHODS = Object.freeze([
 ]);
 
 const REQUEST_METHODS = new Set([...RPC_METHODS, "event.subscribe"]);
-const RESULT_FIELDS = new Set([
+export const RESULT_FIELDS = new Set([
   "message",
   "narration",
   "tokens",
@@ -33,19 +34,13 @@ const RESULT_FIELDS = new Set([
   "incomplete",
   "finalMarker",
 ]);
-const MANAGER_METHODS = Object.freeze({
-  "task.dispatch": "dispatch",
-  "task.cancel": "cancel",
-  "task.status": "status",
-  "task.wait": "poll",
-  "task.list": "list",
-  "task.result": "result",
-  "task.tail": "tail",
-  "task.summary": "summarize",
-  "task.advisor": "advisor",
-});
-
 export class ProtocolError extends Error {
+  /**
+   * @param {string} code
+   * @param {string} message
+   * @param {string} help
+   * @param {string | null} [requestId]
+   */
   constructor(code, message, help, requestId = null) {
     super(message);
     this.name = "ProtocolError";
@@ -55,34 +50,36 @@ export class ProtocolError extends Error {
   }
 }
 
-export function managerMethodFor(method) {
-  return MANAGER_METHODS[method] ?? null;
-}
-
+/** @param {unknown} value @returns {value is Record<string, unknown>} */
 function isObject(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
+/** @param {unknown} value @returns {value is string} */
 function isNonEmptyString(value) {
   return typeof value === "string" && value.length > 0;
 }
 
+/** @param {unknown} value @returns {value is string} */
 function isAbsolutePath(value) {
   return isNonEmptyString(value) && path.isAbsolute(value);
 }
 
+/** @param {unknown} value @param {(value: unknown) => boolean} predicate @returns {boolean} */
 function optional(value, predicate) {
   return value === undefined || predicate(value);
 }
 
+/** @param {Record<string, unknown>} params @param {string[]} names @returns {boolean} */
 function hasOnly(params, names) {
   const allowed = new Set(names);
   return Object.keys(params).every((name) => allowed.has(name));
 }
 
-const positiveInteger = (value) => Number.isSafeInteger(value) && value > 0;
-const nonNegativeInteger = (value) => Number.isSafeInteger(value) && value >= 0;
+const positiveInteger = isPositiveInteger;
+const nonNegativeInteger = isNonNegativeInteger;
 
+/** @param {string} method @param {Record<string, unknown>} params @returns {boolean} */
 function validParams(method, params) {
   switch (method) {
     case "system.health":
@@ -122,7 +119,7 @@ function validParams(method, params) {
     case "task.summary":
       return hasOnly(params, ["taskId", "maxWords", "style"])
         && isNonEmptyString(params.taskId)
-        && optional(params.maxWords, (value) => Number.isSafeInteger(value) && value >= 75 && value <= 300)
+        && optional(params.maxWords, (value) => Number.isSafeInteger(value) && /** @type {number} */ (value) >= 75 && /** @type {number} */ (value) <= 300)
         && optional(params.style, (value) => value === "report" || value === "activity");
     case "task.advisor":
       return hasOnly(params, ["prompt", "directory", "model", "variant", "sessionId", "timeoutMs"])
@@ -144,6 +141,7 @@ function validParams(method, params) {
   }
 }
 
+/** @param {string} line */
 export function parseRequestLine(line) {
   let value;
   try {
@@ -197,18 +195,22 @@ export function parseRequestLine(line) {
   return value;
 }
 
+/** @param {unknown} message */
 export function encodeMessage(message) {
   return `${JSON.stringify(message)}\n`;
 }
 
+/** @param {string} id @param {unknown} result */
 export function successResponse(id, result) {
   return { version: PROTOCOL_VERSION, id, ok: true, result };
 }
 
+/** @param {string | null} id @param {string} code @param {string} message @param {string} help */
 export function errorResponse(id, code, message, help) {
   return { version: PROTOCOL_VERSION, id, ok: false, error: { code, message, help } };
 }
 
+/** @param {string} subscriptionId @param {unknown} event */
 export function eventMessage(subscriptionId, event) {
   return { version: PROTOCOL_VERSION, type: "event", subscriptionId, event };
 }

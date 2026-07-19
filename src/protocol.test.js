@@ -7,7 +7,6 @@ import {
   encodeMessage,
   errorResponse,
   eventMessage,
-  managerMethodFor,
   parseRequestLine,
   successResponse,
 } from "./protocol.js";
@@ -31,13 +30,9 @@ function request(method, params = {}, overrides = {}) {
 }
 
 describe("private daemon protocol", () => {
-  test("exports the exact version, RPC method list, and manager mappings", () => {
+  test("exports the exact version and RPC method list", () => {
     assert.equal(PROTOCOL_VERSION, 1);
     assert.deepEqual(RPC_METHODS, expectedMethods);
-    assert.equal(managerMethodFor("task.wait"), "poll");
-    assert.equal(managerMethodFor("task.summary"), "summarize");
-    assert.equal(managerMethodFor("task.dispatch"), "dispatch");
-    assert.equal(managerMethodFor("task.context"), null);
   });
 
   test("encodes each message as one newline-terminated JSON object", () => {

@@ -37,6 +37,9 @@ function makeRecordingClients(behavior) {
 }
 
 function configuredClients(command, args) {
+  if (command === "git" && args[0] === "rev-parse" && args[1] === "HEAD") {
+    return { status: 0, stdout: "abc123\n", stderr: "", error: null };
+  }
   if (command === "claude") {
     if (args[0] === "plugin" && args[1] === "marketplace") {
       return { status: 0, stdout: "", stderr: "", error: null };
@@ -45,6 +48,75 @@ function configuredClients(command, args) {
       return { status: 0, stdout: "[]", stderr: "", error: null };
     }
     if (args[0] === "plugin" && (args[1] === "install" || args[1] === "update")) {
+      return { status: 0, stdout: "", stderr: "", error: null };
+    }
+  }
+  if (command === "codex") {
+    if (args[0] === "plugin" && args[1] === "marketplace") {
+      return { status: 0, stdout: "", stderr: "", error: null };
+    }
+  }
+  throw new Error(`unexpected client command: ${command} ${args.join(" ")}`);
+}
+
+function matchingHashAlreadyInstalledClients(command, args) {
+  if (command === "git" && args[0] === "rev-parse" && args[1] === "HEAD") {
+    return { status: 0, stdout: "abc123\n", stderr: "", error: null };
+  }
+  if (command === "claude") {
+    if (args[0] === "plugin" && args[1] === "marketplace") {
+      return { status: 0, stdout: "", stderr: "", error: null };
+    }
+    if (args[0] === "plugin" && args[1] === "list") {
+      return { status: 0, stdout: JSON.stringify([{ id: "taskferry@taskferry" }]), stderr: "", error: null };
+    }
+  }
+  if (command === "codex") {
+    if (args[0] === "plugin" && args[1] === "marketplace") {
+      return { status: 0, stdout: "", stderr: "", error: null };
+    }
+  }
+  throw new Error(`unexpected client command: ${command} ${args.join(" ")}`);
+}
+
+function differentHashAlreadyInstalledClients(command, args) {
+  if (command === "git" && args[0] === "rev-parse" && args[1] === "HEAD") {
+    return { status: 0, stdout: "def456\n", stderr: "", error: null };
+  }
+  if (command === "claude") {
+    if (args[0] === "plugin" && args[1] === "marketplace") {
+      return { status: 0, stdout: "", stderr: "", error: null };
+    }
+    if (args[0] === "plugin" && args[1] === "list") {
+      return { status: 0, stdout: JSON.stringify([{ id: "taskferry@taskferry" }]), stderr: "", error: null };
+    }
+    if (args[0] === "plugin" && args[1] === "uninstall") {
+      return { status: 0, stdout: "", stderr: "", error: null };
+    }
+    if (args[0] === "plugin" && args[1] === "install") {
+      return { status: 0, stdout: "", stderr: "", error: null };
+    }
+  }
+  if (command === "codex") {
+    if (args[0] === "plugin" && args[1] === "marketplace") {
+      return { status: 0, stdout: "", stderr: "", error: null };
+    }
+  }
+  throw new Error(`unexpected client command: ${command} ${args.join(" ")}`);
+}
+
+function gitFailsAlreadyInstalledClients(command, args) {
+  if (command === "git" && args[0] === "rev-parse" && args[1] === "HEAD") {
+    return { status: 128, stdout: "", stderr: "fatal: not a git repository", error: null };
+  }
+  if (command === "claude") {
+    if (args[0] === "plugin" && args[1] === "marketplace") {
+      return { status: 0, stdout: "", stderr: "", error: null };
+    }
+    if (args[0] === "plugin" && args[1] === "list") {
+      return { status: 0, stdout: JSON.stringify([{ id: "taskferry@taskferry" }]), stderr: "", error: null };
+    }
+    if (args[0] === "plugin" && args[1] === "update") {
       return { status: 0, stdout: "", stderr: "", error: null };
     }
   }
@@ -132,4 +204,84 @@ test("rerun replaces the existing managed symlinks without throwing", (t) => {
   assert.equal(fs.realpathSync(second.opencode.path), fixture.opencodeSourcePath);
   assert.equal(second.cli.path, first.cli.path);
   assert.equal(second.opencode.path, first.opencode.path);
+});
+
+test("first install writes the hash state file", (t) => {
+  const fixture = makeFixture(t);
+  const commandCalls = [];
+  const result = runSetup({
+    ...fixture,
+    env: {},
+    runCommand: makeRecordingClients({ calls: commandCalls, next: configuredClients }),
+  });
+  assert.equal(result.integrations.claude.status, "installed");
+
+  const hashFile = path.join(fixture.homeDirectory, ".local", "state", "taskferry", "claude-plugin-hash");
+  assert.equal(fs.readFileSync(hashFile, "utf8").trim(), "abc123");
+});
+
+test("skips re-install when stored hash matches current HEAD", (t) => {
+  const fixture = makeFixture(t);
+
+  const hashFile = path.join(fixture.homeDirectory, ".local", "state", "taskferry", "claude-plugin-hash");
+  fs.mkdirSync(path.dirname(hashFile), { recursive: true });
+  fs.writeFileSync(hashFile, "abc123\n");
+
+  const commandCalls = [];
+  const result = runSetup({
+    ...fixture,
+    env: {},
+    runCommand: makeRecordingClients({ calls: commandCalls, next: matchingHashAlreadyInstalledClients }),
+  });
+  assert.equal(result.integrations.claude.status, "installed");
+
+  const hasUninstallOrInstall = commandCalls.some(
+    (c) => c.command === "claude" && ["uninstall", "install", "update"].includes(c.args[1]),
+  );
+  assert.equal(hasUninstallOrInstall, false, "unexpected uninstall/install/update call");
+});
+
+test("re-installs when stored hash differs or is absent", (t) => {
+  const fixture = makeFixture(t);
+
+  const commandCalls = [];
+  const result = runSetup({
+    ...fixture,
+    env: {},
+    runCommand: makeRecordingClients({ calls: commandCalls, next: differentHashAlreadyInstalledClients }),
+  });
+  assert.equal(result.integrations.claude.status, "installed");
+
+  const uninstallIdx = commandCalls.findIndex(
+    (c) => c.command === "claude" && c.args[0] === "plugin" && c.args[1] === "uninstall",
+  );
+  const installIdx = commandCalls.findIndex(
+    (c) => c.command === "claude" && c.args[0] === "plugin" && c.args[1] === "install",
+  );
+  assert.notEqual(uninstallIdx, -1, "uninstall was not called");
+  assert.notEqual(installIdx, -1, "install was not called");
+  assert.ok(uninstallIdx < installIdx, "uninstall must precede install");
+
+  const hashFile = path.join(fixture.homeDirectory, ".local", "state", "taskferry", "claude-plugin-hash");
+  assert.equal(fs.readFileSync(hashFile, "utf8").trim(), "def456");
+});
+
+test("falls back to claude plugin update when git rev-parse HEAD fails", (t) => {
+  const fixture = makeFixture(t);
+
+  const commandCalls = [];
+  const result = runSetup({
+    ...fixture,
+    env: {},
+    runCommand: makeRecordingClients({ calls: commandCalls, next: gitFailsAlreadyInstalledClients }),
+  });
+  assert.equal(result.integrations.claude.status, "installed");
+
+  const updateCall = commandCalls.find(
+    (c) => c.command === "claude" && c.args[0] === "plugin" && c.args[1] === "update",
+  );
+  assert.notEqual(updateCall, undefined, "claude plugin update was not called");
+
+  const hashFile = path.join(fixture.homeDirectory, ".local", "state", "taskferry", "claude-plugin-hash");
+  assert.ok(!fs.existsSync(hashFile), "hash file should not exist after git failure");
 });

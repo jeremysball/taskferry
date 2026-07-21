@@ -286,6 +286,29 @@ describe("output-completeness check at settlement time (issue #35)", () => {
     assert.equal(activityEvent?.originSessionId, "sess-xyz");
   });
 
+  test("scheduleActivity emits an explicit failure marker instead of local narration when the summary model call fails", async () => {
+    const events = [];
+    const child = fakeChild();
+    const mgr = makeManager({
+      tasksFixture: [],
+      spawnFn: () => child,
+      listModelsFn: () => "openai/gpt-5.6-luna\n",
+      onEvent: (event) => events.push(event),
+    });
+    mgr.setActivitySummarySubscriptions(1);
+
+    mgr.dispatch({ prompt: "do the thing", directory: os.tmpdir() });
+    child.emit("exit", 0, null);
+    await new Promise((resolve) => setImmediate(resolve));
+
+    const activityEvents = events.filter((event) => event.type === "task.activity");
+    assert.ok(activityEvents.length >= 1, "expected at least one task.activity event");
+    const failed = activityEvents.find((event) => event.summaryFailed === true);
+    assert.ok(failed, "expected a task.activity event with summaryFailed: true");
+    assert.equal(failed.activity, undefined);
+    assert.match(failed.summaryError, /summary model is unavailable/);
+  });
+
   test("a clean done task with a final message is not flagged incomplete", () => {
     const child = fakeChild();
     const mgr = makeManager({ spawnFn: () => child });
@@ -2150,6 +2173,26 @@ describe("summarize()", () => {
     assert.equal(mgr.list().tasks.length, 1);
   });
 
+  test("checkSummaryModelReady rejects when the configured summary model is unavailable", async () => {
+    const mgr = makeManager({ listModelsFn: () => "openai/gpt-5.6-luna\n" });
+    await assert.rejects(mgr.checkSummaryModelReady(), /summary model is unavailable/);
+  });
+
+  test("checkSummaryModelReady rejects when the summary agent isolation check fails", async () => {
+    const mgr = makeManager({ verifySummaryAgentFn: async () => { throw new Error("bash is enabled"); } });
+    await assert.rejects(mgr.checkSummaryModelReady(), /summary agent isolation check failed/);
+  });
+
+  test("summary --mode activity rejects when the summary model is unavailable, instead of masking the failure with local narration", async () => {
+    const log = JSON.stringify({ type: "text", part: { messageID: "m1", text: "progress" } });
+    const mgr = makeManager({
+      tasksFixture: (logDir) => [baseTask({ id: "source", logPath: path.join(logDir, "source.ndjson") })],
+      logs: { "source.ndjson": log },
+      listModelsFn: () => "openai/gpt-5.6-luna\n",
+    });
+    await assert.rejects(mgr.summarize("source", { mode: "activity", maxWords: 150 }), /summary model is unavailable/);
+  });
+
   // The default listModelsFn/verifySummaryAgentFn (used in production, bypassed
   // by makeManager's forced overrides elsewhere in this file) both shell out to
   // execFileAsync("opencode", ...). This test exercises those real defaults
@@ -2393,8 +2436,7 @@ describe("summarize()", () => {
     assert.match(retrySnapshot.narration, /More work done/);
 
     // Drop a usable final message + sessionID into the retry's log so the
-    // activity-result we get back isn't summaryFailed. The retry's session
-    // id is what survives into the cache for the next call.
+    // retry's session id survives into the cache for the next call.
     const persisted = JSON.parse(fs.readFileSync(mgr.paths.TASKS_FILE, "utf8"));
     const retries = persisted.filter((t) => t.summaryOf && t.summaryOf.sourceTaskId === "source");
     assert.equal(retries.length, 2, "expected two summary tasks to have been queued");
@@ -2406,7 +2448,6 @@ describe("summarize()", () => {
     children[1].emit("exit", 0, null);
 
     const result = await refreshP;
-    assert.equal(result.summaryFailed, false);
     assert.equal(result.activity, "fresh retry output");
     // Cache ended up with the retry's session id (recorded by the exit
     // handler), not the stale ses_cached or the mismatched first attempt.

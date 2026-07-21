@@ -579,27 +579,38 @@ export function createTaskManager({
     if (typeof onEvent !== "function" || task.internal) return;
     const scheduledStatus = task.status;
     const scheduledDirectory = task.directory;
-    void activityCache.refresh(task, { force }).then(/** @param {{activity: string, outputWatermark: number, summaryFailed: boolean, cached: boolean}|null} result */ (result) => {
-      if (!result) return;
+    const baseEvent = () => ({
+      sequence: ++eventSequence,
+      type: "task.activity",
+      taskId: task.id,
+      directory: scheduledDirectory,
+      originSessionId: task.originSessionId ?? null,
+      status: scheduledStatus,
+      previousStatus: null,
+      occurredAt: new Date().toISOString(),
+    });
+    const emit = (/** @type {object} */ event) => {
       if (scheduledStatus === "running" && task.status !== scheduledStatus) return;
-      const event = {
-        sequence: ++eventSequence,
-        type: "task.activity",
-        taskId: task.id,
-        directory: scheduledDirectory,
-        originSessionId: task.originSessionId ?? null,
-        status: scheduledStatus,
-        previousStatus: null,
-        occurredAt: new Date().toISOString(),
-        activity: result.activity,
-        outputWatermark: result.outputWatermark,
-      };
       try {
         onEvent(event);
       } catch {
         // Activity is advisory and cannot interrupt task lifecycle.
       }
-    });
+    };
+    void activityCache.refresh(task, { force }).then(
+      /** @param {{activity: string, outputWatermark: number, cached: boolean}|null} result */ (result) => {
+        if (!result) return;
+        emit({ ...baseEvent(), activity: result.activity, outputWatermark: result.outputWatermark });
+      },
+      (err) => {
+        // A propagated summarizer failure (Task 4) must not become an
+        // unhandled rejection here, and must not be smoothed over with a
+        // retry or stale-narration substitution -- every failed tick
+        // reports failure, explicitly, so a --summaries subscriber can tell
+        // a real summary from a failed one.
+        emit({ ...baseEvent(), summaryFailed: true, summaryError: errMessage(err) });
+      }
+    );
   }
 
   function loadPersisted() {
@@ -873,6 +884,15 @@ export function createTaskManager({
     }
   }
 
+  /** Shared upfront readiness check for both the direct `summary --mode
+   * activity` path and `watch --summaries`'s subscribe-time gate: throws the
+   * same errors `summaryModelAvailable`/`verifySummaryAgent` throw, so a
+   * caller can fail fast before doing any work. */
+  async function checkSummaryModelReady() {
+    const env = summaryEnvironment();
+    await Promise.all([summaryModelAvailable(activitySummaryModel, env), verifySummaryAgent(env)]);
+  }
+
   /**
    * Drives a single secondary-model summary call from the activity cache:
    * spawns the summary child, polls it, extracts the session id and message,
@@ -889,6 +909,16 @@ export function createTaskManager({
    * @returns {Promise<{text: string, sessionId: string|null}>}
    */
   async function summarizeActivity(taskId, maxWords, previousActivity) {
+    // Run the model-availability/isolation check up front, outside the
+    // try/catch below -- that catch exists for the stale-session retry
+    // logic (a spawn or poll failure is legitimately best-effort), but a
+    // genuine "model unavailable" or "isolation check failed" error must
+    // propagate instead of being swallowed into an empty result. This
+    // duplicates the same check `summarizeTask()` performs internally
+    // further down, but both `summaryModelAvailable()` and
+    // `verifySummaryAgent()` are self-memoized for 5 minutes, so the repeat
+    // call is a cache hit, not a second real check.
+    await checkSummaryModelReady();
     const continueSessionId = activityCache.getSummarySessionId(taskId);
     try {
       const firstStarted = await summarizeTask(taskId, { maxWords, allowPromptFallback: true, previousActivity });
@@ -961,13 +991,12 @@ export function createTaskManager({
       sourceStatus: source.status,
       activity: result.activity,
       outputWatermark: result.outputWatermark,
-      summaryFailed: result.summaryFailed,
     };
   }
 
-  /** @param {string} taskId @param {{maxWords?: number, style?: string}} [options] */
+  /** @param {string} taskId @param {{maxWords?: number, mode?: string}} [options] */
   function summarizeRequest(taskId, options = {}) {
-    if (options.style === "activity") return activitySummary(taskId, options.maxWords ?? activityWords);
+    if (options.mode === "activity") return activitySummary(taskId, options.maxWords ?? activityWords);
     return summarizeTask(taskId, options);
   }
 
@@ -2090,6 +2119,7 @@ export function createTaskManager({
     result,
     tail,
     summarize: summarizeRequest,
+    checkSummaryModelReady,
     setActivitySummarySubscriptions: /** @param {number} count */ (count) => {
       activitySummarySubscriptions = Math.max(0, Number.isSafeInteger(count) ? count : 0);
       activityCache.setSummariesEnabled(activitySummariesEnabled && activitySummarySubscriptions > 0);

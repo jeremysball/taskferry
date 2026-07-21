@@ -68,11 +68,11 @@ const commandSpecs = {
     usage: "taskferry summary <id> [options]",
     description: "Create a bounded report or activity summary for a task.",
     options: {
-      "--style report|activity": "summary style, default report",
+      "--mode report|activity": "summary mode, default report",
       "--max-words <number>": "target length from 75 through 300",
       "--wait": "wait for active work before summarizing",
     },
-    examples: ['taskferry summary <id>', 'taskferry summary <id> --style activity --wait'],
+    examples: ['taskferry summary <id>', 'taskferry summary <id> --mode activity --wait'],
   },
   result: {
     usage: "taskferry result <id> [options]",
@@ -240,7 +240,7 @@ function defaultOptions(command, cwd) {
     case "tail":
       return { taskId: undefined, chars: undefined };
     case "summary":
-      return { taskId: undefined, style: "report", maxWords: undefined, wait: false };
+      return { taskId: undefined, mode: "report", maxWords: undefined, wait: false };
     case "result":
       return { taskId: undefined, full: false, fields: undefined };
     case "list":
@@ -303,6 +303,7 @@ export function parseArgs(argv, { cwd = process.cwd() } = {}) {
       "--tail_chars": "--tail_chars was renamed; use --tail-chars",
       "--max_words": "--max_words was renamed; use --max-words",
       "--session_id": "--session_id was renamed; use --session-id",
+      "--style": "--style was renamed; use --mode",
     };
     if (migrationFlags[name] && !(name === "--task-id" && command === "watch")) {
       throw new UsageError(`unknown flag ${name} for \`${command}\``, migrationFlags[name]);
@@ -334,7 +335,7 @@ export function parseArgs(argv, { cwd = process.cwd() } = {}) {
       "--timeout-ms": "timeoutMs",
       "--tail-chars": "tailChars",
       "--chars": "chars",
-      "--style": "style",
+      "--mode": "mode",
       "--max-words": "maxWords",
       "--fields": "fields",
       "--limit": "limit",
@@ -355,8 +356,8 @@ export function parseArgs(argv, { cwd = process.cwd() } = {}) {
     } else if (key === "format") {
       const allowed = command === "watch" ? ["toon", "claude-monitor", "ndjson"] : ["toon", "claude-hook", "codex-hook"];
       if (!allowed.includes(value)) throw new UsageError(`${name} must be one of ${allowed.join(", ")}`, `Use ${name} with one of: ${allowed.join(", ")}`);
-    } else if (key === "style" && !["report", "activity"].includes(value)) {
-      throw new UsageError(`${name} must be one of report, activity`, "Use --style report or --style activity");
+    } else if (key === "mode" && !["report", "activity"].includes(value)) {
+      throw new UsageError(`${name} must be one of report, activity`, "Use --mode report or --mode activity");
     } else if (key === "finalMarker") {
       try {
         new RegExp(value);
@@ -401,7 +402,7 @@ function commandAllows(command, flag) {
     advisor: ["--prompt", "--model", "--directory", "--variant", "--session-id", "--timeout-ms"],
     status: [],
     tail: ["--chars"],
-    summary: ["--style", "--max-words"],
+    summary: ["--mode", "--max-words"],
     result: ["--fields"],
     list: ["--directory", "--limit"],
     watch: ["--directory", "--format", "--task-id", "--origin-session-id"],

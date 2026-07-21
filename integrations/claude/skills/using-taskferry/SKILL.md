@@ -263,9 +263,15 @@ If the raw narration is long enough that reading it directly would blow the
 context budget, condense it first instead of pulling it whole:
 
 ```sh
-taskferry summary <id> --style report          # a bounded final report
-taskferry summary <id> --style activity --wait # a short "what's happening now" while it's still running
+taskferry summary <id> --mode report # a bounded final report, after settlement
 ```
+
+Don't call `summary <id> --mode activity` directly for interim visibility
+while a task is still running -- that mode exists for the statusline/human
+`watch` path, not for a model checking in on its own dispatch. Use
+`taskferry wait <id> --summarize` instead (see above): it already streams
+the same condensed activity summaries while blocking, without a second
+parallel command doing the same job.
 
 Use a distinct prompt file for each concurrent task. Remove it with the runtime's
 file tool after the task settles and its result has been validated.

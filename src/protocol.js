@@ -117,10 +117,10 @@ function validParams(method, params) {
         && isNonEmptyString(params.taskId)
         && optional(params.chars, (value) => positiveInteger(value) && value <= 65536);
     case "task.summary":
-      return hasOnly(params, ["taskId", "maxWords", "style"])
+      return hasOnly(params, ["taskId", "maxWords", "mode"])
         && isNonEmptyString(params.taskId)
         && optional(params.maxWords, (value) => Number.isSafeInteger(value) && /** @type {number} */ (value) >= 75 && /** @type {number} */ (value) <= 300)
-        && optional(params.style, (value) => value === "report" || value === "activity");
+        && optional(params.mode, (value) => value === "report" || value === "activity");
     case "task.advisor":
       return hasOnly(params, ["prompt", "directory", "model", "variant", "sessionId", "timeoutMs"])
         && isNonEmptyString(params.prompt)

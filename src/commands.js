@@ -138,9 +138,9 @@ export async function runCommand(command, options, { client, io = process, signa
       const summary = await client.request("task.summary", {
         taskId: options.taskId,
         ...(options.maxWords === undefined ? {} : { maxWords: options.maxWords }),
-        ...(options.style === "activity" ? { style: options.style } : {}),
+        ...(options.mode === "activity" ? { mode: options.mode } : {}),
       });
-      return options.style === "report" ? summary : { style: options.style, ...summary };
+      return options.mode === "report" ? summary : { mode: options.mode, ...summary };
     }
     case "result": {
       const detail = await client.request("task.result", {

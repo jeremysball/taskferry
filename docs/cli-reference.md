@@ -173,13 +173,13 @@ Produces a bounded report or activity summary for a task.
 
 | Flag | Notes |
 |---|---|
-| `--style report\|activity` | Default `report` |
+| `--mode report\|activity` | Default `report` |
 | `--max-words <number>` | Target length from 75 through 300, default 200 |
 | `--wait` | Wait for the task to settle before summarizing |
 
-`--style report` starts a separate, asynchronous summary task using
+`--mode report` starts a separate, asynchronous summary task using
 `opencode/hy3-free` by default: wait for the returned
-`summaryTask.id`, then run `taskferry result` on that id. `--style activity`
+`summaryTask.id`, then run `taskferry result` on that id. `--mode activity`
 returns a synchronous, cached activity snapshot instead (the same mechanism
 `taskferry watch --summaries` uses); see [security.md](security.md) for what
 gets sent to the summary model and how to disable it.

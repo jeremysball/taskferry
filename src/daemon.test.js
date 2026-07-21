@@ -21,7 +21,7 @@ function temporaryPaths(t) {
   };
 }
 
-function fakeManagerFactory(tasks = []) {
+function fakeManagerFactory(tasks = [], { checkSummaryModelReady } = {}) {
   let onEvent;
   const calls = [];
   const byId = new Map(tasks.map((task) => [task.id, task]));
@@ -71,6 +71,7 @@ function fakeManagerFactory(tasks = []) {
       calls.push(["advisor", params]);
       return { status: "done", message: "advice" };
     },
+    checkSummaryModelReady: checkSummaryModelReady ?? (async () => {}),
   };
 
   return {
@@ -256,6 +257,30 @@ describe("Unix socket daemon", () => {
     assert.deepEqual(secondEvents.map((message) => message.event.taskId), ["one"]);
     assert.equal(daemon.stats().connections, 2);
     assert.equal(daemon.stats().subscriptions, 3);
+  });
+
+  test("event.subscribe with summaries: true rejects upfront when the summary model isn't ready, without registering a subscription", async (t) => {
+    const paths = temporaryPaths(t);
+    const fake = fakeManagerFactory([], {
+      checkSummaryModelReady: async () => {
+        throw new Error("error: summary model is unavailable: opencode/hy3-free\nhelp: set TASKFERRY_SUMMARY_MODEL to an installed model, then retry taskferry_summary");
+      },
+    });
+    const daemon = await startDaemon({ ...paths, taskManagerFactory: fake.factory });
+    t.after(() => daemon.close());
+    const peer = await openPeer(paths.socketPath);
+    t.after(() => peer.close());
+
+    const rejected = await peer.request("sub", "event.subscribe", { directory: paths.root, summaries: true });
+    assert.equal(rejected.ok, false);
+    assert.match(rejected.error.message, /summary model is unavailable/);
+
+    // Confirm no subscription was actually registered: a plain (non-summaries)
+    // subscribe still succeeds afterward, proving the daemon didn't crash or
+    // wedge its subscription state on the earlier rejection.
+    const plain = await peer.request("sub2", "event.subscribe", { directory: paths.root });
+    assert.equal(plain.ok, true);
+    assert.ok(plain.result.subscriptionId);
   });
 
   test("event.subscribe with originSessionId only receives same-origin events, and origin-less events broadcast to everyone", async (t) => {

@@ -40,7 +40,7 @@ test("parses each command's required arguments and defaults", () => {
   assert.equal(parseArgs(["advisor", "--prompt", "help", "--model", "test/model"], { cwd }).options.directory, cwd);
   assert.equal(parseArgs(["status", "oc_1"]).options.full, false);
   assert.equal(parseArgs(["tail", "oc_1"]).options.chars, undefined);
-  assert.equal(parseArgs(["summary", "oc_1"]).options.style, "report");
+  assert.equal(parseArgs(["summary", "oc_1"]).options.mode, "report");
   assert.equal(parseArgs(["result", "oc_1"]).options.full, false);
   assert.equal(parseArgs(["list"], { cwd }).options.directory, cwd);
   assert.equal(parseArgs(["watch"], { cwd }).options.format, "toon");
@@ -154,7 +154,16 @@ test("parses workspace, stream, and result options with their constrained values
 test("accepts --flag=value and rejects invalid enumerated values", () => {
   assert.equal(parseArgs(["dispatch", "--prompt=hello"]).options.prompt, "hello");
   assert.throws(() => parseArgs(["watch", "--format", "json"]), /must be one of toon, claude-monitor, ndjson/);
-  assert.throws(() => parseArgs(["summary", "id", "--style", "brief"]), /must be one of report, activity/);
+  assert.throws(() => parseArgs(["summary", "id", "--mode", "brief"]), /must be one of report, activity/);
+});
+
+test("rejects the retired --style flag on summary with a rename hint pointing at --mode", () => {
+  assert.throws(
+    () => parseArgs(["summary", "id", "--style", "activity"]),
+    (error) => error instanceof UsageError
+      && /unknown flag --style/.test(error.message)
+      && /--style was renamed; use --mode/.test(error.help)
+  );
 });
 
 test("parses watch --task-id and rejects it for commands that don't take it", () => {

@@ -240,7 +240,7 @@ describe("activity summary cache", () => {
     assert.equal(cached.cached, true);
   });
 
-  test("falls back to sanitized local activity when the secondary model fails", async () => {
+  test("propagates the secondary model's failure instead of falling back to local activity", async () => {
     const cache = createActivityCache({
       summariesEnabled: true,
       summarizerTimeoutMs: 0,
@@ -248,11 +248,7 @@ describe("activity summary cache", () => {
       summarize: async () => { throw new Error("provider unavailable"); },
     });
 
-    const result = await cache.refresh(task, { force: true });
-
-    assert.equal(result.activity, "Ran tests");
-    assert.equal(result.summaryFailed, true);
-    assert.equal(result.activity.includes("\n"), false);
+    await assert.rejects(cache.refresh(task, { force: true }), /provider unavailable/);
   });
 
   test("passes the previous successful summary to the next summarize call, so the model can report only the delta", async () => {
@@ -289,7 +285,6 @@ describe("activity summary cache", () => {
 
     assert.equal(calls, 0);
     assert.equal(result.activity, "local activity");
-    assert.equal(result.summaryFailed, false);
   });
 
   test("first summarize call has no prior summary session id or watermark; subsequent calls carry both through", async () => {
@@ -353,9 +348,7 @@ describe("activity summary cache", () => {
       summarize: async () => ({ text: "   \n\t  ", sessionId: "ses_should_not_persist" }),
     });
 
-    const result = await cache.refresh(task, { force: true });
-
-    assert.equal(result.summaryFailed, true);
+    await assert.rejects(cache.refresh(task, { force: true }));
     assert.equal(cache.getSummarySessionId(task.id), null);
     assert.equal(cache.getLastSummarizedWatermark(task.id), 0);
   });
@@ -373,17 +366,16 @@ describe("activity summary cache", () => {
       },
     });
 
-    // The cache traps summarize's rejection behind summaryFailed=true rather
-    // than letting it bubble -- a summary is advisory and a transient
-    // provider failure must not crash the surrounding refresh. We just need
-    // to confirm the failure path left the session/watermark caches empty.
-    const failed = await cache.refresh(task, { force: true });
-    assert.equal(failed.summaryFailed, true);
+    // A thrown summarize failure now propagates out of refresh() instead of
+    // being masked; confirm the failure path still leaves the session and
+    // watermark caches empty so the next call retries fresh.
+    await assert.rejects(cache.refresh(task, { force: true }), /provider 503/);
     assert.equal(cache.getSummarySessionId(task.id), null);
     assert.equal(cache.getLastSummarizedWatermark(task.id), 0);
 
     // Bump the snapshot watermark so the next refresh isn't a cache hit on
-    // the failed entry (the cache stores every result, including failures).
+    // a stale entry (a failed refresh is never cached, so this bump is only
+    // needed to produce genuinely new content for the successful retry).
     shouldThrow = false;
     watermark = 20;
     const result = await cache.refresh(task, { force: true });

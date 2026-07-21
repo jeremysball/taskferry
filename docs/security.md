@@ -80,11 +80,11 @@ taskferry dispatch --prompt "review this diff" --directory /repo --key-slot back
 
 ## Activity summaries
 
-`taskferry watch --summaries` and `taskferry summary --style activity` both
+`taskferry watch --summaries` and `taskferry summary --mode activity` both
 run a bounded snapshot of a task's recent narration through a secondary
 model (`opencode/hy3-free` by default, overridable with
 `TASKFERRY_SUMMARY_MODEL`) to produce a short human-readable status line.
-`taskferry summary --style report` (the default `summary` style) does the
+`taskferry summary --mode report` (the default `summary` mode) does the
 same thing at larger scale: a full asynchronous OpenCode subtask that reads
 more of the log.
 
@@ -112,7 +112,7 @@ task whose log contains secrets you don't want sent there. Specifics:
   disconnecting turns summary generation back off for that daemon.
 - **Fully disable.** Set `TASKFERRY_ACTIVITY_SUMMARIES=0` on the daemon to
   turn off model-backed summaries everywhere, regardless of what any client
-  requests; `watch --summaries` and `summary --style activity` then fall
+  requests; `watch --summaries` and `summary --mode activity` then fall
   back to the same local, no-model activity text.
 
 `TASKFERRY_SUMMARY_MODEL` selects an available replacement model if the

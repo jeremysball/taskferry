@@ -205,7 +205,7 @@ async function invoke(manager, request) {
     case "task.summary":
       return manager.summarize(params.taskId, {
         ...(params.maxWords === undefined ? {} : { maxWords: params.maxWords }),
-        ...(params.style === undefined ? {} : { style: params.style }),
+        ...(params.mode === undefined ? {} : { mode: params.mode }),
       });
     case "task.advisor":
       return manager.advisor({
@@ -334,6 +334,9 @@ export async function startDaemon({
         void (async () => {
           try {
             if (request.method === "event.subscribe") {
+              if (request.params.summaries === true && typeof manager.checkSummaryModelReady === "function") {
+                await manager.checkSummaryModelReady();
+              }
               const subscriptionId = randomUUID();
               subscriptions.set(subscriptionId, {
                 socket,

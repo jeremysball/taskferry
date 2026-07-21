@@ -22,7 +22,7 @@ cli.js          entrypoint: parses process.argv, dispatches to a command,
         -> protocol.js   RPC envelope shape, PROTOCOL_VERSION, method list
         -> events.js     per-daemon event sequencing/emission for watch
         -> activity.js   cached narration-to-summary snapshots (the model
-                          call behind --style activity / watch --summaries)
+                          call behind --mode activity / watch --summaries)
         -> state-lock.js cross-process file lock (daemon auto-start race,
                           not used in the request hot path)
   -> output.js     TOON formatting, lean field projection, MCP-era hint
@@ -94,7 +94,7 @@ Vars marked "config.json" also have a config-file equivalent — see
 | `TASKFERRY_WATCHDOG_POLL_MS` | `2000` | no | Watchdog check interval |
 | `TASKFERRY_KEY_SLOTS` | — | yes | Named provider-key slot registry; see `docs/security.md` |
 | `TASKFERRY_PROVIDER_KEY_ENV` | — | yes | Source env var a key slot copies from |
-| `TASKFERRY_SUMMARY_MODEL` | `opencode/hy3-free` | yes | Model behind `summary --style report` |
+| `TASKFERRY_SUMMARY_MODEL` | `opencode/hy3-free` | yes | Model behind `summary --mode report` |
 | `TASKFERRY_SUMMARY_KEY_SLOT` / `TASKFERRY_SUMMARY_PROVIDER_KEY_ENV` | — | yes | Key-slot wiring specific to the summary model |
 | `TASKFERRY_ACTIVITY_SUMMARIES` | `true` | yes | Enables `watch --summaries` / activity-style model calls |
 | `TASKFERRY_SUMMARIZER_TIMEOUT_MS` | `360000` (6 min) | yes | Throttle between activity-summary model calls |

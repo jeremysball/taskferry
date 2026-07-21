@@ -3,7 +3,7 @@ import { formatToolEventForNarration } from "./narration-format.js";
 
 /** @typedef {{id: string, status: string, logPath?: string, prompt?: string, promptPreview?: string}} ActivityTask */
 /** @typedef {{text: string, narration?: string, outputWatermark: number, sourceLogBytes: number, inputBytes: number}} ActivitySnapshot */
-/** @typedef {{activity: string, outputWatermark: number, summaryFailed: boolean, cached: boolean}} ActivityResult */
+/** @typedef {{activity: string, outputWatermark: number, cached: boolean}} ActivityResult */
 /** @typedef {{text: string|null, sessionId: string|null}} SummarizeOutcome */
 
 const ACTIVITY_REFRESH_BYTES = 4096;
@@ -243,49 +243,48 @@ export function createActivityCache({
       text: current.text,
     });
     const promise = (async () => {
-      let activity = fallback;
-      let summaryFailed = false;
-      if (resolvedIncludeSummary) {
-        try {
-          const previousActivity = lastSummarizedActivity.get(task.id) || null;
-          const previousSessionId = summarySessions.get(task.id) || null;
-          const priorWatermark = lastSummarizedWatermarks.get(task.id) || 0;
-          const summarized = await summarize({
-            task,
-            snapshot: current,
-            maxWords: resolvedMaxWords,
-            summaryModel,
-            previousActivity,
-            previousSessionId,
-            lastSummarizedWatermark: priorWatermark,
-          });
-          const summarizedText = summarized && typeof summarized.text === "string" ? summarized.text : "";
-          const text = sanitizeActivityText(summarizedText);
-          if (text) {
-            activity = text;
-            lastSummarizedActivity.set(task.id, text);
-            lastSummarizedWatermarks.set(task.id, outputWatermark);
-            if (summarized && typeof summarized.sessionId === "string" && summarized.sessionId) {
-              summarySessions.set(task.id, summarized.sessionId);
-            }
-          } else {
-            summaryFailed = true;
-            // Treat empty output as "the cached state is unreliable" so the next
-            // call retries fresh rather than resuming a session that produced
-            // nothing usable.
-            summarySessions.delete(task.id);
-            lastSummarizedWatermarks.delete(task.id);
-          }
-        } catch {
-          summaryFailed = true;
-          summarySessions.delete(task.id);
-          lastSummarizedWatermarks.delete(task.id);
-        }
+      if (!resolvedIncludeSummary) {
+        const result = { activity: fallback, outputWatermark, cached: false };
+        cache.set(key, result);
+        inFlight.delete(key);
+        return result;
       }
-      const result = { activity, outputWatermark, summaryFailed, cached: false };
-      cache.set(key, result);
-      inFlight.delete(key);
-      return result;
+      try {
+        const previousActivity = lastSummarizedActivity.get(task.id) || null;
+        const previousSessionId = summarySessions.get(task.id) || null;
+        const priorWatermark = lastSummarizedWatermarks.get(task.id) || 0;
+        const summarized = await summarize({
+          task,
+          snapshot: current,
+          maxWords: resolvedMaxWords,
+          summaryModel,
+          previousActivity,
+          previousSessionId,
+          lastSummarizedWatermark: priorWatermark,
+        });
+        const summarizedText = summarized && typeof summarized.text === "string" ? summarized.text : "";
+        const text = sanitizeActivityText(summarizedText);
+        if (!text) throw new Error("summarize() returned no usable text");
+        lastSummarizedActivity.set(task.id, text);
+        lastSummarizedWatermarks.set(task.id, outputWatermark);
+        if (summarized && typeof summarized.sessionId === "string" && summarized.sessionId) {
+          summarySessions.set(task.id, summarized.sessionId);
+        }
+        const result = { activity: text, outputWatermark, cached: false };
+        cache.set(key, result);
+        inFlight.delete(key);
+        return result;
+      } catch (err) {
+        // Treat any failure (thrown or empty output) as "the cached state is
+        // unreliable" so the next call retries fresh rather than resuming a
+        // session that produced nothing usable. A failed refresh is never
+        // cached (only `inFlight` tracking is cleared) -- callers see the
+        // real error every time, not a stale masked result.
+        summarySessions.delete(task.id);
+        lastSummarizedWatermarks.delete(task.id);
+        inFlight.delete(key);
+        throw err;
+      }
     })();
     inFlight.set(key, promise);
     return promise;

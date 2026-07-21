@@ -951,9 +951,9 @@ export function createTaskManager({
     };
   }
 
-  /** @param {string} taskId @param {{maxWords?: number, style?: string}} [options] */
+  /** @param {string} taskId @param {{maxWords?: number, mode?: string}} [options] */
   function summarizeRequest(taskId, options = {}) {
-    if (options.style === "activity") return activitySummary(taskId, options.maxWords ?? activityWords);
+    if (options.mode === "activity") return activitySummary(taskId, options.maxWords ?? activityWords);
     return summarizeTask(taskId, options);
   }
 

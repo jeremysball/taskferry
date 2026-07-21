@@ -4,6 +4,13 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { runSetup } from "./setup.js";
+import {
+  checkClaudeCodePlaywrightIsolation,
+  checkOpencodePlaywrightIsolation,
+  ensureClaudeCodePlaywrightIsolation,
+  ensureOpencodePlaywrightIsolation,
+  stripJsonComments,
+} from "./mcp-isolation.js";
 
 function makeFixture(t) {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-setup-home-"));
@@ -289,4 +296,340 @@ test("falls back to claude plugin update when git rev-parse HEAD fails", (t) => 
 
   const hashFile = path.join(fixture.homeDirectory, ".local", "state", "taskferry", "claude-plugin-hash");
   assert.ok(!fs.existsSync(hashFile), "hash file should not exist after git failure");
+});
+
+test("stripJsonComments strips // and /* */ comments but leaves // inside string values untouched", () => {
+  const input = `{
+  "url": "https://example.com/api/v1//endpoint",
+  "comment": "/* this is not a comment */",
+  "real": 42 // real comment
+  /* block comment */
+}`;
+  const result = stripJsonComments(input);
+  const parsed = JSON.parse(result);
+  assert.equal(parsed.url, "https://example.com/api/v1//endpoint");
+  assert.equal(parsed.comment, "/* this is not a comment */");
+  assert.equal(parsed.real, 42);
+});
+
+test("stripJsonComments strips a block comment", () => {
+  const result = stripJsonComments('{ "a": 1 /* remove me */ }');
+  assert.equal(JSON.parse(result).a, 1);
+});
+
+test("checkOpencodePlaywrightIsolation returns isolated true when --isolated is present", (t) => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-mcp-home-"));
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  const configDir = path.join(home, ".config", "opencode");
+  fs.mkdirSync(configDir, { recursive: true });
+  fs.writeFileSync(path.join(configDir, "opencode.json"), JSON.stringify({
+    mcp: { playwright: { command: ["npx", "@anthropic/mcp-server-playwright", "--isolated"] } },
+  }));
+  const result = checkOpencodePlaywrightIsolation(home, {});
+  assert.equal(result.checked, true);
+  assert.equal(result.isolated, true);
+});
+
+test("checkOpencodePlaywrightIsolation returns isolated false when --isolated is missing", (t) => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-mcp-home-"));
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  const configDir = path.join(home, ".config", "opencode");
+  fs.mkdirSync(configDir, { recursive: true });
+  fs.writeFileSync(path.join(configDir, "opencode.json"), JSON.stringify({
+    mcp: { playwright: { command: ["npx", "@anthropic/mcp-server-playwright"] } },
+  }));
+  const result = checkOpencodePlaywrightIsolation(home, {});
+  assert.equal(result.checked, true);
+  assert.equal(result.isolated, false);
+});
+
+test("checkOpencodePlaywrightIsolation returns checked false when no config files exist", (t) => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-mcp-home-"));
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  const result = checkOpencodePlaywrightIsolation(home, {});
+  assert.equal(result.checked, false);
+  assert.match(result.reason, /no opencode config/);
+});
+
+test("checkOpencodePlaywrightIsolation prefers .jsonc over .json when both exist and first has the key", (t) => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-mcp-home-"));
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  const configDir = path.join(home, ".config", "opencode");
+  fs.mkdirSync(configDir, { recursive: true });
+  fs.writeFileSync(path.join(configDir, "opencode.jsonc"), JSON.stringify({
+    mcp: { playwright: { command: ["npx", "@anthropic/mcp-server-playwright", "--isolated"] } },
+  }));
+  fs.writeFileSync(path.join(configDir, "opencode.json"), JSON.stringify({
+    mcp: { playwright: { command: ["npx", "@anthropic/mcp-server-playwright"] } },
+  }));
+  const result = checkOpencodePlaywrightIsolation(home, {});
+  assert.equal(result.path, path.join(configDir, "opencode.jsonc"));
+  assert.equal(result.isolated, true);
+});
+
+test("checkOpencodePlaywrightIsolation falls through to .json when .jsonc has the key but reports isolated false", (t) => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-mcp-home-"));
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  const configDir = path.join(home, ".config", "opencode");
+  fs.mkdirSync(configDir, { recursive: true });
+  fs.writeFileSync(path.join(configDir, "opencode.jsonc"), JSON.stringify({
+    mcp: { playwright: { command: ["npx", "@anthropic/mcp-server-playwright"] } },
+  }));
+  fs.writeFileSync(path.join(configDir, "opencode.json"), JSON.stringify({
+    mcp: { playwright: { command: ["npx", "@anthropic/mcp-server-playwright", "--isolated"] } },
+  }));
+  const result = checkOpencodePlaywrightIsolation(home, {});
+  assert.equal(result.path, path.join(configDir, "opencode.jsonc"));
+  assert.equal(result.isolated, false);
+});
+
+test("checkOpencodePlaywrightIsolation returns checked false on malformed JSON without throwing", (t) => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-mcp-home-"));
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  const configDir = path.join(home, ".config", "opencode");
+  fs.mkdirSync(configDir, { recursive: true });
+  fs.writeFileSync(path.join(configDir, "opencode.json"), "not valid json {{{");
+  const result = checkOpencodePlaywrightIsolation(home, {});
+  assert.equal(result.checked, false);
+  assert.match(result.reason, /failed to parse/);
+});
+
+test("checkOpencodePlaywrightIsolation uses XDG_CONFIG_HOME when set", (t) => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-mcp-home-"));
+  const xdgConfig = fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-mcp-xdg-"));
+  t.after(() => {
+    fs.rmSync(home, { recursive: true, force: true });
+    fs.rmSync(xdgConfig, { recursive: true, force: true });
+  });
+  const configDir = path.join(xdgConfig, "opencode");
+  fs.mkdirSync(configDir, { recursive: true });
+  fs.writeFileSync(path.join(configDir, "opencode.json"), JSON.stringify({
+    mcp: { playwright: { command: ["npx", "@anthropic/mcp-server-playwright", "--isolated"] } },
+  }));
+  const result = checkOpencodePlaywrightIsolation(home, { XDG_CONFIG_HOME: xdgConfig });
+  assert.equal(result.isolated, true);
+});
+
+test("ensureOpencodePlaywrightIsolation adds --isolated when missing from opencode.json", (t) => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-mcp-home-"));
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  const configDir = path.join(home, ".config", "opencode");
+  fs.mkdirSync(configDir, { recursive: true });
+  fs.writeFileSync(path.join(configDir, "opencode.json"), JSON.stringify({
+    mcp: { playwright: { command: ["npx", "@anthropic/mcp-server-playwright"] } },
+  }));
+  const result = ensureOpencodePlaywrightIsolation(home, {});
+  assert.equal(result.changed, true);
+  const written = JSON.parse(fs.readFileSync(path.join(configDir, "opencode.json"), "utf8"));
+  assert.ok(written.mcp.playwright.command.includes("--isolated"));
+});
+
+test("ensureOpencodePlaywrightIsolation is no-op when --isolated is already present", (t) => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-mcp-home-"));
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  const configDir = path.join(home, ".config", "opencode");
+  fs.mkdirSync(configDir, { recursive: true });
+  fs.writeFileSync(path.join(configDir, "opencode.json"), JSON.stringify({
+    mcp: { playwright: { command: ["npx", "@anthropic/mcp-server-playwright", "--isolated"] } },
+  }));
+  const before = fs.readFileSync(path.join(configDir, "opencode.json"), "utf8");
+  const result = ensureOpencodePlaywrightIsolation(home, {});
+  assert.equal(result.changed, false);
+  const after = fs.readFileSync(path.join(configDir, "opencode.json"), "utf8");
+  assert.equal(after, before);
+});
+
+test("ensureOpencodePlaywrightIsolation ignores .jsonc entirely — never touches it", (t) => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-mcp-home-"));
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  const configDir = path.join(home, ".config", "opencode");
+  fs.mkdirSync(configDir, { recursive: true });
+  fs.writeFileSync(path.join(configDir, "opencode.jsonc"), JSON.stringify({
+    mcp: { playwright: { command: ["npx", "@anthropic/mcp-server-playwright"] } },
+  }));
+  const before = fs.readFileSync(path.join(configDir, "opencode.jsonc"), "utf8");
+  const result = ensureOpencodePlaywrightIsolation(home, {});
+  assert.equal(result.changed, false);
+  assert.match(result.reason, /no writable opencode\.json/);
+  const after = fs.readFileSync(path.join(configDir, "opencode.jsonc"), "utf8");
+  assert.equal(after, before);
+});
+
+test("ensureOpencodePlaywrightIsolation is no-op on malformed opencode.json", (t) => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-mcp-home-"));
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  const configDir = path.join(home, ".config", "opencode");
+  fs.mkdirSync(configDir, { recursive: true });
+  fs.writeFileSync(path.join(configDir, "opencode.json"), "not valid json {{{");
+  const before = fs.readFileSync(path.join(configDir, "opencode.json"), "utf8");
+  const result = ensureOpencodePlaywrightIsolation(home, {});
+  assert.equal(result.changed, false);
+  assert.match(result.reason, /failed to parse/);
+  const after = fs.readFileSync(path.join(configDir, "opencode.json"), "utf8");
+  assert.equal(after, before);
+});
+
+test("checkClaudeCodePlaywrightIsolation returns isolated true via referenced config", (t) => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-mcp-home-"));
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  const configPath = path.join(home, "playwright-config.json");
+  fs.writeFileSync(configPath, JSON.stringify({ browser: { isolated: true } }));
+  fs.writeFileSync(path.join(home, ".claude.json"), JSON.stringify({
+    mcpServers: { playwright: { args: ["npx", "@anthropic/mcp-server-playwright", "--config", configPath] } },
+  }));
+  const result = checkClaudeCodePlaywrightIsolation(home);
+  assert.equal(result.checked, true);
+  assert.equal(result.isolated, true);
+  assert.equal(result.path, configPath);
+});
+
+test("checkClaudeCodePlaywrightIsolation returns isolated false when --config is missing", (t) => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-mcp-home-"));
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  fs.writeFileSync(path.join(home, ".claude.json"), JSON.stringify({
+    mcpServers: { playwright: { args: ["npx", "@anthropic/mcp-server-playwright"] } },
+  }));
+  const result = checkClaudeCodePlaywrightIsolation(home);
+  assert.equal(result.checked, true);
+  assert.equal(result.isolated, false);
+  assert.match(result.reason, /no --config/);
+});
+
+test("checkClaudeCodePlaywrightIsolation returns isolated false when referenced config file is missing", (t) => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-mcp-home-"));
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  const configPath = path.join(home, "nonexistent.json");
+  fs.writeFileSync(path.join(home, ".claude.json"), JSON.stringify({
+    mcpServers: { playwright: { args: ["npx", "@anthropic/mcp-server-playwright", "--config", configPath] } },
+  }));
+  const result = checkClaudeCodePlaywrightIsolation(home);
+  assert.equal(result.checked, true);
+  assert.equal(result.isolated, false);
+  assert.equal(result.path, configPath);
+  assert.match(result.reason, /does not exist/);
+});
+
+test("checkClaudeCodePlaywrightIsolation returns checked false when .claude.json does not exist", (t) => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-mcp-home-"));
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  const result = checkClaudeCodePlaywrightIsolation(home);
+  assert.equal(result.checked, false);
+  assert.match(result.reason, /~\/\.claude\.json not found/);
+});
+
+test("checkClaudeCodePlaywrightIsolation returns checked false when no playwright entry", (t) => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-mcp-home-"));
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  fs.writeFileSync(path.join(home, ".claude.json"), JSON.stringify({ mcpServers: {} }));
+  const result = checkClaudeCodePlaywrightIsolation(home);
+  assert.equal(result.checked, false);
+  assert.match(result.reason, /no playwright/);
+});
+
+test("ensureClaudeCodePlaywrightIsolation patches browser.isolated: true into config", (t) => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-mcp-home-"));
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  const configPath = path.join(home, "playwright-config.json");
+  fs.writeFileSync(configPath, JSON.stringify({ browser: { headless: true } }));
+  fs.writeFileSync(path.join(home, ".claude.json"), JSON.stringify({
+    mcpServers: { playwright: { args: ["npx", "@anthropic/mcp-server-playwright", "--config", configPath] } },
+  }));
+  const result = ensureClaudeCodePlaywrightIsolation(home);
+  assert.equal(result.changed, true);
+  assert.equal(result.path, configPath);
+  const written = JSON.parse(fs.readFileSync(configPath, "utf8"));
+  assert.equal(written.browser.isolated, true);
+  assert.equal(written.browser.headless, true);
+});
+
+test("ensureClaudeCodePlaywrightIsolation is no-op when already isolated", (t) => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-mcp-home-"));
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  const configPath = path.join(home, "playwright-config.json");
+  fs.writeFileSync(configPath, JSON.stringify({ browser: { isolated: true, headless: true } }));
+  fs.writeFileSync(path.join(home, ".claude.json"), JSON.stringify({
+    mcpServers: { playwright: { args: ["npx", "@anthropic/mcp-server-playwright", "--config", configPath] } },
+  }));
+  const before = fs.readFileSync(configPath, "utf8");
+  const result = ensureClaudeCodePlaywrightIsolation(home);
+  assert.equal(result.changed, false);
+  const after = fs.readFileSync(configPath, "utf8");
+  assert.equal(after, before);
+});
+
+test("ensureClaudeCodePlaywrightIsolation does not create or touch ~/.claude.json when no --config reference", (t) => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-mcp-home-"));
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  fs.writeFileSync(path.join(home, ".claude.json"), JSON.stringify({
+    mcpServers: { playwright: { args: ["npx", "@anthropic/mcp-server-playwright"] } },
+  }));
+  const before = fs.readFileSync(path.join(home, ".claude.json"), "utf8");
+  const result = ensureClaudeCodePlaywrightIsolation(home);
+  assert.equal(result.changed, false);
+  assert.match(result.reason, /no --config/);
+  const after = fs.readFileSync(path.join(home, ".claude.json"), "utf8");
+  assert.equal(after, before);
+});
+
+test("runSetup repairs a non-isolated opencode.json", (t) => {
+  const fixture = makeFixture(t);
+  const configDir = path.join(fixture.homeDirectory, ".config", "opencode");
+  fs.mkdirSync(configDir, { recursive: true });
+  fs.writeFileSync(path.join(configDir, "opencode.json"), JSON.stringify({
+    mcp: { playwright: { command: ["npx", "@anthropic/mcp-server-playwright"] } },
+  }));
+  const result = runSetup({ ...fixture, runCommand: unavailableClients });
+  assert.deepEqual(result.mcpIsolation.opencode, { changed: true, path: path.join(configDir, "opencode.json") });
+  const written = JSON.parse(fs.readFileSync(path.join(configDir, "opencode.json"), "utf8"));
+  assert.ok(written.mcp.playwright.command.includes("--isolated"));
+});
+
+test("runSetup repairs a non-isolated referenced Claude Code config file", (t) => {
+  const fixture = makeFixture(t);
+  const configPath = path.join(fixture.homeDirectory, "playwright-config.json");
+  fs.writeFileSync(configPath, JSON.stringify({ browser: { headless: true } }));
+  fs.writeFileSync(path.join(fixture.homeDirectory, ".claude.json"), JSON.stringify({
+    mcpServers: { playwright: { args: ["npx", "@anthropic/mcp-server-playwright", "--config", configPath] } },
+  }));
+  const result = runSetup({ ...fixture, runCommand: unavailableClients });
+  assert.equal(result.mcpIsolation.claudeCode.changed, true);
+  assert.equal(result.mcpIsolation.claudeCode.path, configPath);
+  const written = JSON.parse(fs.readFileSync(configPath, "utf8"));
+  assert.equal(written.browser.isolated, true);
+});
+
+test("runSetup leaves an already-isolated setup untouched", (t) => {
+  const fixture = makeFixture(t);
+  const configDir = path.join(fixture.homeDirectory, ".config", "opencode");
+  fs.mkdirSync(configDir, { recursive: true });
+  fs.writeFileSync(path.join(configDir, "opencode.json"), JSON.stringify({
+    mcp: { playwright: { command: ["npx", "@anthropic/mcp-server-playwright", "--isolated"] } },
+  }));
+  const configPath = path.join(fixture.homeDirectory, "playwright-config.json");
+  fs.writeFileSync(configPath, JSON.stringify({ browser: { isolated: true } }));
+  fs.writeFileSync(path.join(fixture.homeDirectory, ".claude.json"), JSON.stringify({
+    mcpServers: { playwright: { args: ["npx", "@anthropic/mcp-server-playwright", "--config", configPath] } },
+  }));
+  const result = runSetup({ ...fixture, runCommand: unavailableClients });
+  assert.equal(result.mcpIsolation.opencode.changed, false);
+  assert.equal(result.mcpIsolation.claudeCode.changed, false);
+});
+
+test("runSetup leaves a .jsonc-only setup untouched — asserts bytes unchanged", (t) => {
+  const fixture = makeFixture(t);
+  const configDir = path.join(fixture.homeDirectory, ".config", "opencode");
+  fs.mkdirSync(configDir, { recursive: true });
+  const jsoncContent = `{
+  // developer comment
+  "mcp": {
+    "playwright": {
+      "command": ["npx", "@anthropic/mcp-server-playwright"]
+    }
+  }
+}`;
+  fs.writeFileSync(path.join(configDir, "opencode.jsonc"), jsoncContent);
+  const before = fs.readFileSync(path.join(configDir, "opencode.jsonc"), "utf8");
+  runSetup({ ...fixture, runCommand: unavailableClients });
+  const after = fs.readFileSync(path.join(configDir, "opencode.jsonc"), "utf8");
+  assert.equal(after, before);
 });

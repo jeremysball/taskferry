@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import os from "node:os";
 import { UsageError } from "./args.js";
 import {
   contextForHook,
@@ -10,6 +11,7 @@ import {
   projectList,
 } from "./output.js";
 import { defaultRunCommand as defaultShellRunner, pluginInstalled } from "./setup.js";
+import { checkClaudeCodePlaywrightIsolation, checkOpencodePlaywrightIsolation } from "./mcp-isolation.js";
 
 // Checked from `doctor` so a missing Claude plugin install surfaces as an
 // explicit warning instead of silent absence: without it, `claude-monitor`
@@ -47,7 +49,7 @@ export function normalizeDirectory(directory) {
   return normalized;
 }
 
-export async function runCommand(command, options, { client, io = process, signal, executablePath, cwd = process.cwd(), runShellCommand = defaultShellRunner } = {}) {
+export async function runCommand(command, options, { client, io = process, signal, executablePath, cwd = process.cwd(), homeDirectory = os.homedir(), env = process.env, runShellCommand = defaultShellRunner } = {}) {
   switch (command) {
     case "home": {
       const directory = normalizeDirectory(options.directory || cwd);
@@ -165,13 +167,22 @@ export async function runCommand(command, options, { client, io = process, signa
     case "doctor": {
       const health = await client.request("system.health", {});
       const claude = checkClaudeIntegration(runShellCommand);
-      const warnings = claude.installed
-        ? []
-        : [`Claude plugin not installed (${claude.reason || "not found in claude plugin list"}): claude-monitor notifications won't fire. Run taskferry setup to install it.`];
+      const opencodeMCP = checkOpencodePlaywrightIsolation(homeDirectory, env);
+      const claudeCodeMCP = checkClaudeCodePlaywrightIsolation(homeDirectory);
+      const warnings = [];
+      if (!claude.installed) {
+        warnings.push(`Claude plugin not installed (${claude.reason || "not found in claude plugin list"}): claude-monitor notifications won't fire. Run taskferry setup to install it.`);
+      }
+      if (opencodeMCP.checked && !opencodeMCP.isolated) {
+        warnings.push(`Playwright MCP for opencode is not isolated (${opencodeMCP.path}): concurrent dispatches sharing one browser profile crash with SIGKILL. Run taskferry setup to fix, or add --isolated to its command manually.`);
+      }
+      if (claudeCodeMCP.checked && !claudeCodeMCP.isolated) {
+        warnings.push(`Playwright MCP for Claude Code is not isolated${claudeCodeMCP.path ? ` (${claudeCodeMCP.path})` : ""}: concurrent dispatches sharing one browser profile crash with SIGKILL. Run taskferry setup to fix${claudeCodeMCP.reason && !claudeCodeMCP.path ? `, or ${claudeCodeMCP.reason.toLowerCase()}` : ""}.`);
+      }
       return {
         ...health,
         ...(options.full ? { cliVersion: "2.0.0", protocolVersion: 1 } : {}),
-        integrations: { claude },
+        integrations: { claude, mcpIsolation: { opencode: opencodeMCP, claudeCode: claudeCodeMCP } },
         ...(warnings.length ? { warnings } : {}),
       };
     }

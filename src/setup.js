@@ -2,6 +2,7 @@ import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { ensureClaudeCodePlaywrightIsolation, ensureOpencodePlaywrightIsolation } from "./mcp-isolation.js";
 
 const MANAGED_TARGETS = new Set([
   path.join("src", "cli.js"),
@@ -247,6 +248,10 @@ export function runSetup({
     .split(path.delimiter)
     .filter(Boolean)
     .some((entry) => path.resolve(entry) === binDirectory);
+
+  const opencodeMCP = ensureOpencodePlaywrightIsolation(homeDirectory, env);
+  const claudeCodeMCP = ensureClaudeCodePlaywrightIsolation(homeDirectory);
+
   return {
     cli: { path: binPath, source: cliPath },
     opencode: { path: opencodePath, source: opencodeSource },
@@ -258,5 +263,6 @@ export function runSetup({
       claude: installClaude(checkoutDirectory, runCommand, homeDirectory, env),
       codex: registerCodex(checkoutDirectory, runCommand),
     },
+    mcpIsolation: { opencode: opencodeMCP, claudeCode: claudeCodeMCP },
   };
 }

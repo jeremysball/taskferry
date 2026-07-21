@@ -245,7 +245,9 @@ test("projects status and result output using the former MCP lean projections", 
   ]);
 });
 
-test("doctor is a structured health check and --full preserves extra daemon fields", async () => {
+test("doctor is a structured health check and --full preserves extra daemon fields", async (t) => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-cli-doctor-"));
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
   const capture = capturedIo();
   const { client, calls } = fakeClient({
     "system.health": { healthy: true, pid: 123, version: 1, socketPath: "/tmp/taskferry.sock" },
@@ -256,26 +258,34 @@ test("doctor is a structured health check and --full preserves extra daemon fiel
     stderr: "",
     error: undefined,
   });
-  const result = await runCli(["doctor", "--full"], { io: capture.io, connectClient: async () => client, runShellCommand });
+  const result = await runCli(["doctor", "--full"], { io: capture.io, connectClient: async () => client, runShellCommand, homeDirectory: home, env: {} });
 
   assert.equal(result.exitCode, 0);
   assert.equal(capture.output().value.healthy, true);
   assert.equal(capture.output().value.socketPath, "/tmp/taskferry.sock");
-  assert.deepEqual(capture.output().value.integrations, { claude: { installed: true } });
+  assert.deepEqual(capture.output().value.integrations, {
+    claude: { installed: true },
+    mcpIsolation: { opencode: { checked: false, reason: "no opencode config with a playwright MCP entry found" }, claudeCode: { checked: false, reason: "~/.claude.json not found" } },
+  });
   assert.equal(capture.output().value.warnings, undefined);
   assert.deepEqual(calls, [{ method: "system.health", params: {} }]);
 });
 
-test("doctor surfaces a warning when the claude plugin is missing", async () => {
+test("doctor surfaces a warning when the claude plugin is missing", async (t) => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-cli-doctor-"));
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
   const capture = capturedIo();
   const { client } = fakeClient({
     "system.health": { healthy: true, pid: 123 },
   });
   const runShellCommand = () => ({ status: null, stdout: "", stderr: "", error: { code: "ENOENT" } });
-  const result = await runCli(["doctor"], { io: capture.io, connectClient: async () => client, runShellCommand });
+  const result = await runCli(["doctor"], { io: capture.io, connectClient: async () => client, runShellCommand, homeDirectory: home, env: {} });
 
   assert.equal(result.exitCode, 0);
-  assert.deepEqual(capture.output().value.integrations, { claude: { installed: false, reason: "claude CLI not found" } });
+  assert.deepEqual(capture.output().value.integrations, {
+    claude: { installed: false, reason: "claude CLI not found" },
+    mcpIsolation: { opencode: { checked: false, reason: "no opencode config with a playwright MCP entry found" }, claudeCode: { checked: false, reason: "~/.claude.json not found" } },
+  });
   assert.equal(capture.output().value.warnings.length, 1);
 });
 

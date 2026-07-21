@@ -412,7 +412,9 @@ test("watch --task-id resolves immediately for an already-settled task instead o
   assert.equal(client.closed.value, true);
 });
 
-test("doctor warns when the claude plugin is not installed", async () => {
+test("doctor warns when the claude plugin is not installed", async (t) => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-doctor-home-"));
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
   const client = fakeClient();
   client.request = async (method) => {
     if (method === "system.health") return { healthy: true, pid: 1 };
@@ -424,15 +426,20 @@ test("doctor warns when the claude plugin is not installed", async () => {
     return { status: 0, stdout: JSON.stringify([{ id: "superpowers@claude-plugins-official" }]), stderr: "", error: undefined };
   };
 
-  const result = await runCommand("doctor", {}, { client, runShellCommand });
+  const result = await runCommand("doctor", {}, { client, homeDirectory: home, env: {}, runShellCommand });
 
-  assert.deepEqual(result.integrations, { claude: { installed: false } });
+  assert.deepEqual(result.integrations, {
+    claude: { installed: false },
+    mcpIsolation: { opencode: { checked: false, reason: "no opencode config with a playwright MCP entry found" }, claudeCode: { checked: false, reason: "~/.claude.json not found" } },
+  });
   assert.equal(result.warnings.length, 1);
   assert.match(result.warnings[0], /claude-monitor notifications won't fire/);
   assert.match(result.warnings[0], /taskferry setup/);
 });
 
-test("doctor has no warnings when the claude plugin is installed", async () => {
+test("doctor has no warnings when the claude plugin is installed", async (t) => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-doctor-home-"));
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
   const client = fakeClient();
   client.request = async (method) => {
     if (method === "system.health") return { healthy: true, pid: 1 };
@@ -445,13 +452,18 @@ test("doctor has no warnings when the claude plugin is installed", async () => {
     error: undefined,
   });
 
-  const result = await runCommand("doctor", {}, { client, runShellCommand });
+  const result = await runCommand("doctor", {}, { client, homeDirectory: home, env: {}, runShellCommand });
 
-  assert.deepEqual(result.integrations, { claude: { installed: true } });
+  assert.deepEqual(result.integrations, {
+    claude: { installed: true },
+    mcpIsolation: { opencode: { checked: false, reason: "no opencode config with a playwright MCP entry found" }, claudeCode: { checked: false, reason: "~/.claude.json not found" } },
+  });
   assert.equal(result.warnings, undefined);
 });
 
-test("doctor reports the claude plugin as not installed when the claude CLI is missing", async () => {
+test("doctor reports the claude plugin as not installed when the claude CLI is missing", async (t) => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-doctor-home-"));
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
   const client = fakeClient();
   client.request = async (method) => {
     if (method === "system.health") return { healthy: true, pid: 1 };
@@ -459,9 +471,12 @@ test("doctor reports the claude plugin as not installed when the claude CLI is m
   };
   const runShellCommand = () => ({ status: null, stdout: "", stderr: "", error: { code: "ENOENT" } });
 
-  const result = await runCommand("doctor", {}, { client, runShellCommand });
+  const result = await runCommand("doctor", {}, { client, homeDirectory: home, env: {}, runShellCommand });
 
-  assert.deepEqual(result.integrations, { claude: { installed: false, reason: "claude CLI not found" } });
+  assert.deepEqual(result.integrations, {
+    claude: { installed: false, reason: "claude CLI not found" },
+    mcpIsolation: { opencode: { checked: false, reason: "no opencode config with a playwright MCP entry found" }, claudeCode: { checked: false, reason: "~/.claude.json not found" } },
+  });
   assert.equal(result.warnings.length, 1);
 });
 
@@ -548,7 +563,9 @@ test("dispatch omits originSessionId when CLAUDE_CODE_SESSION_ID is unset", asyn
   }
 });
 
-test("doctor reports a distinct reason when claude exits with a non-ENOENT spawn error", async () => {
+test("doctor reports a distinct reason when claude exits with a non-ENOENT spawn error", async (t) => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-doctor-home-"));
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
   const client = fakeClient();
   client.request = async (method) => {
     if (method === "system.health") return { healthy: true, pid: 1 };
@@ -561,10 +578,127 @@ test("doctor reports a distinct reason when claude exits with a non-ENOENT spawn
     error: { code: "EACCES", message: "spawnSync claude EACCES" },
   });
 
-  const result = await runCommand("doctor", {}, { client, runShellCommand });
+  const result = await runCommand("doctor", {}, { client, homeDirectory: home, env: {}, runShellCommand });
 
   assert.deepEqual(result.integrations, {
     claude: { installed: false, reason: "claude plugin list failed: spawnSync claude EACCES" },
+    mcpIsolation: { opencode: { checked: false, reason: "no opencode config with a playwright MCP entry found" }, claudeCode: { checked: false, reason: "~/.claude.json not found" } },
   });
   assert.equal(result.warnings.length, 1);
+});
+
+test("doctor warns when opencode playwright MCP is checked and not isolated", async (t) => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-doctor-home-"));
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  const configDir = path.join(home, ".config", "opencode");
+  fs.mkdirSync(configDir, { recursive: true });
+  fs.writeFileSync(path.join(configDir, "opencode.json"), JSON.stringify({
+    mcp: { playwright: { command: ["npx", "@anthropic/mcp-server-playwright"] } },
+  }));
+  const client = fakeClient();
+  client.request = async (method) => {
+    if (method === "system.health") return { healthy: true, pid: 1 };
+    throw new Error(`unexpected request: ${method}`);
+  };
+  const runShellCommand = () => ({
+    status: 0,
+    stdout: JSON.stringify([{ id: "taskferry@taskferry" }]),
+    stderr: "",
+    error: undefined,
+  });
+
+  const result = await runCommand("doctor", {}, { client, homeDirectory: home, env: {}, runShellCommand });
+
+  assert.deepEqual(result.integrations.claude, { installed: true });
+  assert.equal(result.integrations.mcpIsolation.opencode.checked, true);
+  assert.equal(result.integrations.mcpIsolation.opencode.isolated, false);
+  assert.equal(result.warnings.length, 1);
+  assert.match(result.warnings[0], /Playwright MCP for opencode is not isolated/);
+  assert.match(result.warnings[0], /SIGKILL/);
+});
+
+test("doctor warns when claude code playwright MCP is checked and not isolated", async (t) => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-doctor-home-"));
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  const configPath = path.join(home, "playwright-config.json");
+  fs.writeFileSync(configPath, JSON.stringify({ browser: { isolated: false } }));
+  fs.writeFileSync(path.join(home, ".claude.json"), JSON.stringify({
+    mcpServers: { playwright: { args: ["npx", "@anthropic/mcp-server-playwright", "--config", configPath] } },
+  }));
+  const client = fakeClient();
+  client.request = async (method) => {
+    if (method === "system.health") return { healthy: true, pid: 1 };
+    throw new Error(`unexpected request: ${method}`);
+  };
+  const runShellCommand = () => ({
+    status: 0,
+    stdout: JSON.stringify([{ id: "taskferry@taskferry" }]),
+    stderr: "",
+    error: undefined,
+  });
+
+  const result = await runCommand("doctor", {}, { client, homeDirectory: home, env: {}, runShellCommand });
+
+  assert.equal(result.integrations.mcpIsolation.claudeCode.checked, true);
+  assert.equal(result.integrations.mcpIsolation.claudeCode.isolated, false);
+  const mcpWarning = result.warnings.find((w) => w.includes("Claude Code"));
+  assert.notEqual(mcpWarning, undefined);
+  assert.match(mcpWarning, /Playwright MCP for Claude Code is not isolated/);
+  assert.match(mcpWarning, /SIGKILL/);
+});
+
+test("doctor emits no MCP warning when checked: false for both sides", async (t) => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-doctor-home-"));
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  const client = fakeClient();
+  client.request = async (method) => {
+    if (method === "system.health") return { healthy: true, pid: 1 };
+    throw new Error(`unexpected request: ${method}`);
+  };
+  const runShellCommand = () => ({
+    status: 0,
+    stdout: JSON.stringify([{ id: "taskferry@taskferry" }]),
+    stderr: "",
+    error: undefined,
+  });
+
+  const result = await runCommand("doctor", {}, { client, homeDirectory: home, env: {}, runShellCommand });
+
+  assert.equal(result.warnings, undefined);
+  assert.equal(result.integrations.mcpIsolation.opencode.checked, false);
+  assert.equal(result.integrations.mcpIsolation.claudeCode.checked, false);
+});
+
+test("doctor integrations.mcpIsolation shape is present when both sides are isolated", async (t) => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-doctor-home-"));
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  const configDir = path.join(home, ".config", "opencode");
+  fs.mkdirSync(configDir, { recursive: true });
+  fs.writeFileSync(path.join(configDir, "opencode.json"), JSON.stringify({
+    mcp: { playwright: { command: ["npx", "@anthropic/mcp-server-playwright", "--isolated"] } },
+  }));
+  const cConfigPath = path.join(home, "cc-playwright.json");
+  fs.writeFileSync(cConfigPath, JSON.stringify({ browser: { isolated: true } }));
+  fs.writeFileSync(path.join(home, ".claude.json"), JSON.stringify({
+    mcpServers: { playwright: { args: ["npx", "@anthropic/mcp-server-playwright", "--config", cConfigPath] } },
+  }));
+  const client = fakeClient();
+  client.request = async (method) => {
+    if (method === "system.health") return { healthy: true, pid: 1 };
+    throw new Error(`unexpected request: ${method}`);
+  };
+  const runShellCommand = () => ({
+    status: 0,
+    stdout: JSON.stringify([{ id: "taskferry@taskferry" }]),
+    stderr: "",
+    error: undefined,
+  });
+
+  const result = await runCommand("doctor", {}, { client, homeDirectory: home, env: {}, runShellCommand });
+
+  assert.equal(result.warnings, undefined);
+  assert.equal(result.integrations.mcpIsolation.opencode.checked, true);
+  assert.equal(result.integrations.mcpIsolation.opencode.isolated, true);
+  assert.equal(result.integrations.mcpIsolation.claudeCode.checked, true);
+  assert.equal(result.integrations.mcpIsolation.claudeCode.isolated, true);
 });

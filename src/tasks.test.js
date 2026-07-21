@@ -2135,6 +2135,26 @@ describe("summarize()", () => {
     assert.equal(mgr.list().tasks.length, 1);
   });
 
+  test("checkSummaryModelReady rejects when the configured summary model is unavailable", async () => {
+    const mgr = makeManager({ listModelsFn: () => "openai/gpt-5.6-luna\n" });
+    await assert.rejects(mgr.checkSummaryModelReady(), /summary model is unavailable/);
+  });
+
+  test("checkSummaryModelReady rejects when the summary agent isolation check fails", async () => {
+    const mgr = makeManager({ verifySummaryAgentFn: async () => { throw new Error("bash is enabled"); } });
+    await assert.rejects(mgr.checkSummaryModelReady(), /summary agent isolation check failed/);
+  });
+
+  test("summary --mode activity rejects when the summary model is unavailable, instead of masking the failure with local narration", async () => {
+    const log = JSON.stringify({ type: "text", part: { messageID: "m1", text: "progress" } });
+    const mgr = makeManager({
+      tasksFixture: (logDir) => [baseTask({ id: "source", logPath: path.join(logDir, "source.ndjson") })],
+      logs: { "source.ndjson": log },
+      listModelsFn: () => "openai/gpt-5.6-luna\n",
+    });
+    await assert.rejects(mgr.summarize("source", { mode: "activity", maxWords: 150 }), /summary model is unavailable/);
+  });
+
   // The default listModelsFn/verifySummaryAgentFn (used in production, bypassed
   // by makeManager's forced overrides elsewhere in this file) both shell out to
   // execFileAsync("opencode", ...). This test exercises those real defaults

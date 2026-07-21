@@ -10,6 +10,32 @@ Use Taskferry as the worker backend inside `subagent-driven-development`. The
 and reviewer passes, fixes, and final verification. Taskferry owns external worker
 execution. Taskferry is not an alternative lifecycle.
 
+Every implementer, fixer, task reviewer, and final reviewer that lifecycle
+dispatches runs through Taskferry, at zero session-token cost per task. That is
+the only plan-execution handoff — there is no separate "delegate to opencode"
+option alongside it, because `subagent-driven-development` already *is*
+taskferry-backed dispatch. When `writing-plans` offers execution-approach
+choices, the real choice is `subagent-driven-development` vs. inline execution
+(`executing-plans`, or working the plan yourself), not a third opencode-specific
+lane.
+
+Taskferry is a backend for external (non-host-model) workers. Read-only research,
+code location, and one-off lookups belong in the host runtime's own subagent
+mechanism, not here — forcing a quick lookup through a full dispatch/wait/review
+cycle costs turns and wall time for nothing.
+
+## Sizing The Task Before Dispatching
+
+Before routing a backlog item, bug, or fix through Taskferry — worktree creation,
+a written brief, dispatch, wait, review — ask: would you finish this yourself in
+one or two edit/read/search calls if you just looked? If yes, do that instead.
+
+Reserve dispatch for work that is genuinely large or ambiguous: real design
+decisions, multi-file changes, broad multi-location research, anything where
+doing it directly would still take meaningful back-and-forth. Dispatching a
+small, mechanical, single-file fix through a full worker cycle bloats context
+and burns wall-clock time versus just doing it.
+
 ## Worker Contract
 
 - Select the worker model, variant, and optional key slot explicitly when the task
@@ -25,6 +51,11 @@ execution. Taskferry is not an alternative lifecycle.
 - Write long prompts with the runtime's file-writing tool before invoking Taskferry.
   Pass the file content through command substitution so the rendered shell command
   stays short. Do not inline a long prompt in `--prompt`.
+- End every dispatch prompt with an explicit instruction to close on a line
+  starting `Status:` — one of `DONE | DONE_WITH_CONCERNS | BLOCKED |
+  NEEDS_CONTEXT` for implementers, or `Approved | Needs fixes` after a `Task
+  quality:` line for reviewers. This is a standing contract, not a per-task
+  flourish; `--require-final-marker` enforces it.
 - Wait for settlement, retrieve the result, handle crashes, and validate the
   worker's deliverables yourself.
 
@@ -52,10 +83,11 @@ risky, security-sensitive, or has already failed on a lighter model.
   tier for implementers whose brief already contains the exact code to
   write (transcription plus testing) and single-file mechanical fixes.
 - **Provider-specific availability rules (time windows, key-slot limits,
-  single-in-flight constraints) live in your CLAUDE.md, not here** — check
-  it before dispatching to a gated provider, and pick an equivalent model
-  on another provider rather than waiting idle or dispatching outside the
-  allowed window.
+  single-in-flight constraints) are account state and live outside this
+  skill** — in your CLAUDE.md, or a personal skill covering provider
+  availability. Check it before dispatching to a gated provider, and pick an
+  equivalent model on another provider rather than waiting idle or
+  dispatching outside the allowed window.
 - **Reliability is part of "good enough."** A model that crashes or times
   out on a large fraction of its dispatches costs more in wall-clock retries
   than a slightly pricier model that finishes clean the first time. Two or
@@ -94,6 +126,16 @@ taskferry tail <id> --chars 2000
 Do not pass `--timeout-ms` to `taskferry wait`. The process exits on its own the
 moment the task settles; a timeout only makes the caller re-issue `wait` in a
 polling loop for no benefit.
+
+**`taskferry wait` is the only settlement signal — never a bare search for
+`Status:` in the output.** Grepping for the marker alone, before the task has
+settled, false-positives whenever the worker's own output quotes earlier text
+containing a `Status:`-prefixed line (a task that reads old transcripts or other
+dispatch logs matches the first hit anywhere in the stream, not the model's real
+final report). Wait for settlement first, then read `Status:` / `Task quality:`
+out of `taskferry result` or `taskferry tail`. Don't poll for a report file or a
+commit to appear, and don't `tail` mid-run just to check progress absent a real
+need to inspect activity.
 
 `wait` also takes a `--tail-chars <number>` option, but it only fires on a
 `--timeout-ms` timeout (trailing text characters from that point) — since
@@ -227,6 +269,49 @@ taskferry summary <id> --style activity --wait # a short "what's happening now" 
 
 Use a distinct prompt file for each concurrent task. Remove it with the runtime's
 file tool after the task settles and its result has been validated.
+
+## Advisor Review
+
+Dispatch an independent advisor review when finished work is judgment-heavy or
+correctness-critical in a way passing tests wouldn't catch: statistical or
+mathematical reasoning, security-sensitive logic, or any change where "it runs
+and the tests pass" is a weaker guarantee than "the reasoning is right." Reach
+for it before merging or reporting that class of work done — not only when the
+user names a model.
+
+- `taskferry advisor --prompt "$(cat "$prompt_file")" --model <provider/model>
+  --directory "<worktree>"` dispatches and waits in one call.
+- Use the model and effort the user specifies. Absent one, default to the
+  strongest model available to you.
+- **Advisor is a review-only role: it reports findings and does not edit files.**
+  State that in the prompt. Never blend it with the implementer role in one
+  dispatch.
+- Give it what a human reviewer would need — the files, the invariant being
+  relied on, and what "wrong" would look like.
+- If the advisor you want is the host runtime's own model, use the host's native
+  subagent mechanism instead of `taskferry advisor`; Taskferry exists to reach
+  models the host can't run itself.
+- Continue an advisor conversation by passing back the `--session-id` its first
+  call returned, rather than opening a fresh one.
+
+**After the report lands, verify every checkable finding empirically** — rerun
+the corrected code, recompute the number — before folding it into the diff. An
+advisor's confident wrong claim costs more than no review at all.
+
+## Sending Audio Or Image Parts To A Model
+
+OpenCode passes file paths through as text strings, so a worker never actually
+hears or sees the file — it only receives its path. When a model must genuinely
+perceive the bytes (audio review, image review), bypass the worker and POST
+directly to the provider's chat-completions endpoint with a real content part:
+
+```jsonc
+{"type": "input_audio", "input_audio": {"data": "<base64>", "format": "mp3"}}
+// or {"type": "image_url", "image_url": {"url": "data:image/png;base64,<...>"}}
+```
+
+Keep the one-shot script in a temp directory; this is a side channel around
+Taskferry, not a Taskferry feature.
 
 ## `no_output_timeout` Crashes
 

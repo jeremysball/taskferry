@@ -22,29 +22,29 @@ MCP-only tool doesn't:
    can shell out can use it, not only clients that speak MCP.
 2. **State outlives any single client.** The daemon holds task state and
    process handles independent of whichever CLI invocation or agent
-   session is currently talking to it — dispatch a task from one terminal,
+   session is currently talking to it: dispatch a task from one terminal,
    check on it from another.
 3. **No host-imposed call-timeout budget.** An MCP tool call answers inside
    whatever timeout the host enforces; a CLI command just runs.
 
-Each agent gets a *native* integration instead — a Claude Code plugin, an
-OpenCode plugin, a Codex plugin — rather than one MCP server shape bent to
-fit all three. See [docs/integrations/](docs/integrations/).
+Each agent gets a *native* integration instead: a Claude Code plugin, an
+OpenCode plugin, and a Codex plugin, rather than one MCP server shape bent
+to fit all three. See [docs/integrations/](docs/integrations/).
 
 ## How it works
 
 A private daemon (`src/daemon.js`) owns task processes and exposes
-versioned JSON-RPC over a Unix domain socket, permissioned to the current
-user only. The CLI (`taskferry`) is a thin client: it validates input,
+versioned JSON-RPC over a Unix domain socket, restricted to the current
+user. The CLI (`taskferry`) is a thin client: it validates input,
 auto-starts the daemon on first use if none is running, sends a request,
-and prints the result as [TOON](https://toonformat.dev/) — Token-Oriented
-Object Notation, roughly 40% fewer tokens than JSON for the same data, with
-list-shaped results rendered as a compact table instead of a repeated-key
-array.
+and prints the result as [TOON](https://toonformat.dev/) (Token-Oriented
+Object Notation), roughly 40% fewer tokens than JSON for the same data,
+with list-shaped results rendered as a compact table instead of a
+repeated-key array.
 
 `taskferry dispatch` spawns `opencode run --dir <directory> --auto --format
-json -- <prompt>` directly as a child process, detached so its process
-group can be signaled as a whole, with stdout/stderr captured to a private
+json -- <prompt>` directly as a child process, detached to give its whole
+process group one signal target, with stdout/stderr captured to a private
 per-task log. Task completion comes from that child's real `exit` event,
 never from string-matching log output. See [docs/daemon.md](docs/daemon.md)
 for the full process model.
@@ -93,7 +93,7 @@ taskferry --version
 ```
 
 `node src/cli.js setup` is the one-time bootstrap: it runs `npm install`
-in the checkout, then creates three managed symlinks — `~/.local/bin/taskferry`
+in the checkout, then creates three managed symlinks: `~/.local/bin/taskferry`
 pointing at `src/cli.js`, `~/.local/bin/tf-sl` pointing at `src/tf-sl.sh`, and
 `$XDG_CONFIG_HOME/opencode/plugins/taskferry.js` (default
 `~/.config/opencode/plugins/taskferry.js`) pointing at
@@ -105,12 +105,21 @@ is not yet on your `PATH`, the result tells you to add it:
 export PATH="$HOME/.local/bin:$PATH"
 ```
 
-`tf-sl` renders the taskferry segment for a Claude Code statusline command:
-pipe the same JSON Claude Code feeds your statusline script into it, and it
+`tf-sl` renders the taskferry segment for a Claude Code statusline command.
+Pipe the same JSON Claude Code feeds your statusline script into it, and it
 prints an ANSI-colored `tf: <id> <status>` (or a live activity summary, at
 narrow terminal widths) for whichever task is running in the current `cwd`,
-or nothing at all if none is. It's meant to be composed into a larger
-statusline script (`printf '%s' "$input" | tf-sl`), not run standalone.
+or nothing if none is. Compose it into a larger statusline script
+(`printf '%s' "$input" | tf-sl`) rather than running it standalone.
+
+### Configuration
+
+taskferry reads user-tunable options from
+`$XDG_CONFIG_HOME/taskferry/config.json` (default
+`~/.config/taskferry/config.json`), which sits above `TASKFERRY_*` env vars
+and built-in defaults in precedence. Both the config file and every env
+var are optional; a fresh install runs on defaults alone. Field list and
+precedence rules: [docs/config.md](docs/config.md).
 
 ### Updating an existing checkout
 
@@ -119,16 +128,17 @@ git pull
 taskferry setup
 ```
 
-`taskferry setup` re-runs `npm install` and refreshes both symlinks, so
-`taskferry` keeps resolving to the current `src/cli.js` after each
-update. It is idempotent: re-running it on an already-current install is
-safe and reports the same state.
+`taskferry setup` re-runs `npm install`, refreshes all three managed
+symlinks, and re-registers each native integration, so `taskferry` keeps
+resolving to the current `src/cli.js` after every update. It is
+idempotent: running it again on an already-current install is safe and
+reports the same state.
 
-The `setup` command never replaces a symlink at either location unless it
-can prove the existing one is one it created (a self-managed target whose
-underlying file is part of the taskferry checkout). An unrelated
-symlink, a regular file, or a directory at that path is left alone, and
-`setup` exits with `refusing to replace unmanaged path: <path>`.
+The `setup` command never replaces a symlink at any of these locations
+unless it can prove the existing one is one it created (a self-managed
+target whose underlying file is part of the taskferry checkout). An
+unrelated symlink, a regular file, or a directory at that path is left
+alone, and `setup` exits with `refusing to replace unmanaged path: <path>`.
 
 The native integration each agent uses is documented separately:
 
@@ -166,7 +176,7 @@ each worker it runs. It is not an alternative lifecycle of its own.
   risk taking the daemon down with its own children.
 - **Workspace scoping is strict realpath equality, deliberately.** No
   repository- or branch-level grouping exists anywhere in the CLI, daemon,
-  or integrations, on purpose — worktree isolation falls directly out of
+  or integrations, on purpose: worktree isolation falls directly out of
   directory scoping, and adding a grouping concept on top would give a
   model another axis to reason about (and get wrong) for no real benefit.
 
@@ -185,7 +195,7 @@ Node's built-in `node:test`, no test framework dependency, covering
 argument parsing, the daemon's socket protocol and stale-socket recovery,
 task-lifecycle logic (dispatch → exit/error → settle, `cancel`'s
 SIGTERM-then-SIGKILL escalation), activity-summary caching, and both native
-plugin integrations — all through dependency injection (`createTaskManager`
+plugin integrations, all through dependency injection (`createTaskManager`
 takes a fake `spawnFn`/`killFn` instead of touching real processes or OS
 signals), so this layer runs deterministically in well under ten seconds
 with no network or subprocess calls.
@@ -205,9 +215,9 @@ node src/poll-smoke-test.js     # taskferry wait resolving early and hitting its
 Each spins up its own isolated daemon (private `TASKFERRY_STATE_DIR`/
 `TASKFERRY_RUNTIME_DIR` under a temp directory, torn down afterward) and
 drives it entirely through the real CLI binary and real `opencode run`
-calls — real tokens, real cost, roughly a minute total. These are the only
+calls: real tokens, real cost, roughly a minute total. These are the only
 tests that exercise the real `spawn` call, real signal delivery to a real
-process group, and TOON encoding over the real daemon socket — the things
+process group, and TOON encoding over the real daemon socket: the things
 dependency injection deliberately keeps out of the unit tests above. Each
 prints a `... SMOKE TEST PASSED`/`FAILED` line and exits accordingly; pass
 a directory argument to run against a workspace other than this package's
@@ -215,8 +225,10 @@ own root.
 
 ## Further reading
 
-- [docs/cli-reference.md](docs/cli-reference.md) — every command, flag, and TOON example
-- [docs/daemon.md](docs/daemon.md) — process model, socket protocol, recovery
-- [docs/security.md](docs/security.md) — permissions, key slots, activity-summary privacy
-- [docs/troubleshooting.md](docs/troubleshooting.md) — `doctor` output and common failures
-- [docs/migrating-from-mcp.md](docs/migrating-from-mcp.md) — command mapping and cleanup
+- [docs/sourcemap.md](docs/sourcemap.md): file-by-file orientation for new contributors
+- [docs/cli-reference.md](docs/cli-reference.md): every command, flag, and TOON example
+- [docs/daemon.md](docs/daemon.md): process model, socket protocol, recovery
+- [docs/config.md](docs/config.md): config file fields and env var precedence
+- [docs/security.md](docs/security.md): permissions, key slots, activity-summary privacy
+- [docs/troubleshooting.md](docs/troubleshooting.md): `doctor` output and common failures
+- [docs/migrating-from-mcp.md](docs/migrating-from-mcp.md): command mapping and cleanup

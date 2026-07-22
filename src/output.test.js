@@ -1,6 +1,11 @@
 import { describe, test } from "node:test";
 import assert from "node:assert/strict";
-import { colorize, formatWatchEvent, leanStatus } from "./output.js";
+import { colorize, formatWatchEvent, leanStatus, writeToon } from "./output.js";
+
+function fakeStdoutIo(isTTY) {
+  let stdout = "";
+  return { io: { stdout: { isTTY, write: (chunk) => { stdout += chunk; } } }, output: () => stdout };
+}
 
 function resumeHint(detail) {
   return leanStatus(detail).next;
@@ -233,5 +238,42 @@ describe("formatWatchEvent color (TTY-gated)", () => {
     }, "ndjson", true);
 
     assert.ok(!line.includes("\x1b["));
+  });
+});
+
+describe("writeToon status coloring", () => {
+  test("colors a status field in the nested (non-uniform) task layout when stdout is a TTY", () => {
+    const { io, output } = fakeStdoutIo(true);
+    // Mixed key sets across rows (one has failureReason, one doesn't) forces
+    // toon's expanded `status: x` line layout instead of the tabular one.
+    writeToon({ tasks: [{ id: "a", status: "crashed", failureReason: "boom" }, { id: "b", status: "done" }] }, io);
+
+    assert.ok(output().includes("status: \x1b[31mcrashed\x1b[0m"));
+    assert.ok(output().includes("status: \x1b[32mdone\x1b[0m"));
+  });
+
+  test("colors a status field in the tabular (uniform) task layout when stdout is a TTY", () => {
+    const { io, output } = fakeStdoutIo(true);
+    writeToon({ tasks: [{ id: "a", status: "done" }, { id: "b", status: "running" }] }, io);
+
+    assert.ok(output().includes("a,\x1b[32mdone\x1b[0m"));
+    assert.ok(output().includes("b,\x1b[33mrunning\x1b[0m"));
+  });
+
+  test("leaves plain, unmarked status text when stdout is not a TTY (piped/redirected)", () => {
+    const { io, output } = fakeStdoutIo(false);
+    writeToon({ tasks: [{ id: "a", status: "done" }, { id: "b", status: "crashed" }] }, io);
+
+    assert.ok(!output().includes("\x1b["));
+    assert.ok(output().includes("a,done"));
+    assert.ok(output().includes("b,crashed"));
+  });
+
+  test("does not color a status value with no known color mapping (e.g. unknown)", () => {
+    const { io, output } = fakeStdoutIo(true);
+    writeToon({ id: "a", status: "unknown" }, io);
+
+    assert.ok(!output().includes("\x1b["));
+    assert.ok(output().includes("status: unknown"));
   });
 });

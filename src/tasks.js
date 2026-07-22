@@ -567,6 +567,12 @@ export function createTaskManager({
   // "not in the task object" reason as escalationTimers.
   const runningWatchers = new Map();
 
+  // Per-task incremental-scan progress for the running watcher, exposing
+  // bytesRead and carry to classifyTrailingLogFailure() at exit time so the
+  // trailing reclassification only re-reads bytes the watcher hadn't seen
+  // yet, not the whole log from scratch.
+  const runningWatcherState = new Map();
+
   // Pending `wait` callbacks, keyed by task id. Lets a single `taskferry wait`
   // call block until the child's exit event fires (or a timeout elapses)
   // instead of the caller round-tripping taskferry_status in a loop. Not
@@ -1581,6 +1587,7 @@ export function createTaskManager({
       clearInterval(timer);
       runningWatchers.delete(taskId);
     }
+    runningWatcherState.delete(taskId);
   }
 
   // Forces a running task to stop for a reason other than user cancellation
@@ -1617,19 +1624,42 @@ export function createTaskManager({
   // 'error' handlers) is a bare clearInterval with no final read. A
   // provider-error event that lands after the last tick but before/at
   // process exit was therefore never classified and silently lost the
-  // failureReason (issue #81). Re-scanning the whole log here, once, at
-  // settlement time closes that race regardless of what the watcher
-  // already saw.
+  // failureReason (issue #81). Rather than re-read the whole log from
+  // scratch (the cost startRunningWatcher's incremental byte-offset
+  // reader exists to avoid), only the bytes the watcher hadn't seen yet
+  // are read here, concatenated with whatever partial line the watcher
+  // was still carrying -- which is empty when the watcher had been
+  // keeping up, and the whole file otherwise.
   /** @param {Task} task */
   function classifyTrailingLogFailure(task) {
     if (task.failureReason) return; // watcher already classified this task
-    let content;
+    const watcherState = runningWatcherState.get(task.id);
+    /** @type {number} */
+    let bytesRead = watcherState?.bytesRead ?? 0;
+    const carry = watcherState?.carry ?? "";
+    /** @type {number} */
+    let size;
     try {
-      content = fs.readFileSync(task.logPath, "utf8");
+      size = fs.statSync(task.logPath).size;
     } catch {
       return; // log never created or already gone; nothing to classify
     }
-    const providerFailure = classifyProviderFailure(content.split("\n"));
+    if (size < bytesRead) bytesRead = 0; // log shrank out from under the watcher; rescan
+    if (size === bytesRead && !carry) return; // watcher saw everything
+    let text = carry;
+    if (size > bytesRead) {
+      const chunkSize = size - bytesRead;
+      const buf = Buffer.alloc(chunkSize);
+      const fd = fs.openSync(task.logPath, "r");
+      try {
+        fs.readSync(fd, buf, 0, chunkSize, bytesRead);
+      } finally {
+        fs.closeSync(fd);
+      }
+      text += buf.toString("utf8");
+    }
+    if (!text) return; // nothing to classify
+    const providerFailure = classifyProviderFailure(text.split("\n"));
     if (providerFailure) {
       task.failureReason = providerFailure.bucket;
       task.failureDetail = providerFailure.detail;
@@ -1646,6 +1676,7 @@ export function createTaskManager({
     // line from the previous read until it's completed by the next chunk.
     let bytesRead = 0;
     let carry = "";
+    runningWatcherState.set(task.id, { get bytesRead() { return bytesRead; }, get carry() { return carry; } });
     // Two-phase no-output budget:
     //   - Before the task has produced any parseable log event, the watcher
     //     compares against `noOutputTimeout`. A task that is silent from the

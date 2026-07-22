@@ -23,6 +23,37 @@ export function colorForStatus(status) {
   return ANSI_BY_STATUS[status] || null;
 }
 
+// Coloring a status field has to happen post-encode: encode() escapes raw ANSI
+// bytes embedded in a string value into \u escapes. encode() also reshapes a
+// status field's surroundings unpredictably — a uniform tasks[] array collapses
+// to a comma-separated tabular block instead of one "status: x" line per item —
+// so a fixed line pattern can't find every occurrence. Instead, bracket
+// recognized status values in an invisible marker before encoding (encode()
+// passes it through unescaped and unquoted in both layouts) and swap the
+// marked span for an ANSI-colored one afterward.
+const STATUS_MARK = "\u2063";
+const STATUS_MARK_RE = new RegExp(`${STATUS_MARK}(\\w+)${STATUS_MARK}`, "g");
+
+export function markStatuses(value) {
+  if (Array.isArray(value)) return value.map(markStatuses);
+  if (value && typeof value === "object") {
+    return Object.fromEntries(Object.entries(value).map(([key, item]) => {
+      if (key === "status" && typeof item === "string" && colorForStatus(item)) {
+        return [key, `${STATUS_MARK}${item}${STATUS_MARK}`];
+      }
+      return [key, markStatuses(item)];
+    }));
+  }
+  return value;
+}
+
+export function colorizeText(text, useColor) {
+  return text.replace(STATUS_MARK_RE, (_, status) => {
+    const code = useColor && colorForStatus(status);
+    return code ? colorize(status, code, true) : status;
+  });
+}
+
 function shellQuote(value) {
   return `'${String(value).replaceAll("'", "'\\''")}'`;
 }
@@ -51,7 +82,10 @@ function migrateHints(value, key) {
 }
 
 export function writeToon(value, io = process) {
-  io.stdout.write(`${encode(migrateHints(value))}\n`);
+  const useColor = Boolean(io.stdout.isTTY);
+  const hinted = migrateHints(value);
+  const text = encode(useColor ? markStatuses(hinted) : hinted);
+  io.stdout.write(`${colorizeText(text, useColor)}\n`);
 }
 
 function stripPrefix(line, prefix) {

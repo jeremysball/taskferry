@@ -405,7 +405,7 @@ describe("activity summary cache", () => {
     assert.equal(cache.getLastSummarizedWatermark(task.id), 0);
   });
 
-  test("passes --summaries through watch and keeps Claude monitor output to one line", async () => {
+  test("passes --summaries through watch and keeps output to one line", async () => {
     let stdout = "";
     const calls = [];
     const controller = new AbortController();
@@ -418,7 +418,7 @@ describe("activity summary cache", () => {
       close() {},
     };
 
-    const result = await runCli(["watch", "--format", "claude-monitor", "--summaries"], {
+    const result = await runCli(["watch", "--format", "toon", "--summaries"], {
       io: { stdout: { write: (text) => { stdout += text; } }, stderr: { write() {} } },
       signal: controller.signal,
       connectClient: async () => client,
@@ -426,7 +426,7 @@ describe("activity summary cache", () => {
 
     assert.equal(result.exitCode, 0);
     assert.deepEqual(calls, [{ directory: fs.realpathSync(process.cwd()), summaries: true }]);
-    assert.equal(stdout, "Taskferry(running · oc_ab12): Verifying the server with new env vars via Playwright\n");
+    assert.equal(stdout.split("\n").length, 2);
   });
 
   test("accepts the activity subscription parameter at the daemon protocol boundary", () => {

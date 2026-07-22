@@ -412,32 +412,6 @@ test("watch --task-id resolves immediately for an already-settled task instead o
   assert.equal(client.closed.value, true);
 });
 
-test("doctor warns when the claude plugin is not installed", async (t) => {
-  const home = fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-doctor-home-"));
-  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
-  const client = fakeClient();
-  client.request = async (method) => {
-    if (method === "system.health") return { healthy: true, pid: 1 };
-    throw new Error(`unexpected request: ${method}`);
-  };
-  const runShellCommand = (command, args) => {
-    if (command === "bwrap") return { status: 0, stdout: "bubblewrap 0.11.2\n", stderr: "", error: undefined };
-    assert.equal(command, "claude");
-    assert.deepEqual(args, ["plugin", "list", "--json"]);
-    return { status: 0, stdout: JSON.stringify([{ id: "superpowers@claude-plugins-official" }]), stderr: "", error: undefined };
-  };
-
-  const result = await runCommand("doctor", {}, { client, homeDirectory: home, env: {}, runShellCommand });
-
-  assert.deepEqual(result.integrations, {
-    claude: { installed: false },
-    playwrightMcpIsolation: { opencode: { checked: false, reason: "no opencode config with a playwright MCP entry found" }, claudeCode: { checked: false, reason: "~/.claude.json not found" } },
-  });
-  assert.equal(result.warnings.length, 1);
-  assert.match(result.warnings[0], /claude-monitor notifications won't fire/);
-  assert.match(result.warnings[0], /taskferry setup/);
-});
-
 test("doctor has no warnings when the claude plugin is installed", async (t) => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-doctor-home-"));
   t.after(() => fs.rmSync(home, { recursive: true, force: true }));
@@ -460,28 +434,6 @@ test("doctor has no warnings when the claude plugin is installed", async (t) => 
     playwrightMcpIsolation: { opencode: { checked: false, reason: "no opencode config with a playwright MCP entry found" }, claudeCode: { checked: false, reason: "~/.claude.json not found" } },
   });
   assert.equal(result.warnings, undefined);
-});
-
-test("doctor reports the claude plugin as not installed when the claude CLI is missing", async (t) => {
-  const home = fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-doctor-home-"));
-  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
-  const client = fakeClient();
-  client.request = async (method) => {
-    if (method === "system.health") return { healthy: true, pid: 1 };
-    throw new Error(`unexpected request: ${method}`);
-  };
-  const runShellCommand = (command) => {
-    if (command === "bwrap") return { status: 0, stdout: "bubblewrap 0.11.2\n", stderr: "", error: undefined };
-    return { status: null, stdout: "", stderr: "", error: { code: "ENOENT" } };
-  };
-
-  const result = await runCommand("doctor", {}, { client, homeDirectory: home, env: {}, runShellCommand });
-
-  assert.deepEqual(result.integrations, {
-    claude: { installed: false, reason: "claude CLI not found" },
-    playwrightMcpIsolation: { opencode: { checked: false, reason: "no opencode config with a playwright MCP entry found" }, claudeCode: { checked: false, reason: "~/.claude.json not found" } },
-  });
-  assert.equal(result.warnings.length, 1);
 });
 
 test("doctor warns when bwrap is not installed on Linux", async (t) => {
@@ -544,89 +496,6 @@ test("doctor adds an informational note instead of a bwrap check on non-Linux pl
   assert.match(result.info[0], /only available on Linux/);
 });
 
-test("watch forwards originSessionId to client.subscribe when set", async () => {
-  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-commands-test-")));
-  const controller = new AbortController();
-  let capturedParams;
-  const client = fakeClient({
-    onSubscribe: (params) => {
-      capturedParams = params;
-      controller.abort();
-    },
-  });
-  const io = fakeIo();
-
-  await runCommand("watch", { directory: root, format: "claude-monitor", summaries: false, originSessionId: "sess-abc" }, {
-    client,
-    io,
-    signal: controller.signal,
-    cwd: root,
-  });
-
-  assert.equal(capturedParams.originSessionId, "sess-abc");
-});
-
-test("watch omits originSessionId from client.subscribe when not set", async () => {
-  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-commands-test-")));
-  const controller = new AbortController();
-  let capturedParams;
-  const client = fakeClient({
-    onSubscribe: (params) => {
-      capturedParams = params;
-      controller.abort();
-    },
-  });
-  const io = fakeIo();
-
-  await runCommand("watch", { directory: root, format: "toon", summaries: false }, {
-    client,
-    io,
-    signal: controller.signal,
-    cwd: root,
-  });
-
-  assert.equal("originSessionId" in capturedParams, false);
-});
-
-test("dispatch includes originSessionId from CLAUDE_CODE_SESSION_ID when set", async () => {
-  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-commands-test-")));
-  const previous = process.env.CLAUDE_CODE_SESSION_ID;
-  process.env.CLAUDE_CODE_SESSION_ID = "sess-env-abc";
-  try {
-    let capturedParams;
-    const client = {
-      request: async (method, params) => {
-        capturedParams = params;
-        return { id: "oc_1" };
-      },
-    };
-    await runCommand("dispatch", { prompt: "hi", directory: root }, { client, cwd: root });
-    assert.equal(capturedParams.originSessionId, "sess-env-abc");
-  } finally {
-    if (previous === undefined) delete process.env.CLAUDE_CODE_SESSION_ID;
-    else process.env.CLAUDE_CODE_SESSION_ID = previous;
-  }
-});
-
-test("dispatch omits originSessionId when CLAUDE_CODE_SESSION_ID is unset", async () => {
-  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-commands-test-")));
-  const previous = process.env.CLAUDE_CODE_SESSION_ID;
-  delete process.env.CLAUDE_CODE_SESSION_ID;
-  try {
-    let capturedParams;
-    const client = {
-      request: async (method, params) => {
-        capturedParams = params;
-        return { id: "oc_1" };
-      },
-    };
-    await runCommand("dispatch", { prompt: "hi", directory: root }, { client, cwd: root });
-    assert.equal("originSessionId" in capturedParams, false);
-  } finally {
-    if (previous !== undefined) process.env.CLAUDE_CODE_SESSION_ID = previous;
-  }
-});
-
 test("dispatch forwards noSandbox to the RPC payload when set", async () => {
   const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-commands-test-")));
   let capturedParams;
@@ -651,28 +520,6 @@ test("dispatch omits noSandbox from the RPC payload when not set", async () => {
   };
   await runCommand("dispatch", { prompt: "hi", directory: root }, { client, cwd: root });
   assert.equal("noSandbox" in capturedParams, false);
-});
-
-test("doctor reports a distinct reason when claude exits with a non-ENOENT spawn error", async (t) => {
-  const home = fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-doctor-home-"));
-  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
-  const client = fakeClient();
-  client.request = async (method) => {
-    if (method === "system.health") return { healthy: true, pid: 1 };
-    throw new Error(`unexpected request: ${method}`);
-  };
-  const runShellCommand = (command) => {
-    if (command === "bwrap") return { status: 0, stdout: "bubblewrap 0.11.2\n", stderr: "", error: undefined };
-    return { status: null, stdout: "", stderr: "", error: { code: "EACCES", message: "spawnSync claude EACCES" } };
-  };
-
-  const result = await runCommand("doctor", {}, { client, homeDirectory: home, env: {}, runShellCommand });
-
-  assert.deepEqual(result.integrations, {
-    claude: { installed: false, reason: "claude plugin list failed: spawnSync claude EACCES" },
-    playwrightMcpIsolation: { opencode: { checked: false, reason: "no opencode config with a playwright MCP entry found" }, claudeCode: { checked: false, reason: "~/.claude.json not found" } },
-  });
-  assert.equal(result.warnings.length, 1);
 });
 
 test("doctor warns when opencode playwright MCP is checked and not isolated", async (t) => {

@@ -33,11 +33,9 @@ function resolveWaitDefaultTimeoutMs(env) {
   return Number.isFinite(envMs) && envMs > 0 ? envMs : DEFAULT_WAIT_TIMEOUT_MS;
 }
 
-// Checked from `doctor` so a missing Claude plugin install surfaces as an
-// explicit warning instead of silent absence: without it, `claude-monitor`
-// notifications (see docs/cli-reference.md) never fire and nothing else says
-// why. `runShellCommand` is injected (default: a real `claude` invocation) so
-// tests can stub it without spawning a subprocess.
+// Checked from `doctor` so a missing Claude plugin install surfaces in the
+// integrations output. `runShellCommand` is injected (default: a real `claude`
+// invocation) so tests can stub it without spawning a subprocess.
 async function checkClaudeIntegration(runShellCommand) {
   const probe = await runShellCommand("claude", ["plugin", "list", "--json"]);
   if (probe.error) {
@@ -205,9 +203,6 @@ export async function runCommand(command, options, { client, io = process, signa
       const bwrap = checks[4].status === "fulfilled" ? checks[4].value : (platform === "linux" ? { checked: false, available: false, reason: "check failed" } : null);
       const warnings = [];
       const info = [];
-      if (!claude.installed) {
-        warnings.push(`Claude plugin not installed (${claude.reason || "not found in claude plugin list"}): claude-monitor notifications won't fire. Run taskferry setup to install it.`);
-      }
       if (opencodeMCP.checked && !opencodeMCP.isolated) {
         warnings.push(`Playwright MCP for opencode is not isolated (${opencodeMCP.path}): concurrent dispatches sharing one browser profile crash with SIGKILL. Run taskferry setup to fix, or add --isolated to its command manually.`);
       }

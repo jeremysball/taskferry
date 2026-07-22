@@ -126,56 +126,6 @@ describe("formatWatchEvent toon format for activity/state events", () => {
   });
 });
 
-describe("formatWatchEvent claude-monitor format", () => {
-  test("shows a distinct summary-unavailable marker when summaryFailed is true", () => {
-    const line = formatWatchEvent({
-      type: "task.activity",
-      taskId: "oc_1",
-      status: "running",
-      summaryFailed: true,
-      summaryError: "summary model is unavailable: opencode/hy3-free",
-    }, "claude-monitor");
-
-    assert.match(line, /Taskferry\(running · oc_1\)/);
-    assert.match(line, /summary unavailable/);
-    assert.match(line, /summary model is unavailable/);
-  });
-
-  test("uses 'unknown error' fallback when summaryFailed is true but summaryError is missing", () => {
-    const line = formatWatchEvent({
-      type: "task.activity",
-      taskId: "oc_1",
-      status: "running",
-      summaryFailed: true,
-    }, "claude-monitor");
-
-    assert.match(line, /summary unavailable \(unknown error\)/);
-  });
-
-  test("renders activity text normally when summaryFailed is not set", () => {
-    const line = formatWatchEvent({
-      type: "task.activity",
-      taskId: "oc_1",
-      status: "running",
-      activity: "Reading the config file.",
-    }, "claude-monitor");
-
-    assert.match(line, /Taskferry\(running · oc_1\)/);
-    assert.match(line, /Reading the config file\./);
-  });
-
-  test("falls back to Task status when activity is missing and summaryFailed is not set", () => {
-    const line = formatWatchEvent({
-      type: "task.activity",
-      taskId: "oc_1",
-      status: "done",
-    }, "claude-monitor");
-
-    assert.match(line, /Taskferry\(done · oc_1\)/);
-    assert.match(line, /Task done/);
-  });
-});
-
 describe("colorize", () => {
   test("wraps text in the color code and a reset when enabled", () => {
     assert.equal(colorize("done", "\x1b[32m", true), "\x1b[32mdone\x1b[0m");

@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
-import { contextForHook, formatWatchEvent } from "./output.js";
+import { contextForHook } from "./output.js";
 import { runCli } from "./cli.js";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -19,7 +19,6 @@ function readJson(...parts) {
 test("Claude plugin manifests describe only the taskferry native integration", () => {
   const plugin = readJson("integrations", "claude", ".claude-plugin", "plugin.json");
   const marketplace = readJson(".claude-plugin", "marketplace.json");
-  const monitors = readJson("integrations", "claude", "monitors", "monitors.json");
   const hooks = readJson("integrations", "claude", "hooks", "hooks.json");
 
   assert.equal(plugin.name, "taskferry");
@@ -28,11 +27,6 @@ test("Claude plugin manifests describe only the taskferry native integration", (
     Object.keys(plugin).filter((key) => ["commands", "agents", "mcpServers", "channels"].includes(key)),
     []
   );
-  assert.deepEqual(monitors, [{
-    name: "taskferry",
-    description: "Taskferry task activity",
-    command: 'taskferry watch --directory "${CLAUDE_PROJECT_DIR}" --format claude-monitor --summaries ${CLAUDE_CODE_SESSION_ID:+--origin-session-id "$CLAUDE_CODE_SESSION_ID"}',
-  }]);
   assert.equal(Array.isArray(hooks.hooks.SessionStart), true);
   assert.equal(hooks.hooks.SessionStart.length, 1);
   assert.match(hooks.hooks.SessionStart[0].hooks[0].command, /taskferry context/);
@@ -168,18 +162,6 @@ test("SessionStart hook reports a structured error when an installed taskferry f
   } finally {
     fs.rmSync(bin, { recursive: true, force: true });
   }
-});
-
-test("Claude monitor output stays on one line after activity sanitization", () => {
-  const line = formatWatchEvent({
-    type: "task.activity",
-    taskId: "oc_ab12",
-    status: "running",
-    activity: "Verifying the server\nwith new env vars\r\nvia Playwright",
-  }, "claude-monitor");
-
-  assert.equal(line, "Taskferry(running \u00b7 oc_ab12): Verifying the server with new env vars via Playwright");
-  assert.equal(/[\r\n]/.test(line), false);
 });
 
 test("missing taskferry guidance is a single actionable plugin error", () => {

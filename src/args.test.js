@@ -143,7 +143,6 @@ test("parses workspace, stream, and result options with their constrained values
     format: "ndjson",
     summaries: true,
     taskId: undefined,
-    originSessionId: undefined,
   });
   assert.deepEqual(parseArgs(["list", "--all", "--limit", "10"]).options, {
     directory: undefined,
@@ -154,7 +153,7 @@ test("parses workspace, stream, and result options with their constrained values
 
 test("accepts --flag=value and rejects invalid enumerated values", () => {
   assert.equal(parseArgs(["dispatch", "--prompt=hello"]).options.prompt, "hello");
-  assert.throws(() => parseArgs(["watch", "--format", "json"]), /must be one of toon, claude-monitor, ndjson/);
+  assert.throws(() => parseArgs(["watch", "--format", "json"]), /must be one of toon, ndjson/);
   assert.throws(() => parseArgs(["summary", "id", "--mode", "brief"]), /must be one of report, activity/);
 });
 
@@ -173,30 +172,8 @@ test("parses watch --task-id and rejects it for commands that don't take it", ()
     format: "toon",
     summaries: false,
     taskId: "oc_1",
-    originSessionId: undefined,
   });
   assert.throws(() => parseArgs(["status", "oc_1", "--task-id", "oc_2"]), /task id is required|unknown flag/);
-});
-
-test("parses watch --format claude-monitor --origin-session-id", () => {
-  const parsed = parseArgs(["watch", "--format", "claude-monitor", "--origin-session-id", "sess-abc"], { cwd: "/workspace/project" });
-  assert.equal(parsed.options.originSessionId, "sess-abc");
-  assert.equal(parsed.options.format, "claude-monitor");
-});
-
-test("rejects --origin-session-id with any format other than claude-monitor", () => {
-  assert.throws(
-    () => parseArgs(["watch", "--format", "toon", "--origin-session-id", "sess-abc"]),
-    /--origin-session-id requires --format claude-monitor/
-  );
-  assert.throws(
-    () => parseArgs(["watch", "--origin-session-id", "sess-abc"]),
-    /--origin-session-id requires --format claude-monitor/
-  );
-});
-
-test("rejects --origin-session-id for commands other than watch", () => {
-  assert.throws(() => parseArgs(["dispatch", "--prompt", "hi", "--origin-session-id", "sess-abc"]), /unknown flag/);
 });
 
 test("rejects empty option values and trailing global arguments as usage errors", () => {

@@ -438,27 +438,6 @@ test("doctor is a structured health check and --full preserves extra daemon fiel
   assert.deepEqual(calls, [{ method: "system.health", params: {} }]);
 });
 
-test("doctor surfaces a warning when the claude plugin is missing", async (t) => {
-  const home = fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-cli-doctor-"));
-  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
-  const capture = capturedIo();
-  const { client } = fakeClient({
-    "system.health": { healthy: true, pid: 123 },
-  });
-  const runShellCommand = (command) => {
-    if (command === "bwrap") return { status: 0, stdout: "bubblewrap 0.11.2\n", stderr: "", error: undefined };
-    return { status: null, stdout: "", stderr: "", error: { code: "ENOENT" } };
-  };
-  const result = await runCli(["doctor"], { io: capture.io, connectClient: async () => client, runShellCommand, homeDirectory: home, env: {} });
-
-  assert.equal(result.exitCode, 0);
-  assert.deepEqual(capture.output().value.integrations, {
-    claude: { installed: false, reason: "claude CLI not found" },
-    playwrightMcpIsolation: { opencode: { checked: false, reason: "no opencode config with a playwright MCP entry found" }, claudeCode: { checked: false, reason: "~/.claude.json not found" } },
-  });
-  assert.equal(capture.output().value.warnings.length, 1);
-});
-
 test("summary --wait reports a not-settled note instead of summarizing when the task is still active", async () => {
   const capture = capturedIo();
   const { client, calls } = fakeClient({

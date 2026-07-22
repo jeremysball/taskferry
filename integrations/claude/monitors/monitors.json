@@ -1,7 +1,0 @@
-[
-  {
-    "name": "taskferry",
-    "description": "Taskferry task activity",
-    "command": "taskferry watch --directory \"${CLAUDE_PROJECT_DIR}\" --format claude-monitor --summaries ${CLAUDE_CODE_SESSION_ID:+--origin-session-id \"$CLAUDE_CODE_SESSION_ID\"}"
-  }
-]

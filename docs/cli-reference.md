@@ -242,18 +242,15 @@ SIGTERM), then exits cleanly with code `0`.
 | Flag | Notes |
 |---|---|
 | `--directory <path>` | Workspace to watch, defaults to the current workspace |
-| `--format toon\|claude-monitor\|ndjson` | Stream format, default `toon` |
+| `--format toon\|ndjson` | Stream format, default `toon` |
 | `--summaries` | Request live activity summaries (a secondary model call); see [security.md](security.md) |
 | `--task-id <id>` | Scope the stream to one task; `watch` then exits on its own once that task settles, instead of running until interrupted |
-| `--origin-session-id <id>` | Requires `--format claude-monitor`. Only stream events from tasks dispatched with the same origin session id, so multiple Claude Code windows in the same workspace don't see each other's task notifications |
 
 Without `--task-id`, `watch` streams every task in the workspace until
 interrupted. With it, `--directory` is optional — it's resolved from the
 task itself when omitted.
 
-`ndjson` emits one JSON object per line, for scripting. `claude-monitor`
-emits `Taskferry(<status> · <id>): <activity>` lines, the format Claude
-Code's monitor surface uses (`integrations/claude/monitors/monitors.json`).
+`ndjson` emits one JSON object per line, for scripting.
 
 ## `taskferry context [options]`
 
@@ -272,10 +269,7 @@ daemon if needed), and reports `{ healthy, pid }`. `--full` adds `version`,
 `cliVersion`, and `protocolVersion`.
 
 Also reports `integrations.claude.installed`, checked locally via `claude
-plugin list --json` (not a daemon RPC). When it's `false`, a `warnings` array
-explains that `claude-monitor` notifications (see `taskferry watch --format
-claude-monitor` above) won't fire, and points at `taskferry setup` to install
-the plugin. See [troubleshooting.md](troubleshooting.md).
+plugin list --json` (not a daemon RPC). See [troubleshooting.md](troubleshooting.md).
 
 ## `taskferry --version` / `taskferry -V`
 

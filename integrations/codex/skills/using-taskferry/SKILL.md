@@ -356,9 +356,7 @@ escalates to SIGKILL after a grace period (default 5000ms, override with
 long-running command). Use `taskferry list` or `taskferry context --format toon`
 to inspect workspace-scoped state, and `taskferry doctor --full` if something
 about the daemon itself seems wrong (dead socket, stale process, health check
-failing) before assuming a task-level problem. `doctor` also warns if the
-Claude plugin isn't installed, since that silently disables `claude-monitor`
-live-activity notifications with no other symptom. The CLI emits structured data,
+failing) before assuming a task-level problem. The CLI emits structured data,
 errors, and help as TOON on stdout, keeps diagnostics on stderr, and uses exit
 codes to distinguish success, operational failure, and usage errors.
 

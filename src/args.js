@@ -101,9 +101,8 @@ const commandSpecs = {
     options: {
       "--directory <path>": "workspace to watch, defaults to the current workspace",
       "--task-id <id>": "scope the stream to one task; exits automatically once it settles",
-      "--format toon|claude-monitor|ndjson": "stream format, default toon",
+      "--format toon|ndjson": "stream format, default toon",
       "--summaries": "request activity summaries when available",
-      "--origin-session-id <id>": "with --format claude-monitor, only stream tasks dispatched with the same origin session id",
     },
     examples: ['taskferry watch', 'taskferry watch --task-id <id> --summaries', 'taskferry watch --format ndjson'],
   },
@@ -248,7 +247,7 @@ function defaultOptions(command, cwd) {
     case "list":
       return { directory: cwd, all: false, limit: undefined };
     case "watch":
-      return { directory: undefined, format: "toon", summaries: false, taskId: undefined, originSessionId: undefined };
+      return { directory: undefined, format: "toon", summaries: false, taskId: undefined };
     case "context":
       return { directory: cwd, format: "toon" };
     case "doctor":
@@ -346,7 +345,6 @@ export function parseArgs(argv, { cwd = process.cwd() } = {}) {
       "--format": "format",
       "--task-id": "taskId",
       "--require-final-marker": "finalMarker",
-      "--origin-session-id": "originSessionId",
     };
     const key = values[name];
     if (!key || !commandAllows(command, name)) throw usageError(`unknown flag ${name} for \`${command}\``, command);
@@ -358,7 +356,7 @@ export function parseArgs(argv, { cwd = process.cwd() } = {}) {
     } else if (key === "fields") {
       value = parseFields(value);
     } else if (key === "format") {
-      const allowed = command === "watch" ? ["toon", "claude-monitor", "ndjson"] : ["toon", "claude-hook", "codex-hook"];
+      const allowed = command === "watch" ? ["toon", "ndjson"] : ["toon", "claude-hook", "codex-hook"];
       if (!allowed.includes(value)) throw new UsageError(`${name} must be one of ${allowed.join(", ")}`, `Use ${name} with one of: ${allowed.join(", ")}`);
     } else if (key === "mode" && !["report", "activity"].includes(value)) {
       throw new UsageError(`${name} must be one of report, activity`, "Use --mode report or --mode activity");
@@ -391,9 +389,6 @@ export function parseArgs(argv, { cwd = process.cwd() } = {}) {
     if (command === "wait" && options.summarize && options.tailChars !== undefined) {
       throw usageError("--summarize cannot be combined with --tail-chars", command);
     }
-    if (command === "watch" && options.originSessionId !== undefined && options.format !== "claude-monitor") {
-      throw usageError("--origin-session-id requires --format claude-monitor", command);
-    }
   }
   return { command, options, help, ...(help ? { helpText: helpText(command) } : {}) };
 }
@@ -409,7 +404,7 @@ function commandAllows(command, flag) {
     summary: ["--mode", "--max-words"],
     result: ["--fields"],
     list: ["--directory", "--limit"],
-    watch: ["--directory", "--format", "--task-id", "--origin-session-id"],
+    watch: ["--directory", "--format", "--task-id"],
     context: ["--directory", "--format"],
     doctor: [],
   };

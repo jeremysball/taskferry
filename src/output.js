@@ -251,16 +251,6 @@ function formatActivityLine(event, useColor) {
 
 export function formatWatchEvent(event, format, useColor = false) {
   if (format === "ndjson") return JSON.stringify(event);
-  if (format === "claude-monitor") {
-    if (event.summaryFailed === true) {
-      const reason = typeof event.summaryError === "string" && event.summaryError
-        ? event.summaryError.replace(/[\r\n]+/g, " ")
-        : "unknown error";
-      return `Taskferry(${event.status} · ${event.taskId}): summary unavailable (${reason})`;
-    }
-    const activity = typeof event.activity === "string" && event.activity ? event.activity : `Task ${event.status}`;
-    return `Taskferry(${event.status} · ${event.taskId}): ${activity.replace(/[\r\n]+/g, " ")}`;
-  }
   if (event.type === "task.activity" || event.type === "task.state") return formatActivityLine(event, useColor);
   return encode(event);
 }

@@ -522,6 +522,36 @@ test("dispatch omits noSandbox from the RPC payload when not set", async () => {
   assert.equal("noSandbox" in capturedParams, false);
 });
 
+test("dispatch refuses to run when the generated skill copies are stale", async () => {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-commands-test-")));
+  const client = {
+    request: async () => {
+      throw new Error("task.dispatch should not be called when skill:check fails");
+    },
+  };
+  const checkSkills = () => {
+    throw new Error("stale generated skill copies: integrations/claude/skills/using-taskferry/SKILL.md");
+  };
+  await assert.rejects(
+    () => runCommand("dispatch", { prompt: "hi", directory: root }, { client, cwd: root, checkSkills }),
+    /taskferry's own skill files are out of sync/
+  );
+});
+
+test("dispatch proceeds normally when the generated skill copies are in sync", async () => {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-commands-test-")));
+  let checkSkillsCalled = false;
+  const checkSkills = () => {
+    checkSkillsCalled = true;
+  };
+  const client = {
+    request: async () => ({ id: "oc_1" }),
+  };
+  const result = await runCommand("dispatch", { prompt: "hi", directory: root }, { client, cwd: root, checkSkills });
+  assert.equal(checkSkillsCalled, true);
+  assert.equal(result.id, "oc_1");
+});
+
 test("doctor warns when opencode playwright MCP is checked and not isolated", async (t) => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-doctor-home-"));
   t.after(() => fs.rmSync(home, { recursive: true, force: true }));

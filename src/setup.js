@@ -3,6 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { ensureClaudeCodePlaywrightIsolation, ensureOpencodePlaywrightIsolation } from "./mcp-isolation.js";
+import { defaultRunCommand } from "./sandbox.js";
 
 const MANAGED_TARGETS = new Set([
   path.join("src", "cli.js"),
@@ -63,19 +64,6 @@ export function defaultNpmInstall(checkoutDirectory) {
     throw new Error(`npm install failed: ${detail}${stderr ? `\n${stderr}` : ""}`);
   }
   return result;
-}
-
-export function defaultRunCommand(command, args) {
-  const result = spawnSync(command, args, { encoding: "utf8", timeout: 5000 });
-  if (result.error) {
-    return { status: null, stdout: result.stdout || "", stderr: result.stderr || "", error: result.error };
-  }
-  return {
-    status: result.status,
-    stdout: result.stdout || "",
-    stderr: result.stderr || "",
-    error: result.error,
-  };
 }
 
 export function defaultRunCommandAsync(command, args) {

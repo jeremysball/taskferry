@@ -2345,8 +2345,6 @@ export function createTaskManager({
       activitySummarySubscriptions = totalCount;
       activityCache.setSummariesEnabled(activitySummariesEnabled && totalCount > 0);
     },
-    /** @param {string} dir @returns {Set<boolean>|undefined} */
-    getActivitySubscriptionsForDir: (dir) => activitySubscriptions.get(dir),
     advisor,
     paths: { STATE_DIR: stateDir, LOG_DIR, SUMMARY_DIR, TASKS_FILE },
     // Exposed primarily so tests can seed the summary session id and watermark

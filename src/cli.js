@@ -54,8 +54,9 @@ export async function runCli(argv = process.argv.slice(2), {
     }
   }
 
-  const [{ normalizeDirectory, runCommand }, { connectClient: defaultConnectClient }, { writeError, writeToon }] = await Promise.all([
+  const [{ runCommand }, { normalizeDirectory }, { connectClient: defaultConnectClient }, { writeError, writeToon }] = await Promise.all([
     import("./commands.js"),
+    import("./paths.js"),
     import("./client.js"),
     import("./output.js"),
   ]);

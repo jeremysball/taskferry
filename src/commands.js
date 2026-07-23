@@ -14,6 +14,7 @@ import { defaultRunCommandAsync as defaultShellRunner, pluginInstalled } from ".
 import { checkClaudeCodePlaywrightIsolation, checkOpencodePlaywrightIsolation } from "./mcp-isolation.js";
 import { checkBwrapAvailableAsync } from "./sandbox.js";
 import { checkSkills as defaultCheckSkills } from "../scripts/generate-skill.js";
+import { normalizeDirectory } from "./paths.js";
 
 // Default timeout for the CLI `wait` command (and `summary --wait`) when no
 // explicit --timeout-ms is given. Kept generous (15 min) so real tasks aren't
@@ -48,25 +49,6 @@ async function checkClaudeIntegration(runShellCommand) {
   return { installed: pluginInstalled(probe.stdout || "") };
 }
 
-export function normalizeDirectory(directory) {
-  let normalized;
-  try {
-    normalized = fs.realpathSync(directory);
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    throw new UsageError(
-      `directory does not exist: ${directory}`,
-      `Use an existing directory path for --directory (${message})`
-    );
-  }
-  if (!fs.statSync(normalized).isDirectory()) {
-    throw new UsageError(
-      `path is not a directory: ${directory}`,
-      "Use --directory with a workspace directory, not a file"
-    );
-  }
-  return normalized;
-}
 
 export async function runCommand(command, options, { client, io = process, signal, executablePath, cwd = process.cwd(), homeDirectory = os.homedir(), env = process.env, runShellCommand = defaultShellRunner, platform = process.platform, checkSkills = defaultCheckSkills } = {}) {
   switch (command) {

@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url";
 import { createTaskManager } from "./tasks.js";
 import { loadConfig } from "./config.js";
 import { withFileLock } from "./state-lock.js";
-import { resolveRuntimeDir, resolveStateDir } from "./paths.js";
+import { normalizeDirectory, resolveRuntimeDir, resolveStateDir } from "./paths.js";
 import {
   PROTOCOL_VERSION,
   ProtocolError,
@@ -136,10 +136,6 @@ export function removeStaleSocketIfUnchanged(socketPath, checkedIdentity, runtim
     fs.unlinkSync(socketPath);
     return true;
   });
-}
-
-function normalizeDirectory(directory) {
-  return fs.realpathSync(directory);
 }
 
 function emptyCounts() {

@@ -1,13 +1,17 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { UsageError } from "./args.js";
+import { UsageError } from "./errors.js";
 
 export function resolveStateDir(env = process.env) {
   return env.TASKFERRY_STATE_DIR
     || path.join(env.XDG_STATE_HOME || path.join(os.homedir(), ".local", "state"), "taskferry");
 }
 
+/**
+ * @param {string} directory
+ * @returns {string}
+ */
 export function normalizeDirectory(directory) {
   let normalized;
   try {

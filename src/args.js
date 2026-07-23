@@ -1,4 +1,5 @@
 import { RESULT_FIELDS } from "./protocol.js";
+import { UsageError } from "./errors.js";
 
 const commandSpecs = {
   dispatch: {
@@ -129,14 +130,7 @@ const commandSpecs = {
   },
 };
 
-export class UsageError extends Error {
-  constructor(message, help = "Run `taskferry --help` for usage") {
-    super(message);
-    this.name = "UsageError";
-    this.help = help;
-    this.exitCode = 2;
-  }
-}
+export { UsageError };
 
 export function helpText(command) {
   if (!command || !commandSpecs[command]) {

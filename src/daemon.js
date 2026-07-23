@@ -302,8 +302,6 @@ export async function startDaemon({
         variants.add(subscription.summaries);
       }
       manager.setActivitySubscriptions(subs);
-    } else if (typeof manager.setActivitySummarySubscriptions === "function") {
-      manager.setActivitySummarySubscriptions(Array.from(subscriptions.values()).filter((subscription) => subscription.summaries).length);
     }
   };
   const server = net.createServer((socket) => {

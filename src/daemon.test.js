@@ -73,7 +73,6 @@ function fakeManagerFactory(tasks = [], { checkSummaryModelReady } = {}) {
       return { status: "done", message: "advice" };
     },
     checkSummaryModelReady: checkSummaryModelReady ?? (async () => {}),
-    setActivitySummarySubscriptions() {},
     setActivitySubscriptions() {},
   };
 

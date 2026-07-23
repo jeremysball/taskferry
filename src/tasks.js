@@ -1887,6 +1887,12 @@ export function createTaskManager({
   // long time can use this to tell a genuinely stuck process apart from one
   // that's just slow, without waiting out a full taskferry wait timeout.
   const LOG_ACTIVITY_SCAN_BYTES = 64 * 1024;
+  // A log is append-only, so once a parseable event has landed it's there
+  // for good -- cache that fact per log file so a task polled repeatedly
+  // while running doesn't pay the open+read+line-by-line-JSON.parse cost on
+  // every single status() call after its first event, just the stat.
+  /** @type {Set<string>} */
+  const logHasEventCache = new Set();
   /**
    * @param {string} logPath
    * @returns {LogActivity}
@@ -1898,6 +1904,9 @@ export function createTaskManager({
       stat = fs.statSync(logPath);
     } catch {
       return { logBytesWritten: 0, logLastWriteAt: null, logHasEvent: false };
+    }
+    if (logHasEventCache.has(logPath)) {
+      return { logBytesWritten: stat.size, logLastWriteAt: stat.mtime.toISOString(), logHasEvent: true };
     }
     let hasEvent = false;
     if (stat.size > 0) {
@@ -1924,6 +1933,7 @@ export function createTaskManager({
         if (fd != null) fs.closeSync(fd);
       }
     }
+    if (hasEvent) logHasEventCache.add(logPath);
     return { logBytesWritten: stat.size, logLastWriteAt: stat.mtime.toISOString(), logHasEvent: hasEvent };
   }
 

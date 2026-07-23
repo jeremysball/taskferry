@@ -41,6 +41,12 @@ function fakeManagerFactory(tasks = [], { checkSummaryModelReady } = {}) {
       if (!task) throw new Error(`error: unknown task_id: ${taskId}\nhelp: run taskferry_list to see valid task ids`);
       return task;
     },
+    taskDirectory(taskId) {
+      calls.push(["taskDirectory", taskId]);
+      const task = byId.get(taskId);
+      if (!task) throw new Error(`error: unknown task id: ${taskId}\nhelp: run taskferry list to see valid task ids`);
+      return task.directory;
+    },
     async poll(taskId, options) {
       calls.push(["poll", taskId, options]);
       const delay = taskId === "slow" ? 30 : 1;
@@ -272,6 +278,36 @@ describe("Unix socket daemon", () => {
     assert.deepEqual(secondEvents.map((message) => message.event.taskId), ["one"]);
     assert.equal(daemon.stats().connections, 2);
     assert.equal(daemon.stats().subscriptions, 3);
+  });
+
+  test("event.subscribe with taskId resolves the directory server-side, without a client-side task.status round-trip (issue #59)", async (t) => {
+    const paths = temporaryPaths(t);
+    const fake = fakeManagerFactory([{ id: "one", status: "done", directory: paths.root }]);
+    const daemon = await startDaemon({ ...paths, taskManagerFactory: fake.factory });
+    t.after(() => daemon.close());
+    const peer = await openPeer(paths.socketPath);
+    t.after(() => peer.close());
+
+    const sub = await peer.request("sub", "event.subscribe", { taskId: "one" });
+    assert.equal(sub.ok, true);
+    assert.ok(sub.result.subscriptionId);
+
+    fake.emit({ type: "task.state", taskId: "one", directory: paths.root, status: "running" });
+    const events = await peer.waitForEvents(1);
+    assert.equal(events[0].event.taskId, "one");
+  });
+
+  test("event.subscribe rejects an unknown taskId", async (t) => {
+    const paths = temporaryPaths(t);
+    const fake = fakeManagerFactory([]);
+    const daemon = await startDaemon({ ...paths, taskManagerFactory: fake.factory });
+    t.after(() => daemon.close());
+    const peer = await openPeer(paths.socketPath);
+    t.after(() => peer.close());
+
+    const rejected = await peer.request("sub", "event.subscribe", { taskId: "missing" });
+    assert.equal(rejected.ok, false);
+    assert.match(rejected.error.message, /unknown task id/);
   });
 
   test("event.subscribe with summaries: true rejects upfront when the summary model isn't ready, without registering a subscription", async (t) => {

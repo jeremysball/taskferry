@@ -2,8 +2,6 @@ import os from "node:os";
 import path from "node:path";
 import { encode } from "@toon-format/toon";
 
-const HINT_KEYS = new Set(["help", "next", "note", "message"]);
-
 const ANSI_RESET = "\x1b[0m";
 const ANSI_BY_STATUS = {
   done: "\x1b[32m", // green
@@ -58,33 +56,9 @@ function shellQuote(value) {
   return `'${String(value).replaceAll("'", "'\\''")}'`;
 }
 
-function migrateHint(text) {
-  return text
-    .replaceAll("taskferry_dispatch", "taskferry dispatch")
-    .replaceAll("taskferry_cancel", "taskferry cancel")
-    .replaceAll("taskferry_poll", "taskferry wait")
-    .replaceAll("taskferry_advisor", "taskferry advisor")
-    .replaceAll("taskferry_status", "taskferry status")
-    .replaceAll("taskferry_tail", "taskferry tail")
-    .replaceAll("taskferry_summary", "taskferry summary")
-    .replaceAll("taskferry_result", "taskferry result")
-    .replaceAll("taskferry_list", "taskferry list")
-    .replaceAll("task_id", "task id");
-}
-
-function migrateHints(value, key) {
-  if (typeof value === "string") return key && HINT_KEYS.has(key) ? migrateHint(value) : value;
-  if (Array.isArray(value)) return value.map((item) => migrateHints(item));
-  if (value && typeof value === "object") {
-    return Object.fromEntries(Object.entries(value).map(([name, item]) => [name, migrateHints(item, name)]));
-  }
-  return value;
-}
-
 export function writeToon(value, io = process) {
   const useColor = Boolean(io.stdout.isTTY);
-  const hinted = migrateHints(value);
-  const text = encode(useColor ? markStatuses(hinted) : hinted);
+  const text = encode(useColor ? markStatuses(value) : value);
   io.stdout.write(`${colorizeText(text, useColor)}\n`);
 }
 
@@ -99,8 +73,7 @@ export function errorValue(error) {
   const help = error && typeof error === "object" && typeof error.help === "string"
     ? error.help
     : lines.map((line) => stripPrefix(line, "help:")).find(Boolean) || "Retry the command or run `taskferry --help`";
-  if (error && typeof error === "object" && error.name === "UsageError") return { error: message, help };
-  return { error: migrateHint(message), help: migrateHint(help) };
+  return { error: message, help };
 }
 
 export function writeError(error, io = process) {

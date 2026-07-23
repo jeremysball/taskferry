@@ -209,8 +209,8 @@ async function invoke(manager, request) {
         directory: params.directory,
         model: params.model,
         ...(params.variant !== undefined ? { variant: params.variant } : {}),
-        ...(params.sessionId !== undefined ? { session_id: params.sessionId } : {}),
-        ...(params.timeoutMs !== undefined ? { timeout_ms: params.timeoutMs } : {}),
+        ...(params.sessionId !== undefined ? { sessionId: params.sessionId } : {}),
+        ...(params.timeoutMs !== undefined ? { timeoutMs: params.timeoutMs } : {}),
       });
     case "task.context": {
       const context = filteredTaskDetails(manager, params.directory);
@@ -229,8 +229,8 @@ function responseError(error, requestId) {
   const lines = text.split("\n");
   const message = lines.find((line) => line.startsWith("error:"))?.slice(6).trim() || lines[0];
   const help = lines.find((line) => line.startsWith("help:"))?.slice(5).trim() || "Retry the request or inspect the daemon logs";
-  const code = /unknown task_id:/.test(text) ? "UNKNOWN_TASK" : "REQUEST_FAILED";
-  return errorResponse(requestId, code, message.replace("unknown task_id:", "unknown task id:"), help);
+  const code = /unknown task id:/.test(text) ? "UNKNOWN_TASK" : "REQUEST_FAILED";
+  return errorResponse(requestId, code, message, help);
 }
 
 export async function startDaemon({
@@ -351,10 +351,13 @@ export async function startDaemon({
               if (request.params.summaries === true && typeof manager.checkSummaryModelReady === "function") {
                 await manager.checkSummaryModelReady();
               }
+              const directory = request.params.directory !== undefined
+                ? normalizeDirectory(request.params.directory)
+                : normalizeDirectory(manager.taskDirectory(request.params.taskId));
               const subscriptionId = randomUUID();
               subscriptions.set(subscriptionId, {
                 socket,
-                directory: normalizeDirectory(request.params.directory),
+                directory,
                 summaries: request.params.summaries === true,
                 originSessionId: request.params.originSessionId || null,
               });
@@ -389,7 +392,10 @@ export async function startDaemon({
   function close() {
     if (closing) return closing;
     closing = new Promise((resolve, reject) => {
-      for (const socket of clients) socket.destroy();
+      for (const socket of clients) {
+        socket.write(encodeMessage({ version: PROTOCOL_VERSION, type: "shutdown", reason: restarting ? "restart" : "shutdown" }));
+        socket.destroy();
+      }
       server.close((error) => {
         if (error) {
           reject(error);

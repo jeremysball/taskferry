@@ -314,5 +314,33 @@ export function createActivityCache({
       summarySessions.delete(taskId);
       lastSummarizedWatermarks.delete(taskId);
     },
+    // Called once a task settles into a terminal status (done/crashed/
+    // cancelled), so a long-lived daemon doesn't accumulate one cache/
+    // lastRefresh entry per distinct watermark ever seen for every task it
+    // has processed. `cache`/`inFlight` are keyed by a composite
+    // activityCacheKey() string, not the bare task id, so entries for this
+    // task are found by parsing the id back out of each key.
+    /** @param {string} taskId */
+    evictTask: (taskId) => {
+      for (const key of cache.keys()) {
+        if (keyBelongsToTask(key, taskId)) cache.delete(key);
+      }
+      for (const key of inFlight.keys()) {
+        if (keyBelongsToTask(key, taskId)) inFlight.delete(key);
+      }
+      lastRefresh.delete(taskId);
+      lastSummarizedActivity.delete(taskId);
+      summarySessions.delete(taskId);
+      lastSummarizedWatermarks.delete(taskId);
+    },
   };
+}
+
+/** @param {string} key @param {string} taskId @returns {boolean} */
+function keyBelongsToTask(key, taskId) {
+  try {
+    return JSON.parse(key)[0] === taskId;
+  } catch {
+    return false;
+  }
 }

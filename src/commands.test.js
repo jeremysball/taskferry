@@ -169,20 +169,21 @@ test("watch --task-id filters events to one task and exits on its terminal event
   assert.match(io.lines[1], /done/);
 });
 
-test("watch --task-id resolves --directory from the task when omitted, and exits without abort", async () => {
+test("watch --task-id subscribes by taskId directly, without a task.status pre-fetch round-trip (issue #59)", async () => {
   const fromTask = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-commands-test-")));
   const elsewhere = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-commands-test-")));
   let deliver;
   const client = fakeClient({
     onSubscribe: (params, onEvent) => {
       deliver = onEvent;
-      assert.equal(params.directory, fromTask);
+      assert.equal(params.taskId, "oc_9");
+      assert.equal("directory" in params, false, "directory must not be pre-fetched; the daemon resolves it from taskId");
     },
   });
   client.request = async (method, params) => {
-    assert.equal(method, "task.status");
+    assert.equal(method, "task.status", "the only allowed request is the already-terminal catch-up check, not a directory pre-fetch");
     assert.equal(params.taskId, "oc_9");
-    return { directory: fromTask };
+    return { directory: fromTask, status: "running" };
   };
   const io = fakeIo();
 
@@ -198,6 +199,7 @@ test("watch --task-id resolves --directory from the task when omitted, and exits
   const result = await pending;
 
   assert.equal(result.event.status, "crashed");
+  assert.equal(result.directory, fromTask);
   assert.equal(client.closed.value, true);
 });
 

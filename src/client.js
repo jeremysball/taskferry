@@ -94,6 +94,7 @@ class DaemonClient {
     this.socket = socket;
     this.buffer = "";
     this.closed = false;
+    this.shutdownReason = null;
     this.pending = new Map();
     this.eventHandlers = new Map();
     this.queuedEvents = new Map();
@@ -102,7 +103,9 @@ class DaemonClient {
     socket.setEncoding("utf8");
     socket.on("data", (chunk) => this.onData(chunk));
     socket.on("error", (error) => this.failAll(error));
-    socket.on("close", () => this.failAll(new Error("taskferry daemon connection closed")));
+    socket.on("close", () => this.failAll(this.shutdownReason === "restart"
+      ? new Error("taskferry daemon is restarting (config or version change) — retry your command in a moment")
+      : new Error("taskferry daemon connection closed")));
   }
 
   onData(chunk) {
@@ -133,6 +136,10 @@ class DaemonClient {
       if (message.version !== PROTOCOL_VERSION) {
         this.protocolFailure(`taskferry daemon sent unsupported protocol version: ${String(message.version)}`);
         return;
+      }
+      if (message.type === "shutdown") {
+        this.shutdownReason = message.reason === "restart" ? "restart" : "shutdown";
+        continue;
       }
       if (message.type === "event") {
         if (!isExactObject(message, ["version", "type", "subscriptionId", "event"])

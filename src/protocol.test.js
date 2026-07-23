@@ -129,6 +129,15 @@ describe("private daemon protocol", () => {
     })), /invalid params/i);
   });
 
+  test("event.subscribe accepts taskId in place of directory (issue #59)", () => {
+    const parsed = parseRequestLine(request("event.subscribe", { taskId: "oc_1" }));
+    assert.equal(parsed.method, "event.subscribe");
+  });
+
+  test("event.subscribe rejects an empty params object (neither directory nor taskId)", () => {
+    assert.throws(() => parseRequestLine(request("event.subscribe", {})), /invalid params/i);
+  });
+
   test("rejects invalid request envelopes and params", () => {
     assert.throws(
       () => parseRequestLine(JSON.stringify({ version: 1, id: "req-1", method: "system.health" })),

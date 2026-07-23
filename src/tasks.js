@@ -230,24 +230,26 @@ function capDetail(text) {
 // false-positive surface (GLM-5.2 review of 0d944df..4e75129, finding 1).
 /**
  * @param {string[]} lines
- * @returns {{bucket: string, detail: string} | null}
+ * @returns {{failure: {bucket: string, detail: string} | null, hasParseableLine: boolean}}
  */
 function classifyProviderFailure(lines) {
+  let hasParseableLine = false;
   for (const line of lines) {
     if (!line.trim()) continue;
     let evt;
     try {
       evt = JSON.parse(line);
+      hasParseableLine = true;
     } catch {
       for (const [bucket, patterns] of PROVIDER_FAILURE_BUCKETS) {
-        if (patterns.some((pattern) => pattern.test(line))) return { bucket, detail: capDetail(line) };
+        if (patterns.some((pattern) => pattern.test(line))) return { failure: { bucket, detail: capDetail(line) }, hasParseableLine };
       }
       continue;
     }
     if (evt.type !== "error") continue;
     const text = typeof evt.message === "string" ? evt.message : JSON.stringify(evt);
     for (const [bucket, patterns] of PROVIDER_FAILURE_BUCKETS) {
-      if (patterns.some((pattern) => pattern.test(text))) return { bucket, detail: capDetail(text) };
+      if (patterns.some((pattern) => pattern.test(text))) return { failure: { bucket, detail: capDetail(text) }, hasParseableLine };
     }
     // A structured `type:"error"` event is never noise -- unlike the raw
     // non-JSON line branch above, this is opencode's own error signal, so an
@@ -260,11 +262,14 @@ function classifyProviderFailure(lines) {
     const errorName = typeof evt.error?.name === "string" ? evt.error.name : "error";
     const errorMessage = typeof evt.error?.data?.message === "string" ? evt.error.data.message : text;
     return {
-      bucket: `opencode_${errorName.replace(/[^a-zA-Z0-9]+/g, "_").toLowerCase()}`,
-      detail: capDetail(errorMessage),
+      failure: {
+        bucket: `opencode_${errorName.replace(/[^a-zA-Z0-9]+/g, "_").toLowerCase()}`,
+        detail: capDetail(errorMessage),
+      },
+      hasParseableLine,
     };
   }
-  return null;
+  return { failure: null, hasParseableLine };
 }
 
 const SUMMARY_AGENT_CONFIG = JSON.stringify({
@@ -356,7 +361,7 @@ const DEFAULT_WATCHDOG_POLL_MS = positiveInteger(
   Number(process.env.TASKFERRY_WATCHDOG_POLL_MS),
   2000
 );
-const WATCHDOG_KILL_GRACE_MS = 5000;
+const DEFAULT_WATCHDOG_GRACE_MS = 5000;
 
 /**
  * @param {object} [options]
@@ -373,6 +378,7 @@ const WATCHDOG_KILL_GRACE_MS = 5000;
  * @param {number} [options.noOutputTimeoutMs]
  * @param {number} [options.postOutputNoOutputTimeoutMs]
  * @param {number} [options.watchdogPollMs]
+ * @param {number} [options.watchdogGraceMs]
  * @param {number} [options.maxWaitMs]
  * @param {string} [options.keySlotsSpec]
  * @param {string|null} [options.providerKeyEnvName]
@@ -396,7 +402,6 @@ const WATCHDOG_KILL_GRACE_MS = 5000;
 // isolated instance with an injected spawnFn/killFn (no real `opencode`
 // process, no real OS signals) and its own state directory, instead of
 // sharing process-wide state with every other test or the real server.
-// `defaultTaskManager` below is the one real instance server.js uses.
 export function createTaskManager({
   spawnFn = spawn,
   killFn = (pid, signal) => process.kill(pid, signal),
@@ -449,6 +454,10 @@ export function createTaskManager({
     positiveInteger(/** @type {number} */ (config.postOutputNoOutputTimeoutMs), DEFAULT_POST_OUTPUT_NO_OUTPUT_TIMEOUT_MS)
   ),
   watchdogPollMs = DEFAULT_WATCHDOG_POLL_MS,
+  watchdogGraceMs = positiveInteger(
+    Number(process.env.TASKFERRY_WATCHDOG_GRACE_MS),
+    positiveInteger(/** @type {number} */ (config.watchdogGraceMs), DEFAULT_WATCHDOG_GRACE_MS)
+  ),
   maxWaitMs = MAX_WAIT_MS,
   keySlotsSpec = process.env.TASKFERRY_KEY_SLOTS ?? /** @type {string|undefined} */ (config.keySlots),
   providerKeyEnvName = process.env.TASKFERRY_PROVIDER_KEY_ENV || /** @type {string|undefined} */ (config.providerKeyEnv) || null,
@@ -489,6 +498,7 @@ export function createTaskManager({
   const noOutputTimeout = positiveInteger(noOutputTimeoutMs, DEFAULT_NO_OUTPUT_TIMEOUT_MS);
   const postOutputNoOutputTimeout = positiveInteger(postOutputNoOutputTimeoutMs, DEFAULT_POST_OUTPUT_NO_OUTPUT_TIMEOUT_MS);
   const watchdogPoll = positiveInteger(watchdogPollMs, DEFAULT_WATCHDOG_POLL_MS);
+  const watchdogGrace = positiveInteger(watchdogGraceMs, DEFAULT_WATCHDOG_GRACE_MS);
   const maxWait = positiveInteger(maxWaitMs, MAX_WAIT_MS);
   const keySlots = parseKeySlots(keySlotsSpec);
   const summarizerTimeout = nonNegativeInteger(summarizerTimeoutMs, DEFAULT_SUMMARIZER_TIMEOUT_MS);
@@ -575,7 +585,7 @@ export function createTaskManager({
   // In-memory state is the source of truth for queued and running tasks while this server
   // process is alive: process exit is delivered via the 'exit' event on our
   // own child_process handle, which only exists in the process that spawned
-  // it. tasks.json is a best-effort record for taskferry_list/debugging across
+  // it. tasks.json is a best-effort record for taskferry list/debugging across
   // a server restart, not a re-attach mechanism. A restarted server has no
   // handle to a child spawned by its previous instance, so any task still
   // "running" in the file when we reload it is relabeled "unknown" rather
@@ -583,7 +593,7 @@ export function createTaskManager({
   /** @type {Map<string, Task>} */
   const tasks = new Map();
 
-  // Escalation timers for taskferry_cancel, keyed by task id. Kept out of the
+  // Escalation timers for taskferry cancel, keyed by task id. Kept out of the
   // task object itself: task objects get JSON.stringify'd wholesale in
   // persist(), and a Timeout isn't serializable data.
   /** @type {Map<string, NodeJS.Timeout>} */
@@ -603,7 +613,7 @@ export function createTaskManager({
 
   // Pending `wait` callbacks, keyed by task id. Lets a single `taskferry wait`
   // call block until the child's exit event fires (or a timeout elapses)
-  // instead of the caller round-tripping taskferry_status in a loop. Not
+  // instead of the caller round-tripping taskferry status in a loop. Not
   // persisted or shared across a server restart, same as the tasks map itself.
   /** @type {Map<string, Array<(timedOut?: boolean) => void>>} */
   const waiters = new Map();
@@ -611,7 +621,7 @@ export function createTaskManager({
   // Advisor session recency, keyed by opencode session id. Process-lifetime
   // only, same as `tasks` and `waiters` -- a taskferry restart means every
   // session id is "unknown," which resolveAdvisorSession() treats identically
-  // to "expired" rather than special-casing it. Prevents taskferry_advisor
+  // to "expired" rather than special-casing it. Prevents taskferry advisor
   // from silently resuming a conversation whose prompt cache has gone cold.
   /** @type {Map<string, number>} */
   const advisorSessions = new Map();
@@ -650,7 +660,7 @@ export function createTaskManager({
    * @param {{force?: boolean}} [options]
    */
   function scheduleActivity(task, { force = false } = {}) {
-    if (typeof onEvent !== "function" || task.internal) return;
+    if (typeof onEvent !== "function" || task.internal) return Promise.resolve();
     const scheduledStatus = task.status;
     const scheduledDirectory = task.directory;
     const baseEvent = () => ({
@@ -680,7 +690,7 @@ export function createTaskManager({
         .then((result) => (result ? { includeSummary, activity: result.activity, outputWatermark: result.outputWatermark } : null))
         .catch((err) => ({ includeSummary, summaryFailed: true, summaryError: errMessage(err) }))
     );
-    void Promise.all(refreshes).then((results) => {
+    return Promise.all(refreshes).then((results) => {
       /** @type {Record<string, {includeSummary?: boolean, activity?: string, outputWatermark?: number, summaryFailed?: boolean, summaryError?: string}>} */
       const activityVariants = {};
       for (const r of results) {
@@ -816,7 +826,7 @@ export function createTaskManager({
     };
   }
 
-  // Minimal per-row schema for taskferry_list: an agent scanning a task list
+  // Minimal per-row schema for taskferry list: an agent scanning a task list
   // needs id/status/model/startedAt to decide what to poll next, not the full
   // detail (directory, pid, logPath, ...) that summarize() carries for a
   // single-task lookup. failureReason is included despite that otherwise-thin
@@ -839,7 +849,7 @@ export function createTaskManager({
    * @returns {Error}
    */
   function noSuchTask(taskId) {
-    return new Error(`error: unknown task_id: ${taskId}\nhelp: run taskferry_list to see valid task ids`);
+    return new Error(`error: unknown task id: ${taskId}\nhelp: run taskferry list to see valid task ids`);
   }
 
   /**
@@ -914,7 +924,7 @@ export function createTaskManager({
   function dispatch({ prompt, directory, model, variant, sessionId, keySlot, internal = false, finalMarker = null, originSessionId, noSandbox = false, allowedDirs: dispatchAllowedDirs }) {
     ensureStateLoaded();
     if (!prompt || typeof prompt !== "string") {
-      throw new Error("error: prompt is required\nhelp: taskferry_dispatch requires a non-empty prompt string");
+      throw new Error("error: prompt is required\nhelp: taskferry dispatch requires a non-empty prompt string");
     }
     if (!directory || !path.isAbsolute(directory)) {
       throw new Error(`error: directory must be an absolute path (got ${JSON.stringify(directory)})\nhelp: pass the full path, e.g. "/workspace/my-repo"`);
@@ -932,15 +942,31 @@ export function createTaskManager({
         throw new Error(`error: --require-final-marker is not a valid RegExp (${errMessage(err)})\nhelp: use standard JS RegExp syntax, e.g. '^Status: (DONE|DONE_WITH_CONCERNS|BLOCKED)$'`, { cause: err });
       }
     }
-    const normalizedDirectory = fs.realpathSync(directory);
+    let normalizedDirectory;
+    try {
+      normalizedDirectory = fs.realpathSync(directory);
+    } catch (err) {
+      throw new Error(`error: directory does not exist: ${directory}\nhelp: check the path or create the directory first (${errMessage(err)})`, { cause: err });
+    }
 
     const resolvedKeySlot = resolveKeySlot(keySlot);
 
     const id = `oc_${Date.now().toString(36)}_${randomUUID().slice(0, 8)}`;
     const logPath = path.join(LOG_DIR, `${id}.ndjson`);
 
+    // A resume (--session-id with no --model) should inherit the model the
+    // session was actually created under, not silently fall back to the
+    // hardcoded default -- a different model can mean a different provider,
+    // breaking the whole point of resuming that exact session.
+    /** @type {Task|null} */
+    let priorSessionTask = null;
+    if (sessionId) {
+      for (const t of tasks.values()) {
+        if (t.sessionId === sessionId && (!priorSessionTask || t.startedAt > priorSessionTask.startedAt)) priorSessionTask = t;
+      }
+    }
     const usingDefaultModel = !model;
-    const resolvedModel = model || "openai/gpt-5.6-luna";
+    const resolvedModel = model || priorSessionTask?.model || "openai/gpt-5.6-luna";
 
     // Fail fast instead of letting a generic, opaque crash surface from deep
     // inside the spawned opencode child (issue #63). Only applies when this
@@ -991,8 +1017,8 @@ export function createTaskManager({
     return {
       ...summary,
       next: task.status === "queued"
-        ? `Task is queued; run taskferry_poll or taskferry_status with task_id "${id}" to check when it starts`
-        : `Run taskferry_poll or taskferry_status with task_id "${id}" to check progress`,
+        ? `Task is queued; run taskferry wait or taskferry status with task id "${id}" to check when it starts`
+        : `Run taskferry wait or taskferry status with task id "${id}" to check progress`,
     };
   }
 
@@ -1005,11 +1031,11 @@ export function createTaskManager({
       try {
         modelsCache = { expiresAt: Date.now() + 5 * 60 * 1000, output: await listModelsFn(env) };
       } catch (err) {
-        throw new Error(`error: could not list available OpenCode models: ${errMessage(err)}\nhelp: verify that opencode is installed and authenticated, then retry taskferry_summary`, { cause: err });
+        throw new Error(`error: could not list available OpenCode models: ${errMessage(err)}\nhelp: verify that opencode is installed and authenticated, then retry taskferry summary`, { cause: err });
       }
     }
     if (!modelsCache.output.split("\n").some((line) => line.trim() === model)) {
-      throw new Error(`error: summary model is unavailable: ${model}\nhelp: set TASKFERRY_SUMMARY_MODEL to an installed model, then retry taskferry_summary`);
+      throw new Error(`error: summary model is unavailable: ${model}\nhelp: set TASKFERRY_SUMMARY_MODEL to an installed model, then retry taskferry summary`);
     }
   }
 
@@ -1020,7 +1046,7 @@ export function createTaskManager({
       await verifySummaryAgentFn(env);
       summaryAgentVerifiedUntil = Date.now() + 5 * 60 * 1000;
     } catch (err) {
-      throw new Error(`error: summary agent isolation check failed: ${errMessage(err)}\nhelp: verify that OpenCode denies the summary agent's tools before retrying taskferry_summary`, { cause: err });
+      throw new Error(`error: summary agent isolation check failed: ${errMessage(err)}\nhelp: verify that OpenCode denies the summary agent's tools before retrying taskferry summary`, { cause: err });
     }
   }
 
@@ -1225,7 +1251,7 @@ export function createTaskManager({
     const source = tasks.get(taskId);
     if (!source) throw noSuchTask(taskId);
     if (!Number.isSafeInteger(maxWords) || maxWords < 75 || maxWords > 300) {
-      throw new Error("error: max_words must be an integer from 75 through 300\nhelp: run taskferry_summary with max_words between 75 and 300");
+      throw new Error("error: max_words must be an integer from 75 through 300\nhelp: run taskferry summary with max_words between 75 and 300");
     }
     // Resolve the continuation session id and the last-summarized watermark
     // from the activity cache unless the caller (e.g. the activity path's
@@ -1277,7 +1303,7 @@ export function createTaskManager({
         sourceTaskId: taskId,
         sourceStatus,
         summary: "no model text observed yet",
-        help: `Run taskferry_tail with task_id "${taskId}" after the task emits output`,
+        help: `Run taskferry tail with task id "${taskId}" after the task emits output`,
       };
     }
     if (!snapshot.narration) {
@@ -1352,7 +1378,7 @@ export function createTaskManager({
       sourceLogBytes: snapshot.sourceLogBytes,
       summaryInputBytes: snapshot.inputBytes,
       summaryTask: { id, status: task.status, model: task.model },
-      next: `Run taskferry_poll with task_id "${id}", then taskferry_result with task_id "${id}"`,
+      next: `Run taskferry wait with task id "${id}", then taskferry result with task id "${id}"`,
     };
   }
 
@@ -1512,7 +1538,10 @@ export function createTaskManager({
           // In-memory child settlement is authoritative; a failed best-effort
           // state write must not strand the concurrency slot.
         }
-        scheduleActivity(task, { force: true });
+        // Prune the activity cache only after the terminal snapshot above has
+        // had a chance to land, so `watch --summaries` still sees the final
+        // status transition instead of a cache miss.
+        void scheduleActivity(task, { force: true }).then(() => activityCache.evictTask(task.id));
         try {
           cleanUpScratchFiles();
         } finally {
@@ -1592,7 +1621,7 @@ export function createTaskManager({
       task.endedAt = new Date().toISOString();
       if (child?.pid != null) sendSignal(child.pid, "SIGKILL");
       persistTask(task.id);
-      scheduleActivity(task, { force: true });
+      void scheduleActivity(task, { force: true }).then(() => activityCache.evictTask(task.id));
       cleanUpScratchFiles();
       settleWaiters(task.id);
     }
@@ -1622,7 +1651,7 @@ export function createTaskManager({
       task.status = "cancelled";
       task.endedAt = new Date().toISOString();
       persistTask(task.id);
-      scheduleActivity(task, { force: true });
+      void scheduleActivity(task, { force: true }).then(() => activityCache.evictTask(task.id));
       settleWaiters(taskId);
       if (!launchQueue.length && launchTimer) {
         clearTimeout(launchTimer);
@@ -1634,7 +1663,7 @@ export function createTaskManager({
       return { ...summarize(task), note: `task is already ${task.status}; nothing to cancel` };
     }
     if (task.pid == null) {
-      throw new Error(`error: task ${taskId} has no pid on record; cannot signal it\nhelp: run taskferry_status to inspect its recorded state`);
+      throw new Error(`error: task ${taskId} has no pid on record; cannot signal it\nhelp: run taskferry status to inspect its recorded state`);
     }
 
     task.cancelRequested = true;
@@ -1691,14 +1720,15 @@ export function createTaskManager({
     stopRunningWatcher(task.id);
     try {
       persistTask(task.id);
-    } catch {
+    } catch (err) {
       // The child still needs stopping if the state directory became unwritable.
+      console.error(`taskferry: failed to persist failing task ${task.id}: ${errMessage(err)}`);
     }
     sendSignal(/** @type {number} */ (task.pid), "SIGTERM");
     const timer = setTimeout(() => {
       escalationTimers.delete(task.id);
       if (tasks.get(task.id)?.status === "running") sendSignal(/** @type {number} */ (task.pid), "SIGKILL");
-    }, WATCHDOG_KILL_GRACE_MS);
+    }, watchdogGrace);
     escalationTimers.set(task.id, timer);
   }
 
@@ -1740,10 +1770,10 @@ export function createTaskManager({
       text += buf.toString("utf8");
     }
     if (!text) return; // nothing to classify
-    const providerFailure = classifyProviderFailure(text.split("\n"));
-    if (providerFailure) {
-      task.failureReason = providerFailure.bucket;
-      task.failureDetail = providerFailure.detail;
+    const { failure } = classifyProviderFailure(text.split("\n"));
+    if (failure) {
+      task.failureReason = failure.bucket;
+      task.failureDetail = failure.detail;
     }
   }
 
@@ -1797,20 +1827,16 @@ export function createTaskManager({
           const text = carry + buf.toString("utf8");
           const lines = text.split("\n");
           carry = lines.pop() ?? "";
-          const providerFailure = classifyProviderFailure(lines)
-            ?? (carry && !carry.trimStart().startsWith("{") ? classifyProviderFailure([carry]) : null);
+          const linesResult = classifyProviderFailure(lines);
+          const carryResult = !linesResult.failure && carry && !carry.trimStart().startsWith("{")
+            ? classifyProviderFailure([carry])
+            : null;
+          const providerFailure = linesResult.failure ?? carryResult?.failure ?? null;
           if (providerFailure) {
             failRunningTask(current, providerFailure.bucket, providerFailure.detail);
             return;
           }
-          if (lines.some((line) => {
-            try {
-              JSON.parse(line);
-              return true;
-            } catch {
-              return false;
-            }
-          })) {
+          if (linesResult.hasParseableLine) {
             lastActivityMs = Date.now();
             // Latch the budget escalation: once any parseable JSON line has
             // landed for this task, every subsequent tick compares against
@@ -1869,10 +1895,16 @@ export function createTaskManager({
   // Distinguishes "opencode never wrote a byte" (still starting up, or stuck
   // before its first event -- e.g. hung on a usage-limit retry) from "wrote
   // bytes but no parseable event yet" from "at least one event landed". A
-  // caller polling taskferry_status on a task that's been "running" for a
+  // caller polling taskferry status on a task that's been "running" for a
   // long time can use this to tell a genuinely stuck process apart from one
-  // that's just slow, without waiting out a full taskferry_poll timeout.
+  // that's just slow, without waiting out a full taskferry wait timeout.
   const LOG_ACTIVITY_SCAN_BYTES = 64 * 1024;
+  // A log is append-only, so once a parseable event has landed it's there
+  // for good -- cache that fact per log file so a task polled repeatedly
+  // while running doesn't pay the open+read+line-by-line-JSON.parse cost on
+  // every single status() call after its first event, just the stat.
+  /** @type {Set<string>} */
+  const logHasEventCache = new Set();
   /**
    * @param {string} logPath
    * @returns {LogActivity}
@@ -1884,6 +1916,9 @@ export function createTaskManager({
       stat = fs.statSync(logPath);
     } catch {
       return { logBytesWritten: 0, logLastWriteAt: null, logHasEvent: false };
+    }
+    if (logHasEventCache.has(logPath)) {
+      return { logBytesWritten: stat.size, logLastWriteAt: stat.mtime.toISOString(), logHasEvent: true };
     }
     let hasEvent = false;
     if (stat.size > 0) {
@@ -1910,6 +1945,7 @@ export function createTaskManager({
         if (fd != null) fs.closeSync(fd);
       }
     }
+    if (hasEvent) logHasEventCache.add(logPath);
     return { logBytesWritten: stat.size, logLastWriteAt: stat.mtime.toISOString(), logHasEvent: hasEvent };
   }
 
@@ -1922,6 +1958,17 @@ export function createTaskManager({
     const task = tasks.get(taskId);
     if (!task) throw noSuchTask(taskId);
     return { ...summarize(task), ...logActivity(task.logPath) };
+  }
+
+  /**
+   * @param {string} taskId
+   * @returns {string}
+   */
+  function taskDirectory(taskId) {
+    ensureStateLoaded();
+    const task = tasks.get(taskId);
+    if (!task) throw noSuchTask(taskId);
+    return task.directory;
   }
 
   /**
@@ -1971,23 +2018,23 @@ export function createTaskManager({
    * @param {string} [params.directory]
    * @param {string} [params.model]
    * @param {string} [params.variant]
-   * @param {string} [params.session_id]
-   * @param {number} [params.timeout_ms]
+   * @param {string} [params.sessionId]
+   * @param {number} [params.timeoutMs]
    */
-  async function advisor({ prompt, directory, model, variant, session_id, timeout_ms } = {}) {
+  async function advisor({ prompt, directory, model, variant, sessionId, timeoutMs } = {}) {
     ensureStateLoaded();
     if (!model || typeof model !== "string") {
-      throw new Error("error: model is required\nhelp: taskferry_advisor requires a provider/model string, e.g. \"openai/gpt-5.6-sol\"");
+      throw new Error("error: model is required\nhelp: taskferry advisor requires a provider/model string, e.g. \"openai/gpt-5.6-sol\"");
     }
-    const resolved = resolveAdvisorSession(session_id);
+    const resolved = resolveAdvisorSession(sessionId);
     /** @type {TaskSummary & {next: string}} */
     let dispatched;
     try {
       dispatched = dispatch({ prompt: /** @type {string} */ (prompt), directory: /** @type {string} */ (directory), model, variant, sessionId: resolved.sessionId });
     } catch (err) {
-      throw new Error(errMessage(err).replaceAll("taskferry_dispatch", "taskferry_advisor"), { cause: err });
+      throw new Error(errMessage(err).replaceAll("taskferry dispatch", "taskferry advisor"), { cause: err });
     }
-    const settled = await poll(dispatched.id, { timeoutMs: timeout_ms ?? maxWait });
+    const settled = await poll(dispatched.id, { timeoutMs: timeoutMs ?? maxWait });
 
     const resetFields = resolved.reset ? { previous_session_id: resolved.previousSessionId } : {};
 
@@ -2001,8 +2048,8 @@ export function createTaskManager({
         session_reset: resolved.reset,
         ...resetFields,
         note: logSessionId
-          ? `still running; call taskferry_poll or taskferry_advisor again with session_id "${logSessionId}" to continue`
-          : `still running; call taskferry_poll with task_id "${dispatched.id}" to continue (no session_id yet)`,
+          ? `still running; call taskferry wait or taskferry advisor again with session_id "${logSessionId}" to continue`
+          : `still running; call taskferry wait with task id "${dispatched.id}" to continue (no session_id yet)`,
       };
     }
 
@@ -2165,7 +2212,7 @@ export function createTaskManager({
     const task = tasks.get(taskId);
     if (!task) throw noSuchTask(taskId);
     if (!Number.isSafeInteger(chars) || chars <= 0 || chars > 65536) {
-      throw new Error("error: chars must be a positive integer no greater than 65536\nhelp: run taskferry_tail with chars between 1 and 65536");
+      throw new Error("error: chars must be a positive integer no greater than 65536\nhelp: run taskferry tail with chars between 1 and 65536");
     }
     const text = readLastText(task.logPath);
     if (!text) {
@@ -2175,7 +2222,7 @@ export function createTaskManager({
         text: "none observed yet",
         textTotalChars: 0,
         truncated: false,
-        help: `Run taskferry_poll with task_id "${taskId}" to wait for task output`,
+        help: `Run taskferry wait with task id "${taskId}" to wait for task output`,
       };
     }
     const codePoints = Array.from(text);
@@ -2296,7 +2343,7 @@ export function createTaskManager({
       }
     }
     if (task.status === "running" || task.status === "queued") {
-      return projectResult({ taskId, status: task.status, message: `task is still ${task.status}; poll taskferry_status first` }, fields);
+      return projectResult({ taskId, status: task.status, message: `task is still ${task.status}; poll taskferry status first` }, fields);
     }
     if (task.status === "unknown" && task.summaryOf) {
       return projectResult({
@@ -2387,7 +2434,7 @@ export function createTaskManager({
       ...(task.incomplete === true
         ? { next: `Task ${taskId} exited cleanly but produced no usable final output${task.finalMarker ? ` (--require-final-marker ${JSON.stringify(task.finalMarker)} did not match)` : " (empty message)"}; treat as incomplete` }
         : truncated
-          ? { next: `Run taskferry_result with full: true on task_id "${taskId}" to see the complete narration` }
+          ? { next: `Run taskferry result with full: true on task id "${taskId}" to see the complete narration` }
           : {}),
       logPath: task.logPath,
     }, fields);
@@ -2397,6 +2444,7 @@ export function createTaskManager({
     dispatch,
     cancel,
     status,
+    taskDirectory,
     poll,
     list,
     result,
@@ -2423,8 +2471,3 @@ export function createTaskManager({
     activityCache,
   };
 }
-
-// The one real instance the daemon uses: real spawn, real process.kill,
-// real state directory. Everything else (tests) calls createTaskManager()
-// directly with injected spawnFn/killFn and an isolated stateDir.
-export const defaultTaskManager = createTaskManager();

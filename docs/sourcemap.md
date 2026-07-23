@@ -23,8 +23,9 @@ cli.js          entrypoint: parses process.argv, dispatches to a command,
         -> events.js     per-daemon event sequencing/emission for watch
         -> activity.js   cached narration-to-summary snapshots (the model
                           call behind --mode activity / watch --summaries)
-        -> state-lock.js cross-process file lock (daemon auto-start race,
-                          not used in the request hot path)
+        -> state-lock.js cross-process file lock; also guards
+                          persistTask()'s writes, which run on every
+                          dispatch/cancel/settlement
   -> output.js     TOON formatting, lean field projection, MCP-era hint
                     migration (taskferry_dispatch -> taskferry dispatch)
 opencode-plugin.js  native OpenCode plugin: calls client.js directly,
@@ -48,7 +49,7 @@ obviously belong to args parsing or output formatting, start there.
 | `protocol.js` | 208 | `PROTOCOL_VERSION`, `RPC_METHODS`, request/response/error envelope encode/decode, method-name-to-manager-function mapping. |
 | `events.js` | 55 | Assigns a monotonic sequence number to each emitted event; that's the whole file. |
 | `activity.js` | 212 | `activityCacheKey`/cache `refresh()`: bounded head+tail narration snapshot, optional model-summary call, min-interval throttling. |
-| `state-lock.js` | 91 | `withFileLock()`: synchronous, `Atomics.wait`-based cross-process exclusive lock, used only for the daemon auto-start race. |
+| `state-lock.js` | 91 | `withFileLock()`: synchronous, `Atomics.wait`-based cross-process exclusive lock; guards the daemon auto-start race and every `persistTask()` write (dispatch/cancel/settlement — the request hot path). |
 | `output.js` | 174 | TOON encoding, `leanStatus`/`leanResult`/`projectList`/`homeView`, hint-string MCP-name migration. |
 | `opencode-plugin.js` | 174 | OpenCode's native plugin surface: toasts on task state transitions by polling `client.js` directly. |
 | `setup.js` | 210 | `taskferry setup`: npm install, managed symlinks, per-client integration registration (see `.superpowers/.completed/specs/2026-07-16-taskferry-setup-design.md`). |
@@ -92,6 +93,7 @@ Vars marked "config.json" also have a config-file equivalent — see
 | `TASKFERRY_NO_OUTPUT_TIMEOUT_MS` | `256000` (~4.3 min) | yes | Pre-output-seen watchdog deadline |
 | `TASKFERRY_POST_OUTPUT_NO_OUTPUT_TIMEOUT_MS` | `400000` (~6.7 min) | yes | Watchdog deadline once a task has produced its first log event |
 | `TASKFERRY_WATCHDOG_POLL_MS` | `2000` | no | Watchdog check interval |
+| `TASKFERRY_WATCHDOG_GRACE_MS` | `5000` | yes | SIGTERM→SIGKILL escalation grace period when the watchdog force-stops a task (same override surface as `cancel`'s `--grace-ms`, but for watchdog-triggered stops) |
 | `TASKFERRY_KEY_SLOTS` | — | yes | Named provider-key slot registry; see `docs/security.md` |
 | `TASKFERRY_PROVIDER_KEY_ENV` | — | yes | Source env var a key slot copies from |
 | `TASKFERRY_SUMMARY_MODEL` | `opencode/hy3-free` | yes | Model behind `summary --mode report` |

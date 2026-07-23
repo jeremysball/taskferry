@@ -240,12 +240,17 @@ function terminalEventFromStatus(detail) {
 function streamTaskEvents({ client, io, signal, directory, taskId, summaries, format }) {
   let settle;
   let abortHandler;
+  // `directory` is only known upfront when the caller already had it (plain
+  // `watch --directory`); a taskId-scoped `watch --task-id` subscribes by
+  // taskId directly (the daemon resolves the directory server-side) and only
+  // learns it once the first matching event arrives.
+  let resolvedDirectory = directory;
   const finished = new Promise((resolve, reject) => {
     let settled = false;
     settle = (result) => {
       if (settled) return;
       settled = true;
-      resolve(result ?? { directory, watching: false });
+      resolve(result ?? { directory: resolvedDirectory, watching: false });
     };
     abortHandler = () => settle();
     if (signal?.aborted) {
@@ -253,11 +258,12 @@ function streamTaskEvents({ client, io, signal, directory, taskId, summaries, fo
       return;
     }
     signal?.addEventListener("abort", abortHandler, { once: true });
-    Promise.resolve(client.subscribe({ directory, ...(summaries ? { summaries: true } : {}) }, (event) => {
+    Promise.resolve(client.subscribe({ ...(directory ? { directory } : { taskId }), ...(summaries ? { summaries: true } : {}) }, (event) => {
       if (taskId && event.taskId !== taskId) return;
+      resolvedDirectory = event.directory;
       io.stdout.write(`${formatWatchEvent(event, format, io.stdout.isTTY)}\n`);
       if (taskId && TERMINAL_STATUSES.has(event.status)) {
-        settle({ directory, watching: false, event });
+        settle({ directory: resolvedDirectory, watching: false, event });
       }
     })).then(() => {
       // Subscriptions only broadcast future transitions (no snapshot replay), so a task
@@ -268,8 +274,9 @@ function streamTaskEvents({ client, io, signal, directory, taskId, summaries, fo
       return client.request("task.status", { taskId }).then((detail) => {
         if (settled || !TERMINAL_STATUSES.has(detail.status)) return;
         const event = terminalEventFromStatus(detail);
+        resolvedDirectory = detail.directory;
         io.stdout.write(`${formatWatchEvent(event, format, io.stdout.isTTY)}\n`);
-        settle({ directory, watching: false, event });
+        settle({ directory: resolvedDirectory, watching: false, event });
       });
     }).catch((error) => {
       if (settled) return;
@@ -286,7 +293,7 @@ async function watchCommand(options, { client, io, signal, cwd }) {
   const directory = options.directory
     ? normalizeDirectory(options.directory)
     : options.taskId
-      ? normalizeDirectory((await client.request("task.status", { taskId: options.taskId })).directory)
+      ? null
       : normalizeDirectory(cwd);
   return streamTaskEvents({
     client,

@@ -92,24 +92,6 @@ test("renders operational daemon errors as TOON on stdout with exit code 1", asy
   assert.equal(capture.output().stderr, "");
 });
 
-test("rewrites daemon-era next and help hints at the CLI output boundary", async () => {
-  const capture = capturedIo();
-  const { client } = fakeClient({
-    "task.dispatch": {
-      id: "oc_1",
-      status: "queued",
-      next: 'Run taskferry_poll or taskferry_status with task_id "oc_1"',
-    },
-  });
-  const result = await runCli(["dispatch", "--prompt", "do it"], {
-    io: capture.io,
-    connectClient: async () => client,
-  });
-
-  assert.equal(result.exitCode, 0);
-  assert.equal(capture.output().value.next, 'Run taskferry wait or taskferry status with task id "oc_1"');
-});
-
 test("dispatch --prompt - reads the prompt from piped stdin, stripping one trailing newline", async () => {
   const capture = capturedIo({ stdin: fakePipedStdin("large prompt content\n") });
   const { client, calls } = fakeClient({

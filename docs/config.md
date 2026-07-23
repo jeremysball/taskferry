@@ -42,6 +42,7 @@ message — there is no silent typo tolerance.
 | `summarizerTimeoutMs` | `TASKFERRY_SUMMARIZER_TIMEOUT_MS` | number | `360000` |
 | `activityMaxWords` | `TASKFERRY_ACTIVITY_MAX_WORDS` | number | `75` |
 | `advisorSessionTtlMs` | `TASKFERRY_ADVISOR_SESSION_TTL_MS` | number | `1800000` (30 min) |
+| `watchdogGraceMs` | `TASKFERRY_WATCHDOG_GRACE_MS` | number | `5000` |
 | `keySlots` | `TASKFERRY_KEY_SLOTS` | string | (none) |
 | `providerKeyEnv` | `TASKFERRY_PROVIDER_KEY_ENV` | string | (none) |
 | `summaryKeySlot` | `TASKFERRY_SUMMARY_KEY_SLOT` | string | (none) |

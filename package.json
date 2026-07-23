@@ -21,6 +21,9 @@
   },
   "keywords": [],
   "type": "module",
+  "engines": {
+    "node": ">=16.9"
+  },
   "dependencies": {
     "@toon-format/toon": "^2.3.0"
   },

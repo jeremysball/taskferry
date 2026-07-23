@@ -129,8 +129,12 @@ function validParams(method, params) {
     case "task.context":
       return hasOnly(params, ["directory"]) && isAbsolutePath(params.directory);
     case "event.subscribe":
-      return hasOnly(params, ["directory", "summaries", "originSessionId"])
-        && isAbsolutePath(params.directory)
+      // Either an explicit directory, or a taskId the daemon resolves the
+      // directory from server-side -- lets a taskId-scoped subscribe (watch
+      // --task-id) skip a client-side task.status round-trip solely to
+      // learn which directory to subscribe to.
+      return hasOnly(params, ["directory", "taskId", "summaries", "originSessionId"])
+        && (params.directory !== undefined ? isAbsolutePath(params.directory) : isNonEmptyString(params.taskId))
         && optional(params.summaries, (value) => typeof value === "boolean")
         && optional(params.originSessionId, isNonEmptyString);
     default:

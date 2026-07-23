@@ -14,6 +14,7 @@ const CONFIG_FIELD_TYPES = {
   summarizerTimeoutMs: "number",
   activityMaxWords: "number",
   advisorSessionTtlMs: "number",
+  watchdogGraceMs: "number",
   keySlots: "string",
   providerKeyEnv: "string",
   summaryKeySlot: "string",

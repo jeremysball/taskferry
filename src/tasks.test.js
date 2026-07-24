@@ -488,6 +488,7 @@ describe("bwrap sandboxing", () => {
     mgr.dispatch({ prompt: "hello", directory: os.tmpdir() });
 
     assert.equal(captured.opts.env.XDG_DATA_HOME, path.join(runtimeDir, "opencode-data"));
+    assert.equal(captured.opts.env.OPENCODE_DB, path.join(runtimeDir, "opencode-data", "opencode", "opencode.db"));
   });
 
   test("ro-binds the real opencode auth.json into the sandboxed XDG_DATA_HOME when it exists, so credentialed providers still resolve", () => {
@@ -3797,6 +3798,7 @@ describe("startTask() merges executor.sandboxAuthFile().sandboxEnv into spawnEnv
     });
     mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
     assert.equal(captured.opts.env.XDG_DATA_HOME, path.join(runtimeDir, "opencode-data"));
+    assert.equal(captured.opts.env.OPENCODE_DB, path.join(runtimeDir, "opencode-data", "opencode", "opencode.db"));
   });
 
   test("pi's sandboxEnv rewrites PI_CODING_AGENT_DIR, not XDG_DATA_HOME, and the auth bind destination matches", () => {

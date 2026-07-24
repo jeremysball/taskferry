@@ -4,7 +4,7 @@
 
 **Goal:** Add `eslint-plugin-sonarjs` to taskferry as warnings, plus a baseline-ratchet script that fails `npm run lint` (and therefore CI's existing `lint` leg and the pre-commit hook) only when a `file|rule` warning bucket count increases versus a committed baseline — never on pre-existing warnings.
 
-**Architecture:** A new sonarjs config block in `eslint.config.mjs` (rules forced to `'warn'`, scoped like taskferry's existing maintainability-rules block). A Node port of token-burn-dashboard's `scripts/lint-baseline.mjs` reading `config/eslint-baseline.json`. `npm run lint` becomes a two-step pipeline (`eslint --format json` then the baseline compare); a separate `npm run lint:raw` keeps the old plain-eslint behavior for local iteration. The pre-commit hook runs the same baseline check against the staged tree after its existing eslint/tsc step.
+**Architecture:** A new sonarjs config block in `eslint.config.mjs` (rules forced to `'warn'`, scoped like taskferry's existing maintainability-rules block). A Node port of token-burn-dashboard's `scripts/lint-baseline.mjs` reading `config/eslint-baseline.json`. `npm run lint` stays plain `eslint .` (unchanged, for local iteration); a new `npm run lint:baseline` runs the `eslint --format json` + baseline-compare pipeline. `npm run check` and CI's `lint` leg switch from `npm run lint` to `npm run lint:baseline`. The pre-commit hook runs the same baseline check against the staged tree after its existing eslint/tsc step.
 
 **Tech Stack:** Node.js (ESM, `type: "module"` in package.json), ESLint 10, `eslint-plugin-sonarjs`, `node:test`.
 
@@ -43,7 +43,7 @@ Expected output: a version string (not `undefined`).
 
 - [ ] **Step 2: Add the sonarjs block to eslint.config.mjs**
 
-Read the current file first (`eslint.config.mjs` is 55 lines). Add this import at the top alongside the existing `js`/`globals` imports:
+Read the current file first (`eslint.config.mjs` is 57 lines). Add this import at the top alongside the existing `js`/`globals` imports:
 
 ```js
 import sonarjs from "eslint-plugin-sonarjs";
@@ -89,8 +89,9 @@ git commit -m "feat(lint): add eslint-plugin-sonarjs as warnings"
 **Files:**
 - Create: `scripts/lint-baseline.mjs`
 - Create: `scripts/lint-baseline.test.js`
-- Modify: `package.json` (scripts block)
+- Modify: `package.json` (scripts block, including `check`)
 - Modify: `.gitignore`
+- Modify: `.github/workflows/check.yml` (`lint` leg step)
 
 **Interfaces:**
 - Consumes: nothing from Task 1 directly (works against any eslint JSON report file).
@@ -100,8 +101,8 @@ git commit -m "feat(lint): add eslint-plugin-sonarjs as warnings"
 
 ```js
 import { createHash } from "node:crypto";
-import { readFileSync, writeFileSync } from "node:fs";
-import { relative, resolve, sep } from "node:path";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname, relative, resolve, sep } from "node:path";
 
 const baselinePath = "config/eslint-baseline.json";
 const policyFiles = ["eslint.config.mjs", "package-lock.json"];
@@ -245,6 +246,7 @@ function run() {
     const warnings = Object.fromEntries(
       Object.entries(inspection.warnings).sort(([left], [right]) => left.localeCompare(right))
     );
+    mkdirSync(dirname(baselinePath), { recursive: true });
     writeFileSync(baselinePath, `${JSON.stringify({ policyHash: getPolicyHash(), warnings }, null, 2)}\n`);
     return;
   }
@@ -345,17 +347,33 @@ Expected: all 4 tests pass, e.g. `# pass 4`, `# fail 0`.
 
 - [ ] **Step 5: Add package.json scripts**
 
-Modify the `"scripts"` block: rename the existing `"lint": "eslint ."` entry to `"lint:raw": "eslint ."`, and add:
+Modify the `"scripts"` block. Leave the existing `"lint": "eslint ."` entry unchanged (matches the spec: `npm run lint` alone stays a plain, human-readable eslint run for local iteration). Add:
 
 ```json
 "lint:json": "eslint . --format json --output-file .lint-report.json",
-"lint": "npm run lint:json && node scripts/lint-baseline.mjs .lint-report.json",
+"lint:baseline": "npm run lint:json && node scripts/lint-baseline.mjs .lint-report.json",
 "lint:baseline:update": "npm run lint:json && node scripts/lint-baseline.mjs --update .lint-report.json",
 "test:scripts": "node --test scripts/lint-baseline.test.js",
 ```
 
 Also update the top-level `"test"` script to include the new suite:
 `"test": "npm run test:unit && npm run test:scripts"`.
+
+Then change the existing `"check"` script from calling `npm run lint` to calling `npm run lint:baseline`:
+
+```json
+"check": "git ls-files '*.js' | xargs -P4 -I{} node --check {} && npm run lint:baseline && npm run typecheck",
+```
+
+And update `.github/workflows/check.yml`'s `lint` leg step (currently `run: npm run lint`) to:
+
+```yaml
+      - name: Run lint
+        if: matrix.leg == 'lint'
+        run: npm run lint:baseline
+```
+
+This is required, not optional — CI's `lint` leg and the `check` script both call `npm run lint` today, and without this edit they'd keep running plain eslint with no baseline enforcement at all, silently defeating the whole ratchet.
 
 - [ ] **Step 6: Gitignore the ephemeral report**
 
@@ -379,17 +397,17 @@ Expected output: `string <N>` where N > 0.
 
 - [ ] **Step 8: Verify the ratchet passes clean and catches a regression**
 
-Run: `npm run lint`
+Run: `npm run lint:baseline`
 
 Expected: exits 0 (matches the just-seeded baseline).
 
-Then temporarily add a throwaway duplicated-string block to any `src/*.js` file to trigger a new/increased sonarjs bucket, run `npm run lint` again, expect a non-zero exit with `new warning bucket:` or `increased warning bucket:` in the output, then revert the throwaway change (`git checkout -- <file>`).
+Then temporarily add a throwaway duplicated-string block to any `src/*.js` file to trigger a new/increased sonarjs bucket, run `npm run lint:baseline` again, expect a non-zero exit with `new warning bucket:` or `increased warning bucket:` in the output, then revert the throwaway change (`git checkout -- <file>`).
 
 - [ ] **Step 9: Commit**
 
 ```bash
-git add scripts/lint-baseline.mjs scripts/lint-baseline.test.js package.json .gitignore config/eslint-baseline.json
-git commit -m "feat(lint): add baseline-ratchet script and wire into npm run lint"
+git add scripts/lint-baseline.mjs scripts/lint-baseline.test.js package.json .gitignore config/eslint-baseline.json .github/workflows/check.yml
+git commit -m "feat(lint): add baseline-ratchet script and wire into npm run lint:baseline"
 ```
 
 ---
@@ -422,13 +440,14 @@ Change it to also run the baseline check after eslint/tsc succeed, and point the
       exit 1
     fi
     node scripts/lint-baseline.mjs .lint-report.json || {
-      echo "New sonarjs/lint warnings introduced. Run 'npm run lint:baseline:update' if intentional." >&2
+      echo "Lint check failed (a real eslint error, or a new/increased sonarjs warning bucket)." >&2
+      echo "If this is an intentional new warning, run 'npm run lint:baseline:update'." >&2
       exit 1
     }
     ./node_modules/.bin/tsc --noEmit
 ```
 
-Note: `eslint --format json` still writes the report file even when eslint finds errors (exit code 1), so the baseline script sees those as `severity === 2` violations and fails independently of `$eslint_status`. Keep the `$eslint_status`/`-s .lint-report.json` guard only to catch a genuine eslint crash (config error, missing plugin) where no report is produced at all.
+Note: `eslint --format json` still writes the report file even when eslint finds errors (exit code 1) — verified directly: running eslint against a file with a fatal parse error still writes a report containing a `severity: 2` message and exits 1. The baseline script (`inspectReport`) treats any `severity === 2` message as an unconditional violation regardless of baseline state, so it fails independently of `$eslint_status`. The failure message above avoids implying "new warnings" when the real cause could be a plain lint error. Keep the `$eslint_status`/`-s .lint-report.json` guard only to catch a genuine eslint crash (config error, missing plugin) where no report is produced at all. The `.lint-report.json` file written into `$tmp/tree/` is cleaned up automatically by the hook's existing `trap 'rm -rf "$tmp"' EXIT`, so no separate cleanup step is needed.
 
 - [ ] **Step 2: Manually verify the hook end-to-end**
 
@@ -456,9 +475,9 @@ git commit -m "fix(hooks): enforce lint baseline ratchet in pre-commit"
 
 **Interfaces:** none (documentation-only).
 
-- [ ] **Step 1: Add a short section**
+- [ ] **Step 1: Add a new section**
 
-Read `docs/sourcemap.md` first to find where lint/quality tooling is currently documented (search for "eslint" or "lint"), and add 3-5 lines next to it describing: `eslint-plugin-sonarjs` runs as warnings; `npm run lint` enforces a baseline ratchet via `scripts/lint-baseline.mjs` + `config/eslint-baseline.json` (new warnings/increases fail, pre-existing ones don't); `npm run lint:baseline:update` is the intentional-change escape hatch; `npm run lint:raw` gives a plain eslint run with no ratchet.
+`docs/sourcemap.md` currently has no lint/quality-tooling section at all (confirmed: no match for "eslint", "lint", "pre-commit", "sonarjs", "tsc", or "typecheck" anywhere in the file) — do not look for an existing section to insert next to. Add a new top-level section near the end of the file (after the last existing section), titled `## Linting and the sonarjs baseline ratchet`, with 3-5 lines describing: `eslint-plugin-sonarjs` runs as warnings; `npm run lint:baseline` enforces a baseline ratchet via `scripts/lint-baseline.mjs` + `config/eslint-baseline.json` (new warnings/increases fail, pre-existing ones don't); `npm run lint:baseline:update` is the intentional-change escape hatch; `npm run lint` alone stays a plain eslint run with no ratchet, for local iteration; `npm run check` and CI's `lint` leg both run `lint:baseline`, not plain `lint`.
 
 - [ ] **Step 2: Commit**
 

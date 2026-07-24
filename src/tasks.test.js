@@ -2669,6 +2669,37 @@ describe("advisor()", () => {
     assert.match(advised.note, /taskferry wait or taskferry advisor again with session_id/);
   });
 
+  test("reports status: queued (not running) when the timeout elapses while the task is still waiting for a concurrency slot", async () => {
+    const occupyingChild = fakeChild();
+    const children = [occupyingChild];
+    const mgr = makeManager({
+      maxConcurrentTasks: 1,
+      spawnFn: () => {
+        const child = children.length === 1 ? occupyingChild : fakeChild();
+        if (children.length > 1) children.push(child);
+        return child;
+      },
+    });
+
+    // Occupy the only concurrency slot so the advisor dispatch below queues
+    // instead of running.
+    mgr.dispatch({ prompt: "occupying task", directory: os.tmpdir(), model: "openai/gpt-5.6-sol" });
+
+    const advisorPromise = mgr.advisor({
+      prompt: "long question",
+      directory: os.tmpdir(),
+      model: "openai/gpt-5.6-sol",
+      timeoutMs: 20,
+    });
+
+    const advised = await advisorPromise;
+    assert.equal(advised.status, "queued");
+    assert.match(advised.note, /still queued/);
+
+    // Drain the queue so the test process can exit.
+    occupyingChild.emit("exit", 0, null);
+  });
+
   test("when the timeout elapses before opencode has written a session id, the note points at taskferry wait with task id instead of fabricating a session_id", async () => {
     const child = fakeChild();
     const mgr = makeManager({ spawnFn: () => child });

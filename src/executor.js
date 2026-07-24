@@ -191,7 +191,7 @@ export function opencodeExecutor() {
       return {
         extraRoBind: existsFn(realAuthFile) ? /** @type {[string, string]} */ ([realAuthFile, path.join(sandboxedDataHome, "opencode", "auth.json")]) : null,
         sandboxedDataHome,
-        sandboxEnv: { XDG_DATA_HOME: sandboxedDataHome },
+        sandboxEnv: { XDG_DATA_HOME: sandboxedDataHome, OPENCODE_DB: path.join(sandboxedDataHome, "opencode", "opencode.db") },
       };
     },
   };

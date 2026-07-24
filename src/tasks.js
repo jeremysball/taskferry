@@ -2166,14 +2166,14 @@ export function createTaskManager({
       const logSessionId = settled.sessionId || readSessionIdFromLog(dispatched.logPath);
       if (logSessionId) touchAdvisorSession(logSessionId);
       return {
-        status: "running",
+        status: settled.status,
         task_id: dispatched.id,
         session_id: logSessionId ?? null,
         session_reset: resolved.reset,
         ...resetFields,
         note: logSessionId
-          ? `still running; call taskferry wait or taskferry advisor again with session_id "${logSessionId}" to continue`
-          : `still running; call taskferry wait with task id "${dispatched.id}" to continue (no session_id yet)`,
+          ? `still ${settled.status}; call taskferry wait or taskferry advisor again with session_id "${logSessionId}" to continue`
+          : `still ${settled.status}; call taskferry wait with task id "${dispatched.id}" to continue (no session_id yet)`,
       };
     }
 

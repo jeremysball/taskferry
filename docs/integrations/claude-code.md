@@ -5,8 +5,8 @@ session-start hook that shells out to the `taskferry` binary.
 
 ## Prerequisite: `taskferry` on `PATH`
 
-The plugin's hook and monitor commands both start with `command -v taskferry
->/dev/null 2>&1` and degrade to a plain-text notice if that check fails.
+The plugin's hook command starts with `command -v taskferry
+>/dev/null 2>&1` and degrades to a plain-text notice if that check fails.
 Running `taskferry setup` once from the taskferry checkout puts the CLI
 on `PATH` and registers the marketplace/plugin in the same step — see
 the [Install section in the README](../../README.md#install) for the full

@@ -97,9 +97,8 @@ blocking the turn.
 
 ## UI limitations
 
-Codex has no equivalent to Claude Code's monitor surface or OpenCode's
-toasts — no persistent, continuously-updating view of task state inside
-the UI. The two hooks above are the only mechanism; between a
+Codex has no equivalent to OpenCode's toasts — no persistent,
+continuously-updating view of task state inside the UI. The two hooks above are the only mechanism; between a
 `UserPromptSubmit` refresh and the next one, task-state changes are
 invisible until you run `taskferry status`/`taskferry list` yourself or
 send another turn. Do not describe this integration as providing live

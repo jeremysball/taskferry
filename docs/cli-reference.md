@@ -170,8 +170,8 @@ whichever `failureReason` fired. `keySlot` echoes the `--key-slot` name the
 task was dispatched with, or `null`. `incomplete` is `true` when a `done`
 task has an empty final message or one that doesn't match
 `--require-final-marker`; `finalMarker` echoes the regex pattern when one
-was supplied. Both fields only appear when set; otherwise they are
-omitted, matching the convention used by `failureReason`.
+was supplied. Both fields only appear when set, unlike `failureReason`/
+`failureDetail`, which are always present (as `null` when unset).
 
 ## `taskferry tail <id> [--chars <number>]`
 

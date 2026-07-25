@@ -67,10 +67,8 @@ directory. It exposes two behaviors, both scoped to that one workspace:
   `client.tui.showToast`, titled `Taskferry(<status> · <id>)` with the
   task's current activity as the body and a variant chosen by status
   (`queued`/`running` → info, `done` → success, `crashed` → error,
-  `cancelled` → warning). Unlike Claude Code's monitor, which always shows
-  the same fixed-format line, OpenCode's toast title changes per event —
-  the closest thing this integration has to a live per-task status
-  surface.
+  `cancelled` → warning). OpenCode's toast title changes per event — the
+  closest thing this integration has to a live per-task status surface.
 - **System-prompt context.** The `experimental.chat.system.transform` hook
   injects a `Taskferry tasks:` block (up to 5 rows, with a `+N more`
   suffix) listing active tasks and terminal tasks not yet surfaced to a

@@ -28,7 +28,7 @@ that path is left alone and `setup` exits with `refusing to replace
 unmanaged path: <path>`. The same command also creates the CLI
 symlink at `~/.local/bin/taskferry` and registers the Claude Code and
 Codex integrations when their CLIs are on `PATH` — see the
-[Install section in the README](../README.md#install) for the full
+[Install section in the README](../../README.md#install) for the full
 bootstrap.
 
 ## Update

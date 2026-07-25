@@ -215,11 +215,17 @@ still `queued` or `running`, the new process has no such handle for it and
 relabels it `"unknown"` on reload rather than reporting a possibly-stale
 status.
 
-The underlying worker process, if still alive, keeps running and
-writing its log — inspect the log file directly
-(`<state-dir>/logs/<task-id>.ndjson`), or, for a task dispatched with the
-`opencode` executor specifically, run `opencode session list` — but
-the daemon does not re-attach a status watcher to it. There is no periodic
+The underlying worker process, if still alive, keeps running, but its log
+stops receiving new events the way it did before the restart: stdout is a
+pipe the old daemon process owned and normalized into the log itself, so
+once that process exits, nothing is left reading that pipe and stdout
+events stop landing in `<state-dir>/logs/<task-id>.ndjson`. Only stderr —
+duplicated directly into the log file descriptor at spawn time,
+independent of the parent process — keeps writing after the restart.
+Inspect the log file directly for whatever made it in before the restart,
+or, for a task dispatched with the `opencode` executor specifically, run
+`opencode session list` — but the daemon does not re-attach a status
+watcher to it. There is no periodic
 recheck of `unknown` tasks' pids or trailing log events: that would
 reintroduce string/heuristic completion detection for exactly the
 crash-recovery edge case this architecture avoids elsewhere, so it's left

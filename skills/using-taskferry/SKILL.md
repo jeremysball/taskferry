@@ -393,16 +393,15 @@ codes to distinguish success, operational failure, and usage errors.
 
 ## Codex Installation And Hooks
 
-Install this integration through Codex's native plugin mechanism:
-
-```sh
-codex plugin marketplace add .
-codex plugin install taskferry@taskferry
-```
+From the taskferry checkout, run `taskferry setup`. It registers the checkout
+as a Codex marketplace (`codex plugin marketplace add`/`upgrade` under the
+hood) but cannot install or upgrade the plugin itself — Codex desktop drives
+that through its own UI. `setup` exits with `status:
+"desktop-install-required"`; open Codex desktop, install Taskferry from its
+marketplace, then review and trust its hooks through `/hooks` before they run.
 
 The plugin injects current workspace context at `SessionStart` and refreshes it at
-`UserPromptSubmit`. It does not provide a persistent live monitor surface. Codex
-requires you to review and trust plugin hooks through `/hooks` before they run. If
+`UserPromptSubmit`. It does not provide a persistent live monitor surface. If
 hooks are disabled in your Codex configuration, enable them only when you want this
 lifecycle context by setting:
 

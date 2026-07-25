@@ -1,9 +1,11 @@
 # CLI Reference
 
 Every command emits [TOON](https://toonformat.dev/) (Token-Oriented Object
-Notation) on stdout, never JSON: roughly 40% fewer tokens than JSON for the
+Notation) on stdout by default: roughly 40% fewer tokens than JSON for the
 same data, and a tabular form for list-shaped results instead of a repeated
-key array. Diagnostics go to stderr. Exit codes distinguish three outcomes:
+key array. The one exception is `watch --format ndjson`, which emits one
+JSON object per line for scripting — see below. Diagnostics go to stderr.
+Exit codes distinguish three outcomes:
 
 | Exit code | Meaning |
 |---|---|
@@ -285,7 +287,9 @@ fields `setup` returns for the same two clients — `doctor` never edits a
 config file, `setup` does. A conditional `warnings[]` array appears when
 Playwright MCP isolation is missing (concurrent dispatches sharing one
 browser profile can crash with SIGKILL) or bwrap isn't installed on Linux
-(dispatches then run unsandboxed); a conditional `info[]` array appears on
+(dispatches then fail fast with a `crashed` task and a `spawnError` — there
+is no silent unsandboxed fallback; see [security.md](security.md)); a
+conditional `info[]` array appears on
 non-Linux platforms noting sandboxing is unavailable there. See
 [troubleshooting.md](troubleshooting.md).
 
@@ -320,8 +324,10 @@ to an unrelated target, a stale file from an older install — is left
 alone, and `setup` exits with `error: refusing to replace unmanaged
 path: <path>` and `help: fix the reported dependency or filesystem
 problem, then rerun node src/cli.js setup` on stderr. Re-running
-`setup` on a current install is a no-op; you can put it in your
-post-`git pull` flow without guarding it.
+`setup` on a current install is idempotent — it always re-runs `npm
+install` and unlinks/recreates the managed symlinks, but ends in the same
+state either way — so you can put it in your post-`git pull` flow without
+guarding it.
 
 ### Output shape
 

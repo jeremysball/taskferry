@@ -10,7 +10,7 @@ Like the Claude Code integration, both hook commands start with `command -v
 taskferry >/dev/null 2>&1` and fall back to a plain-text notice if the
 binary isn't found. Running `taskferry setup` once from the taskferry
 checkout puts the CLI on `PATH` and registers the Codex marketplace in
-the same step — see the [Install section in the README](../README.md#install)
+the same step — see the [Install section in the README](../../README.md#install)
 for the full bootstrap.
 
 ## Install

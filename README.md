@@ -43,11 +43,15 @@ with list-shaped results rendered as a compact table instead of a
 repeated-key array.
 
 `taskferry dispatch` spawns `opencode run --dir <directory> --auto --format
-json -m <model> <prompt>` directly as a child process, detached to give its whole
+json -m <model> <prompt>` (or the equivalent `pi` invocation with
+`--executor pi`) as a child process, detached to give its whole
 process group one signal target, with stdout/stderr captured to a private
-per-task log. Task completion comes from that child's real `exit` event,
-never from string-matching log output. See [docs/daemon.md](docs/daemon.md)
-for the full process model.
+per-task log. On Linux with sandboxing enabled (the default), the actual
+direct child is `bwrap`, with that command nested inside its arguments —
+see [docs/security.md](docs/security.md) for the sandbox layout. Task
+completion comes from that child's real `exit` event, never from
+string-matching log output. See [docs/daemon.md](docs/daemon.md) for the
+full process model.
 
 ## Commands
 

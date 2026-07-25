@@ -17,13 +17,18 @@ relying on socket-level access control.
 
 ## Task logs
 
-Every dispatched task's stdout/stderr — OpenCode's own `--format json`
-NDJSON stream — is written verbatim to
-`<state-dir>/logs/<task-id>.ndjson`. If a prompt or a task's own tool use
-touches secrets, those secrets land in that file, readable by anyone who
-can read the owning user's files. There is no redaction step. Treat the
-logs directory with the same care as any other credential-adjacent local
-state, and see [Activity summaries](#activity-summaries) below for the one
+Every dispatched task's stdout/stderr lands in
+`<state-dir>/logs/<task-id>.ndjson`. stderr writes straight through to that
+file, byte-for-byte. stdout is parsed line-by-line and normalized through
+the dispatching executor (`opencode`'s or `pi`'s own `--format json` NDJSON
+shape both become taskferry's canonical event shape) before being
+re-serialized and written — content-equivalent, not necessarily
+byte-identical to what the worker emitted; a non-JSON stdout line (e.g. a
+plain-text auth failure) is preserved verbatim, unfiltered. If a prompt or
+a task's own tool use touches secrets, those secrets land in that file,
+readable by anyone who can read the owning user's files. There is no
+redaction step. Treat the logs directory with the same care as any other
+credential-adjacent local state, and see [Activity summaries](#activity-summaries) below for the one
 place log content leaves the local machine.
 
 ## Provider key slots
@@ -122,8 +127,14 @@ task whose log contains secrets you don't want sent there. Specifics:
   disconnecting turns summary generation back off for that daemon.
 - **Fully disable.** Set `TASKFERRY_ACTIVITY_SUMMARIES=0` on the daemon to
   turn off model-backed summaries everywhere, regardless of what any client
-  requests; `watch --summaries` and `summary --mode activity` then fall
-  back to the same local, no-model activity text.
+  requests; `summary --mode activity` then falls back to the same local,
+  no-model activity text. `watch --summaries` does not currently honor this
+  flag the same way: subscribing with `summaries: true` always runs a
+  model-availability preflight check first, and that check throws if
+  `TASKFERRY_SUMMARY_MODEL` isn't installed — even with summaries disabled.
+  A `watch --summaries` caller on a daemon with no working summary model
+  should expect that preflight to fail rather than a silent local-text
+  fallback.
 
 `TASKFERRY_SUMMARY_MODEL` selects an available replacement model if the
 default is unsuitable or unavailable; `--max-words` on `taskferry summary`

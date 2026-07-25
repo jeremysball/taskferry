@@ -39,7 +39,7 @@ and burns wall-clock time versus just doing it.
 ## Worker Contract
 
 - Select the worker model, variant, and optional key slot explicitly when the task
-  needs them: `taskferry dispatch --prompt "$(cat "$prompt_file")" --directory
+  needs them: `cat "$prompt_file" | taskferry dispatch --prompt - --directory
   "<worktree>" --model <provider/model> --variant <name> --key-slot <name>`.
 - State the exact `provider/model` slug (and variant/key-slot, if set) being
   dispatched in your response to the user, not just in the shell command — the
@@ -52,8 +52,10 @@ and burns wall-clock time versus just doing it.
 - Keep the task brief and directory explicit so the worker operates in the intended
   worktree.
 - Write long prompts with the runtime's file-writing tool before invoking Taskferry.
-  Pass the file content through command substitution so the rendered shell command
-  stays short. Do not inline a long prompt in `--prompt`.
+  Pipe the file into stdin with `--prompt -` so the rendered shell command stays
+  short. Do not inline a long prompt in `--prompt` or pass it via command
+  substitution (`--prompt "$(cat "$prompt_file")"`) — substitution still dumps the
+  full prompt into the rendered command line; only `--prompt -` avoids that.
 - End every dispatch prompt with an explicit instruction to close on a line
   starting `Status:` — one of `DONE | DONE_WITH_CONCERNS | BLOCKED |
   NEEDS_CONTEXT` for implementers, or `Approved | Needs fixes` after a `Task
@@ -139,10 +141,12 @@ taskferry_state="${TASKFERRY_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/ta
 prompt_file="$taskferry_state/prompts/<short-task-name>.txt"
 ```
 
-Dispatch work with the prompt file and explicit workspace:
+Dispatch work with the prompt file and explicit workspace, piping the prompt in
+over stdin rather than command substitution — `--prompt -` reads until EOF, so
+the rendered command never contains the prompt text:
 
 ```sh
-taskferry dispatch --prompt "$(cat "$prompt_file")" --directory "<worktree>"
+cat "$prompt_file" | taskferry dispatch --prompt - --directory "<worktree>"
 ```
 
 Inspect and wait for a task:
@@ -278,7 +282,7 @@ Read the final result and request an independent review when needed:
 
 ```sh
 taskferry result <id>
-taskferry advisor --prompt "$(cat "$prompt_file")" --model <provider/model> --directory "<worktree>"
+cat "$prompt_file" | taskferry advisor --prompt - --model <provider/model> --directory "<worktree>"
 ```
 
 Pull only the fields you actually need from a result instead of the full payload
@@ -315,7 +319,7 @@ and the tests pass" is a weaker guarantee than "the reasoning is right." Reach
 for it before merging or reporting that class of work done — not only when the
 user names a model.
 
-- `taskferry advisor --prompt "$(cat "$prompt_file")" --model <provider/model>
+- `cat "$prompt_file" | taskferry advisor --prompt - --model <provider/model>
   --directory "<worktree>"` dispatches and waits in one call.
 - Use the model and effort the user specifies. Absent one, default to the
   strongest model available to you.

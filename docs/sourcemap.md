@@ -70,8 +70,7 @@ not part of the default `npm test`).
 | What does the daemon send to a summary model, how to disable it | `docs/security.md` |
 | Retired MCP tool names / flags | `docs/migrating-from-mcp.md` |
 | Per-agent (Claude Code/Codex/OpenCode) setup | `docs/integrations/*.md` |
-| Open design questions, past decisions | `.superpowers/specs/*.md`, `.superpowers/plans/*.md` (implemented ones move to `.superpowers/.completed/`) |
-| What's left to build, what's blocked, what's deliberately skipped | `todo.txt` (repo root) |
+| Open design questions, past decisions, what's left to build or deliberately skipped | `.superpowers/specs/*.md`, `.superpowers/plans/*.md` (implemented ones move to `.superpowers/.completed/`) |
 | The canonical agent-facing skill (regenerate after any CLI-surface change) | `skills/using-taskferry/SKILL.md`, then `npm run skill:generate` |
 | User-tunable options via a JSON config file (as an alternative to env vars) | `docs/config.md` |
 
@@ -88,6 +87,12 @@ Vars marked "config.json" also have a config-file equivalent — see
 | `TASKFERRY_STATE_DIR` | `$XDG_STATE_HOME/taskferry` or `~/.local/state/taskferry` | no | Task state, logs, summary prompts |
 | `TASKFERRY_RUNTIME_DIR` | `$XDG_RUNTIME_DIR/taskferry` or `<state-dir>/run` | no | Socket + lock files |
 | `TASKFERRY_SOCKET_PATH` | `<runtime-dir>/daemon.sock` | no | Explicit socket override |
+| `TASKFERRY_CACHE_DIR` | `$XDG_CACHE_HOME/taskferry` or `~/.cache/taskferry` | no | Real-disk data home for sandboxed workers (opencode/pi auth + unbounded snapshot caches); see `docs/security.md` |
+| `TASKFERRY_AUTO_START` | `1` (auto-start enabled) | no | Set to `0` to stop the CLI from auto-spawning a daemon on first use |
+| `TASKFERRY_DISABLE_SANDBOX` | `0` (sandboxed on Linux) | yes (`sandboxEnabled`, inverted) | Set to `1`/`true` to run dispatches without the bwrap filesystem sandbox |
+| `TASKFERRY_ALLOWED_DIRS` | — | yes | Extra directories bound read-write inside the sandbox for every dispatch; see `docs/security.md` |
+| `TASKFERRY_CANCEL_GRACE_MS` | `5000` | yes | Default SIGTERM→SIGKILL grace period for `cancel`, overridden per-call by `--grace-ms` |
+| `TASKFERRY_DEFAULT_EXECUTOR` | `opencode` | yes | Default `--executor` (`opencode` or `pi`) when a dispatch/advisor call omits it |
 | `TASKFERRY_MAX_CONCURRENT_TASKS` | `4` | yes | Running-task concurrency cap |
 | `TASKFERRY_MAX_DISPATCHES_PER_WINDOW` / `TASKFERRY_DISPATCH_WINDOW_MS` | `2` / `5000` | yes | Dispatch burst-rate limit |
 | `TASKFERRY_NO_OUTPUT_TIMEOUT_MS` | `256000` (~4.3 min) | yes | Pre-output-seen watchdog deadline |
@@ -102,7 +107,7 @@ Vars marked "config.json" also have a config-file equivalent — see
 | `TASKFERRY_SUMMARIZER_TIMEOUT_MS` | `360000` (6 min) | yes | Throttle between activity-summary model calls |
 | `TASKFERRY_ACTIVITY_MAX_WORDS` | `75` | yes | Max words in an activity-style summary |
 | `TASKFERRY_ADVISOR_SESSION_TTL_MS` | `1800000` (30 min) | yes | Advisor session idle expiry before auto-reset |
-| `TASKFERRY_WAIT_DEFAULT_TIMEOUT_MS` | `900000` (15 min) | no | Default timeout for `wait` and `summary --wait`; set to `0` to disable |
+| `TASKFERRY_WAIT_DEFAULT_TIMEOUT_MS` | `900000` (15 min) | yes | Default timeout for `wait` and `summary --wait`; set to `0` to disable |
 | `TASKFERRY_CHILD` | — | no | Set on the daemon's own spawned children; see `docs/security.md` |
 
 ## Things that look like bugs but aren't

@@ -35,10 +35,14 @@ bootstrap.
 
 After `git pull` (or any other change to the checkout), re-run
 `taskferry setup` from inside it. The OpenCode leg of `setup` is
-idempotent: when the symlink already resolves to the checkout's
-`src/opencode-plugin.js`, it is left in place; when it is missing,
-stale, or points at a different file, it is replaced. Restart OpenCode
-so it reloads the freshly linked module.
+idempotent: when no symlink exists yet, or the existing one resolves to
+a file inside *any* taskferry checkout (its own or a different one, e.g.
+after the checkout moved), it's unlinked and recreated pointing at this
+checkout's `src/opencode-plugin.js`. A dangling symlink (target no longer
+exists) or one pointing at an unrelated file is treated as unmanaged and
+rejected with `refusing to replace unmanaged path: <path>` — remove it by
+hand and re-run `setup`. Restart OpenCode so it reloads the freshly
+linked module.
 
 ## Remove
 
@@ -77,8 +81,11 @@ directory. It exposes two behaviors, both scoped to that one workspace:
 
 If the daemon connection fails, the plugin logs through `client.app.log`
 (`service: "taskferry"`) rather than throwing, so a taskferry outage never
-breaks OpenCode itself; it just runs without task context or toasts until
-the next successful connection attempt.
+breaks OpenCode itself; it just runs without task context or toasts for the
+rest of that plugin instance's lifetime. The connection attempt happens once,
+at plugin initialization — there is no retry timer or lazy reconnect, so a
+daemon that comes back up after the initial failure isn't picked up until
+OpenCode reloads or restarts the plugin.
 
 ## `TASKFERRY_CHILD` and nested plugin loads
 

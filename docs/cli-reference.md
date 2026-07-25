@@ -157,8 +157,11 @@ daemon restarted while the task was still running; see
 Lean fields by default; pass `--full` for directory, model, session id, log
 path, and prompt preview. `failureReason` is `null` unless the task was
 stopped by the no-output watchdog (`"no_output_timeout"`) or a
-provider-failure diagnostic (`"rate_limited"`, `"payment_required"`, or
-`"authentication_failed"`; see [daemon.md](daemon.md#watchdogs)).
+provider-failure diagnostic — `"rate_limited"`, `"payment_required"`, or
+`"authentication_failed"` for the `opencode` executor, the same three
+buckets prefixed with the executor name for others (e.g.
+`"pi_rate_limited"`), or an executor-prefixed error-class name as a
+fallback; see [daemon.md](daemon.md#watchdogs)).
 `failureDetail` (also `--full`-only, or via `result --fields
 failureDetail`) carries the matched log line or timeout detail behind
 whichever `failureReason` fired. `keySlot` echoes the `--key-slot` name the

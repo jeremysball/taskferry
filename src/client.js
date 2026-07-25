@@ -253,7 +253,12 @@ export async function connectClient({
   stateDir = resolveStateDir(env),
   runtimeDir = resolveRuntimeDir({ env, stateDir }),
   socketPath = env.TASKFERRY_SOCKET_PATH || path.join(runtimeDir, "daemon.sock"),
-  autoStart = true,
+  // Callers that poll on a tight cadence with a short external timeout (e.g.
+  // a 1s-refresh statusline segment) should opt out via TASKFERRY_AUTO_START=0:
+  // an interrupted auto-start still holds the daemon-start lock for the full
+  // boot+ready-poll window, so many such pollers racing concurrently can
+  // livelock the lock instead of ever letting one attempt finish.
+  autoStart = env.TASKFERRY_AUTO_START !== "0",
   startupTimeoutMs = 5000,
   retryDelayMs = 25,
   maxBufferBytes = 1024 * 1024,

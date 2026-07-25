@@ -94,9 +94,12 @@ slow to produce its first log line, not to paper over a hung `opencode`.
 
 The watchdog matched a known provider-failure diagnostic in the task's log
 and stopped it early rather than let it burn the remaining grace period
-against a key that was never going to succeed. Which of the three values
-you see picks the fix; see [daemon.md](daemon.md#watchdogs) for exactly
-what triggers each one:
+against a key that was never going to succeed. Which value you see picks
+the fix — for the `opencode` executor it's one of three bare names below;
+a task dispatched with a different executor (e.g. `pi`) gets the same
+three buckets prefixed with the executor name instead (`pi_rate_limited`,
+etc.). See [daemon.md](daemon.md#watchdogs) for exactly what triggers each
+one:
 
 - `"rate_limited"`: transient. Retry later, or switch `--key-slot`/`--model`
   in the meantime (see [security.md](security.md#provider-key-slots)).

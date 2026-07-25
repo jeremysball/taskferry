@@ -44,7 +44,7 @@ describe("piExecutor()", () => {
 
   test("sandboxAuthFile binds auth and overrides pi data directory", () => {
     const ex = piExecutor();
-    assert.deepEqual(ex.sandboxAuthFile({ homeDir: "/home/user", runtimeDir: "/state/run", spawnEnv: { PI_CODING_AGENT_DIR: "/custom/pi" }, existsFn: (p) => p === "/custom/pi/auth.json" }), {
+    assert.deepEqual(ex.sandboxAuthFile({ homeDir: "/home/user", dataDir: "/state/run", spawnEnv: { PI_CODING_AGENT_DIR: "/custom/pi" }, existsFn: (p) => p === "/custom/pi/auth.json" }), {
       extraRoBind: ["/custom/pi/auth.json", "/state/run/pi-data/auth.json"],
       sandboxedDataHome: "/state/run/pi-data",
       sandboxEnv: { PI_CODING_AGENT_DIR: "/state/run/pi-data" },
@@ -61,7 +61,7 @@ describe("piExecutor()", () => {
 
   test("sandboxAuthFile falls back to ~/.pi", () => {
     const ex = piExecutor();
-    const result = ex.sandboxAuthFile({ homeDir: "/home/user", runtimeDir: "/state/run", spawnEnv: {}, existsFn: (p) => p === "/home/user/.pi/auth.json" });
+    const result = ex.sandboxAuthFile({ homeDir: "/home/user", dataDir: "/state/run", spawnEnv: {}, existsFn: (p) => p === "/home/user/.pi/auth.json" });
     assert.deepEqual(result.extraRoBind, ["/home/user/.pi/auth.json", "/state/run/pi-data/auth.json"]);
   });
 });
@@ -223,7 +223,7 @@ describe("opencodeExecutor()", () => {
   test("sandboxAuthFile: binds real auth.json when present", () => {
     const ex = opencodeExecutor();
     const result = ex.sandboxAuthFile({
-      homeDir: "/home/user", runtimeDir: "/state/run", spawnEnv: {},
+      homeDir: "/home/user", dataDir: "/state/run", spawnEnv: {},
       existsFn: (p) => p === "/home/user/.local/share/opencode/auth.json",
     });
     assert.deepEqual(result, {
@@ -235,7 +235,7 @@ describe("opencodeExecutor()", () => {
 
   test("sandboxAuthFile: no bind when auth.json is missing", () => {
     const ex = opencodeExecutor();
-    const result = ex.sandboxAuthFile({ homeDir: "/home/user", runtimeDir: "/state/run", spawnEnv: {}, existsFn: () => false });
+    const result = ex.sandboxAuthFile({ homeDir: "/home/user", dataDir: "/state/run", spawnEnv: {}, existsFn: () => false });
     assert.equal(result.extraRoBind, null);
   });
 

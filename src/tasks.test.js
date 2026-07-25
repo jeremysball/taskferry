@@ -13,10 +13,14 @@ import { createTaskManager, isOutsideDirectory, DEFAULT_SUMMARY_MODEL, bucketFor
 // runs synchronously in the constructor, same as the old module-level code
 // did at import time). `tasksFixture` may be an array or `(logDir) => array`
 // for fixtures whose logPath needs to point inside the real log dir.
-function makeManager({ tasksFixture = [], logs = {}, spawnFn, killFn, listModelsFn, defaultExecutor, maxDispatchesPerWindow, dispatchWindowMs, advisorSessionTtlMs, maxConcurrentTasks, noOutputTimeoutMs, postOutputNoOutputTimeoutMs, watchdogPollMs, maxWaitMs, keySlotsSpec, providerKeyEnvName, summaryKeySlot, summaryProviderKeyEnvName, sandboxEnabled = false, checkBwrapAvailableFn, existsFn, runtimeDir, platform, onEvent, allowedDirs, resolveGitCommonDirFn } = {}) {
+function makeManager({ tasksFixture = [], logs = {}, spawnFn, killFn, listModelsFn, defaultExecutor, maxDispatchesPerWindow, dispatchWindowMs, advisorSessionTtlMs, maxConcurrentTasks, noOutputTimeoutMs, postOutputNoOutputTimeoutMs, watchdogPollMs, maxWaitMs, keySlotsSpec, providerKeyEnvName, summaryKeySlot, summaryProviderKeyEnvName, sandboxEnabled = false, checkBwrapAvailableFn, existsFn, runtimeDir, cacheDir, platform, onEvent, allowedDirs, resolveGitCommonDirFn } = {}) {
   const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-test-"));
   const logDir = path.join(stateDir, "logs");
   fs.mkdirSync(logDir, { recursive: true });
+  // Sandboxing always mkdir's the resolved sandboxedDataHome (real disk, not
+  // tmpfs -- see resolveCacheDir), so give every test an isolated temp
+  // cacheDir by default instead of falling through to the real ~/.cache.
+  const defaultCacheDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-cache-"));
 
   const fixtureTasks = typeof tasksFixture === "function" ? tasksFixture(logDir) : tasksFixture;
   fs.writeFileSync(path.join(stateDir, "tasks.json"), JSON.stringify(fixtureTasks, null, 2));
@@ -34,6 +38,7 @@ function makeManager({ tasksFixture = [], logs = {}, spawnFn, killFn, listModels
     ...(checkBwrapAvailableFn != null ? { checkBwrapAvailableFn } : {}),
     ...(existsFn != null ? { existsFn } : {}),
     ...(runtimeDir != null ? { runtimeDir } : {}),
+    cacheDir: cacheDir ?? defaultCacheDir,
     ...(platform != null ? { platform } : {}),
     ...(onEvent != null ? { onEvent } : {}),
     ...(maxDispatchesPerWindow != null ? { maxDispatchesPerWindow } : {}),
@@ -391,9 +396,9 @@ describe("bwrap sandboxing", () => {
     mgr.dispatch({ prompt: "hello", directory });
 
     const bindCount = captured.args.filter((arg) => arg === "--bind").length;
-    // Only directory + runtimeDir binds -- the git-common-dir sits inside
-    // `directory`, already covered by that one bind.
-    assert.equal(bindCount, 2);
+    // directory + runtimeDir + the sandboxed opencode data home -- the
+    // git-common-dir sits inside `directory`, already covered by that one bind.
+    assert.equal(bindCount, 3);
   });
 
   test("binds the manager-level allowedDirs config default read-write", () => {
@@ -474,25 +479,25 @@ describe("bwrap sandboxing", () => {
     assert.equal(captured.args.includes(present), true);
   });
 
-  test("points XDG_DATA_HOME at a writable spot under runtimeDir when sandboxing, so opencode's own log/session db isn't blocked by the read-only root", () => {
+  test("points XDG_DATA_HOME at a writable spot under cacheDir when sandboxing, so opencode's own log/session db isn't blocked by the read-only root", () => {
     let captured = null;
-    const runtimeDir = path.join(os.tmpdir(), "axi-tasks-runtime");
+    const cacheDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-cache-"));
     const mgr = makeManager({
       spawnFn: (cmd, args, opts) => { captured = { cmd, args, opts }; return fakeChild(); },
       sandboxEnabled: true,
       checkBwrapAvailableFn: () => ({ checked: true, available: true }),
       platform: "linux",
-      runtimeDir,
+      cacheDir,
     });
 
     mgr.dispatch({ prompt: "hello", directory: os.tmpdir() });
 
-    assert.equal(captured.opts.env.XDG_DATA_HOME, path.join(runtimeDir, "opencode-data"));
+    assert.equal(captured.opts.env.XDG_DATA_HOME, path.join(cacheDir, "opencode-data"));
   });
 
   test("ro-binds the real opencode auth.json into the sandboxed XDG_DATA_HOME when it exists, so credentialed providers still resolve", () => {
     let captured = null;
-    const runtimeDir = path.join(os.tmpdir(), "axi-tasks-runtime");
+    const cacheDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-cache-"));
     const realAuthFile = path.join(os.homedir(), ".local", "share", "opencode", "auth.json");
     const mgr = makeManager({
       spawnFn: (cmd, args, opts) => { captured = { cmd, args, opts }; return fakeChild(); },
@@ -500,7 +505,7 @@ describe("bwrap sandboxing", () => {
       checkBwrapAvailableFn: () => ({ checked: true, available: true }),
       existsFn: (p) => p === realAuthFile,
       platform: "linux",
-      runtimeDir,
+      cacheDir,
     });
 
     mgr.dispatch({ prompt: "hello", directory: os.tmpdir() });
@@ -508,7 +513,7 @@ describe("bwrap sandboxing", () => {
     const srcIndex = captured.args.indexOf(realAuthFile);
     assert.notEqual(srcIndex, -1);
     assert.equal(captured.args[srcIndex - 1], "--ro-bind");
-    assert.equal(captured.args[srcIndex + 1], path.join(runtimeDir, "opencode-data", "opencode", "auth.json"));
+    assert.equal(captured.args[srcIndex + 1], path.join(cacheDir, "opencode-data", "opencode", "auth.json"));
   });
 
   test("omits the auth.json ro-bind when the real file doesn't exist on disk", () => {
@@ -523,9 +528,10 @@ describe("bwrap sandboxing", () => {
 
     mgr.dispatch({ prompt: "hello", directory: os.tmpdir() });
 
-    // "--ro-bind" still appears once, for the base "/" root bind — only the
-    // extra auth.json bind (with its "opencode-data" destination) is absent.
-    assert.equal(captured.args.some((arg) => typeof arg === "string" && arg.includes("opencode-data")), false);
+    // "--ro-bind" still appears once, for the base "/" root bind — the extra
+    // auth.json ro-bind (destination ".../opencode-data/opencode/auth.json")
+    // is absent, even though the data home itself is still read-write bound.
+    assert.equal(captured.args.some((arg) => typeof arg === "string" && arg.includes(path.join("opencode-data", "opencode", "auth.json"))), false);
   });
 
   test("leaves XDG_DATA_HOME untouched when sandboxing is disabled", () => {
@@ -3785,23 +3791,23 @@ describe("startTask() spawns the executor's CLI binary, not a hardcoded command 
 });
 
 describe("startTask() merges executor.sandboxAuthFile().sandboxEnv into spawnEnv (Task 7: per-executor env overrides)", () => {
-  test("opencode's sandboxEnv rewrites XDG_DATA_HOME to the sandboxed runtime data home", () => {
+  test("opencode's sandboxEnv rewrites XDG_DATA_HOME to the sandboxed cache data home", () => {
     let captured = null;
-    const runtimeDir = path.join(os.tmpdir(), "axi-tasks-runtime-oc");
+    const cacheDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-cache-oc-"));
     const mgr = makeManager({
       spawnFn: (cmd, args, opts) => { captured = { cmd, args, opts }; return fakeChild(); },
       sandboxEnabled: true,
       checkBwrapAvailableFn: () => ({ checked: true, available: true }),
       platform: "linux",
-      runtimeDir,
+      cacheDir,
     });
     mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
-    assert.equal(captured.opts.env.XDG_DATA_HOME, path.join(runtimeDir, "opencode-data"));
+    assert.equal(captured.opts.env.XDG_DATA_HOME, path.join(cacheDir, "opencode-data"));
   });
 
   test("pi's sandboxEnv rewrites PI_CODING_AGENT_DIR, not XDG_DATA_HOME, and the auth bind destination matches", () => {
     let captured = null;
-    const runtimeDir = path.join(os.tmpdir(), "axi-tasks-runtime-pi");
+    const cacheDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-cache-pi-"));
     const realAuthFile = path.join(os.tmpdir(), "fake-pi-home", "auth.json");
     const fakePi = {
       id: "pi",
@@ -3814,8 +3820,8 @@ describe("startTask() merges executor.sandboxAuthFile().sandboxEnv into spawnEnv
       buildSpawnArgs: (ctx) => ["--model", ctx.model, "--mode", "json", "-p", ctx.prompt],
       buildSummaryPrompt: () => "",
       normalizeLogEvent: (parsed) => parsed,
-      sandboxAuthFile: ({ runtimeDir: rd, existsFn }) => {
-        const sandboxedDataHome = path.join(rd, "pi-data");
+      sandboxAuthFile: ({ dataDir, existsFn }) => {
+        const sandboxedDataHome = path.join(dataDir, "pi-data");
         return {
           extraRoBind: existsFn(realAuthFile) ? /** @type {[string, string]} */ ([realAuthFile, path.join(sandboxedDataHome, "auth.json")]) : null,
           sandboxedDataHome,
@@ -3829,7 +3835,7 @@ describe("startTask() merges executor.sandboxAuthFile().sandboxEnv into spawnEnv
       sandboxEnabled: true,
       checkBwrapAvailableFn: () => ({ checked: true, available: true }),
       platform: "linux",
-      runtimeDir,
+      cacheDir,
       existsFn: (p) => p === realAuthFile,
     });
     mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
@@ -3840,14 +3846,14 @@ describe("startTask() merges executor.sandboxAuthFile().sandboxEnv into spawnEnv
     const separatorIdx = captured.args.lastIndexOf("--");
     assert.equal(captured.args[separatorIdx + 1], "pi");
     // PI_CODING_AGENT_DIR was overridden to the sandboxed data home.
-    assert.equal(captured.opts.env.PI_CODING_AGENT_DIR, path.join(runtimeDir, "pi-data"));
+    assert.equal(captured.opts.env.PI_CODING_AGENT_DIR, path.join(cacheDir, "pi-data"));
     // XDG_DATA_HOME was NOT rewritten for pi -- the opencode dispatcher
     // rewrites it; pi's executor returns a sandboxEnv that only sets
     // PI_CODING_AGENT_DIR. (Any pre-existing XDG_DATA_HOME from process.env
     // is preserved verbatim; we don't care whether the host had one.)
-    assert.notEqual(captured.opts.env.XDG_DATA_HOME, path.join(runtimeDir, "pi-data"));
+    assert.notEqual(captured.opts.env.XDG_DATA_HOME, path.join(cacheDir, "pi-data"));
     // The auth.json bind destination matches the override (pi-data/auth.json)
-    const piDataAuth = path.join(runtimeDir, "pi-data", "auth.json");
+    const piDataAuth = path.join(cacheDir, "pi-data", "auth.json");
     const destIdx = captured.args.indexOf(piDataAuth);
     assert.notEqual(destIdx, -1, "expected the auth.json destination to match PI_CODING_AGENT_DIR");
     // The bwrap pattern is `--ro-bind <src> <dest>`, so --ro-bind sits two

@@ -37,3 +37,14 @@ export function resolveRuntimeDir({ env = process.env, stateDir = resolveStateDi
   if (env.XDG_RUNTIME_DIR) return path.join(env.XDG_RUNTIME_DIR, "taskferry");
   return path.join(stateDir, "run");
 }
+
+// Sandboxed workers' data homes (opencode/pi auth + growing caches like
+// opencode's unbounded snapshot store) belong on real disk, not the small
+// XDG_RUNTIME_DIR tmpfs — that dir is meant for transient sockets/locks, and
+// filled it entirely once opencode's snapshot data accumulated there across
+// dispatches. XDG_CACHE_HOME (not the state dir) is the right fit: this data
+// is regenerable and safe to delete, unlike taskferry's own persisted state.
+export function resolveCacheDir(env = process.env) {
+  return env.TASKFERRY_CACHE_DIR
+    || path.join(env.XDG_CACHE_HOME || path.join(os.homedir(), ".cache"), "taskferry");
+}

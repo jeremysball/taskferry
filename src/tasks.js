@@ -7,7 +7,7 @@ import { promisify } from "node:util";
 import { createTaskEvents } from "./events.js";
 import { createActivityCache, readActivitySnapshot, readDeltaNarration, DEFAULT_SUMMARIZER_TIMEOUT_MS } from "./activity.js";
 import { withFileLock } from "./state-lock.js";
-import { resolveStateDir } from "./paths.js";
+import { resolveStateDir, resolveCacheDir } from "./paths.js";
 import { RESULT_FIELDS } from "./protocol.js";
 import { formatToolEventForNarration } from "./narration-format.js";
 import { errCode } from "./errors.js";
@@ -416,6 +416,7 @@ const DEFAULT_CANCEL_GRACE_MS = 5000;
  * @param {() => {checked: boolean, available: boolean, reason?: string}} [options.checkBwrapAvailableFn]
  * @param {(path: string) => boolean} [options.existsFn]
  * @param {string} [options.runtimeDir]
+ * @param {string} [options.cacheDir]
  * @param {(event: object) => void} [options.onEvent]
  */
 // Factory rather than a module-level singleton, so tests can construct an
@@ -490,6 +491,7 @@ export function createTaskManager({
   checkBwrapAvailableFn = checkBwrapAvailable,
   existsFn = fs.existsSync,
   runtimeDir = path.join(stateDir, "run"),
+  cacheDir = resolveCacheDir(process.env),
   onEvent,
 } = {}) {
   const LOG_DIR = path.join(stateDir, "logs");
@@ -1479,7 +1481,7 @@ export function createTaskManager({
         // PI_CODING_AGENT_DIR) and which destination to ro-bind the real
         // auth file into, so each executor's bound auth destination matches
         // its own environment directory.
-        const { extraRoBind, sandboxEnv } = executor.sandboxAuthFile({ homeDir, runtimeDir, spawnEnv, existsFn });
+        const { extraRoBind, sandboxedDataHome, sandboxEnv } = executor.sandboxAuthFile({ homeDir, dataDir: cacheDir, spawnEnv, existsFn });
         /** @type {[string, string][]} */
         const extraRoBinds = [];
         if (extraRoBind) extraRoBinds.push(extraRoBind);
@@ -1490,6 +1492,13 @@ export function createTaskManager({
         // without this, `git commit` inside the sandbox fails read-only.
         /** @type {string[]} */
         const extraRwBinds = [];
+        // The root filesystem is read-only bound by default, so the
+        // executor's real-disk data home (cacheDir, not the tmpfs runtime
+        // dir -- see resolveCacheDir) needs an explicit read-write bind.
+        // bwrap requires the source to already exist, hence the mkdir here
+        // rather than leaving it for the sandboxed process to create.
+        fs.mkdirSync(sandboxedDataHome, { recursive: true, mode: 0o700 });
+        extraRwBinds.push(sandboxedDataHome);
         const gitCommonDir = resolveGitCommonDirFn(launchDirectory);
         if (gitCommonDir && existsFn(gitCommonDir) && isOutsideDirectory(launchDirectory, gitCommonDir)) {
           extraRwBinds.push(gitCommonDir);

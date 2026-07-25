@@ -24,7 +24,7 @@ const SUMMARY_ISOLATION_PROMPT =
  * @property {(ctx: SpawnLaunchContext) => string[]} buildSpawnArgs
  * @property {() => string} buildSummaryPrompt
  * @property {(parsed: unknown) => unknown} normalizeLogEvent
- * @property {(args: {homeDir: string, runtimeDir: string, spawnEnv: NodeJS.ProcessEnv, existsFn: (file: string) => boolean}) => {extraRoBind: [string, string]|null, sandboxedDataHome: string, sandboxEnv: Record<string, string>}} sandboxAuthFile
+ * @property {(args: {homeDir: string, dataDir: string, spawnEnv: NodeJS.ProcessEnv, existsFn: (file: string) => boolean}) => {extraRoBind: [string, string]|null, sandboxedDataHome: string, sandboxEnv: Record<string, string>}} sandboxAuthFile
  */
 
 /**
@@ -142,10 +142,14 @@ export function piExecutor({ execFileFn = execFileAsync } = {}) {
       return SUMMARY_ISOLATION_PROMPT;
     },
     normalizeLogEvent: piNormalizeLogEvent,
-    /** @param {{homeDir: string, runtimeDir: string, spawnEnv: NodeJS.ProcessEnv, existsFn: (file: string) => boolean}} args @returns {{extraRoBind: [string, string]|null, sandboxedDataHome: string, sandboxEnv: Record<string, string>}} */
-    sandboxAuthFile({ homeDir, runtimeDir, spawnEnv, existsFn }) {
+    // dataDir must be real-disk storage (state dir), not the runtime dir's
+    // small tmpfs: pi's sandboxed data home grows with every dispatch and an
+    // unbounded tmpfs directory eventually starves the whole XDG_RUNTIME_DIR
+    // (sockets, locks) of space.
+    /** @param {{homeDir: string, dataDir: string, spawnEnv: NodeJS.ProcessEnv, existsFn: (file: string) => boolean}} args @returns {{extraRoBind: [string, string]|null, sandboxedDataHome: string, sandboxEnv: Record<string, string>}} */
+    sandboxAuthFile({ homeDir, dataDir, spawnEnv, existsFn }) {
       const realAuthFile = path.join(spawnEnv.PI_CODING_AGENT_DIR || path.join(homeDir, ".pi"), "auth.json");
-      const sandboxedDataHome = path.join(runtimeDir, "pi-data");
+      const sandboxedDataHome = path.join(dataDir, "pi-data");
       return {
         extraRoBind: existsFn(realAuthFile) ? /** @type {[string, string]} */ ([realAuthFile, path.join(sandboxedDataHome, "auth.json")]) : null,
         sandboxedDataHome,
@@ -183,11 +187,15 @@ export function opencodeExecutor() {
       return SUMMARY_ISOLATION_PROMPT;
     },
     normalizeLogEvent: (parsed) => parsed,
-    /** @param {{homeDir: string, runtimeDir: string, spawnEnv: NodeJS.ProcessEnv, existsFn: (file: string) => boolean}} args @returns {{extraRoBind: [string, string]|null, sandboxedDataHome: string, sandboxEnv: Record<string, string>}} */
-    sandboxAuthFile({ homeDir, runtimeDir, spawnEnv, existsFn }) {
+    // dataDir must be real-disk storage (state dir), not the runtime dir's
+    // small tmpfs: opencode's snapshot store under here grows unbounded
+    // across dispatches (no gc) and previously filled the whole
+    // XDG_RUNTIME_DIR tmpfs, starving it of space for sockets/locks too.
+    /** @param {{homeDir: string, dataDir: string, spawnEnv: NodeJS.ProcessEnv, existsFn: (file: string) => boolean}} args @returns {{extraRoBind: [string, string]|null, sandboxedDataHome: string, sandboxEnv: Record<string, string>}} */
+    sandboxAuthFile({ homeDir, dataDir, spawnEnv, existsFn }) {
       const realDataHome = spawnEnv.XDG_DATA_HOME || path.join(homeDir, ".local", "share");
       const realAuthFile = path.join(realDataHome, "opencode", "auth.json");
-      const sandboxedDataHome = path.join(runtimeDir, "opencode-data");
+      const sandboxedDataHome = path.join(dataDir, "opencode-data");
       return {
         extraRoBind: existsFn(realAuthFile) ? /** @type {[string, string]} */ ([realAuthFile, path.join(sandboxedDataHome, "opencode", "auth.json")]) : null,
         sandboxedDataHome,

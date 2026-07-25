@@ -6,7 +6,7 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { removeStaleSocketIfUnchanged, startDaemon } from "./daemon.js";
-import { connectClient, ensureDaemonStarted } from "./client.js";
+import { connectClient, ensureDaemonStarted, startDaemonBooter } from "./client.js";
 import { withFileLock } from "./state-lock.js";
 import { resolveRuntimeDir } from "./paths.js";
 
@@ -727,6 +727,30 @@ describe("multiplexed daemon client", () => {
     assert.notEqual(hereSubscription, thereSubscription);
     assert.deepEqual(hereEvents.map((event) => event.taskId), ["here"]);
     assert.deepEqual(thereEvents.map((event) => event.taskId), ["there"]);
+  });
+
+  test("startDaemonBooter fires the injected spawn function once and returns without waiting on it", async (t) => {
+    const paths = temporaryPaths(t);
+    const spawnCalls = [];
+    await startDaemonBooter({
+      ...paths,
+      spawnBooterFn: (args) => spawnCalls.push(args),
+    });
+
+    assert.equal(spawnCalls.length, 1);
+    assert.deepEqual(Object.keys(spawnCalls[0]).sort(), ["env", "runtimeDir", "socketPath", "stateDir"]);
+    assert.equal(spawnCalls[0].socketPath, paths.socketPath);
+  });
+
+  test("startDaemonBooter clears a stale boot-error file before spawning", async (t) => {
+    const paths = temporaryPaths(t);
+    fs.mkdirSync(paths.runtimeDir, { recursive: true });
+    const errorPath = path.join(paths.runtimeDir, "daemon-boot.err");
+    fs.writeFileSync(errorPath, "stale failure from a previous boot attempt");
+
+    await startDaemonBooter({ ...paths, spawnBooterFn: () => {} });
+
+    assert.equal(fs.existsSync(errorPath), false);
   });
 
   test("auto-starts after an initial connection failure and retries", async (t) => {

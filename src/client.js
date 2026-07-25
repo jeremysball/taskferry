@@ -9,8 +9,10 @@ import { PROTOCOL_VERSION, encodeMessage } from "./protocol.js";
 import { loadConfig } from "./config.js";
 import { isObject } from "./numbers.js";
 import { resolveRuntimeDir, resolveStateDir } from "./paths.js";
+import { errCode } from "./errors.js";
 
 const DAEMON_ENTRY = fileURLToPath(new URL("./daemon.js", import.meta.url));
+const CLIENT_ENTRY = fileURLToPath(import.meta.url);
 
 const HEALTH_PROBE = String.raw`
 const net = require("node:net");
@@ -52,6 +54,45 @@ function spawnDaemon({ env, stateDir, runtimeDir, socketPath }) {
   });
   child.unref();
   return child;
+}
+
+function bootErrorPath(runtimeDir) {
+  return path.join(runtimeDir, "daemon-boot.err");
+}
+
+function spawnDaemonBooter({ env, stateDir, runtimeDir, socketPath }) {
+  const child = spawn(process.execPath, [CLIENT_ENTRY], {
+    detached: true,
+    stdio: "ignore",
+    env: {
+      ...env,
+      TASKFERRY_STATE_DIR: stateDir,
+      TASKFERRY_RUNTIME_DIR: runtimeDir,
+      TASKFERRY_SOCKET_PATH: socketPath,
+    },
+  });
+  child.unref();
+  return child;
+}
+
+// Fires a detached, unref'd subprocess to run ensureDaemonStarted's
+// lock-acquire/spawn/poll sequence and returns immediately, without waiting
+// on it. The subprocess isn't tied to this process's lifetime, so a caller
+// with a short external timeout (e.g. a 1s-refresh statusline) can be killed
+// mid-boot without ever having held daemon-start.lock itself.
+export async function startDaemonBooter({
+  env = process.env,
+  stateDir = resolveStateDir(env),
+  runtimeDir = resolveRuntimeDir({ env, stateDir }),
+  socketPath = env.TASKFERRY_SOCKET_PATH || path.join(runtimeDir, "daemon.sock"),
+  spawnBooterFn = spawnDaemonBooter,
+} = {}) {
+  try {
+    fs.unlinkSync(bootErrorPath(runtimeDir));
+  } catch (err) {
+    if (errCode(err) !== "ENOENT") throw err;
+  }
+  spawnBooterFn({ env, stateDir, runtimeDir, socketPath });
 }
 
 export function ensureDaemonStarted({

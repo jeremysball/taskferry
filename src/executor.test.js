@@ -229,7 +229,7 @@ describe("opencodeExecutor()", () => {
     assert.deepEqual(result, {
       extraRoBind: ["/home/user/.local/share/opencode/auth.json", "/state/run/opencode-data/opencode/auth.json"],
       sandboxedDataHome: "/state/run/opencode-data",
-      sandboxEnv: { XDG_DATA_HOME: "/state/run/opencode-data", OPENCODE_DB: "/state/run/opencode-data/opencode/opencode.db" },
+      sandboxEnv: { XDG_DATA_HOME: "/state/run/opencode-data" },
     });
   });
 

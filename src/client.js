@@ -9,8 +9,10 @@ import { PROTOCOL_VERSION, encodeMessage } from "./protocol.js";
 import { loadConfig } from "./config.js";
 import { isObject } from "./numbers.js";
 import { resolveRuntimeDir, resolveStateDir } from "./paths.js";
+import { errCode } from "./errors.js";
 
 const DAEMON_ENTRY = fileURLToPath(new URL("./daemon.js", import.meta.url));
+const CLIENT_ENTRY = fileURLToPath(import.meta.url);
 
 const HEALTH_PROBE = String.raw`
 const net = require("node:net");
@@ -52,6 +54,46 @@ function spawnDaemon({ env, stateDir, runtimeDir, socketPath }) {
   });
   child.unref();
   return child;
+}
+
+function bootErrorPath(runtimeDir) {
+  return path.join(runtimeDir, "daemon-boot.err");
+}
+
+function spawnDaemonBooter({ env, stateDir, runtimeDir, socketPath }) {
+  const child = spawn(process.execPath, [CLIENT_ENTRY], {
+    detached: true,
+    stdio: "ignore",
+    env: {
+      ...env,
+      TASKFERRY_STATE_DIR: stateDir,
+      TASKFERRY_RUNTIME_DIR: runtimeDir,
+      TASKFERRY_SOCKET_PATH: socketPath,
+    },
+  });
+  child.unref();
+  return child;
+}
+
+// Fires a detached, unref'd subprocess to run ensureDaemonStarted's
+// lock-acquire/spawn/poll sequence and returns immediately, without waiting
+// on it. The subprocess isn't tied to this process's lifetime, so a caller
+// with a short external timeout (e.g. a 1s-refresh statusline) can be killed
+// mid-boot without ever having held daemon-start.lock itself.
+export async function startDaemonBooter({
+  env = process.env,
+  stateDir = resolveStateDir(env),
+  runtimeDir = resolveRuntimeDir({ env, stateDir }),
+  socketPath = env.TASKFERRY_SOCKET_PATH || path.join(runtimeDir, "daemon.sock"),
+  spawnBooterFn = spawnDaemonBooter,
+} = {}) {
+  try {
+    fs.unlinkSync(bootErrorPath(runtimeDir));
+  } catch {
+    // Best-effort: clearing a stale diagnostic file must never block the
+    // booter itself from spawning (e.g. EACCES on a file left by another uid).
+  }
+  spawnBooterFn({ env, stateDir, runtimeDir, socketPath });
 }
 
 export function ensureDaemonStarted({
@@ -253,12 +295,18 @@ export async function connectClient({
   stateDir = resolveStateDir(env),
   runtimeDir = resolveRuntimeDir({ env, stateDir }),
   socketPath = env.TASKFERRY_SOCKET_PATH || path.join(runtimeDir, "daemon.sock"),
-  autoStart = true,
+  // General-purpose escape hatch: a caller can set TASKFERRY_AUTO_START=0 to
+  // fail fast on a missing daemon instead of spawning one (e.g. a script that
+  // should never have side effects). Not needed for lock safety — the
+  // detached booter (startDaemonBooter, above) never blocks the caller on
+  // the lock regardless of autoStart, so a short-timeout poller no longer
+  // has to opt out just to avoid the old inline-boot livelock.
+  autoStart = env.TASKFERRY_AUTO_START !== "0",
   startupTimeoutMs = 5000,
   retryDelayMs = 25,
   maxBufferBytes = 1024 * 1024,
   maxQueuedEvents = 1000,
-  ensureDaemonFn = ensureDaemonStarted,
+  ensureDaemonFn = startDaemonBooter,
   ...startupOptions
 } = {}) {
   const clientOptions = { maxBufferBytes, maxQueuedEvents };
@@ -288,8 +336,33 @@ export async function connectClient({
     }
   } while (Date.now() < deadline);
 
+  let bootError;
+  try {
+    bootError = fs.readFileSync(bootErrorPath(runtimeDir), "utf8").trim();
+  } catch (err) {
+    if (errCode(err) !== "ENOENT") throw err;
+  }
   throw new Error(
     `error: taskferry daemon did not become ready within ${startupTimeoutMs}ms: ${lastError?.message || "connection failed"}\n`
+    + (bootError ? `daemon boot failed: ${bootError}\n` : "")
     + `help: check ${runtimeDir} permissions and daemon startup diagnostics, then retry`
   );
+}
+
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  try {
+    ensureDaemonStarted();
+  } catch (err) {
+    const bootEnv = process.env;
+    const bootStateDir = resolveStateDir(bootEnv);
+    const bootRuntimeDir = resolveRuntimeDir({ env: bootEnv, stateDir: bootStateDir });
+    try {
+      fs.mkdirSync(bootRuntimeDir, { recursive: true, mode: 0o700 });
+      fs.writeFileSync(bootErrorPath(bootRuntimeDir), err instanceof Error ? err.message : String(err));
+    } catch {
+      // Best-effort diagnostics only — connectClient's own generic timeout
+      // error still surfaces to the user even if this write fails.
+    }
+    process.exitCode = 1;
+  }
 }

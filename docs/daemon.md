@@ -7,22 +7,51 @@ recovery behavior.
 
 ## Auto-start
 
-No command ever requires starting the daemon by hand. The CLI's
-`connectClient()` tries to open the socket first; if that fails, it takes an
-exclusive file lock (`daemon-start.lock` in the runtime directory), checks
-again in case another process just started one, and if not, spawns
-`src/daemon.js` detached with `stdio: "ignore"` and waits (polling every
-25ms, up to 5000ms) for a health check to succeed. The lock means concurrent
-`taskferry` invocations racing to start the daemon converge on a single
-instance rather than each spawning their own.
+No command ever requires starting the daemon by hand. Auto-start is split
+between two processes, so a caller that's killed mid-boot never holds
+`daemon-start.lock` itself:
 
-The spawned daemon inherits the parent's environment, so any
-`TASKFERRY_*` variable set when a command first triggers the auto-start
-takes effect for the daemon's entire lifetime — including for other
-terminals and processes that connect to the same socket afterward. Changing
-an env var (a new key slot, a different `TASKFERRY_MAX_CONCURRENT_TASKS`)
-requires the daemon to restart: stop it (see below) and let the next command
-start a fresh one.
+- `connectClient()` (in `src/client.js`) tries to open the socket first. On
+  failure, it fires a detached, unref'd booter subprocess via
+  `startDaemonBooter()` — a re-exec of `src/client.js` itself with
+  `detached: true` and `child.unref()`, so the booter outlives the caller
+  and isn't tied to its lifetime. `connectClient()` then runs its own
+  connect-retry loop against the socket (polling every `retryDelayMs`,
+  up to `startupTimeoutMs`); it does not take the lock or wait on the
+  booter. Set `TASKFERRY_AUTO_START=0` to skip both the booter and the
+  retry loop and fail fast on a missing daemon instead.
+- The detached booter (the re-exec'd `src/client.js`) runs
+  `ensureDaemonStarted()`: it takes the exclusive file lock
+  (`daemon-start.lock` in the runtime directory), re-checks the socket in
+  case a racing process just started one, and if not, spawns `src/daemon.js`
+  detached with `stdio: "ignore"` and polls every 25ms (up to 5000ms) for a
+  health check to succeed. The lock means concurrent `taskferry`
+  invocations racing to start the daemon converge on a single instance
+  rather than each spawning their own. If the booter itself fails (e.g.
+  `loadConfig` throws on a malformed `config.json`), it writes
+  its error message to `<runtime-dir>/daemon-boot.err` and exits with a
+  non-zero code; the caller picks that file up on its next failed
+  connect and folds the contents into the `daemon boot failed: ...`
+  detail of the timeout error it surfaces.
+
+Because the lock lives entirely in the detached booter rather than in
+`connectClient()`, a caller that's killed mid-boot (a short-timeout
+statusline poll, an `exec` that races against the booter's health-check
+window) no longer orphans `daemon-start.lock` — the booter keeps running
+and either starts the daemon successfully or releases the lock when it
+gives up. `startDaemonBooter()` also `unlink`s any stale
+`daemon-boot.err` from a previous failed boot before firing the new
+booter, so a caller that times out sees diagnostics from the boot it
+actually waited on, not from an earlier one.
+
+The spawned daemon inherits the booter's environment, which in turn
+inherits the original caller's environment. Any `TASKFERRY_*` variable
+set when a command first triggers the auto-start takes effect for the
+daemon's entire lifetime — including for other terminals and processes
+that connect to the same socket afterward. Changing an env var (a new
+key slot, a different `TASKFERRY_MAX_CONCURRENT_TASKS`) requires the
+daemon to restart: stop it (see below) and let the next command start a
+fresh one.
 
 ## Stopping the daemon
 

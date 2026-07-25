@@ -1,6 +1,6 @@
 import { describe, test } from "node:test";
 import assert from "node:assert/strict";
-import { colorize, formatWatchEvent, leanStatus, writeToon } from "./output.js";
+import { colorize, errorValue, formatWatchEvent, leanStatus, writeToon } from "./output.js";
 
 function fakeStdoutIo(isTTY) {
   let stdout = "";
@@ -123,6 +123,72 @@ describe("formatWatchEvent toon format for activity/state events", () => {
     assert.match(line, /summary unavailable/);
     assert.match(line, /summary model is unavailable/);
     assert.equal(line.split("\n").length, 1);
+  });
+});
+
+describe("errorValue", () => {
+  test("preserves the boot-failure detail line from connectClient's timeout error", () => {
+    // Shape mirrors the three-line error connectClient() throws when a
+    // booter writes a daemon-boot.err diagnostic before its health-check
+    // timeout: an `error:` line, a `daemon boot failed: ...` detail line
+    // (no recognized prefix), and a `help:` line.
+    const error = new Error(
+      "error: taskferry daemon did not become ready within 5000ms: connect ECONNREFUSED\n"
+      + "daemon boot failed: error: could not parse /fake/config.json: bad json\n"
+      + "help: check /fake/runtime permissions and daemon startup diagnostics, then retry"
+    );
+
+    const { error: message, help } = errorValue(error);
+
+    assert.match(message, /taskferry daemon did not become ready within 5000ms/);
+    assert.match(message, /daemon boot failed: error: could not parse \/fake\/config\.json: bad json/);
+    assert.match(help, /check \/fake\/runtime permissions/);
+  });
+
+  test("round-trips a plain two-line error:/help: message unchanged", () => {
+    // Regression guard: the existing simple case (no middle detail line)
+    // must still produce just the stripped `error:` line as the message and
+    // the stripped `help:` line as the help.
+    const error = new Error(
+      "error: unknown task id: oc_99\n"
+      + "help: run taskferry list to see valid task ids"
+    );
+
+    const { error: message, help } = errorValue(error);
+
+    assert.equal(message, "unknown task id: oc_99");
+    assert.equal(help, "run taskferry list to see valid task ids");
+  });
+
+  test("preserves multiple detail lines in their original order", () => {
+    const error = new Error(
+      "error: first problem\n"
+      + "detail: middle context A\n"
+      + "detail: middle context B\n"
+      + "help: last hint"
+    );
+
+    const { error: message, help } = errorValue(error);
+
+    assert.match(message, /first problem[\s\S]*middle context A[\s\S]*middle context B/);
+    assert.equal(help, "last hint");
+  });
+
+  test("falls back to the first line when no error:/help: prefix is present", () => {
+    const error = new Error("something went wrong");
+
+    const { error: message } = errorValue(error);
+
+    assert.equal(message, "something went wrong");
+  });
+
+  test("uses error.help when the error object has a string help property", () => {
+    const error = new Error("error: boom\nhelp: ignored");
+    error.help = "prefer this hint";
+
+    const { help } = errorValue(error);
+
+    assert.equal(help, "prefer this hint");
   });
 });
 

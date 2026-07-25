@@ -69,10 +69,20 @@ function stripPrefix(line, prefix) {
 export function errorValue(error) {
   const text = error instanceof Error ? error.message : String(error);
   const lines = text.split("\n");
-  const message = lines.map((line) => stripPrefix(line, "error:")).find(Boolean) || lines[0] || "taskferry request failed";
+  const errorLine = lines.map((line) => stripPrefix(line, "error:")).find(Boolean);
+  const helpLine = lines.map((line) => stripPrefix(line, "help:")).find(Boolean);
+  // Detail lines: any line not matched by `error:` or `help:`. Only folded
+  // in when we found an `error:` line as the primary, so the plain
+  // single-line fallback (no recognized prefixes) keeps returning
+  // `lines[0]` unchanged.
+  const detailLines = errorLine !== undefined
+    ? lines.filter((line) => !line.startsWith("error:") && !line.startsWith("help:"))
+    : [];
+  const primary = errorLine || lines[0] || "taskferry request failed";
+  const message = detailLines.length ? `${primary}\n${detailLines.join("\n")}` : primary;
   const help = error && typeof error === "object" && typeof error.help === "string"
     ? error.help
-    : lines.map((line) => stripPrefix(line, "help:")).find(Boolean) || "Retry the command or run `taskferry --help`";
+    : helpLine || "Retry the command or run `taskferry --help`";
   return { error: message, help };
 }
 

@@ -6,7 +6,7 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { removeStaleSocketIfUnchanged, startDaemon } from "./daemon.js";
-import { connectClient, ensureDaemonStarted } from "./client.js";
+import { connectClient, ensureDaemonStarted, startDaemonBooter } from "./client.js";
 import { withFileLock } from "./state-lock.js";
 import { resolveRuntimeDir } from "./paths.js";
 
@@ -729,6 +729,30 @@ describe("multiplexed daemon client", () => {
     assert.deepEqual(thereEvents.map((event) => event.taskId), ["there"]);
   });
 
+  test("startDaemonBooter fires the injected spawn function once and returns without waiting on it", async (t) => {
+    const paths = temporaryPaths(t);
+    const spawnCalls = [];
+    await startDaemonBooter({
+      ...paths,
+      spawnBooterFn: (args) => spawnCalls.push(args),
+    });
+
+    assert.equal(spawnCalls.length, 1);
+    assert.deepEqual(Object.keys(spawnCalls[0]).sort(), ["env", "runtimeDir", "socketPath", "stateDir"]);
+    assert.equal(spawnCalls[0].socketPath, paths.socketPath);
+  });
+
+  test("startDaemonBooter clears a stale boot-error file before spawning", async (t) => {
+    const paths = temporaryPaths(t);
+    fs.mkdirSync(paths.runtimeDir, { recursive: true });
+    const errorPath = path.join(paths.runtimeDir, "daemon-boot.err");
+    fs.writeFileSync(errorPath, "stale failure from a previous boot attempt");
+
+    await startDaemonBooter({ ...paths, spawnBooterFn: () => {} });
+
+    assert.equal(fs.existsSync(errorPath), false);
+  });
+
   test("auto-starts after an initial connection failure and retries", async (t) => {
     const paths = temporaryPaths(t);
     const fake = fakeManagerFactory();
@@ -749,6 +773,35 @@ describe("multiplexed daemon client", () => {
     t.after(() => daemon.close());
 
     assert.equal(starts, 1);
+    assert.equal((await client.request("system.health")).healthy, true);
+  });
+
+  test("default auto-start fires a detached booter and does not block on its own boot completing", async (t) => {
+    const paths = temporaryPaths(t);
+    fs.mkdirSync(paths.runtimeDir, { recursive: true });
+    const fake = fakeManagerFactory();
+    let daemon;
+    let spawnCalls = 0;
+    const client = await connectClient({
+      socketPath: paths.socketPath,
+      stateDir: paths.stateDir,
+      runtimeDir: paths.runtimeDir,
+      retryDelayMs: 5,
+      startupTimeoutMs: 500,
+      spawnBooterFn: () => {
+        spawnCalls++;
+        // Stands in for the detached subprocess: starts the real daemon
+        // well after connectClient's own auto-start call has returned, to
+        // prove connectClient isn't blocked waiting on it in-process.
+        setTimeout(() => {
+          startDaemon({ ...paths, taskManagerFactory: fake.factory }).then((started) => { daemon = started; });
+        }, 30);
+      },
+    });
+    t.after(() => client.close());
+    t.after(() => daemon?.close());
+
+    assert.equal(spawnCalls, 1);
     assert.equal((await client.request("system.health")).healthy, true);
   });
 
@@ -814,6 +867,27 @@ describe("multiplexed daemon client", () => {
         ensureDaemonFn: () => {},
       }),
       /error: taskferry daemon did not become ready.*help:/s
+    );
+  });
+
+  test("includes a boot-error file's contents in the timeout error", async (t) => {
+    const paths = temporaryPaths(t);
+    fs.mkdirSync(paths.runtimeDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(paths.runtimeDir, "daemon-boot.err"),
+      "error: could not parse /fake/config.json: bad json\nhelp: fix it"
+    );
+
+    await assert.rejects(
+      () => connectClient({
+        socketPath: paths.socketPath,
+        stateDir: paths.stateDir,
+        runtimeDir: paths.runtimeDir,
+        startupTimeoutMs: 20,
+        retryDelayMs: 5,
+        ensureDaemonFn: () => {},
+      }),
+      /daemon boot failed: error: could not parse \/fake\/config\.json/
     );
   });
 

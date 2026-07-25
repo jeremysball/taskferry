@@ -2,6 +2,10 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+// Both integrations/* copies are committed, not gitignored: each plugin
+// marketplace (Claude Code, Codex) reads its skill file straight from this
+// repo's git history at its own path, so a stale/missing copy ships wrong
+// content to real installs rather than just failing a rebuild.
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const skillRelativePath = path.join("skills", "using-taskferry", "SKILL.md");
 const generatedRelativePaths = [

@@ -53,7 +53,7 @@ obviously belong to args parsing or output formatting, start there.
 | `output.js` | 174 | TOON encoding, `leanStatus`/`leanResult`/`projectList`/`homeView`, hint-string MCP-name migration. |
 | `opencode-plugin.js` | 174 | OpenCode's native plugin surface: toasts on task state transitions by polling `client.js` directly. |
 | `setup.js` | 210 | `taskferry setup`: npm install, managed symlinks, per-client integration registration (see `.superpowers/.completed/specs/2026-07-16-taskferry-setup-design.md`). |
-| `scripts/generate-skill.js` | — | Regenerates `integrations/*/skills/using-taskferry/SKILL.md` from `skills/using-taskferry/SKILL.md`; `--check` fails on drift. |
+| `scripts/generate-skill.js` | — | Regenerates `integrations/*/skills/using-taskferry/SKILL.md` from `skills/using-taskferry/SKILL.md`; `--check` fails on drift. The two generated copies are committed, not gitignored — they're what the Claude Code and Codex plugin marketplaces actually read (`integrations.test.js` pins the plugin `source` to those exact paths), so a missing or stale copy ships wrong skill content to real installs, not just a rebuildable artifact. |
 
 Every `*.js` above has a co-located `*.test.js` (`node --test`, no
 framework); `smoke-test.js`/`cancel-smoke-test.js`/`poll-smoke-test.js` are
@@ -116,7 +116,9 @@ Vars marked "config.json" also have a config-file equivalent — see
   to keep polling or pass `--timeout-ms` for a longer cap.
 - A `SKILL.md` edit not showing up in `integrations/claude/skills/...` —
   run `npm run skill:generate`; the distributed copies are generated, not
-  hand-edited.
+  hand-edited. Commit them alongside the canonical file anyway — they aren't
+  build output regenerated at install time, they're the literal content each
+  plugin marketplace serves from this repo's git history.
 - Editing `~/.claude/skills/using-taskferry/SKILL.md` directly does nothing for
   this repo — it's a separate manual copy for global availability outside
   the plugin (see `docs/integrations/claude-code.md`), not synced from or

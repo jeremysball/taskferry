@@ -47,6 +47,11 @@ message — there is no silent typo tolerance.
 | `providerKeyEnv` | `TASKFERRY_PROVIDER_KEY_ENV` | string | (none) |
 | `summaryKeySlot` | `TASKFERRY_SUMMARY_KEY_SLOT` | string | (none) |
 | `summaryProviderKeyEnv` | `TASKFERRY_SUMMARY_PROVIDER_KEY_ENV` | string | (none) |
+| `sandboxEnabled` | `TASKFERRY_DISABLE_SANDBOX` (inverted: `1`/`true` disables) | boolean | `true` |
+| `allowedDirs` | `TASKFERRY_ALLOWED_DIRS` | string (comma-separated paths) | (none) |
+| `waitDefaultTimeoutMs` | `TASKFERRY_WAIT_DEFAULT_TIMEOUT_MS` | number | `900000` (15 min); `0` disables |
+| `cancelGraceMs` | `TASKFERRY_CANCEL_GRACE_MS` | number | `5000`; overridden per-call by `cancel --grace-ms` |
+| `defaultExecutor` | `TASKFERRY_DEFAULT_EXECUTOR` | string (`opencode` or `pi`) | `opencode` |
 
 `keySlots` uses the same `name:ENV_VAR_NAME` comma-separated grammar as
 `TASKFERRY_KEY_SLOTS` — see `docs/security.md`.

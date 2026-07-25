@@ -194,7 +194,7 @@ command's exit — it does not surface each summary line as it's written, so
 without a `Monitor` the summaries sit in that file unseen until settlement.
 `tail -n0 -F` starts from the end so you don't re-emit lines already read, and
 turns every new summary line into its own notification as it lands (every
-~3 minutes by default — `DEFAULT_SUMMARIZER_TIMEOUT_MS` in `src/activity.js`,
+~6 minutes by default — `DEFAULT_SUMMARIZER_TIMEOUT_MS` in `src/activity.js`,
 overridable via `TASKFERRY_SUMMARIZER_TIMEOUT_MS`). Stop the monitor with `TaskStop` once the wait job's own completion
 notification confirms the task settled.
 

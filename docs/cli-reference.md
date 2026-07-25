@@ -33,7 +33,7 @@ counts:
   unknown: 0
 tasks[4]{id,status,model,startedAt}:
   ...
-next[2]: Run taskferry status <id> for activity,Run taskferry wait <id> to wait for settlement
+next[3]: Run taskferry status <id> for activity,Run taskferry wait <id> to wait for settlement,Run taskferry result <id> for the final answer
 ```
 
 With no tasks in the workspace, `tasks` reads `"none found in this
@@ -41,8 +41,8 @@ workspace"` and `next` suggests `dispatch` instead.
 
 ## `taskferry dispatch --prompt <text> [options]`
 
-Queues `opencode run --dir <directory> --auto --format json -- <prompt>` (or
-the equivalent `pi` invocation when `--executor pi` is given) as a
+Queues `opencode run --dir <directory> --auto --format json -m <model> <prompt>`
+(or the equivalent `pi` invocation when `--executor pi` is given) as a
 background child process and returns a task summary immediately.
 
 | Flag | Notes |
@@ -128,8 +128,8 @@ planning or hard-debugging help mid-task, not for open-ended background work
 | `--timeout-ms <number>` | Optional early-return cap in milliseconds, same semantics as `wait` — omit to block until the advisor answers |
 
 If it times out before the advisor answers, the response is `status:
-"running"` plus `id` and `sessionId`; call `wait` or `advisor` again (with
-that `sessionId`) to continue. If a resumed `session_id` has gone idle past
+"running"` plus `task_id` and `session_id`; call `wait` or `advisor` again
+(with that `session_id`) to continue. If a resumed `session_id` has gone idle past
 `TASKFERRY_ADVISOR_SESSION_TTL_MS` (default 30 minutes) or is unrecognized
 (a typo, or from before a daemon restart), a fresh session starts
 automatically instead of erroring; the response's `session_reset` is `true`
@@ -182,7 +182,7 @@ Produces a bounded report or activity summary for a task.
 | Flag | Notes |
 |---|---|
 | `--mode report\|activity` | Default `report` |
-| `--max-words <number>` | Target length from 75 through 300, default 200 |
+| `--max-words <number>` | Target length from 75 through 300; default 200 for `--mode report`, 75 for `--mode activity` |
 | `--wait` | Wait for the task to settle before summarizing |
 
 `--mode report` starts a separate, asynchronous summary task using
@@ -212,7 +212,7 @@ tripped.
 
 | Flag | Notes |
 |---|---|
-| `--full` | Include untruncated narration; only valid when `narration` is in `--fields` |
+| `--full` | Include untruncated narration; only rejected as a usage error when combined with `--fields` that omits `narration` — `--full` alone (no `--fields`) works fine |
 | `--fields <comma-list>` | Project only the fields you need: `message`, `narration`, `tokens`, `cost`, `sessionId`, `exitCode`, `signal`, `spawnError`, `failureReason`, `failureDetail`, `keySlot`, `logPath`, `incomplete`, `finalMarker` |
 
 ```
@@ -247,7 +247,7 @@ SIGTERM), then exits cleanly with code `0`.
 | `--directory <path>` | Workspace to watch, defaults to the current workspace |
 | `--format toon\|ndjson` | Stream format, default `toon` |
 | `--summaries` | Request live activity summaries (a secondary model call); see [security.md](security.md) |
-| `--task-id <id>` | Scope the stream to one task; `watch` then exits on its own once that task settles, instead of running until interrupted |
+| `--task-id <id>` | Scope the stream to one task; `watch` then exits on its own once that task settles, instead of running until interrupted. This is the one command where `--task-id` is still live — see "Retired names" below. |
 
 Without `--task-id`, `watch` streams every task in the workspace until
 interrupted. With it, `--directory` is optional — it's resolved from the
@@ -268,8 +268,8 @@ task counts and rows, nothing else.
 ## `taskferry doctor [--full]`
 
 Checks daemon health and installation details: connects (auto-starting the
-daemon if needed), and reports `{ healthy, pid }`. `--full` adds `version`,
-`cliVersion`, and `protocolVersion`.
+daemon if needed), and reports `{ healthy, pid, version }`. `--full` adds
+`cliVersion` and `protocolVersion`.
 
 Also reports `integrations.claude.installed`, checked locally via `claude
 plugin list --json` (not a daemon RPC). See [troubleshooting.md](troubleshooting.md).
@@ -281,12 +281,13 @@ Prints `{ name: "taskferry", version, protocolVersion }`.
 ## `taskferry setup`
 
 The one-time, idempotent bootstrap for a taskferry checkout. Runs `npm
-install` in the checkout, then creates (or refreshes) the two managed
+install` in the checkout, then creates (or refreshes) the three managed
 symlinks Taskferry needs on disk:
 
 - `~/.local/bin/taskferry` → `<checkout>/src/cli.js`
 - `$XDG_CONFIG_HOME/opencode/plugins/taskferry.js` (default
   `~/.config/opencode/plugins/taskferry.js`) → `<checkout>/src/opencode-plugin.js`
+- `~/.local/bin/tf-sl` → `<checkout>/src/tf-sl.sh`
 
 After that, it registers or refreshes the native agent integration for
 whichever client CLI is on `PATH` (`claude`, `codex`). The command
@@ -296,7 +297,7 @@ dependencies are currently broken.
 
 ### Symlink safety
 
-Both symlinks are self-managed: `setup` only replaces a path at the
+All three symlinks are self-managed: `setup` only replaces a path at the
 target location when that path already is a symlink whose target
 resolves to a file in a taskferry checkout (a `package.json` named
 `taskferry`). Anything else — a regular file, a directory, a symlink
@@ -318,11 +319,17 @@ cli:
 opencode:
   path: /home/user/.config/opencode/plugins/taskferry.js
   source: /workspace/taskferry/src/opencode-plugin.js
+statusline:
+  path: /home/user/.local/bin/tf-sl
+  source: /workspace/taskferry/src/tf-sl.sh
 dependencies: installed
 path: available
 integrations:
   claude: {status: installed}
   codex: {status: desktop-install-required,next: "Open Codex desktop, install Taskferry from its marketplace, then review and trust its hooks."}
+playwrightMcpIsolation:
+  opencode: {changed: false, reason: "no writable opencode.json with a playwright MCP entry found"}
+  claudeCode: {changed: false, path: /home/user/.claude/settings.json}
 ```
 
 Field-by-field:
@@ -331,10 +338,12 @@ Field-by-field:
 |---|---|
 | `cli.path`, `cli.source` | Resolved symlink destination and its target after `setup` ran |
 | `opencode.path`, `opencode.source` | Same for the OpenCode plugin symlink |
+| `statusline.path`, `statusline.source` | Same for the `tf-sl` statusline symlink |
 | `dependencies` | Always `"installed"` on a successful run (the `npm install` step) |
 | `path` | `"available"` if `~/.local/bin` is already on `PATH`, otherwise `"missing"` with a sibling `pathInstruction: 'export PATH="$HOME/.local/bin:$PATH"'` field |
 | `integrations.claude.status` | `"installed"` (CLI on `PATH` and the user-scoped plugin is registered, possibly already installed and now updated), or `"unavailable"` (no `claude` binary, nothing done for Claude) |
 | `integrations.codex.status` | `"desktop-install-required"` with a `next` string telling the user to install the plugin through Codex desktop and trust its hooks via `/hooks`, or `"unavailable"` (no `codex` binary) |
+| `playwrightMcpIsolation.opencode`, `.claudeCode` | Best-effort attempt to isolate each client's Playwright MCP browser profile; `{changed: false, reason: "..."}` if there was nothing to touch or writable, `{changed: true, path}` if a config file was updated, `{changed: false, path}` if it was already isolated |
 
 The Codex leg cannot install or upgrade the plugin itself — Codex
 desktop drives that through its own UI — so the `desktop-install-required`
@@ -353,5 +362,7 @@ manual Codex desktop flow.
 
 `taskferry_<name>` MCP tool names, `poll`, and underscore/camelCase
 flags from the MCP era (e.g. `--task-id`, `--timeout_ms`) fail with
-exit code `2` and a `help:` line naming the current CLI equivalent.
-See [migrating-from-mcp.md](migrating-from-mcp.md) for the full table.
+exit code `2` and a `help:` line naming the current CLI equivalent —
+except `--task-id` on `watch`, which is a real, current flag (see above),
+not a retired one. See [migrating-from-mcp.md](migrating-from-mcp.md) for
+the full table.

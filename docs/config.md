@@ -65,10 +65,11 @@ remove a config value to fall back to the old env-var-only behavior.
 ## What's not in the config file
 
 `TASKFERRY_STATE_DIR`, `TASKFERRY_RUNTIME_DIR`, `TASKFERRY_SOCKET_PATH`,
-`TASKFERRY_WATCHDOG_POLL_MS`, `TASKFERRY_CHILD`, and `TASKFERRY_AUTO_START`
-stay env-var-only — they're process plumbing (where state lives, how fast
-the watchdog polls, an internal marker, the daemon auto-spawn escape hatch),
-not something most users tune for behavior.
+`TASKFERRY_CACHE_DIR`, `TASKFERRY_WATCHDOG_POLL_MS`, `TASKFERRY_CHILD`, and
+`TASKFERRY_AUTO_START` stay env-var-only — they're process plumbing (where
+state and sandboxed-worker cache data live, how fast the watchdog polls, an
+internal marker, the daemon auto-spawn escape hatch), not something most
+users tune for behavior.
 
 ## No hot-reload
 

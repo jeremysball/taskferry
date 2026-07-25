@@ -125,7 +125,7 @@ planning or hard-debugging help mid-task, not for open-ended background work
 | `--variant <name>` | Optional reasoning-effort override |
 | `--executor <opencode\|pi>` | Which worker CLI to spawn. Defaults to `opencode` |
 | `--session-id <id>` | Resume a prior advisor exchange |
-| `--timeout-ms <number>` | Optional early-return cap in milliseconds, same semantics as `wait` — omit to block until the advisor answers |
+| `--timeout-ms <number>` | Early-return cap in milliseconds, same semantics as `wait`; omitting it does not block indefinitely — it falls back to a 45-second internal cap, after which the "still running" response below is returned |
 
 If it times out before the advisor answers, the response is `status:
 "running"` plus `task_id` and `session_id`; call `wait` or `advisor` again
@@ -272,7 +272,15 @@ daemon if needed), and reports `{ healthy, pid, version }`. `--full` adds
 `cliVersion` and `protocolVersion`.
 
 Also reports `integrations.claude.installed`, checked locally via `claude
-plugin list --json` (not a daemon RPC). See [troubleshooting.md](troubleshooting.md).
+plugin list --json` (not a daemon RPC), and
+`integrations.playwrightMcpIsolation.{opencode,claudeCode}` (each client's
+Playwright MCP browser-profile isolation status, same shape `setup` returns
+— see above). A conditional `warnings[]` array appears when Playwright MCP
+isolation is missing (concurrent dispatches sharing one browser profile can
+crash with SIGKILL) or bwrap isn't installed on Linux (dispatches then run
+unsandboxed); a conditional `info[]` array appears on non-Linux platforms
+noting sandboxing is unavailable there. See
+[troubleshooting.md](troubleshooting.md).
 
 ## `taskferry --version` / `taskferry -V`
 

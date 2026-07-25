@@ -287,7 +287,7 @@ PROMPT_EOF
 
 Pull only the fields you actually need from a result instead of the full payload
 with `taskferry result <id> --fields message,tokens,cost` (or any subset of
-`message,narration,tokens,cost,sessionId,exitCode,signal,failureReason,failureDetail,keySlot,logPath`)
+`message,narration,tokens,cost,sessionId,exitCode,signal,spawnError,failureReason,failureDetail,keySlot,logPath,incomplete,finalMarker`)
 — cheaper than `--full` when you don't need untruncated narration. To continue
 an advisor conversation instead of starting a fresh one (e.g. a follow-up
 question after its first answer), pass the same `--session-id` the first

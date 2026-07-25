@@ -37,11 +37,15 @@ repository root; the plugin itself lives under `integrations/claude/`
 
 After `git pull` (or any other change to the checkout), re-run `taskferry
 setup` from inside it. With `claude` on `PATH`, the Claude Code leg
-re-adds the marketplace if it has gone missing and calls `claude plugin
-update taskferry@taskferry` for the user-scoped install; without
-`claude` on `PATH`, the rest of the bootstrap still runs but the
-Claude-specific step is skipped. Restart Claude Code so it picks up the
-newly refreshed plugin.
+re-adds the marketplace if it has gone missing, then refreshes the
+user-scoped install: it compares the checkout's current git HEAD hash
+against the hash recorded at the last install, and if they differ, runs
+`claude plugin uninstall taskferry@taskferry --keep-data -y` followed by
+`claude plugin install taskferry@taskferry --scope user` (a plain `claude
+plugin update taskferry@taskferry` is only the fallback when git isn't
+available to compute a hash). Without `claude` on `PATH`, the rest of the
+bootstrap still runs but the Claude-specific step is skipped. Restart
+Claude Code so it picks up the newly refreshed plugin.
 
 ## Remove
 

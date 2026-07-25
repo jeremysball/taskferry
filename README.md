@@ -116,10 +116,11 @@ or nothing if none is. Compose it into a larger statusline script
 
 taskferry reads user-tunable options from
 `$XDG_CONFIG_HOME/taskferry/config.json` (default
-`~/.config/taskferry/config.json`), which sits above `TASKFERRY_*` env vars
-and built-in defaults in precedence. Both the config file and every env
-var are optional; a fresh install runs on defaults alone. Field list and
-precedence rules: [docs/config.md](docs/config.md).
+`~/.config/taskferry/config.json`), which sits below `TASKFERRY_*` env vars
+but above built-in defaults in precedence — a set env var always overrides
+the config file. Both the config file and every env var are optional; a
+fresh install runs on defaults alone. Field list and precedence rules:
+[docs/config.md](docs/config.md).
 
 ### Updating an existing checkout
 

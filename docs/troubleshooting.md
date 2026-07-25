@@ -6,7 +6,7 @@ Start with `taskferry doctor --full`. It connects to the daemon
 ```
 healthy: true
 pid: 605018
-version: 2.0.0
+version: 1
 cliVersion: 2.0.0
 protocolVersion: 1
 ```
@@ -112,8 +112,8 @@ the specific log line or error text that triggered the classification.
 ## `taskferry result` says the task is still running
 
 `result` only returns a final `message`/`narration` once a task reaches
-`done` or `crashed`. Call `taskferry wait <id>` first (looping past its
-45-second internal cap for a long task — see
+`done` or `crashed`. Call `taskferry wait <id>` first (re-running it past
+its 15-minute default cap for a long task — see
 [cli-reference.md](cli-reference.md#taskferry-wait-id-options)), or check
 `taskferry status <id>` to confirm it has actually settled.
 

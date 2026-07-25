@@ -185,9 +185,12 @@ Every dispatched OpenCode child, and every summary child, runs wrapped in
 - **`XDG_DATA_HOME` is redirected.** OpenCode writes its own logs, session
   database, and snapshots under `XDG_DATA_HOME` (`~/.local/share` by
   default), which is read-only inside the sandbox. Sandboxed dispatches get
-  `XDG_DATA_HOME` pointed at `<runtimeDir>/opencode-data` instead — a
-  writable location under the same `runtimeDir` bind used for the daemon
-  socket. This is a separate store from the host's real data home: a
+  `XDG_DATA_HOME` pointed at `<cacheDir>/opencode-data` instead (`cacheDir`
+  is `TASKFERRY_CACHE_DIR` or `$XDG_CACHE_HOME/taskferry`, default
+  `~/.cache/taskferry`) — real disk, not the small `runtimeDir` tmpfs used
+  for the daemon socket, since OpenCode's snapshot store grows unbounded
+  across dispatches and previously filled that tmpfs entirely. This is a
+  separate store from the host's real data home: a
   session started outside the sandbox can't be resumed inside it (or vice
   versa), and `--continue`/`--session <id>` resolve against whichever data
   home the current dispatch is using.

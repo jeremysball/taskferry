@@ -65,16 +65,21 @@ remove a config value to fall back to the old env-var-only behavior.
 ## What's not in the config file
 
 `TASKFERRY_STATE_DIR`, `TASKFERRY_RUNTIME_DIR`, `TASKFERRY_SOCKET_PATH`,
-`TASKFERRY_WATCHDOG_POLL_MS`, and `TASKFERRY_CHILD` stay env-var-only —
-they're process plumbing (where state lives, how fast the watchdog polls,
-an internal marker), not something most users tune for behavior.
+`TASKFERRY_WATCHDOG_POLL_MS`, `TASKFERRY_CHILD`, and `TASKFERRY_AUTO_START`
+stay env-var-only — they're process plumbing (where state lives, how fast
+the watchdog polls, an internal marker, the daemon auto-spawn escape hatch),
+not something most users tune for behavior.
 
 ## No hot-reload
 
-The config file is read once, at daemon startup — the same as env vars
-today. Changing `config.json` while the daemon is running has no effect
-until the daemon restarts. There is also no `taskferry config` CLI
-subcommand yet; hand-edit the file.
+Daemon-side config fields (`maxConcurrentTasks`, `noOutputTimeoutMs`, and
+the rest read at `createTaskManager()` construction) are read once, at
+daemon startup — the same as env vars today. Changing `config.json` while
+the daemon is running has no effect on those fields until the daemon
+restarts. `waitDefaultTimeoutMs` is the one exception: the CLI reads it
+fresh on every `wait`/`summary --wait` call, so a change takes effect
+immediately without a daemon restart. There is also no `taskferry config`
+CLI subcommand yet; hand-edit the file.
 
 ## Errors
 

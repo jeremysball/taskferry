@@ -32,7 +32,7 @@ opencode-plugin.js  native OpenCode plugin: calls client.js directly,
                      not through cli.js
 ```
 
-`src/tasks.js` (1722 lines) is the largest file by a wide margin and does
+`src/tasks.js` (2606 lines) is the largest file by a wide margin and does
 the real work; everything above it is thin. If a bug report doesn't
 obviously belong to args parsing or output formatting, start there.
 
@@ -40,19 +40,19 @@ obviously belong to args parsing or output formatting, start there.
 
 | File | Lines | Responsibility |
 |---|---|---|
-| `cli.js` | 121 | Entrypoint. Direct-execution guard (`fs.realpathSync(argv[1]) === import.meta.url`, symlink-safe) so it's importable without side effects. |
-| `args.js` | 398 | Per-command flag specs, defaults, validation. Rejects retired MCP-era names (`poll`, `--task-id`, `--timeout_ms`) with a rename hint. |
-| `commands.js` | 159 | One function per command; the only place that calls `client.request`/`client.subscribe`. |
-| `client.js` | 301 | Daemon connection, auto-spawn-on-first-use, request/response correlation by id, `subscribe()` for events. |
-| `daemon.js` | 395 | `net.createServer`, one socket per client, request dispatch loop, `event.subscribe` bookkeeping, stale-socket takeover logic (`prepareSocket`). |
-| `tasks.js` | 1722 | `createTaskManager()`: dispatch, cancel, status, poll (`wait`'s RPC target), list, result, tail, summarize, advisor, state persistence (`tasks.json`), the no-output watchdog, queueing/concurrency caps, key-slot env stripping. |
-| `protocol.js` | 208 | `PROTOCOL_VERSION`, `RPC_METHODS`, request/response/error envelope encode/decode, method-name-to-manager-function mapping. |
-| `events.js` | 55 | Assigns a monotonic sequence number to each emitted event; that's the whole file. |
-| `activity.js` | 212 | `activityCacheKey`/cache `refresh()`: bounded head+tail narration snapshot, optional model-summary call, min-interval throttling. |
-| `state-lock.js` | 91 | `withFileLock()`: synchronous, `Atomics.wait`-based cross-process exclusive lock; guards the daemon auto-start race and every `persistTask()` write (dispatch/cancel/settlement — the request hot path). |
-| `output.js` | 174 | TOON encoding, `leanStatus`/`leanResult`/`projectList`/`homeView`, hint-string MCP-name migration. |
+| `cli.js` | 152 | Entrypoint. Direct-execution guard (`fs.realpathSync(argv[1]) === import.meta.url`, symlink-safe) so it's importable without side effects. |
+| `args.js` | 418 | Per-command flag specs, defaults, validation. Rejects retired MCP-era names (`poll`, `--task-id`, `--timeout_ms`) with a rename hint. |
+| `commands.js` | 315 | One function per command; the only place that calls `client.request`/`client.subscribe`. |
+| `client.js` | 368 | Daemon connection, auto-spawn-on-first-use, request/response correlation by id, `subscribe()` for events. |
+| `daemon.js` | 459 | `net.createServer`, one socket per client, request dispatch loop, `event.subscribe` bookkeeping, stale-socket takeover logic (`prepareSocket`). |
+| `tasks.js` | 2606 | `createTaskManager()`: dispatch, cancel, status, poll (`wait`'s RPC target), list, result, tail, summarize, advisor, state persistence (`tasks.json`), the no-output watchdog, queueing/concurrency caps, key-slot env stripping. |
+| `protocol.js` | 220 | `PROTOCOL_VERSION`, `RPC_METHODS`, request/response/error envelope encode/decode, method-name-to-manager-function mapping. |
+| `events.js` | 57 | Assigns a monotonic sequence number to each emitted event; that's the whole file. |
+| `activity.js` | 346 | `activityCacheKey`/cache `refresh()`: bounded head+tail narration snapshot, optional model-summary call, min-interval throttling. |
+| `state-lock.js` | 84 | `withFileLock()`: synchronous, `Atomics.wait`-based cross-process exclusive lock; guards the daemon auto-start race and every `persistTask()` write (dispatch/cancel/settlement — the request hot path). |
+| `output.js` | 248 | TOON encoding, `leanStatus`/`leanResult`/`projectList`/`homeView`, hint-string MCP-name migration. |
 | `opencode-plugin.js` | 174 | OpenCode's native plugin surface: toasts on task state transitions by polling `client.js` directly. |
-| `setup.js` | 210 | `taskferry setup`: npm install, managed symlinks, per-client integration registration (see `.superpowers/.completed/specs/2026-07-16-taskferry-setup-design.md`). |
+| `setup.js` | 268 | `taskferry setup`: npm install, managed symlinks, per-client integration registration (see `.superpowers/.completed/specs/2026-07-16-taskferry-setup-design.md`). |
 | `scripts/generate-skill.js` | — | Regenerates `integrations/*/skills/using-taskferry/SKILL.md` from `skills/using-taskferry/SKILL.md`; `--check` fails on drift. The two generated copies are committed, not gitignored — they're what the Claude Code and Codex plugin marketplaces actually read (`integrations.test.js` pins the plugin `source` to those exact paths), so a missing or stale copy ships wrong skill content to real installs, not just a rebuildable artifact. |
 
 Every `*.js` above has a co-located `*.test.js` (`node --test`, no

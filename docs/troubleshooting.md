@@ -70,25 +70,29 @@ confirm nothing else holds that path open (`lsof <socket-path>` on macOS,
 
 ## `dispatch` fails with `spawnError`
 
-`opencode` itself failed to launch — usually `opencode` isn't installed or
-isn't on the `PATH` the daemon was started with. Confirm with `which
-opencode` in the same shell/environment the daemon auto-started from
-(remember: the daemon inherits environment from whichever command first
-triggered its auto-start, not necessarily your current shell — see
-[daemon.md](daemon.md#auto-start)). If you just installed `opencode`, stop
-the existing daemon (it started before `opencode` was on `PATH`) and let
-the next command spawn a fresh one.
+The task's worker CLI itself failed to launch — `opencode` or `pi`,
+whichever the task's executor selected (explicitly via `--executor`, or the
+daemon's configured default) — usually because that binary isn't installed
+or isn't on the `PATH` the daemon was started with. Confirm with `which
+opencode`/`which pi` in the same shell/environment the daemon auto-started
+from (remember: the daemon inherits environment from whichever command
+first triggered its auto-start, not necessarily your current shell — see
+[daemon.md](daemon.md#auto-start)). If you just installed the missing
+binary, stop the existing daemon (it started before that binary was on
+`PATH`) and let the next command spawn a fresh one.
 
 ## A task is stuck `crashed` with `failureReason: "no_output_timeout"`
 
 The task produced no parseable log event within
 `TASKFERRY_NO_OUTPUT_TIMEOUT_MS` (default 256000ms) and the watchdog killed
-it. Read the log directly (`taskferry status <id> --full` for the
-`logPath`) to see what, if anything, `opencode` wrote before being killed —
-a common cause is a prompt or model that needs an interactive step
-taskferry's non-interactive `opencode run --auto` invocation can't satisfy.
-Raise `TASKFERRY_NO_OUTPUT_TIMEOUT_MS` only if the task is legitimately
-slow to produce its first log line, not to paper over a hung `opencode`.
+it. This applies equally to either executor. Read the log directly
+(`taskferry status <id> --full` for the `logPath`) to see what, if
+anything, the selected worker wrote before being killed — a common cause
+is a prompt or model that needs an interactive step taskferry's
+non-interactive invocation can't satisfy (`opencode run --auto` for the
+`opencode` executor; `pi`'s own non-interactive mode for `pi`). Raise
+`TASKFERRY_NO_OUTPUT_TIMEOUT_MS` only if the task is legitimately slow to
+produce its first log line, not to paper over a hung worker.
 
 ## A task is stuck `crashed` with a provider-failure `failureReason`
 

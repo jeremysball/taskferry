@@ -52,7 +52,7 @@ obviously belong to args parsing or output formatting, start there.
 | `state-lock.js` | 84 | `withFileLock()`: synchronous, `Atomics.wait`-based cross-process exclusive lock; guards the daemon auto-start race and every `persistTask()` write (dispatch/cancel/settlement — the request hot path). |
 | `output.js` | 248 | TOON encoding, `leanStatus`/`leanResult`/`projectList`/`homeView`, hint-string MCP-name migration. |
 | `opencode-plugin.js` | 174 | OpenCode's native plugin surface: toasts on task state transitions by subscribing to daemon task-state events through `client.js`. |
-| `executor.js` | 217 | `WorkerExecutor` abstraction: `opencodeExecutor()`/`piExecutor()` build each CLI's spawn args, summary prompt, log-event normalization, and sandboxed auth-file binding. |
+| `executor.js` | 217 | `WorkerExecutor` abstraction: `opencodeExecutor()`/`piExecutor()` build each CLI's spawn args, summary prompt, log-event normalization, and sandboxed auth-file binding. Both executor objects expose a summary-prompt method, but `tasks.js` currently hardcodes every summary task's `executorId` to `"opencode"` regardless of the originating dispatch's executor — `piExecutor()`'s summary support is unused in practice. |
 | `sandbox.js` | 138 | `bwrap` mount layout: read-only root bind, deny-list (`~/.ssh`, `~/.aws`, `~/.config/gcloud`, `~/.config/gh`, `~/.gnupg`), `allowedDirs` merging, git-common-dir binding for worktrees. |
 | `config.js` | 86 | `loadConfig()`: reads/validates `config.json` against `CONFIG_FIELD_TYPES`, rejects unrecognized keys. |
 | `mcp-isolation.js` | 107 | Playwright MCP isolation checks for `taskferry doctor`/`setup` (`opencode.jsonc`, Claude Code's Playwright MCP config). |

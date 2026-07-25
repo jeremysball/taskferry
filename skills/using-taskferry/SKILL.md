@@ -45,8 +45,12 @@ and burns wall-clock time versus just doing it.
   dispatched in your response to the user, not just in the shell command — the
   user shouldn't have to read the command to know what's running.
 - Both `dispatch` and `advisor` also accept `--executor <opencode|pi>` to pick
-  which worker CLI is spawned. Omit it to use the default (`opencode`); pass
-  `--executor pi` only when the task specifically needs the `pi` CLI.
+  which worker CLI is spawned. Omit it to use the configured default (built-in:
+  `opencode`, but a workspace can set `TASKFERRY_DEFAULT_EXECUTOR` or
+  `config.json`'s `defaultExecutor` to `pi` instead — check before assuming an
+  omitted flag means opencode). Pass `--executor pi`/`--executor opencode`
+  explicitly whenever the task needs a specific CLI regardless of that
+  default.
 - Start fresh sessions for each separate implementation task and each reviewer.
 - Resume only the implementer session for a fix to that same task.
 - Keep the task brief and directory explicit so the worker operates in the intended

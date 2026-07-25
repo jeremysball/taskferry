@@ -96,8 +96,9 @@ run a bounded snapshot of a task's recent narration through a secondary
 model (`opencode/mimo-v2.5-free` by default, overridable with
 `TASKFERRY_SUMMARY_MODEL`) to produce a short human-readable status line.
 `taskferry summary --mode report` (the default `summary` mode) does the
-same thing at larger scale: a full asynchronous OpenCode subtask that reads
-more of the log.
+same thing as a full asynchronous OpenCode subtask instead of an inline
+call, but reads the log under the same bound: at most 96 KiB (head and
+tail), or a smaller delta excerpt when continuing a prior summary session.
 
 This is a real, secondary call to a model provider — do not summarize a
 task whose log contains secrets you don't want sent there. Specifics:
@@ -142,8 +143,8 @@ bounds the target length between 75 and 300 words (default 200).
 
 ## `TASKFERRY_CHILD`
 
-Every dispatched OpenCode child, and every summary child, runs with
-`TASKFERRY_CHILD=1` set in its environment. The native OpenCode plugin
+Every dispatched worker child (OpenCode or pi), and every summary child,
+runs with `TASKFERRY_CHILD=1` set in its environment. The native OpenCode plugin
 (`src/opencode-plugin.js`) checks this and returns an empty hook set when
 present — so a task that itself runs `opencode` (directly, or indirectly
 through a nested taskferry dispatch) doesn't load a second copy of the
@@ -151,7 +152,8 @@ toast/context integration inside that nested process.
 
 ## Filesystem sandboxing (bubblewrap)
 
-Every dispatched OpenCode child, and every summary child, runs wrapped in
+Every dispatched worker child (OpenCode or pi), and every summary child,
+runs wrapped in
 [`bwrap`](https://github.com/containers/bubblewrap) by default on Linux:
 
 - **Mount layout.** A full read-only bind of `/` (`--ro-bind / /`) so the
@@ -189,10 +191,12 @@ Every dispatched OpenCode child, and every summary child, runs wrapped in
   extra directories, for anything else a dispatch legitimately needs to
   write outside its own working directory. Set it as a comma-separated
   list of paths — as the `allowedDirs` config field (applies to every
-  dispatch the daemon serves) or via `--allowed-dirs <path,path,...>` on a
-  single `taskferry dispatch` call (adds to, not replaces, the config
-  default). Entries that don't exist on disk are silently skipped, the
-  same as the deny-list.
+  dispatch the daemon serves, including internal report-summary children)
+  or via `--allowed-dirs <path,path,...>` on a single `taskferry dispatch`
+  call (adds to, not replaces, the config default; unlike the config-level
+  setting, per-dispatch `--allowed-dirs` does not carry over to that
+  dispatch's own summary children). Entries that don't exist on disk are
+  silently skipped, the same as the deny-list.
 - **`XDG_DATA_HOME` is redirected.** OpenCode writes its own logs, session
   database, and snapshots under `XDG_DATA_HOME` (`~/.local/share` by
   default), which is read-only inside the sandbox. Sandboxed dispatches get

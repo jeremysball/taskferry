@@ -274,13 +274,16 @@ daemon if needed), and reports `{ healthy, pid, version }`. `--full` adds
 
 Also reports `integrations.claude.installed`, checked locally via `claude
 plugin list --json` (not a daemon RPC), and
-`integrations.playwrightMcpIsolation.{opencode,claudeCode}` (each client's
-Playwright MCP browser-profile isolation status, same shape `setup` returns
-— see above). A conditional `warnings[]` array appears when Playwright MCP
-isolation is missing (concurrent dispatches sharing one browser profile can
-crash with SIGKILL) or bwrap isn't installed on Linux (dispatches then run
-unsandboxed); a conditional `info[]` array appears on non-Linux platforms
-noting sandboxing is unavailable there. See
+`integrations.playwrightMcpIsolation.{opencode,claudeCode}` — each client's
+Playwright MCP browser-profile isolation status. This is a read-only check
+(`{checked, path, isolated}`, or `{checked: false, reason}` if there was
+nothing to check), a different, non-mutating shape from the `{changed, ...}`
+fields `setup` returns for the same two clients — `doctor` never edits a
+config file, `setup` does. A conditional `warnings[]` array appears when
+Playwright MCP isolation is missing (concurrent dispatches sharing one
+browser profile can crash with SIGKILL) or bwrap isn't installed on Linux
+(dispatches then run unsandboxed); a conditional `info[]` array appears on
+non-Linux platforms noting sandboxing is unavailable there. See
 [troubleshooting.md](troubleshooting.md).
 
 ## `taskferry --version` / `taskferry -V`
@@ -338,7 +341,7 @@ integrations:
   codex: {status: desktop-install-required,next: "Open Codex desktop, install Taskferry from its marketplace, then review and trust its hooks."}
 playwrightMcpIsolation:
   opencode: {changed: false, reason: "no writable opencode.json with a playwright MCP entry found"}
-  claudeCode: {changed: false, path: /home/user/.claude/settings.json}
+  claudeCode: {changed: false, path: /home/user/.playwright-mcp/config.json}
 ```
 
 Field-by-field:

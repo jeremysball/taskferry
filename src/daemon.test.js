@@ -870,6 +870,27 @@ describe("multiplexed daemon client", () => {
     );
   });
 
+  test("includes a boot-error file's contents in the timeout error", async (t) => {
+    const paths = temporaryPaths(t);
+    fs.mkdirSync(paths.runtimeDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(paths.runtimeDir, "daemon-boot.err"),
+      "error: could not parse /fake/config.json: bad json\nhelp: fix it"
+    );
+
+    await assert.rejects(
+      () => connectClient({
+        socketPath: paths.socketPath,
+        stateDir: paths.stateDir,
+        runtimeDir: paths.runtimeDir,
+        startupTimeoutMs: 20,
+        retryDelayMs: 5,
+        ensureDaemonFn: () => {},
+      }),
+      /daemon boot failed: error: could not parse \/fake\/config\.json/
+    );
+  });
+
   test("rejects oversized unterminated daemon messages", async (t) => {
     const paths = temporaryPaths(t);
     fs.mkdirSync(paths.runtimeDir, { recursive: true });

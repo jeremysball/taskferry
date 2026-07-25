@@ -334,8 +334,33 @@ export async function connectClient({
     }
   } while (Date.now() < deadline);
 
+  let bootError;
+  try {
+    bootError = fs.readFileSync(bootErrorPath(runtimeDir), "utf8").trim();
+  } catch (err) {
+    if (errCode(err) !== "ENOENT") throw err;
+  }
   throw new Error(
     `error: taskferry daemon did not become ready within ${startupTimeoutMs}ms: ${lastError?.message || "connection failed"}\n`
+    + (bootError ? `daemon boot failed: ${bootError}\n` : "")
     + `help: check ${runtimeDir} permissions and daemon startup diagnostics, then retry`
   );
+}
+
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  try {
+    ensureDaemonStarted();
+  } catch (err) {
+    const bootEnv = process.env;
+    const bootStateDir = resolveStateDir(bootEnv);
+    const bootRuntimeDir = resolveRuntimeDir({ env: bootEnv, stateDir: bootStateDir });
+    try {
+      fs.mkdirSync(bootRuntimeDir, { recursive: true, mode: 0o700 });
+      fs.writeFileSync(bootErrorPath(bootRuntimeDir), err instanceof Error ? err.message : String(err));
+    } catch {
+      // Best-effort diagnostics only — connectClient's own generic timeout
+      // error still surfaces to the user even if this write fails.
+    }
+    process.exitCode = 1;
+  }
 }

@@ -170,8 +170,9 @@ commit to appear, and don't `tail` mid-run just to check progress absent a real
 need to inspect activity.
 
 `wait` also takes a `--tail-chars <number>` option, but it only fires on a
-`--timeout-ms` timeout (trailing text characters from that point) — since
-`--timeout-ms` itself is not something to pass (previous paragraph), treat
+timeout (trailing text characters from that point) — including the default
+15-minute wait timeout, not just an explicit `--timeout-ms`. Since neither
+timeout is something to wait out deliberately (previous paragraph), treat
 `--tail-chars` as dead weight too and don't reach for it. For the settled
 result, use `taskferry result <id> --fields ...` (see below) instead — it
 returns real structured fields, not a raw character tail.
@@ -366,9 +367,9 @@ the task failed:
 - Check `taskferry status <id> --full` for `sessionId`. If it is non-null, real
   work happened before the kill — resume that exact session rather than
   re-dispatching fresh and re-paying for research already done:
-  `taskferry dispatch --prompt "Continue exactly where you left off and finish
-  the task." --model <same model> --directory "<worktree>" --session-id
-  <sessionId>`.
+  `taskferry dispatch --prompt - --model <same model> --directory "<worktree>"
+  --session-id <sessionId> <<'PROMPT_EOF'` followed by `Continue exactly where
+  you left off and finish the task.` and a `PROMPT_EOF` terminator.
 - If `sessionId` is null, nothing was salvageable (the process never got far
   enough to start a session) — dispatching fresh is the only option.
 - Inspect the worktree (`git status`, `git diff --stat`, look for the expected

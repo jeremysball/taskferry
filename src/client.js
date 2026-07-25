@@ -294,11 +294,12 @@ export async function connectClient({
   stateDir = resolveStateDir(env),
   runtimeDir = resolveRuntimeDir({ env, stateDir }),
   socketPath = env.TASKFERRY_SOCKET_PATH || path.join(runtimeDir, "daemon.sock"),
-  // Callers that poll on a tight cadence with a short external timeout (e.g.
-  // a 1s-refresh statusline segment) should opt out via TASKFERRY_AUTO_START=0:
-  // an interrupted auto-start still holds the daemon-start lock for the full
-  // boot+ready-poll window, so many such pollers racing concurrently can
-  // livelock the lock instead of ever letting one attempt finish.
+  // General-purpose escape hatch: a caller can set TASKFERRY_AUTO_START=0 to
+  // fail fast on a missing daemon instead of spawning one (e.g. a script that
+  // should never have side effects). Not needed for lock safety — the
+  // detached booter (startDaemonBooter, above) never blocks the caller on
+  // the lock regardless of autoStart, so a short-timeout poller no longer
+  // has to opt out just to avoid the old inline-boot livelock.
   autoStart = env.TASKFERRY_AUTO_START !== "0",
   startupTimeoutMs = 5000,
   retryDelayMs = 25,

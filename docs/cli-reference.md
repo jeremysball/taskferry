@@ -43,7 +43,7 @@ workspace"` and `next` suggests `dispatch` instead.
 
 ## `taskferry dispatch --prompt <text> [options]`
 
-Queues `opencode run --dir <directory> --auto --format json -m <model> <prompt>`
+Queues `opencode run --dir <directory> --auto --format json -m <model> -- <prompt>`
 (or the equivalent `pi` invocation when `--executor pi` is given) as a
 background child process and returns a task summary immediately.
 
@@ -51,8 +51,8 @@ background child process and returns a task summary immediately.
 |---|---|
 | `--prompt <text>` | Required. Pass `-` to read the prompt from piped stdin instead (`cat prompt.txt \| taskferry dispatch --prompt -`) — use this for prompts too large to pass as a single command-line argument |
 | `--directory <path>` | Defaults to the current workspace; must be an absolute, existing directory |
-| `--model <id>` | `provider/model`, e.g. `opencode-go/minimax-m3`. Run `opencode models` to list installed models. Defaults to `openai/gpt-5.6-luna` at variant `high` |
-| `--variant <name>` | Reasoning-effort override (`high`, `max`, `minimal`, ...), applied only alongside `--model` |
+| `--model <id>` | `provider/model`, e.g. `opencode-go/minimax-m3`. Run `opencode models` to list installed models. Defaults to `openai/gpt-5.6-luna` at variant `high`. When `--session-id` is given without `--model`, the model is instead inherited from the most recent prior task dispatched with that session id |
+| `--variant <name>` | Reasoning-effort override (`high`, `max`, `minimal`, ...), applied only alongside `--model` — omitting `--model` (including on a `--session-id` resume) always forces variant `high`, regardless of any `--variant` passed |
 | `--executor <opencode\|pi>` | Which worker CLI to spawn. Defaults to `opencode` |
 | `--session-id <id>` | Resume an existing OpenCode session (`--continue --session <id>`) instead of starting fresh; get session ids from a prior `result` or `status --full` |
 | `--key-slot <name>` | Use a configured provider-key slot instead of the daemon's ambient key; see [security.md](security.md) |

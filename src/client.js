@@ -89,8 +89,9 @@ export async function startDaemonBooter({
 } = {}) {
   try {
     fs.unlinkSync(bootErrorPath(runtimeDir));
-  } catch (err) {
-    if (errCode(err) !== "ENOENT") throw err;
+  } catch {
+    // Best-effort: clearing a stale diagnostic file must never block the
+    // booter itself from spawning (e.g. EACCES on a file left by another uid).
   }
   spawnBooterFn({ env, stateDir, runtimeDir, socketPath });
 }

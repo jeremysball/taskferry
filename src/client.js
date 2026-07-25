@@ -304,7 +304,7 @@ export async function connectClient({
   retryDelayMs = 25,
   maxBufferBytes = 1024 * 1024,
   maxQueuedEvents = 1000,
-  ensureDaemonFn = ensureDaemonStarted,
+  ensureDaemonFn = startDaemonBooter,
   ...startupOptions
 } = {}) {
   const clientOptions = { maxBufferBytes, maxQueuedEvents };

@@ -776,6 +776,35 @@ describe("multiplexed daemon client", () => {
     assert.equal((await client.request("system.health")).healthy, true);
   });
 
+  test("default auto-start fires a detached booter and does not block on its own boot completing", async (t) => {
+    const paths = temporaryPaths(t);
+    fs.mkdirSync(paths.runtimeDir, { recursive: true });
+    const fake = fakeManagerFactory();
+    let daemon;
+    let spawnCalls = 0;
+    const client = await connectClient({
+      socketPath: paths.socketPath,
+      stateDir: paths.stateDir,
+      runtimeDir: paths.runtimeDir,
+      retryDelayMs: 5,
+      startupTimeoutMs: 500,
+      spawnBooterFn: () => {
+        spawnCalls++;
+        // Stands in for the detached subprocess: starts the real daemon
+        // well after connectClient's own auto-start call has returned, to
+        // prove connectClient isn't blocked waiting on it in-process.
+        setTimeout(() => {
+          startDaemon({ ...paths, taskManagerFactory: fake.factory }).then((started) => { daemon = started; });
+        }, 30);
+      },
+    });
+    t.after(() => client.close());
+    t.after(() => daemon?.close());
+
+    assert.equal(spawnCalls, 1);
+    assert.equal((await client.request("system.health")).healthy, true);
+  });
+
   test("uses withFileLock so racing auto-start attempts spawn only one daemon", (t) => {
     const paths = temporaryPaths(t);
     fs.mkdirSync(paths.runtimeDir, { recursive: true });

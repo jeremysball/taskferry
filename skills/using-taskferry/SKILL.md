@@ -39,8 +39,8 @@ and burns wall-clock time versus just doing it.
 ## Worker Contract
 
 - Select the worker model, variant, and optional key slot explicitly when the task
-  needs them: `cat "$prompt_file" | taskferry dispatch --prompt - --directory
-  "<worktree>" --model <provider/model> --variant <name> --key-slot <name>`.
+  needs them: `taskferry dispatch --prompt - --directory "<worktree>" --model
+  <provider/model> --variant <name> --key-slot <name> <<'PROMPT_EOF'` ... `PROMPT_EOF`.
 - State the exact `provider/model` slug (and variant/key-slot, if set) being
   dispatched in your response to the user, not just in the shell command — the
   user shouldn't have to read the command to know what's running.
@@ -51,11 +51,16 @@ and burns wall-clock time versus just doing it.
 - Resume only the implementer session for a fix to that same task.
 - Keep the task brief and directory explicit so the worker operates in the intended
   worktree.
-- Write long prompts with the runtime's file-writing tool before invoking Taskferry.
-  Pipe the file into stdin with `--prompt -` so the rendered shell command stays
-  short. Do not inline a long prompt in `--prompt` or pass it via command
-  substitution (`--prompt "$(cat "$prompt_file")"`) — substitution still dumps the
-  full prompt into the rendered command line; only `--prompt -` avoids that.
+- Feed every prompt to `--prompt -` over stdin via a heredoc: `taskferry dispatch
+  --prompt - ... <<'PROMPT_EOF'` followed by the prompt text and a `PROMPT_EOF`
+  terminator on its own line. Always quote the delimiter (`<<'PROMPT_EOF'`, not
+  `<<PROMPT_EOF`) so the shell doesn't expand `$vars` or backticks inside the
+  prompt. No intermediate prompt file, no file-writing tool call — the heredoc
+  is the only prompt-delivery mechanism. Never inline the prompt as a `--prompt
+  "<text>"` argument and never pass it via command substitution
+  (`--prompt "$(cat some_file)"`) — both risk shell-quoting breakage on prompts
+  containing quotes, `$`, or backticks, and substitution is capped by the
+  platform's argv-length limit on large prompts.
 - End every dispatch prompt with an explicit instruction to close on a line
   starting `Status:` — one of `DONE | DONE_WITH_CONCERNS | BLOCKED |
   NEEDS_CONTEXT` for implementers, or `Approved | Needs fixes` after a `Task
@@ -93,7 +98,7 @@ detailed self-report is exactly as unverified as a terse one.
 
 ## Choosing a Model
 
-See `picking-a-model` for the full tier breakdown (cheapest/standard/
+See `choosing-a-model` for the full tier breakdown (cheapest/standard/
 most-capable), the role-to-tier mapping, and effort-level nuances. The
 summary that matters here: use the least powerful model that can handle
 each role, not reflexively the strongest one available — but the review
@@ -108,7 +113,7 @@ risky, security-sensitive, or has already failed on a lighter model.
   requires judgment even when the diff itself was cheap-tier transcription
   work. Dispatching the cheapest available model as a task reviewer because
   the implementer task was cheap is a documented anti-pattern (see
-  `picking-a-model`), not an acceptable cost optimization.
+  `choosing-a-model`), not an acceptable cost optimization.
 - **Turn count beats token price.** The cheapest models routinely take
   2-3× the turns on multi-step work, costing more overall in wall-clock and
   context than a standard-tier model that finishes clean. Reserve the cheapest
@@ -132,21 +137,14 @@ risky, security-sensitive, or has already failed on a lighter model.
 
 ## AXI CLI
 
-Store each long prompt under Taskferry's XDG state tree. Create the parent directory,
-then use the runtime's file-writing tool to write the prompt itself. Do not use a
-shell heredoc, because that puts the full prompt back into the rendered command.
+Dispatch work with an explicit workspace, feeding the prompt straight over
+stdin with a quoted heredoc — no intermediate prompt file, no file-writing
+tool call. `--prompt -` reads until EOF:
 
 ```sh
-taskferry_state="${TASKFERRY_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/taskferry}"
-prompt_file="$taskferry_state/prompts/<short-task-name>.txt"
-```
-
-Dispatch work with the prompt file and explicit workspace, piping the prompt in
-over stdin rather than command substitution — `--prompt -` reads until EOF, so
-the rendered command never contains the prompt text:
-
-```sh
-cat "$prompt_file" | taskferry dispatch --prompt - --directory "<worktree>"
+taskferry dispatch --prompt - --directory "<worktree>" <<'PROMPT_EOF'
+<full prompt text>
+PROMPT_EOF
 ```
 
 Inspect and wait for a task:
@@ -282,7 +280,9 @@ Read the final result and request an independent review when needed:
 
 ```sh
 taskferry result <id>
-cat "$prompt_file" | taskferry advisor --prompt - --model <provider/model> --directory "<worktree>"
+taskferry advisor --prompt - --model <provider/model> --directory "<worktree>" <<'PROMPT_EOF'
+<full prompt text>
+PROMPT_EOF
 ```
 
 Pull only the fields you actually need from a result instead of the full payload
@@ -307,9 +307,6 @@ while a task is still running -- that mode exists for the statusline/human
 the same condensed activity summaries while blocking, without a second
 parallel command doing the same job.
 
-Use a distinct prompt file for each concurrent task. Remove it with the runtime's
-file tool after the task settles and its result has been validated.
-
 ## Advisor Review
 
 Dispatch an independent advisor review when finished work is judgment-heavy or
@@ -319,8 +316,8 @@ and the tests pass" is a weaker guarantee than "the reasoning is right." Reach
 for it before merging or reporting that class of work done — not only when the
 user names a model.
 
-- `cat "$prompt_file" | taskferry advisor --prompt - --model <provider/model>
-  --directory "<worktree>"` dispatches and waits in one call.
+- `taskferry advisor --prompt - --model <provider/model> --directory
+  "<worktree>" <<'PROMPT_EOF'` ... `PROMPT_EOF` dispatches and waits in one call.
 - Use the model and effort the user specifies. Absent one, default to the
   strongest model available to you.
 - **Advisor is a review-only role: it reports findings and does not edit files.**

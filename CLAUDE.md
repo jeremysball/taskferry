@@ -11,3 +11,12 @@ After merging a PR in this repo, check open GitHub issues (`gh-axi issue list
 close <number> --reason completed --comment "<why>"`. Don't assume a merge
 closes nothing just because the PR body didn't say "Closes #N" — cross-check
 the actual diff against open issue descriptions.
+
+## Maintain a healthy `good first issue` list
+
+Keep a standing set of open issues labeled `good first issue` — small,
+self-contained, well-scoped work a new contributor could pick up without
+deep context. When triaging or filing issues, actively tag qualifying ones
+rather than leaving the label to accumulate by accident, and periodically
+sweep open issues for ones that now qualify (scope narrowed, blocker
+resolved) or no longer do (scope grew, now depends on unmerged work).

@@ -396,6 +396,46 @@ failing) before assuming a task-level problem. The CLI emits structured data,
 errors, and help as TOON on stdout, keeps diagnostics on stderr, and uses exit
 codes to distinguish success, operational failure, and usage errors.
 
+**The daemon picks up code changes automatically (deferred-until-idle
+restart), but not new environment variables.** A newly-added API key
+exported into your interactive shell after the daemon started is invisible
+to it — the daemon inherited its environment once at spawn time, and an
+env var isn't part of the source-signature check that triggers an
+auto-restart. If a dispatch crashes with an auth/`UnknownError` failure on
+a route that worked minutes ago via a direct `opencode run` PONG test,
+suspect a stale daemon environment before suspecting a provider outage: a
+PONG test runs in your interactive shell and bypasses the daemon entirely,
+so it succeeding is *not* evidence that a `taskferry dispatch` on the same
+model will work. Confirm with `tr '\0' '\n' < /proc/<daemon-pid>/environ |
+rg <KEY_NAME>`; if the key is missing, kill the daemon so the next
+`taskferry` command respawns it from a shell that has the key. On a
+machine with concurrent taskferry sessions sharing one daemon socket, the
+respawn race can take several kill-and-check iterations before a respawn
+actually wins the race and inherits the right env — loop until
+`/proc/<new-pid>/environ` shows the expected var.
+
+## When a worker's tool calls don't honor `--directory`
+
+Even with `--directory <worktree>` set correctly on the dispatch, a
+worker's individual tool calls can pass their own `workdir` that overrides
+it — confirmed once with `opencode/deepseek-v4-flash-free`: it made the
+correct code changes but every `bash`/`edit`/`write` tool call explicitly
+passed `workdir: <main-checkout-root>` instead of the assigned worktree
+(visible in the raw taskferry ndjson log via `jq 'select(.type=="tool_use")'`),
+so the commit landed on local `main` in the main checkout, not the
+worktree branch — and the worker's own report claimed a commit hash that
+didn't exist in the worktree at all. `taskferry status --full` had flagged
+`incomplete: true` on that task, which in hindsight was the earlier
+warning sign worth checking alongside the final message text.
+
+**Recovery, once you confirm this happened** (per "Verifying A Worker's
+Claimed Commit" above — the commit is missing from the assigned worktree):
+check other likely locations (the main checkout is the common one) before
+assuming the work vanished. If found there, `git cherry-pick` the commit
+onto the correct worktree branch, then `git revert` it in the wrong
+location to remove it — never a hard reset there, since that could disturb
+unrelated pre-existing dirty state in that checkout.
+
 ## Codex Installation And Hooks
 
 Registering the taskferry checkout as a Codex marketplace (see

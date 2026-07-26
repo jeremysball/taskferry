@@ -45,7 +45,7 @@ describe("piExecutor()", () => {
   test("sandboxAuthFile binds auth and overrides pi data directory", () => {
     const ex = piExecutor();
     assert.deepEqual(ex.sandboxAuthFile({ homeDir: "/home/user", dataDir: "/state/run", spawnEnv: { PI_CODING_AGENT_DIR: "/custom/pi" }, existsFn: (p) => p === "/custom/pi/auth.json" }), {
-      extraRoBind: ["/custom/pi/auth.json", "/state/run/pi-data/auth.json"],
+      extraRoBinds: [["/custom/pi/auth.json", "/state/run/pi-data/auth.json"]],
       sandboxedDataHome: "/state/run/pi-data",
       sandboxEnv: { PI_CODING_AGENT_DIR: "/state/run/pi-data" },
     });
@@ -62,7 +62,27 @@ describe("piExecutor()", () => {
   test("sandboxAuthFile falls back to ~/.pi", () => {
     const ex = piExecutor();
     const result = ex.sandboxAuthFile({ homeDir: "/home/user", dataDir: "/state/run", spawnEnv: {}, existsFn: (p) => p === "/home/user/.pi/auth.json" });
-    assert.deepEqual(result.extraRoBind, ["/home/user/.pi/auth.json", "/state/run/pi-data/auth.json"]);
+    assert.deepEqual(result.extraRoBinds, [["/home/user/.pi/auth.json", "/state/run/pi-data/auth.json"]]);
+  });
+
+  test("sandboxAuthFile also binds the real extensions directory read-only, so custom-registered providers still resolve inside the sandbox", () => {
+    const ex = piExecutor();
+    const result = ex.sandboxAuthFile({
+      homeDir: "/home/user",
+      dataDir: "/state/run",
+      spawnEnv: { PI_CODING_AGENT_DIR: "/custom/pi" },
+      existsFn: (p) => p === "/custom/pi/auth.json" || p === "/custom/pi/extensions",
+    });
+    assert.deepEqual(result.extraRoBinds, [
+      ["/custom/pi/auth.json", "/state/run/pi-data/auth.json"],
+      ["/custom/pi/extensions", "/state/run/pi-data/extensions"],
+    ]);
+  });
+
+  test("sandboxAuthFile omits the extensions bind when the real extensions directory doesn't exist", () => {
+    const ex = piExecutor();
+    const result = ex.sandboxAuthFile({ homeDir: "/home/user", dataDir: "/state/run", spawnEnv: { PI_CODING_AGENT_DIR: "/custom/pi" }, existsFn: (p) => p === "/custom/pi/auth.json" });
+    assert.deepEqual(result.extraRoBinds, [["/custom/pi/auth.json", "/state/run/pi-data/auth.json"]]);
   });
 });
 
@@ -227,7 +247,7 @@ describe("opencodeExecutor()", () => {
       existsFn: (p) => p === "/home/user/.local/share/opencode/auth.json",
     });
     assert.deepEqual(result, {
-      extraRoBind: ["/home/user/.local/share/opencode/auth.json", "/state/run/opencode-data/opencode/auth.json"],
+      extraRoBinds: [["/home/user/.local/share/opencode/auth.json", "/state/run/opencode-data/opencode/auth.json"]],
       sandboxedDataHome: "/state/run/opencode-data",
       sandboxEnv: { XDG_DATA_HOME: "/state/run/opencode-data" },
     });
@@ -236,7 +256,7 @@ describe("opencodeExecutor()", () => {
   test("sandboxAuthFile: no bind when auth.json is missing", () => {
     const ex = opencodeExecutor();
     const result = ex.sandboxAuthFile({ homeDir: "/home/user", dataDir: "/state/run", spawnEnv: {}, existsFn: () => false });
-    assert.equal(result.extraRoBind, null);
+    assert.deepEqual(result.extraRoBinds, []);
   });
 
   test("resolveExecutor: undefined and \"opencode\" both resolve to opencodeExecutor", () => {

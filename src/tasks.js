@@ -1481,10 +1481,9 @@ export function createTaskManager({
         // PI_CODING_AGENT_DIR) and which destination to ro-bind the real
         // auth file into, so each executor's bound auth destination matches
         // its own environment directory.
-        const { extraRoBind, sandboxedDataHome, sandboxEnv } = executor.sandboxAuthFile({ homeDir, dataDir: cacheDir, spawnEnv, existsFn });
+        const { extraRoBinds: executorRoBinds, sandboxedDataHome, sandboxEnv } = executor.sandboxAuthFile({ homeDir, dataDir: cacheDir, spawnEnv, existsFn });
         /** @type {[string, string][]} */
-        const extraRoBinds = [];
-        if (extraRoBind) extraRoBinds.push(extraRoBind);
+        const extraRoBinds = [...executorRoBinds];
         if (promptFilePath) extraRoBinds.push([PROMPT_DIR, PROMPT_DIR]);
         // A git worktree's real gitdir (objects/refs it shares with the main
         // checkout, plus its own HEAD/index) lives outside `launchDirectory`

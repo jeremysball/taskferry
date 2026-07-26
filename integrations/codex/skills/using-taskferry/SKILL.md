@@ -45,8 +45,12 @@ and burns wall-clock time versus just doing it.
   dispatched in your response to the user, not just in the shell command — the
   user shouldn't have to read the command to know what's running.
 - Both `dispatch` and `advisor` also accept `--executor <opencode|pi>` to pick
-  which worker CLI is spawned. Omit it to use the default (`opencode`); pass
-  `--executor pi` only when the task specifically needs the `pi` CLI.
+  which worker CLI is spawned. Omit it to use the configured default (built-in:
+  `opencode`, but a workspace can set `TASKFERRY_DEFAULT_EXECUTOR` or
+  `config.json`'s `defaultExecutor` to `pi` instead — check before assuming an
+  omitted flag means opencode). Pass `--executor pi`/`--executor opencode`
+  explicitly whenever the task needs a specific CLI regardless of that
+  default.
 - Start fresh sessions for each separate implementation task and each reviewer.
 - Resume only the implementer session for a fix to that same task.
 - Keep the task brief and directory explicit so the worker operates in the intended
@@ -170,8 +174,9 @@ commit to appear, and don't `tail` mid-run just to check progress absent a real
 need to inspect activity.
 
 `wait` also takes a `--tail-chars <number>` option, but it only fires on a
-`--timeout-ms` timeout (trailing text characters from that point) — since
-`--timeout-ms` itself is not something to pass (previous paragraph), treat
+timeout (trailing text characters from that point) — including the default
+15-minute wait timeout, not just an explicit `--timeout-ms`. Since neither
+timeout is something to wait out deliberately (previous paragraph), treat
 `--tail-chars` as dead weight too and don't reach for it. For the settled
 result, use `taskferry result <id> --fields ...` (see below) instead — it
 returns real structured fields, not a raw character tail.
@@ -194,7 +199,7 @@ command's exit — it does not surface each summary line as it's written, so
 without a `Monitor` the summaries sit in that file unseen until settlement.
 `tail -n0 -F` starts from the end so you don't re-emit lines already read, and
 turns every new summary line into its own notification as it lands (every
-~3 minutes by default — `DEFAULT_SUMMARIZER_TIMEOUT_MS` in `src/activity.js`,
+~6 minutes by default — `DEFAULT_SUMMARIZER_TIMEOUT_MS` in `src/activity.js`,
 overridable via `TASKFERRY_SUMMARIZER_TIMEOUT_MS`). Stop the monitor with `TaskStop` once the wait job's own completion
 notification confirms the task settled.
 
@@ -287,7 +292,7 @@ PROMPT_EOF
 
 Pull only the fields you actually need from a result instead of the full payload
 with `taskferry result <id> --fields message,tokens,cost` (or any subset of
-`message,narration,tokens,cost,sessionId,exitCode,signal,failureReason,failureDetail,keySlot,logPath`)
+`message,narration,tokens,cost,sessionId,exitCode,signal,spawnError,failureReason,failureDetail,keySlot,logPath,incomplete,finalMarker`)
 — cheaper than `--full` when you don't need untruncated narration. To continue
 an advisor conversation instead of starting a fresh one (e.g. a follow-up
 question after its first answer), pass the same `--session-id` the first
@@ -366,9 +371,9 @@ the task failed:
 - Check `taskferry status <id> --full` for `sessionId`. If it is non-null, real
   work happened before the kill — resume that exact session rather than
   re-dispatching fresh and re-paying for research already done:
-  `taskferry dispatch --prompt "Continue exactly where you left off and finish
-  the task." --model <same model> --directory "<worktree>" --session-id
-  <sessionId>`.
+  `taskferry dispatch --prompt - --model <same model> --directory "<worktree>"
+  --session-id <sessionId> <<'PROMPT_EOF'` followed by `Continue exactly where
+  you left off and finish the task.` and a `PROMPT_EOF` terminator.
 - If `sessionId` is null, nothing was salvageable (the process never got far
   enough to start a session) — dispatching fresh is the only option.
 - Inspect the worktree (`git status`, `git diff --stat`, look for the expected
@@ -391,18 +396,56 @@ failing) before assuming a task-level problem. The CLI emits structured data,
 errors, and help as TOON on stdout, keeps diagnostics on stderr, and uses exit
 codes to distinguish success, operational failure, and usage errors.
 
+**The daemon picks up code changes automatically (deferred-until-idle
+restart), but not new environment variables.** A newly-added API key
+exported into your interactive shell after the daemon started is invisible
+to it — the daemon inherited its environment once at spawn time, and an
+env var isn't part of the source-signature check that triggers an
+auto-restart. If a dispatch crashes with an auth/`UnknownError` failure on
+a route that worked minutes ago via a direct `opencode run` PONG test,
+suspect a stale daemon environment before suspecting a provider outage: a
+PONG test runs in your interactive shell and bypasses the daemon entirely,
+so it succeeding is *not* evidence that a `taskferry dispatch` on the same
+model will work. Confirm with `tr '\0' '\n' < /proc/<daemon-pid>/environ |
+rg <KEY_NAME>`; if the key is missing, kill the daemon so the next
+`taskferry` command respawns it from a shell that has the key. On a
+machine with concurrent taskferry sessions sharing one daemon socket, the
+respawn race can take several kill-and-check iterations before a respawn
+actually wins the race and inherits the right env — loop until
+`/proc/<new-pid>/environ` shows the expected var.
+
+## When a worker's tool calls don't honor `--directory`
+
+Even with `--directory <worktree>` set correctly on the dispatch, a
+worker's individual tool calls can pass their own `workdir` that overrides
+it — confirmed once with `opencode/deepseek-v4-flash-free`: it made the
+correct code changes but every `bash`/`edit`/`write` tool call explicitly
+passed `workdir: <main-checkout-root>` instead of the assigned worktree
+(visible in the raw taskferry ndjson log via `jq 'select(.type=="tool_use")'`),
+so the commit landed on local `main` in the main checkout, not the
+worktree branch — and the worker's own report claimed a commit hash that
+didn't exist in the worktree at all. `taskferry status --full` had flagged
+`incomplete: true` on that task, which in hindsight was the earlier
+warning sign worth checking alongside the final message text.
+
+**Recovery, once you confirm this happened** (per "Verifying A Worker's
+Claimed Commit" above — the commit is missing from the assigned worktree):
+check other likely locations (the main checkout is the common one) before
+assuming the work vanished. If found there, `git cherry-pick` the commit
+onto the correct worktree branch, then `git revert` it in the wrong
+location to remove it — never a hard reset there, since that could disturb
+unrelated pre-existing dirty state in that checkout.
+
 ## Codex Installation And Hooks
 
-Install this integration through Codex's native plugin mechanism:
-
-```sh
-codex plugin marketplace add .
-codex plugin install taskferry@taskferry
-```
+Registering the taskferry checkout as a Codex marketplace (see
+`docs/integrations/codex.md` for the bootstrap command) does not install the
+plugin itself — Codex desktop drives that step through its own UI. Open
+Codex desktop, install Taskferry from its marketplace, then review and trust
+its hooks through `/hooks` before they run.
 
 The plugin injects current workspace context at `SessionStart` and refreshes it at
-`UserPromptSubmit`. It does not provide a persistent live monitor surface. Codex
-requires you to review and trust plugin hooks through `/hooks` before they run. If
+`UserPromptSubmit`. It does not provide a persistent live monitor surface. If
 hooks are disabled in your Codex configuration, enable them only when you want this
 lifecycle context by setting:
 

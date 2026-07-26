@@ -87,6 +87,7 @@ CLI and isn't covered here; consult your history for the
   equivalent; set `TASKFERRY_*` variables in the environment the daemon
   auto-starts from instead (see [daemon.md](daemon.md#auto-start)).
 - **MCP's per-tool-call 60-second timeout** no longer bounds anything.
-  `taskferry wait`/`taskferry advisor` still cap a single call at 45
-  seconds internally, but that's now just a deliberate design choice for
-  bounded CLI calls, not a constraint inherited from a host's MCP transport.
+  `taskferry advisor` still caps a single call at 45 seconds internally by
+  default (`wait` defaults to 15 minutes instead), but that's now just a
+  deliberate design choice for bounded CLI calls, not a constraint
+  inherited from a host's MCP transport.

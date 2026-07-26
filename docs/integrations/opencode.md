@@ -28,17 +28,21 @@ that path is left alone and `setup` exits with `refusing to replace
 unmanaged path: <path>`. The same command also creates the CLI
 symlink at `~/.local/bin/taskferry` and registers the Claude Code and
 Codex integrations when their CLIs are on `PATH` — see the
-[Install section in the README](../README.md#install) for the full
+[Install section in the README](../../README.md#install) for the full
 bootstrap.
 
 ## Update
 
 After `git pull` (or any other change to the checkout), re-run
 `taskferry setup` from inside it. The OpenCode leg of `setup` is
-idempotent: when the symlink already resolves to the checkout's
-`src/opencode-plugin.js`, it is left in place; when it is missing,
-stale, or points at a different file, it is replaced. Restart OpenCode
-so it reloads the freshly linked module.
+idempotent: when no symlink exists yet, or the existing one resolves to
+a file inside *any* taskferry checkout (its own or a different one, e.g.
+after the checkout moved), it's unlinked and recreated pointing at this
+checkout's `src/opencode-plugin.js`. A dangling symlink (target no longer
+exists) or one pointing at an unrelated file is treated as unmanaged and
+rejected with `refusing to replace unmanaged path: <path>` — remove it by
+hand and re-run `setup`. Restart OpenCode so it reloads the freshly
+linked module.
 
 ## Remove
 
@@ -63,10 +67,8 @@ directory. It exposes two behaviors, both scoped to that one workspace:
   `client.tui.showToast`, titled `Taskferry(<status> · <id>)` with the
   task's current activity as the body and a variant chosen by status
   (`queued`/`running` → info, `done` → success, `crashed` → error,
-  `cancelled` → warning). Unlike Claude Code's monitor, which always shows
-  the same fixed-format line, OpenCode's toast title changes per event —
-  the closest thing this integration has to a live per-task status
-  surface.
+  `cancelled` → warning). OpenCode's toast title changes per event — the
+  closest thing this integration has to a live per-task status surface.
 - **System-prompt context.** The `experimental.chat.system.transform` hook
   injects a `Taskferry tasks:` block (up to 5 rows, with a `+N more`
   suffix) listing active tasks and terminal tasks not yet surfaced to a
@@ -77,8 +79,11 @@ directory. It exposes two behaviors, both scoped to that one workspace:
 
 If the daemon connection fails, the plugin logs through `client.app.log`
 (`service: "taskferry"`) rather than throwing, so a taskferry outage never
-breaks OpenCode itself; it just runs without task context or toasts until
-the next successful connection attempt.
+breaks OpenCode itself; it just runs without task context or toasts for the
+rest of that plugin instance's lifetime. The connection attempt happens once,
+at plugin initialization — there is no retry timer or lazy reconnect, so a
+daemon that comes back up after the initial failure isn't picked up until
+OpenCode reloads or restarts the plugin.
 
 ## `TASKFERRY_CHILD` and nested plugin loads
 

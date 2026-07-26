@@ -6,7 +6,7 @@ Start with `taskferry doctor --full`. It connects to the daemon
 ```
 healthy: true
 pid: 605018
-version: 2.0.0
+version: 1
 cliVersion: 2.0.0
 protocolVersion: 1
 ```
@@ -70,33 +70,40 @@ confirm nothing else holds that path open (`lsof <socket-path>` on macOS,
 
 ## `dispatch` fails with `spawnError`
 
-`opencode` itself failed to launch — usually `opencode` isn't installed or
-isn't on the `PATH` the daemon was started with. Confirm with `which
-opencode` in the same shell/environment the daemon auto-started from
-(remember: the daemon inherits environment from whichever command first
-triggered its auto-start, not necessarily your current shell — see
-[daemon.md](daemon.md#auto-start)). If you just installed `opencode`, stop
-the existing daemon (it started before `opencode` was on `PATH`) and let
-the next command spawn a fresh one.
+The task's worker CLI itself failed to launch — `opencode` or `pi`,
+whichever the task's executor selected (explicitly via `--executor`, or the
+daemon's configured default) — usually because that binary isn't installed
+or isn't on the `PATH` the daemon was started with. Confirm with `which
+opencode`/`which pi` in the same shell/environment the daemon auto-started
+from (remember: the daemon inherits environment from whichever command
+first triggered its auto-start, not necessarily your current shell — see
+[daemon.md](daemon.md#auto-start)). If you just installed the missing
+binary, stop the existing daemon (it started before that binary was on
+`PATH`) and let the next command spawn a fresh one.
 
 ## A task is stuck `crashed` with `failureReason: "no_output_timeout"`
 
 The task produced no parseable log event within
 `TASKFERRY_NO_OUTPUT_TIMEOUT_MS` (default 256000ms) and the watchdog killed
-it. Read the log directly (`taskferry status <id> --full` for the
-`logPath`) to see what, if anything, `opencode` wrote before being killed —
-a common cause is a prompt or model that needs an interactive step
-taskferry's non-interactive `opencode run --auto` invocation can't satisfy.
-Raise `TASKFERRY_NO_OUTPUT_TIMEOUT_MS` only if the task is legitimately
-slow to produce its first log line, not to paper over a hung `opencode`.
+it. This applies equally to either executor. Read the log directly
+(`taskferry status <id> --full` for the `logPath`) to see what, if
+anything, the selected worker wrote before being killed — a common cause
+is a prompt or model that needs an interactive step taskferry's
+non-interactive invocation can't satisfy (`opencode run --auto` for the
+`opencode` executor; `pi`'s own non-interactive mode for `pi`). Raise
+`TASKFERRY_NO_OUTPUT_TIMEOUT_MS` only if the task is legitimately slow to
+produce its first log line, not to paper over a hung worker.
 
 ## A task is stuck `crashed` with a provider-failure `failureReason`
 
 The watchdog matched a known provider-failure diagnostic in the task's log
 and stopped it early rather than let it burn the remaining grace period
-against a key that was never going to succeed. Which of the three values
-you see picks the fix; see [daemon.md](daemon.md#watchdogs) for exactly
-what triggers each one:
+against a key that was never going to succeed. Which value you see picks
+the fix — for the `opencode` executor it's one of three bare names below;
+a task dispatched with a different executor (e.g. `pi`) gets the same
+three buckets prefixed with the executor name instead (`pi_rate_limited`,
+etc.). See [daemon.md](daemon.md#watchdogs) for exactly what triggers each
+one:
 
 - `"rate_limited"`: transient. Retry later, or switch `--key-slot`/`--model`
   in the meantime (see [security.md](security.md#provider-key-slots)).
@@ -112,8 +119,8 @@ the specific log line or error text that triggered the classification.
 ## `taskferry result` says the task is still running
 
 `result` only returns a final `message`/`narration` once a task reaches
-`done` or `crashed`. Call `taskferry wait <id>` first (looping past its
-45-second internal cap for a long task — see
+`done` or `crashed`. Call `taskferry wait <id>` first (re-running it past
+its 15-minute default cap for a long task — see
 [cli-reference.md](cli-reference.md#taskferry-wait-id-options)), or check
 `taskferry status <id>` to confirm it has actually settled.
 

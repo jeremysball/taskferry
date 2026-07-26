@@ -17,13 +17,18 @@ relying on socket-level access control.
 
 ## Task logs
 
-Every dispatched task's stdout/stderr — OpenCode's own `--format json`
-NDJSON stream — is written verbatim to
-`<state-dir>/logs/<task-id>.ndjson`. If a prompt or a task's own tool use
-touches secrets, those secrets land in that file, readable by anyone who
-can read the owning user's files. There is no redaction step. Treat the
-logs directory with the same care as any other credential-adjacent local
-state, and see [Activity summaries](#activity-summaries) below for the one
+Every dispatched task's stdout/stderr lands in
+`<state-dir>/logs/<task-id>.ndjson`. stderr writes straight through to that
+file, byte-for-byte. stdout is parsed line-by-line and normalized through
+the dispatching executor (`opencode`'s or `pi`'s own `--format json` NDJSON
+shape both become taskferry's canonical event shape) before being
+re-serialized and written — content-equivalent, not necessarily
+byte-identical to what the worker emitted; a non-JSON stdout line (e.g. a
+plain-text auth failure) is preserved verbatim, unfiltered. If a prompt or
+a task's own tool use touches secrets, those secrets land in that file,
+readable by anyone who can read the owning user's files. There is no
+redaction step. Treat the logs directory with the same care as any other
+credential-adjacent local state, and see [Activity summaries](#activity-summaries) below for the one
 place log content leaves the local machine.
 
 ## Provider key slots
@@ -91,8 +96,9 @@ run a bounded snapshot of a task's recent narration through a secondary
 model (`opencode/mimo-v2.5-free` by default, overridable with
 `TASKFERRY_SUMMARY_MODEL`) to produce a short human-readable status line.
 `taskferry summary --mode report` (the default `summary` mode) does the
-same thing at larger scale: a full asynchronous OpenCode subtask that reads
-more of the log.
+same thing as a full asynchronous OpenCode subtask instead of an inline
+call, but reads the log under the same bound: at most 96 KiB (head and
+tail), or a smaller delta excerpt when continuing a prior summary session.
 
 This is a real, secondary call to a model provider — do not summarize a
 task whose log contains secrets you don't want sent there. Specifics:
@@ -122,8 +128,14 @@ task whose log contains secrets you don't want sent there. Specifics:
   disconnecting turns summary generation back off for that daemon.
 - **Fully disable.** Set `TASKFERRY_ACTIVITY_SUMMARIES=0` on the daemon to
   turn off model-backed summaries everywhere, regardless of what any client
-  requests; `watch --summaries` and `summary --mode activity` then fall
-  back to the same local, no-model activity text.
+  requests; `summary --mode activity` then falls back to the same local,
+  no-model activity text. `watch --summaries` does not currently honor this
+  flag the same way: subscribing with `summaries: true` always runs a
+  model-availability preflight check first, and that check throws if
+  `TASKFERRY_SUMMARY_MODEL` isn't installed — even with summaries disabled.
+  A `watch --summaries` caller on a daemon with no working summary model
+  should expect that preflight to fail rather than a silent local-text
+  fallback.
 
 `TASKFERRY_SUMMARY_MODEL` selects an available replacement model if the
 default is unsuitable or unavailable; `--max-words` on `taskferry summary`
@@ -131,8 +143,8 @@ bounds the target length between 75 and 300 words (default 200).
 
 ## `TASKFERRY_CHILD`
 
-Every dispatched OpenCode child, and every summary child, runs with
-`TASKFERRY_CHILD=1` set in its environment. The native OpenCode plugin
+Every dispatched worker child (OpenCode or pi), and every summary child,
+runs with `TASKFERRY_CHILD=1` set in its environment. The native OpenCode plugin
 (`src/opencode-plugin.js`) checks this and returns an empty hook set when
 present — so a task that itself runs `opencode` (directly, or indirectly
 through a nested taskferry dispatch) doesn't load a second copy of the
@@ -140,7 +152,8 @@ toast/context integration inside that nested process.
 
 ## Filesystem sandboxing (bubblewrap)
 
-Every dispatched OpenCode child, and every summary child, runs wrapped in
+Every dispatched worker child (OpenCode or pi), and every summary child,
+runs wrapped in
 [`bwrap`](https://github.com/containers/bubblewrap) by default on Linux:
 
 - **Mount layout.** A full read-only bind of `/` (`--ro-bind / /`) so the
@@ -178,16 +191,21 @@ Every dispatched OpenCode child, and every summary child, runs wrapped in
   extra directories, for anything else a dispatch legitimately needs to
   write outside its own working directory. Set it as a comma-separated
   list of paths — as the `allowedDirs` config field (applies to every
-  dispatch the daemon serves) or via `--allowed-dirs <path,path,...>` on a
-  single `taskferry dispatch` call (adds to, not replaces, the config
-  default). Entries that don't exist on disk are silently skipped, the
-  same as the deny-list.
+  dispatch the daemon serves, including internal report-summary children)
+  or via `--allowed-dirs <path,path,...>` on a single `taskferry dispatch`
+  call (adds to, not replaces, the config default; unlike the config-level
+  setting, per-dispatch `--allowed-dirs` does not carry over to that
+  dispatch's own summary children). Entries that don't exist on disk are
+  silently skipped, the same as the deny-list.
 - **`XDG_DATA_HOME` is redirected.** OpenCode writes its own logs, session
   database, and snapshots under `XDG_DATA_HOME` (`~/.local/share` by
   default), which is read-only inside the sandbox. Sandboxed dispatches get
-  `XDG_DATA_HOME` pointed at `<runtimeDir>/opencode-data` instead — a
-  writable location under the same `runtimeDir` bind used for the daemon
-  socket. This is a separate store from the host's real data home: a
+  `XDG_DATA_HOME` pointed at `<cacheDir>/opencode-data` instead (`cacheDir`
+  is `TASKFERRY_CACHE_DIR` or `$XDG_CACHE_HOME/taskferry`, default
+  `~/.cache/taskferry`) — real disk, not the small `runtimeDir` tmpfs used
+  for the daemon socket, since OpenCode's snapshot store grows unbounded
+  across dispatches and previously filled that tmpfs entirely. This is a
+  separate store from the host's real data home: a
   session started outside the sandbox can't be resumed inside it (or vice
   versa), and `--continue`/`--session <id>` resolve against whichever data
   home the current dispatch is using.

@@ -43,11 +43,15 @@ with list-shaped results rendered as a compact table instead of a
 repeated-key array.
 
 `taskferry dispatch` spawns `opencode run --dir <directory> --auto --format
-json -- <prompt>` directly as a child process, detached to give its whole
+json -m <model> -- <prompt>` (or the equivalent `pi` invocation with
+`--executor pi`) as a child process, detached to give its whole
 process group one signal target, with stdout/stderr captured to a private
-per-task log. Task completion comes from that child's real `exit` event,
-never from string-matching log output. See [docs/daemon.md](docs/daemon.md)
-for the full process model.
+per-task log. On Linux with sandboxing enabled (the default), the actual
+direct child is `bwrap`, with that command nested inside its arguments —
+see [docs/security.md](docs/security.md) for the sandbox layout. Task
+completion comes from that child's real `exit` event, never from
+string-matching log output. See [docs/daemon.md](docs/daemon.md) for the
+full process model.
 
 ## Commands
 
@@ -116,10 +120,11 @@ or nothing if none is. Compose it into a larger statusline script
 
 taskferry reads user-tunable options from
 `$XDG_CONFIG_HOME/taskferry/config.json` (default
-`~/.config/taskferry/config.json`), which sits above `TASKFERRY_*` env vars
-and built-in defaults in precedence. Both the config file and every env
-var are optional; a fresh install runs on defaults alone. Field list and
-precedence rules: [docs/config.md](docs/config.md).
+`~/.config/taskferry/config.json`), which sits below `TASKFERRY_*` env vars
+but above built-in defaults in precedence — a set env var always overrides
+the config file. Both the config file and every env var are optional; a
+fresh install runs on defaults alone. Field list and precedence rules:
+[docs/config.md](docs/config.md).
 
 ### Updating an existing checkout
 

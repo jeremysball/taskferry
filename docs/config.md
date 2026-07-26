@@ -47,6 +47,11 @@ message — there is no silent typo tolerance.
 | `providerKeyEnv` | `TASKFERRY_PROVIDER_KEY_ENV` | string | (none) |
 | `summaryKeySlot` | `TASKFERRY_SUMMARY_KEY_SLOT` | string | (none) |
 | `summaryProviderKeyEnv` | `TASKFERRY_SUMMARY_PROVIDER_KEY_ENV` | string | (none) |
+| `sandboxEnabled` | `TASKFERRY_DISABLE_SANDBOX` (inverted: `1`/`true` disables) | boolean | `true` |
+| `allowedDirs` | `TASKFERRY_ALLOWED_DIRS` | string (comma-separated paths) | (none) |
+| `waitDefaultTimeoutMs` | `TASKFERRY_WAIT_DEFAULT_TIMEOUT_MS` | number | `900000` (15 min); `0` disables via the env var only — a config-file value of `0` is ignored and falls back to the 15-minute default |
+| `cancelGraceMs` | `TASKFERRY_CANCEL_GRACE_MS` | number | `5000`; overridden per-call by `cancel --grace-ms` |
+| `defaultExecutor` | `TASKFERRY_DEFAULT_EXECUTOR` | string (`opencode` or `pi`) | `opencode` |
 
 `keySlots` uses the same `name:ENV_VAR_NAME` comma-separated grammar as
 `TASKFERRY_KEY_SLOTS` — see `docs/security.md`.
@@ -60,16 +65,22 @@ remove a config value to fall back to the old env-var-only behavior.
 ## What's not in the config file
 
 `TASKFERRY_STATE_DIR`, `TASKFERRY_RUNTIME_DIR`, `TASKFERRY_SOCKET_PATH`,
-`TASKFERRY_WATCHDOG_POLL_MS`, and `TASKFERRY_CHILD` stay env-var-only —
-they're process plumbing (where state lives, how fast the watchdog polls,
-an internal marker), not something most users tune for behavior.
+`TASKFERRY_CACHE_DIR`, `TASKFERRY_WATCHDOG_POLL_MS`, `TASKFERRY_CHILD`, and
+`TASKFERRY_AUTO_START` stay env-var-only — they're process plumbing (where
+state and sandboxed-worker cache data live, how fast the watchdog polls, an
+internal marker, the daemon auto-spawn escape hatch), not something most
+users tune for behavior.
 
 ## No hot-reload
 
-The config file is read once, at daemon startup — the same as env vars
-today. Changing `config.json` while the daemon is running has no effect
-until the daemon restarts. There is also no `taskferry config` CLI
-subcommand yet; hand-edit the file.
+Daemon-side config fields (`maxConcurrentTasks`, `noOutputTimeoutMs`, and
+the rest read at `createTaskManager()` construction) are read once, at
+daemon startup — the same as env vars today. Changing `config.json` while
+the daemon is running has no effect on those fields until the daemon
+restarts. `waitDefaultTimeoutMs` is the one exception: the CLI reads it
+fresh on every `wait`/`summary --wait` call, so a change takes effect
+immediately without a daemon restart. There is also no `taskferry config`
+CLI subcommand yet; hand-edit the file.
 
 ## Errors
 

@@ -10,7 +10,7 @@ Like the Claude Code integration, both hook commands start with `command -v
 taskferry >/dev/null 2>&1` and fall back to a plain-text notice if the
 binary isn't found. Running `taskferry setup` once from the taskferry
 checkout puts the CLI on `PATH` and registers the Codex marketplace in
-the same step — see the [Install section in the README](../README.md#install)
+the same step — see the [Install section in the README](../../README.md#install)
 for the full bootstrap.
 
 ## Install
@@ -97,9 +97,8 @@ blocking the turn.
 
 ## UI limitations
 
-Codex has no equivalent to Claude Code's monitor surface or OpenCode's
-toasts — no persistent, continuously-updating view of task state inside
-the UI. The two hooks above are the only mechanism; between a
+Codex has no equivalent to OpenCode's toasts — no persistent,
+continuously-updating view of task state inside the UI. The two hooks above are the only mechanism; between a
 `UserPromptSubmit` refresh and the next one, task-state changes are
 invisible until you run `taskferry status`/`taskferry list` yourself or
 send another turn. Do not describe this integration as providing live

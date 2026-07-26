@@ -147,8 +147,10 @@ CLI usage approaches.
 - `TASKFERRY_WATCHDOG_POLL_MS` (default `2000`): how often the no-output and
   provider-failure checks run against a running task's log.
 - A task stopped because its log matched a known provider-failure
-  diagnostic gets one of three `failureReason` values instead of a bare
-  timeout, so a caller knows which corrective action fits:
+  diagnostic gets a `failureReason` instead of a bare timeout, so a caller
+  knows which corrective action fits. For the `opencode` executor (the
+  historical, shipped names — unprefixed, since callers already key off
+  these exact strings) it's one of three buckets:
   - `"rate_limited"`: rate limit, usage limit, `429`, too many requests, or
     a bare mention of `quota` with no billing-specific phrase nearby.
     Transient: retry later, or switch key slot in the meantime.
@@ -158,6 +160,13 @@ CLI usage approaches.
   - `"authentication_failed"`: `unauthorized`, an invalid API key, or a
     `401` status. The credential in that key slot is broken and needs
     rotating.
+  Other executors (`pi`, future ones) get the same three buckets but
+  prefixed with the executor name (`pi_rate_limited`,
+  `pi_authentication_failed`, ...) so executor-specific failures stay
+  distinguishable. A structured error event that matches none of the three
+  buckets still gets a reason rather than `null`: the executor's own error
+  class name, lowercased and prefixed (e.g. `opencode_unknownerror`,
+  `pi_error`).
   Each crash also carries `failureDetail`: the matched log line or
   provider error text (capped at 500 characters), or for
   `no_output_timeout`, which timeout value fired and whether it was before
@@ -165,12 +174,13 @@ CLI usage approaches.
 
 ## Cancellation
 
-`taskferry cancel` sends `SIGTERM` to the task's process group (the
-`opencode` child is spawned with `detached: true`, making it its own
-process-group leader), escalating to `SIGKILL` after `--grace-ms` (default
-5000) if it hasn't exited. Signaling the group, not just the `opencode`
-pid, reaches subprocesses it's mid-way through running (a long bash
-command), not just the top-level process.
+`taskferry cancel` sends `SIGTERM` to the task's process group (the worker
+child — `opencode` or `pi`, whichever executor the task dispatched with —
+is spawned with `detached: true`, making it its own process-group leader),
+escalating to `SIGKILL` after `--grace-ms` (default 5000) if it hasn't
+exited. Signaling the group, not just the worker's own pid, reaches
+subprocesses it's mid-way through running (a long bash command), not just
+the top-level process.
 
 ## Self-restart on source change
 
@@ -182,7 +192,7 @@ running), a restart is marked pending.
 The restart itself is deferred until idle: it only fires once
 `manager.list().counts` shows zero `running` and zero `queued` tasks, checked
 again on every subsequent request until that's true. This avoids reattaching
-to an in-flight `opencode` child process — deliberately out of scope, per
+to an in-flight worker child process — deliberately out of scope, per
 [Recovery](#recovery) below — by never tearing the daemon down while one
 exists. When the idle check passes, the daemon closes its socket and server,
 spawns a fresh `daemon.js` process with the same environment, and exits; the
@@ -191,8 +201,10 @@ replacement binds a new socket the same way any auto-started daemon does.
 Existing `watch` subscribers are dropped when the old process exits, same as
 any other daemon restart; a client reconnects and resubscribes on its next
 call. There is no special handoff for in-progress requests beyond the
-existing "wait for idle" gate — by the time the restart fires, none are
-in flight against `manager.list()`'s running/queued counts.
+existing "wait for idle" gate, and that gate only checks task counts, not a
+general in-flight-RPC counter — a concurrent non-task request (e.g. another
+client's `list` or `status` call) can still be executing at the exact moment
+the restart fires; only running/queued *tasks* are guaranteed absent.
 
 ## Recovery
 
@@ -203,10 +215,17 @@ still `queued` or `running`, the new process has no such handle for it and
 relabels it `"unknown"` on reload rather than reporting a possibly-stale
 status.
 
-The underlying `opencode` process, if still alive, keeps running and
-writing its log — inspect the log file directly
-(`<state-dir>/logs/<task-id>.ndjson`), or run `opencode session list` — but
-the daemon does not re-attach a status watcher to it. There is no periodic
+The underlying worker process, if still alive, keeps running, but its log
+stops receiving new events the way it did before the restart: stdout is a
+pipe the old daemon process owned and normalized into the log itself, so
+once that process exits, nothing is left reading that pipe and stdout
+events stop landing in `<state-dir>/logs/<task-id>.ndjson`. Only stderr —
+duplicated directly into the log file descriptor at spawn time,
+independent of the parent process — keeps writing after the restart.
+Inspect the log file directly for whatever made it in before the restart,
+or, for a task dispatched with the `opencode` executor specifically, run
+`opencode session list` — but the daemon does not re-attach a status
+watcher to it. There is no periodic
 recheck of `unknown` tasks' pids or trailing log events: that would
 reintroduce string/heuristic completion detection for exactly the
 crash-recovery edge case this architecture avoids elsewhere, so it's left

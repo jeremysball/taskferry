@@ -3686,7 +3686,7 @@ describe("startTask() writes stdout through executor.normalizeLogEvent (Task 7: 
       buildSpawnArgs: () => ["run", "--dir", process.cwd(), "--auto", "--format", "json", "-m", "x", "--", "hi"],
       buildSummaryPrompt: () => "",
       normalizeLogEvent: (evt) => (evt.type === "drop-me" ? null : { ...evt, normalized: true }),
-      sandboxAuthFile: () => ({ extraRoBind: null, sandboxedDataHome: "/tmp/unused", sandboxEnv: {} }),
+      sandboxAuthFile: () => ({ extraRoBinds: [], sandboxedDataHome: "/tmp/unused", sandboxEnv: {} }),
     };
     const mgr = makeManager({ spawnFn, defaultExecutor: fakeExecutor });
     const dispatched = mgr.dispatch({ prompt: "hi", directory: process.cwd() });
@@ -3717,7 +3717,7 @@ describe("startTask() writes stdout through executor.normalizeLogEvent (Task 7: 
       buildSpawnArgs: () => ["run", "--dir", process.cwd(), "--auto", "--format", "json", "-m", "x", "--", "hi"],
       buildSummaryPrompt: () => "",
       normalizeLogEvent: (parsed) => parsed, // identity, so dropped means JSON.parse failed
-      sandboxAuthFile: () => ({ extraRoBind: null, sandboxedDataHome: "/tmp/unused", sandboxEnv: {} }),
+      sandboxAuthFile: () => ({ extraRoBinds: [], sandboxedDataHome: "/tmp/unused", sandboxEnv: {} }),
     };
     const mgr = makeManager({ spawnFn, defaultExecutor: fakeExecutor });
     const dispatched = mgr.dispatch({ prompt: "hi", directory: process.cwd() });
@@ -3742,7 +3742,7 @@ describe("startTask() writes stdout through executor.normalizeLogEvent (Task 7: 
       buildSpawnArgs: () => ["run", "--dir", process.cwd(), "--auto", "--format", "json", "-m", "x", "--", "hi"],
       buildSummaryPrompt: () => "",
       normalizeLogEvent: (parsed) => parsed,
-      sandboxAuthFile: () => ({ extraRoBind: null, sandboxedDataHome: "/tmp/unused", sandboxEnv: {} }),
+      sandboxAuthFile: () => ({ extraRoBinds: [], sandboxedDataHome: "/tmp/unused", sandboxEnv: {} }),
     };
     const mgr = makeManager({ spawnFn, defaultExecutor: fakeExecutor });
     const dispatched = mgr.dispatch({ prompt: "hi", directory: process.cwd() });
@@ -3769,7 +3769,7 @@ describe("startTask() spawns the executor's CLI binary, not a hardcoded command 
       buildSpawnArgs: (ctx) => ["--model", ctx.model, "--mode", "json", "-p", ctx.prompt],
       buildSummaryPrompt: () => "",
       normalizeLogEvent: (parsed) => parsed,
-      sandboxAuthFile: () => ({ extraRoBind: null, sandboxedDataHome: "/tmp/unused", sandboxEnv: {} }),
+      sandboxAuthFile: () => ({ extraRoBinds: [], sandboxedDataHome: "/tmp/unused", sandboxEnv: {} }),
     };
     const mgr = makeManager({
       spawnFn: (cmd, args, opts) => { captured = { cmd, args, opts }; return fakeChild(); },
@@ -3823,7 +3823,7 @@ describe("startTask() merges executor.sandboxAuthFile().sandboxEnv into spawnEnv
       sandboxAuthFile: ({ dataDir, existsFn }) => {
         const sandboxedDataHome = path.join(dataDir, "pi-data");
         return {
-          extraRoBind: existsFn(realAuthFile) ? /** @type {[string, string]} */ ([realAuthFile, path.join(sandboxedDataHome, "auth.json")]) : null,
+          extraRoBinds: existsFn(realAuthFile) ? [/** @type {[string, string]} */ ([realAuthFile, path.join(sandboxedDataHome, "auth.json")])] : [],
           sandboxedDataHome,
           sandboxEnv: { PI_CODING_AGENT_DIR: sandboxedDataHome },
         };
@@ -3876,7 +3876,7 @@ describe("provider-failure classification is task-aware via task.executorId (Tas
       buildSpawnArgs: () => ["--model", "minimax/MiniMax-M2.7", "--mode", "json", "-p", "hi"],
       buildSummaryPrompt: () => "",
       normalizeLogEvent: (parsed) => parsed,
-      sandboxAuthFile: () => ({ extraRoBind: null, sandboxedDataHome: "/tmp/unused", sandboxEnv: {} }),
+      sandboxAuthFile: () => ({ extraRoBinds: [], sandboxedDataHome: "/tmp/unused", sandboxEnv: {} }),
     };
     const child = fakeChild(9119);
     const mgr = makeManager({
@@ -3958,7 +3958,7 @@ describe("classifyProviderFailure() honors the binding compatibility contract (T
       buildSpawnArgs: () => ["--model", "minimax/MiniMax-M2.7", "--mode", "json", "-p", "hi"],
       buildSummaryPrompt: () => "",
       normalizeLogEvent: (parsed) => parsed,
-      sandboxAuthFile: () => ({ extraRoBind: null, sandboxedDataHome: "/tmp/unused", sandboxEnv: {} }),
+      sandboxAuthFile: () => ({ extraRoBinds: [], sandboxedDataHome: "/tmp/unused", sandboxEnv: {} }),
     };
     // Each line is the equivalent pi shape for the opencode buckets above;
     // the same regex set must classify it, but with the pi_ prefix added.
@@ -4032,7 +4032,7 @@ describe("classifyProviderFailure() honors the binding compatibility contract (T
       buildSpawnArgs: () => ["--model", "minimax/MiniMax-M2.7", "--mode", "json", "-p", "hi"],
       buildSummaryPrompt: () => "",
       normalizeLogEvent: (parsed) => parsed,
-      sandboxAuthFile: () => ({ extraRoBind: null, sandboxedDataHome: "/tmp/unused", sandboxEnv: {} }),
+      sandboxAuthFile: () => ({ extraRoBinds: [], sandboxedDataHome: "/tmp/unused", sandboxEnv: {} }),
     };
     const childPi = fakeChild(9501);
     const mgrPi = makeManager({
@@ -4077,7 +4077,7 @@ describe("startTask() never lets normalizeLogEvent() throws escape the stdout ha
       buildSpawnArgs: () => ["run", "--dir", process.cwd(), "--auto", "--format", "json", "-m", "x", "--", "hi"],
       buildSummaryPrompt: () => "",
       normalizeLogEvent: () => { throw new Error("boom from inside normalizeLogEvent"); },
-      sandboxAuthFile: () => ({ extraRoBind: null, sandboxedDataHome: "/tmp/unused", sandboxEnv: {} }),
+      sandboxAuthFile: () => ({ extraRoBinds: [], sandboxedDataHome: "/tmp/unused", sandboxEnv: {} }),
     };
     const mgr = makeManager({ spawnFn, defaultExecutor: fakeExecutor });
     const dispatched = mgr.dispatch({ prompt: "hi", directory: process.cwd() });
@@ -4110,7 +4110,7 @@ describe("startTask() never lets normalizeLogEvent() throws escape the stdout ha
       buildSpawnArgs: () => ["run", "--dir", process.cwd(), "--auto", "--format", "json", "-m", "x", "--", "hi"],
       buildSummaryPrompt: () => "",
       normalizeLogEvent: () => { throw new Error("trailing throw"); },
-      sandboxAuthFile: () => ({ extraRoBind: null, sandboxedDataHome: "/tmp/unused", sandboxEnv: {} }),
+      sandboxAuthFile: () => ({ extraRoBinds: [], sandboxedDataHome: "/tmp/unused", sandboxEnv: {} }),
     };
     const mgr = makeManager({ spawnFn, defaultExecutor: fakeExecutor });
     const dispatched = mgr.dispatch({ prompt: "hi", directory: process.cwd() });
@@ -4148,7 +4148,7 @@ describe("startTask() never lets normalizeLogEvent() throws escape the stdout ha
       buildSpawnArgs: () => ["run", "--dir", process.cwd(), "--auto", "--format", "json", "-m", "x", "--", "hi"],
       buildSummaryPrompt: () => "",
       normalizeLogEvent: () => { throw new Error("always throws"); },
-      sandboxAuthFile: () => ({ extraRoBind: null, sandboxedDataHome: "/tmp/unused", sandboxEnv: {} }),
+      sandboxAuthFile: () => ({ extraRoBinds: [], sandboxedDataHome: "/tmp/unused", sandboxEnv: {} }),
     };
     const mgr = makeManager({
       spawnFn: () => child,

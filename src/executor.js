@@ -24,7 +24,7 @@ const SUMMARY_ISOLATION_PROMPT =
  * @property {(ctx: SpawnLaunchContext) => string[]} buildSpawnArgs
  * @property {() => string} buildSummaryPrompt
  * @property {(parsed: unknown) => unknown} normalizeLogEvent
- * @property {(args: {homeDir: string, dataDir: string, spawnEnv: NodeJS.ProcessEnv, existsFn: (file: string) => boolean}) => {extraRoBind: [string, string]|null, sandboxedDataHome: string, sandboxEnv: Record<string, string>}} sandboxAuthFile
+ * @property {(args: {homeDir: string, dataDir: string, spawnEnv: NodeJS.ProcessEnv, existsFn: (file: string) => boolean}) => {extraRoBinds: [string, string][], sandboxedDataHome: string, sandboxEnv: Record<string, string>}} sandboxAuthFile
  */
 
 /**
@@ -146,12 +146,24 @@ export function piExecutor({ execFileFn = execFileAsync } = {}) {
     // small tmpfs: pi's sandboxed data home grows with every dispatch and an
     // unbounded tmpfs directory eventually starves the whole XDG_RUNTIME_DIR
     // (sockets, locks) of space.
-    /** @param {{homeDir: string, dataDir: string, spawnEnv: NodeJS.ProcessEnv, existsFn: (file: string) => boolean}} args @returns {{extraRoBind: [string, string]|null, sandboxedDataHome: string, sandboxEnv: Record<string, string>}} */
+    /** @param {{homeDir: string, dataDir: string, spawnEnv: NodeJS.ProcessEnv, existsFn: (file: string) => boolean}} args @returns {{extraRoBinds: [string, string][], sandboxedDataHome: string, sandboxEnv: Record<string, string>}} */
     sandboxAuthFile({ homeDir, dataDir, spawnEnv, existsFn }) {
-      const realAuthFile = path.join(spawnEnv.PI_CODING_AGENT_DIR || path.join(homeDir, ".pi"), "auth.json");
+      const realAgentDir = spawnEnv.PI_CODING_AGENT_DIR || path.join(homeDir, ".pi");
+      const realAuthFile = path.join(realAgentDir, "auth.json");
+      // Pi roots both state (auth, sessions) and config (custom-provider
+      // extensions) under the same PI_CODING_AGENT_DIR. Redirecting that
+      // root for sandbox state isolation also hides the user's real
+      // extensions/ dir, so a custom-registered provider (e.g.
+      // cheapestinference) silently disappears inside the sandbox even
+      // though auth.json alone would otherwise work fine.
+      const realExtensionsDir = path.join(realAgentDir, "extensions");
       const sandboxedDataHome = path.join(dataDir, "pi-data");
+      /** @type {[string, string][]} */
+      const extraRoBinds = [];
+      if (existsFn(realAuthFile)) extraRoBinds.push([realAuthFile, path.join(sandboxedDataHome, "auth.json")]);
+      if (existsFn(realExtensionsDir)) extraRoBinds.push([realExtensionsDir, path.join(sandboxedDataHome, "extensions")]);
       return {
-        extraRoBind: existsFn(realAuthFile) ? /** @type {[string, string]} */ ([realAuthFile, path.join(sandboxedDataHome, "auth.json")]) : null,
+        extraRoBinds,
         sandboxedDataHome,
         sandboxEnv: { PI_CODING_AGENT_DIR: sandboxedDataHome },
       };
@@ -191,13 +203,13 @@ export function opencodeExecutor() {
     // small tmpfs: opencode's snapshot store under here grows unbounded
     // across dispatches (no gc) and previously filled the whole
     // XDG_RUNTIME_DIR tmpfs, starving it of space for sockets/locks too.
-    /** @param {{homeDir: string, dataDir: string, spawnEnv: NodeJS.ProcessEnv, existsFn: (file: string) => boolean}} args @returns {{extraRoBind: [string, string]|null, sandboxedDataHome: string, sandboxEnv: Record<string, string>}} */
+    /** @param {{homeDir: string, dataDir: string, spawnEnv: NodeJS.ProcessEnv, existsFn: (file: string) => boolean}} args @returns {{extraRoBinds: [string, string][], sandboxedDataHome: string, sandboxEnv: Record<string, string>}} */
     sandboxAuthFile({ homeDir, dataDir, spawnEnv, existsFn }) {
       const realDataHome = spawnEnv.XDG_DATA_HOME || path.join(homeDir, ".local", "share");
       const realAuthFile = path.join(realDataHome, "opencode", "auth.json");
       const sandboxedDataHome = path.join(dataDir, "opencode-data");
       return {
-        extraRoBind: existsFn(realAuthFile) ? /** @type {[string, string]} */ ([realAuthFile, path.join(sandboxedDataHome, "opencode", "auth.json")]) : null,
+        extraRoBinds: existsFn(realAuthFile) ? [/** @type {[string, string]} */ ([realAuthFile, path.join(sandboxedDataHome, "opencode", "auth.json")])] : [],
         sandboxedDataHome,
         sandboxEnv: { XDG_DATA_HOME: sandboxedDataHome },
       };

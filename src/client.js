@@ -60,10 +60,26 @@ function bootErrorPath(runtimeDir) {
   return path.join(runtimeDir, "daemon-boot.err");
 }
 
+// The direct-execution guard below catches errors from ensureDaemonStarted(),
+// but the booter subprocess can fail before reaching it (a syntax error, a
+// missing import dependency). Node then prints to stderr, and with
+// `stdio: "ignore"` discards the message. Piping stderr to a file next to
+// daemon-boot.err preserves it.
+function bootStderrPath(runtimeDir) {
+  return path.join(runtimeDir, "daemon-boot-stderr.log");
+}
+
 function spawnDaemonBooter({ env, stateDir, runtimeDir, socketPath }) {
+  let stderrFd;
+  try {
+    stderrFd = fs.openSync(bootStderrPath(runtimeDir), "w", 0o600);
+  } catch {
+    // Best-effort: if the file can't be opened, discard stderr instead of
+    // blocking the booter from spawning.
+  }
   const child = spawn(process.execPath, [CLIENT_ENTRY], {
     detached: true,
-    stdio: "ignore",
+    stdio: ["ignore", "ignore", stderrFd ?? "ignore"],
     env: {
       ...env,
       TASKFERRY_STATE_DIR: stateDir,
@@ -71,6 +87,7 @@ function spawnDaemonBooter({ env, stateDir, runtimeDir, socketPath }) {
       TASKFERRY_SOCKET_PATH: socketPath,
     },
   });
+  if (stderrFd != null) child.once("exit", () => fs.closeSync(stderrFd));
   child.unref();
   return child;
 }
@@ -342,14 +359,38 @@ export async function connectClient({
   } catch (err) {
     if (errCode(err) !== "ENOENT") throw err;
   }
+  // Read the stderr log only when bootError is absent: the booter subprocess
+  // failed at import time, before reaching the try/catch that writes
+  // bootError above.
+  let bootStderr;
+  if (!bootError) {
+    try {
+      bootStderr = fs.readFileSync(bootStderrPath(runtimeDir), "utf8").trim();
+    } catch (err) {
+      if (errCode(err) !== "ENOENT") throw err;
+    }
+  }
   throw new Error(
     `error: taskferry daemon did not become ready within ${startupTimeoutMs}ms: ${lastError?.message || "connection failed"}\n`
     + (bootError ? `daemon boot failed: ${bootError}\n` : "")
+    + (bootStderr ? `booter subprocess failed before startup: ${bootStderr}\n` : "")
     + `help: check ${runtimeDir} permissions and daemon startup diagnostics, then retry`
   );
 }
 
-if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+// Symlink-safe, matching cli.js's own resolveInvokedPath. A bare path.resolve()
+// compares the symlink path against the real module path, so invoking
+// client.js through a symlink (an installed bin entry) never matches and the
+// booter never runs.
+function resolveInvokedPath(invoked) {
+  try {
+    return fs.realpathSync(invoked);
+  } catch {
+    return path.resolve(invoked);
+  }
+}
+
+if (process.argv[1] && resolveInvokedPath(process.argv[1]) === fileURLToPath(import.meta.url)) {
   try {
     ensureDaemonStarted();
   } catch (err) {

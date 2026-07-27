@@ -31,7 +31,7 @@ its replacement — the CLI recognizes and explains the old names rather than
 just reporting "unknown command." The same applies to renamed flags from
 the MCP tool-call era: `--task-id` (now positional: `taskferry status
 <id>`), `--timeout_ms`/`--tail_chars`/`--max_words`/`--session_id`
-(underscore forms; now `--timeout-ms`/`--tail-chars`/`--max-words`/
+(underscore forms; now `--timeout`/`--tail-chars`/`--max-words`/
 `--session-id`).
 
 Argument shapes carry over directly: an MCP call like

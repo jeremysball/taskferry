@@ -1,10 +1,12 @@
 import { describe, test } from "node:test";
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { EventEmitter } from "node:events";
 import fs from "node:fs";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { removeStaleSocketIfUnchanged, startDaemon } from "./daemon.js";
 import { connectClient, ensureDaemonStarted, startDaemonBooter } from "./client.js";
 import { withFileLock } from "./state-lock.js";
@@ -753,6 +755,36 @@ describe("multiplexed daemon client", () => {
     assert.equal(fs.existsSync(errorPath), false);
   });
 
+  test("client.js's direct-execution guard runs ensureDaemonStarted() when invoked through a symlink", (t) => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-client-symlink-"));
+    t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+    const realClient = fileURLToPath(new URL("./client.js", import.meta.url));
+    const link = path.join(root, "taskferry-daemon-client");
+    fs.symlinkSync(realClient, link, "file");
+
+    // A malformed config.json makes ensureDaemonStarted() fail fast, so the
+    // file's presence or absence proves whether the guard's symlink
+    // resolution ran.
+    const configHome = path.join(root, "config-home");
+    fs.mkdirSync(path.join(configHome, "taskferry"), { recursive: true });
+    fs.writeFileSync(path.join(configHome, "taskferry", "config.json"), "{ not valid json");
+    const runtimeDir = path.join(root, "run");
+
+    // The guard sets process.exitCode = 1 on this forced failure, so a
+    // non-zero subprocess exit is the expected outcome, not a test failure.
+    try {
+      execFileSync(process.execPath, [link], {
+        env: { ...process.env, XDG_CONFIG_HOME: configHome, TASKFERRY_RUNTIME_DIR: runtimeDir },
+        encoding: "utf8",
+      });
+    } catch {
+      // expected: see comment above.
+    }
+
+    const bootError = fs.readFileSync(path.join(runtimeDir, "daemon-boot.err"), "utf8");
+    assert.match(bootError, /could not parse/);
+  });
+
   test("auto-starts after an initial connection failure and retries", async (t) => {
     const paths = temporaryPaths(t);
     const fake = fakeManagerFactory();
@@ -888,6 +920,27 @@ describe("multiplexed daemon client", () => {
         ensureDaemonFn: () => {},
       }),
       /daemon boot failed: error: could not parse \/fake\/config\.json/
+    );
+  });
+
+  test("includes a booter-stderr log's contents in the timeout error when no boot-error file exists", async (t) => {
+    const paths = temporaryPaths(t);
+    fs.mkdirSync(paths.runtimeDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(paths.runtimeDir, "daemon-boot-stderr.log"),
+      "SyntaxError: Unexpected token 'x' in client.js\n    at Module._compile"
+    );
+
+    await assert.rejects(
+      () => connectClient({
+        socketPath: paths.socketPath,
+        stateDir: paths.stateDir,
+        runtimeDir: paths.runtimeDir,
+        startupTimeoutMs: 20,
+        retryDelayMs: 5,
+        ensureDaemonFn: () => {},
+      }),
+      /booter subprocess failed before startup: SyntaxError: Unexpected token 'x' in client\.js/
     );
   });
 

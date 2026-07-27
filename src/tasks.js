@@ -502,6 +502,11 @@ export function createTaskManager({
   const dispatchLimit = positiveInteger(maxDispatchesPerWindow, DEFAULT_MAX_DISPATCHES_PER_WINDOW);
   const dispatchWindow = positiveInteger(dispatchWindowMs, DEFAULT_DISPATCH_WINDOW_MS);
   const concurrencyLimit = positiveInteger(maxConcurrentTasks, DEFAULT_MAX_CONCURRENT_TASKS);
+  // Summarizer sub-tasks spawned by the activity-refresh path share the
+  // launch queue and runningCount with real dispatches. Reserving half the
+  // pool stops a burst of lifecycle-triggered summaries from occupying every
+  // concurrency slot and starving real dispatches.
+  const summaryConcurrencyLimit = Math.max(1, Math.floor(concurrencyLimit / 2));
   const advisorTtl = positiveInteger(advisorSessionTtlMs, DEFAULT_ADVISOR_SESSION_TTL_MS);
   const noOutputTimeout = positiveInteger(noOutputTimeoutMs, DEFAULT_NO_OUTPUT_TIMEOUT_MS);
   const postOutputNoOutputTimeout = positiveInteger(postOutputNoOutputTimeoutMs, DEFAULT_POST_OUTPUT_NO_OUTPUT_TIMEOUT_MS);
@@ -1090,7 +1095,7 @@ export function createTaskManager({
     await checkSummaryModelReady();
     const continueSessionId = activityCache.getSummarySessionId(taskId);
     try {
-      const firstStarted = await summarizeTask(taskId, { maxWords, allowPromptFallback: true, previousActivity });
+      const firstStarted = await summarizeTask(taskId, { maxWords, allowPromptFallback: true, previousActivity, respectConcurrencyReserve: true });
       if (!firstStarted.summaryTask?.id) return { text: "", sessionId: null };
       const firstSettled = await poll(firstStarted.summaryTask.id, { timeoutMs: MAX_WAIT_MS });
       const firstSummaryTask = tasks.get(firstStarted.summaryTask.id);
@@ -1115,12 +1120,23 @@ export function createTaskManager({
       // hard dependency of the underlying task's status.
       const source = tasks.get(taskId);
       if (!source) return { text: "", sessionId: null };
+      // The first attempt may still be running (it hit the poll timeout
+      // above rather than settling). Cancel it before launching the retry
+      // so both don't occupy a concurrency slot at once.
+      if (firstSettled.status === "running") {
+        try {
+          cancel(firstStarted.summaryTask.id);
+        } catch {
+          // Settled or gone between the poll timeout and here: both fine.
+        }
+      }
       const retryStarted = await summarizeTask(taskId, {
         maxWords,
         allowPromptFallback: true,
         previousActivity,
         summarySessionId: null,
         lastSummarizedWatermark: 0,
+        respectConcurrencyReserve: true,
       });
       if (!retryStarted.summaryTask?.id) {
         // Both attempts failed to even spawn -- signal the failure so the
@@ -1239,10 +1255,10 @@ export function createTaskManager({
 
   /**
    * @param {string} taskId
-   * @param {{maxWords?: number, allowPromptFallback?: boolean, previousActivity?: string|null, summarySessionId?: string|null, lastSummarizedWatermark?: number|null}} [options]
+   * @param {{maxWords?: number, allowPromptFallback?: boolean, previousActivity?: string|null, summarySessionId?: string|null, lastSummarizedWatermark?: number|null, respectConcurrencyReserve?: boolean}} [options]
    */
   async function summarizeTask(taskId, options = {}) {
-    const { maxWords = 200, allowPromptFallback = false, previousActivity = null } = options;
+    const { maxWords = 200, allowPromptFallback = false, previousActivity = null, respectConcurrencyReserve = false } = options;
     // `summarySessionId` and `lastSummarizedWatermark` use `undefined` (not
     // `null`) as the "look it up in the activity cache" sentinel, because the
     // activity path's continue-failure retry needs to *force* a fresh launch
@@ -1255,6 +1271,37 @@ export function createTaskManager({
     if (!source) throw noSuchTask(taskId);
     if (!Number.isSafeInteger(maxWords) || maxWords < 75 || maxWords > 300) {
       throw new Error("error: max_words must be an integer from 75 through 300\nhelp: run taskferry summary with max_words between 75 and 300");
+    }
+    // Only the activity-refresh path (summarizeActivity) opts into this
+    // reserve check. A direct `taskferry summary` call is an explicit user
+    // request and must always run, even with the reserve full.
+    if (respectConcurrencyReserve) {
+      const countInFlightSummaries = () => {
+        let count = 0;
+        for (const t of tasks.values()) {
+          if (t.summaryOf && (t.status === "running" || t.status === "queued")) count++;
+        }
+        return count;
+      };
+      // At a small concurrencyLimit (e.g. 2, giving a reserve of exactly 1),
+      // two tasks finishing within moments of each other would otherwise
+      // have the second one's summary dropped outright instead of merely
+      // delayed. Retry briefly before giving up -- existing summary tasks
+      // typically settle in well under this window.
+      const RESERVE_RETRY_ATTEMPTS = 4;
+      const RESERVE_RETRY_DELAY_MS = 500;
+      for (let attempt = 0; attempt < RESERVE_RETRY_ATTEMPTS; attempt++) {
+        if (countInFlightSummaries() < summaryConcurrencyLimit) break;
+        if (attempt === RESERVE_RETRY_ATTEMPTS - 1) {
+          return {
+            sourceTaskId: taskId,
+            sourceStatus: source.status,
+            summary: "summarizer concurrency reserve is full; skipped this refresh",
+            next: `Run taskferry summary with task id "${taskId}" once the summarizer queue drains`,
+          };
+        }
+        await new Promise((resolve) => setTimeout(resolve, RESERVE_RETRY_DELAY_MS));
+      }
     }
     // Resolve the continuation session id and the last-summarized watermark
     // from the activity cache unless the caller (e.g. the activity path's
@@ -1655,8 +1702,15 @@ export function createTaskManager({
         // had a chance to land, so `watch --summaries` still sees the final
         // status transition instead of a cache miss.
         void scheduleActivity(task, { force: true }).then(() => activityCache.evictTask(task.id));
+        logHasEventCache.delete(task.logPath);
         try {
           cleanUpScratchFiles();
+        } catch (err) {
+          // EBUSY/EACCES unlink failures during scratch cleanup must not
+          // throw from this child exit handler: no uncaughtException handler
+          // upstream, so an unhandled throw crashes the daemon and orphans
+          // every other in-flight task.
+          console.error(`taskferry: failed to clean up scratch files for task ${task.id}: ${errMessage(err)}`);
         } finally {
           runningCount--;
           settleWaiters(task.id);
@@ -1751,7 +1805,16 @@ export function createTaskManager({
       if (child?.pid != null) sendSignal(child.pid, "SIGKILL");
       persistTask(task.id);
       void scheduleActivity(task, { force: true }).then(() => activityCache.evictTask(task.id));
-      cleanUpScratchFiles();
+      logHasEventCache.delete(task.logPath);
+      try {
+        cleanUpScratchFiles();
+      } catch (cleanupErr) {
+        // Same reasoning as finishSettlement()'s cleanUpScratchFiles() guard
+        // above: a non-ENOENT unlink failure here must not throw out of this
+        // spawn-failure catch block, which would crash the daemon the same
+        // way an unguarded call in the exit handler would.
+        console.error(`taskferry: failed to clean up scratch files for task ${task.id}: ${errMessage(cleanupErr)}`);
+      }
       settleWaiters(task.id);
     }
   }
@@ -1781,6 +1844,7 @@ export function createTaskManager({
       task.endedAt = new Date().toISOString();
       persistTask(task.id);
       void scheduleActivity(task, { force: true }).then(() => activityCache.evictTask(task.id));
+      logHasEventCache.delete(task.logPath);
       settleWaiters(taskId);
       if (!launchQueue.length && launchTimer) {
         clearTimeout(launchTimer);

@@ -78,7 +78,7 @@ export async function runCli(argv = process.argv.slice(2), {
       parsed.options.directory = normalizeDirectory(parsed.options.directory || cwd);
     }
     if ((parsed.command === "dispatch" || parsed.command === "advisor") && parsed.options.prompt === "-") {
-      parsed.options.prompt = await readPromptFromStdin(io.stdin || process.stdin, parsed.command);
+      parsed.options.prompt = await readPromptFromStdin(io.stdin || process.stdin, parsed.command, signal);
     }
     client = await connectClient({ env });
     const value = await runCommand(parsed.command, parsed.options, {
@@ -127,15 +127,32 @@ if (process.argv[1] && resolveInvokedPath(process.argv[1]) === fileURLToPath(imp
 // `--prompt -` lets a large prompt bypass the argv-length limit entirely by
 // piping it into taskferry's own stdin (issue #78) instead of requiring the
 // caller to write a temp file and pass a path themselves.
-async function readPromptFromStdin(stdin, command) {
+async function readPromptFromStdin(stdin, command, signal) {
   const stdinHelp = `Pipe a prompt into the command (e.g. \`cat prompt.txt | taskferry ${command} --prompt -\`), or pass --prompt "<text>" directly`;
   if (stdin.isTTY) {
     throw new UsageError("--prompt - requires a piped stdin (no TTY input detected)", stdinHelp);
   }
-  const chunks = [];
-  for await (const chunk of stdin) {
-    chunks.push(typeof chunk === "string" ? Buffer.from(chunk) : chunk);
-  }
+  const abortHelp = "The piped-in process never closed its end of stdin -- fix the producer, or press Ctrl-C to stop waiting";
+  const readChunks = (async () => {
+    const chunks = [];
+    for await (const chunk of stdin) {
+      chunks.push(typeof chunk === "string" ? Buffer.from(chunk) : chunk);
+    }
+    return chunks;
+  })();
+  // A producer that never closes its end of the pipe leaves the `for await`
+  // loop above waiting forever. Races it against the AbortController that
+  // main() wires to SIGINT/SIGTERM so Ctrl-C breaks the hang.
+  const chunks = signal
+    ? await Promise.race([
+        readChunks,
+        new Promise((_, reject) => {
+          const onAbort = () => reject(new UsageError("--prompt - aborted while waiting for stdin to close", abortHelp));
+          if (signal.aborted) onAbort();
+          else signal.addEventListener("abort", onAbort, { once: true });
+        }),
+      ])
+    : await readChunks;
   const content = Buffer.concat(chunks).toString("utf8").replace(/\r?\n$/, "");
   if (!content) {
     throw new UsageError("--prompt - received empty stdin", stdinHelp);

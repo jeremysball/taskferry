@@ -192,6 +192,22 @@ function parseNumber(value, flag, { min = 0, max = Number.MAX_SAFE_INTEGER } = {
   return number;
 }
 
+const DURATION_UNITS_MS = { s: 1000, m: 60_000, h: 3_600_000 };
+
+function parseDuration(value, flag) {
+  const remediation = `Use ${flag} with milliseconds (e.g. 10000) or a duration string (e.g. 30s, 5m, 1h)`;
+  if (/^\d+$/.test(value)) {
+    const ms = Number(value);
+    if (!Number.isSafeInteger(ms)) throw new UsageError(`${flag} must be a safe integer number of milliseconds`, remediation);
+    return ms;
+  }
+  const match = /^(\d+)(s|m|h)$/.exec(value);
+  if (!match) throw new UsageError(`${flag} must be milliseconds or a duration like 30s, 5m, 1h`, remediation);
+  const ms = Number(match[1]) * DURATION_UNITS_MS[match[2]];
+  if (!Number.isSafeInteger(ms)) throw new UsageError(`${flag} is too large`, remediation);
+  return ms;
+}
+
 function requireValue(argv, index, flag, inlineValue) {
   if (inlineValue !== undefined) {
     if (!inlineValue) throw new UsageError(`${flag} requires a non-empty value`, `Run ${flag} with a value`);

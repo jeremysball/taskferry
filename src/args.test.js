@@ -244,3 +244,18 @@ test("parses dispatch --no-sandbox", () => {
   assert.throws(() => parseArgs(["dispatch", "--prompt", "x", "--no-sandbox=1"]), /--no-sandbox does not take a value/);
   assert.throws(() => parseArgs(["wait", "oc_1", "--no-sandbox"]), /unknown flag --no-sandbox/);
 });
+
+test("wait --timeout accepts bare milliseconds and duration strings", () => {
+  assert.equal(parseArgs(["wait", "oc_1", "--timeout", "0"]).options.timeoutMs, 0);
+  assert.equal(parseArgs(["wait", "oc_1", "--timeout", "10000"]).options.timeoutMs, 10000);
+  assert.equal(parseArgs(["wait", "oc_1", "--timeout", "30s"]).options.timeoutMs, 30_000);
+  assert.equal(parseArgs(["wait", "oc_1", "--timeout", "5m"]).options.timeoutMs, 300_000);
+  assert.equal(parseArgs(["wait", "oc_1", "--timeout", "1h"]).options.timeoutMs, 3_600_000);
+});
+
+test("wait --timeout rejects malformed duration strings", () => {
+  const cases = ["-1", "1.5m", "5M", "1h30m", " 5m", "5m ", "5", "abc", ""];
+  for (const value of cases) {
+    assert.throws(() => parseArgs(["wait", "oc_1", "--timeout", value]), UsageError, `expected rejection for "${value}"`);
+  }
+});

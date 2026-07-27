@@ -387,7 +387,7 @@ const DEFAULT_CANCEL_GRACE_MS = 5000;
  * @param {import("./executor.js").WorkerExecutor} [options.defaultExecutor] - fallback WorkerExecutor used when
  *   a dispatch doesn't request one explicitly. Per-dispatch selection (Task 6) calls `resolveExecutor(params.executor)`
  *   and overrides this; this option exists so tests and embedders can swap in a different default without the
- *   `dispatch({...})` params surface. Defaults to `resolveExecutor(undefined)` → `opencodeExecutor()`.
+ *   `dispatch({...})` params surface. Defaults to `resolveExecutor(undefined)` → `piExecutor()`.
  * @param {string} [options.stateDir]
  * @param {Record<string, unknown>} [options.config]
  * @param {number} [options.maxDispatchesPerWindow]

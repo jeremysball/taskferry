@@ -223,7 +223,7 @@ export const KNOWN_EXECUTORS = /** @type {readonly string[]} */ (["opencode", "p
 
 /** @param {string|undefined} name @returns {import("./executor.js").WorkerExecutor} */
 export function resolveExecutor(name) {
-  if (name === undefined || name === "opencode") return opencodeExecutor();
-  if (name === "pi") return piExecutor();
+  if (name === undefined || name === "pi") return piExecutor();
+  if (name === "opencode") return opencodeExecutor();
   throw new Error(`unknown executor: ${name}`);
 }

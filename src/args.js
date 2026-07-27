@@ -16,7 +16,7 @@ const commandSpecs = {
       "--require-final-marker <regex>": "flag the task as incomplete if the final message doesn't match this pattern (case-sensitive, standard JS RegExp semantics)",
       "--no-sandbox": "run this dispatch without the bwrap filesystem sandbox (default: sandboxed on Linux)",
       "--allowed-dirs <path,path,...>": "extra directories bound read-write inside the sandbox, in addition to the auto-detected git-common-dir for a worktree",
-      "--executor <opencode|pi>": "worker backend to dispatch through, default opencode",
+      "--executor <opencode|pi>": "worker backend to dispatch through, default pi",
     },
     examples: [
       'taskferry dispatch --prompt "Fix the failing tests"',
@@ -53,7 +53,7 @@ const commandSpecs = {
       "--variant <name>": "optional model reasoning variant",
       "--session-id <id>": "continue a recent advisor session",
       "--timeout-ms <number>": "maximum wait in milliseconds",
-      "--executor <opencode|pi>": "worker backend to dispatch through, default opencode",
+      "--executor <opencode|pi>": "worker backend to dispatch through, default pi",
     },
     examples: [
       'taskferry advisor --prompt "How should I split this module?" --model openai/gpt-5.6-sol',

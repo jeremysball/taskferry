@@ -259,8 +259,12 @@ describe("opencodeExecutor()", () => {
     assert.deepEqual(result.extraRoBinds, []);
   });
 
-  test("resolveExecutor: undefined and \"opencode\" both resolve to opencodeExecutor", () => {
-    assert.equal(resolveExecutor(undefined).id, "opencode");
+  test("resolveExecutor: undefined and \"pi\" both resolve to piExecutor", () => {
+    assert.equal(resolveExecutor(undefined).id, "pi");
+    assert.equal(resolveExecutor("pi").id, "pi");
+  });
+
+  test("resolveExecutor: \"opencode\" resolves to opencodeExecutor", () => {
     assert.equal(resolveExecutor("opencode").id, "opencode");
   });
 

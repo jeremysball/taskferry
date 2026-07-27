@@ -92,6 +92,19 @@ explicit `--directory <path>` flag is always used exactly as given —
 `resolveWorkspaceRoot` is never consulted when the flag is present, even
 for a path outside any git repo.
 
+**Invariant this relies on:** every one of these call sites already wraps
+its directory expression in `normalizeDirectory(...)` before it reaches the
+daemon (`src/commands.js:60`, `76`, `129`, `179`, `186` — the pattern is
+`normalizeDirectory(options.directory || cwd)`, becoming
+`normalizeDirectory(options.directory || resolveWorkspaceRoot(cwd))`).
+Since `normalizeDirectory` always does the final `fs.realpathSync`
+regardless of which branch produced its input, the daemon's exact-string
+directory comparisons (`src/daemon.js:156`, `273`) stay valid without any
+daemon-side change — `resolveWorkspaceRoot`'s output doesn't need to be
+pre-normalized itself, only consistent enough for `normalizeDirectory` to
+canonicalize identically across callers, which realpath already
+guarantees.
+
 `dispatch` is **not** in this list (see above).
 
 This is the mechanism that replaces manual session-scoping: two Claude

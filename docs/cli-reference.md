@@ -81,26 +81,26 @@ finish, are cancelled, fail to spawn, or hit the no-output watchdog. See
 
 Blocks until the task's real `exit` event fires. A 15-minute default
 timeout (configurable via `TASKFERRY_WAIT_DEFAULT_TIMEOUT_MS`) prevents
-indefinite hangs on stuck tasks. Pass `--timeout-ms` to override the
+indefinite hangs on stuck tasks. Pass `--timeout` to override the
 default cap; the call then returns after that many milliseconds even if
 the task is still running. Set `TASKFERRY_WAIT_DEFAULT_TIMEOUT_MS=0` to
 disable the default timeout entirely (old behavior).
 
 | Flag | Notes |
 |---|---|
-| `--timeout-ms <number>` | Override the default timeout cap in milliseconds; omit to use the 15-minute default |
+| `--timeout <duration>` | Override the default timeout cap — milliseconds or a duration string (30s, 5m, 1h); omit to use the 15-minute default |
 | `--tail-chars <number>` | Include this many trailing narration characters if the task is still running when the timeout elapses |
 | `--full` | Include directory, model, session id, log path, and prompt preview |
-| `--summarize` | Stream periodic live summaries to stdout while waiting; exits and returns the normal result the moment the task settles. Cannot combine with `--timeout-ms` or `--tail-chars`. |
+| `--summarize` | Stream periodic live summaries to stdout while waiting; exits and returns the normal result the moment the task settles. Cannot combine with `--timeout` or `--tail-chars`. |
 
 If it returns `status: "queued"` or `"running"`, the timeout elapsed
 before the task settled; a `note` field explains the situation. Call `wait`
-again to keep polling, or pass `--timeout-ms` for a longer cap. This
+again to keep polling, or pass `--timeout` for a longer cap. This
 command was named `poll` before the AXI CLI; `taskferry poll` now fails
 with a rename notice.
 
 ```
-$ taskferry wait oc_mrn4ipkp_19450105 --timeout-ms 30000
+$ taskferry wait oc_mrn4ipkp_19450105 --timeout 30s
 id: oc_mrn4ipkp_19450105
 status: done
 startedAt: 2026-07-16T06:24:06.650Z
@@ -130,7 +130,7 @@ planning or hard-debugging help mid-task, not for open-ended background work
 | `--variant <name>` | Optional reasoning-effort override |
 | `--executor <opencode\|pi>` | Which worker CLI to spawn. Built-in default `pi`, but an omitted flag actually falls back to the daemon's configured default executor (`TASKFERRY_DEFAULT_EXECUTOR` or `config.json`'s `defaultExecutor`) |
 | `--session-id <id>` | Resume a prior advisor exchange |
-| `--timeout-ms <number>` | Early-return cap in milliseconds, same semantics as `wait`; omitting it does not block indefinitely — it falls back to a 45-second internal cap, after which the "still running" response below is returned |
+| `--timeout <duration>` | Early-return cap — milliseconds or a duration string (30s, 5m, 1h), same semantics as `wait`; omitting it does not block indefinitely — it falls back to a 45-second internal cap, after which the "still running" response below is returned |
 
 If it times out before the advisor answers, the response is `status:
 "running"` plus `task_id` and `session_id`; call `wait` or `advisor` again

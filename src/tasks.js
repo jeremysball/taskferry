@@ -242,6 +242,34 @@ export function bucketFor(errorBucketPrefix, bucket) {
   return `${errorBucketPrefix}_${bucket}`;
 }
 
+// opencode emits one real step_finish per step, each carrying that step's own
+// token delta (not a running total), so result() must accumulate across every
+// step_finish rather than keeping only the last -- otherwise a multi-step
+// task's usage undercounts down to its final step (issue #201). pi's executor
+// only ever emits a single step_finish (its usage is already cumulative), so
+// summing is a no-op there and needs no executor-specific branch.
+/**
+ * @param {any} prev
+ * @param {any} next
+ * @returns {any}
+ */
+function sumTokens(prev, next) {
+  if (!prev) return next;
+  /** @param {any} a @param {any} b */
+  const sum = (a, b) => (typeof a === "number" || typeof b === "number" ? (a ?? 0) + (b ?? 0) : (a ?? b));
+  return {
+    ...prev,
+    ...next,
+    total: sum(prev.total, next.total),
+    input: sum(prev.input, next.input),
+    output: sum(prev.output, next.output),
+    reasoning: sum(prev.reasoning, next.reasoning),
+    ...(prev.cache || next.cache
+      ? { cache: { write: sum(prev.cache?.write, next.cache?.write), read: sum(prev.cache?.read, next.cache?.read) } }
+      : {}),
+  };
+}
+
 // Scoped to opencode's own structured `type:"error"` events and raw
 // non-JSON lines (stderr, crash text), never a `type:"text"` event's
 // content. Those events are the model's own narration and routinely
@@ -2595,8 +2623,8 @@ export function createTaskManager({
         /** @type {string[]} */ (textByMessageId.get(mid)).push(evt.part.text);
       }
       if (evt.type === "step_finish" && evt.part) {
-        if (evt.part.tokens) tokens = evt.part.tokens;
-        if (typeof evt.part.cost === "number") cost = evt.part.cost;
+        if (evt.part.tokens) tokens = sumTokens(tokens, evt.part.tokens);
+        if (typeof evt.part.cost === "number") cost = (cost ?? 0) + evt.part.cost;
         if (evt.part.reason === "stop") finalMessageId = evt.part.messageID;
       }
     }

@@ -2925,6 +2925,38 @@ describe("result()", () => {
     assert.equal("next" in r, false);
   });
 
+  test("sums tokens and cost across every step_finish instead of keeping only the last (issue #201)", () => {
+    const log = [
+      JSON.stringify({ type: "text", part: { messageID: "m1", text: "step one" } }),
+      JSON.stringify({
+        type: "step_finish",
+        part: {
+          messageID: "m1",
+          reason: "tool-calls",
+          tokens: { total: 100, input: 10, output: 20, reasoning: 5, cache: { write: 1, read: 2 } },
+          cost: 0.001,
+        },
+      }),
+      JSON.stringify({ type: "text", part: { messageID: "m2", text: "step two" } }),
+      JSON.stringify({
+        type: "step_finish",
+        part: {
+          messageID: "m2",
+          reason: "stop",
+          tokens: { total: 200, input: 15, output: 25, reasoning: 10, cache: { write: 3, read: 4 } },
+          cost: 0.002,
+        },
+      }),
+    ].join("\n");
+    const mgr = makeManager({
+      tasksFixture: (logDir) => [baseTask({ id: "t1", status: "done", logPath: path.join(logDir, "t1.ndjson") })],
+      logs: { "t1.ndjson": log },
+    });
+    const r = mgr.result("t1");
+    assert.deepEqual(r.tokens, { total: 300, input: 25, output: 45, reasoning: 15, cache: { write: 4, read: 6 } });
+    assert.equal(r.cost, 0.003);
+  });
+
   test("falls back to the last message seen when no step_finish reason 'stop' exists", () => {
     const log = JSON.stringify({ type: "text", part: { messageID: "m1", text: "partial output before a crash" } });
     const mgr = makeManager({

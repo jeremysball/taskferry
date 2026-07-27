@@ -171,7 +171,7 @@ describe("dispatch() lifecycle, driven through an injected spawnFn (no real open
         return fakeChild();
       },
     });
-    mgr.dispatch({ prompt: "hello", directory: os.tmpdir(), model: "opencode-go/minimax-m3", variant: "max" });
+    mgr.dispatch({ prompt: "hello", directory: os.tmpdir(), model: "opencode-go/minimax-m3", variant: "max", executor: "opencode" });
     assert.equal(captured.cmd, "opencode");
     assert.deepEqual(captured.args, [
       "run", "--dir", os.tmpdir(), "--auto", "--format", "json",
@@ -184,7 +184,7 @@ describe("dispatch() lifecycle, driven through an injected spawnFn (no real open
   test("defaults to openai/gpt-5.6-luna --variant high when no model is given", () => {
     let captured = null;
     const mgr = makeManager({ spawnFn: (cmd, args) => { captured = args; return fakeChild(); } });
-    mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+    mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), executor: "opencode" });
     assert.deepEqual(captured.slice(6, 10), ["-m", "openai/gpt-5.6-luna", "--variant", "high"]);
   });
 
@@ -196,23 +196,23 @@ describe("dispatch() lifecycle, driven through an injected spawnFn (no real open
   test("resuming with --session-id and no --model inherits the model of the task that owned that session (issue #47)", () => {
     let captured = null;
     const mgr = makeManager({ spawnFn: (cmd, args) => { captured = args; return fakeChild(); } });
-    mgr.dispatch({ prompt: "first", directory: os.tmpdir(), model: "opencode-go/minimax-m3", sessionId: "ses_abc" });
-    mgr.dispatch({ prompt: "resume", directory: os.tmpdir(), sessionId: "ses_abc" });
+    mgr.dispatch({ prompt: "first", directory: os.tmpdir(), model: "opencode-go/minimax-m3", sessionId: "ses_abc", executor: "opencode" });
+    mgr.dispatch({ prompt: "resume", directory: os.tmpdir(), sessionId: "ses_abc", executor: "opencode" });
     assertDispatchedModel(captured, "opencode-go/minimax-m3");
   });
 
   test("resuming with --session-id and an explicit --model still uses the explicit model", () => {
     let captured = null;
     const mgr = makeManager({ spawnFn: (cmd, args) => { captured = args; return fakeChild(); } });
-    mgr.dispatch({ prompt: "first", directory: os.tmpdir(), model: "opencode-go/minimax-m3", sessionId: "ses_abc" });
-    mgr.dispatch({ prompt: "resume", directory: os.tmpdir(), model: "opencode/other-model", sessionId: "ses_abc" });
+    mgr.dispatch({ prompt: "first", directory: os.tmpdir(), model: "opencode-go/minimax-m3", sessionId: "ses_abc", executor: "opencode" });
+    mgr.dispatch({ prompt: "resume", directory: os.tmpdir(), model: "opencode/other-model", sessionId: "ses_abc", executor: "opencode" });
     assertDispatchedModel(captured, "opencode/other-model");
   });
 
   test("an unrecognized --session-id with no --model still falls back to the hardcoded default", () => {
     let captured = null;
     const mgr = makeManager({ spawnFn: (cmd, args) => { captured = args; return fakeChild(); } });
-    mgr.dispatch({ prompt: "resume", directory: os.tmpdir(), sessionId: "ses_never_seen" });
+    mgr.dispatch({ prompt: "resume", directory: os.tmpdir(), sessionId: "ses_never_seen", executor: "opencode" });
     assertDispatchedModel(captured, "openai/gpt-5.6-luna");
   });
 
@@ -347,7 +347,7 @@ describe("bwrap sandboxing", () => {
       runtimeDir,
     });
 
-    mgr.dispatch({ prompt: "hello", directory: os.tmpdir(), model: "opencode-go/minimax-m3", variant: "max" });
+    mgr.dispatch({ prompt: "hello", directory: os.tmpdir(), model: "opencode-go/minimax-m3", variant: "max", executor: "opencode" });
 
     assert.equal(captured.cmd, "bwrap");
     assert.deepEqual(captured.args.slice(0, 3), ["--ro-bind", "/", "/"]);
@@ -490,7 +490,7 @@ describe("bwrap sandboxing", () => {
       cacheDir,
     });
 
-    mgr.dispatch({ prompt: "hello", directory: os.tmpdir() });
+    mgr.dispatch({ prompt: "hello", directory: os.tmpdir(), executor: "opencode" });
 
     assert.equal(captured.opts.env.XDG_DATA_HOME, path.join(cacheDir, "opencode-data"));
   });
@@ -508,7 +508,7 @@ describe("bwrap sandboxing", () => {
       cacheDir,
     });
 
-    mgr.dispatch({ prompt: "hello", directory: os.tmpdir() });
+    mgr.dispatch({ prompt: "hello", directory: os.tmpdir(), executor: "opencode" });
 
     const srcIndex = captured.args.indexOf(realAuthFile);
     assert.notEqual(srcIndex, -1);
@@ -556,7 +556,7 @@ describe("bwrap sandboxing", () => {
       platform: "linux",
     });
 
-    mgr.dispatch({ prompt: "hello", directory: os.tmpdir(), noSandbox: true });
+    mgr.dispatch({ prompt: "hello", directory: os.tmpdir(), noSandbox: true, executor: "opencode" });
 
     assert.equal(captured.cmd, "opencode");
   });
@@ -570,7 +570,7 @@ describe("bwrap sandboxing", () => {
       platform: "linux",
     });
 
-    mgr.dispatch({ prompt: "hello", directory: os.tmpdir() });
+    mgr.dispatch({ prompt: "hello", directory: os.tmpdir(), executor: "opencode" });
 
     assert.equal(captured.cmd, "opencode");
   });
@@ -584,7 +584,7 @@ describe("bwrap sandboxing", () => {
       platform: "darwin",
     });
 
-    mgr.dispatch({ prompt: "hello", directory: os.tmpdir() });
+    mgr.dispatch({ prompt: "hello", directory: os.tmpdir(), executor: "opencode" });
 
     assert.equal(captured.cmd, "opencode");
   });
@@ -629,7 +629,7 @@ describe("bwrap sandboxing", () => {
     });
     const prompt = "x".repeat(96 * 1024 + 1);
 
-    mgr.dispatch({ prompt, directory: os.tmpdir() });
+    mgr.dispatch({ prompt, directory: os.tmpdir(), executor: "opencode" });
 
     assert.equal(captured.cmd, "bwrap");
     const attachment = captured.args[captured.args.indexOf("-f") + 1];
@@ -685,7 +685,7 @@ describe("dispatch() with a prompt over the argv-safe size (issue #78: spawn E2B
     const mgr = makeManager({ spawnFn: (cmd, args, opts) => { captured = { args, opts }; return fakeChild(); } });
     const prompt = "x".repeat(96 * 1024 + 1);
 
-    mgr.dispatch({ prompt, directory: os.tmpdir() });
+    mgr.dispatch({ prompt, directory: os.tmpdir(), executor: "opencode" });
 
     assert.ok(captured.args.includes("-f"), "expected -f attachment flag in argv");
     const attachment = captured.args[captured.args.indexOf("-f") + 1];
@@ -703,7 +703,7 @@ describe("dispatch() with a prompt over the argv-safe size (issue #78: spawn E2B
     const mgr = makeManager({ spawnFn: (cmd, args, opts) => { captured = { args, opts }; return child; } });
     const prompt = "x".repeat(96 * 1024 + 1);
 
-    mgr.dispatch({ prompt, directory: os.tmpdir() });
+    mgr.dispatch({ prompt, directory: os.tmpdir(), executor: "opencode" });
     const attachment = captured.args[captured.args.indexOf("-f") + 1];
     assert.ok(fs.existsSync(attachment));
 
@@ -1395,7 +1395,7 @@ describe("no-output watchdog", () => {
   test("result --fields failureDetail returns the field", async () => {
     const child = fakeChild(7201);
     const mgr = makeManager({ spawnFn: () => child, killFn: () => {}, noOutputTimeoutMs: 60000, watchdogPollMs: 5 });
-    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), executor: "opencode" });
     fs.writeFileSync(mgr.status(dispatched.id).logPath, JSON.stringify({ type: "error", message: "insufficient_quota: out of credits" }) + "\n");
     await new Promise((r) => setTimeout(r, 40));
     child.emit("exit", 1, null);
@@ -1407,7 +1407,7 @@ describe("no-output watchdog", () => {
   test("a structured error event that matches none of the three named buckets still gets a failureReason instead of null (opencode's own UnknownError class)", async () => {
     const child = fakeChild(7203);
     const mgr = makeManager({ spawnFn: () => child, killFn: () => {}, noOutputTimeoutMs: 60000, watchdogPollMs: 5 });
-    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), executor: "opencode" });
     fs.writeFileSync(
       mgr.status(dispatched.id).logPath,
       JSON.stringify({ type: "error", error: { name: "UnknownError", data: { message: "Streaming response failed" } } }) + "\n"
@@ -1631,7 +1631,7 @@ describe("provider-failure classification", () => {
       noOutputTimeoutMs: 60000, // long enough that only exhaustion detection could trigger this
       watchdogPollMs: 5,
     });
-    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), executor: "opencode" });
     fs.writeFileSync(
       mgr.status(dispatched.id).logPath,
       JSON.stringify({ type: "error", message: "rate_limit_exceeded: please retry after 60s" }) + "\n"
@@ -1655,7 +1655,7 @@ describe("provider-failure classification", () => {
       noOutputTimeoutMs: 60000,
       watchdogPollMs: 5,
     });
-    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), executor: "opencode" });
     fs.writeFileSync(mgr.status(dispatched.id).logPath, "rate limit exceeded");
 
     await new Promise((r) => setTimeout(r, 40));
@@ -1676,7 +1676,7 @@ describe("provider-failure classification", () => {
       noOutputTimeoutMs: 60000,
       watchdogPollMs: 5,
     });
-    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), executor: "opencode" });
     const longLine = "rate limit exceeded " + "x".repeat(1000);
     fs.writeFileSync(mgr.status(dispatched.id).logPath, longLine);
 
@@ -1697,7 +1697,7 @@ describe("provider-failure classification", () => {
       noOutputTimeoutMs: 60000,
       watchdogPollMs: 5,
     });
-    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), executor: "opencode" });
     fs.writeFileSync(
       mgr.status(dispatched.id).logPath,
       JSON.stringify({ type: "error", message: "rate_limit_exceeded: please retry after 60s" }) + "\n"
@@ -1759,7 +1759,7 @@ describe("provider-failure classification", () => {
       noOutputTimeoutMs: 60000,
       watchdogPollMs: 5,
     });
-    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), executor: "opencode" });
     fs.writeFileSync(
       mgr.status(dispatched.id).logPath,
       JSON.stringify({ type: "error", message: "insufficient_quota: your account has run out of credits" }) + "\n"
@@ -1783,7 +1783,7 @@ describe("provider-failure classification", () => {
       noOutputTimeoutMs: 60000,
       watchdogPollMs: 5,
     });
-    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), executor: "opencode" });
     fs.writeFileSync(
       mgr.status(dispatched.id).logPath,
       JSON.stringify({ type: "error", message: "rate limit exceeded: insufficient_quota on this key" }) + "\n"
@@ -1803,7 +1803,7 @@ describe("provider-failure classification", () => {
       noOutputTimeoutMs: 60000,
       watchdogPollMs: 5,
     });
-    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), executor: "opencode" });
     fs.writeFileSync(
       mgr.status(dispatched.id).logPath,
       JSON.stringify({ type: "error", message: "Rate limit exceeded, check your quota" }) + "\n"
@@ -1823,7 +1823,7 @@ describe("provider-failure classification", () => {
       noOutputTimeoutMs: 60000,
       watchdogPollMs: 5,
     });
-    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), executor: "opencode" });
     fs.writeFileSync(
       mgr.status(dispatched.id).logPath,
       JSON.stringify({ type: "error", message: "Unauthorized: invalid API key provided" }) + "\n"
@@ -1861,7 +1861,7 @@ describe("provider-failure classification", () => {
       noOutputTimeoutMs: 60000,
       watchdogPollMs: 5,
     });
-    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), executor: "opencode" });
     fs.writeFileSync(
       mgr.status(dispatched.id).logPath,
       "No API key found for openai.\n"
@@ -1883,7 +1883,7 @@ describe("provider-failure classification", () => {
       noOutputTimeoutMs: 60000,
       watchdogPollMs: 5,
     });
-    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), executor: "opencode" });
     fs.writeFileSync(
       mgr.status(dispatched.id).logPath,
       JSON.stringify({ type: "error", message: "request failed with status_code: 401" }) + "\n"
@@ -1923,7 +1923,7 @@ describe("provider-failure classification", () => {
       noOutputTimeoutMs: 60000,
       watchdogPollMs: 5,
     });
-    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), executor: "opencode" });
     fs.writeFileSync(
       mgr.status(dispatched.id).logPath,
       JSON.stringify({ type: "error", message: "rate_limit_exceeded: please retry after 60s" }) + "\n"
@@ -1954,7 +1954,7 @@ describe("trailing provider-error events that land after the last watcher poll (
       // Long enough that the watchdog interval never ticks during this test.
       watchdogPollMs: 60000,
     });
-    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), executor: "opencode" });
     fs.writeFileSync(
       mgr.status(dispatched.id).logPath,
       JSON.stringify({ type: "error", message: "usage_limit_exceeded: monthly quota reached" }) + "\n"
@@ -1977,7 +1977,7 @@ describe("trailing provider-error events that land after the last watcher poll (
       killFn: () => {},
       watchdogPollMs: 60000,
     });
-    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), executor: "opencode" });
     fs.writeFileSync(
       mgr.status(dispatched.id).logPath,
       JSON.stringify({ type: "error", message: "Unauthorized: invalid API key provided" }) + "\n"
@@ -1999,7 +1999,7 @@ describe("trailing provider-error events that land after the last watcher poll (
       noOutputTimeoutMs: 60000,
       watchdogPollMs: 5,
     });
-    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), executor: "opencode" });
     fs.writeFileSync(
       mgr.status(dispatched.id).logPath,
       JSON.stringify({ type: "error", message: "rate_limit_exceeded: please retry after 60s" }) + "\n"
@@ -2060,7 +2060,7 @@ describe("trailing provider-error events that land after the last watcher poll (
       noOutputTimeoutMs: 60000,
       watchdogPollMs: 5,
     });
-    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), executor: "opencode" });
     const logPath = mgr.status(dispatched.id).logPath;
     const prefix = JSON.stringify({ type: "text", part: { messageID: "m1", text: "x".repeat(4096) } }) + "\n";
     fs.writeFileSync(logPath, prefix);
@@ -2113,7 +2113,7 @@ describe("trailing provider-error events that land after the last watcher poll (
       killFn: () => {},
       watchdogPollMs: 5,
     });
-    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), executor: "opencode" });
     const fullLine = JSON.stringify({ type: "error", message: "rate_limit_exceeded: please retry after 60s" }) + "\n";
     // Write a partial line so the watcher's first tick stores it as carry,
     // then write the rest of the line plus a terminating \n. The exit
@@ -2337,11 +2337,11 @@ describe("dispatch() executor selection (Task 6: optional executor name resolves
     assert.equal(status.executorId, "pi");
   });
 
-  test("dispatch() with no executor defaults to opencode", () => {
+  test("dispatch() with no executor defaults to pi", () => {
     const mgr = makeManager({ spawnFn: () => { throw new Error("not reached in this test"); } });
     const dispatched = mgr.dispatch({ prompt: "hi", directory: process.cwd() });
     const status = mgr.status(dispatched.id);
-    assert.equal(status.executorId, "opencode");
+    assert.equal(status.executorId, "pi");
   });
 
   test("dispatch() with an unknown executor name throws", () => {
@@ -2583,6 +2583,7 @@ describe("advisor()", () => {
       model: "openai/gpt-5.6-sol",
       variant: "max",
       timeoutMs: 5000,
+      executor: "opencode",
     });
 
     assert.deepEqual(captured, [
@@ -3839,13 +3840,13 @@ describe("startTask() spawns the executor's CLI binary, not a hardcoded command 
     assert.deepEqual(captured.args, ["--model", "minimax/MiniMax-M2.7", "--mode", "json", "-p", "hi"]);
   });
 
-  test("a default (opencode) dispatch still spawns `opencode`", () => {
+  test("a default (pi) dispatch still spawns `pi`", () => {
     let captured = null;
     const mgr = makeManager({
       spawnFn: (cmd, args, opts) => { captured = { cmd, args, opts }; return fakeChild(); },
     });
     mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
-    assert.equal(captured.cmd, "opencode");
+    assert.equal(captured.cmd, "pi");
   });
 });
 
@@ -3860,7 +3861,7 @@ describe("startTask() merges executor.sandboxAuthFile().sandboxEnv into spawnEnv
       platform: "linux",
       cacheDir,
     });
-    mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+    mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), executor: "opencode" });
     assert.equal(captured.opts.env.XDG_DATA_HOME, path.join(cacheDir, "opencode-data"));
   });
 
@@ -3993,7 +3994,7 @@ describe("classifyProviderFailure() honors the binding compatibility contract (T
         noOutputTimeoutMs: 60000,
         watchdogPollMs: 5,
       });
-      const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+      const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), executor: "opencode" });
       fs.writeFileSync(mgr.status(dispatched.id).logPath, `${line}\n`);
       await new Promise((r) => setTimeout(r, 40));
       child.emit("exit", null, "SIGTERM");
@@ -4070,7 +4071,7 @@ describe("classifyProviderFailure() honors the binding compatibility contract (T
       noOutputTimeoutMs: 60000,
       watchdogPollMs: 5,
     });
-    const dispatchedOc = mgrOc.dispatch({ prompt: "hi", directory: os.tmpdir() });
+    const dispatchedOc = mgrOc.dispatch({ prompt: "hi", directory: os.tmpdir(), executor: "opencode" });
     fs.writeFileSync(mgrOc.status(dispatchedOc.id).logPath, `${opencodeEvent}\n`);
     await new Promise((r) => setTimeout(r, 40));
     childOc.emit("exit", null, "SIGTERM");

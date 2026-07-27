@@ -66,7 +66,7 @@ check("daemon process is alive", daemonAlive);
 console.log("\n== waiting for settlement (taskferry wait, looping past its internal cap) ==");
 let last = null;
 for (let i = 0; i < 3 && (!last || last.status === "running" || last.status === "queued"); i++) {
-  last = taskferry(["wait", taskId, "--timeout-ms", "45000", "--tail-chars", "500"]);
+  last = taskferry(["wait", taskId, "--timeout", "45000", "--tail-chars", "500"]);
   console.log(`[attempt ${i + 1}]`, last.status);
 }
 check("task settled", last.status === "done");

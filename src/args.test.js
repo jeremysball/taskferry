@@ -254,7 +254,7 @@ test("wait --timeout accepts bare milliseconds and duration strings", () => {
 });
 
 test("wait --timeout rejects malformed duration strings", () => {
-  const cases = ["-1", "1.5m", "5M", "1h30m", " 5m", "5m ", "5", "abc", ""];
+  const cases = ["-1", "1.5m", "5M", "1h30m", " 5m", "5m ", "abc", ""];
   for (const value of cases) {
     assert.throws(() => parseArgs(["wait", "oc_1", "--timeout", value]), UsageError, `expected rejection for "${value}"`);
   }

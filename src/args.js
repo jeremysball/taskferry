@@ -36,12 +36,12 @@ const commandSpecs = {
     usage: "taskferry wait <id> [options]",
     description: "Wait for a task to settle or return its current status after a timeout.",
     options: {
-      "--timeout-ms <number>": "maximum wait in milliseconds",
+      "--timeout <duration>": "maximum wait, e.g. 10000 (ms), 30s, 5m, 1h",
       "--tail-chars <number>": "include this many trailing text characters on timeout",
       "--full": "include directory, model, and log details",
       "--summarize": "print periodic live summaries while waiting; exits when the task settles",
     },
-    examples: ['taskferry wait <id>', 'taskferry wait <id> --timeout-ms 10000 --tail-chars 1000', 'taskferry wait <id> --summarize'],
+    examples: ['taskferry wait <id>', 'taskferry wait <id> --timeout 10s --tail-chars 1000', 'taskferry wait <id> --summarize'],
   },
   advisor: {
     usage: "taskferry advisor --prompt <text> --model <id> [options]",
@@ -52,12 +52,12 @@ const commandSpecs = {
       "--directory <path>": "defaults to the current workspace",
       "--variant <name>": "optional model reasoning variant",
       "--session-id <id>": "continue a recent advisor session",
-      "--timeout-ms <number>": "maximum wait in milliseconds",
+      "--timeout <duration>": "maximum wait, e.g. 10000 (ms), 30s, 5m, 1h",
       "--executor <opencode|pi>": "worker backend to dispatch through, default pi",
     },
     examples: [
       'taskferry advisor --prompt "How should I split this module?" --model openai/gpt-5.6-sol',
-      'taskferry advisor --prompt "Review this design" --model zai/glm-5.2 --timeout-ms 30000',
+      'taskferry advisor --prompt "Review this design" --model zai/glm-5.2 --timeout 30s',
     ],
   },
   status: {
@@ -315,7 +315,8 @@ export function parseArgs(argv, { cwd = process.cwd() } = {}) {
     const { name, inlineValue } = parseLongFlag(token);
     const migrationFlags = {
       "--task-id": "--task-id was replaced by the positional task id; use `taskferry status <id>`",
-      "--timeout_ms": "--timeout_ms was renamed; use --timeout-ms",
+      "--timeout_ms": "--timeout_ms was renamed; use --timeout",
+      "--timeout-ms": "--timeout-ms was renamed; use --timeout",
       "--tail_chars": "--tail_chars was renamed; use --tail-chars",
       "--max_words": "--max_words was renamed; use --max-words",
       "--session_id": "--session_id was renamed; use --session-id",
@@ -350,7 +351,7 @@ export function parseArgs(argv, { cwd = process.cwd() } = {}) {
       "--session-id": "sessionId",
       "--key-slot": "keySlot",
       "--grace-ms": "graceMs",
-      "--timeout-ms": "timeoutMs",
+      "--timeout": "timeoutMs",
       "--tail-chars": "tailChars",
       "--chars": "chars",
       "--mode": "mode",
@@ -368,7 +369,9 @@ export function parseArgs(argv, { cwd = process.cwd() } = {}) {
     const required = requireValue(rest, index, name, inlineValue);
     index = required.nextIndex;
     let value = required.value;
-    if (["graceMs", "timeoutMs", "tailChars", "chars", "maxWords", "limit"].includes(key)) {
+    if (key === "timeoutMs") {
+      value = parseDuration(value, name);
+    } else if (["graceMs", "tailChars", "chars", "maxWords", "limit"].includes(key)) {
       value = parseNumber(value, name, key === "tailChars" || key === "chars" ? { min: 1, max: 65536 } : key === "maxWords" ? { min: 75, max: 300 } : { min: key === "limit" ? 1 : 0 });
     } else if (key === "fields") {
       value = parseFields(value);
@@ -406,7 +409,7 @@ export function parseArgs(argv, { cwd = process.cwd() } = {}) {
       throw usageError("--full requires narration in --fields", command);
     }
     if (command === "wait" && options.summarize && options.timeoutMs !== undefined) {
-      throw usageError("--summarize cannot be combined with --timeout-ms", command);
+      throw usageError("--summarize cannot be combined with --timeout", command);
     }
     if (command === "wait" && options.summarize && options.tailChars !== undefined) {
       throw usageError("--summarize cannot be combined with --tail-chars", command);
@@ -419,8 +422,8 @@ function commandAllows(command, flag) {
   const flags = {
     dispatch: ["--prompt", "--directory", "--model", "--variant", "--session-id", "--key-slot", "--require-final-marker", "--allowed-dirs", "--executor"],
     cancel: ["--grace-ms"],
-    wait: ["--timeout-ms", "--tail-chars"],
-    advisor: ["--prompt", "--model", "--directory", "--variant", "--session-id", "--timeout-ms", "--executor"],
+    wait: ["--timeout", "--tail-chars"],
+    advisor: ["--prompt", "--model", "--directory", "--variant", "--session-id", "--timeout", "--executor"],
     status: [],
     tail: ["--chars"],
     summary: ["--mode", "--max-words"],

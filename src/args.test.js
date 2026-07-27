@@ -184,7 +184,7 @@ test("rejects empty option values and trailing global arguments as usage errors"
   assert.throws(() => parseArgs(["--help", "extra"]), /unexpected argument: extra/);
 });
 
-test("parses wait --summarize and rejects it combined with --timeout-ms or --tail-chars", () => {
+test("parses wait --summarize and rejects it combined with --timeout or --tail-chars", () => {
   assert.deepEqual(parseArgs(["wait", "oc_1", "--summarize"]).options, {
     taskId: "oc_1",
     timeoutMs: undefined,
@@ -192,7 +192,7 @@ test("parses wait --summarize and rejects it combined with --timeout-ms or --tai
     full: false,
     summarize: true,
   });
-  assert.throws(() => parseArgs(["wait", "oc_1", "--summarize", "--timeout-ms", "5000"]), /--summarize cannot be combined with --timeout-ms/);
+  assert.throws(() => parseArgs(["wait", "oc_1", "--summarize", "--timeout", "5000"]), /--summarize cannot be combined with --timeout/);
   assert.throws(() => parseArgs(["wait", "oc_1", "--summarize", "--tail-chars", "500"]), /--summarize cannot be combined with --tail-chars/);
 });
 
@@ -258,4 +258,16 @@ test("wait --timeout rejects malformed duration strings", () => {
   for (const value of cases) {
     assert.throws(() => parseArgs(["wait", "oc_1", "--timeout", value]), UsageError, `expected rejection for "${value}"`);
   }
+});
+
+test("--timeout-ms and --timeout_ms both error with a migration message pointing at --timeout", () => {
+  const migrationAssert = (args) => assert.throws(
+    () => parseArgs(args),
+    (error) => error instanceof UsageError
+      && /unknown flag/.test(error.message)
+      && /use --timeout/.test(error.help)
+  );
+  migrationAssert(["wait", "oc_1", "--timeout-ms", "5000"]);
+  migrationAssert(["wait", "oc_1", "--timeout_ms", "5000"]);
+  migrationAssert(["advisor", "--prompt", "p", "--model", "m", "--timeout-ms", "5000"]);
 });

@@ -1,5 +1,5 @@
 import { decode } from "@toon-format/toon";
-import { execFileSync, execSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -35,7 +35,12 @@ function stopDaemon() {
 
 function psTree(pgid) {
   try {
-    return execSync(`ps -eo pid,pgid,comm,args --no-headers | awk -v pg=${pgid} '$2==pg'`).toString().trim();
+    const output = execFileSync("ps", ["-eo", "pid,pgid,comm,args", "--no-headers"], { encoding: "utf8" });
+    return output
+      .split("\n")
+      .filter((line) => line.trim().split(/\s+/)[1] === String(pgid))
+      .join("\n")
+      .trim();
   } catch {
     return "";
   }

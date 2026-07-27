@@ -155,6 +155,26 @@ test("dispatch --prompt - rejects with a usage error when piped stdin is empty",
   assert.match(capture.output().value.help, /Pipe a prompt into the command/);
 });
 
+test("dispatch --prompt - rejects instead of hanging forever when aborted while stdin never closes", async () => {
+  const { PassThrough } = await import("node:stream");
+  const stdin = new PassThrough();
+  stdin.isTTY = false;
+  const capture = capturedIo({ stdin });
+  const controller = new AbortController();
+  controller.abort();
+  const result = await runCli(["dispatch", "--prompt", "-"], {
+    io: capture.io,
+    signal: controller.signal,
+    connectClient: async () => {
+      throw new Error("must not connect");
+    },
+  });
+
+  assert.equal(result.exitCode, 2);
+  assert.match(capture.output().value.error, /aborted/i);
+  stdin.end();
+});
+
 test("advisor --prompt - surfaces the same actionable help, with the advisor command name, when stdin is a TTY", async () => {
   const capture = capturedIo({ stdin: fakeTtyStdin() });
   const result = await runCli(["advisor", "--prompt", "-", "--model", "opencode/some-model"], {

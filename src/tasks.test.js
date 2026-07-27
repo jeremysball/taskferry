@@ -3441,6 +3441,65 @@ describe("summarize()", () => {
     assert.equal(summary.status, "done");
     assert.equal(summary.sessionId, "ses_real");
   });
+
+  test("activity-refresh summary reserve retries briefly instead of dropping a second task's summary outright (regression for #134 review finding)", async () => {
+    const children = [];
+    const log1 = JSON.stringify({ type: "text", part: { messageID: "m1", text: "Task one progress" } }) + "\n";
+    const log2 = JSON.stringify({ type: "text", part: { messageID: "m1", text: "Task two progress" } }) + "\n";
+    const mgr = makeManager({
+      maxConcurrentTasks: 2,
+      tasksFixture: (logDir) => [
+        baseTask({ id: "source1", logPath: path.join(logDir, "source1.ndjson") }),
+        baseTask({ id: "source2", logPath: path.join(logDir, "source2.ndjson") }),
+      ],
+      logs: { "source1.ndjson": log1, "source2.ndjson": log2 },
+      spawnFn: () => {
+        const child = fakeChild(9000 + children.length);
+        children.push(child);
+        return child;
+      },
+    });
+    const fixtures = JSON.parse(fs.readFileSync(mgr.paths.TASKS_FILE, "utf8"));
+    const source1 = fixtures.find((t) => t.id === "source1");
+    const source2 = fixtures.find((t) => t.id === "source2");
+
+    try {
+      mock.timers.enable({ apis: ["setTimeout"] });
+
+      // source1's forced activity refresh occupies the only summary reserve
+      // slot (summaryConcurrencyLimit = 1 at maxConcurrentTasks = 2).
+      const refresh1P = mgr.activityCache.refresh(source1, { force: true, includeSummary: true });
+      while (children.length < 1) await new Promise((resolve) => setImmediate(resolve));
+      const summary1Id = JSON.parse(fs.readFileSync(mgr.paths.TASKS_FILE, "utf8"))
+        .find((t) => t.summaryOf && t.summaryOf.sourceTaskId === "source1").id;
+
+      // source2's refresh starts while the reserve is full. Before this fix,
+      // the reserve check returned the "skipped" response immediately here.
+      const refresh2P = mgr.activityCache.refresh(source2, { force: true, includeSummary: true });
+      await new Promise((resolve) => setImmediate(resolve));
+      assert.equal(children.length, 1, "source2 must not spawn yet while the reserve is full");
+
+      // Free the slot before the retry loop exhausts its attempts.
+      await settleSummaryChildWithSessionId(mgr, summary1Id, "ses_source1", "source one summary");
+      children[0].emit("exit", 0, null);
+      assert.equal((await refresh1P).activity, "source one summary");
+
+      // Advance past the retry delay so source2's loop re-checks and proceeds
+      // now that the slot is free, instead of giving up.
+      mock.timers.tick(500);
+      while (children.length < 2) await new Promise((resolve) => setImmediate(resolve));
+
+      const summary2Id = JSON.parse(fs.readFileSync(mgr.paths.TASKS_FILE, "utf8"))
+        .find((t) => t.summaryOf && t.summaryOf.sourceTaskId === "source2").id;
+      await settleSummaryChildWithSessionId(mgr, summary2Id, "ses_source2", "source two summary");
+      children[1].emit("exit", 0, null);
+
+      const result2 = await refresh2P;
+      assert.equal(result2.activity, "source two summary", "source2 must get a real summary, not the reserve-skip text");
+    } finally {
+      mock.timers.reset();
+    }
+  });
 });
 
 describe("key slots (summary tasks)", () => {

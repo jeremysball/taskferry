@@ -106,7 +106,7 @@ pointing at `src/cli.js`, `~/.local/bin/tf-sl` pointing at `src/tf-sl.sh`, and
 `src/opencode-plugin.js`. It also registers the native agent integration
 for whichever client is on `PATH` (Claude Code, Codex). The `export PATH`
 line above is what makes `taskferry --version` resolve on the very next
-line — it's only a no-op if `~/.local/bin` was already on your `PATH`
+line. It's only a no-op if `~/.local/bin` was already on your `PATH`
 before you started. Add it to your shell rc file (`~/.bashrc`, `~/.zshrc`,
 ...) too, so future shells pick up `taskferry` without re-running it.
 
@@ -119,7 +119,7 @@ or nothing if none is. Compose it into a larger statusline script
 
 ### Provider credentials
 
-`taskferry dispatch` spawns `pi` or `opencode`, not a model — neither worker
+`taskferry dispatch` spawns `pi` or `opencode`, not a model. Neither worker
 CLI ships with credentials, so a fresh install has none until you configure
 one yourself:
 
@@ -129,9 +129,9 @@ one yourself:
   dispatching.
 - **`opencode`** (`--executor opencode`): run `opencode auth login`.
 
-Skipping this doesn't fail loudly at `dispatch` time — the task is accepted
+Skipping this doesn't fail loudly at `dispatch` time. The task is accepted
 and reports `status: running`, then crashes a few seconds later once the
-worker CLI actually tries to reach a provider with no credentials. Check
+worker CLI tries to reach a provider with no credentials. Check
 `taskferry status <id> --full` for `failureReason`/`failureDetail` if a
 task crashes immediately after your first dispatch; see
 [docs/troubleshooting.md](docs/troubleshooting.md#a-task-is-stuck-crashed-with-a-provider-failure-failurereason)

@@ -216,6 +216,29 @@ describe("dispatch() lifecycle, driven through an injected spawnFn (no real open
     assertDispatchedModel(captured, "openai/gpt-5.6-luna");
   });
 
+  test("resuming with --session-id and no --executor inherits the executor of the task that owned that session", () => {
+    let capturedCmd = null;
+    const mgr = makeManager({ spawnFn: (cmd) => { capturedCmd = cmd; return fakeChild(); } });
+    mgr.dispatch({ prompt: "first", directory: os.tmpdir(), sessionId: "ses_exec", executor: "pi" });
+    mgr.dispatch({ prompt: "resume", directory: os.tmpdir(), sessionId: "ses_exec" });
+    assert.equal(capturedCmd, "pi");
+  });
+
+  test("resuming with --session-id and an explicit --executor still uses the explicit executor", () => {
+    let capturedCmd = null;
+    const mgr = makeManager({ spawnFn: (cmd) => { capturedCmd = cmd; return fakeChild(); } });
+    mgr.dispatch({ prompt: "first", directory: os.tmpdir(), sessionId: "ses_exec2", executor: "pi" });
+    mgr.dispatch({ prompt: "resume", directory: os.tmpdir(), sessionId: "ses_exec2", executor: "opencode" });
+    assert.equal(capturedCmd, "opencode");
+  });
+
+  test("an unrecognized --session-id with no --executor still falls back to the manager's default executor", () => {
+    let capturedCmd = null;
+    const mgr = makeManager({ spawnFn: (cmd) => { capturedCmd = cmd; return fakeChild(); } });
+    mgr.dispatch({ prompt: "resume", directory: os.tmpdir(), sessionId: "ses_exec_never_seen" });
+    assert.equal(capturedCmd, "pi");
+  });
+
   test("a short prompt is returned verbatim in promptPreview, with no promptTotalChars hint", () => {
     const mgr = makeManager({ spawnFn: () => fakeChild() });
     const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });

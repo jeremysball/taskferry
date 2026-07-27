@@ -43,16 +43,18 @@ workspace"` and `next` suggests `dispatch` instead.
 
 ## `taskferry dispatch --prompt <text> [options]`
 
-Queues `opencode run --dir <directory> --auto --format json -m <model> -- <prompt>`
-(or the equivalent `pi` invocation when `--executor pi` is given) as a
-background child process and returns a task summary immediately.
+Queues a `pi --model <model> --mode json -p <prompt>` invocation (the
+built-in default executor), or the equivalent `opencode run --dir
+<directory> --auto --format json -m <model> -- <prompt>` when `--executor
+opencode` is given, as a background child process and returns a task
+summary immediately.
 
 | Flag | Notes |
 |---|---|
 | `--prompt <text>` | Required. Pass `-` to read the prompt from piped stdin instead (`cat prompt.txt \| taskferry dispatch --prompt -`) — use this for prompts too large to pass as a single command-line argument |
 | `--directory <path>` | Defaults to the current workspace; an existing directory (relative paths are resolved against the current working directory) |
 | `--model <id>` | `provider/model`, e.g. `opencode-go/minimax-m3`. Run `opencode models` to list installed models. Defaults to `minimax/MiniMax-M2.7` for the default `pi` executor; `--executor opencode` defaults to `openai/gpt-5.6-luna` instead. When `--session-id` is given without `--model`, the model is instead inherited from the most recent prior task dispatched with that session id |
-| `--variant <name>` | Reasoning-effort override (`high`, `max`, `minimal`, ...), applied only alongside `--model` — omitting `--model` (including on a `--session-id` resume) always forces variant `high`, regardless of any `--variant` passed |
+| `--variant <name>` | Reasoning-effort override, applied only alongside `--model` — omitting `--model` (including on a `--session-id` resume) always forces variant `high`, regardless of any `--variant` passed. Accepted values depend on the executor: pi takes `off`, `minimal`, `low`, `medium`, `high`, `xhigh`; opencode's `--variant` values depend on the model |
 | `--executor <opencode\|pi>` | Which worker CLI to spawn. Built-in default `pi`, but an omitted flag actually falls back to the daemon's configured default executor (`TASKFERRY_DEFAULT_EXECUTOR` or `config.json`'s `defaultExecutor`) |
 | `--session-id <id>` | Resume an existing OpenCode session (`--continue --session <id>`) instead of starting fresh; get session ids from a prior `result` or `status --full` |
 | `--key-slot <name>` | Use a configured provider-key slot instead of the daemon's ambient key; see [security.md](security.md) |

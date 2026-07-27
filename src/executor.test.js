@@ -59,10 +59,10 @@ describe("piExecutor()", () => {
     assert.equal(piExecutor().binaryName, "pi");
   });
 
-  test("sandboxAuthFile falls back to ~/.pi", () => {
+  test("sandboxAuthFile falls back to ~/.pi/agent", () => {
     const ex = piExecutor();
-    const result = ex.sandboxAuthFile({ homeDir: "/home/user", dataDir: "/state/run", spawnEnv: {}, existsFn: (p) => p === "/home/user/.pi/auth.json" });
-    assert.deepEqual(result.extraRoBinds, [["/home/user/.pi/auth.json", "/state/run/pi-data/auth.json"]]);
+    const result = ex.sandboxAuthFile({ homeDir: "/home/user", dataDir: "/state/run", spawnEnv: {}, existsFn: (p) => p === "/home/user/.pi/agent/auth.json" });
+    assert.deepEqual(result.extraRoBinds, [["/home/user/.pi/agent/auth.json", "/state/run/pi-data/auth.json"]]);
   });
 
   test("sandboxAuthFile also binds the real extensions directory read-only, so custom-registered providers still resolve inside the sandbox", () => {

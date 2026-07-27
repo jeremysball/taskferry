@@ -933,14 +933,28 @@ export function createTaskManager({
    * @param {boolean} [params.noSandbox]
    * @param {string[]} [params.allowedDirs] - extra directories bound read-write for this dispatch only, on
    *   top of the manager-level default (see createTaskManager's `allowedDirs` option)
-   * @param {string} [params.executor] - "opencode" | "pi", defaults to the manager's defaultExecutor
-   *   (itself the result of `resolveExecutor(undefined)` at construction). An unknown name throws before
-   *   any validation runs, so a misrouted CLI/RPC call fails fast rather than silently picking the default.
+   * @param {string} [params.executor] - "opencode" | "pi". When omitted on a `sessionId` resume, inherits
+   *   the executor that originally created the session (a different executor can't continue another CLI's
+   *   session file); otherwise defaults to the manager's defaultExecutor (itself the result of
+   *   `resolveExecutor(undefined)` at construction). An unknown name throws before any validation runs, so a
+   *   misrouted CLI/RPC call fails fast rather than silently picking the default.
    * @returns {TaskSummary & {next: string}}
    */
   function dispatch({ prompt, directory, model, variant, sessionId, keySlot, internal = false, finalMarker = null, originSessionId, noSandbox = false, allowedDirs: dispatchAllowedDirs, executor: executorName }) {
     ensureStateLoaded();
-    const executor = executorName === undefined ? defaultExecutor : resolveExecutor(executorName);
+    // A resume (--session-id with no --executor) should inherit the executor
+    // the session was actually created under, not silently fall back to the
+    // manager's default -- a different executor has no way to continue a
+    // session file another CLI's binary wrote.
+    /** @type {Task|null} */
+    let priorSessionTask = null;
+    if (sessionId) {
+      for (const t of tasks.values()) {
+        if (t.sessionId === sessionId && (!priorSessionTask || t.startedAt > priorSessionTask.startedAt)) priorSessionTask = t;
+      }
+    }
+    const executor =
+      executorName !== undefined ? resolveExecutor(executorName) : priorSessionTask ? resolveExecutor(priorSessionTask.executorId) : defaultExecutor;
     if (!prompt || typeof prompt !== "string") {
       throw new Error("error: prompt is required\nhelp: taskferry dispatch requires a non-empty prompt string");
     }
@@ -977,13 +991,6 @@ export function createTaskManager({
     // session was actually created under, not silently fall back to the
     // hardcoded default -- a different model can mean a different provider,
     // breaking the whole point of resuming that exact session.
-    /** @type {Task|null} */
-    let priorSessionTask = null;
-    if (sessionId) {
-      for (const t of tasks.values()) {
-        if (t.sessionId === sessionId && (!priorSessionTask || t.startedAt > priorSessionTask.startedAt)) priorSessionTask = t;
-      }
-    }
     const usingDefaultModel = !model;
     const resolvedModel = model || priorSessionTask?.model || executor.defaultModel;
 

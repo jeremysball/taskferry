@@ -148,7 +148,7 @@ export function piExecutor({ execFileFn = execFileAsync } = {}) {
     // (sockets, locks) of space.
     /** @param {{homeDir: string, dataDir: string, spawnEnv: NodeJS.ProcessEnv, existsFn: (file: string) => boolean}} args @returns {{extraRoBinds: [string, string][], sandboxedDataHome: string, sandboxEnv: Record<string, string>}} */
     sandboxAuthFile({ homeDir, dataDir, spawnEnv, existsFn }) {
-      const realAgentDir = spawnEnv.PI_CODING_AGENT_DIR || path.join(homeDir, ".pi");
+      const realAgentDir = spawnEnv.PI_CODING_AGENT_DIR || path.join(homeDir, ".pi", "agent");
       const realAuthFile = path.join(realAgentDir, "auth.json");
       // Pi roots both state (auth, sessions) and config (custom-provider
       // extensions) under the same PI_CODING_AGENT_DIR. Redirecting that

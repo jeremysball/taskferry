@@ -128,8 +128,8 @@ Vars marked "config.json" also have a config-file equivalent — see
   already-running child processes.
 - `taskferry wait` returning with `status: "running"` and a `note` about
   timing out — expected when the 15-minute default timeout (or an explicit
-  `--timeout-ms`) elapses before the task settles; re-run `taskferry wait`
-  to keep polling or pass `--timeout-ms` for a longer cap.
+  `--timeout`) elapses before the task settles; re-run `taskferry wait`
+  to keep polling or pass `--timeout` for a longer cap.
 - A `SKILL.md` edit not showing up in `integrations/claude/skills/...` —
   run `npm run skill:generate`; the distributed copies are generated, not
   hand-edited. Commit them alongside the canonical file anyway — they aren't

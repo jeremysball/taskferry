@@ -78,7 +78,7 @@ console.log(cancelResult);
 console.log("\n== waiting for settlement (taskferry wait) ==");
 let last = null;
 for (let i = 0; i < 3 && (!last || last.status === "running" || last.status === "queued"); i++) {
-  last = taskferry(["wait", taskId, "--timeout-ms", "10000"]);
+  last = taskferry(["wait", taskId, "--timeout", "10000"]);
   console.log(`[attempt ${i + 1}]`, last.status, last.signal ? `signal=${last.signal}` : "");
 }
 

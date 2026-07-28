@@ -145,6 +145,7 @@ test("parses workspace, stream, and result options with their constrained values
     format: "ndjson",
     summaries: true,
     taskId: undefined,
+    flushIntervalMs: undefined,
   });
   assert.deepEqual(parseArgs(["list", "--all", "--limit", "10"]).options, {
     directory: undefined,
@@ -174,6 +175,7 @@ test("parses watch --task-id and rejects it for commands that don't take it", ()
     format: "toon",
     summaries: false,
     taskId: "oc_1",
+    flushIntervalMs: undefined,
   });
   assert.throws(() => parseArgs(["status", "oc_1", "--task-id", "oc_2"]), /task id is required|unknown flag/);
 });
@@ -279,4 +281,19 @@ test("home's default directory is left undefined (resolved later via resolveWork
 
 test("dispatch's default directory stays literal cwd, unaffected by the observation-command directory default change", () => {
   assert.equal(parseArgs(["dispatch", "--prompt", "x"], { cwd: "/workspace/project" }).options.directory, "/workspace/project");
+});
+
+test("parses watch --flush-interval as a duration and requires --summaries", () => {
+  assert.equal(
+    parseArgs(["watch", "--summaries", "--flush-interval", "5m"]).options.flushIntervalMs,
+    300000
+  );
+  assert.equal(
+    parseArgs(["watch", "--summaries", "--flush-interval", "30000"]).options.flushIntervalMs,
+    30000
+  );
+  assert.throws(
+    () => parseArgs(["watch", "--flush-interval", "5m"]),
+    /--flush-interval requires --summaries/
+  );
 });

@@ -779,3 +779,115 @@ test("doctor integrations.playwrightMcpIsolation shape is present when both side
   assert.equal(result.integrations.playwrightMcpIsolation.claudeCode.checked, true);
   assert.equal(result.integrations.playwrightMcpIsolation.claudeCode.isolated, true);
 });
+
+test("watch --flush-interval batches multiple events for the same and different taskIds into one flushed block", async () => {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-commands-test-")));
+  const controller = new AbortController();
+  let deliver;
+  const client = fakeClient({
+    onSubscribe: (_params, onEvent) => { deliver = onEvent; },
+  });
+  const io = fakeIo();
+
+  const pending = runCommand("watch", { directory: root, format: "toon", summaries: true, flushIntervalMs: 1000 }, {
+    client,
+    io,
+    signal: controller.signal,
+    cwd: root,
+  });
+
+  deliver({ sequence: 1, type: "task.state", taskId: "oc_1", directory: root, status: "running" });
+  deliver({ sequence: 2, type: "task.state", taskId: "oc_2", directory: root, status: "running" });
+  deliver({ sequence: 3, type: "task.state", taskId: "oc_1", directory: root, status: "done" }); // last-write-wins for oc_1
+
+  assert.equal(io.lines.length, 0, "nothing should be written before the first flush tick");
+
+  await new Promise((resolve) => setTimeout(resolve, 1100));
+  controller.abort();
+  await pending;
+
+  // toon/plain format renders one line per buffered event, same as today's
+  // per-event output, just written together at flush time instead of
+  // streamed individually -- Map preserves oc_1's original insertion
+  // position, so it flushes first even though its value was last updated.
+  assert.equal(io.lines.length, 2, "one line per distinct taskId, written together at the flush tick");
+  assert.match(io.lines[0], /oc_1/);
+  assert.match(io.lines[0], /done/);
+  assert.doesNotMatch(io.lines[0], /running/, "oc_1's stale running event must not appear, only its final done");
+  assert.match(io.lines[1], /oc_2/);
+  assert.match(io.lines[1], /running/);
+});
+
+test("watch --flush-interval emits nothing on a tick where no events arrived", async () => {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-commands-test-")));
+  const controller = new AbortController();
+  const client = fakeClient({ onSubscribe: () => {} });
+  const io = fakeIo();
+
+  const pending = runCommand("watch", { directory: root, format: "toon", summaries: true, flushIntervalMs: 200 }, {
+    client,
+    io,
+    signal: controller.signal,
+    cwd: root,
+  });
+
+  await new Promise((resolve) => setTimeout(resolve, 450));
+  controller.abort();
+  await pending;
+
+  assert.equal(io.lines.length, 0);
+});
+
+test("watch --flush-interval --task-id flushes the terminal event synchronously before exiting, not left buffered", async () => {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-commands-test-")));
+  let deliver;
+  const client = fakeClient({
+    onSubscribe: (_params, onEvent) => { deliver = onEvent; },
+  });
+  const io = fakeIo();
+
+  const pending = runCommand("watch", { directory: root, format: "toon", summaries: true, flushIntervalMs: 60000, taskId: "oc_1" }, {
+    client,
+    io,
+    cwd: root,
+  });
+
+  deliver({ sequence: 1, type: "task.state", taskId: "oc_1", directory: root, status: "running" });
+  deliver({ sequence: 2, type: "task.state", taskId: "oc_1", directory: root, status: "done" });
+
+  const result = await pending;
+
+  assert.equal(result.watching, false);
+  assert.equal(io.lines.length, 1, "the terminal event must flush immediately, not wait for a 60s tick that never fires in this test");
+  assert.match(io.lines[0], /done/);
+});
+
+test("watch --flush-interval --format ndjson wraps buffered events in a single watch.flush envelope", async () => {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-commands-test-")));
+  const controller = new AbortController();
+  let deliver;
+  const client = fakeClient({
+    onSubscribe: (_params, onEvent) => { deliver = onEvent; },
+  });
+  const io = fakeIo();
+
+  const pending = runCommand("watch", { directory: root, format: "ndjson", summaries: true, flushIntervalMs: 100 }, {
+    client,
+    io,
+    signal: controller.signal,
+    cwd: root,
+  });
+
+  deliver({ sequence: 1, type: "task.state", taskId: "oc_1", directory: root, status: "running" });
+
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  controller.abort();
+  await pending;
+
+  assert.equal(io.lines.length, 1);
+  const parsed = JSON.parse(io.lines[0]);
+  assert.equal(parsed.type, "watch.flush");
+  assert.equal(typeof parsed.timestamp, "string");
+  assert.equal(parsed.events.length, 1);
+  assert.equal(parsed.events[0].taskId, "oc_1");
+});

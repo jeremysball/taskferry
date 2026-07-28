@@ -243,7 +243,7 @@ function terminalEventFromStatus(detail) {
   };
 }
 
-function streamTaskEvents({ client, io, signal, directory, taskId, summaries, format }) {
+function streamTaskEvents({ client, io, signal, directory, taskId, summaries, format, flushIntervalMs }) {
   let settle;
   let abortHandler;
   // `directory` is only known upfront when the caller already had it (plain
@@ -251,6 +251,36 @@ function streamTaskEvents({ client, io, signal, directory, taskId, summaries, fo
   // taskId directly (the daemon resolves the directory server-side) and only
   // learns it once the first matching event arrives.
   let resolvedDirectory = directory;
+  const buffered = flushIntervalMs ? new Map() : null;
+  const writeRaw = (event) => io.stdout.write(`${formatWatchEvent(event, format, io.stdout.isTTY)}\n`);
+  const flush = () => {
+    if (!buffered || buffered.size === 0) return;
+    const events = [...buffered.values()];
+    buffered.clear();
+    if (format === "ndjson") {
+      io.stdout.write(`${JSON.stringify({ type: "watch.flush", timestamp: new Date().toISOString(), events })}\n`);
+      return;
+    }
+    for (const event of events) writeRaw(event);
+  };
+  const timer = buffered ? setInterval(flush, flushIntervalMs) : null;
+  const emit = (event) => {
+    if (buffered) {
+      buffered.set(event.taskId, event);
+      return;
+    }
+    writeRaw(event);
+  };
+  // A terminal event for a taskId-scoped watch must reach stdout before the
+  // process exits, never left sitting unflushed in the buffer.
+  const emitTerminalNow = (event) => {
+    if (buffered) {
+      buffered.set(event.taskId, event);
+      flush();
+      return;
+    }
+    writeRaw(event);
+  };
   const finished = new Promise((resolve, reject) => {
     let settled = false;
     settle = (result) => {
@@ -267,10 +297,12 @@ function streamTaskEvents({ client, io, signal, directory, taskId, summaries, fo
     Promise.resolve(client.subscribe({ ...(directory ? { directory } : { taskId }), ...(summaries ? { summaries: true } : {}) }, (event) => {
       if (taskId && event.taskId !== taskId) return;
       resolvedDirectory = event.directory;
-      io.stdout.write(`${formatWatchEvent(event, format, io.stdout.isTTY)}\n`);
       if (taskId && TERMINAL_STATUSES.has(event.status)) {
+        emitTerminalNow(event);
         settle({ directory: resolvedDirectory, watching: false, event });
+        return;
       }
+      emit(event);
     })).then(() => {
       // Subscriptions only broadcast future transitions (no snapshot replay), so a task
       // that was already terminal before subscribing, or that settled in the gap between
@@ -281,7 +313,7 @@ function streamTaskEvents({ client, io, signal, directory, taskId, summaries, fo
         if (settled || !TERMINAL_STATUSES.has(detail.status)) return;
         const event = terminalEventFromStatus(detail);
         resolvedDirectory = detail.directory;
-        io.stdout.write(`${formatWatchEvent(event, format, io.stdout.isTTY)}\n`);
+        emitTerminalNow(event);
         settle({ directory: resolvedDirectory, watching: false, event });
       });
     }).catch((error) => {
@@ -292,6 +324,7 @@ function streamTaskEvents({ client, io, signal, directory, taskId, summaries, fo
   });
   return finished.finally(() => {
     signal?.removeEventListener("abort", abortHandler);
+    if (timer) clearInterval(timer);
   });
 }
 
@@ -309,6 +342,7 @@ async function watchCommand(options, { client, io, signal, cwd, resolveWorkspace
     taskId: options.taskId,
     summaries: options.summaries,
     format: options.format,
+    flushIntervalMs: options.flushIntervalMs,
   }).finally(() => {
     if (client.close) client.close();
   });

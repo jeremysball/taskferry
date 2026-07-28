@@ -414,6 +414,60 @@ test("projects status and result output using the former MCP lean projections", 
   ]);
 });
 
+test("list with no --directory resolves to this checkout's git workspace root via the real resolveWorkspaceRoot", async () => {
+  const capture = capturedIo();
+  const workspace = process.cwd();
+  const { client, calls } = fakeClient({
+    "task.list": { directory: workspace, counts: {}, tasks: [] },
+  });
+  const result = await runCli(["list"], {
+    cwd: workspace,
+    io: capture.io,
+    connectClient: async () => client,
+  });
+
+  assert.equal(result.exitCode, 0);
+  // This checkout's cwd during `npm test` is already the repo root, so
+  // resolveWorkspaceRoot(workspace) === workspace here -- this proves the
+  // real (non-injected) resolveWorkspaceRoot is wired in and behaves
+  // correctly for the at-repo-root case, without needing a temp git repo.
+  assert.deepEqual(calls, [{ method: "task.list", params: { directory: workspace } }]);
+});
+
+test("dispatch's directory is never passed through resolveWorkspaceRoot even when injected", async () => {
+  const capture = capturedIo({ stdin: fakeTtyStdin() });
+  const workspace = process.cwd();
+  const { client, calls } = fakeClient({ "task.dispatch": { id: "oc_1", status: "queued" } });
+  let called = false;
+  const result = await runCli(["dispatch", "--prompt", "hi"], {
+    cwd: workspace,
+    io: capture.io,
+    connectClient: async () => client,
+    resolveWorkspaceRoot: () => { called = true; return "/should/never/be/used"; },
+  });
+
+  assert.equal(result.exitCode, 0);
+  assert.equal(called, false);
+  assert.equal(calls[0].params.directory, workspace);
+});
+
+test("advisor's directory is never passed through resolveWorkspaceRoot even when injected (grouped with dispatch)", async () => {
+  const capture = capturedIo({ stdin: fakeTtyStdin() });
+  const workspace = process.cwd();
+  const { client, calls } = fakeClient({ "task.advisor": { status: "done", message: "advice" } });
+  let called = false;
+  const result = await runCli(["advisor", "--prompt", "hi", "--model", "opencode/some-model"], {
+    cwd: workspace,
+    io: capture.io,
+    connectClient: async () => client,
+    resolveWorkspaceRoot: () => { called = true; return "/should/never/be/used"; },
+  });
+
+  assert.equal(result.exitCode, 0);
+  assert.equal(called, false);
+  assert.equal(calls[0].params.directory, workspace);
+});
+
 test("doctor is a structured health check and --full preserves extra daemon fields", async (t) => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-cli-doctor-"));
   t.after(() => fs.rmSync(home, { recursive: true, force: true }));

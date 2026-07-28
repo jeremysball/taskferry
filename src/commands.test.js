@@ -414,6 +414,104 @@ test("watch --task-id resolves immediately for an already-settled task instead o
   assert.equal(client.closed.value, true);
 });
 
+test("list resolves its default directory via resolveWorkspaceRoot when --directory is omitted", async () => {
+  const cwd = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-commands-test-")));
+  const resolvedRoot = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-commands-test-")));
+  let calledWith;
+  const resolveWorkspaceRootFn = (dir) => { calledWith = dir; return resolvedRoot; };
+  const client = { request: async (method, params) => {
+    assert.equal(method, "task.list");
+    assert.equal(params.directory, resolvedRoot);
+    return { counts: {}, tasks: [] };
+  } };
+  await runCommand("list", { directory: undefined, all: false, limit: undefined }, { client, cwd, resolveWorkspaceRoot: resolveWorkspaceRootFn });
+  assert.equal(calledWith, cwd);
+});
+
+test("home/context resolve their default directory via resolveWorkspaceRoot when --directory is omitted", async () => {
+  const cwd = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-commands-test-")));
+  const resolvedRoot = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-commands-test-")));
+  const resolveWorkspaceRootFn = () => resolvedRoot;
+  let seenDirectory;
+  const clientFor = (method) => ({ request: async (m, params) => {
+    assert.equal(m, method);
+    seenDirectory = params.directory;
+    return method === "task.list" ? { counts: {}, tasks: [] } : {};
+  } });
+
+  await runCommand("home", { directory: undefined }, { client: clientFor("task.list"), cwd, resolveWorkspaceRoot: resolveWorkspaceRootFn });
+  assert.equal(seenDirectory, resolvedRoot);
+
+  await runCommand("context", { directory: undefined, format: "toon" }, { client: clientFor("task.context"), cwd, resolveWorkspaceRoot: resolveWorkspaceRootFn });
+  assert.equal(seenDirectory, resolvedRoot);
+});
+
+test("advisor does NOT resolve via resolveWorkspaceRoot (regression test mirroring the dispatch one)", async () => {
+  // advisor is grouped with dispatch at the args/cli/commands layers
+  // because tasks.js's advisor() forwards its directory straight into
+  // dispatch(), which uses it as both the bwrap sandbox root and the
+  // worker's spawn cwd -- so widening advisor's default to the
+  // workspace root would silently expand its sandbox from "the cwd
+  // you ran it in" to "the whole repo root".
+  const cwd = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-commands-test-")));
+  let called = false;
+  const resolveWorkspaceRootFn = () => { called = true; return fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-commands-test-"))); };
+  let seenDirectory;
+  const client = { request: async (method, params) => {
+    assert.equal(method, "task.advisor");
+    seenDirectory = params.directory;
+    return { status: "done", message: "advice" };
+  } };
+
+  await runCommand("advisor", { directory: undefined, prompt: "p", model: "m" }, { client, cwd, resolveWorkspaceRoot: resolveWorkspaceRootFn });
+
+  assert.equal(called, false, "advisor must never consult resolveWorkspaceRoot");
+  assert.equal(seenDirectory, cwd);
+});
+
+test("watch resolves its default directory via resolveWorkspaceRoot when --directory and --task-id are both omitted", async () => {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-commands-test-")));
+  const cwd = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-commands-test-")));
+  const resolveWorkspaceRootFn = (dir) => { assert.equal(dir, cwd); return root; };
+  const controller = new AbortController();
+  let subscribedDirectory;
+  const client = fakeClient({
+    onSubscribe: (params, onEvent) => {
+      subscribedDirectory = params.directory;
+      controller.abort();
+    },
+  });
+  const io = fakeIo();
+
+  await runCommand("watch", { directory: undefined, format: "toon", summaries: false, taskId: undefined }, {
+    client,
+    io,
+    signal: controller.signal,
+    cwd,
+    resolveWorkspaceRoot: resolveWorkspaceRootFn,
+  });
+
+  assert.equal(subscribedDirectory, root);
+});
+
+test("dispatch does NOT resolve via resolveWorkspaceRoot (regression test pinning the launch-directory behavior as unchanged)", async () => {
+  const cwd = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-commands-test-")));
+  let called = false;
+  const resolveWorkspaceRootFn = () => { called = true; return fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-commands-test-"))); };
+  let seenDirectory;
+  const client = { request: async (method, params) => {
+    assert.equal(method, "task.dispatch");
+    seenDirectory = params.directory;
+    return { id: "oc_1", status: "queued" };
+  } };
+  const checkSkills = () => {};
+
+  await runCommand("dispatch", { directory: undefined, prompt: "p" }, { client, cwd, resolveWorkspaceRoot: resolveWorkspaceRootFn, checkSkills });
+
+  assert.equal(called, false, "dispatch must never consult resolveWorkspaceRoot");
+  assert.equal(seenDirectory, cwd);
+});
+
 test("doctor has no warnings when the claude plugin is installed", async (t) => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-doctor-home-"));
   t.after(() => fs.rmSync(home, { recursive: true, force: true }));
@@ -700,4 +798,153 @@ test("doctor integrations.playwrightMcpIsolation shape is present when both side
   assert.equal(result.integrations.playwrightMcpIsolation.opencode.isolated, true);
   assert.equal(result.integrations.playwrightMcpIsolation.claudeCode.checked, true);
   assert.equal(result.integrations.playwrightMcpIsolation.claudeCode.isolated, true);
+});
+
+test("watch --flush-interval batches multiple events for the same and different taskIds into one flushed block", async () => {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-commands-test-")));
+  const controller = new AbortController();
+  let deliver;
+  const client = fakeClient({
+    onSubscribe: (_params, onEvent) => { deliver = onEvent; },
+  });
+  const io = fakeIo();
+
+  const pending = runCommand("watch", { directory: root, format: "toon", summaries: true, flushIntervalMs: 1000 }, {
+    client,
+    io,
+    signal: controller.signal,
+    cwd: root,
+  });
+
+  deliver({ sequence: 1, type: "task.state", taskId: "oc_1", directory: root, status: "running" });
+  deliver({ sequence: 2, type: "task.state", taskId: "oc_2", directory: root, status: "running" });
+  deliver({ sequence: 3, type: "task.state", taskId: "oc_1", directory: root, status: "done" }); // last-write-wins for oc_1
+
+  assert.equal(io.lines.length, 0, "nothing should be written before the first flush tick");
+
+  await new Promise((resolve) => setTimeout(resolve, 1100));
+  controller.abort();
+  await pending;
+
+  // toon/plain format renders one line per buffered event, same as today's
+  // per-event output, just written together at flush time instead of
+  // streamed individually -- Map preserves oc_1's original insertion
+  // position, so it flushes first even though its value was last updated.
+  assert.equal(io.lines.length, 2, "one line per distinct taskId, written together at the flush tick");
+  assert.match(io.lines[0], /oc_1/);
+  assert.match(io.lines[0], /done/);
+  assert.doesNotMatch(io.lines[0], /running/, "oc_1's stale running event must not appear, only its final done");
+  assert.match(io.lines[1], /oc_2/);
+  assert.match(io.lines[1], /running/);
+});
+
+test("watch --flush-interval emits nothing on a tick where no events arrived", async () => {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-commands-test-")));
+  const controller = new AbortController();
+  const client = fakeClient({ onSubscribe: () => {} });
+  const io = fakeIo();
+
+  const pending = runCommand("watch", { directory: root, format: "toon", summaries: true, flushIntervalMs: 200 }, {
+    client,
+    io,
+    signal: controller.signal,
+    cwd: root,
+  });
+
+  await new Promise((resolve) => setTimeout(resolve, 450));
+  controller.abort();
+  await pending;
+
+  assert.equal(io.lines.length, 0);
+});
+
+test("watch --flush-interval --task-id flushes the terminal event synchronously before exiting, not left buffered", async () => {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-commands-test-")));
+  let deliver;
+  const client = fakeClient({
+    onSubscribe: (_params, onEvent) => { deliver = onEvent; },
+  });
+  const io = fakeIo();
+
+  const pending = runCommand("watch", { directory: root, format: "toon", summaries: true, flushIntervalMs: 60000, taskId: "oc_1" }, {
+    client,
+    io,
+    cwd: root,
+  });
+
+  deliver({ sequence: 1, type: "task.state", taskId: "oc_1", directory: root, status: "running" });
+  deliver({ sequence: 2, type: "task.state", taskId: "oc_1", directory: root, status: "done" });
+
+  const result = await pending;
+
+  assert.equal(result.watching, false);
+  assert.equal(io.lines.length, 1, "the terminal event must flush immediately, not wait for a 60s tick that never fires in this test");
+  assert.match(io.lines[0], /done/);
+});
+
+test("watch --flush-interval --format ndjson wraps buffered events in a single watch.flush envelope", async () => {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-commands-test-")));
+  const controller = new AbortController();
+  let deliver;
+  const client = fakeClient({
+    onSubscribe: (_params, onEvent) => { deliver = onEvent; },
+  });
+  const io = fakeIo();
+
+  const pending = runCommand("watch", { directory: root, format: "ndjson", summaries: true, flushIntervalMs: 100 }, {
+    client,
+    io,
+    signal: controller.signal,
+    cwd: root,
+  });
+
+  deliver({ sequence: 1, type: "task.state", taskId: "oc_1", directory: root, status: "running" });
+
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  controller.abort();
+  await pending;
+
+  assert.equal(io.lines.length, 1);
+  const parsed = JSON.parse(io.lines[0]);
+  assert.equal(parsed.type, "watch.flush");
+  assert.equal(typeof parsed.timestamp, "string");
+  assert.equal(parsed.events.length, 1);
+  assert.equal(parsed.events[0].taskId, "oc_1");
+});
+
+test("watch --flush-interval flushes buffered events on abort instead of silently dropping them", async () => {
+  // Regression test: on SIGINT/SIGTERM or an injected AbortSignal, the
+  // buffered events must still be emitted -- otherwise up to one
+  // `--flush-interval` window's worth of events would be silently
+  // dropped on a clean (exit code 0) abort, even though the user
+  // explicitly opted into buffered/batched output.
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-commands-test-")));
+  const controller = new AbortController();
+  let deliver;
+  const client = fakeClient({
+    onSubscribe: (_params, onEvent) => { deliver = onEvent; },
+  });
+  const io = fakeIo();
+
+  const pending = runCommand("watch", { directory: root, format: "toon", summaries: true, flushIntervalMs: 60000 }, {
+    client,
+    io,
+    signal: controller.signal,
+    cwd: root,
+  });
+
+  // Populate the buffer with events but don't wait for the (60s) flush
+  // tick -- the abort must happen first, otherwise this test would
+  // pass for the wrong reason (just by hitting the timer eventually).
+  deliver({ sequence: 1, type: "task.state", taskId: "oc_1", directory: root, status: "running" });
+  deliver({ sequence: 2, type: "task.state", taskId: "oc_2", directory: root, status: "running" });
+  assert.equal(io.lines.length, 0, "nothing should be written before the flush tick or abort");
+
+  controller.abort();
+  const result = await pending;
+
+  assert.equal(result.watching, false);
+  assert.equal(io.lines.length, 2, "both buffered events must be flushed on abort, not silently dropped");
+  assert.match(io.lines[0], /oc_1/);
+  assert.match(io.lines[1], /oc_2/);
 });

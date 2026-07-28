@@ -126,7 +126,7 @@ planning or hard-debugging help mid-task, not for open-ended background work
 |---|---|
 | `--prompt <text>` | Required. Pass `-` to read the prompt from piped stdin instead, same as `dispatch` |
 | `--model <id>` | Required, no default; the caller picks the advisor |
-| `--directory <path>` | Defaults to the current workspace |
+| `--directory <path>` | Defaults to the current git workspace root (falls back to the literal current directory outside a git repo) |
 | `--variant <name>` | Optional reasoning-effort override |
 | `--executor <opencode\|pi>` | Which worker CLI to spawn. Built-in default `pi`, but an omitted flag actually falls back to the daemon's configured default executor (`TASKFERRY_DEFAULT_EXECUTOR` or `config.json`'s `defaultExecutor`) |
 | `--session-id <id>` | Resume a prior advisor exchange |
@@ -241,7 +241,7 @@ Lists tasks scoped to a workspace, newest first, with counts by status.
 
 | Flag | Notes |
 |---|---|
-| `--directory <path>` | Workspace to inspect, defaults to the current workspace |
+| `--directory <path>` | Workspace to inspect, defaults to the current git workspace root (falls back to the literal current directory outside a git repo) |
 | `--all` | Include tasks from every workspace; cannot combine with `--directory` |
 | `--limit <number>` | Limit displayed rows while preserving the full counts |
 
@@ -252,9 +252,10 @@ SIGTERM), then exits cleanly with code `0`.
 
 | Flag | Notes |
 |---|---|
-| `--directory <path>` | Workspace to watch, defaults to the current workspace |
+| `--directory <path>` | Workspace to watch, defaults to the current git workspace root (falls back to the literal current directory outside a git repo) |
 | `--format toon\|ndjson` | Stream format, default `toon` |
 | `--summaries` | Request live activity summaries (a secondary model call); see [security.md](security.md) |
+| `--flush-interval <duration>` | Batch `--summaries` events and print them together on this interval instead of streaming individually; milliseconds or a duration string (30s, 5m, 1h); requires `--summaries` |
 | `--task-id <id>` | Scope the stream to one task; `watch` then exits on its own once that task settles, instead of running until interrupted. This is the one command where `--task-id` is still live — see "Retired names" below. |
 
 Without `--task-id`, `watch` streams every task in the workspace until
@@ -263,6 +264,8 @@ task itself when omitted.
 
 `ndjson` emits one JSON object per line, for scripting.
 
+With `--flush-interval`, `ndjson` emits one `{"type": "watch.flush", "timestamp": ..., "events": [...]}` object per flush tick instead of one object per event; `toon` renders the same buffered events as today's per-event lines, just batched under one tick.
+
 ## `taskferry context [options]`
 
 Prints compact current-workspace context for an agent session-start hook:
@@ -270,7 +273,7 @@ task counts and rows, nothing else.
 
 | Flag | Notes |
 |---|---|
-| `--directory <path>` | Workspace to inspect, defaults to the current workspace |
+| `--directory <path>` | Workspace to inspect, defaults to the current git workspace root (falls back to the literal current directory outside a git repo) |
 | `--format toon\|claude-hook\|codex-hook` | Default `toon`; the two hook formats wrap the TOON payload in the target agent's expected envelope |
 
 ## `taskferry doctor [--full]`

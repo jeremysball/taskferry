@@ -16,7 +16,7 @@ import { defaultRunCommandAsync as defaultShellRunner, pluginInstalled } from ".
 import { checkClaudeCodePlaywrightIsolation, checkOpencodePlaywrightIsolation } from "./mcp-isolation.js";
 import { checkBwrapAvailableAsync } from "./sandbox.js";
 import { checkSkills as defaultCheckSkills } from "../scripts/generate-skill.js";
-import { normalizeDirectory } from "./paths.js";
+import { normalizeDirectory, resolveWorkspaceRoot } from "./paths.js";
 import { loadConfig } from "./config.js";
 
 // Default timeout for the CLI `wait` command (and `summary --wait`) when no
@@ -64,10 +64,10 @@ async function checkClaudeIntegration(runShellCommand) {
 }
 
 
-export async function runCommand(command, options, { client, io = process, signal, executablePath, cwd = process.cwd(), homeDirectory = os.homedir(), env = process.env, runShellCommand = defaultShellRunner, platform = process.platform, checkSkills = defaultCheckSkills } = {}) {
+export async function runCommand(command, options, { client, io = process, signal, executablePath, cwd = process.cwd(), homeDirectory = os.homedir(), env = process.env, runShellCommand = defaultShellRunner, platform = process.platform, checkSkills = defaultCheckSkills, resolveWorkspaceRoot: resolveWorkspaceRootFn = resolveWorkspaceRoot } = {}) {
   switch (command) {
     case "home": {
-      const directory = normalizeDirectory(options.directory || cwd);
+      const directory = normalizeDirectory(options.directory || resolveWorkspaceRootFn(cwd));
       const listed = await client.request("task.list", { directory });
       return homeView(projectList(listed), { executablePath, workspace: directory });
     }
@@ -136,6 +136,12 @@ export async function runCommand(command, options, { client, io = process, signa
       return leanStatus(detail, { full: options.full });
     }
     case "advisor": {
+      // advisor is grouped with dispatch (literal cwd), not with the
+      // observation commands: tasks.js's advisor() forwards its directory
+      // straight into dispatch(), which uses it as both the bwrap sandbox
+      // root and the worker's spawn cwd -- so widening advisor's default
+      // to the workspace root would silently expand its sandbox from
+      // "the cwd you ran it in" to "the whole repo root".
       const directory = normalizeDirectory(options.directory || cwd);
       return client.request("task.advisor", {
         prompt: options.prompt,
@@ -186,14 +192,14 @@ export async function runCommand(command, options, { client, io = process, signa
       return leanResult(detail, { full: options.full, fields: options.fields });
     }
     case "list": {
-      const params = options.all ? {} : { directory: normalizeDirectory(options.directory || cwd) };
+      const params = options.all ? {} : { directory: normalizeDirectory(options.directory || resolveWorkspaceRootFn(cwd)) };
       const listed = await client.request("task.list", params);
       return projectList(listed, { limit: options.limit });
     }
     case "watch":
-      return watchCommand(options, { client, io, signal, cwd });
+      return watchCommand(options, { client, io, signal, cwd, resolveWorkspaceRoot: resolveWorkspaceRootFn });
     case "context": {
-      const directory = normalizeDirectory(options.directory || cwd);
+      const directory = normalizeDirectory(options.directory || resolveWorkspaceRootFn(cwd));
       const context = await client.request("task.context", { directory });
       return contextForHook(projectContext(context), options.format);
     }
@@ -253,7 +259,7 @@ function terminalEventFromStatus(detail) {
   };
 }
 
-function streamTaskEvents({ client, io, signal, directory, taskId, summaries, format }) {
+function streamTaskEvents({ client, io, signal, directory, taskId, summaries, format, flushIntervalMs }) {
   let settle;
   let abortHandler;
   // `directory` is only known upfront when the caller already had it (plain
@@ -261,6 +267,41 @@ function streamTaskEvents({ client, io, signal, directory, taskId, summaries, fo
   // taskId directly (the daemon resolves the directory server-side) and only
   // learns it once the first matching event arrives.
   let resolvedDirectory = directory;
+  // Defensive: the args layer rejects `--flush-interval 0`, so this
+  // code path normally sees only positive values, but use `> 0` instead
+  // of truthy so any future caller that bypasses args.js can't
+  // accidentally fall back to unbuffered per-event streaming on a zero
+  // interval (the silent bug this check exists to prevent).
+  const buffered = flushIntervalMs && flushIntervalMs > 0 ? new Map() : null;
+  const writeRaw = (event) => io.stdout.write(`${formatWatchEvent(event, format, io.stdout.isTTY)}\n`);
+  const flush = () => {
+    if (!buffered || buffered.size === 0) return;
+    const events = [...buffered.values()];
+    buffered.clear();
+    if (format === "ndjson") {
+      io.stdout.write(`${JSON.stringify({ type: "watch.flush", timestamp: new Date().toISOString(), events })}\n`);
+      return;
+    }
+    for (const event of events) writeRaw(event);
+  };
+  const timer = buffered ? setInterval(flush, flushIntervalMs) : null;
+  const emit = (event) => {
+    if (buffered) {
+      buffered.set(event.taskId, event);
+      return;
+    }
+    writeRaw(event);
+  };
+  // A terminal event for a taskId-scoped watch must reach stdout before the
+  // process exits, never left sitting unflushed in the buffer.
+  const emitTerminalNow = (event) => {
+    if (buffered) {
+      buffered.set(event.taskId, event);
+      flush();
+      return;
+    }
+    writeRaw(event);
+  };
   const finished = new Promise((resolve, reject) => {
     let settled = false;
     settle = (result) => {
@@ -268,8 +309,18 @@ function streamTaskEvents({ client, io, signal, directory, taskId, summaries, fo
       settled = true;
       resolve(result ?? { directory: resolvedDirectory, watching: false });
     };
-    abortHandler = () => settle();
+    // On abort (SIGINT/SIGTERM or injected AbortSignal) flush any
+    // buffered events first, otherwise up to one `--flush-interval`
+    // window's worth of events would be silently dropped on a clean
+    // (exit code 0) abort. The setInterval is cleared in the `.finally`
+    // below, so this is the only path that emits them on the abort
+    // boundary.
+    abortHandler = () => {
+      if (buffered && buffered.size > 0) flush();
+      settle();
+    };
     if (signal?.aborted) {
+      if (buffered && buffered.size > 0) flush();
       settle();
       return;
     }
@@ -277,10 +328,12 @@ function streamTaskEvents({ client, io, signal, directory, taskId, summaries, fo
     Promise.resolve(client.subscribe({ ...(directory ? { directory } : { taskId }), ...(summaries ? { summaries: true } : {}) }, (event) => {
       if (taskId && event.taskId !== taskId) return;
       resolvedDirectory = event.directory;
-      io.stdout.write(`${formatWatchEvent(event, format, io.stdout.isTTY)}\n`);
       if (taskId && TERMINAL_STATUSES.has(event.status)) {
+        emitTerminalNow(event);
         settle({ directory: resolvedDirectory, watching: false, event });
+        return;
       }
+      emit(event);
     })).then(() => {
       // Subscriptions only broadcast future transitions (no snapshot replay), so a task
       // that was already terminal before subscribing, or that settled in the gap between
@@ -291,7 +344,7 @@ function streamTaskEvents({ client, io, signal, directory, taskId, summaries, fo
         if (settled || !TERMINAL_STATUSES.has(detail.status)) return;
         const event = terminalEventFromStatus(detail);
         resolvedDirectory = detail.directory;
-        io.stdout.write(`${formatWatchEvent(event, format, io.stdout.isTTY)}\n`);
+        emitTerminalNow(event);
         settle({ directory: resolvedDirectory, watching: false, event });
       });
     }).catch((error) => {
@@ -302,15 +355,16 @@ function streamTaskEvents({ client, io, signal, directory, taskId, summaries, fo
   });
   return finished.finally(() => {
     signal?.removeEventListener("abort", abortHandler);
+    if (timer) clearInterval(timer);
   });
 }
 
-async function watchCommand(options, { client, io, signal, cwd }) {
+async function watchCommand(options, { client, io, signal, cwd, resolveWorkspaceRoot: resolveWorkspaceRootFn = resolveWorkspaceRoot }) {
   const directory = options.directory
     ? normalizeDirectory(options.directory)
     : options.taskId
       ? null
-      : normalizeDirectory(cwd);
+      : normalizeDirectory(resolveWorkspaceRootFn(cwd));
   return streamTaskEvents({
     client,
     io,
@@ -319,6 +373,7 @@ async function watchCommand(options, { client, io, signal, cwd }) {
     taskId: options.taskId,
     summaries: options.summaries,
     format: options.format,
+    flushIntervalMs: options.flushIntervalMs,
   }).finally(() => {
     if (client.close) client.close();
   });

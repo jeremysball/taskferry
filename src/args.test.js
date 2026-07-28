@@ -40,14 +40,14 @@ test("parses each command's required arguments and defaults", () => {
   const cwd = "/workspace/project";
   assert.equal(parseArgs(["cancel", "oc_1"]).options.taskId, "oc_1");
   assert.deepEqual(parseArgs(["wait", "oc_1"]).options, { taskId: "oc_1", timeoutMs: undefined, tailChars: undefined, full: false, summarize: false });
-  assert.equal(parseArgs(["advisor", "--prompt", "help", "--model", "test/model"], { cwd }).options.directory, cwd);
+  assert.equal(parseArgs(["advisor", "--prompt", "help", "--model", "test/model"], { cwd }).options.directory, undefined);
   assert.equal(parseArgs(["status", "oc_1"]).options.full, false);
   assert.equal(parseArgs(["tail", "oc_1"]).options.chars, undefined);
   assert.equal(parseArgs(["summary", "oc_1"]).options.mode, "report");
   assert.equal(parseArgs(["result", "oc_1"]).options.full, false);
-  assert.equal(parseArgs(["list"], { cwd }).options.directory, cwd);
+  assert.equal(parseArgs(["list"], { cwd }).options.directory, undefined);
   assert.equal(parseArgs(["watch"], { cwd }).options.format, "toon");
-  assert.equal(parseArgs(["context"], { cwd }).options.format, "toon");
+  assert.equal(parseArgs(["context"], { cwd }).options.directory, undefined);
   assert.equal(parseArgs(["doctor"]).options.full, false);
 });
 
@@ -145,6 +145,7 @@ test("parses workspace, stream, and result options with their constrained values
     format: "ndjson",
     summaries: true,
     taskId: undefined,
+    flushIntervalMs: undefined,
   });
   assert.deepEqual(parseArgs(["list", "--all", "--limit", "10"]).options, {
     directory: undefined,
@@ -174,6 +175,7 @@ test("parses watch --task-id and rejects it for commands that don't take it", ()
     format: "toon",
     summaries: false,
     taskId: "oc_1",
+    flushIntervalMs: undefined,
   });
   assert.throws(() => parseArgs(["status", "oc_1", "--task-id", "oc_2"]), /task id is required|unknown flag/);
 });
@@ -322,5 +324,55 @@ test("wait --timeout rejects a duration exceeding the setTimeout maximum", () =>
   assert.throws(
     () => parseArgs(["wait", "oc_1", "--timeout", "2147483648"]),
     /must not exceed/
+  );
+});
+
+test("home's default directory is left undefined (resolved later via resolveWorkspaceRoot), for both the empty-argv and bare --help fast-paths", () => {
+  assert.equal(parseArgs([], { cwd: "/workspace/project" }).options.directory, undefined);
+  assert.equal(parseArgs(["--help"], { cwd: "/workspace/project" }).options.directory, undefined);
+});
+
+test("dispatch's default directory stays literal cwd, unaffected by the observation-command directory default change", () => {
+  assert.equal(parseArgs(["dispatch", "--prompt", "x"], { cwd: "/workspace/project" }).options.directory, "/workspace/project");
+});
+
+test("advisor's default directory stays undefined (resolved later to literal cwd, not the workspace root), unaffected by the observation-command directory default change", () => {
+  // advisor is grouped with dispatch at the cli/commands layers because
+  // tasks.js's advisor() forwards its directory straight into dispatch(),
+  // which uses it as both the bwrap sandbox root and the worker's spawn
+  // cwd. args.js leaves directory undefined for both dispatch's callers
+  // (which get cwd from cli.js) and advisor's callers, so an explicit
+  // pin here guards the args-layer shape those downstream layers depend
+  // on.
+  assert.equal(parseArgs(["advisor", "--prompt", "x", "--model", "m"], { cwd: "/workspace/project" }).options.directory, undefined);
+});
+
+test("parses watch --flush-interval as a duration and requires --summaries", () => {
+  assert.equal(
+    parseArgs(["watch", "--summaries", "--flush-interval", "5m"]).options.flushIntervalMs,
+    300000
+  );
+  assert.equal(
+    parseArgs(["watch", "--summaries", "--flush-interval", "30000"]).options.flushIntervalMs,
+    30000
+  );
+  assert.throws(
+    () => parseArgs(["watch", "--flush-interval", "5m"]),
+    /--flush-interval requires --summaries/
+  );
+});
+
+test("watch --flush-interval 0 (and 0s) errors with a clear UsageError instead of silently falling back to per-event streaming", () => {
+  // A zero-length flush interval is meaningless: streamTaskEvents's
+  // truthy check (`flushIntervalMs ? ... : null`) would otherwise treat
+  // 0 as "not set" and silently fall back to per-event streaming,
+  // hiding the user's intent. args.js rejects it explicitly.
+  assert.throws(
+    () => parseArgs(["watch", "--summaries", "--flush-interval", "0"]),
+    /--flush-interval must be greater than zero/
+  );
+  assert.throws(
+    () => parseArgs(["watch", "--summaries", "--flush-interval", "0s"]),
+    /--flush-interval must be greater than zero/
   );
 });

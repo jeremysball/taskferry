@@ -109,8 +109,9 @@ const commandSpecs = {
       "--task-id <id>": "scope the stream to one task; exits automatically once it settles",
       "--format toon|ndjson": "stream format, default toon",
       "--summaries": "request activity summaries when available",
+      "--flush-interval <duration>": "batch events and print them together on this interval, e.g. 30s, 5m, 1h; requires --summaries",
     },
-    examples: ['taskferry watch', 'taskferry watch --task-id <id> --summaries', 'taskferry watch --format ndjson'],
+    examples: ['taskferry watch', 'taskferry watch --task-id <id> --summaries', 'taskferry watch --format ndjson', 'taskferry watch --summaries --flush-interval 5m'],
   },
   context: {
     usage: "taskferry context [options]",
@@ -256,7 +257,7 @@ function defaultOptions(command, cwd) {
     case "dispatch":
       return { prompt: undefined, directory: cwd, model: undefined, variant: undefined, sessionId: undefined, keySlot: undefined, finalMarker: undefined, noSandbox: false, allowedDirs: undefined, executor: undefined };
     case "advisor":
-      return { prompt: undefined, model: undefined, directory: cwd, variant: undefined, sessionId: undefined, timeoutMs: undefined, executor: undefined };
+      return { prompt: undefined, model: undefined, directory: undefined, variant: undefined, sessionId: undefined, timeoutMs: undefined, executor: undefined };
     case "cancel":
       return { taskId: undefined, graceMs: undefined };
     case "wait":
@@ -270,11 +271,11 @@ function defaultOptions(command, cwd) {
     case "result":
       return { taskId: undefined, full: false, fields: undefined };
     case "list":
-      return { directory: cwd, all: false, limit: undefined };
+      return { directory: undefined, all: false, limit: undefined };
     case "watch":
-      return { directory: undefined, format: "toon", summaries: false, taskId: undefined };
+      return { directory: undefined, format: "toon", summaries: false, taskId: undefined, flushIntervalMs: undefined };
     case "context":
-      return { directory: cwd, format: "toon" };
+      return { directory: undefined, format: "toon" };
     case "doctor":
       return { full: false };
     case "setup":
@@ -287,11 +288,11 @@ function defaultOptions(command, cwd) {
 export function parseArgs(argv, { cwd = process.cwd() } = {}) {
   if (!Array.isArray(argv)) throw new TypeError("argv must be an array");
   if (!argv.length) {
-    return { command: "home", options: { directory: cwd }, help: false, helpText: helpText() };
+    return { command: "home", options: { directory: undefined }, help: false, helpText: helpText() };
   }
   if (argv[0] === "--help" || argv[0] === "-h") {
     if (argv.length > 1) throw usageError(`unexpected argument: ${argv[1]}`);
-    return { command: "home", options: { directory: cwd }, help: true, helpText: helpText() };
+    return { command: "home", options: { directory: undefined }, help: true, helpText: helpText() };
   }
   const [command, ...rest] = argv;
   if (command === "--version" || command === "-V") {
@@ -387,13 +388,14 @@ export function parseArgs(argv, { cwd = process.cwd() } = {}) {
       "--require-final-marker": "finalMarker",
       "--allowed-dirs": "allowedDirs",
       "--executor": "executor",
+      "--flush-interval": "flushIntervalMs",
     };
     const key = values[name];
     if (!key || !commandAllows(command, name)) throw usageError(`unknown flag ${name} for \`${command}\``, command);
     const required = requireValue(rest, index, name, inlineValue);
     index = required.nextIndex;
     let value = required.value;
-    if (key === "timeoutMs") {
+    if (key === "timeoutMs" || key === "flushIntervalMs") {
       value = parseDuration(value, name);
     } else if (["graceMs", "tailChars", "chars", "maxWords", "limit"].includes(key)) {
       value = parseNumber(value, name, key === "tailChars" || key === "chars" ? { min: 1, max: 65536 } : key === "maxWords" ? { min: 75, max: 300 } : { min: key === "limit" ? 1 : 0 });
@@ -438,6 +440,16 @@ export function parseArgs(argv, { cwd = process.cwd() } = {}) {
     if (command === "wait" && options.summarize && options.tailChars !== undefined) {
       throw usageError("--summarize cannot be combined with --tail-chars", command);
     }
+    if (command === "watch" && options.flushIntervalMs !== undefined && !options.summaries) {
+      throw usageError("--flush-interval requires --summaries", command);
+    }
+    // A zero-length flush interval is meaningless (it would either flush
+    // every event individually -- defeating the batching -- or, with the
+    // streamTaskEvents truthy-check, fall back silently to per-event
+    // streaming). Reject it explicitly rather than letting it pass.
+    if (command === "watch" && options.flushIntervalMs === 0) {
+      throw usageError("--flush-interval must be greater than zero", command);
+    }
   }
   return { command, options, help, ...(help ? { helpText: helpText(command) } : {}) };
 }
@@ -453,7 +465,7 @@ function commandAllows(command, flag) {
     summary: ["--mode", "--max-words"],
     result: ["--fields"],
     list: ["--directory", "--limit"],
-    watch: ["--directory", "--format", "--task-id"],
+    watch: ["--directory", "--format", "--task-id", "--flush-interval"],
     context: ["--directory", "--format"],
     doctor: [],
   };

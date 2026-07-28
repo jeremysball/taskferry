@@ -451,6 +451,23 @@ test("dispatch's directory is never passed through resolveWorkspaceRoot even whe
   assert.equal(calls[0].params.directory, workspace);
 });
 
+test("advisor's directory is never passed through resolveWorkspaceRoot even when injected (grouped with dispatch)", async () => {
+  const capture = capturedIo({ stdin: fakeTtyStdin() });
+  const workspace = process.cwd();
+  const { client, calls } = fakeClient({ "task.advisor": { status: "done", message: "advice" } });
+  let called = false;
+  const result = await runCli(["advisor", "--prompt", "hi", "--model", "opencode/some-model"], {
+    cwd: workspace,
+    io: capture.io,
+    connectClient: async () => client,
+    resolveWorkspaceRoot: () => { called = true; return "/should/never/be/used"; },
+  });
+
+  assert.equal(result.exitCode, 0);
+  assert.equal(called, false);
+  assert.equal(calls[0].params.directory, workspace);
+});
+
 test("doctor is a structured health check and --full preserves extra daemon fields", async (t) => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-cli-doctor-"));
   t.after(() => fs.rmSync(home, { recursive: true, force: true }));

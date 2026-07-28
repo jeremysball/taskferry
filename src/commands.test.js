@@ -428,7 +428,7 @@ test("list resolves its default directory via resolveWorkspaceRoot when --direct
   assert.equal(calledWith, cwd);
 });
 
-test("home/advisor/context all resolve their default directory via resolveWorkspaceRoot when --directory is omitted", async () => {
+test("home/context resolve their default directory via resolveWorkspaceRoot when --directory is omitted", async () => {
   const cwd = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-commands-test-")));
   const resolvedRoot = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-commands-test-")));
   const resolveWorkspaceRootFn = () => resolvedRoot;
@@ -442,11 +442,31 @@ test("home/advisor/context all resolve their default directory via resolveWorksp
   await runCommand("home", { directory: undefined }, { client: clientFor("task.list"), cwd, resolveWorkspaceRoot: resolveWorkspaceRootFn });
   assert.equal(seenDirectory, resolvedRoot);
 
-  await runCommand("advisor", { directory: undefined, prompt: "p", model: "m" }, { client: clientFor("task.advisor"), cwd, resolveWorkspaceRoot: resolveWorkspaceRootFn });
-  assert.equal(seenDirectory, resolvedRoot);
-
   await runCommand("context", { directory: undefined, format: "toon" }, { client: clientFor("task.context"), cwd, resolveWorkspaceRoot: resolveWorkspaceRootFn });
   assert.equal(seenDirectory, resolvedRoot);
+});
+
+test("advisor does NOT resolve via resolveWorkspaceRoot (regression test mirroring the dispatch one)", async () => {
+  // advisor is grouped with dispatch at the args/cli/commands layers
+  // because tasks.js's advisor() forwards its directory straight into
+  // dispatch(), which uses it as both the bwrap sandbox root and the
+  // worker's spawn cwd -- so widening advisor's default to the
+  // workspace root would silently expand its sandbox from "the cwd
+  // you ran it in" to "the whole repo root".
+  const cwd = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-commands-test-")));
+  let called = false;
+  const resolveWorkspaceRootFn = () => { called = true; return fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-commands-test-"))); };
+  let seenDirectory;
+  const client = { request: async (method, params) => {
+    assert.equal(method, "task.advisor");
+    seenDirectory = params.directory;
+    return { status: "done", message: "advice" };
+  } };
+
+  await runCommand("advisor", { directory: undefined, prompt: "p", model: "m" }, { client, cwd, resolveWorkspaceRoot: resolveWorkspaceRootFn });
+
+  assert.equal(called, false, "advisor must never consult resolveWorkspaceRoot");
+  assert.equal(seenDirectory, cwd);
 });
 
 test("watch resolves its default directory via resolveWorkspaceRoot when --directory and --task-id are both omitted", async () => {
@@ -890,4 +910,41 @@ test("watch --flush-interval --format ndjson wraps buffered events in a single w
   assert.equal(typeof parsed.timestamp, "string");
   assert.equal(parsed.events.length, 1);
   assert.equal(parsed.events[0].taskId, "oc_1");
+});
+
+test("watch --flush-interval flushes buffered events on abort instead of silently dropping them", async () => {
+  // Regression test: on SIGINT/SIGTERM or an injected AbortSignal, the
+  // buffered events must still be emitted -- otherwise up to one
+  // `--flush-interval` window's worth of events would be silently
+  // dropped on a clean (exit code 0) abort, even though the user
+  // explicitly opted into buffered/batched output.
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-commands-test-")));
+  const controller = new AbortController();
+  let deliver;
+  const client = fakeClient({
+    onSubscribe: (_params, onEvent) => { deliver = onEvent; },
+  });
+  const io = fakeIo();
+
+  const pending = runCommand("watch", { directory: root, format: "toon", summaries: true, flushIntervalMs: 60000 }, {
+    client,
+    io,
+    signal: controller.signal,
+    cwd: root,
+  });
+
+  // Populate the buffer with events but don't wait for the (60s) flush
+  // tick -- the abort must happen first, otherwise this test would
+  // pass for the wrong reason (just by hitting the timer eventually).
+  deliver({ sequence: 1, type: "task.state", taskId: "oc_1", directory: root, status: "running" });
+  deliver({ sequence: 2, type: "task.state", taskId: "oc_2", directory: root, status: "running" });
+  assert.equal(io.lines.length, 0, "nothing should be written before the flush tick or abort");
+
+  controller.abort();
+  const result = await pending;
+
+  assert.equal(result.watching, false);
+  assert.equal(io.lines.length, 2, "both buffered events must be flushed on abort, not silently dropped");
+  assert.match(io.lines[0], /oc_1/);
+  assert.match(io.lines[1], /oc_2/);
 });

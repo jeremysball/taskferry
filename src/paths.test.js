@@ -18,18 +18,45 @@ test("resolves a sibling worktree (git worktree add ../repo-feat) to the main ch
 });
 
 test("treats a submodule as its own repo boundary, not the parent repo's root", () => {
-  const runCommand = () => ({ status: 0, stdout: "/workspace/repo/.git/modules/vendor-lib\n", stderr: "" });
-  assert.equal(resolveWorkspaceRoot("/workspace/repo/vendor-lib", { runCommand }), "/workspace/repo/.git/modules");
+  // `git rev-parse --git-common-dir` returns the parent repo's
+  // `<parent>/.git/modules/<name>`, whose `path.dirname()` lands at the
+  // parent's `.git/modules` directory -- not the submodule's own working
+  // tree. The submodule case is detected and resolved with
+  // `git rev-parse --show-toplevel`, which reports the working-tree root
+  // of whichever repo the startDir belongs to.
+  const runCommand = (_cmd, args) => {
+    if (args.includes("--git-common-dir")) {
+      return { status: 0, stdout: "/workspace/repo/.git/modules/vendor-lib\n", stderr: "" };
+    }
+    if (args.includes("--show-toplevel")) {
+      return { status: 0, stdout: "/workspace/repo/vendor-lib\n", stderr: "" };
+    }
+    throw new Error(`unexpected runCommand call: ${args.join(" ")}`);
+  };
+  assert.equal(resolveWorkspaceRoot("/workspace/repo/vendor-lib", { runCommand }), "/workspace/repo/vendor-lib");
 });
 
-test("falls back to the input directory unchanged when no git repo is found, warning once per process (not once per call)", () => {
+test("falls back to the input directory unchanged when no git repo is found, warning once per directory (not once per process)", () => {
+  // Each distinct non-repo startDir gets its own one-shot warning, so a
+  // second call from a different non-repo directory in the same process
+  // doesn't get silently swallowed by a global "warn once ever" flag.
   const warnings = [];
   const runCommand = () => ({ status: 128, stdout: "", stderr: "fatal: not a git repository" });
   const warn = (message) => warnings.push(message);
   assert.equal(resolveWorkspaceRoot("/tmp/not-a-repo-1", { runCommand, warn }), "/tmp/not-a-repo-1");
   assert.equal(resolveWorkspaceRoot("/tmp/not-a-repo-2", { runCommand, warn }), "/tmp/not-a-repo-2");
-  assert.equal(warnings.length, 1, "the warning must fire once per process, not once per call");
+  assert.equal(warnings.length, 2, "each directory must get its own one-shot warning");
   assert.match(warnings[0], /no git repository found for \/tmp\/not-a-repo-1/);
+  assert.match(warnings[1], /no git repository found for \/tmp\/not-a-repo-2/);
+});
+
+test("still suppresses repeat warnings for the same directory (not warn-on-every-call)", () => {
+  const warnings = [];
+  const runCommand = () => ({ status: 128, stdout: "", stderr: "fatal: not a git repository" });
+  const warn = (message) => warnings.push(message);
+  assert.equal(resolveWorkspaceRoot("/tmp/not-a-repo-3", { runCommand, warn }), "/tmp/not-a-repo-3");
+  assert.equal(resolveWorkspaceRoot("/tmp/not-a-repo-3", { runCommand, warn }), "/tmp/not-a-repo-3");
+  assert.equal(warnings.length, 1, "repeated calls with the same directory should only warn once");
 });
 
 test("uses the real defaultRunCommand and process.stderr.write when no overrides are given", () => {

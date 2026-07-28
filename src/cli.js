@@ -71,10 +71,15 @@ export async function runCli(argv = process.argv.slice(2), {
       return { exitCode: 0 };
     }
     const watchNeedsTaskIdResolution = parsed.command === "watch" && parsed.options.taskId && !parsed.options.directory;
-    if (parsed.command === "dispatch") {
+    // advisor is grouped with dispatch (literal cwd), not with the
+    // observation commands: tasks.js's advisor() forwards its directory
+    // straight into dispatch(), which uses it as both the bwrap sandbox
+    // root and the worker's spawn cwd -- so widening advisor's default
+    // to the workspace root would silently expand its sandbox from
+    // "the cwd you ran it in" to "the whole repo root".
+    if (parsed.command === "dispatch" || parsed.command === "advisor") {
       parsed.options.directory = normalizeDirectory(parsed.options.directory || cwd);
     } else if (parsed.command === "home"
-      || parsed.command === "advisor"
       || (parsed.command === "watch" && !watchNeedsTaskIdResolution)
       || parsed.command === "context"
       || (parsed.command === "list" && !parsed.options.all)) {

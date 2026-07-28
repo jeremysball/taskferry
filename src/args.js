@@ -443,6 +443,13 @@ export function parseArgs(argv, { cwd = process.cwd() } = {}) {
     if (command === "watch" && options.flushIntervalMs !== undefined && !options.summaries) {
       throw usageError("--flush-interval requires --summaries", command);
     }
+    // A zero-length flush interval is meaningless (it would either flush
+    // every event individually -- defeating the batching -- or, with the
+    // streamTaskEvents truthy-check, fall back silently to per-event
+    // streaming). Reject it explicitly rather than letting it pass.
+    if (command === "watch" && options.flushIntervalMs === 0) {
+      throw usageError("--flush-interval must be greater than zero", command);
+    }
   }
   return { command, options, help, ...(help ? { helpText: helpText(command) } : {}) };
 }

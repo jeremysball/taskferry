@@ -336,6 +336,17 @@ test("dispatch's default directory stays literal cwd, unaffected by the observat
   assert.equal(parseArgs(["dispatch", "--prompt", "x"], { cwd: "/workspace/project" }).options.directory, "/workspace/project");
 });
 
+test("advisor's default directory stays undefined (resolved later to literal cwd, not the workspace root), unaffected by the observation-command directory default change", () => {
+  // advisor is grouped with dispatch at the cli/commands layers because
+  // tasks.js's advisor() forwards its directory straight into dispatch(),
+  // which uses it as both the bwrap sandbox root and the worker's spawn
+  // cwd. args.js leaves directory undefined for both dispatch's callers
+  // (which get cwd from cli.js) and advisor's callers, so an explicit
+  // pin here guards the args-layer shape those downstream layers depend
+  // on.
+  assert.equal(parseArgs(["advisor", "--prompt", "x", "--model", "m"], { cwd: "/workspace/project" }).options.directory, undefined);
+});
+
 test("parses watch --flush-interval as a duration and requires --summaries", () => {
   assert.equal(
     parseArgs(["watch", "--summaries", "--flush-interval", "5m"]).options.flushIntervalMs,
@@ -348,5 +359,20 @@ test("parses watch --flush-interval as a duration and requires --summaries", () 
   assert.throws(
     () => parseArgs(["watch", "--flush-interval", "5m"]),
     /--flush-interval requires --summaries/
+  );
+});
+
+test("watch --flush-interval 0 (and 0s) errors with a clear UsageError instead of silently falling back to per-event streaming", () => {
+  // A zero-length flush interval is meaningless: streamTaskEvents's
+  // truthy check (`flushIntervalMs ? ... : null`) would otherwise treat
+  // 0 as "not set" and silently fall back to per-event streaming,
+  // hiding the user's intent. args.js rejects it explicitly.
+  assert.throws(
+    () => parseArgs(["watch", "--summaries", "--flush-interval", "0"]),
+    /--flush-interval must be greater than zero/
+  );
+  assert.throws(
+    () => parseArgs(["watch", "--summaries", "--flush-interval", "0s"]),
+    /--flush-interval must be greater than zero/
   );
 });

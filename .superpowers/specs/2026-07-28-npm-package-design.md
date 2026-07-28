@@ -116,27 +116,49 @@ directory.
 
 A new job — either appended to `release-please.yml` or a separate workflow
 triggered on `release: published` — that only runs when release-please's
-own output says a release was actually created this run. It runs
-`npm ci`, then `npm publish --provenance --access public`, authenticated
-with an `NPM_TOKEN` secret (a granular/automation token scoped to just this
-package, same pattern already used for `RELEASE_PLEASE_TOKEN`).
-`--provenance` requires `id-token: write` permission on the job and npm
->=9.5, and gives the public package a verifiable "built from this exact
-commit/workflow" attestation on npmjs.org — worth doing for a public
-package, no added design complexity.
+own output says a release was actually created this run. It runs `npm ci`,
+then `npm publish --provenance`, authenticated via `actions/setup-node`'s
+`registry-url` input plus a `NODE_AUTH_TOKEN` env var set from an
+`NPM_TOKEN` secret — `registry-url` is what actually wires npm's auth for
+the publish step; forgetting it is the most common way this silently fails
+with an auth error. `--provenance` requires `id-token: write` permission on
+the job and npm >=9.5, and gives the public package a verifiable "built
+from this exact commit/workflow" attestation on npmjs.org. (`--access
+public` is not needed: that flag only affects scoped packages like
+`@you/name`, and `taskferry` is unscoped and public by default.)
+
+**Token scope has a bootstrapping wrinkle.** A granular npm token can only
+be scoped to a package that already exists on the registry — there's
+nothing to scope it to before the first publish. So the very first
+`npm publish` needs either a classic "automation" token (all-packages) or a
+granular token scoped to "all packages"; only after that first publish
+succeeds can the token be narrowed to just `taskferry`, the same way
+`RELEASE_PLEASE_TOKEN` is scoped to just this repo.
+
+**If `npm publish` fails after release-please has already tagged and
+published the GitHub Release** (network blip, transient registry error),
+the release exists on GitHub but not on npm. Recoverable by hand
+(`npm publish` from the tagged commit) — not automatically retried by this
+design, but worth knowing rather than assuming the two always stay in
+sync.
 
 ## Docs
 
 README's `## Install` section gets an `npm install -g taskferry` path added
-alongside the existing git-clone path. Both paths end the same way:
-`taskferry setup`.
+alongside the existing git-clone path. It also states explicitly, not just
+implicitly, the guarantee this spec verified: `taskferry setup` behaves
+identically after either install path, so picking npm over git-clone loses
+none of the native-plugin registration.
 
 ## Testing / verification
 
 - `npm pack` + a real `npm install -g` from the tarball into a throwaway
   prefix (the same check already done to verify the `prepare`-script
-  behavior) — confirms the tarball is self-contained and both
-  `taskferry --version` and `taskferry setup` work from it, including the
-  fixed `runNpmInstall` gating.
+  behavior) — confirms the tarball is self-contained and `taskferry
+  --version` works from it.
+- Once the plan picks a concrete `runNpmInstall` gating signal, the same
+  throwaway-prefix install is the test for it too: `taskferry setup` must
+  complete without shelling out to `npm install` a second time against the
+  already-provisioned install directory.
 - Existing `npm run check` (lint/typecheck/unit) stays the gate for the
   code itself; nothing about it changes.

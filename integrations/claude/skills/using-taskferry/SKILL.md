@@ -319,11 +319,12 @@ On a session's first `taskferry dispatch`, also background `taskferry watch
 git workspace root automatically) and register the process with the harness
 `Monitor` tool, the same way `Monitor` is armed for a single `wait
 --summarize` job elsewhere in this skill. This surfaces periodic, batched
-updates for *every* ferry dispatched anywhere in the git workspace —
-including ones dispatched by other concurrent sessions or from other
-subdirectories of the same repo — as notifications into the agent's own
-context, without polling and without a firehose of individual per-event
-notifications.
+updates for every ferry dispatched with the workspace root as its directory —
+the default when dispatching from the repo root, or from a subdirectory with an
+explicit `--directory <root>` — including ones dispatched by other concurrent
+sessions. A ferry dispatched from a subdirectory without an explicit
+`--directory` stays tagged with that subdirectory (dispatch's own directory
+default is unchanged) and won't appear in a root-scoped watch.
 
 This is pure convention for agent sessions to follow — the `Monitor` tool is
 harness-native and can't be invoked from within taskferry's own code, so

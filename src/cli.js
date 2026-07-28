@@ -17,6 +17,7 @@ export async function runCli(argv = process.argv.slice(2), {
   signal,
   runShellCommand,
   homeDirectory = os.homedir(),
+  resolveWorkspaceRoot: resolveWorkspaceRootFn,
 } = {}) {
   let parsed;
   try {
@@ -54,13 +55,14 @@ export async function runCli(argv = process.argv.slice(2), {
     }
   }
 
-  const [{ runCommand }, { normalizeDirectory }, { connectClient: defaultConnectClient }, { writeError, writeToon }] = await Promise.all([
+  const [{ runCommand }, { normalizeDirectory, resolveWorkspaceRoot }, { connectClient: defaultConnectClient }, { writeError, writeToon }] = await Promise.all([
     import("./commands.js"),
     import("./paths.js"),
     import("./client.js"),
     import("./output.js"),
   ]);
   const connectClient = connectClientFn || defaultConnectClient;
+  const resolveRoot = resolveWorkspaceRootFn || resolveWorkspaceRoot;
 
   let client;
   try {
@@ -69,13 +71,14 @@ export async function runCli(argv = process.argv.slice(2), {
       return { exitCode: 0 };
     }
     const watchNeedsTaskIdResolution = parsed.command === "watch" && parsed.options.taskId && !parsed.options.directory;
-    if (parsed.command === "home"
-      || parsed.command === "dispatch"
+    if (parsed.command === "dispatch") {
+      parsed.options.directory = normalizeDirectory(parsed.options.directory || cwd);
+    } else if (parsed.command === "home"
       || parsed.command === "advisor"
       || (parsed.command === "watch" && !watchNeedsTaskIdResolution)
       || parsed.command === "context"
       || (parsed.command === "list" && !parsed.options.all)) {
-      parsed.options.directory = normalizeDirectory(parsed.options.directory || cwd);
+      parsed.options.directory = normalizeDirectory(parsed.options.directory || resolveRoot(cwd));
     }
     if ((parsed.command === "dispatch" || parsed.command === "advisor") && parsed.options.prompt === "-") {
       parsed.options.prompt = await readPromptFromStdin(io.stdin || process.stdin, parsed.command, signal);
@@ -90,6 +93,7 @@ export async function runCli(argv = process.argv.slice(2), {
       runShellCommand,
       env,
       homeDirectory,
+      resolveWorkspaceRoot: resolveRoot,
     });
     if (parsed.command !== "watch" && value !== undefined) writeToon(value, io);
     return { exitCode: 0, value };

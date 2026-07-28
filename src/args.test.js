@@ -40,14 +40,14 @@ test("parses each command's required arguments and defaults", () => {
   const cwd = "/workspace/project";
   assert.equal(parseArgs(["cancel", "oc_1"]).options.taskId, "oc_1");
   assert.deepEqual(parseArgs(["wait", "oc_1"]).options, { taskId: "oc_1", timeoutMs: undefined, tailChars: undefined, full: false, summarize: false });
-  assert.equal(parseArgs(["advisor", "--prompt", "help", "--model", "test/model"], { cwd }).options.directory, cwd);
+  assert.equal(parseArgs(["advisor", "--prompt", "help", "--model", "test/model"], { cwd }).options.directory, undefined);
   assert.equal(parseArgs(["status", "oc_1"]).options.full, false);
   assert.equal(parseArgs(["tail", "oc_1"]).options.chars, undefined);
   assert.equal(parseArgs(["summary", "oc_1"]).options.mode, "report");
   assert.equal(parseArgs(["result", "oc_1"]).options.full, false);
-  assert.equal(parseArgs(["list"], { cwd }).options.directory, cwd);
+  assert.equal(parseArgs(["list"], { cwd }).options.directory, undefined);
   assert.equal(parseArgs(["watch"], { cwd }).options.format, "toon");
-  assert.equal(parseArgs(["context"], { cwd }).options.format, "toon");
+  assert.equal(parseArgs(["context"], { cwd }).options.directory, undefined);
   assert.equal(parseArgs(["doctor"]).options.full, false);
 });
 
@@ -323,4 +323,13 @@ test("wait --timeout rejects a duration exceeding the setTimeout maximum", () =>
     () => parseArgs(["wait", "oc_1", "--timeout", "2147483648"]),
     /must not exceed/
   );
+});
+
+test("home's default directory is left undefined (resolved later via resolveWorkspaceRoot), for both the empty-argv and bare --help fast-paths", () => {
+  assert.equal(parseArgs([], { cwd: "/workspace/project" }).options.directory, undefined);
+  assert.equal(parseArgs(["--help"], { cwd: "/workspace/project" }).options.directory, undefined);
+});
+
+test("dispatch's default directory stays literal cwd, unaffected by the observation-command directory default change", () => {
+  assert.equal(parseArgs(["dispatch", "--prompt", "x"], { cwd: "/workspace/project" }).options.directory, "/workspace/project");
 });

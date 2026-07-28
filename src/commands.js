@@ -16,7 +16,7 @@ import { defaultRunCommandAsync as defaultShellRunner, pluginInstalled } from ".
 import { checkClaudeCodePlaywrightIsolation, checkOpencodePlaywrightIsolation } from "./mcp-isolation.js";
 import { checkBwrapAvailableAsync } from "./sandbox.js";
 import { checkSkills as defaultCheckSkills } from "../scripts/generate-skill.js";
-import { normalizeDirectory } from "./paths.js";
+import { normalizeDirectory, resolveWorkspaceRoot } from "./paths.js";
 import { loadConfig } from "./config.js";
 
 // Default timeout for the CLI `wait` command (and `summary --wait`) when no
@@ -64,10 +64,10 @@ async function checkClaudeIntegration(runShellCommand) {
 }
 
 
-export async function runCommand(command, options, { client, io = process, signal, executablePath, cwd = process.cwd(), homeDirectory = os.homedir(), env = process.env, runShellCommand = defaultShellRunner, platform = process.platform, checkSkills = defaultCheckSkills } = {}) {
+export async function runCommand(command, options, { client, io = process, signal, executablePath, cwd = process.cwd(), homeDirectory = os.homedir(), env = process.env, runShellCommand = defaultShellRunner, platform = process.platform, checkSkills = defaultCheckSkills, resolveWorkspaceRoot: resolveWorkspaceRootFn = resolveWorkspaceRoot } = {}) {
   switch (command) {
     case "home": {
-      const directory = normalizeDirectory(options.directory || cwd);
+      const directory = normalizeDirectory(options.directory || resolveWorkspaceRootFn(cwd));
       const listed = await client.request("task.list", { directory });
       return homeView(projectList(listed), { executablePath, workspace: directory });
     }
@@ -136,7 +136,7 @@ export async function runCommand(command, options, { client, io = process, signa
       return leanStatus(detail, { full: options.full });
     }
     case "advisor": {
-      const directory = normalizeDirectory(options.directory || cwd);
+      const directory = normalizeDirectory(options.directory || resolveWorkspaceRootFn(cwd));
       return client.request("task.advisor", {
         prompt: options.prompt,
         directory,
@@ -186,14 +186,14 @@ export async function runCommand(command, options, { client, io = process, signa
       return leanResult(detail, { full: options.full, fields: options.fields });
     }
     case "list": {
-      const params = options.all ? {} : { directory: normalizeDirectory(options.directory || cwd) };
+      const params = options.all ? {} : { directory: normalizeDirectory(options.directory || resolveWorkspaceRootFn(cwd)) };
       const listed = await client.request("task.list", params);
       return projectList(listed, { limit: options.limit });
     }
     case "watch":
-      return watchCommand(options, { client, io, signal, cwd });
+      return watchCommand(options, { client, io, signal, cwd, resolveWorkspaceRoot: resolveWorkspaceRootFn });
     case "context": {
-      const directory = normalizeDirectory(options.directory || cwd);
+      const directory = normalizeDirectory(options.directory || resolveWorkspaceRootFn(cwd));
       const context = await client.request("task.context", { directory });
       return contextForHook(projectContext(context), options.format);
     }
@@ -305,12 +305,12 @@ function streamTaskEvents({ client, io, signal, directory, taskId, summaries, fo
   });
 }
 
-async function watchCommand(options, { client, io, signal, cwd }) {
+async function watchCommand(options, { client, io, signal, cwd, resolveWorkspaceRoot: resolveWorkspaceRootFn = resolveWorkspaceRoot }) {
   const directory = options.directory
     ? normalizeDirectory(options.directory)
     : options.taskId
       ? null
-      : normalizeDirectory(cwd);
+      : normalizeDirectory(resolveWorkspaceRootFn(cwd));
   return streamTaskEvents({
     client,
     io,

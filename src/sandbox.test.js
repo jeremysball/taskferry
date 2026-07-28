@@ -1,7 +1,7 @@
 import { describe, test } from "node:test";
 import assert from "node:assert/strict";
 import path from "node:path";
-import { buildBwrapArgs, checkBwrapAvailable, platformSupportsSandbox, resolveGitCommonDir } from "./sandbox.js";
+import { buildBwrapArgs, checkBwrapAvailable, platformSupportsSandbox, resolveGitCommonDir, resolveGitDir } from "./sandbox.js";
 
 describe("platformSupportsSandbox()", () => {
   test("is true on linux", () => {
@@ -77,6 +77,32 @@ describe("resolveGitCommonDir()", () => {
   test("returns null when git is not installed", () => {
     const runCommand = () => ({ status: null, stdout: "", stderr: "", error: /** @type {NodeJS.ErrnoException} */ (Object.assign(new Error("not found"), { code: "ENOENT" })) });
     assert.equal(resolveGitCommonDir("/workspace/repo", runCommand), null);
+  });
+});
+
+describe("resolveGitDir()", () => {
+  test("resolves a linked worktree's own private gitdir, distinct from the common dir (taskferry#224)", () => {
+    const runCommand = (command, args) => {
+      assert.equal(command, "git");
+      assert.deepEqual(args, ["-C", "/workspace/repo/.worktrees/issue-1", "rev-parse", "--absolute-git-dir"]);
+      return { status: 0, stdout: "/workspace/repo/.git/worktrees/issue-1\n", stderr: "" };
+    };
+    assert.equal(resolveGitDir("/workspace/repo/.worktrees/issue-1", runCommand), "/workspace/repo/.git/worktrees/issue-1");
+  });
+
+  test("resolves to the same directory as the common dir for the main checkout itself", () => {
+    const runCommand = () => ({ status: 0, stdout: "/workspace/repo/.git\n", stderr: "" });
+    assert.equal(resolveGitDir("/workspace/repo", runCommand), "/workspace/repo/.git");
+  });
+
+  test("returns null when the directory is not a git repo", () => {
+    const runCommand = () => ({ status: 128, stdout: "", stderr: "fatal: not a git repository" });
+    assert.equal(resolveGitDir("/tmp/not-a-repo", runCommand), null);
+  });
+
+  test("returns null when git is not installed", () => {
+    const runCommand = () => ({ status: null, stdout: "", stderr: "", error: /** @type {NodeJS.ErrnoException} */ (Object.assign(new Error("not found"), { code: "ENOENT" })) });
+    assert.equal(resolveGitDir("/workspace/repo", runCommand), null);
   });
 });
 

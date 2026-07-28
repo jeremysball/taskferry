@@ -1,6 +1,7 @@
 import { test, describe, mock } from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
+import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -13,7 +14,7 @@ import { createTaskManager, isOutsideDirectory, DEFAULT_SUMMARY_MODEL, bucketFor
 // runs synchronously in the constructor, same as the old module-level code
 // did at import time). `tasksFixture` may be an array or `(logDir) => array`
 // for fixtures whose logPath needs to point inside the real log dir.
-function makeManager({ tasksFixture = [], logs = {}, spawnFn, killFn, listModelsFn, defaultExecutor, maxDispatchesPerWindow, dispatchWindowMs, advisorSessionTtlMs, maxConcurrentTasks, noOutputTimeoutMs, postOutputNoOutputTimeoutMs, watchdogPollMs, maxWaitMs, keySlotsSpec, providerKeyEnvName, summaryKeySlot, summaryProviderKeyEnvName, sandboxEnabled = false, checkBwrapAvailableFn, existsFn, statFn, readdirFn, runtimeDir, cacheDir, platform, onEvent, allowedDirs, resolveGitCommonDirFn } = {}) {
+function makeManager({ tasksFixture = [], logs = {}, spawnFn, killFn, listModelsFn, defaultExecutor, maxDispatchesPerWindow, dispatchWindowMs, advisorSessionTtlMs, maxConcurrentTasks, noOutputTimeoutMs, postOutputNoOutputTimeoutMs, watchdogPollMs, maxWaitMs, keySlotsSpec, providerKeyEnvName, summaryKeySlot, summaryProviderKeyEnvName, sandboxEnabled = false, checkBwrapAvailableFn, existsFn, statFn, readdirFn, runtimeDir, cacheDir, platform, onEvent, allowedDirs, resolveGitCommonDirFn, resolveGitDirFn } = {}) {
   const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-test-"));
   const logDir = path.join(stateDir, "logs");
   fs.mkdirSync(logDir, { recursive: true });
@@ -57,6 +58,7 @@ function makeManager({ tasksFixture = [], logs = {}, spawnFn, killFn, listModels
     ...(summaryProviderKeyEnvName != null ? { summaryProviderKeyEnvName } : {}),
     ...(allowedDirs != null ? { allowedDirs } : {}),
     ...(resolveGitCommonDirFn != null ? { resolveGitCommonDirFn } : {}),
+    ...(resolveGitDirFn != null ? { resolveGitDirFn } : {}),
   });
 }
 
@@ -469,6 +471,52 @@ describe("bwrap sandboxing", () => {
     // directory + runtimeDir + the sandboxed opencode data home -- the
     // git-common-dir sits inside `directory`, already covered by that one bind.
     assert.equal(bindCount, 3);
+  });
+
+  test("scopes the git-common-dir bind to the worktree's own admin dir + shared objects/refs, never the main checkout's private HEAD/index/config (regression for taskferry#224)", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "axi-git-repo-"));
+    const mainCheckout = path.join(root, "main");
+    fs.mkdirSync(mainCheckout);
+    const git = (args) => execFileSync("git", args, { cwd: mainCheckout, encoding: "utf8" });
+    git(["init", "-q"]);
+    git(["config", "user.email", "a@b.com"]);
+    git(["config", "user.name", "test"]);
+    fs.writeFileSync(path.join(mainCheckout, "f.txt"), "hi\n");
+    git(["add", "f.txt"]);
+    git(["commit", "-q", "-m", "init"]);
+    git(["branch", "feature"]);
+    const worktreeDir = path.join(root, "wt");
+    git(["worktree", "add", "-q", worktreeDir, "feature"]);
+
+    let captured = null;
+    // No resolveGitCommonDirFn/resolveGitDirFn override -- exercises the
+    // real `git rev-parse` calls against the worktree above, not a mock.
+    const mgr = makeManager({
+      spawnFn: (cmd, args, opts) => { captured = { cmd, args, opts }; return fakeChild(); },
+      sandboxEnabled: true,
+      checkBwrapAvailableFn: () => ({ checked: true, available: true }),
+      platform: "linux",
+    });
+
+    mgr.dispatch({ prompt: "hello", directory: worktreeDir });
+
+    const boundPaths = [];
+    for (let i = 0; i < captured.args.length - 1; i++) {
+      if (captured.args[i] === "--bind") boundPaths.push(captured.args[i + 1]);
+    }
+    const mainGitDir = path.join(mainCheckout, ".git");
+    const worktreeGitDir = path.join(mainGitDir, "worktrees", "wt");
+
+    assert.ok(boundPaths.includes(worktreeGitDir), "should bind the worktree's own private gitdir");
+    assert.ok(boundPaths.includes(path.join(mainGitDir, "objects")), "should bind shared objects");
+    assert.ok(boundPaths.includes(path.join(mainGitDir, "refs")), "should bind shared refs");
+
+    // The main checkout's own private admin files must never be writable
+    // from a dispatch that never named that checkout at all.
+    assert.equal(boundPaths.includes(mainGitDir), false, "must not bind the whole common dir");
+    assert.equal(boundPaths.includes(path.join(mainGitDir, "HEAD")), false);
+    assert.equal(boundPaths.includes(path.join(mainGitDir, "index")), false);
+    assert.equal(boundPaths.includes(path.join(mainGitDir, "config")), false);
   });
 
   test("binds the manager-level allowedDirs config default read-write", () => {

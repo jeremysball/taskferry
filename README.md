@@ -1,15 +1,30 @@
 # taskferry
 
-An AXI-style CLI and local daemon for dispatching work to the `opencode`
-CLI as background tasks: run `taskferry dispatch`, get a task id back
-immediately, check on it or wait for it, then read the result. No MCP
-server, no tmux wrappers, no grepping logs for completion markers.
+taskferry is a middleman between a frontend agent and a backend executor: a
+`pi` or `opencode` child process running whatever model you point it at.
+Claude Code is the first-class frontend it's built around, though any
+harness\* can dispatch through it too. Dispatch a task, get an id back
+immediately, check on it or wait for it, then read the result whenever
+you're ready. No MCP server, no tmux wrappers, no grepping logs for
+completion markers.
+
+\* Meaning it can shell out, and preferably manages backgrounding itself
+(the way Claude Code natively runs a tool call in the background) rather
+than reaching for `&` or an equivalent shell-level backgrounding hack, the
+way opencode as a frontend does.
 
 ```bash
 taskferry dispatch --prompt "Fix the failing tests" --directory /workspace/my-repo
 taskferry wait <id>
 taskferry result <id>
 ```
+
+The pattern it's built for: Claude drives, planning the work and reviewing
+it when it's done, while cheap or free open source models grind through the
+actual grunt work in the background. Nothing in taskferry enforces that
+pairing, either end can be anything, but it's the reason a daemon-backed
+CLI beats blocking the frontend agent's own context on work it doesn't need
+to babysit token by token.
 
 ## Why a daemon and a CLI, not an MCP server
 
@@ -58,7 +73,7 @@ full process model.
 | Command | Purpose |
 |---|---|
 | `taskferry` | Show live workspace tasks and next actions |
-| `taskferry dispatch` | Queue a background OpenCode run |
+| `taskferry dispatch` | Queue a background model run |
 | `taskferry list` | List workspace tasks with counts |
 | `taskferry status <id>` | Task status and activity |
 | `taskferry wait <id>` | Wait for settlement or a timeout |
@@ -154,6 +169,17 @@ The native integration each agent uses is documented separately:
 Migrating from the old MCP server?
 [docs/migrating-from-mcp.md](docs/migrating-from-mcp.md) has the full
 `taskferry_*` tool → CLI command mapping and registration cleanup steps.
+
+## Versioning
+
+`package.json`'s version and `taskferry --version`'s output are both driven
+by [release-please](https://github.com/googleapis/release-please): merges to
+`main` are scanned for Conventional Commits (`feat` → minor, `fix` → patch, a
+`BREAKING CHANGE` footer → major), and release-please keeps a standing PR
+that bumps the version and CHANGELOG accordingly. Merging that PR is the
+release; nobody bumps a version number by hand. `PROTOCOL_VERSION` in
+`src/protocol.js` is separate and only changes when the daemon/CLI RPC
+contract itself breaks.
 
 ## As Subagent-Driven Development's worker backend
 

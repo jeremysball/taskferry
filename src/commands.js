@@ -1,6 +1,8 @@
 import fs from "node:fs";
 import os from "node:os";
+import { fileURLToPath } from "node:url";
 import { UsageError } from "./args.js";
+import { PROTOCOL_VERSION } from "./protocol.js";
 import {
   contextForHook,
   formatWatchEvent,
@@ -23,6 +25,14 @@ import { loadConfig } from "./config.js";
 // 45 s MAX_WAIT_MS in tasks.js is for advisor's internal polling — a different,
 // much shorter-lived use case.
 const DEFAULT_WAIT_TIMEOUT_MS = 900000;
+
+const PACKAGE_JSON_PATH = fileURLToPath(new URL("../package.json", import.meta.url));
+
+// Single source of truth for the package version: read package.json rather
+// than duplicating the string here, where it can (and did) drift for months.
+function readPackageVersion() {
+  return JSON.parse(fs.readFileSync(PACKAGE_JSON_PATH, "utf8")).version;
+}
 
 /**
  * Resolve the effective default wait timeout: explicit env var override, then
@@ -62,7 +72,7 @@ export async function runCommand(command, options, { client, io = process, signa
       return homeView(projectList(listed), { executablePath, workspace: directory });
     }
     case "version":
-      return { name: "taskferry", version: "2.0.0", protocolVersion: 1 };
+      return { name: "taskferry", version: readPackageVersion(), protocolVersion: PROTOCOL_VERSION };
     case "dispatch": {
       try {
         checkSkills();

@@ -1,3 +1,17 @@
+---
+status: wont-implement
+reason: >
+  Issue #73 was closed as completed by a commit (7748347, PR #80) that only
+  added this design doc, not the redesign itself. Current code still uses
+  the symlink + git-hash-gated Claude plugin mechanism this spec proposed
+  replacing. Left un-implemented on purpose rather than reopened, since the
+  npm-package-design work (2026-07-28) already re-verified that the
+  symlink mechanism itself works fine for an npm install (import.meta.url
+  resolves through symlinks correctly) -- the one real gap that remains is
+  narrower than this spec's full scope (drop the Claude Code plugin
+  entirely, move to content-hash file copies).
+---
+
 # Managed File Sync Design
 
 ## Goal

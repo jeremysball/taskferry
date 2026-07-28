@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { runSetup } from "./setup.js";
+import { defaultRunCommandAsync, runSetup } from "./setup.js";
 import {
   checkClaudeCodePlaywrightIsolation,
   checkOpencodePlaywrightIsolation,
@@ -220,6 +220,38 @@ test("rerun replaces the existing managed symlinks without throwing", (t) => {
   assert.equal(second.cli.path, first.cli.path);
   assert.equal(second.opencode.path, first.opencode.path);
   assert.equal(second.statusline.path, first.statusline.path);
+});
+
+test("refuses to re-point a symlink already managed by a different taskferry checkout", (t) => {
+  const fixture = makeFixture(t);
+  const env = { PATH: path.join(fixture.homeDirectory, ".local", "bin") };
+  runSetup({ ...fixture, env, runCommand: unavailableClients });
+
+  // A second, unrelated checkout that also happens to be named "taskferry"
+  // (e.g. a throwaway scratch clone) - setup run from here must not be able
+  // to silently steal the symlink the first checkout already owns.
+  const otherCheckout = fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-setup-other-checkout-"));
+  const otherSrc = path.join(otherCheckout, "src");
+  fs.mkdirSync(otherSrc, { recursive: true });
+  fs.writeFileSync(path.join(otherCheckout, "package.json"), JSON.stringify({ name: "taskferry" }));
+  fs.writeFileSync(path.join(otherSrc, "cli.js"), "export {};\n");
+  fs.writeFileSync(path.join(otherSrc, "opencode-plugin.js"), "export {};\n");
+  fs.writeFileSync(path.join(otherSrc, "tf-sl.sh"), "#!/usr/bin/env bash\n");
+  t.after(() => fs.rmSync(otherCheckout, { recursive: true, force: true }));
+
+  assert.throws(
+    () => runSetup({
+      checkoutDirectory: otherCheckout,
+      cliPath: path.join(otherSrc, "cli.js"),
+      homeDirectory: fixture.homeDirectory,
+      env,
+      runCommand: unavailableClients,
+    }),
+    /refusing to replace unmanaged path/,
+  );
+
+  // The original checkout's symlinks must be untouched.
+  assert.equal(fs.realpathSync(path.join(fixture.homeDirectory, ".local", "bin", "taskferry")), fixture.cliPath);
 });
 
 test("first install writes the hash state file", (t) => {
@@ -636,4 +668,22 @@ test("runSetup leaves a .jsonc-only setup untouched — asserts bytes unchanged"
   runSetup({ ...fixture, runCommand: unavailableClients });
   const after = fs.readFileSync(path.join(configDir, "opencode.jsonc"), "utf8");
   assert.equal(after, before);
+});
+
+test("defaultRunCommandAsync reports a non-zero exit the same way as spawnSync -- status set, error undefined", async () => {
+  const result = await defaultRunCommandAsync(process.execPath, ["-e", "process.exit(3)"]);
+  assert.equal(result.status, 3);
+  assert.equal(result.error, undefined);
+});
+
+test("defaultRunCommandAsync reports a launch failure the same way as spawnSync -- status null, error set", async () => {
+  const result = await defaultRunCommandAsync("this-binary-does-not-exist-xyz", []);
+  assert.equal(result.status, null);
+  assert.equal(result.error.code, "ENOENT");
+});
+
+test("defaultRunCommandAsync reports a clean exit the same way as spawnSync -- status 0, error undefined", async () => {
+  const result = await defaultRunCommandAsync(process.execPath, ["-e", "process.exit(0)"]);
+  assert.equal(result.status, 0);
+  assert.equal(result.error, undefined);
 });

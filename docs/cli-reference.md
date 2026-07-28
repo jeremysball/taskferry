@@ -82,7 +82,7 @@ finish, are cancelled, fail to spawn, or hit the no-output watchdog. See
 Blocks until the task's real `exit` event fires. A 15-minute default
 timeout (configurable via `TASKFERRY_WAIT_DEFAULT_TIMEOUT_MS`) prevents
 indefinite hangs on stuck tasks. Pass `--timeout` to override the
-default cap; the call then returns after that many milliseconds even if
+default cap; the call then returns after that duration elapses, even if
 the task is still running. Set `TASKFERRY_WAIT_DEFAULT_TIMEOUT_MS=0` to
 disable the default timeout entirely (old behavior).
 

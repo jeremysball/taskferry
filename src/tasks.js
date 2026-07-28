@@ -11,7 +11,7 @@ import { RESULT_FIELDS } from "./protocol.js";
 import { formatToolEventForNarration } from "./narration-format.js";
 import { errCode } from "./errors.js";
 import { isNonNegativeInteger, isPositiveInteger } from "./numbers.js";
-import { buildBwrapArgs, checkBwrapAvailable, defaultDenyList, platformSupportsSandbox, resolveGitCommonDir } from "./sandbox.js";
+import { buildBwrapArgs, checkBwrapAvailable, defaultDenyList, platformSupportsSandbox, resolveGitCommonDir, resolveGitDir } from "./sandbox.js";
 import { resolveExecutor, opencodeExecutor } from "./executor.js";
 
 /**
@@ -444,6 +444,7 @@ const DEFAULT_CANCEL_GRACE_MS = 5000;
  * @param {string[]} [options.allowedDirs] - extra directories always bound read-write inside the sandbox,
  *   in addition to the auto-detected git-common-dir for a worktree dispatch directory.
  * @param {(directory: string) => string|null} [options.resolveGitCommonDirFn]
+ * @param {(directory: string) => string|null} [options.resolveGitDirFn]
  * @param {() => {checked: boolean, available: boolean, reason?: string}} [options.checkBwrapAvailableFn]
  * @param {(path: string) => boolean} [options.existsFn]
  * @param {(path: string) => {isDirectory: () => boolean}|null} [options.statFn]
@@ -524,6 +525,7 @@ export function createTaskManager({
     : (/** @type {boolean|undefined} */ (config.sandboxEnabled) ?? true),
   allowedDirs = parseAllowedDirs(process.env.TASKFERRY_ALLOWED_DIRS ?? /** @type {string|undefined} */ (config.allowedDirs)),
   resolveGitCommonDirFn = resolveGitCommonDir,
+  resolveGitDirFn = resolveGitDir,
   checkBwrapAvailableFn = checkBwrapAvailable,
   existsFn = fs.existsSync,
   statFn = (/** @type {string} */ p) => { try { return fs.statSync(p); } catch { return null; } },
@@ -1636,7 +1638,43 @@ export function createTaskManager({
         extraRwBinds.push(sandboxedDataHome);
         const gitCommonDir = resolveGitCommonDirFn(launchDirectory);
         if (gitCommonDir && existsFn(gitCommonDir) && isOutsideDirectory(launchDirectory, gitCommonDir)) {
-          extraRwBinds.push(gitCommonDir);
+          // launchDirectory is a linked worktree: the common dir is the
+          // *main* checkout's own .git, and binding it whole would also
+          // expose the main checkout's own private HEAD/index/config as
+          // writable to a dispatch that never named that checkout at all
+          // (taskferry#224 -- a dispatch against one worktree corrupted a
+          // completely different checkout's branch and working tree). A
+          // worktree's own admin files (HEAD/index/logs) live under
+          // gitCommonDir/worktrees/<name> instead; commits only ever need
+          // that private subdir plus the shared objects/refs data (verified
+          // by tracing which files an actual worktree commit touches -- see
+          // taskferry#224 investigation), never the common dir's top level.
+          const gitDir = resolveGitDirFn(launchDirectory);
+          if (gitDir && existsFn(gitDir) && gitDir !== gitCommonDir) {
+            // Bind this worktree's own private admin dir -- wherever it
+            // actually lives, even a non-standard layout where it sits
+            // outside gitCommonDir's own tree (e.g. a manually re-pointed
+            // `gitdir:`/`commondir` file) -- plus the shared data a commit
+            // needs. Never falls through to binding the whole common dir
+            // for any layout where a distinct private gitdir was resolved,
+            // so an unusual layout degrades to "some git ops may fail here"
+            // at worst, never back to the original taskferry#224 exposure.
+            extraRwBinds.push(gitDir);
+            for (const rel of ["objects", "refs", path.join("logs", "refs")]) {
+              const resolved = path.join(gitCommonDir, rel);
+              fs.mkdirSync(resolved, { recursive: true });
+              extraRwBinds.push(resolved);
+            }
+            const packedRefs = path.join(gitCommonDir, "packed-refs");
+            if (existsFn(packedRefs)) extraRwBinds.push(packedRefs);
+          } else {
+            // Not a recognizable linked-worktree layout (e.g. a submodule,
+            // where the "common dir" IS already that submodule's own
+            // private gitdir with no sibling checkout to protect) or gitDir
+            // resolution failed outright -- fall back to the previous broad
+            // bind rather than risk breaking commits.
+            extraRwBinds.push(gitCommonDir);
+          }
         }
         for (const dir of [...allowedDirs, ...(isSummary ? [] : dispatchLaunch.allowedDirs || [])]) {
           const resolved = path.isAbsolute(dir) ? dir : path.resolve(launchDirectory, dir);

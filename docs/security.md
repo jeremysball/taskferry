@@ -171,22 +171,34 @@ runs wrapped in
 - **Deny-list is fixed** in this version — no config override. It covers
   taskferry's own state dir plus the standard credential locations; a
   config override can be added later if a real need surfaces.
-- **Git worktrees get their real gitdir bound read-write automatically.** A
-  worktree's `.git` is just a pointer file to its actual gitdir under the
-  main checkout's `.git/worktrees/<name>` — outside the worktree's own
-  directory, and therefore invisible to the read-write bind on that
-  directory alone. Every dispatch resolves `git rev-parse
-  --git-common-dir` against its working directory and, when the result
-  sits outside that directory (i.e. this is a worktree, not the main
-  checkout), binds it read-write too — otherwise `git commit`/`git add`
-  inside the sandbox fails with a read-only filesystem error. `--git-common-dir`
-  is the *shared* gitdir (objects, refs, config, hooks), not just the
-  worktree-specific `.git/worktrees/<name>` subdirectory — git commit needs
-  write access to the shared object store too, so a sandboxed dispatch into a
-  worktree gets write access to the whole main checkout's git internals, not
-  only its own worktree's slice of it. This is an inherent tradeoff of
-  enabling commits from a worktree at all, not a narrower alternative that
-  was missed.
+- **Git worktrees get a scoped slice of their real gitdir bound read-write
+  automatically.** A worktree's `.git` is just a pointer file to its actual
+  gitdir under the main checkout's `.git/worktrees/<name>` — outside the
+  worktree's own directory, and therefore invisible to the read-write bind
+  on that directory alone. Every dispatch resolves `git rev-parse
+  --git-common-dir` against its working directory and, when the result sits
+  outside that directory (i.e. this is a worktree, not the main checkout),
+  binds a narrow slice of it read-write: the worktree's own private admin
+  dir (`.git/worktrees/<name>` — its `HEAD`/`index`/logs) plus the pieces of
+  the shared common dir a commit actually writes (`objects/`, `refs/`,
+  `logs/refs/`, `packed-refs` if present) — otherwise `git commit`/`git add`
+  inside the sandbox fails with a read-only filesystem error. It does
+  **not** bind the common dir's own top level, which holds the *main*
+  checkout's private `HEAD`/`index`/`config` — those stay part of the
+  read-only root bind, so a dispatch against one worktree cannot flip the
+  main checkout's branch or stage changes into its index. An earlier version
+  bound the whole common dir read-write, which handed exactly that access to
+  every worktree dispatch; a dispatch corrupted a completely separate main
+  checkout's branch and working tree as a result (taskferry#224) before this
+  was narrowed. The scoped bind applies even when the resolved
+  worktree-private gitdir turns out to live outside the common dir's own
+  tree (a non-standard, manually re-pointed `gitdir:`/`commondir` layout) —
+  that still binds only the private gitdir plus the common dir's shared
+  data, never the common dir's top level. Only when the worktree-private
+  gitdir genuinely can't be distinguished from the common dir at all (e.g.
+  a submodule, whose "common dir" already *is* its own private gitdir with
+  no sibling checkout to protect) or its resolution fails outright does the
+  whole common dir still get bound, matching the original behavior.
 - **`allowedDirs`** extends this same read-write allowance to arbitrary
   extra directories, for anything else a dispatch legitimately needs to
   write outside its own working directory. Set it as a comma-separated

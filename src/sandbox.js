@@ -102,6 +102,24 @@ export function resolveGitCommonDir(directory, runCommand = defaultRunCommand) {
 }
 
 /**
+ * A linked worktree's *own* gitdir (HEAD/index/logs private to that
+ * worktree) lives at `<git-common-dir>/worktrees/<name>`, distinct from the
+ * common dir's top level, which holds the *main* checkout's own private
+ * HEAD/index/config -- see taskferry#224. `git rev-parse --absolute-git-dir`
+ * resolves that worktree-specific path; for the main checkout itself it
+ * resolves to the same directory as `resolveGitCommonDir`.
+ * @param {string} directory
+ * @param {(command: string, args: readonly string[]) => {status: number|null, stdout: string, stderr: string, error?: NodeJS.ErrnoException}} [runCommand]
+ * @returns {string|null}
+ */
+export function resolveGitDir(directory, runCommand = defaultRunCommand) {
+  const result = runCommand("git", ["-C", directory, "rev-parse", "--absolute-git-dir"]);
+  if (result.error || result.status !== 0) return null;
+  const raw = result.stdout.trim();
+  return raw || null;
+}
+
+/**
  * @param {object} options
  * @param {string} options.directory
  * @param {string} options.stateDir

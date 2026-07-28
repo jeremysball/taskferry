@@ -192,19 +192,29 @@ function parseNumber(value, flag, { min = 0, max = Number.MAX_SAFE_INTEGER } = {
   return number;
 }
 
+// Node's setTimeout silently clamps any delay above 2^31-1 ms (~24.8 days)
+// down to 1ms, so a "parses fine" duration string would silently fire the
+// wait timer after ~1ms instead of the requested duration. Reject upfront
+// with a clear message instead of inheriting Node's vague overflow warning.
+const MAX_TIMEOUT_MS = 2_147_483_647;
+const MAX_TIMEOUT_HUMAN = `${MAX_TIMEOUT_MS} milliseconds (about 24 days)`;
+
 const DURATION_UNITS_MS = { s: 1000, m: 60_000, h: 3_600_000 };
 
 function parseDuration(value, flag) {
-  const remediation = `Use ${flag} with milliseconds (e.g. 10000) or a duration string (e.g. 30s, 5m, 1h)`;
+  const remediation = `Use ${flag} with milliseconds (e.g. 10000) or a duration string (e.g. 30s, 5m, 1h); values must not exceed ${MAX_TIMEOUT_HUMAN}, the maximum Node's setTimeout supports`;
   if (/^\d+$/.test(value)) {
     const ms = Number(value);
-    if (!Number.isSafeInteger(ms)) throw new UsageError(`${flag} must be a safe integer number of milliseconds`, remediation);
+    if (!Number.isSafeInteger(ms)) throw new UsageError(`${flag} is not a valid integer`, remediation);
+    if (ms > MAX_TIMEOUT_MS) throw new UsageError(`${flag} must not exceed ${MAX_TIMEOUT_HUMAN}`, remediation);
     return ms;
   }
   const match = /^(\d+)(s|m|h)$/.exec(value);
   if (!match) throw new UsageError(`${flag} must be milliseconds or a duration like 30s, 5m, 1h`, remediation);
   const ms = Number(match[1]) * DURATION_UNITS_MS[match[2]];
-  if (!Number.isSafeInteger(ms)) throw new UsageError(`${flag} is too large`, remediation);
+  if (!Number.isSafeInteger(ms) || ms > MAX_TIMEOUT_MS) {
+    throw new UsageError(`${flag} must not exceed ${MAX_TIMEOUT_HUMAN}`, remediation);
+  }
   return ms;
 }
 
@@ -322,7 +332,21 @@ export function parseArgs(argv, { cwd = process.cwd() } = {}) {
       "--session_id": "--session_id was renamed; use --session-id",
       "--style": "--style was renamed; use --mode",
     };
+    // A subset of migration flags point at a target that isn't a valid flag
+    // on every command (e.g. --timeout only exists on wait/advisor). For
+    // those, only emit the "use <target>" hint when the current command
+    // actually accepts the target — otherwise the hint itself triggers a
+    // second "unknown flag" error, which is misleading.
+    const migrationTargetFlag = {
+      "--task-id": null,
+      "--timeout_ms": "--timeout",
+      "--timeout-ms": "--timeout",
+    };
     if (migrationFlags[name] && !(name === "--task-id" && command === "watch")) {
+      const target = migrationTargetFlag[name];
+      if (target && !commandAllows(command, target)) {
+        throw usageError(`unknown flag ${name} for \`${command}\``, command);
+      }
       throw new UsageError(`unknown flag ${name} for \`${command}\``, migrationFlags[name]);
     }
 

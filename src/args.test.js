@@ -271,3 +271,56 @@ test("--timeout-ms and --timeout_ms both error with a migration message pointing
   migrationAssert(["wait", "oc_1", "--timeout_ms", "5000"]);
   migrationAssert(["advisor", "--prompt", "p", "--model", "m", "--timeout-ms", "5000"]);
 });
+
+test("--timeout-ms on a command that doesn't accept --timeout falls through to a plain unknown-flag error", () => {
+  // The migration hint targets --timeout, which is only valid on wait/advisor.
+  // On status, emitting "use --timeout" as remediation would just produce a
+  // second "unknown flag --timeout" error — so the migration branch itself
+  // should fall through and emit the standard "Valid flags for status" hint
+  // without the misleading "use --timeout" line.
+  assert.throws(
+    () => parseArgs(["status", "oc_1", "--timeout-ms", "5000"]),
+    (error) => {
+      assert.ok(error instanceof UsageError);
+      assert.match(error.message, /unknown flag --timeout-ms/);
+      assert.doesNotMatch(error.help, /use --timeout/);
+      assert.match(error.help, /Valid flags for status/);
+      return true;
+    }
+  );
+  // Same for --timeout_ms.
+  assert.throws(
+    () => parseArgs(["status", "oc_1", "--timeout_ms", "5000"]),
+    (error) => /unknown flag --timeout_ms/.test(error.message)
+      && !/use --timeout/.test(error.help)
+  );
+});
+
+test("wait --timeout accepts a duration just under the setTimeout maximum", () => {
+  // Node's setTimeout max is 2^31-1 ms (~24.8 days); values above that are
+  // silently clamped to 1ms, which would silently fire the wait timer after
+  // ~1ms instead of the requested duration. Just-under stays parseable.
+  const justUnderMs = 2_147_483_647;
+  assert.equal(parseArgs(["wait", "oc_1", "--timeout", String(justUnderMs)]).options.timeoutMs, justUnderMs);
+  // 596h -> 2_145_600_000 ms (just under the max)
+  assert.equal(parseArgs(["wait", "oc_1", "--timeout", "596h"]).options.timeoutMs, 596 * 3_600_000);
+});
+
+test("wait --timeout rejects a duration exceeding the setTimeout maximum", () => {
+  // 1000000h is the exact "looks parseable, silently fires after ~1ms"
+  // example: total ~36 trillion ms, well past the 2^31-1 ms setTimeout cap.
+  assert.throws(
+    () => parseArgs(["wait", "oc_1", "--timeout", "1000000h"]),
+    (error) => {
+      assert.ok(error instanceof UsageError);
+      assert.match(error.message, /must not exceed/);
+      assert.match(error.help, /2147483647 milliseconds/);
+      return true;
+    }
+  );
+  // Just over the cap in bare-ms form.
+  assert.throws(
+    () => parseArgs(["wait", "oc_1", "--timeout", "2147483648"]),
+    /must not exceed/
+  );
+});

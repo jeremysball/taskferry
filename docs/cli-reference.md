@@ -255,6 +255,7 @@ SIGTERM), then exits cleanly with code `0`.
 | `--directory <path>` | Workspace to watch, defaults to the current git workspace root (falls back to the literal current directory outside a git repo) |
 | `--format toon\|ndjson` | Stream format, default `toon` |
 | `--summaries` | Request live activity summaries (a secondary model call); see [security.md](security.md) |
+| `--flush-interval <duration>` | Batch `--summaries` events and print them together on this interval instead of streaming individually; milliseconds or a duration string (30s, 5m, 1h); requires `--summaries` |
 | `--task-id <id>` | Scope the stream to one task; `watch` then exits on its own once that task settles, instead of running until interrupted. This is the one command where `--task-id` is still live — see "Retired names" below. |
 
 Without `--task-id`, `watch` streams every task in the workspace until
@@ -262,6 +263,8 @@ interrupted. With it, `--directory` is optional — it's resolved from the
 task itself when omitted.
 
 `ndjson` emits one JSON object per line, for scripting.
+
+With `--flush-interval`, `ndjson` emits one `{"type": "watch.flush", "timestamp": ..., "events": [...]}` object per flush tick instead of one object per event; `toon` renders the same buffered events as today's per-event lines, just batched under one tick.
 
 ## `taskferry context [options]`
 

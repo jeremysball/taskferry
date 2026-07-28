@@ -380,7 +380,13 @@ const DEFAULT_CANCEL_GRACE_MS = 5000;
  * @param {object} [options]
  * @param {typeof spawn} [options.spawnFn]
  * @param {(pid: number, signal: NodeJS.Signals) => void} [options.killFn]
- * @param {(env: NodeJS.ProcessEnv) => Promise<string>} [options.listModelsFn]
+ * @param {(env: NodeJS.ProcessEnv) => Promise<string>} [options.listModelsFn] - shell-out for the
+ *   installed-models list used to validate `TASKFERRY_SUMMARY_MODEL` is available before any summary
+ *   call. Defaults to `opencodeExecutor().listModelsFn` -- not `defaultExecutor.listModelsFn` --
+ *   because `summarizeTask()` deliberately hardcodes `opencodeExecutor()` for the actual summary
+ *   work (separately tracked scope boundary from the dispatch-default executor flip). A default-config
+ *   pi install must validate the configured summary model against opencode's list, since that's the
+ *   CLI summaries actually run through regardless of which executor dispatches use.
  * @param {import("./executor.js").WorkerExecutor} [options.defaultExecutor] - fallback WorkerExecutor used when
  *   a dispatch doesn't request one explicitly. Per-dispatch selection (Task 6) calls `resolveExecutor(params.executor)`
  *   and overrides this; this option exists so tests and embedders can swap in a different default without the
@@ -412,6 +418,8 @@ const DEFAULT_CANCEL_GRACE_MS = 5000;
  * @param {(directory: string) => string|null} [options.resolveGitCommonDirFn]
  * @param {() => {checked: boolean, available: boolean, reason?: string}} [options.checkBwrapAvailableFn]
  * @param {(path: string) => boolean} [options.existsFn]
+ * @param {(path: string) => {isDirectory: () => boolean}|null} [options.statFn]
+ * @param {(path: string) => string[]} [options.readdirFn]
  * @param {string} [options.runtimeDir]
  * @param {string} [options.cacheDir]
  * @param {(event: object) => void} [options.onEvent]
@@ -431,7 +439,7 @@ export function createTaskManager({
   // Defaults to whichever executor is actually the manager's default, so a
   // pi-only install (no opencode CLI on PATH) doesn't ENOENT the first time
   // it touches `taskferry summary` or `watch --summaries`.
-  listModelsFn = defaultExecutor.listModelsFn,
+  listModelsFn = opencodeExecutor().listModelsFn,
   maxDispatchesPerWindow = positiveInteger(
     Number(process.env.TASKFERRY_MAX_DISPATCHES_PER_WINDOW),
     positiveInteger(/** @type {number} */ (config.maxDispatchesPerWindow), DEFAULT_MAX_DISPATCHES_PER_WINDOW)
@@ -490,6 +498,8 @@ export function createTaskManager({
   resolveGitCommonDirFn = resolveGitCommonDir,
   checkBwrapAvailableFn = checkBwrapAvailable,
   existsFn = fs.existsSync,
+  statFn = (/** @type {string} */ p) => { try { return fs.statSync(p); } catch { return null; } },
+  readdirFn = (/** @type {string} */ p) => fs.readdirSync(p),
   runtimeDir = path.join(stateDir, "run"),
   cacheDir = resolveCacheDir(process.env),
   onEvent,
@@ -1067,6 +1077,16 @@ export function createTaskManager({
   }
 
   /**
+   * Validate `model` against opencode's installed-models list, NOT against
+   * the dispatch-default executor's list. `summarizeTask()` deliberately
+   * hardcodes `opencodeExecutor()` for the actual summary work -- a separate
+   * scope boundary from the dispatch-default executor flip -- so a model
+   * available in pi but not in opencode (e.g. an opencode-only Zen model
+   * like the default `opencode/mimo-v2.5-free`) would silently fail the
+   * check on a default pi install. The cached `modelsCache` is shared with
+   * the check, so a follow-up dispatch doesn't re-shell-out for the list
+   * within the 5-minute TTL.
+   *
    * @param {string} model
    * @param {NodeJS.ProcessEnv} env
    */
@@ -1551,13 +1571,25 @@ export function createTaskManager({
         // sandboxed data home (opencode: XDG_DATA_HOME; pi:
         // PI_CODING_AGENT_DIR) and which destination to ro-bind the real
         // auth file into, so each executor's bound auth destination matches
-        // its own environment directory.
+        // its own environment directory. Threading the dispatch's
+        // sessionId + launchDirectory through lets pi scope any sessions
+        // bind to just the resumed session's file -- a worker can write
+        // its own session, but not touch every other session in the
+        // user's pi history.
         const {
           extraRoBinds: executorRoBinds,
           extraRwPairBinds: executorRwPairBinds = [],
           sandboxedDataHome,
           sandboxEnv,
-        } = executor.sandboxAuthFile({ homeDir, dataDir: cacheDir, spawnEnv, existsFn });
+        } = executor.sandboxAuthFile({
+          homeDir,
+          dataDir: cacheDir,
+          spawnEnv,
+          existsFn,
+          statFn,
+          readdirFn,
+          ...(isSummary ? {} : { sessionId: dispatchLaunch.sessionId ?? null, launchDirectory: launchDirectory || null }),
+        });
         /** @type {[string, string][]} */
         const extraRoBinds = [...executorRoBinds];
         if (promptFilePath) extraRoBinds.push([PROMPT_DIR, PROMPT_DIR]);

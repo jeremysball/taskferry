@@ -13,7 +13,7 @@ import { createTaskManager, isOutsideDirectory, DEFAULT_SUMMARY_MODEL, bucketFor
 // runs synchronously in the constructor, same as the old module-level code
 // did at import time). `tasksFixture` may be an array or `(logDir) => array`
 // for fixtures whose logPath needs to point inside the real log dir.
-function makeManager({ tasksFixture = [], logs = {}, spawnFn, killFn, listModelsFn, defaultExecutor, maxDispatchesPerWindow, dispatchWindowMs, advisorSessionTtlMs, maxConcurrentTasks, noOutputTimeoutMs, postOutputNoOutputTimeoutMs, watchdogPollMs, maxWaitMs, keySlotsSpec, providerKeyEnvName, summaryKeySlot, summaryProviderKeyEnvName, sandboxEnabled = false, checkBwrapAvailableFn, existsFn, runtimeDir, cacheDir, platform, onEvent, allowedDirs, resolveGitCommonDirFn } = {}) {
+function makeManager({ tasksFixture = [], logs = {}, spawnFn, killFn, listModelsFn, defaultExecutor, maxDispatchesPerWindow, dispatchWindowMs, advisorSessionTtlMs, maxConcurrentTasks, noOutputTimeoutMs, postOutputNoOutputTimeoutMs, watchdogPollMs, maxWaitMs, keySlotsSpec, providerKeyEnvName, summaryKeySlot, summaryProviderKeyEnvName, sandboxEnabled = false, checkBwrapAvailableFn, existsFn, statFn, readdirFn, runtimeDir, cacheDir, platform, onEvent, allowedDirs, resolveGitCommonDirFn } = {}) {
   const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-test-"));
   const logDir = path.join(stateDir, "logs");
   fs.mkdirSync(logDir, { recursive: true });
@@ -37,6 +37,8 @@ function makeManager({ tasksFixture = [], logs = {}, spawnFn, killFn, listModels
     ...(defaultExecutor != null ? { defaultExecutor } : {}),
     ...(checkBwrapAvailableFn != null ? { checkBwrapAvailableFn } : {}),
     ...(existsFn != null ? { existsFn } : {}),
+    ...(statFn != null ? { statFn } : {}),
+    ...(readdirFn != null ? { readdirFn } : {}),
     ...(runtimeDir != null ? { runtimeDir } : {}),
     cacheDir: cacheDir ?? defaultCacheDir,
     ...(platform != null ? { platform } : {}),
@@ -3257,12 +3259,15 @@ describe("summarize()", () => {
     await assert.rejects(mgr.checkSummaryModelReady(), /summary model is unavailable/);
   });
 
-  test("createTaskManager()'s real default listModelsFn defers to defaultExecutor, not a hardcoded 'opencode models' shell-out", async () => {
+  test("createTaskManager()'s real default listModelsFn validates against opencode's list, not the dispatch-default executor's (a default pi install must still find the default summary model)", async () => {
     // Bypasses makeManager deliberately -- it always injects its own
-    // listModelsFn fallback, which would mask a regression back to the
-    // hardcoded default this test exists to catch.
+    // listModelsFn fallback, which would mask a regression back to either
+    // the round-2 (defaultExecutor.listModelsFn) or round-3 pre-fix
+    // (hardcoded `opencode models`) defaults. We want to prove the new
+    // default is opencodeExecutor().listModelsFn regardless of the
+    // configured dispatch-default executor.
     const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-test-"));
-    let calledWithEnv = null;
+    let piListModelsCalled = false;
     const fakePi = {
       id: "pi",
       taskIdPrefix: "pi",
@@ -3270,9 +3275,11 @@ describe("summarize()", () => {
       defaultModel: "minimax/MiniMax-M2.7",
       defaultSummaryModel: "minimax/MiniMax-M2.7",
       binaryName: "pi",
-      listModelsFn: async (env) => {
-        calledWithEnv = env;
-        return `${DEFAULT_SUMMARY_MODEL}\n`;
+      listModelsFn: async () => {
+        piListModelsCalled = true;
+        // Whatever pi returns here is irrelevant: summaries always run
+        // through opencode, so this list must NOT be used for the check.
+        return "minimax/MiniMax-M2.7\n";
       },
       buildSpawnArgs: () => [],
       buildSummaryPrompt: () => "",
@@ -3287,8 +3294,56 @@ describe("summarize()", () => {
       defaultExecutor: fakePi,
       // listModelsFn intentionally omitted -- exercising the real default.
     });
+    // On a host with opencode installed, the check will succeed (real
+    // `opencode models` output includes the default summary model). On
+    // a host without opencode, the check will fail with a "verify that
+    // opencode is installed" error -- which is itself proof that the
+    // check hit opencode, not pi. Either outcome is fine; what matters
+    // is that pi's listModelsFn was never consulted.
+    try {
+      await mgr.checkSummaryModelReady();
+    } catch (err) {
+      // If opencode isn't installed, the error message must still point
+      // at opencode -- that's what proves we routed through opencode.
+      assert.match(/** @type {Error} */ (err).message, /verify that opencode is installed/, "the summary availability check must consult opencode's listModelsFn, not pi's");
+    }
+    assert.equal(piListModelsCalled, false, "fakePi.listModelsFn must not be used for the summary availability check (it would reject opencode-only summary models)");
+  });
+
+  test("an injected listModelsFn takes precedence over the opencode default (preserves the round-2 test seam)", async () => {
+    // The round-2 fix made createTaskManager's `listModelsFn` option
+    // defer to defaultExecutor's listModelsFn, and several tests rely
+    // on being able to inject a custom listModelsFn. Verify that
+    // explicit injection still works -- just that the new *default* (used
+    // when no override is given) is opencode's, not pi's.
+    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-test-"));
+    let injectedCalled = false;
+    const fakePi = {
+      id: "pi",
+      taskIdPrefix: "pi",
+      errorBucketPrefix: "pi",
+      defaultModel: "minimax/MiniMax-M2.7",
+      defaultSummaryModel: "minimax/MiniMax-M2.7",
+      binaryName: "pi",
+      listModelsFn: async () => "minimax/MiniMax-M2.7\n",
+      buildSpawnArgs: () => [],
+      buildSummaryPrompt: () => "",
+      normalizeLogEvent: (parsed) => parsed,
+      sandboxAuthFile: () => ({ extraRoBinds: [], extraRwPairBinds: [], sandboxedDataHome: "/tmp/unused", sandboxEnv: {} }),
+    };
+    const mgr = createTaskManager({
+      stateDir,
+      sandboxEnabled: false,
+      spawnFn: () => fakeChild(),
+      killFn: () => {},
+      defaultExecutor: fakePi,
+      listModelsFn: async () => {
+        injectedCalled = true;
+        return `${DEFAULT_SUMMARY_MODEL}\n`;
+      },
+    });
     await mgr.checkSummaryModelReady();
-    assert.notEqual(calledWithEnv, null, "the pi executor's own listModelsFn must be the one createTaskManager's default invoked");
+    assert.equal(injectedCalled, true, "explicit listModelsFn injection must take precedence over the opencode default");
   });
 
   test("summary --mode activity rejects when the summary model is unavailable, instead of masking the failure with local narration", async () => {
@@ -4022,6 +4077,176 @@ describe("startTask() merges executor.sandboxAuthFile().sandboxEnv into spawnEnv
     // positions before the destination (src is the one position before dest).
     assert.equal(captured.args[destIdx - 2], "--ro-bind");
     assert.equal(captured.args[destIdx - 1], realAuthFile);
+  });
+
+  test("a pi dispatch's sandboxAuthFile call is invoked with the dispatch's sessionId + launchDirectory, so the bind can scope to a single session file", () => {
+    let capturedArgs = null;
+    const cacheDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-cache-pi-"));
+    const realAuthFile = path.join(os.tmpdir(), "fake-pi-home", "auth.json");
+    const fakePi = {
+      id: "pi",
+      taskIdPrefix: "pi",
+      errorBucketPrefix: "pi",
+      defaultModel: "minimax/MiniMax-M2.7",
+      defaultSummaryModel: "minimax/MiniMax-M2.7",
+      binaryName: "pi",
+      listModelsFn: async () => "",
+      buildSpawnArgs: (ctx) => ["--model", ctx.model, "--mode", "json", "-p", ctx.prompt],
+      buildSummaryPrompt: () => "",
+      normalizeLogEvent: (parsed) => parsed,
+      sandboxAuthFile: (args) => {
+        capturedArgs = args;
+        const sandboxedDataHome = path.join(args.dataDir, "pi-data");
+        return {
+          extraRoBinds: [],
+          extraRwPairBinds: [],
+          sandboxedDataHome,
+          sandboxEnv: { PI_CODING_AGENT_DIR: sandboxedDataHome },
+        };
+      },
+    };
+    const directory = os.tmpdir();
+    const sessionId = "019f90ea-1234-70e0-98dc-6847db316eb4";
+    const mgr = makeManager({
+      spawnFn: () => fakeChild(),
+      defaultExecutor: fakePi,
+      sandboxEnabled: true,
+      checkBwrapAvailableFn: () => ({ checked: true, available: true }),
+      platform: "linux",
+      cacheDir,
+      existsFn: (p) => p === realAuthFile,
+    });
+    mgr.dispatch({ prompt: "resume me", directory, sessionId });
+    assert.notEqual(capturedArgs, null, "sandboxAuthFile must be invoked for a sandboxed dispatch");
+    assert.equal(capturedArgs.sessionId, sessionId, "sandboxAuthFile must receive the dispatch's sessionId so the bind can scope to that single file");
+    assert.equal(capturedArgs.launchDirectory, directory, "sandboxAuthFile must receive the dispatch's launchDirectory so it can compute pi's per-cwd sessions subdirectory");
+    assert.equal(typeof capturedArgs.statFn, "function", "sandboxAuthFile must receive a statFn (for the isDirectory guard)");
+    assert.equal(typeof capturedArgs.readdirFn, "function", "sandboxAuthFile must receive a readdirFn (for the session file lookup)");
+  });
+
+  test("a fresh (non-resume) pi dispatch does not pass a sessionId to sandboxAuthFile, so no sessions bind is added", () => {
+    let capturedArgs = null;
+    const cacheDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-cache-pi-"));
+    const fakePi = {
+      id: "pi",
+      taskIdPrefix: "pi",
+      errorBucketPrefix: "pi",
+      defaultModel: "minimax/MiniMax-M2.7",
+      defaultSummaryModel: "minimax/MiniMax-M2.7",
+      binaryName: "pi",
+      listModelsFn: async () => "",
+      buildSpawnArgs: (ctx) => ["--model", ctx.model, "--mode", "json", "-p", ctx.prompt],
+      buildSummaryPrompt: () => "",
+      normalizeLogEvent: (parsed) => parsed,
+      sandboxAuthFile: (args) => {
+        capturedArgs = args;
+        return {
+          extraRoBinds: [],
+          extraRwPairBinds: [],
+          sandboxedDataHome: path.join(args.dataDir, "pi-data"),
+          sandboxEnv: { PI_CODING_AGENT_DIR: path.join(args.dataDir, "pi-data") },
+        };
+      },
+    };
+    const mgr = makeManager({
+      spawnFn: () => fakeChild(),
+      defaultExecutor: fakePi,
+      sandboxEnabled: true,
+      checkBwrapAvailableFn: () => ({ checked: true, available: true }),
+      platform: "linux",
+      cacheDir,
+      existsFn: () => false,
+    });
+    mgr.dispatch({ prompt: "fresh", directory: os.tmpdir() });
+    assert.notEqual(capturedArgs, null);
+    assert.equal(capturedArgs.sessionId, null, "no sessionId must be threaded for a fresh (non-resume) dispatch");
+    // launchDirectory is still passed -- it's needed for the per-cwd encoding
+    // even when there's no sessionId, in case the executor wants to use it
+    // for diagnostics. The bind itself stays empty because there's no
+    // sessionId to resolve a file for.
+    assert.equal(typeof capturedArgs.launchDirectory, "string");
+  });
+
+  test("the pi sandboxAuthFile call does not add the whole sessions/ pair-bind on the dispatch path -- only the resumed file's bind (regression: scope regression vs. shadowed sandboxed-only sessions)", () => {
+    // Earlier round-2 review surfaced a security scope regression: pi's
+    // sandboxAuthFile was binding the ENTIRE real sessions/ directory
+    // read-write, which let a prompt-injectable sandboxed worker
+    // write/delete any session in the user's pi history. After this fix,
+    // only the resumed session's specific file is bound. Verify that
+    // the bwrap invocation no longer contains a pair-bind of the whole
+    // realSessionsDir, even when pi's own sandboxAuthFile decides to
+    // bind a single file.
+    let captured = null;
+    const cacheDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-cache-pi-"));
+    const realSessionsDir = path.join(os.homedir(), ".pi", "agent", "sessions");
+    const realSessionFile = path.join(realSessionsDir, "--tmp--", "2026-07-23T21-42-41-761Z_019f90ea-1234-70e0-98dc-6847db316eb4.jsonl");
+    const realAuthFile = path.join(os.homedir(), ".pi", "agent", "auth.json");
+    const fakePi = {
+      id: "pi",
+      taskIdPrefix: "pi",
+      errorBucketPrefix: "pi",
+      defaultModel: "minimax/MiniMax-M2.7",
+      defaultSummaryModel: "minimax/MiniMax-M2.7",
+      binaryName: "pi",
+      listModelsFn: async () => "",
+      buildSpawnArgs: (ctx) => ["--model", ctx.model, "--mode", "json", "-p", ctx.prompt],
+      buildSummaryPrompt: () => "",
+      normalizeLogEvent: (parsed) => parsed,
+      sandboxAuthFile: ({ dataDir, existsFn, statFn, readdirFn, sessionId, launchDirectory }) => {
+        const sandboxedDataHome = path.join(dataDir, "pi-data");
+        const sandboxedSessionsHome = path.join(sandboxedDataHome, "sessions");
+        const extraRwPairBinds = [];
+        if (sessionId && launchDirectory && existsFn(realSessionsDir) && statFn(realSessionsDir)?.isDirectory()) {
+          const safePath = `--${launchDirectory.replace(/^[/\\]/, "").replace(/[/\\:]/g, "-")}--`;
+          const subdir = path.join(realSessionsDir, safePath);
+          const entries = readdirFn(subdir);
+          for (const entry of entries) {
+            if (!entry.endsWith(".jsonl")) continue;
+            const underscoreIdx = entry.lastIndexOf("_");
+            if (underscoreIdx === -1) continue;
+            const fileSessionId = entry.slice(underscoreIdx + 1, -".jsonl".length);
+            if (fileSessionId.startsWith(sessionId)) {
+              extraRwPairBinds.push([path.join(subdir, entry), path.join(sandboxedSessionsHome, safePath, entry)]);
+              break;
+            }
+          }
+        }
+        return {
+          extraRoBinds: existsFn(realAuthFile) ? [[realAuthFile, path.join(sandboxedDataHome, "auth.json")]] : [],
+          extraRwPairBinds,
+          sandboxedDataHome,
+          sandboxEnv: { PI_CODING_AGENT_DIR: sandboxedDataHome },
+        };
+      },
+    };
+    const directory = os.tmpdir();
+    const mgr = makeManager({
+      spawnFn: (cmd, args, opts) => { captured = { cmd, args, opts }; return fakeChild(); },
+      defaultExecutor: fakePi,
+      sandboxEnabled: true,
+      checkBwrapAvailableFn: () => ({ checked: true, available: true }),
+      platform: "linux",
+      cacheDir,
+      // Pretend the host has both a sessions/ dir and the specific file.
+      existsFn: (p) => p === realSessionsDir || p === realAuthFile,
+      statFn: (p) => (p === realSessionsDir ? { isDirectory: () => true } : null),
+      readdirFn: (p) => (p === path.join(realSessionsDir, "--tmp--") ? [path.basename(realSessionFile)] : []),
+    });
+    mgr.dispatch({ prompt: "resume", directory, sessionId: "019f90ea-1234-70e0-98dc-6847db316eb4" });
+    assert.equal(captured.cmd, "bwrap");
+    // Look for a --bind whose src is the whole realSessionsDir (not the
+    // single file). Pre-fix this would appear; post-fix it must not.
+    const pairBindSrcs = [];
+    for (let i = 0; i < captured.args.length; i++) {
+      if (captured.args[i] === "--bind" && captured.args[i + 1] && captured.args[i + 2]) {
+        pairBindSrcs.push(captured.args[i + 1]);
+      }
+    }
+    assert.ok(!pairBindSrcs.includes(realSessionsDir), `the whole sessions directory must not be pair-bound (would re-introduce the scope regression). Saw: ${pairBindSrcs.join(", ")}`);
+    // The specific session file IS bound, mapped onto the matching path
+    // under the sandboxed sessions tree.
+    const fileBindSrcs = pairBindSrcs.filter((p) => p === realSessionFile);
+    assert.equal(fileBindSrcs.length, 1, `expected exactly one --bind of the single session file, got ${fileBindSrcs.length} (all pair-bind srcs: ${pairBindSrcs.join(", ")})`);
   });
 });
 

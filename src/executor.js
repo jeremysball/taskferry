@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import fs from "node:fs";
 import path from "node:path";
 import { promisify } from "node:util";
 
@@ -12,6 +13,66 @@ const SUMMARY_ISOLATION_PROMPT =
   + "changed blocker, or steps completed since then — and say 'no change' in a few words if there is "
   + "none. Never restate anything previous_summary already said.";
 
+// Pi encodes a cwd into a per-project sessions directory the same way it does
+// for getDefaultSessionDir() (see pi's core/session-manager.js): strip a single
+// leading / or \, then turn every remaining /, \\, or : into a dash, then wrap
+// in `-- ... --`. Must match exactly -- a drift here silently breaks every
+// --session <id> resume by looking in the wrong directory.
+const PI_SAFE_PATH_FOR_CWD = (/** @type {string} */ cwd) =>
+  `--${cwd.replace(/^[/\\]/, "").replace(/[/\\:]/g, "-")}--`;
+
+/**
+ * Resolve `sessionId` (the value a dispatch passed to `--session`) to the
+ * concrete pi session .jsonl file we should bind read-write into the sandbox.
+ *
+ * Pi accepts two shapes for `--session`: an explicit file path (contains a `/`
+ * or `\\`, or ends in `.jsonl`), or a session-id prefix that
+ * `SessionManager.list(cwd, sessionDir)` matches against the `id` field in
+ * each `.jsonl` file's first line. Replicating that lookup here -- instead of
+ * e.g. binding the whole sessions dir -- is the only way to keep a resumed
+ * session writable for a sandboxed worker without also giving that worker
+ * write/delete access to every other session in the user's pi history.
+ *
+ * Returns null when no unambiguous match is found; the caller should then
+ * skip the bind entirely rather than guess.
+ *
+ * @param {string} realSessionsDir - pi's `<agentDir>/sessions/` on the host.
+ * @param {string} sessionId
+ * @param {{ readdirFn?: (dir: string) => string[] }} [deps]
+ * @returns {string|null}
+ */
+function resolvePiSessionFile(realSessionsDir, sessionId, { readdirFn = (/** @type {string} */ dir) => fs.readdirSync(dir) } = {}) {
+  if (!sessionId) return null;
+  // Pi treats --session as a literal path when it looks like one.
+  if (sessionId.includes("/") || sessionId.includes("\\") || sessionId.endsWith(".jsonl")) {
+    return sessionId;
+  }
+  // Pi names session files `<isoTimestamp>_<sessionId>.jsonl`, with exactly one
+  // underscore separating the timestamp from the UUID. Match by prefix on the
+  // session-id portion of the filename -- this avoids reading every .jsonl's
+  // first line just to filter candidates.
+  let entries;
+  try {
+    entries = readdirFn(realSessionsDir);
+  } catch {
+    return null;
+  }
+  const matches = [];
+  for (const entry of entries) {
+    if (!entry.endsWith(".jsonl")) continue;
+    const underscoreIdx = entry.lastIndexOf("_");
+    if (underscoreIdx === -1) continue;
+    const fileSessionId = entry.slice(underscoreIdx + 1, -".jsonl".length);
+    if (fileSessionId.startsWith(sessionId)) {
+      matches.push(path.join(realSessionsDir, entry));
+    }
+  }
+  // Ambiguous (zero or multiple matches) -> don't bind anything. Pi's own
+  // resolver would surface an error to the user; we can't do that from here,
+  // and a wrong-file bind would be worse than no bind.
+  return matches.length === 1 ? matches[0] : null;
+}
+
 /**
  * @typedef {Object} WorkerExecutor
  * @property {"opencode"|"pi"} id
@@ -24,7 +85,7 @@ const SUMMARY_ISOLATION_PROMPT =
  * @property {(ctx: SpawnLaunchContext) => string[]} buildSpawnArgs
  * @property {() => string} buildSummaryPrompt
  * @property {(parsed: unknown) => unknown} normalizeLogEvent
- * @property {(args: {homeDir: string, dataDir: string, spawnEnv: NodeJS.ProcessEnv, existsFn: (file: string) => boolean}) => {extraRoBinds: [string, string][], extraRwPairBinds?: [string, string][], sandboxedDataHome: string, sandboxEnv: Record<string, string>}} sandboxAuthFile
+ * @property {(args: {homeDir: string, dataDir: string, spawnEnv: NodeJS.ProcessEnv, existsFn: (file: string) => boolean, statFn?: (file: string) => {isDirectory: () => boolean}|null, readdirFn?: (dir: string) => string[], sessionId?: string|null, launchDirectory?: string|null}) => {extraRoBinds: [string, string][], extraRwPairBinds?: [string, string][], sandboxedDataHome: string, sandboxEnv: Record<string, string>}} sandboxAuthFile
  */
 
 /**
@@ -146,8 +207,8 @@ export function piExecutor({ execFileFn = execFileAsync } = {}) {
     // small tmpfs: pi's sandboxed data home grows with every dispatch and an
     // unbounded tmpfs directory eventually starves the whole XDG_RUNTIME_DIR
     // (sockets, locks) of space.
-    /** @param {{homeDir: string, dataDir: string, spawnEnv: NodeJS.ProcessEnv, existsFn: (file: string) => boolean}} args @returns {{extraRoBinds: [string, string][], extraRwPairBinds: [string, string][], sandboxedDataHome: string, sandboxEnv: Record<string, string>}} */
-    sandboxAuthFile({ homeDir, dataDir, spawnEnv, existsFn }) {
+    /** @param {{homeDir: string, dataDir: string, spawnEnv: NodeJS.ProcessEnv, existsFn: (file: string) => boolean, statFn?: (file: string) => {isDirectory: () => boolean}|null, readdirFn?: (dir: string) => string[], sessionId?: string|null, launchDirectory?: string|null}} args @returns {{extraRoBinds: [string, string][], extraRwPairBinds: [string, string][], sandboxedDataHome: string, sandboxEnv: Record<string, string>}} */
+    sandboxAuthFile({ homeDir, dataDir, spawnEnv, existsFn, statFn = fs.statSync, readdirFn, sessionId, launchDirectory }) {
       const realAgentDir = spawnEnv.PI_CODING_AGENT_DIR || path.join(homeDir, ".pi", "agent");
       const realAuthFile = path.join(realAgentDir, "auth.json");
       // Pi roots both state (auth, sessions) and config (custom-provider
@@ -158,20 +219,47 @@ export function piExecutor({ execFileFn = execFileAsync } = {}) {
       // though auth.json alone would otherwise work fine.
       const realExtensionsDir = path.join(realAgentDir, "extensions");
       // pi's session files live under PI_CODING_AGENT_DIR/sessions/ (see pi's
-      // own getSessionsDir()) and pi writes to them in place on resume
-      // (appendFileSync/writeFileSync on the existing session file, not a
-      // fresh copy) -- a read-only bind would let a sandboxed resume find
-      // the file but then fail to persist the continued turn. Bound
-      // read-write, same treatment as sandboxedDataHome itself below.
+      // own getSessionsDir()), organized further by per-cwd encoded
+      // subdirectories, and pi writes to the resumed session file in place
+      // (appendFileSync/writeFileSync on the existing file, not a fresh copy).
+      // Mounting the WHOLE sessions dir read-write (as round-2 review
+      // surfaced) gave a prompt-injectable sandboxed worker write/delete
+      // access to every other session in the user's pi history, not just
+      // the one being resumed -- narrowing this to a single file bind is
+      // the difference between a safe resume and a history wipe.
       const realSessionsDir = path.join(realAgentDir, "sessions");
       const sandboxedDataHome = path.join(dataDir, "pi-data");
+      const sandboxedSessionsHome = path.join(sandboxedDataHome, "sessions");
       /** @type {[string, string][]} */
       const extraRoBinds = [];
       if (existsFn(realAuthFile)) extraRoBinds.push([realAuthFile, path.join(sandboxedDataHome, "auth.json")]);
       if (existsFn(realExtensionsDir)) extraRoBinds.push([realExtensionsDir, path.join(sandboxedDataHome, "extensions")]);
       /** @type {[string, string][]} */
       const extraRwPairBinds = [];
-      if (existsFn(realSessionsDir)) extraRwPairBinds.push([realSessionsDir, path.join(sandboxedDataHome, "sessions")]);
+      // Only bind a single resumed session file, and only when a resume was
+      // actually requested (sessionId). A fresh dispatch has no need for
+      // any read-write sessions bind, and a resumed dispatch only needs
+      // *its* session file -- not the rest of the directory.
+      if (sessionId && launchDirectory) {
+        // `isDirectory` guard: `existsFn(realSessionsDir)` could be true for
+        // a stray non-directory `sessions` entry on the host; bind-mounting
+        // such a file as a directory would make bwrap fail or behave oddly.
+        const sessionsDirStat = (() => {
+          try {
+            return statFn(realSessionsDir);
+          } catch {
+            return null;
+          }
+        })();
+        if (sessionsDirStat?.isDirectory()) {
+          const safePath = PI_SAFE_PATH_FOR_CWD(launchDirectory);
+          const realSessionFile = resolvePiSessionFile(path.join(realSessionsDir, safePath), sessionId, { readdirFn });
+          if (realSessionFile) {
+            const sandboxedSessionFile = path.join(sandboxedSessionsHome, safePath, path.basename(realSessionFile));
+            extraRwPairBinds.push([realSessionFile, sandboxedSessionFile]);
+          }
+        }
+      }
       return {
         extraRoBinds,
         extraRwPairBinds,
@@ -214,7 +302,7 @@ export function opencodeExecutor() {
     // small tmpfs: opencode's snapshot store under here grows unbounded
     // across dispatches (no gc) and previously filled the whole
     // XDG_RUNTIME_DIR tmpfs, starving it of space for sockets/locks too.
-    /** @param {{homeDir: string, dataDir: string, spawnEnv: NodeJS.ProcessEnv, existsFn: (file: string) => boolean}} args @returns {{extraRoBinds: [string, string][], sandboxedDataHome: string, sandboxEnv: Record<string, string>}} */
+    /** @param {{homeDir: string, dataDir: string, spawnEnv: NodeJS.ProcessEnv, existsFn: (file: string) => boolean, statFn?: (file: string) => {isDirectory: () => boolean}|null, readdirFn?: (dir: string) => string[], sessionId?: string|null, launchDirectory?: string|null}} args @returns {{extraRoBinds: [string, string][], extraRwPairBinds?: [string, string][], sandboxedDataHome: string, sandboxEnv: Record<string, string>}} */
     sandboxAuthFile({ homeDir, dataDir, spawnEnv, existsFn }) {
       const realDataHome = spawnEnv.XDG_DATA_HOME || path.join(homeDir, ".local", "share");
       const realAuthFile = path.join(realDataHome, "opencode", "auth.json");

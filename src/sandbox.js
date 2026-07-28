@@ -111,9 +111,11 @@ export function resolveGitCommonDir(directory, runCommand = defaultRunCommand) {
  * @param {string[]} [options.extraRwBinds] - extra directories bound read-write at the same path, applied
  *   after directory/runtimeDir (e.g. a git worktree's real gitdir, which lives outside `directory`).
  * @param {[string, string][]} [options.extraRwPairBinds] - extra [src, dest] read-write binds, for a real
- *   directory that must be writable but lives outside the executor's redirected sandbox data home (e.g.
- *   pi's real sessions/ directory, bound onto the sandboxed PI_CODING_AGENT_DIR's sessions/ path so a
- *   sandboxed resume can both read and persist to it). Applied after extraRwBinds and before extraRoBinds.
+ *   file or directory that must be writable but lives outside the executor's redirected sandbox data home
+ *   (e.g. pi's single resumed session file, bound onto the matching path under the sandboxed
+ *   PI_CODING_AGENT_DIR's sessions/ tree so a sandboxed resume can both read and persist to it without
+ *   also exposing the user's other sessions to write/delete). Applied after extraRwBinds and before
+ *   extraRoBinds.
  * @param {[string, string][]} [options.extraRoBinds] - extra [src, dest] read-only binds, applied last so a
  *   more specific path (e.g. a single credentials file) can be pinned read-only even though it sits under
  *   an already read-write-bound directory.

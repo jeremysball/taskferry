@@ -13,7 +13,7 @@ import { createTaskManager, isOutsideDirectory, DEFAULT_SUMMARY_MODEL, bucketFor
 // runs synchronously in the constructor, same as the old module-level code
 // did at import time). `tasksFixture` may be an array or `(logDir) => array`
 // for fixtures whose logPath needs to point inside the real log dir.
-function makeManager({ tasksFixture = [], logs = {}, spawnFn, killFn, listModelsFn, defaultExecutor, maxDispatchesPerWindow, dispatchWindowMs, advisorSessionTtlMs, maxConcurrentTasks, noOutputTimeoutMs, postOutputNoOutputTimeoutMs, watchdogPollMs, maxWaitMs, keySlotsSpec, providerKeyEnvName, summaryKeySlot, summaryProviderKeyEnvName, sandboxEnabled = false, checkBwrapAvailableFn, existsFn, runtimeDir, cacheDir, platform, onEvent, allowedDirs, resolveGitCommonDirFn } = {}) {
+function makeManager({ tasksFixture = [], logs = {}, spawnFn, killFn, listModelsFn, defaultExecutor, maxDispatchesPerWindow, dispatchWindowMs, advisorSessionTtlMs, maxConcurrentTasks, noOutputTimeoutMs, postOutputNoOutputTimeoutMs, watchdogPollMs, maxWaitMs, keySlotsSpec, providerKeyEnvName, summaryKeySlot, summaryProviderKeyEnvName, sandboxEnabled = false, checkBwrapAvailableFn, existsFn, statFn, readdirFn, runtimeDir, cacheDir, platform, onEvent, allowedDirs, resolveGitCommonDirFn } = {}) {
   const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-test-"));
   const logDir = path.join(stateDir, "logs");
   fs.mkdirSync(logDir, { recursive: true });
@@ -37,6 +37,8 @@ function makeManager({ tasksFixture = [], logs = {}, spawnFn, killFn, listModels
     ...(defaultExecutor != null ? { defaultExecutor } : {}),
     ...(checkBwrapAvailableFn != null ? { checkBwrapAvailableFn } : {}),
     ...(existsFn != null ? { existsFn } : {}),
+    ...(statFn != null ? { statFn } : {}),
+    ...(readdirFn != null ? { readdirFn } : {}),
     ...(runtimeDir != null ? { runtimeDir } : {}),
     cacheDir: cacheDir ?? defaultCacheDir,
     ...(platform != null ? { platform } : {}),
@@ -171,7 +173,7 @@ describe("dispatch() lifecycle, driven through an injected spawnFn (no real open
         return fakeChild();
       },
     });
-    mgr.dispatch({ prompt: "hello", directory: os.tmpdir(), model: "opencode-go/minimax-m3", variant: "max" });
+    mgr.dispatch({ prompt: "hello", directory: os.tmpdir(), model: "opencode-go/minimax-m3", variant: "max", executor: "opencode" });
     assert.equal(captured.cmd, "opencode");
     assert.deepEqual(captured.args, [
       "run", "--dir", os.tmpdir(), "--auto", "--format", "json",
@@ -184,7 +186,7 @@ describe("dispatch() lifecycle, driven through an injected spawnFn (no real open
   test("defaults to openai/gpt-5.6-luna --variant high when no model is given", () => {
     let captured = null;
     const mgr = makeManager({ spawnFn: (cmd, args) => { captured = args; return fakeChild(); } });
-    mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+    mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), executor: "opencode" });
     assert.deepEqual(captured.slice(6, 10), ["-m", "openai/gpt-5.6-luna", "--variant", "high"]);
   });
 
@@ -196,24 +198,87 @@ describe("dispatch() lifecycle, driven through an injected spawnFn (no real open
   test("resuming with --session-id and no --model inherits the model of the task that owned that session (issue #47)", () => {
     let captured = null;
     const mgr = makeManager({ spawnFn: (cmd, args) => { captured = args; return fakeChild(); } });
-    mgr.dispatch({ prompt: "first", directory: os.tmpdir(), model: "opencode-go/minimax-m3", sessionId: "ses_abc" });
-    mgr.dispatch({ prompt: "resume", directory: os.tmpdir(), sessionId: "ses_abc" });
+    mgr.dispatch({ prompt: "first", directory: os.tmpdir(), model: "opencode-go/minimax-m3", sessionId: "ses_abc", executor: "opencode" });
+    mgr.dispatch({ prompt: "resume", directory: os.tmpdir(), sessionId: "ses_abc", executor: "opencode" });
     assertDispatchedModel(captured, "opencode-go/minimax-m3");
   });
 
   test("resuming with --session-id and an explicit --model still uses the explicit model", () => {
     let captured = null;
     const mgr = makeManager({ spawnFn: (cmd, args) => { captured = args; return fakeChild(); } });
-    mgr.dispatch({ prompt: "first", directory: os.tmpdir(), model: "opencode-go/minimax-m3", sessionId: "ses_abc" });
-    mgr.dispatch({ prompt: "resume", directory: os.tmpdir(), model: "opencode/other-model", sessionId: "ses_abc" });
+    mgr.dispatch({ prompt: "first", directory: os.tmpdir(), model: "opencode-go/minimax-m3", sessionId: "ses_abc", executor: "opencode" });
+    mgr.dispatch({ prompt: "resume", directory: os.tmpdir(), model: "opencode/other-model", sessionId: "ses_abc", executor: "opencode" });
     assertDispatchedModel(captured, "opencode/other-model");
   });
 
   test("an unrecognized --session-id with no --model still falls back to the hardcoded default", () => {
     let captured = null;
     const mgr = makeManager({ spawnFn: (cmd, args) => { captured = args; return fakeChild(); } });
-    mgr.dispatch({ prompt: "resume", directory: os.tmpdir(), sessionId: "ses_never_seen" });
+    mgr.dispatch({ prompt: "resume", directory: os.tmpdir(), sessionId: "ses_never_seen", executor: "opencode" });
     assertDispatchedModel(captured, "openai/gpt-5.6-luna");
+  });
+
+  test("resuming with --session-id and no --executor inherits the executor of the task that owned that session", () => {
+    let capturedCmd = null;
+    const mgr = makeManager({ spawnFn: (cmd) => { capturedCmd = cmd; return fakeChild(); } });
+    mgr.dispatch({ prompt: "first", directory: os.tmpdir(), sessionId: "ses_exec", executor: "pi" });
+    mgr.dispatch({ prompt: "resume", directory: os.tmpdir(), sessionId: "ses_exec" });
+    assert.equal(capturedCmd, "pi");
+  });
+
+  test("resuming with --session-id and an explicit --executor still uses the explicit executor", () => {
+    let capturedCmd = null;
+    const mgr = makeManager({ spawnFn: (cmd) => { capturedCmd = cmd; return fakeChild(); } });
+    mgr.dispatch({ prompt: "first", directory: os.tmpdir(), sessionId: "ses_exec2", executor: "pi" });
+    mgr.dispatch({ prompt: "resume", directory: os.tmpdir(), sessionId: "ses_exec2", executor: "opencode" });
+    assert.equal(capturedCmd, "opencode");
+  });
+
+  test("a session-inheriting resume that matches defaultExecutor reuses that exact instance instead of building a fresh one", () => {
+    // Uses a custom fake as defaultExecutor (not the real piExecutor()) so a
+    // regression back to unconditionally calling resolveExecutor(executorId)
+    // is observable: that path ignores this injected instance entirely and
+    // would spawn with the real pi executor's own buildSpawnArgs instead.
+    let captured = null;
+    const fakePi = {
+      id: "pi",
+      taskIdPrefix: "pi",
+      errorBucketPrefix: "pi",
+      defaultModel: "fake-pi/marker-model",
+      defaultSummaryModel: "fake-pi/marker-model",
+      binaryName: "pi",
+      listModelsFn: async () => "",
+      buildSpawnArgs: () => ["--fake-pi-marker"],
+      buildSummaryPrompt: () => "",
+      normalizeLogEvent: (parsed) => parsed,
+      sandboxAuthFile: () => ({ extraRoBinds: [], extraRwPairBinds: [], sandboxedDataHome: "/tmp/unused", sandboxEnv: {} }),
+    };
+    const mgr = makeManager({ spawnFn: (cmd, args) => { captured = args; return fakeChild(); }, defaultExecutor: fakePi });
+    mgr.dispatch({ prompt: "first", directory: os.tmpdir(), sessionId: "ses_reuse", executor: "pi" });
+    mgr.dispatch({ prompt: "resume", directory: os.tmpdir(), sessionId: "ses_reuse" });
+    assert.deepEqual(captured, ["--fake-pi-marker"]);
+  });
+
+  test("an unrecognized --session-id with no --executor still falls back to the manager's default executor", () => {
+    let capturedCmd = null;
+    const mgr = makeManager({ spawnFn: (cmd) => { capturedCmd = cmd; return fakeChild(); } });
+    mgr.dispatch({ prompt: "resume", directory: os.tmpdir(), sessionId: "ses_exec_never_seen" });
+    assert.equal(capturedCmd, "pi");
+  });
+
+  test("a sessionId that collides across executors does not leak the other executor's model when --executor is given explicitly", () => {
+    let captured = null;
+    const mgr = makeManager({ spawnFn: (cmd, args) => { captured = args; return fakeChild(); } });
+    // Same literal sessionId string, but the earlier task belongs to a
+    // different executor -- resolving executor: "pi" here must not inherit
+    // the opencode task's model just because the sessionId string matches.
+    mgr.dispatch({ prompt: "first", directory: os.tmpdir(), model: "opencode-go/minimax-m3", sessionId: "ses_collide", executor: "opencode" });
+    mgr.dispatch({ prompt: "resume", directory: os.tmpdir(), sessionId: "ses_collide", executor: "pi" });
+    // pi's buildSpawnArgs splits a slashed model into --provider/--model,
+    // unlike opencode's single -m flag -- assert pi's own default model
+    // ("minimax/MiniMax-M2.7"), not the opencode task's "opencode-go/minimax-m3".
+    assert.equal(captured[captured.indexOf("--provider") + 1], "minimax");
+    assert.equal(captured[captured.indexOf("--model") + 1], "MiniMax-M2.7");
   });
 
   test("a short prompt is returned verbatim in promptPreview, with no promptTotalChars hint", () => {
@@ -347,7 +412,7 @@ describe("bwrap sandboxing", () => {
       runtimeDir,
     });
 
-    mgr.dispatch({ prompt: "hello", directory: os.tmpdir(), model: "opencode-go/minimax-m3", variant: "max" });
+    mgr.dispatch({ prompt: "hello", directory: os.tmpdir(), model: "opencode-go/minimax-m3", variant: "max", executor: "opencode" });
 
     assert.equal(captured.cmd, "bwrap");
     assert.deepEqual(captured.args.slice(0, 3), ["--ro-bind", "/", "/"]);
@@ -391,6 +456,11 @@ describe("bwrap sandboxing", () => {
       checkBwrapAvailableFn: () => ({ checked: true, available: true }),
       platform: "linux",
       resolveGitCommonDirFn: () => path.join(directory, ".git"),
+      // Independent of whatever real ~/.pi files happen to exist on the
+      // machine running this test -- a real sessions/ dir there would
+      // otherwise add a 4th --bind (the rw sessions pair-bind) and make
+      // this count flaky across environments.
+      existsFn: () => false,
     });
 
     mgr.dispatch({ prompt: "hello", directory });
@@ -490,7 +560,7 @@ describe("bwrap sandboxing", () => {
       cacheDir,
     });
 
-    mgr.dispatch({ prompt: "hello", directory: os.tmpdir() });
+    mgr.dispatch({ prompt: "hello", directory: os.tmpdir(), executor: "opencode" });
 
     assert.equal(captured.opts.env.XDG_DATA_HOME, path.join(cacheDir, "opencode-data"));
   });
@@ -508,7 +578,7 @@ describe("bwrap sandboxing", () => {
       cacheDir,
     });
 
-    mgr.dispatch({ prompt: "hello", directory: os.tmpdir() });
+    mgr.dispatch({ prompt: "hello", directory: os.tmpdir(), executor: "opencode" });
 
     const srcIndex = captured.args.indexOf(realAuthFile);
     assert.notEqual(srcIndex, -1);
@@ -556,7 +626,7 @@ describe("bwrap sandboxing", () => {
       platform: "linux",
     });
 
-    mgr.dispatch({ prompt: "hello", directory: os.tmpdir(), noSandbox: true });
+    mgr.dispatch({ prompt: "hello", directory: os.tmpdir(), noSandbox: true, executor: "opencode" });
 
     assert.equal(captured.cmd, "opencode");
   });
@@ -570,7 +640,7 @@ describe("bwrap sandboxing", () => {
       platform: "linux",
     });
 
-    mgr.dispatch({ prompt: "hello", directory: os.tmpdir() });
+    mgr.dispatch({ prompt: "hello", directory: os.tmpdir(), executor: "opencode" });
 
     assert.equal(captured.cmd, "opencode");
   });
@@ -584,7 +654,7 @@ describe("bwrap sandboxing", () => {
       platform: "darwin",
     });
 
-    mgr.dispatch({ prompt: "hello", directory: os.tmpdir() });
+    mgr.dispatch({ prompt: "hello", directory: os.tmpdir(), executor: "opencode" });
 
     assert.equal(captured.cmd, "opencode");
   });
@@ -629,7 +699,7 @@ describe("bwrap sandboxing", () => {
     });
     const prompt = "x".repeat(96 * 1024 + 1);
 
-    mgr.dispatch({ prompt, directory: os.tmpdir() });
+    mgr.dispatch({ prompt, directory: os.tmpdir(), executor: "opencode" });
 
     assert.equal(captured.cmd, "bwrap");
     const attachment = captured.args[captured.args.indexOf("-f") + 1];
@@ -685,7 +755,7 @@ describe("dispatch() with a prompt over the argv-safe size (issue #78: spawn E2B
     const mgr = makeManager({ spawnFn: (cmd, args, opts) => { captured = { args, opts }; return fakeChild(); } });
     const prompt = "x".repeat(96 * 1024 + 1);
 
-    mgr.dispatch({ prompt, directory: os.tmpdir() });
+    mgr.dispatch({ prompt, directory: os.tmpdir(), executor: "opencode" });
 
     assert.ok(captured.args.includes("-f"), "expected -f attachment flag in argv");
     const attachment = captured.args[captured.args.indexOf("-f") + 1];
@@ -703,7 +773,7 @@ describe("dispatch() with a prompt over the argv-safe size (issue #78: spawn E2B
     const mgr = makeManager({ spawnFn: (cmd, args, opts) => { captured = { args, opts }; return child; } });
     const prompt = "x".repeat(96 * 1024 + 1);
 
-    mgr.dispatch({ prompt, directory: os.tmpdir() });
+    mgr.dispatch({ prompt, directory: os.tmpdir(), executor: "opencode" });
     const attachment = captured.args[captured.args.indexOf("-f") + 1];
     assert.ok(fs.existsSync(attachment));
 
@@ -1395,7 +1465,7 @@ describe("no-output watchdog", () => {
   test("result --fields failureDetail returns the field", async () => {
     const child = fakeChild(7201);
     const mgr = makeManager({ spawnFn: () => child, killFn: () => {}, noOutputTimeoutMs: 60000, watchdogPollMs: 5 });
-    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), executor: "opencode" });
     fs.writeFileSync(mgr.status(dispatched.id).logPath, JSON.stringify({ type: "error", message: "insufficient_quota: out of credits" }) + "\n");
     await new Promise((r) => setTimeout(r, 40));
     child.emit("exit", 1, null);
@@ -1407,7 +1477,7 @@ describe("no-output watchdog", () => {
   test("a structured error event that matches none of the three named buckets still gets a failureReason instead of null (opencode's own UnknownError class)", async () => {
     const child = fakeChild(7203);
     const mgr = makeManager({ spawnFn: () => child, killFn: () => {}, noOutputTimeoutMs: 60000, watchdogPollMs: 5 });
-    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), executor: "opencode" });
     fs.writeFileSync(
       mgr.status(dispatched.id).logPath,
       JSON.stringify({ type: "error", error: { name: "UnknownError", data: { message: "Streaming response failed" } } }) + "\n"
@@ -1631,7 +1701,7 @@ describe("provider-failure classification", () => {
       noOutputTimeoutMs: 60000, // long enough that only exhaustion detection could trigger this
       watchdogPollMs: 5,
     });
-    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), executor: "opencode" });
     fs.writeFileSync(
       mgr.status(dispatched.id).logPath,
       JSON.stringify({ type: "error", message: "rate_limit_exceeded: please retry after 60s" }) + "\n"
@@ -1655,7 +1725,7 @@ describe("provider-failure classification", () => {
       noOutputTimeoutMs: 60000,
       watchdogPollMs: 5,
     });
-    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), executor: "opencode" });
     fs.writeFileSync(mgr.status(dispatched.id).logPath, "rate limit exceeded");
 
     await new Promise((r) => setTimeout(r, 40));
@@ -1676,7 +1746,7 @@ describe("provider-failure classification", () => {
       noOutputTimeoutMs: 60000,
       watchdogPollMs: 5,
     });
-    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), executor: "opencode" });
     const longLine = "rate limit exceeded " + "x".repeat(1000);
     fs.writeFileSync(mgr.status(dispatched.id).logPath, longLine);
 
@@ -1697,7 +1767,7 @@ describe("provider-failure classification", () => {
       noOutputTimeoutMs: 60000,
       watchdogPollMs: 5,
     });
-    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), executor: "opencode" });
     fs.writeFileSync(
       mgr.status(dispatched.id).logPath,
       JSON.stringify({ type: "error", message: "rate_limit_exceeded: please retry after 60s" }) + "\n"
@@ -1759,7 +1829,7 @@ describe("provider-failure classification", () => {
       noOutputTimeoutMs: 60000,
       watchdogPollMs: 5,
     });
-    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), executor: "opencode" });
     fs.writeFileSync(
       mgr.status(dispatched.id).logPath,
       JSON.stringify({ type: "error", message: "insufficient_quota: your account has run out of credits" }) + "\n"
@@ -1783,7 +1853,7 @@ describe("provider-failure classification", () => {
       noOutputTimeoutMs: 60000,
       watchdogPollMs: 5,
     });
-    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), executor: "opencode" });
     fs.writeFileSync(
       mgr.status(dispatched.id).logPath,
       JSON.stringify({ type: "error", message: "rate limit exceeded: insufficient_quota on this key" }) + "\n"
@@ -1803,7 +1873,7 @@ describe("provider-failure classification", () => {
       noOutputTimeoutMs: 60000,
       watchdogPollMs: 5,
     });
-    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), executor: "opencode" });
     fs.writeFileSync(
       mgr.status(dispatched.id).logPath,
       JSON.stringify({ type: "error", message: "Rate limit exceeded, check your quota" }) + "\n"
@@ -1823,7 +1893,7 @@ describe("provider-failure classification", () => {
       noOutputTimeoutMs: 60000,
       watchdogPollMs: 5,
     });
-    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), executor: "opencode" });
     fs.writeFileSync(
       mgr.status(dispatched.id).logPath,
       JSON.stringify({ type: "error", message: "Unauthorized: invalid API key provided" }) + "\n"
@@ -1861,7 +1931,7 @@ describe("provider-failure classification", () => {
       noOutputTimeoutMs: 60000,
       watchdogPollMs: 5,
     });
-    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), executor: "opencode" });
     fs.writeFileSync(
       mgr.status(dispatched.id).logPath,
       "No API key found for openai.\n"
@@ -1883,7 +1953,7 @@ describe("provider-failure classification", () => {
       noOutputTimeoutMs: 60000,
       watchdogPollMs: 5,
     });
-    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), executor: "opencode" });
     fs.writeFileSync(
       mgr.status(dispatched.id).logPath,
       JSON.stringify({ type: "error", message: "request failed with status_code: 401" }) + "\n"
@@ -1923,7 +1993,7 @@ describe("provider-failure classification", () => {
       noOutputTimeoutMs: 60000,
       watchdogPollMs: 5,
     });
-    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), executor: "opencode" });
     fs.writeFileSync(
       mgr.status(dispatched.id).logPath,
       JSON.stringify({ type: "error", message: "rate_limit_exceeded: please retry after 60s" }) + "\n"
@@ -1954,7 +2024,7 @@ describe("trailing provider-error events that land after the last watcher poll (
       // Long enough that the watchdog interval never ticks during this test.
       watchdogPollMs: 60000,
     });
-    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), executor: "opencode" });
     fs.writeFileSync(
       mgr.status(dispatched.id).logPath,
       JSON.stringify({ type: "error", message: "usage_limit_exceeded: monthly quota reached" }) + "\n"
@@ -1977,7 +2047,7 @@ describe("trailing provider-error events that land after the last watcher poll (
       killFn: () => {},
       watchdogPollMs: 60000,
     });
-    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), executor: "opencode" });
     fs.writeFileSync(
       mgr.status(dispatched.id).logPath,
       JSON.stringify({ type: "error", message: "Unauthorized: invalid API key provided" }) + "\n"
@@ -1999,7 +2069,7 @@ describe("trailing provider-error events that land after the last watcher poll (
       noOutputTimeoutMs: 60000,
       watchdogPollMs: 5,
     });
-    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), executor: "opencode" });
     fs.writeFileSync(
       mgr.status(dispatched.id).logPath,
       JSON.stringify({ type: "error", message: "rate_limit_exceeded: please retry after 60s" }) + "\n"
@@ -2060,7 +2130,7 @@ describe("trailing provider-error events that land after the last watcher poll (
       noOutputTimeoutMs: 60000,
       watchdogPollMs: 5,
     });
-    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), executor: "opencode" });
     const logPath = mgr.status(dispatched.id).logPath;
     const prefix = JSON.stringify({ type: "text", part: { messageID: "m1", text: "x".repeat(4096) } }) + "\n";
     fs.writeFileSync(logPath, prefix);
@@ -2113,7 +2183,7 @@ describe("trailing provider-error events that land after the last watcher poll (
       killFn: () => {},
       watchdogPollMs: 5,
     });
-    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), executor: "opencode" });
     const fullLine = JSON.stringify({ type: "error", message: "rate_limit_exceeded: please retry after 60s" }) + "\n";
     // Write a partial line so the watcher's first tick stores it as carry,
     // then write the rest of the line plus a terminating \n. The exit
@@ -2337,11 +2407,11 @@ describe("dispatch() executor selection (Task 6: optional executor name resolves
     assert.equal(status.executorId, "pi");
   });
 
-  test("dispatch() with no executor defaults to opencode", () => {
+  test("dispatch() with no executor defaults to pi", () => {
     const mgr = makeManager({ spawnFn: () => { throw new Error("not reached in this test"); } });
     const dispatched = mgr.dispatch({ prompt: "hi", directory: process.cwd() });
     const status = mgr.status(dispatched.id);
-    assert.equal(status.executorId, "opencode");
+    assert.equal(status.executorId, "pi");
   });
 
   test("dispatch() with an unknown executor name throws", () => {
@@ -2583,6 +2653,7 @@ describe("advisor()", () => {
       model: "openai/gpt-5.6-sol",
       variant: "max",
       timeoutMs: 5000,
+      executor: "opencode",
     });
 
     assert.deepEqual(captured, [
@@ -3218,6 +3289,93 @@ describe("summarize()", () => {
   test("checkSummaryModelReady rejects when the configured summary model is unavailable", async () => {
     const mgr = makeManager({ listModelsFn: () => "openai/gpt-5.6-luna\n" });
     await assert.rejects(mgr.checkSummaryModelReady(), /summary model is unavailable/);
+  });
+
+  test("createTaskManager()'s real default listModelsFn validates against opencode's list, not the dispatch-default executor's (a default pi install must still find the default summary model)", async () => {
+    // Bypasses makeManager deliberately -- it always injects its own
+    // listModelsFn fallback, which would mask a regression back to either
+    // the round-2 (defaultExecutor.listModelsFn) or round-3 pre-fix
+    // (hardcoded `opencode models`) defaults. We want to prove the new
+    // default is opencodeExecutor().listModelsFn regardless of the
+    // configured dispatch-default executor.
+    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-test-"));
+    let piListModelsCalled = false;
+    const fakePi = {
+      id: "pi",
+      taskIdPrefix: "pi",
+      errorBucketPrefix: "pi",
+      defaultModel: "minimax/MiniMax-M2.7",
+      defaultSummaryModel: "minimax/MiniMax-M2.7",
+      binaryName: "pi",
+      listModelsFn: async () => {
+        piListModelsCalled = true;
+        // Whatever pi returns here is irrelevant: summaries always run
+        // through opencode, so this list must NOT be used for the check.
+        return "minimax/MiniMax-M2.7\n";
+      },
+      buildSpawnArgs: () => [],
+      buildSummaryPrompt: () => "",
+      normalizeLogEvent: (parsed) => parsed,
+      sandboxAuthFile: () => ({ extraRoBinds: [], extraRwPairBinds: [], sandboxedDataHome: "/tmp/unused", sandboxEnv: {} }),
+    };
+    const mgr = createTaskManager({
+      stateDir,
+      sandboxEnabled: false,
+      spawnFn: () => fakeChild(),
+      killFn: () => {},
+      defaultExecutor: fakePi,
+      // listModelsFn intentionally omitted -- exercising the real default.
+    });
+    // On a host with opencode installed, the check will succeed (real
+    // `opencode models` output includes the default summary model). On
+    // a host without opencode, the check will fail with a "verify that
+    // opencode is installed" error -- which is itself proof that the
+    // check hit opencode, not pi. Either outcome is fine; what matters
+    // is that pi's listModelsFn was never consulted.
+    try {
+      await mgr.checkSummaryModelReady();
+    } catch (err) {
+      // If opencode isn't installed, the error message must still point
+      // at opencode -- that's what proves we routed through opencode.
+      assert.match(/** @type {Error} */ (err).message, /verify that opencode is installed/, "the summary availability check must consult opencode's listModelsFn, not pi's");
+    }
+    assert.equal(piListModelsCalled, false, "fakePi.listModelsFn must not be used for the summary availability check (it would reject opencode-only summary models)");
+  });
+
+  test("an injected listModelsFn takes precedence over the opencode default (preserves the round-2 test seam)", async () => {
+    // The round-2 fix made createTaskManager's `listModelsFn` option
+    // defer to defaultExecutor's listModelsFn, and several tests rely
+    // on being able to inject a custom listModelsFn. Verify that
+    // explicit injection still works -- just that the new *default* (used
+    // when no override is given) is opencode's, not pi's.
+    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-test-"));
+    let injectedCalled = false;
+    const fakePi = {
+      id: "pi",
+      taskIdPrefix: "pi",
+      errorBucketPrefix: "pi",
+      defaultModel: "minimax/MiniMax-M2.7",
+      defaultSummaryModel: "minimax/MiniMax-M2.7",
+      binaryName: "pi",
+      listModelsFn: async () => "minimax/MiniMax-M2.7\n",
+      buildSpawnArgs: () => [],
+      buildSummaryPrompt: () => "",
+      normalizeLogEvent: (parsed) => parsed,
+      sandboxAuthFile: () => ({ extraRoBinds: [], extraRwPairBinds: [], sandboxedDataHome: "/tmp/unused", sandboxEnv: {} }),
+    };
+    const mgr = createTaskManager({
+      stateDir,
+      sandboxEnabled: false,
+      spawnFn: () => fakeChild(),
+      killFn: () => {},
+      defaultExecutor: fakePi,
+      listModelsFn: async () => {
+        injectedCalled = true;
+        return `${DEFAULT_SUMMARY_MODEL}\n`;
+      },
+    });
+    await mgr.checkSummaryModelReady();
+    assert.equal(injectedCalled, true, "explicit listModelsFn injection must take precedence over the opencode default");
   });
 
   test("summary --mode activity rejects when the summary model is unavailable, instead of masking the failure with local narration", async () => {
@@ -3871,13 +4029,13 @@ describe("startTask() spawns the executor's CLI binary, not a hardcoded command 
     assert.deepEqual(captured.args, ["--model", "minimax/MiniMax-M2.7", "--mode", "json", "-p", "hi"]);
   });
 
-  test("a default (opencode) dispatch still spawns `opencode`", () => {
+  test("a default (pi) dispatch still spawns `pi`", () => {
     let captured = null;
     const mgr = makeManager({
       spawnFn: (cmd, args, opts) => { captured = { cmd, args, opts }; return fakeChild(); },
     });
     mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
-    assert.equal(captured.cmd, "opencode");
+    assert.equal(captured.cmd, "pi");
   });
 });
 
@@ -3892,7 +4050,7 @@ describe("startTask() merges executor.sandboxAuthFile().sandboxEnv into spawnEnv
       platform: "linux",
       cacheDir,
     });
-    mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+    mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), executor: "opencode" });
     assert.equal(captured.opts.env.XDG_DATA_HOME, path.join(cacheDir, "opencode-data"));
   });
 
@@ -3951,6 +4109,176 @@ describe("startTask() merges executor.sandboxAuthFile().sandboxEnv into spawnEnv
     // positions before the destination (src is the one position before dest).
     assert.equal(captured.args[destIdx - 2], "--ro-bind");
     assert.equal(captured.args[destIdx - 1], realAuthFile);
+  });
+
+  test("a pi dispatch's sandboxAuthFile call is invoked with the dispatch's sessionId + launchDirectory, so the bind can scope to a single session file", () => {
+    let capturedArgs = null;
+    const cacheDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-cache-pi-"));
+    const realAuthFile = path.join(os.tmpdir(), "fake-pi-home", "auth.json");
+    const fakePi = {
+      id: "pi",
+      taskIdPrefix: "pi",
+      errorBucketPrefix: "pi",
+      defaultModel: "minimax/MiniMax-M2.7",
+      defaultSummaryModel: "minimax/MiniMax-M2.7",
+      binaryName: "pi",
+      listModelsFn: async () => "",
+      buildSpawnArgs: (ctx) => ["--model", ctx.model, "--mode", "json", "-p", ctx.prompt],
+      buildSummaryPrompt: () => "",
+      normalizeLogEvent: (parsed) => parsed,
+      sandboxAuthFile: (args) => {
+        capturedArgs = args;
+        const sandboxedDataHome = path.join(args.dataDir, "pi-data");
+        return {
+          extraRoBinds: [],
+          extraRwPairBinds: [],
+          sandboxedDataHome,
+          sandboxEnv: { PI_CODING_AGENT_DIR: sandboxedDataHome },
+        };
+      },
+    };
+    const directory = os.tmpdir();
+    const sessionId = "019f90ea-1234-70e0-98dc-6847db316eb4";
+    const mgr = makeManager({
+      spawnFn: () => fakeChild(),
+      defaultExecutor: fakePi,
+      sandboxEnabled: true,
+      checkBwrapAvailableFn: () => ({ checked: true, available: true }),
+      platform: "linux",
+      cacheDir,
+      existsFn: (p) => p === realAuthFile,
+    });
+    mgr.dispatch({ prompt: "resume me", directory, sessionId });
+    assert.notEqual(capturedArgs, null, "sandboxAuthFile must be invoked for a sandboxed dispatch");
+    assert.equal(capturedArgs.sessionId, sessionId, "sandboxAuthFile must receive the dispatch's sessionId so the bind can scope to that single file");
+    assert.equal(capturedArgs.launchDirectory, directory, "sandboxAuthFile must receive the dispatch's launchDirectory so it can compute pi's per-cwd sessions subdirectory");
+    assert.equal(typeof capturedArgs.statFn, "function", "sandboxAuthFile must receive a statFn (for the isDirectory guard)");
+    assert.equal(typeof capturedArgs.readdirFn, "function", "sandboxAuthFile must receive a readdirFn (for the session file lookup)");
+  });
+
+  test("a fresh (non-resume) pi dispatch does not pass a sessionId to sandboxAuthFile, so no sessions bind is added", () => {
+    let capturedArgs = null;
+    const cacheDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-cache-pi-"));
+    const fakePi = {
+      id: "pi",
+      taskIdPrefix: "pi",
+      errorBucketPrefix: "pi",
+      defaultModel: "minimax/MiniMax-M2.7",
+      defaultSummaryModel: "minimax/MiniMax-M2.7",
+      binaryName: "pi",
+      listModelsFn: async () => "",
+      buildSpawnArgs: (ctx) => ["--model", ctx.model, "--mode", "json", "-p", ctx.prompt],
+      buildSummaryPrompt: () => "",
+      normalizeLogEvent: (parsed) => parsed,
+      sandboxAuthFile: (args) => {
+        capturedArgs = args;
+        return {
+          extraRoBinds: [],
+          extraRwPairBinds: [],
+          sandboxedDataHome: path.join(args.dataDir, "pi-data"),
+          sandboxEnv: { PI_CODING_AGENT_DIR: path.join(args.dataDir, "pi-data") },
+        };
+      },
+    };
+    const mgr = makeManager({
+      spawnFn: () => fakeChild(),
+      defaultExecutor: fakePi,
+      sandboxEnabled: true,
+      checkBwrapAvailableFn: () => ({ checked: true, available: true }),
+      platform: "linux",
+      cacheDir,
+      existsFn: () => false,
+    });
+    mgr.dispatch({ prompt: "fresh", directory: os.tmpdir() });
+    assert.notEqual(capturedArgs, null);
+    assert.equal(capturedArgs.sessionId, null, "no sessionId must be threaded for a fresh (non-resume) dispatch");
+    // launchDirectory is still passed -- it's needed for the per-cwd encoding
+    // even when there's no sessionId, in case the executor wants to use it
+    // for diagnostics. The bind itself stays empty because there's no
+    // sessionId to resolve a file for.
+    assert.equal(typeof capturedArgs.launchDirectory, "string");
+  });
+
+  test("the pi sandboxAuthFile call does not add the whole sessions/ pair-bind on the dispatch path -- only the resumed file's bind (regression: scope regression vs. shadowed sandboxed-only sessions)", () => {
+    // Earlier round-2 review surfaced a security scope regression: pi's
+    // sandboxAuthFile was binding the ENTIRE real sessions/ directory
+    // read-write, which let a prompt-injectable sandboxed worker
+    // write/delete any session in the user's pi history. After this fix,
+    // only the resumed session's specific file is bound. Verify that
+    // the bwrap invocation no longer contains a pair-bind of the whole
+    // realSessionsDir, even when pi's own sandboxAuthFile decides to
+    // bind a single file.
+    let captured = null;
+    const cacheDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-cache-pi-"));
+    const realSessionsDir = path.join(os.homedir(), ".pi", "agent", "sessions");
+    const realSessionFile = path.join(realSessionsDir, "--tmp--", "2026-07-23T21-42-41-761Z_019f90ea-1234-70e0-98dc-6847db316eb4.jsonl");
+    const realAuthFile = path.join(os.homedir(), ".pi", "agent", "auth.json");
+    const fakePi = {
+      id: "pi",
+      taskIdPrefix: "pi",
+      errorBucketPrefix: "pi",
+      defaultModel: "minimax/MiniMax-M2.7",
+      defaultSummaryModel: "minimax/MiniMax-M2.7",
+      binaryName: "pi",
+      listModelsFn: async () => "",
+      buildSpawnArgs: (ctx) => ["--model", ctx.model, "--mode", "json", "-p", ctx.prompt],
+      buildSummaryPrompt: () => "",
+      normalizeLogEvent: (parsed) => parsed,
+      sandboxAuthFile: ({ dataDir, existsFn, statFn, readdirFn, sessionId, launchDirectory }) => {
+        const sandboxedDataHome = path.join(dataDir, "pi-data");
+        const sandboxedSessionsHome = path.join(sandboxedDataHome, "sessions");
+        const extraRwPairBinds = [];
+        if (sessionId && launchDirectory && existsFn(realSessionsDir) && statFn(realSessionsDir)?.isDirectory()) {
+          const safePath = `--${launchDirectory.replace(/^[/\\]/, "").replace(/[/\\:]/g, "-")}--`;
+          const subdir = path.join(realSessionsDir, safePath);
+          const entries = readdirFn(subdir);
+          for (const entry of entries) {
+            if (!entry.endsWith(".jsonl")) continue;
+            const underscoreIdx = entry.lastIndexOf("_");
+            if (underscoreIdx === -1) continue;
+            const fileSessionId = entry.slice(underscoreIdx + 1, -".jsonl".length);
+            if (fileSessionId.startsWith(sessionId)) {
+              extraRwPairBinds.push([path.join(subdir, entry), path.join(sandboxedSessionsHome, safePath, entry)]);
+              break;
+            }
+          }
+        }
+        return {
+          extraRoBinds: existsFn(realAuthFile) ? [[realAuthFile, path.join(sandboxedDataHome, "auth.json")]] : [],
+          extraRwPairBinds,
+          sandboxedDataHome,
+          sandboxEnv: { PI_CODING_AGENT_DIR: sandboxedDataHome },
+        };
+      },
+    };
+    const directory = os.tmpdir();
+    const mgr = makeManager({
+      spawnFn: (cmd, args, opts) => { captured = { cmd, args, opts }; return fakeChild(); },
+      defaultExecutor: fakePi,
+      sandboxEnabled: true,
+      checkBwrapAvailableFn: () => ({ checked: true, available: true }),
+      platform: "linux",
+      cacheDir,
+      // Pretend the host has both a sessions/ dir and the specific file.
+      existsFn: (p) => p === realSessionsDir || p === realAuthFile,
+      statFn: (p) => (p === realSessionsDir ? { isDirectory: () => true } : null),
+      readdirFn: (p) => (p === path.join(realSessionsDir, "--tmp--") ? [path.basename(realSessionFile)] : []),
+    });
+    mgr.dispatch({ prompt: "resume", directory, sessionId: "019f90ea-1234-70e0-98dc-6847db316eb4" });
+    assert.equal(captured.cmd, "bwrap");
+    // Look for a --bind whose src is the whole realSessionsDir (not the
+    // single file). Pre-fix this would appear; post-fix it must not.
+    const pairBindSrcs = [];
+    for (let i = 0; i < captured.args.length; i++) {
+      if (captured.args[i] === "--bind" && captured.args[i + 1] && captured.args[i + 2]) {
+        pairBindSrcs.push(captured.args[i + 1]);
+      }
+    }
+    assert.ok(!pairBindSrcs.includes(realSessionsDir), `the whole sessions directory must not be pair-bound (would re-introduce the scope regression). Saw: ${pairBindSrcs.join(", ")}`);
+    // The specific session file IS bound, mapped onto the matching path
+    // under the sandboxed sessions tree.
+    const fileBindSrcs = pairBindSrcs.filter((p) => p === realSessionFile);
+    assert.equal(fileBindSrcs.length, 1, `expected exactly one --bind of the single session file, got ${fileBindSrcs.length} (all pair-bind srcs: ${pairBindSrcs.join(", ")})`);
   });
 });
 
@@ -4025,7 +4353,7 @@ describe("classifyProviderFailure() honors the binding compatibility contract (T
         noOutputTimeoutMs: 60000,
         watchdogPollMs: 5,
       });
-      const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+      const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), executor: "opencode" });
       fs.writeFileSync(mgr.status(dispatched.id).logPath, `${line}\n`);
       await new Promise((r) => setTimeout(r, 40));
       child.emit("exit", null, "SIGTERM");
@@ -4102,7 +4430,7 @@ describe("classifyProviderFailure() honors the binding compatibility contract (T
       noOutputTimeoutMs: 60000,
       watchdogPollMs: 5,
     });
-    const dispatchedOc = mgrOc.dispatch({ prompt: "hi", directory: os.tmpdir() });
+    const dispatchedOc = mgrOc.dispatch({ prompt: "hi", directory: os.tmpdir(), executor: "opencode" });
     fs.writeFileSync(mgrOc.status(dispatchedOc.id).logPath, `${opencodeEvent}\n`);
     await new Promise((r) => setTimeout(r, 40));
     childOc.emit("exit", null, "SIGTERM");

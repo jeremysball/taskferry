@@ -103,7 +103,7 @@ Vars marked "config.json" also have a config-file equivalent — see
 | `TASKFERRY_DISABLE_SANDBOX` | `0` (sandboxed on Linux) | yes (`sandboxEnabled`, inverted) | Set to `1`/`true` to run dispatches without the bwrap filesystem sandbox |
 | `TASKFERRY_ALLOWED_DIRS` | — | yes | Extra directories bound read-write inside the sandbox for every dispatch; see `docs/security.md` |
 | `TASKFERRY_CANCEL_GRACE_MS` | `5000` | yes | Default SIGTERM→SIGKILL grace period for `cancel`, overridden per-call by `--grace-ms` |
-| `TASKFERRY_DEFAULT_EXECUTOR` | `opencode` | yes | Default `--executor` (`opencode` or `pi`) when a dispatch/advisor call omits it |
+| `TASKFERRY_DEFAULT_EXECUTOR` | `pi` | yes | Default `--executor` (`opencode` or `pi`) when a dispatch/advisor call omits it |
 | `TASKFERRY_MAX_CONCURRENT_TASKS` | `4` | yes | Running-task concurrency cap |
 | `TASKFERRY_MAX_DISPATCHES_PER_WINDOW` / `TASKFERRY_DISPATCH_WINDOW_MS` | `2` / `5000` | yes | Dispatch burst-rate limit |
 | `TASKFERRY_NO_OUTPUT_TIMEOUT_MS` | `256000` (~4.3 min) | yes | Pre-output-seen watchdog deadline |

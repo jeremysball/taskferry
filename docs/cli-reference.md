@@ -43,18 +43,20 @@ workspace"` and `next` suggests `dispatch` instead.
 
 ## `taskferry dispatch --prompt <text> [options]`
 
-Queues `opencode run --dir <directory> --auto --format json -m <model> -- <prompt>`
-(or the equivalent `pi` invocation when `--executor pi` is given) as a
-background child process and returns a task summary immediately.
+Queues a `pi --model <model> --mode json -p <prompt>` invocation (the
+built-in default executor), or the equivalent `opencode run --dir
+<directory> --auto --format json -m <model> -- <prompt>` when `--executor
+opencode` is given, as a background child process and returns a task
+summary immediately.
 
 | Flag | Notes |
 |---|---|
 | `--prompt <text>` | Required. Pass `-` to read the prompt from piped stdin instead (`cat prompt.txt \| taskferry dispatch --prompt -`) — use this for prompts too large to pass as a single command-line argument |
 | `--directory <path>` | Defaults to the current workspace; an existing directory (relative paths are resolved against the current working directory) |
-| `--model <id>` | `provider/model`, e.g. `opencode-go/minimax-m3`. Run `opencode models` to list installed models. Defaults to `openai/gpt-5.6-luna` at variant `high` for the default `opencode` executor; `--executor pi` defaults to `minimax/MiniMax-M2.7` instead. When `--session-id` is given without `--model`, the model is instead inherited from the most recent prior task dispatched with that session id |
-| `--variant <name>` | Reasoning-effort override (`high`, `max`, `minimal`, ...), applied only alongside `--model` — omitting `--model` (including on a `--session-id` resume) always forces variant `high`, regardless of any `--variant` passed |
-| `--executor <opencode\|pi>` | Which worker CLI to spawn. Built-in default `opencode`, but an omitted flag actually falls back to the daemon's configured default executor (`TASKFERRY_DEFAULT_EXECUTOR` or `config.json`'s `defaultExecutor`) |
-| `--session-id <id>` | Resume an existing OpenCode session (`--continue --session <id>`) instead of starting fresh; get session ids from a prior `result` or `status --full` |
+| `--model <id>` | `provider/model`, e.g. `opencode-go/minimax-m3`. Run `opencode models` to list installed models. Defaults to `minimax/MiniMax-M2.7` for the default `pi` executor; `--executor opencode` defaults to `openai/gpt-5.6-luna` instead. When `--session-id` is given without `--model`, the model is instead inherited from the most recent prior task dispatched with that session id |
+| `--variant <name>` | Reasoning-effort override, applied only alongside `--model` — omitting `--model` (including on a `--session-id` resume) always forces variant `high`, regardless of any `--variant` passed. Accepted values depend on the executor: pi takes `off`, `minimal`, `low`, `medium`, `high`, `xhigh`; opencode's `--variant` values depend on the model |
+| `--executor <opencode\|pi>` | Which worker CLI to spawn. Built-in default `pi`, but an omitted flag actually falls back to the daemon's configured default executor (`TASKFERRY_DEFAULT_EXECUTOR` or `config.json`'s `defaultExecutor`) |
+| `--session-id <id>` | Resume an existing session instead of starting fresh (`--continue --session <id>`; both pi and opencode use this syntax). When `--executor` is omitted, inherits whichever executor originally created the session; get session ids from a prior `result` or `status --full` |
 | `--key-slot <name>` | Use a configured provider-key slot instead of the daemon's ambient key; see [security.md](security.md) |
 | `--allowed-dirs <path,path,...>` | Extra directories bound read-write inside the sandbox for this dispatch, on top of the auto-detected git-common-dir for a worktree and any config-level `allowedDirs`; see [security.md](security.md) |
 | `--require-final-marker <regex>` | Fail the task if the final message doesn't match this pattern (case-sensitive, standard JS RegExp semantics). Sets `incomplete: true` on the settled task when the final message is empty (after trimming) or doesn't match. Patterns that don't compile as a standard JS RegExp reject the dispatch up front with a usage error. Useful for enforcing a report-format contract like `^Status: (DONE\|DONE_WITH_CONCERNS\|BLOCKED\|NEEDS_CONTEXT)$` on the last line of model output. |
@@ -126,7 +128,7 @@ planning or hard-debugging help mid-task, not for open-ended background work
 | `--model <id>` | Required, no default; the caller picks the advisor |
 | `--directory <path>` | Defaults to the current workspace |
 | `--variant <name>` | Optional reasoning-effort override |
-| `--executor <opencode\|pi>` | Which worker CLI to spawn. Built-in default `opencode`, but an omitted flag actually falls back to the daemon's configured default executor (`TASKFERRY_DEFAULT_EXECUTOR` or `config.json`'s `defaultExecutor`) |
+| `--executor <opencode\|pi>` | Which worker CLI to spawn. Built-in default `pi`, but an omitted flag actually falls back to the daemon's configured default executor (`TASKFERRY_DEFAULT_EXECUTOR` or `config.json`'s `defaultExecutor`) |
 | `--session-id <id>` | Resume a prior advisor exchange |
 | `--timeout-ms <number>` | Early-return cap in milliseconds, same semantics as `wait`; omitting it does not block indefinitely — it falls back to a 45-second internal cap, after which the "still running" response below is returned |
 

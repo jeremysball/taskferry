@@ -86,3 +86,8 @@ worker backend; this plugin's hook only provides ambient context
 inside a live Claude Code session. See
 [cli-reference.md](../cli-reference.md) for the full command surface either
 path relies on.
+
+Outside the SDD lifecycle, a live session also benefits from fleet-wide
+visibility into every ferry dispatched anywhere in the git workspace — see
+the bundled skill's "Fleet-Wide Monitoring" section for the `watch
+--summaries --flush-interval` + `Monitor` auto-arm convention.

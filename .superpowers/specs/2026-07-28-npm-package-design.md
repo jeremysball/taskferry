@@ -3,7 +3,7 @@
 ## Scope
 
 Publish `taskferry` as a real, public, MIT-licensed npm package
-(`npm install -g taskferry` / `npx taskferry`), as an *addition* to the
+(`npm install -g taskferry` / `npx taskferry`), as an _addition_ to the
 existing git-clone flow, not a replacement. Contributors and anyone wanting
 `taskferry setup`'s native-plugin registration can still clone the repo
 directly.
@@ -17,7 +17,8 @@ Non-goals for this pass, explicitly deferred:
 
 - Bun bundling (`bun build`) of the published package
 - Bun `--compile` standalone binaries
-- Auto-running `setup` via an npm `postinstall` hook
+- Auto-running `setup` via an npm `postinstall` hook (not deferred. no plans to
+  implement)
 - A scoped or private package
 
 Package name `taskferry` is confirmed free on the npm registry (`npm view
@@ -33,7 +34,7 @@ taskferry` returns 404).
 - Keep `"bin"`, `"main"`, `"exports"` exactly as they are today — already
   correct for both install paths.
 - Keep the `"prepare"` script (`git config core.hooksPath .githooks ||
-  true`) unchanged. Verified directly rather than assumed: packed the
+true`) unchanged. Verified directly rather than assumed: packed the
   current tree into a real tarball and did a real `npm install -g` from it
   into a throwaway prefix. npm 12 blocks lifecycle scripts (including
   `prepare`) on global installs by default unless allowlisted via
@@ -155,7 +156,7 @@ none of the native-plugin registration.
 - `npm pack` + a real `npm install -g` from the tarball into a throwaway
   prefix (the same check already done to verify the `prepare`-script
   behavior) — confirms the tarball is self-contained and `taskferry
-  --version` works from it.
+--version` works from it.
 - Once the plan picks a concrete `runNpmInstall` gating signal, the same
   throwaway-prefix install is the test for it too: `taskferry setup` must
   complete without shelling out to `npm install` a second time against the

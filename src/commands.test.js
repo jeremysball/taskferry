@@ -414,6 +414,84 @@ test("watch --task-id resolves immediately for an already-settled task instead o
   assert.equal(client.closed.value, true);
 });
 
+test("list resolves its default directory via resolveWorkspaceRoot when --directory is omitted", async () => {
+  const cwd = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-commands-test-")));
+  const resolvedRoot = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-commands-test-")));
+  let calledWith;
+  const resolveWorkspaceRootFn = (dir) => { calledWith = dir; return resolvedRoot; };
+  const client = { request: async (method, params) => {
+    assert.equal(method, "task.list");
+    assert.equal(params.directory, resolvedRoot);
+    return { counts: {}, tasks: [] };
+  } };
+  await runCommand("list", { directory: undefined, all: false, limit: undefined }, { client, cwd, resolveWorkspaceRoot: resolveWorkspaceRootFn });
+  assert.equal(calledWith, cwd);
+});
+
+test("home/advisor/context all resolve their default directory via resolveWorkspaceRoot when --directory is omitted", async () => {
+  const cwd = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-commands-test-")));
+  const resolvedRoot = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-commands-test-")));
+  const resolveWorkspaceRootFn = () => resolvedRoot;
+  let seenDirectory;
+  const clientFor = (method) => ({ request: async (m, params) => {
+    assert.equal(m, method);
+    seenDirectory = params.directory;
+    return method === "task.list" ? { counts: {}, tasks: [] } : {};
+  } });
+
+  await runCommand("home", { directory: undefined }, { client: clientFor("task.list"), cwd, resolveWorkspaceRoot: resolveWorkspaceRootFn });
+  assert.equal(seenDirectory, resolvedRoot);
+
+  await runCommand("advisor", { directory: undefined, prompt: "p", model: "m" }, { client: clientFor("task.advisor"), cwd, resolveWorkspaceRoot: resolveWorkspaceRootFn });
+  assert.equal(seenDirectory, resolvedRoot);
+
+  await runCommand("context", { directory: undefined, format: "toon" }, { client: clientFor("task.context"), cwd, resolveWorkspaceRoot: resolveWorkspaceRootFn });
+  assert.equal(seenDirectory, resolvedRoot);
+});
+
+test("watch resolves its default directory via resolveWorkspaceRoot when --directory and --task-id are both omitted", async () => {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-commands-test-")));
+  const cwd = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-commands-test-")));
+  const resolveWorkspaceRootFn = (dir) => { assert.equal(dir, cwd); return root; };
+  const controller = new AbortController();
+  let subscribedDirectory;
+  const client = fakeClient({
+    onSubscribe: (params, onEvent) => {
+      subscribedDirectory = params.directory;
+      controller.abort();
+    },
+  });
+  const io = fakeIo();
+
+  await runCommand("watch", { directory: undefined, format: "toon", summaries: false, taskId: undefined }, {
+    client,
+    io,
+    signal: controller.signal,
+    cwd,
+    resolveWorkspaceRoot: resolveWorkspaceRootFn,
+  });
+
+  assert.equal(subscribedDirectory, root);
+});
+
+test("dispatch does NOT resolve via resolveWorkspaceRoot (regression test pinning the launch-directory behavior as unchanged)", async () => {
+  const cwd = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-commands-test-")));
+  let called = false;
+  const resolveWorkspaceRootFn = () => { called = true; return fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-commands-test-"))); };
+  let seenDirectory;
+  const client = { request: async (method, params) => {
+    assert.equal(method, "task.dispatch");
+    seenDirectory = params.directory;
+    return { id: "oc_1", status: "queued" };
+  } };
+  const checkSkills = () => {};
+
+  await runCommand("dispatch", { directory: undefined, prompt: "p" }, { client, cwd, resolveWorkspaceRoot: resolveWorkspaceRootFn, checkSkills });
+
+  assert.equal(called, false, "dispatch must never consult resolveWorkspaceRoot");
+  assert.equal(seenDirectory, cwd);
+});
+
 test("doctor has no warnings when the claude plugin is installed", async (t) => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-doctor-home-"));
   t.after(() => fs.rmSync(home, { recursive: true, force: true }));

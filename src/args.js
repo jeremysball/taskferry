@@ -246,7 +246,7 @@ function defaultOptions(command, cwd) {
     case "dispatch":
       return { prompt: undefined, directory: cwd, model: undefined, variant: undefined, sessionId: undefined, keySlot: undefined, finalMarker: undefined, noSandbox: false, allowedDirs: undefined, executor: undefined };
     case "advisor":
-      return { prompt: undefined, model: undefined, directory: cwd, variant: undefined, sessionId: undefined, timeoutMs: undefined, executor: undefined };
+      return { prompt: undefined, model: undefined, directory: undefined, variant: undefined, sessionId: undefined, timeoutMs: undefined, executor: undefined };
     case "cancel":
       return { taskId: undefined, graceMs: undefined };
     case "wait":
@@ -260,11 +260,11 @@ function defaultOptions(command, cwd) {
     case "result":
       return { taskId: undefined, full: false, fields: undefined };
     case "list":
-      return { directory: cwd, all: false, limit: undefined };
+      return { directory: undefined, all: false, limit: undefined };
     case "watch":
       return { directory: undefined, format: "toon", summaries: false, taskId: undefined };
     case "context":
-      return { directory: cwd, format: "toon" };
+      return { directory: undefined, format: "toon" };
     case "doctor":
       return { full: false };
     case "setup":
@@ -277,11 +277,11 @@ function defaultOptions(command, cwd) {
 export function parseArgs(argv, { cwd = process.cwd() } = {}) {
   if (!Array.isArray(argv)) throw new TypeError("argv must be an array");
   if (!argv.length) {
-    return { command: "home", options: { directory: cwd }, help: false, helpText: helpText() };
+    return { command: "home", options: { directory: undefined }, help: false, helpText: helpText() };
   }
   if (argv[0] === "--help" || argv[0] === "-h") {
     if (argv.length > 1) throw usageError(`unexpected argument: ${argv[1]}`);
-    return { command: "home", options: { directory: cwd }, help: true, helpText: helpText() };
+    return { command: "home", options: { directory: undefined }, help: true, helpText: helpText() };
   }
   const [command, ...rest] = argv;
   if (command === "--version" || command === "-V") {

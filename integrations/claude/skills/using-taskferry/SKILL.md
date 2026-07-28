@@ -312,6 +312,37 @@ while a task is still running -- that mode exists for the statusline/human
 the same condensed activity summaries while blocking, without a second
 parallel command doing the same job.
 
+## Fleet-Wide Monitoring
+
+On a session's first `taskferry dispatch`, also background `taskferry watch
+--summaries --flush-interval 5m` (no `--directory` needed — it resolves the
+git workspace root automatically) and register the process with the harness
+`Monitor` tool, the same way `Monitor` is armed for a single `wait
+--summarize` job elsewhere in this skill. This surfaces periodic, batched
+updates for *every* ferry dispatched anywhere in the git workspace —
+including ones dispatched by other concurrent sessions or from other
+subdirectories of the same repo — as notifications into the agent's own
+context, without polling and without a firehose of individual per-event
+notifications.
+
+This is pure convention for agent sessions to follow — the `Monitor` tool is
+harness-native and can't be invoked from within taskferry's own code, so
+nothing in taskferry itself enforces it.
+
+```sh
+taskferry watch --summaries --flush-interval 5m > /tmp/taskferry-fleet-watch.log 2>&1 &
+disown
+```
+
+Then arm a `Monitor` tailing that log file (`tail -n0 -F
+/tmp/taskferry-fleet-watch.log`, `persistent: true`), the same pattern used
+for a single `wait --summarize` job above — one notification per flush tick
+instead of one per raw event.
+
+Arm this once per session, on the first dispatch, not once per dispatch —
+re-arming on every subsequent dispatch would spawn a redundant background
+`watch` process each time.
+
 ## Advisor Review
 
 Dispatch an independent advisor review when finished work is judgment-heavy or

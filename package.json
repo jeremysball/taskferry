@@ -1,6 +1,6 @@
 {
   "name": "taskferry",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "description": "AXI CLI and local daemon for dispatching background pi/OpenCode tasks from any frontend harness",
   "main": "src/cli.js",
   "exports": "./src/opencode-plugin.js",

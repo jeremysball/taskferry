@@ -1650,7 +1650,15 @@ export function createTaskManager({
           // by tracing which files an actual worktree commit touches -- see
           // taskferry#224 investigation), never the common dir's top level.
           const gitDir = resolveGitDirFn(launchDirectory);
-          if (gitDir && existsFn(gitDir) && gitDir !== gitCommonDir && !isOutsideDirectory(gitCommonDir, gitDir)) {
+          if (gitDir && existsFn(gitDir) && gitDir !== gitCommonDir) {
+            // Bind this worktree's own private admin dir -- wherever it
+            // actually lives, even a non-standard layout where it sits
+            // outside gitCommonDir's own tree (e.g. a manually re-pointed
+            // `gitdir:`/`commondir` file) -- plus the shared data a commit
+            // needs. Never falls through to binding the whole common dir
+            // for any layout where a distinct private gitdir was resolved,
+            // so an unusual layout degrades to "some git ops may fail here"
+            // at worst, never back to the original taskferry#224 exposure.
             extraRwBinds.push(gitDir);
             for (const rel of ["objects", "refs", path.join("logs", "refs")]) {
               const resolved = path.join(gitCommonDir, rel);
@@ -1662,9 +1670,9 @@ export function createTaskManager({
           } else {
             // Not a recognizable linked-worktree layout (e.g. a submodule,
             // where the "common dir" IS already that submodule's own
-            // private gitdir with no sibling checkout to protect) -- fall
-            // back to the previous broad bind rather than risk breaking
-            // commits.
+            // private gitdir with no sibling checkout to protect) or gitDir
+            // resolution failed outright -- fall back to the previous broad
+            // bind rather than risk breaking commits.
             extraRwBinds.push(gitCommonDir);
           }
         }

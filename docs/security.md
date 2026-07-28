@@ -190,10 +190,15 @@ runs wrapped in
   bound the whole common dir read-write, which handed exactly that access to
   every worktree dispatch; a dispatch corrupted a completely separate main
   checkout's branch and working tree as a result (taskferry#224) before this
-  was narrowed. For a layout where the resolved worktree-private gitdir
-  can't be determined (e.g. a submodule, whose "common dir" already *is*
-  its own private gitdir with no sibling checkout to protect), the whole
-  common dir is still bound, matching the original behavior.
+  was narrowed. The scoped bind applies even when the resolved
+  worktree-private gitdir turns out to live outside the common dir's own
+  tree (a non-standard, manually re-pointed `gitdir:`/`commondir` layout) —
+  that still binds only the private gitdir plus the common dir's shared
+  data, never the common dir's top level. Only when the worktree-private
+  gitdir genuinely can't be distinguished from the common dir at all (e.g.
+  a submodule, whose "common dir" already *is* its own private gitdir with
+  no sibling checkout to protect) or its resolution fails outright does the
+  whole common dir still get bound, matching the original behavior.
 - **`allowedDirs`** extends this same read-write allowance to arbitrary
   extra directories, for anything else a dispatch legitimately needs to
   write outside its own working directory. Set it as a comma-separated

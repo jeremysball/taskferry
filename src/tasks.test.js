@@ -473,6 +473,74 @@ describe("bwrap sandboxing", () => {
     assert.equal(bindCount, 3);
   });
 
+  test("falls back to binding the whole common dir for a submodule layout, where gitDir resolves to the same path as gitCommonDir", () => {
+    let captured = null;
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "axi-submodule-dir-"));
+    const gitCommonDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-git-common-dir-"));
+    const mgr = makeManager({
+      spawnFn: (cmd, args, opts) => { captured = { cmd, args, opts }; return fakeChild(); },
+      sandboxEnabled: true,
+      checkBwrapAvailableFn: () => ({ checked: true, available: true }),
+      platform: "linux",
+      resolveGitCommonDirFn: () => gitCommonDir,
+      resolveGitDirFn: () => gitCommonDir,
+    });
+
+    mgr.dispatch({ prompt: "hello", directory });
+
+    const bindIndex = captured.args.indexOf(gitCommonDir);
+    assert.notEqual(bindIndex, -1);
+    assert.equal(captured.args[bindIndex - 1], "--bind");
+  });
+
+  test("falls back to binding the whole common dir when gitDir resolution fails outright", () => {
+    let captured = null;
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "axi-resolve-fail-dir-"));
+    const gitCommonDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-git-common-dir-"));
+    const mgr = makeManager({
+      spawnFn: (cmd, args, opts) => { captured = { cmd, args, opts }; return fakeChild(); },
+      sandboxEnabled: true,
+      checkBwrapAvailableFn: () => ({ checked: true, available: true }),
+      platform: "linux",
+      resolveGitCommonDirFn: () => gitCommonDir,
+      resolveGitDirFn: () => null,
+    });
+
+    mgr.dispatch({ prompt: "hello", directory });
+
+    const bindIndex = captured.args.indexOf(gitCommonDir);
+    assert.notEqual(bindIndex, -1);
+    assert.equal(captured.args[bindIndex - 1], "--bind");
+  });
+
+  test("scopes the bind (never the whole common dir) even when gitDir resolves to a non-standard layout outside gitCommonDir's own tree", () => {
+    let captured = null;
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "axi-separate-gitdir-dir-"));
+    const gitCommonDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-git-common-dir-"));
+    // A gitDir that lives entirely outside gitCommonDir's own tree (e.g. a
+    // manually re-pointed `gitdir:`/`commondir` file) -- the earlier version
+    // of this fix fell through to binding the whole common dir for this
+    // case, re-admitting taskferry#224's exposure. It must not do that.
+    const gitDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-elsewhere-gitdir-"));
+    const mgr = makeManager({
+      spawnFn: (cmd, args, opts) => { captured = { cmd, args, opts }; return fakeChild(); },
+      sandboxEnabled: true,
+      checkBwrapAvailableFn: () => ({ checked: true, available: true }),
+      platform: "linux",
+      resolveGitCommonDirFn: () => gitCommonDir,
+      resolveGitDirFn: () => gitDir,
+    });
+
+    mgr.dispatch({ prompt: "hello", directory });
+
+    const boundPaths = [];
+    for (let i = 0; i < captured.args.length - 1; i++) {
+      if (captured.args[i] === "--bind") boundPaths.push(captured.args[i + 1]);
+    }
+    assert.ok(boundPaths.includes(gitDir), "should bind the resolved private gitdir");
+    assert.equal(boundPaths.includes(gitCommonDir), false, "must never bind the whole common dir once a distinct gitDir was resolved");
+  });
+
   test("scopes the git-common-dir bind to the worktree's own admin dir + shared objects/refs, never the main checkout's private HEAD/index/config (regression for taskferry#224)", () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "axi-git-repo-"));
     const mainCheckout = path.join(root, "main");

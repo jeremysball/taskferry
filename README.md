@@ -170,6 +170,17 @@ Migrating from the old MCP server?
 [docs/migrating-from-mcp.md](docs/migrating-from-mcp.md) has the full
 `taskferry_*` tool → CLI command mapping and registration cleanup steps.
 
+## Versioning
+
+`package.json`'s version and `taskferry --version`'s output are both driven
+by [release-please](https://github.com/googleapis/release-please): merges to
+`main` are scanned for Conventional Commits (`feat` → minor, `fix` → patch, a
+`BREAKING CHANGE` footer → major), and release-please keeps a standing PR
+that bumps the version and CHANGELOG accordingly. Merging that PR is the
+release; nobody bumps a version number by hand. `PROTOCOL_VERSION` in
+`src/protocol.js` is separate and only changes when the daemon/CLI RPC
+contract itself breaks.
+
 ## As Subagent-Driven Development's worker backend
 
 The `taskferry` Agent Skill (`skills/using-taskferry/SKILL.md`, bundled into both

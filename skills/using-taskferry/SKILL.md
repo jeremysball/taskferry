@@ -159,7 +159,7 @@ taskferry wait <id>
 taskferry tail <id> --chars 2000
 ```
 
-Do not pass `--timeout-ms` to `taskferry wait`. The process exits on its own the
+Do not pass `--timeout` to `taskferry wait`. The process exits on its own the
 moment the task settles; a timeout only makes the caller re-issue `wait` in a
 polling loop for no benefit.
 
@@ -175,7 +175,7 @@ need to inspect activity.
 
 `wait` also takes a `--tail-chars <number>` option, but it only fires on a
 timeout (trailing text characters from that point) — including the default
-15-minute wait timeout, not just an explicit `--timeout-ms`. Since neither
+15-minute wait timeout, not just an explicit `--timeout`. Since neither
 timeout is something to wait out deliberately (previous paragraph), treat
 `--tail-chars` as dead weight too and don't reach for it. For the settled
 result, use `taskferry result <id> --fields ...` (see below) instead — it

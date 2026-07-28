@@ -126,7 +126,7 @@ export function leanStatus(detail, { full = false } = {}) {
     lean.outputTailTruncated = outputTailTruncated;
   }
   if (timedOut) {
-    lean.note = `wait timed out; the task may still be running. Run taskferry wait again to keep waiting, or pass --timeout-ms to set a longer cap`;
+    lean.note = `wait timed out; the task may still be running. Run taskferry wait again to keep waiting, or pass --timeout to set a longer cap`;
   }
   lean.next = status === "running" || status === "queued"
     ? `Run taskferry wait or taskferry status with task id "${id}" to check progress; pass --full for directory/model/log path details`

@@ -36,12 +36,12 @@ const commandSpecs = {
     usage: "taskferry wait <id> [options]",
     description: "Wait for a task to settle or return its current status after a timeout.",
     options: {
-      "--timeout-ms <number>": "maximum wait in milliseconds",
+      "--timeout <duration>": "maximum wait, e.g. 10000 (ms), 30s, 5m, 1h",
       "--tail-chars <number>": "include this many trailing text characters on timeout",
       "--full": "include directory, model, and log details",
       "--summarize": "print periodic live summaries while waiting; exits when the task settles",
     },
-    examples: ['taskferry wait <id>', 'taskferry wait <id> --timeout-ms 10000 --tail-chars 1000', 'taskferry wait <id> --summarize'],
+    examples: ['taskferry wait <id>', 'taskferry wait <id> --timeout 10s --tail-chars 1000', 'taskferry wait <id> --summarize'],
   },
   advisor: {
     usage: "taskferry advisor --prompt <text> --model <id> [options]",
@@ -52,12 +52,12 @@ const commandSpecs = {
       "--directory <path>": "defaults to the current workspace",
       "--variant <name>": "optional model reasoning variant",
       "--session-id <id>": "continue a recent advisor session",
-      "--timeout-ms <number>": "maximum wait in milliseconds",
+      "--timeout <duration>": "maximum wait, e.g. 10000 (ms), 30s, 5m, 1h",
       "--executor <opencode|pi>": "worker backend to dispatch through, default pi",
     },
     examples: [
       'taskferry advisor --prompt "How should I split this module?" --model openai/gpt-5.6-sol',
-      'taskferry advisor --prompt "Review this design" --model zai/glm-5.2 --timeout-ms 30000',
+      'taskferry advisor --prompt "Review this design" --model zai/glm-5.2 --timeout 30s',
     ],
   },
   status: {
@@ -192,6 +192,32 @@ function parseNumber(value, flag, { min = 0, max = Number.MAX_SAFE_INTEGER } = {
   return number;
 }
 
+// Node's setTimeout silently clamps any delay above 2^31-1 ms (~24.8 days)
+// down to 1ms, so a "parses fine" duration string would silently fire the
+// wait timer after ~1ms instead of the requested duration. Reject upfront
+// with a clear message instead of inheriting Node's vague overflow warning.
+const MAX_TIMEOUT_MS = 2_147_483_647;
+const MAX_TIMEOUT_HUMAN = `${MAX_TIMEOUT_MS} milliseconds (about 24 days)`;
+
+const DURATION_UNITS_MS = { s: 1000, m: 60_000, h: 3_600_000 };
+
+function parseDuration(value, flag) {
+  const remediation = `Use ${flag} with milliseconds (e.g. 10000) or a duration string (e.g. 30s, 5m, 1h); values must not exceed ${MAX_TIMEOUT_HUMAN}, the maximum Node's setTimeout supports`;
+  if (/^\d+$/.test(value)) {
+    const ms = Number(value);
+    if (!Number.isSafeInteger(ms)) throw new UsageError(`${flag} is not a valid integer`, remediation);
+    if (ms > MAX_TIMEOUT_MS) throw new UsageError(`${flag} must not exceed ${MAX_TIMEOUT_HUMAN}`, remediation);
+    return ms;
+  }
+  const match = /^(\d+)(s|m|h)$/.exec(value);
+  if (!match) throw new UsageError(`${flag} must be milliseconds or a duration like 30s, 5m, 1h`, remediation);
+  const ms = Number(match[1]) * DURATION_UNITS_MS[match[2]];
+  if (!Number.isSafeInteger(ms) || ms > MAX_TIMEOUT_MS) {
+    throw new UsageError(`${flag} must not exceed ${MAX_TIMEOUT_HUMAN}`, remediation);
+  }
+  return ms;
+}
+
 function requireValue(argv, index, flag, inlineValue) {
   if (inlineValue !== undefined) {
     if (!inlineValue) throw new UsageError(`${flag} requires a non-empty value`, `Run ${flag} with a value`);
@@ -299,13 +325,28 @@ export function parseArgs(argv, { cwd = process.cwd() } = {}) {
     const { name, inlineValue } = parseLongFlag(token);
     const migrationFlags = {
       "--task-id": "--task-id was replaced by the positional task id; use `taskferry status <id>`",
-      "--timeout_ms": "--timeout_ms was renamed; use --timeout-ms",
+      "--timeout_ms": "--timeout_ms was renamed; use --timeout",
+      "--timeout-ms": "--timeout-ms was renamed; use --timeout",
       "--tail_chars": "--tail_chars was renamed; use --tail-chars",
       "--max_words": "--max_words was renamed; use --max-words",
       "--session_id": "--session_id was renamed; use --session-id",
       "--style": "--style was renamed; use --mode",
     };
+    // A subset of migration flags point at a target that isn't a valid flag
+    // on every command (e.g. --timeout only exists on wait/advisor). For
+    // those, only emit the "use <target>" hint when the current command
+    // actually accepts the target — otherwise the hint itself triggers a
+    // second "unknown flag" error, which is misleading.
+    const migrationTargetFlag = {
+      "--task-id": null,
+      "--timeout_ms": "--timeout",
+      "--timeout-ms": "--timeout",
+    };
     if (migrationFlags[name] && !(name === "--task-id" && command === "watch")) {
+      const target = migrationTargetFlag[name];
+      if (target && !commandAllows(command, target)) {
+        throw usageError(`unknown flag ${name} for \`${command}\``, command);
+      }
       throw new UsageError(`unknown flag ${name} for \`${command}\``, migrationFlags[name]);
     }
 
@@ -334,7 +375,7 @@ export function parseArgs(argv, { cwd = process.cwd() } = {}) {
       "--session-id": "sessionId",
       "--key-slot": "keySlot",
       "--grace-ms": "graceMs",
-      "--timeout-ms": "timeoutMs",
+      "--timeout": "timeoutMs",
       "--tail-chars": "tailChars",
       "--chars": "chars",
       "--mode": "mode",
@@ -352,7 +393,9 @@ export function parseArgs(argv, { cwd = process.cwd() } = {}) {
     const required = requireValue(rest, index, name, inlineValue);
     index = required.nextIndex;
     let value = required.value;
-    if (["graceMs", "timeoutMs", "tailChars", "chars", "maxWords", "limit"].includes(key)) {
+    if (key === "timeoutMs") {
+      value = parseDuration(value, name);
+    } else if (["graceMs", "tailChars", "chars", "maxWords", "limit"].includes(key)) {
       value = parseNumber(value, name, key === "tailChars" || key === "chars" ? { min: 1, max: 65536 } : key === "maxWords" ? { min: 75, max: 300 } : { min: key === "limit" ? 1 : 0 });
     } else if (key === "fields") {
       value = parseFields(value);
@@ -390,7 +433,7 @@ export function parseArgs(argv, { cwd = process.cwd() } = {}) {
       throw usageError("--full requires narration in --fields", command);
     }
     if (command === "wait" && options.summarize && options.timeoutMs !== undefined) {
-      throw usageError("--summarize cannot be combined with --timeout-ms", command);
+      throw usageError("--summarize cannot be combined with --timeout", command);
     }
     if (command === "wait" && options.summarize && options.tailChars !== undefined) {
       throw usageError("--summarize cannot be combined with --tail-chars", command);
@@ -403,8 +446,8 @@ function commandAllows(command, flag) {
   const flags = {
     dispatch: ["--prompt", "--directory", "--model", "--variant", "--session-id", "--key-slot", "--require-final-marker", "--allowed-dirs", "--executor"],
     cancel: ["--grace-ms"],
-    wait: ["--timeout-ms", "--tail-chars"],
-    advisor: ["--prompt", "--model", "--directory", "--variant", "--session-id", "--timeout-ms", "--executor"],
+    wait: ["--timeout", "--tail-chars"],
+    advisor: ["--prompt", "--model", "--directory", "--variant", "--session-id", "--timeout", "--executor"],
     status: [],
     tail: ["--chars"],
     summary: ["--mode", "--max-words"],

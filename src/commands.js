@@ -20,7 +20,7 @@ import { normalizeDirectory } from "./paths.js";
 import { loadConfig } from "./config.js";
 
 // Default timeout for the CLI `wait` command (and `summary --wait`) when no
-// explicit --timeout-ms is given. Kept generous (15 min) so real tasks aren't
+// explicit --timeout is given. Kept generous (15 min) so real tasks aren't
 // cut off, but finite so a hung task doesn't block the caller forever. The
 // 45 s MAX_WAIT_MS in tasks.js is for advisor's internal polling — a different,
 // much shorter-lived use case.

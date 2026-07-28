@@ -184,7 +184,7 @@ test("rejects empty option values and trailing global arguments as usage errors"
   assert.throws(() => parseArgs(["--help", "extra"]), /unexpected argument: extra/);
 });
 
-test("parses wait --summarize and rejects it combined with --timeout-ms or --tail-chars", () => {
+test("parses wait --summarize and rejects it combined with --timeout or --tail-chars", () => {
   assert.deepEqual(parseArgs(["wait", "oc_1", "--summarize"]).options, {
     taskId: "oc_1",
     timeoutMs: undefined,
@@ -192,7 +192,7 @@ test("parses wait --summarize and rejects it combined with --timeout-ms or --tai
     full: false,
     summarize: true,
   });
-  assert.throws(() => parseArgs(["wait", "oc_1", "--summarize", "--timeout-ms", "5000"]), /--summarize cannot be combined with --timeout-ms/);
+  assert.throws(() => parseArgs(["wait", "oc_1", "--summarize", "--timeout", "5000"]), /--summarize cannot be combined with --timeout/);
   assert.throws(() => parseArgs(["wait", "oc_1", "--summarize", "--tail-chars", "500"]), /--summarize cannot be combined with --tail-chars/);
 });
 
@@ -243,4 +243,84 @@ test("parses dispatch --no-sandbox", () => {
   assert.equal(parseArgs(["dispatch", "--prompt", "x", "--no-sandbox"]).options.noSandbox, true);
   assert.throws(() => parseArgs(["dispatch", "--prompt", "x", "--no-sandbox=1"]), /--no-sandbox does not take a value/);
   assert.throws(() => parseArgs(["wait", "oc_1", "--no-sandbox"]), /unknown flag --no-sandbox/);
+});
+
+test("wait --timeout accepts bare milliseconds and duration strings", () => {
+  assert.equal(parseArgs(["wait", "oc_1", "--timeout", "0"]).options.timeoutMs, 0);
+  assert.equal(parseArgs(["wait", "oc_1", "--timeout", "10000"]).options.timeoutMs, 10000);
+  assert.equal(parseArgs(["wait", "oc_1", "--timeout", "30s"]).options.timeoutMs, 30_000);
+  assert.equal(parseArgs(["wait", "oc_1", "--timeout", "5m"]).options.timeoutMs, 300_000);
+  assert.equal(parseArgs(["wait", "oc_1", "--timeout", "1h"]).options.timeoutMs, 3_600_000);
+});
+
+test("wait --timeout rejects malformed duration strings", () => {
+  const cases = ["-1", "1.5m", "5M", "1h30m", " 5m", "5m ", "abc", ""];
+  for (const value of cases) {
+    assert.throws(() => parseArgs(["wait", "oc_1", "--timeout", value]), UsageError, `expected rejection for "${value}"`);
+  }
+});
+
+test("--timeout-ms and --timeout_ms both error with a migration message pointing at --timeout", () => {
+  const migrationAssert = (args) => assert.throws(
+    () => parseArgs(args),
+    (error) => error instanceof UsageError
+      && /unknown flag/.test(error.message)
+      && /use --timeout/.test(error.help)
+  );
+  migrationAssert(["wait", "oc_1", "--timeout-ms", "5000"]);
+  migrationAssert(["wait", "oc_1", "--timeout_ms", "5000"]);
+  migrationAssert(["advisor", "--prompt", "p", "--model", "m", "--timeout-ms", "5000"]);
+});
+
+test("--timeout-ms on a command that doesn't accept --timeout falls through to a plain unknown-flag error", () => {
+  // The migration hint targets --timeout, which is only valid on wait/advisor.
+  // On status, emitting "use --timeout" as remediation would just produce a
+  // second "unknown flag --timeout" error — so the migration branch itself
+  // should fall through and emit the standard "Valid flags for status" hint
+  // without the misleading "use --timeout" line.
+  assert.throws(
+    () => parseArgs(["status", "oc_1", "--timeout-ms", "5000"]),
+    (error) => {
+      assert.ok(error instanceof UsageError);
+      assert.match(error.message, /unknown flag --timeout-ms/);
+      assert.doesNotMatch(error.help, /use --timeout/);
+      assert.match(error.help, /Valid flags for status/);
+      return true;
+    }
+  );
+  // Same for --timeout_ms.
+  assert.throws(
+    () => parseArgs(["status", "oc_1", "--timeout_ms", "5000"]),
+    (error) => /unknown flag --timeout_ms/.test(error.message)
+      && !/use --timeout/.test(error.help)
+  );
+});
+
+test("wait --timeout accepts a duration just under the setTimeout maximum", () => {
+  // Node's setTimeout max is 2^31-1 ms (~24.8 days); values above that are
+  // silently clamped to 1ms, which would silently fire the wait timer after
+  // ~1ms instead of the requested duration. Just-under stays parseable.
+  const justUnderMs = 2_147_483_647;
+  assert.equal(parseArgs(["wait", "oc_1", "--timeout", String(justUnderMs)]).options.timeoutMs, justUnderMs);
+  // 596h -> 2_145_600_000 ms (just under the max)
+  assert.equal(parseArgs(["wait", "oc_1", "--timeout", "596h"]).options.timeoutMs, 596 * 3_600_000);
+});
+
+test("wait --timeout rejects a duration exceeding the setTimeout maximum", () => {
+  // 1000000h is the exact "looks parseable, silently fires after ~1ms"
+  // example: total ~36 trillion ms, well past the 2^31-1 ms setTimeout cap.
+  assert.throws(
+    () => parseArgs(["wait", "oc_1", "--timeout", "1000000h"]),
+    (error) => {
+      assert.ok(error instanceof UsageError);
+      assert.match(error.message, /must not exceed/);
+      assert.match(error.help, /2147483647 milliseconds/);
+      return true;
+    }
+  );
+  // Just over the cap in bare-ms form.
+  assert.throws(
+    () => parseArgs(["wait", "oc_1", "--timeout", "2147483648"]),
+    /must not exceed/
+  );
 });

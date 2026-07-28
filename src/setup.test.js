@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { runSetup } from "./setup.js";
+import { defaultRunCommandAsync, runSetup } from "./setup.js";
 import {
   checkClaudeCodePlaywrightIsolation,
   checkOpencodePlaywrightIsolation,
@@ -636,4 +636,22 @@ test("runSetup leaves a .jsonc-only setup untouched — asserts bytes unchanged"
   runSetup({ ...fixture, runCommand: unavailableClients });
   const after = fs.readFileSync(path.join(configDir, "opencode.jsonc"), "utf8");
   assert.equal(after, before);
+});
+
+test("defaultRunCommandAsync reports a non-zero exit the same way as spawnSync -- status set, error undefined", async () => {
+  const result = await defaultRunCommandAsync(process.execPath, ["-e", "process.exit(3)"]);
+  assert.equal(result.status, 3);
+  assert.equal(result.error, undefined);
+});
+
+test("defaultRunCommandAsync reports a launch failure the same way as spawnSync -- status null, error set", async () => {
+  const result = await defaultRunCommandAsync("this-binary-does-not-exist-xyz", []);
+  assert.equal(result.status, null);
+  assert.equal(result.error.code, "ENOENT");
+});
+
+test("defaultRunCommandAsync reports a clean exit the same way as spawnSync -- status 0, error undefined", async () => {
+  const result = await defaultRunCommandAsync(process.execPath, ["-e", "process.exit(0)"]);
+  assert.equal(result.status, 0);
+  assert.equal(result.error, undefined);
 });

@@ -66,10 +66,23 @@ export function defaultNpmInstall(checkoutDirectory) {
   return result;
 }
 
+// execFile's callback sets `error` both when the process fails to launch
+// (ENOENT, EACCES -- error.code is the string errno) and when it launches
+// but exits non-zero (error.code is the numeric exit code). spawnSync only
+// sets `error` for the former case, leaving `status` to carry a non-zero
+// exit. Splitting on the type of error.code here keeps this function's
+// result shape consistent with defaultRunCommand's, so callers that treat
+// `status !== 0` and `error` as distinct failure modes (e.g.
+// getBwrapAvailabilityResult) behave the same regardless of which runner
+// they were given.
 export function defaultRunCommandAsync(command, args) {
   return new Promise((resolve) => {
     execFile(command, args, { encoding: "utf8", timeout: 5000 }, (error, stdout, stderr) => {
       if (error) {
+        if (typeof error.code === "number") {
+          resolve({ status: error.code, stdout: stdout || "", stderr: stderr || "", error: undefined });
+          return;
+        }
         resolve({ status: null, stdout: stdout || "", stderr: stderr || "", error });
         return;
       }

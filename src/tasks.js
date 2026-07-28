@@ -1,9 +1,8 @@
-import { execFile, spawn } from "node:child_process";
+import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { promisify } from "node:util";
 import { createTaskEvents } from "./events.js";
 import { createActivityCache, readActivitySnapshot, readDeltaNarration, DEFAULT_SUMMARIZER_TIMEOUT_MS } from "./activity.js";
 import { withFileLock } from "./state-lock.js";
@@ -161,8 +160,6 @@ const SUMMARY_INPUT_BYTES = 96 * 1024;
 // riding the exact limit.
 const PROMPT_ARGV_SAFE_BYTES = 96 * 1024;
 export const DEFAULT_SUMMARY_MODEL = "opencode/mimo-v2.5-free";
-const SUMMARY_PREFLIGHT_TIMEOUT_MS = 10000;
-const execFileAsync = promisify(execFile);
 
 // Ordered most-specific-first: real provider error text often combines
 // more than one signal (e.g. "Rate limit exceeded, check your quota"), so
@@ -383,7 +380,7 @@ const DEFAULT_CANCEL_GRACE_MS = 5000;
  * @param {object} [options]
  * @param {typeof spawn} [options.spawnFn]
  * @param {(pid: number, signal: NodeJS.Signals) => void} [options.killFn]
- * @param {(env?: NodeJS.ProcessEnv) => Promise<string>} [options.listModelsFn]
+ * @param {(env: NodeJS.ProcessEnv) => Promise<string>} [options.listModelsFn]
  * @param {import("./executor.js").WorkerExecutor} [options.defaultExecutor] - fallback WorkerExecutor used when
  *   a dispatch doesn't request one explicitly. Per-dispatch selection (Task 6) calls `resolveExecutor(params.executor)`
  *   and overrides this; this option exists so tests and embedders can swap in a different default without the
@@ -426,12 +423,15 @@ const DEFAULT_CANCEL_GRACE_MS = 5000;
 export function createTaskManager({
   spawnFn = spawn,
   killFn = (pid, signal) => process.kill(pid, signal),
-  listModelsFn = async (env) => (await execFileAsync("opencode", ["models"], { encoding: "utf8", timeout: SUMMARY_PREFLIGHT_TIMEOUT_MS, env })).stdout,
   stateDir = DEFAULT_STATE_DIR,
   config = {},
   defaultExecutor = resolveExecutor(
     process.env.TASKFERRY_DEFAULT_EXECUTOR || /** @type {string|undefined} */ (config.defaultExecutor)
   ),
+  // Defaults to whichever executor is actually the manager's default, so a
+  // pi-only install (no opencode CLI on PATH) doesn't ENOENT the first time
+  // it touches `taskferry summary` or `watch --summaries`.
+  listModelsFn = defaultExecutor.listModelsFn,
   maxDispatchesPerWindow = positiveInteger(
     Number(process.env.TASKFERRY_MAX_DISPATCHES_PER_WINDOW),
     positiveInteger(/** @type {number} */ (config.maxDispatchesPerWindow), DEFAULT_MAX_DISPATCHES_PER_WINDOW)
@@ -945,16 +945,33 @@ export function createTaskManager({
     // A resume (--session-id with no --executor) should inherit the executor
     // the session was actually created under, not silently fall back to the
     // manager's default -- a different executor has no way to continue a
-    // session file another CLI's binary wrote.
+    // session file another CLI's binary wrote. When --executor is given
+    // explicitly, scope the lookup to tasks that match it too: session ids
+    // are only unique per executor, so an explicit --executor pi alongside a
+    // sessionId that collides with an unrelated opencode task must not let
+    // that opencode task's model leak into this pi dispatch.
     /** @type {Task|null} */
     let priorSessionTask = null;
     if (sessionId) {
       for (const t of tasks.values()) {
-        if (t.sessionId === sessionId && (!priorSessionTask || t.startedAt > priorSessionTask.startedAt)) priorSessionTask = t;
+        if (
+          t.sessionId === sessionId
+          && (executorName === undefined || t.executorId === executorName)
+          && (!priorSessionTask || t.startedAt > priorSessionTask.startedAt)
+        ) {
+          priorSessionTask = t;
+        }
       }
     }
+    // Reuse the manager's single pre-built defaultExecutor instance when the
+    // inherited/explicit executor matches it, instead of allocating a fresh
+    // WorkerExecutor on every session-inheriting resume.
     const executor =
-      executorName !== undefined ? resolveExecutor(executorName) : priorSessionTask ? resolveExecutor(priorSessionTask.executorId) : defaultExecutor;
+      executorName !== undefined
+        ? (executorName === defaultExecutor.id ? defaultExecutor : resolveExecutor(executorName))
+        : priorSessionTask
+          ? (priorSessionTask.executorId === defaultExecutor.id ? defaultExecutor : resolveExecutor(priorSessionTask.executorId))
+          : defaultExecutor;
     if (!prompt || typeof prompt !== "string") {
       throw new Error("error: prompt is required\nhelp: taskferry dispatch requires a non-empty prompt string");
     }
@@ -1535,7 +1552,12 @@ export function createTaskManager({
         // PI_CODING_AGENT_DIR) and which destination to ro-bind the real
         // auth file into, so each executor's bound auth destination matches
         // its own environment directory.
-        const { extraRoBinds: executorRoBinds, sandboxedDataHome, sandboxEnv } = executor.sandboxAuthFile({ homeDir, dataDir: cacheDir, spawnEnv, existsFn });
+        const {
+          extraRoBinds: executorRoBinds,
+          extraRwPairBinds: executorRwPairBinds = [],
+          sandboxedDataHome,
+          sandboxEnv,
+        } = executor.sandboxAuthFile({ homeDir, dataDir: cacheDir, spawnEnv, existsFn });
         /** @type {[string, string][]} */
         const extraRoBinds = [...executorRoBinds];
         if (promptFilePath) extraRoBinds.push([PROMPT_DIR, PROMPT_DIR]);
@@ -1560,7 +1582,7 @@ export function createTaskManager({
           const resolved = path.isAbsolute(dir) ? dir : path.resolve(launchDirectory, dir);
           if (existsFn(resolved)) extraRwBinds.push(resolved);
         }
-        spawnArgs = buildBwrapArgs({ directory: launchDirectory, stateDir, runtimeDir, homeDir, denyList, extraRwBinds, extraRoBinds }).concat(["--", executor.binaryName, ...args]);
+        spawnArgs = buildBwrapArgs({ directory: launchDirectory, stateDir, runtimeDir, homeDir, denyList, extraRwBinds, extraRwPairBinds: executorRwPairBinds, extraRoBinds }).concat(["--", executor.binaryName, ...args]);
         spawnEnv = { ...spawnEnv, ...sandboxEnv };
       }
       // No tmux: the child has no shared session to introspect. It is its own

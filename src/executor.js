@@ -24,7 +24,7 @@ const SUMMARY_ISOLATION_PROMPT =
  * @property {(ctx: SpawnLaunchContext) => string[]} buildSpawnArgs
  * @property {() => string} buildSummaryPrompt
  * @property {(parsed: unknown) => unknown} normalizeLogEvent
- * @property {(args: {homeDir: string, dataDir: string, spawnEnv: NodeJS.ProcessEnv, existsFn: (file: string) => boolean}) => {extraRoBinds: [string, string][], sandboxedDataHome: string, sandboxEnv: Record<string, string>}} sandboxAuthFile
+ * @property {(args: {homeDir: string, dataDir: string, spawnEnv: NodeJS.ProcessEnv, existsFn: (file: string) => boolean}) => {extraRoBinds: [string, string][], extraRwPairBinds?: [string, string][], sandboxedDataHome: string, sandboxEnv: Record<string, string>}} sandboxAuthFile
  */
 
 /**
@@ -146,7 +146,7 @@ export function piExecutor({ execFileFn = execFileAsync } = {}) {
     // small tmpfs: pi's sandboxed data home grows with every dispatch and an
     // unbounded tmpfs directory eventually starves the whole XDG_RUNTIME_DIR
     // (sockets, locks) of space.
-    /** @param {{homeDir: string, dataDir: string, spawnEnv: NodeJS.ProcessEnv, existsFn: (file: string) => boolean}} args @returns {{extraRoBinds: [string, string][], sandboxedDataHome: string, sandboxEnv: Record<string, string>}} */
+    /** @param {{homeDir: string, dataDir: string, spawnEnv: NodeJS.ProcessEnv, existsFn: (file: string) => boolean}} args @returns {{extraRoBinds: [string, string][], extraRwPairBinds: [string, string][], sandboxedDataHome: string, sandboxEnv: Record<string, string>}} */
     sandboxAuthFile({ homeDir, dataDir, spawnEnv, existsFn }) {
       const realAgentDir = spawnEnv.PI_CODING_AGENT_DIR || path.join(homeDir, ".pi", "agent");
       const realAuthFile = path.join(realAgentDir, "auth.json");
@@ -157,13 +157,24 @@ export function piExecutor({ execFileFn = execFileAsync } = {}) {
       // cheapestinference) silently disappears inside the sandbox even
       // though auth.json alone would otherwise work fine.
       const realExtensionsDir = path.join(realAgentDir, "extensions");
+      // pi's session files live under PI_CODING_AGENT_DIR/sessions/ (see pi's
+      // own getSessionsDir()) and pi writes to them in place on resume
+      // (appendFileSync/writeFileSync on the existing session file, not a
+      // fresh copy) -- a read-only bind would let a sandboxed resume find
+      // the file but then fail to persist the continued turn. Bound
+      // read-write, same treatment as sandboxedDataHome itself below.
+      const realSessionsDir = path.join(realAgentDir, "sessions");
       const sandboxedDataHome = path.join(dataDir, "pi-data");
       /** @type {[string, string][]} */
       const extraRoBinds = [];
       if (existsFn(realAuthFile)) extraRoBinds.push([realAuthFile, path.join(sandboxedDataHome, "auth.json")]);
       if (existsFn(realExtensionsDir)) extraRoBinds.push([realExtensionsDir, path.join(sandboxedDataHome, "extensions")]);
+      /** @type {[string, string][]} */
+      const extraRwPairBinds = [];
+      if (existsFn(realSessionsDir)) extraRwPairBinds.push([realSessionsDir, path.join(sandboxedDataHome, "sessions")]);
       return {
         extraRoBinds,
+        extraRwPairBinds,
         sandboxedDataHome,
         sandboxEnv: { PI_CODING_AGENT_DIR: sandboxedDataHome },
       };

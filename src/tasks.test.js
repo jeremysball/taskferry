@@ -232,11 +232,51 @@ describe("dispatch() lifecycle, driven through an injected spawnFn (no real open
     assert.equal(capturedCmd, "opencode");
   });
 
+  test("a session-inheriting resume that matches defaultExecutor reuses that exact instance instead of building a fresh one", () => {
+    // Uses a custom fake as defaultExecutor (not the real piExecutor()) so a
+    // regression back to unconditionally calling resolveExecutor(executorId)
+    // is observable: that path ignores this injected instance entirely and
+    // would spawn with the real pi executor's own buildSpawnArgs instead.
+    let captured = null;
+    const fakePi = {
+      id: "pi",
+      taskIdPrefix: "pi",
+      errorBucketPrefix: "pi",
+      defaultModel: "fake-pi/marker-model",
+      defaultSummaryModel: "fake-pi/marker-model",
+      binaryName: "pi",
+      listModelsFn: async () => "",
+      buildSpawnArgs: () => ["--fake-pi-marker"],
+      buildSummaryPrompt: () => "",
+      normalizeLogEvent: (parsed) => parsed,
+      sandboxAuthFile: () => ({ extraRoBinds: [], extraRwPairBinds: [], sandboxedDataHome: "/tmp/unused", sandboxEnv: {} }),
+    };
+    const mgr = makeManager({ spawnFn: (cmd, args) => { captured = args; return fakeChild(); }, defaultExecutor: fakePi });
+    mgr.dispatch({ prompt: "first", directory: os.tmpdir(), sessionId: "ses_reuse", executor: "pi" });
+    mgr.dispatch({ prompt: "resume", directory: os.tmpdir(), sessionId: "ses_reuse" });
+    assert.deepEqual(captured, ["--fake-pi-marker"]);
+  });
+
   test("an unrecognized --session-id with no --executor still falls back to the manager's default executor", () => {
     let capturedCmd = null;
     const mgr = makeManager({ spawnFn: (cmd) => { capturedCmd = cmd; return fakeChild(); } });
     mgr.dispatch({ prompt: "resume", directory: os.tmpdir(), sessionId: "ses_exec_never_seen" });
     assert.equal(capturedCmd, "pi");
+  });
+
+  test("a sessionId that collides across executors does not leak the other executor's model when --executor is given explicitly", () => {
+    let captured = null;
+    const mgr = makeManager({ spawnFn: (cmd, args) => { captured = args; return fakeChild(); } });
+    // Same literal sessionId string, but the earlier task belongs to a
+    // different executor -- resolving executor: "pi" here must not inherit
+    // the opencode task's model just because the sessionId string matches.
+    mgr.dispatch({ prompt: "first", directory: os.tmpdir(), model: "opencode-go/minimax-m3", sessionId: "ses_collide", executor: "opencode" });
+    mgr.dispatch({ prompt: "resume", directory: os.tmpdir(), sessionId: "ses_collide", executor: "pi" });
+    // pi's buildSpawnArgs splits a slashed model into --provider/--model,
+    // unlike opencode's single -m flag -- assert pi's own default model
+    // ("minimax/MiniMax-M2.7"), not the opencode task's "opencode-go/minimax-m3".
+    assert.equal(captured[captured.indexOf("--provider") + 1], "minimax");
+    assert.equal(captured[captured.indexOf("--model") + 1], "MiniMax-M2.7");
   });
 
   test("a short prompt is returned verbatim in promptPreview, with no promptTotalChars hint", () => {
@@ -414,6 +454,11 @@ describe("bwrap sandboxing", () => {
       checkBwrapAvailableFn: () => ({ checked: true, available: true }),
       platform: "linux",
       resolveGitCommonDirFn: () => path.join(directory, ".git"),
+      // Independent of whatever real ~/.pi files happen to exist on the
+      // machine running this test -- a real sessions/ dir there would
+      // otherwise add a 4th --bind (the rw sessions pair-bind) and make
+      // this count flaky across environments.
+      existsFn: () => false,
     });
 
     mgr.dispatch({ prompt: "hello", directory });
@@ -3210,6 +3255,40 @@ describe("summarize()", () => {
   test("checkSummaryModelReady rejects when the configured summary model is unavailable", async () => {
     const mgr = makeManager({ listModelsFn: () => "openai/gpt-5.6-luna\n" });
     await assert.rejects(mgr.checkSummaryModelReady(), /summary model is unavailable/);
+  });
+
+  test("createTaskManager()'s real default listModelsFn defers to defaultExecutor, not a hardcoded 'opencode models' shell-out", async () => {
+    // Bypasses makeManager deliberately -- it always injects its own
+    // listModelsFn fallback, which would mask a regression back to the
+    // hardcoded default this test exists to catch.
+    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-test-"));
+    let calledWithEnv = null;
+    const fakePi = {
+      id: "pi",
+      taskIdPrefix: "pi",
+      errorBucketPrefix: "pi",
+      defaultModel: "minimax/MiniMax-M2.7",
+      defaultSummaryModel: "minimax/MiniMax-M2.7",
+      binaryName: "pi",
+      listModelsFn: async (env) => {
+        calledWithEnv = env;
+        return `${DEFAULT_SUMMARY_MODEL}\n`;
+      },
+      buildSpawnArgs: () => [],
+      buildSummaryPrompt: () => "",
+      normalizeLogEvent: (parsed) => parsed,
+      sandboxAuthFile: () => ({ extraRoBinds: [], extraRwPairBinds: [], sandboxedDataHome: "/tmp/unused", sandboxEnv: {} }),
+    };
+    const mgr = createTaskManager({
+      stateDir,
+      sandboxEnabled: false,
+      spawnFn: () => fakeChild(),
+      killFn: () => {},
+      defaultExecutor: fakePi,
+      // listModelsFn intentionally omitted -- exercising the real default.
+    });
+    await mgr.checkSummaryModelReady();
+    assert.notEqual(calledWithEnv, null, "the pi executor's own listModelsFn must be the one createTaskManager's default invoked");
   });
 
   test("summary --mode activity rejects when the summary model is unavailable, instead of masking the failure with local narration", async () => {

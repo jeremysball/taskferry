@@ -110,12 +110,25 @@ export function resolveGitCommonDir(directory, runCommand = defaultRunCommand) {
  * @param {string[]} [options.denyList]
  * @param {string[]} [options.extraRwBinds] - extra directories bound read-write at the same path, applied
  *   after directory/runtimeDir (e.g. a git worktree's real gitdir, which lives outside `directory`).
- * @param {[string, string][]} [options.extraRoBinds] - extra [src, dest] read-only binds, applied after the
- *   read-write binds so a more specific path (e.g. a single credentials file) can be pinned read-only even
- *   though it sits under an already read-write-bound directory.
+ * @param {[string, string][]} [options.extraRwPairBinds] - extra [src, dest] read-write binds, for a real
+ *   directory that must be writable but lives outside the executor's redirected sandbox data home (e.g.
+ *   pi's real sessions/ directory, bound onto the sandboxed PI_CODING_AGENT_DIR's sessions/ path so a
+ *   sandboxed resume can both read and persist to it). Applied after extraRwBinds and before extraRoBinds.
+ * @param {[string, string][]} [options.extraRoBinds] - extra [src, dest] read-only binds, applied last so a
+ *   more specific path (e.g. a single credentials file) can be pinned read-only even though it sits under
+ *   an already read-write-bound directory.
  * @returns {string[]}
  */
-export function buildBwrapArgs({ directory, stateDir, runtimeDir, homeDir, denyList = defaultDenyList(homeDir, stateDir), extraRwBinds = [], extraRoBinds = [] }) {
+export function buildBwrapArgs({
+  directory,
+  stateDir,
+  runtimeDir,
+  homeDir,
+  denyList = defaultDenyList(homeDir, stateDir),
+  extraRwBinds = [],
+  extraRwPairBinds = [],
+  extraRoBinds = [],
+}) {
   const args = ["--ro-bind", "/", "/"];
   // bwrap applies mounts in argument order, and a later mount on a parent
   // directory shadows an earlier mount nested inside it. --tmpfs /tmp must
@@ -130,6 +143,9 @@ export function buildBwrapArgs({ directory, stateDir, runtimeDir, homeDir, denyL
   args.push("--bind", runtimeDir, runtimeDir);
   for (const extra of extraRwBinds) {
     args.push("--bind", extra, extra);
+  }
+  for (const [src, dest] of extraRwPairBinds) {
+    args.push("--bind", src, dest);
   }
   for (const [src, dest] of extraRoBinds) {
     args.push("--ro-bind", src, dest);

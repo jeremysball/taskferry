@@ -181,6 +181,29 @@ describe("buildBwrapArgs()", () => {
     assert.ok(extraBindIndex > runtimeDirBindIndex);
   });
 
+  test("appends extraRwPairBinds after extraRwBinds and before extraRoBinds, as a --bind (not --ro-bind) with different src/dest", () => {
+    const args = buildBwrapArgs({
+      directory: "/workspace/my-repo",
+      stateDir: "/home/user/.local/state/taskferry",
+      runtimeDir: "/home/user/.local/state/taskferry/run",
+      homeDir: "/home/user",
+      extraRwBinds: ["/workspace/main-repo/.git/worktrees/my-repo"],
+      extraRwPairBinds: [["/home/user/.pi/agent/sessions", "/home/user/.local/state/taskferry/run/pi-data/sessions"]],
+      extraRoBinds: [["/home/user/.pi/agent/auth.json", "/home/user/.local/state/taskferry/run/pi-data/auth.json"]],
+    });
+
+    const extraRwBindIndex = args.indexOf("/workspace/main-repo/.git/worktrees/my-repo");
+    const rwPairBindIndex = args.indexOf("--bind", extraRwBindIndex + 1);
+    assert.notEqual(rwPairBindIndex, -1);
+    assert.equal(args[rwPairBindIndex + 1], "/home/user/.pi/agent/sessions");
+    assert.equal(args[rwPairBindIndex + 2], "/home/user/.local/state/taskferry/run/pi-data/sessions");
+    assert.ok(rwPairBindIndex > extraRwBindIndex);
+
+    const roBindIndex = args.indexOf("--ro-bind", rwPairBindIndex);
+    assert.notEqual(roBindIndex, -1);
+    assert.ok(roBindIndex > rwPairBindIndex + 2);
+  });
+
   test("appends extraRoBinds after the read-write binds, so a specific file wins over a broader writable parent", () => {
     const args = buildBwrapArgs({
       directory: "/workspace/my-repo",

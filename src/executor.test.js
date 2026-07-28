@@ -46,6 +46,7 @@ describe("piExecutor()", () => {
     const ex = piExecutor();
     assert.deepEqual(ex.sandboxAuthFile({ homeDir: "/home/user", dataDir: "/state/run", spawnEnv: { PI_CODING_AGENT_DIR: "/custom/pi" }, existsFn: (p) => p === "/custom/pi/auth.json" }), {
       extraRoBinds: [["/custom/pi/auth.json", "/state/run/pi-data/auth.json"]],
+      extraRwPairBinds: [],
       sandboxedDataHome: "/state/run/pi-data",
       sandboxEnv: { PI_CODING_AGENT_DIR: "/state/run/pi-data" },
     });
@@ -83,6 +84,25 @@ describe("piExecutor()", () => {
     const ex = piExecutor();
     const result = ex.sandboxAuthFile({ homeDir: "/home/user", dataDir: "/state/run", spawnEnv: { PI_CODING_AGENT_DIR: "/custom/pi" }, existsFn: (p) => p === "/custom/pi/auth.json" });
     assert.deepEqual(result.extraRoBinds, [["/custom/pi/auth.json", "/state/run/pi-data/auth.json"]]);
+  });
+
+  test("sandboxAuthFile binds the real sessions directory read-write (not read-only), since pi writes to the session file in place on resume", () => {
+    const ex = piExecutor();
+    const result = ex.sandboxAuthFile({
+      homeDir: "/home/user",
+      dataDir: "/state/run",
+      spawnEnv: { PI_CODING_AGENT_DIR: "/custom/pi" },
+      existsFn: (p) => p === "/custom/pi/auth.json" || p === "/custom/pi/sessions",
+    });
+    assert.deepEqual(result.extraRoBinds, [["/custom/pi/auth.json", "/state/run/pi-data/auth.json"]]);
+    assert.deepEqual(result.extraRwPairBinds, [["/custom/pi/sessions", "/state/run/pi-data/sessions"]]);
+  });
+
+  test("sandboxAuthFile omits the sessions bind when the real sessions directory doesn't exist", () => {
+    const ex = piExecutor();
+    const result = ex.sandboxAuthFile({ homeDir: "/home/user", dataDir: "/state/run", spawnEnv: { PI_CODING_AGENT_DIR: "/custom/pi" }, existsFn: (p) => p === "/custom/pi/auth.json" });
+    assert.deepEqual(result.extraRoBinds, [["/custom/pi/auth.json", "/state/run/pi-data/auth.json"]]);
+    assert.deepEqual(result.extraRwPairBinds, []);
   });
 });
 

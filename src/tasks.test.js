@@ -3617,6 +3617,57 @@ describe("summarize()", () => {
     for (const child of spawned) child.emit("exit", 0, null);
   });
 
+  test("summary cache separates entries across opencode catalog/auth overrides and provider base-URL overrides", async () => {
+    // Review follow-up to fix 1: the original fingerprint covered
+    // *_API_KEY / OPENCODE_CONFIG* / PI_CODING_AGENT_DIR only. But
+    // OPENCODE_MODELS_URL / OPENCODE_MODELS_PATH point opencode at a
+    // different model catalog, OPENCODE_AUTH_CONTENT carries inline auth
+    // (the sibling of the already-covered OPENCODE_CONFIG_CONTENT), and
+    // *_BASE_URL endpoint overrides change which catalog a provider
+    // exposes (corporate proxies, self-hosted endpoints). Two callers
+    // differing only in one of these must not share a cache entry.
+    /** @type {Array<EventEmitter>} */
+    const spawned = [];
+    let listModelsCalls = 0;
+    const mgr = makeManager({
+      tasksFixture: (logDir) => [
+        baseTask({ id: "srcA", status: "done", logPath: path.join(logDir, "srcA.ndjson") }),
+        baseTask({ id: "srcB", status: "done", logPath: path.join(logDir, "srcB.ndjson") }),
+      ],
+      logs: {
+        "srcA.ndjson": JSON.stringify({ type: "text", part: { messageID: "m1", text: "did the A thing" } }) + "\n",
+        "srcB.ndjson": JSON.stringify({ type: "text", part: { messageID: "m1", text: "did the B thing" } }) + "\n",
+      },
+      listModelsFn: async () => {
+        listModelsCalls++;
+        return `${DEFAULT_SUMMARY_MODEL}\n`;
+      },
+      spawnFn: () => {
+        const child = fakeChild();
+        spawned.push(child);
+        return child;
+      },
+    });
+
+    await mgr.summarize("srcA", { env: { OPENAI_API_KEY: "same", OPENCODE_MODELS_URL: "https://catalog-1" } });
+    assert.equal(listModelsCalls, 1, "first caller populates");
+
+    await mgr.summarize("srcB", { env: { OPENAI_API_KEY: "same", OPENCODE_MODELS_URL: "https://catalog-2" } });
+    assert.equal(listModelsCalls, 2, "different OPENCODE_MODELS_URL must not share a cache entry");
+
+    await mgr.summarize("srcA", { env: { OPENAI_API_KEY: "same", OPENCODE_MODELS_PATH: "/models-1.json" } });
+    assert.equal(listModelsCalls, 3, "OPENCODE_MODELS_PATH is in the fingerprint");
+
+    await mgr.summarize("srcB", { env: { OPENAI_API_KEY: "same", OPENCODE_AUTH_CONTENT: '{"auth":"a"}' } });
+    await mgr.summarize("srcA", { env: { OPENAI_API_KEY: "same", OPENCODE_AUTH_CONTENT: '{"auth":"b"}' } });
+    assert.equal(listModelsCalls, 5, "different OPENCODE_AUTH_CONTENT must not share a cache entry");
+
+    await mgr.summarize("srcB", { env: { OPENAI_API_KEY: "same", OPENAI_BASE_URL: "https://proxy.internal" } });
+    assert.equal(listModelsCalls, 6, "a *_BASE_URL endpoint override is in the fingerprint");
+
+    for (const child of spawned) child.emit("exit", 0, null);
+  });
+
   test("summary cache TTL still expires per-key after 5 minutes (a stale entry must not be served indefinitely)", async (t) => {
     // Fix 1: re-keying on env does not break the existing 5-minute TTL.
     // After the TTL window elapses, the next call must re-shell-out for

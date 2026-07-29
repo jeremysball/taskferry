@@ -1065,12 +1065,18 @@ export function createTaskManager({
    * Fingerprint of the caller env's model-relevant subset: which keys and
    * values determine which models a provider exposes to opencode/pi.
    * Includes every `*_API_KEY` suffix (any provider credential a user can
-   * name), the opencode config-path overrides (custom providers, redirects
-   * the opencode CLI to a different config tree that may register more),
-   * and `PI_CODING_AGENT_DIR` (the per-user pi state root whose auth.json
-   * gates which providers pi can list). Intentionally excludes unrelated
-   * caller vars -- PATH, LANG, USER, ... -- so trivial cosmetic
-   * differences don't fragment the cache into per-call entries.
+   * name), every `*_BASE_URL` suffix (provider endpoint overrides -- a
+   * corporate proxy or self-hosted endpoint exposes a different catalog
+   * than the stock API host), the opencode config/model-list/auth
+   * overrides (`OPENCODE_CONFIG*`, `OPENCODE_AUTH_CONTENT`,
+   * `OPENCODE_MODELS_PATH`, `OPENCODE_MODELS_URL` -- the latter three
+   * each verified to change `opencode models` output), and
+   * `PI_CODING_AGENT_DIR` (the per-user pi state root whose auth.json
+   * gates which providers pi can list). Known gaps: provider vars with
+   * no suffix pattern (e.g. `OLLAMA_HOST`, Vertex location/project vars).
+   * Intentionally excludes unrelated caller vars -- PATH, LANG, USER,
+   * ... -- so trivial cosmetic differences don't fragment the cache into
+   * per-call entries.
    * @param {NodeJS.ProcessEnv} env
    * @returns {string}
    */
@@ -1080,9 +1086,13 @@ export function createTaskManager({
     for (const name of Object.keys(env)) {
       if (
         name.endsWith("_API_KEY")
+        || name.endsWith("_BASE_URL")
         || name === "OPENCODE_CONFIG"
         || name === "OPENCODE_CONFIG_DIR"
         || name === "OPENCODE_CONFIG_CONTENT"
+        || name === "OPENCODE_AUTH_CONTENT"
+        || name === "OPENCODE_MODELS_PATH"
+        || name === "OPENCODE_MODELS_URL"
         || name === "PI_CODING_AGENT_DIR"
       ) {
         parts.push(`${name}=${env[name]}`);

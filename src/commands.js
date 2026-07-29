@@ -181,7 +181,12 @@ export async function runCommand(command, options, { client, io = process, signa
         taskId: options.taskId,
         ...(options.maxWords === undefined ? {} : { maxWords: options.maxWords }),
         ...(options.mode === "activity" ? { mode: options.mode } : {}),
-        env,
+        // env is omitted on the activity path: protocol.js rejects env +
+        // mode "activity" because the activity path reads the cached task
+        // activity and spawns nothing, so there is no process to forward
+        // caller env into. Report mode (the default) and any future mode
+        // keep forwarding env exactly as before.
+        ...(options.mode === "activity" ? {} : { env }),
       });
       return options.mode === "report" ? summary : { mode: options.mode, ...summary };
     }

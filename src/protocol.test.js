@@ -231,6 +231,31 @@ describe("private daemon protocol", () => {
     assert.deepEqual(parsed.params.env, { FOO: "bar" });
   });
 
+  test("task.summary accepts env alongside mode \"report\"", () => {
+    const parsed = parseRequestLine(request("task.summary", {
+      taskId: "oc_123",
+      mode: "report",
+      env: { FOO: "bar" },
+    }));
+    assert.deepEqual(parsed.params.env, { FOO: "bar" });
+    assert.equal(parsed.params.mode, "report");
+  });
+
+  test("task.summary rejects env with mode \"activity\" as an INVALID_PARAMS validation error (not a silent drop)", () => {
+    assert.throws(
+      () => parseRequestLine(request("task.summary", {
+        taskId: "oc_123",
+        mode: "activity",
+        env: { FOO: "bar" },
+      })),
+      (error) => error instanceof ProtocolError
+        && error.code === "INVALID_PARAMS"
+        && /mode "activity"/.test(error.message)
+        && /env/.test(error.message)
+        && /Omit env/.test(error.help)
+    );
+  });
+
   test("task.summary rejects an env value with a non-string entry", () => {
     assert.throws(
       () => parseRequestLine(request("task.summary", {

@@ -708,6 +708,36 @@ test("summary forwards the caller's env to the RPC payload", async () => {
   assert.deepEqual(capturedParams.env, injectedEnv);
 });
 
+test("summary --mode activity omits env from the RPC payload (protocol rejects env + mode activity)", async () => {
+  let capturedParams;
+  const client = {
+    request: async (method, params) => {
+      capturedParams = params;
+      return { sourceTaskId: "t1", summary: "activity summary" };
+    },
+  };
+  const injectedEnv = { FOO: "bar" };
+  await runCommand("summary", { taskId: "t1", mode: "activity" }, { client, env: injectedEnv });
+  assert.equal(capturedParams.env, undefined, "activity-mode summary must not carry env");
+  assert.equal(capturedParams.mode, "activity");
+});
+
+test("summary --mode report still forwards the caller's env to the RPC payload", async () => {
+  let capturedParams;
+  const client = {
+    request: async (method, params) => {
+      capturedParams = params;
+      return { sourceTaskId: "t1", summary: "report summary" };
+    },
+  };
+  const injectedEnv = { FOO: "bar" };
+  await runCommand("summary", { taskId: "t1", mode: "report" }, { client, env: injectedEnv });
+  assert.deepEqual(capturedParams.env, injectedEnv);
+  // mode "report" is the args-layer default; commands.js only emits the mode
+  // field on the wire when it differs from that default (i.e. "activity").
+  assert.equal("mode" in capturedParams, false);
+});
+
 test("dispatch refuses to run when the generated skill copies are stale", async () => {
   const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-commands-test-")));
   const client = {

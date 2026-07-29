@@ -134,12 +134,23 @@ function validParams(method, params) {
       return hasOnly(params, ["taskId", "chars"])
         && isNonEmptyString(params.taskId)
         && optional(params.chars, (value) => positiveInteger(value) && value <= 65536);
-    case "task.summary":
+    case "task.summary": {
+      if (params.env !== undefined && params.mode === "activity") {
+        // env is meaningless on the activity path -- it reads the cached
+        // task activity and spawns nothing, so there's no process to forward
+        // caller env into. A caller passing it is expressing an intent the
+        // daemon can't honor; reject here so direct RPC callers see a clean
+        // error instead of silently dropping the field. The CLI gates this
+        // on its end too (commands.js), so a normal `taskferry summary
+        // --mode activity` never sends the combination.
+        return false;
+      }
       return hasOnly(params, ["taskId", "maxWords", "mode", "env"])
         && isNonEmptyString(params.taskId)
         && optional(params.maxWords, (value) => Number.isSafeInteger(value) && /** @type {number} */ (value) >= 75 && /** @type {number} */ (value) <= 300)
         && optional(params.mode, (value) => value === "report" || value === "activity")
         && optional(params.env, isEnvironment);
+    }
     case "task.advisor":
       return hasOnly(params, ["prompt", "directory", "model", "variant", "sessionId", "env", "timeoutMs", "executor"])
         && isNonEmptyString(params.prompt)
@@ -210,6 +221,14 @@ export function parseRequestLine(line) {
     );
   }
   if (!validParams(value.method, value.params)) {
+    if (value.method === "task.summary" && value.params.env !== undefined && value.params.mode === "activity") {
+      throw new ProtocolError(
+        "INVALID_PARAMS",
+        "task.summary does not accept env with mode \"activity\"",
+        "Omit env, or use mode \"report\" so the spawned summary child can forward caller env",
+        requestId
+      );
+    }
     throw new ProtocolError(
       "INVALID_PARAMS",
       `invalid params for ${value.method}`,

@@ -156,6 +156,55 @@ describe("private daemon protocol", () => {
     );
   });
 
+  test("task.dispatch accepts an optional env object of string values", () => {
+    const parsed = parseRequestLine(request("task.dispatch", {
+      prompt: "hi",
+      directory: "/tmp/project",
+      env: { FOO: "bar", EMPTY: "" },
+    }));
+    assert.deepEqual(parsed.params.env, { FOO: "bar", EMPTY: "" });
+  });
+
+  test("task.dispatch rejects an env value with a non-string entry", () => {
+    assert.throws(
+      () => parseRequestLine(request("task.dispatch", {
+        prompt: "hi",
+        directory: "/tmp/project",
+        env: { FOO: 42 },
+      })),
+      (error) => error instanceof ProtocolError && error.code === "INVALID_PARAMS"
+    );
+  });
+
+  test("task.dispatch no longer accepts keySlot", () => {
+    assert.throws(
+      () => parseRequestLine(request("task.dispatch", {
+        prompt: "hi",
+        directory: "/tmp/project",
+        keySlot: "primary",
+      })),
+      (error) => error instanceof ProtocolError && error.code === "INVALID_PARAMS"
+    );
+  });
+
+  test("task.advisor accepts an optional env object", () => {
+    const parsed = parseRequestLine(request("task.advisor", {
+      prompt: "hi",
+      directory: "/tmp/project",
+      model: "m",
+      env: { FOO: "bar" },
+    }));
+    assert.deepEqual(parsed.params.env, { FOO: "bar" });
+  });
+
+  test("task.summary accepts an optional env object", () => {
+    const parsed = parseRequestLine(request("task.summary", {
+      taskId: "oc_123",
+      env: { FOO: "bar" },
+    }));
+    assert.deepEqual(parsed.params.env, { FOO: "bar" });
+  });
+
   test("event.subscribe accepts an optional originSessionId string", () => {
     const parsed = parseRequestLine(request("event.subscribe", {
       directory: "/tmp/project",

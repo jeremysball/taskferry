@@ -30,7 +30,6 @@ export const RESULT_FIELDS = new Set([
   "spawnError",
   "failureReason",
   "failureDetail",
-  "keySlot",
   "logPath",
   "incomplete",
   "finalMarker",
@@ -81,13 +80,13 @@ function validParams(method, params) {
     case "system.health":
       return hasOnly(params, []);
     case "task.dispatch":
-      return hasOnly(params, ["prompt", "directory", "model", "variant", "sessionId", "keySlot", "finalMarker", "originSessionId", "noSandbox", "allowedDirs", "executor"])
+      return hasOnly(params, ["prompt", "directory", "model", "variant", "sessionId", "env", "finalMarker", "originSessionId", "noSandbox", "allowedDirs", "executor"])
         && isNonEmptyString(params.prompt)
         && isAbsolutePath(params.directory)
         && optional(params.model, isNonEmptyString)
         && optional(params.variant, isNonEmptyString)
         && optional(params.sessionId, isNonEmptyString)
-        && optional(params.keySlot, isNonEmptyString)
+        && optional(params.env, (value) => isObject(value) && Object.values(value).every((entry) => typeof entry === "string"))
         && optional(params.finalMarker, isNonEmptyString)
         && optional(params.originSessionId, isNonEmptyString)
         && optional(params.noSandbox, (value) => typeof value === "boolean")
@@ -116,18 +115,20 @@ function validParams(method, params) {
         && isNonEmptyString(params.taskId)
         && optional(params.chars, (value) => positiveInteger(value) && value <= 65536);
     case "task.summary":
-      return hasOnly(params, ["taskId", "maxWords", "mode"])
+      return hasOnly(params, ["taskId", "maxWords", "mode", "env"])
         && isNonEmptyString(params.taskId)
         && optional(params.maxWords, (value) => Number.isSafeInteger(value) && /** @type {number} */ (value) >= 75 && /** @type {number} */ (value) <= 300)
-        && optional(params.mode, (value) => value === "report" || value === "activity");
+        && optional(params.mode, (value) => value === "report" || value === "activity")
+        && optional(params.env, (value) => isObject(value) && Object.values(value).every((entry) => typeof entry === "string"));
     case "task.advisor":
-      return hasOnly(params, ["prompt", "directory", "model", "variant", "sessionId", "timeoutMs", "executor"])
+      return hasOnly(params, ["prompt", "directory", "model", "variant", "sessionId", "env", "timeoutMs", "executor"])
         && isNonEmptyString(params.prompt)
         && isAbsolutePath(params.directory)
         && isNonEmptyString(params.model)
         && optional(params.variant, isNonEmptyString)
         && optional(params.sessionId, isNonEmptyString)
         && optional(params.timeoutMs, nonNegativeInteger)
+        && optional(params.env, (value) => isObject(value) && Object.values(value).every((entry) => typeof entry === "string"))
         && optional(params.executor, (value) => typeof value === "string" && KNOWN_EXECUTORS.includes(value));
     case "task.context":
       return hasOnly(params, ["directory"]) && isAbsolutePath(params.directory);

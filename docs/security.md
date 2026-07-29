@@ -31,63 +31,56 @@ redaction step. Treat the logs directory with the same care as any other
 credential-adjacent local state, and see [Activity summaries](#activity-summaries) below for the one
 place log content leaves the local machine.
 
-## Provider key slots
+## Caller-env forwarding
 
 By default, a dispatched task inherits the daemon's own process
-environment, so it authenticates the same way the daemon does. Key slots
-let a single daemon dispatch some tasks under a different provider
-credential without ever putting that credential in a tool call, a log, or
-task state.
+environment, so it authenticates the same way the daemon does. On top of
+that, `taskferry dispatch`, `taskferry advisor`, and `taskferry summary`
+(report mode — the default) each forward the *calling* process's own
+environment to the daemon over the same socket, which the daemon unions on
+top of its own ambient environment before spawning — caller wins.
 
-- `TASKFERRY_KEY_SLOTS`: a comma-separated registry mapping a slot name to
-  the *source* environment variable holding that key, e.g.
-  `TASKFERRY_KEY_SLOTS=primary:OPENCODE_GO_API_KEY,backup:OPENCODE_GO_API_KEY_BACKUP`.
-- `TASKFERRY_PROVIDER_KEY_ENV`: the environment variable name the
-  `opencode` child actually reads for its provider key (e.g.
-  `OPENCODE_GO_API_KEY`). The selected slot's source value is copied into
-  *this* variable in the child's environment only — never into task state,
-  logs, prompts, or CLI output.
-- Pass `--key-slot <name>` to `taskferry dispatch` to pick a configured slot
-  for that task. An unconfigured, unknown, or unset-source slot fails
-  immediately, before anything spawns.
-- `TASKFERRY_SUMMARY_KEY_SLOT` / `TASKFERRY_SUMMARY_PROVIDER_KEY_ENV`: the
-  separate key slot and target variable used for `taskferry summary`'s
-  report-style child. A source task's own `--key-slot` never transfers to
-  its summary task.
-- The daemon only sees environment values present at its own startup;
-  restart it after changing any of these variables (see
-  [daemon.md](daemon.md#auto-start)).
-- If a dispatched model's provider is the one `TASKFERRY_PROVIDER_KEY_ENV`
-  targets (matched by convention, e.g. `openrouter/...` against
-  `OPENROUTER_API_KEY`) and no key resolves for it — neither the ambient
-  variable nor a `--key-slot` — `dispatch` fails immediately with a clear
-  error instead of spawning `opencode` and getting an opaque crash deep in
-  the child.
-- Every dispatched child's environment has every registered slot *source*
-  variable stripped, whether or not that dispatch used a slot — so an
-  unslotted task never accidentally inherits a backup key meant to stay
-  opt-in. If `TASKFERRY_PROVIDER_KEY_ENV` happens to share a name with a
-  slot's source variable (the natural setup — the ambient key and a slot
-  both point at `OPENCODE_GO_API_KEY`), the ambient value is restored after
-  stripping, so an unslotted dispatch still authenticates normally.
-
-To use a backup slot, start with both source variables available in your
-shell, then install the mapping into the daemon's environment before the
-first command that would auto-start it:
+- The daemon and every caller run as the same local user over a `0600`
+  socket (see "Filesystem and socket permissions" above) — there's no
+  trust boundary being crossed by a live caller handing over its own
+  environment, since a caller can already read the daemon's own ambient
+  env via `/proc` and run arbitrary code via dispatch prompts.
+- A fixed set of daemon-controlled plumbing variables can never be
+  overridden by a caller's env, regardless of what it sets: `PATH`,
+  `HOME`, `TASKFERRY_STATE_DIR`, `TASKFERRY_RUNTIME_DIR`,
+  `TASKFERRY_CACHE_DIR`, `TASKFERRY_SOCKET_PATH`. These are resolved once
+  at the daemon's own startup; letting a caller override any of them (most
+  notably `TASKFERRY_SOCKET_PATH`) could misroute a nested `taskferry`
+  call made from inside a dispatched worker.
+- `TASKFERRY_ENV_DENYLIST` (or the `envDenylist` config field): a
+  comma-separated list of env var names an operator wants permanently
+  stripped from every spawned child, whether the value came from the
+  daemon's own ambient environment or from a caller's forwarded env. This
+  is the mechanism for permanently retiring a stale or unwanted variable
+  (e.g. a leftover `PI_CODING_AGENT_DIR` in the daemon's own launch
+  environment) without needing every caller to remember to unset it. It's
+  also the mechanism for an operator who wants to block a specific caller
+  env value from ever reaching a spawned child on principle — e.g.
+  `LD_PRELOAD` or `LD_LIBRARY_PATH`, which aren't in the fixed excluded set
+  above and would otherwise propagate from caller to child unmodified.
+- No restart is needed to pick up a new key: exporting a fresh provider
+  key in your own shell before running `taskferry dispatch` (or
+  `advisor`/`summary`) is enough — the daemon sees it on that call, live,
+  because the caller forwards its own environment on every such call.
+- There is no per-call opt-out for this forwarding. A missing or invalid
+  credential now surfaces as a failure from inside the spawned worker
+  itself (classified by the same provider-failure-bucket parser that
+  already handles `pi_authentication_failed` and similar), not as an
+  upfront `dispatch` error.
 
 ```bash
 export OPENCODE_GO_API_KEY="..."
-export OPENCODE_GO_API_KEY_BACKUP="..."
-export TASKFERRY_KEY_SLOTS="primary:OPENCODE_GO_API_KEY,backup:OPENCODE_GO_API_KEY_BACKUP"
-export TASKFERRY_PROVIDER_KEY_ENV="OPENCODE_GO_API_KEY"
-taskferry doctor   # first command in this shell auto-starts the daemon with these set
+taskferry dispatch --prompt "review this diff" --directory /repo
 ```
 
-Then select the slot per dispatch:
-
-```bash
-taskferry dispatch --prompt "review this diff" --directory /repo --key-slot backup
-```
+The exported key above is visible to `taskferry dispatch` because it's
+forwarded from the calling shell's own environment on that call — no
+daemon restart, no key-slot registry.
 
 ## Activity summaries
 

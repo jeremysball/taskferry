@@ -38,12 +38,16 @@ and burns wall-clock time versus just doing it.
 
 ## Worker Contract
 
-- Select the worker model, variant, and optional key slot explicitly when the task
-  needs them: `taskferry dispatch --prompt - --directory "<worktree>" --model
-  <provider/model> --variant <name> --key-slot <name> <<'PROMPT_EOF'` ... `PROMPT_EOF`.
-- State the exact `provider/model` slug (and variant/key-slot, if set) being
+- Select the worker model and variant explicitly when the task needs them:
+  `taskferry dispatch --prompt - --directory "<worktree>" --model
+  <provider/model> --variant <name> <<'PROMPT_EOF'` ... `PROMPT_EOF`.
+- State the exact `provider/model` slug (and variant, if set) being
   dispatched in your response to the user, not just in the shell command — the
-  user shouldn't have to read the command to know what's running.
+  user shouldn't have to read the command to know what's running. `dispatch`/
+  `advisor`/`summary` (report mode) forward your own shell's environment to
+  the daemon on every call, with no per-call opt-out — export a fresh
+  provider key before dispatching and it's visible immediately, no daemon
+  restart needed.
 - Both `dispatch` and `advisor` also accept `--executor <opencode|pi>` to pick
   which worker CLI is spawned. Omit it to use the configured default (built-in:
   `pi`, but a workspace can set `TASKFERRY_DEFAULT_EXECUTOR` or
@@ -123,7 +127,7 @@ risky, security-sensitive, or has already failed on a lighter model.
   context than a standard-tier model that finishes clean. Reserve the cheapest
   tier for implementers whose brief already contains the exact code to
   write (transcription plus testing) and single-file mechanical fixes.
-- **Provider-specific availability rules (time windows, key-slot limits,
+- **Provider-specific availability rules (time windows, credential limits,
   single-in-flight constraints) are account state and live outside this
   skill** — in your CLAUDE.md, or a personal skill covering provider
   availability. Check it before dispatching to a gated provider, and pick an

@@ -38,7 +38,7 @@ Argument shapes carry over directly: an MCP call like
 `taskferry_dispatch({ prompt: "...", directory: "/repo", model: "..." })`
 becomes `taskferry dispatch --prompt "..." --directory "/repo" --model
 "..."`. camelCase MCP parameter names map to `--kebab-case` flags
-(`session_id` → `--session-id`, `key_slot` → `--key-slot`, `max_words` →
+(`session_id` → `--session-id`, `max_words` →
 `--max-words`).
 
 `taskferry_list()` took no arguments and always listed every task; `taskferry

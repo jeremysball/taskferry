@@ -109,7 +109,7 @@ import { resolveExecutor, opencodeExecutor } from "./executor.js";
  * @property {"summary"} kind
  * @property {string} model
  * @property {string} snapshotPath
- * @property {NodeJS.ProcessEnv} env
+ * @property {NodeJS.ProcessEnv} [env]   caller env snapshot (cloned at request time, same as dispatch's capturedEnv). Computed into the final env at spawn time by startTask().
  * @property {string} [summarySessionId]  opencode session id to continue on this turn, if any
  * @property {import("./executor.js").WorkerExecutor} executor
  */
@@ -670,7 +670,20 @@ export function createTaskManager({
   /** @type {NodeJS.Timeout|null} */
   let launchTimer = null;
   let runningCount = 0;
-  let modelsCache = { expiresAt: 0, output: "" };
+  // Per-caller cache of provider model listings: keyed by a fingerprint of
+  // the caller env's model-relevant vars (provider API keys, opencode
+  // config-path overrides, pi agent dir), not by time alone. Two callers
+  // with different credentials must not read each other's listings -- the
+  // shared single-entry cache used to let caller A's listModelsFn output
+  // satisfy caller B's availability check (and let two concurrent populate
+  // writes interleave). The 5-minute TTL still applies per entry.
+  // `modelsCacheInFlight` coalesces concurrent reads for the same key so
+  // the underlying `opencode models` shell-out runs at most once per
+  // fingerprint per TTL window.
+  /** @type {Map<string, {expiresAt: number, output: string}>} */
+  const modelsCache = new Map();
+  /** @type {Map<string, Promise<{expiresAt: number, output: string}>>} */
+  const modelsCacheInFlight = new Map();
   let activitySummarySubscriptions = 0;
   /** @type {Map<string, Set<boolean>>} */
   const activitySubscriptions = new Map();
@@ -1026,6 +1039,14 @@ export function createTaskManager({
     // what's already queued for spawn. dispatchEnvironment() still reads
     // process.env fresh at spawn time, so the daemon's own ambient overrides
     // track process state, not the dispatch-time snapshot.
+    //
+    // Note: this clone is NOT redundant despite what one might guess from
+    // sanitizedEnvironment()'s one-pass merge -- it reads Object.keys() and
+    // each value lazily at spawn time, so without this snapshot a caller
+    // mutating their original env object between queue time and the queued
+    // launch's actual spawn would change what reaches the child. Pinned by
+    // tasks.test.js's "dispatch()'s queued env is frozen against later
+    // caller mutations" gate; removing the clone makes that test fail.
     const capturedEnv = env === undefined ? undefined : { ...env };
     pendingLaunches.set(id, { prompt, directory: normalizedDirectory, model: resolvedModel, variant: task.variant, sessionId, env: capturedEnv, noSandbox: noSandbox === true, allowedDirs: dispatchAllowedDirs, executor });
     launchQueue.push(id);
@@ -1038,6 +1059,37 @@ export function createTaskManager({
         ? `Task is queued; run taskferry wait or taskferry status with task id "${id}" to check when it starts`
         : `Run taskferry wait or taskferry status with task id "${id}" to check progress`,
     };
+  }
+
+  /**
+   * Fingerprint of the caller env's model-relevant subset: which keys and
+   * values determine which models a provider exposes to opencode/pi.
+   * Includes every `*_API_KEY` suffix (any provider credential a user can
+   * name), the opencode config-path overrides (custom providers, redirects
+   * the opencode CLI to a different config tree that may register more),
+   * and `PI_CODING_AGENT_DIR` (the per-user pi state root whose auth.json
+   * gates which providers pi can list). Intentionally excludes unrelated
+   * caller vars -- PATH, LANG, USER, ... -- so trivial cosmetic
+   * differences don't fragment the cache into per-call entries.
+   * @param {NodeJS.ProcessEnv} env
+   * @returns {string}
+   */
+  function modelsCacheFingerprint(env = {}) {
+    /** @type {string[]} */
+    const parts = [];
+    for (const name of Object.keys(env)) {
+      if (
+        name.endsWith("_API_KEY")
+        || name === "OPENCODE_CONFIG"
+        || name === "OPENCODE_CONFIG_DIR"
+        || name === "OPENCODE_CONFIG_CONTENT"
+        || name === "PI_CODING_AGENT_DIR"
+      ) {
+        parts.push(`${name}=${env[name]}`);
+      }
+    }
+    parts.sort();
+    return parts.join("\n");
   }
 
   /**
@@ -1055,14 +1107,33 @@ export function createTaskManager({
    * @param {NodeJS.ProcessEnv} env
    */
   async function summaryModelAvailable(model, env) {
-    if (Date.now() >= modelsCache.expiresAt) {
-      try {
-        modelsCache = { expiresAt: Date.now() + 5 * 60 * 1000, output: await listModelsFn(env) };
-      } catch (err) {
-        throw new Error(`error: could not list available OpenCode models: ${errMessage(err)}\nhelp: verify that opencode is installed and authenticated, then retry taskferry summary`, { cause: err });
+    const fingerprint = modelsCacheFingerprint(env);
+    let entry = modelsCache.get(fingerprint);
+    const now = Date.now();
+    if (!entry || now >= entry.expiresAt) {
+      let inFlight = modelsCacheInFlight.get(fingerprint);
+      if (!inFlight) {
+        inFlight = (async () => {
+          try {
+            const output = await listModelsFn(env);
+            const result = { expiresAt: Date.now() + 5 * 60 * 1000, output };
+            modelsCache.set(fingerprint, result);
+            return result;
+          } catch (err) {
+            throw new Error(`error: could not list available OpenCode models: ${errMessage(err)}\nhelp: verify that opencode is installed and authenticated, then retry taskferry summary`, { cause: err });
+          } finally {
+            modelsCacheInFlight.delete(fingerprint);
+          }
+        })();
+        modelsCacheInFlight.set(fingerprint, inFlight);
       }
+      await inFlight;
+      // The populate either set the cache entry (success) or threw (we
+      // never reach this line). The non-null assertion is just to placate
+      // TypeScript, which can't track the await-vs-set dependency.
+      entry = /** @type {{expiresAt: number, output: string}} */ (modelsCache.get(fingerprint));
     }
-    if (!modelsCache.output.split("\n").some((line) => line.trim() === model)) {
+    if (!entry.output.split("\n").some((line) => line.trim() === model)) {
       throw new Error(`error: summary model is unavailable: ${model}\nhelp: set TASKFERRY_SUMMARY_MODEL to an installed model, then retry taskferry summary`);
     }
   }
@@ -1369,8 +1440,16 @@ export function createTaskManager({
       snapshot.narration = `Task prompt: ${prompt}`;
       snapshot.inputBytes = Buffer.byteLength(snapshot.narration);
     }
-    const resolvedEnv = summaryEnvironment(env);
-    await summaryModelAvailable(activitySummaryModel, resolvedEnv);
+    // Clone the caller env at request time (same defensive snapshot as
+    // dispatch() applies, for the same reason: a queued summary launch
+    // must not be vulnerable to post-queue caller mutations of the
+    // original env object). The summary env itself -- the daemon's ambient
+    // overlay plus the OPENCODE_CONFIG* strip -- is computed at spawn time
+    // by startTask() below, mirroring how dispatch() defers
+    // dispatchEnvironment() until spawn so the spawned summary child sees
+    // the daemon's current process.env, not a request-time snapshot.
+    const queuedCallerEnv = env === undefined ? undefined : { ...env };
+    await summaryModelAvailable(activitySummaryModel, queuedCallerEnv ?? {});
 
     // Task IDs retain the literal "oc_" prefix for compatibility; WorkerExecutor.taskIdPrefix is not wired in this issue.
     const id = `oc_${Date.now().toString(36)}_${randomUUID().slice(0, 8)}`;
@@ -1426,7 +1505,7 @@ export function createTaskManager({
       kind: "summary",
       model: activitySummaryModel,
       snapshotPath,
-      env: resolvedEnv,
+      env: queuedCallerEnv,
       executor: opencodeExecutor(),
       ...(resolvedSummarySessionId ? { summarySessionId: resolvedSummarySessionId } : {}),
     });
@@ -1518,7 +1597,7 @@ export function createTaskManager({
       if (promptFilePath) fs.writeFileSync(promptFilePath, dispatchLaunch.prompt, { mode: 0o600, flag: "wx" });
       logFd = fs.openSync(task.logPath, "a", 0o600);
       fs.chmodSync(task.logPath, 0o600);
-      let spawnEnv = isSummary ? summaryLaunch.env : dispatchEnvironment(dispatchLaunch.env);
+      let spawnEnv = isSummary ? summaryEnvironment(summaryLaunch.env) : dispatchEnvironment(dispatchLaunch.env);
       const noSandbox = !isSummary && dispatchLaunch.noSandbox === true;
       let spawnCommand = executor.binaryName;
       let spawnArgs = args;

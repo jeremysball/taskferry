@@ -3501,6 +3501,201 @@ describe("summarize()", () => {
     assert.equal(injectedCalled, true, "explicit listModelsFn injection must take precedence over the opencode default");
   });
 
+  test("summary cache keeps separate entries for caller envs with different provider keys (no cross-caller pollution)", async () => {
+    // Fix 1: the old single-entry cache meant caller A's listModelsFn output
+    // (the model list opencode exposed under A's API keys) would satisfy
+    // caller B's availability check, even though B has different credentials
+    // and a different visible model list. Two summarize() calls with
+    // different provider keys must populate and read separate cache entries,
+    // each rooted in its own env.
+    /** @type {Array<EventEmitter>} */
+    const spawned = [];
+    let listModelsCalls = 0;
+    const mgr = makeManager({
+      tasksFixture: (logDir) => [
+        baseTask({ id: "srcA", status: "done", logPath: path.join(logDir, "srcA.ndjson") }),
+        baseTask({ id: "srcB", status: "done", logPath: path.join(logDir, "srcB.ndjson") }),
+      ],
+      logs: {
+        "srcA.ndjson": JSON.stringify({ type: "text", part: { messageID: "m1", text: "did the A thing" } }) + "\n",
+        "srcB.ndjson": JSON.stringify({ type: "text", part: { messageID: "m1", text: "did the B thing" } }) + "\n",
+      },
+      listModelsFn: async (env) => {
+        listModelsCalls++;
+        // Env A sees model-A; env B does NOT (and vice versa). If the cache
+        // ever cross-polluted, the second summarize would read the first
+        // call's cached output and the wrong model list would reach the
+        // availability check for the other caller.
+        if (env.OPENAI_API_KEY === "AAA") return `${DEFAULT_SUMMARY_MODEL}\nopenai/gpt-A-only\n`;
+        if (env.OPENAI_API_KEY === "BBB") return `${DEFAULT_SUMMARY_MODEL}\nopenai/gpt-B-only\n`;
+        return `${DEFAULT_SUMMARY_MODEL}\n`;
+      },
+      spawnFn: () => {
+        const child = fakeChild();
+        spawned.push(child);
+        return child;
+      },
+    });
+
+    await mgr.summarize("srcA", { env: { OPENAI_API_KEY: "AAA" } });
+    assert.equal(listModelsCalls, 1, "first caller populates its own cache entry");
+
+    await mgr.summarize("srcB", { env: { OPENAI_API_KEY: "BBB" } });
+    assert.equal(listModelsCalls, 2, "second caller (different provider key) must populate a separate cache entry, not read the first caller's");
+
+    for (const child of spawned) child.emit("exit", 0, null);
+  });
+
+  test("summary cache shares an entry for identical caller envs (one listModelsFn call within the TTL)", async () => {
+    // Fix 1: opposite of the cross-pollution case. Two callers with the
+    // same provider-relevant env must share the cache entry -- otherwise
+    // every dispatch would re-shell-out to `opencode models`, defeating
+    // the original 5-minute memoization purpose.
+    /** @type {Array<EventEmitter>} */
+    const spawned = [];
+    let listModelsCalls = 0;
+    const mgr = makeManager({
+      tasksFixture: (logDir) => [
+        baseTask({ id: "srcA", status: "done", logPath: path.join(logDir, "srcA.ndjson") }),
+        baseTask({ id: "srcB", status: "done", logPath: path.join(logDir, "srcB.ndjson") }),
+      ],
+      logs: {
+        "srcA.ndjson": JSON.stringify({ type: "text", part: { messageID: "m1", text: "did the A thing" } }) + "\n",
+        "srcB.ndjson": JSON.stringify({ type: "text", part: { messageID: "m1", text: "did the B thing" } }) + "\n",
+      },
+      listModelsFn: async () => {
+        listModelsCalls++;
+        return `${DEFAULT_SUMMARY_MODEL}\n`;
+      },
+      spawnFn: () => {
+        const child = fakeChild();
+        spawned.push(child);
+        return child;
+      },
+    });
+
+    await mgr.summarize("srcA", { env: { OPENAI_API_KEY: "same", ANTHROPIC_API_KEY: "same" } });
+    await mgr.summarize("srcB", { env: { OPENAI_API_KEY: "same", ANTHROPIC_API_KEY: "same" } });
+
+    assert.equal(listModelsCalls, 1, "identical caller envs must share one cache entry");
+
+    for (const child of spawned) child.emit("exit", 0, null);
+  });
+
+  test("summary cache ignores cosmetic env differences that don't change which models a provider exposes (no per-call fragmentation)", async () => {
+    // Fix 1: the fingerprint deliberately excludes high-churn unrelated
+    // caller vars (PATH, LANG, USER, ...) so a caller changing cosmetic
+    // vars doesn't trigger a fresh listModelsFn shell-out within the TTL.
+    /** @type {Array<EventEmitter>} */
+    const spawned = [];
+    let listModelsCalls = 0;
+    const mgr = makeManager({
+      tasksFixture: (logDir) => [
+        baseTask({ id: "srcA", status: "done", logPath: path.join(logDir, "srcA.ndjson") }),
+        baseTask({ id: "srcB", status: "done", logPath: path.join(logDir, "srcB.ndjson") }),
+      ],
+      logs: {
+        "srcA.ndjson": JSON.stringify({ type: "text", part: { messageID: "m1", text: "did the A thing" } }) + "\n",
+        "srcB.ndjson": JSON.stringify({ type: "text", part: { messageID: "m1", text: "did the B thing" } }) + "\n",
+      },
+      listModelsFn: async () => {
+        listModelsCalls++;
+        return `${DEFAULT_SUMMARY_MODEL}\n`;
+      },
+      spawnFn: () => {
+        const child = fakeChild();
+        spawned.push(child);
+        return child;
+      },
+    });
+
+    await mgr.summarize("srcA", { env: { OPENAI_API_KEY: "same", LANG: "en_US.UTF-8", USER: "alice" } });
+    await mgr.summarize("srcB", { env: { OPENAI_API_KEY: "same", LANG: "C.UTF-8", USER: "bob" } });
+
+    assert.equal(listModelsCalls, 1, "LANG/USER are not in the fingerprint -- cosmetic differences must not fragment the cache");
+
+    for (const child of spawned) child.emit("exit", 0, null);
+  });
+
+  test("summary cache TTL still expires per-key after 5 minutes (a stale entry must not be served indefinitely)", async (t) => {
+    // Fix 1: re-keying on env does not break the existing 5-minute TTL.
+    // After the TTL window elapses, the next call must re-shell-out for
+    // the same env's model list (provider availability can change within
+    // a TTL window -- e.g. an opencode auth.json swap or a new provider
+    // registration). Mock Date.now to control TTL timing without
+    // sleeping.
+    const realNow = Date.now;
+    let now = 1_000_000;
+    Date.now = () => now;
+    /** @type {() => void} */
+    const restore = () => { Date.now = realNow; };
+    t.after(restore);
+
+    /** @type {Array<EventEmitter>} */
+    const spawned = [];
+    let listModelsCalls = 0;
+    const mgr = makeManager({
+      tasksFixture: (logDir) => [
+        baseTask({ id: "srcA", status: "done", logPath: path.join(logDir, "srcA.ndjson") }),
+        baseTask({ id: "srcB", status: "done", logPath: path.join(logDir, "srcB.ndjson") }),
+      ],
+      logs: {
+        "srcA.ndjson": JSON.stringify({ type: "text", part: { messageID: "m1", text: "did the A thing" } }) + "\n",
+        "srcB.ndjson": JSON.stringify({ type: "text", part: { messageID: "m1", text: "did the B thing" } }) + "\n",
+      },
+      listModelsFn: async () => {
+        listModelsCalls++;
+        return `${DEFAULT_SUMMARY_MODEL}\n`;
+      },
+      spawnFn: () => {
+        const child = fakeChild();
+        spawned.push(child);
+        return child;
+      },
+    });
+
+    await mgr.summarize("srcA", { env: { OPENAI_API_KEY: "same" } });
+    assert.equal(listModelsCalls, 1, "first call populates the cache");
+
+    now += 5 * 60 * 1000 + 1; // past the 5-minute TTL window
+
+    await mgr.summarize("srcB", { env: { OPENAI_API_KEY: "same" } });
+    assert.equal(listModelsCalls, 2, "after TTL expiry, the same env's cache must repopulate");
+
+    for (const child of spawned) child.emit("exit", 0, null);
+  });
+
+  test("concurrent summary availability checks for the same caller env coalesce into a single listModelsFn call (no interleaved writes)", async () => {
+    // Fix 1: the old single-entry cache had a write race -- two concurrent
+    // `modelsCache = ...` assignments could interleave (one wins the
+    // expiresAt, the other the output), leaving an entry whose output
+    // doesn't match its expiresAt. The new Map<key, entry> + inFlight
+    // pattern serializes populates per-key: the second caller awaits the
+    // first's populate promise and reads the same entry.
+    /** @type {() => void} */
+    let releaseListModels;
+    const listModelsBlocking = new Promise((resolve) => { releaseListModels = () => resolve(undefined); });
+    let listModelsCalls = 0;
+    const mgr = makeManager({
+      listModelsFn: async () => {
+        listModelsCalls++;
+        await listModelsBlocking;
+        return `${DEFAULT_SUMMARY_MODEL}\n`;
+      },
+    });
+
+    // Fire two concurrent checks for the same caller env (no env, so both
+    // share the empty fingerprint). Before fix 1, both would race through
+    // the `if (Date.now() >= modelsCache.expiresAt)` gate before either
+    // populated the entry, leading to two concurrent shell-outs.
+    const call1 = mgr.checkSummaryModelReady();
+    const call2 = mgr.checkSummaryModelReady();
+    releaseListModels();
+    await Promise.all([call1, call2]);
+
+    assert.equal(listModelsCalls, 1, "concurrent populate calls for the same fingerprint must coalesce, not race");
+  });
+
   test("summary --mode activity rejects when the summary model is unavailable, instead of masking the failure with local narration", async () => {
     const log = JSON.stringify({ type: "text", part: { messageID: "m1", text: "progress" } });
     const mgr = makeManager({
@@ -3963,6 +4158,101 @@ describe("caller-env union (sanitizedEnvironment)", () => {
     assert.ok(secondCapturedOpts, "the queued task should have spawned");
     assert.equal(secondCapturedOpts.env.AXI_TEST_MARKER, "captured-at-dispatch-time", "caller env is frozen at dispatch() time");
     assert.equal(secondCapturedOpts.env.AXI_TEST_LATE_AMBIENT, "set-after-queuing", "the daemon's own ambient env is still read fresh at spawn time");
+  });
+
+  test("dispatch()'s queued env is frozen against later caller mutations of the original env object (verification gate for the capturedEnv clone in tasks.js)", async (t) => {
+    // Verification gate for Fix 3 (removing the capturedEnv clone added by
+    // b45de81): the dispatch path must not be vulnerable to the caller
+    // mutating the original env object reference they handed to dispatch().
+    // Reassign an existing key's value AND add a new key on the same object
+    // between queue time and the queued launch's actual spawn. The spawned
+    // child must see the dispatch-time value, not the mutated one, and must
+    // not see the post-queue addition. The b45de81 clone makes this test
+    // pass; if that clone is ever removed, this test will fail and the
+    // removal must be reverted -- see the BLOCKED note in the PR description.
+    delete process.env.AXI_TEST_QUEUE_REASSIGN;
+    delete process.env.AXI_TEST_QUEUE_ADDED;
+    t.after(() => {
+      delete process.env.AXI_TEST_QUEUE_REASSIGN;
+      delete process.env.AXI_TEST_QUEUE_ADDED;
+    });
+    const occupyingChild = fakeChild(9001);
+    /** @type {any} */
+    let secondCapturedOpts = null;
+    let spawnCount = 0;
+    const mgr = makeManager({
+      maxConcurrentTasks: 1,
+      spawnFn: (cmd, args, opts) => {
+        spawnCount++;
+        if (spawnCount === 1) return occupyingChild;
+        secondCapturedOpts = opts;
+        return fakeChild(9002);
+      },
+    });
+
+    mgr.dispatch({ prompt: "occupying task", directory: os.tmpdir() });
+    // Hold a reference to the caller's original env object after dispatch()
+    // returns -- the queued launch must NOT observe these mutations.
+    const callerEnv = { AXI_TEST_QUEUE_REASSIGN: "captured-at-dispatch-time" };
+    mgr.dispatch({ prompt: "queued task", directory: os.tmpdir(), env: callerEnv });
+
+    callerEnv.AXI_TEST_QUEUE_REASSIGN = "mutated-after-queue";
+    callerEnv.AXI_TEST_QUEUE_ADDED = "added-after-queue";
+
+    occupyingChild.emit("exit", 0, null);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    assert.ok(secondCapturedOpts, "the queued task should have spawned");
+    assert.equal(secondCapturedOpts.env.AXI_TEST_QUEUE_REASSIGN, "captured-at-dispatch-time", "the dispatch-time value must reach the spawned child, not the post-queue mutated value");
+    assert.equal("AXI_TEST_QUEUE_ADDED" in secondCapturedOpts.env, false, "a var added after queue must not reach the spawned child");
+  });
+
+  test("summary's spawned env reads the daemon's ambient at spawn time, not request time (matches dispatch's deferred-env behavior)", async (t) => {
+    // Fix 2: dispatch() already defers dispatchEnvironment() to spawn time so
+    // the spawned child sees the daemon's current process.env. Before this
+    // fix, the summary path called summaryEnvironment(env) at request time
+    // and carried the frozen result until the child spawned -- anything
+    // changing in the daemon's ambient env between request and spawn (e.g.
+    // a sibling setting a key) would not reach the spawned summary child.
+    // The summary path now mirrors dispatch()'s pattern: caller env is
+    // snapshot at request time (cloned, like dispatch), and the merged env
+    // is computed in startTask() at spawn time.
+    delete process.env.AXI_TEST_SUMMARY_LATE_AMBIENT;
+    t.after(() => delete process.env.AXI_TEST_SUMMARY_LATE_AMBIENT);
+    const occupyingChild = fakeChild(9001);
+    /** @type {any} */
+    let summaryCapturedOpts = null;
+    let spawnCount = 0;
+    const mgr = makeManager({
+      maxConcurrentTasks: 1,
+      tasksFixture: (logDir) => [{ ...baseTask({ id: "src1", status: "done", logPath: path.join(logDir, "src1.ndjson") }) }],
+      logs: { "src1.ndjson": JSON.stringify({ type: "text", part: { messageID: "m1", text: "did the thing" } }) + "\n" },
+      listModelsFn: () => `${DEFAULT_SUMMARY_MODEL}\n`,
+      spawnFn: (cmd, args, opts) => {
+        spawnCount++;
+        if (spawnCount === 1) return occupyingChild;
+        summaryCapturedOpts = opts;
+        return fakeChild(9002);
+      },
+    });
+
+    // Occupy the only concurrency slot.
+    mgr.dispatch({ prompt: "occupying task", directory: os.tmpdir() });
+
+    // Request the summary -- this queues it (concurrency slot is full).
+    // The env snapshot is captured here, but summaryEnvironment(env) is NOT
+    // yet applied.
+    await mgr.summarize("src1", { env: {} });
+
+    // Simulate the daemon's ambient env changing between request and spawn.
+    process.env.AXI_TEST_SUMMARY_LATE_AMBIENT = "set-after-summary-request";
+
+    // Release the occupying task; the queued summary now actually spawns.
+    occupyingChild.emit("exit", 0, null);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    assert.ok(summaryCapturedOpts, "the queued summary should have spawned");
+    assert.equal(summaryCapturedOpts.env.AXI_TEST_SUMMARY_LATE_AMBIENT, "set-after-summary-request", "summary env reads the daemon's ambient at spawn time, not at request time");
   });
 
   test("excluded names, denylist names, and caller-wins are all applied in a single merge pass (review fix: caller-wins/denylist-last/denylist-strips-ambient semantics)", (t) => {

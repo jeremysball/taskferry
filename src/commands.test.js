@@ -606,7 +606,7 @@ test("dispatch forwards executor to the RPC payload when set", async () => {
     },
   };
 
-  await runCommand("dispatch", { prompt: "hi", directory: root, executor: "pi" }, { client, cwd: root });
+  await runCommand("dispatch", { prompt: "hi", directory: root, executor: "pi" }, { client, cwd: root, checkSkills: () => {} });
 
   assert.equal(captured.method, "task.dispatch");
   assert.equal(captured.params.executor, "pi");
@@ -637,7 +637,7 @@ test("dispatch forwards noSandbox to the RPC payload when set", async () => {
       return { id: "oc_1" };
     },
   };
-  await runCommand("dispatch", { prompt: "hi", directory: root, noSandbox: true }, { client, cwd: root });
+  await runCommand("dispatch", { prompt: "hi", directory: root, noSandbox: true }, { client, cwd: root, checkSkills: () => {} });
   assert.equal(capturedParams.noSandbox, true);
 });
 
@@ -650,7 +650,7 @@ test("dispatch omits noSandbox from the RPC payload when not set", async () => {
       return { id: "oc_1" };
     },
   };
-  await runCommand("dispatch", { prompt: "hi", directory: root }, { client, cwd: root });
+  await runCommand("dispatch", { prompt: "hi", directory: root }, { client, cwd: root, checkSkills: () => {} });
   assert.equal("noSandbox" in capturedParams, false);
 });
 
@@ -664,7 +664,7 @@ test("dispatch forwards the caller's env to the RPC payload", async () => {
     },
   };
   const injectedEnv = { FOO: "bar" };
-  await runCommand("dispatch", { prompt: "hi", directory: root }, { client, cwd: root, env: injectedEnv });
+  await runCommand("dispatch", { prompt: "hi", directory: root }, { client, cwd: root, env: injectedEnv, checkSkills: () => {} });
   assert.deepEqual(capturedParams.env, injectedEnv);
 });
 
@@ -677,7 +677,7 @@ test("dispatch no longer forwards keySlot", async () => {
       return { id: "oc_1" };
     },
   };
-  await runCommand("dispatch", { prompt: "hi", directory: root, keySlot: "primary" }, { client, cwd: root });
+  await runCommand("dispatch", { prompt: "hi", directory: root, keySlot: "primary" }, { client, cwd: root, checkSkills: () => {} });
   assert.equal("keySlot" in capturedParams, false);
 });
 

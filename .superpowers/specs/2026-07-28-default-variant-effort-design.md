@@ -38,9 +38,10 @@ variant: usingDefaultModel ? "high" : variant || null,
 ```
 
 - Omitting `--model` (no `--session-id` either) silently falls back to
-  `executor.defaultModel` (`minimax/MiniMax-M2.7` for opencode,
-  `openai/gpt-5.6-luna` for pi — `src/executor.js:178,279`) **and** forces
-  `variant: "high"`, regardless of whether the caller wanted that effort.
+  `executor.defaultModel` (`minimax/MiniMax-M2.7` for **pi**,
+  `openai/gpt-5.6-luna` for **opencode** — `src/executor.js:178,279`) **and**
+  forces `variant: "high"`, regardless of whether the caller wanted that
+  effort.
 - Passing `--model` explicitly but omitting `--variant` sends no
   `--variant`/`--thinking` flag at all (`null`) — the executor/provider
   picks its own default.
@@ -104,32 +105,88 @@ variant: usingDefaultModel ? "high" : variant || null,
     Resolve by: (1) fetch the model's variants via a live, cached call to
     `opencode models --verbose`; (2) rank the present variant keys by their
     `reasoningEffort` value against canonical order `none/off < low <
-    medium < high < max` and pick whichever key ranks highest; (3) if
-    `variants` is empty, omit `--variant` entirely — same effective result
-    as `"default"` for that model, since there's nothing to escalate to.
+    medium < high < xhigh < max` and pick whichever key ranks highest —
+    confirmed directly against a real `opencode models --verbose` capture:
+    `openai/gpt-5.6-luna` and other models exposing both `xhigh` and `max`
+    variants list them in that relative order, so `xhigh` sits strictly
+    between `high` and `max`, not below the whole scale. Also confirmed:
+    at least one model (`anthropic/claude-fable-latest`) nests its value
+    as `{"reasoning": {"effort": "xhigh"}}` instead of the flat
+    `{"reasoningEffort": "xhigh"}` shape most models use — the parser must
+    accept both shapes, checking the flat field first and falling back to
+    the nested one. A value outside this known set (a future opencode
+    release adding a new rung) should rank below every known value rather
+    than crashing or silently winning by object-key order; (3) if
+    `variants` is empty, or the target model has no entry in the verbose
+    output at all, omit `--variant` entirely — same effective result as
+    `"default"` for that model, since there's nothing to escalate to.
   - This lookup only ever runs for opencode dispatches. A pi-only install
     never shells out to `opencode` and never needs it installed — pi's
     `resolveMaxVariant`-equivalent is synchronous and model-independent.
 
 ### Implementation shape
 
-- `dispatch()` becomes `async` (it already calls into async work
-  elsewhere in the surrounding function; the opencode variant lookup is
-  the only new async edge). `advisor()` already `await`s `dispatch()`;
-  the daemon RPC path in `src/commands.js` already awaits the manager
-  call — no caller needs to change its own sync/async shape.
-- Add a `resolveMaxVariant` optional method to `WorkerExecutor`, following
-  the same optional-capability pattern already used for `listModelsFn`:
-  - `piExecutor().resolveMaxVariant = async () => "xhigh"` — the entire pi
-    delta, one line, no cache, no lookup.
-  - opencode does not get a `resolveMaxVariant` field directly; instead
-    `opencodeExecutor()` gains a `listVariantsFn(env)` (parallel to the
+- **`dispatch()` becomes `async` — this is the largest, not the smallest,
+  part of this change, and every caller's shape must be audited, not
+  assumed compatible.** `dispatch()` at `src/tasks.js:983` is fully
+  synchronous today (no `await`, no `Promise` anywhere in it) — verified
+  directly, not assumed. `task.variant` (and the rest of the returned
+  `TaskSummary`) is part of `dispatch()`'s **immediate** return value,
+  which the CLI/RPC caller prints right away — the "state the exact
+  model/variant being dispatched" UX convention already documented in
+  `skills/using-taskferry/SKILL.md` depends on that value being known
+  synchronously by the time `dispatch()` returns. That rules out the
+  cheaper-looking alternative of deferring the opencode lookup into
+  `startTask` (which runs later, off `launchQueuedTasks`'s timer) and
+  leaving `dispatch()` itself sync — the caller would print a variant
+  that isn't resolved yet. `dispatch()` must genuinely become `async`.
+  - `advisor()` (`src/tasks.js:2356`) currently calls `dispatch({...})`
+    with **no** `await` — this line must gain one.
+  - `daemon.js:182`'s `return manager.dispatch(params);` sits inside an
+    `async invoke()`, so it already works correctly once `dispatch`
+    returns a promise (the `return` implicitly gets awaited by the
+    caller) — no code change needed there, just confirm via lint/test
+    that nothing downstream of `invoke()` assumed a non-promise return.
+  - **Every test that calls `mgr.dispatch(...)` synchronously must be
+    updated.** Verified directly by count: `src/tasks.test.js` alone has
+    169 `.dispatch(` callsites, 162 of them not currently `await`ed —
+    including `assert.throws(() => mgr.dispatch(...), /error: .../)`
+    patterns (e.g. lines 136, 149, 2535) that must become
+    `await assert.rejects(mgr.dispatch(...), /error: .../)` instead, since
+    a rejected promise doesn't throw synchronously. `src/activity.test.js`
+    (3 callsites, already `await`ed — minimal touchup),
+    `src/events.test.js` (9 callsites, currently sync),
+    `src/opencode-plugin.test.js` (1 callsite), and `src/daemon.test.js`
+    (1 callsite — its fake `dispatch(params)` returns synchronously today
+    and should become `async dispatch(params)` to match the new real
+    contract, even though it happens to still work either way under
+    `await`). Treat this migration as its own explicit, sizable task in
+    the implementation plan, not a footnote — budget for ~180 mechanical
+    but individually-reviewed test edits, concentrated in
+    `src/tasks.test.js`.
+- Add a `resolveMaxVariant(model, env)` method to **both** executors —
+  `listModelsFn` is itself defined on both (`src/executor.js:182,282`),
+  not just opencode, so `resolveMaxVariant` follows that same
+  both-executors-implement-it shape rather than being pi-only:
+  - `piExecutor().resolveMaxVariant = (model, env) => "xhigh"` — a plain,
+    non-async function (no cache, no lookup, model-independent). It does
+    not need to be `async` even though the overall helper that calls it
+    is — a sync function's return value is a valid value to `await`.
+  - `opencodeExecutor().resolveMaxVariant = async (model, env) => {...}`
+    internally calls a new `listVariantsFn(env)` (parallel to the
     existing `listModelsFn`, shelling out to `opencode models --verbose`
     and parsing into `Record<modelId, Record<variantKey,
-    {reasoningEffort}>>>`), and `tasks.js` owns the cache-aware resolution
-    on top of it — mirroring how `modelsCache` +
-    `summaryModelAvailable` already live in `tasks.js` while
-    `listModelsFn` lives on the executor.
+    {reasoningEffort}>|{reasoning:{effort}}>>`) plus the ranking logic
+    above. The 5-minute-TTL cache itself still lives in `tasks.js`
+    (mirroring how `modelsCache` + `summaryModelAvailable` already live in
+    `tasks.js` while `listModelsFn` lives on the executor) — `tasks.js`
+    passes a cache-aware wrapper as the `env`/lookup dependency, or the
+    opencode executor factory accepts an injected `listVariantsFn` the
+    same way `piExecutor` accepts an injected `execFileFn`.
+  - The dispatch-time policy boundary in `tasks.js` calls
+    `executor.resolveMaxVariant(model, env)` uniformly — no branching on
+    `executor.id` — since both executors now implement the same optional
+    method.
 - Add a sibling cache in `tasks.js`, parallel to the existing
   `modelsCache` (5-minute TTL, same pattern): `opencodeVariantsCache = {
   expiresAt, byModel }`. Kept **separate** from `modelsCache` rather than
@@ -143,15 +200,53 @@ variant: usingDefaultModel ? "high" : variant || null,
   shared in-flight promise (not left to race and double-fetch).
 - A single `resolveDispatchVariant({ explicitVariant, executor, model,
   defaultVariantEffort, env })` helper in `tasks.js` is the one policy
-  boundary: explicit wins outright; otherwise `"default"` → `null`;
-  otherwise `"highest"` → `executor.resolveMaxVariant` for pi, or the
-  cache-aware opencode lookup, keyed off `executor.id`.
+  boundary: explicit wins outright, passed through **completely
+  unvalidated and unreinterpreted** (see "Explicit `--variant` literal
+  values" below); otherwise `"default"` → `null`; otherwise `"highest"` →
+  `executor.resolveMaxVariant(model, env)`, now defined uniformly on both
+  executors (see above), so no `executor.id` branching is needed here.
 - `buildSpawnArgs` in both executors stays exactly as it is today (`pi`:
   `args.push("--thinking", ctx.variant)`; `opencode`: `args.push
   ("--variant", ctx.variant)`) — it only ever receives an already-resolved
   concrete value or `null`, never the abstract `"highest"` token. This
   keeps `buildSpawnArgs` a pure argv builder with no config/cache/lookup
   awareness.
+
+### Explicit `--variant` literal values are never reinterpreted
+
+`"default"` and `"highest"` are abstract tokens meaningful only to
+`defaultVariantEffort` resolution — they are not reserved strings at the
+`--variant` CLI layer. If a caller passes `--variant default` or
+`--variant highest` explicitly, it is passed straight through to the
+executor exactly as typed, with no special-casing, exactly like any other
+explicit `--variant` value today (a typo'd value fails with whatever error
+the executor itself gives). This matters concretely: `opencode models
+--verbose` shows 28 real models with a variant key literally named
+`"default"` — a caller targeting one of those means it literally, and
+`resolveDispatchVariant` must not intercept or reinterpret it. `--variant
+highest` has no meaning to either executor and will simply fail at the
+executor level, the same as any other invalid explicit value — this is
+acceptable and requires no new validation in `args.js`.
+
+### `--session-id` resume inherits the prior task's variant, not a fresh resolution
+
+A `--session-id` resume with no explicit `--variant` must inherit
+`priorSessionTask.variant` (the exact value that session was actually
+running with), not re-run `defaultVariantEffort` resolution against
+whatever the daemon's current config happens to be. Concretely:
+`task.variant = explicitVariant ?? priorSessionTask?.variant ??
+resolvedFromConfig`. Without this, a resume on a daemon whose
+`defaultVariantEffort` was changed (or across a daemon restart with a
+different config) would silently change the effort level of an
+in-progress session. This mirrors the existing resume-inherits-model
+rule (fix 1 above) — model and variant should follow the same
+"continuing known state wins over fresh defaults" principle. Cross-executor
+resume (a prior task's executor differs from the one requested — allowed
+by existing code when the executor matches) is out of scope for this spec
+to fully resolve; note it as a known edge case: the inherited
+`priorSessionTask.variant` string may not be valid for a different
+executor's flag, and this spec does not add new validation for that case
+beyond what already exists.
 
 ### Documentation
 
@@ -171,10 +266,34 @@ variant: usingDefaultModel ? "high" : variant || null,
 
 ## Tests to update / add
 
+- **`dispatch()` becoming `async` requires touching every test callsite
+  that calls it synchronously — this is the largest single item in this
+  list, not a footnote.** Verified counts: `src/tasks.test.js` has 169
+  `.dispatch(` callsites (162 not currently `await`ed, including
+  `assert.throws(() => mgr.dispatch(...), ...)` patterns at lines 136,
+  149, 2535 that must become `await assert.rejects(mgr.dispatch(...),
+  ...)`); `src/events.test.js` has 9 sync callsites; `src/activity.test.js`
+  has 3 (already `await`ed, minor touchup only);
+  `src/opencode-plugin.test.js` has 1. `src/daemon.test.js`'s fake
+  manager's `dispatch(params)` should become `async dispatch(params)` to
+  match the real contract, even though it happens to work either way
+  under `await`.
+- `src/executor.test.js`: delete the existing test asserting
+  `ex.defaultModel === "minimax/MiniMax-M2.7"` (or equivalent for
+  opencode) — the field is being deleted, so this test must go, not just
+  the code under test.
 - `src/tasks.test.js`: the existing test asserting `--variant high` is
   sent when no model is given must change — omitting `--model` with no
   `--session-id` now throws `--model is required`, so that whole scenario
   changes shape rather than just its assertion.
+- New: a `--session-id` resume with no explicit `--variant` inherits
+  `priorSessionTask.variant` rather than re-resolving from
+  `defaultVariantEffort` (see "resume inherits the prior task's variant"
+  above).
+- New: an explicit `--variant default` (a real opencode variant name on
+  28+ models) or `--variant highest` is passed through to the executor
+  completely unreinterpreted — not intercepted by
+  `defaultVariantEffort`'s resolution.
 - New: omitting `--variant` with `defaultVariantEffort: "default"` sends
   no `--variant`/`--thinking` flag (both executors).
 - New: `defaultVariantEffort: "highest"` + pi → `--thinking xhigh`.
@@ -209,3 +328,19 @@ variant: usingDefaultModel ? "high" : variant || null,
   as the existing `modelsCache`, which also doesn't persist.
 - No migration shim preserving the old implicit-high-on-omitted-model
   behavior — it is being deleted, not flagged.
+- **No in-flight-promise dedup added to the existing `modelsCache`/
+  `summaryModelAvailable`.** The new `opencodeVariantsCache` gets dedup
+  (concurrent cache-miss callers share one in-flight fetch rather than
+  each shelling out) because it's new code with no established pattern to
+  match; the existing `modelsCache` at `src/tasks.js:694,1123-1130` has no
+  such dedup today and this spec does not retrofit it — that's a
+  pre-existing, separate inconsistency, not something this change needs
+  to fix. A future pass could unify both under the same dedup treatment.
+- **No deletion of `defaultSummaryModel`** (`src/executor.js:82,179,280`)
+  in this pass, even though it is genuinely dead code (defined on the
+  typedef and both executors, never read outside test fixtures —
+  `summarizeTask` hardcodes `activitySummaryModel` from
+  `config.summaryModel`/`TASKFERRY_SUMMARY_MODEL` instead). It sits right
+  next to `defaultModel`, which this spec does delete, but removing it is
+  out of scope here — a separate, unrelated dead-code cleanup, not part
+  of the variant-effort feature. Worth its own follow-up issue.

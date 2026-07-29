@@ -26,7 +26,6 @@ test("parses dispatch and applies its argument defaults", () => {
       model: undefined,
       variant: undefined,
       sessionId: undefined,
-      keySlot: undefined,
       finalMarker: undefined,
       noSandbox: false,
       allowedDirs: undefined,
@@ -330,6 +329,13 @@ test("wait --timeout rejects a duration exceeding the setTimeout maximum", () =>
 test("home's default directory is left undefined (resolved later via resolveWorkspaceRoot), for both the empty-argv and bare --help fast-paths", () => {
   assert.equal(parseArgs([], { cwd: "/workspace/project" }).options.directory, undefined);
   assert.equal(parseArgs(["--help"], { cwd: "/workspace/project" }).options.directory, undefined);
+});
+
+test("dispatch rejects --key-slot as an unknown flag", () => {
+  assert.throws(
+    () => parseArgs(["dispatch", "--prompt", "do it", "--key-slot", "primary"], { cwd: "/workspace/project" }),
+    /unknown flag --key-slot for \`dispatch\`/
+  );
 });
 
 test("dispatch's default directory stays literal cwd, unaffected by the observation-command directory default change", () => {

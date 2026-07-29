@@ -32,7 +32,7 @@ opencode-plugin.js  native OpenCode plugin: calls client.js directly,
                      not through cli.js
 ```
 
-`src/tasks.js` (2606 lines) is the largest file by a wide margin and does
+`src/tasks.js` (2796 lines) is the largest file by a wide margin and does
 the real work; everything above it is thin. If a bug report doesn't
 obviously belong to args parsing or output formatting, start there.
 
@@ -40,12 +40,12 @@ obviously belong to args parsing or output formatting, start there.
 
 | File | Lines | Responsibility |
 |---|---|---|
-| `cli.js` | 152 | Entrypoint. Direct-execution guard (`fs.realpathSync(argv[1]) === import.meta.url`, symlink-safe) so it's importable without side effects. |
-| `args.js` | 418 | Per-command flag specs, defaults, validation. Rejects retired MCP-era names (`poll`, `--task-id`, `--timeout_ms`) with a rename hint. |
-| `commands.js` | 315 | One function per command; the only place that calls `client.request`/`client.subscribe`. |
+| `cli.js` | 178 | Entrypoint. Direct-execution guard (`fs.realpathSync(argv[1]) === import.meta.url`, symlink-safe) so it's importable without side effects. |
+| `args.js` | 473 | Per-command flag specs, defaults, validation. Rejects retired MCP-era names (`poll`, `--task-id`, `--timeout_ms`) with a rename hint. |
+| `commands.js` | 380 | One function per command; the only place that calls `client.request`/`client.subscribe`. |
 | `client.js` | 368 | Daemon connection, auto-spawn-on-first-use, request/response correlation by id, `subscribe()` for events. |
 | `daemon.js` | 459 | `net.createServer`, one socket per client, request dispatch loop, `event.subscribe` bookkeeping, stale-socket takeover logic (`prepareSocket`). |
-| `tasks.js` | 2606 | `createTaskManager()`: dispatch, cancel, status, poll (`wait`'s RPC target), list, result, tail, summarize, advisor, state persistence (`tasks.json`), the no-output watchdog, queueing/concurrency caps, key-slot env stripping. |
+| `tasks.js` | 2796 | `createTaskManager()`: dispatch, cancel, status, poll (`wait`'s RPC target), list, result, tail, summarize, advisor, state persistence (`tasks.json`), the no-output watchdog, queueing/concurrency caps, key-slot env stripping. |
 | `protocol.js` | 220 | `PROTOCOL_VERSION`, `RPC_METHODS`, request/response/error envelope encode/decode, method-name-to-manager-function mapping. |
 | `events.js` | 57 | Assigns a monotonic sequence number to each emitted event; that's the whole file. |
 | `activity.js` | 346 | `activityCacheKey`/cache `refresh()`: bounded head+tail narration snapshot, optional model-summary call, min-interval throttling. |
@@ -53,10 +53,10 @@ obviously belong to args parsing or output formatting, start there.
 | `output.js` | 248 | TOON encoding, `leanStatus`/`leanResult`/`projectList`/`homeView`, hint-string MCP-name migration. |
 | `opencode-plugin.js` | 174 | OpenCode's native plugin surface: toasts on task state transitions by subscribing to daemon task-state events through `client.js`. |
 | `executor.js` | 217 | `WorkerExecutor` abstraction: `opencodeExecutor()`/`piExecutor()` build each CLI's spawn args, summary prompt, log-event normalization, and sandboxed auth-file binding. Both executor objects expose a summary-prompt method, but `tasks.js` currently hardcodes every summary task's `executorId` to `"opencode"` regardless of the originating dispatch's executor — `piExecutor()`'s summary support is unused in practice. |
-| `sandbox.js` | 138 | `bwrap` mount layout: read-only root bind, deny-list (`~/.ssh`, `~/.aws`, `~/.config/gcloud`, `~/.config/gh`, `~/.gnupg`), `allowedDirs` merging, git-common-dir binding for worktrees. |
+| `sandbox.js` | 174 | `bwrap` mount layout: read-only root bind, deny-list (`~/.ssh`, `~/.aws`, `~/.config/gcloud`, `~/.config/gh`, `~/.gnupg`), `allowedDirs` merging, `resolveGitCommonDir`/`resolveGitDir` for worktree gitdir resolution. The actual bind-scoping decision (worktree-private gitdir + common dir's shared data only, not the whole common dir) lives in `tasks.js`, not here — see taskferry#224/#227. |
 | `config.js` | 86 | `loadConfig()`: reads/validates `config.json` against `CONFIG_FIELD_TYPES`, rejects unrecognized keys. |
 | `mcp-isolation.js` | 107 | Playwright MCP isolation checks for `taskferry doctor`/`setup` (`opencode.jsonc`, Claude Code's Playwright MCP config). |
-| `paths.js` | 50 | Resolves `TASKFERRY_STATE_DIR`/`TASKFERRY_RUNTIME_DIR`/`TASKFERRY_CACHE_DIR` and the socket path from XDG defaults + env overrides. |
+| `paths.js` | 110 | Resolves `TASKFERRY_STATE_DIR`/`TASKFERRY_RUNTIME_DIR`/`TASKFERRY_CACHE_DIR` and the socket path from XDG defaults + env overrides. Also `resolveWorkspaceRoot()`: the git workspace root (handles plain repo/worktree/submodule/bare-repo layouts) that `list`/`watch`/`context`/`home` default `--directory` to — `dispatch`/`advisor` deliberately keep their default on literal cwd instead, since that value doubles as the sandbox root. |
 | `narration-format.js` | 24 | Formats a task's narration/activity text for display. |
 | `errors.js` | 20 | Shared error-message helpers. |
 | `numbers.js` | 14 | Shared numeric-parsing helpers (`positiveInteger`, `nonNegativeInteger`, etc.). |
@@ -84,6 +84,8 @@ not part of the default `npm test`).
 | Open design questions, past decisions, what's left to build or deliberately skipped | `.superpowers/specs/*.md`, `.superpowers/plans/*.md` (implemented ones move to `.superpowers/.completed/`) |
 | The canonical agent-facing skill (regenerate after any CLI-surface change) | `skills/using-taskferry/SKILL.md`, then `npm run skill:generate` |
 | User-tunable options via a JSON config file (as an alternative to env vars) | `docs/config.md` |
+| Why `list`/`watch`/`context`/`home` default to the git workspace root but `dispatch`/`advisor` don't | `docs/cli-reference.md`, `paths.js`'s `resolveWorkspaceRoot()` |
+| `watch --flush-interval` batching, Monitor auto-arm convention | `docs/cli-reference.md` |
 
 ## Env vars
 

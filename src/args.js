@@ -12,7 +12,6 @@ const commandSpecs = {
       "--model <id>": "use the default model when omitted",
       "--variant <name>": "optional model reasoning variant",
       "--session-id <id>": "resume an existing OpenCode session",
-      "--key-slot <name>": "use a configured provider key slot",
       "--require-final-marker <regex>": "flag the task as incomplete if the final message doesn't match this pattern (case-sensitive, standard JS RegExp semantics)",
       "--no-sandbox": "run this dispatch without the bwrap filesystem sandbox (default: sandboxed on Linux)",
       "--allowed-dirs <path,path,...>": "extra directories bound read-write inside the sandbox, in addition to the auto-detected git-common-dir for a worktree",
@@ -255,7 +254,7 @@ function parseFields(value) {
 function defaultOptions(command, cwd) {
   switch (command) {
     case "dispatch":
-      return { prompt: undefined, directory: cwd, model: undefined, variant: undefined, sessionId: undefined, keySlot: undefined, finalMarker: undefined, noSandbox: false, allowedDirs: undefined, executor: undefined };
+      return { prompt: undefined, directory: cwd, model: undefined, variant: undefined, sessionId: undefined, finalMarker: undefined, noSandbox: false, allowedDirs: undefined, executor: undefined };
     case "advisor":
       return { prompt: undefined, model: undefined, directory: undefined, variant: undefined, sessionId: undefined, timeoutMs: undefined, executor: undefined };
     case "cancel":
@@ -374,7 +373,6 @@ export function parseArgs(argv, { cwd = process.cwd() } = {}) {
       "--model": "model",
       "--variant": "variant",
       "--session-id": "sessionId",
-      "--key-slot": "keySlot",
       "--grace-ms": "graceMs",
       "--timeout": "timeoutMs",
       "--tail-chars": "tailChars",
@@ -456,7 +454,7 @@ export function parseArgs(argv, { cwd = process.cwd() } = {}) {
 
 function commandAllows(command, flag) {
   const flags = {
-    dispatch: ["--prompt", "--directory", "--model", "--variant", "--session-id", "--key-slot", "--require-final-marker", "--allowed-dirs", "--executor"],
+    dispatch: ["--prompt", "--directory", "--model", "--variant", "--session-id", "--require-final-marker", "--allowed-dirs", "--executor"],
     cancel: ["--grace-ms"],
     wait: ["--timeout", "--tail-chars"],
     advisor: ["--prompt", "--model", "--directory", "--variant", "--session-id", "--timeout", "--executor"],

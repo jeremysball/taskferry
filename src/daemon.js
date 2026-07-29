@@ -202,6 +202,7 @@ async function invoke(manager, request) {
       return manager.summarize(params.taskId, {
         ...(params.maxWords === undefined ? {} : { maxWords: params.maxWords }),
         ...(params.mode === undefined ? {} : { mode: params.mode }),
+        ...(params.env === undefined ? {} : { env: params.env }),
       });
     case "task.advisor":
       return manager.advisor({
@@ -212,6 +213,7 @@ async function invoke(manager, request) {
         ...(params.sessionId !== undefined ? { sessionId: params.sessionId } : {}),
         ...(params.timeoutMs !== undefined ? { timeoutMs: params.timeoutMs } : {}),
         ...(params.executor !== undefined ? { executor: params.executor } : {}),
+        ...(params.env !== undefined ? { env: params.env } : {}),
       });
     case "task.context": {
       const context = filteredTaskDetails(manager, params.directory);

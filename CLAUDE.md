@@ -4,6 +4,16 @@ Read `docs/sourcemap.md` at the start of any session in this repo before
 exploring the codebase further. It orients on the call chain, file-by-file
 responsibilities, env vars, and the gotchas that look like bugs but aren't.
 
+## Keep the sourcemap up to date
+
+After any commit that changes `src/` — a new file, a new exported function,
+a behavior change worth flagging as a gotcha, or just a line count drifting
+noticeably — update `docs/sourcemap.md` in the same PR: the file-by-file
+line counts, the affected row's responsibility text, and the "Where do I
+look for X" table if the change adds a new thing worth pointing at. Don't
+let it go stale until someone notices a description no longer matches the
+code.
+
 ## Check GitHub issues after merging a PR
 
 After merging a PR in this repo, check open GitHub issues (`gh-axi issue list

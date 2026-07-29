@@ -354,15 +354,13 @@ export function parseAllowedDirs(spec) {
 }
 
 /**
+ * Parses a comma-separated env var denylist. Same comma-list semantics as
+ * {@link parseAllowedDirs}, kept under its own name for call-site clarity.
  * @param {string|undefined} spec
  * @returns {string[]}
  */
 export function parseEnvDenylist(spec) {
-  if (!spec) return [];
-  return spec
-    .split(",")
-    .map((entry) => entry.trim())
-    .filter(Boolean);
+  return parseAllowedDirs(spec);
 }
 
 /**
@@ -559,8 +557,7 @@ export function createTaskManager({
     }
   }
 
-  const CALLER_ENV_EXCLUDED = Object.freeze(["PATH", "HOME", ...TASKFERRY_PLUMBING_ENV_VARS]);
-  const CALLER_ENV_EXCLUDED_SET = new Set(CALLER_ENV_EXCLUDED);
+  const CALLER_ENV_EXCLUDED = new Set(["PATH", "HOME", ...TASKFERRY_PLUMBING_ENV_VARS]);
 
   /**
    * Builds the final base environment for a spawned child: the daemon's own
@@ -568,25 +565,28 @@ export function createTaskManager({
    * caller-supplied `env` (caller wins, except for CALLER_ENV_EXCLUDED --
    * daemon-controlled plumbing resolved once at the daemon's own startup),
    * with `envDenylist` stripped last regardless of which side the value
-   * came from. Mirrors the RPC-level isEnvironment key/value validation so
-   * a programmatic caller that bypasses the socket (no isEnvironment gate)
-   * can't smuggle a malformed key past the spawn boundary -- bad keys throw
-   * synchronously here, which startTask() catches and surfaces as a
-   * spawnError on a crashed task rather than a silently-dropped value.
+   * came from. Applies the same key/value rules as the RPC-level
+   * isEnvironment so a programmatic caller that bypasses the socket (no
+   * isEnvironment gate) can't smuggle a malformed key past the spawn
+   * boundary -- bad keys throw synchronously here, which startTask() catches
+   * and surfaces as a spawnError on a crashed task rather than a
+   * silently-dropped value. Null or undefined env is treated as empty (as
+   * the pre-validation spread did) rather than rejected.
    * @param {NodeJS.ProcessEnv} [env]
    * @returns {NodeJS.ProcessEnv}
    */
   function sanitizedEnvironment(env = {}) {
+    const callerEnv = env ?? {};
     const merged = { ...process.env };
-    for (const name of Object.keys(env)) {
+    for (const name of Object.keys(callerEnv)) {
       if (name === "" || name.includes("=")) {
         throw new Error(`error: invalid env key in caller-supplied env: ${JSON.stringify(name)}\nhelp: env keys must be non-empty strings without '=' characters`);
       }
-      if (typeof env[name] !== "string") {
-        throw new Error(`error: env value for ${JSON.stringify(name)} must be a string, got ${typeof env[name]}\nhelp: cast values to strings before dispatching`);
+      if (typeof callerEnv[name] !== "string") {
+        throw new Error(`error: env value for ${JSON.stringify(name)} must be a string, got ${typeof callerEnv[name]}\nhelp: cast values to strings before dispatching`);
       }
-      if (CALLER_ENV_EXCLUDED_SET.has(name)) continue;
-      merged[name] = env[name];
+      if (CALLER_ENV_EXCLUDED.has(name)) continue;
+      merged[name] = callerEnv[name];
     }
     for (const name of envDenylist) delete merged[name];
     return merged;

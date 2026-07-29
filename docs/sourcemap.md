@@ -45,8 +45,8 @@ obviously belong to args parsing or output formatting, start there.
 | `commands.js` | 380 | One function per command; the only place that calls `client.request`/`client.subscribe`. |
 | `client.js` | 368 | Daemon connection, auto-spawn-on-first-use, request/response correlation by id, `subscribe()` for events. |
 | `daemon.js` | 459 | `net.createServer`, one socket per client, request dispatch loop, `event.subscribe` bookkeeping, stale-socket takeover logic (`prepareSocket`). |
-| `tasks.js` | 2711 | `createTaskManager()`: dispatch, cancel, status, poll (`wait`'s RPC target), list, result, tail, summarize, advisor, state persistence (`tasks.json`), the no-output watchdog, queueing/concurrency caps, caller-env union sanitization and denylist enforcement. |
-| `protocol.js` | 220 | `PROTOCOL_VERSION`, `RPC_METHODS`, request/response/error envelope encode/decode, method-name-to-manager-function mapping. |
+| `tasks.js` | 2718 | `createTaskManager()`: dispatch, cancel, status, poll (`wait`'s RPC target), list, result, tail, summarize, advisor, state persistence (`tasks.json`), the no-output watchdog, queueing/concurrency caps, caller-env union sanitization and denylist enforcement, dispatch-time env snapshot. |
+| `protocol.js` | 241 | `PROTOCOL_VERSION`, `RPC_METHODS`, request/response/error envelope encode/decode, method-name-to-manager-function mapping, `isEnvironment` env-param predicate. |
 | `events.js` | 57 | Assigns a monotonic sequence number to each emitted event; that's the whole file. |
 | `activity.js` | 346 | `activityCacheKey`/cache `refresh()`: bounded head+tail narration snapshot, optional model-summary call, min-interval throttling. |
 | `state-lock.js` | 84 | `withFileLock()`: synchronous, `Atomics.wait`-based cross-process exclusive lock; guards the daemon auto-start race and every `persistTask()` write (dispatch/cancel/settlement — the request hot path). |

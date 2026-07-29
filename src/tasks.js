@@ -379,6 +379,18 @@ export function parseAllowedDirs(spec) {
 }
 
 /**
+ * @param {string|undefined} spec
+ * @returns {string[]}
+ */
+export function parseEnvDenylist(spec) {
+  if (!spec) return [];
+  return spec
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+}
+
+/**
  * @param {string} directory
  * @param {string} candidate
  * @returns {boolean}
@@ -441,6 +453,9 @@ const DEFAULT_CANCEL_GRACE_MS = 5000;
  * @param {number} [options.activityMaxWords]
  * @param {NodeJS.Platform} [options.platform]
  * @param {boolean} [options.sandboxEnabled]
+ * @param {string[]} [options.envDenylist] - env var names stripped from every spawned child's
+ *   environment, applied last (after the caller-env union), regardless of whether the value
+ *   came from the daemon's own ambient environment or the caller.
  * @param {string[]} [options.allowedDirs] - extra directories always bound read-write inside the sandbox,
  *   in addition to the auto-detected git-common-dir for a worktree dispatch directory.
  * @param {(directory: string) => string|null} [options.resolveGitCommonDirFn]
@@ -524,6 +539,7 @@ export function createTaskManager({
     ? !["1", "true"].includes(process.env.TASKFERRY_DISABLE_SANDBOX)
     : (/** @type {boolean|undefined} */ (config.sandboxEnabled) ?? true),
   allowedDirs = parseAllowedDirs(process.env.TASKFERRY_ALLOWED_DIRS ?? /** @type {string|undefined} */ (config.allowedDirs)),
+  envDenylist = parseEnvDenylist(process.env.TASKFERRY_ENV_DENYLIST ?? /** @type {string|undefined} */ (config.envDenylist)),
   resolveGitCommonDirFn = resolveGitCommonDir,
   resolveGitDirFn = resolveGitDir,
   checkBwrapAvailableFn = checkBwrapAvailable,

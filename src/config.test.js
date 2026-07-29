@@ -107,4 +107,16 @@ describe("loadConfig()", () => {
     const configPath = writeConfig(dir, JSON.stringify({ allowedDirs: ["/opt/shared"] }));
     assert.throws(() => loadConfig({ configPath }), /error: config key "allowedDirs".*must be a string.*\nhelp:/s);
   });
+
+  test("accepts a valid envDenylist value", () => {
+    const dir = tmpConfigDir();
+    const configPath = writeConfig(dir, JSON.stringify({ envDenylist: "PI_CODING_AGENT_DIR,SOME_OTHER_VAR" }));
+    assert.deepEqual(loadConfig({ configPath }), { envDenylist: "PI_CODING_AGENT_DIR,SOME_OTHER_VAR" });
+  });
+
+  test("rejects a wrong-typed envDenylist value", () => {
+    const dir = tmpConfigDir();
+    const configPath = writeConfig(dir, JSON.stringify({ envDenylist: ["SOME_VAR"] }));
+    assert.throws(() => loadConfig({ configPath }), /error: config key "envDenylist".*must be a string.*\nhelp:/s);
+  });
 });

@@ -5,7 +5,7 @@ import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { createTaskManager, isOutsideDirectory, DEFAULT_SUMMARY_MODEL, bucketFor } from "./tasks.js";
+import { createTaskManager, isOutsideDirectory, DEFAULT_SUMMARY_MODEL, bucketFor, parseEnvDenylist } from "./tasks.js";
 
 // Builds an isolated task manager backed by a temp state dir and, unless
 // overridden, fake spawnFn/killFn so no test ever touches a real `opencode`
@@ -94,6 +94,17 @@ function baseTask(overrides = {}) {
     ...overrides,
   };
 }
+
+describe("parseEnvDenylist()", () => {
+  test("returns an empty array for an empty or undefined spec", () => {
+    assert.deepEqual(parseEnvDenylist(undefined), []);
+    assert.deepEqual(parseEnvDenylist(""), []);
+  });
+
+  test("splits, trims, and drops empty entries", () => {
+    assert.deepEqual(parseEnvDenylist("FOO, BAR ,, BAZ"), ["FOO", "BAR", "BAZ"]);
+  });
+});
 
 describe("persistTask() durability across concurrent manager instances", () => {
   test("two manager instances writing concurrently both keep their own task record", () => {

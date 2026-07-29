@@ -22,6 +22,7 @@ const CONFIG_FIELD_TYPES = {
   summaryProviderKeyEnv: "string",
   sandboxEnabled: "boolean",
   allowedDirs: "string",
+  envDenylist: "string",
   waitDefaultTimeoutMs: "number",
   cancelGraceMs: "number",
   defaultExecutor: "string",

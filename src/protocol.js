@@ -60,6 +60,26 @@ function isAbsolutePath(value) {
   return isNonEmptyString(value) && path.isAbsolute(value);
 }
 
+/**
+ * Validates a caller-supplied environment map. Rejects anything that isn't a
+ * plain string-keyed object so a stray `null`/array/number/string can never
+ * reach dispatchEnvironment() -- the keys must also be non-empty strings
+ * without an `=`, since environment variable names can't contain one (shell
+ * export syntax), and every value must be a string so spawn() doesn't have to
+ * coerce at the boundary.
+ * @param {unknown} value
+ * @returns {value is Record<string, string>}
+ */
+function isEnvironment(value) {
+  return isObject(value)
+    && Object.entries(value).every(
+      ([name, entry]) =>
+        isNonEmptyString(name)
+        && !name.includes("=")
+        && typeof entry === "string"
+    );
+}
+
 /** @param {unknown} value @param {(value: unknown) => boolean} predicate @returns {boolean} */
 function optional(value, predicate) {
   return value === undefined || predicate(value);
@@ -86,7 +106,7 @@ function validParams(method, params) {
         && optional(params.model, isNonEmptyString)
         && optional(params.variant, isNonEmptyString)
         && optional(params.sessionId, isNonEmptyString)
-        && optional(params.env, (value) => isObject(value) && Object.values(value).every((entry) => typeof entry === "string"))
+        && optional(params.env, isEnvironment)
         && optional(params.finalMarker, isNonEmptyString)
         && optional(params.originSessionId, isNonEmptyString)
         && optional(params.noSandbox, (value) => typeof value === "boolean")
@@ -119,7 +139,7 @@ function validParams(method, params) {
         && isNonEmptyString(params.taskId)
         && optional(params.maxWords, (value) => Number.isSafeInteger(value) && /** @type {number} */ (value) >= 75 && /** @type {number} */ (value) <= 300)
         && optional(params.mode, (value) => value === "report" || value === "activity")
-        && optional(params.env, (value) => isObject(value) && Object.values(value).every((entry) => typeof entry === "string"));
+        && optional(params.env, isEnvironment);
     case "task.advisor":
       return hasOnly(params, ["prompt", "directory", "model", "variant", "sessionId", "env", "timeoutMs", "executor"])
         && isNonEmptyString(params.prompt)
@@ -128,7 +148,7 @@ function validParams(method, params) {
         && optional(params.variant, isNonEmptyString)
         && optional(params.sessionId, isNonEmptyString)
         && optional(params.timeoutMs, nonNegativeInteger)
-        && optional(params.env, (value) => isObject(value) && Object.values(value).every((entry) => typeof entry === "string"))
+        && optional(params.env, isEnvironment)
         && optional(params.executor, (value) => typeof value === "string" && KNOWN_EXECUTORS.includes(value));
     case "task.context":
       return hasOnly(params, ["directory"]) && isAbsolutePath(params.directory);

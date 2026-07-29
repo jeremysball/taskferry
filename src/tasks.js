@@ -1008,7 +1008,14 @@ export function createTaskManager({
     };
     tasks.set(id, task);
     persistTask(task.id);
-    pendingLaunches.set(id, { prompt, directory: normalizedDirectory, model: resolvedModel, variant: task.variant, sessionId, env, noSandbox: noSandbox === true, allowedDirs: dispatchAllowedDirs, executor });
+    // Capture the caller env at dispatch time rather than holding the caller's
+    // reference directly: later in-place mutations by the caller (or
+    // accidental reuse across retries) must not be able to silently change
+    // what's already queued for spawn. dispatchEnvironment() still reads
+    // process.env fresh at spawn time, so the daemon's own ambient overrides
+    // track process state, not the dispatch-time snapshot.
+    const capturedEnv = env === undefined ? undefined : { ...env };
+    pendingLaunches.set(id, { prompt, directory: normalizedDirectory, model: resolvedModel, variant: task.variant, sessionId, env: capturedEnv, noSandbox: noSandbox === true, allowedDirs: dispatchAllowedDirs, executor });
     launchQueue.push(id);
     launchQueuedTasks();
 

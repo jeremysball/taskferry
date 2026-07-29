@@ -518,17 +518,18 @@ test("summary --wait reports a not-settled note instead of summarizing when the 
 
 test("summary --wait proceeds to summarize once task.wait reports a settled status", async () => {
   const capture = capturedIo();
+  const injectedEnv = { FOO: "bar" };
   const { client, calls } = fakeClient({
     "task.wait": { id: "oc_1", status: "done", startedAt: "2026-07-15T00:00:00.000Z" },
     "task.summary": { text: "it worked" },
   });
-  const result = await runCli(["summary", "oc_1", "--wait"], { io: capture.io, connectClient: async () => client });
+  const result = await runCli(["summary", "oc_1", "--wait"], { io: capture.io, connectClient: async () => client, env: injectedEnv });
 
   assert.equal(result.exitCode, 0);
   assert.deepEqual(capture.output().value, { text: "it worked" });
   assert.deepEqual(calls, [
     { method: "task.wait", params: { taskId: "oc_1", timeoutMs: 900000 } },
-    { method: "task.summary", params: { taskId: "oc_1", env: process.env } },
+    { method: "task.summary", params: { taskId: "oc_1", env: injectedEnv } },
   ]);
 });
 

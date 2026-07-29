@@ -3886,9 +3886,49 @@ describe("caller-env union (sanitizedEnvironment)", () => {
       listModelsFn: () => `${DEFAULT_SUMMARY_MODEL}\n`,
     });
 
-    await mgr.summarize("src1", { env: { OPENCODE_CONFIG: "malicious-config-path" } });
+    await mgr.summarize("src1", { env: { OPENCODE_CONFIG: "malicious-config-path", FOO: "bar" } });
 
     assert.equal("OPENCODE_CONFIG" in capturedEnv, false);
+    assert.equal(capturedEnv.FOO, "bar", "a non-OPENCODE_CONFIG caller var must survive the summaryEnvironment strip");
+  });
+
+  test("advisor() forwards a caller-supplied env value into the dispatched child", async (t) => {
+    delete process.env.AXI_TEST_ADVISOR_CALLER_VAR;
+    t.after(() => delete process.env.AXI_TEST_ADVISOR_CALLER_VAR);
+    let capturedOpts = null;
+    const child = fakeChild();
+    const mgr = makeManager({
+      spawnFn: (cmd, args, opts) => { capturedOpts = opts; return child; },
+    });
+
+    const advisorPromise = mgr.advisor({
+      prompt: "hi",
+      directory: os.tmpdir(),
+      model: "openai/gpt-5.6-sol",
+      env: { AXI_TEST_ADVISOR_CALLER_VAR: "from-advisor-caller" },
+    });
+    child.emit("exit", 1, null);
+    await advisorPromise;
+
+    assert.ok(capturedOpts, "the advisor dispatch must have spawned a child");
+    assert.equal(capturedOpts.env.AXI_TEST_ADVISOR_CALLER_VAR, "from-advisor-caller");
+  });
+
+  test("summarize() report mode forwards a caller-supplied env value into the spawned summary child", async (t) => {
+    delete process.env.AXI_TEST_REPORT_CALLER_VAR;
+    t.after(() => delete process.env.AXI_TEST_REPORT_CALLER_VAR);
+    let capturedEnv = null;
+    const mgr = makeManager({
+      tasksFixture: (logDir) => [{ ...baseTask({ id: "src1", status: "done", logPath: path.join(logDir, "src1.ndjson") }) }],
+      logs: { "src1.ndjson": JSON.stringify({ type: "text", part: { messageID: "m1", text: "did the thing" } }) + "\n" },
+      spawnFn: (cmd, args, opts) => { capturedEnv = opts.env; return fakeChild(); },
+      listModelsFn: () => `${DEFAULT_SUMMARY_MODEL}\n`,
+    });
+
+    await mgr.summarize("src1", { mode: "report", env: { AXI_TEST_REPORT_CALLER_VAR: "from-report-caller" } });
+
+    assert.ok(capturedEnv, "the summarize report call must have spawned a child");
+    assert.equal(capturedEnv.AXI_TEST_REPORT_CALLER_VAR, "from-report-caller");
   });
 
   test("a queued dispatch's stored env is the one captured at dispatch() time, not re-read later", async (t) => {

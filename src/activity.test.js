@@ -8,6 +8,7 @@ import { createActivityCache, buildLocalActivity, snapshotNarration, activityCac
 import { runCli } from "./cli.js";
 import { parseRequestLine } from "./protocol.js";
 import { createTaskManager, DEFAULT_SUMMARY_MODEL } from "./tasks.js";
+import { resolveWorkspaceRoot } from "./paths.js";
 
 function fakeChild(pid = 4242) {
   const child = new EventEmitter();
@@ -425,7 +426,7 @@ describe("activity summary cache", () => {
     });
 
     assert.equal(result.exitCode, 0);
-    assert.deepEqual(calls, [{ directory: fs.realpathSync(process.cwd()), summaries: true }]);
+    assert.deepEqual(calls, [{ directory: resolveWorkspaceRoot(fs.realpathSync(process.cwd())), summaries: true }]);
     assert.equal(stdout.split("\n").length, 2);
   });
 

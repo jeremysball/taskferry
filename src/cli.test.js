@@ -8,6 +8,7 @@ import { decode } from "@toon-format/toon";
 import { fileURLToPath } from "node:url";
 import { Readable } from "node:stream";
 import { runCli } from "./cli.js";
+import { resolveWorkspaceRoot } from "./paths.js";
 
 function capturedIo({ stdin } = {}) {
   let stdout = "";
@@ -264,9 +265,10 @@ test("dispatch --prompt - keeps an interior CRLF in the prompt (only strips the 
 test("no arguments show executable, description, workspace tasks, counts, and next actions", async () => {
   const capture = capturedIo();
   const workspace = process.cwd();
+  const resolvedWorkspace = resolveWorkspaceRoot(workspace);
   const { client, calls } = fakeClient({
     "task.list": {
-      directory: workspace,
+      directory: resolvedWorkspace,
       counts,
       tasks: [{ id: "oc_1", status: "running", model: "test/model", startedAt: "2026-07-15T00:00:00.000Z", failureReason: null }],
     },
@@ -285,7 +287,7 @@ test("no arguments show executable, description, workspace tasks, counts, and ne
   assert.deepEqual(value.counts, counts);
   assert.deepEqual(value.tasks, [{ id: "oc_1", status: "running", model: "test/model", startedAt: "2026-07-15T00:00:00.000Z" }]);
   assert.ok(value.next.some((line) => line.includes("taskferry wait <id>")));
-  assert.deepEqual(calls, [{ method: "task.list", params: { directory: workspace } }]);
+  assert.deepEqual(calls, [{ method: "task.list", params: { directory: resolvedWorkspace } }]);
 });
 
 test("explicit empty workspace output is definitive and uses four-field rows", async () => {
@@ -417,8 +419,9 @@ test("projects status and result output using the former MCP lean projections", 
 test("list with no --directory resolves to this checkout's git workspace root via the real resolveWorkspaceRoot", async () => {
   const capture = capturedIo();
   const workspace = process.cwd();
+  const resolvedWorkspace = resolveWorkspaceRoot(workspace);
   const { client, calls } = fakeClient({
-    "task.list": { directory: workspace, counts: {}, tasks: [] },
+    "task.list": { directory: resolvedWorkspace, counts: {}, tasks: [] },
   });
   const result = await runCli(["list"], {
     cwd: workspace,
@@ -427,11 +430,12 @@ test("list with no --directory resolves to this checkout's git workspace root vi
   });
 
   assert.equal(result.exitCode, 0);
-  // This checkout's cwd during `npm test` is already the repo root, so
-  // resolveWorkspaceRoot(workspace) === workspace here -- this proves the
-  // real (non-injected) resolveWorkspaceRoot is wired in and behaves
-  // correctly for the at-repo-root case, without needing a temp git repo.
-  assert.deepEqual(calls, [{ method: "task.list", params: { directory: workspace } }]);
+  // Computing the expected value via the real resolveWorkspaceRoot (rather
+  // than assuming cwd already equals the workspace root) keeps this correct
+  // whether the suite runs at the repo root or inside a linked worktree --
+  // this still proves the real (non-injected) resolveWorkspaceRoot is wired
+  // in, since a broken wiring would return raw `workspace` instead.
+  assert.deepEqual(calls, [{ method: "task.list", params: { directory: resolvedWorkspace } }]);
 });
 
 test("dispatch's directory is never passed through resolveWorkspaceRoot even when injected", async () => {

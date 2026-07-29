@@ -1,7 +1,6 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { parseKeySlots } from "./tasks.js";
 import { KNOWN_EXECUTORS } from "./executor.js";
 
 const CONFIG_FIELD_TYPES = {
@@ -16,10 +15,6 @@ const CONFIG_FIELD_TYPES = {
   activityMaxWords: "number",
   advisorSessionTtlMs: "number",
   watchdogGraceMs: "number",
-  keySlots: "string",
-  providerKeyEnv: "string",
-  summaryKeySlot: "string",
-  summaryProviderKeyEnv: "string",
   sandboxEnabled: "boolean",
   allowedDirs: "string",
   envDenylist: "string",
@@ -76,8 +71,6 @@ export function loadConfig({ env = process.env, configPath = resolveConfigPath(e
       throw new Error(`error: config key "${key}" in ${configPath} must be a ${expectedType} (got ${JSON.stringify(value)})\nhelp: fix the value's type in ${configPath}`);
     }
   }
-
-  if (parsed.keySlots !== undefined) parseKeySlots(parsed.keySlots);
 
   if (parsed.defaultExecutor !== undefined && !KNOWN_EXECUTORS.includes(parsed.defaultExecutor)) {
     throw new Error(`error: config key "defaultExecutor" in ${configPath} must be one of ${KNOWN_EXECUTORS.join(", ")} (got ${JSON.stringify(parsed.defaultExecutor)})\nhelp: fix the value in ${configPath}`);

@@ -14,7 +14,7 @@ import { createTaskManager, isOutsideDirectory, DEFAULT_SUMMARY_MODEL, bucketFor
 // runs synchronously in the constructor, same as the old module-level code
 // did at import time). `tasksFixture` may be an array or `(logDir) => array`
 // for fixtures whose logPath needs to point inside the real log dir.
-function makeManager({ tasksFixture = [], logs = {}, spawnFn, killFn, listModelsFn, defaultExecutor, maxDispatchesPerWindow, dispatchWindowMs, advisorSessionTtlMs, maxConcurrentTasks, noOutputTimeoutMs, postOutputNoOutputTimeoutMs, watchdogPollMs, maxWaitMs, keySlotsSpec, providerKeyEnvName, summaryKeySlot, summaryProviderKeyEnvName, sandboxEnabled = false, checkBwrapAvailableFn, existsFn, statFn, readdirFn, runtimeDir, cacheDir, platform, onEvent, allowedDirs, resolveGitCommonDirFn, resolveGitDirFn } = {}) {
+function makeManager({ tasksFixture = [], logs = {}, spawnFn, killFn, listModelsFn, defaultExecutor, maxDispatchesPerWindow, dispatchWindowMs, advisorSessionTtlMs, maxConcurrentTasks, noOutputTimeoutMs, postOutputNoOutputTimeoutMs, watchdogPollMs, maxWaitMs, envDenylistSpec, sandboxEnabled = false, checkBwrapAvailableFn, existsFn, statFn, readdirFn, runtimeDir, cacheDir, platform, onEvent, allowedDirs, resolveGitCommonDirFn, resolveGitDirFn } = {}) {
   const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-test-"));
   const logDir = path.join(stateDir, "logs");
   fs.mkdirSync(logDir, { recursive: true });
@@ -52,10 +52,7 @@ function makeManager({ tasksFixture = [], logs = {}, spawnFn, killFn, listModels
     ...(postOutputNoOutputTimeoutMs != null ? { postOutputNoOutputTimeoutMs } : {}),
     ...(watchdogPollMs != null ? { watchdogPollMs } : {}),
     ...(maxWaitMs != null ? { maxWaitMs } : {}),
-    ...(keySlotsSpec != null ? { keySlotsSpec } : {}),
-    ...(providerKeyEnvName != null ? { providerKeyEnvName } : {}),
-    ...(summaryKeySlot != null ? { summaryKeySlot } : {}),
-    ...(summaryProviderKeyEnvName != null ? { summaryProviderKeyEnvName } : {}),
+    ...(envDenylistSpec != null ? { envDenylist: parseEnvDenylist(envDenylistSpec) } : {}),
     ...(allowedDirs != null ? { allowedDirs } : {}),
     ...(resolveGitCommonDirFn != null ? { resolveGitCommonDirFn } : {}),
     ...(resolveGitDirFn != null ? { resolveGitDirFn } : {}),
@@ -1581,11 +1578,10 @@ describe("no-output watchdog", () => {
     const s = mgr.status(dispatched.id);
     assert.equal(s.status, "crashed");
     assert.equal(s.failureReason, "no_output_timeout");
-    assert.deepEqual(mgr.result(dispatched.id, { fields: ["failureReason", "keySlot"] }), {
+    assert.deepEqual(mgr.result(dispatched.id, { fields: ["failureReason"] }), {
       taskId: dispatched.id,
       status: "crashed",
       failureReason: "no_output_timeout",
-      keySlot: null,
     });
   });
 
@@ -3819,231 +3815,114 @@ describe("summarize()", () => {
   });
 });
 
-describe("key slots (summary tasks)", () => {
-  test("a configured summary key slot is injected without exposing any key-slot source variables", async (t) => {
-    process.env.AXI_TEST_SUMMARY_PRIMARY = "sk-summary-secret";
-    process.env.AXI_TEST_SUMMARY_BACKUP = "sk-backup-secret";
-    t.after(() => {
-      delete process.env.AXI_TEST_SUMMARY_PRIMARY;
-      delete process.env.AXI_TEST_SUMMARY_BACKUP;
-    });
-    let capturedEnv = null;
-    let modelsEnv = null;
-    const mgr = makeManager({
-      tasksFixture: (logDir) => [{ ...baseTask({ id: "src1", status: "done", logPath: path.join(logDir, "src1.ndjson") }) }],
-      logs: { "src1.ndjson": JSON.stringify({ type: "text", part: { messageID: "m1", text: "did the thing" } }) + "\n" },
-      spawnFn: (cmd, args, opts) => { capturedEnv = opts.env; return fakeChild(); },
-      listModelsFn: (env) => {
-        modelsEnv = env;
-        return `${DEFAULT_SUMMARY_MODEL}\n`;
-      },
-      keySlotsSpec: "summary-slot:AXI_TEST_SUMMARY_PRIMARY,backup:AXI_TEST_SUMMARY_BACKUP",
-      summaryKeySlot: "summary-slot",
-      summaryProviderKeyEnvName: "DEEPSEEK_API_KEY",
-    });
-    await mgr.summarize("src1");
-    assert.equal(capturedEnv.DEEPSEEK_API_KEY, "sk-summary-secret");
-    assert.equal("AXI_TEST_SUMMARY_PRIMARY" in capturedEnv, false);
-    assert.equal("AXI_TEST_SUMMARY_BACKUP" in capturedEnv, false);
-    assert.equal(modelsEnv.DEEPSEEK_API_KEY, "sk-summary-secret");
-    assert.equal("AXI_TEST_SUMMARY_PRIMARY" in modelsEnv, false);
-    assert.equal("AXI_TEST_SUMMARY_BACKUP" in modelsEnv, false);
+describe("caller-env union (sanitizedEnvironment)", () => {
+  test("a caller-supplied env value overlays the daemon's own ambient environment", (t) => {
+    delete process.env.AXI_TEST_CALLER_VAR;
+    t.after(() => delete process.env.AXI_TEST_CALLER_VAR);
+    let capturedOpts = null;
+    const mgr = makeManager({ spawnFn: (cmd, args, opts) => { capturedOpts = opts; return fakeChild(); } });
+
+    mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), env: { AXI_TEST_CALLER_VAR: "from-caller" } });
+
+    assert.equal(capturedOpts.env.AXI_TEST_CALLER_VAR, "from-caller");
   });
 
-  test("an unset summary key slot source variable fails the summary request before spawning", async () => {
-    delete process.env.AXI_TEST_SUMMARY_UNSET;
-    const mgr = makeManager({
-      tasksFixture: (logDir) => [{ ...baseTask({ id: "src1", status: "done", logPath: path.join(logDir, "src1.ndjson") }) }],
-      logs: { "src1.ndjson": JSON.stringify({ type: "text", part: { messageID: "m1", text: "did the thing" } }) + "\n" },
-      spawnFn: () => { throw new Error("must not spawn"); },
-      keySlotsSpec: "summary-slot:AXI_TEST_SUMMARY_UNSET",
-      summaryKeySlot: "summary-slot",
-      summaryProviderKeyEnvName: "DEEPSEEK_API_KEY",
-    });
-    await assert.rejects(() => mgr.summarize("src1"), /error: summary key slot "summary-slot" source variable AXI_TEST_SUMMARY_UNSET is not set/);
+  test("caller env cannot override the fixed excluded set of daemon-controlled vars", (t) => {
+    const excluded = ["PATH", "HOME", "TASKFERRY_STATE_DIR", "TASKFERRY_RUNTIME_DIR", "TASKFERRY_CACHE_DIR", "TASKFERRY_SOCKET_PATH"];
+    for (const name of excluded) process.env[name] = `real-${name}`;
+    t.after(() => { for (const name of excluded) delete process.env[name]; });
+    let capturedOpts = null;
+    const mgr = makeManager({ spawnFn: (cmd, args, opts) => { capturedOpts = opts; return fakeChild(); } });
+
+    const maliciousEnv = Object.fromEntries(excluded.map((name) => [name, `malicious-${name}`]));
+    mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), env: maliciousEnv });
+
+    for (const name of excluded) {
+      assert.equal(capturedOpts.env[name], `real-${name}`, `${name} must keep the daemon's own ambient value`);
+    }
   });
 
-  test("summarize without a summary key_slot keeps the ambient summary provider key when a slot's source var shares its name (GLM-5.2 review of PR #23, finding 4)", async (t) => {
-    process.env.DEEPSEEK_API_KEY = "sk-default-summary-secret";
-    process.env.AXI_TEST_SUMMARY_BACKUP = "sk-backup-secret";
-    t.after(() => {
-      delete process.env.DEEPSEEK_API_KEY;
-      delete process.env.AXI_TEST_SUMMARY_BACKUP;
+  test("a denylisted name is stripped even when the caller's env explicitly sets it", (t) => {
+    let capturedOpts = null;
+    const mgr = makeManager({
+      spawnFn: (cmd, args, opts) => { capturedOpts = opts; return fakeChild(); },
+      envDenylistSpec: "AXI_TEST_DENIED_VAR",
     });
+
+    mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), env: { AXI_TEST_DENIED_VAR: "leaked-value" } });
+
+    assert.equal("AXI_TEST_DENIED_VAR" in capturedOpts.env, false);
+  });
+
+  test("TASKFERRY_CHILD survives even when denylisted", (t) => {
+    let capturedOpts = null;
+    const mgr = makeManager({
+      spawnFn: (cmd, args, opts) => { capturedOpts = opts; return fakeChild(); },
+      envDenylistSpec: "TASKFERRY_CHILD",
+    });
+
+    mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+
+    assert.equal(capturedOpts.env.TASKFERRY_CHILD, "1");
+  });
+
+  test("omitting env behaves as ambient-only, same as before caller-env forwarding existed", (t) => {
+    process.env.AXI_TEST_AMBIENT_ONLY = "ambient-value";
+    t.after(() => delete process.env.AXI_TEST_AMBIENT_ONLY);
+    let capturedOpts = null;
+    const mgr = makeManager({ spawnFn: (cmd, args, opts) => { capturedOpts = opts; return fakeChild(); } });
+
+    mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+
+    assert.equal(capturedOpts.env.AXI_TEST_AMBIENT_ONLY, "ambient-value");
+  });
+
+  test("summaryEnvironment strips OPENCODE_CONFIG* even when the caller's env explicitly sets one", async (t) => {
     let capturedEnv = null;
     const mgr = makeManager({
       tasksFixture: (logDir) => [{ ...baseTask({ id: "src1", status: "done", logPath: path.join(logDir, "src1.ndjson") }) }],
       logs: { "src1.ndjson": JSON.stringify({ type: "text", part: { messageID: "m1", text: "did the thing" } }) + "\n" },
       spawnFn: (cmd, args, opts) => { capturedEnv = opts.env; return fakeChild(); },
       listModelsFn: () => `${DEFAULT_SUMMARY_MODEL}\n`,
-      keySlotsSpec: "primary:DEEPSEEK_API_KEY,backup:AXI_TEST_SUMMARY_BACKUP",
-      summaryProviderKeyEnvName: "DEEPSEEK_API_KEY",
     });
-    await mgr.summarize("src1");
-    assert.equal(capturedEnv.DEEPSEEK_API_KEY, "sk-default-summary-secret");
-    assert.equal("AXI_TEST_SUMMARY_BACKUP" in capturedEnv, false);
-  });
-});
 
-describe("key slots (dispatch)", () => {
-  test("dispatch with an unconfigured key_slot throws before spawning anything", () => {
-    const mgr = makeManager({ spawnFn: () => { throw new Error("must not spawn"); } });
-    assert.throws(
-      () => mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), keySlot: "primary" }),
-      /error: key_slot given but TASKFERRY_PROVIDER_KEY_ENV is not configured/
-    );
+    await mgr.summarize("src1", { env: { OPENCODE_CONFIG: "malicious-config-path" } });
+
+    assert.equal("OPENCODE_CONFIG" in capturedEnv, false);
   });
 
-  test("dispatch with a key_slot name not in the registry throws before spawning anything", () => {
+  test("a queued dispatch's stored env is the one captured at dispatch() time, not re-read later", async (t) => {
+    delete process.env.AXI_TEST_LATE_AMBIENT;
+    t.after(() => delete process.env.AXI_TEST_LATE_AMBIENT);
+    const occupyingChild = fakeChild(9001);
+    /** @type {any} */
+    let secondCapturedOpts = null;
+    let spawnCount = 0;
     const mgr = makeManager({
-      spawnFn: () => { throw new Error("must not spawn"); },
-      keySlotsSpec: "primary:SOME_SOURCE_VAR",
-      providerKeyEnvName: "OPENCODE_GO_API_KEY",
-    });
-    assert.throws(
-      () => mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), keySlot: "backup" }),
-      /error: unknown key_slot: backup/
-    );
-  });
-
-  test("dispatch with a configured key_slot whose source env var is unset throws before spawning anything", () => {
-    delete process.env.AXI_TEST_UNSET_KEY_SOURCE;
-    const mgr = makeManager({
-      spawnFn: () => { throw new Error("must not spawn"); },
-      keySlotsSpec: "primary:AXI_TEST_UNSET_KEY_SOURCE",
-      providerKeyEnvName: "OPENCODE_GO_API_KEY",
-    });
-    assert.throws(
-      () => mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), keySlot: "primary" }),
-      /error: key_slot "primary" source variable AXI_TEST_UNSET_KEY_SOURCE is not set/
-    );
-  });
-
-  test("a valid key_slot passes only the configured target env var to the spawned child, and only the slot name is persisted", (t) => {
-    process.env.AXI_TEST_KEY_PRIMARY = "sk-super-secret-value";
-    process.env.AXI_TEST_KEY_BACKUP = "sk-backup-secret-value";
-    t.after(() => {
-      delete process.env.AXI_TEST_KEY_PRIMARY;
-      delete process.env.AXI_TEST_KEY_BACKUP;
-    });
-    let capturedOpts = null;
-    const child = fakeChild();
-    const mgr = makeManager({
-      spawnFn: (cmd, args, opts) => { capturedOpts = opts; return child; },
-      keySlotsSpec: "primary:AXI_TEST_KEY_PRIMARY,backup:AXI_TEST_KEY_BACKUP",
-      providerKeyEnvName: "OPENCODE_GO_API_KEY",
-    });
-    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), keySlot: "primary" });
-    assert.equal(dispatched.keySlot, "primary");
-    assert.equal(capturedOpts.env.OPENCODE_GO_API_KEY, "sk-super-secret-value");
-    assert.equal("AXI_TEST_KEY_PRIMARY" in capturedOpts.env, false);
-    assert.equal("AXI_TEST_KEY_BACKUP" in capturedOpts.env, false);
-
-    const onDisk = fs.readFileSync(mgr.paths.TASKS_FILE, "utf8");
-    assert.ok(!onDisk.includes("sk-super-secret-value"), "the raw key value must never reach tasks.json");
-    assert.ok(!onDisk.includes("sk-backup-secret-value"), "other raw key values must never reach tasks.json");
-    assert.ok(onDisk.includes('"keySlot": "primary"'));
-
-    child.emit("exit", 0, null);
-    assert.equal(mgr.result(dispatched.id).keySlot, "primary");
-  });
-
-  test("dispatch without key_slot still strips every configured source variable", (t) => {
-    process.env.AXI_TEST_KEY_PRIMARY = "sk-primary-secret-value";
-    process.env.AXI_TEST_KEY_BACKUP = "sk-backup-secret-value";
-    t.after(() => {
-      delete process.env.AXI_TEST_KEY_PRIMARY;
-      delete process.env.AXI_TEST_KEY_BACKUP;
-    });
-    let capturedOpts = null;
-    const mgr = makeManager({
-      spawnFn: (cmd, args, _opts) => { capturedOpts = _opts; return fakeChild(); },
-      keySlotsSpec: "primary:AXI_TEST_KEY_PRIMARY,backup:AXI_TEST_KEY_BACKUP",
-      providerKeyEnvName: "OPENCODE_GO_API_KEY",
+      maxConcurrentTasks: 1,
+      spawnFn: (cmd, args, opts) => {
+        spawnCount++;
+        if (spawnCount === 1) return occupyingChild;
+        secondCapturedOpts = opts;
+        return fakeChild(9002);
+      },
     });
 
-    mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+    // Occupy the only concurrency slot.
+    mgr.dispatch({ prompt: "occupying task", directory: os.tmpdir() });
+    // This one queues behind the slot, with its own env captured now.
+    mgr.dispatch({ prompt: "queued task", directory: os.tmpdir(), env: { AXI_TEST_MARKER: "captured-at-dispatch-time" } });
 
-    assert.ok(capturedOpts.env);
-    assert.equal("AXI_TEST_KEY_PRIMARY" in capturedOpts.env, false);
-    assert.equal("AXI_TEST_KEY_BACKUP" in capturedOpts.env, false);
-    assert.equal("OPENCODE_GO_API_KEY" in capturedOpts.env, false);
-  });
+    // Simulate ambient env changing while the second dispatch sits queued.
+    process.env.AXI_TEST_LATE_AMBIENT = "set-after-queuing";
 
-  test("dispatch without key_slot keeps the ambient provider key when a slot's source var shares its name (GLM-5.2 review finding)", (t) => {
-    // The documented setup registers the server's default key as a slot too
-    // (TASKFERRY_PROVIDER_KEY_ENV and one slot's source both named
-    // OPENCODE_GO_API_KEY) so it can also be picked explicitly. Without the
-    // fix, environmentWithoutKeySlotSources() strips that variable even when
-    // no key_slot was requested, leaving the child with no key at all.
-    process.env.OPENCODE_GO_API_KEY = "sk-default-secret-value";
-    process.env.AXI_TEST_KEY_BACKUP = "sk-backup-secret-value";
-    t.after(() => {
-      delete process.env.OPENCODE_GO_API_KEY;
-      delete process.env.AXI_TEST_KEY_BACKUP;
-    });
-    let capturedOpts = null;
-    const mgr = makeManager({
-      spawnFn: (cmd, args, opts) => { capturedOpts = opts; return fakeChild(); },
-      keySlotsSpec: "primary:OPENCODE_GO_API_KEY,backup:AXI_TEST_KEY_BACKUP",
-      providerKeyEnvName: "OPENCODE_GO_API_KEY",
-    });
+    // Release the first task so the queued one actually spawns.
+    occupyingChild.emit("exit", 0, null);
+    await new Promise((resolve) => setTimeout(resolve, 20));
 
-    mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
-
-    assert.equal(capturedOpts.env.OPENCODE_GO_API_KEY, "sk-default-secret-value");
-    assert.equal("AXI_TEST_KEY_BACKUP" in capturedOpts.env, false);
-  });
-});
-
-describe("credential preflight for the dispatched model's own provider (issue #63)", () => {
-  test("fails fast, before spawning, when the model's provider matches the configured provider key env and no value resolves for it", () => {
-    delete process.env.OPENROUTER_API_KEY;
-    const mgr = makeManager({
-      spawnFn: () => { throw new Error("must not spawn"); },
-      providerKeyEnvName: "OPENROUTER_API_KEY",
-    });
-    assert.throws(
-      () => mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), model: "openrouter/meta/muse-spark-1.1" }),
-      /error: no credentials available for openrouter \(OPENROUTER_API_KEY is not set\)/
-    );
-  });
-
-  test("does not preflight-check a model from a different provider than the configured provider key env", () => {
-    delete process.env.OPENROUTER_API_KEY;
-    let captured = null;
-    const mgr = makeManager({
-      spawnFn: (cmd, args) => { captured = args; return fakeChild(); },
-      providerKeyEnvName: "OPENROUTER_API_KEY",
-    });
-    mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), model: "opencode/free-model" });
-    assert.ok(captured, "spawn should have been called for an unrelated provider");
-  });
-
-  test("succeeds once the matching provider key is set in the daemon's ambient environment", (t) => {
-    process.env.OPENROUTER_API_KEY = "sk-openrouter-secret-value";
-    t.after(() => delete process.env.OPENROUTER_API_KEY);
-    let captured = null;
-    const mgr = makeManager({
-      spawnFn: (cmd, args, opts) => { captured = opts; return fakeChild(); },
-      providerKeyEnvName: "OPENROUTER_API_KEY",
-    });
-    mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), model: "openrouter/meta/muse-spark-1.1" });
-    assert.equal(captured.env.OPENROUTER_API_KEY, "sk-openrouter-secret-value");
-  });
-
-  test("succeeds when a key_slot supplies the matching provider key even with no ambient value", (t) => {
-    delete process.env.OPENROUTER_API_KEY;
-    process.env.AXI_TEST_OPENROUTER_SLOT = "sk-slotted-secret-value";
-    t.after(() => delete process.env.AXI_TEST_OPENROUTER_SLOT);
-    let captured = null;
-    const mgr = makeManager({
-      spawnFn: (cmd, args, opts) => { captured = opts; return fakeChild(); },
-      providerKeyEnvName: "OPENROUTER_API_KEY",
-      keySlotsSpec: "primary:AXI_TEST_OPENROUTER_SLOT",
-    });
-    mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), model: "openrouter/meta/muse-spark-1.1", keySlot: "primary" });
-    assert.equal(captured.env.OPENROUTER_API_KEY, "sk-slotted-secret-value");
+    assert.ok(secondCapturedOpts, "the queued task should have spawned");
+    assert.equal(secondCapturedOpts.env.AXI_TEST_MARKER, "captured-at-dispatch-time", "caller env is frozen at dispatch() time");
+    assert.equal(secondCapturedOpts.env.AXI_TEST_LATE_AMBIENT, "set-after-queuing", "the daemon's own ambient env is still read fresh at spawn time");
   });
 });
 

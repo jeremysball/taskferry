@@ -32,7 +32,7 @@ opencode-plugin.js  native OpenCode plugin: calls client.js directly,
                      not through cli.js
 ```
 
-`src/tasks.js` (2796 lines) is the largest file by a wide margin and does
+`src/tasks.js` (2711 lines) is the largest file by a wide margin and does
 the real work; everything above it is thin. If a bug report doesn't
 obviously belong to args parsing or output formatting, start there.
 
@@ -45,7 +45,7 @@ obviously belong to args parsing or output formatting, start there.
 | `commands.js` | 380 | One function per command; the only place that calls `client.request`/`client.subscribe`. |
 | `client.js` | 368 | Daemon connection, auto-spawn-on-first-use, request/response correlation by id, `subscribe()` for events. |
 | `daemon.js` | 459 | `net.createServer`, one socket per client, request dispatch loop, `event.subscribe` bookkeeping, stale-socket takeover logic (`prepareSocket`). |
-| `tasks.js` | 2796 | `createTaskManager()`: dispatch, cancel, status, poll (`wait`'s RPC target), list, result, tail, summarize, advisor, state persistence (`tasks.json`), the no-output watchdog, queueing/concurrency caps, key-slot env stripping. |
+| `tasks.js` | 2711 | `createTaskManager()`: dispatch, cancel, status, poll (`wait`'s RPC target), list, result, tail, summarize, advisor, state persistence (`tasks.json`), the no-output watchdog, queueing/concurrency caps, caller-env union sanitization and denylist enforcement. |
 | `protocol.js` | 220 | `PROTOCOL_VERSION`, `RPC_METHODS`, request/response/error envelope encode/decode, method-name-to-manager-function mapping. |
 | `events.js` | 57 | Assigns a monotonic sequence number to each emitted event; that's the whole file. |
 | `activity.js` | 346 | `activityCacheKey`/cache `refresh()`: bounded head+tail narration snapshot, optional model-summary call, min-interval throttling. |
@@ -54,7 +54,7 @@ obviously belong to args parsing or output formatting, start there.
 | `opencode-plugin.js` | 174 | OpenCode's native plugin surface: toasts on task state transitions by subscribing to daemon task-state events through `client.js`. |
 | `executor.js` | 217 | `WorkerExecutor` abstraction: `opencodeExecutor()`/`piExecutor()` build each CLI's spawn args, summary prompt, log-event normalization, and sandboxed auth-file binding. Both executor objects expose a summary-prompt method, but `tasks.js` currently hardcodes every summary task's `executorId` to `"opencode"` regardless of the originating dispatch's executor — `piExecutor()`'s summary support is unused in practice. |
 | `sandbox.js` | 174 | `bwrap` mount layout: read-only root bind, deny-list (`~/.ssh`, `~/.aws`, `~/.config/gcloud`, `~/.config/gh`, `~/.gnupg`), `allowedDirs` merging, `resolveGitCommonDir`/`resolveGitDir` for worktree gitdir resolution. The actual bind-scoping decision (worktree-private gitdir + common dir's shared data only, not the whole common dir) lives in `tasks.js`, not here — see taskferry#224/#227. |
-| `config.js` | 86 | `loadConfig()`: reads/validates `config.json` against `CONFIG_FIELD_TYPES`, rejects unrecognized keys. |
+| `config.js` | 80 | `loadConfig()`: reads/validates `config.json` against `CONFIG_FIELD_TYPES`, rejects unrecognized keys. |
 | `mcp-isolation.js` | 107 | Playwright MCP isolation checks for `taskferry doctor`/`setup` (`opencode.jsonc`, Claude Code's Playwright MCP config). |
 | `paths.js` | 110 | Resolves `TASKFERRY_STATE_DIR`/`TASKFERRY_RUNTIME_DIR`/`TASKFERRY_CACHE_DIR` and the socket path from XDG defaults + env overrides. Also `resolveWorkspaceRoot()`: the git workspace root (handles plain repo/worktree/submodule/bare-repo layouts) that `list`/`watch`/`context`/`home` default `--directory` to — `dispatch`/`advisor` deliberately keep their default on literal cwd instead, since that value doubles as the sandbox root. |
 | `narration-format.js` | 24 | Formats a task's narration/activity text for display. |
@@ -78,6 +78,7 @@ not part of the default `npm test`).
 | What does this CLI flag do? | `docs/cli-reference.md` |
 | Why did a task crash / how do I read `failureReason`? | `docs/troubleshooting.md`, `docs/daemon.md#watchdogs` |
 | Daemon lifecycle, socket resolution, protocol envelope | `docs/daemon.md` |
+| What does the daemon pass to a worker's environment? | `tasks.js`'s `sanitizedEnvironment()`/`dispatchEnvironment()`/`summaryEnvironment()` |
 | What does the daemon send to a summary model, how to disable it | `docs/security.md` |
 | Retired MCP tool names / flags | `docs/migrating-from-mcp.md` |
 | Per-agent (Claude Code/Codex/OpenCode) setup | `docs/integrations/*.md` |
@@ -108,14 +109,12 @@ Vars marked "config.json" also have a config-file equivalent — see
 | `TASKFERRY_DEFAULT_EXECUTOR` | `pi` | yes | Default `--executor` (`opencode` or `pi`) when a dispatch/advisor call omits it |
 | `TASKFERRY_MAX_CONCURRENT_TASKS` | `4` | yes | Running-task concurrency cap |
 | `TASKFERRY_MAX_DISPATCHES_PER_WINDOW` / `TASKFERRY_DISPATCH_WINDOW_MS` | `2` / `5000` | yes | Dispatch burst-rate limit |
+| `TASKFERRY_ENV_DENYLIST` | — | yes (`envDenylist`) | Comma-separated environment variable names stripped from spawned children after caller-env forwarding |
 | `TASKFERRY_NO_OUTPUT_TIMEOUT_MS` | `256000` (~4.3 min) | yes | Pre-output-seen watchdog deadline |
 | `TASKFERRY_POST_OUTPUT_NO_OUTPUT_TIMEOUT_MS` | `400000` (~6.7 min) | yes | Watchdog deadline once a task has produced its first log event |
 | `TASKFERRY_WATCHDOG_POLL_MS` | `2000` | no | Watchdog check interval |
 | `TASKFERRY_WATCHDOG_GRACE_MS` | `5000` | yes | SIGTERM→SIGKILL escalation grace period when the watchdog force-stops a task (same override surface as `cancel`'s `--grace-ms`, but for watchdog-triggered stops) |
-| `TASKFERRY_KEY_SLOTS` | — | yes | Named provider-key slot registry; see `docs/security.md` |
-| `TASKFERRY_PROVIDER_KEY_ENV` | — | yes | Source env var a key slot copies from |
 | `TASKFERRY_SUMMARY_MODEL` | `opencode/mimo-v2.5-free` | yes | Model behind `summary --mode report` |
-| `TASKFERRY_SUMMARY_KEY_SLOT` / `TASKFERRY_SUMMARY_PROVIDER_KEY_ENV` | — | yes | Key-slot wiring specific to the summary model |
 | `TASKFERRY_ACTIVITY_SUMMARIES` | `true` | yes | Enables `watch --summaries` / activity-style model calls |
 | `TASKFERRY_SUMMARIZER_TIMEOUT_MS` | `360000` (6 min) | yes | Throttle between activity-summary model calls |
 | `TASKFERRY_ACTIVITY_MAX_WORDS` | `75` | yes | Max words in an activity-style summary |

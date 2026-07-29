@@ -66,18 +66,6 @@ describe("loadConfig()", () => {
     assert.throws(() => loadConfig({ configPath }), /error: config key "maxConcurrentTasks".*must be a number.*\nhelp:/s);
   });
 
-  test("keySlots reuses parseKeySlots's validation and error text", () => {
-    const dir = tmpConfigDir();
-    const configPath = writeConfig(dir, JSON.stringify({ keySlots: "malformed-no-colon" }));
-    assert.throws(() => loadConfig({ configPath }), /error: malformed TASKFERRY_KEY_SLOTS entry:.*\nhelp:/s);
-  });
-
-  test("accepts a valid keySlots value", () => {
-    const dir = tmpConfigDir();
-    const configPath = writeConfig(dir, JSON.stringify({ keySlots: "primary:OPENCODE_GO_API_KEY" }));
-    assert.deepEqual(loadConfig({ configPath }), { keySlots: "primary:OPENCODE_GO_API_KEY" });
-  });
-
   test("rejects __proto__ as an unrecognized key (prototype-pollution guard)", () => {
     const dir = tmpConfigDir();
     const configPath = writeConfig(dir, '{"__proto__": null}');

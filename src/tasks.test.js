@@ -3964,6 +3964,115 @@ describe("caller-env union (sanitizedEnvironment)", () => {
     assert.equal(secondCapturedOpts.env.AXI_TEST_MARKER, "captured-at-dispatch-time", "caller env is frozen at dispatch() time");
     assert.equal(secondCapturedOpts.env.AXI_TEST_LATE_AMBIENT, "set-after-queuing", "the daemon's own ambient env is still read fresh at spawn time");
   });
+
+  test("excluded names, denylist names, and caller-wins are all applied in a single merge pass (review fix: caller-wins/denylist-last/denylist-strips-ambient semantics)", (t) => {
+    process.env.TASKFERRY_STATE_DIR = "real-state";
+    process.env.AXI_TEST_DENY_AMBIENT = "ambient-leak";
+    t.after(() => {
+      delete process.env.TASKFERRY_STATE_DIR;
+      delete process.env.AXI_TEST_DENY_AMBIENT;
+    });
+    let capturedOpts = null;
+    const mgr = makeManager({
+      spawnFn: (cmd, args, opts) => { capturedOpts = opts; return fakeChild(); },
+      envDenylistSpec: "AXI_TEST_DENY_AMBIENT,AXI_TEST_DENY_CALLER",
+    });
+
+    mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), env: {
+      TASKFERRY_STATE_DIR: "malicious-state",
+      AXI_TEST_DENY_AMBIENT: "caller-overrides-ambient",
+      AXI_TEST_DENY_CALLER: "caller-only",
+      AXI_TEST_KEEP: "from-caller",
+    } });
+
+    assert.equal(capturedOpts.env.TASKFERRY_STATE_DIR, "real-state", "excluded name keeps the daemon's ambient value even when the caller sets it");
+    assert.equal("AXI_TEST_DENY_AMBIENT" in capturedOpts.env, false, "denylist strips a name that came in from the daemon's own ambient env");
+    assert.equal("AXI_TEST_DENY_CALLER" in capturedOpts.env, false, "denylist strips a name the caller set on the env param");
+    assert.equal(capturedOpts.env.AXI_TEST_KEEP, "from-caller", "non-excluded, non-denylist caller names overlay the ambient env");
+  });
+
+  test("the exclusion set is sourced from paths.js's plumbing export -- any new TASKFERRY_* plumbing var added there lands here automatically", (t) => {
+    // Single-source review fix: the excluded list used to be hardcoded
+    // literally in tasks.js (["PATH", "HOME", "TASKFERRY_STATE_DIR", ...]).
+    // If a future plumbing var was added to paths.js without also editing
+    // tasks.js, a caller could override it from their forwarded env and
+    // misroute a nested taskferry call (e.g. via TASKFERRY_SOCKET_PATH). The
+    // set is now built from paths.js's TASKFERRY_PLUMBING_ENV_VARS export
+    // plus PATH and HOME; this test exercises every name in that export to
+    // pin the derivation.
+    for (const name of ["TASKFERRY_STATE_DIR", "TASKFERRY_RUNTIME_DIR", "TASKFERRY_CACHE_DIR", "TASKFERRY_SOCKET_PATH"]) {
+      process.env[name] = `real-${name}`;
+    }
+    t.after(() => {
+      for (const name of ["TASKFERRY_STATE_DIR", "TASKFERRY_RUNTIME_DIR", "TASKFERRY_CACHE_DIR", "TASKFERRY_SOCKET_PATH"]) {
+        delete process.env[name];
+      }
+    });
+    let capturedOpts = null;
+    const mgr = makeManager({ spawnFn: (cmd, args, opts) => { capturedOpts = opts; return fakeChild(); } });
+
+    mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), env: {
+      TASKFERRY_STATE_DIR: "malicious-state",
+      TASKFERRY_RUNTIME_DIR: "malicious-runtime",
+      TASKFERRY_CACHE_DIR: "malicious-cache",
+      TASKFERRY_SOCKET_PATH: "malicious-socket",
+    } });
+
+    assert.equal(capturedOpts.env.TASKFERRY_STATE_DIR, "real-TASKFERRY_STATE_DIR");
+    assert.equal(capturedOpts.env.TASKFERRY_RUNTIME_DIR, "real-TASKFERRY_RUNTIME_DIR");
+    assert.equal(capturedOpts.env.TASKFERRY_CACHE_DIR, "real-TASKFERRY_CACHE_DIR");
+    assert.equal(capturedOpts.env.TASKFERRY_SOCKET_PATH, "real-TASKFERRY_SOCKET_PATH");
+  });
+
+  test("a caller-supplied env key containing '=' is rejected synchronously and the task settles as crashed with a matching spawnError", () => {
+    // Mirrors isEnvironment() in src/protocol.js so a programmatic caller
+    // that bypasses the socket (e.g. internal code invoking dispatch()
+    // directly) can't smuggle a malformed key past the spawn boundary. The
+    // RPC layer already rejects this; sanitizedEnvironment() is the second
+    // gate. The throw lands inside startTask()'s try/catch, which marks the
+    // task crashed with spawnError -- fail fast, no silent drop, no spawn.
+    let spawnCalled = false;
+    const mgr = makeManager({ spawnFn: () => { spawnCalled = true; return fakeChild(); } });
+
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), env: { "BAD=KEY": "value" } });
+
+    assert.equal(mgr.status(dispatched.id).status, "crashed");
+    assert.match(mgr.status(dispatched.id).spawnError, /invalid env key in caller-supplied env.*BAD=KEY/);
+    assert.equal(spawnCalled, false, "the spawn must never happen when env validation fails");
+  });
+
+  test("a caller-supplied env key that is an empty string is rejected synchronously and the task settles as crashed", () => {
+    let spawnCalled = false;
+    const mgr = makeManager({ spawnFn: () => { spawnCalled = true; return fakeChild(); } });
+
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), env: { "": "value" } });
+
+    assert.equal(mgr.status(dispatched.id).status, "crashed");
+    assert.match(mgr.status(dispatched.id).spawnError, /invalid env key in caller-supplied env/);
+    assert.equal(spawnCalled, false);
+  });
+
+  test("a caller-supplied env value that is not a string is rejected synchronously and the task settles as crashed", () => {
+    let spawnCalled = false;
+    const mgr = makeManager({ spawnFn: () => { spawnCalled = true; return fakeChild(); } });
+
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), env: { AXI_TEST_BAD_VALUE: 42 } });
+
+    assert.equal(mgr.status(dispatched.id).status, "crashed");
+    assert.match(mgr.status(dispatched.id).spawnError, /env value for "AXI_TEST_BAD_VALUE" must be a string, got number/);
+    assert.equal(spawnCalled, false);
+  });
+
+  test("a caller-supplied env value that is undefined is rejected synchronously (null/undefined values would silently lose type info at the spawn boundary)", () => {
+    let spawnCalled = false;
+    const mgr = makeManager({ spawnFn: () => { spawnCalled = true; return fakeChild(); } });
+
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), env: { AXI_TEST_UNDEFINED: undefined } });
+
+    assert.equal(mgr.status(dispatched.id).status, "crashed");
+    assert.match(mgr.status(dispatched.id).spawnError, /env value for "AXI_TEST_UNDEFINED" must be a string, got undefined/);
+    assert.equal(spawnCalled, false);
+  });
 });
 
 describe("startTask() writes stdout through executor.normalizeLogEvent (Task 7: write-time normalization)", () => {

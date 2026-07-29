@@ -32,7 +32,7 @@ opencode-plugin.js  native OpenCode plugin: calls client.js directly,
                      not through cli.js
 ```
 
-`src/tasks.js` (2711 lines) is the largest file by a wide margin and does
+`src/tasks.js` (2730 lines) is the largest file by a wide margin and does
 the real work; everything above it is thin. If a bug report doesn't
 obviously belong to args parsing or output formatting, start there.
 
@@ -45,7 +45,7 @@ obviously belong to args parsing or output formatting, start there.
 | `commands.js` | 380 | One function per command; the only place that calls `client.request`/`client.subscribe`. |
 | `client.js` | 368 | Daemon connection, auto-spawn-on-first-use, request/response correlation by id, `subscribe()` for events. |
 | `daemon.js` | 459 | `net.createServer`, one socket per client, request dispatch loop, `event.subscribe` bookkeeping, stale-socket takeover logic (`prepareSocket`). |
-| `tasks.js` | 2718 | `createTaskManager()`: dispatch, cancel, status, poll (`wait`'s RPC target), list, result, tail, summarize, advisor, state persistence (`tasks.json`), the no-output watchdog, queueing/concurrency caps, caller-env union sanitization and denylist enforcement, dispatch-time env snapshot. |
+| `tasks.js` | 2730 | `createTaskManager()`: dispatch, cancel, status, poll (`wait`'s RPC target), list, result, tail, summarize, advisor, state persistence (`tasks.json`), the no-output watchdog, queueing/concurrency caps, caller-env union sanitization (one-pass merge) and denylist enforcement, in-`sanitizedEnvironment` env-key validation (mirrors the RPC-level `isEnvironment` check so programmatic callers can't bypass it), dispatch-time env snapshot. |
 | `protocol.js` | 241 | `PROTOCOL_VERSION`, `RPC_METHODS`, request/response/error envelope encode/decode, method-name-to-manager-function mapping, `isEnvironment` env-param predicate. |
 | `events.js` | 57 | Assigns a monotonic sequence number to each emitted event; that's the whole file. |
 | `activity.js` | 346 | `activityCacheKey`/cache `refresh()`: bounded head+tail narration snapshot, optional model-summary call, min-interval throttling. |
@@ -56,7 +56,7 @@ obviously belong to args parsing or output formatting, start there.
 | `sandbox.js` | 174 | `bwrap` mount layout: read-only root bind, deny-list (`~/.ssh`, `~/.aws`, `~/.config/gcloud`, `~/.config/gh`, `~/.gnupg`), `allowedDirs` merging, `resolveGitCommonDir`/`resolveGitDir` for worktree gitdir resolution. The actual bind-scoping decision (worktree-private gitdir + common dir's shared data only, not the whole common dir) lives in `tasks.js`, not here — see taskferry#224/#227. |
 | `config.js` | 80 | `loadConfig()`: reads/validates `config.json` against `CONFIG_FIELD_TYPES`, rejects unrecognized keys. |
 | `mcp-isolation.js` | 107 | Playwright MCP isolation checks for `taskferry doctor`/`setup` (`opencode.jsonc`, Claude Code's Playwright MCP config). |
-| `paths.js` | 110 | Resolves `TASKFERRY_STATE_DIR`/`TASKFERRY_RUNTIME_DIR`/`TASKFERRY_CACHE_DIR` and the socket path from XDG defaults + env overrides. Also `resolveWorkspaceRoot()`: the git workspace root (handles plain repo/worktree/submodule/bare-repo layouts) that `list`/`watch`/`context`/`home` default `--directory` to — `dispatch`/`advisor` deliberately keep their default on literal cwd instead, since that value doubles as the sandbox root. |
+| `paths.js` | 123 | Resolves `TASKFERRY_STATE_DIR`/`TASKFERRY_RUNTIME_DIR`/`TASKFERRY_CACHE_DIR` and the socket path from XDG defaults + env overrides. Exports `TASKFERRY_PLUMBING_ENV_VARS` (frozen array of those four names) so `tasks.js` builds its caller-env exclusion set from the same source of truth — a new plumbing var added here lands in the exclusion set automatically. Also `resolveWorkspaceRoot()`: the git workspace root (handles plain repo/worktree/submodule/bare-repo layouts) that `list`/`watch`/`context`/`home` default `--directory` to — `dispatch`/`advisor` deliberately keep their default on literal cwd instead, since that value doubles as the sandbox root. |
 | `narration-format.js` | 24 | Formats a task's narration/activity text for display. |
 | `errors.js` | 20 | Shared error-message helpers. |
 | `numbers.js` | 14 | Shared numeric-parsing helpers (`positiveInteger`, `nonNegativeInteger`, etc.). |
@@ -65,7 +65,7 @@ obviously belong to args parsing or output formatting, start there.
 | `scripts/generate-skill.js` | — | Regenerates `integrations/*/skills/using-taskferry/SKILL.md` from `skills/using-taskferry/SKILL.md`; `--check` fails on drift. The two generated copies are committed, not gitignored — they're what the Claude Code and Codex plugin marketplaces actually read (`integrations.test.js` pins the plugin `source` to those exact paths), so a missing or stale copy ships wrong skill content to real installs, not just a rebuildable artifact. |
 
 Most `*.js` files above have a co-located `*.test.js` (`node --test`, no
-framework) — `mcp-isolation.js`, `paths.js`, `narration-format.js`,
+framework) — `mcp-isolation.js`, `narration-format.js`,
 `errors.js`, and `numbers.js` are the current exceptions.
 `smoke-test.js`/`cancel-smoke-test.js`/`poll-smoke-test.js` are
 integration tests that spawn a real daemon (`npm run test:integration`,

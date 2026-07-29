@@ -6,7 +6,7 @@ import path from "node:path";
 import { createTaskEvents } from "./events.js";
 import { createActivityCache, readActivitySnapshot, readDeltaNarration, DEFAULT_SUMMARIZER_TIMEOUT_MS } from "./activity.js";
 import { withFileLock } from "./state-lock.js";
-import { resolveStateDir, resolveCacheDir } from "./paths.js";
+import { resolveStateDir, resolveCacheDir, TASKFERRY_PLUMBING_ENV_VARS } from "./paths.js";
 import { RESULT_FIELDS } from "./protocol.js";
 import { formatToolEventForNarration } from "./narration-format.js";
 import { errCode } from "./errors.js";
@@ -559,7 +559,8 @@ export function createTaskManager({
     }
   }
 
-  const CALLER_ENV_EXCLUDED = ["PATH", "HOME", "TASKFERRY_STATE_DIR", "TASKFERRY_RUNTIME_DIR", "TASKFERRY_CACHE_DIR", "TASKFERRY_SOCKET_PATH"];
+  const CALLER_ENV_EXCLUDED = Object.freeze(["PATH", "HOME", ...TASKFERRY_PLUMBING_ENV_VARS]);
+  const CALLER_ENV_EXCLUDED_SET = new Set(CALLER_ENV_EXCLUDED);
 
   /**
    * Builds the final base environment for a spawned child: the daemon's own
@@ -567,15 +568,26 @@ export function createTaskManager({
    * caller-supplied `env` (caller wins, except for CALLER_ENV_EXCLUDED --
    * daemon-controlled plumbing resolved once at the daemon's own startup),
    * with `envDenylist` stripped last regardless of which side the value
-   * came from.
+   * came from. Mirrors the RPC-level isEnvironment key/value validation so
+   * a programmatic caller that bypasses the socket (no isEnvironment gate)
+   * can't smuggle a malformed key past the spawn boundary -- bad keys throw
+   * synchronously here, which startTask() catches and surfaces as a
+   * spawnError on a crashed task rather than a silently-dropped value.
    * @param {NodeJS.ProcessEnv} [env]
    * @returns {NodeJS.ProcessEnv}
    */
   function sanitizedEnvironment(env = {}) {
-    const base = { ...process.env };
-    const overlay = { ...env };
-    for (const name of CALLER_ENV_EXCLUDED) delete overlay[name];
-    const merged = { ...base, ...overlay };
+    const merged = { ...process.env };
+    for (const name of Object.keys(env)) {
+      if (name === "" || name.includes("=")) {
+        throw new Error(`error: invalid env key in caller-supplied env: ${JSON.stringify(name)}\nhelp: env keys must be non-empty strings without '=' characters`);
+      }
+      if (typeof env[name] !== "string") {
+        throw new Error(`error: env value for ${JSON.stringify(name)} must be a string, got ${typeof env[name]}\nhelp: cast values to strings before dispatching`);
+      }
+      if (CALLER_ENV_EXCLUDED_SET.has(name)) continue;
+      merged[name] = env[name];
+    }
     for (const name of envDenylist) delete merged[name];
     return merged;
   }

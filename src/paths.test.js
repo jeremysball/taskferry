@@ -1,6 +1,20 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { resolveWorkspaceRoot } from "./paths.js";
+import { resolveWorkspaceRoot, TASKFERRY_PLUMBING_ENV_VARS } from "./paths.js";
+
+test("TASKFERRY_PLUMBING_ENV_VARS is a frozen array of the TASKFERRY_* plumbing names tasks.js excludes from caller-env forwarding", () => {
+  assert.ok(Array.isArray(TASKFERRY_PLUMBING_ENV_VARS));
+  assert.ok(Object.isFrozen(TASKFERRY_PLUMBING_ENV_VARS));
+  for (const name of ["TASKFERRY_STATE_DIR", "TASKFERRY_RUNTIME_DIR", "TASKFERRY_CACHE_DIR", "TASKFERRY_SOCKET_PATH"]) {
+    assert.ok(TASKFERRY_PLUMBING_ENV_VARS.includes(name), `expected ${name} in TASKFERRY_PLUMBING_ENV_VARS`);
+  }
+});
+
+test("TASKFERRY_PLUMBING_ENV_VARS contains only uppercase TASKFERRY_* names", () => {
+  for (const name of TASKFERRY_PLUMBING_ENV_VARS) {
+    assert.match(name, /^TASKFERRY_[A-Z0-9_]+$/);
+  }
+});
 
 test("resolves the parent directory of the git-common-dir for a plain repo", () => {
   const runCommand = () => ({ status: 0, stdout: "/workspace/repo/.git\n", stderr: "" });

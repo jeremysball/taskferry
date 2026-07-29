@@ -38,14 +38,18 @@ const PI_SAFE_PATH_FOR_CWD = (/** @type {string} */ cwd) =>
  *
  * @param {string} realSessionsDir - pi's `<agentDir>/sessions/` on the host.
  * @param {string} sessionId
- * @param {{ readdirFn?: (dir: string) => string[] }} [deps]
+ * @param {{ readdirFn?: (dir: string) => string[], existsFn?: (path: string) => boolean }} [deps]
  * @returns {string|null}
  */
-function resolvePiSessionFile(realSessionsDir, sessionId, { readdirFn = (/** @type {string} */ dir) => fs.readdirSync(dir) } = {}) {
+function resolvePiSessionFile(realSessionsDir, sessionId, { readdirFn = (/** @type {string} */ dir) => fs.readdirSync(dir), existsFn = (/** @type {string} */ p) => fs.existsSync(p) } = {}) {
   if (!sessionId) return null;
-  // Pi treats --session as a literal path when it looks like one.
+  // Pi treats --session as a literal path when it looks like one. Unlike the
+  // prefix-match branch below, nothing else validates this path before it
+  // becomes a bwrap --bind source, and plain --bind (not --bind-try) hard-fails
+  // the whole sandbox launch if the source is missing -- so a caller-supplied
+  // path that doesn't exist yet must be caught here, not left to bwrap.
   if (sessionId.includes("/") || sessionId.includes("\\") || sessionId.endsWith(".jsonl")) {
-    return sessionId;
+    return existsFn(sessionId) ? sessionId : null;
   }
   // Pi names session files `<isoTimestamp>_<sessionId>.jsonl`, with exactly one
   // underscore separating the timestamp from the UUID. Match by prefix on the
@@ -228,6 +232,19 @@ export function piExecutor({ execFileFn = execFileAsync } = {}) {
       // the one being resumed -- narrowing this to a single file bind is
       // the difference between a safe resume and a history wipe.
       const realSessionsDir = path.join(realAgentDir, "sessions");
+      // sandboxedDataHome is bound into the sandbox in full, unconditionally,
+      // below via extraRwBinds in tasks.js (independent of sessionId) -- so a
+      // session this same sandbox created on an earlier dispatch is already
+      // reachable there regardless of whether the single-file resolve below
+      // finds anything. The resolve below exists only to pull in a *real*
+      // host session (one from an unsandboxed `pi` run under realAgentDir,
+      // outside taskferry) that a resume references -- it has no way to tell
+      // a taskferry-origin session id from a real-host one, and doesn't need
+      // to: a miss here is silently harmless today only because that other,
+      // unrelated whole-dir bind already covers taskferry's own sessions. If
+      // that bind is ever narrowed or made conditional, this silent-miss
+      // behavior stops being safe for taskferry-origin resumes and needs
+      // revisiting together with it.
       const sandboxedDataHome = path.join(dataDir, "pi-data");
       const sandboxedSessionsHome = path.join(sandboxedDataHome, "sessions");
       /** @type {[string, string][]} */
@@ -253,7 +270,7 @@ export function piExecutor({ execFileFn = execFileAsync } = {}) {
         })();
         if (sessionsDirStat?.isDirectory()) {
           const safePath = PI_SAFE_PATH_FOR_CWD(launchDirectory);
-          const realSessionFile = resolvePiSessionFile(path.join(realSessionsDir, safePath), sessionId, { readdirFn });
+          const realSessionFile = resolvePiSessionFile(path.join(realSessionsDir, safePath), sessionId, { readdirFn, existsFn });
           if (realSessionFile) {
             const sandboxedSessionFile = path.join(sandboxedSessionsHome, safePath, path.basename(realSessionFile));
             extraRwPairBinds.push([realSessionFile, sandboxedSessionFile]);

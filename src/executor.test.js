@@ -151,6 +151,24 @@ describe("piExecutor()", () => {
     assert.equal(readdirCalls.length, 0);
   });
 
+  test("sandboxAuthFile omits the sessions bind when a literal session file path doesn't exist on the host", () => {
+    const ex = piExecutor();
+    const literalSessionPath = "/custom/pi/sessions/--home-user-projects-bar--/missing-session.jsonl";
+    const result = ex.sandboxAuthFile({
+      homeDir: "/home/user",
+      dataDir: "/state/run",
+      spawnEnv: { PI_CODING_AGENT_DIR: "/custom/pi" },
+      // existsFn says everything else is real, but not this specific file --
+      // bwrap's plain --bind hard-fails the sandbox launch if the source is
+      // missing, so this must be caught here rather than left to bwrap.
+      existsFn: (p) => p !== literalSessionPath,
+      statFn: () => ({ isDirectory: () => true }),
+      sessionId: literalSessionPath,
+      launchDirectory: "/home/user/projects/bar",
+    });
+    assert.deepEqual(result.extraRwPairBinds, []);
+  });
+
   test("sandboxAuthFile omits the sessions bind when no sessionId was given (fresh dispatch, not a resume)", () => {
     const ex = piExecutor();
     const result = ex.sandboxAuthFile({

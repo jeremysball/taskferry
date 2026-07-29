@@ -528,7 +528,7 @@ test("summary --wait proceeds to summarize once task.wait reports a settled stat
   assert.deepEqual(capture.output().value, { text: "it worked" });
   assert.deepEqual(calls, [
     { method: "task.wait", params: { taskId: "oc_1", timeoutMs: 900000 } },
-    { method: "task.summary", params: { taskId: "oc_1" } },
+    { method: "task.summary", params: { taskId: "oc_1", env: process.env } },
   ]);
 });
 

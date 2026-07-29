@@ -654,6 +654,60 @@ test("dispatch omits noSandbox from the RPC payload when not set", async () => {
   assert.equal("noSandbox" in capturedParams, false);
 });
 
+test("dispatch forwards the caller's env to the RPC payload", async () => {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-commands-test-")));
+  let capturedParams;
+  const client = {
+    request: async (method, params) => {
+      capturedParams = params;
+      return { id: "oc_1" };
+    },
+  };
+  const injectedEnv = { FOO: "bar" };
+  await runCommand("dispatch", { prompt: "hi", directory: root }, { client, cwd: root, env: injectedEnv });
+  assert.deepEqual(capturedParams.env, injectedEnv);
+});
+
+test("dispatch no longer forwards keySlot", async () => {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-commands-test-")));
+  let capturedParams;
+  const client = {
+    request: async (method, params) => {
+      capturedParams = params;
+      return { id: "oc_1" };
+    },
+  };
+  await runCommand("dispatch", { prompt: "hi", directory: root, keySlot: "primary" }, { client, cwd: root });
+  assert.equal("keySlot" in capturedParams, false);
+});
+
+test("advisor forwards the caller's env to the RPC payload", async () => {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-commands-test-")));
+  let capturedParams;
+  const client = {
+    request: async (method, params) => {
+      capturedParams = params;
+      return { status: "done", message: "advice" };
+    },
+  };
+  const injectedEnv = { FOO: "bar" };
+  await runCommand("advisor", { prompt: "hi", directory: root, model: "m" }, { client, cwd: root, env: injectedEnv });
+  assert.deepEqual(capturedParams.env, injectedEnv);
+});
+
+test("summary forwards the caller's env to the RPC payload", async () => {
+  let capturedParams;
+  const client = {
+    request: async (method, params) => {
+      capturedParams = params;
+      return { sourceTaskId: "t1", summary: "done" };
+    },
+  };
+  const injectedEnv = { FOO: "bar" };
+  await runCommand("summary", { taskId: "t1" }, { client, env: injectedEnv });
+  assert.deepEqual(capturedParams.env, injectedEnv);
+});
+
 test("dispatch refuses to run when the generated skill copies are stale", async () => {
   const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-commands-test-")));
   const client = {

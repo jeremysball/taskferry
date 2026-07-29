@@ -90,11 +90,11 @@ export async function runCommand(command, options, { client, io = process, signa
         ...(options.model === undefined ? {} : { model: options.model }),
         ...(options.variant === undefined ? {} : { variant: options.variant }),
         ...(options.sessionId === undefined ? {} : { sessionId: options.sessionId }),
-        ...(options.keySlot === undefined ? {} : { keySlot: options.keySlot }),
         ...(options.finalMarker === undefined ? {} : { finalMarker: options.finalMarker }),
         ...(options.noSandbox === undefined ? {} : { noSandbox: options.noSandbox }),
         ...(options.allowedDirs === undefined ? {} : { allowedDirs: options.allowedDirs }),
         ...(options.executor === undefined ? {} : { executor: options.executor }),
+        env,
         ...(process.env.CLAUDE_CODE_SESSION_ID ? { originSessionId: process.env.CLAUDE_CODE_SESSION_ID } : {}),
       });
     }
@@ -151,6 +151,7 @@ export async function runCommand(command, options, { client, io = process, signa
         ...(options.sessionId === undefined ? {} : { sessionId: options.sessionId }),
         ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
         ...(options.executor === undefined ? {} : { executor: options.executor }),
+        env,
       });
     }
     case "status": {
@@ -180,6 +181,7 @@ export async function runCommand(command, options, { client, io = process, signa
         taskId: options.taskId,
         ...(options.maxWords === undefined ? {} : { maxWords: options.maxWords }),
         ...(options.mode === "activity" ? { mode: options.mode } : {}),
+        env,
       });
       return options.mode === "report" ? summary : { mode: options.mode, ...summary };
     }

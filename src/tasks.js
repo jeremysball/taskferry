@@ -12,7 +12,7 @@ import { formatToolEventForNarration } from "./narration-format.js";
 import { errCode } from "./errors.js";
 import { isNonNegativeInteger, isPositiveInteger } from "./numbers.js";
 import { buildBwrapArgs, checkBwrapAvailable, checkOverlaySupport, defaultDenyList, platformSupportsSandbox, resolveGitCommonDir, resolveGitDir } from "./sandbox.js";
-import { overlayPaths, resolvePreDispatchHead, subOverlayPaths } from "./changeset.js";
+import { overlayPaths, resolvePreDispatchHead, subOverlayPaths, cleanupOverlay, defaultRunCommand as defaultOverlayRunCommand, extractGitDiff, extractNonGitDiff } from "./changeset.js";
 import { resolveExecutor, opencodeExecutor } from "./executor.js";
 
 /**
@@ -446,7 +446,8 @@ const DEFAULT_CANCEL_GRACE_MS = 5000;
  * @param {(directory: string) => string|null} [options.resolveGitDirFn]
  * @param {boolean} [options.overlayEnabled]
  * @param {() => {supported: boolean, reason?: string}} [options.checkOverlaySupportFn]
- * @param {string} [options.overlayTmpRoot]
+  * @param {string} [options.overlayTmpRoot]
+ * @param {(command: string, args: string[]) => {status: number|null, stdout: string, stderr: string, error?: Error}} [options.runOverlayCommandFn]
  * @param {(path: string) => void} [options.rmOverlayTreeFn]
  * @param {() => {checked: boolean, available: boolean, reason?: string}} [options.checkBwrapAvailableFn]
  * @param {(path: string) => boolean} [options.existsFn]
@@ -529,6 +530,7 @@ export function createTaskManager({
     : (/** @type {boolean|undefined} */ (config.overlayEnabled) ?? true),
   checkOverlaySupportFn = checkOverlaySupport,
   overlayTmpRoot = os.tmpdir(),
+  runOverlayCommandFn = defaultOverlayRunCommand,
   rmOverlayTreeFn = (/** @type {string} */ p) => fs.rmSync(p, { recursive: true, force: true }),
   resolveGitCommonDirFn = resolveGitCommonDir,
   resolveGitDirFn = resolveGitDir,
@@ -594,6 +596,60 @@ export function createTaskManager({
         `error: overlay is required for gated dispatch writes but is unsupported (${result.reason})\n` +
         "help: upgrade bubblewrap to >= 0.8, or opt out explicitly with --no-overlay or TASKFERRY_DISABLE_OVERLAY=1 (writes will not be gated)"
       );
+    }
+  }
+
+  /**
+   * @param {Task} finishedTask
+   */
+  function extractChangesetForTask(finishedTask) {
+    if (!finishedTask.overlayDirs) return;
+    const denyList = defaultDenyList(os.homedir(), stateDir).filter(existsFn);
+    const diffPath = path.join(stateDir, "diffs", `${finishedTask.id}.patch`);
+    const isGitTarget = finishedTask.preDispatchHead != null;
+    let extracted;
+    try {
+      extracted = isGitTarget
+        ? extractGitDiff({
+            directory: finishedTask.directory,
+            overlay: { upperDir: finishedTask.overlayDirs.upperDir, workDir: finishedTask.overlayDirs.workDir },
+            overlayRwBinds: finishedTask.overlayDirs.rwBinds ?? [],
+            preDispatchHead: /** @type {string} */ (finishedTask.preDispatchHead),
+            stateDir,
+            runtimeDir,
+            homeDir: os.homedir(),
+            denyList,
+            diffPath,
+            runCommand: runOverlayCommandFn,
+          })
+        : extractNonGitDiff({
+            directory: finishedTask.directory,
+            overlay: finishedTask.overlayDirs,
+            stateDir,
+            runtimeDir,
+            homeDir: os.homedir(),
+            denyList,
+            diffPath,
+            runCommand: runOverlayCommandFn,
+          });
+    } catch (err) {
+      finishedTask.changesetStatus = "pending";
+      finishedTask.changesetError = err instanceof Error ? err.message : String(err);
+      persistTask(finishedTask.id);
+      return;
+    }
+    finishedTask.diffPath = extracted.diffPath;
+    finishedTask.changesetError = null;
+    if (finishedTask.role === "advisor") {
+      finishedTask.changesetStatus = "rejected";
+      const removal = cleanupOverlay({ root: finishedTask.overlayDirs.root, tmpRoot: overlayTmpRoot, rmFn: rmOverlayTreeFn });
+      if (removal.removed) finishedTask.overlayDirs = null;
+    } else if (extracted.hasChanges) {
+      finishedTask.changesetStatus = "pending";
+    } else {
+      finishedTask.changesetStatus = "accepted";
+      const removal = cleanupOverlay({ root: finishedTask.overlayDirs.root, tmpRoot: overlayTmpRoot, rmFn: rmOverlayTreeFn });
+      if (removal.removed) finishedTask.overlayDirs = null;
     }
   }
 
@@ -909,10 +965,10 @@ export function createTaskManager({
       ...(executorId != null ? { executorId } : {}),
       ...(role != null ? { role } : {}),
       ...(changesetStatus != null ? { changesetStatus } : {}),
-      ...(diffPath != null ? { diffPath } : {}),
-      ...(overlayDirs != null ? { overlayDirs } : {}),
+      diffPath: diffPath ?? null,
+      overlayDirs: overlayDirs ?? null,
       ...(preDispatchHead != null ? { preDispatchHead } : {}),
-      ...(changesetError != null ? { changesetError } : {}),
+      changesetError: changesetError ?? null,
       cancelRequested: !!cancelRequested,
     };
   }
@@ -1999,6 +2055,7 @@ export function createTaskManager({
         const parsedSessionId = readSessionIdFromLog(task.logPath);
         if (parsedSessionId) task.sessionId = parsedSessionId;
         if (task.status === "done") evaluateOutputCompleteness(task);
+        if (task.status === "done" || task.status === "crashed" || task.status === "cancelled") extractChangesetForTask(task);
         // Persist the opencode session id of a successful summary child so the
         // next summarize turn can resume the same prompt-cached conversation
         // via `--continue --session <id>`, and stamp the watermark so the next

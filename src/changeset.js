@@ -5,15 +5,23 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { buildBwrapArgs } from "./sandbox.js";
 
+/** @typedef {{status: number|null, stdout: string, stderr: string, error?: Error}} CommandResult */
+
 // Diff/apply calls are heavier than sandbox.js's bwrap --version probe (a
 // real git diff over a worker's changes), so this uses a longer timeout
 // than sandbox.js's defaultRunCommand.
-function defaultRunCommand(command, args) {
+/**
+ * @param {string} command
+ * @param {string[]} args
+ * @returns {CommandResult}
+ */
+export function defaultRunCommand(command, args) {
   const result = spawnSync(command, args, { encoding: "utf8", timeout: 30000 });
   if (result.error) return { status: null, stdout: result.stdout || "", stderr: result.stderr || "", error: result.error };
   return { status: result.status, stdout: result.stdout || "", stderr: result.stderr || "", error: result.error };
 }
 
+/** @param {string} value */
 function shQuote(value) {
   return `'${value.replaceAll("'", "'\\''")}'`;
 }

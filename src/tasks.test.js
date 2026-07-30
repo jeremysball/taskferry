@@ -1045,6 +1045,168 @@ describe("bwrap sandboxing", () => {
   });
 });
 
+describe("changeset extraction at settlement", () => {
+  test("extracts a diff and leaves changesetStatus pending for a settled dispatch with an active overlay", () => {
+    let extractCommand = null;
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "axi-extract-dir-"));
+    const overlayTmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "axi-extract-tmp-"));
+    let child;
+    const mgr = makeManager({
+      spawnFn: (cmd, args) => { child = fakeChild(); return child; },
+      sandboxEnabled: true,
+      checkBwrapAvailableFn: () => ({ checked: true, available: true }),
+      overlayEnabled: true,
+      checkOverlaySupportFn: () => ({ supported: true }),
+      platform: "linux",
+      overlayTmpRoot,
+      runOverlayCommandFn: (command, args) => { extractCommand = { command, args }; return { status: 0, stdout: "diff --git a/x b/x\n", stderr: "", error: undefined }; },
+    });
+
+    const result = mgr.dispatch({ prompt: "hello", directory });
+    child.emit("exit", 0, null);
+
+    const status = mgr.status(result.id);
+    assert.equal(status.changesetStatus, "pending");
+    assert.ok(status.diffPath);
+    assert.equal(extractCommand.command, "bwrap");
+  });
+
+  test("auto-rejects and cleans up an advisor's changeset at settlement", async () => {
+    let cleanedRoot = null;
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "axi-advisor-extract-dir-"));
+    const overlayTmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "axi-advisor-extract-tmp-"));
+    let child;
+    const mgr = makeManager({
+      spawnFn: (cmd, args) => { child = fakeChild(); return child; },
+      sandboxEnabled: true,
+      checkBwrapAvailableFn: () => ({ checked: true, available: true }),
+      overlayEnabled: true,
+      checkOverlaySupportFn: () => ({ supported: true }),
+      platform: "linux",
+      overlayTmpRoot,
+      runOverlayCommandFn: () => ({ status: 0, stdout: "", stderr: "", error: undefined }),
+      rmOverlayTreeFn: (p) => { cleanedRoot = p; },
+    });
+
+    const advisePromise = mgr.advisor({ prompt: "hello", directory, model: "openai/gpt-5.6-sol" });
+    setImmediate(() => child.emit("exit", 0, null));
+    const advised = await advisePromise;
+
+    const status = mgr.status(advised.task_id);
+    assert.equal(status.changesetStatus, "rejected");
+    assert.ok(cleanedRoot);
+  });
+
+  test("re-mounts persisted git-common-dir sub-overlays during extraction", () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "axi-extract-git-dir-"));
+    execFileSync("git", ["init", "-q", directory]);
+    fs.writeFileSync(path.join(directory, "f.txt"), "base\n");
+    execFileSync("git", ["-C", directory, "add", "-A"]);
+    execFileSync("git", ["-C", directory, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "base"]);
+    const gitCommonDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-extract-common-"));
+    const gitWorktreeAdminDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-extract-gitdir-"));
+    let extractArgs = null;
+    let child;
+    const mgr = makeManager({
+      spawnFn: (cmd, args) => { child = fakeChild(); return child; },
+      sandboxEnabled: true,
+      checkBwrapAvailableFn: () => ({ checked: true, available: true }),
+      overlayEnabled: true,
+      checkOverlaySupportFn: () => ({ supported: true }),
+      platform: "linux",
+      resolveGitCommonDirFn: () => gitCommonDir,
+      resolveGitDirFn: () => gitWorktreeAdminDir,
+      runOverlayCommandFn: (command, args) => { extractArgs = args; return { status: 0, stdout: "diff --git a/f.txt b/f.txt\n", stderr: "", error: undefined }; },
+    });
+
+    const result = mgr.dispatch({ prompt: "hello", directory });
+    child.emit("exit", 0, null);
+
+    const overlaySrcCount = extractArgs.filter((a) => a === "--overlay-src").length;
+    assert.ok(overlaySrcCount >= 2);
+    assert.ok(extractArgs.includes(gitWorktreeAdminDir));
+    assert.equal(mgr.status(result.id).changesetStatus, "pending");
+  });
+
+  test("auto-resolves a zero-change extraction to accepted and cleans up immediately", () => {
+    let cleanedRoot = null;
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "axi-empty-extract-dir-"));
+    const overlayTmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "axi-empty-extract-tmp-"));
+    let child;
+    const mgr = makeManager({
+      spawnFn: (cmd, args) => { child = fakeChild(); return child; },
+      sandboxEnabled: true,
+      checkBwrapAvailableFn: () => ({ checked: true, available: true }),
+      overlayEnabled: true,
+      checkOverlaySupportFn: () => ({ supported: true }),
+      platform: "linux",
+      overlayTmpRoot,
+      runOverlayCommandFn: () => ({ status: 0, stdout: "", stderr: "", error: undefined }),
+      rmOverlayTreeFn: (p) => { cleanedRoot = p; },
+    });
+
+    const result = mgr.dispatch({ prompt: "hello", directory });
+    child.emit("exit", 0, null);
+
+    const status = mgr.status(result.id);
+    assert.equal(status.changesetStatus, "accepted");
+    assert.ok(cleanedRoot);
+    assert.equal(status.overlayDirs, null);
+  });
+
+  test("extracts a changeset for a cancelled task too", () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "axi-cancel-extract-dir-"));
+    let child;
+    const mgr = makeManager({
+      spawnFn: (cmd, args) => { child = fakeChild(); return child; },
+      killFn: () => {},
+      sandboxEnabled: true,
+      checkBwrapAvailableFn: () => ({ checked: true, available: true }),
+      overlayEnabled: true,
+      checkOverlaySupportFn: () => ({ supported: true }),
+      platform: "linux",
+      runOverlayCommandFn: () => ({ status: 0, stdout: "diff --git a/x b/x\n", stderr: "", error: undefined }),
+    });
+
+    const result = mgr.dispatch({ prompt: "hello", directory });
+    mgr.cancel(result.id);
+    child.emit("exit", null, "SIGTERM");
+
+    const status = mgr.status(result.id);
+    assert.equal(status.status, "cancelled");
+    assert.equal(status.changesetStatus, "pending");
+    assert.ok(status.diffPath);
+  });
+
+  test("records extraction errors and keeps the overlay for recovery", () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "axi-failed-extract-dir-"));
+    const overlayTmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "axi-failed-extract-tmp-"));
+    let cleanedAny = false;
+    let child;
+    const mgr = makeManager({
+      spawnFn: (cmd, args) => { child = fakeChild(); return child; },
+      sandboxEnabled: true,
+      checkBwrapAvailableFn: () => ({ checked: true, available: true }),
+      overlayEnabled: true,
+      checkOverlaySupportFn: () => ({ supported: true }),
+      platform: "linux",
+      overlayTmpRoot,
+      runOverlayCommandFn: () => ({ status: null, stdout: "", stderr: "", error: Object.assign(new Error("spawn bwrap ETIMEDOUT"), { code: "ETIMEDOUT" }) }),
+      rmOverlayTreeFn: () => { cleanedAny = true; },
+    });
+
+    const result = mgr.dispatch({ prompt: "hello", directory });
+    child.emit("exit", 0, null);
+
+    const status = mgr.status(result.id);
+    assert.equal(status.changesetStatus, "pending");
+    assert.match(status.changesetError, /ETIMEDOUT/);
+    assert.equal(status.diffPath, null);
+    assert.ok(status.overlayDirs);
+    assert.equal(cleanedAny, false);
+  });
+});
+
 describe("dispatch() role/changeset fields", () => {
   test("a plain dispatch defaults to role 'dispatch' and changesetStatus 'none' when sandboxing is off", () => {
     const mgr = makeManager({ spawnFn: () => fakeChild(), sandboxEnabled: false });

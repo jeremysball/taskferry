@@ -235,3 +235,40 @@ runs wrapped in
   sandboxing for every dispatch it serves. `sandboxEnabled` is also a
   `taskferry` config field, following the usual precedence (CLI flag > env
   var > config file > default).
+- **Copy-on-write overlay.** By default, the sandboxed target directory
+  (and, for a git worktree, the scoped git-common-dir slice described
+  above) is mounted as a copy-on-write overlay instead of a plain
+  read-write bind: all writes and deletes land in a per-task upper layer
+  under `/tmp/taskferry-cow-<task-id>/`, never on the real directory. This
+  requires bwrap >= 0.8 (`--overlay-src`/`--overlay`); a host below that
+  floor fails the dispatch with a `crashed` task and a `spawnError`
+  explaining why, the same fail-closed shape as a missing `bwrap` binary --
+  unless overlay is explicitly disabled **for a dispatch role**
+  (`--no-overlay` per dispatch, `overlayEnabled: false` in config, or
+  `TASKFERRY_DISABLE_OVERLAY=1`), which falls back to the old plain bind
+  with a printed warning that writes are no longer gated. **The advisor
+  role gets no opt-out**: overlay is mandatory for advisors (ADR 0001 --
+  "an advisor has no path to persist a write"), so a globally disabled
+  overlay crashes an advisor dispatch with a `spawnError` instead of
+  falling back, and `--no-overlay` is not accepted on `taskferry advisor`
+  at all. An advisor's sandbox additionally runs with `--unshare-net`
+  instead of `--share-net`, and its `runtimeDir` is bound read-only so the
+  daemon's Unix socket (which lives there) is unreachable -- `--unshare-net`
+  alone does not block Unix-domain-socket connects through a writable bind.
+  A worker's `git commit` inside the sandbox is never
+  replayed as a commit -- only a working-tree-style diff, computed against
+  the real pre-dispatch `HEAD`, survives into `accept`.
+- **Diff-gated writes.** A dispatch's changeset is extracted once at
+  process exit and held as `changesetStatus: "pending"` until
+  `taskferry accept <id>` (applies it: `git apply` for a git target, an
+  in-sandbox `rsync` for a non-git one) or `taskferry reject <id>`
+  (discards it). A dispatch whose extraction finds zero changes
+  auto-resolves to `accepted` immediately (a no-op needs no gate).
+  `taskferry result <id> --diff` inspects the pending
+  changeset read-only. An advisor-role dispatch (`taskferry advisor`)
+  never gets an accept path -- its changeset is always auto-rejected right
+  after extraction. Note the reboot asymmetry for non-git targets: a git
+  changeset's patch is persisted under the state dir and survives a reboot,
+  but a non-git `accept` needs the live overlay to rebuild its merged view,
+  so a non-git changeset left pending across a reboot fails loudly and can
+  only be rejected, never applied.

@@ -220,7 +220,8 @@ tripped.
 | Flag | Notes |
 |---|---|
 | `--full` | Include untruncated narration; only rejected as a usage error when combined with `--fields` that omits `narration` — `--full` alone (no `--fields`) works fine |
-| `--fields <comma-list>` | Project only the fields you need: `message`, `narration`, `tokens`, `cost`, `sessionId`, `exitCode`, `signal`, `spawnError`, `failureReason`, `failureDetail`, `logPath`, `incomplete`, `finalMarker` |
+| `--fields <comma-list>` | Project only the fields you need: `message`, `narration`, `tokens`, `cost`, `sessionId`, `exitCode`, `signal`, `spawnError`, `failureReason`, `failureDetail`, `logPath`, `incomplete`, `finalMarker`, `diff` |
+| `--diff` | Print the task's pending changeset (read-only; cannot combine with `--fields`) |
 
 ```
 $ taskferry result oc_mrn4ipkp_19450105
@@ -233,6 +234,32 @@ cost: 0.00702636
 message: PONG
 next: Run taskferry result --full or --fields narration with task id "oc_mrn4ipkp_19450105" to see intermediate step narration (4 chars total)
 ```
+
+## `taskferry accept <id>`
+
+Applies the dispatch task's pending changeset to its target directory.
+Only meaningful for a task with `changesetStatus: "pending"` (visible on
+`taskferry status` / `taskferry wait` without `--full`); a no-op write
+that auto-resolved to `accepted` cannot be re-accepted. Inspect the
+change with `taskferry result <id> --diff` first. For a git target, the
+apply is `git apply` against the real pre-dispatch `HEAD`; for a non-git
+target, it runs an in-sandbox `rsync --delay-updates` that needs the
+live overlay, so a non-git changeset left pending across a reboot fails
+loudly and can only be rejected, never applied. A successful apply
+transitions the task to `changesetStatus: "accepted"` and frees the CoW
+overlay. A failed apply leaves the task pending so a retry or reject can
+follow. Calling it on a task that already settled (no pending changeset)
+is a no-op that returns a `note` instead of an error, exit code `0`. The
+advisor role (`taskferry advisor`) has no accept path — its changeset is
+auto-rejected right after extraction.
+
+## `taskferry reject <id>`
+
+Discards the task's pending changeset without applying it. Only
+meaningful for a task with `changesetStatus: "pending"`; an already
+accepted, already rejected, or auto-resolved task is a no-op that
+returns a `note` instead of an error, exit code `0`. Frees the CoW
+overlay.
 
 ## `taskferry list [options]`
 

@@ -45,6 +45,7 @@ message — there is no silent typo tolerance.
 | `watchdogGraceMs` | `TASKFERRY_WATCHDOG_GRACE_MS` | number | `5000` |
 | `envDenylist` | `TASKFERRY_ENV_DENYLIST` | string (comma-separated var names) | (none) |
 | `sandboxEnabled` | `TASKFERRY_DISABLE_SANDBOX` (inverted: `1`/`true` disables) | boolean | `true` |
+| `overlayEnabled` | `TASKFERRY_DISABLE_OVERLAY` (inverted: `1`/`true` disables) | boolean | `true` |
 | `allowedDirs` | `TASKFERRY_ALLOWED_DIRS` | string (comma-separated paths) | (none) |
 | `waitDefaultTimeoutMs` | `TASKFERRY_WAIT_DEFAULT_TIMEOUT_MS` | number | `900000` (15 min); `0` disables via the env var only — a config-file value of `0` is ignored and falls back to the 15-minute default |
 | `cancelGraceMs` | `TASKFERRY_CANCEL_GRACE_MS` | number | `5000`; overridden per-call by `cancel --grace-ms` |

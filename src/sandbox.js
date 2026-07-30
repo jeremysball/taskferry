@@ -168,6 +168,14 @@ export function resolveGitDir(directory, runCommand = defaultRunCommand) {
  * @param {[string, string][]} [options.extraRoBinds] - extra [src, dest] read-only binds, applied last so a
  *   more specific path (e.g. a single credentials file) can be pinned read-only even though it sits under
  *   an already read-write-bound directory.
+ * @param {{upperDir: string, workDir: string}} [options.overlay] - when given, `directory` is mounted as a
+ *   copy-on-write overlay (`--overlay-src <directory> --overlay <upperDir> <workDir> <directory>`) instead of
+ *   a plain read-write bind; all writes/deletes land in upperDir, `directory` itself is never mutated.
+ * @param {Array<{path: string, upperDir: string, workDir: string}>} [options.overlayRwBinds] - extra paths
+ *   (e.g. a worktree's git-common-dir slice) that need the same CoW treatment instead of a plain writable
+ *   bind, one independent overlay mount per entry. Applied after extraRwBinds and before extraRwPairBinds.
+ * @param {boolean} [options.shareNet] - default true (matches today's --share-net); pass false for
+ *   advisor-role dispatches to emit --unshare-net instead.
  * @returns {string[]}
  */
 export function buildBwrapArgs({
@@ -179,6 +187,9 @@ export function buildBwrapArgs({
   extraRwBinds = [],
   extraRwPairBinds = [],
   extraRoBinds = [],
+  overlay,
+  overlayRwBinds = [],
+  shareNet = true,
 }) {
   const args = ["--ro-bind", "/", "/"];
   // bwrap applies mounts in argument order, and a later mount on a parent
@@ -190,10 +201,17 @@ export function buildBwrapArgs({
   for (const denied of denyList) {
     args.push("--tmpfs", denied);
   }
-  args.push("--bind", directory, directory);
+  if (overlay) {
+    args.push("--overlay-src", directory, "--overlay", overlay.upperDir, overlay.workDir, directory);
+  } else {
+    args.push("--bind", directory, directory);
+  }
   args.push("--bind", runtimeDir, runtimeDir);
   for (const extra of extraRwBinds) {
     args.push("--bind", extra, extra);
+  }
+  for (const { path: overlayPath, upperDir, workDir } of overlayRwBinds) {
+    args.push("--overlay-src", overlayPath, "--overlay", upperDir, workDir, overlayPath);
   }
   for (const [src, dest] of extraRwPairBinds) {
     args.push("--bind", src, dest);
@@ -201,6 +219,6 @@ export function buildBwrapArgs({
   for (const [src, dest] of extraRoBinds) {
     args.push("--ro-bind", src, dest);
   }
-  args.push("--unshare-all", "--share-net", "--die-with-parent");
+  args.push("--unshare-all", shareNet ? "--share-net" : "--unshare-net", "--die-with-parent");
   return args;
 }

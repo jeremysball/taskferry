@@ -314,4 +314,61 @@ describe("buildBwrapArgs()", () => {
     assert.ok(roBindIndex > runtimeDirBindIndex);
     assert.deepEqual(args.slice(-3), ["--unshare-all", "--share-net", "--die-with-parent"]);
   });
+
+  test("mounts an overlay on the target directory instead of a plain bind when overlay is given", () => {
+    const args = buildBwrapArgs({
+      directory: "/workspace/my-repo",
+      stateDir: "/home/user/.local/state/taskferry",
+      runtimeDir: "/home/user/.local/state/taskferry/run",
+      homeDir: "/home/user",
+      overlay: { upperDir: "/tmp/taskferry-cow-t1/upper/main", workDir: "/tmp/taskferry-cow-t1/work/main" },
+    });
+    const overlayIndex = args.indexOf("--overlay-src");
+    assert.notEqual(overlayIndex, -1);
+    assert.deepEqual(args.slice(overlayIndex, overlayIndex + 6), [
+      "--overlay-src", "/workspace/my-repo",
+      "--overlay", "/tmp/taskferry-cow-t1/upper/main", "/tmp/taskferry-cow-t1/work/main", "/workspace/my-repo",
+    ]);
+    assert.equal(args.some((v, i) => v === "--bind" && args[i + 1] === "/workspace/my-repo"), false, "no plain --bind for the target directory when overlay is active");
+  });
+
+  test("keeps the plain --bind on the target directory when overlay is omitted", () => {
+    const args = buildBwrapArgs({
+      directory: "/workspace/my-repo",
+      stateDir: "/home/user/.local/state/taskferry",
+      runtimeDir: "/home/user/.local/state/taskferry/run",
+      homeDir: "/home/user",
+    });
+    assert.equal(args.includes("--overlay-src"), false);
+    const bindIndex = args.indexOf("--bind");
+    assert.equal(args[bindIndex + 1], "/workspace/my-repo");
+  });
+
+  test("mounts each overlayRwBinds entry as its own overlay, after extraRwBinds and before extraRwPairBinds", () => {
+    const args = buildBwrapArgs({
+      directory: "/workspace/my-repo",
+      stateDir: "/home/user/.local/state/taskferry",
+      runtimeDir: "/home/user/.local/state/taskferry/run",
+      homeDir: "/home/user",
+      extraRwBinds: ["/home/user/.cache/taskferry/opencode-data"],
+      overlayRwBinds: [
+        { path: "/workspace/main-repo/.git/worktrees/my-repo", upperDir: "/tmp/taskferry-cow-t1/upper/extra/a", workDir: "/tmp/taskferry-cow-t1/work/extra/a" },
+      ],
+    });
+    const extraRwBindIndex = args.indexOf("/home/user/.cache/taskferry/opencode-data");
+    const overlayRwIndex = args.indexOf("--overlay-src", extraRwBindIndex);
+    assert.notEqual(overlayRwIndex, -1);
+    assert.deepEqual(args.slice(overlayRwIndex, overlayRwIndex + 6), [
+      "--overlay-src", "/workspace/main-repo/.git/worktrees/my-repo",
+      "--overlay", "/tmp/taskferry-cow-t1/upper/extra/a", "/tmp/taskferry-cow-t1/work/extra/a", "/workspace/main-repo/.git/worktrees/my-repo",
+    ]);
+  });
+
+  test("emits --share-net by default and --unshare-net when shareNet is false", () => {
+    const withNet = buildBwrapArgs({ directory: "/workspace/my-repo", stateDir: "/state", runtimeDir: "/state/run", homeDir: "/home/user" });
+    assert.deepEqual(withNet.slice(-3), ["--unshare-all", "--share-net", "--die-with-parent"]);
+
+    const withoutNet = buildBwrapArgs({ directory: "/workspace/my-repo", stateDir: "/state", runtimeDir: "/state/run", homeDir: "/home/user", shareNet: false });
+    assert.deepEqual(withoutNet.slice(-3), ["--unshare-all", "--unshare-net", "--die-with-parent"]);
+  });
 });

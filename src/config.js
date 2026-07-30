@@ -16,6 +16,7 @@ const CONFIG_FIELD_TYPES = {
   advisorSessionTtlMs: "number",
   watchdogGraceMs: "number",
   sandboxEnabled: "boolean",
+  overlayEnabled: "boolean",
   allowedDirs: "string",
   envDenylist: "string",
   waitDefaultTimeoutMs: "number",

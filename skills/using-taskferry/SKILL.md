@@ -190,18 +190,13 @@ workspace's, use `taskferry watch --task-id <id>` rather than an unscoped
 `taskferry watch`; add `--summaries` to get condensed activity summaries in
 that stream instead of raw events.
 
-**Inside Claude Code, always run `wait --summarize` via `Bash`
-`run_in_background: true`, then immediately arm a `Monitor` tailing that
-background job's own output file** (the file path the `Bash` tool reports back
-at launch, e.g. `/tmp/.../tasks/<bash-id>.output`) with `tail -n0 -F <path>`,
-`persistent: true`. `run_in_background` only notifies once, on the whole
-command's exit — it does not surface each summary line as it's written, so
-without a `Monitor` the summaries sit in that file unseen until settlement.
-`tail -n0 -F` starts from the end so you don't re-emit lines already read, and
-turns every new summary line into its own notification as it lands (every
-~6 minutes by default — `DEFAULT_SUMMARIZER_TIMEOUT_MS` in `src/activity.js`,
-overridable via `TASKFERRY_SUMMARIZER_TIMEOUT_MS`). Stop the monitor with `TaskStop` once the wait job's own completion
-notification confirms the task settled.
+**Inside Claude Code, run `wait --summarize` via `Bash` `run_in_background:
+true`.** Don't arm a second, per-task `Monitor` for it — the fleet-wide
+`watch --summaries` `Monitor` armed once per session (see "Fleet-Wide
+Monitoring" below) already surfaces every ferry's progress, this one
+included, as periodic batched notifications. `run_in_background` notifies
+once, on the whole command's exit; that notification is the settlement
+signal for this specific task.
 
 Relay every summary-line notification with this exact template:
 
@@ -317,9 +312,10 @@ parallel command doing the same job.
 On a session's first `taskferry dispatch`, also background `taskferry watch
 --summaries --flush-interval 5m` (no `--directory` needed — it resolves the
 git workspace root automatically) and register the process with the harness
-`Monitor` tool, the same way `Monitor` is armed for a single `wait
---summarize` job elsewhere in this skill. This surfaces periodic, batched
-updates for every ferry dispatched with the workspace root as its directory —
+`Monitor` tool. This is the only `Monitor` this skill arms for dispatch
+progress — there is no separate per-task `Monitor` alongside it (see "Inside
+Claude Code..." above). It surfaces periodic, batched updates for every
+ferry dispatched with the workspace root as its directory —
 the default when dispatching from the repo root, or from a subdirectory with an
 explicit `--directory <root>` — including ones dispatched by other concurrent
 sessions. A ferry dispatched from a subdirectory without an explicit

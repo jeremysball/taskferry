@@ -975,11 +975,11 @@ export function createTaskManager({
    * @param {string|undefined} [params.originSessionId]
    * @param {NodeJS.ProcessEnv} [params.env]
    * @param {boolean} [params.internal]
-   * @param {string|null} [params.finalMarker]
- * @param {boolean} [params.noSandbox]
- * @param {boolean} [params.noOverlay]
- * @param {"dispatch"|"advisor"} [params.role]
- * @param {string[]} [params.allowedDirs] - extra directories bound read-write for this dispatch only, on
+     * @param {string|null} [params.finalMarker]
+   * @param {boolean} [params.noSandbox]
+   * @param {boolean} [params.noOverlay]
+   * @param {"dispatch"|"advisor"} [params.role]
+   * @param {string[]} [params.allowedDirs] - extra directories bound read-write for this dispatch only, on
  *   top of the manager-level default (see createTaskManager's `allowedDirs` option)
  * @param {string} [params.executor] - "opencode" | "pi". When omitted on a `sessionId` resume, inherits
    *   the executor that originally created the session (a different executor can't continue another CLI's

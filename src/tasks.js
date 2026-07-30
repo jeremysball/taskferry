@@ -11,8 +11,13 @@ import { RESULT_FIELDS } from "./protocol.js";
 import { formatToolEventForNarration } from "./narration-format.js";
 import { errCode } from "./errors.js";
 import { isNonNegativeInteger, isPositiveInteger } from "./numbers.js";
-import { buildBwrapArgs, checkBwrapAvailable, defaultDenyList, platformSupportsSandbox, resolveGitCommonDir, resolveGitDir } from "./sandbox.js";
+import { buildBwrapArgs, checkBwrapAvailable, checkOverlaySupport, defaultDenyList, platformSupportsSandbox, resolveGitCommonDir, resolveGitDir } from "./sandbox.js";
+import { overlayPaths, resolvePreDispatchHead } from "./changeset.js";
 import { resolveExecutor, opencodeExecutor } from "./executor.js";
+
+// overlayPaths and resolvePreDispatchHead are imported for use in later tasks (9+)
+void overlayPaths;
+void resolvePreDispatchHead;
 
 /**
  * @typedef {object} SummaryOf
@@ -50,6 +55,12 @@ import { resolveExecutor, opencodeExecutor } from "./executor.js";
  * @property {boolean} [incomplete]
  * @property {string|null} [finalMarker]
  * @property {"opencode"|"pi"} [executorId]
+ * @property {"dispatch"|"advisor"} [role]
+ * @property {"none"|"pending"|"accepted"|"rejected"} [changesetStatus]
+ * @property {string|null} [diffPath]
+ * @property {{root:string,upperDir:string,workDir:string,rwBinds:string[]}|null} [overlayDirs]
+ * @property {string|null} [preDispatchHead]
+ * @property {string|null} [changesetError]
  */
 
 /**
@@ -76,6 +87,12 @@ import { resolveExecutor, opencodeExecutor } from "./executor.js";
  * @property {boolean} [incomplete]
  * @property {string|null} [finalMarker]
  * @property {"opencode"|"pi"} [executorId]
+ * @property {"dispatch"|"advisor"} [role]
+ * @property {"none"|"pending"|"accepted"|"rejected"} [changesetStatus]
+ * @property {string|null} [diffPath]
+ * @property {{root:string,upperDir:string,workDir:string,rwBinds:string[]}|null} [overlayDirs]
+ * @property {string|null} [preDispatchHead]
+ * @property {string|null} [changesetError]
  */
 
 /**
@@ -98,6 +115,8 @@ import { resolveExecutor, opencodeExecutor } from "./executor.js";
  * @property {string|null|undefined} [sessionId]
  * @property {NodeJS.ProcessEnv} [env]
  * @property {boolean} [noSandbox]
+ * @property {boolean} [noOverlay]
+ * @property {"dispatch"|"advisor"} [role]
  * @property {string[]} [allowedDirs]
  * @property {import("./executor.js").WorkerExecutor} executor
  * @property {undefined} [kind]
@@ -429,6 +448,10 @@ const DEFAULT_CANCEL_GRACE_MS = 5000;
  *   in addition to the auto-detected git-common-dir for a worktree dispatch directory.
  * @param {(directory: string) => string|null} [options.resolveGitCommonDirFn]
  * @param {(directory: string) => string|null} [options.resolveGitDirFn]
+ * @param {boolean} [options.overlayEnabled]
+ * @param {() => {supported: boolean, reason?: string}} [options.checkOverlaySupportFn]
+ * @param {string} [options.overlayTmpRoot]
+ * @param {(path: string) => void} [options.rmOverlayTreeFn]
  * @param {() => {checked: boolean, available: boolean, reason?: string}} [options.checkBwrapAvailableFn]
  * @param {(path: string) => boolean} [options.existsFn]
  * @param {(path: string) => {isDirectory: () => boolean}|null} [options.statFn]
@@ -505,6 +528,12 @@ export function createTaskManager({
     : (/** @type {boolean|undefined} */ (config.sandboxEnabled) ?? true),
   allowedDirs = parseAllowedDirs(process.env.TASKFERRY_ALLOWED_DIRS ?? /** @type {string|undefined} */ (config.allowedDirs)),
   envDenylist = parseEnvDenylist(process.env.TASKFERRY_ENV_DENYLIST ?? /** @type {string|undefined} */ (config.envDenylist)),
+  overlayEnabled = process.env.TASKFERRY_DISABLE_OVERLAY !== undefined
+    ? !["1", "true"].includes(process.env.TASKFERRY_DISABLE_OVERLAY)
+    : (/** @type {boolean|undefined} */ (config.overlayEnabled) ?? true),
+  checkOverlaySupportFn = checkOverlaySupport,
+  overlayTmpRoot = os.tmpdir(),
+  rmOverlayTreeFn = (/** @type {string} */ p) => fs.rmSync(p, { recursive: true, force: true }),
   resolveGitCommonDirFn = resolveGitCommonDir,
   resolveGitDirFn = resolveGitDir,
   checkBwrapAvailableFn = checkBwrapAvailable,
@@ -553,6 +582,21 @@ export function createTaskManager({
       throw new Error(
         "error: bwrap is required for sandboxing but was not found\n" +
         "help: install bubblewrap (e.g. apt install bubblewrap) or opt out with --no-sandbox or TASKFERRY_DISABLE_SANDBOX=1"
+      );
+    }
+  }
+
+  /** @type {{supported: boolean, reason?: string}|null} */
+  let overlaySupport = null;
+  function requireOverlaySupport() {
+    if (overlaySupport == null) {
+      overlaySupport = checkOverlaySupportFn();
+    }
+    const result = /** @type {{supported: boolean, reason?: string}} */ (overlaySupport);
+    if (!result.supported) {
+      throw new Error(
+        `error: overlay is required for gated dispatch writes but is unsupported (${result.reason})\n` +
+        "help: upgrade bubblewrap to >= 0.8, or opt out explicitly with --no-overlay or TASKFERRY_DISABLE_OVERLAY=1 (writes will not be gated)"
       );
     }
   }
@@ -856,7 +900,7 @@ export function createTaskManager({
    * @returns {TaskSummary}
    */
   function summarize(task) {
-    const { promptPreview, promptTotalChars, id, status, directory, model, sessionId, originSessionId, pid, startedAt, endedAt, exitCode, signal, logPath, cancelRequested, incomplete, finalMarker, spawnError, executorId } = task;
+    const { promptPreview, promptTotalChars, id, status, directory, model, sessionId, originSessionId, pid, startedAt, endedAt, exitCode, signal, logPath, cancelRequested, incomplete, finalMarker, spawnError, executorId, role, changesetStatus, diffPath, overlayDirs, preDispatchHead, changesetError } = task;
     return {
       id, status, directory, model, sessionId, originSessionId, pid, startedAt, endedAt, exitCode, signal, logPath,
       ...failureFields(task),
@@ -867,6 +911,12 @@ export function createTaskManager({
       ...(incomplete === true ? { incomplete: true } : {}),
       ...(finalMarker != null ? { finalMarker } : {}),
       ...(executorId != null ? { executorId } : {}),
+      ...(role != null ? { role } : {}),
+      ...(changesetStatus != null ? { changesetStatus } : {}),
+      ...(diffPath != null ? { diffPath } : {}),
+      ...(overlayDirs != null ? { overlayDirs } : {}),
+      ...(preDispatchHead != null ? { preDispatchHead } : {}),
+      ...(changesetError != null ? { changesetError } : {}),
       cancelRequested: !!cancelRequested,
     };
   }
@@ -926,17 +976,19 @@ export function createTaskManager({
    * @param {NodeJS.ProcessEnv} [params.env]
    * @param {boolean} [params.internal]
    * @param {string|null} [params.finalMarker]
-   * @param {boolean} [params.noSandbox]
-   * @param {string[]} [params.allowedDirs] - extra directories bound read-write for this dispatch only, on
-   *   top of the manager-level default (see createTaskManager's `allowedDirs` option)
-   * @param {string} [params.executor] - "opencode" | "pi". When omitted on a `sessionId` resume, inherits
+ * @param {boolean} [params.noSandbox]
+ * @param {boolean} [params.noOverlay]
+ * @param {"dispatch"|"advisor"} [params.role]
+ * @param {string[]} [params.allowedDirs] - extra directories bound read-write for this dispatch only, on
+ *   top of the manager-level default (see createTaskManager's `allowedDirs` option)
+ * @param {string} [params.executor] - "opencode" | "pi". When omitted on a `sessionId` resume, inherits
    *   the executor that originally created the session (a different executor can't continue another CLI's
    *   session file); otherwise defaults to the manager's defaultExecutor (itself the result of
    *   `resolveExecutor(undefined)` at construction). An unknown name throws before any validation runs, so a
    *   misrouted CLI/RPC call fails fast rather than silently picking the default.
    * @returns {TaskSummary & {next: string}}
    */
-  function dispatch({ prompt, directory, model, variant, sessionId, internal = false, finalMarker = null, originSessionId, noSandbox = false, allowedDirs: dispatchAllowedDirs, executor: executorName, env }) {
+  function dispatch({ prompt, directory, model, variant, sessionId, internal = false, finalMarker = null, originSessionId, noSandbox = false, noOverlay = false, allowedDirs: dispatchAllowedDirs, executor: executorName, env, role = "dispatch" }) {
     ensureStateLoaded();
     // A resume (--session-id with no --executor) should inherit the executor
     // the session was actually created under, not silently fall back to the
@@ -1030,6 +1082,12 @@ export function createTaskManager({
       failureDetail: null,
       incomplete: false,
       finalMarker: finalMarker == null ? null : finalMarker,
+      role,
+      changesetStatus: "none",
+      diffPath: null,
+      overlayDirs: null,
+      preDispatchHead: null,
+      changesetError: null,
     };
     tasks.set(id, task);
     persistTask(task.id);
@@ -1048,7 +1106,7 @@ export function createTaskManager({
     // tasks.test.js's "dispatch()'s queued env is frozen against later
     // caller mutations" gate; removing the clone makes that test fail.
     const capturedEnv = env === undefined ? undefined : { ...env };
-    pendingLaunches.set(id, { prompt, directory: normalizedDirectory, model: resolvedModel, variant: task.variant, sessionId, env: capturedEnv, noSandbox: noSandbox === true, allowedDirs: dispatchAllowedDirs, executor });
+    pendingLaunches.set(id, { prompt, directory: normalizedDirectory, model: resolvedModel, variant: task.variant, sessionId, env: capturedEnv, noSandbox: noSandbox === true, noOverlay: noOverlay === true, allowedDirs: dispatchAllowedDirs, executor, role });
     launchQueue.push(id);
     launchQueuedTasks();
 
@@ -2377,7 +2435,7 @@ export function createTaskManager({
     /** @type {TaskSummary & {next: string}} */
     let dispatched;
     try {
-      dispatched = dispatch({ prompt: /** @type {string} */ (prompt), directory: /** @type {string} */ (directory), model, variant, sessionId: resolved.sessionId, executor, env });
+      dispatched = dispatch({ prompt: /** @type {string} */ (prompt), directory: /** @type {string} */ (directory), model, variant, sessionId: resolved.sessionId, executor, env, role: "advisor" });
     } catch (err) {
       throw new Error(errMessage(err).replaceAll("taskferry dispatch", "taskferry advisor"), { cause: err });
     }

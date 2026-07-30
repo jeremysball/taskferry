@@ -14,7 +14,7 @@ import { createTaskManager, isOutsideDirectory, DEFAULT_SUMMARY_MODEL, bucketFor
 // runs synchronously in the constructor, same as the old module-level code
 // did at import time). `tasksFixture` may be an array or `(logDir) => array`
 // for fixtures whose logPath needs to point inside the real log dir.
-function makeManager({ tasksFixture = [], logs = {}, spawnFn, killFn, listModelsFn, defaultExecutor, maxDispatchesPerWindow, dispatchWindowMs, advisorSessionTtlMs, maxConcurrentTasks, noOutputTimeoutMs, postOutputNoOutputTimeoutMs, watchdogPollMs, maxWaitMs, envDenylistSpec, sandboxEnabled = false, checkBwrapAvailableFn, existsFn, statFn, readdirFn, runtimeDir, cacheDir, platform, onEvent, allowedDirs, resolveGitCommonDirFn, resolveGitDirFn } = {}) {
+function makeManager({ tasksFixture = [], logs = {}, spawnFn, killFn, listModelsFn, defaultExecutor, maxDispatchesPerWindow, dispatchWindowMs, advisorSessionTtlMs, maxConcurrentTasks, noOutputTimeoutMs, postOutputNoOutputTimeoutMs, watchdogPollMs, maxWaitMs, envDenylistSpec, sandboxEnabled = false, checkBwrapAvailableFn, existsFn, statFn, readdirFn, runtimeDir, cacheDir, platform, onEvent, allowedDirs, resolveGitCommonDirFn, resolveGitDirFn, overlayEnabled = false, checkOverlaySupportFn, overlayTmpRoot, runOverlayCommandFn, rmOverlayTreeFn } = {}) {
   const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-test-"));
   const logDir = path.join(stateDir, "logs");
   fs.mkdirSync(logDir, { recursive: true });
@@ -56,6 +56,11 @@ function makeManager({ tasksFixture = [], logs = {}, spawnFn, killFn, listModels
     ...(allowedDirs != null ? { allowedDirs } : {}),
     ...(resolveGitCommonDirFn != null ? { resolveGitCommonDirFn } : {}),
     ...(resolveGitDirFn != null ? { resolveGitDirFn } : {}),
+    overlayEnabled,
+    ...(checkOverlaySupportFn != null ? { checkOverlaySupportFn } : {}),
+    ...(overlayTmpRoot != null ? { overlayTmpRoot } : {}),
+    ...(runOverlayCommandFn != null ? { runOverlayCommandFn } : {}),
+    ...(rmOverlayTreeFn != null ? { rmOverlayTreeFn } : {}),
   });
 }
 
@@ -859,6 +864,26 @@ describe("bwrap sandboxing", () => {
     assert.equal(captured.args.includes("--agent"), false);
 
     child.emit("exit", 0, null);
+  });
+});
+
+describe("dispatch() role/changeset fields", () => {
+  test("a plain dispatch defaults to role 'dispatch' and changesetStatus 'none' when sandboxing is off", () => {
+    const mgr = makeManager({ spawnFn: () => fakeChild(), sandboxEnabled: false });
+    const result = mgr.dispatch({ prompt: "hello", directory: os.tmpdir() });
+    const status = mgr.status(result.id);
+    assert.equal(status.role, "dispatch");
+    assert.equal(status.changesetStatus, "none");
+  });
+
+  test("advisor() dispatches internally with role 'advisor'", async () => {
+    const mgr = makeManager({
+      spawnFn: (cmd, args, opts) => { const child = fakeChild(); setImmediate(() => child.emit("exit", 0, null)); return child; },
+      sandboxEnabled: false,
+    });
+    const advised = await mgr.advisor({ prompt: "hello", directory: os.tmpdir(), model: "openai/gpt-5.6-sol" });
+    const status = mgr.status(advised.task_id);
+    assert.equal(status.role, "advisor");
   });
 });
 

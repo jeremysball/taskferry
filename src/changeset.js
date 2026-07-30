@@ -103,6 +103,10 @@ export function extractGitDiff({
   return { diffPath, hasChanges: result.stdout.trim().length > 0 };
 }
 
+/**
+ * @param {string} filePath
+ * @returns {string}
+ */
 function pathDirname(filePath) {
   const idx = filePath.lastIndexOf("/");
   return idx === -1 ? "." : filePath.slice(0, idx);
@@ -230,6 +234,12 @@ export function applyChangeset({ directory, diffPath, isGitTarget, overlay, stat
     const result = runCommand("git", ["-C", directory, "apply", diffPath]);
     if (result.status === 0) return { applied: true, reason: null };
     return { applied: false, reason: result.stderr.trim() || result.error?.message || `git apply exited with status ${result.status}` };
+  }
+  if (!overlay || stateDir == null || runtimeDir == null || homeDir == null || denyList == null) {
+    throw new Error(
+      "error: non-git changeset apply requires a live overlay, stateDir, runtimeDir, homeDir, and denyList\n" +
+      "help: preserve the pending overlay and retry through taskferry accept with a complete task record"
+    );
   }
   const mergedMountPoint = path.join(overlay.root, "merged");
   const bwrapArgs = buildMergedViewBwrapArgs({ directory, overlay, stateDir, runtimeDir, homeDir, denyList, mergedMountPoint, writable: true });

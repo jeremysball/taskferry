@@ -324,6 +324,13 @@ describe("applyChangeset()", () => {
     assert.match(script, /rsync -a --delete --delay-updates '\/tmp\/taskferry-cow-t1\/merged'\/ '\/workspace\/scratch'\//);
     assert.deepEqual(result, { applied: true, reason: null });
   });
+
+  test("non-git target: errors usefully when required overlay inputs are missing", () => {
+    assert.throws(
+      () => applyChangeset({ directory: "/workspace/scratch", diffPath: "/state/diffs/t1.patch", isGitTarget: false }),
+      /non-git changeset apply requires a live overlay, stateDir, runtimeDir, homeDir, and denyList/
+    );
+  });
 });
 
 describe("cleanupOverlay()", () => {

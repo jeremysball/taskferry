@@ -16,6 +16,8 @@ export const RPC_METHODS = Object.freeze([
   "task.summary",
   "task.advisor",
   "task.context",
+  "task.accept",
+  "task.reject",
 ]);
 
 const REQUEST_METHODS = new Set([...RPC_METHODS, "event.subscribe"]);
@@ -33,6 +35,9 @@ export const RESULT_FIELDS = new Set([
   "logPath",
   "incomplete",
   "finalMarker",
+  "diff",
+  "diffStat",
+  "changesetError",
 ]);
 export class ProtocolError extends Error {
   /**
@@ -163,6 +168,9 @@ function validParams(method, params) {
         && optional(params.executor, (value) => typeof value === "string" && KNOWN_EXECUTORS.includes(value));
     case "task.context":
       return hasOnly(params, ["directory"]) && isAbsolutePath(params.directory);
+    case "task.accept":
+    case "task.reject":
+      return hasOnly(params, ["taskId"]) && isNonEmptyString(params.taskId);
     case "event.subscribe":
       // Either an explicit directory, or a taskId the daemon resolves the
       // directory from server-side -- lets a taskId-scoped subscribe (watch

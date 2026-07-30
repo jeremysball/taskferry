@@ -900,6 +900,35 @@ export function createTaskManager({
   }
   sweepOrphanedPromptFiles();
 
+  // Mirrors sweepOrphanedPromptFiles() above: a daemon that crashed after an
+  // overlay was created but before its cleanup (reject/accept, or the
+  // advisor auto-reject in extractChangesetForTask()) ever ran leaves a
+  // /tmp/taskferry-cow-<task-id> dir behind. /tmp being a tmpfs clears these
+  // on a real reboot for free; this only matters for a same-boot daemon
+  // restart. A task whose changesetStatus is still "pending" legitimately
+  // owns its overlay and must never be swept here -- only unknown task ids
+  // and already-resolved (accepted/rejected) tasks with a leftover
+  // overlayDirs (their own cleanupOverlay() call crashed mid-removal) are
+  // orphans.
+  function sweepOrphanedOverlays() {
+    let entries;
+    try {
+      entries = fs.readdirSync(overlayTmpRoot);
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      if (!entry.startsWith("taskferry-cow-")) continue;
+      const taskId = entry.slice("taskferry-cow-".length);
+      const task = tasks.get(taskId);
+      if (task && task.changesetStatus === "pending") continue;
+      const root = path.join(overlayTmpRoot, entry);
+      const removal = cleanupOverlay({ root, tmpRoot: overlayTmpRoot, rmFn: rmOverlayTreeFn });
+      if (removal.removed && task) task.overlayDirs = null;
+    }
+  }
+  sweepOrphanedOverlays();
+
   function ensureStateLoaded() {
     if (!stateLoadError) return;
     throw new Error(`error: could not read persisted task state: ${stateLoadError.message}\nhelp: repair ${TASKS_FILE} before using opencode task tools`);

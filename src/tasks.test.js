@@ -1473,6 +1473,42 @@ describe("boot-time sweep of orphaned prompt scratch files in PROMPT_DIR", () =>
   });
 });
 
+describe("sweepOrphanedOverlays()", () => {
+  test("removes an overlay directory whose task id is unknown to this manager (crash before extraction ever ran)", () => {
+    const overlayTmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "axi-orphan-tmp-"));
+    fs.mkdirSync(path.join(overlayTmpRoot, "taskferry-cow-oc_gone", "upper", "main"), { recursive: true });
+    let cleanedRoot = null;
+    makeManager({
+      overlayTmpRoot,
+      rmOverlayTreeFn: (p) => { cleanedRoot = p; },
+    });
+    assert.equal(cleanedRoot, path.join(overlayTmpRoot, "taskferry-cow-oc_gone"));
+  });
+
+  test("does not sweep an overlay directory whose task still has a pending changeset", () => {
+    const overlayTmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "axi-orphan-tmp-"));
+    const overlayRoot = path.join(overlayTmpRoot, "taskferry-cow-t_pending");
+    fs.mkdirSync(path.join(overlayRoot, "upper", "main"), { recursive: true });
+    let cleanedAny = false;
+    makeManager({
+      overlayTmpRoot,
+      tasksFixture: [{
+        ...baseTask({ id: "t_pending" }),
+        role: "dispatch",
+        changesetStatus: "pending",
+        overlayDirs: { root: overlayRoot, upperDir: path.join(overlayRoot, "upper", "main"), workDir: path.join(overlayRoot, "work", "main") },
+      }],
+      rmOverlayTreeFn: () => { cleanedAny = true; },
+    });
+    assert.equal(cleanedAny, false);
+  });
+
+  test("does nothing when overlayTmpRoot doesn't exist or is empty", () => {
+    const overlayTmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "axi-orphan-empty-"));
+    assert.doesNotThrow(() => makeManager({ overlayTmpRoot }));
+  });
+});
+
 describe("output-completeness check at settlement time (issue #35)", () => {
   function writeLog(logPath, lines) {
     fs.mkdirSync(path.dirname(logPath), { recursive: true });

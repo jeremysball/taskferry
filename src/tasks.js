@@ -924,7 +924,10 @@ export function createTaskManager({
       if (task && task.changesetStatus === "pending") continue;
       const root = path.join(overlayTmpRoot, entry);
       const removal = cleanupOverlay({ root, tmpRoot: overlayTmpRoot, rmFn: rmOverlayTreeFn });
-      if (removal.removed && task) task.overlayDirs = null;
+      if (removal.removed && task) {
+        task.overlayDirs = null;
+        persistTask(taskId);
+      }
     }
   }
   sweepOrphanedOverlays();

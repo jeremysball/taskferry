@@ -1507,6 +1507,39 @@ describe("sweepOrphanedOverlays()", () => {
     const overlayTmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "axi-orphan-empty-"));
     assert.doesNotThrow(() => makeManager({ overlayTmpRoot }));
   });
+
+  test("sweeps a resolved task overlay and persists clearing overlayDirs", () => {
+    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-orphan-resolved-state-"));
+    const overlayTmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "axi-orphan-resolved-overlay-"));
+    const overlayRoot = path.join(overlayTmpRoot, "taskferry-cow-t_resolved");
+    fs.mkdirSync(path.join(overlayRoot, "upper", "main"), { recursive: true });
+    const task = {
+      ...baseTask({ id: "t_resolved", directory: os.tmpdir() }),
+      role: "dispatch",
+      changesetStatus: "accepted",
+      overlayDirs: {
+        root: overlayRoot,
+        upperDir: path.join(overlayRoot, "upper", "main"),
+        workDir: path.join(overlayRoot, "work", "main"),
+      },
+    };
+    const tasksFile = path.join(stateDir, "tasks.json");
+    fs.writeFileSync(tasksFile, JSON.stringify([task], null, 2));
+    const mgr = createTaskManager({
+      stateDir,
+      overlayTmpRoot,
+      sandboxEnabled: false,
+      cacheDir: fs.mkdtempSync(path.join(os.tmpdir(), "axi-orphan-resolved-cache-")),
+      spawnFn: () => { throw new Error("not used"); },
+      killFn: () => {},
+      listModelsFn: () => `${DEFAULT_SUMMARY_MODEL}\n`,
+    });
+
+    assert.equal(fs.existsSync(overlayRoot), false);
+    assert.equal("overlayDirs" in mgr.status(task.id), false);
+    const persisted = JSON.parse(fs.readFileSync(tasksFile, "utf8"));
+    assert.equal(persisted[0].overlayDirs, null);
+  });
 });
 
 describe("output-completeness check at settlement time (issue #35)", () => {

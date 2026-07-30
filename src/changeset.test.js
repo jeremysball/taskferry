@@ -2,7 +2,7 @@
 import { describe, test } from "node:test";
 import assert from "node:assert/strict";
 import path from "node:path";
-import { overlayPaths, subOverlayPaths, subOverlaySlug, extractGitDiff, resolvePreDispatchHead } from "./changeset.js";
+import { overlayPaths, subOverlayPaths, subOverlaySlug, extractGitDiff, resolvePreDispatchHead, buildMergedViewBwrapArgs, extractNonGitDiff } from "./changeset.js";
 
 describe("overlayPaths()", () => {
   test("builds a per-task root plus a main upper/work pair under it", () => {
@@ -37,6 +37,86 @@ describe("subOverlayPaths()", () => {
     assert.equal(result.path, targetPath);
     assert.equal(result.upperDir, path.join(root, "upper", "extra", slug));
     assert.equal(result.workDir, path.join(root, "work", "extra", slug));
+  });
+});
+
+describe("buildMergedViewBwrapArgs()", () => {
+  test("creates the merged mountpoint and overlays directory's content onto it, leaving directory itself read-only", () => {
+    const args = buildMergedViewBwrapArgs({
+      directory: "/workspace/repo",
+      overlay: { upperDir: "/tmp/taskferry-cow-t1/upper/main", workDir: "/tmp/taskferry-cow-t1/work/main" },
+      stateDir: "/state",
+      runtimeDir: "/state/run",
+      homeDir: "/home/user",
+      denyList: [],
+      mergedMountPoint: "/tmp/taskferry-cow-t1/merged",
+    });
+    const dirIndex = args.indexOf("--dir");
+    assert.equal(args[dirIndex + 1], "/tmp/taskferry-cow-t1/merged");
+    const overlayIndex = args.indexOf("--overlay-src");
+    assert.deepEqual(args.slice(overlayIndex, overlayIndex + 6), [
+      "--overlay-src", "/workspace/repo",
+      "--overlay", "/tmp/taskferry-cow-t1/upper/main", "/tmp/taskferry-cow-t1/work/main", "/tmp/taskferry-cow-t1/merged",
+    ]);
+    assert.ok(dirIndex < overlayIndex, "--dir must come before the --overlay line that mounts onto it");
+    // runtimeDir still needs --bind, but directory itself must NOT be rw-bound
+    const bindForDir = args.filter((_, i) => args[i] === "--bind" && args[i + 1] === "/workspace/repo").length;
+    assert.equal(bindForDir, 0, "directory stays read-only (part of the root ro-bind) when writable is not set");
+  });
+
+  test("also rw-binds directory itself when writable: true", () => {
+    const args = buildMergedViewBwrapArgs({
+      directory: "/workspace/repo",
+      overlay: { upperDir: "/tmp/u", workDir: "/tmp/w" },
+      stateDir: "/state",
+      runtimeDir: "/state/run",
+      homeDir: "/home/user",
+      denyList: [],
+      mergedMountPoint: "/tmp/merged",
+      writable: true,
+    });
+    const bindIndex = args.indexOf("--bind");
+    assert.equal(args[bindIndex + 1], "/workspace/repo");
+    assert.equal(args[bindIndex + 2], "/workspace/repo");
+  });
+});
+
+describe("extractNonGitDiff()", () => {
+  test("runs diff -ru between the real directory and the merged view, writing stdout to diffPath", () => {
+    let capturedArgs = null;
+    const written = {};
+    const runCommand = (command, args) => {
+      capturedArgs = args;
+      return { status: 1, stdout: "Only in /tmp/taskferry-cow-t1/merged: newfile.txt\n", stderr: "", error: undefined };
+    };
+    const result = extractNonGitDiff({
+      directory: "/workspace/repo",
+      overlay: { root: "/tmp/taskferry-cow-t1", upperDir: "/tmp/taskferry-cow-t1/upper/main", workDir: "/tmp/taskferry-cow-t1/work/main" },
+      stateDir: "/state",
+      runtimeDir: "/state/run",
+      homeDir: "/home/user",
+      denyList: [],
+      diffPath: "/state/diffs/t1.patch",
+      runCommand,
+      writeFileFn: (filePath, content) => { written[filePath] = content; },
+      mkdirFn: () => {},
+    });
+    // diff -ru takes directory then mergedMountPoint positionally, so mergedMountPoint is last
+    assert.deepEqual(capturedArgs.slice(-4), ["diff", "-ru", "/workspace/repo", "/tmp/taskferry-cow-t1/merged"]);
+    assert.equal(capturedArgs.at(-1), "/tmp/taskferry-cow-t1/merged");
+    assert.equal(result.hasChanges, true);
+    assert.equal(written["/state/diffs/t1.patch"], "Only in /tmp/taskferry-cow-t1/merged: newfile.txt\n");
+  });
+
+  test("diff -ru exit status 0 or 1 are both success (0 = no diff, 1 = differences found)", () => {
+    const runCommand = () => ({ status: 0, stdout: "", stderr: "", error: undefined });
+    const result = extractNonGitDiff({
+      directory: "/workspace/repo",
+      overlay: { root: "/tmp/taskferry-cow-t1", upperDir: "/tmp/u", workDir: "/tmp/w" },
+      stateDir: "/state", runtimeDir: "/state/run", homeDir: "/home/user", denyList: [],
+      diffPath: "/state/diffs/t1.patch", runCommand, writeFileFn: () => {}, mkdirFn: () => {},
+    });
+    assert.equal(result.hasChanges, false);
   });
 });
 

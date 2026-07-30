@@ -106,6 +106,69 @@ export function subOverlaySlug(targetPath) {
  * @param {string} targetPath
  * @returns {{path: string, upperDir: string, workDir: string}}
  */
+/**
+ * Mounts directory's merged (overlay) view at a *separate* synthetic
+ * mountpoint instead of at directory itself, so directory can be diffed
+ * against its own merged view in the same sandbox (git targets don't need
+ * this -- git diff only needs the merged tree at the real path -- this is
+ * only for the non-git diff -ru / non-git apply cases).
+ * @param {object} params
+ * @param {string} params.directory
+ * @param {{upperDir: string, workDir: string}} params.overlay
+ * @param {string} params.stateDir
+ * @param {string} params.runtimeDir
+ * @param {string} params.homeDir
+ * @param {string[]} params.denyList
+ * @param {string} params.mergedMountPoint
+ * @param {boolean} [params.writable] - also rw-bind directory itself, for the apply step (Task 7); omit for
+ *   pure extraction, where directory only needs to stay readable via the standard root ro-bind.
+ * @returns {string[]}
+ */
+export function buildMergedViewBwrapArgs({ directory, overlay, stateDir, runtimeDir, homeDir, denyList, mergedMountPoint, writable = false }) {
+  const args = ["--ro-bind", "/", "/", "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp"];
+  for (const denied of denyList) args.push("--tmpfs", denied);
+  args.push("--dir", mergedMountPoint);
+  args.push("--overlay-src", directory, "--overlay", overlay.upperDir, overlay.workDir, mergedMountPoint);
+  if (writable) args.push("--bind", directory, directory);
+  args.push("--bind", runtimeDir, runtimeDir);
+  args.push("--unshare-all", "--unshare-net", "--die-with-parent");
+  return args;
+}
+
+/**
+ * @param {object} params
+ * @param {string} params.directory
+ * @param {{root: string, upperDir: string, workDir: string}} params.overlay
+ * @param {string} params.stateDir
+ * @param {string} params.runtimeDir
+ * @param {string} params.homeDir
+ * @param {string[]} params.denyList
+ * @param {string} params.diffPath
+ * @param {typeof defaultRunCommand} [params.runCommand]
+ * @param {(filePath: string, content: string) => void} [params.writeFileFn]
+ * @param {(dirPath: string) => void} [params.mkdirFn]
+ * @returns {{diffPath: string, hasChanges: boolean}}
+ */
+export function extractNonGitDiff({
+  directory,
+  overlay,
+  stateDir,
+  runtimeDir,
+  homeDir,
+  denyList,
+  diffPath,
+  runCommand = defaultRunCommand,
+  writeFileFn = (filePath, content) => fs.writeFileSync(filePath, content, { mode: 0o600 }),
+  mkdirFn = (dirPath) => fs.mkdirSync(dirPath, { recursive: true, mode: 0o700 }),
+}) {
+  const mergedMountPoint = path.join(overlay.root, "merged");
+  const bwrapArgs = buildMergedViewBwrapArgs({ directory, overlay, stateDir, runtimeDir, homeDir, denyList, mergedMountPoint, writable: false });
+  const result = runCommand("bwrap", [...bwrapArgs, "--", "diff", "-ru", directory, mergedMountPoint]);
+  mkdirFn(pathDirname(diffPath));
+  writeFileFn(diffPath, result.stdout);
+  return { diffPath, hasChanges: result.stdout.trim().length > 0 };
+}
+
 export function subOverlayPaths(root, targetPath) {
   const slug = subOverlaySlug(targetPath);
   return { path: targetPath, upperDir: path.join(root, "upper", "extra", slug), workDir: path.join(root, "work", "extra", slug) };

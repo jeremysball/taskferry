@@ -25,8 +25,21 @@ function shQuote(value) {
  */
 export function resolvePreDispatchHead(directory, runCommand = defaultRunCommand) {
   const result = runCommand("git", ["-C", directory, "rev-parse", "HEAD"]);
-  if (result.error || result.status !== 0) return null;
-  return result.stdout.trim();
+  if (!result.error && result.status === 0) {
+    const head = result.stdout.trim();
+    if (head) return head;
+  }
+  // A git repo with an unborn HEAD (zero commits) is still a git target.
+  // Anchor the diff on the empty tree so extraction stays on the git path:
+  // misclassifying it as a non-git target would make a later accept rsync
+  // the overlay's merged view -- .git included -- over the real directory,
+  // replaying the worker's commits as real commits, which the design
+  // forbids (commits flatten into a working-tree-style diff instead).
+  const gitDirCheck = runCommand("git", ["-C", directory, "rev-parse", "--git-dir"]);
+  if (!gitDirCheck.error && gitDirCheck.status === 0) {
+    return "4b825dc642cb6eb9a060e54bf8d69288fbee4904"; // git's empty tree object
+  }
+  return null;
 }
 
 /**
@@ -50,6 +63,7 @@ export function resolvePreDispatchHead(directory, runCommand = defaultRunCommand
  * @param {(filePath: string, content: string) => void} [params.writeFileFn]
  * @param {(dirPath: string) => void} [params.mkdirFn]
  * @returns {{diffPath: string, hasChanges: boolean}}
+ * @throws {Error} when the bwrap extraction fails to start or exits non-zero
  */
 export function extractGitDiff({
   directory,
@@ -66,8 +80,16 @@ export function extractGitDiff({
   mkdirFn = (dirPath) => fs.mkdirSync(dirPath, { recursive: true, mode: 0o700 }),
 }) {
   const bwrapArgs = buildBwrapArgs({ directory, stateDir, runtimeDir, homeDir, denyList, overlay, overlayRwBinds });
-  const script = `git -C ${shQuote(directory)} add -A && git -C ${shQuote(directory)} diff --cached ${shQuote(preDispatchHead)}; git -C ${shQuote(directory)} reset > /dev/null 2>&1`;
+  // The final `exit $rc` propagates the diff's own status: the previous
+  // `; git reset` tail made the whole script exit with reset's status, so a
+  // failed diff still reported success. reset runs first regardless (undo
+  // the transient staging -- the upper already captured everything), then
+  // the shell exits with the diff's code.
+  const script = `git -C ${shQuote(directory)} add -A && { git -C ${shQuote(directory)} diff --cached ${shQuote(preDispatchHead)}; rc=$?; git -C ${shQuote(directory)} reset > /dev/null 2>&1; exit $rc; }`;
   const result = runCommand("bwrap", [...bwrapArgs, "--", "sh", "-c", script]);
+  if (result.error || result.status !== 0) {
+    throw new Error(`error: git diff extraction failed for ${directory} (exit ${result.status ?? "null"}): ${(result.error?.message || result.stderr || "unknown error").trim()}`);
+  }
   mkdirFn(pathDirname(diffPath));
   writeFileFn(diffPath, result.stdout);
   return { diffPath, hasChanges: result.stdout.trim().length > 0 };
@@ -101,11 +123,6 @@ export function subOverlaySlug(targetPath) {
   return `${path.basename(targetPath)}-${hash}`;
 }
 
-/**
- * @param {string} root
- * @param {string} targetPath
- * @returns {{path: string, upperDir: string, workDir: string}}
- */
 /**
  * Mounts directory's merged (overlay) view at a *separate* synthetic
  * mountpoint instead of at directory itself, so directory can be diffed
@@ -148,6 +165,7 @@ export function buildMergedViewBwrapArgs({ directory, overlay, stateDir, runtime
  * @param {(filePath: string, content: string) => void} [params.writeFileFn]
  * @param {(dirPath: string) => void} [params.mkdirFn]
  * @returns {{diffPath: string, hasChanges: boolean}}
+ * @throws {Error} when the bwrap extraction fails to start or exits non-zero
  */
 export function extractNonGitDiff({
   directory,
@@ -164,11 +182,23 @@ export function extractNonGitDiff({
   const mergedMountPoint = path.join(overlay.root, "merged");
   const bwrapArgs = buildMergedViewBwrapArgs({ directory, overlay, stateDir, runtimeDir, homeDir, denyList, mergedMountPoint, writable: false });
   const result = runCommand("bwrap", [...bwrapArgs, "--", "diff", "-ru", directory, mergedMountPoint]);
+  // diff exits 0 = identical, 1 = differences found (success for us), >=2 =
+  // real trouble. A bwrap failure (bad mount, timeout, killed) must not be
+  // indistinguishable from "no changes" -- throw on anything but 0/1 so the
+  // caller can record the failure and keep the overlay for recovery.
+  if (result.error || (result.status !== 0 && result.status !== 1)) {
+    throw new Error(`error: non-git diff extraction failed for ${directory} (exit ${result.status ?? "null"}): ${(result.error?.message || result.stderr || "unknown error").trim()}`);
+  }
   mkdirFn(pathDirname(diffPath));
   writeFileFn(diffPath, result.stdout);
   return { diffPath, hasChanges: result.stdout.trim().length > 0 };
 }
 
+/**
+ * @param {string} root
+ * @param {string} targetPath
+ * @returns {{path: string, upperDir: string, workDir: string}}
+ */
 export function subOverlayPaths(root, targetPath) {
   const slug = subOverlaySlug(targetPath);
   return { path: targetPath, upperDir: path.join(root, "upper", "extra", slug), workDir: path.join(root, "work", "extra", slug) };

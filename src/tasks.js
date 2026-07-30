@@ -980,8 +980,8 @@ export function createTaskManager({
    * @param {boolean} [params.noOverlay]
    * @param {"dispatch"|"advisor"} [params.role]
    * @param {string[]} [params.allowedDirs] - extra directories bound read-write for this dispatch only, on
- *   top of the manager-level default (see createTaskManager's `allowedDirs` option)
- * @param {string} [params.executor] - "opencode" | "pi". When omitted on a `sessionId` resume, inherits
+   *   top of the manager-level default (see createTaskManager's `allowedDirs` option)
+   * @param {string} [params.executor] - "opencode" | "pi". When omitted on a `sessionId` resume, inherits
    *   the executor that originally created the session (a different executor can't continue another CLI's
    *   session file); otherwise defaults to the manager's defaultExecutor (itself the result of
    *   `resolveExecutor(undefined)` at construction). An unknown name throws before any validation runs, so a

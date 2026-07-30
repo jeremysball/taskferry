@@ -12,7 +12,7 @@ import { formatToolEventForNarration } from "./narration-format.js";
 import { errCode } from "./errors.js";
 import { isNonNegativeInteger, isPositiveInteger } from "./numbers.js";
 import { buildBwrapArgs, checkBwrapAvailable, checkOverlaySupport, defaultDenyList, platformSupportsSandbox, resolveGitCommonDir, resolveGitDir } from "./sandbox.js";
-import { overlayPaths, resolvePreDispatchHead, subOverlayPaths, cleanupOverlay, defaultRunCommand as defaultOverlayRunCommand, extractGitDiff, extractNonGitDiff } from "./changeset.js";
+import { applyChangeset, overlayPaths, resolvePreDispatchHead, subOverlayPaths, cleanupOverlay, defaultRunCommand as defaultOverlayRunCommand, extractGitDiff, extractNonGitDiff } from "./changeset.js";
 import { resolveExecutor, opencodeExecutor } from "./executor.js";
 
 /**
@@ -152,6 +152,9 @@ import { resolveExecutor, opencodeExecutor } from "./executor.js";
  * @property {string} [next]
  * @property {boolean} [incomplete]
  * @property {string|null} [finalMarker]
+ * @property {string|null} [diff]
+ * @property {{files: number, additions: number, deletions: number}|null} [diffStat]
+ * @property {string|null} [changesetError]
  */
 
 const DEFAULT_STATE_DIR = resolveStateDir(process.env);
@@ -161,6 +164,7 @@ const DEFAULT_STATE_DIR = resolveStateDir(process.env);
 const MAX_WAIT_MS = 45000;
 
 const NARRATION_PREVIEW_CHARS = 2000;
+const TASK_MANAGER_RESULT_FIELDS = new Set([...RESULT_FIELDS, "diff", "diffStat"]);
 const TAIL_READ_BYTES = 1024 * 1024;
 const SUMMARY_INPUT_BYTES = 96 * 1024;
 // Linux caps a single execve argv string at 128KiB (MAX_ARG_STRLEN), separate
@@ -952,7 +956,7 @@ export function createTaskManager({
    * @returns {TaskSummary}
    */
   function summarize(task) {
-    const { promptPreview, promptTotalChars, id, status, directory, model, sessionId, originSessionId, pid, startedAt, endedAt, exitCode, signal, logPath, cancelRequested, incomplete, finalMarker, spawnError, executorId, role, changesetStatus, diffPath, overlayDirs, preDispatchHead, changesetError } = task;
+    const { promptPreview, promptTotalChars, id, status, directory, model, sessionId, originSessionId, pid, startedAt, endedAt, exitCode, signal, logPath, cancelRequested, incomplete, finalMarker, spawnError, executorId, role, changesetStatus } = task;
     return {
       id, status, directory, model, sessionId, originSessionId, pid, startedAt, endedAt, exitCode, signal, logPath,
       ...failureFields(task),
@@ -963,12 +967,9 @@ export function createTaskManager({
       ...(incomplete === true ? { incomplete: true } : {}),
       ...(finalMarker != null ? { finalMarker } : {}),
       ...(executorId != null ? { executorId } : {}),
-      ...(role != null ? { role } : {}),
-      ...(changesetStatus != null ? { changesetStatus } : {}),
-      diffPath: diffPath ?? null,
-      overlayDirs: overlayDirs ?? null,
-      ...(preDispatchHead != null ? { preDispatchHead } : {}),
-      changesetError: changesetError ?? null,
+      ...(changesetStatus != null && (changesetStatus !== "none" || role === "advisor") ? { role, changesetStatus } : {}),
+      ...(task.overlayDirs != null ? { overlayDirs: task.overlayDirs } : {}),
+      ...(task.changesetError != null ? { changesetError: task.changesetError } : {}),
       cancelRequested: !!cancelRequested,
     };
   }
@@ -2195,6 +2196,98 @@ export function createTaskManager({
     return { ...summarize(task), note: `SIGTERM sent to process group ${task.pid}; escalates to SIGKILL after ${graceMs}ms if it hasn't exited` };
   }
 
+  /** @param {Task} task */
+  function hasLiveOverlay(task) {
+    return task.overlayDirs != null && existsFn(task.overlayDirs.upperDir);
+  }
+
+  /**
+   * @param {string} taskId
+   * @returns {{taskId: string, changesetStatus: string, applied: boolean, reason?: string|null, cleanupFailed?: boolean}}
+   */
+  function accept(taskId) {
+    ensureStateLoaded();
+    const task = tasks.get(taskId);
+    if (!task) throw noSuchTask(taskId);
+    if (task.role === "advisor") {
+      throw new Error(`error: task ${taskId} has role "advisor" and cannot be accepted\nhelp: use "taskferry result ${taskId} --diff" to inspect what it wrote -- advisor writes are never applied`);
+    }
+    if (task.changesetStatus !== "pending") {
+      throw new Error(`error: task ${taskId} has no pending changeset (changesetStatus: ${task.changesetStatus ?? "none"})\nhelp: only a task with changesetStatus "pending" can be accepted`);
+    }
+    if (task.diffPath == null) {
+      // The extraction at settlement failed (Task 10 records why in
+      // changesetError); there is no patch to apply, but the overlay was
+      // deliberately kept so the changes remain recoverable.
+      throw new Error(
+        `error: task ${taskId}'s changeset was never extracted (${task.changesetError ?? "unknown reason"})\n` +
+        `help: the overlay was preserved${task.overlayDirs ? ` at ${task.overlayDirs.root}` : ""} -- inspect it there directly, or "taskferry reject ${taskId}" to discard it`
+      );
+    }
+    const isGitTarget = task.preDispatchHead != null;
+    if (!isGitTarget && !hasLiveOverlay(task)) {
+      // Review finding #7: a non-git accept must rebuild the merged view from
+      // the live overlay to rsync it; /tmp being a tmpfs, a reboot clears it.
+      // Fail loudly (fail-fast, never pretend to apply nothing) rather than
+      // rsyncing a missing tree. A git target's patch is persisted under
+      // stateDir and survives reboots, so this check is non-git only.
+      throw new Error(
+        `error: task ${taskId}'s overlay is gone (likely cleared by a reboot -- /tmp is a tmpfs)\n` +
+        `help: a non-git changeset cannot be re-applied without its overlay; use "taskferry result ${taskId} --diff" for the informational diff, then "taskferry reject ${taskId}" to clear the pending state`
+      );
+    }
+    const denyList = defaultDenyList(os.homedir(), stateDir).filter(existsFn);
+    const applied = applyChangeset({
+      directory: task.directory,
+      diffPath: task.diffPath,
+      isGitTarget,
+      overlay: task.overlayDirs ?? undefined,
+      stateDir,
+      runtimeDir,
+      homeDir: os.homedir(),
+      denyList,
+      runCommand: runOverlayCommandFn,
+    });
+    if (!applied.applied) {
+      return { taskId, changesetStatus: task.changesetStatus, applied: false, reason: applied.reason };
+    }
+    task.changesetStatus = "accepted";
+    // Review finding #11: a cleanup failure must not be swallowed. The status
+    // is terminal either way (the apply is what the user asked for), but the
+    // failure surfaces in the return value and overlayDirs stays set so the
+    // daemon-startup sweep (Task 12) retries the removal.
+    let cleanupFailed = false;
+    if (task.overlayDirs) {
+      const removal = cleanupOverlay({ root: task.overlayDirs.root, tmpRoot: overlayTmpRoot, rmFn: rmOverlayTreeFn });
+      if (removal.removed) task.overlayDirs = null;
+      else cleanupFailed = true;
+    }
+    persistTask(task.id);
+    return { taskId, changesetStatus: task.changesetStatus, applied: true, ...(cleanupFailed ? { cleanupFailed: true } : {}) };
+  }
+
+  /**
+   * @param {string} taskId
+   * @returns {{taskId: string, changesetStatus: string, cleanupFailed?: boolean}}
+   */
+  function reject(taskId) {
+    ensureStateLoaded();
+    const task = tasks.get(taskId);
+    if (!task) throw noSuchTask(taskId);
+    if (task.changesetStatus !== "pending") {
+      throw new Error(`error: task ${taskId} has no pending changeset (changesetStatus: ${task.changesetStatus ?? "none"})\nhelp: only a task with changesetStatus "pending" can be rejected`);
+    }
+    task.changesetStatus = "rejected";
+    let cleanupFailed = false;
+    if (task.overlayDirs) {
+      const removal = cleanupOverlay({ root: task.overlayDirs.root, tmpRoot: overlayTmpRoot, rmFn: rmOverlayTreeFn });
+      if (removal.removed) task.overlayDirs = null;
+      else cleanupFailed = true;
+    }
+    persistTask(task.id);
+    return { taskId, changesetStatus: task.changesetStatus, ...(cleanupFailed ? { cleanupFailed: true } : {}) };
+  }
+
   /** @param {string} taskId */
   function stopRunningWatcher(taskId) {
     const timer = runningWatchers.get(taskId);
@@ -2755,6 +2848,22 @@ export function createTaskManager({
     return projected;
   }
 
+  /**
+   * @param {string} diffText
+   * @returns {{files: number, additions: number, deletions: number}}
+   */
+  function computeDiffStat(diffText) {
+    let files = 0;
+    let additions = 0;
+    let deletions = 0;
+    for (const line of diffText.split("\n")) {
+      if (line.startsWith("diff --git ")) files++;
+      else if (line.startsWith("+") && !line.startsWith("+++")) additions++;
+      else if (line.startsWith("-") && !line.startsWith("---")) deletions++;
+    }
+    return { files, additions, deletions };
+  }
+
   // Settlement-time check for "done but no real output": an otherwise clean
   // exit whose extracted final message is empty (after trimming) is flagged
   // with task.incomplete = true, and a task dispatched with --require-final-marker
@@ -2842,8 +2951,8 @@ export function createTaskManager({
     const task = tasks.get(taskId);
     if (!task) throw noSuchTask(taskId);
     if (fields != null) {
-      if (!Array.isArray(fields) || !fields.length || fields.some((field) => !RESULT_FIELDS.has(field))) {
-        throw new Error(`error: fields must contain one or more supported result fields\nhelp: use one of: ${[...RESULT_FIELDS].join(", ")}`);
+      if (!Array.isArray(fields) || !fields.length || fields.some((field) => !TASK_MANAGER_RESULT_FIELDS.has(field))) {
+        throw new Error(`error: fields must contain one or more supported result fields\nhelp: use one of: ${[...TASK_MANAGER_RESULT_FIELDS].join(", ")}`);
       }
       if (full && !fields.includes("narration")) {
         throw new Error("error: full requires narration in fields\nhelp: omit full or include narration in fields");
@@ -2920,6 +3029,22 @@ export function createTaskManager({
     const truncated = !full && fullNarration.length > NARRATION_PREVIEW_CHARS;
     const narration = truncated ? fullNarration.slice(0, NARRATION_PREVIEW_CHARS) + "…" : fullNarration;
 
+    let diffText = null;
+    if (task.diffPath && (fields == null || fields.includes("diff") || fields.includes("diffStat"))) {
+      try {
+        diffText = fs.readFileSync(task.diffPath, "utf8");
+      } catch {
+        diffText = null;
+      }
+    }
+    // Review finding #13: spec §5.3 requires a diffStat summary (files changed,
+    // +/- counts) on result --full. Counted from the cached patch text: "diff
+    // --git" headers for files, hunk-body +/- lines otherwise (works for the
+    // git format; for the non-git diff -ru format the +++/--- header lines are
+    // excluded and "Only in" lines are not counted -- an approximation, which
+    // is all a human-readable summary needs).
+    const diffStat = diffText != null && (fields == null || fields.includes("diffStat")) ? computeDiffStat(diffText) : null;
+
     return projectResult({
       taskId,
       status: task.status,
@@ -2927,6 +3052,9 @@ export function createTaskManager({
       signal: task.signal,
       spawnError: task.spawnError,
       ...failureFields(task),
+      diff: diffText,
+      diffStat,
+      changesetError: task.changesetError ?? null,
       sessionId,
       tokens,
       cost,
@@ -2949,6 +3077,8 @@ export function createTaskManager({
   return {
     dispatch,
     cancel,
+    accept,
+    reject,
     status,
     taskDirectory,
     poll,

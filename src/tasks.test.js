@@ -906,7 +906,7 @@ describe("bwrap sandboxing", () => {
       });
       const result = mgr.dispatch({ prompt: "hello", directory });
       assert.equal(captured.args.includes("--overlay-src"), false);
-      assert.equal(mgr.status(result.id).changesetStatus, "none");
+      assert.equal("changesetStatus" in mgr.status(result.id), false);
       assert.match(warned, /overlay disabled/);
     } finally {
       process.stderr.write = originalWrite;
@@ -1067,7 +1067,7 @@ describe("changeset extraction at settlement", () => {
 
     const status = mgr.status(result.id);
     assert.equal(status.changesetStatus, "pending");
-    assert.ok(status.diffPath);
+    assert.equal(mgr.result(result.id, { fields: ["diff"] }).diff, "diff --git a/x b/x\n");
     assert.equal(extractCommand.command, "bwrap");
   });
 
@@ -1151,7 +1151,7 @@ describe("changeset extraction at settlement", () => {
     const status = mgr.status(result.id);
     assert.equal(status.changesetStatus, "accepted");
     assert.ok(cleanedRoot);
-    assert.equal(status.overlayDirs, null);
+    assert.equal("overlayDirs" in status, false);
   });
 
   test("extracts a changeset for a cancelled task too", () => {
@@ -1175,7 +1175,7 @@ describe("changeset extraction at settlement", () => {
     const status = mgr.status(result.id);
     assert.equal(status.status, "cancelled");
     assert.equal(status.changesetStatus, "pending");
-    assert.ok(status.diffPath);
+    assert.equal(mgr.result(result.id, { fields: ["diff"] }).diff, "diff --git a/x b/x\n");
   });
 
   test("records extraction errors and keeps the overlay for recovery", () => {
@@ -1201,19 +1201,19 @@ describe("changeset extraction at settlement", () => {
     const status = mgr.status(result.id);
     assert.equal(status.changesetStatus, "pending");
     assert.match(status.changesetError, /ETIMEDOUT/);
-    assert.equal(status.diffPath, null);
+    assert.equal(mgr.result(result.id, { fields: ["diff"] }).diff, null);
     assert.ok(status.overlayDirs);
     assert.equal(cleanedAny, false);
   });
 });
 
 describe("dispatch() role/changeset fields", () => {
-  test("a plain dispatch defaults to role 'dispatch' and changesetStatus 'none' when sandboxing is off", () => {
+  test("a plain dispatch without an overlay omits role and changesetStatus from its summary", () => {
     const mgr = makeManager({ spawnFn: () => fakeChild(), sandboxEnabled: false });
     const result = mgr.dispatch({ prompt: "hello", directory: os.tmpdir() });
     const status = mgr.status(result.id);
-    assert.equal(status.role, "dispatch");
-    assert.equal(status.changesetStatus, "none");
+    assert.equal("role" in status, false);
+    assert.equal("changesetStatus" in status, false);
   });
 
   test("advisor() dispatches internally with role 'advisor'", async () => {
@@ -2866,6 +2866,168 @@ describe("cancel()", () => {
   });
 });
 
+describe("accept()/reject()", () => {
+  // The fixture's overlay root lives under this host's actual tmpdir so
+  // cleanupOverlay's containment check (Task 7, review finding #12) accepts
+  // it -- a hardcoded /tmp path would fail that check on hosts where
+  // os.tmpdir() resolves elsewhere.
+  const fixtureTmpRoot = os.tmpdir();
+  const fixtureRoot = path.join(fixtureTmpRoot, "taskferry-cow-t_pending");
+  function pendingTaskFixture(overrides = {}) {
+    return {
+      ...baseTask({ id: "t_pending", status: "done" }),
+      role: "dispatch",
+      changesetStatus: "pending",
+      diffPath: "/does-not-matter-for-this-fixture.patch",
+      overlayDirs: { root: fixtureRoot, upperDir: path.join(fixtureRoot, "upper", "main"), workDir: path.join(fixtureRoot, "work", "main"), rwBinds: [] },
+      preDispatchHead: "abc123",
+      ...overrides,
+    };
+  }
+
+  test("accept() applies the diff, marks the changeset accepted, and cleans up", () => {
+    let applyCalled = false;
+    let cleanedRoot = null;
+    const mgr = makeManager({
+      tasksFixture: [pendingTaskFixture()],
+      runOverlayCommandFn: (command, args) => {
+        if (command === "git" && args[2] === "apply") applyCalled = true;
+        return { status: 0, stdout: "", stderr: "", error: undefined };
+      },
+      rmOverlayTreeFn: (p) => { cleanedRoot = p; },
+    });
+    const result = mgr.accept("t_pending");
+    assert.equal(result.changesetStatus, "accepted");
+    assert.equal(result.applied, true);
+    assert.equal(applyCalled, true);
+    assert.equal(cleanedRoot, fixtureRoot);
+    assert.equal(mgr.status("t_pending").changesetStatus, "accepted");
+  });
+
+  test("accept() leaves changesetStatus pending and does not clean up when apply fails", () => {
+    let cleanedRoot = null;
+    const mgr = makeManager({
+      tasksFixture: [pendingTaskFixture()],
+      runOverlayCommandFn: (command) => {
+        if (command === "git") return { status: 1, stdout: "", stderr: "error: patch does not apply\n", error: undefined };
+        return { status: 0, stdout: "", stderr: "", error: undefined };
+      },
+      rmOverlayTreeFn: (p) => { cleanedRoot = p; },
+    });
+    const result = mgr.accept("t_pending");
+    assert.equal(result.applied, false);
+    assert.match(result.reason, /patch does not apply/);
+    assert.equal(mgr.status("t_pending").changesetStatus, "pending");
+    assert.equal(cleanedRoot, null);
+  });
+
+  test("reject() discards the changeset without applying and cleans up", () => {
+    let applyCalled = false;
+    let cleanedRoot = null;
+    const mgr = makeManager({
+      tasksFixture: [pendingTaskFixture()],
+      runOverlayCommandFn: (command, args) => {
+        if (command === "git" && args[2] === "apply") applyCalled = true;
+        return { status: 0, stdout: "", stderr: "", error: undefined };
+      },
+      rmOverlayTreeFn: (p) => { cleanedRoot = p; },
+    });
+    const result = mgr.reject("t_pending");
+    assert.equal(result.changesetStatus, "rejected");
+    assert.equal(applyCalled, false);
+    assert.equal(cleanedRoot, fixtureRoot);
+    assert.equal(mgr.status("t_pending").changesetStatus, "rejected");
+  });
+
+  test("accept() on an advisor task throws a clear, non-applying error", () => {
+    const mgr = makeManager({ tasksFixture: [pendingTaskFixture({ id: "t_advisor", role: "advisor", changesetStatus: "rejected" })] });
+    assert.throws(() => mgr.accept("t_advisor"), /role "advisor" and cannot be accepted/);
+  });
+
+  test("accept() on a task with no pending changeset throws", () => {
+    const mgr = makeManager({ tasksFixture: [baseTask({ id: "t_none" })] });
+    assert.throws(() => mgr.accept("t_none"), /no pending changeset/);
+  });
+
+  test("accept() on a task whose extraction failed errors usefully and keeps the overlay (regression: review finding #2)", () => {
+    const mgr = makeManager({
+      tasksFixture: [pendingTaskFixture({ diffPath: null, changesetError: "spawn bwrap ETIMEDOUT" })],
+    });
+    assert.throws(() => mgr.accept("t_pending"), /changeset was never extracted.*ETIMEDOUT/s);
+    assert.ok(mgr.status("t_pending").overlayDirs, "the preserved overlay is the user's only copy of the changes");
+  });
+
+  test("accept() on a non-git target whose overlay vanished errors instead of applying nothing (regression: review finding #7)", () => {
+    // A reboot clears the tmpfs overlay; the pending changeset can never be
+    // re-applied. Fail loudly rather than rsyncing a missing tree.
+    const mgr = makeManager({
+      tasksFixture: [pendingTaskFixture({
+        preDispatchHead: null, // non-git target
+        overlayDirs: { root: fixtureRoot, upperDir: path.join(fixtureRoot, "upper", "main"), workDir: path.join(fixtureRoot, "work", "main"), rwBinds: [] }, // never created on disk
+      })],
+    });
+    assert.throws(() => mgr.accept("t_pending"), /overlay is gone/);
+  });
+
+  test("accept() surfaces a failed cleanup via cleanupFailed and leaves overlayDirs for the sweep (regression: review finding #11)", () => {
+    const mgr = makeManager({
+      tasksFixture: [pendingTaskFixture()],
+      runOverlayCommandFn: () => ({ status: 0, stdout: "", stderr: "", error: undefined }),
+      rmOverlayTreeFn: () => { throw new Error("EBUSY: resource busy or locked"); },
+    });
+    const result = mgr.accept("t_pending");
+    assert.equal(result.applied, true);
+    assert.equal(result.changesetStatus, "accepted");
+    assert.equal(result.cleanupFailed, true, "a failed cleanup must not be swallowed");
+    assert.ok(mgr.status("t_pending").overlayDirs, "overlayDirs must stay set so the daemon-startup sweep retries");
+  });
+
+  test("reject() surfaces a failed cleanup and leaves overlayDirs for the sweep", () => {
+    const mgr = makeManager({
+      tasksFixture: [pendingTaskFixture()],
+      rmOverlayTreeFn: () => { throw new Error("EBUSY: resource busy or locked"); },
+    });
+    const result = mgr.reject("t_pending");
+    assert.equal(result.changesetStatus, "rejected");
+    assert.equal(result.cleanupFailed, true);
+    assert.ok(mgr.status("t_pending").overlayDirs);
+  });
+});
+
+describe("summarize() changeset exposure", () => {
+  test("exposes changeset fields only when they are meaningful", () => {
+    const overlayDirs = {
+      root: path.join(os.tmpdir(), "taskferry-cow-t_pending"),
+      upperDir: path.join(os.tmpdir(), "taskferry-cow-t_pending", "upper", "main"),
+      workDir: path.join(os.tmpdir(), "taskferry-cow-t_pending", "work", "main"),
+      rwBinds: [],
+    };
+    const mgr = makeManager({
+      tasksFixture: [
+        baseTask({ id: "t_plain", role: "dispatch", changesetStatus: "none", overlayDirs: null, changesetError: null }),
+        baseTask({ id: "t_advisor", role: "advisor", changesetStatus: "none" }),
+        baseTask({ id: "t_pending", role: "dispatch", changesetStatus: "pending", overlayDirs, changesetError: "spawn bwrap ETIMEDOUT" }),
+      ],
+    });
+
+    const plain = mgr.status("t_plain");
+    assert.equal("role" in plain, false);
+    assert.equal("changesetStatus" in plain, false);
+    assert.equal("overlayDirs" in plain, false);
+    assert.equal("changesetError" in plain, false);
+
+    const advisor = mgr.status("t_advisor");
+    assert.equal(advisor.role, "advisor");
+    assert.equal(advisor.changesetStatus, "none");
+
+    const pending = mgr.status("t_pending");
+    assert.equal(pending.role, "dispatch");
+    assert.equal(pending.changesetStatus, "pending");
+    assert.deepEqual(pending.overlayDirs, overlayDirs);
+    assert.equal(pending.changesetError, "spawn bwrap ETIMEDOUT");
+  });
+});
+
 describe("executorId on persisted tasks (Task 5: legacy records default to opencode at load)", () => {
   test("a persisted task with no executorId defaults to \"opencode\" on load", () => {
     const mgr = makeManager({
@@ -3619,6 +3781,59 @@ describe("result()", () => {
     const r = mgr.result("t1", { fields: ["message"] });
     assert.equal(r.status, "unknown");
     assert.match(r.message, /partial output is unavailable/);
+  });
+});
+
+describe("result() diffStat field", () => {
+  test("computes files/additions/deletions from the cached patch (regression: review finding #13)", () => {
+    const patch = [
+      "diff --git a/one.txt b/one.txt",
+      "--- a/one.txt",
+      "+++ b/one.txt",
+      "@@ -1 +1,2 @@",
+      "+added line",
+      "+another",
+      "diff --git a/two.txt b/two.txt",
+      "--- a/two.txt",
+      "+++ /dev/null",
+      "@@ -1 +0,0 @@",
+      "-removed line",
+      "",
+    ].join("\n");
+    const mgr = makeManager({
+      tasksFixture: (logDir) => [{
+        ...baseTask({ id: "t_stat", logPath: path.join(logDir, "t_stat.ndjson") }),
+        diffPath: path.join(logDir, "..", "diffs", "t_stat.patch"),
+      }],
+      logs: { "t_stat.ndjson": "" },
+    });
+    fs.mkdirSync(path.join(mgr.paths.STATE_DIR, "diffs"), { recursive: true });
+    fs.writeFileSync(path.join(mgr.paths.STATE_DIR, "diffs", "t_stat.patch"), patch);
+    const result = mgr.result("t_stat", { fields: ["diffStat"] });
+    assert.deepEqual(result.diffStat, { files: 2, additions: 2, deletions: 1 });
+    assert.deepEqual(mgr.result("t_stat").diffStat, { files: 2, additions: 2, deletions: 1 });
+  });
+});
+
+describe("result() diff field", () => {
+  test("returns the cached patch text for fields: ['diff']", () => {
+    const mgr = makeManager({
+      tasksFixture: (logDir) => [{
+        ...baseTask({ id: "t_diff", logPath: path.join(logDir, "t_diff.ndjson") }),
+        diffPath: path.join(logDir, "..", "diffs", "t_diff.patch"),
+      }],
+      logs: { "t_diff.ndjson": "" },
+    });
+    fs.mkdirSync(path.join(mgr.paths.STATE_DIR, "diffs"), { recursive: true });
+    fs.writeFileSync(path.join(mgr.paths.STATE_DIR, "diffs", "t_diff.patch"), "diff --git a/x b/x\n");
+    const result = mgr.result("t_diff", { fields: ["diff"] });
+    assert.equal(result.diff, "diff --git a/x b/x\n");
+  });
+
+  test("returns null for a task with no diffPath", () => {
+    const mgr = makeManager({ tasksFixture: [baseTask({ id: "t_no_diff" })] });
+    const result = mgr.result("t_no_diff", { fields: ["diff"] });
+    assert.equal(result.diff, null);
   });
 });
 

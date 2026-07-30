@@ -203,3 +203,68 @@ export function subOverlayPaths(root, targetPath) {
   const slug = subOverlaySlug(targetPath);
   return { path: targetPath, upperDir: path.join(root, "upper", "extra", slug), workDir: path.join(root, "work", "extra", slug) };
 }
+
+/**
+ * @param {object} params
+ * @param {string} params.directory
+ * @param {string} params.diffPath
+ * @param {boolean} params.isGitTarget
+ * @param {{root: string, upperDir: string, workDir: string}} [params.overlay] - required when isGitTarget is false
+ * @param {string} [params.stateDir]
+ * @param {string} [params.runtimeDir]
+ * @param {string} [params.homeDir]
+ * @param {string[]} [params.denyList]
+ * @param {typeof defaultRunCommand} [params.runCommand]
+ * @returns {{applied: boolean, reason: string|null}}
+ */
+export function applyChangeset({ directory, diffPath, isGitTarget, overlay, stateDir, runtimeDir, homeDir, denyList, runCommand = defaultRunCommand }) {
+  if (isGitTarget) {
+    const result = runCommand("git", ["-C", directory, "apply", diffPath]);
+    if (result.status === 0) return { applied: true, reason: null };
+    return { applied: false, reason: result.stderr.trim() || result.error?.message || `git apply exited with status ${result.status}` };
+  }
+  const mergedMountPoint = path.join(overlay.root, "merged");
+  const bwrapArgs = buildMergedViewBwrapArgs({ directory, overlay, stateDir, runtimeDir, homeDir, denyList, mergedMountPoint, writable: true });
+  // --delay-updates (review finding #9): rsync stages each updated file and
+  // renames them all into place in the final update phase, so an interrupted
+  // apply leaves old files intact rather than a half-mutated tree. Not fully
+  // transactional (deletions still apply incrementally), but retryable: a
+  // failed apply leaves changesetStatus "pending" and never runs cleanup
+  // (spec §5.4), so the overlay survives for a second attempt.
+  const script = `rsync -a --delete --delay-updates ${shQuote(mergedMountPoint)}/ ${shQuote(directory)}/`;
+  const result = runCommand("bwrap", [...bwrapArgs, "--", "sh", "-c", script]);
+  if (result.status === 0) return { applied: true, reason: null };
+  return { applied: false, reason: result.stderr.trim() || `apply copy exited with status ${result.status}` };
+}
+
+/**
+ * Overlay upper/work dirs come back owned by the invoking (daemon's own)
+ * uid, not an unmapped namespace one -- bwrap's default --unshare-user
+ * identity-maps the outer uid, and nothing in this design passes
+ * --uid/--gid. Verified live against the exact buildBwrapArgs() flag set
+ * on the target host: overlayfs's internal work/work scratch subdir comes
+ * back mode 000, but a plain rm -rf from the same uid still removes it
+ * (unlink authority comes from the parent directory's permissions, not the
+ * child's own mode). No bwrap wrapper or elevated privilege is needed --
+ * see ADR 0001's corrected "Namespace-owned leftovers" entry.
+ * @param {object} params
+ * @param {string} params.root
+ * @param {string} params.tmpRoot - the overlayTmpRoot the overlay was created under; removal is
+ *   refused for any root that isn't a taskferry-cow tree under it (review finding #12 -- defense
+ *   in depth against a corrupted/tampered tasks.json pointing rm -rf elsewhere; exploiting it
+ *   already requires the daemon's own uid, which is exactly the attacker this feature targets).
+ * @param {(path: string) => void} [params.rmFn]
+ * @returns {{removed: boolean, reason: string|null}}
+ */
+export function cleanupOverlay({ root, tmpRoot, rmFn = (p) => fs.rmSync(p, { recursive: true, force: true }) }) {
+  const resolved = path.resolve(root);
+  if (!resolved.startsWith(path.resolve(tmpRoot) + path.sep) || !path.basename(resolved).startsWith("taskferry-cow-")) {
+    return { removed: false, reason: `refusing to remove ${root}: not a taskferry-cow overlay under ${tmpRoot}` };
+  }
+  try {
+    rmFn(root);
+    return { removed: true, reason: null };
+  } catch (err) {
+    return { removed: false, reason: err instanceof Error ? err.message : String(err) };
+  }
+}

@@ -2,7 +2,7 @@
 import { describe, test } from "node:test";
 import assert from "node:assert/strict";
 import path from "node:path";
-import { overlayPaths, subOverlayPaths, subOverlaySlug, extractGitDiff, resolvePreDispatchHead, buildMergedViewBwrapArgs, extractNonGitDiff } from "./changeset.js";
+import { overlayPaths, subOverlayPaths, subOverlaySlug, extractGitDiff, resolvePreDispatchHead, buildMergedViewBwrapArgs, extractNonGitDiff, applyChangeset, cleanupOverlay } from "./changeset.js";
 
 describe("overlayPaths()", () => {
   test("builds a per-task root plus a main upper/work pair under it", () => {
@@ -270,5 +270,85 @@ describe("extraction fail-closed behavior", () => {
     const runCommand = () => ({ status: 1, stdout: "diff -ru a/x b/x\n", stderr: "", error: undefined });
     const result = extractNonGitDiff({ ...baseNonGitParams, runCommand, writeFileFn: () => {}, mkdirFn: () => {} });
     assert.equal(result.hasChanges, true);
+  });
+});
+
+describe("applyChangeset()", () => {
+  test("git target: runs git apply <diffPath> against directory", () => {
+    let capturedCommand = null;
+    let capturedArgs = null;
+    const runCommand = (command, args) => {
+      capturedCommand = command;
+      capturedArgs = args;
+      return { status: 0, stdout: "", stderr: "", error: undefined };
+    };
+    const result = applyChangeset({
+      directory: "/workspace/repo",
+      diffPath: "/state/diffs/t1.patch",
+      isGitTarget: true,
+      runCommand,
+    });
+    assert.equal(capturedCommand, "git");
+    assert.deepEqual(capturedArgs, ["-C", "/workspace/repo", "apply", "/state/diffs/t1.patch"]);
+    assert.deepEqual(result, { applied: true, reason: null });
+  });
+
+  test("git target: surfaces git apply's stderr as the failure reason on conflict", () => {
+    const runCommand = () => ({ status: 1, stdout: "", stderr: "error: patch does not apply\n", error: undefined });
+    const result = applyChangeset({ directory: "/workspace/repo", diffPath: "/state/diffs/t1.patch", isGitTarget: true, runCommand });
+    assert.equal(result.applied, false);
+    assert.match(result.reason, /patch does not apply/);
+  });
+
+  test("non-git target: rsyncs the merged overlay view onto directory inside one writable remount", () => {
+    let capturedArgs = null;
+    const runCommand = (command, args) => {
+      capturedArgs = args;
+      return { status: 0, stdout: "", stderr: "", error: undefined };
+    };
+    const result = applyChangeset({
+      directory: "/workspace/scratch",
+      diffPath: "/state/diffs/t1.patch",
+      isGitTarget: false,
+      overlay: { root: "/tmp/taskferry-cow-t1", upperDir: "/tmp/taskferry-cow-t1/upper/main", workDir: "/tmp/taskferry-cow-t1/work/main" },
+      stateDir: "/state",
+      runtimeDir: "/state/run",
+      homeDir: "/home/user",
+      denyList: [],
+      runCommand,
+    });
+    assert.ok(capturedArgs.includes("--dir"));
+    assert.ok(capturedArgs.includes("/workspace/scratch"), "directory must be rw-bound for the apply's writable remount");
+    const shIndex = capturedArgs.indexOf("sh");
+    const script = capturedArgs[shIndex + 2];
+    assert.match(script, /rsync -a --delete --delay-updates '\/tmp\/taskferry-cow-t1\/merged'\/ '\/workspace\/scratch'\//);
+    assert.deepEqual(result, { applied: true, reason: null });
+  });
+});
+
+describe("cleanupOverlay()", () => {
+  // Overlay upper/work dirs come back owned by the daemon's own uid, not an
+  // unmapped namespace one (verified live against the target host, see
+  // ADR 0001's corrected "Namespace-owned leftovers" entry) -- a plain
+  // removal is correct, no bwrap wrapper needed.
+  test("removes the task's overlay root and reports success", () => {
+    let removedPath = null;
+    const result = cleanupOverlay({ root: "/tmp/taskferry-cow-t1", tmpRoot: "/tmp", rmFn: (p) => { removedPath = p; } });
+    assert.equal(removedPath, "/tmp/taskferry-cow-t1");
+    assert.deepEqual(result, { removed: true, reason: null });
+  });
+
+  test("refuses to remove a root that is not a taskferry-cow tree under the overlay tmp root", () => {
+    let removedPath = null;
+    const result = cleanupOverlay({ root: "/home/user/important", tmpRoot: "/tmp", rmFn: (p) => { removedPath = p; } });
+    assert.equal(removedPath, null);
+    assert.equal(result.removed, false);
+    assert.match(result.reason, /not a taskferry-cow overlay under/);
+  });
+
+  test("reports failure with the thrown error's message", () => {
+    const result = cleanupOverlay({ root: "/tmp/taskferry-cow-t1", tmpRoot: "/tmp", rmFn: () => { throw new Error("EACCES: permission denied"); } });
+    assert.equal(result.removed, false);
+    assert.match(result.reason, /permission denied/);
   });
 });

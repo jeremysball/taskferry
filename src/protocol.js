@@ -105,7 +105,7 @@ function validParams(method, params) {
     case "system.health":
       return hasOnly(params, []);
     case "task.dispatch":
-      return hasOnly(params, ["prompt", "directory", "model", "variant", "sessionId", "env", "finalMarker", "originSessionId", "noSandbox", "allowedDirs", "executor"])
+      return hasOnly(params, ["prompt", "directory", "model", "variant", "sessionId", "env", "finalMarker", "originSessionId", "noSandbox", "noOverlay", "allowedDirs", "executor"])
         && isNonEmptyString(params.prompt)
         && isAbsolutePath(params.directory)
         && optional(params.model, isNonEmptyString)
@@ -115,6 +115,7 @@ function validParams(method, params) {
         && optional(params.finalMarker, isNonEmptyString)
         && optional(params.originSessionId, isNonEmptyString)
         && optional(params.noSandbox, (value) => typeof value === "boolean")
+        && optional(params.noOverlay, (value) => typeof value === "boolean")
         && optional(params.allowedDirs, (value) => Array.isArray(value) && value.length > 0 && value.every((entry) => isNonEmptyString(entry)))
         && optional(params.executor, (value) => typeof value === "string" && KNOWN_EXECUTORS.includes(value));
     case "task.cancel":

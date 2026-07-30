@@ -28,6 +28,7 @@ test("parses dispatch and applies its argument defaults", () => {
       sessionId: undefined,
       finalMarker: undefined,
       noSandbox: false,
+      noOverlay: false,
       allowedDirs: undefined,
       executor: undefined,
     },
@@ -125,6 +126,7 @@ test("parses workspace, stream, and result options with their constrained values
     taskId: "oc_1",
     full: true,
     fields: ["message", "narration"],
+    diff: false,
   });
   assert.ok(parseArgs([
     "result",
@@ -381,4 +383,43 @@ test("watch --flush-interval 0 (and 0s) errors with a clear UsageError instead o
     () => parseArgs(["watch", "--summaries", "--flush-interval", "0s"]),
     /--flush-interval must be greater than zero/
   );
+});
+
+test("dispatch accepts --no-overlay", () => {
+  const parsed = parseArgs(["dispatch", "--prompt", "hi", "--no-overlay"]);
+  assert.equal(parsed.options.noOverlay, true);
+});
+
+test("advisor rejects --no-overlay (overlay is mandatory for the advisor role; review finding #5)", () => {
+  // Mirrors args.js's existing unknown-flag UsageError shape (the
+  // booleanCommands gate): the remediation lists advisor's valid flags.
+  assert.throws(
+    () => parseArgs(["advisor", "--prompt", "hi", "--model", "openai/gpt-5.6-sol", "--no-overlay"]),
+    /unknown flag --no-overlay/
+  );
+});
+
+test("result accepts --diff", () => {
+  const parsed = parseArgs(["result", "t1", "--diff"]);
+  assert.equal(parsed.options.diff, true);
+});
+
+test("result rejects --diff combined with --fields", () => {
+  assert.throws(() => parseArgs(["result", "t1", "--diff", "--fields", "message"]), /--diff cannot be combined with --fields/);
+});
+
+test("accept requires a task id", () => {
+  assert.throws(() => parseArgs(["accept"]), /task id is required/);
+});
+
+test("accept parses a task id positional", () => {
+  const parsed = parseArgs(["accept", "t1"]);
+  assert.equal(parsed.command, "accept");
+  assert.equal(parsed.options.taskId, "t1");
+});
+
+test("reject parses a task id positional", () => {
+  const parsed = parseArgs(["reject", "t1"]);
+  assert.equal(parsed.command, "reject");
+  assert.equal(parsed.options.taskId, "t1");
 });

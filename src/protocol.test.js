@@ -117,6 +117,35 @@ describe("private daemon protocol", () => {
     })), /invalid params/i);
   });
 
+  test("task.dispatch accepts an optional noOverlay boolean", () => {
+    const parsed = parseRequestLine(request("task.dispatch", {
+      prompt: "hi",
+      directory: "/tmp/project",
+      noOverlay: true,
+    }));
+    assert.equal(parsed.params.noOverlay, true);
+  });
+
+  test("task.dispatch rejects a non-boolean noOverlay", () => {
+    assert.throws(() => parseRequestLine(request("task.dispatch", {
+      prompt: "hi",
+      directory: "/tmp/project",
+      noOverlay: "true",
+    })), /invalid params/i);
+  });
+
+  test("task.advisor rejects noOverlay as an INVALID_PARAMS validation error (overlay is mandatory for the advisor role; review finding #5)", () => {
+    assert.throws(
+      () => parseRequestLine(request("task.advisor", {
+        prompt: "hi",
+        directory: "/tmp/project",
+        model: "m",
+        noOverlay: true,
+      })),
+      (error) => error instanceof ProtocolError && error.code === "INVALID_PARAMS"
+    );
+  });
+
   test("task.dispatch accepts an optional executor param", () => {
     const parsed = parseRequestLine(request("task.dispatch", {
       prompt: "hi",

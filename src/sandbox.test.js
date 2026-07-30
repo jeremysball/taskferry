@@ -1,7 +1,7 @@
 import { describe, test } from "node:test";
 import assert from "node:assert/strict";
 import path from "node:path";
-import { buildBwrapArgs, checkBwrapAvailable, platformSupportsSandbox, resolveGitCommonDir, resolveGitDir } from "./sandbox.js";
+import { buildBwrapArgs, checkBwrapAvailable, checkOverlaySupport, defaultDenyList, parseBwrapVersion, platformSupportsSandbox, resolveGitCommonDir, resolveGitDir } from "./sandbox.js";
 
 describe("platformSupportsSandbox()", () => {
   test("is true on linux", () => {
@@ -28,7 +28,7 @@ describe("checkBwrapAvailable()", () => {
       assert.deepEqual(args, ["--version"]);
       return { status: 0, stdout: "bubblewrap 0.11.2\n", stderr: "", error: undefined };
     };
-    assert.deepEqual(checkBwrapAvailable(runCommand), { checked: true, available: true });
+    assert.deepEqual(checkBwrapAvailable(runCommand), { checked: true, available: true, raw: "bubblewrap 0.11.2\n" });
   });
 
   test("reports unavailable with an ENOENT-derived reason when the binary is missing", () => {
@@ -51,6 +51,62 @@ describe("checkBwrapAvailable()", () => {
     const result = checkBwrapAvailable(runCommand);
     assert.equal(result.available, false);
     assert.match(result.reason, /status 1/);
+  });
+});
+
+describe("checkBwrapAvailable() raw stdout", () => {
+  test("includes the raw probe stdout when available", () => {
+    const runCommand = () => ({ status: 0, stdout: "bubblewrap 0.11.2\n", stderr: "", error: undefined });
+    const result = checkBwrapAvailable(runCommand);
+    assert.equal(result.raw, "bubblewrap 0.11.2\n");
+  });
+});
+
+describe("parseBwrapVersion()", () => {
+  test("parses a standard version string", () => {
+    assert.deepEqual(parseBwrapVersion("bubblewrap 0.11.2\n"), [0, 11, 2]);
+  });
+
+  test("returns null for unparseable output", () => {
+    assert.equal(parseBwrapVersion("not a version"), null);
+  });
+});
+
+describe("checkOverlaySupport()", () => {
+  test("supports bwrap 0.8.0 exactly", () => {
+    const runCommand = () => ({ status: 0, stdout: "bubblewrap 0.8.0\n", stderr: "", error: undefined });
+    assert.deepEqual(checkOverlaySupport(runCommand), { supported: true });
+  });
+
+  test("supports a version newer than 0.8", () => {
+    const runCommand = () => ({ status: 0, stdout: "bubblewrap 0.11.2\n", stderr: "", error: undefined });
+    assert.deepEqual(checkOverlaySupport(runCommand), { supported: true });
+  });
+
+  test("supports a future major version", () => {
+    const runCommand = () => ({ status: 0, stdout: "bubblewrap 1.0.0\n", stderr: "", error: undefined });
+    assert.deepEqual(checkOverlaySupport(runCommand), { supported: true });
+  });
+
+  test("rejects a version below 0.8", () => {
+    const runCommand = () => ({ status: 0, stdout: "bubblewrap 0.7.1\n", stderr: "", error: undefined });
+    const result = checkOverlaySupport(runCommand);
+    assert.equal(result.supported, false);
+    assert.match(result.reason, /0\.7\.1 < 0\.8/);
+  });
+
+  test("reports unsupported when bwrap itself is unavailable", () => {
+    const runCommand = () => ({ status: null, stdout: "", stderr: "", error: { code: "ENOENT" } });
+    const result = checkOverlaySupport(runCommand);
+    assert.equal(result.supported, false);
+    assert.match(result.reason, /bwrap not found/);
+  });
+
+  test("reports unsupported when the version string can't be parsed", () => {
+    const runCommand = () => ({ status: 0, stdout: "unexpected output\n", stderr: "", error: undefined });
+    const result = checkOverlaySupport(runCommand);
+    assert.equal(result.supported, false);
+    assert.match(result.reason, /could not parse/);
   });
 });
 

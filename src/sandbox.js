@@ -24,7 +24,7 @@ export function defaultRunCommand(command, args) {
 
 /**
  * @param {(command: string, args: readonly string[]) => {status: number|null, stdout: string, stderr: string, error?: NodeJS.ErrnoException}} [runCommand]
- * @returns {{checked: boolean, available: boolean, reason?: string}}
+ * @returns {{checked: boolean, available: boolean, reason?: string, raw?: string}}
  */
 export function checkBwrapAvailable(runCommand = defaultRunCommand) {
   const result = runCommand("bwrap", ["--version"]);
@@ -38,7 +38,38 @@ export function checkBwrapAvailable(runCommand = defaultRunCommand) {
   if (result.status !== 0) {
     return { checked: true, available: false, reason: `bwrap --version exited with status ${result.status}` };
   }
-  return { checked: true, available: true };
+  return { checked: true, available: true, raw: result.stdout };
+}
+
+/**
+ * Parses `bubblewrap X.Y.Z` (bwrap's own `--version` output) into a
+ * [major, minor, patch] tuple, or null if the string doesn't match.
+ * @param {string} stdout
+ * @returns {[number, number, number]|null}
+ */
+export function parseBwrapVersion(stdout) {
+  const match = /(\d+)\.(\d+)\.(\d+)/.exec(stdout);
+  if (!match) return null;
+  return [Number(match[1]), Number(match[2]), Number(match[3])];
+}
+
+/**
+ * Overlay support (`--overlay-src`/`--overlay`) requires bwrap >= 0.8. No
+ * separate unprivileged-userns probe is needed: buildBwrapArgs() already
+ * emits --unshare-all, which every existing sandboxed dispatch already
+ * requires -- overlay only raises the version floor, it adds no new
+ * namespace dependency.
+ * @param {(command: string, args: readonly string[]) => {status: number|null, stdout: string, stderr: string, error?: NodeJS.ErrnoException}} [runCommand]
+ * @returns {{supported: boolean, reason?: string}}
+ */
+export function checkOverlaySupport(runCommand = defaultRunCommand) {
+  const probe = checkBwrapAvailable(runCommand);
+  if (!probe.available) return { supported: false, reason: probe.reason };
+  const version = parseBwrapVersion(probe.raw ?? "");
+  if (!version) return { supported: false, reason: "could not parse bwrap version" };
+  const [major, minor] = version;
+  if (major > 0 || (major === 0 && minor >= 8)) return { supported: true };
+  return { supported: false, reason: `bwrap ${version.join(".")} < 0.8 required for --overlay` };
 }
 
 /**

@@ -48,7 +48,7 @@ export function checkBwrapAvailable(runCommand = defaultRunCommand) {
  * @returns {[number, number, number]|null}
  */
 export function parseBwrapVersion(stdout) {
-  const match = /(\d+)\.(\d+)\.(\d+)/.exec(stdout);
+  const match = /^bubblewrap (\d+)\.(\d+)\.(\d+)/.exec(stdout);
   if (!match) return null;
   return [Number(match[1]), Number(match[2]), Number(match[3])];
 }

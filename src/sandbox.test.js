@@ -1,7 +1,7 @@
 import { describe, test } from "node:test";
 import assert from "node:assert/strict";
 import path from "node:path";
-import { buildBwrapArgs, checkBwrapAvailable, checkOverlaySupport, defaultDenyList, parseBwrapVersion, platformSupportsSandbox, resolveGitCommonDir, resolveGitDir } from "./sandbox.js";
+import { buildBwrapArgs, checkBwrapAvailable, checkOverlaySupport, parseBwrapVersion, platformSupportsSandbox, resolveGitCommonDir, resolveGitDir } from "./sandbox.js";
 
 describe("platformSupportsSandbox()", () => {
   test("is true on linux", () => {
@@ -70,6 +70,10 @@ describe("parseBwrapVersion()", () => {
   test("returns null for unparseable output", () => {
     assert.equal(parseBwrapVersion("not a version"), null);
   });
+
+  test("returns null for an unrelated digit triple without the bubblewrap prefix", () => {
+    assert.equal(parseBwrapVersion("wrapper 1.0.0\n"), null);
+  });
 });
 
 describe("checkOverlaySupport()", () => {
@@ -104,6 +108,13 @@ describe("checkOverlaySupport()", () => {
 
   test("reports unsupported when the version string can't be parsed", () => {
     const runCommand = () => ({ status: 0, stdout: "unexpected output\n", stderr: "", error: undefined });
+    const result = checkOverlaySupport(runCommand);
+    assert.equal(result.supported, false);
+    assert.match(result.reason, /could not parse/);
+  });
+
+  test("reports unsupported when an unrelated digit triple has no bubblewrap prefix", () => {
+    const runCommand = () => ({ status: 0, stdout: "wrapper 1.0.0\n", stderr: "", error: undefined });
     const result = checkOverlaySupport(runCommand);
     assert.equal(result.supported, false);
     assert.match(result.reason, /could not parse/);

@@ -975,7 +975,7 @@ export function createTaskManager({
    * @param {string|undefined} [params.originSessionId]
    * @param {NodeJS.ProcessEnv} [params.env]
    * @param {boolean} [params.internal]
-     * @param {string|null} [params.finalMarker]
+   * @param {string|null} [params.finalMarker]
    * @param {boolean} [params.noSandbox]
    * @param {boolean} [params.noOverlay]
    * @param {"dispatch"|"advisor"} [params.role]

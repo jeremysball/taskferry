@@ -21,13 +21,23 @@ function isTaskferryCheckout(resolvedSource) {
   }
 }
 
-function isManagedSymlinkTarget(resolvedSource) {
-  if (!MANAGED_TARGETS.has(path.join("src", path.basename(resolvedSource)))) {
-    return path.basename(resolvedSource) === "taskferry.js"
-      && path.dirname(resolvedSource).endsWith(path.join("opencode", "plugins"))
-      && isTaskferryCheckout(resolvedSource);
+// A symlink is safe to silently re-point only if it already points into the
+// exact checkout `setup` is being run from right now - never merely "some
+// checkout whose package.json happens to be named taskferry". Without the
+// checkout-identity check, running setup from any throwaway/scratch clone
+// silently re-points an unrelated, currently-in-use global taskferry symlink.
+function isManagedSymlinkTarget(resolvedExisting, resolvedNewSource) {
+  const existingCheckout = path.dirname(path.dirname(resolvedExisting));
+  const newCheckout = path.dirname(path.dirname(resolvedNewSource));
+  if (existingCheckout !== newCheckout) {
+    return false;
   }
-  return isTaskferryCheckout(resolvedSource);
+  if (!MANAGED_TARGETS.has(path.join("src", path.basename(resolvedExisting)))) {
+    return path.basename(resolvedExisting) === "taskferry.js"
+      && path.dirname(resolvedExisting).endsWith(path.join("opencode", "plugins"))
+      && isTaskferryCheckout(resolvedExisting);
+  }
+  return isTaskferryCheckout(resolvedExisting);
 }
 
 export function replaceManagedSymlink(destination, source) {
@@ -48,7 +58,7 @@ export function replaceManagedSymlink(destination, source) {
     } catch {
       throw new Error(`refusing to replace unmanaged path: ${destination}`);
     }
-    if (!isManagedSymlinkTarget(resolved)) {
+    if (!isManagedSymlinkTarget(resolved, fs.realpathSync(source))) {
       throw new Error(`refusing to replace unmanaged path: ${destination}`);
     }
     fs.unlinkSync(destination);

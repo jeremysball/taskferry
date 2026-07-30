@@ -38,19 +38,23 @@ and burns wall-clock time versus just doing it.
 
 ## Worker Contract
 
-- Select the worker model, variant, and optional key slot explicitly when the task
-  needs them: `taskferry dispatch --prompt - --directory "<worktree>" --model
-  <provider/model> --variant <name> --key-slot <name> <<'PROMPT_EOF'` ... `PROMPT_EOF`.
-- State the exact `provider/model` slug (and variant/key-slot, if set) being
+- Select the worker model and variant explicitly when the task needs them:
+  `taskferry dispatch --prompt - --directory "<worktree>" --model
+  <provider/model> --variant <name> <<'PROMPT_EOF'` ... `PROMPT_EOF`.
+- State the exact `provider/model` slug (and variant, if set) being
   dispatched in your response to the user, not just in the shell command — the
-  user shouldn't have to read the command to know what's running.
+  user shouldn't have to read the command to know what's running. `dispatch`/
+  `advisor`/`summary` (report mode) forward your own shell's environment to
+  the daemon on every call, with no per-call opt-out — export a fresh
+  provider key before dispatching and it's visible immediately, no daemon
+  restart needed.
 - Both `dispatch` and `advisor` also accept `--executor <opencode|pi>` to pick
   which worker CLI is spawned. Omit it to use the configured default (built-in:
-  `opencode`, but a workspace can set `TASKFERRY_DEFAULT_EXECUTOR` or
-  `config.json`'s `defaultExecutor` to `pi` instead — check before assuming an
-  omitted flag means opencode). Pass `--executor pi`/`--executor opencode`
-  explicitly whenever the task needs a specific CLI regardless of that
-  default.
+  `pi`, but a workspace can set `TASKFERRY_DEFAULT_EXECUTOR` or
+  `config.json`'s `defaultExecutor` to `opencode` instead — check before
+  assuming an omitted flag means pi). Pass `--executor pi`/`--executor
+  opencode` explicitly whenever the task needs a specific CLI regardless of
+  that default.
 - Start fresh sessions for each separate implementation task and each reviewer.
 - Resume only the implementer session for a fix to that same task.
 - Keep the task brief and directory explicit so the worker operates in the intended
@@ -123,7 +127,7 @@ risky, security-sensitive, or has already failed on a lighter model.
   context than a standard-tier model that finishes clean. Reserve the cheapest
   tier for implementers whose brief already contains the exact code to
   write (transcription plus testing) and single-file mechanical fixes.
-- **Provider-specific availability rules (time windows, key-slot limits,
+- **Provider-specific availability rules (time windows, credential limits,
   single-in-flight constraints) are account state and live outside this
   skill** — in your CLAUDE.md, or a personal skill covering provider
   availability. Check it before dispatching to a gated provider, and pick an
@@ -159,7 +163,7 @@ taskferry wait <id>
 taskferry tail <id> --chars 2000
 ```
 
-Do not pass `--timeout-ms` to `taskferry wait`. The process exits on its own the
+Do not pass `--timeout` to `taskferry wait`. The process exits on its own the
 moment the task settles; a timeout only makes the caller re-issue `wait` in a
 polling loop for no benefit.
 
@@ -175,7 +179,7 @@ need to inspect activity.
 
 `wait` also takes a `--tail-chars <number>` option, but it only fires on a
 timeout (trailing text characters from that point) — including the default
-15-minute wait timeout, not just an explicit `--timeout-ms`. Since neither
+15-minute wait timeout, not just an explicit `--timeout`. Since neither
 timeout is something to wait out deliberately (previous paragraph), treat
 `--tail-chars` as dead weight too and don't reach for it. For the settled
 result, use `taskferry result <id> --fields ...` (see below) instead — it
@@ -190,18 +194,13 @@ workspace's, use `taskferry watch --task-id <id>` rather than an unscoped
 `taskferry watch`; add `--summaries` to get condensed activity summaries in
 that stream instead of raw events.
 
-**Inside Claude Code, always run `wait --summarize` via `Bash`
-`run_in_background: true`, then immediately arm a `Monitor` tailing that
-background job's own output file** (the file path the `Bash` tool reports back
-at launch, e.g. `/tmp/.../tasks/<bash-id>.output`) with `tail -n0 -F <path>`,
-`persistent: true`. `run_in_background` only notifies once, on the whole
-command's exit — it does not surface each summary line as it's written, so
-without a `Monitor` the summaries sit in that file unseen until settlement.
-`tail -n0 -F` starts from the end so you don't re-emit lines already read, and
-turns every new summary line into its own notification as it lands (every
-~6 minutes by default — `DEFAULT_SUMMARIZER_TIMEOUT_MS` in `src/activity.js`,
-overridable via `TASKFERRY_SUMMARIZER_TIMEOUT_MS`). Stop the monitor with `TaskStop` once the wait job's own completion
-notification confirms the task settled.
+**Inside Claude Code, run `wait --summarize` via `Bash` `run_in_background:
+true`.** Don't arm a second, per-task `Monitor` for it — the fleet-wide
+`watch --summaries` `Monitor` armed once per session (see "Fleet-Wide
+Monitoring" below) already surfaces every ferry's progress, this one
+included, as periodic batched notifications. `run_in_background` notifies
+once, on the whole command's exit; that notification is the settlement
+signal for this specific task.
 
 Relay every summary-line notification with this exact template:
 
@@ -292,7 +291,7 @@ PROMPT_EOF
 
 Pull only the fields you actually need from a result instead of the full payload
 with `taskferry result <id> --fields message,tokens,cost` (or any subset of
-`message,narration,tokens,cost,sessionId,exitCode,signal,spawnError,failureReason,failureDetail,keySlot,logPath,incomplete,finalMarker`)
+`message,narration,tokens,cost,sessionId,exitCode,signal,spawnError,failureReason,failureDetail,logPath,incomplete,finalMarker`)
 — cheaper than `--full` when you don't need untruncated narration. To continue
 an advisor conversation instead of starting a fresh one (e.g. a follow-up
 question after its first answer), pass the same `--session-id` the first
@@ -311,6 +310,39 @@ while a task is still running -- that mode exists for the statusline/human
 `taskferry wait <id> --summarize` instead (see above): it already streams
 the same condensed activity summaries while blocking, without a second
 parallel command doing the same job.
+
+## Fleet-Wide Monitoring
+
+On a session's first `taskferry dispatch`, also background `taskferry watch
+--summaries --flush-interval 5m` (no `--directory` needed — it resolves the
+git workspace root automatically) and register the process with the harness
+`Monitor` tool. This is the only `Monitor` this skill arms for dispatch
+progress — there is no separate per-task `Monitor` alongside it (see "Inside
+Claude Code..." above). It surfaces periodic, batched updates for every
+ferry dispatched with the workspace root as its directory —
+the default when dispatching from the repo root, or from a subdirectory with an
+explicit `--directory <root>` — including ones dispatched by other concurrent
+sessions. A ferry dispatched from a subdirectory without an explicit
+`--directory` stays tagged with that subdirectory (dispatch's own directory
+default is unchanged) and won't appear in a root-scoped watch.
+
+This is pure convention for agent sessions to follow — the `Monitor` tool is
+harness-native and can't be invoked from within taskferry's own code, so
+nothing in taskferry itself enforces it.
+
+```sh
+taskferry watch --summaries --flush-interval 5m > /tmp/taskferry-fleet-watch.log 2>&1 &
+disown
+```
+
+Then arm a `Monitor` tailing that log file (`tail -n0 -F
+/tmp/taskferry-fleet-watch.log`, `persistent: true`), the same pattern used
+for a single `wait --summarize` job above — one notification per flush tick
+instead of one per raw event.
+
+Arm this once per session, on the first dispatch, not once per dispatch —
+re-arming on every subsequent dispatch would spawn a redundant background
+`watch` process each time.
 
 ## Advisor Review
 
@@ -397,22 +429,14 @@ errors, and help as TOON on stdout, keeps diagnostics on stderr, and uses exit
 codes to distinguish success, operational failure, and usage errors.
 
 **The daemon picks up code changes automatically (deferred-until-idle
-restart), but not new environment variables.** A newly-added API key
-exported into your interactive shell after the daemon started is invisible
-to it — the daemon inherited its environment once at spawn time, and an
-env var isn't part of the source-signature check that triggers an
-auto-restart. If a dispatch crashes with an auth/`UnknownError` failure on
-a route that worked minutes ago via a direct `opencode run` PONG test,
-suspect a stale daemon environment before suspecting a provider outage: a
-PONG test runs in your interactive shell and bypasses the daemon entirely,
-so it succeeding is *not* evidence that a `taskferry dispatch` on the same
-model will work. Confirm with `tr '\0' '\n' < /proc/<daemon-pid>/environ |
-rg <KEY_NAME>`; if the key is missing, kill the daemon so the next
-`taskferry` command respawns it from a shell that has the key. On a
-machine with concurrent taskferry sessions sharing one daemon socket, the
-respawn race can take several kill-and-check iterations before a respawn
-actually wins the race and inherits the right env — loop until
-`/proc/<new-pid>/environ` shows the expected var.
+restart), and provider credentials no longer require a daemon restart.**
+`dispatch`, `advisor`, and `summary` (report mode) forward the calling
+shell's own environment to the daemon on every call — so exporting a fresh
+API key into your shell immediately takes effect on the next taskferry
+command. Daemon-level configuration variables
+(`TASKFERRY_MAX_CONCURRENT_TASKS`, `TASKFERRY_ENV_DENYLIST`, and the
+`config.json` fields they override) still require a daemon restart because
+they are read once at startup.
 
 ## When a worker's tool calls don't honor `--directory`
 

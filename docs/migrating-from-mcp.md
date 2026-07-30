@@ -31,14 +31,14 @@ its replacement — the CLI recognizes and explains the old names rather than
 just reporting "unknown command." The same applies to renamed flags from
 the MCP tool-call era: `--task-id` (now positional: `taskferry status
 <id>`), `--timeout_ms`/`--tail_chars`/`--max_words`/`--session_id`
-(underscore forms; now `--timeout-ms`/`--tail-chars`/`--max-words`/
+(underscore forms; now `--timeout`/`--tail-chars`/`--max-words`/
 `--session-id`).
 
 Argument shapes carry over directly: an MCP call like
 `taskferry_dispatch({ prompt: "...", directory: "/repo", model: "..." })`
 becomes `taskferry dispatch --prompt "..." --directory "/repo" --model
 "..."`. camelCase MCP parameter names map to `--kebab-case` flags
-(`session_id` → `--session-id`, `key_slot` → `--key-slot`, `max_words` →
+(`session_id` → `--session-id`, `max_words` →
 `--max-words`).
 
 `taskferry_list()` took no arguments and always listed every task; `taskferry

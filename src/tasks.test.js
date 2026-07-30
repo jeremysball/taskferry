@@ -1,10 +1,11 @@
 import { test, describe, mock } from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
+import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { createTaskManager, isOutsideDirectory, DEFAULT_SUMMARY_MODEL, bucketFor } from "./tasks.js";
+import { createTaskManager, isOutsideDirectory, DEFAULT_SUMMARY_MODEL, bucketFor, parseEnvDenylist } from "./tasks.js";
 
 // Builds an isolated task manager backed by a temp state dir and, unless
 // overridden, fake spawnFn/killFn so no test ever touches a real `opencode`
@@ -13,7 +14,7 @@ import { createTaskManager, isOutsideDirectory, DEFAULT_SUMMARY_MODEL, bucketFor
 // runs synchronously in the constructor, same as the old module-level code
 // did at import time). `tasksFixture` may be an array or `(logDir) => array`
 // for fixtures whose logPath needs to point inside the real log dir.
-function makeManager({ tasksFixture = [], logs = {}, spawnFn, killFn, listModelsFn, defaultExecutor, maxDispatchesPerWindow, dispatchWindowMs, advisorSessionTtlMs, maxConcurrentTasks, noOutputTimeoutMs, postOutputNoOutputTimeoutMs, watchdogPollMs, maxWaitMs, keySlotsSpec, providerKeyEnvName, summaryKeySlot, summaryProviderKeyEnvName, sandboxEnabled = false, checkBwrapAvailableFn, existsFn, runtimeDir, cacheDir, platform, onEvent, allowedDirs, resolveGitCommonDirFn } = {}) {
+function makeManager({ tasksFixture = [], logs = {}, spawnFn, killFn, listModelsFn, defaultExecutor, maxDispatchesPerWindow, dispatchWindowMs, advisorSessionTtlMs, maxConcurrentTasks, noOutputTimeoutMs, postOutputNoOutputTimeoutMs, watchdogPollMs, maxWaitMs, envDenylistSpec, sandboxEnabled = false, checkBwrapAvailableFn, existsFn, statFn, readdirFn, runtimeDir, cacheDir, platform, onEvent, allowedDirs, resolveGitCommonDirFn, resolveGitDirFn } = {}) {
   const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-test-"));
   const logDir = path.join(stateDir, "logs");
   fs.mkdirSync(logDir, { recursive: true });
@@ -37,6 +38,8 @@ function makeManager({ tasksFixture = [], logs = {}, spawnFn, killFn, listModels
     ...(defaultExecutor != null ? { defaultExecutor } : {}),
     ...(checkBwrapAvailableFn != null ? { checkBwrapAvailableFn } : {}),
     ...(existsFn != null ? { existsFn } : {}),
+    ...(statFn != null ? { statFn } : {}),
+    ...(readdirFn != null ? { readdirFn } : {}),
     ...(runtimeDir != null ? { runtimeDir } : {}),
     cacheDir: cacheDir ?? defaultCacheDir,
     ...(platform != null ? { platform } : {}),
@@ -49,12 +52,10 @@ function makeManager({ tasksFixture = [], logs = {}, spawnFn, killFn, listModels
     ...(postOutputNoOutputTimeoutMs != null ? { postOutputNoOutputTimeoutMs } : {}),
     ...(watchdogPollMs != null ? { watchdogPollMs } : {}),
     ...(maxWaitMs != null ? { maxWaitMs } : {}),
-    ...(keySlotsSpec != null ? { keySlotsSpec } : {}),
-    ...(providerKeyEnvName != null ? { providerKeyEnvName } : {}),
-    ...(summaryKeySlot != null ? { summaryKeySlot } : {}),
-    ...(summaryProviderKeyEnvName != null ? { summaryProviderKeyEnvName } : {}),
+    ...(envDenylistSpec != null ? { envDenylist: parseEnvDenylist(envDenylistSpec) } : {}),
     ...(allowedDirs != null ? { allowedDirs } : {}),
     ...(resolveGitCommonDirFn != null ? { resolveGitCommonDirFn } : {}),
+    ...(resolveGitDirFn != null ? { resolveGitDirFn } : {}),
   });
 }
 
@@ -90,6 +91,17 @@ function baseTask(overrides = {}) {
     ...overrides,
   };
 }
+
+describe("parseEnvDenylist()", () => {
+  test("returns an empty array for an empty or undefined spec", () => {
+    assert.deepEqual(parseEnvDenylist(undefined), []);
+    assert.deepEqual(parseEnvDenylist(""), []);
+  });
+
+  test("splits, trims, and drops empty entries", () => {
+    assert.deepEqual(parseEnvDenylist("FOO, BAR ,, BAZ"), ["FOO", "BAR", "BAZ"]);
+  });
+});
 
 describe("persistTask() durability across concurrent manager instances", () => {
   test("two manager instances writing concurrently both keep their own task record", () => {
@@ -171,7 +183,7 @@ describe("dispatch() lifecycle, driven through an injected spawnFn (no real open
         return fakeChild();
       },
     });
-    mgr.dispatch({ prompt: "hello", directory: os.tmpdir(), model: "opencode-go/minimax-m3", variant: "max" });
+    mgr.dispatch({ prompt: "hello", directory: os.tmpdir(), model: "opencode-go/minimax-m3", variant: "max", executor: "opencode" });
     assert.equal(captured.cmd, "opencode");
     assert.deepEqual(captured.args, [
       "run", "--dir", os.tmpdir(), "--auto", "--format", "json",
@@ -184,7 +196,7 @@ describe("dispatch() lifecycle, driven through an injected spawnFn (no real open
   test("defaults to openai/gpt-5.6-luna --variant high when no model is given", () => {
     let captured = null;
     const mgr = makeManager({ spawnFn: (cmd, args) => { captured = args; return fakeChild(); } });
-    mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+    mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), executor: "opencode" });
     assert.deepEqual(captured.slice(6, 10), ["-m", "openai/gpt-5.6-luna", "--variant", "high"]);
   });
 
@@ -196,24 +208,87 @@ describe("dispatch() lifecycle, driven through an injected spawnFn (no real open
   test("resuming with --session-id and no --model inherits the model of the task that owned that session (issue #47)", () => {
     let captured = null;
     const mgr = makeManager({ spawnFn: (cmd, args) => { captured = args; return fakeChild(); } });
-    mgr.dispatch({ prompt: "first", directory: os.tmpdir(), model: "opencode-go/minimax-m3", sessionId: "ses_abc" });
-    mgr.dispatch({ prompt: "resume", directory: os.tmpdir(), sessionId: "ses_abc" });
+    mgr.dispatch({ prompt: "first", directory: os.tmpdir(), model: "opencode-go/minimax-m3", sessionId: "ses_abc", executor: "opencode" });
+    mgr.dispatch({ prompt: "resume", directory: os.tmpdir(), sessionId: "ses_abc", executor: "opencode" });
     assertDispatchedModel(captured, "opencode-go/minimax-m3");
   });
 
   test("resuming with --session-id and an explicit --model still uses the explicit model", () => {
     let captured = null;
     const mgr = makeManager({ spawnFn: (cmd, args) => { captured = args; return fakeChild(); } });
-    mgr.dispatch({ prompt: "first", directory: os.tmpdir(), model: "opencode-go/minimax-m3", sessionId: "ses_abc" });
-    mgr.dispatch({ prompt: "resume", directory: os.tmpdir(), model: "opencode/other-model", sessionId: "ses_abc" });
+    mgr.dispatch({ prompt: "first", directory: os.tmpdir(), model: "opencode-go/minimax-m3", sessionId: "ses_abc", executor: "opencode" });
+    mgr.dispatch({ prompt: "resume", directory: os.tmpdir(), model: "opencode/other-model", sessionId: "ses_abc", executor: "opencode" });
     assertDispatchedModel(captured, "opencode/other-model");
   });
 
   test("an unrecognized --session-id with no --model still falls back to the hardcoded default", () => {
     let captured = null;
     const mgr = makeManager({ spawnFn: (cmd, args) => { captured = args; return fakeChild(); } });
-    mgr.dispatch({ prompt: "resume", directory: os.tmpdir(), sessionId: "ses_never_seen" });
+    mgr.dispatch({ prompt: "resume", directory: os.tmpdir(), sessionId: "ses_never_seen", executor: "opencode" });
     assertDispatchedModel(captured, "openai/gpt-5.6-luna");
+  });
+
+  test("resuming with --session-id and no --executor inherits the executor of the task that owned that session", () => {
+    let capturedCmd = null;
+    const mgr = makeManager({ spawnFn: (cmd) => { capturedCmd = cmd; return fakeChild(); } });
+    mgr.dispatch({ prompt: "first", directory: os.tmpdir(), sessionId: "ses_exec", executor: "pi" });
+    mgr.dispatch({ prompt: "resume", directory: os.tmpdir(), sessionId: "ses_exec" });
+    assert.equal(capturedCmd, "pi");
+  });
+
+  test("resuming with --session-id and an explicit --executor still uses the explicit executor", () => {
+    let capturedCmd = null;
+    const mgr = makeManager({ spawnFn: (cmd) => { capturedCmd = cmd; return fakeChild(); } });
+    mgr.dispatch({ prompt: "first", directory: os.tmpdir(), sessionId: "ses_exec2", executor: "pi" });
+    mgr.dispatch({ prompt: "resume", directory: os.tmpdir(), sessionId: "ses_exec2", executor: "opencode" });
+    assert.equal(capturedCmd, "opencode");
+  });
+
+  test("a session-inheriting resume that matches defaultExecutor reuses that exact instance instead of building a fresh one", () => {
+    // Uses a custom fake as defaultExecutor (not the real piExecutor()) so a
+    // regression back to unconditionally calling resolveExecutor(executorId)
+    // is observable: that path ignores this injected instance entirely and
+    // would spawn with the real pi executor's own buildSpawnArgs instead.
+    let captured = null;
+    const fakePi = {
+      id: "pi",
+      taskIdPrefix: "pi",
+      errorBucketPrefix: "pi",
+      defaultModel: "fake-pi/marker-model",
+      defaultSummaryModel: "fake-pi/marker-model",
+      binaryName: "pi",
+      listModelsFn: async () => "",
+      buildSpawnArgs: () => ["--fake-pi-marker"],
+      buildSummaryPrompt: () => "",
+      normalizeLogEvent: (parsed) => parsed,
+      sandboxAuthFile: () => ({ extraRoBinds: [], extraRwPairBinds: [], sandboxedDataHome: "/tmp/unused", sandboxEnv: {} }),
+    };
+    const mgr = makeManager({ spawnFn: (cmd, args) => { captured = args; return fakeChild(); }, defaultExecutor: fakePi });
+    mgr.dispatch({ prompt: "first", directory: os.tmpdir(), sessionId: "ses_reuse", executor: "pi" });
+    mgr.dispatch({ prompt: "resume", directory: os.tmpdir(), sessionId: "ses_reuse" });
+    assert.deepEqual(captured, ["--fake-pi-marker"]);
+  });
+
+  test("an unrecognized --session-id with no --executor still falls back to the manager's default executor", () => {
+    let capturedCmd = null;
+    const mgr = makeManager({ spawnFn: (cmd) => { capturedCmd = cmd; return fakeChild(); } });
+    mgr.dispatch({ prompt: "resume", directory: os.tmpdir(), sessionId: "ses_exec_never_seen" });
+    assert.equal(capturedCmd, "pi");
+  });
+
+  test("a sessionId that collides across executors does not leak the other executor's model when --executor is given explicitly", () => {
+    let captured = null;
+    const mgr = makeManager({ spawnFn: (cmd, args) => { captured = args; return fakeChild(); } });
+    // Same literal sessionId string, but the earlier task belongs to a
+    // different executor -- resolving executor: "pi" here must not inherit
+    // the opencode task's model just because the sessionId string matches.
+    mgr.dispatch({ prompt: "first", directory: os.tmpdir(), model: "opencode-go/minimax-m3", sessionId: "ses_collide", executor: "opencode" });
+    mgr.dispatch({ prompt: "resume", directory: os.tmpdir(), sessionId: "ses_collide", executor: "pi" });
+    // pi's buildSpawnArgs splits a slashed model into --provider/--model,
+    // unlike opencode's single -m flag -- assert pi's own default model
+    // ("minimax/MiniMax-M2.7"), not the opencode task's "opencode-go/minimax-m3".
+    assert.equal(captured[captured.indexOf("--provider") + 1], "minimax");
+    assert.equal(captured[captured.indexOf("--model") + 1], "MiniMax-M2.7");
   });
 
   test("a short prompt is returned verbatim in promptPreview, with no promptTotalChars hint", () => {
@@ -347,7 +422,7 @@ describe("bwrap sandboxing", () => {
       runtimeDir,
     });
 
-    mgr.dispatch({ prompt: "hello", directory: os.tmpdir(), model: "opencode-go/minimax-m3", variant: "max" });
+    mgr.dispatch({ prompt: "hello", directory: os.tmpdir(), model: "opencode-go/minimax-m3", variant: "max", executor: "opencode" });
 
     assert.equal(captured.cmd, "bwrap");
     assert.deepEqual(captured.args.slice(0, 3), ["--ro-bind", "/", "/"]);
@@ -391,6 +466,11 @@ describe("bwrap sandboxing", () => {
       checkBwrapAvailableFn: () => ({ checked: true, available: true }),
       platform: "linux",
       resolveGitCommonDirFn: () => path.join(directory, ".git"),
+      // Independent of whatever real ~/.pi files happen to exist on the
+      // machine running this test -- a real sessions/ dir there would
+      // otherwise add a 4th --bind (the rw sessions pair-bind) and make
+      // this count flaky across environments.
+      existsFn: () => false,
     });
 
     mgr.dispatch({ prompt: "hello", directory });
@@ -399,6 +479,120 @@ describe("bwrap sandboxing", () => {
     // directory + runtimeDir + the sandboxed opencode data home -- the
     // git-common-dir sits inside `directory`, already covered by that one bind.
     assert.equal(bindCount, 3);
+  });
+
+  test("falls back to binding the whole common dir for a submodule layout, where gitDir resolves to the same path as gitCommonDir", () => {
+    let captured = null;
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "axi-submodule-dir-"));
+    const gitCommonDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-git-common-dir-"));
+    const mgr = makeManager({
+      spawnFn: (cmd, args, opts) => { captured = { cmd, args, opts }; return fakeChild(); },
+      sandboxEnabled: true,
+      checkBwrapAvailableFn: () => ({ checked: true, available: true }),
+      platform: "linux",
+      resolveGitCommonDirFn: () => gitCommonDir,
+      resolveGitDirFn: () => gitCommonDir,
+    });
+
+    mgr.dispatch({ prompt: "hello", directory });
+
+    const bindIndex = captured.args.indexOf(gitCommonDir);
+    assert.notEqual(bindIndex, -1);
+    assert.equal(captured.args[bindIndex - 1], "--bind");
+  });
+
+  test("falls back to binding the whole common dir when gitDir resolution fails outright", () => {
+    let captured = null;
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "axi-resolve-fail-dir-"));
+    const gitCommonDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-git-common-dir-"));
+    const mgr = makeManager({
+      spawnFn: (cmd, args, opts) => { captured = { cmd, args, opts }; return fakeChild(); },
+      sandboxEnabled: true,
+      checkBwrapAvailableFn: () => ({ checked: true, available: true }),
+      platform: "linux",
+      resolveGitCommonDirFn: () => gitCommonDir,
+      resolveGitDirFn: () => null,
+    });
+
+    mgr.dispatch({ prompt: "hello", directory });
+
+    const bindIndex = captured.args.indexOf(gitCommonDir);
+    assert.notEqual(bindIndex, -1);
+    assert.equal(captured.args[bindIndex - 1], "--bind");
+  });
+
+  test("scopes the bind (never the whole common dir) even when gitDir resolves to a non-standard layout outside gitCommonDir's own tree", () => {
+    let captured = null;
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "axi-separate-gitdir-dir-"));
+    const gitCommonDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-git-common-dir-"));
+    // A gitDir that lives entirely outside gitCommonDir's own tree (e.g. a
+    // manually re-pointed `gitdir:`/`commondir` file) -- the earlier version
+    // of this fix fell through to binding the whole common dir for this
+    // case, re-admitting taskferry#224's exposure. It must not do that.
+    const gitDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-elsewhere-gitdir-"));
+    const mgr = makeManager({
+      spawnFn: (cmd, args, opts) => { captured = { cmd, args, opts }; return fakeChild(); },
+      sandboxEnabled: true,
+      checkBwrapAvailableFn: () => ({ checked: true, available: true }),
+      platform: "linux",
+      resolveGitCommonDirFn: () => gitCommonDir,
+      resolveGitDirFn: () => gitDir,
+    });
+
+    mgr.dispatch({ prompt: "hello", directory });
+
+    const boundPaths = [];
+    for (let i = 0; i < captured.args.length - 1; i++) {
+      if (captured.args[i] === "--bind") boundPaths.push(captured.args[i + 1]);
+    }
+    assert.ok(boundPaths.includes(gitDir), "should bind the resolved private gitdir");
+    assert.equal(boundPaths.includes(gitCommonDir), false, "must never bind the whole common dir once a distinct gitDir was resolved");
+  });
+
+  test("scopes the git-common-dir bind to the worktree's own admin dir + shared objects/refs, never the main checkout's private HEAD/index/config (regression for taskferry#224)", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "axi-git-repo-"));
+    const mainCheckout = path.join(root, "main");
+    fs.mkdirSync(mainCheckout);
+    const git = (args) => execFileSync("git", args, { cwd: mainCheckout, encoding: "utf8" });
+    git(["init", "-q"]);
+    git(["config", "user.email", "a@b.com"]);
+    git(["config", "user.name", "test"]);
+    fs.writeFileSync(path.join(mainCheckout, "f.txt"), "hi\n");
+    git(["add", "f.txt"]);
+    git(["commit", "-q", "-m", "init"]);
+    git(["branch", "feature"]);
+    const worktreeDir = path.join(root, "wt");
+    git(["worktree", "add", "-q", worktreeDir, "feature"]);
+
+    let captured = null;
+    // No resolveGitCommonDirFn/resolveGitDirFn override -- exercises the
+    // real `git rev-parse` calls against the worktree above, not a mock.
+    const mgr = makeManager({
+      spawnFn: (cmd, args, opts) => { captured = { cmd, args, opts }; return fakeChild(); },
+      sandboxEnabled: true,
+      checkBwrapAvailableFn: () => ({ checked: true, available: true }),
+      platform: "linux",
+    });
+
+    mgr.dispatch({ prompt: "hello", directory: worktreeDir });
+
+    const boundPaths = [];
+    for (let i = 0; i < captured.args.length - 1; i++) {
+      if (captured.args[i] === "--bind") boundPaths.push(captured.args[i + 1]);
+    }
+    const mainGitDir = path.join(mainCheckout, ".git");
+    const worktreeGitDir = path.join(mainGitDir, "worktrees", "wt");
+
+    assert.ok(boundPaths.includes(worktreeGitDir), "should bind the worktree's own private gitdir");
+    assert.ok(boundPaths.includes(path.join(mainGitDir, "objects")), "should bind shared objects");
+    assert.ok(boundPaths.includes(path.join(mainGitDir, "refs")), "should bind shared refs");
+
+    // The main checkout's own private admin files must never be writable
+    // from a dispatch that never named that checkout at all.
+    assert.equal(boundPaths.includes(mainGitDir), false, "must not bind the whole common dir");
+    assert.equal(boundPaths.includes(path.join(mainGitDir, "HEAD")), false);
+    assert.equal(boundPaths.includes(path.join(mainGitDir, "index")), false);
+    assert.equal(boundPaths.includes(path.join(mainGitDir, "config")), false);
   });
 
   test("binds the manager-level allowedDirs config default read-write", () => {
@@ -490,7 +684,7 @@ describe("bwrap sandboxing", () => {
       cacheDir,
     });
 
-    mgr.dispatch({ prompt: "hello", directory: os.tmpdir() });
+    mgr.dispatch({ prompt: "hello", directory: os.tmpdir(), executor: "opencode" });
 
     assert.equal(captured.opts.env.XDG_DATA_HOME, path.join(cacheDir, "opencode-data"));
   });
@@ -508,7 +702,7 @@ describe("bwrap sandboxing", () => {
       cacheDir,
     });
 
-    mgr.dispatch({ prompt: "hello", directory: os.tmpdir() });
+    mgr.dispatch({ prompt: "hello", directory: os.tmpdir(), executor: "opencode" });
 
     const srcIndex = captured.args.indexOf(realAuthFile);
     assert.notEqual(srcIndex, -1);
@@ -556,7 +750,7 @@ describe("bwrap sandboxing", () => {
       platform: "linux",
     });
 
-    mgr.dispatch({ prompt: "hello", directory: os.tmpdir(), noSandbox: true });
+    mgr.dispatch({ prompt: "hello", directory: os.tmpdir(), noSandbox: true, executor: "opencode" });
 
     assert.equal(captured.cmd, "opencode");
   });
@@ -570,7 +764,7 @@ describe("bwrap sandboxing", () => {
       platform: "linux",
     });
 
-    mgr.dispatch({ prompt: "hello", directory: os.tmpdir() });
+    mgr.dispatch({ prompt: "hello", directory: os.tmpdir(), executor: "opencode" });
 
     assert.equal(captured.cmd, "opencode");
   });
@@ -584,7 +778,7 @@ describe("bwrap sandboxing", () => {
       platform: "darwin",
     });
 
-    mgr.dispatch({ prompt: "hello", directory: os.tmpdir() });
+    mgr.dispatch({ prompt: "hello", directory: os.tmpdir(), executor: "opencode" });
 
     assert.equal(captured.cmd, "opencode");
   });
@@ -629,7 +823,7 @@ describe("bwrap sandboxing", () => {
     });
     const prompt = "x".repeat(96 * 1024 + 1);
 
-    mgr.dispatch({ prompt, directory: os.tmpdir() });
+    mgr.dispatch({ prompt, directory: os.tmpdir(), executor: "opencode" });
 
     assert.equal(captured.cmd, "bwrap");
     const attachment = captured.args[captured.args.indexOf("-f") + 1];
@@ -685,7 +879,7 @@ describe("dispatch() with a prompt over the argv-safe size (issue #78: spawn E2B
     const mgr = makeManager({ spawnFn: (cmd, args, opts) => { captured = { args, opts }; return fakeChild(); } });
     const prompt = "x".repeat(96 * 1024 + 1);
 
-    mgr.dispatch({ prompt, directory: os.tmpdir() });
+    mgr.dispatch({ prompt, directory: os.tmpdir(), executor: "opencode" });
 
     assert.ok(captured.args.includes("-f"), "expected -f attachment flag in argv");
     const attachment = captured.args[captured.args.indexOf("-f") + 1];
@@ -703,7 +897,7 @@ describe("dispatch() with a prompt over the argv-safe size (issue #78: spawn E2B
     const mgr = makeManager({ spawnFn: (cmd, args, opts) => { captured = { args, opts }; return child; } });
     const prompt = "x".repeat(96 * 1024 + 1);
 
-    mgr.dispatch({ prompt, directory: os.tmpdir() });
+    mgr.dispatch({ prompt, directory: os.tmpdir(), executor: "opencode" });
     const attachment = captured.args[captured.args.indexOf("-f") + 1];
     assert.ok(fs.existsSync(attachment));
 
@@ -1384,18 +1578,17 @@ describe("no-output watchdog", () => {
     const s = mgr.status(dispatched.id);
     assert.equal(s.status, "crashed");
     assert.equal(s.failureReason, "no_output_timeout");
-    assert.deepEqual(mgr.result(dispatched.id, { fields: ["failureReason", "keySlot"] }), {
+    assert.deepEqual(mgr.result(dispatched.id, { fields: ["failureReason"] }), {
       taskId: dispatched.id,
       status: "crashed",
       failureReason: "no_output_timeout",
-      keySlot: null,
     });
   });
 
   test("result --fields failureDetail returns the field", async () => {
     const child = fakeChild(7201);
     const mgr = makeManager({ spawnFn: () => child, killFn: () => {}, noOutputTimeoutMs: 60000, watchdogPollMs: 5 });
-    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), executor: "opencode" });
     fs.writeFileSync(mgr.status(dispatched.id).logPath, JSON.stringify({ type: "error", message: "insufficient_quota: out of credits" }) + "\n");
     await new Promise((r) => setTimeout(r, 40));
     child.emit("exit", 1, null);
@@ -1407,7 +1600,7 @@ describe("no-output watchdog", () => {
   test("a structured error event that matches none of the three named buckets still gets a failureReason instead of null (opencode's own UnknownError class)", async () => {
     const child = fakeChild(7203);
     const mgr = makeManager({ spawnFn: () => child, killFn: () => {}, noOutputTimeoutMs: 60000, watchdogPollMs: 5 });
-    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), executor: "opencode" });
     fs.writeFileSync(
       mgr.status(dispatched.id).logPath,
       JSON.stringify({ type: "error", error: { name: "UnknownError", data: { message: "Streaming response failed" } } }) + "\n"
@@ -1631,7 +1824,7 @@ describe("provider-failure classification", () => {
       noOutputTimeoutMs: 60000, // long enough that only exhaustion detection could trigger this
       watchdogPollMs: 5,
     });
-    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), executor: "opencode" });
     fs.writeFileSync(
       mgr.status(dispatched.id).logPath,
       JSON.stringify({ type: "error", message: "rate_limit_exceeded: please retry after 60s" }) + "\n"
@@ -1655,7 +1848,7 @@ describe("provider-failure classification", () => {
       noOutputTimeoutMs: 60000,
       watchdogPollMs: 5,
     });
-    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), executor: "opencode" });
     fs.writeFileSync(mgr.status(dispatched.id).logPath, "rate limit exceeded");
 
     await new Promise((r) => setTimeout(r, 40));
@@ -1676,7 +1869,7 @@ describe("provider-failure classification", () => {
       noOutputTimeoutMs: 60000,
       watchdogPollMs: 5,
     });
-    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), executor: "opencode" });
     const longLine = "rate limit exceeded " + "x".repeat(1000);
     fs.writeFileSync(mgr.status(dispatched.id).logPath, longLine);
 
@@ -1697,7 +1890,7 @@ describe("provider-failure classification", () => {
       noOutputTimeoutMs: 60000,
       watchdogPollMs: 5,
     });
-    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), executor: "opencode" });
     fs.writeFileSync(
       mgr.status(dispatched.id).logPath,
       JSON.stringify({ type: "error", message: "rate_limit_exceeded: please retry after 60s" }) + "\n"
@@ -1759,7 +1952,7 @@ describe("provider-failure classification", () => {
       noOutputTimeoutMs: 60000,
       watchdogPollMs: 5,
     });
-    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), executor: "opencode" });
     fs.writeFileSync(
       mgr.status(dispatched.id).logPath,
       JSON.stringify({ type: "error", message: "insufficient_quota: your account has run out of credits" }) + "\n"
@@ -1783,7 +1976,7 @@ describe("provider-failure classification", () => {
       noOutputTimeoutMs: 60000,
       watchdogPollMs: 5,
     });
-    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), executor: "opencode" });
     fs.writeFileSync(
       mgr.status(dispatched.id).logPath,
       JSON.stringify({ type: "error", message: "rate limit exceeded: insufficient_quota on this key" }) + "\n"
@@ -1803,7 +1996,7 @@ describe("provider-failure classification", () => {
       noOutputTimeoutMs: 60000,
       watchdogPollMs: 5,
     });
-    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), executor: "opencode" });
     fs.writeFileSync(
       mgr.status(dispatched.id).logPath,
       JSON.stringify({ type: "error", message: "Rate limit exceeded, check your quota" }) + "\n"
@@ -1823,7 +2016,7 @@ describe("provider-failure classification", () => {
       noOutputTimeoutMs: 60000,
       watchdogPollMs: 5,
     });
-    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), executor: "opencode" });
     fs.writeFileSync(
       mgr.status(dispatched.id).logPath,
       JSON.stringify({ type: "error", message: "Unauthorized: invalid API key provided" }) + "\n"
@@ -1861,7 +2054,7 @@ describe("provider-failure classification", () => {
       noOutputTimeoutMs: 60000,
       watchdogPollMs: 5,
     });
-    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), executor: "opencode" });
     fs.writeFileSync(
       mgr.status(dispatched.id).logPath,
       "No API key found for openai.\n"
@@ -1883,7 +2076,7 @@ describe("provider-failure classification", () => {
       noOutputTimeoutMs: 60000,
       watchdogPollMs: 5,
     });
-    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), executor: "opencode" });
     fs.writeFileSync(
       mgr.status(dispatched.id).logPath,
       JSON.stringify({ type: "error", message: "request failed with status_code: 401" }) + "\n"
@@ -1923,7 +2116,7 @@ describe("provider-failure classification", () => {
       noOutputTimeoutMs: 60000,
       watchdogPollMs: 5,
     });
-    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), executor: "opencode" });
     fs.writeFileSync(
       mgr.status(dispatched.id).logPath,
       JSON.stringify({ type: "error", message: "rate_limit_exceeded: please retry after 60s" }) + "\n"
@@ -1954,7 +2147,7 @@ describe("trailing provider-error events that land after the last watcher poll (
       // Long enough that the watchdog interval never ticks during this test.
       watchdogPollMs: 60000,
     });
-    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), executor: "opencode" });
     fs.writeFileSync(
       mgr.status(dispatched.id).logPath,
       JSON.stringify({ type: "error", message: "usage_limit_exceeded: monthly quota reached" }) + "\n"
@@ -1977,7 +2170,7 @@ describe("trailing provider-error events that land after the last watcher poll (
       killFn: () => {},
       watchdogPollMs: 60000,
     });
-    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), executor: "opencode" });
     fs.writeFileSync(
       mgr.status(dispatched.id).logPath,
       JSON.stringify({ type: "error", message: "Unauthorized: invalid API key provided" }) + "\n"
@@ -1999,7 +2192,7 @@ describe("trailing provider-error events that land after the last watcher poll (
       noOutputTimeoutMs: 60000,
       watchdogPollMs: 5,
     });
-    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), executor: "opencode" });
     fs.writeFileSync(
       mgr.status(dispatched.id).logPath,
       JSON.stringify({ type: "error", message: "rate_limit_exceeded: please retry after 60s" }) + "\n"
@@ -2060,7 +2253,7 @@ describe("trailing provider-error events that land after the last watcher poll (
       noOutputTimeoutMs: 60000,
       watchdogPollMs: 5,
     });
-    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), executor: "opencode" });
     const logPath = mgr.status(dispatched.id).logPath;
     const prefix = JSON.stringify({ type: "text", part: { messageID: "m1", text: "x".repeat(4096) } }) + "\n";
     fs.writeFileSync(logPath, prefix);
@@ -2113,7 +2306,7 @@ describe("trailing provider-error events that land after the last watcher poll (
       killFn: () => {},
       watchdogPollMs: 5,
     });
-    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), executor: "opencode" });
     const fullLine = JSON.stringify({ type: "error", message: "rate_limit_exceeded: please retry after 60s" }) + "\n";
     // Write a partial line so the watcher's first tick stores it as carry,
     // then write the rest of the line plus a terminating \n. The exit
@@ -2337,11 +2530,11 @@ describe("dispatch() executor selection (Task 6: optional executor name resolves
     assert.equal(status.executorId, "pi");
   });
 
-  test("dispatch() with no executor defaults to opencode", () => {
+  test("dispatch() with no executor defaults to pi", () => {
     const mgr = makeManager({ spawnFn: () => { throw new Error("not reached in this test"); } });
     const dispatched = mgr.dispatch({ prompt: "hi", directory: process.cwd() });
     const status = mgr.status(dispatched.id);
-    assert.equal(status.executorId, "opencode");
+    assert.equal(status.executorId, "pi");
   });
 
   test("dispatch() with an unknown executor name throws", () => {
@@ -2583,6 +2776,7 @@ describe("advisor()", () => {
       model: "openai/gpt-5.6-sol",
       variant: "max",
       timeoutMs: 5000,
+      executor: "opencode",
     });
 
     assert.deepEqual(captured, [
@@ -3220,6 +3414,339 @@ describe("summarize()", () => {
     await assert.rejects(mgr.checkSummaryModelReady(), /summary model is unavailable/);
   });
 
+  test("createTaskManager()'s real default listModelsFn validates against opencode's list, not the dispatch-default executor's (a default pi install must still find the default summary model)", async () => {
+    // Bypasses makeManager deliberately -- it always injects its own
+    // listModelsFn fallback, which would mask a regression back to either
+    // the round-2 (defaultExecutor.listModelsFn) or round-3 pre-fix
+    // (hardcoded `opencode models`) defaults. We want to prove the new
+    // default is opencodeExecutor().listModelsFn regardless of the
+    // configured dispatch-default executor.
+    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-test-"));
+    let piListModelsCalled = false;
+    const fakePi = {
+      id: "pi",
+      taskIdPrefix: "pi",
+      errorBucketPrefix: "pi",
+      defaultModel: "minimax/MiniMax-M2.7",
+      defaultSummaryModel: "minimax/MiniMax-M2.7",
+      binaryName: "pi",
+      listModelsFn: async () => {
+        piListModelsCalled = true;
+        // Whatever pi returns here is irrelevant: summaries always run
+        // through opencode, so this list must NOT be used for the check.
+        return "minimax/MiniMax-M2.7\n";
+      },
+      buildSpawnArgs: () => [],
+      buildSummaryPrompt: () => "",
+      normalizeLogEvent: (parsed) => parsed,
+      sandboxAuthFile: () => ({ extraRoBinds: [], extraRwPairBinds: [], sandboxedDataHome: "/tmp/unused", sandboxEnv: {} }),
+    };
+    const mgr = createTaskManager({
+      stateDir,
+      sandboxEnabled: false,
+      spawnFn: () => fakeChild(),
+      killFn: () => {},
+      defaultExecutor: fakePi,
+      // listModelsFn intentionally omitted -- exercising the real default.
+    });
+    // On a host with opencode installed, the check will succeed (real
+    // `opencode models` output includes the default summary model). On
+    // a host without opencode, the check will fail with a "verify that
+    // opencode is installed" error -- which is itself proof that the
+    // check hit opencode, not pi. Either outcome is fine; what matters
+    // is that pi's listModelsFn was never consulted.
+    try {
+      await mgr.checkSummaryModelReady();
+    } catch (err) {
+      // If opencode isn't installed, the error message must still point
+      // at opencode -- that's what proves we routed through opencode.
+      assert.match(/** @type {Error} */ (err).message, /verify that opencode is installed/, "the summary availability check must consult opencode's listModelsFn, not pi's");
+    }
+    assert.equal(piListModelsCalled, false, "fakePi.listModelsFn must not be used for the summary availability check (it would reject opencode-only summary models)");
+  });
+
+  test("an injected listModelsFn takes precedence over the opencode default (preserves the round-2 test seam)", async () => {
+    // The round-2 fix made createTaskManager's `listModelsFn` option
+    // defer to defaultExecutor's listModelsFn, and several tests rely
+    // on being able to inject a custom listModelsFn. Verify that
+    // explicit injection still works -- just that the new *default* (used
+    // when no override is given) is opencode's, not pi's.
+    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-test-"));
+    let injectedCalled = false;
+    const fakePi = {
+      id: "pi",
+      taskIdPrefix: "pi",
+      errorBucketPrefix: "pi",
+      defaultModel: "minimax/MiniMax-M2.7",
+      defaultSummaryModel: "minimax/MiniMax-M2.7",
+      binaryName: "pi",
+      listModelsFn: async () => "minimax/MiniMax-M2.7\n",
+      buildSpawnArgs: () => [],
+      buildSummaryPrompt: () => "",
+      normalizeLogEvent: (parsed) => parsed,
+      sandboxAuthFile: () => ({ extraRoBinds: [], extraRwPairBinds: [], sandboxedDataHome: "/tmp/unused", sandboxEnv: {} }),
+    };
+    const mgr = createTaskManager({
+      stateDir,
+      sandboxEnabled: false,
+      spawnFn: () => fakeChild(),
+      killFn: () => {},
+      defaultExecutor: fakePi,
+      listModelsFn: async () => {
+        injectedCalled = true;
+        return `${DEFAULT_SUMMARY_MODEL}\n`;
+      },
+    });
+    await mgr.checkSummaryModelReady();
+    assert.equal(injectedCalled, true, "explicit listModelsFn injection must take precedence over the opencode default");
+  });
+
+  test("summary cache keeps separate entries for caller envs with different provider keys (no cross-caller pollution)", async () => {
+    // Fix 1: the old single-entry cache meant caller A's listModelsFn output
+    // (the model list opencode exposed under A's API keys) would satisfy
+    // caller B's availability check, even though B has different credentials
+    // and a different visible model list. Two summarize() calls with
+    // different provider keys must populate and read separate cache entries,
+    // each rooted in its own env.
+    /** @type {Array<EventEmitter>} */
+    const spawned = [];
+    let listModelsCalls = 0;
+    const mgr = makeManager({
+      tasksFixture: (logDir) => [
+        baseTask({ id: "srcA", status: "done", logPath: path.join(logDir, "srcA.ndjson") }),
+        baseTask({ id: "srcB", status: "done", logPath: path.join(logDir, "srcB.ndjson") }),
+      ],
+      logs: {
+        "srcA.ndjson": JSON.stringify({ type: "text", part: { messageID: "m1", text: "did the A thing" } }) + "\n",
+        "srcB.ndjson": JSON.stringify({ type: "text", part: { messageID: "m1", text: "did the B thing" } }) + "\n",
+      },
+      listModelsFn: async (env) => {
+        listModelsCalls++;
+        // Env A sees model-A; env B does NOT (and vice versa). If the cache
+        // ever cross-polluted, the second summarize would read the first
+        // call's cached output and the wrong model list would reach the
+        // availability check for the other caller.
+        if (env.OPENAI_API_KEY === "AAA") return `${DEFAULT_SUMMARY_MODEL}\nopenai/gpt-A-only\n`;
+        if (env.OPENAI_API_KEY === "BBB") return `${DEFAULT_SUMMARY_MODEL}\nopenai/gpt-B-only\n`;
+        return `${DEFAULT_SUMMARY_MODEL}\n`;
+      },
+      spawnFn: () => {
+        const child = fakeChild();
+        spawned.push(child);
+        return child;
+      },
+    });
+
+    await mgr.summarize("srcA", { env: { OPENAI_API_KEY: "AAA" } });
+    assert.equal(listModelsCalls, 1, "first caller populates its own cache entry");
+
+    await mgr.summarize("srcB", { env: { OPENAI_API_KEY: "BBB" } });
+    assert.equal(listModelsCalls, 2, "second caller (different provider key) must populate a separate cache entry, not read the first caller's");
+
+    for (const child of spawned) child.emit("exit", 0, null);
+  });
+
+  test("summary cache shares an entry for identical caller envs (one listModelsFn call within the TTL)", async () => {
+    // Fix 1: opposite of the cross-pollution case. Two callers with the
+    // same provider-relevant env must share the cache entry -- otherwise
+    // every dispatch would re-shell-out to `opencode models`, defeating
+    // the original 5-minute memoization purpose.
+    /** @type {Array<EventEmitter>} */
+    const spawned = [];
+    let listModelsCalls = 0;
+    const mgr = makeManager({
+      tasksFixture: (logDir) => [
+        baseTask({ id: "srcA", status: "done", logPath: path.join(logDir, "srcA.ndjson") }),
+        baseTask({ id: "srcB", status: "done", logPath: path.join(logDir, "srcB.ndjson") }),
+      ],
+      logs: {
+        "srcA.ndjson": JSON.stringify({ type: "text", part: { messageID: "m1", text: "did the A thing" } }) + "\n",
+        "srcB.ndjson": JSON.stringify({ type: "text", part: { messageID: "m1", text: "did the B thing" } }) + "\n",
+      },
+      listModelsFn: async () => {
+        listModelsCalls++;
+        return `${DEFAULT_SUMMARY_MODEL}\n`;
+      },
+      spawnFn: () => {
+        const child = fakeChild();
+        spawned.push(child);
+        return child;
+      },
+    });
+
+    await mgr.summarize("srcA", { env: { OPENAI_API_KEY: "same", ANTHROPIC_API_KEY: "same" } });
+    await mgr.summarize("srcB", { env: { OPENAI_API_KEY: "same", ANTHROPIC_API_KEY: "same" } });
+
+    assert.equal(listModelsCalls, 1, "identical caller envs must share one cache entry");
+
+    for (const child of spawned) child.emit("exit", 0, null);
+  });
+
+  test("summary cache ignores cosmetic env differences that don't change which models a provider exposes (no per-call fragmentation)", async () => {
+    // Fix 1: the fingerprint deliberately excludes high-churn unrelated
+    // caller vars (PATH, LANG, USER, ...) so a caller changing cosmetic
+    // vars doesn't trigger a fresh listModelsFn shell-out within the TTL.
+    /** @type {Array<EventEmitter>} */
+    const spawned = [];
+    let listModelsCalls = 0;
+    const mgr = makeManager({
+      tasksFixture: (logDir) => [
+        baseTask({ id: "srcA", status: "done", logPath: path.join(logDir, "srcA.ndjson") }),
+        baseTask({ id: "srcB", status: "done", logPath: path.join(logDir, "srcB.ndjson") }),
+      ],
+      logs: {
+        "srcA.ndjson": JSON.stringify({ type: "text", part: { messageID: "m1", text: "did the A thing" } }) + "\n",
+        "srcB.ndjson": JSON.stringify({ type: "text", part: { messageID: "m1", text: "did the B thing" } }) + "\n",
+      },
+      listModelsFn: async () => {
+        listModelsCalls++;
+        return `${DEFAULT_SUMMARY_MODEL}\n`;
+      },
+      spawnFn: () => {
+        const child = fakeChild();
+        spawned.push(child);
+        return child;
+      },
+    });
+
+    await mgr.summarize("srcA", { env: { OPENAI_API_KEY: "same", LANG: "en_US.UTF-8", USER: "alice" } });
+    await mgr.summarize("srcB", { env: { OPENAI_API_KEY: "same", LANG: "C.UTF-8", USER: "bob" } });
+
+    assert.equal(listModelsCalls, 1, "LANG/USER are not in the fingerprint -- cosmetic differences must not fragment the cache");
+
+    for (const child of spawned) child.emit("exit", 0, null);
+  });
+
+  test("summary cache separates entries across opencode catalog/auth overrides and provider base-URL overrides", async () => {
+    // Review follow-up to fix 1: the original fingerprint covered
+    // *_API_KEY / OPENCODE_CONFIG* / PI_CODING_AGENT_DIR only. But
+    // OPENCODE_MODELS_URL / OPENCODE_MODELS_PATH point opencode at a
+    // different model catalog, OPENCODE_AUTH_CONTENT carries inline auth
+    // (the sibling of the already-covered OPENCODE_CONFIG_CONTENT), and
+    // *_BASE_URL endpoint overrides change which catalog a provider
+    // exposes (corporate proxies, self-hosted endpoints). Two callers
+    // differing only in one of these must not share a cache entry.
+    /** @type {Array<EventEmitter>} */
+    const spawned = [];
+    let listModelsCalls = 0;
+    const mgr = makeManager({
+      tasksFixture: (logDir) => [
+        baseTask({ id: "srcA", status: "done", logPath: path.join(logDir, "srcA.ndjson") }),
+        baseTask({ id: "srcB", status: "done", logPath: path.join(logDir, "srcB.ndjson") }),
+      ],
+      logs: {
+        "srcA.ndjson": JSON.stringify({ type: "text", part: { messageID: "m1", text: "did the A thing" } }) + "\n",
+        "srcB.ndjson": JSON.stringify({ type: "text", part: { messageID: "m1", text: "did the B thing" } }) + "\n",
+      },
+      listModelsFn: async () => {
+        listModelsCalls++;
+        return `${DEFAULT_SUMMARY_MODEL}\n`;
+      },
+      spawnFn: () => {
+        const child = fakeChild();
+        spawned.push(child);
+        return child;
+      },
+    });
+
+    await mgr.summarize("srcA", { env: { OPENAI_API_KEY: "same", OPENCODE_MODELS_URL: "https://catalog-1" } });
+    assert.equal(listModelsCalls, 1, "first caller populates");
+
+    await mgr.summarize("srcB", { env: { OPENAI_API_KEY: "same", OPENCODE_MODELS_URL: "https://catalog-2" } });
+    assert.equal(listModelsCalls, 2, "different OPENCODE_MODELS_URL must not share a cache entry");
+
+    await mgr.summarize("srcA", { env: { OPENAI_API_KEY: "same", OPENCODE_MODELS_PATH: "/models-1.json" } });
+    assert.equal(listModelsCalls, 3, "OPENCODE_MODELS_PATH is in the fingerprint");
+
+    await mgr.summarize("srcB", { env: { OPENAI_API_KEY: "same", OPENCODE_AUTH_CONTENT: '{"auth":"a"}' } });
+    await mgr.summarize("srcA", { env: { OPENAI_API_KEY: "same", OPENCODE_AUTH_CONTENT: '{"auth":"b"}' } });
+    assert.equal(listModelsCalls, 5, "different OPENCODE_AUTH_CONTENT must not share a cache entry");
+
+    await mgr.summarize("srcB", { env: { OPENAI_API_KEY: "same", OPENAI_BASE_URL: "https://proxy.internal" } });
+    assert.equal(listModelsCalls, 6, "a *_BASE_URL endpoint override is in the fingerprint");
+
+    for (const child of spawned) child.emit("exit", 0, null);
+  });
+
+  test("summary cache TTL still expires per-key after 5 minutes (a stale entry must not be served indefinitely)", async (t) => {
+    // Fix 1: re-keying on env does not break the existing 5-minute TTL.
+    // After the TTL window elapses, the next call must re-shell-out for
+    // the same env's model list (provider availability can change within
+    // a TTL window -- e.g. an opencode auth.json swap or a new provider
+    // registration). Mock Date.now to control TTL timing without
+    // sleeping.
+    const realNow = Date.now;
+    let now = 1_000_000;
+    Date.now = () => now;
+    /** @type {() => void} */
+    const restore = () => { Date.now = realNow; };
+    t.after(restore);
+
+    /** @type {Array<EventEmitter>} */
+    const spawned = [];
+    let listModelsCalls = 0;
+    const mgr = makeManager({
+      tasksFixture: (logDir) => [
+        baseTask({ id: "srcA", status: "done", logPath: path.join(logDir, "srcA.ndjson") }),
+        baseTask({ id: "srcB", status: "done", logPath: path.join(logDir, "srcB.ndjson") }),
+      ],
+      logs: {
+        "srcA.ndjson": JSON.stringify({ type: "text", part: { messageID: "m1", text: "did the A thing" } }) + "\n",
+        "srcB.ndjson": JSON.stringify({ type: "text", part: { messageID: "m1", text: "did the B thing" } }) + "\n",
+      },
+      listModelsFn: async () => {
+        listModelsCalls++;
+        return `${DEFAULT_SUMMARY_MODEL}\n`;
+      },
+      spawnFn: () => {
+        const child = fakeChild();
+        spawned.push(child);
+        return child;
+      },
+    });
+
+    await mgr.summarize("srcA", { env: { OPENAI_API_KEY: "same" } });
+    assert.equal(listModelsCalls, 1, "first call populates the cache");
+
+    now += 5 * 60 * 1000 + 1; // past the 5-minute TTL window
+
+    await mgr.summarize("srcB", { env: { OPENAI_API_KEY: "same" } });
+    assert.equal(listModelsCalls, 2, "after TTL expiry, the same env's cache must repopulate");
+
+    for (const child of spawned) child.emit("exit", 0, null);
+  });
+
+  test("concurrent summary availability checks for the same caller env coalesce into a single listModelsFn call (no interleaved writes)", async () => {
+    // Fix 1: the old single-entry cache had a write race -- two concurrent
+    // `modelsCache = ...` assignments could interleave (one wins the
+    // expiresAt, the other the output), leaving an entry whose output
+    // doesn't match its expiresAt. The new Map<key, entry> + inFlight
+    // pattern serializes populates per-key: the second caller awaits the
+    // first's populate promise and reads the same entry.
+    /** @type {() => void} */
+    let releaseListModels;
+    const listModelsBlocking = new Promise((resolve) => { releaseListModels = () => resolve(undefined); });
+    let listModelsCalls = 0;
+    const mgr = makeManager({
+      listModelsFn: async () => {
+        listModelsCalls++;
+        await listModelsBlocking;
+        return `${DEFAULT_SUMMARY_MODEL}\n`;
+      },
+    });
+
+    // Fire two concurrent checks for the same caller env (no env, so both
+    // share the empty fingerprint). Before fix 1, both would race through
+    // the `if (Date.now() >= modelsCache.expiresAt)` gate before either
+    // populated the entry, leading to two concurrent shell-outs.
+    const call1 = mgr.checkSummaryModelReady();
+    const call2 = mgr.checkSummaryModelReady();
+    releaseListModels();
+    await Promise.all([call1, call2]);
+
+    assert.equal(listModelsCalls, 1, "concurrent populate calls for the same fingerprint must coalesce, not race");
+  });
+
   test("summary --mode activity rejects when the summary model is unavailable, instead of masking the failure with local narration", async () => {
     const log = JSON.stringify({ type: "text", part: { messageID: "m1", text: "progress" } });
     const mgr = makeManager({
@@ -3534,231 +4061,358 @@ describe("summarize()", () => {
   });
 });
 
-describe("key slots (summary tasks)", () => {
-  test("a configured summary key slot is injected without exposing any key-slot source variables", async (t) => {
-    process.env.AXI_TEST_SUMMARY_PRIMARY = "sk-summary-secret";
-    process.env.AXI_TEST_SUMMARY_BACKUP = "sk-backup-secret";
-    t.after(() => {
-      delete process.env.AXI_TEST_SUMMARY_PRIMARY;
-      delete process.env.AXI_TEST_SUMMARY_BACKUP;
-    });
-    let capturedEnv = null;
-    let modelsEnv = null;
-    const mgr = makeManager({
-      tasksFixture: (logDir) => [{ ...baseTask({ id: "src1", status: "done", logPath: path.join(logDir, "src1.ndjson") }) }],
-      logs: { "src1.ndjson": JSON.stringify({ type: "text", part: { messageID: "m1", text: "did the thing" } }) + "\n" },
-      spawnFn: (cmd, args, opts) => { capturedEnv = opts.env; return fakeChild(); },
-      listModelsFn: (env) => {
-        modelsEnv = env;
-        return `${DEFAULT_SUMMARY_MODEL}\n`;
-      },
-      keySlotsSpec: "summary-slot:AXI_TEST_SUMMARY_PRIMARY,backup:AXI_TEST_SUMMARY_BACKUP",
-      summaryKeySlot: "summary-slot",
-      summaryProviderKeyEnvName: "DEEPSEEK_API_KEY",
-    });
-    await mgr.summarize("src1");
-    assert.equal(capturedEnv.DEEPSEEK_API_KEY, "sk-summary-secret");
-    assert.equal("AXI_TEST_SUMMARY_PRIMARY" in capturedEnv, false);
-    assert.equal("AXI_TEST_SUMMARY_BACKUP" in capturedEnv, false);
-    assert.equal(modelsEnv.DEEPSEEK_API_KEY, "sk-summary-secret");
-    assert.equal("AXI_TEST_SUMMARY_PRIMARY" in modelsEnv, false);
-    assert.equal("AXI_TEST_SUMMARY_BACKUP" in modelsEnv, false);
+describe("caller-env union (sanitizedEnvironment)", () => {
+  test("a caller-supplied env value overlays the daemon's own ambient environment", (t) => {
+    delete process.env.AXI_TEST_CALLER_VAR;
+    t.after(() => delete process.env.AXI_TEST_CALLER_VAR);
+    let capturedOpts = null;
+    const mgr = makeManager({ spawnFn: (cmd, args, opts) => { capturedOpts = opts; return fakeChild(); } });
+
+    mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), env: { AXI_TEST_CALLER_VAR: "from-caller" } });
+
+    assert.equal(capturedOpts.env.AXI_TEST_CALLER_VAR, "from-caller");
   });
 
-  test("an unset summary key slot source variable fails the summary request before spawning", async () => {
-    delete process.env.AXI_TEST_SUMMARY_UNSET;
-    const mgr = makeManager({
-      tasksFixture: (logDir) => [{ ...baseTask({ id: "src1", status: "done", logPath: path.join(logDir, "src1.ndjson") }) }],
-      logs: { "src1.ndjson": JSON.stringify({ type: "text", part: { messageID: "m1", text: "did the thing" } }) + "\n" },
-      spawnFn: () => { throw new Error("must not spawn"); },
-      keySlotsSpec: "summary-slot:AXI_TEST_SUMMARY_UNSET",
-      summaryKeySlot: "summary-slot",
-      summaryProviderKeyEnvName: "DEEPSEEK_API_KEY",
-    });
-    await assert.rejects(() => mgr.summarize("src1"), /error: summary key slot "summary-slot" source variable AXI_TEST_SUMMARY_UNSET is not set/);
+  test("caller env cannot override the fixed excluded set of daemon-controlled vars", (t) => {
+    const excluded = ["PATH", "HOME", "TASKFERRY_STATE_DIR", "TASKFERRY_RUNTIME_DIR", "TASKFERRY_CACHE_DIR", "TASKFERRY_SOCKET_PATH"];
+    for (const name of excluded) process.env[name] = `real-${name}`;
+    t.after(() => { for (const name of excluded) delete process.env[name]; });
+    let capturedOpts = null;
+    const mgr = makeManager({ spawnFn: (cmd, args, opts) => { capturedOpts = opts; return fakeChild(); } });
+
+    const maliciousEnv = Object.fromEntries(excluded.map((name) => [name, `malicious-${name}`]));
+    mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), env: maliciousEnv });
+
+    for (const name of excluded) {
+      assert.equal(capturedOpts.env[name], `real-${name}`, `${name} must keep the daemon's own ambient value`);
+    }
   });
 
-  test("summarize without a summary key_slot keeps the ambient summary provider key when a slot's source var shares its name (GLM-5.2 review of PR #23, finding 4)", async (t) => {
-    process.env.DEEPSEEK_API_KEY = "sk-default-summary-secret";
-    process.env.AXI_TEST_SUMMARY_BACKUP = "sk-backup-secret";
-    t.after(() => {
-      delete process.env.DEEPSEEK_API_KEY;
-      delete process.env.AXI_TEST_SUMMARY_BACKUP;
+  test("a denylisted name is stripped even when the caller's env explicitly sets it", (t) => {
+    let capturedOpts = null;
+    const mgr = makeManager({
+      spawnFn: (cmd, args, opts) => { capturedOpts = opts; return fakeChild(); },
+      envDenylistSpec: "AXI_TEST_DENIED_VAR",
     });
+
+    mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), env: { AXI_TEST_DENIED_VAR: "leaked-value" } });
+
+    assert.equal("AXI_TEST_DENIED_VAR" in capturedOpts.env, false);
+  });
+
+  test("TASKFERRY_CHILD survives even when denylisted", (t) => {
+    let capturedOpts = null;
+    const mgr = makeManager({
+      spawnFn: (cmd, args, opts) => { capturedOpts = opts; return fakeChild(); },
+      envDenylistSpec: "TASKFERRY_CHILD",
+    });
+
+    mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+
+    assert.equal(capturedOpts.env.TASKFERRY_CHILD, "1");
+  });
+
+  test("omitting env behaves as ambient-only, same as before caller-env forwarding existed", (t) => {
+    process.env.AXI_TEST_AMBIENT_ONLY = "ambient-value";
+    t.after(() => delete process.env.AXI_TEST_AMBIENT_ONLY);
+    let capturedOpts = null;
+    const mgr = makeManager({ spawnFn: (cmd, args, opts) => { capturedOpts = opts; return fakeChild(); } });
+
+    mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+
+    assert.equal(capturedOpts.env.AXI_TEST_AMBIENT_ONLY, "ambient-value");
+  });
+
+  test("summaryEnvironment strips OPENCODE_CONFIG* even when the caller's env explicitly sets one", async (t) => {
     let capturedEnv = null;
     const mgr = makeManager({
       tasksFixture: (logDir) => [{ ...baseTask({ id: "src1", status: "done", logPath: path.join(logDir, "src1.ndjson") }) }],
       logs: { "src1.ndjson": JSON.stringify({ type: "text", part: { messageID: "m1", text: "did the thing" } }) + "\n" },
       spawnFn: (cmd, args, opts) => { capturedEnv = opts.env; return fakeChild(); },
       listModelsFn: () => `${DEFAULT_SUMMARY_MODEL}\n`,
-      keySlotsSpec: "primary:DEEPSEEK_API_KEY,backup:AXI_TEST_SUMMARY_BACKUP",
-      summaryProviderKeyEnvName: "DEEPSEEK_API_KEY",
     });
-    await mgr.summarize("src1");
-    assert.equal(capturedEnv.DEEPSEEK_API_KEY, "sk-default-summary-secret");
-    assert.equal("AXI_TEST_SUMMARY_BACKUP" in capturedEnv, false);
-  });
-});
 
-describe("key slots (dispatch)", () => {
-  test("dispatch with an unconfigured key_slot throws before spawning anything", () => {
-    const mgr = makeManager({ spawnFn: () => { throw new Error("must not spawn"); } });
-    assert.throws(
-      () => mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), keySlot: "primary" }),
-      /error: key_slot given but TASKFERRY_PROVIDER_KEY_ENV is not configured/
-    );
+    await mgr.summarize("src1", { env: { OPENCODE_CONFIG: "malicious-config-path", FOO: "bar" } });
+
+    assert.equal("OPENCODE_CONFIG" in capturedEnv, false);
+    assert.equal(capturedEnv.FOO, "bar", "a non-OPENCODE_CONFIG caller var must survive the summaryEnvironment strip");
   });
 
-  test("dispatch with a key_slot name not in the registry throws before spawning anything", () => {
-    const mgr = makeManager({
-      spawnFn: () => { throw new Error("must not spawn"); },
-      keySlotsSpec: "primary:SOME_SOURCE_VAR",
-      providerKeyEnvName: "OPENCODE_GO_API_KEY",
-    });
-    assert.throws(
-      () => mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), keySlot: "backup" }),
-      /error: unknown key_slot: backup/
-    );
-  });
-
-  test("dispatch with a configured key_slot whose source env var is unset throws before spawning anything", () => {
-    delete process.env.AXI_TEST_UNSET_KEY_SOURCE;
-    const mgr = makeManager({
-      spawnFn: () => { throw new Error("must not spawn"); },
-      keySlotsSpec: "primary:AXI_TEST_UNSET_KEY_SOURCE",
-      providerKeyEnvName: "OPENCODE_GO_API_KEY",
-    });
-    assert.throws(
-      () => mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), keySlot: "primary" }),
-      /error: key_slot "primary" source variable AXI_TEST_UNSET_KEY_SOURCE is not set/
-    );
-  });
-
-  test("a valid key_slot passes only the configured target env var to the spawned child, and only the slot name is persisted", (t) => {
-    process.env.AXI_TEST_KEY_PRIMARY = "sk-super-secret-value";
-    process.env.AXI_TEST_KEY_BACKUP = "sk-backup-secret-value";
-    t.after(() => {
-      delete process.env.AXI_TEST_KEY_PRIMARY;
-      delete process.env.AXI_TEST_KEY_BACKUP;
-    });
+  test("advisor() forwards a caller-supplied env value into the dispatched child", async (t) => {
+    delete process.env.AXI_TEST_ADVISOR_CALLER_VAR;
+    t.after(() => delete process.env.AXI_TEST_ADVISOR_CALLER_VAR);
     let capturedOpts = null;
     const child = fakeChild();
     const mgr = makeManager({
       spawnFn: (cmd, args, opts) => { capturedOpts = opts; return child; },
-      keySlotsSpec: "primary:AXI_TEST_KEY_PRIMARY,backup:AXI_TEST_KEY_BACKUP",
-      providerKeyEnvName: "OPENCODE_GO_API_KEY",
     });
-    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), keySlot: "primary" });
-    assert.equal(dispatched.keySlot, "primary");
-    assert.equal(capturedOpts.env.OPENCODE_GO_API_KEY, "sk-super-secret-value");
-    assert.equal("AXI_TEST_KEY_PRIMARY" in capturedOpts.env, false);
-    assert.equal("AXI_TEST_KEY_BACKUP" in capturedOpts.env, false);
 
-    const onDisk = fs.readFileSync(mgr.paths.TASKS_FILE, "utf8");
-    assert.ok(!onDisk.includes("sk-super-secret-value"), "the raw key value must never reach tasks.json");
-    assert.ok(!onDisk.includes("sk-backup-secret-value"), "other raw key values must never reach tasks.json");
-    assert.ok(onDisk.includes('"keySlot": "primary"'));
+    const advisorPromise = mgr.advisor({
+      prompt: "hi",
+      directory: os.tmpdir(),
+      model: "openai/gpt-5.6-sol",
+      env: { AXI_TEST_ADVISOR_CALLER_VAR: "from-advisor-caller" },
+    });
+    child.emit("exit", 1, null);
+    await advisorPromise;
 
-    child.emit("exit", 0, null);
-    assert.equal(mgr.result(dispatched.id).keySlot, "primary");
+    assert.ok(capturedOpts, "the advisor dispatch must have spawned a child");
+    assert.equal(capturedOpts.env.AXI_TEST_ADVISOR_CALLER_VAR, "from-advisor-caller");
   });
 
-  test("dispatch without key_slot still strips every configured source variable", (t) => {
-    process.env.AXI_TEST_KEY_PRIMARY = "sk-primary-secret-value";
-    process.env.AXI_TEST_KEY_BACKUP = "sk-backup-secret-value";
-    t.after(() => {
-      delete process.env.AXI_TEST_KEY_PRIMARY;
-      delete process.env.AXI_TEST_KEY_BACKUP;
-    });
-    let capturedOpts = null;
+  test("summarize() report mode forwards a caller-supplied env value into the spawned summary child", async (t) => {
+    delete process.env.AXI_TEST_REPORT_CALLER_VAR;
+    t.after(() => delete process.env.AXI_TEST_REPORT_CALLER_VAR);
+    let capturedEnv = null;
     const mgr = makeManager({
-      spawnFn: (cmd, args, _opts) => { capturedOpts = _opts; return fakeChild(); },
-      keySlotsSpec: "primary:AXI_TEST_KEY_PRIMARY,backup:AXI_TEST_KEY_BACKUP",
-      providerKeyEnvName: "OPENCODE_GO_API_KEY",
+      tasksFixture: (logDir) => [{ ...baseTask({ id: "src1", status: "done", logPath: path.join(logDir, "src1.ndjson") }) }],
+      logs: { "src1.ndjson": JSON.stringify({ type: "text", part: { messageID: "m1", text: "did the thing" } }) + "\n" },
+      spawnFn: (cmd, args, opts) => { capturedEnv = opts.env; return fakeChild(); },
+      listModelsFn: () => `${DEFAULT_SUMMARY_MODEL}\n`,
     });
 
-    mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+    await mgr.summarize("src1", { mode: "report", env: { AXI_TEST_REPORT_CALLER_VAR: "from-report-caller" } });
 
-    assert.ok(capturedOpts.env);
-    assert.equal("AXI_TEST_KEY_PRIMARY" in capturedOpts.env, false);
-    assert.equal("AXI_TEST_KEY_BACKUP" in capturedOpts.env, false);
-    assert.equal("OPENCODE_GO_API_KEY" in capturedOpts.env, false);
+    assert.ok(capturedEnv, "the summarize report call must have spawned a child");
+    assert.equal(capturedEnv.AXI_TEST_REPORT_CALLER_VAR, "from-report-caller");
   });
 
-  test("dispatch without key_slot keeps the ambient provider key when a slot's source var shares its name (GLM-5.2 review finding)", (t) => {
-    // The documented setup registers the server's default key as a slot too
-    // (TASKFERRY_PROVIDER_KEY_ENV and one slot's source both named
-    // OPENCODE_GO_API_KEY) so it can also be picked explicitly. Without the
-    // fix, environmentWithoutKeySlotSources() strips that variable even when
-    // no key_slot was requested, leaving the child with no key at all.
-    process.env.OPENCODE_GO_API_KEY = "sk-default-secret-value";
-    process.env.AXI_TEST_KEY_BACKUP = "sk-backup-secret-value";
+  test("a queued dispatch's stored env is the one captured at dispatch() time, not re-read later", async (t) => {
+    delete process.env.AXI_TEST_LATE_AMBIENT;
+    t.after(() => delete process.env.AXI_TEST_LATE_AMBIENT);
+    const occupyingChild = fakeChild(9001);
+    /** @type {any} */
+    let secondCapturedOpts = null;
+    let spawnCount = 0;
+    const mgr = makeManager({
+      maxConcurrentTasks: 1,
+      spawnFn: (cmd, args, opts) => {
+        spawnCount++;
+        if (spawnCount === 1) return occupyingChild;
+        secondCapturedOpts = opts;
+        return fakeChild(9002);
+      },
+    });
+
+    // Occupy the only concurrency slot.
+    mgr.dispatch({ prompt: "occupying task", directory: os.tmpdir() });
+    // This one queues behind the slot, with its own env captured now.
+    mgr.dispatch({ prompt: "queued task", directory: os.tmpdir(), env: { AXI_TEST_MARKER: "captured-at-dispatch-time" } });
+
+    // Simulate ambient env changing while the second dispatch sits queued.
+    process.env.AXI_TEST_LATE_AMBIENT = "set-after-queuing";
+
+    // Release the first task so the queued one actually spawns.
+    occupyingChild.emit("exit", 0, null);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    assert.ok(secondCapturedOpts, "the queued task should have spawned");
+    assert.equal(secondCapturedOpts.env.AXI_TEST_MARKER, "captured-at-dispatch-time", "caller env is frozen at dispatch() time");
+    assert.equal(secondCapturedOpts.env.AXI_TEST_LATE_AMBIENT, "set-after-queuing", "the daemon's own ambient env is still read fresh at spawn time");
+  });
+
+  test("dispatch()'s queued env is frozen against later caller mutations of the original env object (verification gate for the capturedEnv clone in tasks.js)", async (t) => {
+    // Verification gate for Fix 3 (removing the capturedEnv clone added by
+    // b45de81): the dispatch path must not be vulnerable to the caller
+    // mutating the original env object reference they handed to dispatch().
+    // Reassign an existing key's value AND add a new key on the same object
+    // between queue time and the queued launch's actual spawn. The spawned
+    // child must see the dispatch-time value, not the mutated one, and must
+    // not see the post-queue addition. The b45de81 clone makes this test
+    // pass; if that clone is ever removed, this test will fail and the
+    // removal must be reverted -- see the BLOCKED note in the PR description.
+    delete process.env.AXI_TEST_QUEUE_REASSIGN;
+    delete process.env.AXI_TEST_QUEUE_ADDED;
     t.after(() => {
-      delete process.env.OPENCODE_GO_API_KEY;
-      delete process.env.AXI_TEST_KEY_BACKUP;
+      delete process.env.AXI_TEST_QUEUE_REASSIGN;
+      delete process.env.AXI_TEST_QUEUE_ADDED;
+    });
+    const occupyingChild = fakeChild(9001);
+    /** @type {any} */
+    let secondCapturedOpts = null;
+    let spawnCount = 0;
+    const mgr = makeManager({
+      maxConcurrentTasks: 1,
+      spawnFn: (cmd, args, opts) => {
+        spawnCount++;
+        if (spawnCount === 1) return occupyingChild;
+        secondCapturedOpts = opts;
+        return fakeChild(9002);
+      },
+    });
+
+    mgr.dispatch({ prompt: "occupying task", directory: os.tmpdir() });
+    // Hold a reference to the caller's original env object after dispatch()
+    // returns -- the queued launch must NOT observe these mutations.
+    const callerEnv = { AXI_TEST_QUEUE_REASSIGN: "captured-at-dispatch-time" };
+    mgr.dispatch({ prompt: "queued task", directory: os.tmpdir(), env: callerEnv });
+
+    callerEnv.AXI_TEST_QUEUE_REASSIGN = "mutated-after-queue";
+    callerEnv.AXI_TEST_QUEUE_ADDED = "added-after-queue";
+
+    occupyingChild.emit("exit", 0, null);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    assert.ok(secondCapturedOpts, "the queued task should have spawned");
+    assert.equal(secondCapturedOpts.env.AXI_TEST_QUEUE_REASSIGN, "captured-at-dispatch-time", "the dispatch-time value must reach the spawned child, not the post-queue mutated value");
+    assert.equal("AXI_TEST_QUEUE_ADDED" in secondCapturedOpts.env, false, "a var added after queue must not reach the spawned child");
+  });
+
+  test("summary's spawned env reads the daemon's ambient at spawn time, not request time (matches dispatch's deferred-env behavior)", async (t) => {
+    // Fix 2: dispatch() already defers dispatchEnvironment() to spawn time so
+    // the spawned child sees the daemon's current process.env. Before this
+    // fix, the summary path called summaryEnvironment(env) at request time
+    // and carried the frozen result until the child spawned -- anything
+    // changing in the daemon's ambient env between request and spawn (e.g.
+    // a sibling setting a key) would not reach the spawned summary child.
+    // The summary path now mirrors dispatch()'s pattern: caller env is
+    // snapshot at request time (cloned, like dispatch), and the merged env
+    // is computed in startTask() at spawn time.
+    delete process.env.AXI_TEST_SUMMARY_LATE_AMBIENT;
+    t.after(() => delete process.env.AXI_TEST_SUMMARY_LATE_AMBIENT);
+    const occupyingChild = fakeChild(9001);
+    /** @type {any} */
+    let summaryCapturedOpts = null;
+    let spawnCount = 0;
+    const mgr = makeManager({
+      maxConcurrentTasks: 1,
+      tasksFixture: (logDir) => [{ ...baseTask({ id: "src1", status: "done", logPath: path.join(logDir, "src1.ndjson") }) }],
+      logs: { "src1.ndjson": JSON.stringify({ type: "text", part: { messageID: "m1", text: "did the thing" } }) + "\n" },
+      listModelsFn: () => `${DEFAULT_SUMMARY_MODEL}\n`,
+      spawnFn: (cmd, args, opts) => {
+        spawnCount++;
+        if (spawnCount === 1) return occupyingChild;
+        summaryCapturedOpts = opts;
+        return fakeChild(9002);
+      },
+    });
+
+    // Occupy the only concurrency slot.
+    mgr.dispatch({ prompt: "occupying task", directory: os.tmpdir() });
+
+    // Request the summary -- this queues it (concurrency slot is full).
+    // The env snapshot is captured here, but summaryEnvironment(env) is NOT
+    // yet applied.
+    await mgr.summarize("src1", { env: {} });
+
+    // Simulate the daemon's ambient env changing between request and spawn.
+    process.env.AXI_TEST_SUMMARY_LATE_AMBIENT = "set-after-summary-request";
+
+    // Release the occupying task; the queued summary now actually spawns.
+    occupyingChild.emit("exit", 0, null);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    assert.ok(summaryCapturedOpts, "the queued summary should have spawned");
+    assert.equal(summaryCapturedOpts.env.AXI_TEST_SUMMARY_LATE_AMBIENT, "set-after-summary-request", "summary env reads the daemon's ambient at spawn time, not at request time");
+  });
+
+  test("excluded names, denylist names, and caller-wins are all applied in a single merge pass (review fix: caller-wins/denylist-last/denylist-strips-ambient semantics)", (t) => {
+    process.env.TASKFERRY_STATE_DIR = "real-state";
+    process.env.AXI_TEST_DENY_AMBIENT = "ambient-leak";
+    t.after(() => {
+      delete process.env.TASKFERRY_STATE_DIR;
+      delete process.env.AXI_TEST_DENY_AMBIENT;
     });
     let capturedOpts = null;
     const mgr = makeManager({
       spawnFn: (cmd, args, opts) => { capturedOpts = opts; return fakeChild(); },
-      keySlotsSpec: "primary:OPENCODE_GO_API_KEY,backup:AXI_TEST_KEY_BACKUP",
-      providerKeyEnvName: "OPENCODE_GO_API_KEY",
+      envDenylistSpec: "AXI_TEST_DENY_AMBIENT,AXI_TEST_DENY_CALLER",
     });
 
-    mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+    mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), env: {
+      TASKFERRY_STATE_DIR: "malicious-state",
+      AXI_TEST_DENY_AMBIENT: "caller-overrides-ambient",
+      AXI_TEST_DENY_CALLER: "caller-only",
+      AXI_TEST_KEEP: "from-caller",
+    } });
 
-    assert.equal(capturedOpts.env.OPENCODE_GO_API_KEY, "sk-default-secret-value");
-    assert.equal("AXI_TEST_KEY_BACKUP" in capturedOpts.env, false);
-  });
-});
-
-describe("credential preflight for the dispatched model's own provider (issue #63)", () => {
-  test("fails fast, before spawning, when the model's provider matches the configured provider key env and no value resolves for it", () => {
-    delete process.env.OPENROUTER_API_KEY;
-    const mgr = makeManager({
-      spawnFn: () => { throw new Error("must not spawn"); },
-      providerKeyEnvName: "OPENROUTER_API_KEY",
-    });
-    assert.throws(
-      () => mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), model: "openrouter/meta/muse-spark-1.1" }),
-      /error: no credentials available for openrouter \(OPENROUTER_API_KEY is not set\)/
-    );
+    assert.equal(capturedOpts.env.TASKFERRY_STATE_DIR, "real-state", "excluded name keeps the daemon's ambient value even when the caller sets it");
+    assert.equal("AXI_TEST_DENY_AMBIENT" in capturedOpts.env, false, "denylist strips a name that came in from the daemon's own ambient env");
+    assert.equal("AXI_TEST_DENY_CALLER" in capturedOpts.env, false, "denylist strips a name the caller set on the env param");
+    assert.equal(capturedOpts.env.AXI_TEST_KEEP, "from-caller", "non-excluded, non-denylist caller names overlay the ambient env");
   });
 
-  test("does not preflight-check a model from a different provider than the configured provider key env", () => {
-    delete process.env.OPENROUTER_API_KEY;
-    let captured = null;
-    const mgr = makeManager({
-      spawnFn: (cmd, args) => { captured = args; return fakeChild(); },
-      providerKeyEnvName: "OPENROUTER_API_KEY",
+  test("the exclusion set is sourced from paths.js's plumbing export -- any new TASKFERRY_* plumbing var added there lands here automatically", (t) => {
+    // Single-source review fix: the excluded list used to be hardcoded
+    // literally in tasks.js (["PATH", "HOME", "TASKFERRY_STATE_DIR", ...]).
+    // If a future plumbing var was added to paths.js without also editing
+    // tasks.js, a caller could override it from their forwarded env and
+    // misroute a nested taskferry call (e.g. via TASKFERRY_SOCKET_PATH). The
+    // set is now built from paths.js's TASKFERRY_PLUMBING_ENV_VARS export
+    // plus PATH and HOME; this test exercises every name in that export to
+    // pin the derivation.
+    for (const name of ["TASKFERRY_STATE_DIR", "TASKFERRY_RUNTIME_DIR", "TASKFERRY_CACHE_DIR", "TASKFERRY_SOCKET_PATH"]) {
+      process.env[name] = `real-${name}`;
+    }
+    t.after(() => {
+      for (const name of ["TASKFERRY_STATE_DIR", "TASKFERRY_RUNTIME_DIR", "TASKFERRY_CACHE_DIR", "TASKFERRY_SOCKET_PATH"]) {
+        delete process.env[name];
+      }
     });
-    mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), model: "opencode/free-model" });
-    assert.ok(captured, "spawn should have been called for an unrelated provider");
+    let capturedOpts = null;
+    const mgr = makeManager({ spawnFn: (cmd, args, opts) => { capturedOpts = opts; return fakeChild(); } });
+
+    mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), env: {
+      TASKFERRY_STATE_DIR: "malicious-state",
+      TASKFERRY_RUNTIME_DIR: "malicious-runtime",
+      TASKFERRY_CACHE_DIR: "malicious-cache",
+      TASKFERRY_SOCKET_PATH: "malicious-socket",
+    } });
+
+    assert.equal(capturedOpts.env.TASKFERRY_STATE_DIR, "real-TASKFERRY_STATE_DIR");
+    assert.equal(capturedOpts.env.TASKFERRY_RUNTIME_DIR, "real-TASKFERRY_RUNTIME_DIR");
+    assert.equal(capturedOpts.env.TASKFERRY_CACHE_DIR, "real-TASKFERRY_CACHE_DIR");
+    assert.equal(capturedOpts.env.TASKFERRY_SOCKET_PATH, "real-TASKFERRY_SOCKET_PATH");
   });
 
-  test("succeeds once the matching provider key is set in the daemon's ambient environment", (t) => {
-    process.env.OPENROUTER_API_KEY = "sk-openrouter-secret-value";
-    t.after(() => delete process.env.OPENROUTER_API_KEY);
-    let captured = null;
-    const mgr = makeManager({
-      spawnFn: (cmd, args, opts) => { captured = opts; return fakeChild(); },
-      providerKeyEnvName: "OPENROUTER_API_KEY",
-    });
-    mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), model: "openrouter/meta/muse-spark-1.1" });
-    assert.equal(captured.env.OPENROUTER_API_KEY, "sk-openrouter-secret-value");
+  test("a caller-supplied env key containing '=' is rejected synchronously and the task settles as crashed with a matching spawnError", () => {
+    // Mirrors isEnvironment() in src/protocol.js so a programmatic caller
+    // that bypasses the socket (e.g. internal code invoking dispatch()
+    // directly) can't smuggle a malformed key past the spawn boundary. The
+    // RPC layer already rejects this; sanitizedEnvironment() is the second
+    // gate. The throw lands inside startTask()'s try/catch, which marks the
+    // task crashed with spawnError -- fail fast, no silent drop, no spawn.
+    let spawnCalled = false;
+    const mgr = makeManager({ spawnFn: () => { spawnCalled = true; return fakeChild(); } });
+
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), env: { "BAD=KEY": "value" } });
+
+    assert.equal(mgr.status(dispatched.id).status, "crashed");
+    assert.match(mgr.status(dispatched.id).spawnError, /invalid env key in caller-supplied env.*BAD=KEY/);
+    assert.equal(spawnCalled, false, "the spawn must never happen when env validation fails");
   });
 
-  test("succeeds when a key_slot supplies the matching provider key even with no ambient value", (t) => {
-    delete process.env.OPENROUTER_API_KEY;
-    process.env.AXI_TEST_OPENROUTER_SLOT = "sk-slotted-secret-value";
-    t.after(() => delete process.env.AXI_TEST_OPENROUTER_SLOT);
-    let captured = null;
-    const mgr = makeManager({
-      spawnFn: (cmd, args, opts) => { captured = opts; return fakeChild(); },
-      providerKeyEnvName: "OPENROUTER_API_KEY",
-      keySlotsSpec: "primary:AXI_TEST_OPENROUTER_SLOT",
-    });
-    mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), model: "openrouter/meta/muse-spark-1.1", keySlot: "primary" });
-    assert.equal(captured.env.OPENROUTER_API_KEY, "sk-slotted-secret-value");
+  test("a caller-supplied env key that is an empty string is rejected synchronously and the task settles as crashed", () => {
+    let spawnCalled = false;
+    const mgr = makeManager({ spawnFn: () => { spawnCalled = true; return fakeChild(); } });
+
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), env: { "": "value" } });
+
+    assert.equal(mgr.status(dispatched.id).status, "crashed");
+    assert.match(mgr.status(dispatched.id).spawnError, /invalid env key in caller-supplied env/);
+    assert.equal(spawnCalled, false);
+  });
+
+  test("a caller-supplied env value that is not a string is rejected synchronously and the task settles as crashed", () => {
+    let spawnCalled = false;
+    const mgr = makeManager({ spawnFn: () => { spawnCalled = true; return fakeChild(); } });
+
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), env: { AXI_TEST_BAD_VALUE: 42 } });
+
+    assert.equal(mgr.status(dispatched.id).status, "crashed");
+    assert.match(mgr.status(dispatched.id).spawnError, /env value for "AXI_TEST_BAD_VALUE" must be a string, got number/);
+    assert.equal(spawnCalled, false);
+  });
+
+  test("a caller-supplied env value that is undefined is rejected synchronously (null/undefined values would silently lose type info at the spawn boundary)", () => {
+    let spawnCalled = false;
+    const mgr = makeManager({ spawnFn: () => { spawnCalled = true; return fakeChild(); } });
+
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), env: { AXI_TEST_UNDEFINED: undefined } });
+
+    assert.equal(mgr.status(dispatched.id).status, "crashed");
+    assert.match(mgr.status(dispatched.id).spawnError, /env value for "AXI_TEST_UNDEFINED" must be a string, got undefined/);
+    assert.equal(spawnCalled, false);
   });
 });
 
@@ -3871,13 +4525,13 @@ describe("startTask() spawns the executor's CLI binary, not a hardcoded command 
     assert.deepEqual(captured.args, ["--model", "minimax/MiniMax-M2.7", "--mode", "json", "-p", "hi"]);
   });
 
-  test("a default (opencode) dispatch still spawns `opencode`", () => {
+  test("a default (pi) dispatch still spawns `pi`", () => {
     let captured = null;
     const mgr = makeManager({
       spawnFn: (cmd, args, opts) => { captured = { cmd, args, opts }; return fakeChild(); },
     });
     mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
-    assert.equal(captured.cmd, "opencode");
+    assert.equal(captured.cmd, "pi");
   });
 });
 
@@ -3892,7 +4546,7 @@ describe("startTask() merges executor.sandboxAuthFile().sandboxEnv into spawnEnv
       platform: "linux",
       cacheDir,
     });
-    mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+    mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), executor: "opencode" });
     assert.equal(captured.opts.env.XDG_DATA_HOME, path.join(cacheDir, "opencode-data"));
   });
 
@@ -3951,6 +4605,176 @@ describe("startTask() merges executor.sandboxAuthFile().sandboxEnv into spawnEnv
     // positions before the destination (src is the one position before dest).
     assert.equal(captured.args[destIdx - 2], "--ro-bind");
     assert.equal(captured.args[destIdx - 1], realAuthFile);
+  });
+
+  test("a pi dispatch's sandboxAuthFile call is invoked with the dispatch's sessionId + launchDirectory, so the bind can scope to a single session file", () => {
+    let capturedArgs = null;
+    const cacheDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-cache-pi-"));
+    const realAuthFile = path.join(os.tmpdir(), "fake-pi-home", "auth.json");
+    const fakePi = {
+      id: "pi",
+      taskIdPrefix: "pi",
+      errorBucketPrefix: "pi",
+      defaultModel: "minimax/MiniMax-M2.7",
+      defaultSummaryModel: "minimax/MiniMax-M2.7",
+      binaryName: "pi",
+      listModelsFn: async () => "",
+      buildSpawnArgs: (ctx) => ["--model", ctx.model, "--mode", "json", "-p", ctx.prompt],
+      buildSummaryPrompt: () => "",
+      normalizeLogEvent: (parsed) => parsed,
+      sandboxAuthFile: (args) => {
+        capturedArgs = args;
+        const sandboxedDataHome = path.join(args.dataDir, "pi-data");
+        return {
+          extraRoBinds: [],
+          extraRwPairBinds: [],
+          sandboxedDataHome,
+          sandboxEnv: { PI_CODING_AGENT_DIR: sandboxedDataHome },
+        };
+      },
+    };
+    const directory = os.tmpdir();
+    const sessionId = "019f90ea-1234-70e0-98dc-6847db316eb4";
+    const mgr = makeManager({
+      spawnFn: () => fakeChild(),
+      defaultExecutor: fakePi,
+      sandboxEnabled: true,
+      checkBwrapAvailableFn: () => ({ checked: true, available: true }),
+      platform: "linux",
+      cacheDir,
+      existsFn: (p) => p === realAuthFile,
+    });
+    mgr.dispatch({ prompt: "resume me", directory, sessionId });
+    assert.notEqual(capturedArgs, null, "sandboxAuthFile must be invoked for a sandboxed dispatch");
+    assert.equal(capturedArgs.sessionId, sessionId, "sandboxAuthFile must receive the dispatch's sessionId so the bind can scope to that single file");
+    assert.equal(capturedArgs.launchDirectory, directory, "sandboxAuthFile must receive the dispatch's launchDirectory so it can compute pi's per-cwd sessions subdirectory");
+    assert.equal(typeof capturedArgs.statFn, "function", "sandboxAuthFile must receive a statFn (for the isDirectory guard)");
+    assert.equal(typeof capturedArgs.readdirFn, "function", "sandboxAuthFile must receive a readdirFn (for the session file lookup)");
+  });
+
+  test("a fresh (non-resume) pi dispatch does not pass a sessionId to sandboxAuthFile, so no sessions bind is added", () => {
+    let capturedArgs = null;
+    const cacheDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-cache-pi-"));
+    const fakePi = {
+      id: "pi",
+      taskIdPrefix: "pi",
+      errorBucketPrefix: "pi",
+      defaultModel: "minimax/MiniMax-M2.7",
+      defaultSummaryModel: "minimax/MiniMax-M2.7",
+      binaryName: "pi",
+      listModelsFn: async () => "",
+      buildSpawnArgs: (ctx) => ["--model", ctx.model, "--mode", "json", "-p", ctx.prompt],
+      buildSummaryPrompt: () => "",
+      normalizeLogEvent: (parsed) => parsed,
+      sandboxAuthFile: (args) => {
+        capturedArgs = args;
+        return {
+          extraRoBinds: [],
+          extraRwPairBinds: [],
+          sandboxedDataHome: path.join(args.dataDir, "pi-data"),
+          sandboxEnv: { PI_CODING_AGENT_DIR: path.join(args.dataDir, "pi-data") },
+        };
+      },
+    };
+    const mgr = makeManager({
+      spawnFn: () => fakeChild(),
+      defaultExecutor: fakePi,
+      sandboxEnabled: true,
+      checkBwrapAvailableFn: () => ({ checked: true, available: true }),
+      platform: "linux",
+      cacheDir,
+      existsFn: () => false,
+    });
+    mgr.dispatch({ prompt: "fresh", directory: os.tmpdir() });
+    assert.notEqual(capturedArgs, null);
+    assert.equal(capturedArgs.sessionId, null, "no sessionId must be threaded for a fresh (non-resume) dispatch");
+    // launchDirectory is still passed -- it's needed for the per-cwd encoding
+    // even when there's no sessionId, in case the executor wants to use it
+    // for diagnostics. The bind itself stays empty because there's no
+    // sessionId to resolve a file for.
+    assert.equal(typeof capturedArgs.launchDirectory, "string");
+  });
+
+  test("the pi sandboxAuthFile call does not add the whole sessions/ pair-bind on the dispatch path -- only the resumed file's bind (regression: scope regression vs. shadowed sandboxed-only sessions)", () => {
+    // Earlier round-2 review surfaced a security scope regression: pi's
+    // sandboxAuthFile was binding the ENTIRE real sessions/ directory
+    // read-write, which let a prompt-injectable sandboxed worker
+    // write/delete any session in the user's pi history. After this fix,
+    // only the resumed session's specific file is bound. Verify that
+    // the bwrap invocation no longer contains a pair-bind of the whole
+    // realSessionsDir, even when pi's own sandboxAuthFile decides to
+    // bind a single file.
+    let captured = null;
+    const cacheDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-cache-pi-"));
+    const realSessionsDir = path.join(os.homedir(), ".pi", "agent", "sessions");
+    const realSessionFile = path.join(realSessionsDir, "--tmp--", "2026-07-23T21-42-41-761Z_019f90ea-1234-70e0-98dc-6847db316eb4.jsonl");
+    const realAuthFile = path.join(os.homedir(), ".pi", "agent", "auth.json");
+    const fakePi = {
+      id: "pi",
+      taskIdPrefix: "pi",
+      errorBucketPrefix: "pi",
+      defaultModel: "minimax/MiniMax-M2.7",
+      defaultSummaryModel: "minimax/MiniMax-M2.7",
+      binaryName: "pi",
+      listModelsFn: async () => "",
+      buildSpawnArgs: (ctx) => ["--model", ctx.model, "--mode", "json", "-p", ctx.prompt],
+      buildSummaryPrompt: () => "",
+      normalizeLogEvent: (parsed) => parsed,
+      sandboxAuthFile: ({ dataDir, existsFn, statFn, readdirFn, sessionId, launchDirectory }) => {
+        const sandboxedDataHome = path.join(dataDir, "pi-data");
+        const sandboxedSessionsHome = path.join(sandboxedDataHome, "sessions");
+        const extraRwPairBinds = [];
+        if (sessionId && launchDirectory && existsFn(realSessionsDir) && statFn(realSessionsDir)?.isDirectory()) {
+          const safePath = `--${launchDirectory.replace(/^[/\\]/, "").replace(/[/\\:]/g, "-")}--`;
+          const subdir = path.join(realSessionsDir, safePath);
+          const entries = readdirFn(subdir);
+          for (const entry of entries) {
+            if (!entry.endsWith(".jsonl")) continue;
+            const underscoreIdx = entry.lastIndexOf("_");
+            if (underscoreIdx === -1) continue;
+            const fileSessionId = entry.slice(underscoreIdx + 1, -".jsonl".length);
+            if (fileSessionId.startsWith(sessionId)) {
+              extraRwPairBinds.push([path.join(subdir, entry), path.join(sandboxedSessionsHome, safePath, entry)]);
+              break;
+            }
+          }
+        }
+        return {
+          extraRoBinds: existsFn(realAuthFile) ? [[realAuthFile, path.join(sandboxedDataHome, "auth.json")]] : [],
+          extraRwPairBinds,
+          sandboxedDataHome,
+          sandboxEnv: { PI_CODING_AGENT_DIR: sandboxedDataHome },
+        };
+      },
+    };
+    const directory = os.tmpdir();
+    const mgr = makeManager({
+      spawnFn: (cmd, args, opts) => { captured = { cmd, args, opts }; return fakeChild(); },
+      defaultExecutor: fakePi,
+      sandboxEnabled: true,
+      checkBwrapAvailableFn: () => ({ checked: true, available: true }),
+      platform: "linux",
+      cacheDir,
+      // Pretend the host has both a sessions/ dir and the specific file.
+      existsFn: (p) => p === realSessionsDir || p === realAuthFile,
+      statFn: (p) => (p === realSessionsDir ? { isDirectory: () => true } : null),
+      readdirFn: (p) => (p === path.join(realSessionsDir, "--tmp--") ? [path.basename(realSessionFile)] : []),
+    });
+    mgr.dispatch({ prompt: "resume", directory, sessionId: "019f90ea-1234-70e0-98dc-6847db316eb4" });
+    assert.equal(captured.cmd, "bwrap");
+    // Look for a --bind whose src is the whole realSessionsDir (not the
+    // single file). Pre-fix this would appear; post-fix it must not.
+    const pairBindSrcs = [];
+    for (let i = 0; i < captured.args.length; i++) {
+      if (captured.args[i] === "--bind" && captured.args[i + 1] && captured.args[i + 2]) {
+        pairBindSrcs.push(captured.args[i + 1]);
+      }
+    }
+    assert.ok(!pairBindSrcs.includes(realSessionsDir), `the whole sessions directory must not be pair-bound (would re-introduce the scope regression). Saw: ${pairBindSrcs.join(", ")}`);
+    // The specific session file IS bound, mapped onto the matching path
+    // under the sandboxed sessions tree.
+    const fileBindSrcs = pairBindSrcs.filter((p) => p === realSessionFile);
+    assert.equal(fileBindSrcs.length, 1, `expected exactly one --bind of the single session file, got ${fileBindSrcs.length} (all pair-bind srcs: ${pairBindSrcs.join(", ")})`);
   });
 });
 
@@ -4025,7 +4849,7 @@ describe("classifyProviderFailure() honors the binding compatibility contract (T
         noOutputTimeoutMs: 60000,
         watchdogPollMs: 5,
       });
-      const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+      const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), executor: "opencode" });
       fs.writeFileSync(mgr.status(dispatched.id).logPath, `${line}\n`);
       await new Promise((r) => setTimeout(r, 40));
       child.emit("exit", null, "SIGTERM");
@@ -4102,7 +4926,7 @@ describe("classifyProviderFailure() honors the binding compatibility contract (T
       noOutputTimeoutMs: 60000,
       watchdogPollMs: 5,
     });
-    const dispatchedOc = mgrOc.dispatch({ prompt: "hi", directory: os.tmpdir() });
+    const dispatchedOc = mgrOc.dispatch({ prompt: "hi", directory: os.tmpdir(), executor: "opencode" });
     fs.writeFileSync(mgrOc.status(dispatchedOc.id).logPath, `${opencodeEvent}\n`);
     await new Promise((r) => setTimeout(r, 40));
     childOc.emit("exit", null, "SIGTERM");

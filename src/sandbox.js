@@ -112,6 +112,24 @@ export function resolveGitCommonDir(directory, runCommand = defaultRunCommand) {
 }
 
 /**
+ * A linked worktree's *own* gitdir (HEAD/index/logs private to that
+ * worktree) lives at `<git-common-dir>/worktrees/<name>`, distinct from the
+ * common dir's top level, which holds the *main* checkout's own private
+ * HEAD/index/config -- see taskferry#224. `git rev-parse --absolute-git-dir`
+ * resolves that worktree-specific path; for the main checkout itself it
+ * resolves to the same directory as `resolveGitCommonDir`.
+ * @param {string} directory
+ * @param {(command: string, args: readonly string[]) => {status: number|null, stdout: string, stderr: string, error?: NodeJS.ErrnoException}} [runCommand]
+ * @returns {string|null}
+ */
+export function resolveGitDir(directory, runCommand = defaultRunCommand) {
+  const result = runCommand("git", ["-C", directory, "rev-parse", "--absolute-git-dir"]);
+  if (result.error || result.status !== 0) return null;
+  const raw = result.stdout.trim();
+  return raw || null;
+}
+
+/**
  * @param {object} options
  * @param {string} options.directory
  * @param {string} options.stateDir
@@ -120,12 +138,27 @@ export function resolveGitCommonDir(directory, runCommand = defaultRunCommand) {
  * @param {string[]} [options.denyList]
  * @param {string[]} [options.extraRwBinds] - extra directories bound read-write at the same path, applied
  *   after directory/runtimeDir (e.g. a git worktree's real gitdir, which lives outside `directory`).
- * @param {[string, string][]} [options.extraRoBinds] - extra [src, dest] read-only binds, applied after the
- *   read-write binds so a more specific path (e.g. a single credentials file) can be pinned read-only even
- *   though it sits under an already read-write-bound directory.
+ * @param {[string, string][]} [options.extraRwPairBinds] - extra [src, dest] read-write binds, for a real
+ *   file or directory that must be writable but lives outside the executor's redirected sandbox data home
+ *   (e.g. pi's single resumed session file, bound onto the matching path under the sandboxed
+ *   PI_CODING_AGENT_DIR's sessions/ tree so a sandboxed resume can both read and persist to it without
+ *   also exposing the user's other sessions to write/delete). Applied after extraRwBinds and before
+ *   extraRoBinds.
+ * @param {[string, string][]} [options.extraRoBinds] - extra [src, dest] read-only binds, applied last so a
+ *   more specific path (e.g. a single credentials file) can be pinned read-only even though it sits under
+ *   an already read-write-bound directory.
  * @returns {string[]}
  */
-export function buildBwrapArgs({ directory, stateDir, runtimeDir, homeDir, denyList = defaultDenyList(homeDir, stateDir), extraRwBinds = [], extraRoBinds = [] }) {
+export function buildBwrapArgs({
+  directory,
+  stateDir,
+  runtimeDir,
+  homeDir,
+  denyList = defaultDenyList(homeDir, stateDir),
+  extraRwBinds = [],
+  extraRwPairBinds = [],
+  extraRoBinds = [],
+}) {
   const args = ["--ro-bind", "/", "/"];
   // bwrap applies mounts in argument order, and a later mount on a parent
   // directory shadows an earlier mount nested inside it. --tmpfs /tmp must
@@ -140,6 +173,9 @@ export function buildBwrapArgs({ directory, stateDir, runtimeDir, homeDir, denyL
   args.push("--bind", runtimeDir, runtimeDir);
   for (const extra of extraRwBinds) {
     args.push("--bind", extra, extra);
+  }
+  for (const [src, dest] of extraRwPairBinds) {
+    args.push("--bind", src, dest);
   }
   for (const [src, dest] of extraRoBinds) {
     args.push("--ro-bind", src, dest);

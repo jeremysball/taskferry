@@ -43,19 +43,21 @@ workspace"` and `next` suggests `dispatch` instead.
 
 ## `taskferry dispatch --prompt <text> [options]`
 
-Queues `opencode run --dir <directory> --auto --format json -m <model> -- <prompt>`
-(or the equivalent `pi` invocation when `--executor pi` is given) as a
-background child process and returns a task summary immediately.
+Queues a `pi --model <model> --mode json -p <prompt>` invocation (the
+built-in default executor), or the equivalent `opencode run --dir
+<directory> --auto --format json -m <model> -- <prompt>` when `--executor
+opencode` is given, as a background child process and returns a task
+summary immediately.
 
 | Flag | Notes |
 |---|---|
 | `--prompt <text>` | Required. Pass `-` to read the prompt from piped stdin instead (`cat prompt.txt \| taskferry dispatch --prompt -`) — use this for prompts too large to pass as a single command-line argument |
 | `--directory <path>` | Defaults to the current workspace; an existing directory (relative paths are resolved against the current working directory) |
-| `--model <id>` | `provider/model`, e.g. `opencode-go/minimax-m3`. Run `opencode models` to list installed models. Defaults to `openai/gpt-5.6-luna` at variant `high` for the default `opencode` executor; `--executor pi` defaults to `minimax/MiniMax-M2.7` instead. When `--session-id` is given without `--model`, the model is instead inherited from the most recent prior task dispatched with that session id |
-| `--variant <name>` | Reasoning-effort override (`high`, `max`, `minimal`, ...), applied only alongside `--model` — omitting `--model` (including on a `--session-id` resume) always forces variant `high`, regardless of any `--variant` passed |
-| `--executor <opencode\|pi>` | Which worker CLI to spawn. Built-in default `opencode`, but an omitted flag actually falls back to the daemon's configured default executor (`TASKFERRY_DEFAULT_EXECUTOR` or `config.json`'s `defaultExecutor`) |
-| `--session-id <id>` | Resume an existing OpenCode session (`--continue --session <id>`) instead of starting fresh; get session ids from a prior `result` or `status --full` |
-| `--key-slot <name>` | Use a configured provider-key slot instead of the daemon's ambient key; see [security.md](security.md) |
+| (no flag — always on) | `dispatch`, `advisor`, and `summary` (report mode) forward the calling shell's own environment to the daemon on every call, with no per-call opt-out; see [security.md](security.md#caller-env-forwarding) |
+| `--model <id>` | `provider/model`, e.g. `opencode-go/minimax-m3`. Run `opencode models` to list installed models. Defaults to `minimax/MiniMax-M2.7` for the default `pi` executor; `--executor opencode` defaults to `openai/gpt-5.6-luna` instead. When `--session-id` is given without `--model`, the model is instead inherited from the most recent prior task dispatched with that session id |
+| `--variant <name>` | Reasoning-effort override, applied only alongside `--model` — omitting `--model` (including on a `--session-id` resume) always forces variant `high`, regardless of any `--variant` passed. Accepted values depend on the executor: pi takes `off`, `minimal`, `low`, `medium`, `high`, `xhigh`; opencode's `--variant` values depend on the model |
+| `--executor <opencode\|pi>` | Which worker CLI to spawn. Built-in default `pi`, but an omitted flag actually falls back to the daemon's configured default executor (`TASKFERRY_DEFAULT_EXECUTOR` or `config.json`'s `defaultExecutor`) |
+| `--session-id <id>` | Resume an existing session instead of starting fresh (`--continue --session <id>`; both pi and opencode use this syntax). When `--executor` is omitted, inherits whichever executor originally created the session; get session ids from a prior `result` or `status --full` |
 | `--allowed-dirs <path,path,...>` | Extra directories bound read-write inside the sandbox for this dispatch, on top of the auto-detected git-common-dir for a worktree and any config-level `allowedDirs`; see [security.md](security.md) |
 | `--require-final-marker <regex>` | Fail the task if the final message doesn't match this pattern (case-sensitive, standard JS RegExp semantics). Sets `incomplete: true` on the settled task when the final message is empty (after trimming) or doesn't match. Patterns that don't compile as a standard JS RegExp reject the dispatch up front with a usage error. Useful for enforcing a report-format contract like `^Status: (DONE\|DONE_WITH_CONCERNS\|BLOCKED\|NEEDS_CONTEXT)$` on the last line of model output. |
 | `--no-sandbox` | Run this dispatch without the bwrap filesystem sandbox (default: sandboxed on Linux, no-op on macOS); see [security.md](security.md) |
@@ -79,26 +81,26 @@ finish, are cancelled, fail to spawn, or hit the no-output watchdog. See
 
 Blocks until the task's real `exit` event fires. A 15-minute default
 timeout (configurable via `TASKFERRY_WAIT_DEFAULT_TIMEOUT_MS`) prevents
-indefinite hangs on stuck tasks. Pass `--timeout-ms` to override the
-default cap; the call then returns after that many milliseconds even if
+indefinite hangs on stuck tasks. Pass `--timeout` to override the
+default cap; the call then returns after that duration elapses, even if
 the task is still running. Set `TASKFERRY_WAIT_DEFAULT_TIMEOUT_MS=0` to
 disable the default timeout entirely (old behavior).
 
 | Flag | Notes |
 |---|---|
-| `--timeout-ms <number>` | Override the default timeout cap in milliseconds; omit to use the 15-minute default |
+| `--timeout <duration>` | Override the default timeout cap — milliseconds or a duration string (30s, 5m, 1h); omit to use the 15-minute default |
 | `--tail-chars <number>` | Include this many trailing narration characters if the task is still running when the timeout elapses |
 | `--full` | Include directory, model, session id, log path, and prompt preview |
-| `--summarize` | Stream periodic live summaries to stdout while waiting; exits and returns the normal result the moment the task settles. Cannot combine with `--timeout-ms` or `--tail-chars`. |
+| `--summarize` | Stream periodic live summaries to stdout while waiting; exits and returns the normal result the moment the task settles. Cannot combine with `--timeout` or `--tail-chars`. |
 
 If it returns `status: "queued"` or `"running"`, the timeout elapsed
 before the task settled; a `note` field explains the situation. Call `wait`
-again to keep polling, or pass `--timeout-ms` for a longer cap. This
+again to keep polling, or pass `--timeout` for a longer cap. This
 command was named `poll` before the AXI CLI; `taskferry poll` now fails
 with a rename notice.
 
 ```
-$ taskferry wait oc_mrn4ipkp_19450105 --timeout-ms 30000
+$ taskferry wait oc_mrn4ipkp_19450105 --timeout 30s
 id: oc_mrn4ipkp_19450105
 status: done
 startedAt: 2026-07-16T06:24:06.650Z
@@ -124,11 +126,11 @@ planning or hard-debugging help mid-task, not for open-ended background work
 |---|---|
 | `--prompt <text>` | Required. Pass `-` to read the prompt from piped stdin instead, same as `dispatch` |
 | `--model <id>` | Required, no default; the caller picks the advisor |
-| `--directory <path>` | Defaults to the current workspace |
+| `--directory <path>` | Defaults to the current git workspace root (falls back to the literal current directory outside a git repo) |
 | `--variant <name>` | Optional reasoning-effort override |
-| `--executor <opencode\|pi>` | Which worker CLI to spawn. Built-in default `opencode`, but an omitted flag actually falls back to the daemon's configured default executor (`TASKFERRY_DEFAULT_EXECUTOR` or `config.json`'s `defaultExecutor`) |
+| `--executor <opencode\|pi>` | Which worker CLI to spawn. Built-in default `pi`, but an omitted flag actually falls back to the daemon's configured default executor (`TASKFERRY_DEFAULT_EXECUTOR` or `config.json`'s `defaultExecutor`) |
 | `--session-id <id>` | Resume a prior advisor exchange |
-| `--timeout-ms <number>` | Early-return cap in milliseconds, same semantics as `wait`; omitting it does not block indefinitely — it falls back to a 45-second internal cap, after which the "still running" response below is returned |
+| `--timeout <duration>` | Early-return cap — milliseconds or a duration string (30s, 5m, 1h), same semantics as `wait`; omitting it does not block indefinitely — it falls back to a 45-second internal cap, after which the "still running" response below is returned |
 
 If it times out before the advisor answers, the response is `status:
 "running"` plus `task_id` and `session_id`; call `wait` or `advisor` again
@@ -166,8 +168,7 @@ buckets prefixed with the executor name for others (e.g.
 fallback; see [daemon.md](daemon.md#watchdogs)).
 `failureDetail` (also `--full`-only, or via `result --fields
 failureDetail`) carries the matched log line or timeout detail behind
-whichever `failureReason` fired. `keySlot` echoes the `--key-slot` name the
-task was dispatched with, or `null`. `incomplete` is `true` when a `done`
+whichever `failureReason` fired. `incomplete` is `true` when a `done`
 task has an empty final message or one that doesn't match
 `--require-final-marker`; `finalMarker` echoes the regex pattern when one
 was supplied. Both fields only appear when set, unlike `failureReason`/
@@ -219,7 +220,7 @@ tripped.
 | Flag | Notes |
 |---|---|
 | `--full` | Include untruncated narration; only rejected as a usage error when combined with `--fields` that omits `narration` — `--full` alone (no `--fields`) works fine |
-| `--fields <comma-list>` | Project only the fields you need: `message`, `narration`, `tokens`, `cost`, `sessionId`, `exitCode`, `signal`, `spawnError`, `failureReason`, `failureDetail`, `keySlot`, `logPath`, `incomplete`, `finalMarker` |
+| `--fields <comma-list>` | Project only the fields you need: `message`, `narration`, `tokens`, `cost`, `sessionId`, `exitCode`, `signal`, `spawnError`, `failureReason`, `failureDetail`, `logPath`, `incomplete`, `finalMarker` |
 
 ```
 $ taskferry result oc_mrn4ipkp_19450105
@@ -239,7 +240,7 @@ Lists tasks scoped to a workspace, newest first, with counts by status.
 
 | Flag | Notes |
 |---|---|
-| `--directory <path>` | Workspace to inspect, defaults to the current workspace |
+| `--directory <path>` | Workspace to inspect, defaults to the current git workspace root (falls back to the literal current directory outside a git repo) |
 | `--all` | Include tasks from every workspace; cannot combine with `--directory` |
 | `--limit <number>` | Limit displayed rows while preserving the full counts |
 
@@ -250,9 +251,10 @@ SIGTERM), then exits cleanly with code `0`.
 
 | Flag | Notes |
 |---|---|
-| `--directory <path>` | Workspace to watch, defaults to the current workspace |
+| `--directory <path>` | Workspace to watch, defaults to the current git workspace root (falls back to the literal current directory outside a git repo) |
 | `--format toon\|ndjson` | Stream format, default `toon` |
 | `--summaries` | Request live activity summaries (a secondary model call); see [security.md](security.md) |
+| `--flush-interval <duration>` | Batch `--summaries` events and print them together on this interval instead of streaming individually; milliseconds or a duration string (30s, 5m, 1h); requires `--summaries` |
 | `--task-id <id>` | Scope the stream to one task; `watch` then exits on its own once that task settles, instead of running until interrupted. This is the one command where `--task-id` is still live — see "Retired names" below. |
 
 Without `--task-id`, `watch` streams every task in the workspace until
@@ -261,6 +263,8 @@ task itself when omitted.
 
 `ndjson` emits one JSON object per line, for scripting.
 
+With `--flush-interval`, `ndjson` emits one `{"type": "watch.flush", "timestamp": ..., "events": [...]}` object per flush tick instead of one object per event; `toon` renders the same buffered events as today's per-event lines, just batched under one tick.
+
 ## `taskferry context [options]`
 
 Prints compact current-workspace context for an agent session-start hook:
@@ -268,7 +272,7 @@ task counts and rows, nothing else.
 
 | Flag | Notes |
 |---|---|
-| `--directory <path>` | Workspace to inspect, defaults to the current workspace |
+| `--directory <path>` | Workspace to inspect, defaults to the current git workspace root (falls back to the literal current directory outside a git repo) |
 | `--format toon\|claude-hook\|codex-hook` | Default `toon`; the two hook formats wrap the TOON payload in the target agent's expected envelope |
 
 ## `taskferry doctor [--full]`

@@ -24,7 +24,7 @@ message — there is no silent typo tolerance.
   "maxConcurrentTasks": 8,
   "noOutputTimeoutMs": 300000,
   "summaryModel": "opencode/mimo-v2.5-free",
-  "keySlots": "primary:OPENCODE_GO_API_KEY,backup:OPENCODE_GO_API_KEY_2"
+  "envDenylist": "PI_CODING_AGENT_DIR"
 }
 ```
 
@@ -43,18 +43,17 @@ message — there is no silent typo tolerance.
 | `activityMaxWords` | `TASKFERRY_ACTIVITY_MAX_WORDS` | number | `75` |
 | `advisorSessionTtlMs` | `TASKFERRY_ADVISOR_SESSION_TTL_MS` | number | `1800000` (30 min) |
 | `watchdogGraceMs` | `TASKFERRY_WATCHDOG_GRACE_MS` | number | `5000` |
-| `keySlots` | `TASKFERRY_KEY_SLOTS` | string | (none) |
-| `providerKeyEnv` | `TASKFERRY_PROVIDER_KEY_ENV` | string | (none) |
-| `summaryKeySlot` | `TASKFERRY_SUMMARY_KEY_SLOT` | string | (none) |
-| `summaryProviderKeyEnv` | `TASKFERRY_SUMMARY_PROVIDER_KEY_ENV` | string | (none) |
+| `envDenylist` | `TASKFERRY_ENV_DENYLIST` | string (comma-separated var names) | (none) |
 | `sandboxEnabled` | `TASKFERRY_DISABLE_SANDBOX` (inverted: `1`/`true` disables) | boolean | `true` |
 | `allowedDirs` | `TASKFERRY_ALLOWED_DIRS` | string (comma-separated paths) | (none) |
 | `waitDefaultTimeoutMs` | `TASKFERRY_WAIT_DEFAULT_TIMEOUT_MS` | number | `900000` (15 min); `0` disables via the env var only — a config-file value of `0` is ignored and falls back to the 15-minute default |
 | `cancelGraceMs` | `TASKFERRY_CANCEL_GRACE_MS` | number | `5000`; overridden per-call by `cancel --grace-ms` |
-| `defaultExecutor` | `TASKFERRY_DEFAULT_EXECUTOR` | string (`opencode` or `pi`) | `opencode` |
+| `defaultExecutor` | `TASKFERRY_DEFAULT_EXECUTOR` | string (`opencode` or `pi`) | `pi` |
 
-`keySlots` uses the same `name:ENV_VAR_NAME` comma-separated grammar as
-`TASKFERRY_KEY_SLOTS` — see `docs/security.md`.
+`envDenylist` uses the same comma-separated grammar as `allowedDirs` — a
+flat list of env var names, always stripped from every spawned child
+regardless of whether the value came from the daemon's own ambient
+environment or a caller's forwarded env; see `docs/security.md`.
 
 ## Precedence
 

@@ -8,6 +8,7 @@ import { decode } from "@toon-format/toon";
 import { fileURLToPath } from "node:url";
 import { Readable } from "node:stream";
 import { runCli } from "./cli.js";
+import { resolveWorkspaceRoot } from "./paths.js";
 
 function capturedIo({ stdin } = {}) {
   let stdout = "";
@@ -264,9 +265,10 @@ test("dispatch --prompt - keeps an interior CRLF in the prompt (only strips the 
 test("no arguments show executable, description, workspace tasks, counts, and next actions", async () => {
   const capture = capturedIo();
   const workspace = process.cwd();
+  const resolvedWorkspace = resolveWorkspaceRoot(workspace);
   const { client, calls } = fakeClient({
     "task.list": {
-      directory: workspace,
+      directory: resolvedWorkspace,
       counts,
       tasks: [{ id: "oc_1", status: "running", model: "test/model", startedAt: "2026-07-15T00:00:00.000Z", failureReason: null }],
     },
@@ -285,7 +287,7 @@ test("no arguments show executable, description, workspace tasks, counts, and ne
   assert.deepEqual(value.counts, counts);
   assert.deepEqual(value.tasks, [{ id: "oc_1", status: "running", model: "test/model", startedAt: "2026-07-15T00:00:00.000Z" }]);
   assert.ok(value.next.some((line) => line.includes("taskferry wait <id>")));
-  assert.deepEqual(calls, [{ method: "task.list", params: { directory: workspace } }]);
+  assert.deepEqual(calls, [{ method: "task.list", params: { directory: resolvedWorkspace } }]);
 });
 
 test("explicit empty workspace output is definitive and uses four-field rows", async () => {
@@ -414,6 +416,62 @@ test("projects status and result output using the former MCP lean projections", 
   ]);
 });
 
+test("list with no --directory resolves to this checkout's git workspace root via the real resolveWorkspaceRoot", async () => {
+  const capture = capturedIo();
+  const workspace = process.cwd();
+  const resolvedWorkspace = resolveWorkspaceRoot(workspace);
+  const { client, calls } = fakeClient({
+    "task.list": { directory: resolvedWorkspace, counts: {}, tasks: [] },
+  });
+  const result = await runCli(["list"], {
+    cwd: workspace,
+    io: capture.io,
+    connectClient: async () => client,
+  });
+
+  assert.equal(result.exitCode, 0);
+  // Computing the expected value via the real resolveWorkspaceRoot (rather
+  // than assuming cwd already equals the workspace root) keeps this correct
+  // whether the suite runs at the repo root or inside a linked worktree --
+  // this still proves the real (non-injected) resolveWorkspaceRoot is wired
+  // in, since a broken wiring would return raw `workspace` instead.
+  assert.deepEqual(calls, [{ method: "task.list", params: { directory: resolvedWorkspace } }]);
+});
+
+test("dispatch's directory is never passed through resolveWorkspaceRoot even when injected", async () => {
+  const capture = capturedIo({ stdin: fakeTtyStdin() });
+  const workspace = process.cwd();
+  const { client, calls } = fakeClient({ "task.dispatch": { id: "oc_1", status: "queued" } });
+  let called = false;
+  const result = await runCli(["dispatch", "--prompt", "hi"], {
+    cwd: workspace,
+    io: capture.io,
+    connectClient: async () => client,
+    resolveWorkspaceRoot: () => { called = true; return "/should/never/be/used"; },
+  });
+
+  assert.equal(result.exitCode, 0);
+  assert.equal(called, false);
+  assert.equal(calls[0].params.directory, workspace);
+});
+
+test("advisor's directory is never passed through resolveWorkspaceRoot even when injected (grouped with dispatch)", async () => {
+  const capture = capturedIo({ stdin: fakeTtyStdin() });
+  const workspace = process.cwd();
+  const { client, calls } = fakeClient({ "task.advisor": { status: "done", message: "advice" } });
+  let called = false;
+  const result = await runCli(["advisor", "--prompt", "hi", "--model", "opencode/some-model"], {
+    cwd: workspace,
+    io: capture.io,
+    connectClient: async () => client,
+    resolveWorkspaceRoot: () => { called = true; return "/should/never/be/used"; },
+  });
+
+  assert.equal(result.exitCode, 0);
+  assert.equal(called, false);
+  assert.equal(calls[0].params.directory, workspace);
+});
+
 test("doctor is a structured health check and --full preserves extra daemon fields", async (t) => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-cli-doctor-"));
   t.after(() => fs.rmSync(home, { recursive: true, force: true }));
@@ -460,17 +518,18 @@ test("summary --wait reports a not-settled note instead of summarizing when the 
 
 test("summary --wait proceeds to summarize once task.wait reports a settled status", async () => {
   const capture = capturedIo();
+  const injectedEnv = { FOO: "bar" };
   const { client, calls } = fakeClient({
     "task.wait": { id: "oc_1", status: "done", startedAt: "2026-07-15T00:00:00.000Z" },
     "task.summary": { text: "it worked" },
   });
-  const result = await runCli(["summary", "oc_1", "--wait"], { io: capture.io, connectClient: async () => client });
+  const result = await runCli(["summary", "oc_1", "--wait"], { io: capture.io, connectClient: async () => client, env: injectedEnv });
 
   assert.equal(result.exitCode, 0);
   assert.deepEqual(capture.output().value, { text: "it worked" });
   assert.deepEqual(calls, [
     { method: "task.wait", params: { taskId: "oc_1", timeoutMs: 900000 } },
-    { method: "task.summary", params: { taskId: "oc_1" } },
+    { method: "task.summary", params: { taskId: "oc_1", env: injectedEnv } },
   ]);
 });
 

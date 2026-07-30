@@ -30,7 +30,6 @@ export const RESULT_FIELDS = new Set([
   "spawnError",
   "failureReason",
   "failureDetail",
-  "keySlot",
   "logPath",
   "incomplete",
   "finalMarker",
@@ -61,6 +60,26 @@ function isAbsolutePath(value) {
   return isNonEmptyString(value) && path.isAbsolute(value);
 }
 
+/**
+ * Validates a caller-supplied environment map. Rejects anything that isn't a
+ * plain string-keyed object so a stray `null`/array/number/string can never
+ * reach dispatchEnvironment() -- the keys must also be non-empty strings
+ * without an `=`, since environment variable names can't contain one (shell
+ * export syntax), and every value must be a string so spawn() doesn't have to
+ * coerce at the boundary.
+ * @param {unknown} value
+ * @returns {value is Record<string, string>}
+ */
+function isEnvironment(value) {
+  return isObject(value)
+    && Object.entries(value).every(
+      ([name, entry]) =>
+        isNonEmptyString(name)
+        && !name.includes("=")
+        && typeof entry === "string"
+    );
+}
+
 /** @param {unknown} value @param {(value: unknown) => boolean} predicate @returns {boolean} */
 function optional(value, predicate) {
   return value === undefined || predicate(value);
@@ -81,13 +100,13 @@ function validParams(method, params) {
     case "system.health":
       return hasOnly(params, []);
     case "task.dispatch":
-      return hasOnly(params, ["prompt", "directory", "model", "variant", "sessionId", "keySlot", "finalMarker", "originSessionId", "noSandbox", "allowedDirs", "executor"])
+      return hasOnly(params, ["prompt", "directory", "model", "variant", "sessionId", "env", "finalMarker", "originSessionId", "noSandbox", "allowedDirs", "executor"])
         && isNonEmptyString(params.prompt)
         && isAbsolutePath(params.directory)
         && optional(params.model, isNonEmptyString)
         && optional(params.variant, isNonEmptyString)
         && optional(params.sessionId, isNonEmptyString)
-        && optional(params.keySlot, isNonEmptyString)
+        && optional(params.env, isEnvironment)
         && optional(params.finalMarker, isNonEmptyString)
         && optional(params.originSessionId, isNonEmptyString)
         && optional(params.noSandbox, (value) => typeof value === "boolean")
@@ -115,19 +134,32 @@ function validParams(method, params) {
       return hasOnly(params, ["taskId", "chars"])
         && isNonEmptyString(params.taskId)
         && optional(params.chars, (value) => positiveInteger(value) && value <= 65536);
-    case "task.summary":
-      return hasOnly(params, ["taskId", "maxWords", "mode"])
+    case "task.summary": {
+      if (params.env !== undefined && params.mode === "activity") {
+        // env is meaningless on the activity path -- it reads the cached
+        // task activity and spawns nothing, so there's no process to forward
+        // caller env into. A caller passing it is expressing an intent the
+        // daemon can't honor; reject here so direct RPC callers see a clean
+        // error instead of silently dropping the field. The CLI gates this
+        // on its end too (commands.js), so a normal `taskferry summary
+        // --mode activity` never sends the combination.
+        return false;
+      }
+      return hasOnly(params, ["taskId", "maxWords", "mode", "env"])
         && isNonEmptyString(params.taskId)
         && optional(params.maxWords, (value) => Number.isSafeInteger(value) && /** @type {number} */ (value) >= 75 && /** @type {number} */ (value) <= 300)
-        && optional(params.mode, (value) => value === "report" || value === "activity");
+        && optional(params.mode, (value) => value === "report" || value === "activity")
+        && optional(params.env, isEnvironment);
+    }
     case "task.advisor":
-      return hasOnly(params, ["prompt", "directory", "model", "variant", "sessionId", "timeoutMs", "executor"])
+      return hasOnly(params, ["prompt", "directory", "model", "variant", "sessionId", "env", "timeoutMs", "executor"])
         && isNonEmptyString(params.prompt)
         && isAbsolutePath(params.directory)
         && isNonEmptyString(params.model)
         && optional(params.variant, isNonEmptyString)
         && optional(params.sessionId, isNonEmptyString)
         && optional(params.timeoutMs, nonNegativeInteger)
+        && optional(params.env, isEnvironment)
         && optional(params.executor, (value) => typeof value === "string" && KNOWN_EXECUTORS.includes(value));
     case "task.context":
       return hasOnly(params, ["directory"]) && isAbsolutePath(params.directory);
@@ -189,6 +221,14 @@ export function parseRequestLine(line) {
     );
   }
   if (!validParams(value.method, value.params)) {
+    if (value.method === "task.summary" && value.params.env !== undefined && value.params.mode === "activity") {
+      throw new ProtocolError(
+        "INVALID_PARAMS",
+        "task.summary does not accept env with mode \"activity\"",
+        "Omit env, or use mode \"report\" so the spawned summary child can forward caller env",
+        requestId
+      );
+    }
     throw new ProtocolError(
       "INVALID_PARAMS",
       `invalid params for ${value.method}`,

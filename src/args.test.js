@@ -26,7 +26,6 @@ test("parses dispatch and applies its argument defaults", () => {
       model: undefined,
       variant: undefined,
       sessionId: undefined,
-      keySlot: undefined,
       finalMarker: undefined,
       noSandbox: false,
       allowedDirs: undefined,
@@ -40,14 +39,14 @@ test("parses each command's required arguments and defaults", () => {
   const cwd = "/workspace/project";
   assert.equal(parseArgs(["cancel", "oc_1"]).options.taskId, "oc_1");
   assert.deepEqual(parseArgs(["wait", "oc_1"]).options, { taskId: "oc_1", timeoutMs: undefined, tailChars: undefined, full: false, summarize: false });
-  assert.equal(parseArgs(["advisor", "--prompt", "help", "--model", "test/model"], { cwd }).options.directory, cwd);
+  assert.equal(parseArgs(["advisor", "--prompt", "help", "--model", "test/model"], { cwd }).options.directory, undefined);
   assert.equal(parseArgs(["status", "oc_1"]).options.full, false);
   assert.equal(parseArgs(["tail", "oc_1"]).options.chars, undefined);
   assert.equal(parseArgs(["summary", "oc_1"]).options.mode, "report");
   assert.equal(parseArgs(["result", "oc_1"]).options.full, false);
-  assert.equal(parseArgs(["list"], { cwd }).options.directory, cwd);
+  assert.equal(parseArgs(["list"], { cwd }).options.directory, undefined);
   assert.equal(parseArgs(["watch"], { cwd }).options.format, "toon");
-  assert.equal(parseArgs(["context"], { cwd }).options.format, "toon");
+  assert.equal(parseArgs(["context"], { cwd }).options.directory, undefined);
   assert.equal(parseArgs(["doctor"]).options.full, false);
 });
 
@@ -145,6 +144,7 @@ test("parses workspace, stream, and result options with their constrained values
     format: "ndjson",
     summaries: true,
     taskId: undefined,
+    flushIntervalMs: undefined,
   });
   assert.deepEqual(parseArgs(["list", "--all", "--limit", "10"]).options, {
     directory: undefined,
@@ -174,6 +174,7 @@ test("parses watch --task-id and rejects it for commands that don't take it", ()
     format: "toon",
     summaries: false,
     taskId: "oc_1",
+    flushIntervalMs: undefined,
   });
   assert.throws(() => parseArgs(["status", "oc_1", "--task-id", "oc_2"]), /task id is required|unknown flag/);
 });
@@ -184,7 +185,7 @@ test("rejects empty option values and trailing global arguments as usage errors"
   assert.throws(() => parseArgs(["--help", "extra"]), /unexpected argument: extra/);
 });
 
-test("parses wait --summarize and rejects it combined with --timeout-ms or --tail-chars", () => {
+test("parses wait --summarize and rejects it combined with --timeout or --tail-chars", () => {
   assert.deepEqual(parseArgs(["wait", "oc_1", "--summarize"]).options, {
     taskId: "oc_1",
     timeoutMs: undefined,
@@ -192,7 +193,7 @@ test("parses wait --summarize and rejects it combined with --timeout-ms or --tai
     full: false,
     summarize: true,
   });
-  assert.throws(() => parseArgs(["wait", "oc_1", "--summarize", "--timeout-ms", "5000"]), /--summarize cannot be combined with --timeout-ms/);
+  assert.throws(() => parseArgs(["wait", "oc_1", "--summarize", "--timeout", "5000"]), /--summarize cannot be combined with --timeout/);
   assert.throws(() => parseArgs(["wait", "oc_1", "--summarize", "--tail-chars", "500"]), /--summarize cannot be combined with --tail-chars/);
 });
 
@@ -243,4 +244,141 @@ test("parses dispatch --no-sandbox", () => {
   assert.equal(parseArgs(["dispatch", "--prompt", "x", "--no-sandbox"]).options.noSandbox, true);
   assert.throws(() => parseArgs(["dispatch", "--prompt", "x", "--no-sandbox=1"]), /--no-sandbox does not take a value/);
   assert.throws(() => parseArgs(["wait", "oc_1", "--no-sandbox"]), /unknown flag --no-sandbox/);
+});
+
+test("wait --timeout accepts bare milliseconds and duration strings", () => {
+  assert.equal(parseArgs(["wait", "oc_1", "--timeout", "0"]).options.timeoutMs, 0);
+  assert.equal(parseArgs(["wait", "oc_1", "--timeout", "10000"]).options.timeoutMs, 10000);
+  assert.equal(parseArgs(["wait", "oc_1", "--timeout", "30s"]).options.timeoutMs, 30_000);
+  assert.equal(parseArgs(["wait", "oc_1", "--timeout", "5m"]).options.timeoutMs, 300_000);
+  assert.equal(parseArgs(["wait", "oc_1", "--timeout", "1h"]).options.timeoutMs, 3_600_000);
+});
+
+test("wait --timeout rejects malformed duration strings", () => {
+  const cases = ["-1", "1.5m", "5M", "1h30m", " 5m", "5m ", "abc", ""];
+  for (const value of cases) {
+    assert.throws(() => parseArgs(["wait", "oc_1", "--timeout", value]), UsageError, `expected rejection for "${value}"`);
+  }
+});
+
+test("--timeout-ms and --timeout_ms both error with a migration message pointing at --timeout", () => {
+  const migrationAssert = (args) => assert.throws(
+    () => parseArgs(args),
+    (error) => error instanceof UsageError
+      && /unknown flag/.test(error.message)
+      && /use --timeout/.test(error.help)
+  );
+  migrationAssert(["wait", "oc_1", "--timeout-ms", "5000"]);
+  migrationAssert(["wait", "oc_1", "--timeout_ms", "5000"]);
+  migrationAssert(["advisor", "--prompt", "p", "--model", "m", "--timeout-ms", "5000"]);
+});
+
+test("--timeout-ms on a command that doesn't accept --timeout falls through to a plain unknown-flag error", () => {
+  // The migration hint targets --timeout, which is only valid on wait/advisor.
+  // On status, emitting "use --timeout" as remediation would just produce a
+  // second "unknown flag --timeout" error — so the migration branch itself
+  // should fall through and emit the standard "Valid flags for status" hint
+  // without the misleading "use --timeout" line.
+  assert.throws(
+    () => parseArgs(["status", "oc_1", "--timeout-ms", "5000"]),
+    (error) => {
+      assert.ok(error instanceof UsageError);
+      assert.match(error.message, /unknown flag --timeout-ms/);
+      assert.doesNotMatch(error.help, /use --timeout/);
+      assert.match(error.help, /Valid flags for status/);
+      return true;
+    }
+  );
+  // Same for --timeout_ms.
+  assert.throws(
+    () => parseArgs(["status", "oc_1", "--timeout_ms", "5000"]),
+    (error) => /unknown flag --timeout_ms/.test(error.message)
+      && !/use --timeout/.test(error.help)
+  );
+});
+
+test("wait --timeout accepts a duration just under the setTimeout maximum", () => {
+  // Node's setTimeout max is 2^31-1 ms (~24.8 days); values above that are
+  // silently clamped to 1ms, which would silently fire the wait timer after
+  // ~1ms instead of the requested duration. Just-under stays parseable.
+  const justUnderMs = 2_147_483_647;
+  assert.equal(parseArgs(["wait", "oc_1", "--timeout", String(justUnderMs)]).options.timeoutMs, justUnderMs);
+  // 596h -> 2_145_600_000 ms (just under the max)
+  assert.equal(parseArgs(["wait", "oc_1", "--timeout", "596h"]).options.timeoutMs, 596 * 3_600_000);
+});
+
+test("wait --timeout rejects a duration exceeding the setTimeout maximum", () => {
+  // 1000000h is the exact "looks parseable, silently fires after ~1ms"
+  // example: total ~36 trillion ms, well past the 2^31-1 ms setTimeout cap.
+  assert.throws(
+    () => parseArgs(["wait", "oc_1", "--timeout", "1000000h"]),
+    (error) => {
+      assert.ok(error instanceof UsageError);
+      assert.match(error.message, /must not exceed/);
+      assert.match(error.help, /2147483647 milliseconds/);
+      return true;
+    }
+  );
+  // Just over the cap in bare-ms form.
+  assert.throws(
+    () => parseArgs(["wait", "oc_1", "--timeout", "2147483648"]),
+    /must not exceed/
+  );
+});
+
+test("home's default directory is left undefined (resolved later via resolveWorkspaceRoot), for both the empty-argv and bare --help fast-paths", () => {
+  assert.equal(parseArgs([], { cwd: "/workspace/project" }).options.directory, undefined);
+  assert.equal(parseArgs(["--help"], { cwd: "/workspace/project" }).options.directory, undefined);
+});
+
+test("dispatch rejects --key-slot as an unknown flag", () => {
+  assert.throws(
+    () => parseArgs(["dispatch", "--prompt", "do it", "--key-slot", "primary"], { cwd: "/workspace/project" }),
+    /unknown flag --key-slot for `dispatch`/
+  );
+});
+
+test("dispatch's default directory stays literal cwd, unaffected by the observation-command directory default change", () => {
+  assert.equal(parseArgs(["dispatch", "--prompt", "x"], { cwd: "/workspace/project" }).options.directory, "/workspace/project");
+});
+
+test("advisor's default directory stays undefined (resolved later to literal cwd, not the workspace root), unaffected by the observation-command directory default change", () => {
+  // advisor is grouped with dispatch at the cli/commands layers because
+  // tasks.js's advisor() forwards its directory straight into dispatch(),
+  // which uses it as both the bwrap sandbox root and the worker's spawn
+  // cwd. args.js leaves directory undefined for both dispatch's callers
+  // (which get cwd from cli.js) and advisor's callers, so an explicit
+  // pin here guards the args-layer shape those downstream layers depend
+  // on.
+  assert.equal(parseArgs(["advisor", "--prompt", "x", "--model", "m"], { cwd: "/workspace/project" }).options.directory, undefined);
+});
+
+test("parses watch --flush-interval as a duration and requires --summaries", () => {
+  assert.equal(
+    parseArgs(["watch", "--summaries", "--flush-interval", "5m"]).options.flushIntervalMs,
+    300000
+  );
+  assert.equal(
+    parseArgs(["watch", "--summaries", "--flush-interval", "30000"]).options.flushIntervalMs,
+    30000
+  );
+  assert.throws(
+    () => parseArgs(["watch", "--flush-interval", "5m"]),
+    /--flush-interval requires --summaries/
+  );
+});
+
+test("watch --flush-interval 0 (and 0s) errors with a clear UsageError instead of silently falling back to per-event streaming", () => {
+  // A zero-length flush interval is meaningless: streamTaskEvents's
+  // truthy check (`flushIntervalMs ? ... : null`) would otherwise treat
+  // 0 as "not set" and silently fall back to per-event streaming,
+  // hiding the user's intent. args.js rejects it explicitly.
+  assert.throws(
+    () => parseArgs(["watch", "--summaries", "--flush-interval", "0"]),
+    /--flush-interval must be greater than zero/
+  );
+  assert.throws(
+    () => parseArgs(["watch", "--summaries", "--flush-interval", "0s"]),
+    /--flush-interval must be greater than zero/
+  );
 });

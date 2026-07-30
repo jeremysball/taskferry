@@ -46,6 +46,7 @@ describe("piExecutor()", () => {
     const ex = piExecutor();
     assert.deepEqual(ex.sandboxAuthFile({ homeDir: "/home/user", dataDir: "/state/run", spawnEnv: { PI_CODING_AGENT_DIR: "/custom/pi" }, existsFn: (p) => p === "/custom/pi/auth.json" }), {
       extraRoBinds: [["/custom/pi/auth.json", "/state/run/pi-data/auth.json"]],
+      extraRwPairBinds: [],
       sandboxedDataHome: "/state/run/pi-data",
       sandboxEnv: { PI_CODING_AGENT_DIR: "/state/run/pi-data" },
     });
@@ -59,10 +60,10 @@ describe("piExecutor()", () => {
     assert.equal(piExecutor().binaryName, "pi");
   });
 
-  test("sandboxAuthFile falls back to ~/.pi", () => {
+  test("sandboxAuthFile falls back to ~/.pi/agent", () => {
     const ex = piExecutor();
-    const result = ex.sandboxAuthFile({ homeDir: "/home/user", dataDir: "/state/run", spawnEnv: {}, existsFn: (p) => p === "/home/user/.pi/auth.json" });
-    assert.deepEqual(result.extraRoBinds, [["/home/user/.pi/auth.json", "/state/run/pi-data/auth.json"]]);
+    const result = ex.sandboxAuthFile({ homeDir: "/home/user", dataDir: "/state/run", spawnEnv: {}, existsFn: (p) => p === "/home/user/.pi/agent/auth.json" });
+    assert.deepEqual(result.extraRoBinds, [["/home/user/.pi/agent/auth.json", "/state/run/pi-data/auth.json"]]);
   });
 
   test("sandboxAuthFile also binds the real extensions directory read-only, so custom-registered providers still resolve inside the sandbox", () => {
@@ -83,6 +84,203 @@ describe("piExecutor()", () => {
     const ex = piExecutor();
     const result = ex.sandboxAuthFile({ homeDir: "/home/user", dataDir: "/state/run", spawnEnv: { PI_CODING_AGENT_DIR: "/custom/pi" }, existsFn: (p) => p === "/custom/pi/auth.json" });
     assert.deepEqual(result.extraRoBinds, [["/custom/pi/auth.json", "/state/run/pi-data/auth.json"]]);
+  });
+
+  test("sandboxAuthFile binds the single resumed session file read-write (not the whole sessions directory), scoping pi writes to that one session only", () => {
+    const ex = piExecutor();
+    const realSessionsDir = "/custom/pi/sessions";
+    const realSafePathDir = `${realSessionsDir}/--home-user-projects-foo--`;
+    const realSessionFile = `${realSafePathDir}/2026-07-23T21-42-41-761Z_019f90ea-1234-70e0-98dc-6847db316eb4.jsonl`;
+    const result = ex.sandboxAuthFile({
+      homeDir: "/home/user",
+      dataDir: "/state/run",
+      spawnEnv: { PI_CODING_AGENT_DIR: "/custom/pi" },
+      existsFn: (p) => p === "/custom/pi/auth.json" || p === realSessionsDir,
+      statFn: (p) => (p === realSessionsDir ? { isDirectory: () => true } : null),
+      readdirFn: (p) => (p === realSafePathDir ? [realSessionFile.split("/").pop()] : []),
+      sessionId: "019f90ea-1234-70e0-98dc-6847db316eb4",
+      launchDirectory: "/home/user/projects/foo",
+    });
+    assert.deepEqual(result.extraRoBinds, [["/custom/pi/auth.json", "/state/run/pi-data/auth.json"]]);
+    // The bind is the SINGLE resumed session file mapped onto the matching
+    // path inside the sandboxed sessions tree -- not the whole `sessions/`
+    // directory, which would have let the worker tamper with every other
+    // session in the user's pi history.
+    assert.deepEqual(result.extraRwPairBinds, [
+      [realSessionFile, "/state/run/pi-data/sessions/--home-user-projects-foo--/2026-07-23T21-42-41-761Z_019f90ea-1234-70e0-98dc-6847db316eb4.jsonl"],
+    ]);
+  });
+
+  test("sandboxAuthFile matches a sessionId prefix to a session file under the per-cwd encoded subdirectory", () => {
+    const ex = piExecutor();
+    const realSafePathDir = "/custom/pi/sessions/--home-user-projects-foo--";
+    const realSessionFile = `${realSafePathDir}/2026-07-23T21-42-41-761Z_019f90ea-1234-70e0-98dc-6847db316eb4.jsonl`;
+    const result = ex.sandboxAuthFile({
+      homeDir: "/home/user",
+      dataDir: "/state/run",
+      spawnEnv: { PI_CODING_AGENT_DIR: "/custom/pi" },
+      existsFn: () => true,
+      statFn: (p) => (p === "/custom/pi/sessions" ? { isDirectory: () => true } : null),
+      readdirFn: (p) => (p === realSafePathDir ? ["2026-07-23T21-42-41-761Z_019f90ea-1234-70e0-98dc-6847db316eb4.jsonl"] : []),
+      // A UUID prefix -- pi's own --session <id> resolver accepts the same.
+      sessionId: "019f90ea",
+      launchDirectory: "/home/user/projects/foo",
+    });
+    assert.equal(result.extraRwPairBinds.length, 1);
+    assert.equal(result.extraRwPairBinds[0][0], realSessionFile);
+    assert.equal(result.extraRwPairBinds[0][1], "/state/run/pi-data/sessions/--home-user-projects-foo--/2026-07-23T21-42-41-761Z_019f90ea-1234-70e0-98dc-6847db316eb4.jsonl");
+  });
+
+  test("sandboxAuthFile binds a literal session file path verbatim when sessionId looks like a path (no readdir scan)", () => {
+    const ex = piExecutor();
+    const literalSessionPath = "/custom/pi/sessions/--home-user-projects-bar--/manual-session.jsonl";
+    const readdirCalls = [];
+    const result = ex.sandboxAuthFile({
+      homeDir: "/home/user",
+      dataDir: "/state/run",
+      spawnEnv: { PI_CODING_AGENT_DIR: "/custom/pi" },
+      existsFn: () => true,
+      statFn: () => ({ isDirectory: () => true }),
+      readdirFn: (p) => { readdirCalls.push(p); return []; },
+      sessionId: literalSessionPath,
+      launchDirectory: "/home/user/projects/bar",
+    });
+    assert.deepEqual(result.extraRwPairBinds, [[literalSessionPath, "/state/run/pi-data/sessions/--home-user-projects-bar--/manual-session.jsonl"]]);
+    // A path-shaped sessionId must not trigger a readdir of the per-cwd
+    // subdirectory -- pi treats it as a literal path, no lookup needed.
+    assert.equal(readdirCalls.length, 0);
+  });
+
+  test("sandboxAuthFile omits the sessions bind when no sessionId was given (fresh dispatch, not a resume)", () => {
+    const ex = piExecutor();
+    const result = ex.sandboxAuthFile({
+      homeDir: "/home/user",
+      dataDir: "/state/run",
+      spawnEnv: { PI_CODING_AGENT_DIR: "/custom/pi" },
+      existsFn: (p) => p === "/custom/pi/auth.json" || p === "/custom/pi/sessions",
+      // no sessionId -- a fresh dispatch, not a resume.
+    });
+    assert.deepEqual(result.extraRoBinds, [["/custom/pi/auth.json", "/state/run/pi-data/auth.json"]]);
+    assert.deepEqual(result.extraRwPairBinds, []);
+  });
+
+  test("sandboxAuthFile omits the sessions bind when the real sessions directory doesn't exist", () => {
+    const ex = piExecutor();
+    const result = ex.sandboxAuthFile({ homeDir: "/home/user", dataDir: "/state/run", spawnEnv: { PI_CODING_AGENT_DIR: "/custom/pi" }, existsFn: (p) => p === "/custom/pi/auth.json" });
+    assert.deepEqual(result.extraRoBinds, [["/custom/pi/auth.json", "/state/run/pi-data/auth.json"]]);
+    assert.deepEqual(result.extraRwPairBinds, []);
+  });
+
+  test("sandboxAuthFile omits the sessions bind when the per-cwd subdirectory has no matching session file", () => {
+    const ex = piExecutor();
+    const result = ex.sandboxAuthFile({
+      homeDir: "/home/user",
+      dataDir: "/state/run",
+      spawnEnv: { PI_CODING_AGENT_DIR: "/custom/pi" },
+      existsFn: () => true,
+      statFn: () => ({ isDirectory: () => true }),
+      readdirFn: () => ["unrelated.jsonl"], // No file with this sessionId prefix.
+      sessionId: "nonexistent",
+      launchDirectory: "/home/user/projects/foo",
+    });
+    // Better to bind nothing than to bind the wrong file: a wrong-file bind
+    // would let the worker persist resume state into someone else's session.
+    assert.deepEqual(result.extraRwPairBinds, []);
+  });
+
+  test("sandboxAuthFile omits the sessions bind when the per-cwd subdirectory has multiple matching session files (ambiguous prefix)", () => {
+    const ex = piExecutor();
+    const realSafePathDir = "/custom/pi/sessions/--home-user-projects-foo--";
+    const result = ex.sandboxAuthFile({
+      homeDir: "/home/user",
+      dataDir: "/state/run",
+      spawnEnv: { PI_CODING_AGENT_DIR: "/custom/pi" },
+      existsFn: () => true,
+      statFn: () => ({ isDirectory: () => true }),
+      readdirFn: (p) => (
+        p === realSafePathDir
+          ? [
+              "2026-07-23T21-42-41-761Z_019f90ea-1234-70e0-98dc-6847db316eb4.jsonl",
+              "2026-07-24T09-00-00-000Z_019f90ea-9999-70e0-98dc-6847db316eb4.jsonl",
+            ]
+          : []
+      ),
+      // A short prefix matches two distinct files -- pi's own resolver
+      // surfaces "no session found matching..." to the user. We can't do
+      // that from here, and a guess would write to the wrong file.
+      sessionId: "019f90ea",
+      launchDirectory: "/home/user/projects/foo",
+    });
+    assert.deepEqual(result.extraRwPairBinds, []);
+  });
+
+  test("sandboxAuthFile omits the sessions bind when the real sessions path exists but isn't a directory (isDirectory guard)", () => {
+    const ex = piExecutor();
+    const result = ex.sandboxAuthFile({
+      homeDir: "/home/user",
+      dataDir: "/state/run",
+      spawnEnv: { PI_CODING_AGENT_DIR: "/custom/pi" },
+      existsFn: (p) => p === "/custom/pi/auth.json" || p === "/custom/pi/sessions",
+      // existsFn lies and says the path is there, but statFn reports it as
+      // a stray non-directory file (e.g. a stale symlink to a regular file).
+      statFn: (p) => (p === "/custom/pi/sessions" ? { isDirectory: () => false } : null),
+      sessionId: "019f90ea-1234-70e0-98dc-6847db316eb4",
+      launchDirectory: "/home/user/projects/foo",
+    });
+    // A bwrap --bind of a non-directory file at the destination directory
+    // path would fail; the right answer is to skip the bind entirely.
+    assert.deepEqual(result.extraRwPairBinds, []);
+  });
+
+  test("sandboxAuthFile omits the sessions bind when statFn throws on the real sessions path", () => {
+    const ex = piExecutor();
+    const result = ex.sandboxAuthFile({
+      homeDir: "/home/user",
+      dataDir: "/state/run",
+      spawnEnv: { PI_CODING_AGENT_DIR: "/custom/pi" },
+      existsFn: (p) => p === "/custom/pi/auth.json" || p === "/custom/pi/sessions",
+      statFn: () => { throw new Error("EACCES"); },
+      sessionId: "019f90ea-1234-70e0-98dc-6847db316eb4",
+      launchDirectory: "/home/user/projects/foo",
+    });
+    assert.deepEqual(result.extraRwPairBinds, []);
+  });
+
+  test("sandboxAuthFile omits the sessions bind when readdirFn throws on the per-cwd subdirectory", () => {
+    const ex = piExecutor();
+    const result = ex.sandboxAuthFile({
+      homeDir: "/home/user",
+      dataDir: "/state/run",
+      spawnEnv: { PI_CODING_AGENT_DIR: "/custom/pi" },
+      existsFn: () => true,
+      statFn: () => ({ isDirectory: () => true }),
+      readdirFn: () => { throw new Error("EACCES"); },
+      sessionId: "019f90ea-1234-70e0-98dc-6847db316eb4",
+      launchDirectory: "/home/user/projects/foo",
+    });
+    assert.deepEqual(result.extraRwPairBinds, []);
+  });
+
+  test("sandboxAuthFile computes the per-cwd encoded subdirectory exactly like pi's getDefaultSessionDir does", () => {
+    // Encoded the same way pi's core/session-manager.js getDefaultSessionDir
+    // does: `--${cwd.replace(/^[/\\]/, "").replace(/[/\\:]/g, "-")}--`.
+    // A drift here silently breaks every resume by looking in the wrong
+    // directory inside the sandbox, so we pin it via a spy on readdirFn.
+    const ex = piExecutor();
+    const seenPaths = [];
+    const realSafePathDir = "/custom/pi/sessions/--var-folders-abc-T-project--";
+    ex.sandboxAuthFile({
+      homeDir: "/home/user",
+      dataDir: "/state/run",
+      spawnEnv: { PI_CODING_AGENT_DIR: "/custom/pi" },
+      existsFn: () => true,
+      statFn: () => ({ isDirectory: () => true }),
+      readdirFn: (p) => { seenPaths.push(p); return p === realSafePathDir ? ["2026-07-23T21-42-41-761Z_019f90ea-1234-70e0-98dc-6847db316eb4.jsonl"] : []; },
+      sessionId: "019f90ea-1234-70e0-98dc-6847db316eb4",
+      launchDirectory: "/var/folders/abc/T/project",
+    });
+    // Leading slash is stripped and inner slashes are dashed -- same as pi.
+    assert.ok(seenPaths.includes(realSafePathDir), `expected readdirFn to be called with ${realSafePathDir}, got ${JSON.stringify(seenPaths)}`);
   });
 });
 
@@ -259,8 +457,12 @@ describe("opencodeExecutor()", () => {
     assert.deepEqual(result.extraRoBinds, []);
   });
 
-  test("resolveExecutor: undefined and \"opencode\" both resolve to opencodeExecutor", () => {
-    assert.equal(resolveExecutor(undefined).id, "opencode");
+  test("resolveExecutor: undefined and \"pi\" both resolve to piExecutor", () => {
+    assert.equal(resolveExecutor(undefined).id, "pi");
+    assert.equal(resolveExecutor("pi").id, "pi");
+  });
+
+  test("resolveExecutor: \"opencode\" resolves to opencodeExecutor", () => {
     assert.equal(resolveExecutor("opencode").id, "opencode");
   });
 

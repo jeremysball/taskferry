@@ -187,6 +187,62 @@ describe("Unix socket daemon", () => {
     assert.deepEqual(lastAdvisorCall, ["advisor", { prompt: "hi", directory: paths.root, model: "m", executor: "pi" }]);
   });
 
+  test("forwards an env param on task.summary to manager.summarize", async (t) => {
+    const paths = temporaryPaths(t);
+    const fake = fakeManagerFactory();
+    const daemon = await startDaemon({ ...paths, taskManagerFactory: fake.factory });
+    t.after(() => daemon.close());
+    const peer = await openPeer(paths.socketPath);
+    t.after(() => peer.close());
+
+    await peer.request("summarize", "task.summary", { taskId: "t1", env: { FOO: "bar" } });
+
+    const lastSummarizeCall = fake.calls.filter((call) => call[0] === "summarize").at(-1);
+    assert.deepEqual(lastSummarizeCall, ["summarize", "t1", { taskId: "t1", env: { FOO: "bar" } }]);
+  });
+
+  test("forwards the whole validated task.summary params object (not a field-list rebuild), so a new field the manager accepts rides through without a daemon.js change", async (t) => {
+    const paths = temporaryPaths(t);
+    const fake = fakeManagerFactory();
+    const daemon = await startDaemon({ ...paths, taskManagerFactory: fake.factory });
+    t.after(() => daemon.close());
+    const peer = await openPeer(paths.socketPath);
+    t.after(() => peer.close());
+
+    await peer.request("summarize", "task.summary", { taskId: "t1", maxWords: 200, env: { FOO: "bar" } });
+
+    const lastSummarizeCall = fake.calls.filter((call) => call[0] === "summarize").at(-1);
+    assert.deepEqual(lastSummarizeCall, ["summarize", "t1", { taskId: "t1", maxWords: 200, env: { FOO: "bar" } }]);
+  });
+
+  test("forwards an env param on task.advisor to manager.advisor", async (t) => {
+    const paths = temporaryPaths(t);
+    const fake = fakeManagerFactory();
+    const daemon = await startDaemon({ ...paths, taskManagerFactory: fake.factory });
+    t.after(() => daemon.close());
+    const peer = await openPeer(paths.socketPath);
+    t.after(() => peer.close());
+
+    await peer.request("advise", "task.advisor", { prompt: "hi", directory: paths.root, model: "m", env: { FOO: "bar" } });
+
+    const lastAdvisorCall = fake.calls.filter((call) => call[0] === "advisor").at(-1);
+    assert.deepEqual(lastAdvisorCall, ["advisor", { prompt: "hi", directory: paths.root, model: "m", env: { FOO: "bar" } }]);
+  });
+
+  test("forwards the whole validated task.advisor params object (not a field-list rebuild), so a new field the manager accepts rides through without a daemon.js change", async (t) => {
+    const paths = temporaryPaths(t);
+    const fake = fakeManagerFactory();
+    const daemon = await startDaemon({ ...paths, taskManagerFactory: fake.factory });
+    t.after(() => daemon.close());
+    const peer = await openPeer(paths.socketPath);
+    t.after(() => peer.close());
+
+    await peer.request("advise", "task.advisor", { prompt: "hi", directory: paths.root, model: "m", variant: "high", timeoutMs: 30000 });
+
+    const lastAdvisorCall = fake.calls.filter((call) => call[0] === "advisor").at(-1);
+    assert.deepEqual(lastAdvisorCall, ["advisor", { prompt: "hi", directory: paths.root, model: "m", variant: "high", timeoutMs: 30000 }]);
+  });
+
   test("propagates manager.advisor() errors through the RPC layer", async (t) => {
     const paths = temporaryPaths(t);
     const fake = fakeManagerFactory();

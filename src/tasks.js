@@ -1,18 +1,17 @@
-import { execFile, spawn } from "node:child_process";
+import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { promisify } from "node:util";
 import { createTaskEvents } from "./events.js";
 import { createActivityCache, readActivitySnapshot, readDeltaNarration, DEFAULT_SUMMARIZER_TIMEOUT_MS } from "./activity.js";
 import { withFileLock } from "./state-lock.js";
-import { resolveStateDir, resolveCacheDir } from "./paths.js";
+import { resolveStateDir, resolveCacheDir, TASKFERRY_PLUMBING_ENV_VARS } from "./paths.js";
 import { RESULT_FIELDS } from "./protocol.js";
 import { formatToolEventForNarration } from "./narration-format.js";
 import { errCode } from "./errors.js";
 import { isNonNegativeInteger, isPositiveInteger } from "./numbers.js";
-import { buildBwrapArgs, checkBwrapAvailable, defaultDenyList, platformSupportsSandbox, resolveGitCommonDir } from "./sandbox.js";
+import { buildBwrapArgs, checkBwrapAvailable, defaultDenyList, platformSupportsSandbox, resolveGitCommonDir, resolveGitDir } from "./sandbox.js";
 import { resolveExecutor, opencodeExecutor } from "./executor.js";
 
 /**
@@ -47,7 +46,6 @@ import { resolveExecutor, opencodeExecutor } from "./executor.js";
  * @property {boolean} internal
  * @property {string|null} [failureReason]
  * @property {string|null} [failureDetail]
- * @property {string|null} [keySlot]
  * @property {SummaryOf} [summaryOf]
  * @property {boolean} [incomplete]
  * @property {string|null} [finalMarker]
@@ -74,7 +72,6 @@ import { resolveExecutor, opencodeExecutor } from "./executor.js";
  * @property {boolean} cancelRequested
  * @property {string|null} [failureReason]
  * @property {string|null} [failureDetail]
- * @property {string|null} [keySlot]
  * @property {string|null} [spawnError]
  * @property {boolean} [incomplete]
  * @property {string|null} [finalMarker]
@@ -99,7 +96,7 @@ import { resolveExecutor, opencodeExecutor } from "./executor.js";
  * @property {string} model
  * @property {string|null} variant
  * @property {string|null|undefined} [sessionId]
- * @property {string|null} [keyEnvValue]
+ * @property {NodeJS.ProcessEnv} [env]
  * @property {boolean} [noSandbox]
  * @property {string[]} [allowedDirs]
  * @property {import("./executor.js").WorkerExecutor} executor
@@ -112,8 +109,7 @@ import { resolveExecutor, opencodeExecutor } from "./executor.js";
  * @property {"summary"} kind
  * @property {string} model
  * @property {string} snapshotPath
- * @property {NodeJS.ProcessEnv} env
- * @property {string|null} [keyEnvValue]
+ * @property {NodeJS.ProcessEnv} [env]   caller env snapshot (cloned at request time, same as dispatch's capturedEnv). Computed into the final env at spawn time by startTask().
  * @property {string} [summarySessionId]  opencode session id to continue on this turn, if any
  * @property {import("./executor.js").WorkerExecutor} executor
  */
@@ -133,7 +129,6 @@ import { resolveExecutor, opencodeExecutor } from "./executor.js";
  * @property {string|null} [spawnError]
  * @property {string|null} [failureReason]
  * @property {string|null} [failureDetail]
- * @property {string|null} [keySlot]
  * @property {string|null} [sessionId]
  * @property {unknown} [tokens]
  * @property {number|null} [cost]
@@ -161,8 +156,6 @@ const SUMMARY_INPUT_BYTES = 96 * 1024;
 // riding the exact limit.
 const PROMPT_ARGV_SAFE_BYTES = 96 * 1024;
 export const DEFAULT_SUMMARY_MODEL = "opencode/mimo-v2.5-free";
-const SUMMARY_PREFLIGHT_TIMEOUT_MS = 10000;
-const execFileAsync = promisify(execFile);
 
 // Ordered most-specific-first: real provider error text often combines
 // more than one signal (e.g. "Rate limit exceeded, check your quota"), so
@@ -350,27 +343,6 @@ function errMessage(err) {
 
 /**
  * @param {string|undefined} spec
- * @returns {Map<string, string>}
- */
-export function parseKeySlots(spec) {
-  const slots = new Map();
-  if (!spec) return slots;
-  for (const entry of spec.split(",")) {
-    const trimmed = entry.trim();
-    if (!trimmed) continue;
-    const sepIndex = trimmed.indexOf(":");
-    const name = sepIndex === -1 ? "" : trimmed.slice(0, sepIndex).trim();
-    const sourceEnvVar = sepIndex === -1 ? "" : trimmed.slice(sepIndex + 1).trim();
-    if (!name || !sourceEnvVar) {
-      throw new Error(`error: malformed TASKFERRY_KEY_SLOTS entry: ${JSON.stringify(trimmed)}\nhelp: use the form name:ENV_VAR_NAME, comma-separated`);
-    }
-    slots.set(name, sourceEnvVar);
-  }
-  return slots;
-}
-
-/**
- * @param {string|undefined} spec
  * @returns {string[]}
  */
 export function parseAllowedDirs(spec) {
@@ -379,6 +351,16 @@ export function parseAllowedDirs(spec) {
     .split(",")
     .map((entry) => entry.trim())
     .filter(Boolean);
+}
+
+/**
+ * Parses a comma-separated env var denylist. Same comma-list semantics as
+ * {@link parseAllowedDirs}, kept under its own name for call-site clarity.
+ * @param {string|undefined} spec
+ * @returns {string[]}
+ */
+export function parseEnvDenylist(spec) {
+  return parseAllowedDirs(spec);
 }
 
 /**
@@ -411,11 +393,17 @@ const DEFAULT_CANCEL_GRACE_MS = 5000;
  * @param {object} [options]
  * @param {typeof spawn} [options.spawnFn]
  * @param {(pid: number, signal: NodeJS.Signals) => void} [options.killFn]
- * @param {(env?: NodeJS.ProcessEnv) => Promise<string>} [options.listModelsFn]
+ * @param {(env: NodeJS.ProcessEnv) => Promise<string>} [options.listModelsFn] - shell-out for the
+ *   installed-models list used to validate `TASKFERRY_SUMMARY_MODEL` is available before any summary
+ *   call. Defaults to `opencodeExecutor().listModelsFn` -- not `defaultExecutor.listModelsFn` --
+ *   because `summarizeTask()` deliberately hardcodes `opencodeExecutor()` for the actual summary
+ *   work (separately tracked scope boundary from the dispatch-default executor flip). A default-config
+ *   pi install must validate the configured summary model against opencode's list, since that's the
+ *   CLI summaries actually run through regardless of which executor dispatches use.
  * @param {import("./executor.js").WorkerExecutor} [options.defaultExecutor] - fallback WorkerExecutor used when
  *   a dispatch doesn't request one explicitly. Per-dispatch selection (Task 6) calls `resolveExecutor(params.executor)`
  *   and overrides this; this option exists so tests and embedders can swap in a different default without the
- *   `dispatch({...})` params surface. Defaults to `resolveExecutor(undefined)` → `opencodeExecutor()`.
+ *   `dispatch({...})` params surface. Defaults to `resolveExecutor(undefined)` → `piExecutor()`.
  * @param {string} [options.stateDir]
  * @param {Record<string, unknown>} [options.config]
  * @param {number} [options.maxDispatchesPerWindow]
@@ -428,21 +416,23 @@ const DEFAULT_CANCEL_GRACE_MS = 5000;
  * @param {number} [options.watchdogGraceMs]
  * @param {number} [options.cancelGraceMs]
  * @param {number} [options.maxWaitMs]
- * @param {string} [options.keySlotsSpec]
- * @param {string|null} [options.providerKeyEnvName]
- * @param {string|null} [options.summaryKeySlot]
- * @param {string|null} [options.summaryProviderKeyEnvName]
  * @param {boolean} [options.activitySummariesEnabled]
  * @param {number} [options.summarizerTimeoutMs]
  * @param {string} [options.activitySummaryModel]
  * @param {number} [options.activityMaxWords]
  * @param {NodeJS.Platform} [options.platform]
  * @param {boolean} [options.sandboxEnabled]
+ * @param {string[]} [options.envDenylist] - env var names stripped from every spawned child's
+ *   environment, applied last (after the caller-env union), regardless of whether the value
+ *   came from the daemon's own ambient environment or the caller.
  * @param {string[]} [options.allowedDirs] - extra directories always bound read-write inside the sandbox,
  *   in addition to the auto-detected git-common-dir for a worktree dispatch directory.
  * @param {(directory: string) => string|null} [options.resolveGitCommonDirFn]
+ * @param {(directory: string) => string|null} [options.resolveGitDirFn]
  * @param {() => {checked: boolean, available: boolean, reason?: string}} [options.checkBwrapAvailableFn]
  * @param {(path: string) => boolean} [options.existsFn]
+ * @param {(path: string) => {isDirectory: () => boolean}|null} [options.statFn]
+ * @param {(path: string) => string[]} [options.readdirFn]
  * @param {string} [options.runtimeDir]
  * @param {string} [options.cacheDir]
  * @param {(event: object) => void} [options.onEvent]
@@ -454,12 +444,15 @@ const DEFAULT_CANCEL_GRACE_MS = 5000;
 export function createTaskManager({
   spawnFn = spawn,
   killFn = (pid, signal) => process.kill(pid, signal),
-  listModelsFn = async (env) => (await execFileAsync("opencode", ["models"], { encoding: "utf8", timeout: SUMMARY_PREFLIGHT_TIMEOUT_MS, env })).stdout,
   stateDir = DEFAULT_STATE_DIR,
   config = {},
   defaultExecutor = resolveExecutor(
     process.env.TASKFERRY_DEFAULT_EXECUTOR || /** @type {string|undefined} */ (config.defaultExecutor)
   ),
+  // Defaults to whichever executor is actually the manager's default, so a
+  // pi-only install (no opencode CLI on PATH) doesn't ENOENT the first time
+  // it touches `taskferry summary` or `watch --summaries`.
+  listModelsFn = opencodeExecutor().listModelsFn,
   maxDispatchesPerWindow = positiveInteger(
     Number(process.env.TASKFERRY_MAX_DISPATCHES_PER_WINDOW),
     positiveInteger(/** @type {number} */ (config.maxDispatchesPerWindow), DEFAULT_MAX_DISPATCHES_PER_WINDOW)
@@ -494,10 +487,6 @@ export function createTaskManager({
     positiveInteger(/** @type {number} */ (config.cancelGraceMs), DEFAULT_CANCEL_GRACE_MS)
   ),
   maxWaitMs = MAX_WAIT_MS,
-  keySlotsSpec = process.env.TASKFERRY_KEY_SLOTS ?? /** @type {string|undefined} */ (config.keySlots),
-  providerKeyEnvName = process.env.TASKFERRY_PROVIDER_KEY_ENV || /** @type {string|undefined} */ (config.providerKeyEnv) || null,
-  summaryKeySlot = process.env.TASKFERRY_SUMMARY_KEY_SLOT || /** @type {string|undefined} */ (config.summaryKeySlot) || null,
-  summaryProviderKeyEnvName = process.env.TASKFERRY_SUMMARY_PROVIDER_KEY_ENV || /** @type {string|undefined} */ (config.summaryProviderKeyEnv) || null,
   activitySummariesEnabled = process.env.TASKFERRY_ACTIVITY_SUMMARIES !== undefined
     ? process.env.TASKFERRY_ACTIVITY_SUMMARIES !== "0"
     : (/** @type {boolean|undefined} */ (config.activitySummariesEnabled) ?? true),
@@ -515,9 +504,13 @@ export function createTaskManager({
     ? !["1", "true"].includes(process.env.TASKFERRY_DISABLE_SANDBOX)
     : (/** @type {boolean|undefined} */ (config.sandboxEnabled) ?? true),
   allowedDirs = parseAllowedDirs(process.env.TASKFERRY_ALLOWED_DIRS ?? /** @type {string|undefined} */ (config.allowedDirs)),
+  envDenylist = parseEnvDenylist(process.env.TASKFERRY_ENV_DENYLIST ?? /** @type {string|undefined} */ (config.envDenylist)),
   resolveGitCommonDirFn = resolveGitCommonDir,
+  resolveGitDirFn = resolveGitDir,
   checkBwrapAvailableFn = checkBwrapAvailable,
   existsFn = fs.existsSync,
+  statFn = (/** @type {string} */ p) => { try { return fs.statSync(p); } catch { return null; } },
+  readdirFn = (/** @type {string} */ p) => fs.readdirSync(p),
   runtimeDir = path.join(stateDir, "run"),
   cacheDir = resolveCacheDir(process.env),
   onEvent,
@@ -542,7 +535,6 @@ export function createTaskManager({
   const watchdogGrace = positiveInteger(watchdogGraceMs, DEFAULT_WATCHDOG_GRACE_MS);
   const cancelGrace = positiveInteger(cancelGraceMs, DEFAULT_CANCEL_GRACE_MS);
   const maxWait = positiveInteger(maxWaitMs, MAX_WAIT_MS);
-  const keySlots = parseKeySlots(keySlotsSpec);
   const summarizerTimeout = nonNegativeInteger(summarizerTimeoutMs, DEFAULT_SUMMARIZER_TIMEOUT_MS);
   const activityWords = positiveInteger(activityMaxWords, 75);
   let eventSequence = 0;
@@ -565,57 +557,56 @@ export function createTaskManager({
     }
   }
 
-  function environmentWithoutKeySlotSources() {
-    const env = { ...process.env };
-    for (const sourceEnvVar of keySlots.values()) delete env[sourceEnvVar];
-    return env;
+  const CALLER_ENV_EXCLUDED = new Set(["PATH", "HOME", ...TASKFERRY_PLUMBING_ENV_VARS]);
+
+  /**
+   * Builds the final base environment for a spawned child: the daemon's own
+   * ambient environment (read fresh at call time), overlaid with the
+   * caller-supplied `env` (caller wins, except for CALLER_ENV_EXCLUDED --
+   * daemon-controlled plumbing resolved once at the daemon's own startup),
+   * with `envDenylist` stripped last regardless of which side the value
+   * came from. Applies the same key/value rules as the RPC-level
+   * isEnvironment so a programmatic caller that bypasses the socket (no
+   * isEnvironment gate) can't smuggle a malformed key past the spawn
+   * boundary -- bad keys throw synchronously here, which startTask() catches
+   * and surfaces as a spawnError on a crashed task rather than a
+   * silently-dropped value. Null or undefined env is treated as empty (as
+   * the pre-validation spread did) rather than rejected.
+   * @param {NodeJS.ProcessEnv} [env]
+   * @returns {NodeJS.ProcessEnv}
+   */
+  function sanitizedEnvironment(env = {}) {
+    const callerEnv = env ?? {};
+    const merged = { ...process.env };
+    for (const name of Object.keys(callerEnv)) {
+      if (name === "" || name.includes("=")) {
+        throw new Error(`error: invalid env key in caller-supplied env: ${JSON.stringify(name)}\nhelp: env keys must be non-empty strings without '=' characters`);
+      }
+      if (typeof callerEnv[name] !== "string") {
+        throw new Error(`error: env value for ${JSON.stringify(name)} must be a string, got ${typeof callerEnv[name]}\nhelp: cast values to strings before dispatching`);
+      }
+      if (CALLER_ENV_EXCLUDED.has(name)) continue;
+      merged[name] = callerEnv[name];
+    }
+    for (const name of envDenylist) delete merged[name];
+    return merged;
   }
 
-  /** @param {string|null|undefined} keyEnvValue */
-  function dispatchEnvironment(keyEnvValue) {
-    const env = environmentWithoutKeySlotSources();
-    if (keyEnvValue != null && providerKeyEnvName) {
-      env[providerKeyEnvName] = keyEnvValue;
-    } else if (providerKeyEnvName && process.env[providerKeyEnvName] != null) {
-      // No key_slot was requested for this task. environmentWithoutKeySlotSources()
-      // strips every registered slot *source* var, which silently erases the
-      // server's own ambient provider key whenever a slot happens to source
-      // from that same variable name (the natural setup: TASKFERRY_PROVIDER_KEY_ENV
-      // doubles as one slot's source, e.g. both named OPENCODE_GO_API_KEY).
-      // Restore the ambient value here so an unslotted dispatch still gets a
-      // key instead of failing deep in the opencode child with no diagnostic
-      // (GLM-5.2 review of 0d944df..4e75129, finding 2).
-      env[providerKeyEnvName] = process.env[providerKeyEnvName];
-    }
-    env.TASKFERRY_CHILD = "1";
-    return env;
+  /** @param {NodeJS.ProcessEnv} [env] */
+  function dispatchEnvironment(env) {
+    const result = sanitizedEnvironment(env);
+    result.TASKFERRY_CHILD = "1";
+    return result;
   }
 
-  function summaryEnvironment() {
-    const env = environmentWithoutKeySlotSources();
-    delete env.OPENCODE_CONFIG;
-    delete env.OPENCODE_CONFIG_DIR;
-    delete env.OPENCODE_CONFIG_CONTENT;
-    if (summaryKeySlot && summaryProviderKeyEnvName) {
-      const sourceEnvVar = keySlots.get(summaryKeySlot);
-      if (!sourceEnvVar) {
-        throw new Error(`error: TASKFERRY_SUMMARY_KEY_SLOT "${summaryKeySlot}" is not a configured key slot\nhelp: add it to TASKFERRY_KEY_SLOTS or fix TASKFERRY_SUMMARY_KEY_SLOT`);
-      }
-      const value = process.env[sourceEnvVar];
-      if (!value) {
-        throw new Error(`error: summary key slot "${summaryKeySlot}" source variable ${sourceEnvVar} is not set\nhelp: set ${sourceEnvVar}, then stop the taskferry daemon (kill the pid from \`taskferry doctor --full\`) so the next command starts a fresh one with the new environment`);
-      }
-      env[summaryProviderKeyEnvName] = value;
-    } else if (summaryProviderKeyEnvName && process.env[summaryProviderKeyEnvName] != null) {
-      // No summary key_slot was requested. environmentWithoutKeySlotSources() strips
-      // every registered slot *source* var, which silently erases the ambient summary
-      // provider key whenever a slot happens to source from that same variable name.
-      // Restore it so the summary child still gets a key instead of failing deep in
-      // the opencode child with no diagnostic (GLM-5.2 review of PR #23, finding 4).
-      env[summaryProviderKeyEnvName] = process.env[summaryProviderKeyEnvName];
-    }
-    env.TASKFERRY_CHILD = "1";
-    return env;
+  /** @param {NodeJS.ProcessEnv} [env] */
+  function summaryEnvironment(env) {
+    const result = sanitizedEnvironment(env);
+    delete result.OPENCODE_CONFIG;
+    delete result.OPENCODE_CONFIG_DIR;
+    delete result.OPENCODE_CONFIG_CONTENT;
+    result.TASKFERRY_CHILD = "1";
+    return result;
   }
 
   for (const dir of [stateDir, LOG_DIR, SUMMARY_DIR, PROMPT_DIR]) {
@@ -679,7 +670,20 @@ export function createTaskManager({
   /** @type {NodeJS.Timeout|null} */
   let launchTimer = null;
   let runningCount = 0;
-  let modelsCache = { expiresAt: 0, output: "" };
+  // Per-caller cache of provider model listings: keyed by a fingerprint of
+  // the caller env's model-relevant vars (provider API keys, opencode
+  // config-path overrides, pi agent dir), not by time alone. Two callers
+  // with different credentials must not read each other's listings -- the
+  // shared single-entry cache used to let caller A's listModelsFn output
+  // satisfy caller B's availability check (and let two concurrent populate
+  // writes interleave). The 5-minute TTL still applies per entry.
+  // `modelsCacheInFlight` coalesces concurrent reads for the same key so
+  // the underlying `opencode models` shell-out runs at most once per
+  // fingerprint per TTL window.
+  /** @type {Map<string, {expiresAt: number, output: string}>} */
+  const modelsCache = new Map();
+  /** @type {Map<string, Promise<{expiresAt: number, output: string}>>} */
+  const modelsCacheInFlight = new Map();
   let activitySummarySubscriptions = 0;
   /** @type {Map<string, Set<boolean>>} */
   const activitySubscriptions = new Map();
@@ -852,11 +856,10 @@ export function createTaskManager({
    * @returns {TaskSummary}
    */
   function summarize(task) {
-    const { promptPreview, promptTotalChars, id, status, directory, model, sessionId, originSessionId, pid, startedAt, endedAt, exitCode, signal, logPath, cancelRequested, keySlot, incomplete, finalMarker, spawnError, executorId } = task;
+    const { promptPreview, promptTotalChars, id, status, directory, model, sessionId, originSessionId, pid, startedAt, endedAt, exitCode, signal, logPath, cancelRequested, incomplete, finalMarker, spawnError, executorId } = task;
     return {
       id, status, directory, model, sessionId, originSessionId, pid, startedAt, endedAt, exitCode, signal, logPath,
       ...failureFields(task),
-      keySlot: keySlot ?? null,
       spawnError: spawnError ?? null,
       promptPreview,
       ...(promptTotalChars != null ? { promptTotalChars } : {}),
@@ -913,41 +916,6 @@ export function createTaskManager({
   }
 
   /**
-   * Derives the conventional env var name (PROVIDER_API_KEY) for a model's
-   * provider prefix, e.g. "openrouter/meta/x" -> "OPENROUTER_API_KEY",
-   * "opencode-go/y" -> "OPENCODE_GO_API_KEY" (the same convention already
-   * used for key_slot source vars elsewhere in this file).
-   * @param {string} model
-   * @returns {string|null}
-   */
-  function providerKeyEnvNameFor(model) {
-    const slash = model.indexOf("/");
-    if (slash === -1) return null;
-    const provider = model.slice(0, slash);
-    return `${provider.toUpperCase().replace(/[^A-Z0-9]+/g, "_")}_API_KEY`;
-  }
-
-  /**
-   * @param {string|null|undefined} keySlot
-   * @returns {{keySlot: string|null, keyEnvValue: string|null}}
-   */
-  function resolveKeySlot(keySlot) {
-    if (keySlot == null) return { keySlot: null, keyEnvValue: null };
-    if (!providerKeyEnvName) {
-      throw new Error("error: key_slot given but TASKFERRY_PROVIDER_KEY_ENV is not configured\nhelp: set TASKFERRY_PROVIDER_KEY_ENV on the server before using key_slot");
-    }
-    if (!keySlots.has(keySlot)) {
-      throw new Error(`error: unknown key_slot: ${keySlot}\nhelp: configured slots are: ${Array.from(keySlots.keys()).join(", ") || "(none configured)"}`);
-    }
-    const sourceEnvVar = /** @type {string} */ (keySlots.get(keySlot));
-    const value = process.env[sourceEnvVar];
-    if (!value) {
-      throw new Error(`error: key_slot "${keySlot}" source variable ${sourceEnvVar} is not set\nhelp: set ${sourceEnvVar}, then stop the taskferry daemon (kill the pid from \`taskferry doctor --full\`) so the next command starts a fresh one with the new environment`);
-    }
-    return { keySlot, keyEnvValue: value };
-  }
-
-  /**
    * @param {object} params
    * @param {string} params.prompt
    * @param {string} params.directory
@@ -955,20 +923,51 @@ export function createTaskManager({
    * @param {string} [params.variant]
    * @param {string|undefined} [params.sessionId]
    * @param {string|undefined} [params.originSessionId]
-   * @param {string|null} [params.keySlot]
+   * @param {NodeJS.ProcessEnv} [params.env]
    * @param {boolean} [params.internal]
    * @param {string|null} [params.finalMarker]
    * @param {boolean} [params.noSandbox]
    * @param {string[]} [params.allowedDirs] - extra directories bound read-write for this dispatch only, on
    *   top of the manager-level default (see createTaskManager's `allowedDirs` option)
-   * @param {string} [params.executor] - "opencode" | "pi", defaults to the manager's defaultExecutor
-   *   (itself the result of `resolveExecutor(undefined)` at construction). An unknown name throws before
-   *   any validation runs, so a misrouted CLI/RPC call fails fast rather than silently picking the default.
+   * @param {string} [params.executor] - "opencode" | "pi". When omitted on a `sessionId` resume, inherits
+   *   the executor that originally created the session (a different executor can't continue another CLI's
+   *   session file); otherwise defaults to the manager's defaultExecutor (itself the result of
+   *   `resolveExecutor(undefined)` at construction). An unknown name throws before any validation runs, so a
+   *   misrouted CLI/RPC call fails fast rather than silently picking the default.
    * @returns {TaskSummary & {next: string}}
    */
-  function dispatch({ prompt, directory, model, variant, sessionId, keySlot, internal = false, finalMarker = null, originSessionId, noSandbox = false, allowedDirs: dispatchAllowedDirs, executor: executorName }) {
+  function dispatch({ prompt, directory, model, variant, sessionId, internal = false, finalMarker = null, originSessionId, noSandbox = false, allowedDirs: dispatchAllowedDirs, executor: executorName, env }) {
     ensureStateLoaded();
-    const executor = executorName === undefined ? defaultExecutor : resolveExecutor(executorName);
+    // A resume (--session-id with no --executor) should inherit the executor
+    // the session was actually created under, not silently fall back to the
+    // manager's default -- a different executor has no way to continue a
+    // session file another CLI's binary wrote. When --executor is given
+    // explicitly, scope the lookup to tasks that match it too: session ids
+    // are only unique per executor, so an explicit --executor pi alongside a
+    // sessionId that collides with an unrelated opencode task must not let
+    // that opencode task's model leak into this pi dispatch.
+    /** @type {Task|null} */
+    let priorSessionTask = null;
+    if (sessionId) {
+      for (const t of tasks.values()) {
+        if (
+          t.sessionId === sessionId
+          && (executorName === undefined || t.executorId === executorName)
+          && (!priorSessionTask || t.startedAt > priorSessionTask.startedAt)
+        ) {
+          priorSessionTask = t;
+        }
+      }
+    }
+    // Reuse the manager's single pre-built defaultExecutor instance when the
+    // inherited/explicit executor matches it, instead of allocating a fresh
+    // WorkerExecutor on every session-inheriting resume.
+    const executor =
+      executorName !== undefined
+        ? (executorName === defaultExecutor.id ? defaultExecutor : resolveExecutor(executorName))
+        : priorSessionTask
+          ? (priorSessionTask.executorId === defaultExecutor.id ? defaultExecutor : resolveExecutor(priorSessionTask.executorId))
+          : defaultExecutor;
     if (!prompt || typeof prompt !== "string") {
       throw new Error("error: prompt is required\nhelp: taskferry dispatch requires a non-empty prompt string");
     }
@@ -995,8 +994,6 @@ export function createTaskManager({
       throw new Error(`error: directory does not exist: ${directory}\nhelp: check the path or create the directory first (${errMessage(err)})`, { cause: err });
     }
 
-    const resolvedKeySlot = resolveKeySlot(keySlot);
-
     // Task IDs retain the literal "oc_" prefix for compatibility; WorkerExecutor.taskIdPrefix is not wired in this issue.
     const id = `oc_${Date.now().toString(36)}_${randomUUID().slice(0, 8)}`;
     const logPath = path.join(LOG_DIR, `${id}.ndjson`);
@@ -1005,28 +1002,8 @@ export function createTaskManager({
     // session was actually created under, not silently fall back to the
     // hardcoded default -- a different model can mean a different provider,
     // breaking the whole point of resuming that exact session.
-    /** @type {Task|null} */
-    let priorSessionTask = null;
-    if (sessionId) {
-      for (const t of tasks.values()) {
-        if (t.sessionId === sessionId && (!priorSessionTask || t.startedAt > priorSessionTask.startedAt)) priorSessionTask = t;
-      }
-    }
     const usingDefaultModel = !model;
     const resolvedModel = model || priorSessionTask?.model || executor.defaultModel;
-
-    // Fail fast instead of letting a generic, opaque crash surface from deep
-    // inside the spawned opencode child (issue #63). Only applies when this
-    // dispatch's own provider is the one TASKFERRY_PROVIDER_KEY_ENV targets --
-    // every other provider's credentials are opencode's own responsibility
-    // (auth.json, ambient env) and outside taskferry's knowledge.
-    if (providerKeyEnvName && providerKeyEnvNameFor(resolvedModel) === providerKeyEnvName) {
-      const keyValue = resolvedKeySlot.keyEnvValue || process.env[providerKeyEnvName];
-      if (!keyValue) {
-        const provider = resolvedModel.slice(0, resolvedModel.indexOf("/"));
-        throw new Error(`error: no credentials available for ${provider} (${providerKeyEnvName} is not set)\nhelp: export ${providerKeyEnvName} in the daemon's environment (then restart the daemon) or pass a key_slot that resolves to a value`);
-      }
-    }
 
     /** @type {Task} */
     const task = {
@@ -1051,13 +1028,27 @@ export function createTaskManager({
       internal: internal === true,
       failureReason: null,
       failureDetail: null,
-      keySlot: resolvedKeySlot.keySlot,
       incomplete: false,
       finalMarker: finalMarker == null ? null : finalMarker,
     };
     tasks.set(id, task);
     persistTask(task.id);
-    pendingLaunches.set(id, { prompt, directory: normalizedDirectory, model: resolvedModel, variant: task.variant, sessionId, keyEnvValue: resolvedKeySlot.keyEnvValue, noSandbox: noSandbox === true, allowedDirs: dispatchAllowedDirs, executor });
+    // Capture the caller env at dispatch time rather than holding the caller's
+    // reference directly: later in-place mutations by the caller (or
+    // accidental reuse across retries) must not be able to silently change
+    // what's already queued for spawn. dispatchEnvironment() still reads
+    // process.env fresh at spawn time, so the daemon's own ambient overrides
+    // track process state, not the dispatch-time snapshot.
+    //
+    // Note: this clone is NOT redundant despite what one might guess from
+    // sanitizedEnvironment()'s one-pass merge -- it reads Object.keys() and
+    // each value lazily at spawn time, so without this snapshot a caller
+    // mutating their original env object between queue time and the queued
+    // launch's actual spawn would change what reaches the child. Pinned by
+    // tasks.test.js's "dispatch()'s queued env is frozen against later
+    // caller mutations" gate; removing the clone makes that test fail.
+    const capturedEnv = env === undefined ? undefined : { ...env };
+    pendingLaunches.set(id, { prompt, directory: normalizedDirectory, model: resolvedModel, variant: task.variant, sessionId, env: capturedEnv, noSandbox: noSandbox === true, allowedDirs: dispatchAllowedDirs, executor });
     launchQueue.push(id);
     launchQueuedTasks();
 
@@ -1071,18 +1062,88 @@ export function createTaskManager({
   }
 
   /**
+   * Fingerprint of the caller env's model-relevant subset: which keys and
+   * values determine which models a provider exposes to opencode/pi.
+   * Includes every `*_API_KEY` suffix (any provider credential a user can
+   * name), every `*_BASE_URL` suffix (provider endpoint overrides -- a
+   * corporate proxy or self-hosted endpoint exposes a different catalog
+   * than the stock API host), the opencode config/model-list/auth
+   * overrides (`OPENCODE_CONFIG*`, `OPENCODE_AUTH_CONTENT`,
+   * `OPENCODE_MODELS_PATH`, `OPENCODE_MODELS_URL` -- the latter three
+   * each verified to change `opencode models` output), and
+   * `PI_CODING_AGENT_DIR` (the per-user pi state root whose auth.json
+   * gates which providers pi can list). Known gaps: provider vars with
+   * no suffix pattern (e.g. `OLLAMA_HOST`, Vertex location/project vars).
+   * Intentionally excludes unrelated caller vars -- PATH, LANG, USER,
+   * ... -- so trivial cosmetic differences don't fragment the cache into
+   * per-call entries.
+   * @param {NodeJS.ProcessEnv} env
+   * @returns {string}
+   */
+  function modelsCacheFingerprint(env = {}) {
+    /** @type {string[]} */
+    const parts = [];
+    for (const name of Object.keys(env)) {
+      if (
+        name.endsWith("_API_KEY")
+        || name.endsWith("_BASE_URL")
+        || name === "OPENCODE_CONFIG"
+        || name === "OPENCODE_CONFIG_DIR"
+        || name === "OPENCODE_CONFIG_CONTENT"
+        || name === "OPENCODE_AUTH_CONTENT"
+        || name === "OPENCODE_MODELS_PATH"
+        || name === "OPENCODE_MODELS_URL"
+        || name === "PI_CODING_AGENT_DIR"
+      ) {
+        parts.push(`${name}=${env[name]}`);
+      }
+    }
+    parts.sort();
+    return parts.join("\n");
+  }
+
+  /**
+   * Validate `model` against opencode's installed-models list, NOT against
+   * the dispatch-default executor's list. `summarizeTask()` deliberately
+   * hardcodes `opencodeExecutor()` for the actual summary work -- a separate
+   * scope boundary from the dispatch-default executor flip -- so a model
+   * available in pi but not in opencode (e.g. an opencode-only Zen model
+   * like the default `opencode/mimo-v2.5-free`) would silently fail the
+   * check on a default pi install. The cached `modelsCache` is shared with
+   * the check, so a follow-up dispatch doesn't re-shell-out for the list
+   * within the 5-minute TTL.
+   *
    * @param {string} model
    * @param {NodeJS.ProcessEnv} env
    */
   async function summaryModelAvailable(model, env) {
-    if (Date.now() >= modelsCache.expiresAt) {
-      try {
-        modelsCache = { expiresAt: Date.now() + 5 * 60 * 1000, output: await listModelsFn(env) };
-      } catch (err) {
-        throw new Error(`error: could not list available OpenCode models: ${errMessage(err)}\nhelp: verify that opencode is installed and authenticated, then retry taskferry summary`, { cause: err });
+    const fingerprint = modelsCacheFingerprint(env);
+    let entry = modelsCache.get(fingerprint);
+    const now = Date.now();
+    if (!entry || now >= entry.expiresAt) {
+      let inFlight = modelsCacheInFlight.get(fingerprint);
+      if (!inFlight) {
+        inFlight = (async () => {
+          try {
+            const output = await listModelsFn(env);
+            const result = { expiresAt: Date.now() + 5 * 60 * 1000, output };
+            modelsCache.set(fingerprint, result);
+            return result;
+          } catch (err) {
+            throw new Error(`error: could not list available OpenCode models: ${errMessage(err)}\nhelp: verify that opencode is installed and authenticated, then retry taskferry summary`, { cause: err });
+          } finally {
+            modelsCacheInFlight.delete(fingerprint);
+          }
+        })();
+        modelsCacheInFlight.set(fingerprint, inFlight);
       }
+      await inFlight;
+      // The populate either set the cache entry (success) or threw (we
+      // never reach this line). The non-null assertion is just to placate
+      // TypeScript, which can't track the await-vs-set dependency.
+      entry = /** @type {{expiresAt: number, output: string}} */ (modelsCache.get(fingerprint));
     }
-    if (!modelsCache.output.split("\n").some((line) => line.trim() === model)) {
+    if (!entry.output.split("\n").some((line) => line.trim() === model)) {
       throw new Error(`error: summary model is unavailable: ${model}\nhelp: set TASKFERRY_SUMMARY_MODEL to an installed model, then retry taskferry summary`);
     }
   }
@@ -1207,7 +1268,7 @@ export function createTaskManager({
     };
   }
 
-  /** @param {string} taskId @param {{maxWords?: number, mode?: string}} [options] */
+  /** @param {string} taskId @param {{maxWords?: number, mode?: string, env?: NodeJS.ProcessEnv}} [options] */
   function summarizeRequest(taskId, options = {}) {
     if (options.mode === "activity") return activitySummary(taskId, options.maxWords ?? activityWords);
     return summarizeTask(taskId, options);
@@ -1283,10 +1344,10 @@ export function createTaskManager({
 
   /**
    * @param {string} taskId
-   * @param {{maxWords?: number, allowPromptFallback?: boolean, previousActivity?: string|null, summarySessionId?: string|null, lastSummarizedWatermark?: number|null, respectConcurrencyReserve?: boolean}} [options]
+   * @param {{maxWords?: number, allowPromptFallback?: boolean, previousActivity?: string|null, summarySessionId?: string|null, lastSummarizedWatermark?: number|null, respectConcurrencyReserve?: boolean, env?: NodeJS.ProcessEnv}} [options]
    */
   async function summarizeTask(taskId, options = {}) {
-    const { maxWords = 200, allowPromptFallback = false, previousActivity = null, respectConcurrencyReserve = false } = options;
+    const { maxWords = 200, allowPromptFallback = false, previousActivity = null, respectConcurrencyReserve = false, env } = options;
     // `summarySessionId` and `lastSummarizedWatermark` use `undefined` (not
     // `null`) as the "look it up in the activity cache" sentinel, because the
     // activity path's continue-failure retry needs to *force* a fresh launch
@@ -1389,8 +1450,16 @@ export function createTaskManager({
       snapshot.narration = `Task prompt: ${prompt}`;
       snapshot.inputBytes = Buffer.byteLength(snapshot.narration);
     }
-    const env = summaryEnvironment();
-    await summaryModelAvailable(activitySummaryModel, env);
+    // Clone the caller env at request time (same defensive snapshot as
+    // dispatch() applies, for the same reason: a queued summary launch
+    // must not be vulnerable to post-queue caller mutations of the
+    // original env object). The summary env itself -- the daemon's ambient
+    // overlay plus the OPENCODE_CONFIG* strip -- is computed at spawn time
+    // by startTask() below, mirroring how dispatch() defers
+    // dispatchEnvironment() until spawn so the spawned summary child sees
+    // the daemon's current process.env, not a request-time snapshot.
+    const queuedCallerEnv = env === undefined ? undefined : { ...env };
+    await summaryModelAvailable(activitySummaryModel, queuedCallerEnv ?? {});
 
     // Task IDs retain the literal "oc_" prefix for compatibility; WorkerExecutor.taskIdPrefix is not wired in this issue.
     const id = `oc_${Date.now().toString(36)}_${randomUUID().slice(0, 8)}`;
@@ -1446,7 +1515,7 @@ export function createTaskManager({
       kind: "summary",
       model: activitySummaryModel,
       snapshotPath,
-      env,
+      env: queuedCallerEnv,
       executor: opencodeExecutor(),
       ...(resolvedSummarySessionId ? { summarySessionId: resolvedSummarySessionId } : {}),
     });
@@ -1538,7 +1607,7 @@ export function createTaskManager({
       if (promptFilePath) fs.writeFileSync(promptFilePath, dispatchLaunch.prompt, { mode: 0o600, flag: "wx" });
       logFd = fs.openSync(task.logPath, "a", 0o600);
       fs.chmodSync(task.logPath, 0o600);
-      let spawnEnv = isSummary ? summaryLaunch.env : dispatchEnvironment(dispatchLaunch.keyEnvValue);
+      let spawnEnv = isSummary ? summaryEnvironment(summaryLaunch.env) : dispatchEnvironment(dispatchLaunch.env);
       const noSandbox = !isSummary && dispatchLaunch.noSandbox === true;
       let spawnCommand = executor.binaryName;
       let spawnArgs = args;
@@ -1555,8 +1624,25 @@ export function createTaskManager({
         // sandboxed data home (opencode: XDG_DATA_HOME; pi:
         // PI_CODING_AGENT_DIR) and which destination to ro-bind the real
         // auth file into, so each executor's bound auth destination matches
-        // its own environment directory.
-        const { extraRoBinds: executorRoBinds, sandboxedDataHome, sandboxEnv } = executor.sandboxAuthFile({ homeDir, dataDir: cacheDir, spawnEnv, existsFn });
+        // its own environment directory. Threading the dispatch's
+        // sessionId + launchDirectory through lets pi scope any sessions
+        // bind to just the resumed session's file -- a worker can write
+        // its own session, but not touch every other session in the
+        // user's pi history.
+        const {
+          extraRoBinds: executorRoBinds,
+          extraRwPairBinds: executorRwPairBinds = [],
+          sandboxedDataHome,
+          sandboxEnv,
+        } = executor.sandboxAuthFile({
+          homeDir,
+          dataDir: cacheDir,
+          spawnEnv,
+          existsFn,
+          statFn,
+          readdirFn,
+          ...(isSummary ? {} : { sessionId: dispatchLaunch.sessionId ?? null, launchDirectory: launchDirectory || null }),
+        });
         /** @type {[string, string][]} */
         const extraRoBinds = [...executorRoBinds];
         if (promptFilePath) extraRoBinds.push([PROMPT_DIR, PROMPT_DIR]);
@@ -1575,13 +1661,49 @@ export function createTaskManager({
         extraRwBinds.push(sandboxedDataHome);
         const gitCommonDir = resolveGitCommonDirFn(launchDirectory);
         if (gitCommonDir && existsFn(gitCommonDir) && isOutsideDirectory(launchDirectory, gitCommonDir)) {
-          extraRwBinds.push(gitCommonDir);
+          // launchDirectory is a linked worktree: the common dir is the
+          // *main* checkout's own .git, and binding it whole would also
+          // expose the main checkout's own private HEAD/index/config as
+          // writable to a dispatch that never named that checkout at all
+          // (taskferry#224 -- a dispatch against one worktree corrupted a
+          // completely different checkout's branch and working tree). A
+          // worktree's own admin files (HEAD/index/logs) live under
+          // gitCommonDir/worktrees/<name> instead; commits only ever need
+          // that private subdir plus the shared objects/refs data (verified
+          // by tracing which files an actual worktree commit touches -- see
+          // taskferry#224 investigation), never the common dir's top level.
+          const gitDir = resolveGitDirFn(launchDirectory);
+          if (gitDir && existsFn(gitDir) && gitDir !== gitCommonDir) {
+            // Bind this worktree's own private admin dir -- wherever it
+            // actually lives, even a non-standard layout where it sits
+            // outside gitCommonDir's own tree (e.g. a manually re-pointed
+            // `gitdir:`/`commondir` file) -- plus the shared data a commit
+            // needs. Never falls through to binding the whole common dir
+            // for any layout where a distinct private gitdir was resolved,
+            // so an unusual layout degrades to "some git ops may fail here"
+            // at worst, never back to the original taskferry#224 exposure.
+            extraRwBinds.push(gitDir);
+            for (const rel of ["objects", "refs", path.join("logs", "refs")]) {
+              const resolved = path.join(gitCommonDir, rel);
+              fs.mkdirSync(resolved, { recursive: true });
+              extraRwBinds.push(resolved);
+            }
+            const packedRefs = path.join(gitCommonDir, "packed-refs");
+            if (existsFn(packedRefs)) extraRwBinds.push(packedRefs);
+          } else {
+            // Not a recognizable linked-worktree layout (e.g. a submodule,
+            // where the "common dir" IS already that submodule's own
+            // private gitdir with no sibling checkout to protect) or gitDir
+            // resolution failed outright -- fall back to the previous broad
+            // bind rather than risk breaking commits.
+            extraRwBinds.push(gitCommonDir);
+          }
         }
         for (const dir of [...allowedDirs, ...(isSummary ? [] : dispatchLaunch.allowedDirs || [])]) {
           const resolved = path.isAbsolute(dir) ? dir : path.resolve(launchDirectory, dir);
           if (existsFn(resolved)) extraRwBinds.push(resolved);
         }
-        spawnArgs = buildBwrapArgs({ directory: launchDirectory, stateDir, runtimeDir, homeDir, denyList, extraRwBinds, extraRoBinds }).concat(["--", executor.binaryName, ...args]);
+        spawnArgs = buildBwrapArgs({ directory: launchDirectory, stateDir, runtimeDir, homeDir, denyList, extraRwBinds, extraRwPairBinds: executorRwPairBinds, extraRoBinds }).concat(["--", executor.binaryName, ...args]);
         spawnEnv = { ...spawnEnv, ...sandboxEnv };
       }
       // No tmux: the child has no shared session to introspect. It is its own
@@ -2244,8 +2366,9 @@ export function createTaskManager({
    * @param {string} [params.sessionId]
    * @param {number} [params.timeoutMs]
    * @param {string} [params.executor] - optional "opencode" | "pi" forwarded to dispatch().
+   * @param {NodeJS.ProcessEnv} [params.env] - caller environment forwarded to the worker.
    */
-  async function advisor({ prompt, directory, model, variant, sessionId, timeoutMs, executor } = {}) {
+  async function advisor({ prompt, directory, model, variant, sessionId, timeoutMs, executor, env } = {}) {
     ensureStateLoaded();
     if (!model || typeof model !== "string") {
       throw new Error("error: model is required\nhelp: taskferry advisor requires a provider/model string, e.g. \"openai/gpt-5.6-sol\"");
@@ -2254,7 +2377,7 @@ export function createTaskManager({
     /** @type {TaskSummary & {next: string}} */
     let dispatched;
     try {
-      dispatched = dispatch({ prompt: /** @type {string} */ (prompt), directory: /** @type {string} */ (directory), model, variant, sessionId: resolved.sessionId, executor });
+      dispatched = dispatch({ prompt: /** @type {string} */ (prompt), directory: /** @type {string} */ (directory), model, variant, sessionId: resolved.sessionId, executor, env });
     } catch (err) {
       throw new Error(errMessage(err).replaceAll("taskferry dispatch", "taskferry advisor"), { cause: err });
     }
@@ -2644,7 +2767,6 @@ export function createTaskManager({
       signal: task.signal,
       spawnError: task.spawnError,
       ...failureFields(task),
-      keySlot: task.keySlot ?? null,
       sessionId,
       tokens,
       cost,

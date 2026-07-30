@@ -1,15 +1,30 @@
 # taskferry
 
-An AXI-style CLI and local daemon for dispatching work to the `opencode`
-CLI as background tasks: run `taskferry dispatch`, get a task id back
-immediately, check on it or wait for it, then read the result. No MCP
-server, no tmux wrappers, no grepping logs for completion markers.
+taskferry is a middleman between a frontend agent and a backend executor: a
+`pi` or `opencode` child process running whatever model you point it at.
+Claude Code is the first-class frontend it's built around, though any
+harness\* can dispatch through it too. Dispatch a task, get an id back
+immediately, check on it or wait for it, then read the result whenever
+you're ready. No MCP server, no tmux wrappers, no grepping logs for
+completion markers.
+
+\* Meaning it can shell out, and preferably manages backgrounding itself
+(the way Claude Code natively runs a tool call in the background) rather
+than reaching for `&` or an equivalent shell-level backgrounding hack, the
+way opencode as a frontend does.
 
 ```bash
 taskferry dispatch --prompt "Fix the failing tests" --directory /workspace/my-repo
 taskferry wait <id>
 taskferry result <id>
 ```
+
+The pattern it's built for: Claude drives, planning the work and reviewing
+it when it's done, while cheap or free open source models grind through the
+actual grunt work in the background. Nothing in taskferry enforces that
+pairing, either end can be anything, but it's the reason a daemon-backed
+CLI beats blocking the frontend agent's own context on work it doesn't need
+to babysit token by token.
 
 ## Why a daemon and a CLI, not an MCP server
 
@@ -42,9 +57,10 @@ Object Notation), roughly 40% fewer tokens than JSON for the same data,
 with list-shaped results rendered as a compact table instead of a
 repeated-key array.
 
-`taskferry dispatch` spawns `opencode run --dir <directory> --auto --format
-json -m <model> -- <prompt>` (or the equivalent `pi` invocation with
-`--executor pi`) as a child process, detached to give its whole
+`taskferry dispatch` spawns `pi --provider <provider> --model <model> --mode
+json -p <prompt>` by default (or the equivalent `opencode run --dir
+<directory> --auto --format json -m <model> -- <prompt>` invocation with
+`--executor opencode`) as a child process, detached to give its whole
 process group one signal target, with stdout/stderr captured to a private
 per-task log. On Linux with sandboxing enabled (the default), the actual
 direct child is `bwrap`, with that command nested inside its arguments —
@@ -58,7 +74,7 @@ full process model.
 | Command | Purpose |
 |---|---|
 | `taskferry` | Show live workspace tasks and next actions |
-| `taskferry dispatch` | Queue a background OpenCode run |
+| `taskferry dispatch` | Queue a background model run |
 | `taskferry list` | List workspace tasks with counts |
 | `taskferry status <id>` | Task status and activity |
 | `taskferry wait <id>` | Wait for settlement or a timeout |
@@ -93,6 +109,7 @@ Windows.
 git clone https://github.com/jeremysball/taskferry.git
 cd taskferry
 node src/cli.js setup
+export PATH="$HOME/.local/bin:$PATH"
 taskferry --version
 ```
 
@@ -102,12 +119,11 @@ pointing at `src/cli.js`, `~/.local/bin/tf-sl` pointing at `src/tf-sl.sh`, and
 `$XDG_CONFIG_HOME/opencode/plugins/taskferry.js` (default
 `~/.config/opencode/plugins/taskferry.js`) pointing at
 `src/opencode-plugin.js`. It also registers the native agent integration
-for whichever client is on `PATH` (Claude Code, Codex). If `~/.local/bin`
-is not yet on your `PATH`, the result tells you to add it:
-
-```bash
-export PATH="$HOME/.local/bin:$PATH"
-```
+for whichever client is on `PATH` (Claude Code, Codex). The `export PATH`
+line above is what makes `taskferry --version` resolve on the very next
+line. It's only a no-op if `~/.local/bin` was already on your `PATH`
+before you started. Add it to your shell rc file (`~/.bashrc`, `~/.zshrc`,
+...) too, so future shells pick up `taskferry` without re-running it.
 
 `tf-sl` renders the taskferry segment for a Claude Code statusline command.
 Pipe the same JSON Claude Code feeds your statusline script into it, and it
@@ -115,6 +131,26 @@ prints an ANSI-colored `tf: <id> <status>` (or a live activity summary, at
 narrow terminal widths) for whichever task is running in the current `cwd`,
 or nothing if none is. Compose it into a larger statusline script
 (`printf '%s' "$input" | tf-sl`) rather than running it standalone.
+
+### Provider credentials
+
+`taskferry dispatch` spawns `pi` or `opencode`, not a model. Neither worker
+CLI ships with credentials, so a fresh install has none until you configure
+one yourself:
+
+- **`pi`** (the default executor): run `pi` once and type `/login` to
+  authenticate a provider via OAuth or API key, or set that provider's API
+  key env var directly (e.g. `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`) before
+  dispatching.
+- **`opencode`** (`--executor opencode`): run `opencode auth login`.
+
+Skipping this doesn't fail loudly at `dispatch` time. The task is accepted
+and reports `status: running`, then crashes a few seconds later once the
+worker CLI tries to reach a provider with no credentials. Check
+`taskferry status <id> --full` for `failureReason`/`failureDetail` if a
+task crashes immediately after your first dispatch; see
+[docs/troubleshooting.md](docs/troubleshooting.md#a-task-is-stuck-crashed-with-a-provider-failure-failurereason)
+for what each `failureReason` value means.
 
 ### Configuration
 
@@ -154,6 +190,17 @@ The native integration each agent uses is documented separately:
 Migrating from the old MCP server?
 [docs/migrating-from-mcp.md](docs/migrating-from-mcp.md) has the full
 `taskferry_*` tool → CLI command mapping and registration cleanup steps.
+
+## Versioning
+
+`package.json`'s version and `taskferry --version`'s output are both driven
+by [release-please](https://github.com/googleapis/release-please): merges to
+`main` are scanned for Conventional Commits (`feat` → minor, `fix` → patch, a
+`BREAKING CHANGE` footer → major), and release-please keeps a standing PR
+that bumps the version and CHANGELOG accordingly. Merging that PR is the
+release; nobody bumps a version number by hand. `PROTOCOL_VERSION` in
+`src/protocol.js` is separate and only changes when the daemon/CLI RPC
+contract itself breaks.
 
 ## As Subagent-Driven Development's worker backend
 
@@ -234,6 +281,6 @@ own root.
 - [docs/cli-reference.md](docs/cli-reference.md): every command, flag, and TOON example
 - [docs/daemon.md](docs/daemon.md): process model, socket protocol, recovery
 - [docs/config.md](docs/config.md): config file fields and env var precedence
-- [docs/security.md](docs/security.md): permissions, key slots, activity-summary privacy
+- [docs/security.md](docs/security.md): permissions, caller-env forwarding, activity-summary privacy
 - [docs/troubleshooting.md](docs/troubleshooting.md): `doctor` output and common failures
 - [docs/migrating-from-mcp.md](docs/migrating-from-mcp.md): command mapping and cleanup

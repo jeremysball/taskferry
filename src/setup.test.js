@@ -222,6 +222,38 @@ test("rerun replaces the existing managed symlinks without throwing", (t) => {
   assert.equal(second.statusline.path, first.statusline.path);
 });
 
+test("refuses to re-point a symlink already managed by a different taskferry checkout", (t) => {
+  const fixture = makeFixture(t);
+  const env = { PATH: path.join(fixture.homeDirectory, ".local", "bin") };
+  runSetup({ ...fixture, env, runCommand: unavailableClients });
+
+  // A second, unrelated checkout that also happens to be named "taskferry"
+  // (e.g. a throwaway scratch clone) - setup run from here must not be able
+  // to silently steal the symlink the first checkout already owns.
+  const otherCheckout = fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-setup-other-checkout-"));
+  const otherSrc = path.join(otherCheckout, "src");
+  fs.mkdirSync(otherSrc, { recursive: true });
+  fs.writeFileSync(path.join(otherCheckout, "package.json"), JSON.stringify({ name: "taskferry" }));
+  fs.writeFileSync(path.join(otherSrc, "cli.js"), "export {};\n");
+  fs.writeFileSync(path.join(otherSrc, "opencode-plugin.js"), "export {};\n");
+  fs.writeFileSync(path.join(otherSrc, "tf-sl.sh"), "#!/usr/bin/env bash\n");
+  t.after(() => fs.rmSync(otherCheckout, { recursive: true, force: true }));
+
+  assert.throws(
+    () => runSetup({
+      checkoutDirectory: otherCheckout,
+      cliPath: path.join(otherSrc, "cli.js"),
+      homeDirectory: fixture.homeDirectory,
+      env,
+      runCommand: unavailableClients,
+    }),
+    /refusing to replace unmanaged path/,
+  );
+
+  // The original checkout's symlinks must be untouched.
+  assert.equal(fs.realpathSync(path.join(fixture.homeDirectory, ".local", "bin", "taskferry")), fixture.cliPath);
+});
+
 test("first install writes the hash state file", (t) => {
   const fixture = makeFixture(t);
   const commandCalls = [];

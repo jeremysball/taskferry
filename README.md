@@ -281,6 +281,6 @@ own root.
 - [docs/cli-reference.md](docs/cli-reference.md): every command, flag, and TOON example
 - [docs/daemon.md](docs/daemon.md): process model, socket protocol, recovery
 - [docs/config.md](docs/config.md): config file fields and env var precedence
-- [docs/security.md](docs/security.md): permissions, key slots, activity-summary privacy
+- [docs/security.md](docs/security.md): permissions, caller-env forwarding, activity-summary privacy
 - [docs/troubleshooting.md](docs/troubleshooting.md): `doctor` output and common failures
 - [docs/migrating-from-mcp.md](docs/migrating-from-mcp.md): command mapping and cleanup

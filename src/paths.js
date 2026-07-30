@@ -4,6 +4,19 @@ import path from "node:path";
 import { UsageError } from "./errors.js";
 import { resolveGitCommonDir, defaultRunCommand } from "./sandbox.js";
 
+// Names of the TASKFERRY_* plumbing env vars paths.js owns -- the state /
+// runtime / cache dirs and the explicit socket override. tasks.js builds
+// its caller-env exclusion set from this export plus PATH and HOME, so a
+// new plumbing var added here is excluded automatically without a parallel
+// edit in tasks.js (review fix: the exclusion set was duplicated between
+// paths.js and tasks.js, so the two could silently drift apart).
+export const TASKFERRY_PLUMBING_ENV_VARS = Object.freeze([
+  "TASKFERRY_STATE_DIR",
+  "TASKFERRY_RUNTIME_DIR",
+  "TASKFERRY_CACHE_DIR",
+  "TASKFERRY_SOCKET_PATH",
+]);
+
 export function resolveStateDir(env = process.env) {
   return env.TASKFERRY_STATE_DIR
     || path.join(env.XDG_STATE_HOME || path.join(os.homedir(), ".local", "state"), "taskferry");

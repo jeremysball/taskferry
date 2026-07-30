@@ -38,12 +38,16 @@ and burns wall-clock time versus just doing it.
 
 ## Worker Contract
 
-- Select the worker model, variant, and optional key slot explicitly when the task
-  needs them: `taskferry dispatch --prompt - --directory "<worktree>" --model
-  <provider/model> --variant <name> --key-slot <name> <<'PROMPT_EOF'` ... `PROMPT_EOF`.
-- State the exact `provider/model` slug (and variant/key-slot, if set) being
+- Select the worker model and variant explicitly when the task needs them:
+  `taskferry dispatch --prompt - --directory "<worktree>" --model
+  <provider/model> --variant <name> <<'PROMPT_EOF'` ... `PROMPT_EOF`.
+- State the exact `provider/model` slug (and variant, if set) being
   dispatched in your response to the user, not just in the shell command — the
-  user shouldn't have to read the command to know what's running.
+  user shouldn't have to read the command to know what's running. `dispatch`/
+  `advisor`/`summary` (report mode) forward your own shell's environment to
+  the daemon on every call, with no per-call opt-out — export a fresh
+  provider key before dispatching and it's visible immediately, no daemon
+  restart needed.
 - Both `dispatch` and `advisor` also accept `--executor <opencode|pi>` to pick
   which worker CLI is spawned. Omit it to use the configured default (built-in:
   `pi`, but a workspace can set `TASKFERRY_DEFAULT_EXECUTOR` or
@@ -123,7 +127,7 @@ risky, security-sensitive, or has already failed on a lighter model.
   context than a standard-tier model that finishes clean. Reserve the cheapest
   tier for implementers whose brief already contains the exact code to
   write (transcription plus testing) and single-file mechanical fixes.
-- **Provider-specific availability rules (time windows, key-slot limits,
+- **Provider-specific availability rules (time windows, credential limits,
   single-in-flight constraints) are account state and live outside this
   skill** — in your CLAUDE.md, or a personal skill covering provider
   availability. Check it before dispatching to a gated provider, and pick an
@@ -292,7 +296,7 @@ PROMPT_EOF
 
 Pull only the fields you actually need from a result instead of the full payload
 with `taskferry result <id> --fields message,tokens,cost` (or any subset of
-`message,narration,tokens,cost,sessionId,exitCode,signal,spawnError,failureReason,failureDetail,keySlot,logPath,incomplete,finalMarker`)
+`message,narration,tokens,cost,sessionId,exitCode,signal,spawnError,failureReason,failureDetail,logPath,incomplete,finalMarker`)
 — cheaper than `--full` when you don't need untruncated narration. To continue
 an advisor conversation instead of starting a fresh one (e.g. a follow-up
 question after its first answer), pass the same `--session-id` the first
@@ -429,22 +433,14 @@ errors, and help as TOON on stdout, keeps diagnostics on stderr, and uses exit
 codes to distinguish success, operational failure, and usage errors.
 
 **The daemon picks up code changes automatically (deferred-until-idle
-restart), but not new environment variables.** A newly-added API key
-exported into your interactive shell after the daemon started is invisible
-to it — the daemon inherited its environment once at spawn time, and an
-env var isn't part of the source-signature check that triggers an
-auto-restart. If a dispatch crashes with an auth/`UnknownError` failure on
-a route that worked minutes ago via a direct `opencode run` PONG test,
-suspect a stale daemon environment before suspecting a provider outage: a
-PONG test runs in your interactive shell and bypasses the daemon entirely,
-so it succeeding is *not* evidence that a `taskferry dispatch` on the same
-model will work. Confirm with `tr '\0' '\n' < /proc/<daemon-pid>/environ |
-rg <KEY_NAME>`; if the key is missing, kill the daemon so the next
-`taskferry` command respawns it from a shell that has the key. On a
-machine with concurrent taskferry sessions sharing one daemon socket, the
-respawn race can take several kill-and-check iterations before a respawn
-actually wins the race and inherits the right env — loop until
-`/proc/<new-pid>/environ` shows the expected var.
+restart), and provider credentials no longer require a daemon restart.**
+`dispatch`, `advisor`, and `summary` (report mode) forward the calling
+shell's own environment to the daemon on every call — so exporting a fresh
+API key into your shell immediately takes effect on the next taskferry
+command. Daemon-level configuration variables
+(`TASKFERRY_MAX_CONCURRENT_TASKS`, `TASKFERRY_ENV_DENYLIST`, and the
+`config.json` fields they override) still require a daemon restart because
+they are read once at startup.
 
 ## When a worker's tool calls don't honor `--directory`
 

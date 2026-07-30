@@ -199,20 +199,19 @@ async function invoke(manager, request) {
     case "task.tail":
       return manager.tail(params.taskId, params.chars === undefined ? undefined : { chars: params.chars });
     case "task.summary":
-      return manager.summarize(params.taskId, {
-        ...(params.maxWords === undefined ? {} : { maxWords: params.maxWords }),
-        ...(params.mode === undefined ? {} : { mode: params.mode }),
-      });
+      // Forward the whole validated params object as the manager's options
+      // argument. The explicit field-list rebuild was the shape that
+      // silently dropped newly-added fields (the previous fix that landed
+      // this env forwarding had to be its own commit because the rebuild
+      // here was filtering it out); forwarding the whole params matches
+      // task.dispatch's pattern and means new fields arrive at the manager
+      // without a separate code change here.
+      return manager.summarize(params.taskId, params);
     case "task.advisor":
-      return manager.advisor({
-        prompt: params.prompt,
-        directory: params.directory,
-        model: params.model,
-        ...(params.variant !== undefined ? { variant: params.variant } : {}),
-        ...(params.sessionId !== undefined ? { sessionId: params.sessionId } : {}),
-        ...(params.timeoutMs !== undefined ? { timeoutMs: params.timeoutMs } : {}),
-        ...(params.executor !== undefined ? { executor: params.executor } : {}),
-      });
+      // Same as task.summary: forward the whole validated params object
+      // rather than rebuilding a field list. manager.advisor() destructures
+      // the fields it consumes and ignores the rest.
+      return manager.advisor(params);
     case "task.context": {
       const context = filteredTaskDetails(manager, params.directory);
       return { ...context, counts: countTasks(context.tasks) };

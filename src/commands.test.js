@@ -606,7 +606,7 @@ test("dispatch forwards executor to the RPC payload when set", async () => {
     },
   };
 
-  await runCommand("dispatch", { prompt: "hi", directory: root, executor: "pi" }, { client, cwd: root });
+  await runCommand("dispatch", { prompt: "hi", directory: root, executor: "pi" }, { client, cwd: root, checkSkills: () => {} });
 
   assert.equal(captured.method, "task.dispatch");
   assert.equal(captured.params.executor, "pi");
@@ -637,7 +637,7 @@ test("dispatch forwards noSandbox to the RPC payload when set", async () => {
       return { id: "oc_1" };
     },
   };
-  await runCommand("dispatch", { prompt: "hi", directory: root, noSandbox: true }, { client, cwd: root });
+  await runCommand("dispatch", { prompt: "hi", directory: root, noSandbox: true }, { client, cwd: root, checkSkills: () => {} });
   assert.equal(capturedParams.noSandbox, true);
 });
 
@@ -650,8 +650,92 @@ test("dispatch omits noSandbox from the RPC payload when not set", async () => {
       return { id: "oc_1" };
     },
   };
-  await runCommand("dispatch", { prompt: "hi", directory: root }, { client, cwd: root });
+  await runCommand("dispatch", { prompt: "hi", directory: root }, { client, cwd: root, checkSkills: () => {} });
   assert.equal("noSandbox" in capturedParams, false);
+});
+
+test("dispatch forwards the caller's env to the RPC payload", async () => {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-commands-test-")));
+  let capturedParams;
+  const client = {
+    request: async (method, params) => {
+      capturedParams = params;
+      return { id: "oc_1" };
+    },
+  };
+  const injectedEnv = { FOO: "bar" };
+  await runCommand("dispatch", { prompt: "hi", directory: root }, { client, cwd: root, env: injectedEnv, checkSkills: () => {} });
+  assert.deepEqual(capturedParams.env, injectedEnv);
+});
+
+test("dispatch no longer forwards keySlot", async () => {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-commands-test-")));
+  let capturedParams;
+  const client = {
+    request: async (method, params) => {
+      capturedParams = params;
+      return { id: "oc_1" };
+    },
+  };
+  await runCommand("dispatch", { prompt: "hi", directory: root, keySlot: "primary" }, { client, cwd: root, checkSkills: () => {} });
+  assert.equal("keySlot" in capturedParams, false);
+});
+
+test("advisor forwards the caller's env to the RPC payload", async () => {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-commands-test-")));
+  let capturedParams;
+  const client = {
+    request: async (method, params) => {
+      capturedParams = params;
+      return { status: "done", message: "advice" };
+    },
+  };
+  const injectedEnv = { FOO: "bar" };
+  await runCommand("advisor", { prompt: "hi", directory: root, model: "m" }, { client, cwd: root, env: injectedEnv });
+  assert.deepEqual(capturedParams.env, injectedEnv);
+});
+
+test("summary forwards the caller's env to the RPC payload", async () => {
+  let capturedParams;
+  const client = {
+    request: async (method, params) => {
+      capturedParams = params;
+      return { sourceTaskId: "t1", summary: "done" };
+    },
+  };
+  const injectedEnv = { FOO: "bar" };
+  await runCommand("summary", { taskId: "t1" }, { client, env: injectedEnv });
+  assert.deepEqual(capturedParams.env, injectedEnv);
+});
+
+test("summary --mode activity omits env from the RPC payload (protocol rejects env + mode activity)", async () => {
+  let capturedParams;
+  const client = {
+    request: async (method, params) => {
+      capturedParams = params;
+      return { sourceTaskId: "t1", summary: "activity summary" };
+    },
+  };
+  const injectedEnv = { FOO: "bar" };
+  await runCommand("summary", { taskId: "t1", mode: "activity" }, { client, env: injectedEnv });
+  assert.equal(capturedParams.env, undefined, "activity-mode summary must not carry env");
+  assert.equal(capturedParams.mode, "activity");
+});
+
+test("summary --mode report still forwards the caller's env to the RPC payload", async () => {
+  let capturedParams;
+  const client = {
+    request: async (method, params) => {
+      capturedParams = params;
+      return { sourceTaskId: "t1", summary: "report summary" };
+    },
+  };
+  const injectedEnv = { FOO: "bar" };
+  await runCommand("summary", { taskId: "t1", mode: "report" }, { client, env: injectedEnv });
+  assert.deepEqual(capturedParams.env, injectedEnv);
+  // mode "report" is the args-layer default; commands.js only emits the mode
+  // field on the wire when it differs from that default (i.e. "activity").
+  assert.equal("mode" in capturedParams, false);
 });
 
 test("dispatch refuses to run when the generated skill copies are stale", async () => {

@@ -282,13 +282,34 @@ test("distributed skills are generated from the canonical source", () => {
 });
 
 test("skill check detects a stale generated copy", () => {
-  const generated = path.join(codexRoot, "skills", "using-taskferry", "SKILL.md");
-  const original = fs.readFileSync(generated, "utf8");
-
+  // Run the check against a miniature tree in tmpdir, never the live repo:
+  // node --test runs test files concurrently, and staling the real
+  // integrations/codex copy even transiently raced with commands.test.js
+  // dispatch tests that run the real checkSkills() against the same tree
+  // (flaky "skill files are out of sync" failures in CI).
+  const sandbox = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-skill-check-")));
+  const skillFiles = [
+    path.join("skills", "using-taskferry", "SKILL.md"),
+    path.join("integrations", "claude", "skills", "using-taskferry", "SKILL.md"),
+    path.join("integrations", "codex", "skills", "using-taskferry", "SKILL.md"),
+  ];
   try {
-    fs.writeFileSync(generated, `${original}\nstale\n`);
-    const result = spawnSync(process.execPath, ["scripts/generate-skill.js", "--check"], {
-      cwd: root,
+    for (const relativePath of skillFiles) {
+      const destination = path.join(sandbox, relativePath);
+      fs.mkdirSync(path.dirname(destination), { recursive: true });
+      fs.copyFileSync(path.join(root, relativePath), destination);
+    }
+    const scriptDestination = path.join(sandbox, "scripts", "generate-skill.js");
+    fs.mkdirSync(path.dirname(scriptDestination), { recursive: true });
+    fs.copyFileSync(path.join(root, "scripts", "generate-skill.js"), scriptDestination);
+
+    fs.appendFileSync(
+      path.join(sandbox, "integrations", "codex", "skills", "using-taskferry", "SKILL.md"),
+      "\nstale\n"
+    );
+
+    const result = spawnSync(process.execPath, [scriptDestination, "--check"], {
+      cwd: sandbox,
       encoding: "utf8",
     });
 
@@ -296,7 +317,7 @@ test("skill check detects a stale generated copy", () => {
     assert.match(result.stderr, /stale/i);
     assert.match(result.stderr, /integrations\/codex\/skills\/using-taskferry\/SKILL\.md/);
   } finally {
-    fs.writeFileSync(generated, original);
+    fs.rmSync(sandbox, { recursive: true, force: true });
   }
 });
 

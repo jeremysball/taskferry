@@ -48,10 +48,14 @@ The spawned daemon inherits the booter's environment, which in turn
 inherits the original caller's environment. Any `TASKFERRY_*` variable
 set when a command first triggers the auto-start takes effect for the
 daemon's entire lifetime — including for other terminals and processes
-that connect to the same socket afterward. Changing an env var (a new
-key slot, a different `TASKFERRY_MAX_CONCURRENT_TASKS`) requires the
-daemon to restart: stop it (see below) and let the next command start a
-fresh one.
+that connect to the same socket afterward. Changing a daemon-level env
+var (a different `TASKFERRY_MAX_CONCURRENT_TASKS`, `TASKFERRY_ENV_DENYLIST`,
+etc.) requires the daemon to restart: stop it (see below) and let the next
+command start a fresh one. A provider credential is different: `dispatch`/
+`advisor`/`summary` (report mode) forward the *calling* shell's own
+environment on every call, so exporting a fresh key before dispatching
+takes effect immediately, with no restart — see
+[security.md](security.md#caller-env-forwarding).
 
 ## Stopping the daemon
 
@@ -153,13 +157,13 @@ CLI usage approaches.
   these exact strings) it's one of three buckets:
   - `"rate_limited"`: rate limit, usage limit, `429`, too many requests, or
     a bare mention of `quota` with no billing-specific phrase nearby.
-    Transient: retry later, or switch key slot in the meantime.
+    Transient: retry later.
   - `"payment_required"`: `insufficient_quota`, `payment required`,
-    `billing`, or a `402` status. The account behind that key slot needs a
-    billing fix, not a retry.
+    `billing`, or a `402` status. The account behind that credential needs
+    a billing fix, not a retry.
   - `"authentication_failed"`: `unauthorized`, an invalid API key, or a
-    `401` status. The credential in that key slot is broken and needs
-    rotating.
+    `401` status. The credential is broken and needs rotating — export a
+    working one before the next dispatch.
   Other executors (`pi`, future ones) get the same three buckets but
   prefixed with the executor name (`pi_rate_limited`,
   `pi_authentication_failed`, ...) so executor-specific failures stay

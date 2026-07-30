@@ -334,7 +334,7 @@ test("home's default directory is left undefined (resolved later via resolveWork
 test("dispatch rejects --key-slot as an unknown flag", () => {
   assert.throws(
     () => parseArgs(["dispatch", "--prompt", "do it", "--key-slot", "primary"], { cwd: "/workspace/project" }),
-    /unknown flag --key-slot for \`dispatch\`/
+    /unknown flag --key-slot for `dispatch`/
   );
 });
 

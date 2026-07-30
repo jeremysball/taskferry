@@ -105,13 +105,13 @@ three buckets prefixed with the executor name instead (`pi_rate_limited`,
 etc.). See [daemon.md](daemon.md#watchdogs) for exactly what triggers each
 one:
 
-- `"rate_limited"`: transient. Retry later, or switch `--key-slot`/`--model`
-  in the meantime (see [security.md](security.md#provider-key-slots)).
-- `"payment_required"`: the account behind that key slot needs a billing
-  fix. Switching `--key-slot` to a different account works around it; the
-  original slot needs attention regardless.
-- `"authentication_failed"`: the credential in that key slot is broken.
-  Rotate it, or switch `--key-slot` to a working one.
+- `"rate_limited"`: transient. Retry later, or switch `--model` in the
+  meantime.
+- `"payment_required"`: the account behind that credential needs a
+  billing fix.
+- `"authentication_failed"`: the credential is broken. Rotate it, or
+  export a different one before the next dispatch (see
+  [security.md](security.md#caller-env-forwarding)).
 
 `taskferry status <id> --full` (or `result --fields failureDetail`) shows
 the specific log line or error text that triggered the classification.
@@ -140,14 +140,6 @@ still `queued` or `running`. This is expected, not a bug — see
 [daemon.md](daemon.md#recovery) for why taskferry deliberately doesn't try
 to reattach to it. Inspect the task's log file directly, or run `opencode
 session list`, to check on the underlying process by hand.
-
-## `error: key_slot "..." source variable ... is not set`
-
-The environment variable a configured key slot points at
-(`TASKFERRY_KEY_SLOTS=name:ENV_VAR`) isn't set in the daemon's own
-environment. Set it, then stop the daemon (`taskferry doctor --full` for
-its pid) so the next command starts a fresh one with the variable present —
-see [security.md](security.md#provider-key-slots).
 
 ## Claude Code / Codex hook shows "taskferry is unavailable"
 

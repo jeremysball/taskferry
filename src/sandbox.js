@@ -176,6 +176,9 @@ export function resolveGitDir(directory, runCommand = defaultRunCommand) {
  *   bind, one independent overlay mount per entry. Applied after extraRwBinds and before extraRwPairBinds.
  * @param {boolean} [options.shareNet] - default true (matches today's --share-net); pass false for
  *   advisor-role dispatches to emit --unshare-net instead.
+ * @param {boolean} [options.runtimeDirWritable] - default true (today's --bind runtimeDir for dispatch
+ *   roles); pass false for advisor-role dispatches to emit --ro-bind instead, so the daemon's Unix
+ *   socket inside runtimeDir is unreachable from the sandbox (connect() fails on a read-only mount).
  * @returns {string[]}
  */
 export function buildBwrapArgs({
@@ -190,6 +193,7 @@ export function buildBwrapArgs({
   overlay,
   overlayRwBinds = [],
   shareNet = true,
+  runtimeDirWritable = true,
 }) {
   const args = ["--ro-bind", "/", "/"];
   // bwrap applies mounts in argument order, and a later mount on a parent
@@ -206,7 +210,7 @@ export function buildBwrapArgs({
   } else {
     args.push("--bind", directory, directory);
   }
-  args.push("--bind", runtimeDir, runtimeDir);
+  args.push(runtimeDirWritable ? "--bind" : "--ro-bind", runtimeDir, runtimeDir);
   for (const extra of extraRwBinds) {
     args.push("--bind", extra, extra);
   }

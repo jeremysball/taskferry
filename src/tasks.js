@@ -12,12 +12,8 @@ import { formatToolEventForNarration } from "./narration-format.js";
 import { errCode } from "./errors.js";
 import { isNonNegativeInteger, isPositiveInteger } from "./numbers.js";
 import { buildBwrapArgs, checkBwrapAvailable, checkOverlaySupport, defaultDenyList, platformSupportsSandbox, resolveGitCommonDir, resolveGitDir } from "./sandbox.js";
-import { overlayPaths, resolvePreDispatchHead } from "./changeset.js";
+import { overlayPaths, resolvePreDispatchHead, subOverlayPaths } from "./changeset.js";
 import { resolveExecutor, opencodeExecutor } from "./executor.js";
-
-// overlayPaths and resolvePreDispatchHead are imported for use in later tasks (9+)
-void overlayPaths;
-void resolvePreDispatchHead;
 
 /**
  * @typedef {object} SummaryOf
@@ -58,7 +54,7 @@ void resolvePreDispatchHead;
  * @property {"dispatch"|"advisor"} [role]
  * @property {"none"|"pending"|"accepted"|"rejected"} [changesetStatus]
  * @property {string|null} [diffPath]
- * @property {{root:string,upperDir:string,workDir:string,rwBinds:string[]}|null} [overlayDirs]
+ * @property {{root:string,upperDir:string,workDir:string,rwBinds:Array<{path:string,upperDir:string,workDir:string}>}|null} [overlayDirs]
  * @property {string|null} [preDispatchHead]
  * @property {string|null} [changesetError]
  */
@@ -90,7 +86,7 @@ void resolvePreDispatchHead;
  * @property {"dispatch"|"advisor"} [role]
  * @property {"none"|"pending"|"accepted"|"rejected"} [changesetStatus]
  * @property {string|null} [diffPath]
- * @property {{root:string,upperDir:string,workDir:string,rwBinds:string[]}|null} [overlayDirs]
+ * @property {{root:string,upperDir:string,workDir:string,rwBinds:Array<{path:string,upperDir:string,workDir:string}>}|null} [overlayDirs]
  * @property {string|null} [preDispatchHead]
  * @property {string|null} [changesetError]
  */
@@ -1717,52 +1713,101 @@ export function createTaskManager({
         // rather than leaving it for the sandboxed process to create.
         fs.mkdirSync(sandboxedDataHome, { recursive: true, mode: 0o700 });
         extraRwBinds.push(sandboxedDataHome);
+
+        // Summary/report children never get an overlay -- they don't write
+        // to the target directory in any sense the changeset model cares
+        // about, so the plain v1 bind is correct and unchanged for them.
+        const role = isSummary ? null : (dispatchLaunch.role ?? "dispatch");
+        const wantsOverlay = !isSummary && overlayEnabled && dispatchLaunch.noOverlay !== true;
+        /** @type {{root: string, upperDir: string, workDir: string}|null} */
+        let overlayInfo = null;
+        if (wantsOverlay) {
+          requireOverlaySupport();
+          overlayInfo = overlayPaths(task.id, overlayTmpRoot);
+          // Exclusive creation of the overlay root (review finding #12): the
+          // non-recursive mkdir fails closed (EEXIST -> spawnError via the
+          // outer catch) if the path already exists -- e.g. a pre-planted
+          // symlink, which a recursive mkdir would follow. Fresh random task
+          // ids make a genuine collision impossible in practice; upper/work
+          // are then created recursively *under* the safely-exclusive root.
+          fs.mkdirSync(overlayTmpRoot, { recursive: true, mode: 0o700 });
+          fs.mkdirSync(overlayInfo.root, { mode: 0o700 });
+          fs.mkdirSync(overlayInfo.upperDir, { recursive: true, mode: 0o700 });
+          fs.mkdirSync(overlayInfo.workDir, { recursive: true, mode: 0o700 });
+        } else if (role === "advisor") {
+          // Review finding #5: an advisor without an overlay gets a plain
+          // writable bind -- a path to persist writes, contradicting ADR
+          // 0001's "an advisor has no path to persist a write." Overlay is
+          // mandatory for the advisor role whenever sandboxing is active, so
+          // a globally-disabled overlay fails closed here. (Per-call
+          // --no-overlay never reaches here for advisors: the CLI/protocol
+          // surface rejects it, see Task 15.)
+          throw new Error(
+            "error: advisor dispatch requires overlay-gated writes, but overlay is disabled\n" +
+            "help: unset TASKFERRY_DISABLE_OVERLAY or set overlayEnabled: true in config -- advisor writes must be gated, see docs/adr/0001-cow-overlays-and-diff-gated-writes.md"
+          );
+        } else if (!isSummary) {
+          process.stderr.write(`warning: overlay disabled -- writes land directly on ${launchDirectory}, not gated by accept/reject\n`);
+        }
+
+        /** @type {Array<{path: string, upperDir: string, workDir: string}>} */
+        const overlayRwBinds = [];
         const gitCommonDir = resolveGitCommonDirFn(launchDirectory);
         if (gitCommonDir && existsFn(gitCommonDir) && isOutsideDirectory(launchDirectory, gitCommonDir)) {
-          // launchDirectory is a linked worktree: the common dir is the
-          // *main* checkout's own .git, and binding it whole would also
-          // expose the main checkout's own private HEAD/index/config as
-          // writable to a dispatch that never named that checkout at all
-          // (taskferry#224 -- a dispatch against one worktree corrupted a
-          // completely different checkout's branch and working tree). A
-          // worktree's own admin files (HEAD/index/logs) live under
-          // gitCommonDir/worktrees/<name> instead; commits only ever need
-          // that private subdir plus the shared objects/refs data (verified
-          // by tracing which files an actual worktree commit touches -- see
-          // taskferry#224 investigation), never the common dir's top level.
           const gitDir = resolveGitDirFn(launchDirectory);
+          /** @param {string} p */
+          const addWritable = (p) => {
+            if (overlayInfo) {
+              const sub = subOverlayPaths(overlayInfo.root, p);
+              fs.mkdirSync(sub.upperDir, { recursive: true, mode: 0o700 });
+              fs.mkdirSync(sub.workDir, { recursive: true, mode: 0o700 });
+              overlayRwBinds.push(sub);
+            } else {
+              extraRwBinds.push(p);
+            }
+          };
           if (gitDir && existsFn(gitDir) && gitDir !== gitCommonDir) {
-            // Bind this worktree's own private admin dir -- wherever it
-            // actually lives, even a non-standard layout where it sits
-            // outside gitCommonDir's own tree (e.g. a manually re-pointed
-            // `gitdir:`/`commondir` file) -- plus the shared data a commit
-            // needs. Never falls through to binding the whole common dir
-            // for any layout where a distinct private gitdir was resolved,
-            // so an unusual layout degrades to "some git ops may fail here"
-            // at worst, never back to the original taskferry#224 exposure.
-            extraRwBinds.push(gitDir);
+            addWritable(gitDir);
             for (const rel of ["objects", "refs", path.join("logs", "refs")]) {
               const resolved = path.join(gitCommonDir, rel);
               fs.mkdirSync(resolved, { recursive: true });
-              extraRwBinds.push(resolved);
+              addWritable(resolved);
             }
             const packedRefs = path.join(gitCommonDir, "packed-refs");
-            if (existsFn(packedRefs)) extraRwBinds.push(packedRefs);
+            if (existsFn(packedRefs)) addWritable(packedRefs);
           } else {
-            // Not a recognizable linked-worktree layout (e.g. a submodule,
-            // where the "common dir" IS already that submodule's own
-            // private gitdir with no sibling checkout to protect) or gitDir
-            // resolution failed outright -- fall back to the previous broad
-            // bind rather than risk breaking commits.
-            extraRwBinds.push(gitCommonDir);
+            addWritable(gitCommonDir);
           }
         }
         for (const dir of [...allowedDirs, ...(isSummary ? [] : dispatchLaunch.allowedDirs || [])]) {
           const resolved = path.isAbsolute(dir) ? dir : path.resolve(launchDirectory, dir);
           if (existsFn(resolved)) extraRwBinds.push(resolved);
         }
-        spawnArgs = buildBwrapArgs({ directory: launchDirectory, stateDir, runtimeDir, homeDir, denyList, extraRwBinds, extraRwPairBinds: executorRwPairBinds, extraRoBinds }).concat(["--", executor.binaryName, ...args]);
+        spawnArgs = buildBwrapArgs({
+          directory: launchDirectory,
+          stateDir,
+          runtimeDir,
+          homeDir,
+          denyList,
+          extraRwBinds,
+          extraRwPairBinds: executorRwPairBinds,
+          extraRoBinds,
+          ...(overlayInfo ? { overlay: { upperDir: overlayInfo.upperDir, workDir: overlayInfo.workDir }, overlayRwBinds } : {}),
+          shareNet: role !== "advisor",
+          runtimeDirWritable: role !== "advisor",
+        }).concat(["--", executor.binaryName, ...args]);
         spawnEnv = { ...spawnEnv, ...sandboxEnv };
+
+        if (overlayInfo && !isSummary) {
+          // rwBinds persisted onto the task (review finding #1): settlement-time
+          // extraction (Task 10) must re-mount the exact git-common-dir sub-overlays
+          // the worker ran with. They are not reliably re-derivable later -- the
+          // packed-refs/objects/refs selection above depends on live filesystem
+          // state that can change between dispatch and extraction.
+          task.overlayDirs = { ...overlayInfo, rwBinds: overlayRwBinds };
+          task.changesetStatus = "pending";
+          task.preDispatchHead = resolvePreDispatchHead(launchDirectory);
+        }
       }
       // No tmux: the child has no shared session to introspect. It is its own
       // process group so cancellation can stop any subprocesses it creates.

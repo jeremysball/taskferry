@@ -865,6 +865,184 @@ describe("bwrap sandboxing", () => {
 
     child.emit("exit", 0, null);
   });
+
+  test("mounts an overlay on the target directory when overlayEnabled and the host supports it", () => {
+    let captured = null;
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "axi-overlay-dir-"));
+    const overlayTmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "axi-overlay-tmp-"));
+    const mgr = makeManager({
+      spawnFn: (cmd, args, opts) => { captured = { cmd, args, opts }; return fakeChild(); },
+      sandboxEnabled: true,
+      checkBwrapAvailableFn: () => ({ checked: true, available: true }),
+      overlayEnabled: true,
+      checkOverlaySupportFn: () => ({ supported: true }),
+      platform: "linux",
+      overlayTmpRoot,
+    });
+
+    const result = mgr.dispatch({ prompt: "hello", directory });
+
+    assert.ok(captured.args.includes("--overlay-src"));
+    const overlayIndex = captured.args.indexOf("--overlay-src");
+    assert.equal(captured.args[overlayIndex + 1], directory);
+    const status = mgr.status(result.id);
+    assert.equal(status.changesetStatus, "pending");
+    assert.ok(status.overlayDirs.upperDir.startsWith(overlayTmpRoot));
+  });
+
+  test("falls back to a plain bind with a warning when overlayEnabled is explicitly false", () => {
+    let captured = null;
+    let warned = "";
+    const originalWrite = process.stderr.write;
+    process.stderr.write = (chunk) => { warned += chunk; return true; };
+    try {
+      const directory = fs.mkdtempSync(path.join(os.tmpdir(), "axi-no-overlay-dir-"));
+      const mgr = makeManager({
+        spawnFn: (cmd, args, opts) => { captured = { cmd, args, opts }; return fakeChild(); },
+        sandboxEnabled: true,
+        checkBwrapAvailableFn: () => ({ checked: true, available: true }),
+        overlayEnabled: false,
+        platform: "linux",
+      });
+      const result = mgr.dispatch({ prompt: "hello", directory });
+      assert.equal(captured.args.includes("--overlay-src"), false);
+      assert.equal(mgr.status(result.id).changesetStatus, "none");
+      assert.match(warned, /overlay disabled/);
+    } finally {
+      process.stderr.write = originalWrite;
+    }
+  });
+
+  test("crashes the task with a spawnError instead of dispatching unguarded when overlay is required but unsupported", () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "axi-unsupported-dir-"));
+    const mgr = makeManager({
+      spawnFn: () => fakeChild(),
+      sandboxEnabled: true,
+      overlayEnabled: true,
+      checkBwrapAvailableFn: () => ({ checked: true, available: true }),
+      checkOverlaySupportFn: () => ({ supported: false, reason: "bwrap 0.6.0 < 0.8 required for --overlay" }),
+      platform: "linux",
+    });
+    const result = mgr.dispatch({ prompt: "hello", directory });
+    const status = mgr.status(result.id);
+    assert.equal(status.status, "crashed");
+    assert.match(status.spawnError, /bwrap 0.6.0 < 0.8/);
+  });
+
+  test("converts the git-common-dir binds into per-path overlays instead of plain writable binds when overlay is active", () => {
+    let captured = null;
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "axi-worktree-overlay-dir-"));
+    const gitCommonDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-git-common-overlay-"));
+    const mgr = makeManager({
+      spawnFn: (cmd, args, opts) => { captured = { cmd, args, opts }; return fakeChild(); },
+      sandboxEnabled: true,
+      checkBwrapAvailableFn: () => ({ checked: true, available: true }),
+      overlayEnabled: true,
+      checkOverlaySupportFn: () => ({ supported: true }),
+      platform: "linux",
+      resolveGitCommonDirFn: () => gitCommonDir,
+    });
+
+    mgr.dispatch({ prompt: "hello", directory });
+
+    // The whole-common-dir fallback path (no resolveGitDirFn override -> gitDir
+    // resolves to the same as gitCommonDir via the real `git` binary failing in
+    // this temp dir, matching the existing "falls back to binding the whole
+    // common dir" test's setup) must appear as an overlay, not a plain --bind.
+    const overlaySrcIndex = captured.args.indexOf("--overlay-src", captured.args.indexOf("--overlay-src") + 1);
+    assert.notEqual(overlaySrcIndex, -1, "expected a second --overlay-src for the git-common-dir slice");
+    assert.equal(captured.args[overlaySrcIndex + 1], gitCommonDir);
+  });
+
+  test("shareNet is true (--share-net) for a plain dispatch and false (--unshare-net) for an advisor role", async () => {
+    let dispatchArgs = null;
+    let advisorArgs = null;
+    const mgr = makeManager({
+      spawnFn: (cmd, args) => { if (!dispatchArgs) dispatchArgs = args; else advisorArgs = args; const child = fakeChild(); setImmediate(() => child.emit("exit", 0, null)); return child; },
+      sandboxEnabled: true,
+      overlayEnabled: true,
+      checkBwrapAvailableFn: () => ({ checked: true, available: true }),
+      checkOverlaySupportFn: () => ({ supported: true }),
+      platform: "linux",
+    });
+    mgr.dispatch({ prompt: "hello", directory: os.tmpdir() });
+    assert.ok(dispatchArgs.includes("--share-net"));
+    assert.ok(!dispatchArgs.includes("--unshare-net"));
+
+    await mgr.advisor({ prompt: "hello", directory: os.tmpdir(), model: "openai/gpt-5.6-sol" });
+    assert.ok(advisorArgs.includes("--unshare-net"));
+    assert.ok(!advisorArgs.includes("--share-net"));
+  });
+
+  test("persists the git-common-dir sub-overlays onto the task record for extraction", () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "axi-rwbinds-persist-dir-"));
+    const gitCommonDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-rwbinds-common-"));
+    const mgr = makeManager({
+      spawnFn: () => fakeChild(),
+      sandboxEnabled: true,
+      checkBwrapAvailableFn: () => ({ checked: true, available: true }),
+      overlayEnabled: true,
+      checkOverlaySupportFn: () => ({ supported: true }),
+      platform: "linux",
+      resolveGitCommonDirFn: () => gitCommonDir,
+    });
+
+    const result = mgr.dispatch({ prompt: "hello", directory });
+
+    // Review finding #1: extraction (Task 10) re-mounts the exact sub-overlays
+    // the worker ran with; they must be persisted here, not re-derived later.
+    const status = mgr.status(result.id);
+    assert.ok(Array.isArray(status.overlayDirs.rwBinds));
+    assert.ok(status.overlayDirs.rwBinds.length > 0, "the whole-common-dir fallback must be persisted as a sub-overlay");
+    assert.ok(status.overlayDirs.rwBinds.every((b) => b.path && b.upperDir && b.workDir));
+  });
+
+  test("binds runtimeDir read-only for advisor spawns so the daemon socket is unreachable", async () => {
+    // --unshare-net alone does not block Unix-domain-socket access to a
+    // writable bind-mounted path, and runtimeDir holds daemon.sock (review
+    // finding #6); a read-only bind makes connect() fail instead.
+    let dispatchArgs = null;
+    let advisorArgs = null;
+    const mgr = makeManager({
+      spawnFn: (cmd, args) => { if (!dispatchArgs) dispatchArgs = args; else advisorArgs = args; const child = fakeChild(); setImmediate(() => child.emit("exit", 0, null)); return child; },
+      sandboxEnabled: true,
+      overlayEnabled: true,
+      checkBwrapAvailableFn: () => ({ checked: true, available: true }),
+      checkOverlaySupportFn: () => ({ supported: true }),
+      platform: "linux",
+    });
+    const runtimeDir = path.join(mgr.paths.STATE_DIR, "run");
+
+    mgr.dispatch({ prompt: "hello", directory: os.tmpdir() });
+    const flagPairs = (args) => {
+      const pairs = [];
+      for (let i = 0; i < args.length; i++) {
+        if (args[i] === "--bind" || args[i] === "--ro-bind") pairs.push([args[i], args[i + 1]]);
+      }
+      return pairs;
+    };
+    assert.ok(flagPairs(dispatchArgs).some(([flag, p]) => flag === "--bind" && p === runtimeDir), "dispatch keeps today's writable runtimeDir bind");
+
+    await mgr.advisor({ prompt: "hello", directory: os.tmpdir(), model: "openai/gpt-5.6-sol" });
+    assert.ok(flagPairs(advisorArgs).some(([flag, p]) => flag === "--ro-bind" && p === runtimeDir), "advisor must get a read-only runtimeDir bind");
+    assert.ok(!flagPairs(advisorArgs).some(([flag, p]) => flag === "--bind" && p === runtimeDir), "advisor must not get a writable runtimeDir bind");
+  });
+
+  test("crashes an advisor dispatch instead of running it unguarded when overlay is globally disabled", async () => {
+    // Review finding #5: an advisor without an overlay gets a plain writable
+    // bind -- a path to persist writes, contradicting ADR 0001. Fail closed.
+    const mgr = makeManager({
+      spawnFn: () => fakeChild(),
+      sandboxEnabled: true,
+      checkBwrapAvailableFn: () => ({ checked: true, available: true }),
+      overlayEnabled: false,
+      platform: "linux",
+    });
+    const advised = await mgr.advisor({ prompt: "hello", directory: os.tmpdir(), model: "openai/gpt-5.6-sol" });
+    const status = mgr.status(advised.task_id);
+    assert.equal(status.status, "crashed");
+    assert.match(status.spawnError, /advisor dispatch requires overlay-gated writes/);
+  });
 });
 
 describe("dispatch() role/changeset fields", () => {

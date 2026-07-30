@@ -371,4 +371,15 @@ describe("buildBwrapArgs()", () => {
     const withoutNet = buildBwrapArgs({ directory: "/workspace/my-repo", stateDir: "/state", runtimeDir: "/state/run", homeDir: "/home/user", shareNet: false });
     assert.deepEqual(withoutNet.slice(-3), ["--unshare-all", "--unshare-net", "--die-with-parent"]);
   });
+
+  test("binds runtimeDir read-only when runtimeDirWritable is false (advisor isolation)", () => {
+    const args = buildBwrapArgs({ directory: "/w", stateDir: "/s", runtimeDir: "/s/run", homeDir: "/h", denyList: [], runtimeDirWritable: false });
+    assert.notEqual(args.findIndex((a, i) => a === "--ro-bind" && args[i + 1] === "/s/run"), -1);
+    assert.equal(args.findIndex((a, i) => a === "--bind" && args[i + 1] === "/s/run"), -1);
+  });
+
+  test("defaults to a writable runtimeDir bind (unchanged dispatch behavior)", () => {
+    const args = buildBwrapArgs({ directory: "/w", stateDir: "/s", runtimeDir: "/s/run", homeDir: "/h", denyList: [] });
+    assert.notEqual(args.findIndex((a, i) => a === "--bind" && args[i + 1] === "/s/run"), -1);
+  });
 });

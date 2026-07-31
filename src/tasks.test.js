@@ -5,7 +5,7 @@ import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { createTaskManager, isOutsideDirectory, DEFAULT_SUMMARY_MODEL, bucketFor, parseEnvDenylist } from "./tasks.js";
+import { createTaskManager, isOutsideDirectory, DEFAULT_SUMMARY_MODEL, bucketFor, parseEnvDenylist, parseSandboxDenylist } from "./tasks.js";
 import { defaultRunCommand as changesetDefaultRunCommand } from "./changeset.js";
 
 // Builds an isolated task manager backed by a temp state dir and, unless
@@ -114,6 +114,21 @@ describe("parseEnvDenylist()", () => {
 
   test("splits, trims, and drops empty entries", () => {
     assert.deepEqual(parseEnvDenylist("FOO, BAR ,, BAZ"), ["FOO", "BAR", "BAZ"]);
+  });
+});
+
+describe("parseSandboxDenylist()", () => {
+  test("returns an empty array for an empty or undefined spec", () => {
+    assert.deepEqual(parseSandboxDenylist(undefined), []);
+    assert.deepEqual(parseSandboxDenylist(""), []);
+  });
+
+  test("splits, trims, and drops empty entries", () => {
+    assert.deepEqual(parseSandboxDenylist("/home/user/.docker, /home/user/.kube ,, /opt/shared"), [
+      "/home/user/.docker",
+      "/home/user/.kube",
+      "/opt/shared",
+    ]);
   });
 });
 
@@ -800,6 +815,12 @@ describe("bwrap sandboxing", () => {
       spawnFn: (cmd, args, opts) => { captured = { cmd, args, opts }; return fakeChild(); },
       sandboxEnabled: true,
       checkBwrapAvailableFn: () => ({ checked: true, available: true }),
+      // Fixed-default entries (~/.ssh, ~/.claude) are asserted below as
+      // present alongside the configured extra -- stub existsFn so that
+      // assertion doesn't depend on this host's actual home directory
+      // contents (a clean CI runner has neither), same pattern as the
+      // sibling "drops deny-list paths that don't exist on disk" test above.
+      existsFn: () => true,
       platform: "linux",
       sandboxDenylist: [extra],
     });

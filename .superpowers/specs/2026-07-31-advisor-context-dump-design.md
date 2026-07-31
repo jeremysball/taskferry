@@ -73,30 +73,11 @@ Lives in `commands.js`'s `case "advisor"`, client-side, before the RPC:
 2. **Else, `env.TASKFERRY_TASK_ID` is set** → this is a ferry (a taskferry
    dispatch/advisor child) calling `advisor` on itself. Call
    `client.request("task.tail", { taskId: env.TASKFERRY_TASK_ID, chars:
-   min(budget, 131072) })` over the same daemon connection `advisor`
-   already uses (see "`task.tail` cap raised" below for the 131072 figure).
+   budget })` over the same daemon connection `advisor` already uses.
 3. **Else** → no context source available. If `--prompt` was also not
    given, fail fast (UsageError). If `--prompt` *was* given, proceed with
    no attached context — the canned prompt plus the caller's own prompt
    still go out.
-
-### 3a. `task.tail` cap raised to 131072
-
-`task.tail`'s `chars` parameter is currently hard-capped at 65536,
-enforced in three places: `args.js`'s `parseNumber(..., { min: 1, max:
-65536 })` for both `tail --chars` and `wait --tail-chars`, `protocol.js`'s
-RPC-level validator (`value <= 65536`), and `tasks.js`'s `tail()` itself
-(`chars > 65536` throws). That's below the 120,000-char advisor context
-budget, so the ferry-log source could never deliver the configured budget
-without a change here.
-
-Raise the ceiling to **131072** (128k) in all three places — a round
-number comfortably above the 120k default budget, with headroom for a
-larger `TASKFERRY_ADVISOR_CONTEXT_CHARS` override. This is a general
-`task.tail`/`wait --tail-chars` capability change, not an advisor-only
-carve-out: `TAIL_READ_BYTES` (1 MiB, `tasks.js:168`) already reads enough
-of the log to support it, so no other part of `tail()`'s implementation
-needs to change.
 
 ### 4. Budget and summarization
 
@@ -107,39 +88,11 @@ needs to change.
   env-then-config-then-default resolution pattern already used elsewhere in
   this file (e.g. `resolveWaitDefaultTimeoutMs`).
 - New opt-in flag **`--summarize-context`** (default off): when set, the
-  gathered context is condensed before being attached, instead of being
+  gathered context is passed through taskferry's existing summarizer
+  (`task.summary`, report mode) before being attached, instead of being
   attached raw. This trades some latency/cost for a denser, pre-condensed
-  context blob — useful when a ferry's log or a session transcript is large
-  and mostly noise. Default stays off so the common path has no extra
-  round-trip.
-
-  `task.summary` doesn't fit here as-is: it summarizes an *existing
-  taskferry task's own log* by `taskId`, but the Claude-session source is a
-  transcript file with no taskId to hand it. Rather than build a
-  parallel summarization pipeline, condensation is implemented as a
-  same-process helper in `commands.js` (`summarizeContextText()`) that
-  works on the raw text string directly, using RPCs already exposed for
-  other commands — no daemon changes, and not a new public command surface:
-  1. `client.request("task.dispatch", { prompt: <condense instruction +
-     text>, directory, model: <fixed cheap model>, env })` — a throwaway
-     dispatch, same `directory` already resolved for the advisor call
-     itself.
-  2. `client.request("task.wait", { taskId, timeoutMs: 120000 })` — block
-     for it to settle.
-  3. `client.request("task.result", { taskId, fields: ["message"] })` —
-     pull the condensed text out.
-  4. Return `result.message` as the summarized context (falling back to
-     the raw, unsummarized text with a note if the summarize dispatch
-     crashed or times out — condensation is a best-effort convenience,
-     never a hard dependency that turns a working advisor call into a
-     failure).
-
-  The model is a fixed constant (`opencode/mimo-v2.5-free`, matching
-  `tasks.js`'s own `DEFAULT_SUMMARY_MODEL` value, kept as an independent
-  local constant since `commands.js` doesn't otherwise import daemon-side
-  `tasks.js`), overridable via `TASKFERRY_ADVISOR_SUMMARIZER_MODEL` — not a
-  new `--model`-like CLI flag, since the flag only toggles condensation
-  on/off, it doesn't pick the condenser.
+  context blob — useful when a ferry's log is large and mostly noise.
+  Default stays off so the common path has no extra round-trip.
 
 ### 5. Prompt assembly
 
@@ -201,8 +154,7 @@ valid, in fact the primary, invocation shape.
 CLI `taskferry advisor [--prompt ...] --model <id> [--summarize-context]`
   → commands.js case "advisor":
       resolve context source (env.CLAUDE_CODE_SESSION_ID / env.TASKFERRY_TASK_ID / none)
-      read/fetch bounded context
-      if --summarize-context: summarizeContextText() (dispatch+wait+result round trip)
+      read/fetch bounded context (optionally through task.summary first)
       assemble final prompt (canned + context + caller prompt)
       fail fast if no context AND no --prompt
   → client.request("task.advisor", { prompt: assembled, model, directory, ... })
@@ -225,27 +177,15 @@ CLI `taskferry advisor [--prompt ...] --model <id> [--summarize-context]`
 - `args.js`/`args.test.js`: `advisor` no longer throws at parse time for a
   missing `--prompt`; add a test that this is now valid at the parse layer
   (the runtime check moves to `commands.js`).
-- `commands.test.js`: one test per context-resolution branch (Claude-session
-  tail read, ferry `task.tail` fetch, no-source-plus-no-prompt failure,
-  no-source-plus-prompt success), a test that `--summarize-context` drives
-  the dispatch+wait+result round trip and substitutes its `message`, and a
-  test that a crashed/timed-out summarize dispatch falls back to the raw
-  text rather than failing the whole advisor call. Existing advisor tests
-  in this file (the `resolveWorkspaceRoot` regression test, the executor-
-  forwarding test, the env-forwarding test) must pass an explicit `env`
-  with neither `CLAUDE_CODE_SESSION_ID` nor `TASKFERRY_TASK_ID` set, so
-  they keep testing what they already test instead of picking up
-  whatever's ambient in the real test-runner process's `process.env`
-  default.
+- `commands.test.js` (or wherever `runCommand` is tested): one test per
+  context-resolution branch (Claude-session tail read, ferry `task.tail`
+  fetch, no-source-plus-no-prompt failure, no-source-plus-prompt success),
+  plus a test that `--summarize-context` routes through `task.summary`
+  first.
 - `tasks.test.js`: extend the existing `TASKFERRY_CHILD` spawn-env
   assertions to also check `TASKFERRY_TASK_ID` is present and equals the
   task's own id, for both `dispatch` and `advisor` roles, and absent for
   summary spawns.
-- `args.test.js`/`protocol.test.js`/`tasks.test.js`: no test currently pins
-  the literal 65536 value, so this is new coverage, not an update — add a
-  test per layer confirming 131072 is now accepted and 131073 now rejected
-  (`args.js` parse-time, `protocol.js` RPC-level, `tasks.js`'s `tail()`
-  itself).
 
 ## Out of scope
 

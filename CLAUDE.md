@@ -22,6 +22,14 @@ close <number> --reason completed --comment "<why>"`. Don't assume a merge
 closes nothing just because the PR body didn't say "Closes #N" — cross-check
 the actual diff against open issue descriptions.
 
+## Credit external contributors in the changelog
+
+When merging an external contributor's PR, credit them by name/handle and
+link their commit/PR in the changelog entry for that change (release-please
+notes or a hand-written CHANGELOG, whichever this repo uses). Don't let a
+squash-merge or a release-please rollup silently absorb their contribution
+under a generic entry with no attribution.
+
 ## Maintain a healthy `good first issue` list
 
 Keep a standing set of open issues labeled `good first issue` — small,

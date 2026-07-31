@@ -11,7 +11,8 @@ import { RESULT_FIELDS } from "./protocol.js";
 import { formatToolEventForNarration } from "./narration-format.js";
 import { errCode } from "./errors.js";
 import { isNonNegativeInteger, isPositiveInteger } from "./numbers.js";
-import { buildBwrapArgs, checkBwrapAvailable, defaultDenyList, platformSupportsSandbox, resolveGitCommonDir, resolveGitDir } from "./sandbox.js";
+import { buildBwrapArgs, checkBwrapAvailable, checkOverlaySupport, defaultDenyList, platformSupportsSandbox, resolveGitCommonDir, resolveGitDir } from "./sandbox.js";
+import { applyChangeset, overlayPaths, resolvePreDispatchHead, subOverlayPaths, cleanupOverlay, defaultRunCommand as defaultOverlayRunCommand, extractGitDiff, extractNonGitDiff } from "./changeset.js";
 import { resolveExecutor, opencodeExecutor } from "./executor.js";
 
 /**
@@ -50,6 +51,12 @@ import { resolveExecutor, opencodeExecutor } from "./executor.js";
  * @property {boolean} [incomplete]
  * @property {string|null} [finalMarker]
  * @property {"opencode"|"pi"} [executorId]
+ * @property {"dispatch"|"advisor"} [role]
+ * @property {"none"|"pending"|"accepted"|"rejected"} [changesetStatus]
+ * @property {string|null} [diffPath]
+ * @property {{root:string,tmpRoot:string,upperDir:string,workDir:string,rwBinds:Array<{path:string,upperDir:string,workDir:string}>}|null} [overlayDirs]
+ * @property {string|null} [preDispatchHead]
+ * @property {string|null} [changesetError]
  */
 
 /**
@@ -76,6 +83,12 @@ import { resolveExecutor, opencodeExecutor } from "./executor.js";
  * @property {boolean} [incomplete]
  * @property {string|null} [finalMarker]
  * @property {"opencode"|"pi"} [executorId]
+ * @property {"dispatch"|"advisor"} [role]
+ * @property {"none"|"pending"|"accepted"|"rejected"} [changesetStatus]
+ * @property {string|null} [diffPath]
+ * @property {{root:string,tmpRoot:string,upperDir:string,workDir:string,rwBinds:Array<{path:string,upperDir:string,workDir:string}>}|null} [overlayDirs]
+ * @property {string|null} [preDispatchHead]
+ * @property {string|null} [changesetError]
  */
 
 /**
@@ -98,6 +111,8 @@ import { resolveExecutor, opencodeExecutor } from "./executor.js";
  * @property {string|null|undefined} [sessionId]
  * @property {NodeJS.ProcessEnv} [env]
  * @property {boolean} [noSandbox]
+ * @property {boolean} [noOverlay]
+ * @property {"dispatch"|"advisor"} [role]
  * @property {string[]} [allowedDirs]
  * @property {import("./executor.js").WorkerExecutor} executor
  * @property {undefined} [kind]
@@ -137,6 +152,9 @@ import { resolveExecutor, opencodeExecutor } from "./executor.js";
  * @property {string} [next]
  * @property {boolean} [incomplete]
  * @property {string|null} [finalMarker]
+ * @property {string|null} [diff]
+ * @property {{files: number, additions: number, deletions: number}|null} [diffStat]
+ * @property {string|null} [changesetError]
  */
 
 const DEFAULT_STATE_DIR = resolveStateDir(process.env);
@@ -146,6 +164,7 @@ const DEFAULT_STATE_DIR = resolveStateDir(process.env);
 const MAX_WAIT_MS = 45000;
 
 const NARRATION_PREVIEW_CHARS = 2000;
+const TASK_MANAGER_RESULT_FIELDS = new Set([...RESULT_FIELDS, "diff", "diffStat"]);
 const TAIL_READ_BYTES = 1024 * 1024;
 const SUMMARY_INPUT_BYTES = 96 * 1024;
 // Linux caps a single execve argv string at 128KiB (MAX_ARG_STRLEN), separate
@@ -429,6 +448,11 @@ const DEFAULT_CANCEL_GRACE_MS = 5000;
  *   in addition to the auto-detected git-common-dir for a worktree dispatch directory.
  * @param {(directory: string) => string|null} [options.resolveGitCommonDirFn]
  * @param {(directory: string) => string|null} [options.resolveGitDirFn]
+ * @param {boolean} [options.overlayEnabled]
+ * @param {() => {supported: boolean, reason?: string}} [options.checkOverlaySupportFn]
+  * @param {string} [options.overlayTmpRoot]
+ * @param {(command: string, args: string[]) => {status: number|null, stdout: string, stderr: string, error?: Error}} [options.runOverlayCommandFn]
+ * @param {(path: string) => void} [options.rmOverlayTreeFn]
  * @param {() => {checked: boolean, available: boolean, reason?: string}} [options.checkBwrapAvailableFn]
  * @param {(path: string) => boolean} [options.existsFn]
  * @param {(path: string) => {isDirectory: () => boolean}|null} [options.statFn]
@@ -505,6 +529,13 @@ export function createTaskManager({
     : (/** @type {boolean|undefined} */ (config.sandboxEnabled) ?? true),
   allowedDirs = parseAllowedDirs(process.env.TASKFERRY_ALLOWED_DIRS ?? /** @type {string|undefined} */ (config.allowedDirs)),
   envDenylist = parseEnvDenylist(process.env.TASKFERRY_ENV_DENYLIST ?? /** @type {string|undefined} */ (config.envDenylist)),
+  overlayEnabled = process.env.TASKFERRY_DISABLE_OVERLAY !== undefined
+    ? !["1", "true"].includes(process.env.TASKFERRY_DISABLE_OVERLAY)
+    : (/** @type {boolean|undefined} */ (config.overlayEnabled) ?? true),
+  checkOverlaySupportFn = checkOverlaySupport,
+  overlayTmpRoot = os.tmpdir(),
+  runOverlayCommandFn = defaultOverlayRunCommand,
+  rmOverlayTreeFn,
   resolveGitCommonDirFn = resolveGitCommonDir,
   resolveGitDirFn = resolveGitDir,
   checkBwrapAvailableFn = checkBwrapAvailable,
@@ -554,6 +585,99 @@ export function createTaskManager({
         "error: bwrap is required for sandboxing but was not found\n" +
         "help: install bubblewrap (e.g. apt install bubblewrap) or opt out with --no-sandbox or TASKFERRY_DISABLE_SANDBOX=1"
       );
+    }
+  }
+
+  /** @type {{supported: boolean, reason?: string, checkedAt: number}|null} */
+  let overlaySupport = null;
+  // Re-probe a negative result after this many ms so a transient failure
+  // (bwrap version-too-old mid-upgrade, PATH temporarily missing the binary,
+  // a freshly-installed package not yet on the daemon's PATH, etc.) can
+  // self-heal without a full daemon restart. A positive result is cached
+  // forever — once the host supports the overlay, it stays supported unless
+  // someone uninstalls bwrap, which is not a transient failure.
+  const OVERLAY_SUPPORT_TTL_MS = 60_000;
+  function requireOverlaySupport() {
+    const now = Date.now();
+    if (overlaySupport == null || (!overlaySupport.supported && now - overlaySupport.checkedAt >= OVERLAY_SUPPORT_TTL_MS)) {
+      overlaySupport = { ...checkOverlaySupportFn(), checkedAt: now };
+    }
+    const result = /** @type {{supported: boolean, reason?: string}} */ (overlaySupport);
+    if (!result.supported) {
+      throw new Error(
+        `error: overlay is required for gated dispatch writes but is unsupported (${result.reason})\n` +
+        "help: upgrade bubblewrap to >= 0.8, or opt out explicitly with --no-overlay or TASKFERRY_DISABLE_OVERLAY=1 (writes will not be gated)"
+      );
+    }
+  }
+
+  /**
+   * Removes a task's overlay using the tmp root recorded when that overlay
+   * was created. A failed removal leaves overlayDirs intact for the startup
+   * sweep to retry.
+   * @param {{overlayDirs?: {root:string,tmpRoot:string}|null}} task
+   * @returns {boolean} whether cleanup failed
+   */
+  function releaseOverlay(task) {
+    if (!task.overlayDirs) return false;
+    const removal = cleanupOverlay({
+      root: task.overlayDirs.root,
+      tmpRoot: task.overlayDirs.tmpRoot,
+      rmFn: rmOverlayTreeFn,
+    });
+    if (removal.removed) task.overlayDirs = null;
+    return !removal.removed;
+  }
+
+  /**
+   * @param {Task} finishedTask
+   */
+  function extractChangesetForTask(finishedTask) {
+    if (!finishedTask.overlayDirs) return;
+    const denyList = defaultDenyList(os.homedir(), stateDir).filter(existsFn);
+    const diffPath = path.join(stateDir, "diffs", `${finishedTask.id}.patch`);
+    const isGitTarget = finishedTask.preDispatchHead != null;
+    let extracted;
+    try {
+      extracted = isGitTarget
+        ? extractGitDiff({
+            directory: finishedTask.directory,
+            overlay: { upperDir: finishedTask.overlayDirs.upperDir, workDir: finishedTask.overlayDirs.workDir },
+            overlayRwBinds: finishedTask.overlayDirs.rwBinds ?? [],
+            preDispatchHead: /** @type {string} */ (finishedTask.preDispatchHead),
+            stateDir,
+            runtimeDir,
+            homeDir: os.homedir(),
+            denyList,
+            diffPath,
+            runCommand: runOverlayCommandFn,
+          })
+        : extractNonGitDiff({
+            directory: finishedTask.directory,
+            overlay: finishedTask.overlayDirs,
+            stateDir,
+            runtimeDir,
+            homeDir: os.homedir(),
+            denyList,
+            diffPath,
+            runCommand: runOverlayCommandFn,
+          });
+    } catch (err) {
+      finishedTask.changesetStatus = "pending";
+      finishedTask.changesetError = err instanceof Error ? err.message : String(err);
+      persistTask(finishedTask.id);
+      return;
+    }
+    finishedTask.diffPath = extracted.diffPath;
+    finishedTask.changesetError = null;
+    if (finishedTask.role === "advisor") {
+      finishedTask.changesetStatus = "rejected";
+      releaseOverlay(finishedTask);
+    } else if (extracted.hasChanges) {
+      finishedTask.changesetStatus = "pending";
+    } else {
+      finishedTask.changesetStatus = "accepted";
+      releaseOverlay(finishedTask);
     }
   }
 
@@ -761,6 +885,11 @@ export function createTaskManager({
         }
         if (t.status === "running" || t.status === "queued") t.status = "unknown";
         if (t.executorId === undefined) t.executorId = "opencode";
+        // Legacy records predate creation-time tmpRoot persistence. Keep their
+        // prior live-root cleanup behavior rather than letting releaseOverlay
+        // pass undefined into the containment guard; newly-created overlays
+        // always carry the exact root that was in effect at creation.
+        if (t.overlayDirs && t.overlayDirs.tmpRoot === undefined) t.overlayDirs.tmpRoot = overlayTmpRoot;
         tasks.set(t.id, t);
         if (t.status !== previousStatus) taskEvents.emitState(t, previousStatus);
       }
@@ -799,6 +928,45 @@ export function createTaskManager({
     }
   }
   sweepOrphanedPromptFiles();
+
+  // Mirrors sweepOrphanedPromptFiles() above: a daemon that crashed after an
+  // overlay was created but before its cleanup (reject/accept, or the
+  // advisor auto-reject in extractChangesetForTask()) ever ran leaves a
+  // /tmp/taskferry-cow-<task-id> dir behind. /tmp being a tmpfs clears these
+  // on a real reboot for free; this only matters for a same-boot daemon
+  // restart. A task whose changesetStatus is still "pending" legitimately
+  // owns its overlay and must never be swept here -- only unknown task ids
+  // and already-resolved (accepted/rejected) tasks with a leftover
+  // overlayDirs (their own cleanupOverlay() call crashed mid-removal) are
+  // orphans.
+  function sweepOrphanedOverlays() {
+    const tmpRoots = new Set([overlayTmpRoot]);
+    for (const task of tasks.values()) {
+      if (task.overlayDirs?.tmpRoot) tmpRoots.add(task.overlayDirs.tmpRoot);
+    }
+    for (const tmpRoot of tmpRoots) {
+      let entries;
+      try {
+        entries = fs.readdirSync(tmpRoot);
+      } catch {
+        continue;
+      }
+      for (const entry of entries) {
+        if (!entry.startsWith("taskferry-cow-")) continue;
+        const taskId = entry.slice("taskferry-cow-".length);
+        const task = tasks.get(taskId);
+        const root = path.join(tmpRoot, entry);
+        const ownsThisOverlay = task?.overlayDirs?.root === root;
+        if (ownsThisOverlay && task.changesetStatus === "pending") continue;
+        const cleanupTarget = ownsThisOverlay
+          ? task
+          : { overlayDirs: { root, tmpRoot } };
+        const cleanupFailed = releaseOverlay(cleanupTarget);
+        if (!cleanupFailed && ownsThisOverlay) persistTask(taskId);
+      }
+    }
+  }
+  sweepOrphanedOverlays();
 
   function ensureStateLoaded() {
     if (!stateLoadError) return;
@@ -856,7 +1024,7 @@ export function createTaskManager({
    * @returns {TaskSummary}
    */
   function summarize(task) {
-    const { promptPreview, promptTotalChars, id, status, directory, model, sessionId, originSessionId, pid, startedAt, endedAt, exitCode, signal, logPath, cancelRequested, incomplete, finalMarker, spawnError, executorId } = task;
+    const { promptPreview, promptTotalChars, id, status, directory, model, sessionId, originSessionId, pid, startedAt, endedAt, exitCode, signal, logPath, cancelRequested, incomplete, finalMarker, spawnError, executorId, role, changesetStatus } = task;
     return {
       id, status, directory, model, sessionId, originSessionId, pid, startedAt, endedAt, exitCode, signal, logPath,
       ...failureFields(task),
@@ -867,6 +1035,9 @@ export function createTaskManager({
       ...(incomplete === true ? { incomplete: true } : {}),
       ...(finalMarker != null ? { finalMarker } : {}),
       ...(executorId != null ? { executorId } : {}),
+      ...(changesetStatus != null && (changesetStatus !== "none" || role === "advisor") ? { role, changesetStatus } : {}),
+      ...(task.overlayDirs != null ? { overlayDirs: task.overlayDirs } : {}),
+      ...(task.changesetError != null ? { changesetError: task.changesetError } : {}),
       cancelRequested: !!cancelRequested,
     };
   }
@@ -927,6 +1098,8 @@ export function createTaskManager({
    * @param {boolean} [params.internal]
    * @param {string|null} [params.finalMarker]
    * @param {boolean} [params.noSandbox]
+   * @param {boolean} [params.noOverlay]
+   * @param {"dispatch"|"advisor"} [params.role]
    * @param {string[]} [params.allowedDirs] - extra directories bound read-write for this dispatch only, on
    *   top of the manager-level default (see createTaskManager's `allowedDirs` option)
    * @param {string} [params.executor] - "opencode" | "pi". When omitted on a `sessionId` resume, inherits
@@ -936,7 +1109,7 @@ export function createTaskManager({
    *   misrouted CLI/RPC call fails fast rather than silently picking the default.
    * @returns {TaskSummary & {next: string}}
    */
-  function dispatch({ prompt, directory, model, variant, sessionId, internal = false, finalMarker = null, originSessionId, noSandbox = false, allowedDirs: dispatchAllowedDirs, executor: executorName, env }) {
+  function dispatch({ prompt, directory, model, variant, sessionId, internal = false, finalMarker = null, originSessionId, noSandbox = false, noOverlay = false, allowedDirs: dispatchAllowedDirs, executor: executorName, env, role = "dispatch" }) {
     ensureStateLoaded();
     // A resume (--session-id with no --executor) should inherit the executor
     // the session was actually created under, not silently fall back to the
@@ -1030,6 +1203,12 @@ export function createTaskManager({
       failureDetail: null,
       incomplete: false,
       finalMarker: finalMarker == null ? null : finalMarker,
+      role,
+      changesetStatus: "none",
+      diffPath: null,
+      overlayDirs: null,
+      preDispatchHead: null,
+      changesetError: null,
     };
     tasks.set(id, task);
     persistTask(task.id);
@@ -1048,7 +1227,7 @@ export function createTaskManager({
     // tasks.test.js's "dispatch()'s queued env is frozen against later
     // caller mutations" gate; removing the clone makes that test fail.
     const capturedEnv = env === undefined ? undefined : { ...env };
-    pendingLaunches.set(id, { prompt, directory: normalizedDirectory, model: resolvedModel, variant: task.variant, sessionId, env: capturedEnv, noSandbox: noSandbox === true, allowedDirs: dispatchAllowedDirs, executor });
+    pendingLaunches.set(id, { prompt, directory: normalizedDirectory, model: resolvedModel, variant: task.variant, sessionId, env: capturedEnv, noSandbox: noSandbox === true, noOverlay: noOverlay === true, allowedDirs: dispatchAllowedDirs, executor, role });
     launchQueue.push(id);
     launchQueuedTasks();
 
@@ -1611,6 +1790,25 @@ export function createTaskManager({
       const noSandbox = !isSummary && dispatchLaunch.noSandbox === true;
       let spawnCommand = executor.binaryName;
       let spawnArgs = args;
+      // Summary/report children never get an overlay -- they don't write
+      // to the target directory in any sense the changeset model cares
+      // about, so the plain v1 bind is correct and unchanged for them.
+      const role = isSummary ? null : (dispatchLaunch.role ?? "dispatch");
+      // Review finding #5 (dispatch-launch side): overlay-gating lives inside
+      // the bwrap block below, so when sandboxing is force-disabled
+      // (--no-sandbox / TASKFERRY_DISABLE_SANDBOX=1) or unsupported on this
+      // platform (non-Linux) an advisor would silently launch with a plain
+      // writable bind on the target -- a path to persist a write,
+      // contradicting ADR 0001's "an advisor has no path to persist a write."
+      // Fail closed at dispatch-launch time, mirroring the overlay-disabled
+      // check inside the sandbox block below, instead of degrading to
+      // unsandboxed writes.
+      if (role === "advisor" && !(sandboxEnabled && !noSandbox && platformSupportsSandbox(platform))) {
+        throw new Error(
+          "error: advisor dispatch requires overlay-gated writes, but the sandbox is unavailable\n" +
+          "help: advisor writes must be gated by a copy-on-write overlay (docs/adr/0001-cow-overlays-and-diff-gated-writes.md), which requires the bwrap sandbox -- unset TASKFERRY_DISABLE_SANDBOX (or drop --no-sandbox) and run on a supported platform with bubblewrap >= 0.8"
+        );
+      }
       if (sandboxEnabled && !noSandbox && platformSupportsSandbox(platform)) {
         requireBwrap();
         spawnCommand = "bwrap";
@@ -1659,52 +1857,97 @@ export function createTaskManager({
         // rather than leaving it for the sandboxed process to create.
         fs.mkdirSync(sandboxedDataHome, { recursive: true, mode: 0o700 });
         extraRwBinds.push(sandboxedDataHome);
+
+        const wantsOverlay = !isSummary && overlayEnabled && dispatchLaunch.noOverlay !== true;
+        /** @type {{root: string, upperDir: string, workDir: string}|null} */
+        let overlayInfo = null;
+        if (wantsOverlay) {
+          requireOverlaySupport();
+          overlayInfo = overlayPaths(task.id, overlayTmpRoot);
+          // Exclusive creation of the overlay root (review finding #12): the
+          // non-recursive mkdir fails closed (EEXIST -> spawnError via the
+          // outer catch) if the path already exists -- e.g. a pre-planted
+          // symlink, which a recursive mkdir would follow. Fresh random task
+          // ids make a genuine collision impossible in practice; upper/work
+          // are then created recursively *under* the safely-exclusive root.
+          fs.mkdirSync(overlayTmpRoot, { recursive: true, mode: 0o700 });
+          fs.mkdirSync(overlayInfo.root, { mode: 0o700 });
+          fs.mkdirSync(overlayInfo.upperDir, { recursive: true, mode: 0o700 });
+          fs.mkdirSync(overlayInfo.workDir, { recursive: true, mode: 0o700 });
+        } else if (role === "advisor") {
+          // Review finding #5: an advisor without an overlay gets a plain
+          // writable bind -- a path to persist writes, contradicting ADR
+          // 0001's "an advisor has no path to persist a write." Overlay is
+          // mandatory for the advisor role whenever sandboxing is active, so
+          // a globally-disabled overlay fails closed here. (Per-call
+          // --no-overlay never reaches here for advisors: the CLI/protocol
+          // surface rejects it, see Task 15.)
+          throw new Error(
+            "error: advisor dispatch requires overlay-gated writes, but overlay is disabled\n" +
+            "help: unset TASKFERRY_DISABLE_OVERLAY or set overlayEnabled: true in config -- advisor writes must be gated, see docs/adr/0001-cow-overlays-and-diff-gated-writes.md"
+          );
+        } else if (!isSummary) {
+          process.stderr.write(`warning: overlay disabled -- writes land directly on ${launchDirectory}, not gated by accept/reject\n`);
+        }
+
+        /** @type {Array<{path: string, upperDir: string, workDir: string}>} */
+        const overlayRwBinds = [];
         const gitCommonDir = resolveGitCommonDirFn(launchDirectory);
         if (gitCommonDir && existsFn(gitCommonDir) && isOutsideDirectory(launchDirectory, gitCommonDir)) {
-          // launchDirectory is a linked worktree: the common dir is the
-          // *main* checkout's own .git, and binding it whole would also
-          // expose the main checkout's own private HEAD/index/config as
-          // writable to a dispatch that never named that checkout at all
-          // (taskferry#224 -- a dispatch against one worktree corrupted a
-          // completely different checkout's branch and working tree). A
-          // worktree's own admin files (HEAD/index/logs) live under
-          // gitCommonDir/worktrees/<name> instead; commits only ever need
-          // that private subdir plus the shared objects/refs data (verified
-          // by tracing which files an actual worktree commit touches -- see
-          // taskferry#224 investigation), never the common dir's top level.
           const gitDir = resolveGitDirFn(launchDirectory);
+          /** @param {string} p */
+          const addWritable = (p) => {
+            if (overlayInfo) {
+              const sub = subOverlayPaths(overlayInfo.root, p);
+              fs.mkdirSync(sub.upperDir, { recursive: true, mode: 0o700 });
+              fs.mkdirSync(sub.workDir, { recursive: true, mode: 0o700 });
+              overlayRwBinds.push(sub);
+            } else {
+              extraRwBinds.push(p);
+            }
+          };
           if (gitDir && existsFn(gitDir) && gitDir !== gitCommonDir) {
-            // Bind this worktree's own private admin dir -- wherever it
-            // actually lives, even a non-standard layout where it sits
-            // outside gitCommonDir's own tree (e.g. a manually re-pointed
-            // `gitdir:`/`commondir` file) -- plus the shared data a commit
-            // needs. Never falls through to binding the whole common dir
-            // for any layout where a distinct private gitdir was resolved,
-            // so an unusual layout degrades to "some git ops may fail here"
-            // at worst, never back to the original taskferry#224 exposure.
-            extraRwBinds.push(gitDir);
+            addWritable(gitDir);
             for (const rel of ["objects", "refs", path.join("logs", "refs")]) {
               const resolved = path.join(gitCommonDir, rel);
               fs.mkdirSync(resolved, { recursive: true });
-              extraRwBinds.push(resolved);
+              addWritable(resolved);
             }
             const packedRefs = path.join(gitCommonDir, "packed-refs");
-            if (existsFn(packedRefs)) extraRwBinds.push(packedRefs);
+            if (existsFn(packedRefs)) addWritable(packedRefs);
           } else {
-            // Not a recognizable linked-worktree layout (e.g. a submodule,
-            // where the "common dir" IS already that submodule's own
-            // private gitdir with no sibling checkout to protect) or gitDir
-            // resolution failed outright -- fall back to the previous broad
-            // bind rather than risk breaking commits.
-            extraRwBinds.push(gitCommonDir);
+            addWritable(gitCommonDir);
           }
         }
         for (const dir of [...allowedDirs, ...(isSummary ? [] : dispatchLaunch.allowedDirs || [])]) {
           const resolved = path.isAbsolute(dir) ? dir : path.resolve(launchDirectory, dir);
           if (existsFn(resolved)) extraRwBinds.push(resolved);
         }
-        spawnArgs = buildBwrapArgs({ directory: launchDirectory, stateDir, runtimeDir, homeDir, denyList, extraRwBinds, extraRwPairBinds: executorRwPairBinds, extraRoBinds }).concat(["--", executor.binaryName, ...args]);
+        spawnArgs = buildBwrapArgs({
+          directory: launchDirectory,
+          stateDir,
+          runtimeDir,
+          homeDir,
+          denyList,
+          extraRwBinds,
+          extraRwPairBinds: executorRwPairBinds,
+          extraRoBinds,
+          ...(overlayInfo ? { overlay: { upperDir: overlayInfo.upperDir, workDir: overlayInfo.workDir }, overlayRwBinds } : {}),
+          shareNet: role !== "advisor",
+          runtimeDirWritable: role !== "advisor",
+        }).concat(["--", executor.binaryName, ...args]);
         spawnEnv = { ...spawnEnv, ...sandboxEnv };
+
+        if (overlayInfo && !isSummary) {
+          // rwBinds persisted onto the task (review finding #1): settlement-time
+          // extraction (Task 10) must re-mount the exact git-common-dir sub-overlays
+          // the worker ran with. They are not reliably re-derivable later -- the
+          // packed-refs/objects/refs selection above depends on live filesystem
+          // state that can change between dispatch and extraction.
+          task.overlayDirs = { ...overlayInfo, tmpRoot: overlayTmpRoot, rwBinds: overlayRwBinds };
+          task.changesetStatus = "pending";
+          task.preDispatchHead = resolvePreDispatchHead(launchDirectory, runOverlayCommandFn);
+        }
       }
       // No tmux: the child has no shared session to introspect. It is its own
       // process group so cancellation can stop any subprocesses it creates.
@@ -1896,6 +2139,7 @@ export function createTaskManager({
         const parsedSessionId = readSessionIdFromLog(task.logPath);
         if (parsedSessionId) task.sessionId = parsedSessionId;
         if (task.status === "done") evaluateOutputCompleteness(task);
+        if (task.status === "done" || task.status === "crashed" || task.status === "cancelled") extractChangesetForTask(task);
         // Persist the opencode session id of a successful summary child so the
         // next summarize turn can resume the same prompt-cached conversation
         // via `--continue --session <id>`, and stamp the watermark so the next
@@ -1937,6 +2181,18 @@ export function createTaskManager({
         task.status = "crashed";
         task.spawnError = errMessage(err);
         task.endedAt = new Date().toISOString();
+        // Spawn failure (e.g. ENOENT) lands here AFTER the sandbox/overlay
+        // block already ran: overlayDirs is set, changesetStatus is still
+        // "pending", and the overlay would otherwise sit on disk with no
+        // extraction ever booked against it. Run the same extraction/cleanup
+        // path the exit handler does so the task isn't stranded (review
+        // finding -- spawn-failure path missed the cleanup the exit path
+        // already does). extractChangesetForTask is internally error-safe
+        // (extract+failure paths both go through its own try/catch) and
+        // handles an empty overlay the same way the exit path does: no
+        // diff produced, status moves to "accepted" (or "rejected" for an
+        // advisor), overlayDirs cleared.
+        extractChangesetForTask(task);
         finishSettlement();
       });
 
@@ -1953,6 +2209,20 @@ export function createTaskManager({
       task.spawnError = errMessage(err);
       task.endedAt = new Date().toISOString();
       if (child?.pid != null) sendSignal(child.pid, "SIGKILL");
+      // Mirrors the child.on("error") spawn-failure path above: a sync throw
+      // from spawnFn (or from resolvePreDispatchHead / any other code in this
+      // try block after overlay creation) lands here AFTER overlayDirs +
+      // changesetStatus === "pending" were already set, so the overlay would
+      // otherwise sit on the tmpfs with no extraction ever booked against it
+      // and the startup sweep skip (line ~960) deliberately protecting
+      // "pending" owners never cleans it. Run the same
+      // extractChangesetForTask() the async-error path does so a
+      // sync-spawn-failed task isn't stranded -- it's internally error-safe
+      // and on an empty overlay produces the correct terminal state
+      // ("accepted" + no diff for dispatch, "rejected" + cleanup for
+      // advisor). Doing this BEFORE the explicit persistTask() below ensures
+      // the durable record reflects the post-extract changesetStatus.
+      extractChangesetForTask(task);
       persistTask(task.id);
       void scheduleActivity(task, { force: true }).then(() => activityCache.evictTask(task.id));
       logHasEventCache.delete(task.logPath);
@@ -2033,6 +2303,120 @@ export function createTaskManager({
     persistTask(task.id);
 
     return { ...summarize(task), note: `SIGTERM sent to process group ${task.pid}; escalates to SIGKILL after ${graceMs}ms if it hasn't exited` };
+  }
+
+  /** @param {Task} task */
+  function hasLiveOverlay(task) {
+    return task.overlayDirs != null && existsFn(task.overlayDirs.upperDir);
+  }
+
+  /**
+   * @param {string} taskId
+   * @returns {{taskId: string, changesetStatus: string, applied: boolean, reason?: string|null, cleanupFailed?: boolean}}
+   */
+  function accept(taskId) {
+    ensureStateLoaded();
+    const task = tasks.get(taskId);
+    if (!task) throw noSuchTask(taskId);
+    if (task.role === "advisor") {
+      throw new Error(`error: task ${taskId} has role "advisor" and cannot be accepted\nhelp: use "taskferry result ${taskId} --diff" to inspect what it wrote -- advisor writes are never applied`);
+    }
+    if (task.changesetStatus !== "pending") {
+      throw new Error(`error: task ${taskId} has no pending changeset (changesetStatus: ${task.changesetStatus ?? "none"})\nhelp: only a task with changesetStatus "pending" can be accepted`);
+    }
+    if (task.diffPath == null) {
+      // The extraction at settlement failed (Task 10 records why in
+      // changesetError); there is no patch to apply, but the overlay was
+      // deliberately kept so the changes remain recoverable.
+      throw new Error(
+        `error: task ${taskId}'s changeset was never extracted (${task.changesetError ?? "unknown reason"})\n` +
+        `help: the overlay was preserved${task.overlayDirs ? ` at ${task.overlayDirs.root}` : ""} -- inspect it there directly, or "taskferry reject ${taskId}" to discard it`
+      );
+    }
+    // The diff file lives under stateDir; a partial cleanup (or a tampered
+    // tasks.json) can leave a recorded diffPath whose file is gone. Fail
+    // with a clear error instead of letting git apply surface its own
+    // misleading "can't open patch" message against a path the user has no
+    // reason to suspect.
+    if (!existsFn(task.diffPath)) {
+      throw new Error(
+        `error: task ${taskId}'s diff file at ${task.diffPath} no longer exists\n` +
+        `help: the state directory may have been partially cleaned; a pending changeset cannot be applied without its diff. Use "taskferry reject ${taskId}" to discard the pending state, or restore the diff file at the recorded path before retrying.`
+      );
+    }
+    const isGitTarget = task.preDispatchHead != null;
+    if (!isGitTarget && !hasLiveOverlay(task)) {
+      // Review finding #7: a non-git accept must rebuild the merged view from
+      // the live overlay to rsync it; /tmp being a tmpfs, a reboot clears it.
+      // Fail loudly (fail-fast, never pretend to apply nothing) rather than
+      // rsyncing a missing tree. A git target's patch is persisted under
+      // stateDir and survives reboots, so this check is non-git only.
+      throw new Error(
+        `error: task ${taskId}'s overlay is gone (likely cleared by a reboot -- /tmp is a tmpfs)\n` +
+        `help: a non-git changeset cannot be re-applied without its overlay; use "taskferry result ${taskId} --diff" for the informational diff, then "taskferry reject ${taskId}" to clear the pending state`
+      );
+    }
+    const denyList = defaultDenyList(os.homedir(), stateDir).filter(existsFn);
+    const applied = applyChangeset({
+      directory: task.directory,
+      diffPath: task.diffPath,
+      isGitTarget,
+      overlay: task.overlayDirs ?? undefined,
+      stateDir,
+      runtimeDir,
+      homeDir: os.homedir(),
+      denyList,
+      runCommand: runOverlayCommandFn,
+    });
+    if (!applied.applied) {
+      return { taskId, changesetStatus: task.changesetStatus, applied: false, reason: applied.reason };
+    }
+    task.changesetStatus = "accepted";
+    // Persist before cleanup: a crash between apply and persist would leave
+    // the task reading as "pending" after a restart even though the patch
+    // was already applied, risking a double-apply on the next accept()
+    // retry. The cleanup may still fail (review finding #11), but that
+    // failure surfaces in the return value and overlayDirs stays set so the
+    // daemon-startup sweep (Task 12) retries the removal.
+    persistTask(task.id);
+    const cleanupFailed = releaseOverlay(task);
+    // If cleanup succeeded, releaseOverlay() cleared overlayDirs in memory
+    // (review finding #11). Persist once more so the durable task record
+    // reflects the cleared overlay metadata instead of claiming an overlay
+    // still exists for an overlay that was just removed. If cleanup failed,
+    // overlayDirs stays set on disk and the startup sweep (Task 12) retries
+    // the removal on the next daemon start -- consistent with the pre-fix
+    // behavior for the cleanup-failure path.
+    if (!cleanupFailed) persistTask(task.id);
+    return { taskId, changesetStatus: task.changesetStatus, applied: true, ...(cleanupFailed ? { cleanupFailed: true } : {}) };
+  }
+
+  /**
+   * @param {string} taskId
+   * @returns {{taskId: string, changesetStatus: string, cleanupFailed?: boolean}}
+   */
+  function reject(taskId) {
+    ensureStateLoaded();
+    const task = tasks.get(taskId);
+    if (!task) throw noSuchTask(taskId);
+    if (task.changesetStatus !== "pending") {
+      throw new Error(`error: task ${taskId} has no pending changeset (changesetStatus: ${task.changesetStatus ?? "none"})\nhelp: only a task with changesetStatus "pending" can be rejected`);
+    }
+    task.changesetStatus = "rejected";
+    // Persist before cleanup (parallel to accept()'s fix): the status is
+    // the committed outcome, the cleanup is the side effect. A crash
+    // between cleanup and persist would leave the task reading as
+    // "pending" after a restart; the next reject() would re-run the
+    // cleanup (idempotent -- rm -rf on a missing path is fine) and then
+    // persist, so the pre-fix order is benign for reject(); matching
+    // accept()'s order keeps the two paths consistent.
+    persistTask(task.id);
+    const cleanupFailed = releaseOverlay(task);
+    // If cleanup succeeded, releaseOverlay() cleared overlayDirs in memory;
+    // persist once more so the durable task record reflects the cleared
+    // overlay metadata (parallel to accept()).
+    if (!cleanupFailed) persistTask(task.id);
+    return { taskId, changesetStatus: task.changesetStatus, ...(cleanupFailed ? { cleanupFailed: true } : {}) };
   }
 
   /** @param {string} taskId */
@@ -2377,7 +2761,7 @@ export function createTaskManager({
     /** @type {TaskSummary & {next: string}} */
     let dispatched;
     try {
-      dispatched = dispatch({ prompt: /** @type {string} */ (prompt), directory: /** @type {string} */ (directory), model, variant, sessionId: resolved.sessionId, executor, env });
+      dispatched = dispatch({ prompt: /** @type {string} */ (prompt), directory: /** @type {string} */ (directory), model, variant, sessionId: resolved.sessionId, executor, env, role: "advisor" });
     } catch (err) {
       throw new Error(errMessage(err).replaceAll("taskferry dispatch", "taskferry advisor"), { cause: err });
     }
@@ -2595,6 +2979,51 @@ export function createTaskManager({
     return projected;
   }
 
+  /**
+   * Review finding #13 (root-cause fix): parse stat counts via real git
+   * tooling instead of hand-rolling a header scan. `git apply --numstat`
+   * reads either git-style (`diff --git`) or plain unified (`diff -ruN`,
+   * the format non-git changesets use) diffs and emits one
+   * `<adds>\t<dels>\t<path>` line per file, which we just sum. Delegating
+   * to git keeps the stat correct for both extraction kinds without
+   * re-deriving the parsing rules. Falls back to a zero stat on any
+   * non-zero exit status (e.g. a plain `diff -ru` without `-N` whose
+   * "Only in ..." lines git apply can't grok, or parsing stdout from a
+   * failed invocation that would have given a misleading non-zero count);
+   * the diff itself stays readable via `result --diff`, only the
+   * human-readable summary is uncomputable.
+   * @param {string} diffPath
+   * @param {(command: string, args: string[]) => {status: number|null, stdout: string, stderr: string, error?: Error}} [runCommand]
+   * @returns {{files: number, additions: number, deletions: number}}
+   */
+  function computeDiffStat(diffPath, runCommand = defaultOverlayRunCommand) {
+    const result = runCommand("git", ["apply", "--numstat", diffPath]);
+    // `git apply --numstat` exits 0 on success and a non-zero status on
+    // any failure (corrupt patch, parse error, etc.). Treat any non-zero
+    // status as "the stat is uncomputable" and return the zero fallback
+    // rather than parsing partial stdout from a failed invocation.
+    if (result.error || result.status !== 0) {
+      return { files: 0, additions: 0, deletions: 0 };
+    }
+    let files = 0;
+    let additions = 0;
+    let deletions = 0;
+    for (const line of result.stdout.split("\n")) {
+      if (!line) continue;
+      const firstTab = line.indexOf("\t");
+      if (firstTab === -1) continue;
+      const secondTab = line.indexOf("\t", firstTab + 1);
+      if (secondTab === -1) continue;
+      const adds = Number(line.slice(0, firstTab));
+      const dels = Number(line.slice(firstTab + 1, secondTab));
+      if (Number.isNaN(adds) || Number.isNaN(dels)) continue;
+      files += 1;
+      additions += adds;
+      deletions += dels;
+    }
+    return { files, additions, deletions };
+  }
+
   // Settlement-time check for "done but no real output": an otherwise clean
   // exit whose extracted final message is empty (after trimming) is flagged
   // with task.incomplete = true, and a task dispatched with --require-final-marker
@@ -2682,8 +3111,8 @@ export function createTaskManager({
     const task = tasks.get(taskId);
     if (!task) throw noSuchTask(taskId);
     if (fields != null) {
-      if (!Array.isArray(fields) || !fields.length || fields.some((field) => !RESULT_FIELDS.has(field))) {
-        throw new Error(`error: fields must contain one or more supported result fields\nhelp: use one of: ${[...RESULT_FIELDS].join(", ")}`);
+      if (!Array.isArray(fields) || !fields.length || fields.some((field) => !TASK_MANAGER_RESULT_FIELDS.has(field))) {
+        throw new Error(`error: fields must contain one or more supported result fields\nhelp: use one of: ${[...TASK_MANAGER_RESULT_FIELDS].join(", ")}`);
       }
       if (full && !fields.includes("narration")) {
         throw new Error("error: full requires narration in fields\nhelp: omit full or include narration in fields");
@@ -2760,6 +3189,21 @@ export function createTaskManager({
     const truncated = !full && fullNarration.length > NARRATION_PREVIEW_CHARS;
     const narration = truncated ? fullNarration.slice(0, NARRATION_PREVIEW_CHARS) + "…" : fullNarration;
 
+    let diffText = null;
+    if (task.diffPath && (fields == null || fields.includes("diff"))) {
+      try {
+        diffText = fs.readFileSync(task.diffPath, "utf8");
+      } catch {
+        diffText = null;
+      }
+    }
+    // Review finding #13: spec §5.3 requires a diffStat summary (files changed,
+    // +/- counts) on result --full. Routed through `git apply --numstat`
+    // (see computeDiffStat) so the same parser handles both git and non-git
+    // changesets -- the prior hand-rolled scan only counted `diff --git`
+    // headers and silently reported files:0 for every non-git result.
+    const diffStat = task.diffPath != null && (fields == null || fields.includes("diffStat")) ? computeDiffStat(task.diffPath, runOverlayCommandFn) : null;
+
     return projectResult({
       taskId,
       status: task.status,
@@ -2767,6 +3211,9 @@ export function createTaskManager({
       signal: task.signal,
       spawnError: task.spawnError,
       ...failureFields(task),
+      diff: diffText,
+      diffStat,
+      changesetError: task.changesetError ?? null,
       sessionId,
       tokens,
       cost,
@@ -2789,6 +3236,8 @@ export function createTaskManager({
   return {
     dispatch,
     cancel,
+    accept,
+    reject,
     status,
     taskDirectory,
     poll,

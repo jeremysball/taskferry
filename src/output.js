@@ -109,12 +109,17 @@ export function leanStatus(detail, { full = false } = {}) {
     outputTailTotalChars,
     outputTailTruncated,
     timedOut,
+    changesetStatus,
   } = detail;
   const lean = { id, status, startedAt };
   if (status !== "running" && status !== "queued") {
     lean.exitCode = exitCode;
     lean.signal = signal;
   }
+  if (changesetStatus === "pending") {
+    lean.changesetStatus = changesetStatus;
+  }
+  if (detail.changesetError) lean.changesetError = detail.changesetError;
   if (logBytesWritten !== undefined) {
     lean.logBytesWritten = logBytesWritten;
     lean.logLastWriteAt = logLastWriteAt;

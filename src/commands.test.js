@@ -996,6 +996,38 @@ test("watch --flush-interval --format ndjson wraps buffered events in a single w
   assert.equal(parsed.events[0].taskId, "oc_1");
 });
 
+test("accept calls task.accept via the client", async () => {
+  let capturedMethod = null;
+  let capturedParams = null;
+  const client = { request: async (method, params) => { capturedMethod = method; capturedParams = params; return { taskId: "t1", changesetStatus: "accepted", applied: true }; } };
+  const result = await runCommand("accept", { taskId: "t1" }, { client });
+  assert.equal(capturedMethod, "task.accept");
+  assert.deepEqual(capturedParams, { taskId: "t1" });
+  assert.equal(result.changesetStatus, "accepted");
+});
+
+test("reject calls task.reject via the client", async () => {
+  let capturedMethod = null;
+  const client = { request: async (method) => { capturedMethod = method; return { taskId: "t1", changesetStatus: "rejected" }; } };
+  const result = await runCommand("reject", { taskId: "t1" }, { client });
+  assert.equal(capturedMethod, "task.reject");
+  assert.equal(result.changesetStatus, "rejected");
+});
+
+test("result --diff requests fields: ['diff']", async () => {
+  let capturedParams = null;
+  const client = { request: async (method, params) => { capturedParams = params; return { taskId: "t1", status: "done", diff: "diff --git a/x b/x\n" }; } };
+  await runCommand("result", { taskId: "t1", diff: true }, { client });
+  assert.deepEqual(capturedParams.fields, ["diff"]);
+});
+
+test("dispatch forwards noOverlay to task.dispatch", async () => {
+  let capturedParams = null;
+  const client = { request: async (method, params) => { capturedParams = params; return {}; } };
+  await runCommand("dispatch", { prompt: "hi", directory: "/tmp", noOverlay: true }, { client, cwd: "/tmp", checkSkills: () => {} });
+  assert.equal(capturedParams.noOverlay, true);
+});
+
 test("watch --flush-interval flushes buffered events on abort instead of silently dropping them", async () => {
   // Regression test: on SIGINT/SIGTERM or an injected AbortSignal, the
   // buffered events must still be emitted -- otherwise up to one

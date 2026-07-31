@@ -14,6 +14,7 @@ const commandSpecs = {
       "--session-id <id>": "resume an existing OpenCode session",
       "--require-final-marker <regex>": "flag the task as incomplete if the final message doesn't match this pattern (case-sensitive, standard JS RegExp semantics)",
       "--no-sandbox": "run this dispatch without the bwrap filesystem sandbox (default: sandboxed on Linux)",
+      "--no-overlay": "run this dispatch without the copy-on-write overlay (writes land directly, not gated by accept/reject)",
       "--allowed-dirs <path,path,...>": "extra directories bound read-write inside the sandbox, in addition to the auto-detected git-common-dir for a worktree",
       "--executor <opencode|pi>": "worker backend to dispatch through, default pi",
     },
@@ -30,6 +31,18 @@ const commandSpecs = {
     description: "Cancel queued or running work.",
     options: { "--grace-ms <number>": "milliseconds before SIGKILL, default 5000" },
     examples: ['taskferry cancel <id>', 'taskferry cancel <id> --grace-ms 10000'],
+  },
+  accept: {
+    usage: "taskferry accept <id>",
+    description: "Apply a dispatch task's pending changeset to its target directory.",
+    options: {},
+    examples: ['taskferry accept <id>'],
+  },
+  reject: {
+    usage: "taskferry reject <id>",
+    description: "Discard a task's pending changeset without applying it.",
+    options: {},
+    examples: ['taskferry reject <id>'],
   },
   wait: {
     usage: "taskferry wait <id> [options]",
@@ -87,8 +100,9 @@ const commandSpecs = {
     options: {
       "--full": "include untruncated narration",
       "--fields <comma-list>": "request selected result fields",
+      "--diff": "print the task's changeset diff (read-only; cannot combine with --fields or --full)",
     },
-    examples: ['taskferry result <id>', 'taskferry result <id> --full', 'taskferry result <id> --fields message,tokens'],
+    examples: ['taskferry result <id>', 'taskferry result <id> --full', 'taskferry result <id> --fields message,tokens', 'taskferry result <id> --diff'],
   },
   list: {
     usage: "taskferry list [options]",
@@ -254,7 +268,7 @@ function parseFields(value) {
 function defaultOptions(command, cwd) {
   switch (command) {
     case "dispatch":
-      return { prompt: undefined, directory: cwd, model: undefined, variant: undefined, sessionId: undefined, finalMarker: undefined, noSandbox: false, allowedDirs: undefined, executor: undefined };
+      return { prompt: undefined, directory: cwd, model: undefined, variant: undefined, sessionId: undefined, finalMarker: undefined, noSandbox: false, noOverlay: false, allowedDirs: undefined, executor: undefined };
     case "advisor":
       return { prompt: undefined, model: undefined, directory: undefined, variant: undefined, sessionId: undefined, timeoutMs: undefined, executor: undefined };
     case "cancel":
@@ -268,7 +282,11 @@ function defaultOptions(command, cwd) {
     case "summary":
       return { taskId: undefined, mode: "report", maxWords: undefined, wait: false };
     case "result":
-      return { taskId: undefined, full: false, fields: undefined };
+      return { taskId: undefined, full: false, fields: undefined, diff: false };
+    case "accept":
+      return { taskId: undefined };
+    case "reject":
+      return { taskId: undefined };
     case "list":
       return { directory: undefined, all: false, limit: undefined };
     case "watch":
@@ -314,7 +332,7 @@ export function parseArgs(argv, { cwd = process.cwd() } = {}) {
     }
     if (!token.startsWith("-")) {
       if (positional) throw usageError(`unexpected argument: ${token}`, command);
-      if (!["cancel", "wait", "status", "tail", "summary", "result"].includes(command)) {
+      if (!["cancel", "wait", "status", "tail", "summary", "result", "accept", "reject"].includes(command)) {
         throw usageError(`unexpected argument: ${token}`, command);
       }
       options.taskId = token;
@@ -357,8 +375,10 @@ export function parseArgs(argv, { cwd = process.cwd() } = {}) {
       "--summaries": ["watch"],
       "--summarize": ["wait"],
       "--no-sandbox": ["dispatch"],
+      "--no-overlay": ["dispatch"], // advisor deliberately excluded -- review finding #5
+      "--diff": ["result"],
     };
-    const booleanKeyOverrides = { "--no-sandbox": "noSandbox" };
+    const booleanKeyOverrides = { "--no-sandbox": "noSandbox", "--no-overlay": "noOverlay" };
     if (booleanCommands[name]) {
       if (!booleanCommands[name].includes(command)) throw usageError(`unknown flag ${name} for \`${command}\``, command);
       if (inlineValue !== undefined) throw usageError(`${name} does not take a value`, command);
@@ -424,13 +444,25 @@ export function parseArgs(argv, { cwd = process.cwd() } = {}) {
   }
   if (command === "list" && options.all) options.directory = undefined;
   if (!help) {
-    if (["cancel", "wait", "status", "tail", "summary", "result"].includes(command) && !options.taskId) {
+    if (["cancel", "wait", "status", "tail", "summary", "result", "accept", "reject"].includes(command) && !options.taskId) {
       throw usageError("task id is required", command);
     }
     if (["dispatch", "advisor"].includes(command) && !options.prompt) throw usageError("--prompt is required", command);
     if (command === "advisor" && !options.model) throw usageError("--model is required", command);
     if (command === "result" && options.full && options.fields && !options.fields.includes("narration")) {
       throw usageError("--full requires narration in --fields", command);
+    }
+    if (command === "result" && options.diff && options.fields) {
+      throw usageError("--diff cannot be combined with --fields", command);
+    }
+    if (command === "result" && options.diff && options.full) {
+      // --full server-side only widens the narration preview; the diff field
+      // is independent and gated by `fields: ["diff"]` (--diff takes that
+      // route). Combining them would either silently drop --full (the
+      // pre-fix if/else-if in commands.js) or send both and have the
+      // projection throw away one -- either way a confusing user experience.
+      // Reject at parse time so the failure is loud and early.
+      throw usageError("--diff cannot be combined with --full", command);
     }
     if (command === "wait" && options.summarize && options.timeoutMs !== undefined) {
       throw usageError("--summarize cannot be combined with --timeout", command);

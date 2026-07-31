@@ -6,6 +6,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { createTaskManager, isOutsideDirectory, DEFAULT_SUMMARY_MODEL, bucketFor, parseEnvDenylist } from "./tasks.js";
+import { defaultRunCommand as changesetDefaultRunCommand } from "./changeset.js";
 
 // Builds an isolated task manager backed by a temp state dir and, unless
 // overridden, fake spawnFn/killFn so no test ever touches a real `opencode`
@@ -14,7 +15,7 @@ import { createTaskManager, isOutsideDirectory, DEFAULT_SUMMARY_MODEL, bucketFor
 // runs synchronously in the constructor, same as the old module-level code
 // did at import time). `tasksFixture` may be an array or `(logDir) => array`
 // for fixtures whose logPath needs to point inside the real log dir.
-function makeManager({ tasksFixture = [], logs = {}, spawnFn, killFn, listModelsFn, defaultExecutor, maxDispatchesPerWindow, dispatchWindowMs, advisorSessionTtlMs, maxConcurrentTasks, noOutputTimeoutMs, postOutputNoOutputTimeoutMs, watchdogPollMs, maxWaitMs, envDenylistSpec, sandboxEnabled = false, checkBwrapAvailableFn, existsFn, statFn, readdirFn, runtimeDir, cacheDir, platform, onEvent, allowedDirs, resolveGitCommonDirFn, resolveGitDirFn } = {}) {
+function makeManager({ tasksFixture = [], logs = {}, spawnFn, killFn, listModelsFn, defaultExecutor, maxDispatchesPerWindow, dispatchWindowMs, advisorSessionTtlMs, maxConcurrentTasks, noOutputTimeoutMs, postOutputNoOutputTimeoutMs, watchdogPollMs, maxWaitMs, envDenylistSpec, sandboxEnabled = false, checkBwrapAvailableFn, existsFn, statFn, readdirFn, runtimeDir, cacheDir, platform, onEvent, allowedDirs, resolveGitCommonDirFn, resolveGitDirFn, overlayEnabled = false, checkOverlaySupportFn, overlayTmpRoot, runOverlayCommandFn, rmOverlayTreeFn } = {}) {
   const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-test-"));
   const logDir = path.join(stateDir, "logs");
   fs.mkdirSync(logDir, { recursive: true });
@@ -56,6 +57,11 @@ function makeManager({ tasksFixture = [], logs = {}, spawnFn, killFn, listModels
     ...(allowedDirs != null ? { allowedDirs } : {}),
     ...(resolveGitCommonDirFn != null ? { resolveGitCommonDirFn } : {}),
     ...(resolveGitDirFn != null ? { resolveGitDirFn } : {}),
+    overlayEnabled,
+    ...(checkOverlaySupportFn != null ? { checkOverlaySupportFn } : {}),
+    ...(overlayTmpRoot != null ? { overlayTmpRoot } : {}),
+    ...(runOverlayCommandFn != null ? { runOverlayCommandFn } : {}),
+    ...(rmOverlayTreeFn != null ? { rmOverlayTreeFn } : {}),
   });
 }
 
@@ -389,6 +395,112 @@ describe("dispatch() lifecycle, driven through an injected spawnFn (no real open
     assert.equal(settled.status, "crashed");
     const full = mgr.result(dispatched.id);
     assert.equal(full.spawnError, "spawn opencode ENOENT");
+  });
+
+  test("child.on('error') still runs changeset extraction/cleanup so a spawn-failed task doesn't strand its overlay", () => {
+    // The overlay is created during the sandbox block, BEFORE the spawn
+    // attempt. If the spawn errors (ENOENT), the overlay would otherwise sit
+    // on disk with changesetStatus still "pending" and no extraction ever
+    // booked against it -- the spawn-error path must run the same
+    // extractChangesetForTask() the exit path does.
+    let extractCalls = 0;
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "axi-spawn-error-extract-"));
+    const overlayTmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "axi-spawn-error-extract-tmp-"));
+    const child = fakeChild();
+    const mgr = makeManager({
+      spawnFn: () => child,
+      sandboxEnabled: true,
+      checkBwrapAvailableFn: () => ({ checked: true, available: true }),
+      overlayEnabled: true,
+      checkOverlaySupportFn: () => ({ supported: true }),
+      platform: "linux",
+      overlayTmpRoot,
+      runOverlayCommandFn: () => { extractCalls++; return { status: 0, stdout: "", stderr: "", error: undefined }; },
+    });
+
+    const dispatched = mgr.dispatch({ prompt: "hi", directory });
+    const preErrorCalls = extractCalls;
+
+    child.emit("error", new Error("spawn opencode ENOENT"));
+
+    const status = mgr.status(dispatched.id);
+    assert.equal(status.status, "crashed");
+    // Empty overlay (no worker ever ran) -> 0-byte diff -> "accepted" (same
+    // shape the exit path's zero-change case produces), overlayDirs cleared.
+    assert.equal(status.changesetStatus, "accepted");
+    assert.equal("overlayDirs" in status, false);
+    assert.ok(extractCalls > preErrorCalls, "extractChangesetForTask should run on the spawn-error path");
+  });
+
+  test("advisor: child.on('error') still auto-rejects and cleans up the overlay so it's not stranded", async () => {
+    // Advisor's settlement already auto-rejects+cleans; if the spawn errors
+    // out, the same auto-reject must run for the spawn-error path too (the
+    // bootstrap can otherwise leave the overlay under tmp until the startup
+    // sweep next runs).
+    let cleanedRoot = null;
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "axi-spawn-error-advisor-"));
+    const overlayTmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "axi-spawn-error-advisor-tmp-"));
+    const child = fakeChild();
+    const mgr = makeManager({
+      spawnFn: () => child,
+      sandboxEnabled: true,
+      checkBwrapAvailableFn: () => ({ checked: true, available: true }),
+      overlayEnabled: true,
+      checkOverlaySupportFn: () => ({ supported: true }),
+      platform: "linux",
+      overlayTmpRoot,
+      runOverlayCommandFn: () => ({ status: 0, stdout: "", stderr: "", error: undefined }),
+      rmOverlayTreeFn: (p) => { cleanedRoot = p; },
+    });
+
+    const advisePromise = mgr.advisor({ prompt: "hi", directory, model: "openai/gpt-5.6-sol" });
+    child.emit("error", new Error("spawn opencode ENOENT"));
+    const advised = await advisePromise;
+
+    const status = mgr.status(advised.task_id);
+    assert.equal(status.status, "crashed");
+    assert.equal(status.changesetStatus, "rejected");
+    assert.equal("overlayDirs" in status, false);
+    assert.ok(cleanedRoot, "advisor's overlay must be cleaned up on the spawn-error path");
+  });
+
+  test("dispatch() synchronous throw from spawnFn still runs changeset extraction/cleanup so a sync-spawn-failed task doesn't strand its overlay", () => {
+    // Companion to the child.on('error') test above: child.emit("error")
+    // exercises the async spawn-failure path inside the dispatch() body,
+    // but spawnFn can also throw synchronously (e.g. an unforeseen bug in
+    // options handling, a misconfigured bwrap probe that throws during
+    // dispatch) -- that lands in the startTask() try/catch which was
+    // missing the same extractChangesetForTask() the async path runs.
+    // Without the fix, overlayDirs is set + changesetStatus === "pending"
+    // and the orphan sweep (sweepOrphanedOverlays, whose skip condition is
+    // `ownsThisOverlay && changesetStatus === "pending"`) deliberately
+    // leaves it alone -- the overlay sits on the tmpfs until a manual
+    // reject or a reboot.
+    let extractCalls = 0;
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "axi-spawn-throw-extract-"));
+    const overlayTmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "axi-spawn-throw-extract-tmp-"));
+    const mgr = makeManager({
+      spawnFn: () => { throw new Error("spawn failed synchronously"); },
+      sandboxEnabled: true,
+      checkBwrapAvailableFn: () => ({ checked: true, available: true }),
+      overlayEnabled: true,
+      checkOverlaySupportFn: () => ({ supported: true }),
+      platform: "linux",
+      overlayTmpRoot,
+      runOverlayCommandFn: () => { extractCalls++; return { status: 0, stdout: "", stderr: "", error: undefined }; },
+    });
+
+    const preDispatchCalls = extractCalls;
+    const dispatched = mgr.dispatch({ prompt: "hi", directory });
+
+    const status = mgr.status(dispatched.id);
+    assert.equal(status.status, "crashed");
+    assert.equal(status.spawnError, "spawn failed synchronously");
+    // Empty overlay (no worker ever ran) -> 0-byte diff -> "accepted" (same
+    // shape the async spawn-error path produces), overlayDirs cleared.
+    assert.equal(status.changesetStatus, "accepted");
+    assert.equal("overlayDirs" in status, false);
+    assert.ok(extractCalls > preDispatchCalls, "extractChangesetForTask should run on the sync-throw spawn-failure path");
   });
 });
 
@@ -860,6 +972,521 @@ describe("bwrap sandboxing", () => {
 
     child.emit("exit", 0, null);
   });
+
+  test("mounts an overlay on the target directory when overlayEnabled and the host supports it", () => {
+    let captured = null;
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "axi-overlay-dir-"));
+    const overlayTmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "axi-overlay-tmp-"));
+    const mgr = makeManager({
+      spawnFn: (cmd, args, opts) => { captured = { cmd, args, opts }; return fakeChild(); },
+      sandboxEnabled: true,
+      checkBwrapAvailableFn: () => ({ checked: true, available: true }),
+      overlayEnabled: true,
+      checkOverlaySupportFn: () => ({ supported: true }),
+      platform: "linux",
+      overlayTmpRoot,
+    });
+
+    const result = mgr.dispatch({ prompt: "hello", directory });
+
+    assert.ok(captured.args.includes("--overlay-src"));
+    const overlayIndex = captured.args.indexOf("--overlay-src");
+    assert.equal(captured.args[overlayIndex + 1], directory);
+    const status = mgr.status(result.id);
+    assert.equal(status.changesetStatus, "pending");
+    assert.ok(status.overlayDirs.upperDir.startsWith(overlayTmpRoot));
+    assert.equal(status.overlayDirs.tmpRoot, overlayTmpRoot);
+  });
+
+  test("resolvePreDispatchHead is invoked through the injected runOverlayCommandFn delegate, not via a direct subprocess", () => {
+    // The pre-dispatch HEAD probe used to be a direct call into the
+    // changeset.js default runner, side-stepping the runOverlayCommandFn
+    // delegate every other git/command invocation in this module goes
+    // through. Fake it out and assert the probe is observably routed through
+    // the injected delegate (and the captured HEAD lands on the task).
+    const overlayTmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "axi-pre-dispatch-head-tmp-"));
+    const preDispatchCalls = [];
+    const FAKE_HEAD = "0123456789abcdef0123456789abcdef01234567";
+    const mgr = makeManager({
+      spawnFn: () => fakeChild(),
+      sandboxEnabled: true,
+      checkBwrapAvailableFn: () => ({ checked: true, available: true }),
+      overlayEnabled: true,
+      checkOverlaySupportFn: () => ({ supported: true }),
+      platform: "linux",
+      overlayTmpRoot,
+      runOverlayCommandFn: (command, args) => {
+        preDispatchCalls.push({ command, args });
+        // Only the pre-dispatch HEAD probe runs here (the child never
+        // exits, so there's no extraction bwrap call). Return a fake HEAD
+        // for the first probe + a git-dir for the fallback to land on the
+        // git target path.
+        if (command === "git" && args.includes("rev-parse") && args.includes("HEAD")) {
+          return { status: 0, stdout: `${FAKE_HEAD}\n`, stderr: "", error: undefined };
+        }
+        if (command === "git" && args.includes("--git-dir")) {
+          return { status: 0, stdout: ".git\n", stderr: "", error: undefined };
+        }
+        return { status: 0, stdout: "", stderr: "", error: undefined };
+      },
+    });
+
+    mgr.dispatch({ prompt: "hello", directory: os.tmpdir() });
+
+    // The probe must be observable through the injected delegate, not a
+    // real subprocess. The directory argument has to be threaded through too,
+    // so the bwrap/git probe targets the dispatch's launch directory.
+    const headProbe = preDispatchCalls.find((c) => c.command === "git" && c.args.includes("HEAD"));
+    assert.ok(headProbe, "resolvePreDispatchHead must go through runOverlayCommandFn");
+    assert.equal(headProbe.args[0], "-C");
+    assert.equal(headProbe.args[1], os.tmpdir());
+    // The probe went through the delegate: the dispatch landed on a git
+    // target rather than a non-git one (otherwise the --git-dir fallback
+    // probe would have returned the empty-tree sentinel and the task would
+    // have been a git target via a different code path -- the existence of
+    // the HEAD probe alone is what we're checking here).
+    assert.ok(preDispatchCalls.some((c) => c.command === "git" && c.args.includes("HEAD")));
+  });
+
+  test("falls back to a plain bind with a warning when overlayEnabled is explicitly false", () => {
+    let captured = null;
+    let warned = "";
+    const originalWrite = process.stderr.write;
+    process.stderr.write = (chunk) => { warned += chunk; return true; };
+    try {
+      const directory = fs.mkdtempSync(path.join(os.tmpdir(), "axi-no-overlay-dir-"));
+      const mgr = makeManager({
+        spawnFn: (cmd, args, opts) => { captured = { cmd, args, opts }; return fakeChild(); },
+        sandboxEnabled: true,
+        checkBwrapAvailableFn: () => ({ checked: true, available: true }),
+        overlayEnabled: false,
+        platform: "linux",
+      });
+      const result = mgr.dispatch({ prompt: "hello", directory });
+      assert.equal(captured.args.includes("--overlay-src"), false);
+      assert.equal("changesetStatus" in mgr.status(result.id), false);
+      assert.match(warned, /overlay disabled/);
+    } finally {
+      process.stderr.write = originalWrite;
+    }
+  });
+
+  test("crashes the task with a spawnError instead of dispatching unguarded when overlay is required but unsupported", () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "axi-unsupported-dir-"));
+    const mgr = makeManager({
+      spawnFn: () => fakeChild(),
+      sandboxEnabled: true,
+      overlayEnabled: true,
+      checkBwrapAvailableFn: () => ({ checked: true, available: true }),
+      checkOverlaySupportFn: () => ({ supported: false, reason: "bwrap 0.6.0 < 0.8 required for --overlay" }),
+      platform: "linux",
+    });
+    const result = mgr.dispatch({ prompt: "hello", directory });
+    const status = mgr.status(result.id);
+    assert.equal(status.status, "crashed");
+    assert.match(status.spawnError, /bwrap 0.6.0 < 0.8/);
+  });
+
+  test("requireOverlaySupport() re-probes a negative result after the TTL so a transient failure can self-heal", () => {
+    // Trigger: a time-based TTL on a negative probe cache. A positive probe
+    // is cached forever (no point re-probing); a transient negative probe
+    // (PATH temporarily missing bwrap, bwrap version low mid-upgrade, ...) is
+    // re-evaluated after 60s so the daemon self-heals without a restart.
+    let calls = 0;
+    let now = 1_000_000;
+    const realNow = Date.now;
+    Date.now = () => now;
+    const restore = () => { Date.now = realNow; };
+    try {
+      const mgr = makeManager({
+        spawnFn: () => fakeChild(),
+        sandboxEnabled: true,
+        checkBwrapAvailableFn: () => ({ checked: true, available: true }),
+        overlayEnabled: true,
+        checkOverlaySupportFn: () => { calls++; return { supported: false, reason: "bwrap 0.6.0 < 0.8" }; },
+        platform: "linux",
+      });
+
+      // First dispatch: probe runs, cached as negative.
+      mgr.dispatch({ prompt: "one", directory: os.tmpdir() });
+      assert.equal(calls, 1);
+
+      // Second dispatch immediately: cache is negative and recent, no re-probe.
+      mgr.dispatch({ prompt: "two", directory: os.tmpdir() });
+      assert.equal(calls, 1);
+
+      // Just under the TTL: still cached.
+      now += 59_999;
+      mgr.dispatch({ prompt: "three", directory: os.tmpdir() });
+      assert.equal(calls, 1);
+
+      // At/past the TTL: re-probe.
+      now += 1;
+      mgr.dispatch({ prompt: "four", directory: os.tmpdir() });
+      assert.equal(calls, 2);
+    } finally {
+      restore();
+    }
+  });
+
+  test("requireOverlaySupport() caches a positive result forever (no re-probe)", () => {
+    // Companion to the negative-TTL test: once supported, the host stays
+    // supported (bwrap doesn't get uninstalled through a transient issue).
+    // A TTL here would be wasted work on every dispatch.
+    let calls = 0;
+    const mgr = makeManager({
+      spawnFn: () => fakeChild(),
+      sandboxEnabled: true,
+      checkBwrapAvailableFn: () => ({ checked: true, available: true }),
+      overlayEnabled: true,
+      checkOverlaySupportFn: () => { calls++; return { supported: true }; },
+      platform: "linux",
+    });
+
+    mgr.dispatch({ prompt: "one", directory: os.tmpdir() });
+    mgr.dispatch({ prompt: "two", directory: os.tmpdir() });
+    mgr.dispatch({ prompt: "three", directory: os.tmpdir() });
+
+    assert.equal(calls, 1);
+  });
+
+  test("converts the git-common-dir binds into per-path overlays instead of plain writable binds when overlay is active", () => {
+    let captured = null;
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "axi-worktree-overlay-dir-"));
+    const gitCommonDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-git-common-overlay-"));
+    const mgr = makeManager({
+      spawnFn: (cmd, args, opts) => { captured = { cmd, args, opts }; return fakeChild(); },
+      sandboxEnabled: true,
+      checkBwrapAvailableFn: () => ({ checked: true, available: true }),
+      overlayEnabled: true,
+      checkOverlaySupportFn: () => ({ supported: true }),
+      platform: "linux",
+      resolveGitCommonDirFn: () => gitCommonDir,
+    });
+
+    mgr.dispatch({ prompt: "hello", directory });
+
+    // The whole-common-dir fallback path (no resolveGitDirFn override -> gitDir
+    // resolves to the same as gitCommonDir via the real `git` binary failing in
+    // this temp dir, matching the existing "falls back to binding the whole
+    // common dir" test's setup) must appear as an overlay, not a plain --bind.
+    const overlaySrcIndex = captured.args.indexOf("--overlay-src", captured.args.indexOf("--overlay-src") + 1);
+    assert.notEqual(overlaySrcIndex, -1, "expected a second --overlay-src for the git-common-dir slice");
+    assert.equal(captured.args[overlaySrcIndex + 1], gitCommonDir);
+  });
+
+  test("shareNet is true (--share-net) for a plain dispatch and false (--unshare-net) for an advisor role", async () => {
+    let dispatchArgs = null;
+    let advisorArgs = null;
+    const mgr = makeManager({
+      spawnFn: (cmd, args) => { if (!dispatchArgs) dispatchArgs = args; else advisorArgs = args; const child = fakeChild(); setImmediate(() => child.emit("exit", 0, null)); return child; },
+      sandboxEnabled: true,
+      overlayEnabled: true,
+      checkBwrapAvailableFn: () => ({ checked: true, available: true }),
+      checkOverlaySupportFn: () => ({ supported: true }),
+      platform: "linux",
+    });
+    mgr.dispatch({ prompt: "hello", directory: os.tmpdir() });
+    assert.ok(dispatchArgs.includes("--share-net"));
+    assert.ok(!dispatchArgs.includes("--unshare-net"));
+
+    await mgr.advisor({ prompt: "hello", directory: os.tmpdir(), model: "openai/gpt-5.6-sol" });
+    assert.ok(advisorArgs.includes("--unshare-net"));
+    assert.ok(!advisorArgs.includes("--share-net"));
+  });
+
+  test("persists the git-common-dir sub-overlays onto the task record for extraction", () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "axi-rwbinds-persist-dir-"));
+    const gitCommonDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-rwbinds-common-"));
+    const mgr = makeManager({
+      spawnFn: () => fakeChild(),
+      sandboxEnabled: true,
+      checkBwrapAvailableFn: () => ({ checked: true, available: true }),
+      overlayEnabled: true,
+      checkOverlaySupportFn: () => ({ supported: true }),
+      platform: "linux",
+      resolveGitCommonDirFn: () => gitCommonDir,
+    });
+
+    const result = mgr.dispatch({ prompt: "hello", directory });
+
+    // Review finding #1: extraction (Task 10) re-mounts the exact sub-overlays
+    // the worker ran with; they must be persisted here, not re-derived later.
+    const status = mgr.status(result.id);
+    assert.ok(Array.isArray(status.overlayDirs.rwBinds));
+    assert.ok(status.overlayDirs.rwBinds.length > 0, "the whole-common-dir fallback must be persisted as a sub-overlay");
+    assert.ok(status.overlayDirs.rwBinds.every((b) => b.path && b.upperDir && b.workDir));
+  });
+
+  test("binds runtimeDir read-only for advisor spawns so the daemon socket is unreachable", async () => {
+    // --unshare-net alone does not block Unix-domain-socket access to a
+    // writable bind-mounted path, and runtimeDir holds daemon.sock (review
+    // finding #6); a read-only bind makes connect() fail instead.
+    let dispatchArgs = null;
+    let advisorArgs = null;
+    const mgr = makeManager({
+      spawnFn: (cmd, args) => { if (!dispatchArgs) dispatchArgs = args; else advisorArgs = args; const child = fakeChild(); setImmediate(() => child.emit("exit", 0, null)); return child; },
+      sandboxEnabled: true,
+      overlayEnabled: true,
+      checkBwrapAvailableFn: () => ({ checked: true, available: true }),
+      checkOverlaySupportFn: () => ({ supported: true }),
+      platform: "linux",
+    });
+    const runtimeDir = path.join(mgr.paths.STATE_DIR, "run");
+
+    mgr.dispatch({ prompt: "hello", directory: os.tmpdir() });
+    const flagPairs = (args) => {
+      const pairs = [];
+      for (let i = 0; i < args.length; i++) {
+        if (args[i] === "--bind" || args[i] === "--ro-bind") pairs.push([args[i], args[i + 1]]);
+      }
+      return pairs;
+    };
+    assert.ok(flagPairs(dispatchArgs).some(([flag, p]) => flag === "--bind" && p === runtimeDir), "dispatch keeps today's writable runtimeDir bind");
+
+    await mgr.advisor({ prompt: "hello", directory: os.tmpdir(), model: "openai/gpt-5.6-sol" });
+    assert.ok(flagPairs(advisorArgs).some(([flag, p]) => flag === "--ro-bind" && p === runtimeDir), "advisor must get a read-only runtimeDir bind");
+    assert.ok(!flagPairs(advisorArgs).some(([flag, p]) => flag === "--bind" && p === runtimeDir), "advisor must not get a writable runtimeDir bind");
+  });
+
+  test("crashes an advisor dispatch instead of running it unguarded when overlay is globally disabled", async () => {
+    // Review finding #5: an advisor without an overlay gets a plain writable
+    // bind -- a path to persist writes, contradicting ADR 0001. Fail closed.
+    const mgr = makeManager({
+      spawnFn: () => fakeChild(),
+      sandboxEnabled: true,
+      checkBwrapAvailableFn: () => ({ checked: true, available: true }),
+      overlayEnabled: false,
+      platform: "linux",
+    });
+    const advised = await mgr.advisor({ prompt: "hello", directory: os.tmpdir(), model: "openai/gpt-5.6-sol" });
+    const status = mgr.status(advised.task_id);
+    assert.equal(status.status, "crashed");
+    assert.match(status.spawnError, /advisor dispatch requires overlay-gated writes/);
+  });
+
+  test("crashes an advisor dispatch instead of running it unguarded when sandboxing is force-disabled", async () => {
+    // Review finding #5 (dispatch-launch side): the overlay fail-closed check
+    // lives inside the sandbox block, so a globally-disabled sandbox would
+    // otherwise let an advisor launch with a plain writable bind -- a path to
+    // persist writes, contradicting ADR 0001. Fail closed at dispatch-launch.
+    let spawned = false;
+    const mgr = makeManager({
+      spawnFn: () => { spawned = true; return fakeChild(); },
+      sandboxEnabled: false,
+      overlayEnabled: true,
+      checkOverlaySupportFn: () => ({ supported: true }),
+      platform: "linux",
+    });
+    const advised = await mgr.advisor({ prompt: "hello", directory: os.tmpdir(), model: "openai/gpt-5.6-sol" });
+    const status = mgr.status(advised.task_id);
+    assert.equal(status.status, "crashed");
+    assert.match(status.spawnError, /advisor dispatch requires overlay-gated writes/);
+    assert.match(status.spawnError, /sandbox is unavailable/);
+    assert.equal(spawned, false, "advisor must not spawn an unsandboxed child");
+  });
+
+  test("crashes an advisor dispatch instead of running it unguarded when the platform cannot sandbox", async () => {
+    // Same guarantee on a platform with no sandbox support (e.g. non-Linux):
+    // overlay-gating cannot be established, so an advisor must fail closed
+    // rather than silently writing through to the target directory.
+    let spawned = false;
+    const mgr = makeManager({
+      spawnFn: () => { spawned = true; return fakeChild(); },
+      sandboxEnabled: true,
+      overlayEnabled: true,
+      checkBwrapAvailableFn: () => ({ checked: true, available: true }),
+      checkOverlaySupportFn: () => ({ supported: true }),
+      platform: "darwin",
+    });
+    const advised = await mgr.advisor({ prompt: "hello", directory: os.tmpdir(), model: "openai/gpt-5.6-sol" });
+    const status = mgr.status(advised.task_id);
+    assert.equal(status.status, "crashed");
+    assert.match(status.spawnError, /advisor dispatch requires overlay-gated writes/);
+    assert.equal(spawned, false, "advisor must not spawn an unsandboxed child");
+  });
+});
+
+describe("changeset extraction at settlement", () => {
+  test("extracts a diff and leaves changesetStatus pending for a settled dispatch with an active overlay", () => {
+    let extractCommand = null;
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "axi-extract-dir-"));
+    const overlayTmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "axi-extract-tmp-"));
+    let child;
+    const mgr = makeManager({
+      spawnFn: (cmd, args) => { child = fakeChild(); return child; },
+      sandboxEnabled: true,
+      checkBwrapAvailableFn: () => ({ checked: true, available: true }),
+      overlayEnabled: true,
+      checkOverlaySupportFn: () => ({ supported: true }),
+      platform: "linux",
+      overlayTmpRoot,
+      runOverlayCommandFn: (command, args) => { extractCommand = { command, args }; return { status: 0, stdout: "diff --git a/x b/x\n", stderr: "", error: undefined }; },
+    });
+
+    const result = mgr.dispatch({ prompt: "hello", directory });
+    child.emit("exit", 0, null);
+
+    const status = mgr.status(result.id);
+    assert.equal(status.changesetStatus, "pending");
+    assert.equal(mgr.result(result.id, { fields: ["diff"] }).diff, "diff --git a/x b/x\n");
+    assert.equal(extractCommand.command, "bwrap");
+  });
+
+  test("auto-rejects and cleans up an advisor's changeset at settlement", async () => {
+    let cleanedRoot = null;
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "axi-advisor-extract-dir-"));
+    const overlayTmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "axi-advisor-extract-tmp-"));
+    let child;
+    const mgr = makeManager({
+      spawnFn: (cmd, args) => { child = fakeChild(); return child; },
+      sandboxEnabled: true,
+      checkBwrapAvailableFn: () => ({ checked: true, available: true }),
+      overlayEnabled: true,
+      checkOverlaySupportFn: () => ({ supported: true }),
+      platform: "linux",
+      overlayTmpRoot,
+      runOverlayCommandFn: () => ({ status: 0, stdout: "", stderr: "", error: undefined }),
+      rmOverlayTreeFn: (p) => { cleanedRoot = p; },
+    });
+
+    const advisePromise = mgr.advisor({ prompt: "hello", directory, model: "openai/gpt-5.6-sol" });
+    setImmediate(() => child.emit("exit", 0, null));
+    const advised = await advisePromise;
+
+    const status = mgr.status(advised.task_id);
+    assert.equal(status.changesetStatus, "rejected");
+    assert.ok(cleanedRoot);
+  });
+
+  test("re-mounts persisted git-common-dir sub-overlays during extraction", () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "axi-extract-git-dir-"));
+    execFileSync("git", ["init", "-q", directory]);
+    fs.writeFileSync(path.join(directory, "f.txt"), "base\n");
+    execFileSync("git", ["-C", directory, "add", "-A"]);
+    execFileSync("git", ["-C", directory, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "base"]);
+    const gitCommonDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-extract-common-"));
+    const gitWorktreeAdminDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-extract-gitdir-"));
+    let extractArgs = null;
+    let child;
+    const mgr = makeManager({
+      spawnFn: (cmd, args) => { child = fakeChild(); return child; },
+      sandboxEnabled: true,
+      checkBwrapAvailableFn: () => ({ checked: true, available: true }),
+      overlayEnabled: true,
+      checkOverlaySupportFn: () => ({ supported: true }),
+      platform: "linux",
+      resolveGitCommonDirFn: () => gitCommonDir,
+      resolveGitDirFn: () => gitWorktreeAdminDir,
+      runOverlayCommandFn: (command, args) => { extractArgs = args; return { status: 0, stdout: "diff --git a/f.txt b/f.txt\n", stderr: "", error: undefined }; },
+    });
+
+    const result = mgr.dispatch({ prompt: "hello", directory });
+    child.emit("exit", 0, null);
+
+    const overlaySrcCount = extractArgs.filter((a) => a === "--overlay-src").length;
+    assert.ok(overlaySrcCount >= 2);
+    assert.ok(extractArgs.includes(gitWorktreeAdminDir));
+    assert.equal(mgr.status(result.id).changesetStatus, "pending");
+  });
+
+  test("auto-resolves a zero-change extraction to accepted and cleans up immediately", () => {
+    let cleanedRoot = null;
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "axi-empty-extract-dir-"));
+    const overlayTmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "axi-empty-extract-tmp-"));
+    let child;
+    const mgr = makeManager({
+      spawnFn: (cmd, args) => { child = fakeChild(); return child; },
+      sandboxEnabled: true,
+      checkBwrapAvailableFn: () => ({ checked: true, available: true }),
+      overlayEnabled: true,
+      checkOverlaySupportFn: () => ({ supported: true }),
+      platform: "linux",
+      overlayTmpRoot,
+      runOverlayCommandFn: () => ({ status: 0, stdout: "", stderr: "", error: undefined }),
+      rmOverlayTreeFn: (p) => { cleanedRoot = p; },
+    });
+
+    const result = mgr.dispatch({ prompt: "hello", directory });
+    child.emit("exit", 0, null);
+
+    const status = mgr.status(result.id);
+    assert.equal(status.changesetStatus, "accepted");
+    assert.ok(cleanedRoot);
+    assert.equal("overlayDirs" in status, false);
+  });
+
+  test("extracts a changeset for a cancelled task too", () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "axi-cancel-extract-dir-"));
+    let child;
+    const mgr = makeManager({
+      spawnFn: (cmd, args) => { child = fakeChild(); return child; },
+      killFn: () => {},
+      sandboxEnabled: true,
+      checkBwrapAvailableFn: () => ({ checked: true, available: true }),
+      overlayEnabled: true,
+      checkOverlaySupportFn: () => ({ supported: true }),
+      platform: "linux",
+      runOverlayCommandFn: () => ({ status: 0, stdout: "diff --git a/x b/x\n", stderr: "", error: undefined }),
+    });
+
+    const result = mgr.dispatch({ prompt: "hello", directory });
+    mgr.cancel(result.id);
+    child.emit("exit", null, "SIGTERM");
+
+    const status = mgr.status(result.id);
+    assert.equal(status.status, "cancelled");
+    assert.equal(status.changesetStatus, "pending");
+    assert.equal(mgr.result(result.id, { fields: ["diff"] }).diff, "diff --git a/x b/x\n");
+  });
+
+  test("records extraction errors and keeps the overlay for recovery", () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "axi-failed-extract-dir-"));
+    const overlayTmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "axi-failed-extract-tmp-"));
+    let cleanedAny = false;
+    let child;
+    const mgr = makeManager({
+      spawnFn: (cmd, args) => { child = fakeChild(); return child; },
+      sandboxEnabled: true,
+      checkBwrapAvailableFn: () => ({ checked: true, available: true }),
+      overlayEnabled: true,
+      checkOverlaySupportFn: () => ({ supported: true }),
+      platform: "linux",
+      overlayTmpRoot,
+      runOverlayCommandFn: () => ({ status: null, stdout: "", stderr: "", error: Object.assign(new Error("spawn bwrap ETIMEDOUT"), { code: "ETIMEDOUT" }) }),
+      rmOverlayTreeFn: () => { cleanedAny = true; },
+    });
+
+    const result = mgr.dispatch({ prompt: "hello", directory });
+    child.emit("exit", 0, null);
+
+    const status = mgr.status(result.id);
+    assert.equal(status.changesetStatus, "pending");
+    assert.match(status.changesetError, /ETIMEDOUT/);
+    assert.equal(mgr.result(result.id, { fields: ["diff"] }).diff, null);
+    assert.ok(status.overlayDirs);
+    assert.equal(cleanedAny, false);
+  });
+});
+
+describe("dispatch() role/changeset fields", () => {
+  test("a plain dispatch without an overlay omits role and changesetStatus from its summary", () => {
+    const mgr = makeManager({ spawnFn: () => fakeChild(), sandboxEnabled: false });
+    const result = mgr.dispatch({ prompt: "hello", directory: os.tmpdir() });
+    const status = mgr.status(result.id);
+    assert.equal("role" in status, false);
+    assert.equal("changesetStatus" in status, false);
+  });
+
+  test("advisor() dispatches internally with role 'advisor'", async () => {
+    const mgr = makeManager({
+      spawnFn: (cmd, args, opts) => { const child = fakeChild(); setImmediate(() => child.emit("exit", 0, null)); return child; },
+      sandboxEnabled: false,
+    });
+    const advised = await mgr.advisor({ prompt: "hello", directory: os.tmpdir(), model: "openai/gpt-5.6-sol" });
+    const status = mgr.status(advised.task_id);
+    assert.equal(status.role, "advisor");
+  });
 });
 
 describe("dispatch() with a prompt over the argv-safe size (issue #78: spawn E2BIG)", () => {
@@ -1105,6 +1732,77 @@ describe("boot-time sweep of orphaned prompt scratch files in PROMPT_DIR", () =>
 
     const remaining = fs.readdirSync(path.join(stateDir, "prompts")).sort();
     assert.deepEqual(remaining, []);
+  });
+});
+
+describe("sweepOrphanedOverlays()", () => {
+  test("removes an overlay directory whose task id is unknown to this manager (crash before extraction ever ran)", () => {
+    const overlayTmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "axi-orphan-tmp-"));
+    fs.mkdirSync(path.join(overlayTmpRoot, "taskferry-cow-oc_gone", "upper", "main"), { recursive: true });
+    let cleanedRoot = null;
+    makeManager({
+      overlayTmpRoot,
+      rmOverlayTreeFn: (p) => { cleanedRoot = p; },
+    });
+    assert.equal(cleanedRoot, path.join(overlayTmpRoot, "taskferry-cow-oc_gone"));
+  });
+
+  test("does not sweep an overlay directory whose task still has a pending changeset", () => {
+    const overlayTmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "axi-orphan-tmp-"));
+    const overlayRoot = path.join(overlayTmpRoot, "taskferry-cow-t_pending");
+    fs.mkdirSync(path.join(overlayRoot, "upper", "main"), { recursive: true });
+    let cleanedAny = false;
+    makeManager({
+      overlayTmpRoot,
+      tasksFixture: [{
+        ...baseTask({ id: "t_pending" }),
+        role: "dispatch",
+        changesetStatus: "pending",
+        overlayDirs: { root: overlayRoot, tmpRoot: overlayTmpRoot, upperDir: path.join(overlayRoot, "upper", "main"), workDir: path.join(overlayRoot, "work", "main") },
+      }],
+      rmOverlayTreeFn: () => { cleanedAny = true; },
+    });
+    assert.equal(cleanedAny, false);
+  });
+
+  test("does nothing when overlayTmpRoot doesn't exist or is empty", () => {
+    const overlayTmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "axi-orphan-empty-"));
+    assert.doesNotThrow(() => makeManager({ overlayTmpRoot }));
+  });
+
+  test("sweeps a resolved task overlay under its recorded non-live tmpRoot and persists clearing overlayDirs", () => {
+    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-orphan-resolved-state-"));
+    const overlayTmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "axi-orphan-resolved-overlay-"));
+    const liveOverlayTmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "axi-orphan-live-overlay-"));
+    const overlayRoot = path.join(overlayTmpRoot, "taskferry-cow-t_resolved");
+    fs.mkdirSync(path.join(overlayRoot, "upper", "main"), { recursive: true });
+    const task = {
+      ...baseTask({ id: "t_resolved", directory: os.tmpdir() }),
+      role: "dispatch",
+      changesetStatus: "accepted",
+      overlayDirs: {
+        root: overlayRoot,
+        tmpRoot: overlayTmpRoot,
+        upperDir: path.join(overlayRoot, "upper", "main"),
+        workDir: path.join(overlayRoot, "work", "main"),
+      },
+    };
+    const tasksFile = path.join(stateDir, "tasks.json");
+    fs.writeFileSync(tasksFile, JSON.stringify([task], null, 2));
+    const mgr = createTaskManager({
+      stateDir,
+      overlayTmpRoot: liveOverlayTmpRoot,
+      sandboxEnabled: false,
+      cacheDir: fs.mkdtempSync(path.join(os.tmpdir(), "axi-orphan-resolved-cache-")),
+      spawnFn: () => { throw new Error("not used"); },
+      killFn: () => {},
+      listModelsFn: () => `${DEFAULT_SUMMARY_MODEL}\n`,
+    });
+
+    assert.equal(fs.existsSync(overlayRoot), false);
+    assert.equal("overlayDirs" in mgr.status(task.id), false);
+    const persisted = JSON.parse(fs.readFileSync(tasksFile, "utf8"));
+    assert.equal(persisted[0].overlayDirs, null);
   });
 });
 
@@ -2501,6 +3199,272 @@ describe("cancel()", () => {
   });
 });
 
+describe("accept()/reject()", () => {
+  // The fixture's overlay root lives under this host's actual tmpdir so
+  // cleanupOverlay's containment check (Task 7, review finding #12) accepts
+  // it -- a hardcoded /tmp path would fail that check on hosts where
+  // os.tmpdir() resolves elsewhere.
+  const fixtureTmpRoot = os.tmpdir();
+  const fixtureRoot = path.join(fixtureTmpRoot, "taskferry-cow-t_pending");
+  function pendingTaskFixture(overrides = {}) {
+    // accept() now refuses to hand a missing diff file to git apply (Task 4
+    // review finding #1), so the fixture must record a diffPath whose file
+    // actually exists on disk. The content is irrelevant -- runCommand is
+    // mocked -- only the file's existence matters. A unique tmp path per
+    // fixture call keeps parallel tests from clobbering each other.
+    const diffPath = path.join(os.tmpdir(), `taskferry-accept-diff-${process.pid}-${Math.random().toString(36).slice(2)}.patch`);
+    fs.writeFileSync(diffPath, "diff --git a/x b/x\n");
+    return {
+      ...baseTask({ id: "t_pending", status: "done" }),
+      role: "dispatch",
+      changesetStatus: "pending",
+      diffPath,
+      overlayDirs: { root: fixtureRoot, tmpRoot: fixtureTmpRoot, upperDir: path.join(fixtureRoot, "upper", "main"), workDir: path.join(fixtureRoot, "work", "main"), rwBinds: [] },
+      preDispatchHead: "abc123",
+      ...overrides,
+    };
+  }
+
+  test("accept() applies the diff, marks the changeset accepted, and cleans up", () => {
+    let applyCalled = false;
+    let cleanedRoot = null;
+    const mgr = makeManager({
+      tasksFixture: [pendingTaskFixture()],
+      runOverlayCommandFn: (command, args) => {
+        if (command === "git" && args[2] === "apply") applyCalled = true;
+        return { status: 0, stdout: "", stderr: "", error: undefined };
+      },
+      rmOverlayTreeFn: (p) => { cleanedRoot = p; },
+    });
+    const result = mgr.accept("t_pending");
+    assert.equal(result.changesetStatus, "accepted");
+    assert.equal(result.applied, true);
+    assert.equal(applyCalled, true);
+    assert.equal(cleanedRoot, fixtureRoot);
+    assert.equal(mgr.status("t_pending").changesetStatus, "accepted");
+  });
+
+  test("accept() leaves changesetStatus pending and does not clean up when apply fails", () => {
+    let cleanedRoot = null;
+    const mgr = makeManager({
+      tasksFixture: [pendingTaskFixture()],
+      runOverlayCommandFn: (command) => {
+        if (command === "git") return { status: 1, stdout: "", stderr: "error: patch does not apply\n", error: undefined };
+        return { status: 0, stdout: "", stderr: "", error: undefined };
+      },
+      rmOverlayTreeFn: (p) => { cleanedRoot = p; },
+    });
+    const result = mgr.accept("t_pending");
+    assert.equal(result.applied, false);
+    assert.match(result.reason, /patch does not apply/);
+    assert.equal(mgr.status("t_pending").changesetStatus, "pending");
+    assert.equal(cleanedRoot, null);
+  });
+
+  test("reject() discards the changeset without applying and cleans up", () => {
+    let applyCalled = false;
+    let cleanedRoot = null;
+    const mgr = makeManager({
+      tasksFixture: [pendingTaskFixture()],
+      runOverlayCommandFn: (command, args) => {
+        if (command === "git" && args[2] === "apply") applyCalled = true;
+        return { status: 0, stdout: "", stderr: "", error: undefined };
+      },
+      rmOverlayTreeFn: (p) => { cleanedRoot = p; },
+    });
+    const result = mgr.reject("t_pending");
+    assert.equal(result.changesetStatus, "rejected");
+    assert.equal(applyCalled, false);
+    assert.equal(cleanedRoot, fixtureRoot);
+    assert.equal(mgr.status("t_pending").changesetStatus, "rejected");
+  });
+
+  test("reject() cleans an overlay using its recorded tmpRoot after the live tmpRoot changes", () => {
+    const recordedTmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "axi-recorded-overlay-"));
+    const liveTmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "axi-live-overlay-"));
+    const root = path.join(recordedTmpRoot, "taskferry-cow-t_pending");
+    fs.mkdirSync(path.join(root, "upper", "main"), { recursive: true });
+    fs.mkdirSync(path.join(root, "work", "main"), { recursive: true });
+    const mgr = makeManager({
+      overlayTmpRoot: liveTmpRoot,
+      tasksFixture: [pendingTaskFixture({
+        overlayDirs: {
+          root,
+          tmpRoot: recordedTmpRoot,
+          upperDir: path.join(root, "upper", "main"),
+          workDir: path.join(root, "work", "main"),
+          rwBinds: [],
+        },
+      })],
+    });
+
+    const result = mgr.reject("t_pending");
+    assert.equal(result.changesetStatus, "rejected");
+    assert.equal(result.cleanupFailed, undefined);
+    assert.equal(fs.existsSync(root), false);
+  });
+
+  test("accept() on an advisor task throws a clear, non-applying error", () => {
+    const mgr = makeManager({ tasksFixture: [pendingTaskFixture({ id: "t_advisor", role: "advisor", changesetStatus: "rejected" })] });
+    assert.throws(() => mgr.accept("t_advisor"), /role "advisor" and cannot be accepted/);
+  });
+
+  test("accept() on a task with no pending changeset throws", () => {
+    const mgr = makeManager({ tasksFixture: [baseTask({ id: "t_none" })] });
+    assert.throws(() => mgr.accept("t_none"), /no pending changeset/);
+  });
+
+  test("accept() on a task whose extraction failed errors usefully and keeps the overlay (regression: review finding #2)", () => {
+    const mgr = makeManager({
+      tasksFixture: [pendingTaskFixture({ diffPath: null, changesetError: "spawn bwrap ETIMEDOUT" })],
+    });
+    assert.throws(() => mgr.accept("t_pending"), /changeset was never extracted.*ETIMEDOUT/s);
+    assert.ok(mgr.status("t_pending").overlayDirs, "the preserved overlay is the user's only copy of the changes");
+  });
+
+  test("accept() errors usefully when the recorded diff file is no longer on disk (regression: review finding #1)", () => {
+    // The diffPath is recorded in tasks.json but the file itself is gone
+    // (partial stateDir cleanup, a tampered tasks.json, etc.). Without this
+    // check, git apply would surface its own "can't open patch" message
+    // against a path the user has no reason to suspect -- fail with a
+    // clear, actionable error before that happens.
+    const missingDiffPath = path.join(os.tmpdir(), `taskferry-does-not-exist-${process.pid}-${Math.random().toString(36).slice(2)}.patch`);
+    const mgr = makeManager({
+      tasksFixture: [pendingTaskFixture({ diffPath: missingDiffPath })],
+    });
+    assert.throws(() => mgr.accept("t_pending"), /diff file at \/tmp\/taskferry-does-not-exist-/);
+    assert.throws(() => mgr.accept("t_pending"), /cannot be applied without its diff/);
+  });
+
+  test("accept() on a non-git target whose overlay vanished errors instead of applying nothing (regression: review finding #7)", () => {
+    // A reboot clears the tmpfs overlay; the pending changeset can never be
+    // re-applied. Fail loudly rather than rsyncing a missing tree.
+    const mgr = makeManager({
+      tasksFixture: [pendingTaskFixture({
+        preDispatchHead: null, // non-git target
+        overlayDirs: { root: fixtureRoot, tmpRoot: fixtureTmpRoot, upperDir: path.join(fixtureRoot, "upper", "main"), workDir: path.join(fixtureRoot, "work", "main"), rwBinds: [] }, // never created on disk
+      })],
+    });
+    assert.throws(() => mgr.accept("t_pending"), /overlay is gone/);
+  });
+
+  test("accept() surfaces a failed cleanup via cleanupFailed and leaves overlayDirs for the sweep (regression: review finding #11)", () => {
+    const mgr = makeManager({
+      tasksFixture: [pendingTaskFixture()],
+      runOverlayCommandFn: () => ({ status: 0, stdout: "", stderr: "", error: undefined }),
+      rmOverlayTreeFn: () => { throw new Error("EBUSY: resource busy or locked"); },
+    });
+    const result = mgr.accept("t_pending");
+    assert.equal(result.applied, true);
+    assert.equal(result.changesetStatus, "accepted");
+    assert.equal(result.cleanupFailed, true, "a failed cleanup must not be swallowed");
+    assert.ok(mgr.status("t_pending").overlayDirs, "overlayDirs must stay set so the daemon-startup sweep retries");
+  });
+
+  test("reject() surfaces a failed cleanup and leaves overlayDirs for the sweep", () => {
+    const mgr = makeManager({
+      tasksFixture: [pendingTaskFixture()],
+      rmOverlayTreeFn: () => { throw new Error("EBUSY: resource busy or locked"); },
+    });
+    const result = mgr.reject("t_pending");
+    assert.equal(result.changesetStatus, "rejected");
+    assert.equal(result.cleanupFailed, true);
+    assert.ok(mgr.status("t_pending").overlayDirs);
+  });
+
+  // Persist-before-cleanup must be followed by a second persist after the
+  // cleanup actually clears overlayDirs, so the durable task record
+  // doesn't keep claiming an overlay exists for an overlay that was
+  // just removed. Otherwise: after a restart, the task record on disk
+  // has overlayDirs populated even though the overlay is gone -- the
+  // startup sweep would still clean it up (rm -rf on a missing path is
+  // idempotent), but the record lies until the sweep runs.
+  function readPersistedTask(mgr, taskId) {
+    const tasks = JSON.parse(fs.readFileSync(mgr.paths.TASKS_FILE, "utf8"));
+    return tasks.find((t) => t.id === taskId);
+  }
+
+  test("accept() persists the cleared overlay metadata after successful cleanup (regression: review followup #1)", () => {
+    const mgr = makeManager({
+      tasksFixture: [pendingTaskFixture()],
+      runOverlayCommandFn: () => ({ status: 0, stdout: "", stderr: "", error: undefined }),
+      rmOverlayTreeFn: () => {},
+    });
+    const result = mgr.accept("t_pending");
+    assert.equal(result.changesetStatus, "accepted");
+    assert.equal(result.applied, true);
+    assert.equal(result.cleanupFailed, undefined);
+    const onDisk = readPersistedTask(mgr, "t_pending");
+    assert.equal(onDisk.changesetStatus, "accepted", "status must be durable");
+    assert.equal(onDisk.overlayDirs, null, "cleared overlay metadata must be durable, not claim an overlay still exists");
+  });
+
+  test("reject() persists the cleared overlay metadata after successful cleanup (regression: review followup #1)", () => {
+    const mgr = makeManager({
+      tasksFixture: [pendingTaskFixture()],
+      rmOverlayTreeFn: () => {},
+    });
+    const result = mgr.reject("t_pending");
+    assert.equal(result.changesetStatus, "rejected");
+    assert.equal(result.cleanupFailed, undefined);
+    const onDisk = readPersistedTask(mgr, "t_pending");
+    assert.equal(onDisk.changesetStatus, "rejected", "status must be durable");
+    assert.equal(onDisk.overlayDirs, null, "cleared overlay metadata must be durable, not claim an overlay still exists");
+  });
+
+  test("accept() leaves overlayDirs durable on cleanup failure so the startup sweep can retry (regression: review followup #1)", () => {
+    // Symmetric to the success cases: when cleanup fails, both the
+    // status and overlayDirs must be durable on disk so the
+    // daemon-startup sweep can pick up the orphan and retry the removal.
+    const mgr = makeManager({
+      tasksFixture: [pendingTaskFixture()],
+      runOverlayCommandFn: () => ({ status: 0, stdout: "", stderr: "", error: undefined }),
+      rmOverlayTreeFn: () => { throw new Error("EBUSY: resource busy or locked"); },
+    });
+    const result = mgr.accept("t_pending");
+    assert.equal(result.cleanupFailed, true);
+    const onDisk = readPersistedTask(mgr, "t_pending");
+    assert.equal(onDisk.changesetStatus, "accepted");
+    assert.ok(onDisk.overlayDirs, "overlayDirs must persist on cleanup failure so the startup sweep retries");
+    assert.equal(onDisk.overlayDirs.root, fixtureRoot);
+  });
+});
+
+describe("summarize() changeset exposure", () => {
+  test("exposes changeset fields only when they are meaningful", () => {
+    const overlayDirs = {
+      root: path.join(os.tmpdir(), "taskferry-cow-t_pending"),
+      tmpRoot: os.tmpdir(),
+      upperDir: path.join(os.tmpdir(), "taskferry-cow-t_pending", "upper", "main"),
+      workDir: path.join(os.tmpdir(), "taskferry-cow-t_pending", "work", "main"),
+      rwBinds: [],
+    };
+    const mgr = makeManager({
+      tasksFixture: [
+        baseTask({ id: "t_plain", role: "dispatch", changesetStatus: "none", overlayDirs: null, changesetError: null }),
+        baseTask({ id: "t_advisor", role: "advisor", changesetStatus: "none" }),
+        baseTask({ id: "t_pending", role: "dispatch", changesetStatus: "pending", overlayDirs, changesetError: "spawn bwrap ETIMEDOUT" }),
+      ],
+    });
+
+    const plain = mgr.status("t_plain");
+    assert.equal("role" in plain, false);
+    assert.equal("changesetStatus" in plain, false);
+    assert.equal("overlayDirs" in plain, false);
+    assert.equal("changesetError" in plain, false);
+
+    const advisor = mgr.status("t_advisor");
+    assert.equal(advisor.role, "advisor");
+    assert.equal(advisor.changesetStatus, "none");
+
+    const pending = mgr.status("t_pending");
+    assert.equal(pending.role, "dispatch");
+    assert.equal(pending.changesetStatus, "pending");
+    assert.deepEqual(pending.overlayDirs, overlayDirs);
+    assert.equal(pending.changesetError, "spawn bwrap ETIMEDOUT");
+  });
+});
+
 describe("executorId on persisted tasks (Task 5: legacy records default to opencode at load)", () => {
   test("a persisted task with no executorId defaults to \"opencode\" on load", () => {
     const mgr = makeManager({
@@ -2768,6 +3732,11 @@ describe("advisor()", () => {
         captured = args;
         return child;
       },
+      sandboxEnabled: true,
+      overlayEnabled: true,
+      checkBwrapAvailableFn: () => ({ checked: true, available: true }),
+      checkOverlaySupportFn: () => ({ supported: true }),
+      platform: "linux",
     });
 
     const advisorPromise = mgr.advisor({
@@ -2779,7 +3748,10 @@ describe("advisor()", () => {
       executor: "opencode",
     });
 
-    assert.deepEqual(captured, [
+    // Advisor dispatches are overlay-gated under bwrap (ADR 0001), so the
+    // captured args are the bwrap invocation; the executor command follows "--".
+    assert.deepEqual(captured.slice(captured.indexOf("--") + 1), [
+      "opencode",
       "run", "--dir", os.tmpdir(), "--auto", "--format", "json",
       "-m", "openai/gpt-5.6-sol", "--variant", "max", "--", "how should I shard this counter?",
     ]);
@@ -2815,6 +3787,11 @@ describe("advisor()", () => {
         captured = { cmd, args };
         return child;
       },
+      sandboxEnabled: true,
+      overlayEnabled: true,
+      checkBwrapAvailableFn: () => ({ checked: true, available: true }),
+      checkOverlaySupportFn: () => ({ supported: true }),
+      platform: "linux",
     });
 
     const advisorPromise = mgr.advisor({
@@ -2825,9 +3802,13 @@ describe("advisor()", () => {
       timeoutMs: 5000,
     });
 
-    assert.equal(captured.cmd, "pi");
-    assert.ok(captured.args.includes("--provider"));
-    assert.ok(captured.args.includes("minimax"));
+    // Advisor dispatches are overlay-gated under bwrap (ADR 0001); the pi
+    // command is the bwrap payload following "--".
+    assert.equal(captured.cmd, "bwrap");
+    const piArgs = captured.args.slice(captured.args.indexOf("--") + 1);
+    assert.equal(piArgs[0], "pi");
+    assert.ok(piArgs.includes("--provider"));
+    assert.ok(piArgs.includes("minimax"));
 
     // Raw pi --mode json events on stdout; startTask's stdout handler must
     // run them through the real piExecutor().normalizeLogEvent before they
@@ -2850,7 +3831,14 @@ describe("advisor()", () => {
 
   test("returns status: running with a task_id and session_id when the timeout elapses first", async () => {
     const child = fakeChild();
-    const mgr = makeManager({ spawnFn: () => child });
+    const mgr = makeManager({
+      spawnFn: () => child,
+      sandboxEnabled: true,
+      overlayEnabled: true,
+      checkBwrapAvailableFn: () => ({ checked: true, available: true }),
+      checkOverlaySupportFn: () => ({ supported: true }),
+      platform: "linux",
+    });
 
     const advisorPromise = mgr.advisor({
       prompt: "long question",
@@ -2902,7 +3890,14 @@ describe("advisor()", () => {
 
   test("when the timeout elapses before opencode has written a session id, the note points at taskferry wait with task id instead of fabricating a session_id", async () => {
     const child = fakeChild();
-    const mgr = makeManager({ spawnFn: () => child });
+    const mgr = makeManager({
+      spawnFn: () => child,
+      sandboxEnabled: true,
+      overlayEnabled: true,
+      checkBwrapAvailableFn: () => ({ checked: true, available: true }),
+      checkOverlaySupportFn: () => ({ supported: true }),
+      platform: "linux",
+    });
 
     const advisorPromise = mgr.advisor({
       prompt: "long question",
@@ -2940,6 +3935,11 @@ describe("advisor()", () => {
         captured = args;
         return child;
       },
+      sandboxEnabled: true,
+      overlayEnabled: true,
+      checkBwrapAvailableFn: () => ({ checked: true, available: true }),
+      checkOverlaySupportFn: () => ({ supported: true }),
+      platform: "linux",
     });
 
     // First call establishes ses_live in the registry via its own result.
@@ -2993,6 +3993,11 @@ describe("advisor()", () => {
         captured = args;
         return child;
       },
+      sandboxEnabled: true,
+      overlayEnabled: true,
+      checkBwrapAvailableFn: () => ({ checked: true, available: true }),
+      checkOverlaySupportFn: () => ({ supported: true }),
+      platform: "linux",
     });
 
     const advisorPromise = mgr.advisor({
@@ -3024,7 +4029,14 @@ describe("advisor()", () => {
 
   test("a crashed advisor task surfaces exitCode/spawnError, not a thrown error", async () => {
     const child = fakeChild();
-    const mgr = makeManager({ spawnFn: () => child });
+    const mgr = makeManager({
+      spawnFn: () => child,
+      sandboxEnabled: true,
+      overlayEnabled: true,
+      checkBwrapAvailableFn: () => ({ checked: true, available: true }),
+      checkOverlaySupportFn: () => ({ supported: true }),
+      platform: "linux",
+    });
 
     const advisorPromise = mgr.advisor({ prompt: "hi", directory: os.tmpdir(), model: "openai/gpt-5.6-sol" });
     child.emit("exit", 1, null);
@@ -3036,7 +4048,15 @@ describe("advisor()", () => {
 
   test("with no timeout_ms, against an injected small maxWaitMs, still returns the bounded 'still running' + resumable session_id shape", async () => {
     const child = fakeChild();
-    const mgr = makeManager({ spawnFn: () => child, maxWaitMs: 30 });
+    const mgr = makeManager({
+      spawnFn: () => child,
+      maxWaitMs: 30,
+      sandboxEnabled: true,
+      overlayEnabled: true,
+      checkBwrapAvailableFn: () => ({ checked: true, available: true }),
+      checkOverlaySupportFn: () => ({ supported: true }),
+      platform: "linux",
+    });
 
     const advisorPromise = mgr.advisor({
       prompt: "long question",
@@ -3254,6 +4274,192 @@ describe("result()", () => {
     const r = mgr.result("t1", { fields: ["message"] });
     assert.equal(r.status, "unknown");
     assert.match(r.message, /partial output is unavailable/);
+  });
+});
+
+describe("result() diffStat field", () => {
+  // The diffStat path now shells out to `git apply --numstat <diffPath>` via
+  // the runOverlayCommandFn delegate (review finding #13, root-cause fix).
+  // The fake here mirrors the real git format: one `<adds>\t<dels>\t<path>`
+  // line per file; the test never touches a real git binary.
+  test("shells out to git apply --numstat and sums the tab-separated counts (regression: review finding #13)", () => {
+    const mgr = makeManager({
+      tasksFixture: (logDir) => [{
+        ...baseTask({ id: "t_stat", logPath: path.join(logDir, "t_stat.ndjson") }),
+        diffPath: path.join(logDir, "..", "diffs", "t_stat.patch"),
+      }],
+      logs: { "t_stat.ndjson": "" },
+      runOverlayCommandFn: (command, args) => {
+        if (command === "git" && args[0] === "apply" && args[1] === "--numstat") {
+          return { status: 0, stdout: "2\t1\tone.txt\n0\t1\ttwo.txt\n", stderr: "", error: undefined };
+        }
+        return { status: 0, stdout: "", stderr: "", error: undefined };
+      },
+    });
+    fs.mkdirSync(path.join(mgr.paths.STATE_DIR, "diffs"), { recursive: true });
+    fs.writeFileSync(path.join(mgr.paths.STATE_DIR, "diffs", "t_stat.patch"), "diff --git a/one.txt b/one.txt\n");
+    const result = mgr.result("t_stat", { fields: ["diffStat"] });
+    assert.deepEqual(result.diffStat, { files: 2, additions: 2, deletions: 2 });
+    assert.deepEqual(mgr.result("t_stat").diffStat, { files: 2, additions: 2, deletions: 2 });
+  });
+
+  test("reports a non-zero file count for a non-git-style diff (regression: review finding #13, non-git)", () => {
+    // The pre-fix hand-rolled scan counted only `diff --git` headers, so
+    // every non-git changeset reported files:0 regardless of how many files
+    // actually changed. The new path routes both kinds through git apply
+    // --numstat, which parses both `diff --git` and plain `diff -ruN`
+    // headers. This delegate unit test mocks the run command with the same
+    // output git would emit for a two-file non-git extraction; the patch
+    // content matches what the mock claims to produce so the test exercises
+    // the parser contract rather than skipping the patch entirely.
+    const patch = [
+      "diff -ruN a/existing.txt b/existing.txt",
+      "--- a/existing.txt\t2026-01-01 00:00:00.000000000 -0500",
+      "+++ b/existing.txt\t2026-01-01 00:00:00.000000000 -0500",
+      "@@ -1 +1,2 @@",
+      "-original",
+      "+modified",
+      "+added",
+      "diff -ruN a/newfile.txt b/newfile.txt",
+      "--- a/newfile.txt\t1969-12-31 19:00:00.000000000 -0500",
+      "+++ b/newfile.txt\t2026-01-01 00:00:00.000000000 -0500",
+      "@@ -0,0 +1 @@",
+      "+new content",
+      "",
+    ].join("\n");
+    const mgr = makeManager({
+      tasksFixture: (logDir) => [{
+        ...baseTask({ id: "t_nongit", logPath: path.join(logDir, "t_nongit.ndjson") }),
+        diffPath: path.join(logDir, "..", "diffs", "t_nongit.patch"),
+      }],
+      logs: { "t_nongit.ndjson": "" },
+      runOverlayCommandFn: (command, args) => {
+        if (command === "git" && args[0] === "apply" && args[1] === "--numstat") {
+          return { status: 0, stdout: "2\t1\tmerged/existing.txt\n1\t0\tmerged/newfile.txt\n", stderr: "", error: undefined };
+        }
+        return { status: 0, stdout: "", stderr: "", error: undefined };
+      },
+    });
+    fs.mkdirSync(path.join(mgr.paths.STATE_DIR, "diffs"), { recursive: true });
+    fs.writeFileSync(path.join(mgr.paths.STATE_DIR, "diffs", "t_nongit.patch"), patch);
+    const result = mgr.result("t_nongit", { fields: ["diffStat"] });
+    assert.notEqual(result.diffStat.files, 0, "non-git diffs must not silently report 0 files");
+    assert.deepEqual(result.diffStat, { files: 2, additions: 3, deletions: 1 });
+  });
+
+  test("parses a real diff -ruN patch via the real git apply --numstat parser (regression followup: central compatibility claim)", () => {
+    // The delegate unit test above mocks git's output. This test verifies
+    // the central compatibility claim the brief called out: that git apply
+    // --numstat actually parses the diff -ruN format extractNonGitDiff
+    // produces, and the parser sums the columns git emits. Inject
+    // changeset.js's real defaultRunCommand so the test exercises the real
+    // Git binary rather than a synthetic mock.
+    const patch = [
+      "diff -ruN a/existing.txt b/existing.txt",
+      "--- a/existing.txt\t2026-01-01 00:00:00.000000000 -0500",
+      "+++ b/existing.txt\t2026-01-01 00:00:00.000000000 -0500",
+      "@@ -1 +1,2 @@",
+      "-original",
+      "+modified",
+      "+added",
+      "diff -ruN a/newfile.txt b/newfile.txt",
+      "--- a/newfile.txt\t1969-12-31 19:00:00.000000000 -0500",
+      "+++ b/newfile.txt\t2026-01-01 00:00:00.000000000 -0500",
+      "@@ -0,0 +1 @@",
+      "+new content",
+      "",
+    ].join("\n");
+    const mgr = makeManager({
+      tasksFixture: (logDir) => [{
+        ...baseTask({ id: "t_real_nongit", logPath: path.join(logDir, "t_real_nongit.ndjson") }),
+        diffPath: path.join(logDir, "..", "diffs", "t_real_nongit.patch"),
+      }],
+      logs: { "t_real_nongit.ndjson": "" },
+      runOverlayCommandFn: changesetDefaultRunCommand,
+    });
+    fs.mkdirSync(path.join(mgr.paths.STATE_DIR, "diffs"), { recursive: true });
+    fs.writeFileSync(path.join(mgr.paths.STATE_DIR, "diffs", "t_real_nongit.patch"), patch);
+    const result = mgr.result("t_real_nongit", { fields: ["diffStat"] });
+    // Real git apply --numstat must report non-zero counts for this
+    // representative diff -ruN patch; previously the hand-rolled scan
+    // reported files:0 for every non-git changeset.
+    assert.notEqual(result.diffStat.files, 0, "git apply --numstat must parse real diff -ruN output");
+    // The patch has 2 additions + 1 deletion in existing.txt and 1
+    // addition in newfile.txt.
+    assert.equal(result.diffStat.files, 2);
+    assert.equal(result.diffStat.additions, 3);
+    assert.equal(result.diffStat.deletions, 1);
+  });
+
+  test("falls back to a zero stat when git apply --numstat fails to parse the diff", () => {
+    // Failure mode: a plain `diff -ru` (without `-N`) extraction whose
+    // "Only in ..." lines confuse git apply. The diff text is still
+    // readable via `result --diff`, only the human-readable summary is
+    // uncomputable; returning a zero stat is the documented fallback.
+    const mgr = makeManager({
+      tasksFixture: (logDir) => [{
+        ...baseTask({ id: "t_unparsable", logPath: path.join(logDir, "t_unparsable.ndjson") }),
+        diffPath: path.join(logDir, "..", "diffs", "t_unparsable.patch"),
+      }],
+      logs: { "t_unparsable.ndjson": "" },
+      runOverlayCommandFn: (command, args) => {
+        if (command === "git" && args[0] === "apply" && args[1] === "--numstat") {
+          return { status: 128, stdout: "", stderr: "error: No valid patches in input\n", error: undefined };
+        }
+        return { status: 0, stdout: "", stderr: "", error: undefined };
+      },
+    });
+    fs.mkdirSync(path.join(mgr.paths.STATE_DIR, "diffs"), { recursive: true });
+    fs.writeFileSync(path.join(mgr.paths.STATE_DIR, "diffs", "t_unparsable.patch"), "Only in b: newfile.txt\n");
+    const result = mgr.result("t_unparsable", { fields: ["diffStat"] });
+    assert.deepEqual(result.diffStat, { files: 0, additions: 0, deletions: 0 });
+  });
+
+  test("treats a non-zero git apply --numstat exit as parse failure even when stdout is non-empty (regression followup)", () => {
+    // git apply --numstat exits 0 on success and a non-zero status on any
+    // failure (corrupt patch, parse error, etc.). A non-zero status with
+    // partial stdout should NOT be parsed -- a failed invocation can
+    // produce partial output that would, if read, give a misleading
+    // non-zero count. The fallback is the zero stat.
+    const mgr = makeManager({
+      tasksFixture: (logDir) => [{
+        ...baseTask({ id: "t_status1", logPath: path.join(logDir, "t_status1.ndjson") }),
+        diffPath: path.join(logDir, "..", "diffs", "t_status1.patch"),
+      }],
+      logs: { "t_status1.ndjson": "" },
+      runOverlayCommandFn: (command, args) => {
+        if (command === "git" && args[0] === "apply" && args[1] === "--numstat") {
+          return { status: 1, stdout: "5\t3\tmerged/leftover.txt\n", stderr: "error: corrupt patch\n", error: undefined };
+        }
+        return { status: 0, stdout: "", stderr: "", error: undefined };
+      },
+    });
+    fs.mkdirSync(path.join(mgr.paths.STATE_DIR, "diffs"), { recursive: true });
+    fs.writeFileSync(path.join(mgr.paths.STATE_DIR, "diffs", "t_status1.patch"), "garbage\n");
+    const result = mgr.result("t_status1", { fields: ["diffStat"] });
+    assert.deepEqual(result.diffStat, { files: 0, additions: 0, deletions: 0 }, "non-zero status must zero the stat, not parse partial stdout");
+  });
+});
+
+describe("result() diff field", () => {
+  test("returns the cached patch text for fields: ['diff']", () => {
+    const mgr = makeManager({
+      tasksFixture: (logDir) => [{
+        ...baseTask({ id: "t_diff", logPath: path.join(logDir, "t_diff.ndjson") }),
+        diffPath: path.join(logDir, "..", "diffs", "t_diff.patch"),
+      }],
+      logs: { "t_diff.ndjson": "" },
+    });
+    fs.mkdirSync(path.join(mgr.paths.STATE_DIR, "diffs"), { recursive: true });
+    fs.writeFileSync(path.join(mgr.paths.STATE_DIR, "diffs", "t_diff.patch"), "diff --git a/x b/x\n");
+    const result = mgr.result("t_diff", { fields: ["diff"] });
+    assert.equal(result.diff, "diff --git a/x b/x\n");
+  });
+
+  test("returns null for a task with no diffPath", () => {
+    const mgr = makeManager({ tasksFixture: [baseTask({ id: "t_no_diff" })] });
+    const result = mgr.result("t_no_diff", { fields: ["diff"] });
+    assert.equal(result.diff, null);
   });
 });
 
@@ -4145,6 +5351,11 @@ describe("caller-env union (sanitizedEnvironment)", () => {
     const child = fakeChild();
     const mgr = makeManager({
       spawnFn: (cmd, args, opts) => { capturedOpts = opts; return child; },
+      sandboxEnabled: true,
+      overlayEnabled: true,
+      checkBwrapAvailableFn: () => ({ checked: true, available: true }),
+      checkOverlaySupportFn: () => ({ supported: true }),
+      platform: "linux",
     });
 
     const advisorPromise = mgr.advisor({

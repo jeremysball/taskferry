@@ -16,6 +16,8 @@ export const RPC_METHODS = Object.freeze([
   "task.summary",
   "task.advisor",
   "task.context",
+  "task.accept",
+  "task.reject",
 ]);
 
 const REQUEST_METHODS = new Set([...RPC_METHODS, "event.subscribe"]);
@@ -33,6 +35,9 @@ export const RESULT_FIELDS = new Set([
   "logPath",
   "incomplete",
   "finalMarker",
+  "diff",
+  "diffStat",
+  "changesetError",
 ]);
 export class ProtocolError extends Error {
   /**
@@ -100,7 +105,7 @@ function validParams(method, params) {
     case "system.health":
       return hasOnly(params, []);
     case "task.dispatch":
-      return hasOnly(params, ["prompt", "directory", "model", "variant", "sessionId", "env", "finalMarker", "originSessionId", "noSandbox", "allowedDirs", "executor"])
+      return hasOnly(params, ["prompt", "directory", "model", "variant", "sessionId", "env", "finalMarker", "originSessionId", "noSandbox", "noOverlay", "allowedDirs", "executor"])
         && isNonEmptyString(params.prompt)
         && isAbsolutePath(params.directory)
         && optional(params.model, isNonEmptyString)
@@ -110,6 +115,7 @@ function validParams(method, params) {
         && optional(params.finalMarker, isNonEmptyString)
         && optional(params.originSessionId, isNonEmptyString)
         && optional(params.noSandbox, (value) => typeof value === "boolean")
+        && optional(params.noOverlay, (value) => typeof value === "boolean")
         && optional(params.allowedDirs, (value) => Array.isArray(value) && value.length > 0 && value.every((entry) => isNonEmptyString(entry)))
         && optional(params.executor, (value) => typeof value === "string" && KNOWN_EXECUTORS.includes(value));
     case "task.cancel":
@@ -163,6 +169,9 @@ function validParams(method, params) {
         && optional(params.executor, (value) => typeof value === "string" && KNOWN_EXECUTORS.includes(value));
     case "task.context":
       return hasOnly(params, ["directory"]) && isAbsolutePath(params.directory);
+    case "task.accept":
+    case "task.reject":
+      return hasOnly(params, ["taskId"]) && isNonEmptyString(params.taskId);
     case "event.subscribe":
       // Either an explicit directory, or a taskId the daemon resolves the
       // directory from server-side -- lets a taskId-scoped subscribe (watch

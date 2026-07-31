@@ -92,6 +92,7 @@ export async function runCommand(command, options, { client, io = process, signa
         ...(options.sessionId === undefined ? {} : { sessionId: options.sessionId }),
         ...(options.finalMarker === undefined ? {} : { finalMarker: options.finalMarker }),
         ...(options.noSandbox === undefined ? {} : { noSandbox: options.noSandbox }),
+        ...(options.noOverlay === undefined ? {} : { noOverlay: options.noOverlay }),
         ...(options.allowedDirs === undefined ? {} : { allowedDirs: options.allowedDirs }),
         ...(options.executor === undefined ? {} : { executor: options.executor }),
         env,
@@ -103,6 +104,18 @@ export async function runCommand(command, options, { client, io = process, signa
         taskId: options.taskId,
         ...(options.graceMs === undefined ? {} : { graceMs: options.graceMs }),
       });
+    case "accept": {
+      const accepted = await client.request("task.accept", { taskId: options.taskId });
+      // Review finding #11: a failed cleanup must not be swallowed -- without
+      // this, the leftover overlay is invisible until the daemon-restart sweep.
+      if (accepted.cleanupFailed) process.stderr.write(`warning: changeset applied, but overlay cleanup failed -- ${accepted.taskId}'s overlay dir remains on disk (a daemon restart will sweep it)\n`);
+      return accepted;
+    }
+    case "reject": {
+      const rejected = await client.request("task.reject", { taskId: options.taskId });
+      if (rejected.cleanupFailed) process.stderr.write(`warning: changeset rejected, but overlay cleanup failed -- ${rejected.taskId}'s overlay dir remains on disk (a daemon restart will sweep it)\n`);
+      return rejected;
+    }
     case "wait": {
       if (options.summarize) {
         // do not close the client here: cli.js's top-level finally owns the
@@ -191,12 +204,18 @@ export async function runCommand(command, options, { client, io = process, signa
       return options.mode === "report" ? summary : { mode: options.mode, ...summary };
     }
     case "result": {
+      // `options.diff` and `options.full` are mutually exclusive (args.js
+      // rejects the combination at parse time), so the if/else-if below is
+      // deterministic: --diff takes the fields:["diff"] branch, --full takes
+      // the full:true branch, neither passes {}. leanResult() still receives
+      // `full: options.full` so the local-narrowing step mirrors the
+      // server-side contract regardless of which branch was taken above.
       const detail = await client.request("task.result", {
-        ...(options.full ? { full: true } : {}),
-        ...(options.fields ? { fields: options.fields } : {}),
+        ...(options.diff ? { fields: ["diff"] } : options.full ? { full: true } : {}),
+        ...(!options.diff && options.fields ? { fields: options.fields } : {}),
         taskId: options.taskId,
       });
-      return leanResult(detail, { full: options.full, fields: options.fields });
+      return leanResult(detail, { full: options.full, fields: options.diff ? ["diff"] : options.fields });
     }
     case "list": {
       const params = options.all ? {} : { directory: normalizeDirectory(options.directory || resolveWorkspaceRootFn(cwd)) };

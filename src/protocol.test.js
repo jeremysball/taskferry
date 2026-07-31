@@ -4,6 +4,7 @@ import {
   PROTOCOL_VERSION,
   RPC_METHODS,
   ProtocolError,
+  RESULT_FIELDS,
   encodeMessage,
   errorResponse,
   eventMessage,
@@ -23,6 +24,8 @@ const expectedMethods = [
   "task.summary",
   "task.advisor",
   "task.context",
+  "task.accept",
+  "task.reject",
 ];
 
 function request(method, params = {}, overrides = {}) {
@@ -112,6 +115,35 @@ describe("private daemon protocol", () => {
       directory: "/tmp/project",
       noSandbox: "true",
     })), /invalid params/i);
+  });
+
+  test("task.dispatch accepts an optional noOverlay boolean", () => {
+    const parsed = parseRequestLine(request("task.dispatch", {
+      prompt: "hi",
+      directory: "/tmp/project",
+      noOverlay: true,
+    }));
+    assert.equal(parsed.params.noOverlay, true);
+  });
+
+  test("task.dispatch rejects a non-boolean noOverlay", () => {
+    assert.throws(() => parseRequestLine(request("task.dispatch", {
+      prompt: "hi",
+      directory: "/tmp/project",
+      noOverlay: "true",
+    })), /invalid params/i);
+  });
+
+  test("task.advisor rejects noOverlay as an INVALID_PARAMS validation error (overlay is mandatory for the advisor role; review finding #5)", () => {
+    assert.throws(
+      () => parseRequestLine(request("task.advisor", {
+        prompt: "hi",
+        directory: "/tmp/project",
+        model: "m",
+        noOverlay: true,
+      })),
+      (error) => error instanceof ProtocolError && error.code === "INVALID_PARAMS"
+    );
   });
 
   test("task.dispatch accepts an optional executor param", () => {
@@ -328,6 +360,42 @@ describe("private daemon protocol", () => {
       () => parseRequestLine(request("task.result", { taskId: "oc_123", fields: ["failureDetail", "notAResultField"] })),
       (error) => error instanceof ProtocolError && error.code === "INVALID_PARAMS"
     );
+  });
+
+  describe("task.accept / task.reject", () => {
+    test("accepts a valid taskId-only request", () => {
+      const parsed = parseRequestLine(request("task.accept", { taskId: "oc_1" }));
+      assert.equal(parsed.method, "task.accept");
+      assert.deepEqual(parsed.params, { taskId: "oc_1" });
+    });
+
+    test("accepts a valid task.reject taskId-only request", () => {
+      const parsed = parseRequestLine(request("task.reject", { taskId: "oc_1" }));
+      assert.equal(parsed.method, "task.reject");
+      assert.deepEqual(parsed.params, { taskId: "oc_1" });
+    });
+
+    test("rejects task.accept with extra params", () => {
+      assert.throws(
+        () => parseRequestLine(request("task.accept", { taskId: "oc_1", extra: true })),
+        (error) => error instanceof ProtocolError && error.code === "INVALID_PARAMS"
+      );
+    });
+
+    test("rejects task.reject with a missing taskId", () => {
+      assert.throws(
+        () => parseRequestLine(request("task.reject", {})),
+        (error) => error instanceof ProtocolError && error.code === "INVALID_PARAMS"
+      );
+    });
+  });
+
+  describe("RESULT_FIELDS", () => {
+    test("includes diff, diffStat, and changesetError", () => {
+      assert.ok(RESULT_FIELDS.has("diff"));
+      assert.ok(RESULT_FIELDS.has("diffStat"));
+      assert.ok(RESULT_FIELDS.has("changesetError"));
+    });
   });
 
   test("constructs exact response and event envelopes", () => {

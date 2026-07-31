@@ -37,6 +37,14 @@ function fakeManagerFactory(tasks = [], { checkSummaryModelReady } = {}) {
       calls.push(["cancel", taskId, options]);
       return { id: taskId, status: "cancelled" };
     },
+    accept(taskId) {
+      calls.push(["accept", taskId]);
+      return { taskId, changesetStatus: "accepted", applied: true };
+    },
+    reject(taskId) {
+      calls.push(["reject", taskId]);
+      return { taskId, changesetStatus: "rejected" };
+    },
     status(taskId) {
       calls.push(["status", taskId]);
       const task = byId.get(taskId);
@@ -158,6 +166,38 @@ describe("Unix socket daemon", () => {
     const paths = temporaryPaths(t);
     await assert.rejects(() => startDaemon({ ...paths, platform: "win32" }), /Linux and macOS/);
     assert.equal(fs.existsSync(paths.socketPath), false);
+  });
+
+  describe("task.accept / task.reject", () => {
+    test("task.accept invokes manager.accept(taskId)", async (t) => {
+      const paths = temporaryPaths(t);
+      const fake = fakeManagerFactory();
+      const daemon = await startDaemon({ ...paths, taskManagerFactory: fake.factory });
+      t.after(() => daemon.close());
+      const peer = await openPeer(paths.socketPath);
+      t.after(() => peer.close());
+
+      const response = await peer.request("accept", "task.accept", { taskId: "t1" });
+
+      assert.equal(response.ok, true, response.error?.message);
+      assert.deepEqual(fake.calls.at(-1), ["accept", "t1"]);
+      assert.equal(response.result.changesetStatus, "accepted");
+    });
+
+    test("task.reject invokes manager.reject(taskId)", async (t) => {
+      const paths = temporaryPaths(t);
+      const fake = fakeManagerFactory();
+      const daemon = await startDaemon({ ...paths, taskManagerFactory: fake.factory });
+      t.after(() => daemon.close());
+      const peer = await openPeer(paths.socketPath);
+      t.after(() => peer.close());
+
+      const response = await peer.request("reject", "task.reject", { taskId: "t1" });
+
+      assert.equal(response.ok, true, response.error?.message);
+      assert.deepEqual(fake.calls.at(-1), ["reject", "t1"]);
+      assert.equal(response.result.changesetStatus, "rejected");
+    });
   });
 
   test("forwards an executor param on task.dispatch to manager.dispatch(params)", async (t) => {

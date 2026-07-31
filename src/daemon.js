@@ -216,6 +216,10 @@ async function invoke(manager, request) {
       const context = filteredTaskDetails(manager, params.directory);
       return { ...context, counts: countTasks(context.tasks) };
     }
+    case "task.accept":
+      return manager.accept(params.taskId);
+    case "task.reject":
+      return manager.reject(params.taskId);
     default:
       throw new Error(`unsupported method after validation: ${request.method}`);
   }

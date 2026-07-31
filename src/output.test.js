@@ -257,6 +257,18 @@ describe("formatWatchEvent color (TTY-gated)", () => {
   });
 });
 
+test("leanStatus surfaces a pending changesetStatus without --full", () => {
+  const detail = { id: "t1", status: "done", startedAt: "2026-07-29T00:00:00.000Z", exitCode: 0, signal: null, role: "dispatch", changesetStatus: "pending" };
+  const lean = leanStatus(detail);
+  assert.equal(lean.changesetStatus, "pending");
+});
+
+test("leanStatus omits changesetStatus when it's already resolved", () => {
+  const detail = { id: "t1", status: "done", startedAt: "2026-07-29T00:00:00.000Z", exitCode: 0, signal: null, role: "dispatch", changesetStatus: "accepted" };
+  const lean = leanStatus(detail);
+  assert.equal(lean.changesetStatus, undefined);
+});
+
 describe("writeToon status coloring", () => {
   test("colors a status field in the nested (non-uniform) task layout when stdout is a TTY", () => {
     const { io, output } = fakeStdoutIo(true);

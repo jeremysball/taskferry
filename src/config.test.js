@@ -84,6 +84,18 @@ describe("loadConfig()", () => {
     assert.throws(() => loadConfig({ configPath }), /error: config key "sandboxEnabled".*must be a boolean.*\nhelp:/s);
   });
 
+  test("accepts a valid overlayEnabled value", () => {
+    const dir = tmpConfigDir();
+    const configPath = writeConfig(dir, JSON.stringify({ overlayEnabled: false }));
+    assert.deepEqual(loadConfig({ configPath }), { overlayEnabled: false });
+  });
+
+  test("rejects a wrong-typed overlayEnabled value", () => {
+    const dir = tmpConfigDir();
+    const configPath = writeConfig(dir, JSON.stringify({ overlayEnabled: "false" }));
+    assert.throws(() => loadConfig({ configPath }), /error: config key "overlayEnabled".*must be a boolean.*\nhelp:/s);
+  });
+
   test("accepts a valid allowedDirs value", () => {
     const dir = tmpConfigDir();
     const configPath = writeConfig(dir, JSON.stringify({ allowedDirs: "/home/user/.cache/myapp,/opt/shared" }));

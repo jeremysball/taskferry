@@ -588,11 +588,19 @@ export function createTaskManager({
     }
   }
 
-  /** @type {{supported: boolean, reason?: string}|null} */
+  /** @type {{supported: boolean, reason?: string, checkedAt: number}|null} */
   let overlaySupport = null;
+  // Re-probe a negative result after this many ms so a transient failure
+  // (bwrap version-too-old mid-upgrade, PATH temporarily missing the binary,
+  // a freshly-installed package not yet on the daemon's PATH, etc.) can
+  // self-heal without a full daemon restart. A positive result is cached
+  // forever — once the host supports the overlay, it stays supported unless
+  // someone uninstalls bwrap, which is not a transient failure.
+  const OVERLAY_SUPPORT_TTL_MS = 60_000;
   function requireOverlaySupport() {
-    if (overlaySupport == null) {
-      overlaySupport = checkOverlaySupportFn();
+    const now = Date.now();
+    if (overlaySupport == null || (!overlaySupport.supported && now - overlaySupport.checkedAt >= OVERLAY_SUPPORT_TTL_MS)) {
+      overlaySupport = { ...checkOverlaySupportFn(), checkedAt: now };
     }
     const result = /** @type {{supported: boolean, reason?: string}} */ (overlaySupport);
     if (!result.supported) {
@@ -1938,7 +1946,7 @@ export function createTaskManager({
           // state that can change between dispatch and extraction.
           task.overlayDirs = { ...overlayInfo, tmpRoot: overlayTmpRoot, rwBinds: overlayRwBinds };
           task.changesetStatus = "pending";
-          task.preDispatchHead = resolvePreDispatchHead(launchDirectory);
+          task.preDispatchHead = resolvePreDispatchHead(launchDirectory, runOverlayCommandFn);
         }
       }
       // No tmux: the child has no shared session to introspect. It is its own
@@ -2173,6 +2181,18 @@ export function createTaskManager({
         task.status = "crashed";
         task.spawnError = errMessage(err);
         task.endedAt = new Date().toISOString();
+        // Spawn failure (e.g. ENOENT) lands here AFTER the sandbox/overlay
+        // block already ran: overlayDirs is set, changesetStatus is still
+        // "pending", and the overlay would otherwise sit on disk with no
+        // extraction ever booked against it. Run the same extraction/cleanup
+        // path the exit handler does so the task isn't stranded (review
+        // finding -- spawn-failure path missed the cleanup the exit path
+        // already does). extractChangesetForTask is internally error-safe
+        // (extract+failure paths both go through its own try/catch) and
+        // handles an empty overlay the same way the exit path does: no
+        // diff produced, status moves to "accepted" (or "rejected" for an
+        // advisor), overlayDirs cleared.
+        extractChangesetForTask(task);
         finishSettlement();
       });
 

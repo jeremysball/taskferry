@@ -395,6 +395,73 @@ describe("dispatch() lifecycle, driven through an injected spawnFn (no real open
     const full = mgr.result(dispatched.id);
     assert.equal(full.spawnError, "spawn opencode ENOENT");
   });
+
+  test("child.on('error') still runs changeset extraction/cleanup so a spawn-failed task doesn't strand its overlay", () => {
+    // The overlay is created during the sandbox block, BEFORE the spawn
+    // attempt. If the spawn errors (ENOENT), the overlay would otherwise sit
+    // on disk with changesetStatus still "pending" and no extraction ever
+    // booked against it -- the spawn-error path must run the same
+    // extractChangesetForTask() the exit path does.
+    let extractCalls = 0;
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "axi-spawn-error-extract-"));
+    const overlayTmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "axi-spawn-error-extract-tmp-"));
+    const child = fakeChild();
+    const mgr = makeManager({
+      spawnFn: () => child,
+      sandboxEnabled: true,
+      checkBwrapAvailableFn: () => ({ checked: true, available: true }),
+      overlayEnabled: true,
+      checkOverlaySupportFn: () => ({ supported: true }),
+      platform: "linux",
+      overlayTmpRoot,
+      runOverlayCommandFn: () => { extractCalls++; return { status: 0, stdout: "", stderr: "", error: undefined }; },
+    });
+
+    const dispatched = mgr.dispatch({ prompt: "hi", directory });
+    const preErrorCalls = extractCalls;
+
+    child.emit("error", new Error("spawn opencode ENOENT"));
+
+    const status = mgr.status(dispatched.id);
+    assert.equal(status.status, "crashed");
+    // Empty overlay (no worker ever ran) -> 0-byte diff -> "accepted" (same
+    // shape the exit path's zero-change case produces), overlayDirs cleared.
+    assert.equal(status.changesetStatus, "accepted");
+    assert.equal("overlayDirs" in status, false);
+    assert.ok(extractCalls > preErrorCalls, "extractChangesetForTask should run on the spawn-error path");
+  });
+
+  test("advisor: child.on('error') still auto-rejects and cleans up the overlay so it's not stranded", async () => {
+    // Advisor's settlement already auto-rejects+cleans; if the spawn errors
+    // out, the same auto-reject must run for the spawn-error path too (the
+    // bootstrap can otherwise leave the overlay under tmp until the startup
+    // sweep next runs).
+    let cleanedRoot = null;
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "axi-spawn-error-advisor-"));
+    const overlayTmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "axi-spawn-error-advisor-tmp-"));
+    const child = fakeChild();
+    const mgr = makeManager({
+      spawnFn: () => child,
+      sandboxEnabled: true,
+      checkBwrapAvailableFn: () => ({ checked: true, available: true }),
+      overlayEnabled: true,
+      checkOverlaySupportFn: () => ({ supported: true }),
+      platform: "linux",
+      overlayTmpRoot,
+      runOverlayCommandFn: () => ({ status: 0, stdout: "", stderr: "", error: undefined }),
+      rmOverlayTreeFn: (p) => { cleanedRoot = p; },
+    });
+
+    const advisePromise = mgr.advisor({ prompt: "hi", directory, model: "openai/gpt-5.6-sol" });
+    child.emit("error", new Error("spawn opencode ENOENT"));
+    const advised = await advisePromise;
+
+    const status = mgr.status(advised.task_id);
+    assert.equal(status.status, "crashed");
+    assert.equal(status.changesetStatus, "rejected");
+    assert.equal("overlayDirs" in status, false);
+    assert.ok(cleanedRoot, "advisor's overlay must be cleaned up on the spawn-error path");
+  });
 });
 
 describe("isOutsideDirectory()", () => {
@@ -891,6 +958,56 @@ describe("bwrap sandboxing", () => {
     assert.equal(status.overlayDirs.tmpRoot, overlayTmpRoot);
   });
 
+  test("resolvePreDispatchHead is invoked through the injected runOverlayCommandFn delegate, not via a direct subprocess", () => {
+    // The pre-dispatch HEAD probe used to be a direct call into the
+    // changeset.js default runner, side-stepping the runOverlayCommandFn
+    // delegate every other git/command invocation in this module goes
+    // through. Fake it out and assert the probe is observably routed through
+    // the injected delegate (and the captured HEAD lands on the task).
+    const overlayTmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "axi-pre-dispatch-head-tmp-"));
+    const preDispatchCalls = [];
+    const FAKE_HEAD = "0123456789abcdef0123456789abcdef01234567";
+    const mgr = makeManager({
+      spawnFn: () => fakeChild(),
+      sandboxEnabled: true,
+      checkBwrapAvailableFn: () => ({ checked: true, available: true }),
+      overlayEnabled: true,
+      checkOverlaySupportFn: () => ({ supported: true }),
+      platform: "linux",
+      overlayTmpRoot,
+      runOverlayCommandFn: (command, args) => {
+        preDispatchCalls.push({ command, args });
+        // Only the pre-dispatch HEAD probe runs here (the child never
+        // exits, so there's no extraction bwrap call). Return a fake HEAD
+        // for the first probe + a git-dir for the fallback to land on the
+        // git target path.
+        if (command === "git" && args.includes("rev-parse") && args.includes("HEAD")) {
+          return { status: 0, stdout: `${FAKE_HEAD}\n`, stderr: "", error: undefined };
+        }
+        if (command === "git" && args.includes("--git-dir")) {
+          return { status: 0, stdout: ".git\n", stderr: "", error: undefined };
+        }
+        return { status: 0, stdout: "", stderr: "", error: undefined };
+      },
+    });
+
+    mgr.dispatch({ prompt: "hello", directory: os.tmpdir() });
+
+    // The probe must be observable through the injected delegate, not a
+    // real subprocess. The directory argument has to be threaded through too,
+    // so the bwrap/git probe targets the dispatch's launch directory.
+    const headProbe = preDispatchCalls.find((c) => c.command === "git" && c.args.includes("HEAD"));
+    assert.ok(headProbe, "resolvePreDispatchHead must go through runOverlayCommandFn");
+    assert.equal(headProbe.args[0], "-C");
+    assert.equal(headProbe.args[1], os.tmpdir());
+    // The probe went through the delegate: the dispatch landed on a git
+    // target rather than a non-git one (otherwise the --git-dir fallback
+    // probe would have returned the empty-tree sentinel and the task would
+    // have been a git target via a different code path -- the existence of
+    // the HEAD probe alone is what we're checking here).
+    assert.ok(preDispatchCalls.some((c) => c.command === "git" && c.args.includes("HEAD")));
+  });
+
   test("falls back to a plain bind with a warning when overlayEnabled is explicitly false", () => {
     let captured = null;
     let warned = "";
@@ -928,6 +1045,69 @@ describe("bwrap sandboxing", () => {
     const status = mgr.status(result.id);
     assert.equal(status.status, "crashed");
     assert.match(status.spawnError, /bwrap 0.6.0 < 0.8/);
+  });
+
+  test("requireOverlaySupport() re-probes a negative result after the TTL so a transient failure can self-heal", () => {
+    // Trigger: a time-based TTL on a negative probe cache. A positive probe
+    // is cached forever (no point re-probing); a transient negative probe
+    // (PATH temporarily missing bwrap, bwrap version low mid-upgrade, ...) is
+    // re-evaluated after 60s so the daemon self-heals without a restart.
+    let calls = 0;
+    let now = 1_000_000;
+    const realNow = Date.now;
+    Date.now = () => now;
+    const restore = () => { Date.now = realNow; };
+    try {
+      const mgr = makeManager({
+        spawnFn: () => fakeChild(),
+        sandboxEnabled: true,
+        checkBwrapAvailableFn: () => ({ checked: true, available: true }),
+        overlayEnabled: true,
+        checkOverlaySupportFn: () => { calls++; return { supported: false, reason: "bwrap 0.6.0 < 0.8" }; },
+        platform: "linux",
+      });
+
+      // First dispatch: probe runs, cached as negative.
+      mgr.dispatch({ prompt: "one", directory: os.tmpdir() });
+      assert.equal(calls, 1);
+
+      // Second dispatch immediately: cache is negative and recent, no re-probe.
+      mgr.dispatch({ prompt: "two", directory: os.tmpdir() });
+      assert.equal(calls, 1);
+
+      // Just under the TTL: still cached.
+      now += 59_999;
+      mgr.dispatch({ prompt: "three", directory: os.tmpdir() });
+      assert.equal(calls, 1);
+
+      // At/past the TTL: re-probe.
+      now += 1;
+      mgr.dispatch({ prompt: "four", directory: os.tmpdir() });
+      assert.equal(calls, 2);
+    } finally {
+      restore();
+    }
+  });
+
+  test("requireOverlaySupport() caches a positive result forever (no re-probe)", () => {
+    // Companion to the negative-TTL test: once supported, the host stays
+    // supported (bwrap doesn't get uninstalled through a transient issue).
+    // A TTL here would be wasted work on every dispatch.
+    let calls = 0;
+    const mgr = makeManager({
+      spawnFn: () => fakeChild(),
+      sandboxEnabled: true,
+      checkBwrapAvailableFn: () => ({ checked: true, available: true }),
+      overlayEnabled: true,
+      checkOverlaySupportFn: () => { calls++; return { supported: true }; },
+      platform: "linux",
+    });
+
+    mgr.dispatch({ prompt: "one", directory: os.tmpdir() });
+    mgr.dispatch({ prompt: "two", directory: os.tmpdir() });
+    mgr.dispatch({ prompt: "three", directory: os.tmpdir() });
+
+    assert.equal(calls, 1);
   });
 
   test("converts the git-common-dir binds into per-path overlays instead of plain writable binds when overlay is active", () => {

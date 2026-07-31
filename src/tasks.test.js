@@ -1043,6 +1043,47 @@ describe("bwrap sandboxing", () => {
     assert.equal(status.status, "crashed");
     assert.match(status.spawnError, /advisor dispatch requires overlay-gated writes/);
   });
+
+  test("crashes an advisor dispatch instead of running it unguarded when sandboxing is force-disabled", async () => {
+    // Review finding #5 (dispatch-launch side): the overlay fail-closed check
+    // lives inside the sandbox block, so a globally-disabled sandbox would
+    // otherwise let an advisor launch with a plain writable bind -- a path to
+    // persist writes, contradicting ADR 0001. Fail closed at dispatch-launch.
+    let spawned = false;
+    const mgr = makeManager({
+      spawnFn: () => { spawned = true; return fakeChild(); },
+      sandboxEnabled: false,
+      overlayEnabled: true,
+      checkOverlaySupportFn: () => ({ supported: true }),
+      platform: "linux",
+    });
+    const advised = await mgr.advisor({ prompt: "hello", directory: os.tmpdir(), model: "openai/gpt-5.6-sol" });
+    const status = mgr.status(advised.task_id);
+    assert.equal(status.status, "crashed");
+    assert.match(status.spawnError, /advisor dispatch requires overlay-gated writes/);
+    assert.match(status.spawnError, /sandbox is unavailable/);
+    assert.equal(spawned, false, "advisor must not spawn an unsandboxed child");
+  });
+
+  test("crashes an advisor dispatch instead of running it unguarded when the platform cannot sandbox", async () => {
+    // Same guarantee on a platform with no sandbox support (e.g. non-Linux):
+    // overlay-gating cannot be established, so an advisor must fail closed
+    // rather than silently writing through to the target directory.
+    let spawned = false;
+    const mgr = makeManager({
+      spawnFn: () => { spawned = true; return fakeChild(); },
+      sandboxEnabled: true,
+      overlayEnabled: true,
+      checkBwrapAvailableFn: () => ({ checked: true, available: true }),
+      checkOverlaySupportFn: () => ({ supported: true }),
+      platform: "darwin",
+    });
+    const advised = await mgr.advisor({ prompt: "hello", directory: os.tmpdir(), model: "openai/gpt-5.6-sol" });
+    const status = mgr.status(advised.task_id);
+    assert.equal(status.status, "crashed");
+    assert.match(status.spawnError, /advisor dispatch requires overlay-gated writes/);
+    assert.equal(spawned, false, "advisor must not spawn an unsandboxed child");
+  });
 });
 
 describe("changeset extraction at settlement", () => {
@@ -3364,6 +3405,11 @@ describe("advisor()", () => {
         captured = args;
         return child;
       },
+      sandboxEnabled: true,
+      overlayEnabled: true,
+      checkBwrapAvailableFn: () => ({ checked: true, available: true }),
+      checkOverlaySupportFn: () => ({ supported: true }),
+      platform: "linux",
     });
 
     const advisorPromise = mgr.advisor({
@@ -3375,7 +3421,10 @@ describe("advisor()", () => {
       executor: "opencode",
     });
 
-    assert.deepEqual(captured, [
+    // Advisor dispatches are overlay-gated under bwrap (ADR 0001), so the
+    // captured args are the bwrap invocation; the executor command follows "--".
+    assert.deepEqual(captured.slice(captured.indexOf("--") + 1), [
+      "opencode",
       "run", "--dir", os.tmpdir(), "--auto", "--format", "json",
       "-m", "openai/gpt-5.6-sol", "--variant", "max", "--", "how should I shard this counter?",
     ]);
@@ -3411,6 +3460,11 @@ describe("advisor()", () => {
         captured = { cmd, args };
         return child;
       },
+      sandboxEnabled: true,
+      overlayEnabled: true,
+      checkBwrapAvailableFn: () => ({ checked: true, available: true }),
+      checkOverlaySupportFn: () => ({ supported: true }),
+      platform: "linux",
     });
 
     const advisorPromise = mgr.advisor({
@@ -3421,9 +3475,13 @@ describe("advisor()", () => {
       timeoutMs: 5000,
     });
 
-    assert.equal(captured.cmd, "pi");
-    assert.ok(captured.args.includes("--provider"));
-    assert.ok(captured.args.includes("minimax"));
+    // Advisor dispatches are overlay-gated under bwrap (ADR 0001); the pi
+    // command is the bwrap payload following "--".
+    assert.equal(captured.cmd, "bwrap");
+    const piArgs = captured.args.slice(captured.args.indexOf("--") + 1);
+    assert.equal(piArgs[0], "pi");
+    assert.ok(piArgs.includes("--provider"));
+    assert.ok(piArgs.includes("minimax"));
 
     // Raw pi --mode json events on stdout; startTask's stdout handler must
     // run them through the real piExecutor().normalizeLogEvent before they
@@ -3446,7 +3504,14 @@ describe("advisor()", () => {
 
   test("returns status: running with a task_id and session_id when the timeout elapses first", async () => {
     const child = fakeChild();
-    const mgr = makeManager({ spawnFn: () => child });
+    const mgr = makeManager({
+      spawnFn: () => child,
+      sandboxEnabled: true,
+      overlayEnabled: true,
+      checkBwrapAvailableFn: () => ({ checked: true, available: true }),
+      checkOverlaySupportFn: () => ({ supported: true }),
+      platform: "linux",
+    });
 
     const advisorPromise = mgr.advisor({
       prompt: "long question",
@@ -3498,7 +3563,14 @@ describe("advisor()", () => {
 
   test("when the timeout elapses before opencode has written a session id, the note points at taskferry wait with task id instead of fabricating a session_id", async () => {
     const child = fakeChild();
-    const mgr = makeManager({ spawnFn: () => child });
+    const mgr = makeManager({
+      spawnFn: () => child,
+      sandboxEnabled: true,
+      overlayEnabled: true,
+      checkBwrapAvailableFn: () => ({ checked: true, available: true }),
+      checkOverlaySupportFn: () => ({ supported: true }),
+      platform: "linux",
+    });
 
     const advisorPromise = mgr.advisor({
       prompt: "long question",
@@ -3536,6 +3608,11 @@ describe("advisor()", () => {
         captured = args;
         return child;
       },
+      sandboxEnabled: true,
+      overlayEnabled: true,
+      checkBwrapAvailableFn: () => ({ checked: true, available: true }),
+      checkOverlaySupportFn: () => ({ supported: true }),
+      platform: "linux",
     });
 
     // First call establishes ses_live in the registry via its own result.
@@ -3589,6 +3666,11 @@ describe("advisor()", () => {
         captured = args;
         return child;
       },
+      sandboxEnabled: true,
+      overlayEnabled: true,
+      checkBwrapAvailableFn: () => ({ checked: true, available: true }),
+      checkOverlaySupportFn: () => ({ supported: true }),
+      platform: "linux",
     });
 
     const advisorPromise = mgr.advisor({
@@ -3620,7 +3702,14 @@ describe("advisor()", () => {
 
   test("a crashed advisor task surfaces exitCode/spawnError, not a thrown error", async () => {
     const child = fakeChild();
-    const mgr = makeManager({ spawnFn: () => child });
+    const mgr = makeManager({
+      spawnFn: () => child,
+      sandboxEnabled: true,
+      overlayEnabled: true,
+      checkBwrapAvailableFn: () => ({ checked: true, available: true }),
+      checkOverlaySupportFn: () => ({ supported: true }),
+      platform: "linux",
+    });
 
     const advisorPromise = mgr.advisor({ prompt: "hi", directory: os.tmpdir(), model: "openai/gpt-5.6-sol" });
     child.emit("exit", 1, null);
@@ -3632,7 +3721,15 @@ describe("advisor()", () => {
 
   test("with no timeout_ms, against an injected small maxWaitMs, still returns the bounded 'still running' + resumable session_id shape", async () => {
     const child = fakeChild();
-    const mgr = makeManager({ spawnFn: () => child, maxWaitMs: 30 });
+    const mgr = makeManager({
+      spawnFn: () => child,
+      maxWaitMs: 30,
+      sandboxEnabled: true,
+      overlayEnabled: true,
+      checkBwrapAvailableFn: () => ({ checked: true, available: true }),
+      checkOverlaySupportFn: () => ({ supported: true }),
+      platform: "linux",
+    });
 
     const advisorPromise = mgr.advisor({
       prompt: "long question",
@@ -4794,6 +4891,11 @@ describe("caller-env union (sanitizedEnvironment)", () => {
     const child = fakeChild();
     const mgr = makeManager({
       spawnFn: (cmd, args, opts) => { capturedOpts = opts; return child; },
+      sandboxEnabled: true,
+      overlayEnabled: true,
+      checkBwrapAvailableFn: () => ({ checked: true, available: true }),
+      checkOverlaySupportFn: () => ({ supported: true }),
+      platform: "linux",
     });
 
     const advisorPromise = mgr.advisor({

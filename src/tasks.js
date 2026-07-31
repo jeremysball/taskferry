@@ -1754,6 +1754,25 @@ export function createTaskManager({
       const noSandbox = !isSummary && dispatchLaunch.noSandbox === true;
       let spawnCommand = executor.binaryName;
       let spawnArgs = args;
+      // Summary/report children never get an overlay -- they don't write
+      // to the target directory in any sense the changeset model cares
+      // about, so the plain v1 bind is correct and unchanged for them.
+      const role = isSummary ? null : (dispatchLaunch.role ?? "dispatch");
+      // Review finding #5 (dispatch-launch side): overlay-gating lives inside
+      // the bwrap block below, so when sandboxing is force-disabled
+      // (--no-sandbox / TASKFERRY_DISABLE_SANDBOX=1) or unsupported on this
+      // platform (non-Linux) an advisor would silently launch with a plain
+      // writable bind on the target -- a path to persist a write,
+      // contradicting ADR 0001's "an advisor has no path to persist a write."
+      // Fail closed at dispatch-launch time, mirroring the overlay-disabled
+      // check inside the sandbox block below, instead of degrading to
+      // unsandboxed writes.
+      if (role === "advisor" && !(sandboxEnabled && !noSandbox && platformSupportsSandbox(platform))) {
+        throw new Error(
+          "error: advisor dispatch requires overlay-gated writes, but the sandbox is unavailable\n" +
+          "help: advisor writes must be gated by a copy-on-write overlay (docs/adr/0001-cow-overlays-and-diff-gated-writes.md), which requires the bwrap sandbox -- unset TASKFERRY_DISABLE_SANDBOX (or drop --no-sandbox) and run on a supported platform with bubblewrap >= 0.8"
+        );
+      }
       if (sandboxEnabled && !noSandbox && platformSupportsSandbox(platform)) {
         requireBwrap();
         spawnCommand = "bwrap";
@@ -1803,10 +1822,6 @@ export function createTaskManager({
         fs.mkdirSync(sandboxedDataHome, { recursive: true, mode: 0o700 });
         extraRwBinds.push(sandboxedDataHome);
 
-        // Summary/report children never get an overlay -- they don't write
-        // to the target directory in any sense the changeset model cares
-        // about, so the plain v1 bind is correct and unchanged for them.
-        const role = isSummary ? null : (dispatchLaunch.role ?? "dispatch");
         const wantsOverlay = !isSummary && overlayEnabled && dispatchLaunch.noOverlay !== true;
         /** @type {{root: string, upperDir: string, workDir: string}|null} */
         let overlayInfo = null;

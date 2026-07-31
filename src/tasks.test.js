@@ -1272,6 +1272,41 @@ describe("bwrap sandboxing", () => {
     assert.deepEqual(status.overlayDirs.rwFileBinds, [{ path: packedRefs, bindSrc: scratchPath }]);
   });
 
+  test("a git-common-dir with no packed-refs file (unborn/fresh repo) gets no file bind", () => {
+    // Companion to the packed-refs regression test above -- a fresh worktree
+    // with no packed refs yet must not synthesize a scratch-copy bind for a
+    // file that doesn't exist (existsFn(packedRefs) guards this).
+    let captured = null;
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "axi-nofilebind-dir-"));
+    const gitCommonDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-nofilebind-common-"));
+    const gitDir = path.join(gitCommonDir, "worktrees", "wt");
+    fs.mkdirSync(gitDir, { recursive: true });
+    fs.mkdirSync(path.join(gitCommonDir, "objects"));
+    fs.mkdirSync(path.join(gitCommonDir, "refs"));
+    fs.mkdirSync(path.join(gitCommonDir, "logs", "refs"), { recursive: true });
+    // Deliberately no packed-refs file written.
+    const mgr = makeManager({
+      spawnFn: (cmd, args, opts) => { captured = { cmd, args, opts }; return fakeChild(); },
+      sandboxEnabled: true,
+      checkBwrapAvailableFn: () => ({ checked: true, available: true }),
+      overlayEnabled: true,
+      checkOverlaySupportFn: () => ({ supported: true }),
+      platform: "linux",
+      resolveGitCommonDirFn: () => gitCommonDir,
+      resolveGitDirFn: () => gitDir,
+    });
+
+    const result = mgr.dispatch({ prompt: "hello", directory });
+
+    const packedRefs = path.join(gitCommonDir, "packed-refs");
+    const scratchIdx = captured.args.findIndex((a, idx) => a === "--bind" && captured.args[idx + 2] === packedRefs);
+    assert.equal(scratchIdx, -1, "no rw bind should target a packed-refs file that doesn't exist");
+
+    const status = mgr.status(result.id);
+    assert.deepEqual(status.overlayDirs.rwFileBinds, [], "rwFileBinds must be empty when there is no writable file to bind");
+    assert.equal(status.overlayDirs.rwBinds.length, 4, "the directory slices are unaffected");
+  });
+
   test("binds runtimeDir read-only for advisor spawns so the daemon socket is unreachable", async () => {
     // --unshare-net alone does not block Unix-domain-socket access to a
     // writable bind-mounted path, and runtimeDir holds daemon.sock (review

@@ -82,7 +82,7 @@ describe("buildMergedViewBwrapArgs()", () => {
 });
 
 describe("extractNonGitDiff()", () => {
-  test("runs diff -ru between the real directory and the merged view, writing stdout to diffPath", () => {
+  test("runs diff -ruN between the real directory and the merged view, writing stdout to diffPath", () => {
     let capturedArgs = null;
     const written = {};
     const runCommand = (command, args) => {
@@ -108,7 +108,7 @@ describe("extractNonGitDiff()", () => {
     assert.equal(written["/state/diffs/t1.patch"], "Only in /tmp/taskferry-cow-t1/merged: newfile.txt\n");
   });
 
-  test("diff -ru exit status 0 or 1 are both success (0 = no diff, 1 = differences found)", () => {
+  test("diff -ruN exit status 0 or 1 are both success (0 = no diff, 1 = differences found)", () => {
     const runCommand = () => ({ status: 0, stdout: "", stderr: "", error: undefined });
     const result = extractNonGitDiff({
       directory: "/workspace/repo",

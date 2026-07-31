@@ -401,7 +401,7 @@ levels.
       (hard error vs. ignore).
 - [ ] Invoke `superpowers:writing-plans` for the implementation plan.
       Do NOT reuse `.superpowers/plans/2026-07-28-default-variant-effort.md`
-      (untracked scratch from the superseded design; its async-dispatch
+      (committed for history but superseded; its async-dispatch
       migration tasks no longer exist).
 - [ ] After implementation: supersession note in the old spec can stay
       permanent; move both specs to `.superpowers/.completed/specs/`

@@ -1,5 +1,14 @@
 # defaultVariantEffort design
 
+**Superseded 2026-07-31** by
+`2026-07-31-required-model-and-default-variant-design.md`. The second pass
+keeps this spec's required-`--model` fix, resume-inheritance rules, and the
+"explicit `--variant` is never reinterpreted" finding, and replaces the
+`default`/`highest` abstract config plus the live `opencode models
+--verbose` lookup (and the async-`dispatch()` test migration it forced)
+with a concrete pi-level config value mapped through a vendored copy of
+pi's own table. Kept for its verified findings; do not implement from it.
+
 ## Scope
 
 Replace the current hardcoded, `--model`-presence-coupled reasoning-effort

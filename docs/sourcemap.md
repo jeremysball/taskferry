@@ -148,3 +148,14 @@ Vars marked "config.json" also have a config-file equivalent — see
   when a source `.js` file's mtime moved forward since startup (a merge
   landed) and no tasks were running/queued; see
   `docs/daemon.md#self-restart-on-source-change`.
+- A pending changeset listing files the worker never touched — expected when
+  the dispatch directory had untracked files at dispatch time. Git-target
+  extraction stages the overlay's whole merged view (`git add -A && git diff
+  --cached <pre-dispatch HEAD>`, `changeset.js`'s `extractGitDiff`) so
+  pre-existing untracked files surface as new-file entries alongside the
+  worker's own writes. `accept` runs a plain `git apply`, which fails
+  outright when those paths already exist in the working tree — blocking the
+  worker's real changes too — so commit or shelve untracked files before
+  dispatching against a dirty tree. Non-git targets are unaffected: their
+  extraction diffs the directory against the merged view, so untouched files
+  never appear.

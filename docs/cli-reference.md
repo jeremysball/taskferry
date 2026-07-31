@@ -241,7 +241,12 @@ Applies the dispatch task's pending changeset to its target directory.
 Only meaningful for a task with `changesetStatus: "pending"` (visible on
 `taskferry status` / `taskferry wait` without `--full`); a no-op write
 that auto-resolved to `accepted` cannot be re-accepted. Inspect the
-change with `taskferry result <id> --diff` first. For a git target, the
+change with `taskferry result <id> --diff` first — note the diff can
+include files the worker never touched: git-target extraction stages the
+overlay's whole merged view, so files already untracked in the dispatch
+directory at dispatch time appear as new-file entries, and the plain
+`git apply` fails outright if they still exist on disk (see the
+sourcemap's "Things that look like bugs but aren't"). For a git target, the
 apply is `git apply` against the real pre-dispatch `HEAD`; for a non-git
 target, it runs an in-sandbox `rsync --delay-updates` that needs the
 live overlay, so a non-git changeset left pending across a reboot fails

@@ -40,14 +40,39 @@ and burns wall-clock time versus just doing it.
 
 Every sandboxed ferry writes to a copy-on-write overlay, never the real
 directory directly -- a rogue or mistaken dispatch cannot corrupt whatever
-directory you point it at, worktree or not. Worktrees remain useful for two
-unrelated reasons, not safety: branch isolation (parallel sessions on
-different branches without a switch race) and lower-layer stability (a
-concurrent edit to a live main checkout mutates the overlay's *lower* in
-place while a ferry is in flight, which can make `accept` conflict later).
-Ask which of those two applies before choosing; if neither does (a solo
-session, one task at a time), dispatching straight at the main checkout is
-fine.
+directory you point it at, worktree or not. `taskferry result --diff` also
+fails closed rather than silently corrupting: if the directory's real git
+HEAD has moved since dispatch (someone or something checked out a different
+branch there while the task was in flight), extraction refuses with an
+explicit "HEAD moved" error instead of returning a diff computed against the
+wrong tree.
+
+That guard only fires on a *confirmed* HEAD mismatch, though -- it won't
+catch every way a shared directory can bite you (a concurrent file edit that
+doesn't touch HEAD, for instance), and hitting it mid-session is still lost
+wall time you'd rather not spend. Worktrees remain the safer default for two
+independent reasons: branch isolation (parallel sessions on different
+branches without a switch race) and lower-layer stability (a concurrent
+edit to a live main checkout mutates the overlay's *lower* in place while a
+ferry is in flight, which can make `accept` conflict later). Ask which of
+those two applies before choosing; if neither does (a solo session, one task
+at a time, nothing else touching the directory), dispatching straight at the
+main checkout is fine -- but prefer a worktree when in doubt, since the
+failure mode without one is "stop and investigate," not "nothing to worry
+about."
+
+**A worker's writes only land somewhere durable inside `--directory`.** The
+sandbox bind-mounts the dispatched directory's own tree plus its git
+internals -- it does not follow a symlink out to some other path on the
+host, even one that looks like it should resolve fine (e.g. a worktree's
+scratch directory symlinked out to a shared location in the main checkout).
+A write through a path that resolves outside `--directory` lands in a
+throwaway overlay copy that vanishes at settlement, never appears in
+`taskferry result --diff` (doubly true for a gitignored path, which a
+git-diff-based extraction can't see regardless), and the worker's own
+narration will still report success. If multiple worktrees need to share
+scratch files (an SDD plan's ledger, briefs, reports), copy them into each
+worktree instead of symlinking across the sandbox boundary.
 
 ## Worker Contract
 

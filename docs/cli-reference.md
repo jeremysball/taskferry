@@ -220,7 +220,7 @@ tripped.
 | Flag | Notes |
 |---|---|
 | `--full` | Include untruncated narration; only rejected as a usage error when combined with `--fields` that omits `narration` — `--full` alone (no `--fields`) works fine |
-| `--fields <comma-list>` | Project only the fields you need: `message`, `narration`, `tokens`, `cost`, `sessionId`, `exitCode`, `signal`, `spawnError`, `failureReason`, `failureDetail`, `logPath`, `incomplete`, `finalMarker`, `diff` |
+| `--fields <comma-list>` | Project only the fields you need: `message`, `narration`, `tokens`, `cost`, `sessionId`, `exitCode`, `signal`, `spawnError`, `failureReason`, `failureDetail`, `logPath`, `incomplete`, `finalMarker`, `diff`, `diffStat`, `changesetError` |
 | `--diff` | Print the task's pending changeset (read-only; cannot combine with `--fields`) |
 
 ```

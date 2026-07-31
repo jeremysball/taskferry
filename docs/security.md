@@ -271,4 +271,10 @@ runs wrapped in
   changeset's patch is persisted under the state dir and survives a reboot,
   but a non-git `accept` needs the live overlay to rebuild its merged view,
   so a non-git changeset left pending across a reboot fails loudly and can
-  only be rejected, never applied.
+  only be rejected, never applied. Cleanup has the same persistence
+  boundary: each overlay records the tmp root in effect at creation, so
+  removal keeps working across daemon restarts even when `TMPDIR` changes,
+  but records persisted before that field existed get the live
+  `overlayTmpRoot` backfilled at load as a best-effort guess. A legacy
+  overlay whose effective `TMPDIR` has since changed can't be recovered
+  retroactively and sits until reboot.

@@ -165,6 +165,30 @@ export function resolveGitDir(directory, runCommand = defaultRunCommand) {
 }
 
 /**
+ * Shared prefix both `buildBwrapArgs()` (sandboxed dispatch) and
+ * `buildMergedViewBwrapArgs()` (changeset extraction/apply over a CoW
+ * overlay) start from: the read-only root bind, the standard
+ * `/proc`/`/dev`/`/tmp` scaffolding, and the per-deny-list tmpfs mounts.
+ * bwrap applies mounts in argument order and a later mount on a parent
+ * directory shadows an earlier mount nested inside it, so --tmpfs /tmp
+ * must come before the deny-list and the read-write binds below — any
+ * deny-list entry or bind path that happens to live under /tmp (a
+ * plausible scratch/CI/worktree path) must not be silently hidden by a
+ * /tmp mount that comes after it.
+ * @param {object} options
+ * @param {string[]} options.denyList
+ * @returns {string[]}
+ */
+export function buildBwrapBaseArgs({ denyList }) {
+  const args = ["--ro-bind", "/", "/"];
+  args.push("--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp");
+  for (const denied of denyList) {
+    args.push("--tmpfs", denied);
+  }
+  return args;
+}
+
+/**
  * @param {object} options
  * @param {string} options.directory
  * @param {string} options.stateDir
@@ -209,16 +233,7 @@ export function buildBwrapArgs({
   shareNet = true,
   runtimeDirWritable = true,
 }) {
-  const args = ["--ro-bind", "/", "/"];
-  // bwrap applies mounts in argument order, and a later mount on a parent
-  // directory shadows an earlier mount nested inside it. --tmpfs /tmp must
-  // come before the deny-list and read-write binds below, or any of them
-  // that happen to live under /tmp (a plausible scratch/CI/worktree path)
-  // would silently disappear behind the fresh, empty /tmp tmpfs.
-  args.push("--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp");
-  for (const denied of denyList) {
-    args.push("--tmpfs", denied);
-  }
+  const args = buildBwrapBaseArgs({ denyList });
   if (overlay) {
     args.push("--overlay-src", directory, "--overlay", overlay.upperDir, overlay.workDir, directory);
   } else {

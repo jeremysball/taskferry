@@ -3,7 +3,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
-import { buildBwrapArgs } from "./sandbox.js";
+import { buildBwrapArgs, buildBwrapBaseArgs } from "./sandbox.js";
 
 /** @typedef {{status: number|null, stdout: string, stderr: string, error?: Error}} CommandResult */
 
@@ -141,6 +141,20 @@ export function subOverlaySlug(targetPath) {
  * against its own merged view in the same sandbox (git targets don't need
  * this -- git diff only needs the merged tree at the real path -- this is
  * only for the non-git diff -ru / non-git apply cases).
+ *
+ * The /tmp-shadowing question (review finding folded in here): the
+ * overlay paths themselves (`overlay.upperDir`, `overlay.workDir`, and
+ * the synthetic `mergedMountPoint` -- all of which live under /tmp by
+ * construction) do NOT need the same explicit bind protection that
+ * `directory` gets below. `upperDir`/`workDir` are host-namespace paths
+ * consumed directly by the kernel's overlay mount(2) call, not by
+ * user-space lookups that go through the bwrap namespace's mounts, so
+ * the fresh --tmpfs /tmp never shadows them. `mergedMountPoint` is a
+ * path in the new namespace (created via `--dir` *after* the `--tmpfs
+ * /tmp`, so it lands on the empty tmpfs), then immediately consumed as
+ * the mount point for `--overlay` -- it's intentionally empty before the
+ * mount and never needs to persist on the host.
+ *
  * @param {object} params
  * @param {string} params.directory
  * @param {{upperDir: string, workDir: string}} params.overlay
@@ -156,8 +170,7 @@ export function subOverlaySlug(targetPath) {
  * @returns {string[]}
  */
 export function buildMergedViewBwrapArgs({ directory, overlay, stateDir, runtimeDir, homeDir, denyList, mergedMountPoint, writable = false }) {
-  const args = ["--ro-bind", "/", "/", "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp"];
-  for (const denied of denyList) args.push("--tmpfs", denied);
+  const args = buildBwrapBaseArgs({ denyList });
   args.push("--dir", mergedMountPoint);
   args.push("--overlay-src", directory, "--overlay", overlay.upperDir, overlay.workDir, mergedMountPoint);
   if (writable) args.push("--bind", directory, directory);

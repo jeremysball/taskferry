@@ -81,6 +81,62 @@ describe("buildMergedViewBwrapArgs()", () => {
   });
 });
 
+describe("buildMergedViewBwrapArgs() byte-identical output (Task 5: post-refactor regression)", () => {
+  // The two baseline arrays below were captured from the pre-refactor
+  // buildMergedViewBwrapArgs() against the inputs shown. Refactoring it to
+  // share buildBwrapBaseArgs() with buildBwrapArgs() must not change any
+  // element of these arrays -- this is the safety net. The overlay paths
+  // themselves (upperDir/workDir/mergedMountPoint, all under /tmp by
+  // construction) need no shadowing protection: upper/work are consumed
+  // by the kernel overlay mount(2) on host paths, and mergedMountPoint is
+  // the overlayfs mount point in the new namespace -- see the JSDoc on
+  // buildMergedViewBwrapArgs().
+  test("writable: false (extraction) case is byte-identical to the pre-refactor output", () => {
+    const args = buildMergedViewBwrapArgs({
+      directory: "/workspace/repo",
+      overlay: { upperDir: "/tmp/taskferry-cow-t1/upper/main", workDir: "/tmp/taskferry-cow-t1/work/main" },
+      stateDir: "/state",
+      runtimeDir: "/state/run",
+      homeDir: "/home/user",
+      denyList: [],
+      mergedMountPoint: "/tmp/taskferry-cow-t1/merged",
+    });
+    assert.deepEqual(args, [
+      "--ro-bind", "/", "/",
+      "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp",
+      "--dir", "/tmp/taskferry-cow-t1/merged",
+      "--overlay-src", "/workspace/repo",
+      "--overlay", "/tmp/taskferry-cow-t1/upper/main", "/tmp/taskferry-cow-t1/work/main", "/tmp/taskferry-cow-t1/merged",
+      "--ro-bind", "/workspace/repo", "/workspace/repo",
+      "--bind", "/state/run", "/state/run",
+      "--unshare-all", "--unshare-net", "--die-with-parent",
+    ]);
+  });
+
+  test("writable: true (apply) case is byte-identical to the pre-refactor output", () => {
+    const args = buildMergedViewBwrapArgs({
+      directory: "/workspace/repo",
+      overlay: { upperDir: "/tmp/taskferry-cow-t1/upper/main", workDir: "/tmp/taskferry-cow-t1/work/main" },
+      stateDir: "/state",
+      runtimeDir: "/state/run",
+      homeDir: "/home/user",
+      denyList: [],
+      mergedMountPoint: "/tmp/taskferry-cow-t1/merged",
+      writable: true,
+    });
+    assert.deepEqual(args, [
+      "--ro-bind", "/", "/",
+      "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp",
+      "--dir", "/tmp/taskferry-cow-t1/merged",
+      "--overlay-src", "/workspace/repo",
+      "--overlay", "/tmp/taskferry-cow-t1/upper/main", "/tmp/taskferry-cow-t1/work/main", "/tmp/taskferry-cow-t1/merged",
+      "--bind", "/workspace/repo", "/workspace/repo",
+      "--bind", "/state/run", "/state/run",
+      "--unshare-all", "--unshare-net", "--die-with-parent",
+    ]);
+  });
+});
+
 describe("extractNonGitDiff()", () => {
   test("runs diff -ruN between the real directory and the merged view, writing stdout to diffPath", () => {
     let capturedArgs = null;

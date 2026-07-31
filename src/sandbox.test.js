@@ -1,7 +1,7 @@
 import { describe, test } from "node:test";
 import assert from "node:assert/strict";
 import path from "node:path";
-import { buildBwrapArgs, checkBwrapAvailable, checkOverlaySupport, parseBwrapVersion, platformSupportsSandbox, resolveGitCommonDir, resolveGitDir } from "./sandbox.js";
+import { buildBwrapArgs, buildBwrapBaseArgs, checkBwrapAvailable, checkOverlaySupport, parseBwrapVersion, platformSupportsSandbox, resolveGitCommonDir, resolveGitDir } from "./sandbox.js";
 
 describe("platformSupportsSandbox()", () => {
   test("is true on linux", () => {
@@ -381,5 +381,73 @@ describe("buildBwrapArgs()", () => {
   test("defaults to a writable runtimeDir bind (unchanged dispatch behavior)", () => {
     const args = buildBwrapArgs({ directory: "/w", stateDir: "/s", runtimeDir: "/s/run", homeDir: "/h", denyList: [] });
     assert.notEqual(args.findIndex((a, i) => a === "--bind" && args[i + 1] === "/s/run"), -1);
+  });
+});
+
+describe("buildBwrapBaseArgs() (Task 5: shared scaffolding)", () => {
+  test("emits ro-bind root, /proc+/dev+/tmp scaffolding, then one --tmpfs per denied path", () => {
+    const args = buildBwrapBaseArgs({ denyList: ["/a", "/b"] });
+    assert.deepEqual(args, [
+      "--ro-bind", "/", "/",
+      "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp",
+      "--tmpfs", "/a", "--tmpfs", "/b",
+    ]);
+  });
+
+  test("emits no --tmpfs for the deny-list entries when denyList is empty", () => {
+    const args = buildBwrapBaseArgs({ denyList: [] });
+    assert.deepEqual(args, ["--ro-bind", "/", "/", "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp"]);
+  });
+});
+
+describe("buildBwrapArgs() byte-identical output (Task 5: post-refactor regression)", () => {
+  // The two baseline arrays below were captured from the pre-refactor
+  // buildBwrapArgs() against the inputs shown. Refactoring buildBwrapArgs()
+  // to share buildBwrapBaseArgs() with buildMergedViewBwrapArgs() must not
+  // change any element of these arrays -- this is the safety net.
+  test("non-overlay case is byte-identical to the pre-refactor output", () => {
+    const args = buildBwrapArgs({
+      directory: "/workspace/my-repo",
+      stateDir: "/home/user/.local/state/taskferry",
+      runtimeDir: "/home/user/.local/state/taskferry/run",
+      homeDir: "/home/user",
+    });
+    assert.deepEqual(args, [
+      "--ro-bind", "/", "/",
+      "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp",
+      "--tmpfs", "/home/user/.local/state/taskferry",
+      "--tmpfs", "/home/user/.ssh",
+      "--tmpfs", "/home/user/.aws",
+      "--tmpfs", "/home/user/.config/gcloud",
+      "--tmpfs", "/home/user/.config/gh",
+      "--tmpfs", "/home/user/.gnupg",
+      "--bind", "/workspace/my-repo", "/workspace/my-repo",
+      "--bind", "/home/user/.local/state/taskferry/run", "/home/user/.local/state/taskferry/run",
+      "--unshare-all", "--share-net", "--die-with-parent",
+    ]);
+  });
+
+  test("overlay case is byte-identical to the pre-refactor output", () => {
+    const args = buildBwrapArgs({
+      directory: "/workspace/my-repo",
+      stateDir: "/home/user/.local/state/taskferry",
+      runtimeDir: "/home/user/.local/state/taskferry/run",
+      homeDir: "/home/user",
+      overlay: { upperDir: "/tmp/taskferry-cow-t1/upper/main", workDir: "/tmp/taskferry-cow-t1/work/main" },
+    });
+    assert.deepEqual(args, [
+      "--ro-bind", "/", "/",
+      "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp",
+      "--tmpfs", "/home/user/.local/state/taskferry",
+      "--tmpfs", "/home/user/.ssh",
+      "--tmpfs", "/home/user/.aws",
+      "--tmpfs", "/home/user/.config/gcloud",
+      "--tmpfs", "/home/user/.config/gh",
+      "--tmpfs", "/home/user/.gnupg",
+      "--overlay-src", "/workspace/my-repo",
+      "--overlay", "/tmp/taskferry-cow-t1/upper/main", "/tmp/taskferry-cow-t1/work/main", "/workspace/my-repo",
+      "--bind", "/home/user/.local/state/taskferry/run", "/home/user/.local/state/taskferry/run",
+      "--unshare-all", "--share-net", "--die-with-parent",
+    ]);
   });
 });

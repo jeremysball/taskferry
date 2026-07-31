@@ -100,7 +100,7 @@ const commandSpecs = {
     options: {
       "--full": "include untruncated narration",
       "--fields <comma-list>": "request selected result fields",
-      "--diff": "print the task's changeset diff (read-only; cannot combine with --fields)",
+      "--diff": "print the task's changeset diff (read-only; cannot combine with --fields or --full)",
     },
     examples: ['taskferry result <id>', 'taskferry result <id> --full', 'taskferry result <id> --fields message,tokens', 'taskferry result <id> --diff'],
   },
@@ -454,6 +454,15 @@ export function parseArgs(argv, { cwd = process.cwd() } = {}) {
     }
     if (command === "result" && options.diff && options.fields) {
       throw usageError("--diff cannot be combined with --fields", command);
+    }
+    if (command === "result" && options.diff && options.full) {
+      // --full server-side only widens the narration preview; the diff field
+      // is independent and gated by `fields: ["diff"]` (--diff takes that
+      // route). Combining them would either silently drop --full (the
+      // pre-fix if/else-if in commands.js) or send both and have the
+      // projection throw away one -- either way a confusing user experience.
+      // Reject at parse time so the failure is loud and early.
+      throw usageError("--diff cannot be combined with --full", command);
     }
     if (command === "wait" && options.summarize && options.timeoutMs !== undefined) {
       throw usageError("--summarize cannot be combined with --timeout", command);

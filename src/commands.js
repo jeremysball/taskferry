@@ -204,6 +204,12 @@ export async function runCommand(command, options, { client, io = process, signa
       return options.mode === "report" ? summary : { mode: options.mode, ...summary };
     }
     case "result": {
+      // `options.diff` and `options.full` are mutually exclusive (args.js
+      // rejects the combination at parse time), so the if/else-if below is
+      // deterministic: --diff takes the fields:["diff"] branch, --full takes
+      // the full:true branch, neither passes {}. leanResult() still receives
+      // `full: options.full` so the local-narrowing step mirrors the
+      // server-side contract regardless of which branch was taken above.
       const detail = await client.request("task.result", {
         ...(options.diff ? { fields: ["diff"] } : options.full ? { full: true } : {}),
         ...(!options.diff && options.fields ? { fields: options.fields } : {}),

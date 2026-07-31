@@ -408,6 +408,15 @@ test("result rejects --diff combined with --fields", () => {
   assert.throws(() => parseArgs(["result", "t1", "--diff", "--fields", "message"]), /--diff cannot be combined with --fields/);
 });
 
+test("result rejects --diff combined with --full (regression: review finding #3)", () => {
+  // --full server-side only widens the narration preview; the diff field
+  // is independent and gated by `fields: ["diff"]`. The pre-fix
+  // if/else-if chain in commands.js silently dropped --full when both
+  // were set, which is a confusing failure mode -- reject at parse time
+  // instead so the error is loud and early.
+  assert.throws(() => parseArgs(["result", "t1", "--diff", "--full"]), /--diff cannot be combined with --full/);
+});
+
 test("accept requires a task id", () => {
   assert.throws(() => parseArgs(["accept"]), /task id is required/);
 });

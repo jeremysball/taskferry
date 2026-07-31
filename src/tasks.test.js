@@ -3167,11 +3167,18 @@ describe("accept()/reject()", () => {
   const fixtureTmpRoot = os.tmpdir();
   const fixtureRoot = path.join(fixtureTmpRoot, "taskferry-cow-t_pending");
   function pendingTaskFixture(overrides = {}) {
+    // accept() now refuses to hand a missing diff file to git apply (Task 4
+    // review finding #1), so the fixture must record a diffPath whose file
+    // actually exists on disk. The content is irrelevant -- runCommand is
+    // mocked -- only the file's existence matters. A unique tmp path per
+    // fixture call keeps parallel tests from clobbering each other.
+    const diffPath = path.join(os.tmpdir(), `taskferry-accept-diff-${process.pid}-${Math.random().toString(36).slice(2)}.patch`);
+    fs.writeFileSync(diffPath, "diff --git a/x b/x\n");
     return {
       ...baseTask({ id: "t_pending", status: "done" }),
       role: "dispatch",
       changesetStatus: "pending",
-      diffPath: "/does-not-matter-for-this-fixture.patch",
+      diffPath,
       overlayDirs: { root: fixtureRoot, tmpRoot: fixtureTmpRoot, upperDir: path.join(fixtureRoot, "upper", "main"), workDir: path.join(fixtureRoot, "work", "main"), rwBinds: [] },
       preDispatchHead: "abc123",
       ...overrides,
@@ -3273,6 +3280,20 @@ describe("accept()/reject()", () => {
     });
     assert.throws(() => mgr.accept("t_pending"), /changeset was never extracted.*ETIMEDOUT/s);
     assert.ok(mgr.status("t_pending").overlayDirs, "the preserved overlay is the user's only copy of the changes");
+  });
+
+  test("accept() errors usefully when the recorded diff file is no longer on disk (regression: review finding #1)", () => {
+    // The diffPath is recorded in tasks.json but the file itself is gone
+    // (partial stateDir cleanup, a tampered tasks.json, etc.). Without this
+    // check, git apply would surface its own "can't open patch" message
+    // against a path the user has no reason to suspect -- fail with a
+    // clear, actionable error before that happens.
+    const missingDiffPath = path.join(os.tmpdir(), `taskferry-does-not-exist-${process.pid}-${Math.random().toString(36).slice(2)}.patch`);
+    const mgr = makeManager({
+      tasksFixture: [pendingTaskFixture({ diffPath: missingDiffPath })],
+    });
+    assert.throws(() => mgr.accept("t_pending"), /diff file at \/tmp\/taskferry-does-not-exist-/);
+    assert.throws(() => mgr.accept("t_pending"), /cannot be applied without its diff/);
   });
 
   test("accept() on a non-git target whose overlay vanished errors instead of applying nothing (regression: review finding #7)", () => {
@@ -4160,33 +4181,80 @@ describe("result()", () => {
 });
 
 describe("result() diffStat field", () => {
-  test("computes files/additions/deletions from the cached patch (regression: review finding #13)", () => {
-    const patch = [
-      "diff --git a/one.txt b/one.txt",
-      "--- a/one.txt",
-      "+++ b/one.txt",
-      "@@ -1 +1,2 @@",
-      "+added line",
-      "+another",
-      "diff --git a/two.txt b/two.txt",
-      "--- a/two.txt",
-      "+++ /dev/null",
-      "@@ -1 +0,0 @@",
-      "-removed line",
-      "",
-    ].join("\n");
+  // The diffStat path now shells out to `git apply --numstat <diffPath>` via
+  // the runOverlayCommandFn delegate (review finding #13, root-cause fix).
+  // The fake here mirrors the real git format: one `<adds>\t<dels>\t<path>`
+  // line per file; the test never touches a real git binary.
+  test("shells out to git apply --numstat and sums the tab-separated counts (regression: review finding #13)", () => {
     const mgr = makeManager({
       tasksFixture: (logDir) => [{
         ...baseTask({ id: "t_stat", logPath: path.join(logDir, "t_stat.ndjson") }),
         diffPath: path.join(logDir, "..", "diffs", "t_stat.patch"),
       }],
       logs: { "t_stat.ndjson": "" },
+      runOverlayCommandFn: (command, args) => {
+        if (command === "git" && args[0] === "apply" && args[1] === "--numstat") {
+          return { status: 0, stdout: "2\t1\tone.txt\n0\t1\ttwo.txt\n", stderr: "", error: undefined };
+        }
+        return { status: 0, stdout: "", stderr: "", error: undefined };
+      },
     });
     fs.mkdirSync(path.join(mgr.paths.STATE_DIR, "diffs"), { recursive: true });
-    fs.writeFileSync(path.join(mgr.paths.STATE_DIR, "diffs", "t_stat.patch"), patch);
+    fs.writeFileSync(path.join(mgr.paths.STATE_DIR, "diffs", "t_stat.patch"), "diff --git a/one.txt b/one.txt\n");
     const result = mgr.result("t_stat", { fields: ["diffStat"] });
-    assert.deepEqual(result.diffStat, { files: 2, additions: 2, deletions: 1 });
-    assert.deepEqual(mgr.result("t_stat").diffStat, { files: 2, additions: 2, deletions: 1 });
+    assert.deepEqual(result.diffStat, { files: 2, additions: 2, deletions: 2 });
+    assert.deepEqual(mgr.result("t_stat").diffStat, { files: 2, additions: 2, deletions: 2 });
+  });
+
+  test("reports a non-zero file count for a non-git-style diff (regression: review finding #13, non-git)", () => {
+    // The pre-fix hand-rolled scan counted only `diff --git` headers, so
+    // every non-git changeset reported files:0 regardless of how many files
+    // actually changed. The new path routes both kinds through git apply
+    // --numstat, which parses both `diff --git` and plain `diff -ruN`
+    // headers. Mock the run command with the same output git would emit
+    // for a two-file non-git extraction.
+    const mgr = makeManager({
+      tasksFixture: (logDir) => [{
+        ...baseTask({ id: "t_nongit", logPath: path.join(logDir, "t_nongit.ndjson") }),
+        diffPath: path.join(logDir, "..", "diffs", "t_nongit.patch"),
+      }],
+      logs: { "t_nongit.ndjson": "" },
+      runOverlayCommandFn: (command, args) => {
+        if (command === "git" && args[0] === "apply" && args[1] === "--numstat") {
+          return { status: 0, stdout: "1\t0\tmerged/newfile.txt\n2\t1\tmerged/existing.txt\n", stderr: "", error: undefined };
+        }
+        return { status: 0, stdout: "", stderr: "", error: undefined };
+      },
+    });
+    fs.mkdirSync(path.join(mgr.paths.STATE_DIR, "diffs"), { recursive: true });
+    fs.writeFileSync(path.join(mgr.paths.STATE_DIR, "diffs", "t_nongit.patch"), "diff -ruN a b\nOnly in b: newfile.txt\n");
+    const result = mgr.result("t_nongit", { fields: ["diffStat"] });
+    assert.notEqual(result.diffStat.files, 0, "non-git diffs must not silently report 0 files");
+    assert.deepEqual(result.diffStat, { files: 2, additions: 3, deletions: 1 });
+  });
+
+  test("falls back to a zero stat when git apply --numstat fails to parse the diff", () => {
+    // Failure mode: a plain `diff -ru` (without `-N`) extraction whose
+    // "Only in ..." lines confuse git apply. The diff text is still
+    // readable via `result --diff`, only the human-readable summary is
+    // uncomputable; returning a zero stat is the documented fallback.
+    const mgr = makeManager({
+      tasksFixture: (logDir) => [{
+        ...baseTask({ id: "t_unparsable", logPath: path.join(logDir, "t_unparsable.ndjson") }),
+        diffPath: path.join(logDir, "..", "diffs", "t_unparsable.patch"),
+      }],
+      logs: { "t_unparsable.ndjson": "" },
+      runOverlayCommandFn: (command, args) => {
+        if (command === "git" && args[0] === "apply" && args[1] === "--numstat") {
+          return { status: 128, stdout: "", stderr: "error: No valid patches in input\n", error: undefined };
+        }
+        return { status: 0, stdout: "", stderr: "", error: undefined };
+      },
+    });
+    fs.mkdirSync(path.join(mgr.paths.STATE_DIR, "diffs"), { recursive: true });
+    fs.writeFileSync(path.join(mgr.paths.STATE_DIR, "diffs", "t_unparsable.patch"), "Only in b: newfile.txt\n");
+    const result = mgr.result("t_unparsable", { fields: ["diffStat"] });
+    assert.deepEqual(result.diffStat, { files: 0, additions: 0, deletions: 0 });
   });
 });
 

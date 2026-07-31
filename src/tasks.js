@@ -2319,6 +2319,17 @@ export function createTaskManager({
         `help: the overlay was preserved${task.overlayDirs ? ` at ${task.overlayDirs.root}` : ""} -- inspect it there directly, or "taskferry reject ${taskId}" to discard it`
       );
     }
+    // The diff file lives under stateDir; a partial cleanup (or a tampered
+    // tasks.json) can leave a recorded diffPath whose file is gone. Fail
+    // with a clear error instead of letting git apply surface its own
+    // misleading "can't open patch" message against a path the user has no
+    // reason to suspect.
+    if (!existsFn(task.diffPath)) {
+      throw new Error(
+        `error: task ${taskId}'s diff file at ${task.diffPath} no longer exists\n` +
+        `help: the state directory may have been partially cleaned; a pending changeset cannot be applied without its diff. Use "taskferry reject ${taskId}" to discard the pending state, or restore the diff file at the recorded path before retrying.`
+      );
+    }
     const isGitTarget = task.preDispatchHead != null;
     if (!isGitTarget && !hasLiveOverlay(task)) {
       // Review finding #7: a non-git accept must rebuild the merged view from
@@ -2347,12 +2358,14 @@ export function createTaskManager({
       return { taskId, changesetStatus: task.changesetStatus, applied: false, reason: applied.reason };
     }
     task.changesetStatus = "accepted";
-    // Review finding #11: a cleanup failure must not be swallowed. The status
-    // is terminal either way (the apply is what the user asked for), but the
+    // Persist before cleanup: a crash between apply and persist would leave
+    // the task reading as "pending" after a restart even though the patch
+    // was already applied, risking a double-apply on the next accept()
+    // retry. The cleanup may still fail (review finding #11), but that
     // failure surfaces in the return value and overlayDirs stays set so the
     // daemon-startup sweep (Task 12) retries the removal.
-    const cleanupFailed = releaseOverlay(task);
     persistTask(task.id);
+    const cleanupFailed = releaseOverlay(task);
     return { taskId, changesetStatus: task.changesetStatus, applied: true, ...(cleanupFailed ? { cleanupFailed: true } : {}) };
   }
 
@@ -2368,8 +2381,15 @@ export function createTaskManager({
       throw new Error(`error: task ${taskId} has no pending changeset (changesetStatus: ${task.changesetStatus ?? "none"})\nhelp: only a task with changesetStatus "pending" can be rejected`);
     }
     task.changesetStatus = "rejected";
-    const cleanupFailed = releaseOverlay(task);
+    // Persist before cleanup (parallel to accept()'s fix): the status is
+    // the committed outcome, the cleanup is the side effect. A crash
+    // between cleanup and persist would leave the task reading as
+    // "pending" after a restart; the next reject() would re-run the
+    // cleanup (idempotent -- rm -rf on a missing path is fine) and then
+    // persist, so the pre-fix order is benign for reject(); matching
+    // accept()'s order keeps the two paths consistent.
     persistTask(task.id);
+    const cleanupFailed = releaseOverlay(task);
     return { taskId, changesetStatus: task.changesetStatus, ...(cleanupFailed ? { cleanupFailed: true } : {}) };
   }
 
@@ -2934,17 +2954,40 @@ export function createTaskManager({
   }
 
   /**
-   * @param {string} diffText
+   * Review finding #13 (root-cause fix): parse stat counts via real git
+   * tooling instead of hand-rolling a header scan. `git apply --numstat`
+   * reads either git-style (`diff --git`) or plain unified (`diff -ruN`,
+   * the format non-git changesets use) diffs and emits one
+   * `<adds>\t<dels>\t<path>` line per file, which we just sum. Delegating
+   * to git keeps the stat correct for both extraction kinds without
+   * re-deriving the parsing rules. Falls back to a zero stat on parse
+   * failure (e.g. a plain `diff -ru` without `-N` whose "Only in ..."
+   * lines git apply can't grok) -- the diff itself stays readable via
+   * `result --diff`, only the human-readable summary is uncomputable.
+   * @param {string} diffPath
+   * @param {(command: string, args: string[]) => {status: number|null, stdout: string, stderr: string, error?: Error}} [runCommand]
    * @returns {{files: number, additions: number, deletions: number}}
    */
-  function computeDiffStat(diffText) {
+  function computeDiffStat(diffPath, runCommand = defaultOverlayRunCommand) {
+    const result = runCommand("git", ["apply", "--numstat", diffPath]);
+    if (result.error || (result.status !== 0 && result.status !== 1)) {
+      return { files: 0, additions: 0, deletions: 0 };
+    }
     let files = 0;
     let additions = 0;
     let deletions = 0;
-    for (const line of diffText.split("\n")) {
-      if (line.startsWith("diff --git ")) files++;
-      else if (line.startsWith("+") && !line.startsWith("+++")) additions++;
-      else if (line.startsWith("-") && !line.startsWith("---")) deletions++;
+    for (const line of result.stdout.split("\n")) {
+      if (!line) continue;
+      const firstTab = line.indexOf("\t");
+      if (firstTab === -1) continue;
+      const secondTab = line.indexOf("\t", firstTab + 1);
+      if (secondTab === -1) continue;
+      const adds = Number(line.slice(0, firstTab));
+      const dels = Number(line.slice(firstTab + 1, secondTab));
+      if (Number.isNaN(adds) || Number.isNaN(dels)) continue;
+      files += 1;
+      additions += adds;
+      deletions += dels;
     }
     return { files, additions, deletions };
   }
@@ -3115,7 +3158,7 @@ export function createTaskManager({
     const narration = truncated ? fullNarration.slice(0, NARRATION_PREVIEW_CHARS) + "…" : fullNarration;
 
     let diffText = null;
-    if (task.diffPath && (fields == null || fields.includes("diff") || fields.includes("diffStat"))) {
+    if (task.diffPath && (fields == null || fields.includes("diff"))) {
       try {
         diffText = fs.readFileSync(task.diffPath, "utf8");
       } catch {
@@ -3123,12 +3166,11 @@ export function createTaskManager({
       }
     }
     // Review finding #13: spec §5.3 requires a diffStat summary (files changed,
-    // +/- counts) on result --full. Counted from the cached patch text: "diff
-    // --git" headers for files, hunk-body +/- lines otherwise (works for the
-    // git format; for the non-git diff -ru format the +++/--- header lines are
-    // excluded and "Only in" lines are not counted -- an approximation, which
-    // is all a human-readable summary needs).
-    const diffStat = diffText != null && (fields == null || fields.includes("diffStat")) ? computeDiffStat(diffText) : null;
+    // +/- counts) on result --full. Routed through `git apply --numstat`
+    // (see computeDiffStat) so the same parser handles both git and non-git
+    // changesets -- the prior hand-rolled scan only counted `diff --git`
+    // headers and silently reported files:0 for every non-git result.
+    const diffStat = task.diffPath != null && (fields == null || fields.includes("diffStat")) ? computeDiffStat(task.diffPath, runOverlayCommandFn) : null;
 
     return projectResult({
       taskId,

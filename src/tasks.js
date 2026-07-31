@@ -3113,8 +3113,8 @@ export function createTaskManager({
     ensureStateLoaded();
     const task = tasks.get(taskId);
     if (!task) throw noSuchTask(taskId);
-    if (!Number.isSafeInteger(chars) || chars <= 0 || chars > 65536) {
-      throw new Error("error: chars must be a positive integer no greater than 65536\nhelp: run taskferry tail with chars between 1 and 65536");
+    if (!Number.isSafeInteger(chars) || chars <= 0 || chars > 131072) {
+      throw new Error("error: chars must be a positive integer no greater than 131072\nhelp: run taskferry tail with chars between 1 and 131072");
     }
     let text = readLastText(task.logPath);
     // Eventless crash: narration is never coming (the log has no parseable

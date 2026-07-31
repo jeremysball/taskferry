@@ -4660,6 +4660,12 @@ describe("tail()", () => {
     assert.throws(() => mgr.tail("t1", { chars: 0 }), /chars must be a positive integer/);
   });
 
+  test("accepts a request up to the 131072 ceiling and rejects above it", () => {
+    const mgr = makeManager({ tasksFixture: [baseTask({ id: "t1" })] });
+    assert.doesNotThrow(() => mgr.tail("t1", { chars: 131072 }));
+    assert.throws(() => mgr.tail("t1", { chars: 131073 }), /chars must be a positive integer no greater than 131072/);
+  });
+
   test("falls back to raw captured output for a crashed task that never emitted an event", () => {
     const raw = 'Error: Extension "/x/y.js" error: Provider y: "baseUrl" is required when defining models.';
     const mgr = makeManager({

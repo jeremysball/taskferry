@@ -81,7 +81,7 @@ const commandSpecs = {
   tail: {
     usage: "taskferry tail <id> [--chars <number>]",
     description: "Read the latest model text for a task.",
-    options: { "--chars <number>": "characters to return, default 1000, maximum 65536" },
+    options: { "--chars <number>": "characters to return, default 1000, maximum 131072" },
     examples: ['taskferry tail <id>', 'taskferry tail <id> --chars 2000'],
   },
   summary: {
@@ -200,7 +200,7 @@ function parseNumber(value, flag, { min = 0, max = Number.MAX_SAFE_INTEGER } = {
   if (!/^\d+$/.test(value)) throw new UsageError(`${flag} must be an integer`, `Use ${flag} with a number from ${min} through ${max}`);
   const number = Number(value);
   if (!Number.isSafeInteger(number) || number < min || number > max) {
-    const qualifier = min === 1 ? "a positive integer" : `from ${min} through ${max}`;
+    const qualifier = min === 1 ? (number > max ? `a positive integer from ${min} through ${max}` : "a positive integer") : `from ${min} through ${max}`;
     throw new UsageError(`${flag} must be ${qualifier}`, `Use ${flag} with a number from ${min} through ${max}`);
   }
   return number;
@@ -416,7 +416,7 @@ export function parseArgs(argv, { cwd = process.cwd() } = {}) {
     if (key === "timeoutMs" || key === "flushIntervalMs") {
       value = parseDuration(value, name);
     } else if (["graceMs", "tailChars", "chars", "maxWords", "limit"].includes(key)) {
-      value = parseNumber(value, name, key === "tailChars" || key === "chars" ? { min: 1, max: 65536 } : key === "maxWords" ? { min: 75, max: 300 } : { min: key === "limit" ? 1 : 0 });
+      value = parseNumber(value, name, key === "tailChars" || key === "chars" ? { min: 1, max: 131072 } : key === "maxWords" ? { min: 75, max: 300 } : { min: key === "limit" ? 1 : 0 });
     } else if (key === "fields") {
       value = parseFields(value);
     } else if (key === "allowedDirs") {

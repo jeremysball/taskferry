@@ -139,7 +139,7 @@ function validParams(method, params) {
     case "task.tail":
       return hasOnly(params, ["taskId", "chars"])
         && isNonEmptyString(params.taskId)
-        && optional(params.chars, (value) => positiveInteger(value) && value <= 65536);
+        && optional(params.chars, (value) => positiveInteger(value) && value <= 131072);
     case "task.summary": {
       if (params.env !== undefined && params.mode === "activity") {
         // env is meaningless on the activity path -- it reads the cached

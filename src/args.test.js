@@ -68,6 +68,11 @@ test("requires command-specific arguments and values", () => {
   assert.throws(() => parseArgs(["tail", "id", "--chars", "0"]), /positive integer/);
 });
 
+test("tail --chars accepts up to the new 131072 ceiling and rejects above it", () => {
+  assert.equal(parseArgs(["tail", "oc_1", "--chars", "131072"]).options.chars, 131072);
+  assert.throws(() => parseArgs(["tail", "oc_1", "--chars", "131073"]), /from 1 through 131072/);
+});
+
 test("rejects unknown flags and extra positional arguments before daemon access", () => {
   assert.throws(() => parseArgs(["list", "--stat"]), (error) => {
     assert.ok(error instanceof UsageError);

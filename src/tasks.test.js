@@ -5,7 +5,7 @@ import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { createTaskManager, isOutsideDirectory, DEFAULT_SUMMARY_MODEL, bucketFor, parseEnvDenylist } from "./tasks.js";
+import { createTaskManager, isOutsideDirectory, DEFAULT_SUMMARY_MODEL, bucketFor, parseEnvDenylist, parseSandboxDenylist } from "./tasks.js";
 import { defaultRunCommand as changesetDefaultRunCommand } from "./changeset.js";
 
 // Builds an isolated task manager backed by a temp state dir and, unless
@@ -15,7 +15,7 @@ import { defaultRunCommand as changesetDefaultRunCommand } from "./changeset.js"
 // runs synchronously in the constructor, same as the old module-level code
 // did at import time). `tasksFixture` may be an array or `(logDir) => array`
 // for fixtures whose logPath needs to point inside the real log dir.
-function makeManager({ tasksFixture = [], logs = {}, spawnFn, killFn, listModelsFn, defaultExecutor, maxDispatchesPerWindow, dispatchWindowMs, advisorSessionTtlMs, maxConcurrentTasks, noOutputTimeoutMs, postOutputNoOutputTimeoutMs, watchdogPollMs, maxWaitMs, envDenylistSpec, sandboxEnabled = false, checkBwrapAvailableFn, existsFn, statFn, readdirFn, runtimeDir, cacheDir, platform, onEvent, allowedDirs, resolveGitCommonDirFn, resolveGitDirFn, overlayEnabled = false, checkOverlaySupportFn, overlayTmpRoot, runOverlayCommandFn, rmOverlayTreeFn } = {}) {
+function makeManager({ tasksFixture = [], logs = {}, spawnFn, killFn, listModelsFn, defaultExecutor, maxDispatchesPerWindow, dispatchWindowMs, advisorSessionTtlMs, maxConcurrentTasks, noOutputTimeoutMs, postOutputNoOutputTimeoutMs, watchdogPollMs, maxWaitMs, envDenylistSpec, sandboxDenylist, sandboxEnabled = false, checkBwrapAvailableFn, existsFn, statFn, readdirFn, runtimeDir, cacheDir, platform, onEvent, allowedDirs, resolveGitCommonDirFn, resolveGitDirFn, overlayEnabled = false, checkOverlaySupportFn, overlayTmpRoot, runOverlayCommandFn, rmOverlayTreeFn } = {}) {
   const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-test-"));
   const logDir = path.join(stateDir, "logs");
   fs.mkdirSync(logDir, { recursive: true });
@@ -61,6 +61,7 @@ function makeManager({ tasksFixture = [], logs = {}, spawnFn, killFn, listModels
     ...(watchdogPollMs != null ? { watchdogPollMs } : {}),
     ...(maxWaitMs != null ? { maxWaitMs } : {}),
     ...(envDenylistSpec != null ? { envDenylist: parseEnvDenylist(envDenylistSpec) } : {}),
+    ...(sandboxDenylist != null ? { sandboxDenylist } : {}),
     ...(allowedDirs != null ? { allowedDirs } : {}),
     ...(resolveGitCommonDirFn != null ? { resolveGitCommonDirFn } : {}),
     ...(resolveGitDirFn != null ? { resolveGitDirFn } : {}),
@@ -113,6 +114,21 @@ describe("parseEnvDenylist()", () => {
 
   test("splits, trims, and drops empty entries", () => {
     assert.deepEqual(parseEnvDenylist("FOO, BAR ,, BAZ"), ["FOO", "BAR", "BAZ"]);
+  });
+});
+
+describe("parseSandboxDenylist()", () => {
+  test("returns an empty array for an empty or undefined spec", () => {
+    assert.deepEqual(parseSandboxDenylist(undefined), []);
+    assert.deepEqual(parseSandboxDenylist(""), []);
+  });
+
+  test("splits, trims, and drops empty entries", () => {
+    assert.deepEqual(parseSandboxDenylist("/home/user/.docker, /home/user/.kube ,, /opt/shared"), [
+      "/home/user/.docker",
+      "/home/user/.kube",
+      "/opt/shared",
+    ]);
   });
 });
 
@@ -790,6 +806,33 @@ describe("bwrap sandboxing", () => {
 
     assert.equal(captured.args.includes(missing), false);
     assert.equal(captured.args.includes(present), true);
+  });
+
+  test("tmpfs-masks a configured sandboxDenylist entry in addition to the fixed default deny-list", () => {
+    let captured = null;
+    const extra = fs.mkdtempSync(path.join(os.tmpdir(), "axi-sandbox-denylist-"));
+    const mgr = makeManager({
+      spawnFn: (cmd, args, opts) => { captured = { cmd, args, opts }; return fakeChild(); },
+      sandboxEnabled: true,
+      checkBwrapAvailableFn: () => ({ checked: true, available: true }),
+      // Fixed-default entries (~/.ssh, ~/.claude) are asserted below as
+      // present alongside the configured extra -- stub existsFn so that
+      // assertion doesn't depend on this host's actual home directory
+      // contents (a clean CI runner has neither), same pattern as the
+      // sibling "drops deny-list paths that don't exist on disk" test above.
+      existsFn: () => true,
+      platform: "linux",
+      sandboxDenylist: [extra],
+    });
+
+    mgr.dispatch({ prompt: "hello", directory: os.tmpdir() });
+
+    const extraIndex = captured.args.indexOf(extra);
+    assert.notEqual(extraIndex, -1, "expected the configured extra path to be tmpfs-denied");
+    assert.equal(captured.args[extraIndex - 1], "--tmpfs");
+    // The fixed defaults are still applied alongside the configured extra.
+    assert.ok(captured.args.includes(path.join(os.homedir(), ".ssh")));
+    assert.ok(captured.args.includes(path.join(os.homedir(), ".claude")));
   });
 
   test("points XDG_DATA_HOME at a writable spot under cacheDir when sandboxing, so opencode's own log/session db isn't blocked by the read-only root", () => {

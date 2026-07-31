@@ -6,6 +6,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { createTaskManager, isOutsideDirectory, DEFAULT_SUMMARY_MODEL, bucketFor, parseEnvDenylist } from "./tasks.js";
+import { defaultRunCommand as changesetDefaultRunCommand } from "./changeset.js";
 
 // Builds an isolated task manager backed by a temp state dir and, unless
 // overridden, fake spawnFn/killFn so no test ever touches a real `opencode`
@@ -3331,6 +3332,63 @@ describe("accept()/reject()", () => {
     assert.equal(result.cleanupFailed, true);
     assert.ok(mgr.status("t_pending").overlayDirs);
   });
+
+  // Persist-before-cleanup must be followed by a second persist after the
+  // cleanup actually clears overlayDirs, so the durable task record
+  // doesn't keep claiming an overlay exists for an overlay that was
+  // just removed. Otherwise: after a restart, the task record on disk
+  // has overlayDirs populated even though the overlay is gone -- the
+  // startup sweep would still clean it up (rm -rf on a missing path is
+  // idempotent), but the record lies until the sweep runs.
+  function readPersistedTask(mgr, taskId) {
+    const tasks = JSON.parse(fs.readFileSync(mgr.paths.TASKS_FILE, "utf8"));
+    return tasks.find((t) => t.id === taskId);
+  }
+
+  test("accept() persists the cleared overlay metadata after successful cleanup (regression: review followup #1)", () => {
+    const mgr = makeManager({
+      tasksFixture: [pendingTaskFixture()],
+      runOverlayCommandFn: () => ({ status: 0, stdout: "", stderr: "", error: undefined }),
+      rmOverlayTreeFn: () => {},
+    });
+    const result = mgr.accept("t_pending");
+    assert.equal(result.changesetStatus, "accepted");
+    assert.equal(result.applied, true);
+    assert.equal(result.cleanupFailed, undefined);
+    const onDisk = readPersistedTask(mgr, "t_pending");
+    assert.equal(onDisk.changesetStatus, "accepted", "status must be durable");
+    assert.equal(onDisk.overlayDirs, null, "cleared overlay metadata must be durable, not claim an overlay still exists");
+  });
+
+  test("reject() persists the cleared overlay metadata after successful cleanup (regression: review followup #1)", () => {
+    const mgr = makeManager({
+      tasksFixture: [pendingTaskFixture()],
+      rmOverlayTreeFn: () => {},
+    });
+    const result = mgr.reject("t_pending");
+    assert.equal(result.changesetStatus, "rejected");
+    assert.equal(result.cleanupFailed, undefined);
+    const onDisk = readPersistedTask(mgr, "t_pending");
+    assert.equal(onDisk.changesetStatus, "rejected", "status must be durable");
+    assert.equal(onDisk.overlayDirs, null, "cleared overlay metadata must be durable, not claim an overlay still exists");
+  });
+
+  test("accept() leaves overlayDirs durable on cleanup failure so the startup sweep can retry (regression: review followup #1)", () => {
+    // Symmetric to the success cases: when cleanup fails, both the
+    // status and overlayDirs must be durable on disk so the
+    // daemon-startup sweep can pick up the orphan and retry the removal.
+    const mgr = makeManager({
+      tasksFixture: [pendingTaskFixture()],
+      runOverlayCommandFn: () => ({ status: 0, stdout: "", stderr: "", error: undefined }),
+      rmOverlayTreeFn: () => { throw new Error("EBUSY: resource busy or locked"); },
+    });
+    const result = mgr.accept("t_pending");
+    assert.equal(result.cleanupFailed, true);
+    const onDisk = readPersistedTask(mgr, "t_pending");
+    assert.equal(onDisk.changesetStatus, "accepted");
+    assert.ok(onDisk.overlayDirs, "overlayDirs must persist on cleanup failure so the startup sweep retries");
+    assert.equal(onDisk.overlayDirs.root, fixtureRoot);
+  });
 });
 
 describe("summarize() changeset exposure", () => {
@@ -4211,8 +4269,25 @@ describe("result() diffStat field", () => {
     // every non-git changeset reported files:0 regardless of how many files
     // actually changed. The new path routes both kinds through git apply
     // --numstat, which parses both `diff --git` and plain `diff -ruN`
-    // headers. Mock the run command with the same output git would emit
-    // for a two-file non-git extraction.
+    // headers. This delegate unit test mocks the run command with the same
+    // output git would emit for a two-file non-git extraction; the patch
+    // content matches what the mock claims to produce so the test exercises
+    // the parser contract rather than skipping the patch entirely.
+    const patch = [
+      "diff -ruN a/existing.txt b/existing.txt",
+      "--- a/existing.txt\t2026-01-01 00:00:00.000000000 -0500",
+      "+++ b/existing.txt\t2026-01-01 00:00:00.000000000 -0500",
+      "@@ -1 +1,2 @@",
+      "-original",
+      "+modified",
+      "+added",
+      "diff -ruN a/newfile.txt b/newfile.txt",
+      "--- a/newfile.txt\t1969-12-31 19:00:00.000000000 -0500",
+      "+++ b/newfile.txt\t2026-01-01 00:00:00.000000000 -0500",
+      "@@ -0,0 +1 @@",
+      "+new content",
+      "",
+    ].join("\n");
     const mgr = makeManager({
       tasksFixture: (logDir) => [{
         ...baseTask({ id: "t_nongit", logPath: path.join(logDir, "t_nongit.ndjson") }),
@@ -4221,16 +4296,60 @@ describe("result() diffStat field", () => {
       logs: { "t_nongit.ndjson": "" },
       runOverlayCommandFn: (command, args) => {
         if (command === "git" && args[0] === "apply" && args[1] === "--numstat") {
-          return { status: 0, stdout: "1\t0\tmerged/newfile.txt\n2\t1\tmerged/existing.txt\n", stderr: "", error: undefined };
+          return { status: 0, stdout: "2\t1\tmerged/existing.txt\n1\t0\tmerged/newfile.txt\n", stderr: "", error: undefined };
         }
         return { status: 0, stdout: "", stderr: "", error: undefined };
       },
     });
     fs.mkdirSync(path.join(mgr.paths.STATE_DIR, "diffs"), { recursive: true });
-    fs.writeFileSync(path.join(mgr.paths.STATE_DIR, "diffs", "t_nongit.patch"), "diff -ruN a b\nOnly in b: newfile.txt\n");
+    fs.writeFileSync(path.join(mgr.paths.STATE_DIR, "diffs", "t_nongit.patch"), patch);
     const result = mgr.result("t_nongit", { fields: ["diffStat"] });
     assert.notEqual(result.diffStat.files, 0, "non-git diffs must not silently report 0 files");
     assert.deepEqual(result.diffStat, { files: 2, additions: 3, deletions: 1 });
+  });
+
+  test("parses a real diff -ruN patch via the real git apply --numstat parser (regression followup: central compatibility claim)", () => {
+    // The delegate unit test above mocks git's output. This test verifies
+    // the central compatibility claim the brief called out: that git apply
+    // --numstat actually parses the diff -ruN format extractNonGitDiff
+    // produces, and the parser sums the columns git emits. Inject
+    // changeset.js's real defaultRunCommand so the test exercises the real
+    // Git binary rather than a synthetic mock.
+    const patch = [
+      "diff -ruN a/existing.txt b/existing.txt",
+      "--- a/existing.txt\t2026-01-01 00:00:00.000000000 -0500",
+      "+++ b/existing.txt\t2026-01-01 00:00:00.000000000 -0500",
+      "@@ -1 +1,2 @@",
+      "-original",
+      "+modified",
+      "+added",
+      "diff -ruN a/newfile.txt b/newfile.txt",
+      "--- a/newfile.txt\t1969-12-31 19:00:00.000000000 -0500",
+      "+++ b/newfile.txt\t2026-01-01 00:00:00.000000000 -0500",
+      "@@ -0,0 +1 @@",
+      "+new content",
+      "",
+    ].join("\n");
+    const mgr = makeManager({
+      tasksFixture: (logDir) => [{
+        ...baseTask({ id: "t_real_nongit", logPath: path.join(logDir, "t_real_nongit.ndjson") }),
+        diffPath: path.join(logDir, "..", "diffs", "t_real_nongit.patch"),
+      }],
+      logs: { "t_real_nongit.ndjson": "" },
+      runOverlayCommandFn: changesetDefaultRunCommand,
+    });
+    fs.mkdirSync(path.join(mgr.paths.STATE_DIR, "diffs"), { recursive: true });
+    fs.writeFileSync(path.join(mgr.paths.STATE_DIR, "diffs", "t_real_nongit.patch"), patch);
+    const result = mgr.result("t_real_nongit", { fields: ["diffStat"] });
+    // Real git apply --numstat must report non-zero counts for this
+    // representative diff -ruN patch; previously the hand-rolled scan
+    // reported files:0 for every non-git changeset.
+    assert.notEqual(result.diffStat.files, 0, "git apply --numstat must parse real diff -ruN output");
+    // The patch has 2 additions + 1 deletion in existing.txt and 1
+    // addition in newfile.txt.
+    assert.equal(result.diffStat.files, 2);
+    assert.equal(result.diffStat.additions, 3);
+    assert.equal(result.diffStat.deletions, 1);
   });
 
   test("falls back to a zero stat when git apply --numstat fails to parse the diff", () => {
@@ -4255,6 +4374,31 @@ describe("result() diffStat field", () => {
     fs.writeFileSync(path.join(mgr.paths.STATE_DIR, "diffs", "t_unparsable.patch"), "Only in b: newfile.txt\n");
     const result = mgr.result("t_unparsable", { fields: ["diffStat"] });
     assert.deepEqual(result.diffStat, { files: 0, additions: 0, deletions: 0 });
+  });
+
+  test("treats a non-zero git apply --numstat exit as parse failure even when stdout is non-empty (regression followup)", () => {
+    // git apply --numstat exits 0 on success and a non-zero status on any
+    // failure (corrupt patch, parse error, etc.). A non-zero status with
+    // partial stdout should NOT be parsed -- a failed invocation can
+    // produce partial output that would, if read, give a misleading
+    // non-zero count. The fallback is the zero stat.
+    const mgr = makeManager({
+      tasksFixture: (logDir) => [{
+        ...baseTask({ id: "t_status1", logPath: path.join(logDir, "t_status1.ndjson") }),
+        diffPath: path.join(logDir, "..", "diffs", "t_status1.patch"),
+      }],
+      logs: { "t_status1.ndjson": "" },
+      runOverlayCommandFn: (command, args) => {
+        if (command === "git" && args[0] === "apply" && args[1] === "--numstat") {
+          return { status: 1, stdout: "5\t3\tmerged/leftover.txt\n", stderr: "error: corrupt patch\n", error: undefined };
+        }
+        return { status: 0, stdout: "", stderr: "", error: undefined };
+      },
+    });
+    fs.mkdirSync(path.join(mgr.paths.STATE_DIR, "diffs"), { recursive: true });
+    fs.writeFileSync(path.join(mgr.paths.STATE_DIR, "diffs", "t_status1.patch"), "garbage\n");
+    const result = mgr.result("t_status1", { fields: ["diffStat"] });
+    assert.deepEqual(result.diffStat, { files: 0, additions: 0, deletions: 0 }, "non-zero status must zero the stat, not parse partial stdout");
   });
 });
 

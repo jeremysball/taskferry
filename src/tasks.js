@@ -2366,6 +2366,14 @@ export function createTaskManager({
     // daemon-startup sweep (Task 12) retries the removal.
     persistTask(task.id);
     const cleanupFailed = releaseOverlay(task);
+    // If cleanup succeeded, releaseOverlay() cleared overlayDirs in memory
+    // (review finding #11). Persist once more so the durable task record
+    // reflects the cleared overlay metadata instead of claiming an overlay
+    // still exists for an overlay that was just removed. If cleanup failed,
+    // overlayDirs stays set on disk and the startup sweep (Task 12) retries
+    // the removal on the next daemon start -- consistent with the pre-fix
+    // behavior for the cleanup-failure path.
+    if (!cleanupFailed) persistTask(task.id);
     return { taskId, changesetStatus: task.changesetStatus, applied: true, ...(cleanupFailed ? { cleanupFailed: true } : {}) };
   }
 
@@ -2390,6 +2398,10 @@ export function createTaskManager({
     // accept()'s order keeps the two paths consistent.
     persistTask(task.id);
     const cleanupFailed = releaseOverlay(task);
+    // If cleanup succeeded, releaseOverlay() cleared overlayDirs in memory;
+    // persist once more so the durable task record reflects the cleared
+    // overlay metadata (parallel to accept()).
+    if (!cleanupFailed) persistTask(task.id);
     return { taskId, changesetStatus: task.changesetStatus, ...(cleanupFailed ? { cleanupFailed: true } : {}) };
   }
 
@@ -2960,17 +2972,23 @@ export function createTaskManager({
    * the format non-git changesets use) diffs and emits one
    * `<adds>\t<dels>\t<path>` line per file, which we just sum. Delegating
    * to git keeps the stat correct for both extraction kinds without
-   * re-deriving the parsing rules. Falls back to a zero stat on parse
-   * failure (e.g. a plain `diff -ru` without `-N` whose "Only in ..."
-   * lines git apply can't grok) -- the diff itself stays readable via
-   * `result --diff`, only the human-readable summary is uncomputable.
+   * re-deriving the parsing rules. Falls back to a zero stat on any
+   * non-zero exit status (e.g. a plain `diff -ru` without `-N` whose
+   * "Only in ..." lines git apply can't grok, or parsing stdout from a
+   * failed invocation that would have given a misleading non-zero count);
+   * the diff itself stays readable via `result --diff`, only the
+   * human-readable summary is uncomputable.
    * @param {string} diffPath
    * @param {(command: string, args: string[]) => {status: number|null, stdout: string, stderr: string, error?: Error}} [runCommand]
    * @returns {{files: number, additions: number, deletions: number}}
    */
   function computeDiffStat(diffPath, runCommand = defaultOverlayRunCommand) {
     const result = runCommand("git", ["apply", "--numstat", diffPath]);
-    if (result.error || (result.status !== 0 && result.status !== 1)) {
+    // `git apply --numstat` exits 0 on success and a non-zero status on
+    // any failure (corrupt patch, parse error, etc.). Treat any non-zero
+    // status as "the stat is uncomputable" and return the zero fallback
+    // rather than parsing partial stdout from a failed invocation.
+    if (result.error || result.status !== 0) {
       return { files: 0, additions: 0, deletions: 0 };
     }
     let files = 0;

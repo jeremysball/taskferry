@@ -2209,6 +2209,20 @@ export function createTaskManager({
       task.spawnError = errMessage(err);
       task.endedAt = new Date().toISOString();
       if (child?.pid != null) sendSignal(child.pid, "SIGKILL");
+      // Mirrors the child.on("error") spawn-failure path above: a sync throw
+      // from spawnFn (or from resolvePreDispatchHead / any other code in this
+      // try block after overlay creation) lands here AFTER overlayDirs +
+      // changesetStatus === "pending" were already set, so the overlay would
+      // otherwise sit on the tmpfs with no extraction ever booked against it
+      // and the startup sweep skip (line ~960) deliberately protecting
+      // "pending" owners never cleans it. Run the same
+      // extractChangesetForTask() the async-error path does so a
+      // sync-spawn-failed task isn't stranded -- it's internally error-safe
+      // and on an empty overlay produces the correct terminal state
+      // ("accepted" + no diff for dispatch, "rejected" + cleanup for
+      // advisor). Doing this BEFORE the explicit persistTask() below ensures
+      // the durable record reflects the post-extract changesetStatus.
+      extractChangesetForTask(task);
       persistTask(task.id);
       void scheduleActivity(task, { force: true }).then(() => activityCache.evictTask(task.id));
       logHasEventCache.delete(task.logPath);

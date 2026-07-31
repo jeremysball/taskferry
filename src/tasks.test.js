@@ -463,6 +463,45 @@ describe("dispatch() lifecycle, driven through an injected spawnFn (no real open
     assert.equal("overlayDirs" in status, false);
     assert.ok(cleanedRoot, "advisor's overlay must be cleaned up on the spawn-error path");
   });
+
+  test("dispatch() synchronous throw from spawnFn still runs changeset extraction/cleanup so a sync-spawn-failed task doesn't strand its overlay", () => {
+    // Companion to the child.on('error') test above: child.emit("error")
+    // exercises the async spawn-failure path inside the dispatch() body,
+    // but spawnFn can also throw synchronously (e.g. an unforeseen bug in
+    // options handling, a misconfigured bwrap probe that throws during
+    // dispatch) -- that lands in the startTask() try/catch which was
+    // missing the same extractChangesetForTask() the async path runs.
+    // Without the fix, overlayDirs is set + changesetStatus === "pending"
+    // and the orphan sweep (sweepOrphanedOverlays, whose skip condition is
+    // `ownsThisOverlay && changesetStatus === "pending"`) deliberately
+    // leaves it alone -- the overlay sits on the tmpfs until a manual
+    // reject or a reboot.
+    let extractCalls = 0;
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "axi-spawn-throw-extract-"));
+    const overlayTmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "axi-spawn-throw-extract-tmp-"));
+    const mgr = makeManager({
+      spawnFn: () => { throw new Error("spawn failed synchronously"); },
+      sandboxEnabled: true,
+      checkBwrapAvailableFn: () => ({ checked: true, available: true }),
+      overlayEnabled: true,
+      checkOverlaySupportFn: () => ({ supported: true }),
+      platform: "linux",
+      overlayTmpRoot,
+      runOverlayCommandFn: () => { extractCalls++; return { status: 0, stdout: "", stderr: "", error: undefined }; },
+    });
+
+    const preDispatchCalls = extractCalls;
+    const dispatched = mgr.dispatch({ prompt: "hi", directory });
+
+    const status = mgr.status(dispatched.id);
+    assert.equal(status.status, "crashed");
+    assert.equal(status.spawnError, "spawn failed synchronously");
+    // Empty overlay (no worker ever ran) -> 0-byte diff -> "accepted" (same
+    // shape the async spawn-error path produces), overlayDirs cleared.
+    assert.equal(status.changesetStatus, "accepted");
+    assert.equal("overlayDirs" in status, false);
+    assert.ok(extractCalls > preDispatchCalls, "extractChangesetForTask should run on the sync-throw spawn-failure path");
+  });
 });
 
 describe("isOutsideDirectory()", () => {

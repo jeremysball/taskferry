@@ -36,6 +36,19 @@ doing it directly would still take meaningful back-and-forth. Dispatching a
 small, mechanical, single-file fix through a full worker cycle bloats context
 and burns wall-clock time versus just doing it.
 
+## Worktree Or Main Checkout
+
+Every sandboxed ferry writes to a copy-on-write overlay, never the real
+directory directly -- a rogue or mistaken dispatch cannot corrupt whatever
+directory you point it at, worktree or not. Worktrees remain useful for two
+unrelated reasons, not safety: branch isolation (parallel sessions on
+different branches without a switch race) and lower-layer stability (a
+concurrent edit to a live main checkout mutates the overlay's *lower* in
+place while a ferry is in flight, which can make `accept` conflict later).
+Ask which of those two applies before choosing; if neither does (a solo
+session, one task at a time), dispatching straight at the main checkout is
+fine.
+
 ## Worker Contract
 
 - Select the worker model and variant explicitly when the task needs them:
@@ -77,32 +90,53 @@ and burns wall-clock time versus just doing it.
 - Wait for settlement, retrieve the result, handle crashes, and validate the
   worker's deliverables yourself.
 
-## Verifying A Worker's Claimed Commit
+## Verifying A Worker's Claimed Changeset
 
-A worker's final `Status:` line and narration are not evidence a commit
-happened — only `git log`/`git status` against the actual worktree is. After
-every settled implementer/fixer dispatch, before treating the task as done:
+A worker's final `Status:` line and narration are not evidence of what it
+wrote -- only the extracted changeset is. Every sandboxed dispatch writes
+to an overlay, not the real directory: `git -C "<worktree>" log`/`status`
+against the real worktree will show nothing until you explicitly accept,
+regardless of how good or bad the worker's actual changes were. After every
+settled implementer/fixer dispatch, before treating the task as done:
 
 ```sh
-git -C "<worktree>" log --oneline origin/main..HEAD
-git -C "<worktree>" status --short
+taskferry result <id> --diff
 ```
 
-If commits exist and their stated summary is plausible, you're done. If the
-worktree shows uncommitted changes (or nothing at all) despite a `Status:
-DONE` claim describing a commit, don't re-dispatch reflexively — first check
-whether the diff on disk actually matches what the worker described. If it
-does, the implementation itself is real and only the git step failed (a
-sandboxed worker's `git commit` can fail silently for reasons invisible to
-its own narration, e.g. a broken or read-only git-dir mount in its
-environment); verify tests and lint yourself, then commit it directly rather
-than throwing away completed work. Only re-dispatch when the diff itself is
-missing, wrong, or incomplete.
+If the diff matches what the worker claims (a `Status: DONE` describing a
+specific change, matched by an actual diff doing that change), accept it:
 
-This generalizes past just commits: any deliverable a worker claims to have
+```sh
+taskferry accept <id>
+```
+
+*Then* the ordinary `git -C "<worktree>" log --oneline origin/main..HEAD` /
+`git -C "<worktree>" status --short` checks become meaningful again, since
+the diff has now actually landed.
+
+If `accept` itself fails (a conflicting `git apply` -- the lower moved
+under a long-running ferry, see "Worktree Or Main Checkout" above), don't
+re-dispatch reflexively: `taskferry result <id> --diff` still has the
+worker's changes, so resolve the conflict by hand or reject and retry with
+a fresh dispatch against the now-current directory.
+
+If the diff itself is missing, wrong, or incomplete relative to the
+worker's claim, reject it and re-dispatch:
+
+```sh
+taskferry reject <id>
+```
+
+A worker's `git commit` made *inside* the sandbox is never preserved as a
+commit -- it's flattened into the same diff an uncommitted edit would
+produce, and only survives if you `accept`. There is no more
+"sandboxed `git commit` failed silently" failure mode to route around: a
+commit was never going to land as a commit in the first place, by design,
+not by an environment quirk.
+
+This generalizes past just diffs: any deliverable a worker claims to have
 produced (a written file, a pushed branch, a passed test run) is a claim to
-verify independently, not to accept on narration alone — a confident,
-detailed self-report is exactly as unverified as a terse one.
+verify independently, not to accept on narration alone.
 
 ## Choosing a Model
 

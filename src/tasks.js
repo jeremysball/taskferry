@@ -232,6 +232,56 @@ function capDetail(text) {
   return text.length > FAILURE_DETAIL_MAX_CHARS ? text.slice(0, FAILURE_DETAIL_MAX_CHARS - 1) + "…" : text;
 }
 
+// Boot failures: the child exited non-zero having produced zero parseable
+// events -- opencode/pi died during startup (a malformed provider extension,
+// a broken config) before ever reaching the model. classifyProviderFailure
+// deliberately matches only the curated provider patterns on raw non-JSON
+// lines, so such a crash used to settle with failureReason/failureDetail
+// null and `taskferry list` showed hundreds of bare "crashed" rows with no
+// diagnostic (real incident: a provider extension missing its baseUrl
+// brick-crashed every dispatch for ~20 hours before anyone could name the
+// cause). Surface the last Error: line of the bounded log tail (or the last
+// non-JSON line when nothing is Error-prefixed) as the detail instead.
+// Settlement-path only: the running watcher and classifyTrailingLogFailure
+// keep their curated-pattern behavior untouched, so raw stderr noise can
+// never preemptively kill a healthy running task -- this classification
+// only applies once the child is already dead and provably never worked.
+const BOOT_FAILURE_SCAN_BYTES = 64 * 1024;
+/**
+ * @param {string} logPath
+ * @returns {{bucket: string, detail: string} | null}
+ */
+function extractBootFailureDetail(logPath) {
+  /** @type {number|undefined} */
+  let fd;
+  try {
+    const size = fs.statSync(logPath).size;
+    if (size === 0) return null;
+    const bytes = Math.min(size, BOOT_FAILURE_SCAN_BYTES);
+    const buffer = Buffer.alloc(bytes);
+    fd = fs.openSync(logPath, "r");
+    fs.readSync(fd, buffer, 0, bytes, size - bytes);
+    /** @type {string|null} */
+    let lastError = null;
+    /** @type {string|null} */
+    let lastNonJson = null;
+    for (const line of buffer.toString("utf8").split("\n")) {
+      const trimmed = line.trim();
+      // Blank lines carry nothing; JSON event lines are owned by the
+      // curated classifier and are never boot-failure evidence.
+      if (!trimmed || trimmed.startsWith("{")) continue;
+      if (/^error\b[:\s]/i.test(trimmed)) lastError = trimmed;
+      else lastNonJson = trimmed;
+    }
+    const detail = lastError ?? lastNonJson;
+    return detail ? { bucket: "boot_failure", detail: capDetail(detail) } : null;
+  } catch {
+    return null; // log unreadable or gone; nothing to surface
+  } finally {
+    if (fd != null) fs.closeSync(fd);
+  }
+}
+
 // Maps a classifier bucket to its public-facing name. Opencode's named
 // buckets (`rate_limited`, `authentication_failed`, `payment_required`)
 // are the historical, shipped names and stay unprefixed for opencode
@@ -2133,6 +2183,19 @@ export function createTaskManager({
         // 0/unsignaled if it traps SIGTERM and shuts down gracefully -- don't let
         // that read as "done" and bury the failureReason behind a healthy status.
         task.status = task.cancelRequested ? "cancelled" : task.failureReason ? "crashed" : code === 0 && !signal ? "done" : "crashed";
+        // Boot-crash surfacing: non-zero exit, nothing set by the curated
+        // classifier, and not a single parseable event in the whole log --
+        // the child never did any work, so its raw capture is unambiguous
+        // and becomes the failureReason/failureDetail. Skipped once any
+        // event exists: raw stderr after real work started is ambiguous
+        // and stays the curated classifier's job.
+        if (task.status === "crashed" && !task.failureReason && !logActivity(task.logPath).logHasEvent) {
+          const bootFailure = extractBootFailureDetail(task.logPath);
+          if (bootFailure) {
+            task.failureReason = bucketFor(resolveExecutor(task.executorId).errorBucketPrefix, bootFailure.bucket);
+            task.failureDetail = bootFailure.detail;
+          }
+        }
         task.exitCode = code;
         task.signal = signal;
         task.endedAt = new Date().toISOString();
@@ -2935,6 +2998,32 @@ export function createTaskManager({
   }
 
   /**
+   * @param {string} logPath
+   * @returns {string}
+   */
+  function readRawCaptureTail(logPath) {
+    /** @type {number|undefined} */
+    let fd;
+    try {
+      const size = fs.statSync(logPath).size;
+      if (size === 0) return "";
+      const bytes = Math.min(size, TAIL_READ_BYTES);
+      const buffer = Buffer.alloc(bytes);
+      fd = fs.openSync(logPath, "r");
+      fs.readSync(fd, buffer, 0, bytes, size - bytes);
+      return buffer
+        .toString("utf8")
+        .split("\n")
+        .filter((line) => line.trim())
+        .join("\n");
+    } catch {
+      return "";
+    } finally {
+      if (fd != null) fs.closeSync(fd);
+    }
+  }
+
+  /**
    * @param {string} taskId
    * @param {{chars?: number}} [options]
    */
@@ -2945,7 +3034,13 @@ export function createTaskManager({
     if (!Number.isSafeInteger(chars) || chars <= 0 || chars > 65536) {
       throw new Error("error: chars must be a positive integer no greater than 65536\nhelp: run taskferry tail with chars between 1 and 65536");
     }
-    const text = readLastText(task.logPath);
+    let text = readLastText(task.logPath);
+    // Boot crash: narration is never coming (the log has no parseable
+    // events at all), so the raw capture IS the task's output -- show it
+    // instead of "none observed yet", which reads as "still waiting".
+    if (!text && task.status === "crashed" && !logActivity(task.logPath).logHasEvent) {
+      text = readRawCaptureTail(task.logPath);
+    }
     if (!text) {
       return {
         taskId,

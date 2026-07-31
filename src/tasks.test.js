@@ -2606,7 +2606,7 @@ describe("provider-failure classification", () => {
     assert.equal(s.failureReason, "rate_limited");
   });
 
-  test("ordinary crash text is not misclassified as a provider failure", () => {
+  test("ordinary crash text is not misclassified as a provider failure (it surfaces as boot_failure instead)", () => {
     const child = fakeChild(7102);
     const mgr = makeManager({ spawnFn: () => child, killFn: () => {} });
     const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
@@ -2614,8 +2614,11 @@ describe("provider-failure classification", () => {
     child.emit("exit", 1, null);
     const s = mgr.status(dispatched.id, { full: true });
     assert.equal(s.status, "crashed");
-    assert.equal(s.failureReason, null);
-    assert.equal(s.failureDetail, null);
+    // The false-positive protection this test was written for stands: no
+    // provider bucket. But an eventless non-zero exit no longer settles
+    // silent -- the raw line is now surfaced under the boot_failure bucket.
+    assert.equal(s.failureReason, "pi_boot_failure");
+    assert.equal(s.failureDetail, "TypeError: cannot read property 'x' of undefined");
   });
 
   test("a type:\"text\" narration event that legitimately mentions rate limits, quotas, or 429 is not misclassified as a provider failure (GLM-5.2 review finding)", async () => {
@@ -2733,7 +2736,12 @@ describe("provider-failure classification", () => {
     const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
     fs.writeFileSync(mgr.status(dispatched.id).logPath, "401 tests passed, 0 failed\n");
     child.emit("exit", 1, null);
-    assert.equal(mgr.status(dispatched.id).failureReason, null);
+    // Not authentication_failed (the false-positive this test guards); an
+    // eventless non-zero exit now surfaces as boot_failure with the raw
+    // line as detail rather than leaving failureReason null.
+    const s = mgr.status(dispatched.id);
+    assert.equal(s.failureReason, "pi_boot_failure");
+    assert.equal(s.failureDetail, "401 tests passed, 0 failed");
   });
 
   test("pi's plain-text 'No API key found for openai.' stderr line lands on authentication_failed (issue #94)", async () => {
@@ -4493,6 +4501,26 @@ describe("tail()", () => {
   test("validates the requested suffix length", () => {
     const mgr = makeManager({ tasksFixture: [baseTask({ id: "t1" })] });
     assert.throws(() => mgr.tail("t1", { chars: 0 }), /chars must be a positive integer/);
+  });
+
+  test("falls back to raw captured output for a crashed task that never emitted an event", () => {
+    const raw = 'Error: Extension "/x/y.js" error: Provider y: "baseUrl" is required when defining models.';
+    const mgr = makeManager({
+      tasksFixture: (logDir) => [baseTask({ id: "t1", status: "crashed", logPath: path.join(logDir, "t1.ndjson") })],
+      logs: { "t1.ndjson": raw + "\n" },
+    });
+    const r = mgr.tail("t1");
+    assert.equal(r.text, raw);
+    assert.equal(r.textTotalChars, raw.length);
+    assert.equal(r.truncated, false);
+  });
+
+  test("keeps the none-observed response once any parseable event exists, even with no narration", () => {
+    const mgr = makeManager({
+      tasksFixture: (logDir) => [baseTask({ id: "t1", status: "crashed", logPath: path.join(logDir, "t1.ndjson") })],
+      logs: { "t1.ndjson": JSON.stringify({ type: "step_start", part: {} }) + "\nError: mid-run stderr noise\n" },
+    });
+    assert.equal(mgr.tail("t1").text, "none observed yet");
   });
 });
 
@@ -6292,5 +6320,74 @@ describe("startTask() never lets normalizeLogEvent() throws escape the stdout ha
     const s = mgr.status(dispatched.id, { full: true });
     assert.equal(s.failureReason, "opencode_executornormalizationerror");
     assert.ok(s.failureDetail?.includes("always throws"), "failureDetail must carry the original thrown message for diagnosis");
+  });
+});
+
+describe("boot-failure surfacing (exit non-zero with zero parseable events)", () => {
+  test("raw capture from a boot crash becomes failureReason boot_failure with the fatal Error line as detail", () => {
+    const child = fakeChild(7301);
+    const mgr = makeManager({ spawnFn: () => child, killFn: () => {} });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), executor: "opencode" });
+    fs.writeFileSync(
+      mgr.status(dispatched.id).logPath,
+      'Warning: No models match pattern "kimi-coding/k2p5"\n' +
+        'Error: Extension "/x/y.js" error: Provider y: "baseUrl" is required when defining models.\n'
+    );
+    child.emit("exit", 1, null);
+    const r = mgr.result(dispatched.id, { fields: ["failureReason", "failureDetail", "exitCode"] });
+    assert.equal(r.failureReason, "boot_failure");
+    assert.equal(
+      r.failureDetail,
+      'Error: Extension "/x/y.js" error: Provider y: "baseUrl" is required when defining models.'
+    );
+    assert.equal(r.exitCode, 1);
+    assert.equal(
+      mgr.status(dispatched.id).failureReason,
+      "boot_failure",
+      "the status snapshot (and thus list rows) must carry the reason"
+    );
+  });
+
+  test("the pi executor gets the prefixed pi_boot_failure bucket", () => {
+    const child = fakeChild(7302);
+    const mgr = makeManager({ spawnFn: () => child, killFn: () => {} });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), executor: "pi" });
+    fs.writeFileSync(mgr.status(dispatched.id).logPath, "Error: auth.json not found\n");
+    child.emit("exit", 1, null);
+    assert.equal(mgr.result(dispatched.id, { fields: ["failureReason"] }).failureReason, "pi_boot_failure");
+  });
+
+  test("with no Error-prefixed line, the last non-JSON line becomes the detail", () => {
+    const child = fakeChild(7303);
+    const mgr = makeManager({ spawnFn: () => child, killFn: () => {} });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), executor: "opencode" });
+    fs.writeFileSync(mgr.status(dispatched.id).logPath, "warning: something odd\npanic: runtime exploded\n");
+    child.emit("exit", 1, null);
+    const r = mgr.result(dispatched.id, { fields: ["failureReason", "failureDetail"] });
+    assert.equal(r.failureReason, "boot_failure");
+    assert.equal(r.failureDetail, "panic: runtime exploded");
+  });
+
+  test("a crash after real events leaves failureReason to the curated classifier (gate holds)", () => {
+    const child = fakeChild(7304);
+    const mgr = makeManager({ spawnFn: () => child, killFn: () => {} });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), executor: "opencode" });
+    fs.writeFileSync(
+      mgr.status(dispatched.id).logPath,
+      JSON.stringify({ type: "step_start", part: {} }) + "\nError: some mid-run stderr noise\n"
+    );
+    child.emit("exit", 1, null);
+    assert.equal(mgr.result(dispatched.id, { fields: ["failureReason"] }).failureReason, null);
+  });
+
+  test("exit 0 with only raw text is not classified as a boot failure", () => {
+    const child = fakeChild(7305);
+    const mgr = makeManager({ spawnFn: () => child, killFn: () => {} });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), executor: "opencode" });
+    fs.writeFileSync(mgr.status(dispatched.id).logPath, "Error: text from a child that still exited 0\n");
+    child.emit("exit", 0, null);
+    const r = mgr.result(dispatched.id, { fields: ["failureReason"] });
+    assert.equal(r.status, "done");
+    assert.equal(r.failureReason, null);
   });
 });

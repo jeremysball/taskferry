@@ -54,7 +54,7 @@ import { resolveExecutor, opencodeExecutor } from "./executor.js";
  * @property {"dispatch"|"advisor"} [role]
  * @property {"none"|"pending"|"accepted"|"rejected"} [changesetStatus]
  * @property {string|null} [diffPath]
- * @property {{root:string,upperDir:string,workDir:string,rwBinds:Array<{path:string,upperDir:string,workDir:string}>}|null} [overlayDirs]
+ * @property {{root:string,tmpRoot:string,upperDir:string,workDir:string,rwBinds:Array<{path:string,upperDir:string,workDir:string}>}|null} [overlayDirs]
  * @property {string|null} [preDispatchHead]
  * @property {string|null} [changesetError]
  */
@@ -86,7 +86,7 @@ import { resolveExecutor, opencodeExecutor } from "./executor.js";
  * @property {"dispatch"|"advisor"} [role]
  * @property {"none"|"pending"|"accepted"|"rejected"} [changesetStatus]
  * @property {string|null} [diffPath]
- * @property {{root:string,upperDir:string,workDir:string,rwBinds:Array<{path:string,upperDir:string,workDir:string}>}|null} [overlayDirs]
+ * @property {{root:string,tmpRoot:string,upperDir:string,workDir:string,rwBinds:Array<{path:string,upperDir:string,workDir:string}>}|null} [overlayDirs]
  * @property {string|null} [preDispatchHead]
  * @property {string|null} [changesetError]
  */
@@ -535,7 +535,7 @@ export function createTaskManager({
   checkOverlaySupportFn = checkOverlaySupport,
   overlayTmpRoot = os.tmpdir(),
   runOverlayCommandFn = defaultOverlayRunCommand,
-  rmOverlayTreeFn = (/** @type {string} */ p) => fs.rmSync(p, { recursive: true, force: true }),
+  rmOverlayTreeFn,
   resolveGitCommonDirFn = resolveGitCommonDir,
   resolveGitDirFn = resolveGitDir,
   checkBwrapAvailableFn = checkBwrapAvailable,
@@ -604,6 +604,24 @@ export function createTaskManager({
   }
 
   /**
+   * Removes a task's overlay using the tmp root recorded when that overlay
+   * was created. A failed removal leaves overlayDirs intact for the startup
+   * sweep to retry.
+   * @param {{overlayDirs?: {root:string,tmpRoot:string}|null}} task
+   * @returns {boolean} whether cleanup failed
+   */
+  function releaseOverlay(task) {
+    if (!task.overlayDirs) return false;
+    const removal = cleanupOverlay({
+      root: task.overlayDirs.root,
+      tmpRoot: task.overlayDirs.tmpRoot,
+      rmFn: rmOverlayTreeFn,
+    });
+    if (removal.removed) task.overlayDirs = null;
+    return !removal.removed;
+  }
+
+  /**
    * @param {Task} finishedTask
    */
   function extractChangesetForTask(finishedTask) {
@@ -646,14 +664,12 @@ export function createTaskManager({
     finishedTask.changesetError = null;
     if (finishedTask.role === "advisor") {
       finishedTask.changesetStatus = "rejected";
-      const removal = cleanupOverlay({ root: finishedTask.overlayDirs.root, tmpRoot: overlayTmpRoot, rmFn: rmOverlayTreeFn });
-      if (removal.removed) finishedTask.overlayDirs = null;
+      releaseOverlay(finishedTask);
     } else if (extracted.hasChanges) {
       finishedTask.changesetStatus = "pending";
     } else {
       finishedTask.changesetStatus = "accepted";
-      const removal = cleanupOverlay({ root: finishedTask.overlayDirs.root, tmpRoot: overlayTmpRoot, rmFn: rmOverlayTreeFn });
-      if (removal.removed) finishedTask.overlayDirs = null;
+      releaseOverlay(finishedTask);
     }
   }
 
@@ -861,6 +877,11 @@ export function createTaskManager({
         }
         if (t.status === "running" || t.status === "queued") t.status = "unknown";
         if (t.executorId === undefined) t.executorId = "opencode";
+        // Legacy records predate creation-time tmpRoot persistence. Keep their
+        // prior live-root cleanup behavior rather than letting releaseOverlay
+        // pass undefined into the containment guard; newly-created overlays
+        // always carry the exact root that was in effect at creation.
+        if (t.overlayDirs && t.overlayDirs.tmpRoot === undefined) t.overlayDirs.tmpRoot = overlayTmpRoot;
         tasks.set(t.id, t);
         if (t.status !== previousStatus) taskEvents.emitState(t, previousStatus);
       }
@@ -911,22 +932,29 @@ export function createTaskManager({
   // overlayDirs (their own cleanupOverlay() call crashed mid-removal) are
   // orphans.
   function sweepOrphanedOverlays() {
-    let entries;
-    try {
-      entries = fs.readdirSync(overlayTmpRoot);
-    } catch {
-      return;
+    const tmpRoots = new Set([overlayTmpRoot]);
+    for (const task of tasks.values()) {
+      if (task.overlayDirs?.tmpRoot) tmpRoots.add(task.overlayDirs.tmpRoot);
     }
-    for (const entry of entries) {
-      if (!entry.startsWith("taskferry-cow-")) continue;
-      const taskId = entry.slice("taskferry-cow-".length);
-      const task = tasks.get(taskId);
-      if (task && task.changesetStatus === "pending") continue;
-      const root = path.join(overlayTmpRoot, entry);
-      const removal = cleanupOverlay({ root, tmpRoot: overlayTmpRoot, rmFn: rmOverlayTreeFn });
-      if (removal.removed && task) {
-        task.overlayDirs = null;
-        persistTask(taskId);
+    for (const tmpRoot of tmpRoots) {
+      let entries;
+      try {
+        entries = fs.readdirSync(tmpRoot);
+      } catch {
+        continue;
+      }
+      for (const entry of entries) {
+        if (!entry.startsWith("taskferry-cow-")) continue;
+        const taskId = entry.slice("taskferry-cow-".length);
+        const task = tasks.get(taskId);
+        const root = path.join(tmpRoot, entry);
+        const ownsThisOverlay = task?.overlayDirs?.root === root;
+        if (ownsThisOverlay && task.changesetStatus === "pending") continue;
+        const cleanupTarget = ownsThisOverlay
+          ? task
+          : { overlayDirs: { root, tmpRoot } };
+        const cleanupFailed = releaseOverlay(cleanupTarget);
+        if (!cleanupFailed && ownsThisOverlay) persistTask(taskId);
       }
     }
   }
@@ -1908,7 +1936,7 @@ export function createTaskManager({
           // the worker ran with. They are not reliably re-derivable later -- the
           // packed-refs/objects/refs selection above depends on live filesystem
           // state that can change between dispatch and extraction.
-          task.overlayDirs = { ...overlayInfo, rwBinds: overlayRwBinds };
+          task.overlayDirs = { ...overlayInfo, tmpRoot: overlayTmpRoot, rwBinds: overlayRwBinds };
           task.changesetStatus = "pending";
           task.preDispatchHead = resolvePreDispatchHead(launchDirectory);
         }
@@ -2303,12 +2331,7 @@ export function createTaskManager({
     // is terminal either way (the apply is what the user asked for), but the
     // failure surfaces in the return value and overlayDirs stays set so the
     // daemon-startup sweep (Task 12) retries the removal.
-    let cleanupFailed = false;
-    if (task.overlayDirs) {
-      const removal = cleanupOverlay({ root: task.overlayDirs.root, tmpRoot: overlayTmpRoot, rmFn: rmOverlayTreeFn });
-      if (removal.removed) task.overlayDirs = null;
-      else cleanupFailed = true;
-    }
+    const cleanupFailed = releaseOverlay(task);
     persistTask(task.id);
     return { taskId, changesetStatus: task.changesetStatus, applied: true, ...(cleanupFailed ? { cleanupFailed: true } : {}) };
   }
@@ -2325,12 +2348,7 @@ export function createTaskManager({
       throw new Error(`error: task ${taskId} has no pending changeset (changesetStatus: ${task.changesetStatus ?? "none"})\nhelp: only a task with changesetStatus "pending" can be rejected`);
     }
     task.changesetStatus = "rejected";
-    let cleanupFailed = false;
-    if (task.overlayDirs) {
-      const removal = cleanupOverlay({ root: task.overlayDirs.root, tmpRoot: overlayTmpRoot, rmFn: rmOverlayTreeFn });
-      if (removal.removed) task.overlayDirs = null;
-      else cleanupFailed = true;
-    }
+    const cleanupFailed = releaseOverlay(task);
     persistTask(task.id);
     return { taskId, changesetStatus: task.changesetStatus, ...(cleanupFailed ? { cleanupFailed: true } : {}) };
   }

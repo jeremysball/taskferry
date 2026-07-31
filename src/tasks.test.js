@@ -888,6 +888,7 @@ describe("bwrap sandboxing", () => {
     const status = mgr.status(result.id);
     assert.equal(status.changesetStatus, "pending");
     assert.ok(status.overlayDirs.upperDir.startsWith(overlayTmpRoot));
+    assert.equal(status.overlayDirs.tmpRoot, overlayTmpRoot);
   });
 
   test("falls back to a plain bind with a warning when overlayEnabled is explicitly false", () => {
@@ -1537,7 +1538,7 @@ describe("sweepOrphanedOverlays()", () => {
         ...baseTask({ id: "t_pending" }),
         role: "dispatch",
         changesetStatus: "pending",
-        overlayDirs: { root: overlayRoot, upperDir: path.join(overlayRoot, "upper", "main"), workDir: path.join(overlayRoot, "work", "main") },
+        overlayDirs: { root: overlayRoot, tmpRoot: overlayTmpRoot, upperDir: path.join(overlayRoot, "upper", "main"), workDir: path.join(overlayRoot, "work", "main") },
       }],
       rmOverlayTreeFn: () => { cleanedAny = true; },
     });
@@ -1549,9 +1550,10 @@ describe("sweepOrphanedOverlays()", () => {
     assert.doesNotThrow(() => makeManager({ overlayTmpRoot }));
   });
 
-  test("sweeps a resolved task overlay and persists clearing overlayDirs", () => {
+  test("sweeps a resolved task overlay under its recorded non-live tmpRoot and persists clearing overlayDirs", () => {
     const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-orphan-resolved-state-"));
     const overlayTmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "axi-orphan-resolved-overlay-"));
+    const liveOverlayTmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "axi-orphan-live-overlay-"));
     const overlayRoot = path.join(overlayTmpRoot, "taskferry-cow-t_resolved");
     fs.mkdirSync(path.join(overlayRoot, "upper", "main"), { recursive: true });
     const task = {
@@ -1560,6 +1562,7 @@ describe("sweepOrphanedOverlays()", () => {
       changesetStatus: "accepted",
       overlayDirs: {
         root: overlayRoot,
+        tmpRoot: overlayTmpRoot,
         upperDir: path.join(overlayRoot, "upper", "main"),
         workDir: path.join(overlayRoot, "work", "main"),
       },
@@ -1568,7 +1571,7 @@ describe("sweepOrphanedOverlays()", () => {
     fs.writeFileSync(tasksFile, JSON.stringify([task], null, 2));
     const mgr = createTaskManager({
       stateDir,
-      overlayTmpRoot,
+      overlayTmpRoot: liveOverlayTmpRoot,
       sandboxEnabled: false,
       cacheDir: fs.mkdtempSync(path.join(os.tmpdir(), "axi-orphan-resolved-cache-")),
       spawnFn: () => { throw new Error("not used"); },
@@ -2989,7 +2992,7 @@ describe("accept()/reject()", () => {
       role: "dispatch",
       changesetStatus: "pending",
       diffPath: "/does-not-matter-for-this-fixture.patch",
-      overlayDirs: { root: fixtureRoot, upperDir: path.join(fixtureRoot, "upper", "main"), workDir: path.join(fixtureRoot, "work", "main"), rwBinds: [] },
+      overlayDirs: { root: fixtureRoot, tmpRoot: fixtureTmpRoot, upperDir: path.join(fixtureRoot, "upper", "main"), workDir: path.join(fixtureRoot, "work", "main"), rwBinds: [] },
       preDispatchHead: "abc123",
       ...overrides,
     };
@@ -3049,6 +3052,31 @@ describe("accept()/reject()", () => {
     assert.equal(mgr.status("t_pending").changesetStatus, "rejected");
   });
 
+  test("reject() cleans an overlay using its recorded tmpRoot after the live tmpRoot changes", () => {
+    const recordedTmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "axi-recorded-overlay-"));
+    const liveTmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "axi-live-overlay-"));
+    const root = path.join(recordedTmpRoot, "taskferry-cow-t_pending");
+    fs.mkdirSync(path.join(root, "upper", "main"), { recursive: true });
+    fs.mkdirSync(path.join(root, "work", "main"), { recursive: true });
+    const mgr = makeManager({
+      overlayTmpRoot: liveTmpRoot,
+      tasksFixture: [pendingTaskFixture({
+        overlayDirs: {
+          root,
+          tmpRoot: recordedTmpRoot,
+          upperDir: path.join(root, "upper", "main"),
+          workDir: path.join(root, "work", "main"),
+          rwBinds: [],
+        },
+      })],
+    });
+
+    const result = mgr.reject("t_pending");
+    assert.equal(result.changesetStatus, "rejected");
+    assert.equal(result.cleanupFailed, undefined);
+    assert.equal(fs.existsSync(root), false);
+  });
+
   test("accept() on an advisor task throws a clear, non-applying error", () => {
     const mgr = makeManager({ tasksFixture: [pendingTaskFixture({ id: "t_advisor", role: "advisor", changesetStatus: "rejected" })] });
     assert.throws(() => mgr.accept("t_advisor"), /role "advisor" and cannot be accepted/);
@@ -3073,7 +3101,7 @@ describe("accept()/reject()", () => {
     const mgr = makeManager({
       tasksFixture: [pendingTaskFixture({
         preDispatchHead: null, // non-git target
-        overlayDirs: { root: fixtureRoot, upperDir: path.join(fixtureRoot, "upper", "main"), workDir: path.join(fixtureRoot, "work", "main"), rwBinds: [] }, // never created on disk
+        overlayDirs: { root: fixtureRoot, tmpRoot: fixtureTmpRoot, upperDir: path.join(fixtureRoot, "upper", "main"), workDir: path.join(fixtureRoot, "work", "main"), rwBinds: [] }, // never created on disk
       })],
     });
     assert.throws(() => mgr.accept("t_pending"), /overlay is gone/);
@@ -3108,6 +3136,7 @@ describe("summarize() changeset exposure", () => {
   test("exposes changeset fields only when they are meaningful", () => {
     const overlayDirs = {
       root: path.join(os.tmpdir(), "taskferry-cow-t_pending"),
+      tmpRoot: os.tmpdir(),
       upperDir: path.join(os.tmpdir(), "taskferry-cow-t_pending", "upper", "main"),
       workDir: path.join(os.tmpdir(), "taskferry-cow-t_pending", "work", "main"),
       rwBinds: [],

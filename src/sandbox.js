@@ -212,6 +212,9 @@ export function buildBwrapBaseArgs({ denyList }) {
  * @param {Array<{path: string, upperDir: string, workDir: string}>} [options.overlayRwBinds] - extra paths
  *   (e.g. a worktree's git-common-dir slice) that need the same CoW treatment instead of a plain writable
  *   bind, one independent overlay mount per entry. Applied after extraRwBinds and before extraRwPairBinds.
+ * @param {Array<{path: string, bindSrc: string}>} [options.overlayRwFileBinds] - writable FILE paths outside
+ *   `directory` (e.g. a worktree git common-dir's packed-refs): overlayfs mounts are directory-only, so each
+ *   is bound rw from a scratch copy (bindSrc) onto its host path (path). Applied right after overlayRwBinds.
  * @param {boolean} [options.shareNet] - default true (matches today's --share-net); pass false for
  *   advisor-role dispatches to emit --unshare-net instead.
  * @param {boolean} [options.runtimeDirWritable] - default true (today's --bind runtimeDir for dispatch
@@ -230,6 +233,7 @@ export function buildBwrapArgs({
   extraRoBinds = [],
   overlay,
   overlayRwBinds = [],
+  overlayRwFileBinds = [],
   shareNet = true,
   runtimeDirWritable = true,
 }) {
@@ -245,6 +249,9 @@ export function buildBwrapArgs({
   }
   for (const { path: overlayPath, upperDir, workDir } of overlayRwBinds) {
     args.push("--overlay-src", overlayPath, "--overlay", upperDir, workDir, overlayPath);
+  }
+  for (const { bindSrc, path: filePath } of overlayRwFileBinds) {
+    args.push("--bind", bindSrc, filePath);
   }
   for (const [src, dest] of extraRwPairBinds) {
     args.push("--bind", src, dest);

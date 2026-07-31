@@ -6,7 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { buildBwrapArgs, checkOverlaySupport } from "./sandbox.js";
-import { applyChangeset, cleanupOverlay, extractGitDiff, extractNonGitDiff, overlayPaths, resolvePreDispatchHead, subOverlayPaths } from "./changeset.js";
+import { applyChangeset, cleanupOverlay, extractGitDiff, extractNonGitDiff, overlayPaths, resolvePreDispatchHead, subFilePaths, subOverlayPaths } from "./changeset.js";
 
 // Skip the whole suite unless this host can actually run overlays: Linux,
 // bwrap >= 0.8, and (for the non-git round trip) a real rsync. A missing
@@ -18,8 +18,8 @@ const skip = skipReason ? { skip: `overlay integration skipped: ${skipReason}` }
 
 // Runs one real bwrap invocation against a directory mounted as a CoW
 // overlay (plus any sub-overlays), executing `script` inside.
-function runInOverlay({ directory, overlay, overlayRwBinds = [], script, runtimeDir, homeDir }) {
-  const args = buildBwrapArgs({ directory, stateDir: os.tmpdir(), runtimeDir, homeDir, denyList: [], overlay: { upperDir: overlay.upperDir, workDir: overlay.workDir }, overlayRwBinds });
+function runInOverlay({ directory, overlay, overlayRwBinds = [], overlayRwFileBinds = [], script, runtimeDir, homeDir }) {
+  const args = buildBwrapArgs({ directory, stateDir: os.tmpdir(), runtimeDir, homeDir, denyList: [], overlay: { upperDir: overlay.upperDir, workDir: overlay.workDir }, overlayRwBinds, overlayRwFileBinds });
   return spawnSync("bwrap", [...args, "--", "sh", "-c", script], { encoding: "utf8" });
 }
 
@@ -104,6 +104,65 @@ describe("overlay round trips (real bwrap)", () => {
     const diffPath = path.join(tmpRoot, "int_subovl.patch");
     const extracted = extractGitDiff({ directory: worktree, overlay, overlayRwBinds, preDispatchHead, stateDir: tmpRoot, runtimeDir, homeDir: os.homedir(), denyList: [], diffPath });
     assert.equal(extracted.hasChanges, true, "with overlayRwBinds re-mounted, the flattened commit diff must be visible");
+    assert.match(fs.readFileSync(diffPath, "utf8"), /\+two/);
+    cleanupOverlay({ root: overlay.root, tmpRoot });
+  });
+
+  test("worktree-shaped target: git-common-dir FILE (packed-refs) scratch-copy bind is visible inside the sandbox and re-mounted for extraction", skip ? undefined : () => {
+    // Companion to the sub-overlay test above, but for a writable
+    // git-common-dir FILE (overlayfs can't mount a directory overlay onto a
+    // plain file, hence the separate subFilePaths()/overlayRwFileBinds
+    // mechanism). Proves the scratch-copy bind is actually visible at the
+    // real host path *inside* the bwrap namespace -- the earlier unit tests
+    // only assert on the constructed bwrap argv, never a real invocation.
+    const mainRepo = fs.mkdtempSync(path.join(os.tmpdir(), "axi-int-filebind-main-"));
+    spawnSync("git", ["init", "-q", mainRepo]);
+    fs.writeFileSync(path.join(mainRepo, "f.txt"), "one\n");
+    spawnSync("git", ["-C", mainRepo, "add", "-A"]);
+    spawnSync("git", ["-C", mainRepo, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "base"]);
+    const worktree = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "axi-int-filebind-wt-")), "wt");
+    spawnSync("git", ["-C", mainRepo, "worktree", "add", "-q", worktree, "-b", "wt-filebind-branch"]);
+    // pack-refs forces packed-refs into existence so it's the writable file
+    // under test, mirroring the real trigger for this whole mechanism.
+    spawnSync("git", ["-C", mainRepo, "pack-refs", "--all"]);
+    const packedRefs = path.join(mainRepo, ".git", "packed-refs");
+    assert.ok(fs.existsSync(packedRefs), "fixture repo must have a real packed-refs file");
+    const originalContent = fs.readFileSync(packedRefs, "utf8");
+
+    const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "axi-int-tmp-"));
+    const runtimeDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-int-run-"));
+    const preDispatchHead = resolvePreDispatchHead(worktree);
+    const overlay = overlayPaths("int_filebind", tmpRoot);
+    fs.mkdirSync(overlay.upperDir, { recursive: true, mode: 0o700 });
+    fs.mkdirSync(overlay.workDir, { recursive: true, mode: 0o700 });
+
+    const gitCommonDir = path.join(mainRepo, ".git");
+    const gitDir = path.join(gitCommonDir, "worktrees", path.basename(worktree));
+    const overlayRwBinds = [gitDir, path.join(gitCommonDir, "objects"), path.join(gitCommonDir, "refs"), path.join(gitCommonDir, "logs", "refs")]
+      .map((p) => { const sub = subOverlayPaths(overlay.root, p); fs.mkdirSync(sub.upperDir, { recursive: true, mode: 0o700 }); fs.mkdirSync(sub.workDir, { recursive: true, mode: 0o700 }); return sub; });
+    const fileBind = subFilePaths(overlay.root, packedRefs);
+    fs.mkdirSync(path.dirname(fileBind.bindSrc), { recursive: true, mode: 0o700 });
+    fs.copyFileSync(packedRefs, fileBind.bindSrc);
+    const overlayRwFileBinds = [fileBind];
+
+    const ran = runInOverlay({
+      directory: worktree, overlay, overlayRwBinds, overlayRwFileBinds, runtimeDir, homeDir: os.homedir(),
+      // Proves the bind is visible at the real host path from inside the
+      // sandbox, then mutates it -- the write must land on the scratch copy,
+      // never the real host file (checked below, outside the sandbox).
+      script: `test -f ${packedRefs} && echo aaaa2222aaaa2222aaaa2222aaaa2222aaaa2222 refs/heads/wt-filebind-branch >> ${packedRefs} && echo two >> ${worktree}/f.txt && git -C ${worktree} add -A && git -C ${worktree} -c user.email=t@t -c user.name=t commit -qm wt-worker`,
+    });
+    assert.equal(ran.status, 0, `sandboxed worktree commit failed: ${ran.stderr}`);
+    // The real host packed-refs must be untouched -- the whole point of the
+    // scratch-copy indirection.
+    assert.equal(fs.readFileSync(packedRefs, "utf8"), originalContent);
+    // But the scratch copy itself did receive the write, proving the bind
+    // was live and the sandboxed script targeted the real host path.
+    assert.match(fs.readFileSync(fileBind.bindSrc, "utf8"), /aaaa2222aaaa2222aaaa2222aaaa2222aaaa2222 refs\/heads\/wt-filebind-branch/);
+
+    const diffPath = path.join(tmpRoot, "int_filebind.patch");
+    const extracted = extractGitDiff({ directory: worktree, overlay, overlayRwBinds, overlayRwFileBinds, preDispatchHead, stateDir: tmpRoot, runtimeDir, homeDir: os.homedir(), denyList: [], diffPath });
+    assert.equal(extracted.hasChanges, true, "with overlayRwFileBinds re-mounted, the flattened commit diff must be visible");
     assert.match(fs.readFileSync(diffPath, "utf8"), /\+two/);
     cleanupOverlay({ root: overlay.root, tmpRoot });
   });

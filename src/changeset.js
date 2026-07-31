@@ -61,6 +61,7 @@ export function resolvePreDispatchHead(directory, runCommand = defaultRunCommand
  * @param {string} params.directory
  * @param {{upperDir: string, workDir: string}} params.overlay
  * @param {Array<{path: string, upperDir: string, workDir: string}>} params.overlayRwBinds
+ * @param {Array<{path: string, bindSrc: string}>} [params.overlayRwFileBinds]
  * @param {string} params.preDispatchHead
  * @param {string} params.stateDir
  * @param {string} params.runtimeDir
@@ -77,6 +78,7 @@ export function extractGitDiff({
   directory,
   overlay,
   overlayRwBinds,
+  overlayRwFileBinds = [],
   preDispatchHead,
   stateDir,
   runtimeDir,
@@ -87,7 +89,7 @@ export function extractGitDiff({
   writeFileFn = (filePath, content) => fs.writeFileSync(filePath, content, { mode: 0o600 }),
   mkdirFn = (dirPath) => fs.mkdirSync(dirPath, { recursive: true, mode: 0o700 }),
 }) {
-  const bwrapArgs = buildBwrapArgs({ directory, stateDir, runtimeDir, homeDir, denyList, overlay, overlayRwBinds });
+  const bwrapArgs = buildBwrapArgs({ directory, stateDir, runtimeDir, homeDir, denyList, overlay, overlayRwBinds, overlayRwFileBinds });
   // The final `exit $rc` propagates the diff's own status: the previous
   // `; git reset` tail made the whole script exit with reset's status, so a
   // failed diff still reported success. reset runs first regardless (undo
@@ -234,6 +236,20 @@ export function extractNonGitDiff({
 export function subOverlayPaths(root, targetPath) {
   const slug = subOverlaySlug(targetPath);
   return { path: targetPath, upperDir: path.join(root, "upper", "extra", slug), workDir: path.join(root, "work", "extra", slug) };
+}
+
+/**
+ * Scratch-copy bind for a writable FILE outside the dispatch directory
+ * (e.g. a worktree git common-dir's packed-refs). Overlayfs mounts are
+ * directory-only, so files get a scratch copy under the overlay root,
+ * bound rw onto the host path, instead of a sub-overlay; extraction
+ * re-mounts the same bind so the diff sees the worker's writes.
+ * @param {string} root
+ * @param {string} targetPath
+ * @returns {{path: string, bindSrc: string}}
+ */
+export function subFilePaths(root, targetPath) {
+  return { path: targetPath, bindSrc: path.join(root, "files", subOverlaySlug(targetPath)) };
 }
 
 /**

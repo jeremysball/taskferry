@@ -23,22 +23,46 @@ export function defaultRunCommand(command, args) {
 }
 
 /**
+ * `raw` carries bwrap's own `--version` stdout so callers that need the version
+ * (checkOverlaySupport() via parseBwrapVersion()) don't have to re-probe. It is
+ * only set when bwrap is actually available.
+ * @param {{status: number|null, stdout: string, stderr: string, error?: NodeJS.ErrnoException}} result
+ * @returns {{checked: boolean, available: boolean, reason?: string, raw?: string}}
+ */
+function getBwrapAvailabilityResult(result) {
+  if (result.error) {
+    return {
+      checked: true,
+      available: false,
+      reason:
+        result.error.code === "ENOENT"
+          ? "bwrap not found"
+          : `bwrap --version failed: ${result.error.message}`,
+    };
+  }
+
+  if (result.status !== 0) {
+    return {
+      checked: true,
+      available: false,
+      reason: `bwrap --version exited with status ${result.status}`,
+    };
+  }
+
+  return {
+    checked: true,
+    available: true,
+    raw: result.stdout,
+  };
+}
+
+/**
  * @param {(command: string, args: readonly string[]) => {status: number|null, stdout: string, stderr: string, error?: NodeJS.ErrnoException}} [runCommand]
  * @returns {{checked: boolean, available: boolean, reason?: string, raw?: string}}
  */
 export function checkBwrapAvailable(runCommand = defaultRunCommand) {
   const result = runCommand("bwrap", ["--version"]);
-  if (result.error) {
-    return {
-      checked: true,
-      available: false,
-      reason: result.error.code === "ENOENT" ? "bwrap not found" : `bwrap --version failed: ${result.error.message}`,
-    };
-  }
-  if (result.status !== 0) {
-    return { checked: true, available: false, reason: `bwrap --version exited with status ${result.status}` };
-  }
-  return { checked: true, available: true, raw: result.stdout };
+  return getBwrapAvailabilityResult(result);
 }
 
 /**
@@ -79,17 +103,7 @@ export function checkOverlaySupport(runCommand = defaultRunCommand) {
  */
 export async function checkBwrapAvailableAsync(runCommand) {
   const result = await runCommand("bwrap", ["--version"]);
-  if (result.error) {
-    return {
-      checked: true,
-      available: false,
-      reason: result.error.code === "ENOENT" ? "bwrap not found" : `bwrap --version failed: ${result.error.message}`,
-    };
-  }
-  if (result.status !== 0) {
-    return { checked: true, available: false, reason: `bwrap --version exited with status ${result.status}` };
-  }
-  return { checked: true, available: true };
+  return getBwrapAvailabilityResult(result);
 }
 
 /**

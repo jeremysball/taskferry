@@ -160,12 +160,16 @@ daemon restarted while the task was still running; see
 
 Lean fields by default; pass `--full` for directory, model, session id, log
 path, and prompt preview. `failureReason` is `null` unless the task was
-stopped by the no-output watchdog (`"no_output_timeout"`) or a
-provider-failure diagnostic — `"rate_limited"`, `"payment_required"`, or
+stopped by the no-output watchdog (`"no_output_timeout"`), a
+provider-failure diagnostic (`"rate_limited"`, `"payment_required"`, or
 `"authentication_failed"` for the `opencode` executor, the same three
 buckets prefixed with the executor name for others (e.g.
 `"pi_rate_limited"`), or an executor-prefixed error-class name as a
-fallback; see [daemon.md](daemon.md#watchdogs)).
+fallback; see [daemon.md](daemon.md#watchdogs)), or a boot failure
+(`"boot_failure"` / `"pi_boot_failure"`): the child exited non-zero
+without emitting any parseable event at all (a crash at CLI startup,
+e.g. a malformed extension), and `failureDetail` carries the last
+`Error:` line of its captured output.
 `failureDetail` (also `--full`-only, or via `result --fields
 failureDetail`) carries the matched log line or timeout detail behind
 whichever `failureReason` fired. `incomplete` is `true` when a `done`
@@ -180,7 +184,10 @@ Returns the final `--chars` Unicode code points of the newest parsed `text`
 event for a task, reading the local task log only (never sends content to a
 model). Defaults to 1000, maximum 65536. The response includes the complete
 event length and `truncated` so callers know whether the suffix omitted
-earlier content.
+earlier content. A crashed task whose log has no parseable events at all
+(a boot failure, or a watchdog kill before first output) never grows a
+`text` event, so `tail` falls back to the raw captured output for it
+instead of reporting `none observed yet`.
 
 ## `taskferry summary <id> [options]`
 

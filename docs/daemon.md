@@ -175,6 +175,15 @@ CLI usage approaches.
   provider error text (capped at 500 characters), or for
   `no_output_timeout`, which timeout value fired and whether it was before
   or after the task's first output.
+- A child that exits non-zero without ever emitting a parseable event (a
+  crash during CLI startup, e.g. a malformed provider extension) settles
+  with `"boot_failure"` (`"pi_boot_failure"` for `pi`) and a
+  `failureDetail` taken from the last `Error:` line of its captured
+  output, or the last non-JSON line when nothing is Error-prefixed. This
+  classification runs once at settlement, never on a watcher tick, so raw
+  stderr can't kill a running task early: only the curated provider
+  patterns above do that. Signal-killed children (external `SIGKILL`,
+  OOM) are excluded too; `"boot_failure"` means the child exited itself.
 
 ## Cancellation
 

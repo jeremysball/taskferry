@@ -258,6 +258,33 @@ describe("extractGitDiff()", () => {
     });
     assert.equal(result.hasChanges, false);
   });
+
+  test("re-mounts persisted rwFileBinds as scratch-copy binds so the diff sees the worker's file writes", () => {
+    let capturedArgs = null;
+    const runCommand = (command, args) => {
+      capturedArgs = args;
+      return { status: 0, stdout: "", stderr: "", error: undefined };
+    };
+    extractGitDiff({
+      directory: "/workspace/repo",
+      overlay: { upperDir: "/tmp/u", workDir: "/tmp/w" },
+      overlayRwBinds: [],
+      overlayRwFileBinds: [{ path: "/host/.git/packed-refs", bindSrc: "/tmp/taskferry-cow-t1/files/packed-refs-abcd1234" }],
+      preDispatchHead: "abc123",
+      stateDir: "/state",
+      runtimeDir: "/state/run",
+      homeDir: "/home/user",
+      denyList: [],
+      diffPath: "/state/diffs/t1.patch",
+      runCommand,
+      writeFileFn: () => {},
+      mkdirFn: () => {},
+    });
+    const idx = capturedArgs.indexOf("/tmp/taskferry-cow-t1/files/packed-refs-abcd1234");
+    assert.notEqual(idx, -1, "the scratch copy must appear in the extraction bwrap args");
+    assert.equal(capturedArgs[idx - 1], "--bind");
+    assert.equal(capturedArgs[idx + 1], "/host/.git/packed-refs");
+  });
 });
 
 describe("extraction fail-closed behavior", () => {

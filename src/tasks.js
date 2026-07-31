@@ -12,7 +12,7 @@ import { formatToolEventForNarration } from "./narration-format.js";
 import { errCode } from "./errors.js";
 import { isNonNegativeInteger, isPositiveInteger } from "./numbers.js";
 import { buildBwrapArgs, checkBwrapAvailable, checkOverlaySupport, defaultDenyList, platformSupportsSandbox, resolveGitCommonDir, resolveGitDir } from "./sandbox.js";
-import { applyChangeset, overlayPaths, resolvePreDispatchHead, subOverlayPaths, cleanupOverlay, defaultRunCommand as defaultOverlayRunCommand, extractGitDiff, extractNonGitDiff } from "./changeset.js";
+import { applyChangeset, overlayPaths, resolvePreDispatchHead, subOverlayPaths, subFilePaths, cleanupOverlay, defaultRunCommand as defaultOverlayRunCommand, extractGitDiff, extractNonGitDiff } from "./changeset.js";
 import { resolveExecutor, opencodeExecutor } from "./executor.js";
 
 /**
@@ -54,7 +54,7 @@ import { resolveExecutor, opencodeExecutor } from "./executor.js";
  * @property {"dispatch"|"advisor"} [role]
  * @property {"none"|"pending"|"accepted"|"rejected"} [changesetStatus]
  * @property {string|null} [diffPath]
- * @property {{root:string,tmpRoot:string,upperDir:string,workDir:string,rwBinds:Array<{path:string,upperDir:string,workDir:string}>}|null} [overlayDirs]
+ * @property {{root:string,tmpRoot:string,upperDir:string,workDir:string,rwBinds:Array<{path:string,upperDir:string,workDir:string}>,rwFileBinds:Array<{path:string,bindSrc:string}>}|null} [overlayDirs]
  * @property {string|null} [preDispatchHead]
  * @property {string|null} [changesetError]
  */
@@ -86,7 +86,7 @@ import { resolveExecutor, opencodeExecutor } from "./executor.js";
  * @property {"dispatch"|"advisor"} [role]
  * @property {"none"|"pending"|"accepted"|"rejected"} [changesetStatus]
  * @property {string|null} [diffPath]
- * @property {{root:string,tmpRoot:string,upperDir:string,workDir:string,rwBinds:Array<{path:string,upperDir:string,workDir:string}>}|null} [overlayDirs]
+ * @property {{root:string,tmpRoot:string,upperDir:string,workDir:string,rwBinds:Array<{path:string,upperDir:string,workDir:string}>,rwFileBinds:Array<{path:string,bindSrc:string}>}|null} [overlayDirs]
  * @property {string|null} [preDispatchHead]
  * @property {string|null} [changesetError]
  */
@@ -741,6 +741,7 @@ export function createTaskManager({
             directory: finishedTask.directory,
             overlay: { upperDir: finishedTask.overlayDirs.upperDir, workDir: finishedTask.overlayDirs.workDir },
             overlayRwBinds: finishedTask.overlayDirs.rwBinds ?? [],
+            overlayRwFileBinds: finishedTask.overlayDirs.rwFileBinds ?? [],
             preDispatchHead: /** @type {string} */ (finishedTask.preDispatchHead),
             stateDir,
             runtimeDir,
@@ -1989,16 +1990,31 @@ export function createTaskManager({
 
         /** @type {Array<{path: string, upperDir: string, workDir: string}>} */
         const overlayRwBinds = [];
+        /** @type {Array<{path: string, bindSrc: string}>} */
+        const overlayRwFileBinds = [];
         const gitCommonDir = resolveGitCommonDirFn(launchDirectory);
         if (gitCommonDir && existsFn(gitCommonDir) && isOutsideDirectory(launchDirectory, gitCommonDir)) {
           const gitDir = resolveGitDirFn(launchDirectory);
           /** @param {string} p */
           const addWritable = (p) => {
             if (overlayInfo) {
-              const sub = subOverlayPaths(overlayInfo.root, p);
-              fs.mkdirSync(sub.upperDir, { recursive: true, mode: 0o700 });
-              fs.mkdirSync(sub.workDir, { recursive: true, mode: 0o700 });
-              overlayRwBinds.push(sub);
+              if (statFn(p)?.isDirectory()) {
+                const sub = subOverlayPaths(overlayInfo.root, p);
+                fs.mkdirSync(sub.upperDir, { recursive: true, mode: 0o700 });
+                fs.mkdirSync(sub.workDir, { recursive: true, mode: 0o700 });
+                overlayRwBinds.push(sub);
+              } else {
+                // Overlayfs mounts are directory-only (bwrap dies with "Can't
+                // mkdir <file>: Not a directory"), so a writable FILE gets a
+                // scratch copy under the overlay root bound rw onto the host
+                // path instead. Extraction re-mounts the same bind (persisted
+                // as rwFileBinds) so the diff sees the worker's writes;
+                // accept applies them, reject discards the scratch copy.
+                const bind = subFilePaths(overlayInfo.root, p);
+                fs.mkdirSync(path.dirname(bind.bindSrc), { recursive: true, mode: 0o700 });
+                fs.copyFileSync(p, bind.bindSrc);
+                overlayRwFileBinds.push(bind);
+              }
             } else {
               extraRwBinds.push(p);
             }
@@ -2029,7 +2045,7 @@ export function createTaskManager({
           extraRwBinds,
           extraRwPairBinds: executorRwPairBinds,
           extraRoBinds,
-          ...(overlayInfo ? { overlay: { upperDir: overlayInfo.upperDir, workDir: overlayInfo.workDir }, overlayRwBinds } : {}),
+          ...(overlayInfo ? { overlay: { upperDir: overlayInfo.upperDir, workDir: overlayInfo.workDir }, overlayRwBinds, overlayRwFileBinds } : {}),
           shareNet: role !== "advisor",
           runtimeDirWritable: role !== "advisor",
         }).concat(["--", executor.binaryName, ...args]);
@@ -2041,7 +2057,7 @@ export function createTaskManager({
           // the worker ran with. They are not reliably re-derivable later -- the
           // packed-refs/objects/refs selection above depends on live filesystem
           // state that can change between dispatch and extraction.
-          task.overlayDirs = { ...overlayInfo, tmpRoot: overlayTmpRoot, rwBinds: overlayRwBinds };
+          task.overlayDirs = { ...overlayInfo, tmpRoot: overlayTmpRoot, rwBinds: overlayRwBinds, rwFileBinds: overlayRwFileBinds };
           task.changesetStatus = "pending";
           task.preDispatchHead = resolvePreDispatchHead(launchDirectory, runOverlayCommandFn);
         }

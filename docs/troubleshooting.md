@@ -116,6 +116,17 @@ one:
 `taskferry status <id> --full` (or `result --fields failureDetail`) shows
 the specific log line or error text that triggered the classification.
 
+## A task crashes instantly with `failureReason: "boot_failure"`
+
+The child exited non-zero without ever emitting a log event, which means
+it died during CLI startup, before doing any work. The bucket follows the
+same prefix rule (`"pi_boot_failure"` for the `pi` executor), and
+`failureDetail` carries the last `Error:` line of the captured output (or
+the last non-JSON line when nothing is Error-prefixed). Read the detail
+as the fix list: a malformed provider extension, a broken config, or
+whatever else the runtime loads before reaching the model. Fix what it
+names, then re-dispatch. Retrying unchanged will crash the same way.
+
 ## `taskferry result` says the task is still running
 
 `result` only returns a final `message`/`narration` once a task reaches

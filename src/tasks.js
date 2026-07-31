@@ -261,15 +261,28 @@ function extractBootFailureDetail(logPath) {
     const buffer = Buffer.alloc(bytes);
     fd = fs.openSync(logPath, "r");
     fs.readSync(fd, buffer, 0, bytes, size - bytes);
+    const lines = buffer.toString("utf8").split("\n");
+    // A read starting mid-file can begin inside a line; that partial first
+    // line is not a real line of the log, so it is never evidence. (A read
+    // from offset 0 starts on a real line and keeps everything.)
+    if (size > BOOT_FAILURE_SCAN_BYTES) lines.shift();
     /** @type {string|null} */
     let lastError = null;
     /** @type {string|null} */
     let lastNonJson = null;
-    for (const line of buffer.toString("utf8").split("\n")) {
+    for (const line of lines) {
       const trimmed = line.trim();
-      // Blank lines carry nothing; JSON event lines are owned by the
-      // curated classifier and are never boot-failure evidence.
-      if (!trimmed || trimmed.startsWith("{")) continue;
+      if (!trimmed) continue;
+      try {
+        JSON.parse(trimmed);
+        // Parseable event lines are owned by the curated classifier and
+        // are never boot-failure evidence. (A startsWith("{") test is not
+        // enough here: an unparseable brace-starting stderr dump -- an
+        // object literal, not JSON -- is evidence and must not be skipped.)
+        continue;
+      } catch {
+        // Non-JSON output: boot-failure evidence.
+      }
       if (/^error\b[:\s]/i.test(trimmed)) lastError = trimmed;
       else lastNonJson = trimmed;
     }
@@ -280,6 +293,40 @@ function extractBootFailureDetail(logPath) {
   } finally {
     if (fd != null) fs.closeSync(fd);
   }
+}
+
+// Whole-log answer to "did this child ever emit an event," for the boot-crash
+// gate at settlement. logActivity()'s cached 64KiB head scan is the right
+// approximation for cheap repeated status polling, but wrong here: a single
+// event line larger than 64KiB (a long answer is one NDJSON line) fails
+// JSON.parse on the truncated head fragment and leaves a task that did real
+// work looking eventless, which would stamp boot_failure on a healthy run.
+// Settlement happens once per task, so pay for a whole-log scan with early
+// exit: healthy logs parse their first line, boot-crash logs are tiny by
+// nature (the child died immediately), and an eventless log that still grew
+// large is bounded by the pre-output watchdog kill.
+/**
+ * @param {string} logPath
+ * @returns {boolean}
+ */
+function logHasAnyEvent(logPath) {
+  /** @type {string|undefined} */
+  let raw;
+  try {
+    raw = fs.readFileSync(logPath, "utf8");
+  } catch {
+    return false;
+  }
+  for (const line of raw.split("\n")) {
+    if (!line.trim()) continue;
+    try {
+      JSON.parse(line);
+      return true;
+    } catch {
+      continue;
+    }
+  }
+  return false;
 }
 
 // Maps a classifier bucket to its public-facing name. Opencode's named
@@ -2183,13 +2230,15 @@ export function createTaskManager({
         // 0/unsignaled if it traps SIGTERM and shuts down gracefully -- don't let
         // that read as "done" and bury the failureReason behind a healthy status.
         task.status = task.cancelRequested ? "cancelled" : task.failureReason ? "crashed" : code === 0 && !signal ? "done" : "crashed";
-        // Boot-crash surfacing: non-zero exit, nothing set by the curated
-        // classifier, and not a single parseable event in the whole log --
-        // the child never did any work, so its raw capture is unambiguous
-        // and becomes the failureReason/failureDetail. Skipped once any
-        // event exists: raw stderr after real work started is ambiguous
-        // and stays the curated classifier's job.
-        if (task.status === "crashed" && !task.failureReason && !logActivity(task.logPath).logHasEvent) {
+        // Boot-crash surfacing: an explicit non-zero exit (signal deaths
+        // stay unclassified: code is null there, and an external kill is
+        // not a boot failure even when it lands during startup), nothing
+        // set by the curated classifier, and not a single parseable event
+        // anywhere in the log -- the child never did any work, so its raw
+        // capture is unambiguous and becomes failureReason/failureDetail.
+        // Skipped once any event exists: raw stderr after real work
+        // started is ambiguous and stays the curated classifier's job.
+        if (task.status === "crashed" && !task.failureReason && code != null && code !== 0 && !logHasAnyEvent(task.logPath)) {
           const bootFailure = extractBootFailureDetail(task.logPath);
           if (bootFailure) {
             task.failureReason = bucketFor(resolveExecutor(task.executorId).errorBucketPrefix, bootFailure.bucket);
@@ -3035,10 +3084,14 @@ export function createTaskManager({
       throw new Error("error: chars must be a positive integer no greater than 65536\nhelp: run taskferry tail with chars between 1 and 65536");
     }
     let text = readLastText(task.logPath);
-    // Boot crash: narration is never coming (the log has no parseable
-    // events at all), so the raw capture IS the task's output -- show it
-    // instead of "none observed yet", which reads as "still waiting".
-    if (!text && task.status === "crashed" && !logActivity(task.logPath).logHasEvent) {
+    // Eventless crash: narration is never coming (the log has no parseable
+    // events at all, checked over the whole log), so the raw capture IS the
+    // task's output -- show it instead of "none observed yet", which reads
+    // as "still waiting". Deliberately broader than the settlement gate
+    // (no failureReason requirement): tail is display-only, and a
+    // watchdog-killed eventless task's stderr is just as much its only
+    // output as a boot crash's is.
+    if (!text && task.status === "crashed" && !logHasAnyEvent(task.logPath)) {
       text = readRawCaptureTail(task.logPath);
     }
     if (!text) {

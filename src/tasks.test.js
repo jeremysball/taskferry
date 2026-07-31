@@ -4522,6 +4522,35 @@ describe("tail()", () => {
     });
     assert.equal(mgr.tail("t1").text, "none observed yet");
   });
+
+  test("raw-capture fallback respects the chars suffix and reports truncation", () => {
+    const raw = "Error: " + "x".repeat(1500);
+    const mgr = makeManager({
+      tasksFixture: (logDir) => [baseTask({ id: "t1", status: "crashed", logPath: path.join(logDir, "t1.ndjson") })],
+      logs: { "t1.ndjson": raw + "\n" },
+    });
+    const r = mgr.tail("t1");
+    assert.equal(Array.from(r.text).length, 1000);
+    assert.equal(r.textTotalChars, raw.length);
+    assert.equal(r.truncated, true);
+  });
+
+  test("an eventless crashed task with an empty log keeps the none-observed response", () => {
+    const mgr = makeManager({
+      tasksFixture: (logDir) => [baseTask({ id: "t1", status: "crashed", logPath: path.join(logDir, "t1.ndjson") })],
+      logs: { "t1.ndjson": "" },
+    });
+    assert.equal(mgr.tail("t1").text, "none observed yet");
+  });
+
+  test("a watchdog-killed eventless task shows its raw capture (failureReason does not gate tail)", () => {
+    const raw = "Error: Extension \"/x/y.js\" blew up at load";
+    const mgr = makeManager({
+      tasksFixture: (logDir) => [baseTask({ id: "t1", status: "crashed", failureReason: "no_output_timeout", logPath: path.join(logDir, "t1.ndjson") })],
+      logs: { "t1.ndjson": raw + "\n" },
+    });
+    assert.equal(mgr.tail("t1").text, raw);
+  });
 });
 
 describe("summarize()", () => {
@@ -6389,5 +6418,86 @@ describe("boot-failure surfacing (exit non-zero with zero parseable events)", ()
     const r = mgr.result(dispatched.id, { fields: ["failureReason"] });
     assert.equal(r.status, "done");
     assert.equal(r.failureReason, null);
+  });
+
+  test("an event line larger than the 64KiB head window still blocks boot classification (whole-log gate)", () => {
+    const child = fakeChild(7306);
+    const mgr = makeManager({ spawnFn: () => child, killFn: () => {} });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), executor: "opencode" });
+    // A long answer is one NDJSON line; a head-only event scan sees a
+    // truncated fragment, fails JSON.parse, and would misclassify this
+    // working task as a boot crash.
+    const longAnswer = JSON.stringify({ type: "text", part: { messageID: "m1", text: "x".repeat(70 * 1024) } });
+    fs.writeFileSync(mgr.status(dispatched.id).logPath, longAnswer + "\n");
+    child.emit("exit", 1, null);
+    const r = mgr.result(dispatched.id, { fields: ["failureReason", "failureDetail"] });
+    assert.equal(r.failureReason, null);
+    assert.equal(r.failureDetail, null);
+  });
+
+  test("a log whose only content is one oversized raw line past the scan window yields no garbage detail", () => {
+    const child = fakeChild(7307);
+    const mgr = makeManager({ spawnFn: () => child, killFn: () => {} });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), executor: "opencode" });
+    fs.writeFileSync(mgr.status(dispatched.id).logPath, "Error: " + "x".repeat(70000) + "\n");
+    child.emit("exit", 1, null);
+    // The scan window starts mid-line; the partial first line is dropped
+    // rather than promoted to evidence, so nothing classifiable remains.
+    const r = mgr.result(dispatched.id, { fields: ["failureReason", "failureDetail"] });
+    assert.equal(r.failureReason, null);
+    assert.equal(r.failureDetail, null);
+  });
+
+  test("an oversized noise line before a real Error line still surfaces the real one", () => {
+    const child = fakeChild(7308);
+    const mgr = makeManager({ spawnFn: () => child, killFn: () => {} });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), executor: "opencode" });
+    fs.writeFileSync(mgr.status(dispatched.id).logPath, "w".repeat(70000) + "\n" + "Error: fatal baseUrl missing\n");
+    child.emit("exit", 1, null);
+    const r = mgr.result(dispatched.id, { fields: ["failureReason", "failureDetail"] });
+    assert.equal(r.failureReason, "boot_failure");
+    assert.equal(r.failureDetail, "Error: fatal baseUrl missing");
+  });
+
+  test("unparseable brace-starting stderr is evidence, not an event", () => {
+    const child = fakeChild(7309);
+    const mgr = makeManager({ spawnFn: () => child, killFn: () => {} });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), executor: "opencode" });
+    const dump = '{ provider: "x", error: "boom" }';
+    fs.writeFileSync(mgr.status(dispatched.id).logPath, dump + "\n");
+    child.emit("exit", 1, null);
+    const r = mgr.result(dispatched.id, { fields: ["failureReason", "failureDetail"] });
+    assert.equal(r.failureReason, "boot_failure");
+    assert.equal(r.failureDetail, dump);
+  });
+
+  test("a signal-killed eventless child is not classified as a boot failure", () => {
+    const child = fakeChild(7310);
+    const mgr = makeManager({ spawnFn: () => child, killFn: () => {} });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), executor: "opencode" });
+    fs.writeFileSync(mgr.status(dispatched.id).logPath, "Warning: something harmless\n");
+    child.emit("exit", null, "SIGKILL");
+    const s = mgr.status(dispatched.id);
+    assert.equal(s.status, "crashed");
+    assert.equal(s.failureReason, null, "an external kill is not a boot failure even during startup");
+  });
+
+  test("a watcher-set failureReason survives an eventless non-zero exit (gate does not clobber)", async () => {
+    const child = fakeChild(7311);
+    const killed = [];
+    const mgr = makeManager({
+      spawnFn: () => child,
+      killFn: (pid, signal) => killed.push({ pid, signal }),
+      noOutputTimeoutMs: 20,
+      watchdogPollMs: 5,
+    });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), executor: "opencode" });
+    fs.writeFileSync(mgr.status(dispatched.id).logPath, 'Error: Extension "/x/y.js" blew up at load\n');
+    await new Promise((r) => setTimeout(r, 60));
+    assert.ok(killed.some((k) => k.signal === "SIGTERM"), "watchdog must fire on the eventless silence");
+    // Graceful-trap exit: non-zero code after the watchdog already named
+    // the failure. The boot gate must leave the existing reason alone.
+    child.emit("exit", 1, null);
+    assert.equal(mgr.result(dispatched.id, { fields: ["failureReason"] }).failureReason, "no_output_timeout");
   });
 });

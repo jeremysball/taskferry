@@ -8,11 +8,20 @@
 
 **Tech Stack:** Node.js (no new runtime dependencies), `bwrap`/bubblewrap ≥ 0.8, `git`, `rsync` (non-git apply only), Node's built-in `node:test` + `node:assert/strict`.
 
-## Review findings (2026-07-30) — Needs fixes before continuing implementation
+## Review findings (2026-07-30): all 14 resolved, implementation complete
 
-An independent review (`minimax/MiniMax-M3` via taskferry, task `oc_ms6ybuxr_bc880930`) plus manual verification against this plan's actual code/text found the design **not ready to implement as written**. Verified findings below; two of the reviewer's original claims were checked and disproven (noted at the end) — don't reintroduce fixes for those.
+> **Status as of 2026-07-31: done.** Every task in this plan is implemented on
+> `worktree-cow-sandbox`, and all 14 accepted findings below are fixed. Each fix was
+> re-verified against the actual code on 2026-07-31, not just against this plan's own
+> resolution list. Gates on that branch: 729 unit tests passing, 3 real-`bwrap` 0.11.2
+> integration tests passing, `typecheck` exit 0, `eslint` 0 errors. Findings #7 and #10
+> are closed as documented limitations rather than code fixes; see the Resolutions block
+> below and `docs/security.md`. Nothing here is outstanding work. Read this section as
+> history explaining why the code looks the way it does.
 
-**Critical — architecture-level, must resolve before continuing past the current commits (Tasks 1-6 already implemented on `worktree-cow-sandbox`):**
+An independent review (`minimax/MiniMax-M3` via taskferry, task `oc_ms6ybuxr_bc880930`) plus manual verification against this plan's actual code/text found the design not ready to implement **as originally written**. Verified findings below; two of the reviewer's original claims were checked and disproven (noted at the end), so don't reintroduce fixes for those.
+
+**Critical, architecture-level (these blocked continuing past Tasks 1-6 at the time; all now resolved):**
 
 1. **Git-common-dir sub-overlays are lost at extraction.** Task 9's spawn path creates a separate overlay per git-common-dir slice (`overlayRwBinds`), but Task 10's `extractChangesetForTask()` hardcodes `overlayRwBinds: []` with a comment claiming they're "already merged into the main worker run" — they aren't persisted onto the task anywhere, so a worktree's `.git` metadata writes are invisible to the extracted diff.
 2. **Extraction silently swallows failures.** `extractGitDiff()`/`extractNonGitDiff()` never check `result.status`/`result.error` from the `bwrap` subprocess — they write whatever `stdout` came back and derive `hasChanges` from it alone. A crashed extraction (bad mount, timeout, `bwrap` failure) is indistinguishable from "no changes."
@@ -23,7 +32,7 @@ An independent review (`minimax/MiniMax-M3` via taskferry, task `oc_ms6ybuxr_bc8
 7. **Non-git accept can't survive a reboot.** `overlayTmpRoot` defaults to `os.tmpdir()` (typically a tmpfs, cleared on reboot). Non-git `accept()` needs the live overlay to rebuild its merged view for `rsync`; after a reboot a non-git pending changeset becomes unapplyable with no recovery path described.
 8. **Cancelled tasks never get their changeset extracted.** The exit handler only calls `extractChangesetForTask()` for `status === "done" || "crashed"`; `"cancelled"` is a distinct real status (`src/tasks.js:1892,1993`) that's excluded, contradicting the spec's "at process exit, for every task dispatched with an active overlay."
 
-**High — real but narrower:**
+**High, real but narrower (all now resolved):**
 
 9. `rsync -a --delete` (non-git apply) is not transactional; a mid-apply failure can partially mutate the real target with no rollback.
 10. `git add -A && git diff --cached <head>` misses gitignored-but-untracked worker writes, doesn't handle an unborn-HEAD target, and diffs against whatever the lower currently is — concurrent external edits to the lower during a dispatch can get folded into the cached patch and misattributed to the worker.

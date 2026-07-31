@@ -157,13 +157,22 @@ runs wrapped in
   - `TASKFERRY_STATE_DIR` (every task's NDJSON logs, including other tasks'
     prompt/tool output)
   - `~/.ssh`, `~/.aws`, `~/.config/gcloud`, `~/.config/gh`, `~/.gnupg`
+  - `~/.claude` — not a credential, but a global instructions/context file
+    (`CLAUDE.md`) with no legitimate reason to be readable by a worker;
+    OpenCode reads `CLAUDE.md` the same way it reads `AGENTS.md`, so without
+    this entry a worker's context (and therefore its output) silently picks
+    up the caller's personal instructions
 - **Read-write access** is then re-granted only for the task's own working
   directory and `TASKFERRY_RUNTIME_DIR` (needed so a nested/recursive
   dispatch from inside the sandbox can still reach the daemon socket at
   `<runtimeDir>/daemon.sock`).
-- **Deny-list is fixed** in this version — no config override. It covers
-  taskferry's own state dir plus the standard credential locations; a
-  config override can be added later if a real need surfaces.
+- **Deny-list has a fixed base plus an optional extension.** The paths above
+  are always denied; `sandboxDenylist` / `TASKFERRY_SANDBOX_DENYLIST` (see
+  `docs/config.md`) adds extra directories on top, merged with — not
+  replacing — the fixed base. Entries are directories only: a file mount
+  point (e.g. `~/.npmrc`, `~/.netrc`, `~/.git-credentials`) needs a
+  different bwrap mechanism (masking the file, not tmpfs-ing a directory)
+  and isn't covered by this list yet.
 - **Git worktrees get a scoped slice of their real gitdir bound read-write
   automatically.** A worktree's `.git` is just a pointer file to its actual
   gitdir under the main checkout's `.git/worktrees/<name>` — outside the

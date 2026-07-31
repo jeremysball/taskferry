@@ -480,6 +480,20 @@ export function parseEnvDenylist(spec) {
 }
 
 /**
+ * Parses a comma-separated list of extra sandbox deny-list paths, merged
+ * with {@link defaultDenyList} at every bwrap call site (see denyList
+ * assembly in dispatch launch, extractChangesetForTask, and
+ * summarizeTask). Same comma-list semantics as {@link parseAllowedDirs},
+ * kept under its own name for call-site clarity. Entries must be
+ * directories -- see the file-vs-directory note on {@link defaultDenyList}.
+ * @param {string|undefined} spec
+ * @returns {string[]}
+ */
+export function parseSandboxDenylist(spec) {
+  return parseAllowedDirs(spec);
+}
+
+/**
  * @param {string} directory
  * @param {string} candidate
  * @returns {boolean}
@@ -541,6 +555,9 @@ const DEFAULT_CANCEL_GRACE_MS = 5000;
  * @param {string[]} [options.envDenylist] - env var names stripped from every spawned child's
  *   environment, applied last (after the caller-env union), regardless of whether the value
  *   came from the daemon's own ambient environment or the caller.
+ * @param {string[]} [options.sandboxDenylist] - extra directories tmpfs-masked inside the bwrap
+ *   sandbox, merged with {@link defaultDenyList} at every call site. Directories only (see the
+ *   file-vs-directory note on {@link defaultDenyList}).
  * @param {string[]} [options.allowedDirs] - extra directories always bound read-write inside the sandbox,
  *   in addition to the auto-detected git-common-dir for a worktree dispatch directory.
  * @param {(directory: string) => string|null} [options.resolveGitCommonDirFn]
@@ -626,6 +643,7 @@ export function createTaskManager({
     : (/** @type {boolean|undefined} */ (config.sandboxEnabled) ?? true),
   allowedDirs = parseAllowedDirs(process.env.TASKFERRY_ALLOWED_DIRS ?? /** @type {string|undefined} */ (config.allowedDirs)),
   envDenylist = parseEnvDenylist(process.env.TASKFERRY_ENV_DENYLIST ?? /** @type {string|undefined} */ (config.envDenylist)),
+  sandboxDenylist = parseSandboxDenylist(process.env.TASKFERRY_SANDBOX_DENYLIST ?? /** @type {string|undefined} */ (config.sandboxDenylist)),
   overlayEnabled = process.env.TASKFERRY_DISABLE_OVERLAY !== undefined
     ? !["1", "true"].includes(process.env.TASKFERRY_DISABLE_OVERLAY)
     : (/** @type {boolean|undefined} */ (config.overlayEnabled) ?? true),
@@ -731,7 +749,7 @@ export function createTaskManager({
    */
   function extractChangesetForTask(finishedTask) {
     if (!finishedTask.overlayDirs) return;
-    const denyList = defaultDenyList(os.homedir(), stateDir).filter(existsFn);
+    const denyList = [...defaultDenyList(os.homedir(), stateDir), ...sandboxDenylist].filter(existsFn);
     const diffPath = path.join(stateDir, "diffs", `${finishedTask.id}.patch`);
     const isGitTarget = finishedTask.preDispatchHead != null;
     let extracted;
@@ -1915,7 +1933,7 @@ export function createTaskManager({
         // doesn't already exist under the --ro-bind / / root, so any
         // deny-list entry the user simply doesn't have (e.g. no ~/.aws) must
         // be dropped before it reaches buildBwrapArgs, not passed through.
-        const denyList = defaultDenyList(homeDir, stateDir).filter(existsFn);
+        const denyList = [...defaultDenyList(homeDir, stateDir), ...sandboxDenylist].filter(existsFn);
         // The executor decides which env var overrides point at its
         // sandboxed data home (opencode: XDG_DATA_HOME; pi:
         // PI_CODING_AGENT_DIR) and which destination to ro-bind the real
@@ -2483,7 +2501,7 @@ export function createTaskManager({
         `help: a non-git changeset cannot be re-applied without its overlay; use "taskferry result ${taskId} --diff" for the informational diff, then "taskferry reject ${taskId}" to clear the pending state`
       );
     }
-    const denyList = defaultDenyList(os.homedir(), stateDir).filter(existsFn);
+    const denyList = [...defaultDenyList(os.homedir(), stateDir), ...sandboxDenylist].filter(existsFn);
     const applied = applyChangeset({
       directory: task.directory,
       diffPath: task.diffPath,

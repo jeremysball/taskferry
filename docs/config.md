@@ -47,6 +47,7 @@ message — there is no silent typo tolerance.
 | `sandboxEnabled` | `TASKFERRY_DISABLE_SANDBOX` (inverted: `1`/`true` disables) | boolean | `true` |
 | `overlayEnabled` | `TASKFERRY_DISABLE_OVERLAY` (inverted: `1`/`true` disables) | boolean | `true` |
 | `allowedDirs` | `TASKFERRY_ALLOWED_DIRS` | string (comma-separated paths) | (none) |
+| `sandboxDenylist` | `TASKFERRY_SANDBOX_DENYLIST` | string (comma-separated paths) | (none) |
 | `waitDefaultTimeoutMs` | `TASKFERRY_WAIT_DEFAULT_TIMEOUT_MS` | number | `900000` (15 min); `0` disables via the env var only — a config-file value of `0` is ignored and falls back to the 15-minute default |
 | `cancelGraceMs` | `TASKFERRY_CANCEL_GRACE_MS` | number | `5000`; overridden per-call by `cancel --grace-ms` |
 | `defaultExecutor` | `TASKFERRY_DEFAULT_EXECUTOR` | string (`opencode` or `pi`) | `pi` |
@@ -55,6 +56,12 @@ message — there is no silent typo tolerance.
 flat list of env var names, always stripped from every spawned child
 regardless of whether the value came from the daemon's own ambient
 environment or a caller's forwarded env; see `docs/security.md`.
+
+`sandboxDenylist` uses the same comma-separated grammar as `allowedDirs` —
+extra directories tmpfs-masked inside the bwrap sandbox, merged with the
+fixed default deny-list (`~/.ssh`, `~/.aws`, `~/.config/gcloud`,
+`~/.config/gh`, `~/.gnupg`, `~/.claude`) rather than replacing it; see
+`docs/security.md`.
 
 ## Precedence
 

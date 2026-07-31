@@ -1,4 +1,4 @@
-import { test, describe, mock } from "node:test";
+import { test, describe, mock, after } from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { execFileSync } from "node:child_process";
@@ -23,6 +23,13 @@ function makeManager({ tasksFixture = [], logs = {}, spawnFn, killFn, listModels
   // tmpfs -- see resolveCacheDir), so give every test an isolated temp
   // cacheDir by default instead of falling through to the real ~/.cache.
   const defaultCacheDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-cache-"));
+  // createTaskManager() runs sweepOrphanedOverlays() synchronously at
+  // construction, scanning overlayTmpRoot for real "taskferry-cow-*" dirs --
+  // its default is the real os.tmpdir(). Without an isolated default here,
+  // any test that doesn't explicitly pass its own overlayTmpRoot ends up
+  // scanning (and acting on) whatever a real, concurrently-running daemon
+  // has actually left in /tmp on this host.
+  const defaultOverlayTmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-overlay-"));
 
   const fixtureTasks = typeof tasksFixture === "function" ? tasksFixture(logDir) : tasksFixture;
   fs.writeFileSync(path.join(stateDir, "tasks.json"), JSON.stringify(fixtureTasks, null, 2));
@@ -59,7 +66,7 @@ function makeManager({ tasksFixture = [], logs = {}, spawnFn, killFn, listModels
     ...(resolveGitDirFn != null ? { resolveGitDirFn } : {}),
     overlayEnabled,
     ...(checkOverlaySupportFn != null ? { checkOverlaySupportFn } : {}),
-    ...(overlayTmpRoot != null ? { overlayTmpRoot } : {}),
+    overlayTmpRoot: overlayTmpRoot ?? defaultOverlayTmpRoot,
     ...(runOverlayCommandFn != null ? { runOverlayCommandFn } : {}),
     ...(rmOverlayTreeFn != null ? { rmOverlayTreeFn } : {}),
   });
@@ -3297,12 +3304,29 @@ describe("cancel()", () => {
 });
 
 describe("accept()/reject()", () => {
-  // The fixture's overlay root lives under this host's actual tmpdir so
-  // cleanupOverlay's containment check (Task 7, review finding #12) accepts
-  // it -- a hardcoded /tmp path would fail that check on hosts where
-  // os.tmpdir() resolves elsewhere.
-  const fixtureTmpRoot = os.tmpdir();
+  // The fixture's overlay root lives under this host's actual tmpdir (not a
+  // hardcoded "/tmp", which would fail on hosts where os.tmpdir() resolves
+  // elsewhere) so cleanupOverlay's containment check (Task 7, review finding
+  // #12) accepts it. It's a dedicated mkdtemp'd subdirectory, not the bare
+  // os.tmpdir() itself -- the manager's startup sweepOrphanedOverlays() scans
+  // every task's overlayDirs.tmpRoot, and a fixture pointing straight at real
+  // os.tmpdir() made every test in this block scan (and act on) whatever a
+  // real, concurrently-running daemon actually has in /tmp (issue #253).
+  const fixtureTmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "axi-accept-reject-tmp-"));
   const fixtureRoot = path.join(fixtureTmpRoot, "taskferry-cow-t_pending");
+  // Each pendingTaskFixture() call writes a real .patch file to the host
+  // tmpdir; track them here and remove them once the whole suite finishes
+  // instead of leaking one per invocation (issue #253).
+  const createdDiffPaths = [];
+  after(() => {
+    for (const p of createdDiffPaths) {
+      try {
+        fs.unlinkSync(p);
+      } catch {
+        // already gone or never created -- nothing to clean up
+      }
+    }
+  });
   function pendingTaskFixture(overrides = {}) {
     // accept() now refuses to hand a missing diff file to git apply (Task 4
     // review finding #1), so the fixture must record a diffPath whose file
@@ -3311,6 +3335,7 @@ describe("accept()/reject()", () => {
     // fixture call keeps parallel tests from clobbering each other.
     const diffPath = path.join(os.tmpdir(), `taskferry-accept-diff-${process.pid}-${Math.random().toString(36).slice(2)}.patch`);
     fs.writeFileSync(diffPath, "diff --git a/x b/x\n");
+    createdDiffPaths.push(diffPath);
     return {
       ...baseTask({ id: "t_pending", status: "done" }),
       role: "dispatch",

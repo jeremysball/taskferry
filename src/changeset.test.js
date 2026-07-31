@@ -101,8 +101,8 @@ describe("extractNonGitDiff()", () => {
       writeFileFn: (filePath, content) => { written[filePath] = content; },
       mkdirFn: () => {},
     });
-    // diff -ru takes directory then mergedMountPoint positionally, so mergedMountPoint is last
-    assert.deepEqual(capturedArgs.slice(-4), ["diff", "-ru", "/workspace/repo", "/tmp/taskferry-cow-t1/merged"]);
+    // diff -ruN takes directory then mergedMountPoint positionally, so mergedMountPoint is last
+    assert.deepEqual(capturedArgs.slice(-4), ["diff", "-ruN", "/workspace/repo", "/tmp/taskferry-cow-t1/merged"]);
     assert.equal(capturedArgs.at(-1), "/tmp/taskferry-cow-t1/merged");
     assert.equal(result.hasChanges, true);
     assert.equal(written["/state/diffs/t1.patch"], "Only in /tmp/taskferry-cow-t1/merged: newfile.txt\n");

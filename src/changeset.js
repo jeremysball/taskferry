@@ -150,7 +150,9 @@ export function subOverlaySlug(targetPath) {
  * @param {string[]} params.denyList
  * @param {string} params.mergedMountPoint
  * @param {boolean} [params.writable] - also rw-bind directory itself, for the apply step (Task 7); omit for
- *   pure extraction, where directory only needs to stay readable via the standard root ro-bind.
+ *   pure extraction, where directory is bound read-only. The explicit bind (read-only or read-write)
+ *   is always needed because the earlier --tmpfs /tmp can shadow directory when directory (or an
+ *   ancestor) is under /tmp.
  * @returns {string[]}
  */
 export function buildMergedViewBwrapArgs({ directory, overlay, stateDir, runtimeDir, homeDir, denyList, mergedMountPoint, writable = false }) {
@@ -159,6 +161,7 @@ export function buildMergedViewBwrapArgs({ directory, overlay, stateDir, runtime
   args.push("--dir", mergedMountPoint);
   args.push("--overlay-src", directory, "--overlay", overlay.upperDir, overlay.workDir, mergedMountPoint);
   if (writable) args.push("--bind", directory, directory);
+  else args.push("--ro-bind", directory, directory);
   args.push("--bind", runtimeDir, runtimeDir);
   args.push("--unshare-all", "--unshare-net", "--die-with-parent");
   return args;
@@ -193,7 +196,11 @@ export function extractNonGitDiff({
 }) {
   const mergedMountPoint = path.join(overlay.root, "merged");
   const bwrapArgs = buildMergedViewBwrapArgs({ directory, overlay, stateDir, runtimeDir, homeDir, denyList, mergedMountPoint, writable: false });
-  const result = runCommand("bwrap", [...bwrapArgs, "--", "diff", "-ru", directory, mergedMountPoint]);
+  // -N (--new-file) treats files missing from one side as empty, so a file
+  // created inside the overlay shows its full content (a plain -ru would
+  // collapse it to a bare "Only in ... merged" line with no content, and
+  // the apply step would then lose the new file entirely).
+  const result = runCommand("bwrap", [...bwrapArgs, "--", "diff", "-ruN", directory, mergedMountPoint]);
   // diff exits 0 = identical, 1 = differences found (success for us), >=2 =
   // real trouble. A bwrap failure (bad mount, timeout, killed) must not be
   // indistinguishable from "no changes" -- throw on anything but 0/1 so the
@@ -263,8 +270,12 @@ export function applyChangeset({ directory, diffPath, isGitTarget, overlay, stat
  * on the target host: overlayfs's internal work/work scratch subdir comes
  * back mode 000, but a plain rm -rf from the same uid still removes it
  * (unlink authority comes from the parent directory's permissions, not the
- * child's own mode). No bwrap wrapper or elevated privilege is needed --
- * see ADR 0001's corrected "Namespace-owned leftovers" entry.
+ * child's own mode). The default rmFn shells out to a real rm -rf via
+ * spawnSync("rm", ["-rf", p]) because Node's fs.rmSync calls readdir()
+ * on every directory it walks (failing with EACCES on mode-000
+ * subdirectories), while a real rm -rf only needs write+execute on the
+ * parent. No bwrap wrapper or elevated privilege is needed -- see
+ * ADR 0001's corrected "Namespace-owned leftovers" entry.
  * @param {object} params
  * @param {string} params.root
  * @param {string} params.tmpRoot - the overlayTmpRoot the overlay was created under; removal is
@@ -274,7 +285,12 @@ export function applyChangeset({ directory, diffPath, isGitTarget, overlay, stat
  * @param {(path: string) => void} [params.rmFn]
  * @returns {{removed: boolean, reason: string|null}}
  */
-export function cleanupOverlay({ root, tmpRoot, rmFn = (p) => fs.rmSync(p, { recursive: true, force: true }) }) {
+export function cleanupOverlay({ root, tmpRoot, rmFn = (p) => {
+    const result = spawnSync("rm", ["-rf", p]);
+    if (result.status !== 0) {
+      throw new Error(`rm -rf ${p} failed: ${(result.stderr || "").toString().trim() || `exit ${result.status}`}`);
+    }
+  } }) {
   const resolved = path.resolve(root);
   if (!resolved.startsWith(path.resolve(tmpRoot) + path.sep) || !path.basename(resolved).startsWith("taskferry-cow-")) {
     return { removed: false, reason: `refusing to remove ${root}: not a taskferry-cow overlay under ${tmpRoot}` };

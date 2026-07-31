@@ -89,6 +89,22 @@ export function extractGitDiff({
   writeFileFn = (filePath, content) => fs.writeFileSync(filePath, content, { mode: 0o600 }),
   mkdirFn = (dirPath) => fs.mkdirSync(dirPath, { recursive: true, mode: 0o700 }),
 }) {
+  // Fail closed on HEAD drift: `directory` below is a live bind to the real
+  // checkout, not a snapshot from dispatch time. If something else (a manual
+  // checkout, a branch switch, another dispatch) moved that checkout's HEAD
+  // since preDispatchHead was recorded, the diff-cached-against-preDispatchHead
+  // script still runs successfully but compares the wrong trees -- it can
+  // report files as deleted/added that the worker never touched. Only refuse
+  // on a *confirmed* mismatch (both hashes resolved and differ); an
+  // inconclusive re-check (git failure, non-git target) falls through to
+  // extraction unchanged, matching prior behavior.
+  const currentHead = resolvePreDispatchHead(directory, runCommand);
+  if (currentHead !== null && currentHead !== preDispatchHead) {
+    throw new Error(
+      `error: ${directory}'s HEAD moved from '${preDispatchHead}' to '${currentHead}' since dispatch\n` +
+      `help: something else changed this directory's checkout while the task was in flight (a manual git checkout, a branch switch, or another process) -- diffing against the original HEAD would compare the wrong trees. Investigate what changed ${directory}, then retry against a stable target (a dedicated worktree avoids this)`
+    );
+  }
   const bwrapArgs = buildBwrapArgs({ directory, stateDir, runtimeDir, homeDir, denyList, overlay, overlayRwBinds, overlayRwFileBinds });
   // The final `exit $rc` propagates the diff's own status: the previous
   // `; git reset` tail made the whole script exit with reset's status, so a

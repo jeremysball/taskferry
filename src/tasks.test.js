@@ -1175,7 +1175,15 @@ describe("bwrap sandboxing", () => {
     assert.equal(captured.args[overlaySrcIndex + 1], gitCommonDir);
   });
 
-  test("shareNet is true (--share-net) for a plain dispatch and false (--unshare-net) for an advisor role", async () => {
+  test("shareNet stays true (--share-net) for both a plain dispatch and an advisor role", async () => {
+    // Regression: an advisor role previously passed shareNet: false
+    // (--unshare-net), which blocks ALL outbound network in the sandbox --
+    // not just the daemon socket -- so the worker CLI could never reach its
+    // model provider's API at all. It failed instantly (connection refused)
+    // or hung until the no-output watchdog killed it, depending on the
+    // executor. The daemon socket is protected by runtimeDirWritable: false
+    // instead (see the read-only-runtimeDir test below), which doesn't touch
+    // network access.
     let dispatchArgs = null;
     let advisorArgs = null;
     const mgr = makeManager({
@@ -1191,8 +1199,8 @@ describe("bwrap sandboxing", () => {
     assert.ok(!dispatchArgs.includes("--unshare-net"));
 
     await mgr.advisor({ prompt: "hello", directory: os.tmpdir(), model: "openai/gpt-5.6-sol" });
-    assert.ok(advisorArgs.includes("--unshare-net"));
-    assert.ok(!advisorArgs.includes("--share-net"));
+    assert.ok(advisorArgs.includes("--share-net"));
+    assert.ok(!advisorArgs.includes("--unshare-net"));
   });
 
   test("persists the git-common-dir sub-overlays onto the task record for extraction", () => {

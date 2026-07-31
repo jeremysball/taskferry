@@ -2046,7 +2046,6 @@ export function createTaskManager({
           extraRwPairBinds: executorRwPairBinds,
           extraRoBinds,
           ...(overlayInfo ? { overlay: { upperDir: overlayInfo.upperDir, workDir: overlayInfo.workDir }, overlayRwBinds, overlayRwFileBinds } : {}),
-          shareNet: role !== "advisor",
           runtimeDirWritable: role !== "advisor",
         }).concat(["--", executor.binaryName, ...args]);
         spawnEnv = { ...spawnEnv, ...sandboxEnv };

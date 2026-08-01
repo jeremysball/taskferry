@@ -1,14 +1,42 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { resolveWorkspaceRoot, TASKFERRY_PLUMBING_ENV_VARS } from "./paths.js";
+import path from "node:path";
+import { resolveWorkspaceRoot, resolveOverlayTmpRoot, TASKFERRY_PLUMBING_ENV_VARS } from "./paths.js";
 
 test("TASKFERRY_PLUMBING_ENV_VARS is a frozen array of the TASKFERRY_* plumbing names tasks.js excludes from caller-env forwarding", () => {
   assert.ok(Array.isArray(TASKFERRY_PLUMBING_ENV_VARS));
   assert.ok(Object.isFrozen(TASKFERRY_PLUMBING_ENV_VARS));
   assert.deepEqual(
     [...TASKFERRY_PLUMBING_ENV_VARS].sort(),
-    ["TASKFERRY_CACHE_DIR", "TASKFERRY_RUNTIME_DIR", "TASKFERRY_SOCKET_PATH", "TASKFERRY_STATE_DIR"],
-    "expected exactly the four TASKFERRY_* plumbing names, no more, no less"
+    ["TASKFERRY_CACHE_DIR", "TASKFERRY_OVERLAY_TMP_DIR", "TASKFERRY_RUNTIME_DIR", "TASKFERRY_SOCKET_PATH", "TASKFERRY_STATE_DIR"],
+    "expected exactly the five TASKFERRY_* plumbing names, no more, no less"
+  );
+});
+
+test("resolveOverlayTmpRoot() scopes the overlay dir under the given runtimeDir, not the shared os.tmpdir()", () => {
+  assert.equal(
+    resolveOverlayTmpRoot({ env: {}, runtimeDir: "/run/user/1000/taskferry" }),
+    path.join("/run/user/1000/taskferry", "overlay")
+  );
+});
+
+test("resolveOverlayTmpRoot() gives two differently-scoped runtimeDirs (e.g. two isolated daemon instances) distinct overlay namespaces", () => {
+  const a = resolveOverlayTmpRoot({ env: {}, runtimeDir: "/run/user/1000/taskferry-a" });
+  const b = resolveOverlayTmpRoot({ env: {}, runtimeDir: "/run/user/1000/taskferry-b" });
+  assert.notEqual(a, b);
+});
+
+test("resolveOverlayTmpRoot() honors an explicit TASKFERRY_OVERLAY_TMP_DIR override, ignoring runtimeDir", () => {
+  assert.equal(
+    resolveOverlayTmpRoot({ env: { TASKFERRY_OVERLAY_TMP_DIR: "/mnt/scratch/overlay" }, runtimeDir: "/run/user/1000/taskferry" }),
+    "/mnt/scratch/overlay"
+  );
+});
+
+test("resolveOverlayTmpRoot() derives runtimeDir from env when not given explicitly, mirroring resolveRuntimeDir()", () => {
+  assert.equal(
+    resolveOverlayTmpRoot({ env: { TASKFERRY_RUNTIME_DIR: "/run/user/1000/taskferry" } }),
+    path.join("/run/user/1000/taskferry", "overlay")
   );
 });
 

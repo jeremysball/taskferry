@@ -817,7 +817,9 @@ export function createTaskManager({
    */
   function sanitizedEnvironment(env = {}) {
     const callerEnv = env ?? {};
-    const merged = { ...process.env };
+    // Validate caller-supplied keys up front so bad input throws
+    // synchronously (same behavior as before: startTask() catches and
+    // surfaces as spawnError on a crashed task).
     for (const name of Object.keys(callerEnv)) {
       if (name === "" || name.includes("=")) {
         throw new Error(`error: invalid env key in caller-supplied env: ${JSON.stringify(name)}\nhelp: env keys must be non-empty strings without '=' characters`);
@@ -825,11 +827,24 @@ export function createTaskManager({
       if (typeof callerEnv[name] !== "string") {
         throw new Error(`error: env value for ${JSON.stringify(name)} must be a string, got ${typeof callerEnv[name]}\nhelp: cast values to strings before dispatching`);
       }
-      if (CALLER_ENV_EXCLUDED.has(name)) continue;
-      merged[name] = callerEnv[name];
     }
-    for (const name of envDenylist) delete merged[name];
-    return merged;
+    // Build the merged env in one pass instead of spreading all of
+    // process.env and then deleting denylisted keys.
+    const denySet = new Set(envDenylist);
+    const result = {};
+    for (const key of Object.keys(process.env)) {
+      if (!denySet.has(key)) {
+        result[key] = process.env[key];
+      }
+    }
+    // Overlay caller env: caller wins except for protected (excluded) and
+    // denylisted keys.
+    for (const key of Object.keys(callerEnv)) {
+      if (!CALLER_ENV_EXCLUDED.has(key) && !denySet.has(key)) {
+        result[key] = callerEnv[key];
+      }
+    }
+    return result;
   }
 
   /** @param {NodeJS.ProcessEnv} [env] @param {string} [taskId] */

@@ -578,6 +578,30 @@ export function isOutsideDirectory(directory, candidate) {
  */
 
 /**
+ * Resolves the executor's spawn args for a launch from the pre-parsed launch
+ * metadata, keeping `resolveStartTaskLaunch` itself flat. Every `isSummary`
+ * ternary mirrors the monolithic launch-wiring exactly: summary launches
+ * carry a snapshot path and no prompt file; dispatch launches carry a prompt
+ * and a variant, and thread the session id (falling back to null when the
+ * caller supplied none).
+ * @param {import("./executor.js").WorkerExecutor} executor
+ * @param {{isSummary: boolean, summaryLaunch: SummaryLaunch, dispatchLaunch: DispatchLaunch, launchDirectory: string, promptFilePath: string|null}} p
+ * @returns {string[]}
+ */
+function buildLaunchSpawnArgs(executor, { isSummary, summaryLaunch, dispatchLaunch, launchDirectory, promptFilePath }) {
+  return executor.buildSpawnArgs({
+    isSummary,
+    launchDirectory,
+    promptFilePath,
+    model: isSummary ? summaryLaunch.model : dispatchLaunch.model,
+    variant: isSummary ? undefined : dispatchLaunch.variant,
+    snapshotPath: isSummary ? summaryLaunch.snapshotPath : undefined,
+    prompt: isSummary ? "" : dispatchLaunch.prompt,
+    sessionId: isSummary ? summaryLaunch.summarySessionId ?? null : dispatchLaunch.sessionId ?? null,
+  });
+}
+
+/**
  * Resolves the per-launch metadata a dispatch needs before it can spawn:
  * which kind of launch this is (summary vs dispatch), the target directory,
  * whether the prompt must be routed through a prompt file to dodge the argv
@@ -602,31 +626,10 @@ function resolveStartTaskLaunch(task, launch, ctx) {
   const promptFilePath = !isSummary && Buffer.byteLength(dispatchLaunch.prompt, "utf8") > PROMPT_ARGV_SAFE_BYTES
     ? path.join(ctx.PROMPT_DIR, `${task.id}.prompt.txt`)
     : null;
-  const args = executor.buildSpawnArgs({
-    isSummary,
-    launchDirectory,
-    promptFilePath,
-    model: isSummary ? summaryLaunch.model : dispatchLaunch.model,
-    variant: isSummary ? undefined : dispatchLaunch.variant,
-    snapshotPath: isSummary ? summaryLaunch.snapshotPath : undefined,
-    prompt: isSummary ? "" : dispatchLaunch.prompt,
-    sessionId: isSummary ? summaryLaunch.summarySessionId ?? null : dispatchLaunch.sessionId ?? null,
-  });
+  const args = buildLaunchSpawnArgs(executor, { isSummary, summaryLaunch, dispatchLaunch, launchDirectory, promptFilePath });
   const cleanUpScratchFiles = () => {
-    if (isSummary && summaryLaunch.snapshotPath) {
-      try {
-        fs.unlinkSync(summaryLaunch.snapshotPath);
-      } catch (err) {
-        if (errCode(err) !== "ENOENT") throw err;
-      }
-    }
-    if (promptFilePath) {
-      try {
-        fs.unlinkSync(promptFilePath);
-      } catch (err) {
-        if (errCode(err) !== "ENOENT") throw err;
-      }
-    }
+    if (isSummary && summaryLaunch.snapshotPath) removeFileIfPresent(summaryLaunch.snapshotPath);
+    if (promptFilePath) removeFileIfPresent(promptFilePath);
   };
   return { isSummary, summaryLaunch, dispatchLaunch, executor, launchDirectory, promptFilePath, args, cleanUpScratchFiles };
 }
@@ -2282,6 +2285,359 @@ function collectFinalMessageLine(evt, textByMessageId, textOrder) {
   return null;
 }
 
+// sharing process-wide state with every other test or the real server.
+
+/**
+ * Loads the persisted task records from TASKS_FILE into the manager's live
+ * `tasks` map at boot, normalizing each record in place. Extracted out of
+ * `createTaskManager`'s `loadPersisted` closure. `setStateLoadError` writes
+ * back to the factory's `stateLoadError` binding on a non-ENOENT read
+ * failure, matching the original behavior of keeping a broken store from
+ * killing the daemon but making every subsequent state-dependent call fail
+ * loudly.
+ * @param {{TASKS_FILE: string, overlayTmpRoot: string, tasks: Map<string, Task>, taskEvents: {emitState: (task: Task, previousStatus?: string) => void}, setStateLoadError: (err: Error) => void}} ctx
+ */
+function loadPersistedTasks(ctx) {
+  try {
+    const raw = fs.readFileSync(ctx.TASKS_FILE, "utf8");
+    /** @type {Task[]} */
+    const persisted = JSON.parse(raw);
+    for (const t of persisted) loadPersistedTask(ctx, t);
+    fs.chmodSync(ctx.TASKS_FILE, 0o600);
+  } catch (err) {
+    if (errCode(err) !== "ENOENT") ctx.setStateLoadError(/** @type {Error} */ (err));
+  }
+}
+
+/**
+ * Normalizes and registers a single persisted task record. The pre-persistence
+ * normalization (realpath the directory, degrade running/queued to unknown,
+ * default the executor, backfill legacy tmpRoots) is unchanged from the
+ * original `loadPersisted` loop body.
+ * @param {{overlayTmpRoot: string, tasks: Map<string, Task>, taskEvents: {emitState: (task: Task, previousStatus?: string) => void}}} ctx
+ * @param {Task} t
+ */
+function loadPersistedTask(ctx, t) {
+  const previousStatus = t.status;
+  if (t.summaryOf) t.internal = true;
+  try {
+    t.directory = fs.realpathSync(t.directory);
+  } catch {
+    // A persisted task may outlive a workspace that has since been removed.
+  }
+  if (t.status === "running" || t.status === "queued") t.status = "unknown";
+  if (t.executorId === undefined) t.executorId = "opencode";
+  if (t.overlayDirs && t.overlayDirs.tmpRoot === undefined) t.overlayDirs.tmpRoot = ctx.overlayTmpRoot;
+  ctx.tasks.set(t.id, t);
+  if (t.status !== previousStatus) ctx.taskEvents.emitState(t, previousStatus);
+}
+
+/**
+ * Collects the set of overlay tmp roots that might contain orphans: the
+ * daemon's own overlayTmpRoot plus every root a live task record references.
+ * Mirrors the original sweep's root-gathering loop.
+ * @param {Map<string, Task>} tasks
+ * @param {string} overlayTmpRoot
+ * @returns {Set<string>}
+ */
+function collectOverlayTmpRoots(tasks, overlayTmpRoot) {
+  const tmpRoots = new Set([overlayTmpRoot]);
+  for (const task of tasks.values()) {
+    if (task.overlayDirs?.tmpRoot) tmpRoots.add(task.overlayDirs.tmpRoot);
+  }
+  return tmpRoots;
+}
+
+/**
+ * Sweeps every orphaned overlay directory under one tmp root. Extracted from
+ * `sweepOrphanedOverlays`' inner loop so each nesting level of the original
+ * double loop stays its own standalone helper.
+ * @param {{tasks: Map<string, Task>, releaseOverlay: (task: {overlayDirs?: {root: string, tmpRoot: string}|null}) => boolean, persistTask: (taskId: string) => void}} ctx
+ * @param {string} tmpRoot
+ */
+function sweepOverlayTmpRoot(ctx, tmpRoot) {
+  let entries;
+  try {
+    entries = fs.readdirSync(tmpRoot);
+  } catch {
+    return;
+  }
+  for (const entry of entries) sweepOverlayEntry(ctx, entry, tmpRoot);
+}
+
+/**
+ * Decides whether a single tmp-root entry is an orphaned overlay and cleans
+ * it up if so. A task whose changesetStatus is still "pending" owns its
+ * overlay and must never be swept; only unknown ids and already-resolved
+ * tasks with a leftover overlayDirs are orphans.
+ * @param {{tasks: Map<string, Task>, releaseOverlay: (task: {overlayDirs?: {root: string, tmpRoot: string}|null}) => boolean, persistTask: (taskId: string) => void}} ctx
+ * @param {string} entry
+ * @param {string} tmpRoot
+ */
+function sweepOverlayEntry(ctx, entry, tmpRoot) {
+  const taskId = entry.startsWith("taskferry-cow-") ? entry.slice("taskferry-cow-".length) : null;
+  const task = taskId ? ctx.tasks.get(taskId) : undefined;
+  const root = path.join(tmpRoot, entry);
+  const ownsThisOverlay = task?.overlayDirs?.root === root;
+  const isOwnedPending = ownsThisOverlay && task.changesetStatus === "pending";
+  if (!taskId || isOwnedPending) return;
+  const cleanupTarget = ownsThisOverlay ? task : { overlayDirs: { root, tmpRoot } };
+  const cleanupFailed = ctx.releaseOverlay(cleanupTarget);
+  if (!cleanupFailed && ownsThisOverlay) ctx.persistTask(taskId);
+}
+
+/**
+ * Builds the conditional extra fields for a summarized task (the optional
+ * fields the direct summarize path only includes when present). Extracted
+ * from `summarize`'s single return statement, which had accumulated eight
+ * conditional spreads and driven the function past the cyclomatic ceiling.
+ * @param {Task} task
+ */
+function summarizeOptionalFields(task) {
+  const { promptTotalChars, incomplete, finalMarker, executorId } = task;
+  return {
+    ...(promptTotalChars != null ? { promptTotalChars } : {}),
+    ...(task.summaryOf ? { summaryOf: task.summaryOf } : {}),
+    ...(incomplete === true ? { incomplete: true } : {}),
+    ...(finalMarker != null ? { finalMarker } : {}),
+    ...(executorId != null ? { executorId } : {}),
+    ...(task.overlayDirs != null ? { overlayDirs: task.overlayDirs } : {}),
+    ...(task.changesetError != null ? { changesetError: task.changesetError } : {}),
+  };
+}
+
+/**
+ * Builds the changeset-related conditional field of a summary: only an
+ * advisor, or a task whose changeset status is anything other than "none",
+ * carries the `role`/`changesetStatus` pair. Split out of
+ * `summarizeOptionalFields` because this spread's nested condition kept that
+ * helper's cyclomatic count one above the ceiling.
+ * @param {Task} task
+ */
+function summarizeChangesetFields(task) {
+  const { changesetStatus, role } = task;
+  return changesetStatus != null && (changesetStatus !== "none" || role === "advisor")
+    ? { role, changesetStatus }
+    : {};
+}
+
+/**
+ * Prunes launch-timestamps older than the dispatch window off the front of
+ * the tracking array, so the rate-limit accounting never counts launches
+ * from before the current window.
+ * @param {number[]} launchTimes
+ * @param {number} dispatchWindow
+ */
+function pruneStaleLaunchTimes(launchTimes, dispatchWindow) {
+  const now = Date.now();
+  while (launchTimes.length && launchTimes[0] <= now - dispatchWindow) launchTimes.shift();
+}
+
+/**
+ * Launches queued tasks while both the per-window dispatch limit and the
+ * concurrency limit have headroom. A task that vanished from `tasks` (or is
+ * no longer queued) is skipped but still consumed from the queue, matching
+ * the original loop.
+ * @param {{launchTimes: number[], launchQueue: string[], runningCount: number}} sched
+ * @param {{dispatchLimit: number, concurrencyLimit: number, tasks: Map<string, Task>, startTask: (task: Task) => void}} ctx
+ */
+function drainLaunchQueue(sched, ctx) {
+  while (sched.launchQueue.length && sched.launchTimes.length < ctx.dispatchLimit && sched.runningCount < ctx.concurrencyLimit) {
+    const id = /** @type {string} */ (sched.launchQueue.shift());
+    const task = ctx.tasks.get(id);
+    if (!task || task.status !== "queued") continue;
+    sched.launchTimes.push(Date.now());
+    ctx.startTask(task);
+  }
+}
+
+/**
+ * Arms the next launch tick when the queue is non-empty and no timer is
+ * already pending, backing off for the remaining dispatch-window rate delay
+ * or a fixed 250ms concurrency delay, whichever is longer.
+ * @param {{launchTimer: NodeJS.Timeout|null, launchTimes: number[], launchQueue: string[], runningCount: number}} sched
+ * @param {{dispatchLimit: number, dispatchWindow: number, concurrencyLimit: number, reschedule: () => void}} ctx
+ */
+function scheduleNextLaunch(sched, ctx) {
+  if (!sched.launchQueue.length || sched.launchTimer) return;
+  const rateDelay = sched.launchTimes.length >= ctx.dispatchLimit ? sched.launchTimes[0] + ctx.dispatchWindow - Date.now() : 0;
+  const concurrencyDelay = sched.runningCount >= ctx.concurrencyLimit ? 250 : 0;
+  sched.launchTimer = setTimeout(ctx.reschedule, Math.max(1, rateDelay, concurrencyDelay));
+}
+
+/**
+ * Runs one launch-queue tick: cancel any pending timer, prune stale window
+ * timestamps, drain as many queued tasks as the limits allow, then re-arm a
+ * timer if the queue still has work. Threads the factory's mutable scheduler
+ * state via `sched` so the module-level helpers can read/write `launchTimer`
+ * and `runningCount` without closing over the factory.
+ * @param {{launchTimer: NodeJS.Timeout|null, launchTimes: number[], launchQueue: string[], runningCount: number}} sched
+ * @param {{dispatchLimit: number, dispatchWindow: number, concurrencyLimit: number, tasks: Map<string, Task>, startTask: (task: Task) => void, reschedule: () => void}} ctx
+ */
+function runLaunchQueuedTasks(sched, ctx) {
+  if (sched.launchTimer) {
+    clearTimeout(sched.launchTimer);
+    sched.launchTimer = null;
+  }
+  pruneStaleLaunchTimes(sched.launchTimes, ctx.dispatchWindow);
+  drainLaunchQueue(sched, ctx);
+  scheduleNextLaunch(sched, ctx);
+}
+
+/**
+ * Validates that a task is in a state where its pending changeset can be
+ * accepted, throwing the same user-facing errors the original `accept` raised
+ * inline for each guard. Returns whether the target is a git target (i.e. has
+ * a persisted pre-dispatch head) so the caller can route the apply.
+ * @param {Task} task
+ * @param {{existsFn: (path: string) => boolean, hasLiveOverlay: (task: Task) => boolean}} ctx
+ * @returns {boolean}
+ */
+function validateAcceptable(task, ctx) {
+  if (task.role === "advisor") {
+    throw new Error(`error: task ${task.id} has role "advisor" and cannot be accepted\nhelp: use "taskferry result ${task.id} --diff" to inspect what it wrote -- advisor writes are never applied`);
+  }
+  if (task.changesetStatus !== "pending") {
+    throw new Error(`error: task ${task.id} has no pending changeset (changesetStatus: ${task.changesetStatus ?? "none"})\nhelp: only a task with changesetStatus "pending" can be accepted`);
+  }
+  if (task.diffPath == null) {
+    const overlayLocation = task.overlayDirs ? ` at ${task.overlayDirs.root}` : "";
+    throw new Error(
+      `error: task ${task.id}'s changeset was never extracted (${task.changesetError ?? "unknown reason"})\n` +
+      `help: the overlay was preserved${overlayLocation} -- inspect it there directly, or "taskferry reject ${task.id}" to discard it`
+    );
+  }
+  if (!ctx.existsFn(task.diffPath)) {
+    throw new Error(
+      `error: task ${task.id}'s diff file at ${task.diffPath} no longer exists\n` +
+      `help: the state directory may have been partially cleaned; a pending changeset cannot be applied without its diff. Use "taskferry reject ${task.id}" to discard the pending state, or restore the diff file at the recorded path before retrying.`
+    );
+  }
+  if (task.preDispatchHead == null && !ctx.hasLiveOverlay(task)) {
+    throw new Error(
+      `error: task ${task.id}'s overlay is gone (likely cleared by a reboot -- /tmp is a tmpfs)\n` +
+      `help: a non-git changeset cannot be re-applied without its overlay; use "taskferry result ${task.id} --diff" for the informational diff, then "taskferry reject ${task.id}" to clear the pending state`
+    );
+  }
+  return task.preDispatchHead != null;
+}
+
+/**
+ * Reads the bytes appended to a running task's log since the last watcher
+ * tick, updating the shared watch state (bytesRead/carry) and classifying any
+ * provider failure in the new chunk. Returns true when a provider failure was
+ * found and the task has already been failed (so the tick can bail before the
+ * no-output check). Extracted from the watchdog interval's body to keep the
+ * interval callback's complexity under the family's ceilings.
+ * @param {{bytesRead: number, carry: string, outputSeen: boolean, currentNoOutputTimeout: number, lastActivityMs: number}} state
+ * @param {Task} current
+ * @param {{failRunningTask: (task: Task, reason: string, detail?: string) => void, scheduleActivity: (task: Task) => Promise<unknown>, postOutputNoOutputTimeout: number}} ctx
+ * @returns {boolean}
+ */
+/**
+ * Classifies a freshly-read log chunk (plus the trailing carry line) into a
+ * provider failure and whether the chunk contained any parseable JSON line.
+ * The carry line is only classified on its own when the main lines yielded no
+ * failure and the carry isn't the head of a JSON object (which would be an
+ * in-progress line split across ticks).
+ * @param {string[]} lines
+ * @param {string} carry
+ * @param {string} errorBucketPrefix
+ * @returns {{failure: {bucket: string, detail: string}|null, hasParseableLine: boolean}}
+ */
+function resolveChunkProviderFailure(lines, carry, errorBucketPrefix) {
+  const linesResult = classifyProviderFailure(lines, errorBucketPrefix);
+  const carryResult = !linesResult.failure && carry && !carry.trimStart().startsWith("{")
+    ? classifyProviderFailure([carry], errorBucketPrefix)
+    : null;
+  return {
+    failure: linesResult.failure ?? carryResult?.failure ?? null,
+    hasParseableLine: linesResult.hasParseableLine,
+  };
+}
+
+/**
+ * Reads the bytes appended to a running task's log since the last watcher
+ * tick, updating the shared watch state (bytesRead/carry) and classifying any
+ * provider failure in the new chunk. Returns true when a provider failure was
+ * found and the task has already been failed (so the tick can bail before the
+ * no-output check). Extracted from the watchdog interval's body to keep the
+ * interval callback's complexity under the family's ceilings.
+ * @param {{bytesRead: number, carry: string, outputSeen: boolean, currentNoOutputTimeout: number, lastActivityMs: number}} state
+ * @param {Task} current
+ * @param {{failRunningTask: (task: Task, reason: string, detail?: string) => void, scheduleActivity: (task: Task) => Promise<unknown>, postOutputNoOutputTimeout: number}} ctx
+ * @returns {boolean}
+ */
+function consumeWatchdogLogChunk(state, current, ctx) {
+  let size;
+  try {
+    size = fs.statSync(current.logPath).size;
+  } catch {
+    return false;
+  }
+  if (size < state.bytesRead) {
+    // Log shrank or was replaced out from under us; rescan from scratch.
+    state.bytesRead = 0;
+    state.carry = "";
+  }
+  if (size <= state.bytesRead) return false;
+  const chunkSize = size - state.bytesRead;
+  const buf = Buffer.alloc(chunkSize);
+  const fd = fs.openSync(current.logPath, "r");
+  try {
+    fs.readSync(fd, buf, 0, chunkSize, state.bytesRead);
+  } finally {
+    fs.closeSync(fd);
+  }
+  state.bytesRead = size;
+  const text = state.carry + buf.toString("utf8");
+  const lines = text.split("\n");
+  state.carry = lines.pop() ?? "";
+  const { failure, hasParseableLine } = resolveChunkProviderFailure(
+    lines,
+    state.carry,
+    resolveExecutor(current.executorId).errorBucketPrefix
+  );
+  if (failure) {
+    ctx.failRunningTask(current, failure.bucket, failure.detail);
+    return true;
+  }
+  if (hasParseableLine) {
+    state.lastActivityMs = Date.now();
+    if (!state.outputSeen) {
+      state.outputSeen = true;
+      state.currentNoOutputTimeout = ctx.postOutputNoOutputTimeout;
+    }
+  }
+  void ctx.scheduleActivity(current);
+  return false;
+}
+
+/**
+ * One watchdog tick: re-read the current task, and if it's no longer running
+ * tear the watcher down; otherwise consume any new log bytes (failing the
+ * task on a provider failure) and enforce the no-output timeout. Errors from
+ * log reads (rotated/removed log) are swallowed and retried next tick.
+ * @param {{bytesRead: number, carry: string, outputSeen: boolean, currentNoOutputTimeout: number, lastActivityMs: number}} state
+ * @param {{taskId: string, tasks: Map<string, Task>, stopRunningWatcher: (taskId: string) => void, failRunningTask: (task: Task, reason: string, detail?: string) => void, scheduleActivity: (task: Task) => Promise<unknown>, postOutputNoOutputTimeout: number}} ctx
+ */
+function watchdogTick(state, ctx) {
+  const current = ctx.tasks.get(ctx.taskId);
+  if (!current || current.status !== "running") {
+    ctx.stopRunningWatcher(ctx.taskId);
+    return;
+  }
+  try {
+    if (consumeWatchdogLogChunk(state, current, ctx)) return;
+  } catch {
+    // A rotated or removed log is retried on the next watcher tick.
+  }
+  if (Date.now() - state.lastActivityMs >= state.currentNoOutputTimeout) {
+    ctx.failRunningTask(current, "no_output_timeout", `no output for ${state.currentNoOutputTimeout}ms (${state.outputSeen ? "post-output" : "pre-output"} timeout)`);
+  }
+}
+
+
 /**
  * @param {object} [options]
  * @param {typeof spawn} [options.spawnFn]
@@ -2339,7 +2695,8 @@ function collectFinalMessageLine(evt, textByMessageId, textOrder) {
 // Factory rather than a module-level singleton, so tests can construct an
 // isolated instance with an injected spawnFn/killFn (no real `opencode`
 // process, no real OS signals) and its own state directory, instead of
-// sharing process-wide state with every other test or the real server.
+
+
 export function createTaskManager({
   spawnFn = spawn,
   killFn = (pid, signal) => process.kill(pid, signal),
@@ -2670,6 +3027,17 @@ export function createTaskManager({
   /** @type {NodeJS.Timeout|null} */
   let launchTimer = null;
   let runningCount = 0;
+  // Mutable scheduler state handed to the module-level launch helpers. The
+  // getter/setter pair lets the helpers read/write `launchTimer` and
+  // `runningCount` (the factory's own `let` bindings) without closing over
+  // the factory, while `launchTimes`/`launchQueue` are shared by reference.
+  const launchScheduler = {
+    launchTimes,
+    launchQueue,
+    get runningCount() { return runningCount; },
+    get launchTimer() { return launchTimer; },
+    set launchTimer(v) { launchTimer = v; },
+  };
   // Per-caller cache of provider model listings: keyed by a fingerprint of
   // the caller env's model-relevant vars (provider API keys, opencode
   // config-path overrides, pi agent dir), not by time alone. Two callers
@@ -2750,35 +3118,15 @@ export function createTaskManager({
     });
   }
 
-  function loadPersisted() {
-    try {
-      const raw = fs.readFileSync(TASKS_FILE, "utf8");
-      /** @type {Task[]} */
-      const persisted = JSON.parse(raw);
-      for (const t of persisted) {
-        const previousStatus = t.status;
-        if (t.summaryOf) t.internal = true;
-        try {
-          t.directory = fs.realpathSync(t.directory);
-        } catch {
-          // A persisted task may outlive a workspace that has since been removed.
-        }
-        if (t.status === "running" || t.status === "queued") t.status = "unknown";
-        if (t.executorId === undefined) t.executorId = "opencode";
-        // Legacy records predate creation-time tmpRoot persistence. Keep their
-        // prior live-root cleanup behavior rather than letting releaseOverlay
-        // pass undefined into the containment guard; newly-created overlays
-        // always carry the exact root that was in effect at creation.
-        if (t.overlayDirs && t.overlayDirs.tmpRoot === undefined) t.overlayDirs.tmpRoot = overlayTmpRoot;
-        tasks.set(t.id, t);
-        if (t.status !== previousStatus) taskEvents.emitState(t, previousStatus);
-      }
-      fs.chmodSync(TASKS_FILE, 0o600);
-    } catch (err) {
-      if (errCode(err) !== "ENOENT") stateLoadError = /** @type {Error} */ (err);
-    }
-  }
-  loadPersisted();
+  loadPersistedTasks({
+    TASKS_FILE,
+    overlayTmpRoot,
+    tasks,
+    taskEvents,
+    setStateLoadError: (err) => {
+      stateLoadError = err;
+    },
+  });
 
   // Scrub prompt scratch files left behind by a daemon crash or forced
   // restart. Each oversized dispatch writes its prompt to PROMPT_DIR as
@@ -2816,30 +3164,9 @@ export function createTaskManager({
   // overlayDirs (their own cleanupOverlay() call crashed mid-removal) are
   // orphans.
   function sweepOrphanedOverlays() {
-    const tmpRoots = new Set([overlayTmpRoot]);
-    for (const task of tasks.values()) {
-      if (task.overlayDirs?.tmpRoot) tmpRoots.add(task.overlayDirs.tmpRoot);
-    }
+    const tmpRoots = collectOverlayTmpRoots(tasks, overlayTmpRoot);
     for (const tmpRoot of tmpRoots) {
-      let entries;
-      try {
-        entries = fs.readdirSync(tmpRoot);
-      } catch {
-        continue;
-      }
-      for (const entry of entries) {
-        const taskId = entry.startsWith("taskferry-cow-") ? entry.slice("taskferry-cow-".length) : null;
-        const task = taskId ? tasks.get(taskId) : undefined;
-        const root = path.join(tmpRoot, entry);
-        const ownsThisOverlay = task?.overlayDirs?.root === root;
-        const isOwnedPending = ownsThisOverlay && task.changesetStatus === "pending";
-        if (!taskId || isOwnedPending) continue;
-        const cleanupTarget = ownsThisOverlay
-          ? task
-          : { overlayDirs: { root, tmpRoot } };
-        const cleanupFailed = releaseOverlay(cleanupTarget);
-        if (!cleanupFailed && ownsThisOverlay) persistTask(taskId);
-      }
+      sweepOverlayTmpRoot({ tasks, releaseOverlay, persistTask }, tmpRoot);
     }
   }
   sweepOrphanedOverlays();
@@ -2900,20 +3227,14 @@ export function createTaskManager({
    * @returns {TaskSummary}
    */
   function summarize(task) {
-    const { promptPreview, promptTotalChars, id, status, directory, model, sessionId, originSessionId, pid, startedAt, endedAt, exitCode, signal, logPath, cancelRequested, incomplete, finalMarker, spawnError, executorId, role, changesetStatus } = task;
+    const { promptPreview, id, status, directory, model, sessionId, originSessionId, pid, startedAt, endedAt, exitCode, signal, logPath, cancelRequested, spawnError } = task;
     return {
       id, status, directory, model, sessionId, originSessionId, pid, startedAt, endedAt, exitCode, signal, logPath,
       ...failureFields(task),
       spawnError: spawnError ?? null,
       promptPreview,
-      ...(promptTotalChars != null ? { promptTotalChars } : {}),
-      ...(task.summaryOf ? { summaryOf: task.summaryOf } : {}),
-      ...(incomplete === true ? { incomplete: true } : {}),
-      ...(finalMarker != null ? { finalMarker } : {}),
-      ...(executorId != null ? { executorId } : {}),
-      ...(changesetStatus != null && (changesetStatus !== "none" || role === "advisor") ? { role, changesetStatus } : {}),
-      ...(task.overlayDirs != null ? { overlayDirs: task.overlayDirs } : {}),
-      ...(task.changesetError != null ? { changesetError: task.changesetError } : {}),
+      ...summarizeOptionalFields(task),
+      ...summarizeChangesetFields(task),
       cancelRequested: !!cancelRequested,
     };
   }
@@ -3292,26 +3613,14 @@ export function createTaskManager({
   }
 
   function launchQueuedTasks() {
-    if (launchTimer) {
-      clearTimeout(launchTimer);
-      launchTimer = null;
-    }
-    const now = Date.now();
-    while (launchTimes.length && launchTimes[0] <= now - dispatchWindow) launchTimes.shift();
-
-    while (launchQueue.length && launchTimes.length < dispatchLimit && runningCount < concurrencyLimit) {
-      const id = /** @type {string} */ (launchQueue.shift());
-      const task = tasks.get(id);
-      if (!task || task.status !== "queued") continue;
-      launchTimes.push(Date.now());
-      startTask(task);
-    }
-
-    if (launchQueue.length && !launchTimer) {
-      const rateDelay = launchTimes.length >= dispatchLimit ? launchTimes[0] + dispatchWindow - Date.now() : 0;
-      const concurrencyDelay = runningCount >= concurrencyLimit ? 250 : 0;
-      launchTimer = setTimeout(launchQueuedTasks, Math.max(1, rateDelay, concurrencyDelay));
-    }
+    runLaunchQueuedTasks(launchScheduler, {
+      dispatchLimit,
+      dispatchWindow,
+      concurrencyLimit,
+      tasks,
+      startTask,
+      reschedule: launchQueuedTasks,
+    });
   }
 
   /** @param {Task} task */
@@ -3444,45 +3753,7 @@ export function createTaskManager({
     ensureStateLoaded();
     const task = tasks.get(taskId);
     if (!task) throw noSuchTask(taskId);
-    if (task.role === "advisor") {
-      throw new Error(`error: task ${taskId} has role "advisor" and cannot be accepted\nhelp: use "taskferry result ${taskId} --diff" to inspect what it wrote -- advisor writes are never applied`);
-    }
-    if (task.changesetStatus !== "pending") {
-      throw new Error(`error: task ${taskId} has no pending changeset (changesetStatus: ${task.changesetStatus ?? "none"})\nhelp: only a task with changesetStatus "pending" can be accepted`);
-    }
-    if (task.diffPath == null) {
-      // The extraction at settlement failed (Task 10 records why in
-      // changesetError); there is no patch to apply, but the overlay was
-      // deliberately kept so the changes remain recoverable.
-      const overlayLocation = task.overlayDirs ? ` at ${task.overlayDirs.root}` : "";
-      throw new Error(
-        `error: task ${taskId}'s changeset was never extracted (${task.changesetError ?? "unknown reason"})\n` +
-        `help: the overlay was preserved${overlayLocation} -- inspect it there directly, or "taskferry reject ${taskId}" to discard it`
-      );
-    }
-    // The diff file lives under stateDir; a partial cleanup (or a tampered
-    // tasks.json) can leave a recorded diffPath whose file is gone. Fail
-    // with a clear error instead of letting git apply surface its own
-    // misleading "can't open patch" message against a path the user has no
-    // reason to suspect.
-    if (!existsFn(task.diffPath)) {
-      throw new Error(
-        `error: task ${taskId}'s diff file at ${task.diffPath} no longer exists\n` +
-        `help: the state directory may have been partially cleaned; a pending changeset cannot be applied without its diff. Use "taskferry reject ${taskId}" to discard the pending state, or restore the diff file at the recorded path before retrying.`
-      );
-    }
-    const isGitTarget = task.preDispatchHead != null;
-    if (!isGitTarget && !hasLiveOverlay(task)) {
-      // Review finding #7: a non-git accept must rebuild the merged view from
-      // the live overlay to rsync it; /tmp being a tmpfs, a reboot clears it.
-      // Fail loudly (fail-fast, never pretend to apply nothing) rather than
-      // rsyncing a missing tree. A git target's patch is persisted under
-      // stateDir and survives reboots, so this check is non-git only.
-      throw new Error(
-        `error: task ${taskId}'s overlay is gone (likely cleared by a reboot -- /tmp is a tmpfs)\n` +
-        `help: a non-git changeset cannot be re-applied without its overlay; use "taskferry result ${taskId} --diff" for the informational diff, then "taskferry reject ${taskId}" to clear the pending state`
-      );
-    }
+    const isGitTarget = validateAcceptable(task, { existsFn, hasLiveOverlay });
     const denyList = defaultDenyList(os.homedir(), stateDir).filter(existsFn);
     const applied = applyChangeset({
       isGitTarget,
@@ -3490,13 +3761,17 @@ export function createTaskManager({
       runtimeDir,
       denyList,
       directory: task.directory,
-      diffPath: task.diffPath,
+      // validateAcceptable() threw above if diffPath were null, but that
+      // narrowing lives inside the helper, so assert the invariant here.
+      diffPath: /** @type {string} */ (task.diffPath),
       overlay: task.overlayDirs ?? undefined,
       homeDir: os.homedir(),
       runCommand: runOverlayCommandFn,
     });
     if (!applied.applied) {
-      return { taskId, changesetStatus: task.changesetStatus, applied: false, reason: applied.reason };
+      // validateAcceptable() threw above if changesetStatus weren't pending,
+      // so it is non-undefined here; assert it for the type checker.
+      return { taskId, changesetStatus: /** @type {string} */ (task.changesetStatus), applied: false, reason: applied.reason };
     }
     task.changesetStatus = "accepted";
     // Persist before cleanup: a crash between apply and persist would leave
@@ -3634,15 +3909,23 @@ export function createTaskManager({
 
   /** @param {Task} task */
   function startRunningWatcher(task) {
-    let lastActivityMs = Date.now();
-    // Tracks how much of the log this watcher has already scanned, so each
-    // tick reads and regexes only the bytes appended since the last one
-    // instead of the whole file (O(1) amortized per tick, not O(n) per tick
-    // / O(n²) over a long-running task). `carry` holds a trailing partial
-    // line from the previous read until it's completed by the next chunk.
-    let bytesRead = 0;
-    let carry = "";
-    runningWatcherState.set(task.id, { get bytesRead() { return bytesRead; }, get carry() { return carry; } });
+    // Mutable per-task watch state threaded into the module-level watchdog
+    // helpers so each tick reads and regexes only the bytes appended since
+    // the last one instead of the whole file (O(1) amortized per tick, not
+    // O(n) per tick / O(n²) over a long-running task). `carry` holds a
+    // trailing partial line from the previous read until it's completed by
+    // the next chunk.
+    const watchState = {
+      bytesRead: 0,
+      carry: "",
+      outputSeen: false,
+      currentNoOutputTimeout: noOutputTimeout,
+      lastActivityMs: Date.now(),
+    };
+    runningWatcherState.set(task.id, {
+      get bytesRead() { return watchState.bytesRead; },
+      get carry() { return watchState.carry; },
+    });
     // Two-phase no-output budget:
     //   - Before the task has produced any parseable log event, the watcher
     //     compares against `noOutputTimeout`. A task that is silent from the
@@ -3654,62 +3937,15 @@ export function createTaskManager({
     //     Silence after real work is far more likely a long generation
     //     (opencode writes step-level events, not token deltas, so a long
     //     final answer can produce zero log lines for minutes) than a hang.
-    let outputSeen = false;
-    let currentNoOutputTimeout = noOutputTimeout;
     const timer = setInterval(() => {
-      const current = tasks.get(task.id);
-      if (!current || current.status !== "running") {
-        stopRunningWatcher(task.id);
-        return;
-      }
-      try {
-        const size = fs.statSync(current.logPath).size;
-        if (size < bytesRead) {
-          // Log shrank or was replaced out from under us; rescan from scratch.
-          bytesRead = 0;
-          carry = "";
-        }
-        if (size > bytesRead) {
-          const chunkSize = size - bytesRead;
-          const buf = Buffer.alloc(chunkSize);
-          const fd = fs.openSync(current.logPath, "r");
-          try {
-            fs.readSync(fd, buf, 0, chunkSize, bytesRead);
-          } finally {
-            fs.closeSync(fd);
-          }
-          bytesRead = size;
-          const text = carry + buf.toString("utf8");
-          const lines = text.split("\n");
-          carry = lines.pop() ?? "";
-          const errorBucketPrefix = resolveExecutor(current.executorId).errorBucketPrefix;
-          const linesResult = classifyProviderFailure(lines, errorBucketPrefix);
-          const carryResult = !linesResult.failure && carry && !carry.trimStart().startsWith("{")
-            ? classifyProviderFailure([carry], errorBucketPrefix)
-            : null;
-          const providerFailure = linesResult.failure ?? carryResult?.failure ?? null;
-          if (providerFailure) {
-            failRunningTask(current, providerFailure.bucket, providerFailure.detail);
-            return;
-          }
-          // Latch the budget escalation: once any parseable JSON line has
-          // landed for this task, every subsequent tick compares against
-          // `postOutputNoOutputTimeout` regardless of how much later silence
-          // follows. This is the only assignment to either flag/variable
-          // outside their initializers, so the latch is unconditional.
-          if (linesResult.hasParseableLine) lastActivityMs = Date.now();
-          if (linesResult.hasParseableLine && !outputSeen) {
-            outputSeen = true;
-            currentNoOutputTimeout = postOutputNoOutputTimeout;
-          }
-          void scheduleActivity(current);
-        }
-      } catch {
-        // A rotated or removed log is retried on the next watcher tick.
-      }
-      if (Date.now() - lastActivityMs >= currentNoOutputTimeout) {
-        failRunningTask(current, "no_output_timeout", `no output for ${currentNoOutputTimeout}ms (${outputSeen ? "post-output" : "pre-output"} timeout)`);
-      }
+      watchdogTick(watchState, {
+        taskId: task.id,
+        tasks,
+        stopRunningWatcher,
+        failRunningTask,
+        scheduleActivity,
+        postOutputNoOutputTimeout,
+      });
     }, watchdogPoll);
     // Same as child.unref() in startTask: the watchdog is a background
     // observer, not something that should pin the server's event loop alive.

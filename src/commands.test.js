@@ -4,6 +4,40 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { runCommand } from "./commands.js";
+const TMP_PREFIX = "taskferry-commands-test-";
+const DOCTOR_HOME_PREFIX = "taskferry-doctor-home-";
+const TASK_STATE = "task.state";
+const TASK_STATUS = "task.status";
+const STARTED_AT = "2026-07-17T00:00:00.000Z";
+const PROJECT_DIR = "/workspace/project";
+const CLAUDE_PLUGIN_ID = "taskferry@taskferry";
+const PLAYWRIGHT_MCP = "@anthropic/mcp-server-playwright";
+
+function makeTmp() {
+  return fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), TMP_PREFIX)));
+}
+
+function makeDoctorHome(t) {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), DOCTOR_HOME_PREFIX));
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  return home;
+}
+
+function makeHealthClient() {
+  const client = fakeClient();
+  client.request = async (method) => {
+    if (method === "system.health") return { healthy: true, pid: 1 };
+    throw new Error(`unexpected request: ${method}`);
+  };
+  return client;
+}
+
+const okRunShellCommand = () => ({
+  status: 0,
+  stdout: JSON.stringify([{ id: CLAUDE_PLUGIN_ID }]),
+  stderr: "",
+});
+
 
 function fakeIo({ isTTY } = {}) {
   const stdout = [];
@@ -28,7 +62,7 @@ function fakeClient({ onSubscribe } = {}) {
 }
 
 test("watch prints each event through formatWatchEvent and resolves on abort", async () => {
-  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-commands-test-")));
+  const root = makeTmp();
   const controller = new AbortController();
   let deliver;
   const client = fakeClient({
@@ -45,7 +79,7 @@ test("watch prints each event through formatWatchEvent and resolves on abort", a
     cwd: root,
   });
 
-  deliver({ sequence: 1, type: "task.state", taskId: "oc_1", directory: root, status: "running" });
+  deliver({ sequence: 1, type: TASK_STATE, taskId: "oc_1", directory: root, status: "running" });
   controller.abort();
   const result = await pending;
 
@@ -56,7 +90,7 @@ test("watch prints each event through formatWatchEvent and resolves on abort", a
 });
 
 test("watch colors the status only when stdout is a TTY", async () => {
-  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-commands-test-")));
+  const root = makeTmp();
   const controller = new AbortController();
   let deliver;
   const client = fakeClient({
@@ -73,7 +107,7 @@ test("watch colors the status only when stdout is a TTY", async () => {
     cwd: root,
   });
 
-  deliver({ sequence: 1, type: "task.state", taskId: "oc_1", directory: root, status: "done", previousStatus: "running" });
+  deliver({ sequence: 1, type: TASK_STATE, taskId: "oc_1", directory: root, status: "done", previousStatus: "running" });
   controller.abort();
   await pending;
 
@@ -81,7 +115,7 @@ test("watch colors the status only when stdout is a TTY", async () => {
 });
 
 test("watch never colors ndjson output even when stdout is a TTY", async () => {
-  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-commands-test-")));
+  const root = makeTmp();
   const controller = new AbortController();
   let deliver;
   const client = fakeClient({
@@ -98,7 +132,7 @@ test("watch never colors ndjson output even when stdout is a TTY", async () => {
     cwd: root,
   });
 
-  deliver({ sequence: 1, type: "task.state", taskId: "oc_1", directory: root, status: "done", previousStatus: "running" });
+  deliver({ sequence: 1, type: TASK_STATE, taskId: "oc_1", directory: root, status: "done", previousStatus: "running" });
   controller.abort();
   await pending;
 
@@ -106,7 +140,7 @@ test("watch never colors ndjson output even when stdout is a TTY", async () => {
 });
 
 test("watch collapses a multi-line activity event to exactly one written line", async () => {
-  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-commands-test-")));
+  const root = makeTmp();
   const controller = new AbortController();
   let deliver;
   const client = fakeClient({
@@ -141,7 +175,7 @@ test("watch collapses a multi-line activity event to exactly one written line", 
 });
 
 test("watch --task-id filters events to one task and exits on its terminal event", async () => {
-  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-commands-test-")));
+  const root = makeTmp();
   let deliver;
   const client = fakeClient({
     onSubscribe: (_params, onEvent) => {
@@ -156,9 +190,9 @@ test("watch --task-id filters events to one task and exits on its terminal event
     cwd: root,
   });
 
-  deliver({ sequence: 1, type: "task.state", taskId: "oc_2", directory: root, status: "running" });
-  deliver({ sequence: 2, type: "task.state", taskId: "oc_1", directory: root, status: "running" });
-  deliver({ sequence: 3, type: "task.state", taskId: "oc_1", directory: root, status: "done" });
+  deliver({ sequence: 1, type: TASK_STATE, taskId: "oc_2", directory: root, status: "running" });
+  deliver({ sequence: 2, type: TASK_STATE, taskId: "oc_1", directory: root, status: "running" });
+  deliver({ sequence: 3, type: TASK_STATE, taskId: "oc_1", directory: root, status: "done" });
 
   const result = await pending;
   assert.equal(result.watching, false);
@@ -170,8 +204,8 @@ test("watch --task-id filters events to one task and exits on its terminal event
 });
 
 test("watch --task-id subscribes by taskId directly, without a task.status pre-fetch round-trip (issue #59)", async () => {
-  const fromTask = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-commands-test-")));
-  const elsewhere = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-commands-test-")));
+  const fromTask = makeTmp();
+  const elsewhere = makeTmp();
   let deliver;
   const client = fakeClient({
     onSubscribe: (params, onEvent) => {
@@ -181,13 +215,13 @@ test("watch --task-id subscribes by taskId directly, without a task.status pre-f
     },
   });
   client.request = async (method, params) => {
-    assert.equal(method, "task.status", "the only allowed request is the already-terminal catch-up check, not a directory pre-fetch");
+    assert.equal(method, TASK_STATUS, "the only allowed request is the already-terminal catch-up check, not a directory pre-fetch");
     assert.equal(params.taskId, "oc_9");
     return { directory: fromTask, status: "running" };
   };
   const io = fakeIo();
 
-  const pending = runCommand("watch", { directory: undefined, format: "toon", summaries: false, taskId: "oc_9" }, {
+  const pending = runCommand("watch", { format: "toon", summaries: false, taskId: "oc_9" }, {
     client,
     io,
     cwd: elsewhere,
@@ -195,7 +229,7 @@ test("watch --task-id subscribes by taskId directly, without a task.status pre-f
 
   await new Promise((resolve) => setImmediate(resolve));
 
-  deliver({ sequence: 1, type: "task.state", taskId: "oc_9", directory: fromTask, status: "crashed" });
+  deliver({ sequence: 1, type: TASK_STATE, taskId: "oc_9", directory: fromTask, status: "crashed" });
   const result = await pending;
 
   assert.equal(result.event.status, "crashed");
@@ -204,7 +238,7 @@ test("watch --task-id subscribes by taskId directly, without a task.status pre-f
 });
 
 test("wait --summarize streams summaries then returns the same shape as plain wait", async () => {
-  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-commands-test-")));
+  const root = makeTmp();
   let deliver;
   let currentStatus = "running";
   const client = fakeClient({
@@ -213,13 +247,13 @@ test("wait --summarize streams summaries then returns the same shape as plain wa
     },
   });
   client.request = async (method) => {
-    if (method === "task.status") {
+    if (method === TASK_STATUS) {
       return currentStatus === "running"
         ? { directory: root, status: currentStatus }
         : {
             id: "oc_5",
             status: currentStatus,
-            startedAt: "2026-07-17T00:00:00.000Z",
+            startedAt: STARTED_AT,
             exitCode: 0,
             signal: null,
             directory: root,
@@ -231,16 +265,16 @@ test("wait --summarize streams summaries then returns the same shape as plain wa
   };
   const io = fakeIo();
 
-  const pending = runCommand("wait", { taskId: "oc_5", timeoutMs: undefined, tailChars: undefined, full: false, summarize: true }, {
+  const pending = runCommand("wait", { taskId: "oc_5", full: false, summarize: true }, {
     client,
     io,
   });
 
   await new Promise((resolve) => setImmediate(resolve));
 
-  deliver({ sequence: 1, type: "task.state", taskId: "oc_5", directory: root, status: "running", activity: "reading files" });
+  deliver({ sequence: 1, type: TASK_STATE, taskId: "oc_5", directory: root, status: "running", activity: "reading files" });
   currentStatus = "done";
-  deliver({ sequence: 2, type: "task.state", taskId: "oc_5", directory: root, status: "done" });
+  deliver({ sequence: 2, type: TASK_STATE, taskId: "oc_5", directory: root, status: "done" });
 
   const result = await pending;
   assert.equal(result.id, "oc_5");
@@ -250,7 +284,7 @@ test("wait --summarize streams summaries then returns the same shape as plain wa
   assert.deepEqual(result, {
     id: "oc_5",
     status: "done",
-    startedAt: "2026-07-17T00:00:00.000Z",
+    startedAt: STARTED_AT,
     exitCode: 0,
     signal: null,
     next: 'Run taskferry result with task id "oc_5" to see the final message; pass --full here for directory/model/log path details',
@@ -258,7 +292,7 @@ test("wait --summarize streams summaries then returns the same shape as plain wa
 });
 
 test("wait --summarize resolves immediately for an already-settled task instead of hanging", async () => {
-  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-commands-test-")));
+  const root = makeTmp();
   const client = fakeClient({
     onSubscribe: () => {
       // No terminal event will ever be delivered on this subscription: the task
@@ -266,11 +300,11 @@ test("wait --summarize resolves immediately for an already-settled task instead 
     },
   });
   client.request = async (method, params) => {
-    if (method === "task.status") {
+    if (method === TASK_STATUS) {
       return {
         id: params.taskId,
         status: "done",
-        startedAt: "2026-07-17T00:00:00.000Z",
+        startedAt: STARTED_AT,
         exitCode: 0,
         signal: null,
         directory: root,
@@ -280,7 +314,7 @@ test("wait --summarize resolves immediately for an already-settled task instead 
   };
   const io = fakeIo();
 
-  const result = await runCommand("wait", { taskId: "oc_6", timeoutMs: undefined, tailChars: undefined, full: false, summarize: true }, {
+  const result = await runCommand("wait", { taskId: "oc_6", full: false, summarize: true }, {
     client,
     io,
   });
@@ -290,7 +324,7 @@ test("wait --summarize resolves immediately for an already-settled task instead 
 });
 
 test("wait --summarize skips the trailing task.status RPC on abort and reports the last known state", async () => {
-  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-commands-test-")));
+  const root = makeTmp();
   const controller = new AbortController();
   let deliver;
   let statusCalls = 0;
@@ -300,22 +334,22 @@ test("wait --summarize skips the trailing task.status RPC on abort and reports t
     },
   });
   client.request = async (method, params) => {
-    if (method === "task.status") {
+    if (method === TASK_STATUS) {
       statusCalls++;
-      return { id: params.taskId, status: "running", startedAt: "2026-07-17T00:00:00.000Z", directory: root };
+      return { id: params.taskId, status: "running", startedAt: STARTED_AT, directory: root };
     }
     throw new Error(`unexpected request: ${method}`);
   };
   const io = fakeIo();
 
-  const pending = runCommand("wait", { taskId: "oc_8", timeoutMs: undefined, tailChars: undefined, full: false, summarize: true }, {
+  const pending = runCommand("wait", { taskId: "oc_8", full: false, summarize: true }, {
     client,
     io,
     signal: controller.signal,
   });
 
   await new Promise((resolve) => setImmediate(resolve));
-  deliver({ sequence: 1, type: "task.state", taskId: "oc_8", directory: root, status: "running", activity: "reading files" });
+  deliver({ sequence: 1, type: TASK_STATE, taskId: "oc_8", directory: root, status: "running", activity: "reading files" });
   const callsBeforeAbort = statusCalls;
   controller.abort();
 
@@ -328,14 +362,14 @@ test("wait --summarize skips the trailing task.status RPC on abort and reports t
 test("status surfaces a resume hint when a crashed task has a salvageable sessionId", async () => {
   const client = {
     request: async (method, params) => {
-      assert.equal(method, "task.status");
+      assert.equal(method, TASK_STATUS);
       assert.equal(params.taskId, "oc_7");
       return {
         id: "oc_7",
         status: "crashed",
-        directory: "/workspace/project",
+        directory: PROJECT_DIR,
         sessionId: "ses_abc123",
-        startedAt: "2026-07-17T00:00:00.000Z",
+        startedAt: STARTED_AT,
         exitCode: 1,
         signal: null,
         failureReason: "rate_limited",
@@ -354,9 +388,9 @@ test("status keeps the generic hint for a crashed task with no sessionId", async
     request: async () => ({
       id: "oc_8",
       status: "crashed",
-      directory: "/workspace/project",
+      directory: PROJECT_DIR,
       sessionId: null,
-      startedAt: "2026-07-17T00:00:00.000Z",
+      startedAt: STARTED_AT,
       exitCode: 1,
       signal: null,
       failureReason: "authentication_failed",
@@ -374,9 +408,9 @@ test("status keeps the running-task hint unaffected by the crashed-path change",
     request: async () => ({
       id: "oc_9",
       status: "running",
-      directory: "/workspace/project",
+      directory: PROJECT_DIR,
       sessionId: "ses_should_be_ignored",
-      startedAt: "2026-07-17T00:00:00.000Z",
+      startedAt: STARTED_AT,
       exitCode: null,
       signal: null,
     }),
@@ -389,7 +423,7 @@ test("status keeps the running-task hint unaffected by the crashed-path change",
 });
 
 test("watch --task-id resolves immediately for an already-settled task instead of hanging", async () => {
-  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-commands-test-")));
+  const root = makeTmp();
   const client = fakeClient({
     onSubscribe: () => {
       // No terminal event will ever be delivered: the task was already terminal
@@ -397,14 +431,14 @@ test("watch --task-id resolves immediately for an already-settled task instead o
     },
   });
   client.request = async (method, params) => {
-    if (method === "task.status") {
+    if (method === TASK_STATUS) {
       return { id: params.taskId, status: "crashed", directory: root };
     }
     throw new Error(`unexpected request: ${method}`);
   };
   const io = fakeIo();
 
-  const result = await runCommand("watch", { directory: undefined, format: "toon", summaries: false, taskId: "oc_7" }, {
+  const result = await runCommand("watch", { format: "toon", summaries: false, taskId: "oc_7" }, {
     client,
     io,
     cwd: root,
@@ -415,8 +449,8 @@ test("watch --task-id resolves immediately for an already-settled task instead o
 });
 
 test("list resolves its default directory via resolveWorkspaceRoot when --directory is omitted", async () => {
-  const cwd = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-commands-test-")));
-  const resolvedRoot = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-commands-test-")));
+  const cwd = makeTmp();
+  const resolvedRoot = makeTmp();
   let calledWith;
   const resolveWorkspaceRootFn = (dir) => { calledWith = dir; return resolvedRoot; };
   const client = { request: async (method, params) => {
@@ -424,13 +458,13 @@ test("list resolves its default directory via resolveWorkspaceRoot when --direct
     assert.equal(params.directory, resolvedRoot);
     return { counts: {}, tasks: [] };
   } };
-  await runCommand("list", { directory: undefined, all: false, limit: undefined }, { client, cwd, resolveWorkspaceRoot: resolveWorkspaceRootFn });
+  await runCommand("list", { all: false }, { client, cwd, resolveWorkspaceRoot: resolveWorkspaceRootFn });
   assert.equal(calledWith, cwd);
 });
 
 test("home/context resolve their default directory via resolveWorkspaceRoot when --directory is omitted", async () => {
-  const cwd = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-commands-test-")));
-  const resolvedRoot = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-commands-test-")));
+  const cwd = makeTmp();
+  const resolvedRoot = makeTmp();
   const resolveWorkspaceRootFn = () => resolvedRoot;
   let seenDirectory;
   const clientFor = (method) => ({ request: async (m, params) => {
@@ -439,10 +473,10 @@ test("home/context resolve their default directory via resolveWorkspaceRoot when
     return method === "task.list" ? { counts: {}, tasks: [] } : {};
   } });
 
-  await runCommand("home", { directory: undefined }, { client: clientFor("task.list"), cwd, resolveWorkspaceRoot: resolveWorkspaceRootFn });
+  await runCommand("home", {}, { cwd, client: clientFor("task.list"), resolveWorkspaceRoot: resolveWorkspaceRootFn });
   assert.equal(seenDirectory, resolvedRoot);
 
-  await runCommand("context", { directory: undefined, format: "toon" }, { client: clientFor("task.context"), cwd, resolveWorkspaceRoot: resolveWorkspaceRootFn });
+  await runCommand("context", { format: "toon" }, { cwd, client: clientFor("task.context"), resolveWorkspaceRoot: resolveWorkspaceRootFn });
   assert.equal(seenDirectory, resolvedRoot);
 });
 
@@ -453,9 +487,9 @@ test("advisor does NOT resolve via resolveWorkspaceRoot (regression test mirrori
   // worker's spawn cwd -- so widening advisor's default to the
   // workspace root would silently expand its sandbox from "the cwd
   // you ran it in" to "the whole repo root".
-  const cwd = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-commands-test-")));
+  const cwd = makeTmp();
   let called = false;
-  const resolveWorkspaceRootFn = () => { called = true; return fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-commands-test-"))); };
+  const resolveWorkspaceRootFn = () => { called = true; return makeTmp(); };
   let seenDirectory;
   const client = { request: async (method, params) => {
     assert.equal(method, "task.advisor");
@@ -463,31 +497,31 @@ test("advisor does NOT resolve via resolveWorkspaceRoot (regression test mirrori
     return { status: "done", message: "advice" };
   } };
 
-  await runCommand("advisor", { directory: undefined, prompt: "p", model: "m" }, { client, cwd, resolveWorkspaceRoot: resolveWorkspaceRootFn });
+  await runCommand("advisor", { prompt: "p", model: "m" }, { client, cwd, resolveWorkspaceRoot: resolveWorkspaceRootFn });
 
   assert.equal(called, false, "advisor must never consult resolveWorkspaceRoot");
   assert.equal(seenDirectory, cwd);
 });
 
 test("watch resolves its default directory via resolveWorkspaceRoot when --directory and --task-id are both omitted", async () => {
-  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-commands-test-")));
-  const cwd = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-commands-test-")));
+  const root = makeTmp();
+  const cwd = makeTmp();
   const resolveWorkspaceRootFn = (dir) => { assert.equal(dir, cwd); return root; };
   const controller = new AbortController();
   let subscribedDirectory;
   const client = fakeClient({
-    onSubscribe: (params, onEvent) => {
+    onSubscribe: (params, _onEvent) => {
       subscribedDirectory = params.directory;
       controller.abort();
     },
   });
   const io = fakeIo();
 
-  await runCommand("watch", { directory: undefined, format: "toon", summaries: false, taskId: undefined }, {
+  await runCommand("watch", { format: "toon", summaries: false }, {
     client,
     io,
-    signal: controller.signal,
     cwd,
+    signal: controller.signal,
     resolveWorkspaceRoot: resolveWorkspaceRootFn,
   });
 
@@ -495,9 +529,9 @@ test("watch resolves its default directory via resolveWorkspaceRoot when --direc
 });
 
 test("dispatch does NOT resolve via resolveWorkspaceRoot (regression test pinning the launch-directory behavior as unchanged)", async () => {
-  const cwd = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-commands-test-")));
+  const cwd = makeTmp();
   let called = false;
-  const resolveWorkspaceRootFn = () => { called = true; return fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-commands-test-"))); };
+  const resolveWorkspaceRootFn = () => { called = true; return makeTmp(); };
   let seenDirectory;
   const client = { request: async (method, params) => {
     assert.equal(method, "task.dispatch");
@@ -506,28 +540,16 @@ test("dispatch does NOT resolve via resolveWorkspaceRoot (regression test pinnin
   } };
   const checkSkills = () => {};
 
-  await runCommand("dispatch", { directory: undefined, prompt: "p" }, { client, cwd, resolveWorkspaceRoot: resolveWorkspaceRootFn, checkSkills });
+  await runCommand("dispatch", { prompt: "p" }, { client, cwd, checkSkills, resolveWorkspaceRoot: resolveWorkspaceRootFn });
 
   assert.equal(called, false, "dispatch must never consult resolveWorkspaceRoot");
   assert.equal(seenDirectory, cwd);
 });
 
 test("doctor has no warnings when the claude plugin is installed", async (t) => {
-  const home = fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-doctor-home-"));
-  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
-  const client = fakeClient();
-  client.request = async (method) => {
-    if (method === "system.health") return { healthy: true, pid: 1 };
-    throw new Error(`unexpected request: ${method}`);
-  };
-  const runShellCommand = () => ({
-    status: 0,
-    stdout: JSON.stringify([{ id: "taskferry@taskferry" }]),
-    stderr: "",
-    error: undefined,
-  });
-
-  const result = await runCommand("doctor", {}, { client, homeDirectory: home, env: {}, runShellCommand });
+  const home = makeDoctorHome(t);
+  const client = makeHealthClient();
+  const result = await runCommand("doctor", {}, { client, homeDirectory: home, env: {}, runShellCommand: okRunShellCommand });
 
   assert.deepEqual(result.integrations, {
     claude: { installed: true },
@@ -537,19 +559,14 @@ test("doctor has no warnings when the claude plugin is installed", async (t) => 
 });
 
 test("doctor warns when bwrap is not installed on Linux", async (t) => {
-  const home = fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-doctor-home-"));
-  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
-  const client = fakeClient();
-  client.request = async (method) => {
-    if (method === "system.health") return { healthy: true, pid: 1 };
-    throw new Error(`unexpected request: ${method}`);
-  };
+  const home = makeDoctorHome(t);
+  const client = makeHealthClient();
   const runShellCommand = (command) => {
     if (command === "bwrap") return { status: null, stdout: "", stderr: "", error: { code: "ENOENT" } };
-    return { status: 0, stdout: JSON.stringify([{ id: "taskferry@taskferry" }]), stderr: "", error: undefined };
+    return { status: 0, stdout: JSON.stringify([{ id: CLAUDE_PLUGIN_ID }]), stderr: "" };
   };
 
-  const result = await runCommand("doctor", {}, { client, homeDirectory: home, env: {}, runShellCommand, platform: "linux" });
+  const result = await runCommand("doctor", {}, { client, runShellCommand, homeDirectory: home, env: {}, platform: "linux" });
 
   assert.equal(result.warnings.length, 1);
   assert.match(result.warnings[0], /bwrap is not installed/);
@@ -558,38 +575,28 @@ test("doctor warns when bwrap is not installed on Linux", async (t) => {
 });
 
 test("doctor has no sandbox warning or info when bwrap is installed on Linux", async (t) => {
-  const home = fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-doctor-home-"));
-  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
-  const client = fakeClient();
-  client.request = async (method) => {
-    if (method === "system.health") return { healthy: true, pid: 1 };
-    throw new Error(`unexpected request: ${method}`);
-  };
+  const home = makeDoctorHome(t);
+  const client = makeHealthClient();
   const runShellCommand = (command) => {
-    if (command === "bwrap") return { status: 0, stdout: "bubblewrap 0.11.2\n", stderr: "", error: undefined };
-    return { status: 0, stdout: JSON.stringify([{ id: "taskferry@taskferry" }]), stderr: "", error: undefined };
+    if (command === "bwrap") return { status: 0, stdout: "bubblewrap 0.11.2\n", stderr: "" };
+    return { status: 0, stdout: JSON.stringify([{ id: CLAUDE_PLUGIN_ID }]), stderr: "" };
   };
 
-  const result = await runCommand("doctor", {}, { client, homeDirectory: home, env: {}, runShellCommand, platform: "linux" });
+  const result = await runCommand("doctor", {}, { client, runShellCommand, homeDirectory: home, env: {}, platform: "linux" });
 
   assert.equal(result.warnings, undefined);
   assert.equal(result.info, undefined);
 });
 
 test("doctor adds an informational note instead of a bwrap check on non-Linux platforms", async (t) => {
-  const home = fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-doctor-home-"));
-  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
-  const client = fakeClient();
-  client.request = async (method) => {
-    if (method === "system.health") return { healthy: true, pid: 1 };
-    throw new Error(`unexpected request: ${method}`);
-  };
+  const home = makeDoctorHome(t);
+  const client = makeHealthClient();
   const runShellCommand = (command) => {
     assert.notEqual(command, "bwrap");
-    return { status: 0, stdout: JSON.stringify([{ id: "taskferry@taskferry" }]), stderr: "", error: undefined };
+    return { status: 0, stdout: JSON.stringify([{ id: CLAUDE_PLUGIN_ID }]), stderr: "" };
   };
 
-  const result = await runCommand("doctor", {}, { client, homeDirectory: home, env: {}, runShellCommand, platform: "darwin" });
+  const result = await runCommand("doctor", {}, { client, runShellCommand, homeDirectory: home, env: {}, platform: "darwin" });
 
   assert.equal(result.warnings, undefined);
   assert.equal(result.info.length, 1);
@@ -597,7 +604,7 @@ test("doctor adds an informational note instead of a bwrap check on non-Linux pl
 });
 
 test("dispatch forwards executor to the RPC payload when set", async () => {
-  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-commands-test-")));
+  const root = makeTmp();
   let captured;
   const client = {
     request: async (method, params) => {
@@ -613,7 +620,7 @@ test("dispatch forwards executor to the RPC payload when set", async () => {
 });
 
 test("advisor forwards executor to the RPC payload when set", async () => {
-  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-commands-test-")));
+  const root = makeTmp();
   let captured;
   const client = {
     request: async (method, params) => {
@@ -629,10 +636,10 @@ test("advisor forwards executor to the RPC payload when set", async () => {
 });
 
 test("dispatch forwards noSandbox to the RPC payload when set", async () => {
-  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-commands-test-")));
+  const root = makeTmp();
   let capturedParams;
   const client = {
-    request: async (method, params) => {
+    request: async (_method, params) => {
       capturedParams = params;
       return { id: "oc_1" };
     },
@@ -642,10 +649,10 @@ test("dispatch forwards noSandbox to the RPC payload when set", async () => {
 });
 
 test("dispatch omits noSandbox from the RPC payload when not set", async () => {
-  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-commands-test-")));
+  const root = makeTmp();
   let capturedParams;
   const client = {
-    request: async (method, params) => {
+    request: async (_method, params) => {
       capturedParams = params;
       return { id: "oc_1" };
     },
@@ -655,10 +662,10 @@ test("dispatch omits noSandbox from the RPC payload when not set", async () => {
 });
 
 test("dispatch forwards the caller's env to the RPC payload", async () => {
-  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-commands-test-")));
+  const root = makeTmp();
   let capturedParams;
   const client = {
-    request: async (method, params) => {
+    request: async (_method, params) => {
       capturedParams = params;
       return { id: "oc_1" };
     },
@@ -669,10 +676,10 @@ test("dispatch forwards the caller's env to the RPC payload", async () => {
 });
 
 test("dispatch no longer forwards keySlot", async () => {
-  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-commands-test-")));
+  const root = makeTmp();
   let capturedParams;
   const client = {
-    request: async (method, params) => {
+    request: async (_method, params) => {
       capturedParams = params;
       return { id: "oc_1" };
     },
@@ -682,10 +689,10 @@ test("dispatch no longer forwards keySlot", async () => {
 });
 
 test("advisor forwards the caller's env to the RPC payload", async () => {
-  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-commands-test-")));
+  const root = makeTmp();
   let capturedParams;
   const client = {
-    request: async (method, params) => {
+    request: async (_method, params) => {
       capturedParams = params;
       return { status: "done", message: "advice" };
     },
@@ -698,7 +705,7 @@ test("advisor forwards the caller's env to the RPC payload", async () => {
 test("summary forwards the caller's env to the RPC payload", async () => {
   let capturedParams;
   const client = {
-    request: async (method, params) => {
+    request: async (_method, params) => {
       capturedParams = params;
       return { sourceTaskId: "t1", summary: "done" };
     },
@@ -711,7 +718,7 @@ test("summary forwards the caller's env to the RPC payload", async () => {
 test("summary --mode activity omits env from the RPC payload (protocol rejects env + mode activity)", async () => {
   let capturedParams;
   const client = {
-    request: async (method, params) => {
+    request: async (_method, params) => {
       capturedParams = params;
       return { sourceTaskId: "t1", summary: "activity summary" };
     },
@@ -725,7 +732,7 @@ test("summary --mode activity omits env from the RPC payload (protocol rejects e
 test("summary --mode report still forwards the caller's env to the RPC payload", async () => {
   let capturedParams;
   const client = {
-    request: async (method, params) => {
+    request: async (_method, params) => {
       capturedParams = params;
       return { sourceTaskId: "t1", summary: "report summary" };
     },
@@ -739,7 +746,7 @@ test("summary --mode report still forwards the caller's env to the RPC payload",
 });
 
 test("dispatch refuses to run when the generated skill copies are stale", async () => {
-  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-commands-test-")));
+  const root = makeTmp();
   const client = {
     request: async () => {
       throw new Error("task.dispatch should not be called when skill:check fails");
@@ -749,13 +756,13 @@ test("dispatch refuses to run when the generated skill copies are stale", async 
     throw new Error("stale generated skill copies: integrations/claude/skills/using-taskferry/SKILL.md");
   };
   await assert.rejects(
-    () => runCommand("dispatch", { prompt: "hi", directory: root }, { client, cwd: root, checkSkills }),
+    () => runCommand("dispatch", { prompt: "hi", directory: root }, { client, checkSkills, cwd: root }),
     /taskferry's own skill files are out of sync/
   );
 });
 
 test("dispatch proceeds normally when the generated skill copies are in sync", async () => {
-  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-commands-test-")));
+  const root = makeTmp();
   let checkSkillsCalled = false;
   const checkSkills = () => {
     checkSkillsCalled = true;
@@ -763,32 +770,20 @@ test("dispatch proceeds normally when the generated skill copies are in sync", a
   const client = {
     request: async () => ({ id: "oc_1" }),
   };
-  const result = await runCommand("dispatch", { prompt: "hi", directory: root }, { client, cwd: root, checkSkills });
+  const result = await runCommand("dispatch", { prompt: "hi", directory: root }, { client, checkSkills, cwd: root });
   assert.equal(checkSkillsCalled, true);
   assert.equal(result.id, "oc_1");
 });
 
 test("doctor warns when opencode playwright MCP is checked and not isolated", async (t) => {
-  const home = fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-doctor-home-"));
-  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  const home = makeDoctorHome(t);
   const configDir = path.join(home, ".config", "opencode");
   fs.mkdirSync(configDir, { recursive: true });
   fs.writeFileSync(path.join(configDir, "opencode.json"), JSON.stringify({
-    mcp: { playwright: { command: ["npx", "@anthropic/mcp-server-playwright"] } },
+    mcp: { playwright: { command: ["npx", PLAYWRIGHT_MCP] } },
   }));
-  const client = fakeClient();
-  client.request = async (method) => {
-    if (method === "system.health") return { healthy: true, pid: 1 };
-    throw new Error(`unexpected request: ${method}`);
-  };
-  const runShellCommand = () => ({
-    status: 0,
-    stdout: JSON.stringify([{ id: "taskferry@taskferry" }]),
-    stderr: "",
-    error: undefined,
-  });
-
-  const result = await runCommand("doctor", {}, { client, homeDirectory: home, env: {}, runShellCommand });
+  const client = makeHealthClient();
+  const result = await runCommand("doctor", {}, { client, homeDirectory: home, env: {}, runShellCommand: okRunShellCommand });
 
   assert.deepEqual(result.integrations.claude, { installed: true });
   assert.equal(result.integrations.playwrightMcpIsolation.opencode.checked, true);
@@ -799,26 +794,14 @@ test("doctor warns when opencode playwright MCP is checked and not isolated", as
 });
 
 test("doctor warns when claude code playwright MCP is checked and not isolated", async (t) => {
-  const home = fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-doctor-home-"));
-  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  const home = makeDoctorHome(t);
   const configPath = path.join(home, "playwright-config.json");
   fs.writeFileSync(configPath, JSON.stringify({ browser: { isolated: false } }));
   fs.writeFileSync(path.join(home, ".claude.json"), JSON.stringify({
-    mcpServers: { playwright: { args: ["npx", "@anthropic/mcp-server-playwright", "--config", configPath] } },
+    mcpServers: { playwright: { args: ["npx", PLAYWRIGHT_MCP, "--config", configPath] } },
   }));
-  const client = fakeClient();
-  client.request = async (method) => {
-    if (method === "system.health") return { healthy: true, pid: 1 };
-    throw new Error(`unexpected request: ${method}`);
-  };
-  const runShellCommand = () => ({
-    status: 0,
-    stdout: JSON.stringify([{ id: "taskferry@taskferry" }]),
-    stderr: "",
-    error: undefined,
-  });
-
-  const result = await runCommand("doctor", {}, { client, homeDirectory: home, env: {}, runShellCommand });
+  const client = makeHealthClient();
+  const result = await runCommand("doctor", {}, { client, homeDirectory: home, env: {}, runShellCommand: okRunShellCommand });
 
   assert.equal(result.integrations.playwrightMcpIsolation.claudeCode.checked, true);
   assert.equal(result.integrations.playwrightMcpIsolation.claudeCode.isolated, false);
@@ -829,21 +812,9 @@ test("doctor warns when claude code playwright MCP is checked and not isolated",
 });
 
 test("doctor emits no MCP warning when checked: false for both sides", async (t) => {
-  const home = fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-doctor-home-"));
-  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
-  const client = fakeClient();
-  client.request = async (method) => {
-    if (method === "system.health") return { healthy: true, pid: 1 };
-    throw new Error(`unexpected request: ${method}`);
-  };
-  const runShellCommand = () => ({
-    status: 0,
-    stdout: JSON.stringify([{ id: "taskferry@taskferry" }]),
-    stderr: "",
-    error: undefined,
-  });
-
-  const result = await runCommand("doctor", {}, { client, homeDirectory: home, env: {}, runShellCommand });
+  const home = makeDoctorHome(t);
+  const client = makeHealthClient();
+  const result = await runCommand("doctor", {}, { client, homeDirectory: home, env: {}, runShellCommand: okRunShellCommand });
 
   assert.equal(result.warnings, undefined);
   assert.equal(result.integrations.playwrightMcpIsolation.opencode.checked, false);
@@ -851,31 +822,19 @@ test("doctor emits no MCP warning when checked: false for both sides", async (t)
 });
 
 test("doctor integrations.playwrightMcpIsolation shape is present when both sides are isolated", async (t) => {
-  const home = fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-doctor-home-"));
-  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  const home = makeDoctorHome(t);
   const configDir = path.join(home, ".config", "opencode");
   fs.mkdirSync(configDir, { recursive: true });
   fs.writeFileSync(path.join(configDir, "opencode.json"), JSON.stringify({
-    mcp: { playwright: { command: ["npx", "@anthropic/mcp-server-playwright", "--isolated"] } },
+    mcp: { playwright: { command: ["npx", PLAYWRIGHT_MCP, "--isolated"] } },
   }));
   const cConfigPath = path.join(home, "cc-playwright.json");
   fs.writeFileSync(cConfigPath, JSON.stringify({ browser: { isolated: true } }));
   fs.writeFileSync(path.join(home, ".claude.json"), JSON.stringify({
-    mcpServers: { playwright: { args: ["npx", "@anthropic/mcp-server-playwright", "--config", cConfigPath] } },
+    mcpServers: { playwright: { args: ["npx", PLAYWRIGHT_MCP, "--config", cConfigPath] } },
   }));
-  const client = fakeClient();
-  client.request = async (method) => {
-    if (method === "system.health") return { healthy: true, pid: 1 };
-    throw new Error(`unexpected request: ${method}`);
-  };
-  const runShellCommand = () => ({
-    status: 0,
-    stdout: JSON.stringify([{ id: "taskferry@taskferry" }]),
-    stderr: "",
-    error: undefined,
-  });
-
-  const result = await runCommand("doctor", {}, { client, homeDirectory: home, env: {}, runShellCommand });
+  const client = makeHealthClient();
+  const result = await runCommand("doctor", {}, { client, homeDirectory: home, env: {}, runShellCommand: okRunShellCommand });
 
   assert.equal(result.warnings, undefined);
   assert.equal(result.integrations.playwrightMcpIsolation.opencode.checked, true);
@@ -885,7 +844,7 @@ test("doctor integrations.playwrightMcpIsolation shape is present when both side
 });
 
 test("watch --flush-interval batches multiple events for the same and different taskIds into one flushed block", async () => {
-  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-commands-test-")));
+  const root = makeTmp();
   const controller = new AbortController();
   let deliver;
   const client = fakeClient({
@@ -900,9 +859,9 @@ test("watch --flush-interval batches multiple events for the same and different 
     cwd: root,
   });
 
-  deliver({ sequence: 1, type: "task.state", taskId: "oc_1", directory: root, status: "running" });
-  deliver({ sequence: 2, type: "task.state", taskId: "oc_2", directory: root, status: "running" });
-  deliver({ sequence: 3, type: "task.state", taskId: "oc_1", directory: root, status: "done" }); // last-write-wins for oc_1
+  deliver({ sequence: 1, type: TASK_STATE, taskId: "oc_1", directory: root, status: "running" });
+  deliver({ sequence: 2, type: TASK_STATE, taskId: "oc_2", directory: root, status: "running" });
+  deliver({ sequence: 3, type: TASK_STATE, taskId: "oc_1", directory: root, status: "done" }); // last-write-wins for oc_1
 
   assert.equal(io.lines.length, 0, "nothing should be written before the first flush tick");
 
@@ -923,7 +882,7 @@ test("watch --flush-interval batches multiple events for the same and different 
 });
 
 test("watch --flush-interval emits nothing on a tick where no events arrived", async () => {
-  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-commands-test-")));
+  const root = makeTmp();
   const controller = new AbortController();
   const client = fakeClient({ onSubscribe: () => {} });
   const io = fakeIo();
@@ -943,7 +902,7 @@ test("watch --flush-interval emits nothing on a tick where no events arrived", a
 });
 
 test("watch --flush-interval --task-id flushes the terminal event synchronously before exiting, not left buffered", async () => {
-  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-commands-test-")));
+  const root = makeTmp();
   let deliver;
   const client = fakeClient({
     onSubscribe: (_params, onEvent) => { deliver = onEvent; },
@@ -956,8 +915,8 @@ test("watch --flush-interval --task-id flushes the terminal event synchronously 
     cwd: root,
   });
 
-  deliver({ sequence: 1, type: "task.state", taskId: "oc_1", directory: root, status: "running" });
-  deliver({ sequence: 2, type: "task.state", taskId: "oc_1", directory: root, status: "done" });
+  deliver({ sequence: 1, type: TASK_STATE, taskId: "oc_1", directory: root, status: "running" });
+  deliver({ sequence: 2, type: TASK_STATE, taskId: "oc_1", directory: root, status: "done" });
 
   const result = await pending;
 
@@ -967,7 +926,7 @@ test("watch --flush-interval --task-id flushes the terminal event synchronously 
 });
 
 test("watch --flush-interval --format ndjson wraps buffered events in a single watch.flush envelope", async () => {
-  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-commands-test-")));
+  const root = makeTmp();
   const controller = new AbortController();
   let deliver;
   const client = fakeClient({
@@ -982,7 +941,7 @@ test("watch --flush-interval --format ndjson wraps buffered events in a single w
     cwd: root,
   });
 
-  deliver({ sequence: 1, type: "task.state", taskId: "oc_1", directory: root, status: "running" });
+  deliver({ sequence: 1, type: TASK_STATE, taskId: "oc_1", directory: root, status: "running" });
 
   await new Promise((resolve) => setTimeout(resolve, 200));
   controller.abort();
@@ -1016,14 +975,14 @@ test("reject calls task.reject via the client", async () => {
 
 test("result --diff requests fields: ['diff']", async () => {
   let capturedParams = null;
-  const client = { request: async (method, params) => { capturedParams = params; return { taskId: "t1", status: "done", diff: "diff --git a/x b/x\n" }; } };
+  const client = { request: async (_method, params) => { capturedParams = params; return { taskId: "t1", status: "done", diff: "diff --git a/x b/x\n" }; } };
   await runCommand("result", { taskId: "t1", diff: true }, { client });
   assert.deepEqual(capturedParams.fields, ["diff"]);
 });
 
 test("dispatch forwards noOverlay to task.dispatch", async () => {
   let capturedParams = null;
-  const client = { request: async (method, params) => { capturedParams = params; return {}; } };
+  const client = { request: async (_method, params) => { capturedParams = params; return {}; } };
   await runCommand("dispatch", { prompt: "hi", directory: "/tmp", noOverlay: true }, { client, cwd: "/tmp", checkSkills: () => {} });
   assert.equal(capturedParams.noOverlay, true);
 });
@@ -1034,7 +993,7 @@ test("watch --flush-interval flushes buffered events on abort instead of silentl
   // `--flush-interval` window's worth of events would be silently
   // dropped on a clean (exit code 0) abort, even though the user
   // explicitly opted into buffered/batched output.
-  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-commands-test-")));
+  const root = makeTmp();
   const controller = new AbortController();
   let deliver;
   const client = fakeClient({
@@ -1052,8 +1011,8 @@ test("watch --flush-interval flushes buffered events on abort instead of silentl
   // Populate the buffer with events but don't wait for the (60s) flush
   // tick -- the abort must happen first, otherwise this test would
   // pass for the wrong reason (just by hitting the timer eventually).
-  deliver({ sequence: 1, type: "task.state", taskId: "oc_1", directory: root, status: "running" });
-  deliver({ sequence: 2, type: "task.state", taskId: "oc_2", directory: root, status: "running" });
+  deliver({ sequence: 1, type: TASK_STATE, taskId: "oc_1", directory: root, status: "running" });
+  deliver({ sequence: 2, type: TASK_STATE, taskId: "oc_2", directory: root, status: "running" });
   assert.equal(io.lines.length, 0, "nothing should be written before the flush tick or abort");
 
   controller.abort();

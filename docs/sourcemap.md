@@ -107,6 +107,7 @@ Vars marked "config.json" also have a config-file equivalent — see
 | `TASKFERRY_RUNTIME_DIR` | `$XDG_RUNTIME_DIR/taskferry` or `<state-dir>/run` | no | Socket + lock files |
 | `TASKFERRY_SOCKET_PATH` | `<runtime-dir>/daemon.sock` | no | Explicit socket override |
 | `TASKFERRY_CACHE_DIR` | `$XDG_CACHE_HOME/taskferry` or `~/.cache/taskferry` | no | Real-disk data home for sandboxed workers (opencode/pi auth + unbounded snapshot caches); see `docs/security.md` |
+| `TASKFERRY_OVERLAY_TMP_DIR` | `<runtime-dir>/overlay` | no | CoW overlay root for dispatch writes; scoped under the runtime dir (not plain `os.tmpdir()`) so isolated daemon instances never share an overlay namespace -- taskferry#286 |
 | `TASKFERRY_AUTO_START` | `1` (auto-start enabled) | no | Set to `0` to stop the CLI from auto-spawning a daemon on first use |
 | `TASKFERRY_DISABLE_SANDBOX` | `0` (sandboxed on Linux) | yes (`sandboxEnabled`, inverted) | Set to `1`/`true` to run dispatches without the bwrap filesystem sandbox |
 | `TASKFERRY_DISABLE_OVERLAY` | `0` (overlay enabled) | yes (`overlayEnabled`, inverted) | Set to `1`/`true` to disable the CoW overlay for dispatch writes |

@@ -1005,11 +1005,16 @@ export function createTaskManager({
         }
         if (t.status === "running" || t.status === "queued") t.status = "unknown";
         if (t.executorId === undefined) t.executorId = "opencode";
-        // Legacy records predate creation-time tmpRoot persistence. Keep their
-        // prior live-root cleanup behavior rather than letting releaseOverlay
-        // pass undefined into the containment guard; newly-created overlays
-        // always carry the exact root that was in effect at creation.
-        if (t.overlayDirs && t.overlayDirs.tmpRoot === undefined) t.overlayDirs.tmpRoot = overlayTmpRoot;
+        // Legacy records predate creation-time tmpRoot persistence. Their
+        // overlay actually lives on disk under the *old* default -- plain
+        // os.tmpdir() -- not today's overlayTmpRoot (now runtimeDir/overlay
+        // per taskferry#286). Stamping the current overlayTmpRoot here would
+        // point the record's containment root at a directory that never
+        // held the overlay, which both releaseOverlay()'s containment guard
+        // (changeset.js's cleanupOverlay()) and sweepOrphanedOverlays()'s
+        // tmpRoots scan key off of -- silently orphaning the real leftover
+        // under os.tmpdir() forever.
+        if (t.overlayDirs && t.overlayDirs.tmpRoot === undefined) t.overlayDirs.tmpRoot = os.tmpdir();
         tasks.set(t.id, t);
         if (t.status !== previousStatus) taskEvents.emitState(t, previousStatus);
       }
@@ -1052,9 +1057,12 @@ export function createTaskManager({
   // Mirrors sweepOrphanedPromptFiles() above: a daemon that crashed after an
   // overlay was created but before its cleanup (reject/accept, or the
   // advisor auto-reject in extractChangesetForTask()) ever ran leaves a
-  // /tmp/taskferry-cow-<task-id> dir behind. /tmp being a tmpfs clears these
-  // on a real reboot for free; this only matters for a same-boot daemon
-  // restart. A task whose changesetStatus is still "pending" legitimately
+  // <overlay-tmp-root>/taskferry-cow-<task-id> dir behind. The overlay tmp
+  // root (runtimeDir/overlay by default -- see paths.js's
+  // resolveOverlayTmpRoot()) is often a tmpfs too, clearing these on a real
+  // reboot for free, but that's not guaranteed the way plain /tmp was; this
+  // sweep only matters for a same-boot daemon restart either way. A task
+  // whose changesetStatus is still "pending" legitimately
   // owns its overlay and must never be swept here -- only unknown task ids
   // and already-resolved (accepted/rejected) tasks with a leftover
   // overlayDirs (their own cleanupOverlay() call crashed mid-removal) are
@@ -1067,7 +1075,7 @@ export function createTaskManager({
     for (const tmpRoot of tmpRoots) {
       let entries;
       try {
-        entries = fs.readdirSync(tmpRoot);
+        entries = readdirFn(tmpRoot);
       } catch {
         continue;
       }

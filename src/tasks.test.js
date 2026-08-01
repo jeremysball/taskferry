@@ -1886,6 +1886,46 @@ describe("sweepOrphanedOverlays()", () => {
     assert.equal(cleanedRoot, path.join(overlayTmpRoot, "taskferry-cow-oc_gone"));
   });
 
+  test("a legacy persisted task (overlayDirs.tmpRoot === undefined, predating creation-time tmpRoot persistence) gets its containment root migrated to the pre-upgrade os.tmpdir() default, not today's overlayTmpRoot -- and the sweep finds/cleans it there", () => {
+    // Regression: loadPersisted() used to stamp a legacy record's tmpRoot
+    // with the *current* overlayTmpRoot -- fine when that was always plain
+    // os.tmpdir(), but wrong now that overlayTmpRoot defaults to
+    // runtimeDir/overlay (taskferry#286). A legacy overlay's real on-disk
+    // location is still under the old os.tmpdir() default; stamping the
+    // new root would point releaseOverlay()'s containment guard and this
+    // sweep's scan set at a directory that never held the overlay,
+    // silently orphaning it forever. Uses readdirFn injection (not a real
+    // dir under the real host os.tmpdir()) so this test can't act on
+    // another concurrent process's real overlay on a shared host -- see
+    // 04d5e48's "stop overlay tests from scanning and acting on real host
+    // /tmp".
+    const overlayTmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "axi-legacy-new-root-"));
+    const legacyRoot = path.join(os.tmpdir(), "taskferry-cow-t_legacy");
+    const cleanedRoots = [];
+    const mgr = makeManager({
+      overlayTmpRoot,
+      tasksFixture: [{
+        ...baseTask({ id: "t_legacy" }),
+        role: "dispatch",
+        changesetStatus: "accepted",
+        overlayDirs: {
+          root: legacyRoot,
+          tmpRoot: undefined,
+          upperDir: path.join(legacyRoot, "upper", "main"),
+          workDir: path.join(legacyRoot, "work", "main"),
+        },
+      }],
+      readdirFn: (p) => {
+        if (p === overlayTmpRoot) return [];
+        if (p === os.tmpdir()) return ["taskferry-cow-t_legacy"];
+        throw Object.assign(new Error(`ENOENT: ${p}`), { code: "ENOENT" });
+      },
+      rmOverlayTreeFn: (p) => { cleanedRoots.push(p); },
+    });
+    assert.deepEqual(cleanedRoots, [legacyRoot], "the sweep must scan the legacy os.tmpdir() root (not just the new overlayTmpRoot) and clean the legacy overlay found there");
+    assert.equal("overlayDirs" in mgr.status("t_legacy"), false, "cleanup succeeded, so the task record's overlayDirs must be cleared");
+  });
+
   test("does not sweep an overlay directory whose task still has a pending changeset", () => {
     const overlayTmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "axi-orphan-tmp-"));
     const overlayRoot = path.join(overlayTmpRoot, "taskferry-cow-t_pending");

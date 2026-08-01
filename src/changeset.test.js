@@ -1,6 +1,8 @@
 // src/changeset.test.js
 import { describe, test } from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { overlayPaths, subOverlayPaths, subOverlaySlug, extractGitDiff, resolvePreDispatchHead, buildMergedViewBwrapArgs, extractNonGitDiff, applyChangeset, cleanupOverlay } from "./changeset.js";
 
@@ -478,5 +480,51 @@ describe("cleanupOverlay()", () => {
     const result = cleanupOverlay({ root: "/tmp/taskferry-cow-t1", tmpRoot: "/tmp", rmFn: () => { throw new Error("EACCES: permission denied"); } });
     assert.equal(result.removed, false);
     assert.match(result.reason, /permission denied/);
+  });
+
+  test("default rmFn includes chmod's own stderr when both chmod and rm fail", () => {
+    const calls = [];
+    const spawnFn = (command, _args) => {
+      calls.push(command);
+      if (command === "chmod") return { status: 1, stderr: "chmod: Operation not permitted (immutable flag)" };
+      return { status: 1, stderr: "rm: cannot remove: Read-only file system" };
+    };
+    const result = cleanupOverlay({ root: "/tmp/taskferry-cow-t1", tmpRoot: "/tmp", spawnFn });
+    assert.deepEqual(calls, ["chmod", "rm"]);
+    assert.equal(result.removed, false);
+    assert.match(result.reason, /chmod failed: chmod: Operation not permitted \(immutable flag\)/);
+    assert.match(result.reason, /rm -rf failed: rm: cannot remove: Read-only file system/);
+  });
+
+  // Real overlayfs mounts leave a kernel-owned, mode-000 scratch directory at
+  // workDir/work, and -- once anything in the overlay was ever deleted --
+  // that directory holds an internal whiteout entry (verified live against a
+  // real leftover overlay: `sudo ls -la` showed a mode-000 dir containing a
+  // single char-device entry, e.g. "c--------- 1 jeremy jeremy 0, 0 ... #2d1b").
+  // An *empty* mode-000 directory is removable by a same-uid `rm -rf` (GNU
+  // rm's optimistic rmdir() fast path needs only the parent's permissions),
+  // but a *non-empty* one forces rm to opendir()/readdir() it to remove its
+  // children first, which requires read+execute on the directory itself --
+  // mode 000 blocks that, so rm fails with EACCES and aborts, having already
+  // deleted sibling entries like upper/. That leaves upperDir gone but
+  // cleanupOverlay() reporting removed: false, so the caller never clears
+  // overlayDirs -- a task now claims a live overlay whose upper/ no longer
+  // exists (taskferry issue #273: "Can't find source path .../upper/main").
+  // This exercises the real default rmFn (no injected fake) against that
+  // exact shape.
+  test("default rmFn removes a tree containing a non-empty mode-000 kernel-owned work scratch dir", () => {
+    const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "cleanup-overlay-test-"));
+    const root = path.join(tmpRoot, "taskferry-cow-modetest");
+    const upperDir = path.join(root, "upper", "main");
+    const workScratch = path.join(root, "work", "main", "work");
+    fs.mkdirSync(upperDir, { recursive: true, mode: 0o700 });
+    fs.mkdirSync(workScratch, { recursive: true, mode: 0o700 });
+    fs.writeFileSync(path.join(workScratch, "whiteout-marker"), "");
+    fs.chmodSync(workScratch, 0o000);
+
+    const result = cleanupOverlay({ root, tmpRoot });
+
+    assert.deepEqual(result, { removed: true, reason: null });
+    assert.equal(fs.existsSync(root), false);
   });
 });

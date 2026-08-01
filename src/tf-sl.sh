@@ -26,9 +26,13 @@ RESET='\033[0m'
 tf_seg=""
 tf_summary_fresh=""
 if command -v taskferry >/dev/null 2>&1 && [ -n "$cwd" ]; then
+  # TASKFERRY_AUTO_START=0 on every call in this script: if a statusline poll
+  # were ever the first command to trigger a daemon autostart, the daemon
+  # inherits that poll's env for its entire lifetime (see docs/daemon.md) --
+  # a statusline segment must never be the thing that boots the daemon.
   # --limit 5, not 1: only a running task should surface, and the newest
   # dispatch (row 1) isn't necessarily the one still running.
-  tf_out=$(timeout 1 taskferry list --directory "$cwd" --limit 5 2>/dev/null)
+  tf_out=$(TASKFERRY_AUTO_START=0 timeout 1 taskferry list --directory "$cwd" --limit 5 2>/dev/null)
   if [ -n "$tf_out" ]; then
     tf_running=$(echo "$tf_out" | awk -F': ' '/^  running:/{print $2; exit}')
     tf_queued=$(echo "$tf_out" | awk -F': ' '/^  queued:/{print $2; exit}')
@@ -47,7 +51,7 @@ if command -v taskferry >/dev/null 2>&1 && [ -n "$cwd" ]; then
   # in a one-line state file since taskferry's status response carries no
   # timestamp of its own for when the summary was captured.
   if [ -n "$tf_id" ]; then
-    tf_status_out=$(timeout 1 taskferry status "$tf_id" 2>/dev/null)
+    tf_status_out=$(TASKFERRY_AUTO_START=0 timeout 1 taskferry status "$tf_id" 2>/dev/null)
     tf_summary_raw=$(echo "$tf_status_out" | sed -n 's/^summarizedActivity: "\(.*\)"$/\1/p')
     if [ -n "$tf_summary_raw" ]; then
       tf_summary=$(printf '%s' "$tf_summary_raw" | sed 's/\\"/"/g')

@@ -6,7 +6,7 @@ import path from "node:path";
 import { createTaskEvents } from "./events.js";
 import { createActivityCache, readActivitySnapshot, readDeltaNarration, DEFAULT_SUMMARIZER_TIMEOUT_MS } from "./activity.js";
 import { withFileLock } from "./state-lock.js";
-import { resolveStateDir, resolveCacheDir, TASKFERRY_PLUMBING_ENV_VARS } from "./paths.js";
+import { resolveStateDir, resolveCacheDir, resolveOverlayTmpRoot, TASKFERRY_PLUMBING_ENV_VARS } from "./paths.js";
 import { RESULT_FIELDS } from "./protocol.js";
 import { formatToolEventForNarration } from "./narration-format.js";
 import { errCode } from "./errors.js";
@@ -14,6 +14,7 @@ import { isNonNegativeInteger, isPositiveInteger } from "./numbers.js";
 import { buildBwrapArgs, checkBwrapAvailable, checkOverlaySupport, defaultDenyList, platformSupportsSandbox, resolveGitCommonDir, resolveGitDir } from "./sandbox.js";
 import { applyChangeset, overlayPaths, resolvePreDispatchHead, subOverlayPaths, subFilePaths, cleanupOverlay, defaultRunCommand as defaultOverlayRunCommand, extractGitDiff, extractNonGitDiff } from "./changeset.js";
 import { resolveExecutor, opencodeExecutor } from "./executor.js";
+import { loadEnvFile, watchEnvFile } from "./env-file.js";
 
 /**
  * @typedef {object} SummaryOf
@@ -560,6 +561,27 @@ const DEFAULT_CANCEL_GRACE_MS = 5000;
  *   file-vs-directory note on {@link defaultDenyList}).
  * @param {string[]} [options.allowedDirs] - extra directories always bound read-write inside the sandbox,
  *   in addition to the auto-detected git-common-dir for a worktree dispatch directory.
+ * @param {string} [options.envFilePath] - path to a `.env`-style file loaded once at daemon
+ *   startup and unioned in as the lowest-priority layer of every spawned child's environment
+ *   (below the daemon's own ambient `process.env`, which stays below the caller's forwarded
+ *   env). Exists for secrets that live only in an interactive shell's rc file and never reach a
+ *   non-interactive caller (cron, systemd) that dispatches through the same daemon. The initial
+ *   load happens synchronously at construction, so an explicitly configured path that can't be
+ *   read throws at daemon startup rather than silently dispatching with the secret missing.
+ *   After that, `watchEnvFileFn` keeps `envFileVars` live -- see its own doc comment.
+ * @param {(path: string) => Record<string, string>} [options.loadEnvFileFn]
+ * @param {Record<string, string>} [options.envFileVars] - pre-loaded env-file contents; defaults
+ *   to `loadEnvFileFn(envFilePath)` when `envFilePath` is set, `{}` otherwise. Exposed directly so
+ *   tests can inject values without touching the filesystem. Reassigned in place whenever the
+ *   `envFilePath` watcher (see `watchEnvFileFn`) observes a change, so `sanitizedEnvironment()`
+ *   -- which reads this binding fresh on every spawn, the same as `process.env` -- picks up a
+ *   rotated secret without a daemon restart.
+ * @param {typeof import("./env-file.js").watchEnvFile} [options.watchEnvFileFn] - starts watching
+ *   `envFilePath` for changes once the initial `envFileVars` load above has already succeeded.
+ *   Only invoked when `envFilePath` is set; a failure to establish the watch itself (as opposed
+ *   to a later reload failure) is logged and otherwise ignored rather than treated as fatal --
+ *   the mandatory initial load already guarantees a working `envFileVars`, so losing live updates
+ *   degrades to the old restart-required behavior instead of taking the daemon down.
  * @param {(directory: string) => string|null} [options.resolveGitCommonDirFn]
  * @param {(directory: string) => string|null} [options.resolveGitDirFn]
  * @param {boolean} [options.overlayEnabled]
@@ -644,11 +666,16 @@ export function createTaskManager({
   allowedDirs = parseAllowedDirs(process.env.TASKFERRY_ALLOWED_DIRS ?? /** @type {string|undefined} */ (config.allowedDirs)),
   envDenylist = parseEnvDenylist(process.env.TASKFERRY_ENV_DENYLIST ?? /** @type {string|undefined} */ (config.envDenylist)),
   sandboxDenylist = parseSandboxDenylist(process.env.TASKFERRY_SANDBOX_DENYLIST ?? /** @type {string|undefined} */ (config.sandboxDenylist)),
+  envFilePath = process.env.TASKFERRY_ENV_FILE !== undefined
+    ? process.env.TASKFERRY_ENV_FILE
+    : /** @type {string|undefined} */ (config.envFile),
+  loadEnvFileFn = loadEnvFile,
+  envFileVars = envFilePath ? loadEnvFileFn(envFilePath) : {},
+  watchEnvFileFn = watchEnvFile,
   overlayEnabled = process.env.TASKFERRY_DISABLE_OVERLAY !== undefined
     ? !["1", "true"].includes(process.env.TASKFERRY_DISABLE_OVERLAY)
     : (/** @type {boolean|undefined} */ (config.overlayEnabled) ?? true),
   checkOverlaySupportFn = checkOverlaySupport,
-  overlayTmpRoot = os.tmpdir(),
   runOverlayCommandFn = defaultOverlayRunCommand,
   rmOverlayTreeFn,
   resolveGitCommonDirFn = resolveGitCommonDir,
@@ -658,6 +685,10 @@ export function createTaskManager({
   statFn = (/** @type {string} */ p) => { try { return fs.statSync(p); } catch { return null; } },
   readdirFn = (/** @type {string} */ p) => fs.readdirSync(p),
   runtimeDir = path.join(stateDir, "run"),
+  // Scoped under runtimeDir (not plain os.tmpdir()) so two daemon instances
+  // -- isolated via TASKFERRY_STATE_DIR/RUNTIME_DIR or not -- never share an
+  // overlay namespace; see resolveOverlayTmpRoot()'s doc comment (taskferry#286).
+  overlayTmpRoot = resolveOverlayTmpRoot({ env: process.env, runtimeDir }),
   cacheDir = resolveCacheDir(process.env),
   onEvent,
 } = {}) {
@@ -683,6 +714,26 @@ export function createTaskManager({
   const maxWait = positiveInteger(maxWaitMs, MAX_WAIT_MS);
   const summarizerTimeout = nonNegativeInteger(summarizerTimeoutMs, DEFAULT_SUMMARIZER_TIMEOUT_MS);
   const activityWords = positiveInteger(activityMaxWords, 75);
+
+  // Keeps envFileVars live after the mandatory initial load above -- see
+  // sanitizedEnvironment()'s fresh read of it below. A failure here (e.g. the
+  // directory backing envFilePath vanishing) only costs live updates, not
+  // the daemon's ability to start, since the initial load already succeeded.
+  let envFileWatcher = null;
+  if (envFilePath) {
+    try {
+      envFileWatcher = watchEnvFileFn(envFilePath, {
+        loadEnvFileFn,
+        onReload: (vars) => { envFileVars = vars; },
+        onError: (error) => {
+          process.stderr.write(`warning: env-file reload failed for ${envFilePath}: ${error instanceof Error ? error.message : String(error)} (keeping previous values)\n`);
+        },
+      });
+    } catch (error) {
+      process.stderr.write(`warning: could not watch env file ${envFilePath} for live updates: ${error instanceof Error ? error.message : String(error)} (loaded once at startup; changes need a daemon restart)\n`);
+    }
+  }
+
   let eventSequence = 0;
   const taskEvents = createTaskEvents((event) => {
     eventSequence = Math.max(eventSequence, /** @type {{sequence: number}} */ (event).sequence);
@@ -800,16 +851,27 @@ export function createTaskManager({
   const CALLER_ENV_EXCLUDED = new Set(["PATH", "HOME", ...TASKFERRY_PLUMBING_ENV_VARS]);
 
   /**
-   * Builds the final base environment for a spawned child: the daemon's own
-   * ambient environment (read fresh at call time), overlaid with the
-   * caller-supplied `env` (caller wins, except for CALLER_ENV_EXCLUDED --
-   * daemon-controlled plumbing resolved once at the daemon's own startup),
-   * with `envDenylist` stripped last regardless of which side the value
-   * came from. Applies the same key/value rules as the RPC-level
+   * Builds the final base environment for a spawned child, three layers
+   * unioned low-to-high priority: `envFileVars` (loaded once from
+   * `envFilePath` at daemon startup -- the fallback for secrets that never
+   * reach a non-interactive caller like cron or systemd in the first
+   * place), the daemon's own ambient environment (`process.env`, read
+   * fresh at call time), then the caller-supplied `env` (caller wins).
+   * CALLER_ENV_EXCLUDED (daemon-controlled plumbing resolved once at the
+   * daemon's own startup) is applied to BOTH the envFileVars layer and the
+   * caller layer -- a name in that set can never be set by either, only by
+   * the daemon's own ambient process.env, even when the ambient env
+   * happens not to have that name set (a naive `{...envFileVars,
+   * ...process.env}` spread would let a file-supplied plumbing var like
+   * TASKFERRY_SOCKET_PATH through unopposed in that case; explicitly
+   * checking `!(name in merged)` after seeding from process.env, plus the
+   * same exclusion check as the caller loop below, closes that gap).
+   * `envDenylist` is stripped last regardless of which of the three layers
+   * the value came from. Applies the same key/value rules as the RPC-level
    * isEnvironment so a programmatic caller that bypasses the socket (no
    * isEnvironment gate) can't smuggle a malformed key past the spawn
-   * boundary -- bad keys throw synchronously here, which startTask() catches
-   * and surfaces as a spawnError on a crashed task rather than a
+   * boundary -- bad keys throw synchronously here, which startTask()
+   * catches and surfaces as a spawnError on a crashed task rather than a
    * silently-dropped value. Null or undefined env is treated as empty (as
    * the pre-validation spread did) rather than rejected.
    * @param {NodeJS.ProcessEnv} [env]
@@ -818,6 +880,10 @@ export function createTaskManager({
   function sanitizedEnvironment(env = {}) {
     const callerEnv = env ?? {};
     const merged = { ...process.env };
+    for (const name of Object.keys(envFileVars)) {
+      if (CALLER_ENV_EXCLUDED.has(name)) continue;
+      if (!(name in merged)) merged[name] = envFileVars[name];
+    }
     for (const name of Object.keys(callerEnv)) {
       if (name === "" || name.includes("=")) {
         throw new Error(`error: invalid env key in caller-supplied env: ${JSON.stringify(name)}\nhelp: env keys must be non-empty strings without '=' characters`);
@@ -1002,11 +1068,16 @@ export function createTaskManager({
         }
         if (t.status === "running" || t.status === "queued") t.status = "unknown";
         if (t.executorId === undefined) t.executorId = "opencode";
-        // Legacy records predate creation-time tmpRoot persistence. Keep their
-        // prior live-root cleanup behavior rather than letting releaseOverlay
-        // pass undefined into the containment guard; newly-created overlays
-        // always carry the exact root that was in effect at creation.
-        if (t.overlayDirs && t.overlayDirs.tmpRoot === undefined) t.overlayDirs.tmpRoot = overlayTmpRoot;
+        // Legacy records predate creation-time tmpRoot persistence. Their
+        // overlay actually lives on disk under the *old* default -- plain
+        // os.tmpdir() -- not today's overlayTmpRoot (now runtimeDir/overlay
+        // per taskferry#286). Stamping the current overlayTmpRoot here would
+        // point the record's containment root at a directory that never
+        // held the overlay, which both releaseOverlay()'s containment guard
+        // (changeset.js's cleanupOverlay()) and sweepOrphanedOverlays()'s
+        // tmpRoots scan key off of -- silently orphaning the real leftover
+        // under os.tmpdir() forever.
+        if (t.overlayDirs && t.overlayDirs.tmpRoot === undefined) t.overlayDirs.tmpRoot = os.tmpdir();
         tasks.set(t.id, t);
         if (t.status !== previousStatus) taskEvents.emitState(t, previousStatus);
       }
@@ -1049,9 +1120,12 @@ export function createTaskManager({
   // Mirrors sweepOrphanedPromptFiles() above: a daemon that crashed after an
   // overlay was created but before its cleanup (reject/accept, or the
   // advisor auto-reject in extractChangesetForTask()) ever ran leaves a
-  // /tmp/taskferry-cow-<task-id> dir behind. /tmp being a tmpfs clears these
-  // on a real reboot for free; this only matters for a same-boot daemon
-  // restart. A task whose changesetStatus is still "pending" legitimately
+  // <overlay-tmp-root>/taskferry-cow-<task-id> dir behind. The overlay tmp
+  // root (runtimeDir/overlay by default -- see paths.js's
+  // resolveOverlayTmpRoot()) is often a tmpfs too, clearing these on a real
+  // reboot for free, but that's not guaranteed the way plain /tmp was; this
+  // sweep only matters for a same-boot daemon restart either way. A task
+  // whose changesetStatus is still "pending" legitimately
   // owns its overlay and must never be swept here -- only unknown task ids
   // and already-resolved (accepted/rejected) tasks with a leftover
   // overlayDirs (their own cleanupOverlay() call crashed mid-removal) are
@@ -1064,7 +1138,7 @@ export function createTaskManager({
     for (const tmpRoot of tmpRoots) {
       let entries;
       try {
-        entries = fs.readdirSync(tmpRoot);
+        entries = readdirFn(tmpRoot);
       } catch {
         continue;
       }
@@ -3441,10 +3515,17 @@ export function createTaskManager({
       activityCache.setSummariesEnabled(activitySummariesEnabled && totalCount > 0);
     },
     advisor,
-    paths: { STATE_DIR: stateDir, LOG_DIR, SUMMARY_DIR, TASKS_FILE },
+    paths: { STATE_DIR: stateDir, LOG_DIR, SUMMARY_DIR, TASKS_FILE, OVERLAY_TMP_ROOT: overlayTmpRoot },
     // Exposed primarily so tests can seed the summary session id and watermark
     // (the activity cache owns the "last successful summary" state shared
     // between the activity path and the direct summarize path).
     activityCache,
+    // Stops the envFileVars live-reload watch, if one was started. Every
+    // other background timer this manager owns (the watchdog interval) is
+    // .unref()'d and left to die with the process instead, but fs.watch
+    // handles keep the event loop alive regardless of unref, so a test
+    // process that constructs many managers without ever exiting needs an
+    // explicit way to release them -- daemon.js's close() calls this too.
+    close: () => envFileWatcher?.close(),
   };
 }

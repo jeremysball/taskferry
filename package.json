@@ -31,7 +31,15 @@
     "@eslint/js": "^10.0.1",
     "@types/node": "^26.1.1",
     "eslint": "^10.7.0",
+    "eslint-plugin-sonarjs": "^4.2.0",
     "globals": "^17.7.0",
     "typescript": "^7.0.2"
+  },
+  "overrides": {
+    "eslint-plugin-sonarjs": {
+      "ts-api-utils": {
+        "typescript": "6.0.3"
+      }
+    }
   }
 }

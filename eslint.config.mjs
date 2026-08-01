@@ -1,5 +1,6 @@
 import js from "@eslint/js";
 import globals from "globals";
+import sonarjs from "eslint-plugin-sonarjs";
 
 // Taskferry is a Node ESM project: the AXI CLI entrypoint (src/cli.js),
 // the daemon that owns task processes (src/daemon.js), its task manager
@@ -35,6 +36,34 @@ export default [
       "max-params": ["warn", 5],
       "max-lines-per-function": ["warn", { max: 80, skipBlankLines: true, skipComments: true }],
       "max-lines": ["warn", { max: 400, skipBlankLines: true, skipComments: true }],
+    },
+  },
+
+  // SonarJS bug/code-smell detectors, layered on top of the maintainability
+  // rules above. Also warnings for now: see issue #135 for the plan to
+  // promote both rule sets to errors once the backlog they report is clear.
+  {
+    files: ["**/*.js"],
+    plugins: { sonarjs },
+    rules: {
+      ...Object.fromEntries(
+        Object.entries(sonarjs.configs.recommended.rules).map(([name, value]) => [
+          name,
+          Array.isArray(value) ? ["warn", ...value.slice(1)] : "warn",
+        ]),
+      ),
+      // Pure style preference (parens around single-arg arrows), not a bug
+      // or maintainability signal -- disabled rather than fixed.
+      "sonarjs/arrow-function-convention": "off",
+      // Wants a license header block on every file; this project doesn't
+      // use one.
+      "sonarjs/file-header": "off",
+      // Taskferry's whole job is sandboxing: os.tmpdir()/`/tmp` use and
+      // PATH-resolved spawns of bwrap/git/opencode/pi are expected,
+      // reviewed patterns here, not accidental exposure -- disabled rather
+      // than generating permanent noise no fix can resolve.
+      "sonarjs/publicly-writable-directories": "off",
+      "sonarjs/no-os-command-from-path": "off",
     },
   },
 

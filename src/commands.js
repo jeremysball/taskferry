@@ -102,6 +102,56 @@ function readTailChars(filePath, maxChars) {
   return codePoints.length > maxChars ? codePoints.slice(-maxChars).join("") : codePoints.join("");
 }
 
+/**
+ * Reads a Claude Code session transcript and extracts just the plain-text
+ * user and assistant turns, dropping thinking blocks, tool_use calls, and
+ * raw tool_result/toolUseResult dumps -- the bulk of a transcript's bytes,
+ * and mostly noise for advisor's job of critiquing a decision in flight.
+ * Malformed lines are skipped rather than failing the whole read (a
+ * transcript can be mid-write when advisor reads it). Returns the last
+ * `maxChars` Unicode code points of the extracted text.
+ * @param {string} filePath
+ * @param {number} maxChars
+ * @returns {string}
+ */
+function extractTranscriptText(filePath, maxChars) {
+  let raw;
+  try {
+    raw = fs.readFileSync(filePath, "utf8");
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    throw new UsageError(
+      `advisor could not read the Claude session transcript at ${filePath}: ${message}`,
+      "CLAUDE_CODE_SESSION_ID was set but its transcript file wasn't readable -- --prompt does not skip auto-context (it's prepended to it), so this still fails even with --prompt set; unset CLAUDE_CODE_SESSION_ID for this call, or check the transcript path"
+    );
+  }
+  const turns = [];
+  for (const line of raw.split("\n")) {
+    if (!line) continue;
+    let entry;
+    try {
+      entry = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (entry.type !== "user" && entry.type !== "assistant") continue;
+    const content = entry.message?.content;
+    let text;
+    if (typeof content === "string") {
+      text = content;
+    } else if (Array.isArray(content)) {
+      text = content
+        .filter((block) => block?.type === "text")
+        .map((block) => block.text)
+        .join("\n");
+    }
+    if (text) turns.push(`${entry.type}: ${text}`);
+  }
+  const joined = turns.join("\n\n");
+  const codePoints = Array.from(joined);
+  return codePoints.length > maxChars ? codePoints.slice(-maxChars).join("") : joined;
+}
+
 const ADVISOR_TAIL_CHARS_CAP = 131072;
 
 const ADVISOR_CANNED_PROMPT = `You are an advisor reviewing the in-progress work of a cheaper dispatcher agent. The text that follows is a tail of its session log: its current task, what it has read, what it has decided, and what it is about to do next. Treat it as suspect, not as a draft to refine.
@@ -129,7 +179,7 @@ async function gatherAdvisorContext({ client, env, cwd, homeDirectory }) {
   const budget = resolveAdvisorContextChars(env);
   if (env.CLAUDE_CODE_SESSION_ID) {
     const transcriptPath = claudeTranscriptPath(homeDirectory, cwd, env.CLAUDE_CODE_SESSION_ID);
-    const text = readTailChars(transcriptPath, budget);
+    const text = extractTranscriptText(transcriptPath, budget);
     return { source: "claude-session", text };
   }
   if (env.TASKFERRY_TASK_ID) {
@@ -214,7 +264,7 @@ async function checkClaudeIntegration(runShellCommand) {
 }
 
 
-export { resolveAdvisorContextChars, claudeTranscriptPath, readTailChars };
+export { resolveAdvisorContextChars, claudeTranscriptPath, readTailChars, extractTranscriptText };
 
 export async function runCommand(command, options, { client, io = process, signal, executablePath, cwd = process.cwd(), homeDirectory = os.homedir(), env = process.env, runShellCommand = defaultShellRunner, platform = process.platform, checkSkills = defaultCheckSkills, resolveWorkspaceRoot: resolveWorkspaceRootFn = resolveWorkspaceRoot } = {}) {
   switch (command) {

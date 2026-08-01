@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { runCommand, resolveAdvisorContextChars, claudeTranscriptPath, readTailChars } from "./commands.js";
+import { runCommand, resolveAdvisorContextChars, claudeTranscriptPath, readTailChars, extractTranscriptText } from "./commands.js";
 import { UsageError } from "./args.js";
 
 function fakeIo({ isTTY } = {}) {
@@ -715,7 +715,7 @@ test("advisor auto-attaches a Claude session transcript tail when CLAUDE_CODE_SE
   const slug = root.split(path.sep).join("-");
   const projectDir = path.join(home, ".claude", "projects", slug);
   fs.mkdirSync(projectDir, { recursive: true });
-  fs.writeFileSync(path.join(projectDir, "sess-1.jsonl"), '{"role":"user","text":"do the thing"}\n');
+  fs.writeFileSync(path.join(projectDir, "sess-1.jsonl"), '{"type":"user","message":{"role":"user","content":"do the thing"}}\n');
 
   let capturedPrompt;
   const client = { request: async (method, params) => { capturedPrompt = params.prompt; return { status: "done", message: "advice" }; } };
@@ -1297,5 +1297,56 @@ describe("advisor context helpers", () => {
 
   test("readTailChars() throws a UsageError naming the path when the file doesn't exist", () => {
     assert.throws(() => readTailChars("/nonexistent/transcript.jsonl", 100), (err) => err instanceof UsageError && /\/nonexistent\/transcript\.jsonl/.test(err.message));
+  });
+
+  test("extractTranscriptText() keeps only user/assistant text turns, dropping thinking, tool_use, and tool_result noise", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-extract-transcript-"));
+    const filePath = path.join(dir, "transcript.jsonl");
+    const lines = [
+      { type: "user", message: { role: "user", content: "please fix the bug" } },
+      { type: "assistant", message: { role: "assistant", content: [{ type: "thinking", thinking: "let me think about this" }] } },
+      { type: "assistant", message: { role: "assistant", content: [{ type: "tool_use", id: "1", name: "Read", input: {} }] } },
+      { type: "user", message: { role: "user", content: [{ type: "tool_result", tool_use_id: "1", content: "huge file dump here" }] } },
+      { type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "found it, fixing now" }] } },
+      { type: "system", subtype: "hook", hookInfos: [] },
+    ];
+    fs.writeFileSync(filePath, lines.map((l) => JSON.stringify(l)).join("\n") + "\n");
+
+    const result = extractTranscriptText(filePath, 10000);
+
+    assert.match(result, /please fix the bug/);
+    assert.match(result, /found it, fixing now/);
+    assert.doesNotMatch(result, /let me think about this/);
+    assert.doesNotMatch(result, /huge file dump here/);
+    assert.doesNotMatch(result, /Read/);
+  });
+
+  test("extractTranscriptText() returns the last N characters of the extracted text when it exceeds the budget", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-extract-transcript-"));
+    const filePath = path.join(dir, "transcript.jsonl");
+    const lines = [
+      { type: "user", message: { role: "user", content: "first message" } },
+      { type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "second message" }] } },
+    ];
+    fs.writeFileSync(filePath, lines.map((l) => JSON.stringify(l)).join("\n") + "\n");
+
+    const result = extractTranscriptText(filePath, 10);
+
+    assert.equal(result.length, 10);
+    assert.doesNotMatch(result, /first message/);
+  });
+
+  test("extractTranscriptText() skips malformed lines instead of throwing", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-extract-transcript-"));
+    const filePath = path.join(dir, "transcript.jsonl");
+    fs.writeFileSync(filePath, 'not valid json\n{"type":"user","message":{"role":"user","content":"still readable"}}\n');
+
+    const result = extractTranscriptText(filePath, 10000);
+
+    assert.match(result, /still readable/);
+  });
+
+  test("extractTranscriptText() throws a UsageError naming the path when the file doesn't exist", () => {
+    assert.throws(() => extractTranscriptText("/nonexistent/transcript.jsonl", 100), (err) => err instanceof UsageError && /\/nonexistent\/transcript\.jsonl/.test(err.message));
   });
 });

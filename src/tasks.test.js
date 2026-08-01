@@ -208,7 +208,7 @@ describe("dispatch() lifecycle, driven through an injected spawnFn (no real open
 
   test("defaults to openai/gpt-5.6-luna --variant high when no model is given", () => {
     let captured = null;
-    const mgr = makeManager({ spawnFn: (cmd, args) => { captured = args; return fakeChild(); } });
+    const mgr = makeManager({ spawnFn: (_cmd, args) => { captured = args; return fakeChild(); } });
     mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), executor: "opencode" });
     assert.deepEqual(captured.slice(6, 10), ["-m", "openai/gpt-5.6-luna", "--variant", "high"]);
   });
@@ -220,7 +220,7 @@ describe("dispatch() lifecycle, driven through an injected spawnFn (no real open
 
   test("resuming with --session-id and no --model inherits the model of the task that owned that session (issue #47)", () => {
     let captured = null;
-    const mgr = makeManager({ spawnFn: (cmd, args) => { captured = args; return fakeChild(); } });
+    const mgr = makeManager({ spawnFn: (_cmd, args) => { captured = args; return fakeChild(); } });
     mgr.dispatch({ prompt: "first", directory: os.tmpdir(), model: "opencode-go/minimax-m3", sessionId: "ses_abc", executor: "opencode" });
     mgr.dispatch({ prompt: "resume", directory: os.tmpdir(), sessionId: "ses_abc", executor: "opencode" });
     assertDispatchedModel(captured, "opencode-go/minimax-m3");
@@ -228,7 +228,7 @@ describe("dispatch() lifecycle, driven through an injected spawnFn (no real open
 
   test("resuming with --session-id and an explicit --model still uses the explicit model", () => {
     let captured = null;
-    const mgr = makeManager({ spawnFn: (cmd, args) => { captured = args; return fakeChild(); } });
+    const mgr = makeManager({ spawnFn: (_cmd, args) => { captured = args; return fakeChild(); } });
     mgr.dispatch({ prompt: "first", directory: os.tmpdir(), model: "opencode-go/minimax-m3", sessionId: "ses_abc", executor: "opencode" });
     mgr.dispatch({ prompt: "resume", directory: os.tmpdir(), model: "opencode/other-model", sessionId: "ses_abc", executor: "opencode" });
     assertDispatchedModel(captured, "opencode/other-model");
@@ -236,7 +236,7 @@ describe("dispatch() lifecycle, driven through an injected spawnFn (no real open
 
   test("an unrecognized --session-id with no --model still falls back to the hardcoded default", () => {
     let captured = null;
-    const mgr = makeManager({ spawnFn: (cmd, args) => { captured = args; return fakeChild(); } });
+    const mgr = makeManager({ spawnFn: (_cmd, args) => { captured = args; return fakeChild(); } });
     mgr.dispatch({ prompt: "resume", directory: os.tmpdir(), sessionId: "ses_never_seen", executor: "opencode" });
     assertDispatchedModel(captured, "openai/gpt-5.6-luna");
   });
@@ -276,7 +276,7 @@ describe("dispatch() lifecycle, driven through an injected spawnFn (no real open
       normalizeLogEvent: (parsed) => parsed,
       sandboxAuthFile: () => ({ extraRoBinds: [], extraRwPairBinds: [], sandboxedDataHome: "/tmp/unused", sandboxEnv: {} }),
     };
-    const mgr = makeManager({ spawnFn: (cmd, args) => { captured = args; return fakeChild(); }, defaultExecutor: fakePi });
+    const mgr = makeManager({ spawnFn: (_cmd, args) => { captured = args; return fakeChild(); }, defaultExecutor: fakePi });
     mgr.dispatch({ prompt: "first", directory: os.tmpdir(), sessionId: "ses_reuse", executor: "pi" });
     mgr.dispatch({ prompt: "resume", directory: os.tmpdir(), sessionId: "ses_reuse" });
     assert.deepEqual(captured, ["--fake-pi-marker"]);
@@ -291,7 +291,7 @@ describe("dispatch() lifecycle, driven through an injected spawnFn (no real open
 
   test("a sessionId that collides across executors does not leak the other executor's model when --executor is given explicitly", () => {
     let captured = null;
-    const mgr = makeManager({ spawnFn: (cmd, args) => { captured = args; return fakeChild(); } });
+    const mgr = makeManager({ spawnFn: (_cmd, args) => { captured = args; return fakeChild(); } });
     // Same literal sessionId string, but the earlier task belongs to a
     // different executor -- resolving executor: "pi" here must not inherit
     // the opencode task's model just because the sessionId string matches.
@@ -1194,7 +1194,7 @@ describe("bwrap sandboxing", () => {
     let dispatchArgs = null;
     let advisorArgs = null;
     const mgr = makeManager({
-      spawnFn: (cmd, args) => { if (!dispatchArgs) dispatchArgs = args; else advisorArgs = args; const child = fakeChild(); setImmediate(() => child.emit("exit", 0, null)); return child; },
+      spawnFn: (_cmd, args) => { if (!dispatchArgs) dispatchArgs = args; else advisorArgs = args; const child = fakeChild(); setImmediate(() => child.emit("exit", 0, null)); return child; },
       sandboxEnabled: true,
       overlayEnabled: true,
       checkBwrapAvailableFn: () => ({ checked: true, available: true }),
@@ -1321,7 +1321,7 @@ describe("bwrap sandboxing", () => {
     let dispatchArgs = null;
     let advisorArgs = null;
     const mgr = makeManager({
-      spawnFn: (cmd, args) => { if (!dispatchArgs) dispatchArgs = args; else advisorArgs = args; const child = fakeChild(); setImmediate(() => child.emit("exit", 0, null)); return child; },
+      spawnFn: (_cmd, args) => { if (!dispatchArgs) dispatchArgs = args; else advisorArgs = args; const child = fakeChild(); setImmediate(() => child.emit("exit", 0, null)); return child; },
       sandboxEnabled: true,
       overlayEnabled: true,
       checkBwrapAvailableFn: () => ({ checked: true, available: true }),
@@ -1410,7 +1410,7 @@ describe("changeset extraction at settlement", () => {
     const overlayTmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "axi-extract-tmp-"));
     let child;
     const mgr = makeManager({
-      spawnFn: (cmd, args) => { child = fakeChild(); return child; },
+      spawnFn: (_cmd, _args) => { child = fakeChild(); return child; },
       sandboxEnabled: true,
       checkBwrapAvailableFn: () => ({ checked: true, available: true }),
       overlayEnabled: true,
@@ -1435,7 +1435,7 @@ describe("changeset extraction at settlement", () => {
     const overlayTmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "axi-advisor-extract-tmp-"));
     let child;
     const mgr = makeManager({
-      spawnFn: (cmd, args) => { child = fakeChild(); return child; },
+      spawnFn: (_cmd, _args) => { child = fakeChild(); return child; },
       sandboxEnabled: true,
       checkBwrapAvailableFn: () => ({ checked: true, available: true }),
       overlayEnabled: true,
@@ -1466,7 +1466,7 @@ describe("changeset extraction at settlement", () => {
     let extractArgs = null;
     let child;
     const mgr = makeManager({
-      spawnFn: (cmd, args) => { child = fakeChild(); return child; },
+      spawnFn: (_cmd, _args) => { child = fakeChild(); return child; },
       sandboxEnabled: true,
       checkBwrapAvailableFn: () => ({ checked: true, available: true }),
       overlayEnabled: true,
@@ -1474,7 +1474,7 @@ describe("changeset extraction at settlement", () => {
       platform: "linux",
       resolveGitCommonDirFn: () => gitCommonDir,
       resolveGitDirFn: () => gitWorktreeAdminDir,
-      runOverlayCommandFn: (command, args) => { extractArgs = args; return { status: 0, stdout: "diff --git a/f.txt b/f.txt\n", stderr: "", error: undefined }; },
+      runOverlayCommandFn: (_command, args) => { extractArgs = args; return { status: 0, stdout: "diff --git a/f.txt b/f.txt\n", stderr: "", error: undefined }; },
     });
 
     const result = mgr.dispatch({ prompt: "hello", directory });
@@ -1492,7 +1492,7 @@ describe("changeset extraction at settlement", () => {
     const overlayTmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "axi-empty-extract-tmp-"));
     let child;
     const mgr = makeManager({
-      spawnFn: (cmd, args) => { child = fakeChild(); return child; },
+      spawnFn: (_cmd, _args) => { child = fakeChild(); return child; },
       sandboxEnabled: true,
       checkBwrapAvailableFn: () => ({ checked: true, available: true }),
       overlayEnabled: true,
@@ -1516,7 +1516,7 @@ describe("changeset extraction at settlement", () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "axi-cancel-extract-dir-"));
     let child;
     const mgr = makeManager({
-      spawnFn: (cmd, args) => { child = fakeChild(); return child; },
+      spawnFn: (_cmd, _args) => { child = fakeChild(); return child; },
       killFn: () => {},
       sandboxEnabled: true,
       checkBwrapAvailableFn: () => ({ checked: true, available: true }),
@@ -1542,7 +1542,7 @@ describe("changeset extraction at settlement", () => {
     let cleanedAny = false;
     let child;
     const mgr = makeManager({
-      spawnFn: (cmd, args) => { child = fakeChild(); return child; },
+      spawnFn: (_cmd, _args) => { child = fakeChild(); return child; },
       sandboxEnabled: true,
       checkBwrapAvailableFn: () => ({ checked: true, available: true }),
       overlayEnabled: true,
@@ -1576,7 +1576,7 @@ describe("dispatch() role/changeset fields", () => {
 
   test("advisor() dispatches internally with role 'advisor'", async () => {
     const mgr = makeManager({
-      spawnFn: (cmd, args, opts) => { const child = fakeChild(); setImmediate(() => child.emit("exit", 0, null)); return child; },
+      spawnFn: (_cmd, _args, _opts) => { const child = fakeChild(); setImmediate(() => child.emit("exit", 0, null)); return child; },
       sandboxEnabled: false,
     });
     const advised = await mgr.advisor({ prompt: "hello", directory: os.tmpdir(), model: "openai/gpt-5.6-sol" });
@@ -1588,7 +1588,7 @@ describe("dispatch() role/changeset fields", () => {
 describe("dispatch() with a prompt over the argv-safe size (issue #78: spawn E2BIG)", () => {
   test("a prompt at or under the argv-safe threshold is still passed inline, no -f attachment", () => {
     let captured = null;
-    const mgr = makeManager({ spawnFn: (cmd, args, opts) => { captured = { args, opts }; return fakeChild(); } });
+    const mgr = makeManager({ spawnFn: (_cmd, args, opts) => { captured = { args, opts }; return fakeChild(); } });
     const prompt = "x".repeat(96 * 1024);
 
     mgr.dispatch({ prompt, directory: os.tmpdir() });
@@ -1599,7 +1599,7 @@ describe("dispatch() with a prompt over the argv-safe size (issue #78: spawn E2B
 
   test("a prompt over the argv-safe threshold is written to a scratch file and attached via -f, never appearing in argv", () => {
     let captured = null;
-    const mgr = makeManager({ spawnFn: (cmd, args, opts) => { captured = { args, opts }; return fakeChild(); } });
+    const mgr = makeManager({ spawnFn: (_cmd, args, opts) => { captured = { args, opts }; return fakeChild(); } });
     const prompt = "x".repeat(96 * 1024 + 1);
 
     mgr.dispatch({ prompt, directory: os.tmpdir(), executor: "opencode" });
@@ -1617,7 +1617,7 @@ describe("dispatch() with a prompt over the argv-safe size (issue #78: spawn E2B
   test("the scratch prompt file is deleted once the task settles", () => {
     const child = fakeChild();
     let captured = null;
-    const mgr = makeManager({ spawnFn: (cmd, args, opts) => { captured = { args, opts }; return child; } });
+    const mgr = makeManager({ spawnFn: (_cmd, args, opts) => { captured = { args, opts }; return child; } });
     const prompt = "x".repeat(96 * 1024 + 1);
 
     mgr.dispatch({ prompt, directory: os.tmpdir(), executor: "opencode" });
@@ -1632,7 +1632,7 @@ describe("dispatch() with a prompt over the argv-safe size (issue #78: spawn E2B
   test("the scratch prompt file is deleted even when the spawned child errors before exiting", () => {
     const child = fakeChild();
     let captured = null;
-    const mgr = makeManager({ spawnFn: (cmd, args, opts) => { captured = { args, opts }; return child; } });
+    const mgr = makeManager({ spawnFn: (_cmd, args, opts) => { captured = { args, opts }; return child; } });
     const prompt = "x".repeat(96 * 1024 + 1);
 
     mgr.dispatch({ prompt, directory: os.tmpdir() });
@@ -3850,7 +3850,7 @@ describe("advisor()", () => {
     const child = fakeChild();
     let captured = null;
     const mgr = makeManager({
-      spawnFn: (cmd, args, _opts) => {
+      spawnFn: (_cmd, args, _opts) => {
         captured = args;
         return child;
       },
@@ -4053,7 +4053,7 @@ describe("advisor()", () => {
     let captured = null;
     const mgr = makeManager({
       advisorSessionTtlMs: 60000,
-      spawnFn: (cmd, args) => {
+      spawnFn: (_cmd, args) => {
         captured = args;
         return child;
       },
@@ -4111,7 +4111,7 @@ describe("advisor()", () => {
     let captured = null;
     const mgr = makeManager({
       advisorSessionTtlMs: 10,
-      spawnFn: (cmd, args) => {
+      spawnFn: (_cmd, args) => {
         captured = args;
         return child;
       },
@@ -4702,7 +4702,7 @@ describe("summarize()", () => {
     const mgr = makeManager({
       tasksFixture: (logDir) => [baseTask({ id: "source", logPath: path.join(logDir, "source.ndjson") })],
       logs: { "source.ndjson": log },
-      spawnFn: (command, args) => {
+      spawnFn: (_command, args) => {
         const attachment = args[args.indexOf("-f") + 1];
         capturedSnapshot = JSON.parse(fs.readFileSync(attachment, "utf8"));
         return child;
@@ -4722,7 +4722,7 @@ describe("summarize()", () => {
     const mgr = makeManager({
       tasksFixture: (logDir) => [baseTask({ id: "source", logPath: path.join(logDir, "source.ndjson") })],
       logs: { "source.ndjson": log },
-      spawnFn: (command, args) => {
+      spawnFn: (_command, args) => {
         const attachment = args[args.indexOf("-f") + 1];
         capturedSnapshot = JSON.parse(fs.readFileSync(attachment, "utf8"));
         return child;
@@ -4749,7 +4749,7 @@ describe("summarize()", () => {
     const mgr = makeManager({
       tasksFixture: (logDir) => [baseTask({ id: "source", logPath: path.join(logDir, "source.ndjson") })],
       logs: { "source.ndjson": log },
-      spawnFn: (command, args) => {
+      spawnFn: (_command, args) => {
         const attachment = args[args.indexOf("-f") + 1];
         capturedSnapshot = JSON.parse(fs.readFileSync(attachment, "utf8"));
         return child;
@@ -5443,7 +5443,7 @@ describe("caller-env union (sanitizedEnvironment)", () => {
     delete process.env.AXI_TEST_CALLER_VAR;
     t.after(() => delete process.env.AXI_TEST_CALLER_VAR);
     let capturedOpts = null;
-    const mgr = makeManager({ spawnFn: (cmd, args, opts) => { capturedOpts = opts; return fakeChild(); } });
+    const mgr = makeManager({ spawnFn: (_cmd, _args, opts) => { capturedOpts = opts; return fakeChild(); } });
 
     mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), env: { AXI_TEST_CALLER_VAR: "from-caller" } });
 
@@ -5455,7 +5455,7 @@ describe("caller-env union (sanitizedEnvironment)", () => {
     for (const name of excluded) process.env[name] = `real-${name}`;
     t.after(() => { for (const name of excluded) delete process.env[name]; });
     let capturedOpts = null;
-    const mgr = makeManager({ spawnFn: (cmd, args, opts) => { capturedOpts = opts; return fakeChild(); } });
+    const mgr = makeManager({ spawnFn: (_cmd, _args, opts) => { capturedOpts = opts; return fakeChild(); } });
 
     const maliciousEnv = Object.fromEntries(excluded.map((name) => [name, `malicious-${name}`]));
     mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), env: maliciousEnv });
@@ -5465,10 +5465,10 @@ describe("caller-env union (sanitizedEnvironment)", () => {
     }
   });
 
-  test("a denylisted name is stripped even when the caller's env explicitly sets it", (t) => {
+  test("a denylisted name is stripped even when the caller's env explicitly sets it", (_t) => {
     let capturedOpts = null;
     const mgr = makeManager({
-      spawnFn: (cmd, args, opts) => { capturedOpts = opts; return fakeChild(); },
+      spawnFn: (_cmd, _args, opts) => { capturedOpts = opts; return fakeChild(); },
       envDenylistSpec: "AXI_TEST_DENIED_VAR",
     });
 
@@ -5477,10 +5477,10 @@ describe("caller-env union (sanitizedEnvironment)", () => {
     assert.equal("AXI_TEST_DENIED_VAR" in capturedOpts.env, false);
   });
 
-  test("TASKFERRY_CHILD survives even when denylisted", (t) => {
+  test("TASKFERRY_CHILD survives even when denylisted", (_t) => {
     let capturedOpts = null;
     const mgr = makeManager({
-      spawnFn: (cmd, args, opts) => { capturedOpts = opts; return fakeChild(); },
+      spawnFn: (_cmd, _args, opts) => { capturedOpts = opts; return fakeChild(); },
       envDenylistSpec: "TASKFERRY_CHILD",
     });
 
@@ -5493,19 +5493,19 @@ describe("caller-env union (sanitizedEnvironment)", () => {
     process.env.AXI_TEST_AMBIENT_ONLY = "ambient-value";
     t.after(() => delete process.env.AXI_TEST_AMBIENT_ONLY);
     let capturedOpts = null;
-    const mgr = makeManager({ spawnFn: (cmd, args, opts) => { capturedOpts = opts; return fakeChild(); } });
+    const mgr = makeManager({ spawnFn: (_cmd, _args, opts) => { capturedOpts = opts; return fakeChild(); } });
 
     mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
 
     assert.equal(capturedOpts.env.AXI_TEST_AMBIENT_ONLY, "ambient-value");
   });
 
-  test("summaryEnvironment strips OPENCODE_CONFIG* even when the caller's env explicitly sets one", async (t) => {
+  test("summaryEnvironment strips OPENCODE_CONFIG* even when the caller's env explicitly sets one", async (_t) => {
     let capturedEnv = null;
     const mgr = makeManager({
       tasksFixture: (logDir) => [{ ...baseTask({ id: "src1", status: "done", logPath: path.join(logDir, "src1.ndjson") }) }],
       logs: { "src1.ndjson": JSON.stringify({ type: "text", part: { messageID: "m1", text: "did the thing" } }) + "\n" },
-      spawnFn: (cmd, args, opts) => { capturedEnv = opts.env; return fakeChild(); },
+      spawnFn: (_cmd, _args, opts) => { capturedEnv = opts.env; return fakeChild(); },
       listModelsFn: () => `${DEFAULT_SUMMARY_MODEL}\n`,
     });
 
@@ -5521,7 +5521,7 @@ describe("caller-env union (sanitizedEnvironment)", () => {
     let capturedOpts = null;
     const child = fakeChild();
     const mgr = makeManager({
-      spawnFn: (cmd, args, opts) => { capturedOpts = opts; return child; },
+      spawnFn: (_cmd, _args, opts) => { capturedOpts = opts; return child; },
       sandboxEnabled: true,
       overlayEnabled: true,
       checkBwrapAvailableFn: () => ({ checked: true, available: true }),
@@ -5549,7 +5549,7 @@ describe("caller-env union (sanitizedEnvironment)", () => {
     const mgr = makeManager({
       tasksFixture: (logDir) => [{ ...baseTask({ id: "src1", status: "done", logPath: path.join(logDir, "src1.ndjson") }) }],
       logs: { "src1.ndjson": JSON.stringify({ type: "text", part: { messageID: "m1", text: "did the thing" } }) + "\n" },
-      spawnFn: (cmd, args, opts) => { capturedEnv = opts.env; return fakeChild(); },
+      spawnFn: (_cmd, _args, opts) => { capturedEnv = opts.env; return fakeChild(); },
       listModelsFn: () => `${DEFAULT_SUMMARY_MODEL}\n`,
     });
 
@@ -5568,7 +5568,7 @@ describe("caller-env union (sanitizedEnvironment)", () => {
     let spawnCount = 0;
     const mgr = makeManager({
       maxConcurrentTasks: 1,
-      spawnFn: (cmd, args, opts) => {
+      spawnFn: (_cmd, _args, opts) => {
         spawnCount++;
         if (spawnCount === 1) return occupyingChild;
         secondCapturedOpts = opts;
@@ -5615,7 +5615,7 @@ describe("caller-env union (sanitizedEnvironment)", () => {
     let spawnCount = 0;
     const mgr = makeManager({
       maxConcurrentTasks: 1,
-      spawnFn: (cmd, args, opts) => {
+      spawnFn: (_cmd, _args, opts) => {
         spawnCount++;
         if (spawnCount === 1) return occupyingChild;
         secondCapturedOpts = opts;
@@ -5661,7 +5661,7 @@ describe("caller-env union (sanitizedEnvironment)", () => {
       tasksFixture: (logDir) => [{ ...baseTask({ id: "src1", status: "done", logPath: path.join(logDir, "src1.ndjson") }) }],
       logs: { "src1.ndjson": JSON.stringify({ type: "text", part: { messageID: "m1", text: "did the thing" } }) + "\n" },
       listModelsFn: () => `${DEFAULT_SUMMARY_MODEL}\n`,
-      spawnFn: (cmd, args, opts) => {
+      spawnFn: (_cmd, _args, opts) => {
         spawnCount++;
         if (spawnCount === 1) return occupyingChild;
         summaryCapturedOpts = opts;
@@ -5697,7 +5697,7 @@ describe("caller-env union (sanitizedEnvironment)", () => {
     });
     let capturedOpts = null;
     const mgr = makeManager({
-      spawnFn: (cmd, args, opts) => { capturedOpts = opts; return fakeChild(); },
+      spawnFn: (_cmd, _args, opts) => { capturedOpts = opts; return fakeChild(); },
       envDenylistSpec: "AXI_TEST_DENY_AMBIENT,AXI_TEST_DENY_CALLER",
     });
 
@@ -5732,7 +5732,7 @@ describe("caller-env union (sanitizedEnvironment)", () => {
       }
     });
     let capturedOpts = null;
-    const mgr = makeManager({ spawnFn: (cmd, args, opts) => { capturedOpts = opts; return fakeChild(); } });
+    const mgr = makeManager({ spawnFn: (_cmd, _args, opts) => { capturedOpts = opts; return fakeChild(); } });
 
     mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), env: {
       TASKFERRY_STATE_DIR: "malicious-state",

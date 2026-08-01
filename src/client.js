@@ -8,7 +8,7 @@ import { withFileLock } from "./state-lock.js";
 import { PROTOCOL_VERSION, encodeMessage } from "./protocol.js";
 import { loadConfig } from "./config.js";
 import { isObject } from "./numbers.js";
-import { resolveRuntimeDir, resolveStateDir } from "./paths.js";
+import { resolveRuntimeDir, resolveStateDir, resolveInvokedPath } from "./paths.js";
 import { errCode } from "./errors.js";
 
 const DAEMON_ENTRY = fileURLToPath(new URL("./daemon.js", import.meta.url));
@@ -376,18 +376,6 @@ export async function connectClient({
     + (bootStderr ? `booter subprocess failed before startup: ${bootStderr}\n` : "")
     + `help: check ${runtimeDir} permissions and daemon startup diagnostics, then retry`
   );
-}
-
-// Symlink-safe, matching cli.js's own resolveInvokedPath. A bare path.resolve()
-// compares the symlink path against the real module path, so invoking
-// client.js through a symlink (an installed bin entry) never matches and the
-// booter never runs.
-function resolveInvokedPath(invoked) {
-  try {
-    return fs.realpathSync(invoked);
-  } catch {
-    return path.resolve(invoked);
-  }
 }
 
 if (process.argv[1] && resolveInvokedPath(process.argv[1]) === fileURLToPath(import.meta.url)) {

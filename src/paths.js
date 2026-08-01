@@ -63,6 +63,18 @@ export function resolveCacheDir(env = process.env) {
     || path.join(env.XDG_CACHE_HOME || path.join(os.homedir(), ".cache"), "taskferry");
 }
 
+// Symlink-safe, comparing the real (resolved) path against the caller's own
+// module path. A bare path.resolve() compares the symlink path against the
+// real module path, so invoking cli.js or client.js through a symlink (an
+// installed bin entry) never matches and the direct-execution guard never runs.
+export function resolveInvokedPath(invoked) {
+  try {
+    return fs.realpathSync(invoked);
+  } catch {
+    return path.resolve(invoked);
+  }
+}
+
 // Emitted at most once per directory (not once per process): a startup-time
 // git lookup failing repeatedly for the same non-repo startDir would
 // otherwise spam stderr on every observation-command invocation, but a

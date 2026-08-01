@@ -6,25 +6,8 @@ const commandSpecs = {
   dispatch: {
     usage: "taskferry dispatch --prompt <text> [options]",
     description: "Queue a background OpenCode run.",
-    options: {
-      "--prompt <text>": "required",
-      "--directory <path>": "defaults to the current workspace",
-      "--model <id>": "use the default model when omitted",
-      "--variant <name>": "optional model reasoning variant",
-      "--session-id <id>": "resume an existing OpenCode session",
-      "--require-final-marker <regex>": "flag the task as incomplete if the final message doesn't match this pattern (case-sensitive, standard JS RegExp semantics)",
-      "--no-sandbox": "run this dispatch without the bwrap filesystem sandbox (default: sandboxed on Linux)",
-      "--no-overlay": "run this dispatch without the copy-on-write overlay (writes land directly, not gated by accept/reject)",
-      "--allowed-dirs <path,path,...>": "extra directories bound read-write inside the sandbox, in addition to the auto-detected git-common-dir for a worktree",
-      "--executor <opencode|pi>": "worker backend to dispatch through, default pi",
-    },
-    examples: [
-      'taskferry dispatch --prompt "Fix the failing tests"',
-      'taskferry dispatch --prompt "Review this change" --model openai/gpt-5.6-sol',
-      'taskferry dispatch --prompt "Investigate" --require-final-marker "^Status: (DONE|DONE_WITH_CONCERNS|BLOCKED)$"',
-      'taskferry dispatch --prompt "Run one-off shell tooling" --no-sandbox',
-      'taskferry dispatch --prompt "Update the shared cache dir" --allowed-dirs /home/user/.cache/myapp',
-    ],
+    options: { "--prompt <text>": "required", "--directory <path>": "defaults to the current workspace", "--model <id>": "use the default model when omitted", "--variant <name>": "optional model reasoning variant", "--session-id <id>": "resume an existing OpenCode session", "--require-final-marker <regex>": "flag the task as incomplete if the final message doesn't match this pattern (case-sensitive, standard JS RegExp semantics)", "--no-sandbox": "run this dispatch without the bwrap filesystem sandbox (default: sandboxed on Linux)", "--no-overlay": "run this dispatch without the copy-on-write overlay (writes land directly, not gated by accept/reject)", "--allowed-dirs <path,path,...>": "extra directories bound read-write inside the sandbox, in addition to the auto-detected git-common-dir for a worktree", "--executor <opencode|pi>": "worker backend to dispatch through, default pi" },
+    examples: ['taskferry dispatch --prompt "Fix the failing tests"', 'taskferry dispatch --prompt "Review this change" --model openai/gpt-5.6-sol', 'taskferry dispatch --prompt "Investigate" --require-final-marker "^Status: (DONE|DONE_WITH_CONCERNS)$"', 'taskferry dispatch --prompt "Run one-off shell tooling" --no-sandbox', 'taskferry dispatch --prompt "Update the shared cache dir" --allowed-dirs /home/user/.cache/myapp'],
   },
   cancel: {
     usage: "taskferry cancel <id> [--grace-ms <number>]",
@@ -47,30 +30,14 @@ const commandSpecs = {
   wait: {
     usage: "taskferry wait <id> [options]",
     description: "Wait for a task to settle or return its current status after a timeout.",
-    options: {
-      "--timeout <duration>": "maximum wait, e.g. 10000 (ms), 30s, 5m, 1h",
-      "--tail-chars <number>": "include this many trailing text characters on timeout",
-      "--full": "include directory, model, and log details",
-      "--summarize": "print periodic live summaries while waiting; exits when the task settles",
-    },
+    options: { "--timeout <duration>": "maximum wait, e.g. 10000 (ms), 30s, 5m, 1h", "--tail-chars <number>": "include this many trailing text characters on timeout", "--full": "include directory, model, and log details", "--summarize": "print periodic live summaries while waiting; exits when the task settles" },
     examples: ['taskferry wait <id>', 'taskferry wait <id> --timeout 10s --tail-chars 1000', 'taskferry wait <id> --summarize'],
   },
   advisor: {
     usage: "taskferry advisor --prompt <text> --model <id> [options]",
     description: "Ask a model for advice and wait for its response.",
-    options: {
-      "--prompt <text>": "required",
-      "--model <id>": "required",
-      "--directory <path>": "defaults to the current workspace",
-      "--variant <name>": "optional model reasoning variant",
-      "--session-id <id>": "continue a recent advisor session",
-      "--timeout <duration>": "maximum wait, e.g. 10000 (ms), 30s, 5m, 1h",
-      "--executor <opencode|pi>": "worker backend to dispatch through, default pi",
-    },
-    examples: [
-      'taskferry advisor --prompt "How should I split this module?" --model openai/gpt-5.6-sol',
-      'taskferry advisor --prompt "Review this design" --model zai/glm-5.2 --timeout 30s',
-    ],
+    options: { "--prompt <text>": "required", "--model <id>": "required", "--directory <path>": "defaults to the current workspace", "--variant <name>": "optional model reasoning variant", "--session-id <id>": "continue a recent advisor session", "--timeout <duration>": "maximum wait, e.g. 10000 (ms), 30s, 5m, 1h", "--executor <opencode|pi>": "worker backend to dispatch through, default pi" },
+    examples: ['taskferry advisor --prompt "How should I split this module?" --model openai/gpt-5.6-sol', 'taskferry advisor --prompt "Review this design" --model zai/glm-5.2 --timeout 30s'],
   },
   status: {
     usage: "taskferry status <id> [--full]",
@@ -87,52 +54,31 @@ const commandSpecs = {
   summary: {
     usage: "taskferry summary <id> [options]",
     description: "Create a bounded report or activity summary for a task.",
-    options: {
-      "--mode report|activity": "summary mode, default report",
-      "--max-words <number>": "target length from 75 through 300",
-      "--wait": "wait for active work before summarizing",
-    },
+    options: { "--mode report|activity": "summary mode, default report", "--max-words <number>": "target length from 75 through 300", "--wait": "wait for active work before summarizing" },
     examples: ['taskferry summary <id>', 'taskferry summary <id> --mode activity --wait'],
   },
   result: {
     usage: "taskferry result <id> [options]",
     description: "Read the final model result for a task.",
-    options: {
-      "--full": "include untruncated narration",
-      "--fields <comma-list>": "request selected result fields",
-      "--diff": "print the task's changeset diff (read-only; cannot combine with --fields or --full)",
-    },
+    options: { "--full": "include untruncated narration", "--fields <comma-list>": "request selected result fields", "--diff": "print the task's changeset diff (read-only; cannot combine with --fields or --full)" },
     examples: ['taskferry result <id>', 'taskferry result <id> --full', 'taskferry result <id> --fields message,tokens', 'taskferry result <id> --diff'],
   },
   list: {
     usage: "taskferry list [options]",
     description: "List tasks scoped to a workspace, newest first.",
-    options: {
-      "--directory <path>": "workspace to inspect, defaults to the current workspace",
-      "--all": "include tasks from every workspace",
-      "--limit <number>": "limit displayed rows while preserving counts",
-    },
+    options: { "--directory <path>": "workspace to inspect, defaults to the current workspace", "--all": "include tasks from every workspace", "--limit <number>": "limit displayed rows while preserving counts" },
     examples: ['taskferry list', 'taskferry list --limit 20', 'taskferry list --all'],
   },
   watch: {
     usage: "taskferry watch [options]",
     description: "Stream task state events for a workspace.",
-    options: {
-      "--directory <path>": "workspace to watch, defaults to the current workspace",
-      "--task-id <id>": "scope the stream to one task; exits automatically once it settles",
-      "--format toon|ndjson": "stream format, default toon",
-      "--summaries": "request activity summaries when available",
-      "--flush-interval <duration>": "batch events and print them together on this interval, e.g. 30s, 5m, 1h; requires --summaries",
-    },
+    options: { "--directory <path>": "workspace to watch, defaults to the current workspace", "--task-id <id>": "scope the stream to one task; exits automatically once it settles", "--format toon|ndjson": "stream format, default toon", "--summaries": "request activity summaries when available", "--flush-interval <duration>": "batch events and print them together on this interval, e.g. 30s, 5m, 1h; requires --summaries" },
     examples: ['taskferry watch', 'taskferry watch --task-id <id> --summaries', 'taskferry watch --format ndjson', 'taskferry watch --summaries --flush-interval 5m'],
   },
   context: {
     usage: "taskferry context [options]",
     description: "Print compact current-workspace context for an agent hook.",
-    options: {
-      "--directory <path>": "workspace to inspect, defaults to the current workspace",
-      "--format toon|claude-hook|codex-hook": "context format, default toon",
-    },
+    options: { "--directory <path>": "workspace to inspect, defaults to the current workspace", "--format toon|claude-hook|codex-hook": "context format, default toon" },
     examples: ['taskferry context', 'taskferry context --format claude-hook', 'taskferry context --format codex-hook'],
   },
   doctor: {
@@ -149,6 +95,9 @@ const commandSpecs = {
   },
 };
 
+const POSITIONAL_TASK_COMMANDS = ["cancel", "wait", "status", "tail", "summary", "result", "accept", "reject"];
+const PROMPT_REQUIRED_COMMANDS = ["dispatch", "advisor"];
+
 export { UsageError };
 
 export function helpText(command) {
@@ -163,13 +112,7 @@ export function helpText(command) {
     };
   }
   const spec = commandSpecs[command];
-  return {
-    command,
-    usage: spec.usage,
-    description: spec.description,
-    options: spec.options,
-    examples: spec.examples,
-  };
+  return { command, usage: spec.usage, description: spec.description, options: spec.options, examples: spec.examples };
 }
 
 function usageError(message, command) {
@@ -177,13 +120,13 @@ function usageError(message, command) {
     const validFlags = Object.keys(commandSpecs[command].options).join(", ") || "none";
     return new UsageError(message, `Valid flags for ${command}: ${validFlags}. Run \`taskferry ${command} --help\` for details`);
   }
-  const help = "Run `taskferry --help` for usage";
-  return new UsageError(message, help);
+  return new UsageError(message, "Run `taskferry --help` for usage");
 }
 
 function migrationError(name, args) {
+  const received = args.length ? ` (received ${args.join(" ")})` : "";
   const migrations = {
-    taskferry_dispatch: `Use: taskferry dispatch --prompt "<text>"${args.length ? ` (received ${args.join(" ")})` : ""}`,
+    taskferry_dispatch: `Use: taskferry dispatch --prompt "<text>"${received}`,
     taskferry_cancel: "Use: taskferry cancel <id>",
     taskferry_poll: `Use: taskferry wait ${args[0] || "<id>"}`,
     taskferry_advisor: "Use: taskferry advisor --prompt \"<text>\" --model <id>",
@@ -212,7 +155,6 @@ function parseNumber(value, flag, { min = 0, max = Number.MAX_SAFE_INTEGER } = {
 // with a clear message instead of inheriting Node's vague overflow warning.
 const MAX_TIMEOUT_MS = 2_147_483_647;
 const MAX_TIMEOUT_HUMAN = `${MAX_TIMEOUT_MS} milliseconds (about 24 days)`;
-
 const DURATION_UNITS_MS = { s: 1000, m: 60_000, h: 3_600_000 };
 
 function parseDuration(value, flag) {
@@ -223,12 +165,10 @@ function parseDuration(value, flag) {
     if (ms > MAX_TIMEOUT_MS) throw new UsageError(`${flag} must not exceed ${MAX_TIMEOUT_HUMAN}`, remediation);
     return ms;
   }
-  const match = /^(\d+)(s|m|h)$/.exec(value);
+  const match = /^(\d+)([smh])$/.exec(value);
   if (!match) throw new UsageError(`${flag} must be milliseconds or a duration like 30s, 5m, 1h`, remediation);
   const ms = Number(match[1]) * DURATION_UNITS_MS[match[2]];
-  if (!Number.isSafeInteger(ms) || ms > MAX_TIMEOUT_MS) {
-    throw new UsageError(`${flag} must not exceed ${MAX_TIMEOUT_HUMAN}`, remediation);
-  }
+  if (!Number.isSafeInteger(ms) || ms > MAX_TIMEOUT_MS) throw new UsageError(`${flag} must not exceed ${MAX_TIMEOUT_HUMAN}`, remediation);
   return ms;
 }
 
@@ -251,253 +191,253 @@ function setOption(options, name, value, command, seen) {
 
 function parseLongFlag(token) {
   const equals = token.indexOf("=");
-  return equals === -1 ? { name: token, inlineValue: undefined } : { name: token.slice(0, equals), inlineValue: token.slice(equals + 1) };
+  return equals === -1 ? { name: token, inlineValue: void 0 } : { name: token.slice(0, equals), inlineValue: token.slice(equals + 1) };
 }
 
 function parseFields(value) {
   const fields = value.split(",").map((field) => field.trim()).filter(Boolean);
   if (!fields.length || fields.some((field) => !RESULT_FIELDS.has(field))) {
-    throw new UsageError(
-      "--fields must contain one or more supported result fields",
-      `Use one of: ${[...RESULT_FIELDS].join(", ")}`
-    );
+    throw new UsageError("--fields must contain one or more supported result fields", `Use one of: ${[...RESULT_FIELDS].join(", ")}`);
   }
   return fields;
 }
 
+const DEFAULT_OPTIONS = {
+  dispatch: (c) => ({ prompt: void 0, directory: c, model: void 0, variant: void 0, sessionId: void 0, finalMarker: void 0, noSandbox: false, noOverlay: false, allowedDirs: void 0, executor: void 0 }),
+  advisor: () => ({ prompt: void 0, model: void 0, directory: void 0, variant: void 0, sessionId: void 0, timeoutMs: void 0, executor: void 0 }),
+  cancel: () => ({ taskId: void 0, graceMs: void 0 }),
+  wait: () => ({ taskId: void 0, timeoutMs: void 0, tailChars: void 0, full: false, summarize: false }),
+  status: () => ({ taskId: void 0, full: false }),
+  tail: () => ({ taskId: void 0, chars: void 0 }),
+  summary: () => ({ taskId: void 0, mode: "report", maxWords: void 0, wait: false }),
+  result: () => ({ taskId: void 0, full: false, fields: void 0, diff: false }),
+  accept: () => ({ taskId: void 0 }),
+  reject: () => ({ taskId: void 0 }),
+  list: () => ({ directory: void 0, all: false, limit: void 0 }),
+  watch: () => ({ directory: void 0, format: "toon", summaries: false, taskId: void 0, flushIntervalMs: void 0 }),
+  context: () => ({ directory: void 0, format: "toon" }),
+  doctor: () => ({ full: false }),
+  setup: () => ({}),
+};
+
 function defaultOptions(command, cwd) {
-  switch (command) {
-    case "dispatch":
-      return { prompt: undefined, directory: cwd, model: undefined, variant: undefined, sessionId: undefined, finalMarker: undefined, noSandbox: false, noOverlay: false, allowedDirs: undefined, executor: undefined };
-    case "advisor":
-      return { prompt: undefined, model: undefined, directory: undefined, variant: undefined, sessionId: undefined, timeoutMs: undefined, executor: undefined };
-    case "cancel":
-      return { taskId: undefined, graceMs: undefined };
-    case "wait":
-      return { taskId: undefined, timeoutMs: undefined, tailChars: undefined, full: false, summarize: false };
-    case "status":
-      return { taskId: undefined, full: false };
-    case "tail":
-      return { taskId: undefined, chars: undefined };
-    case "summary":
-      return { taskId: undefined, mode: "report", maxWords: undefined, wait: false };
-    case "result":
-      return { taskId: undefined, full: false, fields: undefined, diff: false };
-    case "accept":
-      return { taskId: undefined };
-    case "reject":
-      return { taskId: undefined };
-    case "list":
-      return { directory: undefined, all: false, limit: undefined };
-    case "watch":
-      return { directory: undefined, format: "toon", summaries: false, taskId: undefined, flushIntervalMs: undefined };
-    case "context":
-      return { directory: undefined, format: "toon" };
-    case "doctor":
-      return { full: false };
-    case "setup":
-      return {};
-    default:
-      return {};
+  const factory = DEFAULT_OPTIONS[command];
+  return factory ? factory(cwd) : {};
+}
+
+function coerceAllowedDirs(value, _name) {
+  const dirs = value.split(",").map((entry) => entry.trim()).filter(Boolean);
+  if (!dirs.length) throw new UsageError("--allowed-dirs must contain at least one path", "Use --allowed-dirs with one or more comma-separated paths");
+  return dirs;
+}
+
+function coerceFormat(value, name, command) {
+  const allowed = command === "watch" ? ["toon", "ndjson"] : ["toon", "claude-hook", "codex-hook"];
+  if (!allowed.includes(value)) throw new UsageError(`${name} must be one of ${allowed.join(", ")}`, `Use ${name} with one of: ${allowed.join(", ")}`);
+  return value;
+}
+
+function coerceMode(value, name) {
+  if (!["report", "activity"].includes(value)) throw new UsageError(`${name} must be one of report, activity`, "Use --mode report or --mode activity");
+  return value;
+}
+
+function coerceExecutor(value, name) {
+  if (!KNOWN_EXECUTORS.includes(value)) throw new UsageError(`${name} must be one of ${KNOWN_EXECUTORS.join(", ")}`, `Use --executor ${KNOWN_EXECUTORS.join(" or --executor ")}`);
+  return value;
+}
+
+function coerceFinalMarker(value, name) {
+  try {
+    new RegExp(value);
+  } catch (err) {
+    throw new UsageError(`${name} is not a valid RegExp: ${err.message}`, "Use --require-final-marker with a pattern that compiles as a standard JS RegExp");
   }
+  return value;
+}
+
+// Every flag in one table: the commands that allow it, whether it is a bare
+// boolean, the option key it writes, an optional value coercer, and (for
+// retired MCP-era names) a rename hint plus the flag the hint points at.
+const FLAGS = {
+  "--prompt": { allow: ["dispatch", "advisor"], key: "prompt" },
+  "--directory": { allow: ["dispatch", "advisor", "list", "watch", "context"], key: "directory" },
+  "--model": { allow: ["dispatch", "advisor"], key: "model" },
+  "--variant": { allow: ["dispatch", "advisor"], key: "variant" },
+  "--session-id": { allow: ["dispatch", "advisor"], key: "sessionId" },
+  "--require-final-marker": { allow: ["dispatch"], key: "finalMarker", coerce: coerceFinalMarker },
+  "--allowed-dirs": { allow: ["dispatch"], key: "allowedDirs", coerce: coerceAllowedDirs },
+  "--executor": { allow: ["dispatch", "advisor"], key: "executor", coerce: coerceExecutor },
+  "--grace-ms": { allow: ["cancel"], key: "graceMs", coerce: (v, n) => parseNumber(v, n, { min: 0 }) },
+  "--timeout": { allow: ["wait", "advisor"], key: "timeoutMs", coerce: (v, n) => parseDuration(v, n) },
+  "--tail-chars": { allow: ["wait"], key: "tailChars", coerce: (v, n) => parseNumber(v, n, { min: 1, max: 65536 }) },
+  "--chars": { allow: ["tail"], key: "chars", coerce: (v, n) => parseNumber(v, n, { min: 1, max: 65536 }) },
+  "--mode": { allow: ["summary"], key: "mode", coerce: coerceMode },
+  "--max-words": { allow: ["summary"], key: "maxWords", coerce: (v, n) => parseNumber(v, n, { min: 75, max: 300 }) },
+  "--fields": { allow: ["result"], key: "fields", coerce: parseFields },
+  "--limit": { allow: ["list"], key: "limit", coerce: (v, n) => parseNumber(v, n, { min: 1 }) },
+  "--format": { allow: ["watch", "context"], key: "format", coerce: coerceFormat },
+  "--task-id": { allow: ["watch"], key: "taskId", mention: "--task-id was replaced by the positional task id; use `taskferry status <id>`" },
+  "--flush-interval": { allow: ["watch"], key: "flushIntervalMs", coerce: (v, n) => parseDuration(v, n) },
+  "--full": { allow: ["wait", "status", "result", "doctor"], bool: true },
+  "--all": { allow: ["list"], bool: true },
+  "--wait": { allow: ["summary"], bool: true },
+  "--summaries": { allow: ["watch"], bool: true },
+  "--summarize": { allow: ["wait"], bool: true },
+  "--no-sandbox": { allow: ["dispatch"], bool: true, key: "noSandbox" },
+  "--no-overlay": { allow: ["dispatch"], bool: true, key: "noOverlay" }, // advisor deliberately excluded -- review finding #5
+  "--diff": { allow: ["result"], bool: true },
+  "--timeout_ms": { mention: "--timeout_ms was renamed; use --timeout", target: "--timeout" },
+  "--timeout-ms": { mention: "--timeout-ms was renamed; use --timeout", target: "--timeout" },
+  "--tail_chars": { mention: "--tail_chars was renamed; use --tail-chars" },
+  "--max_words": { mention: "--max_words was renamed; use --max-words" },
+  "--session_id": { mention: "--session_id was renamed; use --session-id" },
+  "--style": { mention: "--style was renamed; use --mode" },
+};
+
+// A subset of migration flags point at a target that isn't a valid flag on
+// every command (e.g. --timeout only exists on wait/advisor). For those, only
+// emit the "use <target>" hint when the current command actually accepts the
+// target -- otherwise the hint itself triggers a second "unknown flag" error.
+function commandAllows(command, flag) {
+  return FLAGS[flag]?.allow?.includes(command) === true;
+}
+
+function throwUnknown(ctx, name) {
+  throw usageError(`unknown flag ${name} for \`${ctx.command}\``, ctx.command);
+}
+
+function isMigration(ctx, name, def) {
+  return Boolean(def.mention && !(name === "--task-id" && ctx.command === "watch"));
+}
+
+function handleMigrationFlag(ctx, name, def) {
+  if (def.target && !commandAllows(ctx.command, def.target)) throwUnknown(ctx, name);
+  throw new UsageError(`unknown flag ${name} for \`${ctx.command}\``, def.mention);
+}
+
+function handleBooleanFlag(ctx, name, def, inlineValue, index) {
+  if (inlineValue !== undefined) throw usageError(`${name} does not take a value`, ctx.command);
+  const key = def.key ?? name.slice(2);
+  setOption(ctx.options, key, true, ctx.command, ctx.seen);
+  return index + 1;
+}
+
+function handleValueFlag(ctx, name, def, required) {
+  const value = def.coerce ? def.coerce(required.value, name, ctx.command) : required.value;
+  setOption(ctx.options, def.key, value, ctx.command, ctx.seen);
+  return required.nextIndex + 1;
+}
+
+function consumeFlag(ctx, rest, index, token) {
+  const { name, inlineValue } = parseLongFlag(token);
+  const def = FLAGS[name];
+  if (!def) throwUnknown(ctx, name);
+  if (isMigration(ctx, name, def)) return handleMigrationFlag(ctx, name, def);
+  if (!def.allow.includes(ctx.command)) throwUnknown(ctx, name);
+  if (def.bool) return handleBooleanFlag(ctx, name, def, inlineValue, index);
+  const required = requireValue(rest, index, name, inlineValue);
+  return handleValueFlag(ctx, name, def, required);
+}
+
+function handlePositional(ctx, token) {
+  const { command, options } = ctx;
+  if (ctx.positional) throw usageError(`unexpected argument: ${token}`, command);
+  if (!POSITIONAL_TASK_COMMANDS.includes(command)) throw usageError(`unexpected argument: ${token}`, command);
+  options.taskId = token;
+  ctx.positional = true;
+}
+
+function helpHome(argv) {
+  if (argv.length > 1) throw usageError(`unexpected argument: ${argv[1]}`);
+  return { command: "home", options: { directory: void 0 }, help: true, helpText: helpText() };
+}
+
+function versionResult(argv) {
+  if (argv.length > 1) throw usageError(`unexpected argument: ${argv[1]}`);
+  return { command: "version", options: {}, help: false };
+}
+
+// Fast-path returns described by { done: true, result } (home/version/show
+// help), otherwise { done: false, command, rest } once the command is known.
+function parseHead(argv) {
+  if (!Array.isArray(argv)) throw new TypeError("argv must be an array");
+  if (argv.length === 0) return { done: true, result: { command: "home", options: { directory: void 0 }, help: false, helpText: helpText() } };
+  const first = argv[0];
+  if (first === "--help" || first === "-h") return { done: true, result: helpHome(argv) };
+  if (first === "--version" || first === "-V") return { done: true, result: versionResult(argv) };
+  if (first.startsWith("taskferry_")) throw migrationError(first, argv.slice(1));
+  if (first === "poll") throw new UsageError("poll was renamed to wait", "Use `taskferry wait <id>`");
+  if (!commandSpecs[first]) throw new UsageError(`unknown command: ${first}`, "Run `taskferry --help` to see available commands");
+  return { done: false, command: first, rest: argv.slice(1) };
+}
+
+function validateList({ command, options, seen }) {
+  if (command !== "list") return;
+  if (options.all && seen.has("directory")) throw usageError("--all cannot be combined with --directory", command);
+  if (options.all) options.directory = void 0;
+}
+
+function validateResult(command, options) {
+  if (command !== "result") return;
+  if (options.full && options.fields && !options.fields.includes("narration")) throw usageError("--full requires narration in --fields", command);
+  if (options.diff && options.fields) throw usageError("--diff cannot be combined with --fields", command);
+  if (options.diff && options.full) {
+    // --full server-side only widens the narration preview; the diff field
+    // is independent and gated by `fields: ["diff"]` (--diff takes that
+    // route). Combining them would either silently drop --full (the
+    // pre-fix if/else-if in commands.js) or send both and have the
+    // projection throw away one -- either way a confusing user experience.
+    // Reject at parse time so the failure is loud and early.
+    throw usageError("--diff cannot be combined with --full", command);
+  }
+}
+
+function validateWait(command, options) {
+  if (command !== "wait") return;
+  if (options.summarize && options.timeoutMs !== undefined) throw usageError("--summarize cannot be combined with --timeout", command);
+  if (options.summarize && options.tailChars !== undefined) throw usageError("--summarize cannot be combined with --tail-chars", command);
+}
+
+function validateWatch(command, options) {
+  if (command !== "watch") return;
+  if (options.flushIntervalMs !== undefined && !options.summaries) throw usageError("--flush-interval requires --summaries", command);
+  // A zero-length flush interval is meaningless (it would either flush
+  // every event individually -- defeating the batching -- or fall back
+  // silently to per-event streaming via the streamTaskEvents truthy check).
+  if (options.flushIntervalMs === 0) throw usageError("--flush-interval must be greater than zero", command);
+}
+
+function validateCommand(command, options) {
+  if (POSITIONAL_TASK_COMMANDS.includes(command) && !options.taskId) throw usageError("task id is required", command);
+  if (PROMPT_REQUIRED_COMMANDS.includes(command) && !options.prompt) throw usageError("--prompt is required", command);
+  if (command === "advisor" && !options.model) throw usageError("--model is required", command);
+  validateResult(command, options);
+  validateWait(command, options);
+  validateWatch(command, options);
 }
 
 export function parseArgs(argv, { cwd = process.cwd() } = {}) {
-  if (!Array.isArray(argv)) throw new TypeError("argv must be an array");
-  if (!argv.length) {
-    return { command: "home", options: { directory: undefined }, help: false, helpText: helpText() };
-  }
-  if (argv[0] === "--help" || argv[0] === "-h") {
-    if (argv.length > 1) throw usageError(`unexpected argument: ${argv[1]}`);
-    return { command: "home", options: { directory: undefined }, help: true, helpText: helpText() };
-  }
-  const [command, ...rest] = argv;
-  if (command === "--version" || command === "-V") {
-    if (rest.length) throw usageError(`unexpected argument: ${rest[0]}`);
-    return { command: "version", options: {}, help: false };
-  }
-  if (command.startsWith("taskferry_")) throw migrationError(command, rest);
-  if (command === "poll") throw new UsageError("poll was renamed to wait", "Use `taskferry wait <id>`");
-  if (!commandSpecs[command]) throw new UsageError(`unknown command: ${command}`, "Run `taskferry --help` to see available commands");
-
-  const options = defaultOptions(command, cwd);
-  const seen = new Set();
-  let positional = false;
-  let help = false;
-  for (let index = 0; index < rest.length; index++) {
+  const head = parseHead(argv);
+  if (head.done) return head.result;
+  const { command, rest } = head;
+  const ctx = { command, options: defaultOptions(command, cwd), seen: new Set(), positional: false, help: false };
+  let index = 0;
+  while (index < rest.length) {
     const token = rest[index];
     if (token === "--help" || token === "-h") {
-      help = true;
-      continue;
-    }
-    if (!token.startsWith("-")) {
-      if (positional) throw usageError(`unexpected argument: ${token}`, command);
-      if (!["cancel", "wait", "status", "tail", "summary", "result", "accept", "reject"].includes(command)) {
-        throw usageError(`unexpected argument: ${token}`, command);
-      }
-      options.taskId = token;
-      positional = true;
-      continue;
-    }
-    if (!token.startsWith("--")) throw usageError(`unknown flag ${token} for \`${command}\``, command);
-    const { name, inlineValue } = parseLongFlag(token);
-    const migrationFlags = {
-      "--task-id": "--task-id was replaced by the positional task id; use `taskferry status <id>`",
-      "--timeout_ms": "--timeout_ms was renamed; use --timeout",
-      "--timeout-ms": "--timeout-ms was renamed; use --timeout",
-      "--tail_chars": "--tail_chars was renamed; use --tail-chars",
-      "--max_words": "--max_words was renamed; use --max-words",
-      "--session_id": "--session_id was renamed; use --session-id",
-      "--style": "--style was renamed; use --mode",
-    };
-    // A subset of migration flags point at a target that isn't a valid flag
-    // on every command (e.g. --timeout only exists on wait/advisor). For
-    // those, only emit the "use <target>" hint when the current command
-    // actually accepts the target — otherwise the hint itself triggers a
-    // second "unknown flag" error, which is misleading.
-    const migrationTargetFlag = {
-      "--task-id": null,
-      "--timeout_ms": "--timeout",
-      "--timeout-ms": "--timeout",
-    };
-    if (migrationFlags[name] && !(name === "--task-id" && command === "watch")) {
-      const target = migrationTargetFlag[name];
-      if (target && !commandAllows(command, target)) {
-        throw usageError(`unknown flag ${name} for \`${command}\``, command);
-      }
-      throw new UsageError(`unknown flag ${name} for \`${command}\``, migrationFlags[name]);
-    }
-
-    const booleanCommands = {
-      "--full": ["wait", "status", "result", "doctor"],
-      "--all": ["list"],
-      "--wait": ["summary"],
-      "--summaries": ["watch"],
-      "--summarize": ["wait"],
-      "--no-sandbox": ["dispatch"],
-      "--no-overlay": ["dispatch"], // advisor deliberately excluded -- review finding #5
-      "--diff": ["result"],
-    };
-    const booleanKeyOverrides = { "--no-sandbox": "noSandbox", "--no-overlay": "noOverlay" };
-    if (booleanCommands[name]) {
-      if (!booleanCommands[name].includes(command)) throw usageError(`unknown flag ${name} for \`${command}\``, command);
-      if (inlineValue !== undefined) throw usageError(`${name} does not take a value`, command);
-      const key = booleanKeyOverrides[name] ?? name.slice(2);
-      setOption(options, key, true, command, seen);
-      continue;
-    }
-
-    const values = {
-      "--prompt": "prompt",
-      "--directory": "directory",
-      "--model": "model",
-      "--variant": "variant",
-      "--session-id": "sessionId",
-      "--grace-ms": "graceMs",
-      "--timeout": "timeoutMs",
-      "--tail-chars": "tailChars",
-      "--chars": "chars",
-      "--mode": "mode",
-      "--max-words": "maxWords",
-      "--fields": "fields",
-      "--limit": "limit",
-      "--format": "format",
-      "--task-id": "taskId",
-      "--require-final-marker": "finalMarker",
-      "--allowed-dirs": "allowedDirs",
-      "--executor": "executor",
-      "--flush-interval": "flushIntervalMs",
-    };
-    const key = values[name];
-    if (!key || !commandAllows(command, name)) throw usageError(`unknown flag ${name} for \`${command}\``, command);
-    const required = requireValue(rest, index, name, inlineValue);
-    index = required.nextIndex;
-    let value = required.value;
-    if (key === "timeoutMs" || key === "flushIntervalMs") {
-      value = parseDuration(value, name);
-    } else if (["graceMs", "tailChars", "chars", "maxWords", "limit"].includes(key)) {
-      value = parseNumber(value, name, key === "tailChars" || key === "chars" ? { min: 1, max: 65536 } : key === "maxWords" ? { min: 75, max: 300 } : { min: key === "limit" ? 1 : 0 });
-    } else if (key === "fields") {
-      value = parseFields(value);
-    } else if (key === "allowedDirs") {
-      value = value.split(",").map((entry) => entry.trim()).filter(Boolean);
-      if (!value.length) throw new UsageError("--allowed-dirs must contain at least one path", "Use --allowed-dirs with one or more comma-separated paths");
-    } else if (key === "format") {
-      const allowed = command === "watch" ? ["toon", "ndjson"] : ["toon", "claude-hook", "codex-hook"];
-      if (!allowed.includes(value)) throw new UsageError(`${name} must be one of ${allowed.join(", ")}`, `Use ${name} with one of: ${allowed.join(", ")}`);
-    } else if (key === "mode" && !["report", "activity"].includes(value)) {
-      throw new UsageError(`${name} must be one of report, activity`, "Use --mode report or --mode activity");
-    } else if (key === "executor" && !KNOWN_EXECUTORS.includes(value)) {
-      throw new UsageError(`${name} must be one of ${KNOWN_EXECUTORS.join(", ")}`, `Use --executor ${KNOWN_EXECUTORS.join(" or --executor ")}`);
-    } else if (key === "finalMarker") {
-      try {
-        new RegExp(value);
-      } catch (err) {
-        throw new UsageError(`${name} is not a valid RegExp: ${err.message}`, "Use --require-final-marker with a pattern that compiles as a standard JS RegExp");
-      }
-    }
-    setOption(options, key, value, command, seen);
-  }
-
-  if (command === "list" && options.all && seen.has("directory")) {
-    throw usageError("--all cannot be combined with --directory", command);
-  }
-  if (command === "list" && options.all) options.directory = undefined;
-  if (!help) {
-    if (["cancel", "wait", "status", "tail", "summary", "result", "accept", "reject"].includes(command) && !options.taskId) {
-      throw usageError("task id is required", command);
-    }
-    if (["dispatch", "advisor"].includes(command) && !options.prompt) throw usageError("--prompt is required", command);
-    if (command === "advisor" && !options.model) throw usageError("--model is required", command);
-    if (command === "result" && options.full && options.fields && !options.fields.includes("narration")) {
-      throw usageError("--full requires narration in --fields", command);
-    }
-    if (command === "result" && options.diff && options.fields) {
-      throw usageError("--diff cannot be combined with --fields", command);
-    }
-    if (command === "result" && options.diff && options.full) {
-      // --full server-side only widens the narration preview; the diff field
-      // is independent and gated by `fields: ["diff"]` (--diff takes that
-      // route). Combining them would either silently drop --full (the
-      // pre-fix if/else-if in commands.js) or send both and have the
-      // projection throw away one -- either way a confusing user experience.
-      // Reject at parse time so the failure is loud and early.
-      throw usageError("--diff cannot be combined with --full", command);
-    }
-    if (command === "wait" && options.summarize && options.timeoutMs !== undefined) {
-      throw usageError("--summarize cannot be combined with --timeout", command);
-    }
-    if (command === "wait" && options.summarize && options.tailChars !== undefined) {
-      throw usageError("--summarize cannot be combined with --tail-chars", command);
-    }
-    if (command === "watch" && options.flushIntervalMs !== undefined && !options.summaries) {
-      throw usageError("--flush-interval requires --summaries", command);
-    }
-    // A zero-length flush interval is meaningless (it would either flush
-    // every event individually -- defeating the batching -- or, with the
-    // streamTaskEvents truthy-check, fall back silently to per-event
-    // streaming). Reject it explicitly rather than letting it pass.
-    if (command === "watch" && options.flushIntervalMs === 0) {
-      throw usageError("--flush-interval must be greater than zero", command);
+      ctx.help = true;
+      index += 1;
+    } else if (!token.startsWith("-")) {
+      handlePositional(ctx, token);
+      index += 1;
+    } else if (!token.startsWith("--")) {
+      throw usageError(`unknown flag ${token} for \`${command}\``, command);
+    } else {
+      index = consumeFlag(ctx, rest, index, token);
     }
   }
-  return { command, options, help, ...(help ? { helpText: helpText(command) } : {}) };
-}
-
-function commandAllows(command, flag) {
-  const flags = {
-    dispatch: ["--prompt", "--directory", "--model", "--variant", "--session-id", "--require-final-marker", "--allowed-dirs", "--executor"],
-    cancel: ["--grace-ms"],
-    wait: ["--timeout", "--tail-chars"],
-    advisor: ["--prompt", "--model", "--directory", "--variant", "--session-id", "--timeout", "--executor"],
-    status: [],
-    tail: ["--chars"],
-    summary: ["--mode", "--max-words"],
-    result: ["--fields"],
-    list: ["--directory", "--limit"],
-    watch: ["--directory", "--format", "--task-id", "--flush-interval"],
-    context: ["--directory", "--format"],
-    doctor: [],
-  };
-  return flags[command]?.includes(flag) === true;
+  validateList(ctx);
+  if (!ctx.help) validateCommand(command, ctx.options);
+  return { command, options: ctx.options, help: ctx.help, ...(ctx.help ? { helpText: helpText(command) } : {}) };
 }

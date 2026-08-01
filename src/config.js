@@ -3,6 +3,24 @@ import os from "node:os";
 import path from "node:path";
 import { KNOWN_EXECUTORS } from "./executor.js";
 
+// Per-path cache so repeated loadConfig() calls in the same process only
+// stat the file (cheap) instead of re-reading, re-parsing, and re-validating
+// on every invocation.  The cache entry is invalidated when the file's mtime
+// changes, so a config.json edit is observed on the next call without
+// requiring an explicit reset.
+//
+// Entries: configPath -> { mtimeMs: number | null, result: object }
+// mtimeMs is null when the file did not exist (ENOENT) at last load.
+const _configCache = new Map();
+
+/**
+ * Clear the internal config cache so the next loadConfig() call re-reads
+ * from disk.  Exported for test use only.
+ */
+export function _resetConfigCache() {
+  _configCache.clear();
+}
+
 const CONFIG_FIELD_TYPES = {
   maxConcurrentTasks: "number",
   maxDispatchesPerWindow: "number",
@@ -24,6 +42,7 @@ const CONFIG_FIELD_TYPES = {
   cancelGraceMs: "number",
   defaultExecutor: "string",
   advisorContextChars: "number",
+  envFile: "string",
 };
 
 /**
@@ -45,13 +64,26 @@ export function resolveConfigPath(env = process.env) {
  * @returns {Record<string, unknown>}
  */
 export function loadConfig({ env = process.env, configPath = resolveConfigPath(env) } = {}) {
-  let raw;
+  // Fast path: stat the file and return the cached result if mtime is unchanged.
+  let currentMtimeMs;
   try {
-    raw = fs.readFileSync(configPath, "utf8");
+    currentMtimeMs = fs.statSync(configPath).mtimeMs;
   } catch (err) {
-    if (err.code === "ENOENT") return {};
+    if (err.code === "ENOENT") {
+      const cached = _configCache.get(configPath);
+      if (cached && cached.mtimeMs === null) return cached.result;
+      const result = {};
+      _configCache.set(configPath, { mtimeMs: null, result });
+      return result;
+    }
     throw err;
   }
+
+  const cached = _configCache.get(configPath);
+  if (cached && cached.mtimeMs === currentMtimeMs) return cached.result;
+
+  // Cache miss or stale — full read, parse, and validate.
+  const raw = fs.readFileSync(configPath, "utf8");
 
   let parsed;
   try {
@@ -79,5 +111,6 @@ export function loadConfig({ env = process.env, configPath = resolveConfigPath(e
     throw new Error(`error: config key "defaultExecutor" in ${configPath} must be one of ${KNOWN_EXECUTORS.join(", ")} (got ${JSON.stringify(parsed.defaultExecutor)})\nhelp: fix the value in ${configPath}`);
   }
 
+  _configCache.set(configPath, { mtimeMs: currentMtimeMs, result: parsed });
   return parsed;
 }

@@ -6,6 +6,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs, UsageError } from "./args.js";
 import { runSetup } from "./setup.js";
+import { resolveInvokedPath } from "./paths.js";
 
 export async function runCli(argv = process.argv.slice(2), {
   io = process,
@@ -169,10 +170,4 @@ async function readPromptFromStdin(stdin, command, signal) {
   return content;
 }
 
-function resolveInvokedPath(invoked) {
-  try {
-    return fs.realpathSync(invoked);
-  } catch {
-    return path.resolve(invoked);
-  }
-}
+

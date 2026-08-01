@@ -17,19 +17,21 @@ import { errCode } from "./errors.js";
 // instead of a plain lock file. Accepted as residual risk: it only matters
 // once a holder has already overrun staleMs, which is itself anomalous.
 /**
- * @template T
+ * Synchronously acquires the lock file, blocking via Atomics.wait while
+ * contended. Shared by both the sync and async lock-holding helpers below --
+ * acquisition itself never needs to await anything, only the critical
+ * section guarded by it might.
  * @param {string} lockPath
- * @param {() => T} fn
  * @param {{staleMs?: number, retryMs?: number, timeoutMs?: number}} [options]
- * @returns {T}
+ * @returns {string} the ownership token written to the lock file
  */
-export function withFileLock(lockPath, fn, { staleMs = 10000, retryMs = 25, timeoutMs = 5000 } = {}) {
+function acquireLock(lockPath, { staleMs = 10000, retryMs = 25, timeoutMs = 5000 } = {}) {
   const deadline = Date.now() + timeoutMs;
   const ownershipToken = `${process.pid}-${Date.now()}-${randomUUID()}`;
   for (;;) {
     try {
       fs.writeFileSync(lockPath, ownershipToken, { flag: "wx", mode: 0o600 });
-      break;
+      return ownershipToken;
     } catch (err) {
       if (errCode(err) !== "EEXIST") throw err;
       /** @type {number} */
@@ -54,6 +56,39 @@ export function withFileLock(lockPath, fn, { staleMs = 10000, retryMs = 25, time
       Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, retryMs);
     }
   }
+}
+
+/**
+ * @param {string} lockPath
+ * @param {string} ownershipToken
+ * @returns {unknown} a cleanup error to surface, or undefined
+ */
+function releaseLock(lockPath, ownershipToken) {
+  /** @type {string|undefined} */
+  let currentToken;
+  try {
+    currentToken = fs.readFileSync(lockPath, "utf8");
+  } catch (err) {
+    return errCode(err) !== "ENOENT" ? err : undefined;
+  }
+  if (currentToken !== ownershipToken) return undefined;
+  try {
+    fs.unlinkSync(lockPath);
+  } catch (err) {
+    return errCode(err) !== "ENOENT" ? err : undefined;
+  }
+  return undefined;
+}
+
+/**
+ * @template T
+ * @param {string} lockPath
+ * @param {() => T} fn
+ * @param {{staleMs?: number, retryMs?: number, timeoutMs?: number}} [options]
+ * @returns {T}
+ */
+export function withFileLock(lockPath, fn, options) {
+  const ownershipToken = acquireLock(lockPath, options);
   // Throwing from a `finally` would mask a real error from fn() (e.g. a
   // failed state write) with an unrelated cleanup failure. Defer the
   // cleanup error and only surface it once fn() itself has succeeded.
@@ -64,20 +99,34 @@ export function withFileLock(lockPath, fn, { staleMs = 10000, retryMs = 25, time
   try {
     result = fn();
   } finally {
-    /** @type {string|undefined} */
-    let currentToken;
-    try {
-      currentToken = fs.readFileSync(lockPath, "utf8");
-    } catch (err) {
-      if (errCode(err) !== "ENOENT") cleanupError = err;
-    }
-    if (currentToken === ownershipToken) {
-      try {
-        fs.unlinkSync(lockPath);
-      } catch (err) {
-        if (errCode(err) !== "ENOENT") cleanupError = err;
-      }
-    }
+    cleanupError = releaseLock(lockPath, ownershipToken);
+  }
+  if (cleanupError) throw cleanupError;
+  return result;
+}
+
+/**
+ * Same contract as withFileLock, but for a critical section that itself
+ * needs to await -- e.g. the daemon's socket-prepare-then-bind sequence,
+ * which spans an async health-check round trip and must hold exclusivity
+ * across that whole span, not just around a single synchronous read-modify-
+ * write (taskferry#287).
+ * @template T
+ * @param {string} lockPath
+ * @param {() => Promise<T>} fn
+ * @param {{staleMs?: number, retryMs?: number, timeoutMs?: number}} [options]
+ * @returns {Promise<T>}
+ */
+export async function withFileLockAsync(lockPath, fn, options) {
+  const ownershipToken = acquireLock(lockPath, options);
+  /** @type {unknown} */
+  let cleanupError;
+  /** @type {T} */
+  let result;
+  try {
+    result = await fn();
+  } finally {
+    cleanupError = releaseLock(lockPath, ownershipToken);
   }
   if (cleanupError) throw cleanupError;
   return result;

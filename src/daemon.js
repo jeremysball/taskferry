@@ -7,7 +7,7 @@ import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { createTaskManager } from "./tasks.js";
 import { loadConfig } from "./config.js";
-import { withFileLock } from "./state-lock.js";
+import { withFileLock, withFileLockAsync } from "./state-lock.js";
 import { normalizeDirectory, resolveRuntimeDir, resolveStateDir } from "./paths.js";
 import {
   PROTOCOL_VERSION,
@@ -165,9 +165,15 @@ function filteredTaskDetails(manager, directory) {
   const normalized = normalizeDirectory(directory);
   return {
     directory: normalized,
+    // Filter the cheap in-memory row (which already carries `directory`)
+    // before calling manager.status() -- status() does per-task log I/O
+    // (statSync/open/read), so calling it for every task ever recorded
+    // instead of just the ones in this workspace turns a routine
+    // statusline poll into O(all-time task count) synchronous I/O on the
+    // daemon's single thread (taskferry#287).
     tasks: listRows(manager)
-      .map((row) => manager.status(row.id))
-      .filter((task) => task.directory === normalized),
+      .filter((row) => row.directory === normalized)
+      .map((row) => manager.status(row.id)),
   };
 }
 
@@ -270,7 +276,7 @@ export async function startDaemon({
   if (platform !== "linux" && platform !== "darwin") {
     throw new Error("error: taskferry daemon supports Linux and macOS only\nhelp: run taskferry on a Unix host with Unix-domain socket support");
   }
-  await prepareSocket(runtimeDir, socketPath, healthCheckTimeoutMs);
+  fs.mkdirSync(runtimeDir, { recursive: true, mode: 0o700 });
 
   const clients = new Set();
   const subscriptions = new Map();
@@ -396,12 +402,43 @@ export async function startDaemon({
     });
   });
 
-  await new Promise((resolve, reject) => {
-    const onError = (error) => reject(error);
-    server.once("error", onError);
-    server.listen(socketPath, () => {
-      server.off("error", onError);
-      resolve();
+  // Hold one lock across the whole check-decide-bind sequence, not just
+  // around the stale-socket unlink inside removeStaleSocketIfUnchanged().
+  // This does NOT prevent two processes from ever truly binding the same
+  // path at once -- the OS's own bind(2) already guarantees only one
+  // AF_UNIX listen() on a given path can succeed, the loser gets
+  // EADDRINUSE regardless. What this closes is two concurrent invocations
+  // each independently deciding "no socket exists yet, safe to proceed"
+  // and both racing into server.listen() -- without this lock the loser
+  // fails via a raw EADDRINUSE bubbling out of the listen() promise
+  // instead of prepareSocket()'s clean "already listening" error, and both
+  // do the existence/health-check work redundantly.
+  //
+  // The actual "two daemon.js processes observed bound to the identical
+  // socket path at once" symptom from taskferry#287 has a different root
+  // cause: under CPU starvation (the O(n)-over-all-tasks list/status scan
+  // fixed alongside this), socketHealth()'s `connect` event can fail to
+  // fire within healthCheckTimeoutMs even though the existing daemon is
+  // still alive and still bound -- `connected` stays false, so
+  // prepareSocket() reads `listening: false` and falls through to
+  // removeStaleSocketIfUnchanged(), which finds the socket file's identity
+  // unchanged (nobody replaced it) and unlinks a merely-slow, not actually
+  // dead, daemon's live socket. A second daemon then binds fresh at the
+  // freed path while the first is still running, unreachable, in the
+  // background. Fixing the CPU-starvation root cause removes the trigger
+  // for this; the identity check itself doesn't distinguish "dead" from
+  // "alive but didn't answer in 250ms" and remains a latent gap worth a
+  // follow-up (e.g. a short retry before concluding stale).
+  const bindLockPath = path.join(runtimeDir, "socket-bind.lock");
+  await withFileLockAsync(bindLockPath, async () => {
+    await prepareSocket(runtimeDir, socketPath, healthCheckTimeoutMs);
+    await new Promise((resolve, reject) => {
+      const onError = (error) => reject(error);
+      server.once("error", onError);
+      server.listen(socketPath, () => {
+        server.off("error", onError);
+        resolve();
+      });
     });
   });
   fs.chmodSync(socketPath, 0o600);
@@ -410,6 +447,7 @@ export async function startDaemon({
   function close() {
     if (closing) return closing;
     closing = new Promise((resolve, reject) => {
+      manager.close?.();
       for (const socket of clients) {
         socket.write(encodeMessage({ version: PROTOCOL_VERSION, type: "shutdown", reason: restarting ? "restart" : "shutdown" }));
         socket.destroy();

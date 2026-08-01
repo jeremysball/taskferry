@@ -120,6 +120,18 @@ describe("loadConfig()", () => {
     assert.throws(() => loadConfig({ configPath }), /error: config key "envDenylist".*must be a string.*\nhelp:/s);
   });
 
+  test("accepts a valid envFile value", () => {
+    const dir = tmpConfigDir();
+    const configPath = writeConfig(dir, JSON.stringify({ envFile: "/home/user/.config/taskferry/secrets.env" }));
+    assert.deepEqual(loadConfig({ configPath }), { envFile: "/home/user/.config/taskferry/secrets.env" });
+  });
+
+  test("rejects a wrong-typed envFile value", () => {
+    const dir = tmpConfigDir();
+    const configPath = writeConfig(dir, JSON.stringify({ envFile: 123 }));
+    assert.throws(() => loadConfig({ configPath }), /error: config key "envFile".*must be a string.*\nhelp:/s);
+  });
+
   test("accepts a valid sandboxDenylist value", () => {
     const dir = tmpConfigDir();
     const configPath = writeConfig(dir, JSON.stringify({ sandboxDenylist: "/home/user/.docker,/home/user/.kube" }));

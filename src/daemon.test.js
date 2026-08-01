@@ -68,7 +68,7 @@ function fakeManagerFactory(tasks = [], { checkSummaryModelReady } = {}) {
       return {
         counts: { queued: 0, running: 0, done: tasks.length, crashed: 0, cancelled: 0, unknown: 0 },
         tasks: tasks.length
-          ? tasks.map(({ id, status, model = "test/model", startedAt = "2026-07-15T00:00:00.000Z" }) => ({ id, status, model, startedAt }))
+          ? tasks.map(({ id, status, model = "test/model", startedAt = "2026-07-15T00:00:00.000Z", directory }) => ({ id, status, model, startedAt, directory }))
           : "none found (this server process's lifetime)",
       };
     },
@@ -159,7 +159,21 @@ describe("Unix socket daemon", () => {
   test("resolves runtime directories in the required precedence order", () => {
     assert.equal(resolveRuntimeDir({ env: { TASKFERRY_RUNTIME_DIR: "/explicit", XDG_RUNTIME_DIR: "/xdg" }, stateDir: "/state" }), "/explicit");
     assert.equal(resolveRuntimeDir({ env: { XDG_RUNTIME_DIR: "/xdg" }, stateDir: "/state" }), path.join("/xdg", "taskferry"));
-    assert.equal(resolveRuntimeDir({ env: {}, stateDir: "/state" }), path.join("/state", "run"));
+    // XDG_RUNTIME_DIR unexported but /run/user/<uid> genuinely exists: use it
+    // rather than drifting to the state dir (the split-brain-daemon bug).
+    assert.equal(
+      resolveRuntimeDir({ env: {}, stateDir: "/state", uid: 1000, pathExists: () => true }),
+      path.join("/run/user/1000", "taskferry")
+    );
+    // Only when /run/user/<uid> truly doesn't exist does it fall back.
+    assert.equal(
+      resolveRuntimeDir({ env: {}, stateDir: "/state", uid: 1000, pathExists: () => false }),
+      path.join("/state", "run")
+    );
+    // No uid available at all (non-POSIX platform) also falls back. `null`,
+    // not `undefined` -- an explicit `undefined` in a destructured param
+    // re-triggers that param's default value instead of overriding it.
+    assert.equal(resolveRuntimeDir({ env: {}, stateDir: "/state", uid: null }), path.join("/state", "run"));
   });
 
   test("rejects unsupported operating systems before touching the socket", async (t) => {
@@ -395,6 +409,27 @@ describe("Unix socket daemon", () => {
     assert.equal(context.result.directory, fs.realpathSync(paths.root));
     assert.deepEqual(context.result.tasks.map((task) => task.id), ["here"]);
     assert.equal(context.result.tasks[0].directory, paths.root);
+  });
+
+  test("does not call manager.status() for tasks outside the requested workspace", async (t) => {
+    const paths = temporaryPaths(t);
+    const otherDirectory = path.join(paths.root, "other");
+    fs.mkdirSync(otherDirectory);
+    const tasks = [
+      { id: "here", status: "done", directory: paths.root, model: "test/model", startedAt: "2026-07-15T02:00:00.000Z" },
+      { id: "there-1", status: "done", directory: otherDirectory, model: "test/model", startedAt: "2026-07-15T01:00:00.000Z" },
+      { id: "there-2", status: "done", directory: otherDirectory, model: "test/model", startedAt: "2026-07-15T00:00:00.000Z" },
+    ];
+    const fake = fakeManagerFactory(tasks);
+    const daemon = await startDaemon({ ...paths, taskManagerFactory: fake.factory });
+    t.after(() => daemon.close());
+    const peer = await openPeer(paths.socketPath);
+    t.after(() => peer.close());
+
+    await peer.request("context", "task.context", { directory: paths.root });
+
+    const statusCalls = fake.calls.filter((call) => call[0] === "status").map((call) => call[1]);
+    assert.deepEqual(statusCalls, ["here"]);
   });
 
   test("supports multiple clients and multiple filtered subscriptions per connection", async (t) => {

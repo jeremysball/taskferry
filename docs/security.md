@@ -70,6 +70,17 @@ the secret. It does not need to duplicate everything already in the
 daemon's ambient environment — only the subset that a non-interactive
 caller would otherwise be missing.
 
+- The file itself must be owner-only (`chmod 600`) — `loadEnvFile()` fails
+  daemon startup on any file readable by group or other, the same
+  fail-loud stance as a missing/malformed file (see `docs/config.md`).
+- The fixed set of daemon-controlled plumbing variables below (`PATH`,
+  `HOME`, and the `TASKFERRY_*` names in `TASKFERRY_PLUMBING_ENV_VARS`) is
+  excluded from the env-file layer exactly the same way it's excluded from
+  the caller layer — a value for `TASKFERRY_SOCKET_PATH` (for instance) set
+  in the env file can never reach a spawned child, even when the daemon's
+  own ambient environment happens not to have that variable set (in which
+  case a naive union would otherwise let the file's value through
+  unopposed).
 - The daemon and every caller run as the same local user over a `0600`
   socket (see "Filesystem and socket permissions" above) — there's no
   trust boundary being crossed by a live caller handing over its own

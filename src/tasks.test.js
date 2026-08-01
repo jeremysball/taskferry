@@ -5654,6 +5654,35 @@ describe("caller-env union (sanitizedEnvironment)", () => {
     assert.equal(capturedOpts.env.PATH, "real-path");
   });
 
+  test("envFileVars cannot smuggle a value for a plumbing var the ambient env never set (review finding: CALLER_ENV_EXCLUDED was only applied to caller env)", (t) => {
+    delete process.env.TASKFERRY_SOCKET_PATH;
+    t.after(() => delete process.env.TASKFERRY_SOCKET_PATH);
+    let capturedOpts = null;
+    const mgr = makeManager({
+      spawnFn: (cmd, args, opts) => { capturedOpts = opts; return fakeChild(); },
+      envFileVars: { TASKFERRY_SOCKET_PATH: "/tmp/attacker-controlled.sock" },
+    });
+
+    mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+
+    assert.equal("TASKFERRY_SOCKET_PATH" in capturedOpts.env, false);
+  });
+
+  test("envFileVars cannot smuggle a value for HOME either, when ambient HOME is unset", (t) => {
+    const realHome = process.env.HOME;
+    delete process.env.HOME;
+    t.after(() => { process.env.HOME = realHome; });
+    let capturedOpts = null;
+    const mgr = makeManager({
+      spawnFn: (cmd, args, opts) => { capturedOpts = opts; return fakeChild(); },
+      envFileVars: { HOME: "/tmp/attacker-controlled-home" },
+    });
+
+    mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+
+    assert.equal("HOME" in capturedOpts.env, false);
+  });
+
   test("createTaskManager() with envFilePath but no envFileVars override loads via loadEnvFileFn once at construction", () => {
     const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-test-"));
     fs.writeFileSync(path.join(stateDir, "tasks.json"), "[]");
@@ -5722,6 +5751,30 @@ describe("caller-env union (sanitizedEnvironment)", () => {
     });
 
     assert.equal(loadCalls, 0);
+  });
+
+  test("an explicit empty-string TASKFERRY_ENV_FILE disables loading rather than falling through to config.envFile (review finding: the old `||` check treated \"\" as unset)", (t) => {
+    process.env.TASKFERRY_ENV_FILE = "";
+    t.after(() => delete process.env.TASKFERRY_ENV_FILE);
+    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-test-"));
+    fs.writeFileSync(path.join(stateDir, "tasks.json"), "[]");
+    const cacheDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-cache-"));
+    const overlayTmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-overlay-"));
+    let loadCalls = 0;
+
+    createTaskManager({
+      stateDir,
+      cacheDir,
+      overlayTmpRoot,
+      sandboxEnabled: false,
+      overlayEnabled: false,
+      spawnFn: () => fakeChild(),
+      killFn: () => {},
+      config: { envFile: "/would/have/loaded/this.env" },
+      loadEnvFileFn: () => { loadCalls++; return { SHOULD_NOT_APPEAR: "leaked" }; },
+    });
+
+    assert.equal(loadCalls, 0, "an explicit empty TASKFERRY_ENV_FILE must disable loading, not fall through to config.envFile");
   });
 
   test("summaryEnvironment strips OPENCODE_CONFIG* even when the caller's env explicitly sets one", async (t) => {

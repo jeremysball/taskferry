@@ -79,6 +79,16 @@ daemon startup, not a silent fallback: a `.env`-shaped file is presumably
 carrying secrets a dispatch actually needs, so a typo'd path should fail
 loudly rather than quietly dispatch without them.
 
+The file must be owner-only (`chmod 600`, no group/other read bits) —
+`loadEnvFile()` refuses (also a hard daemon-startup error) a file it's
+readable by anyone other than the daemon's own user, since this file
+exists specifically to hold secrets rather than ordinary settings.
+
+`TASKFERRY_ENV_FILE=""` (explicitly set to empty) disables env-file
+loading; it does not fall through to a `envFile` config-file value, same
+"explicit empty overrides, doesn't fall through" semantics as an explicit
+`false`/`0` would for a boolean field.
+
 ## Precedence
 
 Per field: env var (if set) > config file value (if present) > built-in

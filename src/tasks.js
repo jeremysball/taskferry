@@ -657,7 +657,9 @@ export function createTaskManager({
   allowedDirs = parseAllowedDirs(process.env.TASKFERRY_ALLOWED_DIRS ?? /** @type {string|undefined} */ (config.allowedDirs)),
   envDenylist = parseEnvDenylist(process.env.TASKFERRY_ENV_DENYLIST ?? /** @type {string|undefined} */ (config.envDenylist)),
   sandboxDenylist = parseSandboxDenylist(process.env.TASKFERRY_SANDBOX_DENYLIST ?? /** @type {string|undefined} */ (config.sandboxDenylist)),
-  envFilePath = process.env.TASKFERRY_ENV_FILE || /** @type {string|undefined} */ (config.envFile),
+  envFilePath = process.env.TASKFERRY_ENV_FILE !== undefined
+    ? process.env.TASKFERRY_ENV_FILE
+    : /** @type {string|undefined} */ (config.envFile),
   loadEnvFileFn = loadEnvFile,
   envFileVars = envFilePath ? loadEnvFileFn(envFilePath) : {},
   overlayEnabled = process.env.TASKFERRY_DISABLE_OVERLAY !== undefined
@@ -821,23 +823,34 @@ export function createTaskManager({
    * `envFilePath` at daemon startup -- the fallback for secrets that never
    * reach a non-interactive caller like cron or systemd in the first
    * place), the daemon's own ambient environment (`process.env`, read
-   * fresh at call time), then the caller-supplied `env` (caller wins,
-   * except for CALLER_ENV_EXCLUDED -- daemon-controlled plumbing resolved
-   * once at the daemon's own startup). `envDenylist` is stripped last
-   * regardless of which of the three layers the value came from. Applies
-   * the same key/value rules as the RPC-level isEnvironment so a
-   * programmatic caller that bypasses the socket (no isEnvironment gate)
-   * can't smuggle a malformed key past the spawn boundary -- bad keys throw
-   * synchronously here, which startTask() catches and surfaces as a
-   * spawnError on a crashed task rather than a silently-dropped value. Null
-   * or undefined env is treated as empty (as the pre-validation spread
-   * did) rather than rejected.
+   * fresh at call time), then the caller-supplied `env` (caller wins).
+   * CALLER_ENV_EXCLUDED (daemon-controlled plumbing resolved once at the
+   * daemon's own startup) is applied to BOTH the envFileVars layer and the
+   * caller layer -- a name in that set can never be set by either, only by
+   * the daemon's own ambient process.env, even when the ambient env
+   * happens not to have that name set (a naive `{...envFileVars,
+   * ...process.env}` spread would let a file-supplied plumbing var like
+   * TASKFERRY_SOCKET_PATH through unopposed in that case; explicitly
+   * checking `!(name in merged)` after seeding from process.env, plus the
+   * same exclusion check as the caller loop below, closes that gap).
+   * `envDenylist` is stripped last regardless of which of the three layers
+   * the value came from. Applies the same key/value rules as the RPC-level
+   * isEnvironment so a programmatic caller that bypasses the socket (no
+   * isEnvironment gate) can't smuggle a malformed key past the spawn
+   * boundary -- bad keys throw synchronously here, which startTask()
+   * catches and surfaces as a spawnError on a crashed task rather than a
+   * silently-dropped value. Null or undefined env is treated as empty (as
+   * the pre-validation spread did) rather than rejected.
    * @param {NodeJS.ProcessEnv} [env]
    * @returns {NodeJS.ProcessEnv}
    */
   function sanitizedEnvironment(env = {}) {
     const callerEnv = env ?? {};
-    const merged = { ...envFileVars, ...process.env };
+    const merged = { ...process.env };
+    for (const name of Object.keys(envFileVars)) {
+      if (CALLER_ENV_EXCLUDED.has(name)) continue;
+      if (!(name in merged)) merged[name] = envFileVars[name];
+    }
     for (const name of Object.keys(callerEnv)) {
       if (name === "" || name.includes("=")) {
         throw new Error(`error: invalid env key in caller-supplied env: ${JSON.stringify(name)}\nhelp: env keys must be non-empty strings without '=' characters`);

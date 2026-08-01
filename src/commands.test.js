@@ -464,7 +464,7 @@ test("advisor does NOT resolve via resolveWorkspaceRoot (regression test mirrori
     return { status: "done", message: "advice" };
   } };
 
-  await runCommand("advisor", { directory: undefined, prompt: "p", model: "m" }, { client, cwd, resolveWorkspaceRoot: resolveWorkspaceRootFn });
+  await runCommand("advisor", { directory: undefined, prompt: "p", model: "m" }, { client, cwd, resolveWorkspaceRoot: resolveWorkspaceRootFn, env: {} });
 
   assert.equal(called, false, "advisor must never consult resolveWorkspaceRoot");
   assert.equal(seenDirectory, cwd);
@@ -623,7 +623,7 @@ test("advisor forwards executor to the RPC payload when set", async () => {
     },
   };
 
-  await runCommand("advisor", { prompt: "hi", directory: root, model: "m", executor: "pi" }, { client, cwd: root });
+  await runCommand("advisor", { prompt: "hi", directory: root, model: "m", executor: "pi" }, { client, cwd: root, env: {} });
 
   assert.equal(captured.method, "task.advisor");
   assert.equal(captured.params.executor, "pi");
@@ -691,9 +691,98 @@ test("advisor forwards the caller's env to the RPC payload", async () => {
       return { status: "done", message: "advice" };
     },
   };
+  // `injectedEnv` deliberately has neither CLAUDE_CODE_SESSION_ID nor
+  // TASKFERRY_TASK_ID set, so it doubles as the "no context source" case
+  // here -- this is the safe ambient for the auto-context resolver.
   const injectedEnv = { FOO: "bar" };
   await runCommand("advisor", { prompt: "hi", directory: root, model: "m" }, { client, cwd: root, env: injectedEnv });
   assert.deepEqual(capturedParams.env, injectedEnv);
+});
+
+test("advisor fails fast with no --prompt and no context source in env", async () => {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-commands-test-")));
+  const client = { request: async () => { throw new Error("must not reach the daemon"); } };
+
+  await assert.rejects(
+    runCommand("advisor", { directory: root, model: "m" }, { client, cwd: root, env: {} }),
+    (err) => err instanceof UsageError && /no context source/.test(err.message)
+  );
+});
+
+test("advisor auto-attaches a Claude session transcript tail when CLAUDE_CODE_SESSION_ID is set and no --prompt is given", async () => {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-commands-test-")));
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-commands-home-"));
+  const slug = root.split(path.sep).join("-");
+  const projectDir = path.join(home, ".claude", "projects", slug);
+  fs.mkdirSync(projectDir, { recursive: true });
+  fs.writeFileSync(path.join(projectDir, "sess-1.jsonl"), '{"role":"user","text":"do the thing"}\n');
+
+  let capturedPrompt;
+  const client = { request: async (method, params) => { capturedPrompt = params.prompt; return { status: "done", message: "advice" }; } };
+
+  await runCommand("advisor", { directory: root, model: "m" }, { client, cwd: root, homeDirectory: home, env: { CLAUDE_CODE_SESSION_ID: "sess-1" } });
+
+  assert.match(capturedPrompt, /do the thing/);
+  assert.match(capturedPrompt, /attached context \(claude-session/);
+});
+
+test("advisor fails fast when CLAUDE_CODE_SESSION_ID is set but the transcript file is missing", async () => {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-commands-test-")));
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-commands-home-"));
+  const client = { request: async () => { throw new Error("must not reach the daemon"); } };
+
+  await assert.rejects(
+    runCommand("advisor", { directory: root, model: "m" }, { client, cwd: root, homeDirectory: home, env: { CLAUDE_CODE_SESSION_ID: "sess-missing" } }),
+    (err) => err instanceof UsageError && /transcript/.test(err.message)
+  );
+});
+
+test("advisor fetches its own task.tail when TASKFERRY_TASK_ID is set and no --prompt is given", async () => {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-commands-test-")));
+  let capturedPrompt;
+  const client = {
+    request: async (method, params) => {
+      if (method === "task.tail") {
+        assert.equal(params.taskId, "oc_self");
+        return { taskId: "oc_self", status: "running", text: "ferry log tail text", textTotalChars: 20, truncated: false };
+      }
+      capturedPrompt = params.prompt;
+      return { status: "done", message: "advice" };
+    },
+  };
+
+  await runCommand("advisor", { directory: root, model: "m" }, { client, cwd: root, env: { TASKFERRY_TASK_ID: "oc_self" } });
+
+  assert.match(capturedPrompt, /ferry log tail text/);
+  assert.match(capturedPrompt, /attached context \(ferry-log/);
+});
+
+test("advisor with an explicit --prompt still attaches context when a source is available", async () => {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-commands-test-")));
+  let capturedPrompt;
+  const client = {
+    request: async (method, params) => {
+      if (method === "task.tail") return { taskId: "oc_self", status: "running", text: "ferry log tail text", textTotalChars: 20, truncated: false };
+      capturedPrompt = params.prompt;
+      return { status: "done", message: "advice" };
+    },
+  };
+
+  await runCommand("advisor", { directory: root, model: "m", prompt: "also check the retry logic" }, { client, cwd: root, env: { TASKFERRY_TASK_ID: "oc_self" } });
+
+  assert.match(capturedPrompt, /ferry log tail text/);
+  assert.match(capturedPrompt, /also check the retry logic/);
+});
+
+test("advisor with an explicit --prompt and no context source sends the canned prompt plus the caller's prompt only", async () => {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-commands-test-")));
+  let capturedPrompt;
+  const client = { request: async (method, params) => { capturedPrompt = params.prompt; return { status: "done", message: "advice" }; } };
+
+  await runCommand("advisor", { directory: root, model: "m", prompt: "just answer this" }, { client, cwd: root, env: {} });
+
+  assert.match(capturedPrompt, /just answer this/);
+  assert.doesNotMatch(capturedPrompt, /attached context/);
 });
 
 test("summary forwards the caller's env to the RPC payload", async () => {

@@ -101,6 +101,44 @@ function readTailChars(filePath, maxChars) {
   return codePoints.length > maxChars ? codePoints.slice(-maxChars).join("") : codePoints.join("");
 }
 
+const ADVISOR_TAIL_CHARS_CAP = 131072;
+
+const ADVISOR_CANNED_PROMPT = `You are an advisor reviewing the in-progress work of a cheaper dispatcher agent. The text that follows is a tail of its session log: its current task, what it has read, what it has decided, and what it is about to do next. Treat it as suspect, not as a draft to refine.
+
+Your reply goes directly back to that autonomous agent mid-task; it will not be read by a human first. Do not summarize what the ferry did and do not validate its choices for politeness. Push back.
+
+Interrogate its assumptions: list each one the ferry is acting on without verifying, and say whether it is load-bearing. Hunt for blind spots: what did it not read, not run, not check, and where is a known foot-gun pattern it is about to step on (silent error swallow, mock-green-real-fail, off-by-one on the boundary it is touching, an unverified config default). Propose concrete alternatives: for each decision it is about to lock in, name at least one it has not considered, with the file and approximate line, not just an abstraction. Rank so the single highest-leverage change comes first.
+
+Format: bulleted, terse, no preamble, no closing summary. Short sentences. Reference code as \`path/to/file.js:NNN\`. Prefer "should" and "must" over "you might consider." If there is nothing material to add, reply \`no change, proceed\` and stop.`;
+
+/**
+ * Resolves advisor's auto-attached context: a Claude session transcript
+ * tail when CLAUDE_CODE_SESSION_ID is set (this call came directly from a
+ * Claude Code session), else the calling ferry's own task.tail when
+ * TASKFERRY_TASK_ID is set (this call came from inside a taskferry-spawned
+ * worker), else null (no source available).
+ * @param {object} params
+ * @param {{request: (method: string, params: object) => Promise<any>}} params.client
+ * @param {NodeJS.ProcessEnv} params.env
+ * @param {string} params.cwd
+ * @param {string} params.homeDirectory
+ * @returns {Promise<{source: string, text: string} | null>}
+ */
+async function gatherAdvisorContext({ client, env, cwd, homeDirectory }) {
+  const budget = resolveAdvisorContextChars(env);
+  if (env.CLAUDE_CODE_SESSION_ID) {
+    const transcriptPath = claudeTranscriptPath(homeDirectory, cwd, env.CLAUDE_CODE_SESSION_ID);
+    const text = readTailChars(transcriptPath, budget);
+    return { source: "claude-session", text };
+  }
+  if (env.TASKFERRY_TASK_ID) {
+    const tailed = await client.request("task.tail", { taskId: env.TASKFERRY_TASK_ID, chars: Math.min(budget, ADVISOR_TAIL_CHARS_CAP) });
+    const text = tailed.text === "none observed yet" ? "" : tailed.text;
+    return { source: "ferry-log", text };
+  }
+  return null;
+}
+
 const PACKAGE_JSON_PATH = fileURLToPath(new URL("../package.json", import.meta.url));
 
 // Single source of truth for the package version: read package.json rather
@@ -233,8 +271,20 @@ export async function runCommand(command, options, { client, io = process, signa
       // to the workspace root would silently expand its sandbox from
       // "the cwd you ran it in" to "the whole repo root".
       const directory = normalizeDirectory(options.directory || cwd);
+      const gathered = await gatherAdvisorContext({ client, env, cwd, homeDirectory });
+      if (!gathered && !options.prompt) {
+        throw new UsageError(
+          "advisor needs context or an explicit --prompt: no context source found",
+          "Neither CLAUDE_CODE_SESSION_ID nor TASKFERRY_TASK_ID is set in the environment, so advisor has nothing to auto-attach -- pass --prompt explicitly, or run this from a Claude Code session or a taskferry-dispatched worker"
+        );
+      }
+      const assembledPrompt = [
+        ADVISOR_CANNED_PROMPT,
+        ...(gathered ? [`\n--- attached context (${gathered.source}, ${gathered.text.length} chars) ---\n${gathered.text}\n---`] : []),
+        ...(options.prompt ? [`\n${options.prompt}`] : []),
+      ].join("\n");
       return client.request("task.advisor", {
-        prompt: options.prompt,
+        prompt: assembledPrompt,
         directory,
         model: options.model,
         ...(options.variant === undefined ? {} : { variant: options.variant }),

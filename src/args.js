@@ -447,7 +447,7 @@ export function parseArgs(argv, { cwd = process.cwd() } = {}) {
     if (["cancel", "wait", "status", "tail", "summary", "result", "accept", "reject"].includes(command) && !options.taskId) {
       throw usageError("task id is required", command);
     }
-    if (["dispatch", "advisor"].includes(command) && !options.prompt) throw usageError("--prompt is required", command);
+    if (command === "dispatch" && !options.prompt) throw usageError("--prompt is required", command);
     if (command === "advisor" && !options.model) throw usageError("--model is required", command);
     if (command === "result" && options.full && options.fields && !options.fields.includes("narration")) {
       throw usageError("--full requires narration in --fields", command);

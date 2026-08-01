@@ -73,6 +73,12 @@ test("tail --chars accepts up to the new 131072 ceiling and rejects above it", (
   assert.throws(() => parseArgs(["tail", "oc_1", "--chars", "131073"]), /from 1 through 131072/);
 });
 
+test("advisor no longer requires --prompt (context-only invocation is now valid)", () => {
+  const parsed = parseArgs(["advisor", "--model", "m"]);
+  assert.equal(parsed.options.prompt, undefined);
+  assert.equal(parsed.options.model, "m");
+});
+
 test("rejects unknown flags and extra positional arguments before daemon access", () => {
   assert.throws(() => parseArgs(["list", "--stat"]), (error) => {
     assert.ok(error instanceof UsageError);

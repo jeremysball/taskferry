@@ -1,0 +1,16 @@
+[tools]
+node = "26.5.1"
+
+# Pulls the same account-wide secrets (provider API keys, etc.) this shell
+# gets interactively via ~/.bashrc -> ~/.config/secrets.sh, but through
+# mise's own env activation instead of an interactive-only rc file -- so a
+# `mise run <task>`/`mise exec` invocation (including from a non-interactive
+# script or a worktree) sees the same keys without depending on bash startup
+# having run. Missing the file (a host with no secrets configured) is a
+# silent no-op, matching secrets.sh's own `[ -f ... ]` guard.
+[env]
+_.file = "{{env.XDG_RUNTIME_DIR}}/secrets/global.env"
+
+[tasks.setup]
+description = "Install/share node_modules for this checkout (fast-paths a symlink from the main checkout's node_modules when a git worktree's package-lock.json is unchanged)"
+run = "bash scripts/mise-setup-deps.sh"

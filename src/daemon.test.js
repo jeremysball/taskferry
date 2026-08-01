@@ -12,6 +12,13 @@ import { connectClient, ensureDaemonStarted, startDaemonBooter } from "./client.
 import { withFileLock } from "./state-lock.js";
 import { resolveRuntimeDir } from "./paths.js";
 
+const TEST_MODEL = "test/model";
+const TASK_ADVISOR = "task.advisor";
+const SYSTEM_HEALTH = "system.health";
+const EVENT_SUBSCRIBE = "event.subscribe";
+const TASK_STATE = "task.state";
+const DAEMON_BOOT_ERR = "daemon-boot.err";
+
 function temporaryPaths(t) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-daemon-test-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
@@ -68,7 +75,7 @@ function fakeManagerFactory(tasks = [], { checkSummaryModelReady } = {}) {
       return {
         counts: { queued: 0, running: 0, done: tasks.length, crashed: 0, cancelled: 0, unknown: 0 },
         tasks: tasks.length
-          ? tasks.map(({ id, status, model = "test/model", startedAt = "2026-07-15T00:00:00.000Z" }) => ({ id, status, model, startedAt }))
+          ? tasks.map(({ id, status, model = TEST_MODEL, startedAt = "2026-07-15T00:00:00.000Z" }) => ({ id, status, model, startedAt }))
           : "none found (this server process's lifetime)",
       };
     },
@@ -98,13 +105,13 @@ function fakeManagerFactory(tasks = [], { checkSummaryModelReady } = {}) {
       onEvent = options.onEvent;
       return manager;
     },
-    calls,
     emit(event) {
       onEvent(event);
     },
     get options() {
       return capturedOptions;
     },
+    calls,
   };
 }
 
@@ -119,12 +126,7 @@ async function openPeer(socketPath) {
   socket.setEncoding("utf8");
   socket.on("data", (chunk) => {
     buffer += chunk;
-    for (;;) {
-      const newline = buffer.indexOf("\n");
-      if (newline === -1) break;
-      const line = buffer.slice(0, newline);
-      buffer = buffer.slice(newline + 1);
-      if (!line) continue;
+    const handleLine = (line) => {
       const message = JSON.parse(line);
       if (message.type === "event") {
         events.push(message);
@@ -133,6 +135,13 @@ async function openPeer(socketPath) {
         pending.get(message.id)?.(message);
         pending.delete(message.id);
       }
+    };
+    for (;;) {
+      const newline = buffer.indexOf("\n");
+      if (newline === -1) break;
+      const line = buffer.slice(0, newline);
+      buffer = buffer.slice(newline + 1);
+      if (line) handleLine(line);
     }
   });
 
@@ -221,7 +230,7 @@ describe("Unix socket daemon", () => {
     const peer = await openPeer(paths.socketPath);
     t.after(() => peer.close());
 
-    await peer.request("advise", "task.advisor", { prompt: "hi", directory: paths.root, model: "m", executor: "pi" });
+    await peer.request("advise", TASK_ADVISOR, { prompt: "hi", directory: paths.root, model: "m", executor: "pi" });
 
     const lastAdvisorCall = fake.calls.filter((call) => call[0] === "advisor").at(-1);
     assert.deepEqual(lastAdvisorCall, ["advisor", { prompt: "hi", directory: paths.root, model: "m", executor: "pi" }]);
@@ -263,7 +272,7 @@ describe("Unix socket daemon", () => {
     const peer = await openPeer(paths.socketPath);
     t.after(() => peer.close());
 
-    await peer.request("advise", "task.advisor", { prompt: "hi", directory: paths.root, model: "m", env: { FOO: "bar" } });
+    await peer.request("advise", TASK_ADVISOR, { prompt: "hi", directory: paths.root, model: "m", env: { FOO: "bar" } });
 
     const lastAdvisorCall = fake.calls.filter((call) => call[0] === "advisor").at(-1);
     assert.deepEqual(lastAdvisorCall, ["advisor", { prompt: "hi", directory: paths.root, model: "m", env: { FOO: "bar" } }]);
@@ -277,7 +286,7 @@ describe("Unix socket daemon", () => {
     const peer = await openPeer(paths.socketPath);
     t.after(() => peer.close());
 
-    await peer.request("advise", "task.advisor", { prompt: "hi", directory: paths.root, model: "m", variant: "high", timeoutMs: 30000 });
+    await peer.request("advise", TASK_ADVISOR, { prompt: "hi", directory: paths.root, model: "m", variant: "high", timeoutMs: 30000 });
 
     const lastAdvisorCall = fake.calls.filter((call) => call[0] === "advisor").at(-1);
     assert.deepEqual(lastAdvisorCall, ["advisor", { prompt: "hi", directory: paths.root, model: "m", variant: "high", timeoutMs: 30000 }]);
@@ -299,7 +308,7 @@ describe("Unix socket daemon", () => {
     const peer = await openPeer(paths.socketPath);
     t.after(() => peer.close());
 
-    const response = await peer.request("advise", "task.advisor", { prompt: "hi", directory: paths.root, model: "m", executor: "pi" });
+    const response = await peer.request("advise", TASK_ADVISOR, { prompt: "hi", directory: paths.root, model: "m", executor: "pi" });
 
     assert.equal(response.ok, false);
     assert.equal(response.error.code, "REQUEST_FAILED");
@@ -317,7 +326,7 @@ describe("Unix socket daemon", () => {
     assert.equal(fs.statSync(paths.socketPath).mode & 0o777, 0o600);
 
     const peer = await openPeer(paths.socketPath);
-    const health = await peer.request("health", "system.health");
+    const health = await peer.request("health", SYSTEM_HEALTH);
     const dispatched = await peer.request("dispatch", "task.dispatch", { prompt: "hello", directory: paths.root });
     peer.close();
 
@@ -336,9 +345,12 @@ describe("Unix socket daemon", () => {
     assert.equal(fake.options.runtimeDir, paths.runtimeDir);
   });
 
+});
+
+describe("Unix socket daemon: concurrency and workspace filtering", () => {
   test("multiplexes concurrent out-of-order responses on one connection", async (t) => {
-    const paths = temporaryPaths(t);
-    const fake = fakeManagerFactory();
+      const paths = temporaryPaths(t);
+      const fake = fakeManagerFactory();
     const daemon = await startDaemon({ ...paths, taskManagerFactory: fake.factory });
     t.after(() => daemon.close());
     const peer = await openPeer(paths.socketPath);
@@ -366,7 +378,7 @@ describe("Unix socket daemon", () => {
     t.after(() => peer.close());
 
     const slow = peer.request("slow", "task.wait", { taskId: "slow", timeoutMs: 100 });
-    const rejected = await peer.request("overflow", "system.health");
+    const rejected = await peer.request("overflow", SYSTEM_HEALTH);
 
     assert.equal(rejected.ok, false);
     assert.equal(rejected.error.code, "SERVER_BUSY");
@@ -378,8 +390,8 @@ describe("Unix socket daemon", () => {
     const otherDirectory = path.join(paths.root, "other");
     fs.mkdirSync(otherDirectory);
     const tasks = [
-      { id: "here", status: "done", directory: paths.root, model: "test/model", startedAt: "2026-07-15T02:00:00.000Z" },
-      { id: "there", status: "done", directory: otherDirectory, model: "test/model", startedAt: "2026-07-15T01:00:00.000Z" },
+      { id: "here", status: "done", directory: paths.root, model: TEST_MODEL, startedAt: "2026-07-15T02:00:00.000Z" },
+      { id: "there", status: "done", directory: otherDirectory, model: TEST_MODEL, startedAt: "2026-07-15T01:00:00.000Z" },
     ];
     const fake = fakeManagerFactory(tasks);
     const daemon = await startDaemon({ ...paths, taskManagerFactory: fake.factory });
@@ -409,14 +421,14 @@ describe("Unix socket daemon", () => {
     t.after(() => first.close());
     t.after(() => second.close());
 
-    const firstHere = await first.request("sub-here", "event.subscribe", { directory: paths.root });
-    const firstThere = await first.request("sub-there", "event.subscribe", { directory: otherDirectory });
-    const secondHere = await second.request("sub-second", "event.subscribe", { directory: paths.root });
+    const firstHere = await first.request("sub-here", EVENT_SUBSCRIBE, { directory: paths.root });
+    const firstThere = await first.request("sub-there", EVENT_SUBSCRIBE, { directory: otherDirectory });
+    const secondHere = await second.request("sub-second", EVENT_SUBSCRIBE, { directory: paths.root });
     assert.notEqual(firstHere.result.subscriptionId, firstThere.result.subscriptionId);
     assert.notEqual(firstHere.result.subscriptionId, secondHere.result.subscriptionId);
 
-    fake.emit({ type: "task.state", taskId: "one", directory: paths.root, status: "running" });
-    fake.emit({ type: "task.state", taskId: "two", directory: otherDirectory, status: "done" });
+    fake.emit({ type: TASK_STATE, taskId: "one", directory: paths.root, status: "running" });
+    fake.emit({ type: TASK_STATE, taskId: "two", directory: otherDirectory, status: "done" });
 
     const firstEvents = await first.waitForEvents(2);
     const secondEvents = await second.waitForEvents(1);
@@ -429,6 +441,9 @@ describe("Unix socket daemon", () => {
     assert.equal(daemon.stats().subscriptions, 3);
   });
 
+});
+
+describe("Unix socket daemon: event subscription routing and teardown", () => {
   test("event.subscribe with taskId resolves the directory server-side, without a client-side task.status round-trip (issue #59)", async (t) => {
     const paths = temporaryPaths(t);
     const fake = fakeManagerFactory([{ id: "one", status: "done", directory: paths.root }]);
@@ -437,11 +452,11 @@ describe("Unix socket daemon", () => {
     const peer = await openPeer(paths.socketPath);
     t.after(() => peer.close());
 
-    const sub = await peer.request("sub", "event.subscribe", { taskId: "one" });
+    const sub = await peer.request("sub", EVENT_SUBSCRIBE, { taskId: "one" });
     assert.equal(sub.ok, true);
     assert.ok(sub.result.subscriptionId);
 
-    fake.emit({ type: "task.state", taskId: "one", directory: paths.root, status: "running" });
+    fake.emit({ type: TASK_STATE, taskId: "one", directory: paths.root, status: "running" });
     const events = await peer.waitForEvents(1);
     assert.equal(events[0].event.taskId, "one");
   });
@@ -454,7 +469,7 @@ describe("Unix socket daemon", () => {
     const peer = await openPeer(paths.socketPath);
     t.after(() => peer.close());
 
-    const rejected = await peer.request("sub", "event.subscribe", { taskId: "missing" });
+    const rejected = await peer.request("sub", EVENT_SUBSCRIBE, { taskId: "missing" });
     assert.equal(rejected.ok, false);
     assert.match(rejected.error.message, /unknown task id/);
   });
@@ -471,14 +486,14 @@ describe("Unix socket daemon", () => {
     const peer = await openPeer(paths.socketPath);
     t.after(() => peer.close());
 
-    const rejected = await peer.request("sub", "event.subscribe", { directory: paths.root, summaries: true });
+    const rejected = await peer.request("sub", EVENT_SUBSCRIBE, { directory: paths.root, summaries: true });
     assert.equal(rejected.ok, false);
     assert.match(rejected.error.message, /summary model is unavailable/);
 
     // Confirm no subscription was actually registered: a plain (non-summaries)
     // subscribe still succeeds afterward, proving the daemon didn't crash or
     // wedge its subscription state on the earlier rejection.
-    const plain = await peer.request("sub2", "event.subscribe", { directory: paths.root });
+    const plain = await peer.request("sub2", EVENT_SUBSCRIBE, { directory: paths.root });
     assert.equal(plain.ok, true);
     assert.ok(plain.result.subscriptionId);
   });
@@ -493,12 +508,12 @@ describe("Unix socket daemon", () => {
     t.after(() => first.close());
     t.after(() => second.close());
 
-    await first.request("sub-first", "event.subscribe", { directory: paths.root, originSessionId: "sess-A" });
-    await second.request("sub-second", "event.subscribe", { directory: paths.root, originSessionId: "sess-B" });
+    await first.request("sub-first", EVENT_SUBSCRIBE, { directory: paths.root, originSessionId: "sess-A" });
+    await second.request("sub-second", EVENT_SUBSCRIBE, { directory: paths.root, originSessionId: "sess-B" });
 
-    fake.emit({ type: "task.state", taskId: "one", directory: paths.root, status: "running", originSessionId: "sess-A" });
-    fake.emit({ type: "task.state", taskId: "two", directory: paths.root, status: "running", originSessionId: "sess-B" });
-    fake.emit({ type: "task.state", taskId: "three", directory: paths.root, status: "done" });
+    fake.emit({ type: TASK_STATE, taskId: "one", directory: paths.root, status: "running", originSessionId: "sess-A" });
+    fake.emit({ type: TASK_STATE, taskId: "two", directory: paths.root, status: "running", originSessionId: "sess-B" });
+    fake.emit({ type: TASK_STATE, taskId: "three", directory: paths.root, status: "done" });
 
     const firstEvents = await first.waitForEvents(2);
     const secondEvents = await second.waitForEvents(2);
@@ -516,8 +531,8 @@ describe("Unix socket daemon", () => {
     t.after(() => rawPeer.close());
     t.after(() => summaryPeer.close());
 
-    const rawSub = await rawPeer.request("sub-raw", "event.subscribe", { directory: paths.root });
-    const summarySub = await summaryPeer.request("sub-summary", "event.subscribe", { directory: paths.root, summaries: true });
+    const rawSub = await rawPeer.request("sub-raw", EVENT_SUBSCRIBE, { directory: paths.root });
+    const summarySub = await summaryPeer.request("sub-summary", EVENT_SUBSCRIBE, { directory: paths.root, summaries: true });
 
     fake.emit({
       type: "task.activity",
@@ -553,8 +568,8 @@ describe("Unix socket daemon", () => {
     t.after(() => rawPeer.close());
     t.after(() => summaryPeer.close());
 
-    await rawPeer.request("sub-raw", "event.subscribe", { directory: paths.root });
-    await summaryPeer.request("sub-summary", "event.subscribe", { directory: paths.root, summaries: true });
+    await rawPeer.request("sub-raw", EVENT_SUBSCRIBE, { directory: paths.root });
+    await summaryPeer.request("sub-summary", EVENT_SUBSCRIBE, { directory: paths.root, summaries: true });
 
     fake.emit({
       type: "task.activity",
@@ -581,14 +596,14 @@ describe("Unix socket daemon", () => {
     const daemon = await startDaemon({ ...paths, taskManagerFactory: fake.factory });
     t.after(() => daemon.close());
     const peer = await openPeer(paths.socketPath);
-    await peer.request("sub", "event.subscribe", { directory: paths.root });
+    await peer.request("sub", EVENT_SUBSCRIBE, { directory: paths.root });
     assert.equal(daemon.stats().subscriptions, 1);
 
     peer.socket.end();
     await EventEmitter.once(peer.socket, "close");
 
     assert.deepEqual(daemon.stats(), { connections: 0, subscriptions: 0 });
-    assert.doesNotThrow(() => fake.emit({ type: "task.state", directory: paths.root }));
+    assert.doesNotThrow(() => fake.emit({ type: TASK_STATE, directory: paths.root }));
   });
 
   test("disconnects a slow subscriber before its outbound queue can grow", async (t) => {
@@ -601,15 +616,18 @@ describe("Unix socket daemon", () => {
     });
     t.after(() => daemon.close());
     const peer = await openPeer(paths.socketPath);
-    await peer.request("sub", "event.subscribe", { directory: paths.root });
+    await peer.request("sub", EVENT_SUBSCRIBE, { directory: paths.root });
     const closed = EventEmitter.once(peer.socket, "close");
 
-    fake.emit({ type: "task.state", taskId: "large-event", directory: paths.root, payload: "x".repeat(1000) });
+    fake.emit({ type: TASK_STATE, taskId: "large-event", directory: paths.root, payload: "x".repeat(1000) });
     await closed;
 
     assert.deepEqual(daemon.stats(), { connections: 0, subscriptions: 0 });
   });
 
+});
+
+describe("Unix socket daemon: stale sockets, rehydration, and self-restart", () => {
   test("removes a stale socket only after a refused health check", async (t) => {
     const paths = temporaryPaths(t);
     fs.mkdirSync(paths.runtimeDir, { recursive: true });
@@ -621,7 +639,7 @@ describe("Unix socket daemon", () => {
 
     assert.equal(fs.statSync(paths.socketPath).isSocket(), true);
     const peer = await openPeer(paths.socketPath);
-    assert.equal((await peer.request("health", "system.health")).ok, true);
+    assert.equal((await peer.request("health", SYSTEM_HEALTH)).ok, true);
     peer.close();
   });
 
@@ -659,10 +677,10 @@ describe("Unix socket daemon", () => {
     const paths = temporaryPaths(t);
     fs.mkdirSync(paths.stateDir, { recursive: true });
     const persisted = ["queued", "running"].map((status, index) => ({
-      id: `old-${index}`,
       status,
+      id: `old-${index}`,
       directory: paths.root,
-      model: "test/model",
+      model: TEST_MODEL,
       variant: null,
       sessionId: null,
       pid: 100 + index,
@@ -711,8 +729,8 @@ describe("Unix socket daemon", () => {
       const peer = await openPeer(paths.socketPath);
       t.after(() => peer.close());
 
-      await peer.request("health", "system.health");
-      await peer.request("health-2", "system.health");
+      await peer.request("health", SYSTEM_HEALTH);
+      await peer.request("health-2", SYSTEM_HEALTH);
 
       assert.equal(spawnCalls.length, 0);
     });
@@ -739,7 +757,7 @@ describe("Unix socket daemon", () => {
       const bumped = new Date(Date.now() + 60_000);
       fs.utimesSync(entry, bumped, bumped);
 
-      await peer.request("health", "system.health");
+      await peer.request("health", SYSTEM_HEALTH);
       // The restart itself is async (close() + spawn + exit); give it a tick.
       await new Promise((resolve) => setTimeout(resolve, 20));
 
@@ -774,7 +792,7 @@ describe("Unix socket daemon", () => {
       const bumped = new Date(Date.now() + 60_000);
       fs.utimesSync(entry, bumped, bumped);
 
-      await peer.request("health", "system.health");
+      await peer.request("health", SYSTEM_HEALTH);
       await new Promise((resolve) => setTimeout(resolve, 20));
 
       assert.equal(spawnCalls.length, 0, "must not restart while a task is still running");
@@ -784,7 +802,7 @@ describe("Unix socket daemon", () => {
   });
 });
 
-describe("multiplexed daemon client", () => {
+describe("multiplexed daemon client: request correlation, subscriptions, and auto-start", () => {
   test("correlates concurrent responses by id on one connection", async (t) => {
     const paths = temporaryPaths(t);
     const fake = fakeManagerFactory();
@@ -818,8 +836,8 @@ describe("multiplexed daemon client", () => {
 
     const hereSubscription = await client.subscribe({ directory: paths.root }, (event) => hereEvents.push(event));
     const thereSubscription = await client.subscribe({ directory: otherDirectory }, (event) => thereEvents.push(event));
-    fake.emit({ type: "task.state", taskId: "here", directory: paths.root });
-    fake.emit({ type: "task.state", taskId: "there", directory: otherDirectory });
+    fake.emit({ type: TASK_STATE, taskId: "here", directory: paths.root });
+    fake.emit({ type: TASK_STATE, taskId: "there", directory: otherDirectory });
     await new Promise((resolve) => setTimeout(resolve, 10));
 
     assert.notEqual(hereSubscription, thereSubscription);
@@ -843,7 +861,7 @@ describe("multiplexed daemon client", () => {
   test("startDaemonBooter clears a stale boot-error file before spawning", async (t) => {
     const paths = temporaryPaths(t);
     fs.mkdirSync(paths.runtimeDir, { recursive: true });
-    const errorPath = path.join(paths.runtimeDir, "daemon-boot.err");
+    const errorPath = path.join(paths.runtimeDir, DAEMON_BOOT_ERR);
     fs.writeFileSync(errorPath, "stale failure from a previous boot attempt");
 
     await startDaemonBooter({ ...paths, spawnBooterFn: () => {} });
@@ -877,7 +895,7 @@ describe("multiplexed daemon client", () => {
       // expected: see comment above.
     }
 
-    const bootError = fs.readFileSync(path.join(runtimeDir, "daemon-boot.err"), "utf8");
+    const bootError = fs.readFileSync(path.join(runtimeDir, DAEMON_BOOT_ERR), "utf8");
     assert.match(bootError, /could not parse/);
   });
 
@@ -901,7 +919,7 @@ describe("multiplexed daemon client", () => {
     t.after(() => daemon.close());
 
     assert.equal(starts, 1);
-    assert.equal((await client.request("system.health")).healthy, true);
+    assert.equal((await client.request(SYSTEM_HEALTH)).healthy, true);
   });
 
   test("default auto-start fires a detached booter and does not block on its own boot completing", async (t) => {
@@ -930,7 +948,7 @@ describe("multiplexed daemon client", () => {
     t.after(() => daemon?.close());
 
     assert.equal(spawnCalls, 1);
-    assert.equal((await client.request("system.health")).healthy, true);
+    assert.equal((await client.request(SYSTEM_HEALTH)).healthy, true);
   });
 
   test("uses withFileLock so racing auto-start attempts spawn only one daemon", (t) => {
@@ -983,6 +1001,9 @@ describe("multiplexed daemon client", () => {
     assert.equal(spawns, 0);
   });
 
+});
+
+describe("multiplexed daemon client: boot-failure reporting and malformed messages", () => {
   test("reports bounded startup failures with actionable help", async (t) => {
     const paths = temporaryPaths(t);
     await assert.rejects(
@@ -1002,7 +1023,7 @@ describe("multiplexed daemon client", () => {
     const paths = temporaryPaths(t);
     fs.mkdirSync(paths.runtimeDir, { recursive: true });
     fs.writeFileSync(
-      path.join(paths.runtimeDir, "daemon-boot.err"),
+      path.join(paths.runtimeDir, DAEMON_BOOT_ERR),
       "error: could not parse /fake/config.json: bad json\nhelp: fix it"
     );
 
@@ -1049,7 +1070,7 @@ describe("multiplexed daemon client", () => {
     const client = await connectClient({ socketPath: paths.socketPath, autoStart: false, maxBufferBytes: 32 });
     t.after(() => client.close());
 
-    await assert.rejects(() => client.request("system.health"), /exceeds 32 bytes/);
+    await assert.rejects(() => client.request(SYSTEM_HEALTH), /exceeds 32 bytes/);
   });
 
   test("rejects malformed daemon event envelopes instead of queueing them", async (t) => {
@@ -1065,7 +1086,7 @@ describe("multiplexed daemon client", () => {
     const client = await connectClient({ socketPath: paths.socketPath, autoStart: false });
     t.after(() => client.close());
 
-    await assert.rejects(() => client.request("system.health"), /invalid event envelope/);
+    await assert.rejects(() => client.request(SYSTEM_HEALTH), /invalid event envelope/);
   });
 
   test("rejects non-object daemon messages", async (t) => {
@@ -1077,6 +1098,6 @@ describe("multiplexed daemon client", () => {
     const client = await connectClient({ socketPath: paths.socketPath, autoStart: false });
     t.after(() => client.close());
 
-    await assert.rejects(() => client.request("system.health"), /invalid daemon message/);
+    await assert.rejects(() => client.request(SYSTEM_HEALTH), /invalid daemon message/);
   });
 });

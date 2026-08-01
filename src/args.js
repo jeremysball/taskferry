@@ -287,7 +287,7 @@ const FLAGS = {
   "--grace-ms": { allow: ["cancel"], key: "graceMs", coerce: (v, n) => parseNumber(v, n, { min: 0 }) },
   "--timeout": { allow: ["wait", "advisor"], key: "timeoutMs", coerce: (v, n) => parseDuration(v, n) },
   "--tail-chars": { allow: ["wait"], key: "tailChars", coerce: (v, n) => parseNumber(v, n, { min: 1, max: 65536 }) },
-  "--chars": { allow: ["tail"], key: "chars", coerce: (v, n) => parseNumber(v, n, { min: 1, max: 65536 }) },
+  "--chars": { allow: ["tail"], key: "chars", coerce: (v, n) => parseNumber(v, n, { min: 1, max: 131072 }) },
   "--mode": { allow: ["summary"], key: "mode", coerce: coerceMode },
   "--max-words": { allow: ["summary"], key: "maxWords", coerce: (v, n) => parseNumber(v, n, { min: 75, max: 300 }) },
   "--fields": { allow: ["result"], key: "fields", coerce: parseFields },

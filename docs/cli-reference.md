@@ -314,7 +314,7 @@ task counts and rows, nothing else.
 | `--directory <path>` | Workspace to inspect, defaults to the current git workspace root (falls back to the literal current directory outside a git repo) |
 | `--format toon\|claude-hook\|codex-hook` | Default `toon`; the two hook formats wrap the TOON payload in the target agent's expected envelope |
 
-## `taskferry doctor [--full]`
+## `taskferry doctor [--full] [--stats]`
 
 Checks daemon health and installation details: connects (auto-starting the
 daemon if needed), and reports `{ healthy, pid, version }`. `--full` adds
@@ -335,6 +335,14 @@ is no silent unsandboxed fallback; see [security.md](security.md)); a
 conditional `info[]` array appears on
 non-Linux platforms noting sandboxing is unavailable there. See
 [troubleshooting.md](troubleshooting.md).
+
+`--stats` replaces the environment checks entirely with an aggregate report
+over persisted task history: status mix (`overall`/`last24h`/`last7d`), a
+per-model breakdown (dispatch count, done/crash rate, dominant failure
+reason), a failure-reason histogram, the unknown-status backlog (capped at
+20 entries, newest first), and a 24h-vs-prior-24h crash-rate trend.
+Recomputed from `task.list` on every call — nothing is cached. Cannot be
+combined with `--full`.
 
 ## `taskferry --version` / `taskferry -V`
 

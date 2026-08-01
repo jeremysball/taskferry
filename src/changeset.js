@@ -331,23 +331,30 @@ export function applyChangeset({ directory, diffPath, isGitTarget, overlay, stat
  * in this state. The default rmFn shells out to real `chmod`/`rm` (rather
  * than Node's fs.chmodSync/fs.rmSync) because fs.rmSync's own directory walk
  * hits the same EACCES on a not-yet-chmod'd mode-000 entry that rm -rf does.
+ * chmod's own result isn't just discarded on failure: a chmod failure for a
+ * *different* reason than the expected mode-000 case (an immutable flag, a
+ * read-only remount) would otherwise surface only as rm's own opaque
+ * failure, losing the more specific diagnostic chmod's stderr carries.
  * @param {object} params
  * @param {string} params.root
  * @param {string} params.tmpRoot - the overlayTmpRoot the overlay was created under; removal is
  *   refused for any root that isn't a taskferry-cow tree under it (review finding #12 -- defense
  *   in depth against a corrupted/tampered tasks.json pointing rm -rf elsewhere; exploiting it
  *   already requires the daemon's own uid, which is exactly the attacker this feature targets).
+ * @param {typeof spawnSync} [params.spawnFn] - overridable for tests; the default rmFn's chmod/rm
+ *   subprocess calls both run through this.
  * @param {(path: string) => void} [params.rmFn]
  * @returns {{removed: boolean, reason: string|null}}
  */
-export function cleanupOverlay({ root, tmpRoot, rmFn = (p) => {
-    // Best-effort: a mode-000 entry blocks rm's own opendir() the same way
-    // it blocks ours, so chmod failing here isn't fatal -- rm -rf below is
-    // still the operation whose result actually matters.
-    spawnSync("chmod", ["-R", "u+rwX", p]);
-    const result = spawnSync("rm", ["-rf", p]);
-    if (result.status !== 0) {
-      throw new Error(`rm -rf ${p} failed: ${(result.stderr || "").toString().trim() || `exit ${result.status}`}`);
+export function cleanupOverlay({ root, tmpRoot, spawnFn = spawnSync, rmFn = (p) => {
+    const chmodResult = spawnFn("chmod", ["-R", "u+rwX", p]);
+    const rmResult = spawnFn("rm", ["-rf", p]);
+    if (rmResult.status !== 0) {
+      const details = [
+        chmodResult.status !== 0 ? `chmod failed: ${(chmodResult.stderr || "").toString().trim() || `exit ${chmodResult.status}`}` : null,
+        `rm -rf failed: ${(rmResult.stderr || "").toString().trim() || `exit ${rmResult.status}`}`,
+      ].filter(Boolean).join("; ");
+      throw new Error(details);
     }
   } }) {
   const resolved = path.resolve(root);

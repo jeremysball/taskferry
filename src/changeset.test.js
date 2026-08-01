@@ -482,6 +482,20 @@ describe("cleanupOverlay()", () => {
     assert.match(result.reason, /permission denied/);
   });
 
+  test("default rmFn includes chmod's own stderr when both chmod and rm fail", () => {
+    const calls = [];
+    const spawnFn = (command, _args) => {
+      calls.push(command);
+      if (command === "chmod") return { status: 1, stderr: "chmod: Operation not permitted (immutable flag)" };
+      return { status: 1, stderr: "rm: cannot remove: Read-only file system" };
+    };
+    const result = cleanupOverlay({ root: "/tmp/taskferry-cow-t1", tmpRoot: "/tmp", spawnFn });
+    assert.deepEqual(calls, ["chmod", "rm"]);
+    assert.equal(result.removed, false);
+    assert.match(result.reason, /chmod failed: chmod: Operation not permitted \(immutable flag\)/);
+    assert.match(result.reason, /rm -rf failed: rm: cannot remove: Read-only file system/);
+  });
+
   // Real overlayfs mounts leave a kernel-owned, mode-000 scratch directory at
   // workDir/work, and -- once anything in the overlay was ever deleted --
   // that directory holds an internal whiteout entry (verified live against a

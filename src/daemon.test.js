@@ -159,7 +159,19 @@ describe("Unix socket daemon", () => {
   test("resolves runtime directories in the required precedence order", () => {
     assert.equal(resolveRuntimeDir({ env: { TASKFERRY_RUNTIME_DIR: "/explicit", XDG_RUNTIME_DIR: "/xdg" }, stateDir: "/state" }), "/explicit");
     assert.equal(resolveRuntimeDir({ env: { XDG_RUNTIME_DIR: "/xdg" }, stateDir: "/state" }), path.join("/xdg", "taskferry"));
-    assert.equal(resolveRuntimeDir({ env: {}, stateDir: "/state" }), path.join("/state", "run"));
+    // XDG_RUNTIME_DIR unexported but /run/user/<uid> genuinely exists: use it
+    // rather than drifting to the state dir (the split-brain-daemon bug).
+    assert.equal(
+      resolveRuntimeDir({ env: {}, stateDir: "/state", uid: 1000, pathExists: () => true }),
+      path.join("/run/user/1000", "taskferry")
+    );
+    // Only when /run/user/<uid> truly doesn't exist does it fall back.
+    assert.equal(
+      resolveRuntimeDir({ env: {}, stateDir: "/state", uid: 1000, pathExists: () => false }),
+      path.join("/state", "run")
+    );
+    // No uid available at all (non-POSIX platform) also falls back.
+    assert.equal(resolveRuntimeDir({ env: {}, stateDir: "/state", uid: undefined }), path.join("/state", "run"));
   });
 
   test("rejects unsupported operating systems before touching the socket", async (t) => {

@@ -311,29 +311,50 @@ export function applyChangeset({ directory, diffPath, isGitTarget, overlay, stat
  * Overlay upper/work dirs come back owned by the invoking (daemon's own)
  * uid, not an unmapped namespace one -- bwrap's default --unshare-user
  * identity-maps the outer uid, and nothing in this design passes
- * --uid/--gid. Verified live against the exact buildBwrapArgs() flag set
- * on the target host: overlayfs's internal work/work scratch subdir comes
- * back mode 000, but a plain rm -rf from the same uid still removes it
- * (unlink authority comes from the parent directory's permissions, not the
- * child's own mode). The default rmFn shells out to a real rm -rf via
- * spawnSync("rm", ["-rf", p]) because Node's fs.rmSync calls readdir()
- * on every directory it walks (failing with EACCES on mode-000
- * subdirectories), while a real rm -rf only needs write+execute on the
- * parent. No bwrap wrapper or elevated privilege is needed -- see
- * ADR 0001's corrected "Namespace-owned leftovers" entry.
+ * --uid/--gid. Verified live against the exact buildBwrapArgs() flag set on
+ * the target host: overlayfs's internal work/work scratch subdir comes back
+ * mode 000. An *empty* mode-000 directory is still removable by a same-uid
+ * `rm -rf` (GNU rm's optimistic rmdir() fast path needs only the parent's
+ * permissions), which is the case ADR 0001's "Namespace-owned leftovers"
+ * entry verified -- but once anything was ever deleted inside the overlay,
+ * that scratch dir holds an internal whiteout entry (confirmed live: `sudo
+ * ls -la` on a real leftover showed a mode-000 dir containing a single
+ * char-device entry) and is no longer empty. Removing a *non-empty*
+ * directory forces rm to opendir()/readdir() it first, which does require
+ * read+execute on the directory itself -- mode 000 blocks that, so rm fails
+ * with EACCES partway through and aborts, having already deleted sibling
+ * entries like upper/. That silently strands a task claiming a live overlay
+ * whose upper/ no longer exists (taskferry issue #273: "Can't find source
+ * path .../upper/main"). A same-uid `chmod -R` needs no special permission
+ * on its own targets (only the parent's, to resolve each path), so running
+ * one before rm -rf makes every entry openable regardless of how it landed
+ * in this state. The default rmFn shells out to real `chmod`/`rm` (rather
+ * than Node's fs.chmodSync/fs.rmSync) because fs.rmSync's own directory walk
+ * hits the same EACCES on a not-yet-chmod'd mode-000 entry that rm -rf does.
+ * chmod's own result isn't just discarded on failure: a chmod failure for a
+ * *different* reason than the expected mode-000 case (an immutable flag, a
+ * read-only remount) would otherwise surface only as rm's own opaque
+ * failure, losing the more specific diagnostic chmod's stderr carries.
  * @param {object} params
  * @param {string} params.root
  * @param {string} params.tmpRoot - the overlayTmpRoot the overlay was created under; removal is
  *   refused for any root that isn't a taskferry-cow tree under it (review finding #12 -- defense
  *   in depth against a corrupted/tampered tasks.json pointing rm -rf elsewhere; exploiting it
  *   already requires the daemon's own uid, which is exactly the attacker this feature targets).
+ * @param {typeof spawnSync} [params.spawnFn] - overridable for tests; the default rmFn's chmod/rm
+ *   subprocess calls both run through this.
  * @param {(path: string) => void} [params.rmFn]
  * @returns {{removed: boolean, reason: string|null}}
  */
-export function cleanupOverlay({ root, tmpRoot, rmFn = (p) => {
-    const result = spawnSync("rm", ["-rf", p]);
-    if (result.status !== 0) {
-      throw new Error(`rm -rf ${p} failed: ${(result.stderr || "").toString().trim() || `exit ${result.status}`}`);
+export function cleanupOverlay({ root, tmpRoot, spawnFn = spawnSync, rmFn = (p) => {
+    const chmodResult = spawnFn("chmod", ["-R", "u+rwX", p]);
+    const rmResult = spawnFn("rm", ["-rf", p]);
+    if (rmResult.status !== 0) {
+      const details = [
+        chmodResult.status !== 0 ? `chmod failed: ${(chmodResult.stderr || "").toString().trim() || `exit ${chmodResult.status}`}` : null,
+        `rm -rf failed: ${(rmResult.stderr || "").toString().trim() || `exit ${rmResult.status}`}`,
+      ].filter(Boolean).join("; ");
+      throw new Error(details);
     }
   } }) {
   const resolved = path.resolve(root);

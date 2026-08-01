@@ -20,11 +20,11 @@ function makeManager({ tasks = [], spawnFn, killFn, onEvent, maxConcurrentTasks 
   fs.writeFileSync(path.join(stateDir, "tasks.json"), JSON.stringify(tasks, null, 2));
   return createTaskManager({
     stateDir,
+    onEvent,
+    maxConcurrentTasks,
     sandboxEnabled: false,
     spawnFn: spawnFn ?? (() => fakeChild()),
     killFn: killFn ?? (() => {}),
-    onEvent,
-    maxConcurrentTasks,
     maxDispatchesPerWindow: 100,
     dispatchWindowMs: 60000,
   });
@@ -188,7 +188,7 @@ describe("task lifecycle events", () => {
   test("keeps persisted summary tasks from older state files out of the event stream", () => {
     const events = [];
     const summary = persistedTask({
-      internal: undefined,
+      internal: null,
       summaryOf: { sourceTaskId: "source" },
     });
 

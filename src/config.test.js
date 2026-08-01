@@ -5,6 +5,8 @@ import os from "node:os";
 import path from "node:path";
 import { resolveConfigPath, loadConfig } from "./config.js";
 
+const CONFIG_FILENAME = "config.json";
+
 function tmpConfigDir() {
   return fs.mkdtempSync(path.join(os.tmpdir(), "axi-config-test-"));
 }
@@ -12,7 +14,7 @@ function tmpConfigDir() {
 function writeConfig(dir, content) {
   const configDir = path.join(dir, "taskferry");
   fs.mkdirSync(configDir, { recursive: true });
-  const configPath = path.join(configDir, "config.json");
+  const configPath = path.join(configDir, CONFIG_FILENAME);
   fs.writeFileSync(configPath, content);
   return configPath;
 }
@@ -20,19 +22,19 @@ function writeConfig(dir, content) {
 describe("resolveConfigPath()", () => {
   test("uses XDG_CONFIG_HOME when set", () => {
     const result = resolveConfigPath({ XDG_CONFIG_HOME: "/xdg-config" });
-    assert.equal(result, path.join("/xdg-config", "taskferry", "config.json"));
+    assert.equal(result, path.join("/xdg-config", "taskferry", CONFIG_FILENAME));
   });
 
   test("falls back to ~/.config when XDG_CONFIG_HOME is unset", () => {
     const result = resolveConfigPath({});
-    assert.equal(result, path.join(os.homedir(), ".config", "taskferry", "config.json"));
+    assert.equal(result, path.join(os.homedir(), ".config", "taskferry", CONFIG_FILENAME));
   });
 });
 
 describe("loadConfig()", () => {
   test("returns {} when the file is missing", () => {
     const dir = tmpConfigDir();
-    const configPath = path.join(dir, "taskferry", "config.json");
+    const configPath = path.join(dir, "taskferry", CONFIG_FILENAME);
     assert.deepEqual(loadConfig({ configPath }), {});
   });
 

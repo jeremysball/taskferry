@@ -4660,6 +4660,12 @@ describe("tail()", () => {
     assert.throws(() => mgr.tail("t1", { chars: 0 }), /chars must be a positive integer/);
   });
 
+  test("accepts a request up to the 131072 ceiling and rejects above it", () => {
+    const mgr = makeManager({ tasksFixture: [baseTask({ id: "t1" })] });
+    assert.doesNotThrow(() => mgr.tail("t1", { chars: 131072 }));
+    assert.throws(() => mgr.tail("t1", { chars: 131073 }), /chars must be a positive integer no greater than 131072/);
+  });
+
   test("falls back to raw captured output for a crashed task that never emitted an event", () => {
     const raw = 'Error: Extension "/x/y.js" error: Provider y: "baseUrl" is required when defining models.';
     const mgr = makeManager({
@@ -5530,6 +5536,44 @@ describe("caller-env union (sanitizedEnvironment)", () => {
     mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
 
     assert.equal(capturedOpts.env.TASKFERRY_CHILD, "1");
+  });
+
+  test("TASKFERRY_TASK_ID is stamped with the spawned task's own id, for both dispatch and advisor roles", async () => {
+    let dispatchOpts = null;
+    let advisorOpts = null;
+    const mgr = makeManager({
+      spawnFn: (cmd, args, opts) => {
+        if (!dispatchOpts) dispatchOpts = opts; else advisorOpts = opts;
+        const child = fakeChild();
+        setImmediate(() => child.emit("exit", 0, null));
+        return child;
+      },
+      sandboxEnabled: true,
+      overlayEnabled: true,
+      checkBwrapAvailableFn: () => ({ checked: true, available: true }),
+      checkOverlaySupportFn: () => ({ supported: true }),
+      platform: "linux",
+    });
+
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+    assert.equal(dispatchOpts.env.TASKFERRY_TASK_ID, dispatched.id);
+
+    const advised = await mgr.advisor({ prompt: "hello", directory: os.tmpdir(), model: "openai/gpt-5.6-sol" });
+    assert.equal(advisorOpts.env.TASKFERRY_TASK_ID, advised.task_id);
+  });
+
+  test("TASKFERRY_TASK_ID is absent from summary spawns", async () => {
+    let capturedOpts = null;
+    const log = JSON.stringify({ type: "text", part: { messageID: "m1", text: "Investigated the issue" } });
+    const mgr = makeManager({
+      tasksFixture: (logDir) => [baseTask({ id: "source", logPath: path.join(logDir, "source.ndjson") })],
+      logs: { "source.ndjson": log },
+      spawnFn: (cmd, args, opts) => { capturedOpts = opts; return fakeChild(); },
+    });
+
+    await mgr.summarize("source", { maxWords: 150 });
+
+    assert.equal("TASKFERRY_TASK_ID" in capturedOpts.env, false);
   });
 
   test("omitting env behaves as ambient-only, same as before caller-env forwarding existed", (t) => {

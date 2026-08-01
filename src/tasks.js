@@ -832,10 +832,11 @@ export function createTaskManager({
     return merged;
   }
 
-  /** @param {NodeJS.ProcessEnv} [env] */
-  function dispatchEnvironment(env) {
+  /** @param {NodeJS.ProcessEnv} [env] @param {string} [taskId] */
+  function dispatchEnvironment(env, taskId) {
     const result = sanitizedEnvironment(env);
     result.TASKFERRY_CHILD = "1";
+    result.TASKFERRY_TASK_ID = taskId;
     return result;
   }
 
@@ -1902,7 +1903,7 @@ export function createTaskManager({
       if (promptFilePath) fs.writeFileSync(promptFilePath, dispatchLaunch.prompt, { mode: 0o600, flag: "wx" });
       logFd = fs.openSync(task.logPath, "a", 0o600);
       fs.chmodSync(task.logPath, 0o600);
-      let spawnEnv = isSummary ? summaryEnvironment(summaryLaunch.env) : dispatchEnvironment(dispatchLaunch.env);
+      let spawnEnv = isSummary ? summaryEnvironment(summaryLaunch.env) : dispatchEnvironment(dispatchLaunch.env, task.id);
       const noSandbox = !isSummary && dispatchLaunch.noSandbox === true;
       let spawnCommand = executor.binaryName;
       let spawnArgs = args;
@@ -3113,8 +3114,8 @@ export function createTaskManager({
     ensureStateLoaded();
     const task = tasks.get(taskId);
     if (!task) throw noSuchTask(taskId);
-    if (!Number.isSafeInteger(chars) || chars <= 0 || chars > 65536) {
-      throw new Error("error: chars must be a positive integer no greater than 65536\nhelp: run taskferry tail with chars between 1 and 65536");
+    if (!Number.isSafeInteger(chars) || chars <= 0 || chars > 131072) {
+      throw new Error("error: chars must be a positive integer no greater than 131072\nhelp: run taskferry tail with chars between 1 and 131072");
     }
     let text = readLastText(task.logPath);
     // Eventless crash: narration is never coming (the log has no parseable

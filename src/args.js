@@ -56,18 +56,20 @@ const commandSpecs = {
     examples: ['taskferry wait <id>', 'taskferry wait <id> --timeout 10s --tail-chars 1000', 'taskferry wait <id> --summarize'],
   },
   advisor: {
-    usage: "taskferry advisor --prompt <text> --model <id> [options]",
-    description: "Ask a model for advice and wait for its response.",
+    usage: "taskferry advisor --model <id> [--prompt <text>] [options]",
+    description: "Consult a stronger model for a second opinion and block until it answers. With no --prompt, auto-attaches the caller's own recent context (a Claude Code session transcript, or the calling ferry's own task log) and asks for structured, actionable pushback.",
     options: {
-      "--prompt <text>": "required",
       "--model <id>": "required",
+      "--prompt <text>": "optional; auto-attaches context and asks for methodical review when omitted",
       "--directory <path>": "defaults to the current workspace",
       "--variant <name>": "optional model reasoning variant",
       "--session-id <id>": "continue a recent advisor session",
       "--timeout <duration>": "maximum wait, e.g. 10000 (ms), 30s, 5m, 1h",
       "--executor <opencode|pi>": "worker backend to dispatch through, default pi",
+      "--summarize-context": "condense the auto-attached context through a throwaway model call before sending it (off by default)",
     },
     examples: [
+      'taskferry advisor --model openai/gpt-5.6-sol',
       'taskferry advisor --prompt "How should I split this module?" --model openai/gpt-5.6-sol',
       'taskferry advisor --prompt "Review this design" --model zai/glm-5.2 --timeout 30s',
     ],
@@ -81,7 +83,7 @@ const commandSpecs = {
   tail: {
     usage: "taskferry tail <id> [--chars <number>]",
     description: "Read the latest model text for a task.",
-    options: { "--chars <number>": "characters to return, default 1000, maximum 65536" },
+    options: { "--chars <number>": "characters to return, default 1000, maximum 131072" },
     examples: ['taskferry tail <id>', 'taskferry tail <id> --chars 2000'],
   },
   summary: {
@@ -186,7 +188,7 @@ function migrationError(name, args) {
     taskferry_dispatch: `Use: taskferry dispatch --prompt "<text>"${args.length ? ` (received ${args.join(" ")})` : ""}`,
     taskferry_cancel: "Use: taskferry cancel <id>",
     taskferry_poll: `Use: taskferry wait ${args[0] || "<id>"}`,
-    taskferry_advisor: "Use: taskferry advisor --prompt \"<text>\" --model <id>",
+    taskferry_advisor: "Use: taskferry advisor --model <id>  (--prompt is optional)",
     taskferry_status: "Use: taskferry status <id>",
     taskferry_tail: "Use: taskferry tail <id>",
     taskferry_summary: "Use: taskferry summary <id>",
@@ -200,7 +202,7 @@ function parseNumber(value, flag, { min = 0, max = Number.MAX_SAFE_INTEGER } = {
   if (!/^\d+$/.test(value)) throw new UsageError(`${flag} must be an integer`, `Use ${flag} with a number from ${min} through ${max}`);
   const number = Number(value);
   if (!Number.isSafeInteger(number) || number < min || number > max) {
-    const qualifier = min === 1 ? "a positive integer" : `from ${min} through ${max}`;
+    const qualifier = min === 1 ? (number > max ? `a positive integer from ${min} through ${max}` : "a positive integer") : `from ${min} through ${max}`;
     throw new UsageError(`${flag} must be ${qualifier}`, `Use ${flag} with a number from ${min} through ${max}`);
   }
   return number;
@@ -270,7 +272,7 @@ function defaultOptions(command, cwd) {
     case "dispatch":
       return { prompt: undefined, directory: cwd, model: undefined, variant: undefined, sessionId: undefined, finalMarker: undefined, noSandbox: false, noOverlay: false, allowedDirs: undefined, executor: undefined };
     case "advisor":
-      return { prompt: undefined, model: undefined, directory: undefined, variant: undefined, sessionId: undefined, timeoutMs: undefined, executor: undefined };
+      return { prompt: undefined, model: undefined, directory: undefined, variant: undefined, sessionId: undefined, timeoutMs: undefined, executor: undefined, summarizeContext: false };
     case "cancel":
       return { taskId: undefined, graceMs: undefined };
     case "wait":
@@ -374,11 +376,12 @@ export function parseArgs(argv, { cwd = process.cwd() } = {}) {
       "--wait": ["summary"],
       "--summaries": ["watch"],
       "--summarize": ["wait"],
+      "--summarize-context": ["advisor"],
       "--no-sandbox": ["dispatch"],
       "--no-overlay": ["dispatch"], // advisor deliberately excluded -- review finding #5
       "--diff": ["result"],
     };
-    const booleanKeyOverrides = { "--no-sandbox": "noSandbox", "--no-overlay": "noOverlay" };
+    const booleanKeyOverrides = { "--no-sandbox": "noSandbox", "--no-overlay": "noOverlay", "--summarize-context": "summarizeContext" };
     if (booleanCommands[name]) {
       if (!booleanCommands[name].includes(command)) throw usageError(`unknown flag ${name} for \`${command}\``, command);
       if (inlineValue !== undefined) throw usageError(`${name} does not take a value`, command);
@@ -416,7 +419,7 @@ export function parseArgs(argv, { cwd = process.cwd() } = {}) {
     if (key === "timeoutMs" || key === "flushIntervalMs") {
       value = parseDuration(value, name);
     } else if (["graceMs", "tailChars", "chars", "maxWords", "limit"].includes(key)) {
-      value = parseNumber(value, name, key === "tailChars" || key === "chars" ? { min: 1, max: 65536 } : key === "maxWords" ? { min: 75, max: 300 } : { min: key === "limit" ? 1 : 0 });
+      value = parseNumber(value, name, key === "tailChars" || key === "chars" ? { min: 1, max: 131072 } : key === "maxWords" ? { min: 75, max: 300 } : { min: key === "limit" ? 1 : 0 });
     } else if (key === "fields") {
       value = parseFields(value);
     } else if (key === "allowedDirs") {
@@ -447,7 +450,7 @@ export function parseArgs(argv, { cwd = process.cwd() } = {}) {
     if (["cancel", "wait", "status", "tail", "summary", "result", "accept", "reject"].includes(command) && !options.taskId) {
       throw usageError("task id is required", command);
     }
-    if (["dispatch", "advisor"].includes(command) && !options.prompt) throw usageError("--prompt is required", command);
+    if (command === "dispatch" && !options.prompt) throw usageError("--prompt is required", command);
     if (command === "advisor" && !options.model) throw usageError("--model is required", command);
     if (command === "result" && options.full && options.fields && !options.fields.includes("narration")) {
       throw usageError("--full requires narration in --fields", command);
@@ -489,7 +492,7 @@ function commandAllows(command, flag) {
     dispatch: ["--prompt", "--directory", "--model", "--variant", "--session-id", "--require-final-marker", "--allowed-dirs", "--executor"],
     cancel: ["--grace-ms"],
     wait: ["--timeout", "--tail-chars"],
-    advisor: ["--prompt", "--model", "--directory", "--variant", "--session-id", "--timeout", "--executor"],
+    advisor: ["--prompt", "--model", "--directory", "--variant", "--session-id", "--timeout", "--executor", "--summarize-context"],
     status: [],
     tail: ["--chars"],
     summary: ["--mode", "--max-words"],

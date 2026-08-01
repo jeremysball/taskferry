@@ -298,6 +298,15 @@ describe("private daemon protocol", () => {
     );
   });
 
+  test("task.tail accepts chars up to 131072", () => {
+    const parsed = parseRequestLine(request("task.tail", { taskId: "t1", chars: 131072 }));
+    assert.equal(parsed.params.chars, 131072);
+  });
+
+  test("task.tail rejects chars above 131072", () => {
+    assert.throws(() => parseRequestLine(request("task.tail", { taskId: "t1", chars: 131073 })), /invalid params/i);
+  });
+
   test("event.subscribe accepts an optional originSessionId string", () => {
     const parsed = parseRequestLine(request("event.subscribe", {
       directory: "/tmp/project",

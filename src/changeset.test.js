@@ -207,6 +207,7 @@ describe("extractGitDiff()", () => {
     let capturedArgs = null;
     const written = {};
     const runCommand = (command, args) => {
+      if (command === "git") return { status: 0, stdout: "abc123\n", stderr: "", error: undefined };
       capturedCommand = command;
       capturedArgs = args;
       return { status: 0, stdout: "diff --git a/foo b/foo\n+bar\n", stderr: "", error: undefined };
@@ -241,7 +242,9 @@ describe("extractGitDiff()", () => {
   });
 
   test("reports hasChanges: false for an empty diff", () => {
-    const runCommand = () => ({ status: 0, stdout: "", stderr: "", error: undefined });
+    const runCommand = (command) => command === "git"
+      ? { status: 0, stdout: "abc123\n", stderr: "", error: undefined }
+      : { status: 0, stdout: "", stderr: "", error: undefined };
     const result = extractGitDiff({
       directory: "/workspace/repo",
       overlay: { upperDir: "/tmp/u", workDir: "/tmp/w" },
@@ -262,6 +265,7 @@ describe("extractGitDiff()", () => {
   test("re-mounts persisted rwFileBinds as scratch-copy binds so the diff sees the worker's file writes", () => {
     let capturedArgs = null;
     const runCommand = (command, args) => {
+      if (command === "git") return { status: 0, stdout: "abc123\n", stderr: "", error: undefined };
       capturedArgs = args;
       return { status: 0, stdout: "", stderr: "", error: undefined };
     };
@@ -302,7 +306,9 @@ describe("extraction fail-closed behavior", () => {
 
   test("extractGitDiff throws on a bwrap execution error and writes nothing", () => {
     let written = null;
-    const runCommand = () => ({ status: null, stdout: "", stderr: "", error: Object.assign(new Error("spawn bwrap ETIMEDOUT"), { code: "ETIMEDOUT" }) });
+    const runCommand = (command) => command === "git"
+      ? { status: 0, stdout: "abc123\n", stderr: "", error: undefined }
+      : { status: null, stdout: "", stderr: "", error: Object.assign(new Error("spawn bwrap ETIMEDOUT"), { code: "ETIMEDOUT" }) };
     assert.throws(
       () => extractGitDiff({ ...baseGitParams, runCommand, writeFileFn: (p) => { written = p; } }),
       /git diff extraction failed.*ETIMEDOUT/
@@ -312,7 +318,9 @@ describe("extraction fail-closed behavior", () => {
 
   test("extractGitDiff throws on a non-zero exit status and writes nothing", () => {
     let written = null;
-    const runCommand = () => ({ status: 128, stdout: "", stderr: "fatal: bad revision 'abc123'\n", error: undefined });
+    const runCommand = (command) => command === "git"
+      ? { status: 0, stdout: "abc123\n", stderr: "", error: undefined }
+      : { status: 128, stdout: "", stderr: "fatal: bad revision 'abc123'\n", error: undefined };
     assert.throws(
       () => extractGitDiff({ ...baseGitParams, runCommand, writeFileFn: (p) => { written = p; } }),
       /git diff extraction failed.*bad revision/
@@ -322,11 +330,41 @@ describe("extraction fail-closed behavior", () => {
 
   test("extractGitDiff's extraction script propagates the diff's exit status, not reset's", () => {
     let capturedArgs = null;
-    const runCommand = (command, args) => { capturedArgs = args; return { status: 0, stdout: "diff --git a/x b/x\n", stderr: "", error: undefined }; };
+    const runCommand = (command, args) => {
+      if (command === "git") return { status: 0, stdout: "abc123\n", stderr: "", error: undefined };
+      capturedArgs = args;
+      return { status: 0, stdout: "diff --git a/x b/x\n", stderr: "", error: undefined };
+    };
     extractGitDiff({ ...baseGitParams, runCommand, writeFileFn: () => {}, mkdirFn: () => {} });
     const script = capturedArgs[capturedArgs.indexOf("sh") + 2];
     assert.match(script, /rc=\$\?/, "the script must capture the diff's own exit code");
     assert.match(script, /exit \$rc/, "the script must exit with the diff's code, not reset's");
+  });
+
+  test("extractGitDiff refuses to extract when the directory's HEAD moved since preDispatchHead, without invoking bwrap", () => {
+    let bwrapCalled = false;
+    const runCommand = (command) => {
+      if (command === "git") return { status: 0, stdout: "def456\n", stderr: "", error: undefined };
+      bwrapCalled = true;
+      return { status: 0, stdout: "diff --git a/x b/x\n", stderr: "", error: undefined };
+    };
+    assert.throws(
+      () => extractGitDiff({ ...baseGitParams, runCommand, writeFileFn: () => {}, mkdirFn: () => {} }),
+      /HEAD moved from 'abc123' to 'def456' since dispatch/
+    );
+    assert.equal(bwrapCalled, false, "extraction must never run against a directory whose HEAD has drifted");
+  });
+
+  test("extractGitDiff proceeds normally when the HEAD re-check itself can't resolve (git failure)", () => {
+    let capturedArgs = null;
+    const runCommand = (command, args) => {
+      if (command === "git") return { status: 128, stdout: "", stderr: "fatal: not a git repository\n", error: undefined };
+      capturedArgs = args;
+      return { status: 0, stdout: "diff --git a/x b/x\n", stderr: "", error: undefined };
+    };
+    const result = extractGitDiff({ ...baseGitParams, runCommand, writeFileFn: () => {}, mkdirFn: () => {} });
+    assert.ok(capturedArgs, "bwrap must still run when the HEAD re-check is inconclusive rather than a confirmed drift");
+    assert.equal(result.hasChanges, true);
   });
 
   const baseNonGitParams = {

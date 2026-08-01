@@ -36,18 +36,49 @@ doing it directly would still take meaningful back-and-forth. Dispatching a
 small, mechanical, single-file fix through a full worker cycle bloats context
 and burns wall-clock time versus just doing it.
 
-## Worktree Or Main Checkout
+## Always Use A Worktree
 
 Every sandboxed ferry writes to a copy-on-write overlay, never the real
 directory directly -- a rogue or mistaken dispatch cannot corrupt whatever
-directory you point it at, worktree or not. Worktrees remain useful for two
-unrelated reasons, not safety: branch isolation (parallel sessions on
-different branches without a switch race) and lower-layer stability (a
-concurrent edit to a live main checkout mutates the overlay's *lower* in
-place while a ferry is in flight, which can make `accept` conflict later).
-Ask which of those two applies before choosing; if neither does (a solo
-session, one task at a time), dispatching straight at the main checkout is
-fine.
+directory you point it at, worktree or not. `taskferry result --diff` also
+fails closed rather than silently corrupting: if the directory's real git
+HEAD has moved since dispatch (someone or something checked out a different
+branch there while the task was in flight), extraction refuses with an
+explicit "HEAD moved" error instead of returning a diff computed against the
+wrong tree.
+
+That guard only fires on a *confirmed* HEAD mismatch, though -- it won't
+catch every way a shared directory can bite you (a concurrent file edit that
+doesn't touch HEAD, for instance), and hitting it mid-session is still lost
+wall time you'd rather not spend. **Always dispatch at a worktree, never the
+main checkout.** This used to carve out an exception for a solo session
+doing one task at a time on the reasoning that nothing else would touch the
+directory -- that reasoning failed in practice (taskferry#261): a real
+solo session hit an unexplained branch flip on the main checkout mid-dispatch,
+and `taskferry result --diff` silently produced a diff comparing the wrong
+trees before the HEAD-drift guard above existed. "Nothing else touches this
+directory" is an assumption, not a guarantee the sandbox can enforce, and the
+cost of being wrong (a corrupted diff, or now a stalled "HEAD moved" refusal
+mid-session) is never worth the one worktree-creation step it saves. Create
+a worktree even for a single quick dispatch. The two reasons worktrees help
+beyond this -- branch isolation (parallel sessions on different branches
+without a switch race) and lower-layer stability (a concurrent edit to a
+live main checkout mutates the overlay's *lower* in place while a ferry is
+in flight, which can make `accept` conflict later) -- still apply on top of
+this; they're not the only justification anymore.
+
+**A worker's writes only land somewhere durable inside `--directory`.** The
+sandbox bind-mounts the dispatched directory's own tree plus its git
+internals -- it does not follow a symlink out to some other path on the
+host, even one that looks like it should resolve fine (e.g. a worktree's
+scratch directory symlinked out to a shared location in the main checkout).
+A write through a path that resolves outside `--directory` lands in a
+throwaway overlay copy that vanishes at settlement, never appears in
+`taskferry result --diff` (doubly true for a gitignored path, which a
+git-diff-based extraction can't see regardless), and the worker's own
+narration will still report success. If multiple worktrees need to share
+scratch files (an SDD plan's ledger, briefs, reports), copy them into each
+worktree instead of symlinking across the sandbox boundary.
 
 ## Worker Contract
 
@@ -115,7 +146,7 @@ taskferry accept <id>
 the diff has now actually landed.
 
 If `accept` itself fails (a conflicting `git apply` -- the lower moved
-under a long-running ferry, see "Worktree Or Main Checkout" above), don't
+under a long-running ferry, see "Always Use A Worktree" above), don't
 re-dispatch reflexively: `taskferry result <id> --diff` still has the
 worker's changes, so resolve the conflict by hand or reject and retry with
 a fresh dispatch against the now-current directory.

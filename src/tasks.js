@@ -1645,6 +1645,235 @@ function queueDispatchLaunch(ctx, { id, task, prompt, sessionId, env, noSandbox,
   ctx.launchQueuedTasks();
 }
 
+
+/**
+ * The subset of `createTaskManager`'s closure that `summarizeTask`'s
+ * extracted helper pipeline needs threaded in explicitly -- the same
+ * convention the `startTask`/`result`/`dispatch` extractions use. Each
+ * helper reads only what it is handed, so the task's fault lines (reserve
+ * enforcement, session/watermark resolution, narration building, and the
+ * summary launch itself) each stay a standalone module-level function rather
+ * than one monolithic 142-line method.
+ * @typedef {object} SummarizeTaskContext
+ * @property {() => void} ensureStateLoaded
+ * @property {Map<string, Task>} tasks
+ * @property {(taskId: string) => Error} noSuchTask
+ * @property {number} summaryConcurrencyLimit
+ * @property {{getSummarySessionId: (taskId: string) => string|null, getLastSummarizedWatermark: (taskId: string) => number, clearSummaryState: (taskId: string) => void}} activityCache
+ * @property {string} activitySummaryModel
+ * @property {(model: string, env: NodeJS.ProcessEnv) => Promise<void>} summaryModelAvailable
+ * @property {(logPath: string) => {narration: string, sourceLogBytes: number, inputBytes: number}} readNarrationExcerpt
+ * @property {string} LOG_DIR
+ * @property {string} SUMMARY_DIR
+ * @property {(taskId: string) => void} persistTask
+ * @property {Map<string, LaunchSpec>} pendingLaunches
+ * @property {() => import("./executor.js").WorkerExecutor} opencodeExecutor
+ * @property {string[]} launchQueue
+ * @property {() => void} launchQueuedTasks
+ */
+
+/**
+ * Enforce the summarizer concurrency reserve when the caller opts in (the
+ * activity-refresh path). Returns `undefined` to let the launch proceed, or
+ * the early-return result object when the reserve stays full through the
+ * brief retry window. A direct `taskferry summary` call never opts in and
+ * always runs, matching the original semantics. At a small concurrencyLimit
+ * two tasks finishing within moments of each other would otherwise have the
+ * second one's summary dropped outright instead of merely delayed, so retry
+ * briefly before giving up.
+ * @param {SummarizeTaskContext} ctx
+ * @param {{taskId: string, source: Task, respectConcurrencyReserve: boolean}} opts
+ * @returns {Promise<{sourceTaskId: string, sourceStatus: string, summary: string, next: string}|undefined>}
+ */
+async function enforceSummaryReserve(ctx, { taskId, source, respectConcurrencyReserve }) {
+  if (!respectConcurrencyReserve) return undefined;
+  const countInFlightSummaries = () => {
+    let count = 0;
+    for (const t of ctx.tasks.values()) {
+      if (t.summaryOf && (t.status === "running" || t.status === "queued")) count++;
+    }
+    return count;
+  };
+  const RESERVE_RETRY_ATTEMPTS = 4;
+  const RESERVE_RETRY_DELAY_MS = 500;
+  for (let attempt = 0; attempt < RESERVE_RETRY_ATTEMPTS; attempt++) {
+    if (countInFlightSummaries() < ctx.summaryConcurrencyLimit) return undefined;
+    if (attempt === RESERVE_RETRY_ATTEMPTS - 1) {
+      return {
+        sourceTaskId: taskId,
+        sourceStatus: source.status,
+        summary: "summarizer concurrency reserve is full; skipped this refresh",
+        next: `Run taskferry summary with task id "${taskId}" once the summarizer queue drains`,
+      };
+    }
+    await new Promise((resolve) => setTimeout(resolve, RESERVE_RETRY_DELAY_MS));
+  }
+  return undefined;
+}
+
+/**
+ * Resolve the continuation session id and last-summarized watermark for a
+ * task, falling back to the activity cache when the caller doesn't supply
+ * explicit values, and stat the source log. If the log shrank (rotation or
+ * truncation) the cached session/watermark no longer refer to readable
+ * bytes, so the state is cleared and the next pass restarts fresh -- the
+ * only safe interpretation of "watermark is in the future relative to the
+ * log."
+ * @param {SummarizeTaskContext} ctx
+ * @param {Task} source
+ * @param {string} taskId
+ * @param {{summarySessionId?: string|null, lastSummarizedWatermark?: number|null}} options
+ * @returns {{resolvedSummarySessionId: string|null, resolvedWatermark: number, currentSize: number}}
+ */
+function resolveSummarySession(ctx, source, taskId, { summarySessionId, lastSummarizedWatermark }) {
+  let resolvedSummarySessionId = summarySessionId !== undefined
+    ? summarySessionId
+    : ctx.activityCache.getSummarySessionId(taskId);
+  let resolvedWatermark = lastSummarizedWatermark !== undefined && lastSummarizedWatermark !== null
+    ? lastSummarizedWatermark
+    : ctx.activityCache.getLastSummarizedWatermark(taskId);
+  let currentSize;
+  try {
+    currentSize = fs.statSync(source.logPath).size;
+  } catch {
+    currentSize = 0;
+  }
+  if (resolvedWatermark > currentSize) {
+    ctx.activityCache.clearSummaryState(taskId);
+    resolvedSummarySessionId = null;
+    resolvedWatermark = 0;
+  }
+  return { resolvedSummarySessionId, resolvedWatermark, currentSize };
+}
+
+/**
+ * Build the input narration for the summary launch: a delta of only the new
+ * bytes since the last watermark when a session is being continued, otherwise
+ * the bounded head+tail excerpt. Early-returns (via `skip`) with the "no
+ * model text" result when the log has no narration and prompt fallback is
+ * disallowed; otherwise falls back to the task's prompt preview as the
+ * narration.
+ * @param {SummarizeTaskContext} ctx
+ * @param {Task} source
+ * @param {string} taskId
+ * @param {{resolvedSummarySessionId: string|null, resolvedWatermark: number, currentSize: number}} session
+ * @param {boolean} allowPromptFallback
+ * @returns {{snapshot: {narration: string, sourceLogBytes: number, inputBytes: number}, isDelta: boolean, skip?: {sourceTaskId: string, sourceStatus: string, summary: string, help: string}}}
+ */
+function buildSummarySnapshot(ctx, source, taskId, { resolvedSummarySessionId, resolvedWatermark, currentSize }, allowPromptFallback) {
+  /** @type {{narration: string, sourceLogBytes: number, inputBytes: number}} */
+  let snapshot;
+  let isDelta = false;
+  if (resolvedSummarySessionId && resolvedWatermark > 0 && currentSize > resolvedWatermark) {
+    const delta = readDeltaNarration(source.logPath, resolvedWatermark);
+    snapshot = delta;
+    isDelta = true;
+  } else {
+    snapshot = ctx.readNarrationExcerpt(source.logPath);
+  }
+  if (!snapshot.narration && !allowPromptFallback) {
+    return {
+      snapshot,
+      isDelta,
+      skip: {
+        sourceTaskId: taskId,
+        sourceStatus: source.status,
+        summary: "no model text observed yet",
+        help: `Run taskferry tail with task id "${taskId}" after the task emits output`,
+      },
+    };
+  }
+  if (!snapshot.narration) {
+    const prompt = source.promptPreview || "No model output observed yet.";
+    snapshot.narration = `Task prompt: ${prompt}`;
+    snapshot.inputBytes = Buffer.byteLength(snapshot.narration);
+  }
+  return { snapshot, isDelta };
+}
+
+/**
+ * Create and enqueue the summary child task: build the unique id/log/snapshot
+ * paths, write the snapshot JSON (mode 0600, exclusive-create), register the
+ * queued Task, persist it, stage the summary LaunchSpec, push it onto the
+ * queue, and trigger the launch. Returns the success result object exactly as
+ * the original method did. The summary env itself is recomputed at spawn time
+ * by startTask, so only the defensive caller-env clone is staged here.
+ * @param {SummarizeTaskContext} ctx
+ * @param {{taskId: string, source: Task, snapshot: {narration: string, sourceLogBytes: number, inputBytes: number}, isDelta: boolean, capturedAt: string, sourceStatus: string, maxWords: number, previousActivity: string|null, resolvedSummarySessionId: string|null, queuedCallerEnv: NodeJS.ProcessEnv|undefined}} p
+ * @returns {{sourceTaskId: string, sourceStatus: string, capturedAt: string, sourceLogBytes: number, summaryInputBytes: number, summaryTask: {id: string, status: string, model: string}, next: string}}
+ */
+function launchSummaryTask(ctx, p) {
+  const { taskId, source, snapshot, isDelta, capturedAt, sourceStatus, maxWords, previousActivity, resolvedSummarySessionId, queuedCallerEnv } = p;
+  const id = `oc_${Date.now().toString(36)}_${randomUUID().slice(0, 8)}`;
+  const logPath = path.join(ctx.LOG_DIR, `${id}.ndjson`);
+  const snapshotPath = path.join(ctx.SUMMARY_DIR, `${id}.json`);
+  /** @type {SummaryOf} */
+  const summaryOf = {
+    sourceTaskId: taskId,
+    sourceStatus,
+    capturedAt,
+    sourceLogBytes: snapshot.sourceLogBytes,
+    summaryInputBytes: snapshot.inputBytes,
+    maxWords,
+  };
+  fs.writeFileSync(
+    snapshotPath,
+    JSON.stringify({
+      source: { id: taskId, status: sourceStatus, promptPreview: source.promptPreview, capturedAt },
+      narration: snapshot.narration,
+      ...(previousActivity ? { previous_summary: previousActivity } : {}),
+      ...(isDelta ? { narration_is_delta: true } : {}),
+    }, null, 2),
+    { mode: 0o600, flag: "wx" }
+  );
+  /** @type {Task} */
+  const task = {
+    id,
+    status: "queued",
+    directory: fs.realpathSync(ctx.SUMMARY_DIR),
+    model: ctx.activitySummaryModel,
+    executorId: "opencode", // summaries stay opencode-only in this issue -- see plan Verified Findings #10
+    variant: null,
+    sessionId: null,
+    originSessionId: null,
+    pid: null,
+    startedAt: capturedAt,
+    endedAt: null,
+    exitCode: null,
+    signal: null,
+    logPath,
+    promptPreview: "Summarize the attached task transcript.",
+    promptTotalChars: null,
+    spawnError: null,
+    cancelRequested: false,
+    internal: true,
+    failureReason: null,
+    failureDetail: null,
+    summaryOf,
+  };
+  ctx.tasks.set(id, task);
+  ctx.persistTask(task.id);
+  ctx.pendingLaunches.set(id, {
+    kind: "summary",
+    model: ctx.activitySummaryModel,
+    snapshotPath,
+    env: queuedCallerEnv,
+    executor: ctx.opencodeExecutor(),
+    ...(resolvedSummarySessionId ? { summarySessionId: resolvedSummarySessionId } : {}),
+  });
+  ctx.launchQueue.push(id);
+  ctx.launchQueuedTasks();
+  return {
+    sourceTaskId: taskId,
+    sourceStatus,
+    capturedAt,
+    sourceLogBytes: snapshot.sourceLogBytes,
+    summaryInputBytes: snapshot.inputBytes,
+    summaryTask: { id, status: task.status, model: task.model },
+    next: `Run taskferry wait with task id "${id}", then taskferry result with task id "${id}"`,
+  };
+}
+
 /**
  * @param {object} [options]
  * @param {typeof spawn} [options.spawnFn]
@@ -1698,6 +1927,7 @@ function queueDispatchLaunch(ctx, { id, task, prompt, sessionId, env, noSandbox,
  * @param {string} [options.cacheDir]
  * @param {(event: object) => void} [options.onEvent]
  */
+
 // Factory rather than a module-level singleton, so tests can construct an
 // isolated instance with an injected spawnFn/killFn (no real `opencode`
 // process, no real OS signals) and its own state directory, instead of
@@ -2652,6 +2882,7 @@ export function createTaskManager({
   /**
    * @param {string} taskId
    * @param {{maxWords?: number, allowPromptFallback?: boolean, previousActivity?: string|null, summarySessionId?: string|null, lastSummarizedWatermark?: number|null, respectConcurrencyReserve?: boolean, env?: NodeJS.ProcessEnv}} [options]
+   * @returns {Promise<{sourceTaskId: string, sourceStatus: string, summary?: string, help?: string, capturedAt?: string, sourceLogBytes?: number, summaryInputBytes?: number, next?: string, summaryTask?: {id: string, status: string, model: string}}>}
    */
   async function summarizeTask(taskId, options = {}) {
     const { maxWords = 200, allowPromptFallback = false, previousActivity = null, respectConcurrencyReserve = false, env } = options;
@@ -2668,175 +2899,55 @@ export function createTaskManager({
     if (!Number.isSafeInteger(maxWords) || maxWords < 75 || maxWords > 300) {
       throw new Error("error: max_words must be an integer from 75 through 300\nhelp: run taskferry summary with max_words between 75 and 300");
     }
-    // Only the activity-refresh path (summarizeActivity) opts into this
+    const ctx = {
+      ensureStateLoaded,
+      tasks,
+      noSuchTask,
+      summaryConcurrencyLimit,
+      activityCache,
+      activitySummaryModel,
+      summaryModelAvailable,
+      readNarrationExcerpt,
+      LOG_DIR,
+      SUMMARY_DIR,
+      persistTask,
+      pendingLaunches,
+      opencodeExecutor,
+      launchQueue,
+      launchQueuedTasks,
+    };
+    // Only the activity-refresh path (summarizeActivity) opts into the
     // reserve check. A direct `taskferry summary` call is an explicit user
     // request and must always run, even with the reserve full.
-    if (respectConcurrencyReserve) {
-      const countInFlightSummaries = () => {
-        let count = 0;
-        for (const t of tasks.values()) {
-          if (t.summaryOf && (t.status === "running" || t.status === "queued")) count++;
-        }
-        return count;
-      };
-      // At a small concurrencyLimit (e.g. 2, giving a reserve of exactly 1),
-      // two tasks finishing within moments of each other would otherwise
-      // have the second one's summary dropped outright instead of merely
-      // delayed. Retry briefly before giving up -- existing summary tasks
-      // typically settle in well under this window.
-      const RESERVE_RETRY_ATTEMPTS = 4;
-      const RESERVE_RETRY_DELAY_MS = 500;
-      for (let attempt = 0; attempt < RESERVE_RETRY_ATTEMPTS; attempt++) {
-        if (countInFlightSummaries() < summaryConcurrencyLimit) break;
-        if (attempt === RESERVE_RETRY_ATTEMPTS - 1) {
-          return {
-            sourceTaskId: taskId,
-            sourceStatus: source.status,
-            summary: "summarizer concurrency reserve is full; skipped this refresh",
-            next: `Run taskferry summary with task id "${taskId}" once the summarizer queue drains`,
-          };
-        }
-        await new Promise((resolve) => setTimeout(resolve, RESERVE_RETRY_DELAY_MS));
-      }
-    }
-    // Resolve the continuation session id and the last-summarized watermark
-    // from the activity cache unless the caller (e.g. the activity path's
-    // continue-failure fallback) supplies them explicitly. The direct
-    // `taskferry summary` path leaves both undefined and inherits whatever the
-    // cache last stored for this task.
-    let resolvedSummarySessionId = summarySessionId !== undefined
-      ? summarySessionId
-      : activityCache.getSummarySessionId(taskId);
-    let resolvedWatermark = lastSummarizedWatermark !== undefined && lastSummarizedWatermark !== null
-      ? lastSummarizedWatermark
-      : activityCache.getLastSummarizedWatermark(taskId);
+    const reserveSkip = await enforceSummaryReserve(ctx, { taskId, source, respectConcurrencyReserve });
+    if (reserveSkip) return reserveSkip;
 
-    let currentSize;
-    try {
-      currentSize = fs.statSync(source.logPath).size;
-    } catch {
-      currentSize = 0;
-    }
-    // If the source log shrank (rotation/truncation) the prior session id and
-    // watermark no longer refer to anything readable. Drop them and start the
-    // next pass fresh — the only safe interpretation of "watermark is in the
-    // future relative to the log."
-    if (resolvedWatermark > currentSize) {
-      activityCache.clearSummaryState(taskId);
-      resolvedSummarySessionId = null;
-      resolvedWatermark = 0;
-    }
-
-    // Build the input narration. Continuing a session only makes sense if we
-    // have new bytes since the last summary; otherwise the model would just
-    // re-read the same content it already summarized. Fall back to the bounded
-    // head+tail excerpt in every other case (first call, no growth, or a
-    // failed-continuation retry that wants the model to see the whole log).
-    /** @type {{narration: string, sourceLogBytes: number, inputBytes: number}} */
-    let snapshot;
-    let isDelta = false;
-    if (resolvedSummarySessionId && resolvedWatermark > 0 && currentSize > resolvedWatermark) {
-      const delta = readDeltaNarration(source.logPath, resolvedWatermark);
-      snapshot = delta;
-      isDelta = true;
-    } else {
-      snapshot = readNarrationExcerpt(source.logPath);
-    }
+    // Resolve the continuation session id and last-summarized watermark (from
+    // explicit options or the activity cache) and stat the source log, then
+    // build the input narration. Clone the caller env defensively at request
+    // time (same as dispatch()) so a queued summary launch isn't vulnerable
+    // to post-queue caller mutations.
+    const session = resolveSummarySession(ctx, source, taskId, { summarySessionId, lastSummarizedWatermark });
+    const snapshotResult = buildSummarySnapshot(ctx, source, taskId, session, allowPromptFallback);
+    if (snapshotResult.skip) return snapshotResult.skip;
+    const { snapshot, isDelta } = snapshotResult;
     const capturedAt = new Date().toISOString();
     const sourceStatus = source.status;
-    if (!snapshot.narration && !allowPromptFallback) {
-      return {
-        sourceTaskId: taskId,
-        sourceStatus,
-        summary: "no model text observed yet",
-        help: `Run taskferry tail with task id "${taskId}" after the task emits output`,
-      };
-    }
-    if (!snapshot.narration) {
-      const prompt = source.promptPreview || "No model output observed yet.";
-      snapshot.narration = `Task prompt: ${prompt}`;
-      snapshot.inputBytes = Buffer.byteLength(snapshot.narration);
-    }
-    // Clone the caller env at request time (same defensive snapshot as
-    // dispatch() applies, for the same reason: a queued summary launch
-    // must not be vulnerable to post-queue caller mutations of the
-    // original env object). The summary env itself -- the daemon's ambient
-    // overlay plus the OPENCODE_CONFIG* strip -- is computed at spawn time
-    // by startTask() below, mirroring how dispatch() defers
-    // dispatchEnvironment() until spawn so the spawned summary child sees
-    // the daemon's current process.env, not a request-time snapshot.
     const queuedCallerEnv = env === undefined ? undefined : { ...env };
     await summaryModelAvailable(activitySummaryModel, queuedCallerEnv ?? {});
 
-    // Task IDs retain the literal "oc_" prefix for compatibility; WorkerExecutor.taskIdPrefix is not wired in this issue.
-    const id = `oc_${Date.now().toString(36)}_${randomUUID().slice(0, 8)}`;
-    const logPath = path.join(LOG_DIR, `${id}.ndjson`);
-    const snapshotPath = path.join(SUMMARY_DIR, `${id}.json`);
-    /** @type {SummaryOf} */
-    const summaryOf = {
-      sourceTaskId: taskId,
-      sourceStatus,
+    return launchSummaryTask(ctx, {
+      taskId,
+      source,
+      snapshot,
+      isDelta,
       capturedAt,
-      sourceLogBytes: snapshot.sourceLogBytes,
-      summaryInputBytes: snapshot.inputBytes,
+      sourceStatus,
       maxWords,
-    };
-    fs.writeFileSync(
-      snapshotPath,
-      JSON.stringify({
-        source: { id: taskId, status: sourceStatus, promptPreview: source.promptPreview, capturedAt },
-        narration: snapshot.narration,
-        ...(previousActivity ? { previous_summary: previousActivity } : {}),
-        ...(isDelta ? { narration_is_delta: true } : {}),
-      }, null, 2),
-      { mode: 0o600, flag: "wx" }
-    );
-    /** @type {Task} */
-    const task = {
-      id,
-      status: "queued",
-      directory: fs.realpathSync(SUMMARY_DIR),
-      model: activitySummaryModel,
-      executorId: "opencode", // summaries stay opencode-only in this issue -- see plan Verified Findings #10
-      variant: null,
-      sessionId: null,
-      originSessionId: null,
-      pid: null,
-      startedAt: capturedAt,
-      endedAt: null,
-      exitCode: null,
-      signal: null,
-      logPath,
-      promptPreview: "Summarize the attached task transcript.",
-      promptTotalChars: null,
-      spawnError: null,
-      cancelRequested: false,
-      internal: true,
-      failureReason: null,
-      failureDetail: null,
-      summaryOf,
-    };
-    tasks.set(id, task);
-    persistTask(task.id);
-    pendingLaunches.set(id, {
-      kind: "summary",
-      model: activitySummaryModel,
-      snapshotPath,
-      env: queuedCallerEnv,
-      executor: opencodeExecutor(),
-      ...(resolvedSummarySessionId ? { summarySessionId: resolvedSummarySessionId } : {}),
+      previousActivity,
+      resolvedSummarySessionId: session.resolvedSummarySessionId,
+      queuedCallerEnv,
     });
-    launchQueue.push(id);
-    launchQueuedTasks();
-    return {
-      sourceTaskId: taskId,
-      sourceStatus,
-      capturedAt,
-      sourceLogBytes: snapshot.sourceLogBytes,
-      summaryInputBytes: snapshot.inputBytes,
-      summaryTask: { id, status: task.status, model: task.model },
-      next: `Run taskferry wait with task id "${id}", then taskferry result with task id "${id}"`,
-    };
   }
 
   function launchQueuedTasks() {

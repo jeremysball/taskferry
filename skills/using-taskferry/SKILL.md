@@ -364,19 +364,43 @@ This is pure convention for agent sessions to follow — the `Monitor` tool is
 harness-native and can't be invoked from within taskferry's own code, so
 nothing in taskferry itself enforces it.
 
+**Scope the log path to the workspace, not a fixed filename.** A literal
+`/tmp/taskferry-fleet-watch.log` collides across concurrent sessions: two
+sessions in different repos (or two sessions/terminals in the same repo)
+both redirecting to the identical path race on the same inode — the second
+session's `>` truncates the file out from under the first session's
+already-open write fd, corrupting or dropping the first session's events
+with no error from either side. Derive the path from the workspace root
+instead, so every session working the same repo recomputes the identical
+path deterministically (no `mktemp` — a random suffix can't be
+recomputed in a later shell call, since shell state doesn't persist between
+tool calls) and reuses the same watcher rather than spawning a duplicate:
+
 ```sh
-taskferry watch --summaries --flush-interval 5m > /tmp/taskferry-fleet-watch.log 2>&1 &
-disown
+WORKSPACE_ROOT=$(git rev-parse --show-toplevel)
+SLUG=$(echo "$WORKSPACE_ROOT" | tr -c 'A-Za-z0-9_-' '-')
+FLEET_LOG="/tmp/taskferry-fleet-watch${SLUG}.log"
+FLEET_PID="/tmp/taskferry-fleet-watch${SLUG}.pid"
+if ! kill -0 "$(cat "$FLEET_PID" 2>/dev/null)" 2>/dev/null; then
+  taskferry watch --summaries --flush-interval 5m --directory "$WORKSPACE_ROOT" > "$FLEET_LOG" 2>&1 &
+  disown
+  echo $! > "$FLEET_PID"
+fi
 ```
 
-Then arm a `Monitor` tailing that log file (`tail -n0 -F
-/tmp/taskferry-fleet-watch.log`, `persistent: true`), the same pattern used
-for a single `wait --summarize` job above — one notification per flush tick
-instead of one per raw event.
+Then arm a `Monitor` tailing `$FLEET_LOG` (`tail -n0 -F "$FLEET_LOG"`,
+`persistent: true`), the same pattern used for a single `wait --summarize`
+job above — one notification per flush tick instead of one per raw event.
+Recompute `$FLEET_LOG`/`$FLEET_PID` from `$WORKSPACE_ROOT` the same way in
+any later shell call in this session (e.g. to `cat` the log) — don't rely on
+the variable surviving between tool calls.
 
 Arm this once per session, on the first dispatch, not once per dispatch —
 re-arming on every subsequent dispatch would spawn a redundant background
-`watch` process each time.
+`watch` process each time. The `kill -0`/pid-file check above additionally
+guards the cross-session case: a second concurrent session in the same
+workspace reuses the first session's already-running watcher instead of
+starting a colliding second one.
 
 ## Advisor Review
 

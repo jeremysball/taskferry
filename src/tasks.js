@@ -3183,21 +3183,9 @@ export function createTaskManager({
    * @returns {Promise<{sourceTaskId: string, sourceStatus: string, summary?: string, help?: string, capturedAt?: string, sourceLogBytes?: number, summaryInputBytes?: number, next?: string, summaryTask?: {id: string, status: string, model: string}}>}
    */
   async function summarizeTask(taskId, options = {}) {
-    const { maxWords = 200, allowPromptFallback = false, previousActivity = null, respectConcurrencyReserve = false, env } = options;
-    // `summarySessionId` and `lastSummarizedWatermark` use `undefined` (not
-    // `null`) as the "look it up in the activity cache" sentinel, because the
-    // activity path's continue-failure retry needs to *force* a fresh launch
-    // by passing `null` explicitly -- a `null` here means "ignore whatever is
-    // cached and treat this turn as a brand-new session", while an undefined
-    // here means "use the cache's current state for this task."
-    const { summarySessionId, lastSummarizedWatermark } = options;
-    ensureStateLoaded();
-    const source = tasks.get(taskId);
-    if (!source) throw noSuchTask(taskId);
-    if (!Number.isSafeInteger(maxWords) || maxWords < 75 || maxWords > 300) {
-      throw new Error("error: max_words must be an integer from 75 through 300\nhelp: run taskferry summary with max_words between 75 and 300");
-    }
-    const ctx = {
+    // Thin wrapper over the extracted module-level pipeline; the handful of
+    // closure dependencies it needs are threaded in explicitly via `ctx`.
+    return summarizeTaskFor(taskId, options, {
       ensureStateLoaded,
       tasks,
       noSuchTask,
@@ -3213,38 +3201,6 @@ export function createTaskManager({
       opencodeExecutor,
       launchQueue,
       launchQueuedTasks,
-    };
-    // Only the activity-refresh path (summarizeActivity) opts into the
-    // reserve check. A direct `taskferry summary` call is an explicit user
-    // request and must always run, even with the reserve full.
-    const reserveSkip = await enforceSummaryReserve(ctx, { taskId, source, respectConcurrencyReserve });
-    if (reserveSkip) return reserveSkip;
-
-    // Resolve the continuation session id and last-summarized watermark (from
-    // explicit options or the activity cache) and stat the source log, then
-    // build the input narration. Clone the caller env defensively at request
-    // time (same as dispatch()) so a queued summary launch isn't vulnerable
-    // to post-queue caller mutations.
-    const session = resolveSummarySession(ctx, source, taskId, { summarySessionId, lastSummarizedWatermark });
-    const snapshotResult = buildSummarySnapshot(ctx, source, taskId, session, allowPromptFallback);
-    if (snapshotResult.skip) return snapshotResult.skip;
-    const { snapshot, isDelta } = snapshotResult;
-    const capturedAt = new Date().toISOString();
-    const sourceStatus = source.status;
-    const queuedCallerEnv = env === undefined ? undefined : { ...env };
-    await summaryModelAvailable(activitySummaryModel, queuedCallerEnv ?? {});
-
-    return launchSummaryTask(ctx, {
-      taskId,
-      source,
-      snapshot,
-      isDelta,
-      capturedAt,
-      sourceStatus,
-      maxWords,
-      previousActivity,
-      queuedCallerEnv,
-      resolvedSummarySessionId: session.resolvedSummarySessionId,
     });
   }
 
@@ -3269,10 +3225,11 @@ export function createTaskManager({
    * @param {Task} task
    */
   function startTask(task) {
-    const launch = pendingLaunches.get(task.id);
-    pendingLaunches.delete(task.id);
-    if (!launch) return;
-    const ctx = {
+    // Thin wrapper over the extracted module-level spawn pipeline (see
+    // `startTaskFor`); every factory closure dependency is threaded in
+    // explicitly via `ctx`.
+    return startTaskFor(task, {
+      pendingLaunches,
       SUMMARY_DIR,
       PROMPT_DIR,
       spawnFn,
@@ -3311,9 +3268,7 @@ export function createTaskManager({
       tasks,
       decRunning: () => { runningCount--; },
       incRunning: () => { runningCount++; },
-    };
-    const launchInfo = resolveStartTaskLaunch(task, launch, ctx);
-    spawnTaskChild(ctx, launchInfo, task);
+    });
   }
 
   /**
@@ -3522,31 +3477,7 @@ export function createTaskManager({
    * @returns {ResultDetail}
    */
   function result(taskId, { full = false, fields } = {}) {
-    ensureStateLoaded();
-    const task = tasks.get(taskId);
-    if (!task) throw noSuchTask(taskId);
-    validateResultFields(full, fields);
-    if (task.status === "running" || task.status === "queued") {
-      return projectResult({ taskId, status: task.status, message: `task is still ${task.status}; poll taskferry status first` }, fields);
-    }
-    if (task.status === "unknown" && task.summaryOf) {
-      return projectResult({
-        taskId,
-        status: task.status,
-        message: "summary task became unknown after the server restarted; its partial output is unavailable",
-      }, fields);
-    }
-    // opencode's steps are text (narration) -> tool_use -> step_finish per
-    // messageID; only the messageID whose step ended in reason "stop" is the
-    // model's final turn. Everything earlier is intermediate narration, kept
-    // separately (not returned as `message`) so nothing is silently dropped.
-    // See parseTaskLog / shapeNarration for the decomposition below.
-    const ctx = {
-      failureFields,
-      computeDiffStat,
-      runOverlayCommandFn,
-    };
-    return projectResult(computeResultDetail(task, { taskId, full, fields }, ctx), fields);
+    return resultFor(taskId, { full, fields }, { ensureStateLoaded, tasks, noSuchTask, runOverlayCommandFn });
   }
 
   return {
@@ -4975,4 +4906,119 @@ async function checkSummaryModelReadyFor(ctx) {
 function summarizeRequestFor(taskId, options, ctx) {
   if (options.mode === "activity") return ctx.activitySummary(taskId, options.maxWords ?? ctx.activityWords);
   return ctx.summarizeTask(taskId, options);
+}
+
+/**
+ * Drives a single direct `taskferry summary` call (the non-activity path):
+ * validates the source task and maxWords, enforces the concurrency reserve
+ * for the activity path, resolves the continuation session id and watermark,
+ * builds the input narration snapshot, and launches the summary child.
+ * Extracted out of `createTaskManager`'s `summarizeTask` closure; every
+ * factory binding is threaded in via `ctx`.
+ * @param {string} taskId
+ * @param {{maxWords?: number, allowPromptFallback?: boolean, previousActivity?: string|null, respectConcurrencyReserve?: boolean, env?: NodeJS.ProcessEnv, summarySessionId?: string|null, lastSummarizedWatermark?: number|null}} options
+ * @param {SummarizeTaskContext} ctx
+ */
+async function summarizeTaskFor(taskId, options, ctx) {
+  const { maxWords = 200, allowPromptFallback = false, previousActivity = null, respectConcurrencyReserve = false, env } = options;
+  // `summarySessionId` and `lastSummarizedWatermark` use `undefined` (not
+  // `null`) as the "look it up in the activity cache" sentinel, because the
+  // activity path's continue-failure retry needs to *force* a fresh launch
+  // by passing `null` explicitly -- a `null` here means "ignore whatever is
+  // cached and treat this turn as a brand-new session", while an undefined
+  // here means "use the cache's current state for this task."
+  const { summarySessionId, lastSummarizedWatermark } = options;
+  ctx.ensureStateLoaded();
+  const source = ctx.tasks.get(taskId);
+  if (!source) throw ctx.noSuchTask(taskId);
+  if (!Number.isSafeInteger(maxWords) || maxWords < 75 || maxWords > 300) {
+    throw new Error("error: max_words must be an integer from 75 through 300\nhelp: run taskferry summary with max_words between 75 and 300");
+  }
+  // Only the activity-refresh path (summarizeActivity) opts into the
+  // reserve check. A direct `taskferry summary` call is an explicit user
+  // request and must always run, even with the reserve full.
+  const reserveSkip = await enforceSummaryReserve(ctx, { taskId, source, respectConcurrencyReserve });
+  if (reserveSkip) return reserveSkip;
+
+  // Resolve the continuation session id and last-summarized watermark (from
+  // explicit options or the activity cache) and stat the source log, then
+  // build the input narration. Clone the caller env defensively at request
+  // time (same as dispatch()) so a queued summary launch isn't vulnerable
+  // to post-queue caller mutations.
+  const session = resolveSummarySession(ctx, source, taskId, { summarySessionId, lastSummarizedWatermark });
+  const snapshotResult = buildSummarySnapshot(ctx, source, taskId, session, allowPromptFallback);
+  if (snapshotResult.skip) return snapshotResult.skip;
+  const { snapshot, isDelta } = snapshotResult;
+  const capturedAt = new Date().toISOString();
+  const sourceStatus = source.status;
+  const queuedCallerEnv = env === undefined ? undefined : { ...env };
+  await ctx.summaryModelAvailable(ctx.activitySummaryModel, queuedCallerEnv ?? {});
+
+  return launchSummaryTask(ctx, {
+    taskId,
+    source,
+    snapshot,
+    isDelta,
+    capturedAt,
+    sourceStatus,
+    maxWords,
+    previousActivity,
+    queuedCallerEnv,
+    resolvedSummarySessionId: session.resolvedSummarySessionId,
+  });
+}
+
+/**
+ * Spawns a queued launch's worker process. The launch's pre-parsed metadata
+ * (target dir, prompt-file routing, buildSpawnArgs output) comes from
+ * resolveStartTaskLaunch; the actual spawn + child lifecycle is delegated to
+ * spawnTaskChild. Extracted out of `createTaskManager`'s `startTask`
+ * closure; every factory binding is threaded in via `ctx`.
+ * @param {Task} task
+ * @param {StartTaskContext & {pendingLaunches: Map<string, LaunchSpec>}} ctx
+ */
+function startTaskFor(task, ctx) {
+  const launch = ctx.pendingLaunches.get(task.id);
+  ctx.pendingLaunches.delete(task.id);
+  if (!launch) return;
+  const launchInfo = resolveStartTaskLaunch(task, launch, ctx);
+  spawnTaskChild(ctx, launchInfo, task);
+}
+
+/**
+ * Builds a task's detailed result view (full detail, optional field
+ * projection, and the running/queued/unknown short-circuit messages).
+ * Extracted out of `createTaskManager`'s `result` closure; `failureFields`,
+ * `computeDiffStat`, `validateResultFields` and `projectResult` are plain
+ * module-level helpers called directly, the rest is threaded in via `ctx`.
+ * @param {string} taskId
+ * @param {{full: boolean, fields?: string[]}} options
+ * @param {{ensureStateLoaded: () => void, tasks: Map<string, Task>, noSuchTask: (taskId: string) => Error, runOverlayCommandFn: (command: string, args: string[]) => {status: number|null, stdout: string, stderr: string, error?: Error}}} ctx
+ * @returns {ResultDetail}
+ */
+function resultFor(taskId, { full, fields }, ctx) {
+  const task = ctx.tasks.get(taskId);
+  if (!task) throw ctx.noSuchTask(taskId);
+  validateResultFields(full, fields);
+  if (task.status === "running" || task.status === "queued") {
+    return projectResult({ taskId, status: task.status, message: `task is still ${task.status}; poll taskferry status first` }, fields);
+  }
+  if (task.status === "unknown" && task.summaryOf) {
+    return projectResult({
+      taskId,
+      status: task.status,
+      message: "summary task became unknown after the server restarted; its partial output is unavailable",
+    }, fields);
+  }
+  // opencode's steps are text (narration) -> tool_use -> step_finish per
+  // messageID; only the messageID whose step ended in reason "stop" is the
+  // model's final turn. Everything earlier is intermediate narration, kept
+  // separately (not returned as `message`) so nothing is silently dropped.
+  // See parseTaskLog / shapeNarration for the decomposition below.
+  const detailCtx = {
+    failureFields,
+    computeDiffStat,
+    runOverlayCommandFn: ctx.runOverlayCommandFn,
+  };
+  return projectResult(computeResultDetail(task, { taskId, full, fields }, detailCtx), fields);
 }

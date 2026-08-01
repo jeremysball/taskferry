@@ -831,6 +831,7 @@ export function createTaskManager({
     // Build the merged env in one pass instead of spreading all of
     // process.env and then deleting denylisted keys.
     const denySet = new Set(envDenylist);
+    /** @type {NodeJS.ProcessEnv} */
     const result = {};
     for (const key of Object.keys(process.env)) {
       if (!denySet.has(key)) {

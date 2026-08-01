@@ -323,10 +323,19 @@ export async function runCommand(command, options, { client, io = process, signa
         const condensed = await summarizeContextText(client, gathered.text, { env, directory });
         finalContext = condensed === gathered.text ? gathered : { source: `summarized ${gathered.source}`, text: condensed };
       }
+      // The caller's own --prompt leads the assembled text (when given), with
+      // the canned pushback framing and auto-attached context appended after
+      // it -- not the other way around. With the canned prompt first, a
+      // model reliably answered its "push back on the ferry's plan" framing
+      // instead of the caller's actual ask, even though the ask was present
+      // later in the same text (confirmed live: two separate models both did
+      // this on 2026-07-31, e.g. openai/gpt-5.6-sol was fine standalone but
+      // cheapestinference/glm-5.2 and cheapestinference/kimi-k2.7 answered
+      // the canned framing when it came first).
       const assembledPrompt = [
+        ...(options.prompt ? [options.prompt] : []),
         ADVISOR_CANNED_PROMPT,
         ...(finalContext ? [`\n--- attached context (${finalContext.source}, ${finalContext.text.length} chars) ---\n${finalContext.text}\n---`] : []),
-        ...(options.prompt ? [`\n${options.prompt}`] : []),
       ].join("\n");
       return client.request("task.advisor", {
         prompt: assembledPrompt,

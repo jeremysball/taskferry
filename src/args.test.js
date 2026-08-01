@@ -59,6 +59,30 @@ test("parses each command's required arguments and defaults", () => {
   assert.equal(parseArgs(["doctor"]).options.full, false);
 });
 
+test("doctor --stats sets options.stats", () => {
+  const parsed = parseArgs(["doctor", "--stats"]);
+  assert.equal(parsed.options.stats, true);
+});
+
+test("doctor with no --stats defaults options.stats to false", () => {
+  const parsed = parseArgs(["doctor"]);
+  assert.equal(parsed.options.stats, false);
+});
+
+test("doctor --stats --full is rejected", () => {
+  assert.throws(
+    () => parseArgs(["doctor", "--stats", "--full"]),
+    (err) => err instanceof UsageError && /--stats cannot be combined with --full/.test(err.message)
+  );
+});
+
+test("doctor --full --stats is rejected regardless of flag order", () => {
+  assert.throws(
+    () => parseArgs(["doctor", "--full", "--stats"]),
+    (err) => err instanceof UsageError && /--stats cannot be combined with --full/.test(err.message)
+  );
+});
+
 test("parses every documented command's help without requiring operation arguments", () => {
   for (const command of commands) {
     const parsed = parseArgs([command, "--help"]);
@@ -68,12 +92,28 @@ test("parses every documented command's help without requiring operation argumen
   }
 });
 
+test("advisor's help text frames it as consulting a stronger model", () => {
+  const { helpText } = parseArgs(["advisor", "--help"]);
+  assert.match(helpText.description, /stronger model/);
+});
+
 test("requires command-specific arguments and values", () => {
   assert.throws(() => parseArgs(["dispatch"]), /--prompt is required/);
   assert.throws(() => parseArgs(["cancel"]), /task id is required/);
   assert.throws(() => parseArgs(["advisor", "--prompt", "question"]), /--model is required/);
   assert.throws(() => parseArgs(["result", "id", "--fields"]), /requires a value/);
   assert.throws(() => parseArgs(["tail", "id", "--chars", "0"]), /positive integer/);
+});
+
+test("tail --chars accepts up to the new 131072 ceiling and rejects above it", () => {
+  assert.equal(parseArgs(["tail", "oc_1", "--chars", "131072"]).options.chars, 131072);
+  assert.throws(() => parseArgs(["tail", "oc_1", "--chars", "131073"]), /from 1 through 131072/);
+});
+
+test("advisor no longer requires --prompt (context-only invocation is now valid)", () => {
+  const parsed = parseArgs(["advisor", "--model", "m"]);
+  assert.equal(parsed.options.prompt, undefined);
+  assert.equal(parsed.options.model, "m");
 });
 
 test("rejects unknown flags and extra positional arguments before daemon access", () => {
@@ -405,6 +445,20 @@ test("advisor rejects --no-overlay (overlay is mandatory for the advisor role; r
     () => parseArgs(["advisor", "--prompt", "hi", "--model", "openai/gpt-5.6-sol", "--no-overlay"]),
     /unknown flag --no-overlay/
   );
+});
+
+test("advisor accepts --summarize-context", () => {
+  const parsed = parseArgs(["advisor", "--model", "m", "--summarize-context"]);
+  assert.equal(parsed.options.summarizeContext, true);
+});
+
+test("advisor defaults --summarize-context to false", () => {
+  const parsed = parseArgs(["advisor", "--model", "m"]);
+  assert.equal(parsed.options.summarizeContext, false);
+});
+
+test("--summarize-context is rejected on dispatch", () => {
+  assert.throws(() => parseArgs(["dispatch", "--prompt", "p", "--summarize-context"]), /unknown flag --summarize-context/);
 });
 
 test("result accepts --diff", () => {

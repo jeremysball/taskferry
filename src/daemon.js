@@ -327,7 +327,7 @@ export async function startDaemon(options = {}) {
   });
   fs.chmodSync(socketPath, 0o600);
 
-  const close = makeClose({ clients, server, socketPath, restart });
+  const close = makeClose({ manager, clients, server, socketPath, restart });
   maybeRestartRef.current = makeMaybeRestart({
     manager,
     sourceDir,

@@ -208,6 +208,154 @@ function textOf(summarized) {
 }
 
 /**
+ * @param {object} deps
+ * @param {ActivityTask} deps.task
+ * @param {ActivitySnapshot} deps.current
+ * @param {number} deps.outputWatermark
+ * @param {number} deps.resolvedMaxWords
+ * @param {string} deps.summaryModel
+ * @param {Map<string, string>} deps.lastSummarizedActivity
+ * @param {Map<string, string>} deps.summarySessions
+ * @param {Map<string, number>} deps.lastSummarizedWatermarks
+ * @param {(input: {task: ActivityTask, snapshot: ActivitySnapshot, maxWords: number, summaryModel: string, previousActivity: string|null, previousSessionId: string|null, lastSummarizedWatermark: number}) => Promise<SummarizeOutcome>|SummarizeOutcome} deps.summarize
+ * @returns {Promise<{outputWatermark: number, activity: string, cached: boolean}>}
+ */
+async function resolveSummarizedActivity({
+  task,
+  current,
+  outputWatermark,
+  resolvedMaxWords,
+  summaryModel,
+  lastSummarizedActivity,
+  summarySessions,
+  lastSummarizedWatermarks,
+  summarize,
+}) {
+  try {
+    const previousActivity = lastSummarizedActivity.get(task.id) || null;
+    const previousSessionId = summarySessions.get(task.id) || null;
+    const priorWatermark = lastSummarizedWatermarks.get(task.id) || 0;
+    const summarized = await summarize({
+      task,
+      summaryModel,
+      previousActivity,
+      previousSessionId,
+      snapshot: current,
+      maxWords: resolvedMaxWords,
+      lastSummarizedWatermark: priorWatermark,
+    });
+    const summarizedText = textOf(summarized);
+    const text = sanitizeActivityText(summarizedText);
+    if (!text) throw new Error("summarize() returned no usable text");
+    lastSummarizedActivity.set(task.id, text);
+    lastSummarizedWatermarks.set(task.id, outputWatermark);
+    if (hasSessionId(summarized)) {
+      const sessionId = summarized.sessionId;
+      if (sessionId) summarySessions.set(task.id, sessionId);
+    }
+    return { outputWatermark, activity: text, cached: false };
+  } catch (err) {
+    // Treat any failure (thrown or empty output) as "the cached state is
+    // unreliable" so the next call retries fresh rather than resuming a
+    // session that produced nothing usable. A failed refresh is never
+    // cached (only `inFlight` tracking is cleared) -- callers see the
+    // real error every time, not a stale masked result.
+    summarySessions.delete(task.id);
+    lastSummarizedWatermarks.delete(task.id);
+    throw err;
+  }
+}
+
+/**
+ * @param {object} deps
+ * @param {number} deps.summarizerTimeoutMs
+ * @param {number} deps.refreshBytes
+ * @param {string} deps.summaryModel
+ * @param {number} deps.maxWords
+ * @param {(task: ActivityTask) => ActivitySnapshot} deps.snapshot
+ * @param {(input: {task: ActivityTask, snapshot: ActivitySnapshot, maxWords: number, summaryModel: string, previousActivity: string|null, previousSessionId: string|null, lastSummarizedWatermark: number}) => Promise<SummarizeOutcome>|SummarizeOutcome} deps.summarize
+ * @param {() => number} deps.now
+ * @param {() => boolean} deps.getSummariesEnabled
+ * @param {Map<string, ActivityResult>} deps.cache
+ * @param {Map<string, Promise<ActivityResult>>} deps.inFlight
+ * @param {Map<string, {outputWatermark: number, refreshedAt: number}>} deps.lastRefresh
+ * @param {Map<string, string>} deps.lastSummarizedActivity
+ * @param {Map<string, string>} deps.summarySessions
+ * @param {Map<string, number>} deps.lastSummarizedWatermarks
+ * @returns {(task: ActivityTask, options?: {force?: boolean, includeSummary?: boolean, maxWords?: number}) => Promise<ActivityResult|null>}
+ */
+function makeRefresh({
+  summarizerTimeoutMs,
+  refreshBytes,
+  summaryModel,
+  maxWords,
+  snapshot,
+  summarize,
+  now,
+  getSummariesEnabled,
+  cache,
+  inFlight,
+  lastRefresh,
+  lastSummarizedActivity,
+  summarySessions,
+  lastSummarizedWatermarks,
+}) {
+  return function refresh(task, { force = false, includeSummary, maxWords: requestedMaxWords } = {}) {
+    const current = snapshot(task);
+    const outputWatermark = Number(current.outputWatermark) || 0;
+    const resolvedMaxWords = requestedMaxWords ?? maxWords;
+    const resolvedIncludeSummary = includeSummary ?? getSummariesEnabled();
+    const key = activityCacheKey(task, outputWatermark, summaryModel, resolvedMaxWords, resolvedIncludeSummary);
+    const cached = cache.get(key);
+    if (cached) return Promise.resolve({ ...cached, cached: true });
+    const pending = inFlight.get(key);
+    if (pending) return pending;
+
+    const previous = lastRefresh.get(task.id);
+    if (shouldSkipRefresh({ force, previous, task, outputWatermark, refreshBytes, summarizerTimeoutMs, now })) {
+      return Promise.resolve(null);
+    }
+    lastRefresh.set(task.id, { outputWatermark, refreshedAt: now() });
+
+    const fallback = buildLocalActivity({
+      status: task.status,
+      prompt: task.prompt,
+      promptPreview: task.promptPreview,
+      text: current.text,
+    });
+    const promise = (async () => {
+      if (!resolvedIncludeSummary) {
+        const result = { outputWatermark, activity: fallback, cached: false };
+        cache.set(key, result);
+        inFlight.delete(key);
+        return result;
+      }
+      try {
+        const result = await resolveSummarizedActivity({
+          task,
+          current,
+          outputWatermark,
+          resolvedMaxWords,
+          summaryModel,
+          lastSummarizedActivity,
+          summarySessions,
+          lastSummarizedWatermarks,
+          summarize,
+        });
+        cache.set(key, result);
+        inFlight.delete(key);
+        return result;
+      } catch (err) {
+        inFlight.delete(key);
+        throw err;
+      }
+    })();
+    inFlight.set(key, promise);
+    return promise;
+  };
+}
+
+/**
  * @param {object} [options]
  * @param {boolean} [options.summariesEnabled]
  * @param {number} [options.summarizerTimeoutMs]
@@ -251,78 +399,22 @@ export function createActivityCache({
   /** @type {Map<string, number>} */
   const lastSummarizedWatermarks = new Map();
 
-  /** @param {ActivityTask} task @param {{force?: boolean, includeSummary?: boolean, maxWords?: number}} [options] @returns {Promise<ActivityResult|null>} */
-  function refresh(task, { force = false, includeSummary, maxWords: requestedMaxWords } = {}) {
-    const current = snapshot(task);
-    const outputWatermark = Number(current.outputWatermark) || 0;
-    const resolvedMaxWords = requestedMaxWords ?? maxWords;
-    const resolvedIncludeSummary = includeSummary ?? summariesEnabledState;
-    const key = activityCacheKey(task, outputWatermark, summaryModel, resolvedMaxWords, resolvedIncludeSummary);
-    const cached = cache.get(key);
-    if (cached) return Promise.resolve({ ...cached, cached: true });
-    const pending = inFlight.get(key);
-    if (pending) return pending;
-
-    const previous = lastRefresh.get(task.id);
-    if (shouldSkipRefresh({ force, previous, task, outputWatermark, refreshBytes, summarizerTimeoutMs, now })) {
-      return Promise.resolve(null);
-    }
-    lastRefresh.set(task.id, { outputWatermark, refreshedAt: now() });
-
-    const fallback = buildLocalActivity({
-      status: task.status,
-      prompt: task.prompt,
-      promptPreview: task.promptPreview,
-      text: current.text,
-    });
-    const promise = (async () => {
-      if (!resolvedIncludeSummary) {
-        const result = { outputWatermark, activity: fallback, cached: false };
-        cache.set(key, result);
-        inFlight.delete(key);
-        return result;
-      }
-      try {
-        const previousActivity = lastSummarizedActivity.get(task.id) || null;
-        const previousSessionId = summarySessions.get(task.id) || null;
-        const priorWatermark = lastSummarizedWatermarks.get(task.id) || 0;
-        const summarized = await summarize({
-          task,
-          summaryModel,
-          previousActivity,
-          previousSessionId,
-          snapshot: current,
-          maxWords: resolvedMaxWords,
-          lastSummarizedWatermark: priorWatermark,
-        });
-        const summarizedText = textOf(summarized);
-        const text = sanitizeActivityText(summarizedText);
-        if (!text) throw new Error("summarize() returned no usable text");
-        lastSummarizedActivity.set(task.id, text);
-        lastSummarizedWatermarks.set(task.id, outputWatermark);
-        if (hasSessionId(summarized)) {
-          const sessionId = summarized.sessionId;
-          if (sessionId) summarySessions.set(task.id, sessionId);
-        }
-        const result = { outputWatermark, activity: text, cached: false };
-        cache.set(key, result);
-        inFlight.delete(key);
-        return result;
-      } catch (err) {
-        // Treat any failure (thrown or empty output) as "the cached state is
-        // unreliable" so the next call retries fresh rather than resuming a
-        // session that produced nothing usable. A failed refresh is never
-        // cached (only `inFlight` tracking is cleared) -- callers see the
-        // real error every time, not a stale masked result.
-        summarySessions.delete(task.id);
-        lastSummarizedWatermarks.delete(task.id);
-        inFlight.delete(key);
-        throw err;
-      }
-    })();
-    inFlight.set(key, promise);
-    return promise;
-  }
+  const refresh = makeRefresh({
+    summarizerTimeoutMs,
+    refreshBytes,
+    summaryModel,
+    maxWords,
+    snapshot,
+    summarize,
+    now,
+    cache,
+    inFlight,
+    lastRefresh,
+    lastSummarizedActivity,
+    summarySessions,
+    lastSummarizedWatermarks,
+    getSummariesEnabled: () => summariesEnabledState,
+  });
 
   return {
     refresh,
@@ -355,19 +447,32 @@ export function createActivityCache({
     // activityCacheKey() string, not the bare task id, so entries for this
     // task are found by parsing the id back out of each key.
     /** @param {string} taskId */
-    evictTask: (taskId) => {
-      for (const key of cache.keys()) {
-        if (keyBelongsToTask(key, taskId)) cache.delete(key);
-      }
-      for (const key of inFlight.keys()) {
-        if (keyBelongsToTask(key, taskId)) inFlight.delete(key);
-      }
-      lastRefresh.delete(taskId);
-      lastSummarizedActivity.delete(taskId);
-      summarySessions.delete(taskId);
-      lastSummarizedWatermarks.delete(taskId);
-    },
+    evictTask: (taskId) =>
+      evictTaskState(taskId, { cache, inFlight, lastRefresh, lastSummarizedActivity, summarySessions, lastSummarizedWatermarks }),
   };
+}
+
+/**
+ * @param {string} taskId
+ * @param {object} deps
+ * @param {Map<string, ActivityResult>} deps.cache
+ * @param {Map<string, Promise<ActivityResult>>} deps.inFlight
+ * @param {Map<string, {outputWatermark: number, refreshedAt: number}>} deps.lastRefresh
+ * @param {Map<string, string>} deps.lastSummarizedActivity
+ * @param {Map<string, string>} deps.summarySessions
+ * @param {Map<string, number>} deps.lastSummarizedWatermarks
+ */
+function evictTaskState(taskId, { cache, inFlight, lastRefresh, lastSummarizedActivity, summarySessions, lastSummarizedWatermarks }) {
+  for (const key of cache.keys()) {
+    if (keyBelongsToTask(key, taskId)) cache.delete(key);
+  }
+  for (const key of inFlight.keys()) {
+    if (keyBelongsToTask(key, taskId)) inFlight.delete(key);
+  }
+  lastRefresh.delete(taskId);
+  lastSummarizedActivity.delete(taskId);
+  summarySessions.delete(taskId);
+  lastSummarizedWatermarks.delete(taskId);
 }
 
 /** @param {string} key @param {string} taskId @returns {boolean} */

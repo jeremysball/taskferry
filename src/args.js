@@ -138,10 +138,13 @@ const commandSpecs = {
     examples: ['taskferry context', 'taskferry context --format claude-hook', 'taskferry context --format codex-hook'],
   },
   doctor: {
-    usage: "taskferry doctor [--full]",
-    description: "Check daemon health and installation details.",
-    options: { "--full": "include complete health details" },
-    examples: ['taskferry doctor', 'taskferry doctor --full'],
+    usage: "taskferry doctor [--full] [--stats]",
+    description: "Check daemon health and installation details, or report aggregate task-history stats.",
+    options: {
+      "--full": "include complete health details",
+      "--stats": "report aggregate task-history stats instead of environment checks (mutually exclusive with --full)",
+    },
+    examples: ['taskferry doctor', 'taskferry doctor --full', 'taskferry doctor --stats'],
   },
   setup: {
     usage: "taskferry setup",
@@ -296,7 +299,7 @@ function defaultOptions(command, cwd) {
     case "context":
       return { directory: undefined, format: "toon" };
     case "doctor":
-      return { full: false };
+      return { full: false, stats: false };
     case "setup":
       return {};
     default:
@@ -380,6 +383,7 @@ export function parseArgs(argv, { cwd = process.cwd() } = {}) {
       "--no-sandbox": ["dispatch"],
       "--no-overlay": ["dispatch"], // advisor deliberately excluded -- review finding #5
       "--diff": ["result"],
+      "--stats": ["doctor"],
     };
     const booleanKeyOverrides = { "--no-sandbox": "noSandbox", "--no-overlay": "noOverlay", "--summarize-context": "summarizeContext" };
     if (booleanCommands[name]) {
@@ -466,6 +470,9 @@ export function parseArgs(argv, { cwd = process.cwd() } = {}) {
       // projection throw away one -- either way a confusing user experience.
       // Reject at parse time so the failure is loud and early.
       throw usageError("--diff cannot be combined with --full", command);
+    }
+    if (command === "doctor" && options.stats && options.full) {
+      throw usageError("--stats cannot be combined with --full", command);
     }
     if (command === "wait" && options.summarize && options.timeoutMs !== undefined) {
       throw usageError("--summarize cannot be combined with --timeout", command);

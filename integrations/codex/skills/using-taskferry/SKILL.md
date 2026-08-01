@@ -511,9 +511,12 @@ Use `taskferry cancel <id>` for work that should stop; it sends SIGTERM and
 escalates to SIGKILL after a grace period (default 5000ms, override with
 `--grace-ms <number>` for a worker that needs longer to unwind, e.g. mid
 long-running command). Use `taskferry list` or `taskferry context --format toon`
-to inspect workspace-scoped state, and `taskferry doctor --full` if something
+to inspect workspace-scoped state, `taskferry doctor --full` if something
 about the daemon itself seems wrong (dead socket, stale process, health check
-failing) before assuming a task-level problem. The CLI emits structured data,
+failing) before assuming a task-level problem, and `taskferry doctor --stats`
+for an aggregate report over task history (status mix, per-model crash rates,
+failure-reason histogram, unknown backlog, crash-rate trend) instead of
+hand-computing it from `taskferry list --all`. The CLI emits structured data,
 errors, and help as TOON on stdout, keeps diagnostics on stderr, and uses exit
 codes to distinguish success, operational failure, and usage errors.
 

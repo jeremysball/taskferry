@@ -19,6 +19,7 @@ import { checkBwrapAvailableAsync } from "./sandbox.js";
 import { checkSkills as defaultCheckSkills } from "../scripts/generate-skill.js";
 import { normalizeDirectory, resolveWorkspaceRoot } from "./paths.js";
 import { loadConfig } from "./config.js";
+import { computeDoctorStats } from "./doctor-stats.js";
 
 // Default timeout for the CLI `wait` command (and `summary --wait`) when no
 // explicit --timeout is given. Kept generous (15 min) so real tasks aren't
@@ -411,6 +412,10 @@ export async function runCommand(command, options, { client, io = process, signa
       return contextForHook(projectContext(context), options.format);
     }
     case "doctor": {
+      if (options.stats) {
+        const listed = await client.request("task.list", {});
+        return computeDoctorStats(Array.isArray(listed.tasks) ? listed.tasks : []);
+      }
       const checks = await Promise.allSettled([
         client.request("system.health", {}),
         checkClaudeIntegration(runShellCommand),

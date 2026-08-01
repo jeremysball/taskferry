@@ -14,7 +14,7 @@ import { isNonNegativeInteger, isPositiveInteger } from "./numbers.js";
 import { buildBwrapArgs, checkBwrapAvailable, checkOverlaySupport, defaultDenyList, platformSupportsSandbox, resolveGitCommonDir, resolveGitDir } from "./sandbox.js";
 import { applyChangeset, overlayPaths, resolvePreDispatchHead, subOverlayPaths, subFilePaths, cleanupOverlay, defaultRunCommand as defaultOverlayRunCommand, extractGitDiff, extractNonGitDiff } from "./changeset.js";
 import { resolveExecutor, opencodeExecutor } from "./executor.js";
-import { loadEnvFile } from "./env-file.js";
+import { loadEnvFile, watchEnvFile } from "./env-file.js";
 
 /**
  * @typedef {object} SummaryOf
@@ -565,14 +565,23 @@ const DEFAULT_CANCEL_GRACE_MS = 5000;
  *   startup and unioned in as the lowest-priority layer of every spawned child's environment
  *   (below the daemon's own ambient `process.env`, which stays below the caller's forwarded
  *   env). Exists for secrets that live only in an interactive shell's rc file and never reach a
- *   non-interactive caller (cron, systemd) that dispatches through the same daemon. Read once;
- *   changing the file or the setting needs a daemon restart, same as `envDenylist` and friends.
- *   An explicitly configured path that can't be read throws at daemon startup rather than
- *   silently dispatching with the secret missing.
+ *   non-interactive caller (cron, systemd) that dispatches through the same daemon. The initial
+ *   load happens synchronously at construction, so an explicitly configured path that can't be
+ *   read throws at daemon startup rather than silently dispatching with the secret missing.
+ *   After that, `watchEnvFileFn` keeps `envFileVars` live -- see its own doc comment.
  * @param {(path: string) => Record<string, string>} [options.loadEnvFileFn]
  * @param {Record<string, string>} [options.envFileVars] - pre-loaded env-file contents; defaults
  *   to `loadEnvFileFn(envFilePath)` when `envFilePath` is set, `{}` otherwise. Exposed directly so
- *   tests can inject values without touching the filesystem.
+ *   tests can inject values without touching the filesystem. Reassigned in place whenever the
+ *   `envFilePath` watcher (see `watchEnvFileFn`) observes a change, so `sanitizedEnvironment()`
+ *   -- which reads this binding fresh on every spawn, the same as `process.env` -- picks up a
+ *   rotated secret without a daemon restart.
+ * @param {typeof import("./env-file.js").watchEnvFile} [options.watchEnvFileFn] - starts watching
+ *   `envFilePath` for changes once the initial `envFileVars` load above has already succeeded.
+ *   Only invoked when `envFilePath` is set; a failure to establish the watch itself (as opposed
+ *   to a later reload failure) is logged and otherwise ignored rather than treated as fatal --
+ *   the mandatory initial load already guarantees a working `envFileVars`, so losing live updates
+ *   degrades to the old restart-required behavior instead of taking the daemon down.
  * @param {(directory: string) => string|null} [options.resolveGitCommonDirFn]
  * @param {(directory: string) => string|null} [options.resolveGitDirFn]
  * @param {boolean} [options.overlayEnabled]
@@ -662,6 +671,7 @@ export function createTaskManager({
     : /** @type {string|undefined} */ (config.envFile),
   loadEnvFileFn = loadEnvFile,
   envFileVars = envFilePath ? loadEnvFileFn(envFilePath) : {},
+  watchEnvFileFn = watchEnvFile,
   overlayEnabled = process.env.TASKFERRY_DISABLE_OVERLAY !== undefined
     ? !["1", "true"].includes(process.env.TASKFERRY_DISABLE_OVERLAY)
     : (/** @type {boolean|undefined} */ (config.overlayEnabled) ?? true),
@@ -701,6 +711,26 @@ export function createTaskManager({
   const maxWait = positiveInteger(maxWaitMs, MAX_WAIT_MS);
   const summarizerTimeout = nonNegativeInteger(summarizerTimeoutMs, DEFAULT_SUMMARIZER_TIMEOUT_MS);
   const activityWords = positiveInteger(activityMaxWords, 75);
+
+  // Keeps envFileVars live after the mandatory initial load above -- see
+  // sanitizedEnvironment()'s fresh read of it below. A failure here (e.g. the
+  // directory backing envFilePath vanishing) only costs live updates, not
+  // the daemon's ability to start, since the initial load already succeeded.
+  let envFileWatcher = null;
+  if (envFilePath) {
+    try {
+      envFileWatcher = watchEnvFileFn(envFilePath, {
+        loadEnvFileFn,
+        onReload: (vars) => { envFileVars = vars; },
+        onError: (error) => {
+          process.stderr.write(`warning: env-file reload failed for ${envFilePath}: ${error instanceof Error ? error.message : String(error)} (keeping previous values)\n`);
+        },
+      });
+    } catch (error) {
+      process.stderr.write(`warning: could not watch env file ${envFilePath} for live updates: ${error instanceof Error ? error.message : String(error)} (loaded once at startup; changes need a daemon restart)\n`);
+    }
+  }
+
   let eventSequence = 0;
   const taskEvents = createTaskEvents((event) => {
     eventSequence = Math.max(eventSequence, /** @type {{sequence: number}} */ (event).sequence);
@@ -3479,5 +3509,12 @@ export function createTaskManager({
     // (the activity cache owns the "last successful summary" state shared
     // between the activity path and the direct summarize path).
     activityCache,
+    // Stops the envFileVars live-reload watch, if one was started. Every
+    // other background timer this manager owns (the watchdog interval) is
+    // .unref()'d and left to die with the process instead, but fs.watch
+    // handles keep the event loop alive regardless of unref, so a test
+    // process that constructs many managers without ever exiting needs an
+    // explicit way to release them -- daemon.js's close() calls this too.
+    close: () => envFileWatcher?.close(),
   };
 }

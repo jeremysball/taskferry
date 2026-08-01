@@ -115,6 +115,16 @@ fresh on every `wait`/`summary --wait` call, so a change takes effect
 immediately without a daemon restart. There is also no `taskferry config`
 CLI subcommand yet; hand-edit the file.
 
+`envFile`'s *contents* are a second exception, with a narrower scope: the
+`envFile` path itself (the config-file value or `TASKFERRY_ENV_FILE`) is
+still read once at startup like every other field, but once that path is
+resolved, the daemon watches the file it points at and re-applies it live
+whenever it changes — a `secrets-unlock`-style decrypt-and-replace rotates
+a secret into every subsequent spawn without a restart. Changing *which*
+file `envFile` points at still needs a restart; changing the *contents* of
+the file it already points at does not. See `docs/security.md` for the
+mechanics (debounced directory watch, last-known-good on a failed reload).
+
 ## Errors
 
 A malformed file, an unrecognized key, or a wrong-typed value throws

@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import path from "node:path";
 
 const KEY_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
@@ -120,4 +121,77 @@ export function loadEnvFile(filePath, { readFileFn = fs.readFileSync, statFn = f
     throw new Error(`error: ${filePath} is readable by group or other (mode ${(stat.mode & 0o777).toString(8)})\nhelp: chmod 600 ${filePath}`);
   }
   return parseEnvFile(raw, filePath);
+}
+
+/**
+ * Re-applies `loadEnvFileFn(filePath)` whenever the file changes, so a
+ * secret rotated after daemon startup (e.g. a `secrets-unlock`-style
+ * decrypt-and-replace) reaches spawned children without a daemon restart.
+ * Does *not* perform the required initial load itself -- callers are
+ * expected to have already called `loadEnvFile(filePath)` once (that's
+ * what surfaces a missing/misconfigured path as the hard daemon-startup
+ * error `docs/config.md` documents) before calling this, so this function
+ * can assume the directory already exists and doesn't need a fallback for
+ * watching a not-yet-created one.
+ *
+ * Watches the parent directory rather than the file itself, filtered by
+ * filename: a decrypt-and-replace rewrite goes through mktemp+rename,
+ * which swaps the file's inode out from under a direct watch on it, but a
+ * directory watch survives that. Multiple filesystem events from one
+ * rewrite are coalesced with a short debounce.
+ *
+ * A reload that fails (a transient partial write caught mid-rename, a
+ * permission regression, the file removed) is reported via `onError` and
+ * otherwise ignored -- the caller keeps whatever `onReload` last gave it,
+ * since a live daemon dropping every secret because the file was briefly
+ * unreadable is worse than serving one more request with a
+ * stale-but-valid value.
+ *
+ * @param {string} filePath
+ * @param {object} options
+ * @param {(vars: Record<string, string>) => void} options.onReload
+ * @param {(error: Error) => void} [options.onError]
+ * @param {number} [options.debounceMs]
+ * @param {typeof fs.watch} [options.watchFn]
+ * @param {(path: string) => Record<string, string>} [options.loadEnvFileFn]
+ * @returns {{close: () => void}}
+ */
+export function watchEnvFile(filePath, { onReload, onError = () => {}, debounceMs = 100, watchFn = fs.watch, loadEnvFileFn = loadEnvFile }) {
+  const dir = path.dirname(filePath);
+  const fileName = path.basename(filePath);
+  /** @type {ReturnType<typeof setTimeout>} */
+  let debounceTimer;
+  let closed = false;
+
+  const reload = () => {
+    if (closed) return;
+    // Deliberately split apart rather than `onReload(loadEnvFileFn(...))`
+    // inlined behind a try -- keeping the fallible read and the
+    // side-effecting callback on separate lines makes it obvious neither
+    // one is accidentally skipped by short-circuiting, the failure mode
+    // that bit an earlier optional-chained version of this same pattern.
+    let vars;
+    try {
+      vars = loadEnvFileFn(filePath);
+    } catch (error) {
+      onError(error instanceof Error ? error : new Error(String(error)));
+      return;
+    }
+    onReload(vars);
+  };
+
+  const watcher = watchFn(dir, (_eventType, changedName) => {
+    if (closed || (changedName && changedName !== fileName)) return;
+    clearTimeout(debounceTimer);
+    debounceTimer = setTimeout(reload, debounceMs);
+  });
+  watcher.on("error", (error) => { if (!closed) onError(error); });
+
+  return {
+    close: () => {
+      closed = true;
+      clearTimeout(debounceTimer);
+      watcher.close();
+    },
+  };
 }

@@ -15,7 +15,7 @@ import { defaultRunCommand as changesetDefaultRunCommand } from "./changeset.js"
 // runs synchronously in the constructor, same as the old module-level code
 // did at import time). `tasksFixture` may be an array or `(logDir) => array`
 // for fixtures whose logPath needs to point inside the real log dir.
-function makeManager({ tasksFixture = [], logs = {}, spawnFn, killFn, listModelsFn, defaultExecutor, maxDispatchesPerWindow, dispatchWindowMs, advisorSessionTtlMs, maxConcurrentTasks, noOutputTimeoutMs, postOutputNoOutputTimeoutMs, watchdogPollMs, maxWaitMs, envDenylistSpec, sandboxDenylist, sandboxEnabled = false, checkBwrapAvailableFn, existsFn, statFn, readdirFn, runtimeDir, cacheDir, platform, onEvent, allowedDirs, resolveGitCommonDirFn, resolveGitDirFn, overlayEnabled = false, checkOverlaySupportFn, overlayTmpRoot, runOverlayCommandFn, rmOverlayTreeFn } = {}) {
+function makeManager({ tasksFixture = [], logs = {}, spawnFn, killFn, listModelsFn, defaultExecutor, maxDispatchesPerWindow, dispatchWindowMs, advisorSessionTtlMs, maxConcurrentTasks, noOutputTimeoutMs, postOutputNoOutputTimeoutMs, watchdogPollMs, maxWaitMs, envDenylistSpec, sandboxDenylist, sandboxEnabled = false, checkBwrapAvailableFn, existsFn, statFn, readdirFn, runtimeDir, cacheDir, platform, onEvent, allowedDirs, resolveGitCommonDirFn, resolveGitDirFn, overlayEnabled = false, checkOverlaySupportFn, overlayTmpRoot, runOverlayCommandFn, rmOverlayTreeFn, envFileVars } = {}) {
   const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-test-"));
   const logDir = path.join(stateDir, "logs");
   fs.mkdirSync(logDir, { recursive: true });
@@ -61,6 +61,7 @@ function makeManager({ tasksFixture = [], logs = {}, spawnFn, killFn, listModels
     ...(watchdogPollMs != null ? { watchdogPollMs } : {}),
     ...(maxWaitMs != null ? { maxWaitMs } : {}),
     ...(envDenylistSpec != null ? { envDenylist: parseEnvDenylist(envDenylistSpec) } : {}),
+    ...(envFileVars != null ? { envFileVars } : {}),
     ...(sandboxDenylist != null ? { sandboxDenylist } : {}),
     ...(allowedDirs != null ? { allowedDirs } : {}),
     ...(resolveGitCommonDirFn != null ? { resolveGitCommonDirFn } : {}),
@@ -5585,6 +5586,195 @@ describe("caller-env union (sanitizedEnvironment)", () => {
     mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
 
     assert.equal(capturedOpts.env.AXI_TEST_AMBIENT_ONLY, "ambient-value");
+  });
+
+  test("envFileVars supplies a var missing from both the daemon's ambient env and the caller's env", () => {
+    delete process.env.AXI_TEST_FILE_ONLY;
+    let capturedOpts = null;
+    const mgr = makeManager({
+      spawnFn: (cmd, args, opts) => { capturedOpts = opts; return fakeChild(); },
+      envFileVars: { AXI_TEST_FILE_ONLY: "from-file" },
+    });
+
+    mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+
+    assert.equal(capturedOpts.env.AXI_TEST_FILE_ONLY, "from-file");
+  });
+
+  test("the daemon's own ambient env overrides the same key in envFileVars", (t) => {
+    process.env.AXI_TEST_FILE_VS_AMBIENT = "ambient-value";
+    t.after(() => delete process.env.AXI_TEST_FILE_VS_AMBIENT);
+    let capturedOpts = null;
+    const mgr = makeManager({
+      spawnFn: (cmd, args, opts) => { capturedOpts = opts; return fakeChild(); },
+      envFileVars: { AXI_TEST_FILE_VS_AMBIENT: "file-value" },
+    });
+
+    mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+
+    assert.equal(capturedOpts.env.AXI_TEST_FILE_VS_AMBIENT, "ambient-value");
+  });
+
+  test("caller-supplied env overrides the same key in envFileVars", () => {
+    let capturedOpts = null;
+    const mgr = makeManager({
+      spawnFn: (cmd, args, opts) => { capturedOpts = opts; return fakeChild(); },
+      envFileVars: { AXI_TEST_FILE_VS_CALLER: "file-value" },
+    });
+
+    mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), env: { AXI_TEST_FILE_VS_CALLER: "from-caller" } });
+
+    assert.equal(capturedOpts.env.AXI_TEST_FILE_VS_CALLER, "from-caller");
+  });
+
+  test("envDenylist strips a var that came from envFileVars", () => {
+    let capturedOpts = null;
+    const mgr = makeManager({
+      spawnFn: (cmd, args, opts) => { capturedOpts = opts; return fakeChild(); },
+      envFileVars: { AXI_TEST_DENIED_FROM_FILE: "leaked-value" },
+      envDenylistSpec: "AXI_TEST_DENIED_FROM_FILE",
+    });
+
+    mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+
+    assert.equal("AXI_TEST_DENIED_FROM_FILE" in capturedOpts.env, false);
+  });
+
+  test("a var from envFileVars cannot override the daemon's real ambient PATH", (t) => {
+    process.env.PATH = "real-path";
+    t.after(() => delete process.env.PATH);
+    let capturedOpts = null;
+    const mgr = makeManager({
+      spawnFn: (cmd, args, opts) => { capturedOpts = opts; return fakeChild(); },
+      envFileVars: { PATH: "malicious-path-from-file" },
+    });
+
+    mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+
+    assert.equal(capturedOpts.env.PATH, "real-path");
+  });
+
+  test("envFileVars cannot smuggle a value for a plumbing var the ambient env never set (review finding: CALLER_ENV_EXCLUDED was only applied to caller env)", (t) => {
+    delete process.env.TASKFERRY_SOCKET_PATH;
+    t.after(() => delete process.env.TASKFERRY_SOCKET_PATH);
+    let capturedOpts = null;
+    const mgr = makeManager({
+      spawnFn: (cmd, args, opts) => { capturedOpts = opts; return fakeChild(); },
+      envFileVars: { TASKFERRY_SOCKET_PATH: "/tmp/attacker-controlled.sock" },
+    });
+
+    mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+
+    assert.equal("TASKFERRY_SOCKET_PATH" in capturedOpts.env, false);
+  });
+
+  test("envFileVars cannot smuggle a value for HOME either, when ambient HOME is unset", (t) => {
+    const realHome = process.env.HOME;
+    delete process.env.HOME;
+    t.after(() => { process.env.HOME = realHome; });
+    let capturedOpts = null;
+    const mgr = makeManager({
+      spawnFn: (cmd, args, opts) => { capturedOpts = opts; return fakeChild(); },
+      envFileVars: { HOME: "/tmp/attacker-controlled-home" },
+    });
+
+    mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+
+    assert.equal("HOME" in capturedOpts.env, false);
+  });
+
+  test("createTaskManager() with envFilePath but no envFileVars override loads via loadEnvFileFn once at construction", () => {
+    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-test-"));
+    fs.writeFileSync(path.join(stateDir, "tasks.json"), "[]");
+    const cacheDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-cache-"));
+    const overlayTmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-overlay-"));
+    let loadCalls = 0;
+    let capturedOpts = null;
+
+    const mgr = createTaskManager({
+      stateDir,
+      cacheDir,
+      overlayTmpRoot,
+      sandboxEnabled: false,
+      overlayEnabled: false,
+      spawnFn: (cmd, args, opts) => { capturedOpts = opts; return fakeChild(); },
+      killFn: () => {},
+      envFilePath: "/fake/secrets.env",
+      loadEnvFileFn: (p) => { loadCalls++; assert.equal(p, "/fake/secrets.env"); return { AXI_TEST_FROM_LOADER: "loaded-once" }; },
+    });
+
+    assert.equal(loadCalls, 1, "loadEnvFileFn must run exactly once, at construction, not per-dispatch");
+    mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+    mgr.dispatch({ prompt: "hi again", directory: os.tmpdir() });
+    assert.equal(loadCalls, 1);
+    assert.equal(capturedOpts.env.AXI_TEST_FROM_LOADER, "loaded-once");
+  });
+
+  test("createTaskManager() propagates a loadEnvFileFn throw synchronously, before any dispatch is possible", () => {
+    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-test-"));
+    fs.writeFileSync(path.join(stateDir, "tasks.json"), "[]");
+    const cacheDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-cache-"));
+    const overlayTmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-overlay-"));
+
+    assert.throws(
+      () => createTaskManager({
+        stateDir,
+        cacheDir,
+        overlayTmpRoot,
+        sandboxEnabled: false,
+        overlayEnabled: false,
+        spawnFn: () => fakeChild(),
+        killFn: () => {},
+        envFilePath: "/fake/missing.env",
+        loadEnvFileFn: () => { throw new Error("error: env file not found: /fake/missing.env"); },
+      }),
+      /env file not found/
+    );
+  });
+
+  test("omitting envFilePath never calls loadEnvFileFn and defaults envFileVars to {}", () => {
+    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-test-"));
+    fs.writeFileSync(path.join(stateDir, "tasks.json"), "[]");
+    const cacheDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-cache-"));
+    const overlayTmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-overlay-"));
+    let loadCalls = 0;
+
+    createTaskManager({
+      stateDir,
+      cacheDir,
+      overlayTmpRoot,
+      sandboxEnabled: false,
+      overlayEnabled: false,
+      spawnFn: () => fakeChild(),
+      killFn: () => {},
+      loadEnvFileFn: () => { loadCalls++; return {}; },
+    });
+
+    assert.equal(loadCalls, 0);
+  });
+
+  test("an explicit empty-string TASKFERRY_ENV_FILE disables loading rather than falling through to config.envFile (review finding: the old `||` check treated \"\" as unset)", (t) => {
+    process.env.TASKFERRY_ENV_FILE = "";
+    t.after(() => delete process.env.TASKFERRY_ENV_FILE);
+    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-test-"));
+    fs.writeFileSync(path.join(stateDir, "tasks.json"), "[]");
+    const cacheDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-cache-"));
+    const overlayTmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-overlay-"));
+    let loadCalls = 0;
+
+    createTaskManager({
+      stateDir,
+      cacheDir,
+      overlayTmpRoot,
+      sandboxEnabled: false,
+      overlayEnabled: false,
+      spawnFn: () => fakeChild(),
+      killFn: () => {},
+      config: { envFile: "/would/have/loaded/this.env" },
+      loadEnvFileFn: () => { loadCalls++; return { SHOULD_NOT_APPEAR: "leaked" }; },
+    });
+
+    assert.equal(loadCalls, 0, "an explicit empty TASKFERRY_ENV_FILE must disable loading, not fall through to config.envFile");
   });
 
   test("summaryEnvironment strips OPENCODE_CONFIG* even when the caller's env explicitly sets one", async (t) => {

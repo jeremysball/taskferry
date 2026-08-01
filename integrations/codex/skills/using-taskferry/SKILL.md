@@ -530,6 +530,20 @@ command. Daemon-level configuration variables
 `config.json` fields they override) still require a daemon restart because
 they are read once at startup.
 
+**`TASKFERRY_ENV_FILE` (or the `envFile` config field) solves a different
+problem than caller-env forwarding: a non-interactive caller — cron,
+systemd, a scheduled job — that never had the secret in its own environment
+to forward in the first place**, because secrets exported in an interactive
+shell's rc file (`.bashrc`/`.zshrc`/`config.fish`) are invisible to a
+process cron spawns. Point it at a `.env`-style file (`NAME=VALUE` per
+line) and the daemon loads it once at startup as the lowest-priority layer
+of every spawned child's environment — below its own ambient env, below the
+caller's forwarded env, so a live caller's or the daemon's own value still
+wins on a shared key. It's read once at daemon startup like the other
+daemon-level vars above, not per-dispatch — a daemon restart is required to
+pick up a changed file or a newly set/changed `TASKFERRY_ENV_FILE`. See
+`docs/security.md#caller-env-forwarding` and `docs/config.md`.
+
 ## When a worker's tool calls don't honor `--directory`
 
 Even with `--directory <worktree>` set correctly on the dispatch, a

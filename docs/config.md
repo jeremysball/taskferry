@@ -52,6 +52,7 @@ message — there is no silent typo tolerance.
 | `waitDefaultTimeoutMs` | `TASKFERRY_WAIT_DEFAULT_TIMEOUT_MS` | number | `900000` (15 min); `0` disables via the env var only — a config-file value of `0` is ignored and falls back to the 15-minute default |
 | `cancelGraceMs` | `TASKFERRY_CANCEL_GRACE_MS` | number | `5000`; overridden per-call by `cancel --grace-ms` |
 | `defaultExecutor` | `TASKFERRY_DEFAULT_EXECUTOR` | string (`opencode` or `pi`) | `pi` |
+| `envFile` | `TASKFERRY_ENV_FILE` | string (path to a `.env`-style file) | (none) |
 
 `envDenylist` uses the same comma-separated grammar as `allowedDirs` — a
 flat list of env var names, always stripped from every spawned child
@@ -63,6 +64,30 @@ extra directories tmpfs-masked inside the bwrap sandbox, merged with the
 fixed default deny-list (`~/.ssh`, `~/.aws`, `~/.config/gcloud`,
 `~/.config/gh`, `~/.gnupg`, `~/.claude`) rather than replacing it; see
 `docs/security.md`.
+
+`envFile` points at a `.env`-style file (`NAME=VALUE` per line, blank lines
+and `#`-comment lines skipped, an optional leading `export `, values
+optionally wrapped in matching single/double quotes) loaded once at daemon
+startup and unioned into every spawned child's environment as the
+lowest-priority layer — below the daemon's own ambient environment, which
+stays below a caller's forwarded env. This exists for secrets that live
+only in an interactive shell's rc file and therefore never reach a
+non-interactive caller (cron, systemd, a scheduled job) dispatching
+through the same daemon — see `docs/security.md`. Unlike the other string
+fields above, a configured path that can't be read is a hard error at
+daemon startup, not a silent fallback: a `.env`-shaped file is presumably
+carrying secrets a dispatch actually needs, so a typo'd path should fail
+loudly rather than quietly dispatch without them.
+
+The file must be owner-only (`chmod 600`, no group/other read bits) —
+`loadEnvFile()` refuses (also a hard daemon-startup error) a file it's
+readable by anyone other than the daemon's own user, since this file
+exists specifically to hold secrets rather than ordinary settings.
+
+`TASKFERRY_ENV_FILE=""` (explicitly set to empty) disables env-file
+loading; it does not fall through to a `envFile` config-file value, same
+"explicit empty overrides, doesn't fall through" semantics as an explicit
+`false`/`0` would for a boolean field.
 
 ## Precedence
 

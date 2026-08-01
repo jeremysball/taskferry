@@ -3217,27 +3217,9 @@ export function createTaskManager({
     if (task) taskEvents.emitState(task);
   }
 
-  /** @param {Task} task */
-  function failureFields(task) {
-    return { failureReason: task.failureReason ?? null, failureDetail: task.failureDetail ?? null };
-  }
+  
 
-  /**
-   * @param {Task} task
-   * @returns {TaskSummary}
-   */
-  function summarize(task) {
-    const { promptPreview, id, status, directory, model, sessionId, originSessionId, pid, startedAt, endedAt, exitCode, signal, logPath, cancelRequested, spawnError } = task;
-    return {
-      id, status, directory, model, sessionId, originSessionId, pid, startedAt, endedAt, exitCode, signal, logPath,
-      ...failureFields(task),
-      spawnError: spawnError ?? null,
-      promptPreview,
-      ...summarizeOptionalFields(task),
-      ...summarizeChangesetFields(task),
-      cancelRequested: !!cancelRequested,
-    };
-  }
+  
 
   // Minimal per-row schema for taskferry list: an agent scanning a task list
   // needs id/status/model/startedAt to decide what to poll next, not the full
@@ -3248,22 +3230,9 @@ export function createTaskManager({
   // such as rate_limited, payment_required, or authentication_failed)
   // or not (any other crash) -- omitting it here forces a task.status
   // round-trip per crashed row just to learn that.
-  /**
-   * @param {Task} task
-   * @returns {{id: string, status: string, model: string, startedAt: string, failureReason: string|null}}
-   */
-  function summarizeRow(task) {
-    const { id, status, model, startedAt, failureReason } = task;
-    return { id, status, model, startedAt, failureReason: failureReason ?? null };
-  }
+  
 
-  /**
-   * @param {string} taskId
-   * @returns {Error}
-   */
-  function noSuchTask(taskId) {
-    return new Error(`error: unknown task id: ${taskId}\nhelp: run taskferry list to see valid task ids`);
-  }
+  
 
   /**
    * @param {string|undefined} sessionId
@@ -3327,46 +3296,7 @@ export function createTaskManager({
     };
   }
 
-  /**
-   * Fingerprint of the caller env's model-relevant subset: which keys and
-   * values determine which models a provider exposes to opencode/pi.
-   * Includes every `*_API_KEY` suffix (any provider credential a user can
-   * name), every `*_BASE_URL` suffix (provider endpoint overrides -- a
-   * corporate proxy or self-hosted endpoint exposes a different catalog
-   * than the stock API host), the opencode config/model-list/auth
-   * overrides (`OPENCODE_CONFIG*`, `OPENCODE_AUTH_CONTENT`,
-   * `OPENCODE_MODELS_PATH`, `OPENCODE_MODELS_URL` -- the latter three
-   * each verified to change `opencode models` output), and
-   * `PI_CODING_AGENT_DIR` (the per-user pi state root whose auth.json
-   * gates which providers pi can list). Known gaps: provider vars with
-   * no suffix pattern (e.g. `OLLAMA_HOST`, Vertex location/project vars).
-   * Intentionally excludes unrelated caller vars -- PATH, LANG, USER,
-   * ... -- so trivial cosmetic differences don't fragment the cache into
-   * per-call entries.
-   * @param {NodeJS.ProcessEnv} env
-   * @returns {string}
-   */
-  function modelsCacheFingerprint(env = {}) {
-    const suffixNames = ["_API_KEY", "_BASE_URL"];
-    const exactNames = [
-      "OPENCODE_CONFIG",
-      "OPENCODE_CONFIG_DIR",
-      "OPENCODE_CONFIG_CONTENT",
-      "OPENCODE_AUTH_CONTENT",
-      "OPENCODE_MODELS_PATH",
-      "OPENCODE_MODELS_URL",
-      "PI_CODING_AGENT_DIR",
-    ];
-    /** @type {string[]} */
-    const parts = [];
-    for (const name of Object.keys(env)) {
-      if (suffixNames.some((suffix) => name.endsWith(suffix)) || exactNames.includes(name)) {
-        parts.push(`${name}=${env[name]}`);
-      }
-    }
-    parts.sort();
-    return parts.join("\n");
-  }
+  
 
   /**
    * Validate `model` against opencode's installed-models list, NOT against
@@ -3480,66 +3410,9 @@ export function createTaskManager({
     return summarizeTask(taskId, options);
   }
 
-  /**
-   * @param {string} logPath
-   * @returns {{narration: string, sourceLogBytes: number, inputBytes: number}}
-   */
-  function readNarrationExcerpt(logPath) {
-    /** @type {number|undefined} */
-    let fd;
-    try {
-      const size = fs.statSync(logPath).size;
-      const firstBytes = size <= SUMMARY_INPUT_BYTES ? size : Math.floor(SUMMARY_INPUT_BYTES / 2);
-      const lastBytes = size <= SUMMARY_INPUT_BYTES ? 0 : Math.ceil(SUMMARY_INPUT_BYTES / 2);
-      fd = fs.openSync(logPath, "r");
-      const first = Buffer.alloc(firstBytes);
-      fs.readSync(fd, first, 0, firstBytes, 0);
-      const firstRaw = first.toString("utf8");
-      let narration = parseNarration(firstRaw);
-      let inputRaw = firstRaw;
-      if (lastBytes) {
-        const last = Buffer.alloc(lastBytes);
-        fs.readSync(fd, last, 0, lastBytes, size - lastBytes);
-        const omittedBytes = size - firstBytes - lastBytes;
-        const lastRaw = last.toString("utf8");
-        const omission = `[${omittedBytes} bytes omitted from source log]`;
-        narration = [narration, omission, parseNarration(lastRaw)].filter(Boolean).join("\n\n");
-        inputRaw += lastRaw;
-      }
-      return { narration, sourceLogBytes: size, inputBytes: Buffer.byteLength(inputRaw) };
-    } catch {
-      return { narration: "", sourceLogBytes: 0, inputBytes: 0 };
-    } finally {
-      if (fd != null) fs.closeSync(fd);
-    }
-  }
+  
 
-  /**
-   * @param {string} raw
-   * @returns {string}
-   */
-  function parseNarration(raw) {
-    /** @type {Map<string, string[]>} */
-    const textByMessageId = new Map();
-    /** @type {Array<{kind: "text", mid: string}|{kind: "tool", line: string}>} */
-    const order = [];
-    for (const line of raw.split("\n")) {
-      if (!line.trim()) continue;
-      /** @type {any} */
-      let evt;
-      let parsed = false;
-      try {
-        evt = JSON.parse(line);
-        parsed = true;
-      } catch {
-        // Not a parseable event line -- not narration.
-      }
-      if (parsed) collectNarrationLine(evt, textByMessageId, order);
-    }
-    return order
-      .map((entry) => (entry.kind === "text" ? /** @type {string[]} */ (textByMessageId.get(entry.mid)).join("") : entry.line))
-      .join("\n\n");
-  }
+  
 
   /**
    * @param {string} taskId
@@ -4135,36 +4008,7 @@ export function createTaskManager({
     };
   }
 
-  /**
-   * @param {string} logPath
-   * @returns {string|null}
-   */
-  function readSessionIdFromLog(logPath) {
-    const CHUNK_SIZE = 64 * 1024;
-    let fd;
-    try {
-      fd = fs.openSync(logPath, "r");
-    } catch {
-      return null;
-    }
-    try {
-      let carry = "";
-      const buf = Buffer.alloc(CHUNK_SIZE);
-      for (;;) {
-        const bytesRead = fs.readSync(fd, buf, 0, CHUNK_SIZE, null);
-        if (bytesRead === 0) break;
-        carry += buf.toString("utf8", 0, bytesRead);
-        const result = extractSessionId(carry);
-        if (result.sessionId) return result.sessionId;
-        carry = result.remainder;
-      }
-      return carry.trim() ? sessionIdInJson(carry) : null;
-    } catch {
-      return null;
-    } finally {
-      fs.closeSync(fd);
-    }
-  }
+  
 
   /**
    * @param {string} logPath
@@ -4490,4 +4334,177 @@ export function createTaskManager({
     },
     paths: { STATE_DIR: stateDir, LOG_DIR, SUMMARY_DIR, TASKS_FILE },
   };
+}
+
+
+/**
+ * @param {string} logPath
+ * @returns {string|null}
+ */
+function readSessionIdFromLog(logPath) {
+  const CHUNK_SIZE = 64 * 1024;
+  let fd;
+  try {
+    fd = fs.openSync(logPath, "r");
+  } catch {
+    return null;
+  }
+  try {
+    let carry = "";
+    const buf = Buffer.alloc(CHUNK_SIZE);
+    for (;;) {
+      const bytesRead = fs.readSync(fd, buf, 0, CHUNK_SIZE, null);
+      if (bytesRead === 0) break;
+      carry += buf.toString("utf8", 0, bytesRead);
+      const result = extractSessionId(carry);
+      if (result.sessionId) return result.sessionId;
+      carry = result.remainder;
+    }
+    return carry.trim() ? sessionIdInJson(carry) : null;
+  } catch {
+    return null;
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+/**
+ * @param {string} raw
+ * @returns {string}
+ */
+function parseNarration(raw) {
+  /** @type {Map<string, string[]>} */
+  const textByMessageId = new Map();
+  /** @type {Array<{kind: "text", mid: string}|{kind: "tool", line: string}>} */
+  const order = [];
+  for (const line of raw.split("\n")) {
+    if (!line.trim()) continue;
+    /** @type {any} */
+    let evt;
+    let parsed = false;
+    try {
+      evt = JSON.parse(line);
+      parsed = true;
+    } catch {
+      // Not a parseable event line -- not narration.
+    }
+    if (parsed) collectNarrationLine(evt, textByMessageId, order);
+  }
+  return order
+    .map((entry) => (entry.kind === "text" ? /** @type {string[]} */ (textByMessageId.get(entry.mid)).join("") : entry.line))
+    .join("\n\n");
+}
+
+/**
+ * @param {string} logPath
+ * @returns {{narration: string, sourceLogBytes: number, inputBytes: number}}
+ */
+function readNarrationExcerpt(logPath) {
+  /** @type {number|undefined} */
+  let fd;
+  try {
+    const size = fs.statSync(logPath).size;
+    const firstBytes = size <= SUMMARY_INPUT_BYTES ? size : Math.floor(SUMMARY_INPUT_BYTES / 2);
+    const lastBytes = size <= SUMMARY_INPUT_BYTES ? 0 : Math.ceil(SUMMARY_INPUT_BYTES / 2);
+    fd = fs.openSync(logPath, "r");
+    const first = Buffer.alloc(firstBytes);
+    fs.readSync(fd, first, 0, firstBytes, 0);
+    const firstRaw = first.toString("utf8");
+    let narration = parseNarration(firstRaw);
+    let inputRaw = firstRaw;
+    if (lastBytes) {
+      const last = Buffer.alloc(lastBytes);
+      fs.readSync(fd, last, 0, lastBytes, size - lastBytes);
+      const omittedBytes = size - firstBytes - lastBytes;
+      const lastRaw = last.toString("utf8");
+      const omission = `[${omittedBytes} bytes omitted from source log]`;
+      narration = [narration, omission, parseNarration(lastRaw)].filter(Boolean).join("\n\n");
+      inputRaw += lastRaw;
+    }
+    return { narration, sourceLogBytes: size, inputBytes: Buffer.byteLength(inputRaw) };
+  } catch {
+    return { narration: "", sourceLogBytes: 0, inputBytes: 0 };
+  } finally {
+    if (fd != null) fs.closeSync(fd);
+  }
+}
+
+/**
+ * Fingerprint of the caller env's model-relevant subset: which keys and
+ * values determine which models a provider exposes to opencode/pi.
+ * Includes every `*_API_KEY` suffix (any provider credential a user can
+ * name), every `*_BASE_URL` suffix (provider endpoint overrides -- a
+ * corporate proxy or self-hosted endpoint exposes a different catalog
+ * than the stock API host), the opencode config/model-list/auth
+ * overrides (`OPENCODE_CONFIG*`, `OPENCODE_AUTH_CONTENT`,
+ * `OPENCODE_MODELS_PATH`, `OPENCODE_MODELS_URL` -- the latter three
+ * each verified to change `opencode models` output), and
+ * `PI_CODING_AGENT_DIR` (the per-user pi state root whose auth.json
+ * gates which providers pi can list). Known gaps: provider vars with
+ * no suffix pattern (e.g. `OLLAMA_HOST`, Vertex location/project vars).
+ * Intentionally excludes unrelated caller vars -- PATH, LANG, USER,
+ * ... -- so trivial cosmetic differences don't fragment the cache into
+ * per-call entries.
+ * @param {NodeJS.ProcessEnv} env
+ * @returns {string}
+ */
+function modelsCacheFingerprint(env = {}) {
+  const suffixNames = ["_API_KEY", "_BASE_URL"];
+  const exactNames = [
+    "OPENCODE_CONFIG",
+    "OPENCODE_CONFIG_DIR",
+    "OPENCODE_CONFIG_CONTENT",
+    "OPENCODE_AUTH_CONTENT",
+    "OPENCODE_MODELS_PATH",
+    "OPENCODE_MODELS_URL",
+    "PI_CODING_AGENT_DIR",
+  ];
+  /** @type {string[]} */
+  const parts = [];
+  for (const name of Object.keys(env)) {
+    if (suffixNames.some((suffix) => name.endsWith(suffix)) || exactNames.includes(name)) {
+      parts.push(`${name}=${env[name]}`);
+    }
+  }
+  parts.sort();
+  return parts.join("\n");
+}
+
+/**
+ * @param {string} taskId
+ * @returns {Error}
+ */
+function noSuchTask(taskId) {
+  return new Error(`error: unknown task id: ${taskId}\nhelp: run taskferry list to see valid task ids`);
+}
+
+/**
+ * @param {Task} task
+ * @returns {{id: string, status: string, model: string, startedAt: string, failureReason: string|null}}
+ */
+function summarizeRow(task) {
+  const { id, status, model, startedAt, failureReason } = task;
+  return { id, status, model, startedAt, failureReason: failureReason ?? null };
+}
+
+/**
+ * @param {Task} task
+ * @returns {TaskSummary}
+ */
+function summarize(task) {
+  const { promptPreview, id, status, directory, model, sessionId, originSessionId, pid, startedAt, endedAt, exitCode, signal, logPath, cancelRequested, spawnError } = task;
+  return {
+    id, status, directory, model, sessionId, originSessionId, pid, startedAt, endedAt, exitCode, signal, logPath,
+    ...failureFields(task),
+    spawnError: spawnError ?? null,
+    promptPreview,
+    ...summarizeOptionalFields(task),
+    ...summarizeChangesetFields(task),
+    cancelRequested: !!cancelRequested,
+  };
+}
+
+/** @param {Task} task */
+function failureFields(task) {
+  return { failureReason: task.failureReason ?? null, failureDetail: task.failureDetail ?? null };
 }

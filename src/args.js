@@ -154,6 +154,150 @@ const commandSpecs = {
   },
 };
 
+// ------------------------------------------------------------------
+// Single source of truth for which flags each command accepts.
+// "flags" are value-taking flags (value = option-key on the parsed result).
+// "booleans" are boolean flags (value = option-key on the parsed result).
+// The three legacy lookup structures (values, booleanCommands,
+// commandAllows) are derived from this spec at module scope.
+// ------------------------------------------------------------------
+const commandFlagSpecs = {
+  dispatch: {
+    flags: {
+      "--prompt": "prompt",
+      "--directory": "directory",
+      "--model": "model",
+      "--variant": "variant",
+      "--session-id": "sessionId",
+      "--require-final-marker": "finalMarker",
+      "--allowed-dirs": "allowedDirs",
+      "--executor": "executor",
+    },
+    booleans: {
+      "--no-sandbox": "noSandbox",
+      "--no-overlay": "noOverlay",
+    },
+  },
+  cancel: {
+    flags: { "--grace-ms": "graceMs" },
+    booleans: {},
+  },
+  accept: {
+    flags: {},
+    booleans: {},
+  },
+  reject: {
+    flags: {},
+    booleans: {},
+  },
+  wait: {
+    flags: {
+      "--timeout": "timeoutMs",
+      "--tail-chars": "tailChars",
+    },
+    booleans: {
+      "--full": "full",
+      "--summarize": "summarize",
+    },
+  },
+  advisor: {
+    flags: {
+      "--prompt": "prompt",
+      "--model": "model",
+      "--directory": "directory",
+      "--variant": "variant",
+      "--session-id": "sessionId",
+      "--timeout": "timeoutMs",
+      "--executor": "executor",
+    },
+    booleans: {
+      "--summarize-context": "summarizeContext",
+    },
+  },
+  status: {
+    flags: {},
+    booleans: {
+      "--full": "full",
+    },
+  },
+  tail: {
+    flags: { "--chars": "chars" },
+    booleans: {},
+  },
+  summary: {
+    flags: {
+      "--mode": "mode",
+      "--max-words": "maxWords",
+    },
+    booleans: {
+      "--wait": "wait",
+    },
+  },
+  result: {
+    flags: { "--fields": "fields" },
+    booleans: {
+      "--full": "full",
+      "--diff": "diff",
+    },
+  },
+  list: {
+    flags: {
+      "--directory": "directory",
+      "--limit": "limit",
+    },
+    booleans: {
+      "--all": "all",
+    },
+  },
+  watch: {
+    flags: {
+      "--directory": "directory",
+      "--format": "format",
+      "--task-id": "taskId",
+      "--flush-interval": "flushIntervalMs",
+    },
+    booleans: {
+      "--summaries": "summaries",
+    },
+  },
+  context: {
+    flags: {
+      "--directory": "directory",
+      "--format": "format",
+    },
+    booleans: {},
+  },
+  doctor: {
+    flags: {},
+    booleans: {
+      "--full": "full",
+      "--stats": "stats",
+    },
+  },
+  setup: {
+    flags: {},
+    booleans: {},
+  },
+};
+
+// Derive backward-compatible lookup structures from commandFlagSpecs.
+const values = {};
+const booleanCommands = {};
+const commandAllowsMap = {};
+
+for (const [command, spec] of Object.entries(commandFlagSpecs)) {
+  // Value flags: flag → option-key  AND  command → [flags]
+  commandAllowsMap[command] = Object.keys(spec.flags);
+  for (const [flag, key] of Object.entries(spec.flags)) {
+    values[flag] = key;
+  }
+  // Boolean flags: flag → [commands]
+  for (const flag of Object.keys(spec.booleans)) {
+    if (!booleanCommands[flag]) booleanCommands[flag] = [];
+    booleanCommands[flag].push(command);
+  }
+}
+
 export { UsageError };
 
 export function helpText(command) {
@@ -373,48 +517,13 @@ export function parseArgs(argv, { cwd = process.cwd() } = {}) {
       throw new UsageError(`unknown flag ${name} for \`${command}\``, migrationFlags[name]);
     }
 
-    const booleanCommands = {
-      "--full": ["wait", "status", "result", "doctor"],
-      "--all": ["list"],
-      "--wait": ["summary"],
-      "--summaries": ["watch"],
-      "--summarize": ["wait"],
-      "--summarize-context": ["advisor"],
-      "--no-sandbox": ["dispatch"],
-      "--no-overlay": ["dispatch"], // advisor deliberately excluded -- review finding #5
-      "--diff": ["result"],
-      "--stats": ["doctor"],
-    };
-    const booleanKeyOverrides = { "--no-sandbox": "noSandbox", "--no-overlay": "noOverlay", "--summarize-context": "summarizeContext" };
     if (booleanCommands[name]) {
       if (!booleanCommands[name].includes(command)) throw usageError(`unknown flag ${name} for \`${command}\``, command);
       if (inlineValue !== undefined) throw usageError(`${name} does not take a value`, command);
-      const key = booleanKeyOverrides[name] ?? name.slice(2);
-      setOption(options, key, true, command, seen);
+      setOption(options, commandFlagSpecs[command].booleans[name], true, command, seen);
       continue;
     }
 
-    const values = {
-      "--prompt": "prompt",
-      "--directory": "directory",
-      "--model": "model",
-      "--variant": "variant",
-      "--session-id": "sessionId",
-      "--grace-ms": "graceMs",
-      "--timeout": "timeoutMs",
-      "--tail-chars": "tailChars",
-      "--chars": "chars",
-      "--mode": "mode",
-      "--max-words": "maxWords",
-      "--fields": "fields",
-      "--limit": "limit",
-      "--format": "format",
-      "--task-id": "taskId",
-      "--require-final-marker": "finalMarker",
-      "--allowed-dirs": "allowedDirs",
-      "--executor": "executor",
-      "--flush-interval": "flushIntervalMs",
-    };
     const key = values[name];
     if (!key || !commandAllows(command, name)) throw usageError(`unknown flag ${name} for \`${command}\``, command);
     const required = requireValue(rest, index, name, inlineValue);
@@ -495,19 +604,5 @@ export function parseArgs(argv, { cwd = process.cwd() } = {}) {
 }
 
 function commandAllows(command, flag) {
-  const flags = {
-    dispatch: ["--prompt", "--directory", "--model", "--variant", "--session-id", "--require-final-marker", "--allowed-dirs", "--executor"],
-    cancel: ["--grace-ms"],
-    wait: ["--timeout", "--tail-chars"],
-    advisor: ["--prompt", "--model", "--directory", "--variant", "--session-id", "--timeout", "--executor", "--summarize-context"],
-    status: [],
-    tail: ["--chars"],
-    summary: ["--mode", "--max-words"],
-    result: ["--fields"],
-    list: ["--directory", "--limit"],
-    watch: ["--directory", "--format", "--task-id", "--flush-interval"],
-    context: ["--directory", "--format"],
-    doctor: [],
-  };
-  return flags[command]?.includes(flag) === true;
+  return commandAllowsMap[command]?.includes(flag) === true;
 }

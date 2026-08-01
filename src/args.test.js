@@ -60,6 +60,11 @@ test("parses every documented command's help without requiring operation argumen
   }
 });
 
+test("advisor's help text frames it as consulting a stronger model", () => {
+  const { helpText } = parseArgs(["advisor", "--help"]);
+  assert.match(helpText.description, /stronger model/);
+});
+
 test("requires command-specific arguments and values", () => {
   assert.throws(() => parseArgs(["dispatch"]), /--prompt is required/);
   assert.throws(() => parseArgs(["cancel"]), /task id is required/);

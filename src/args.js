@@ -56,11 +56,11 @@ const commandSpecs = {
     examples: ['taskferry wait <id>', 'taskferry wait <id> --timeout 10s --tail-chars 1000', 'taskferry wait <id> --summarize'],
   },
   advisor: {
-    usage: "taskferry advisor --prompt <text> --model <id> [options]",
-    description: "Ask a model for advice and wait for its response.",
+    usage: "taskferry advisor --model <id> [--prompt <text>] [options]",
+    description: "Consult a stronger model for a second opinion and block until it answers. With no --prompt, auto-attaches the caller's own recent context (a Claude Code session transcript, or the calling ferry's own task log) and asks for structured, actionable pushback.",
     options: {
-      "--prompt <text>": "required",
       "--model <id>": "required",
+      "--prompt <text>": "optional; auto-attaches context and asks for methodical review when omitted",
       "--directory <path>": "defaults to the current workspace",
       "--variant <name>": "optional model reasoning variant",
       "--session-id <id>": "continue a recent advisor session",
@@ -69,6 +69,7 @@ const commandSpecs = {
       "--summarize-context": "condense the auto-attached context through a throwaway model call before sending it (off by default)",
     },
     examples: [
+      'taskferry advisor --model openai/gpt-5.6-sol',
       'taskferry advisor --prompt "How should I split this module?" --model openai/gpt-5.6-sol',
       'taskferry advisor --prompt "Review this design" --model zai/glm-5.2 --timeout 30s',
     ],

@@ -2867,19 +2867,12 @@ export function createTaskManager({
 
   /** @param {NodeJS.ProcessEnv} [env] */
   function dispatchEnvironment(env) {
-    const result = sanitizedEnvironment(env);
-    result.TASKFERRY_CHILD = "1";
-    return result;
+    return buildDispatchEnvironment({ sanitizedEnvironment }, env);
   }
 
   /** @param {NodeJS.ProcessEnv} [env] */
   function summaryEnvironment(env) {
-    const result = sanitizedEnvironment(env);
-    delete result.OPENCODE_CONFIG;
-    delete result.OPENCODE_CONFIG_DIR;
-    delete result.OPENCODE_CONFIG_CONTENT;
-    result.TASKFERRY_CHILD = "1";
-    return result;
+    return buildSummaryEnvironment({ sanitizedEnvironment }, env);
   }
 
   for (const dir of [stateDir, LOG_DIR, SUMMARY_DIR, PROMPT_DIR]) {
@@ -3037,16 +3030,12 @@ export function createTaskManager({
   // overlayDirs (their own cleanupOverlay() call crashed mid-removal) are
   // orphans.
   function sweepOrphanedOverlays() {
-    const tmpRoots = collectOverlayTmpRoots(tasks, overlayTmpRoot);
-    for (const tmpRoot of tmpRoots) {
-      sweepOverlayTmpRoot({ tasks, releaseOverlay, persistTask }, tmpRoot);
-    }
+    sweepOrphanedOverlaysFor({ tasks, overlayTmpRoot, releaseOverlay, persistTask });
   }
   sweepOrphanedOverlays();
 
   function ensureStateLoaded() {
-    if (!stateLoadError) return;
-    throw new Error(`error: could not read persisted task state: ${stateLoadError.message}\nhelp: repair ${TASKS_FILE} before using opencode task tools`);
+    ensureStateLoadedFor({ get stateLoadError() { return stateLoadError; }, TASKS_FILE });
   }
 
   /**
@@ -3078,17 +3067,12 @@ export function createTaskManager({
    * @returns {{sessionId: string|undefined, reset: boolean, previousSessionId: string|undefined}}
    */
   function resolveAdvisorSession(sessionId) {
-    const effectiveSessionId = sessionId ? sessionId : undefined;
-    const lastUsedAt = effectiveSessionId ? advisorSessions.get(effectiveSessionId) : undefined;
-    const fresh = effectiveSessionId != null && lastUsedAt != null && Date.now() - lastUsedAt <= advisorTtl;
-    const reset = effectiveSessionId != null && !fresh;
-    const previousSessionId = reset ? effectiveSessionId : undefined;
-    return { sessionId: fresh ? effectiveSessionId : undefined, reset, previousSessionId };
+    return resolveAdvisorSessionFor(sessionId, { advisorSessions, advisorTtl });
   }
 
   /** @param {string|undefined} sessionId */
   function touchAdvisorSession(sessionId) {
-    if (sessionId) advisorSessions.set(sessionId, Date.now());
+    touchAdvisorSessionFor(sessionId, { advisorSessions });
   }
 
   /**
@@ -3143,8 +3127,7 @@ export function createTaskManager({
    * same error `summaryModelAvailable` throws, so a caller can fail fast
    * before doing any work. */
   async function checkSummaryModelReady() {
-    const env = summaryEnvironment();
-    await summaryModelAvailable(activitySummaryModel, env);
+    await checkSummaryModelReadyFor({ summaryEnvironment, summaryModelAvailable, activitySummaryModel });
   }
 
   /**
@@ -3187,8 +3170,7 @@ export function createTaskManager({
 
   /** @param {string} taskId @param {{maxWords?: number, mode?: string, env?: NodeJS.ProcessEnv}} [options] */
   function summarizeRequest(taskId, options = {}) {
-    if (options.mode === "activity") return activitySummary(taskId, options.maxWords ?? activityWords);
-    return summarizeTask(taskId, options);
+    return summarizeRequestFor(taskId, options, { activitySummary, activityWords, summarizeTask });
   }
 
   
@@ -4884,4 +4866,113 @@ function cancelTask(taskId, { graceMs }, ctx) {
   ctx.persistTask(task.id);
 
   return { ...summarize(task), note: `SIGTERM sent to process group ${task.pid}; escalates to SIGKILL after ${graceMs}ms if it hasn't exited` };
+}
+
+/**
+ * Builds the dispatch child environment: the sanitized base plus the
+ * TASKFERRY_CHILD marker. Extracted out of `createTaskManager`'s
+ * `dispatchEnvironment` closure.
+ * @param {{sanitizedEnvironment: (env?: NodeJS.ProcessEnv) => NodeJS.ProcessEnv}} ctx
+ * @param {NodeJS.ProcessEnv} [env]
+ * @returns {NodeJS.ProcessEnv}
+ */
+function buildDispatchEnvironment(ctx, env) {
+  const result = ctx.sanitizedEnvironment(env);
+  result.TASKFERRY_CHILD = "1";
+  return result;
+}
+
+/**
+ * Builds the summary child environment: the sanitized base with opencode
+ * config overrides stripped plus the TASKFERRY_CHILD marker. Extracted out
+ * of `createTaskManager`'s `summaryEnvironment` closure.
+ * @param {{sanitizedEnvironment: (env?: NodeJS.ProcessEnv) => NodeJS.ProcessEnv}} ctx
+ * @param {NodeJS.ProcessEnv} [env]
+ * @returns {NodeJS.ProcessEnv}
+ */
+function buildSummaryEnvironment(ctx, env) {
+  const result = ctx.sanitizedEnvironment(env);
+  delete result.OPENCODE_CONFIG;
+  delete result.OPENCODE_CONFIG_DIR;
+  delete result.OPENCODE_CONFIG_CONTENT;
+  result.TASKFERRY_CHILD = "1";
+  return result;
+}
+
+/**
+ * Sweeps orphaned overlay directories under the live tmp root plus every
+ * creation-time tmp root a live task records. Extracted out of
+ * `createTaskManager`'s `sweepOrphanedOverlays` closure.
+ * @param {{tasks: Map<string, Task>, overlayTmpRoot: string, releaseOverlay: (task: {overlayDirs?: {root:string,tmpRoot:string}|null}) => boolean, persistTask: (taskId: string) => void}} ctx
+ */
+function sweepOrphanedOverlaysFor(ctx) {
+  const tmpRoots = collectOverlayTmpRoots(ctx.tasks, ctx.overlayTmpRoot);
+  for (const tmpRoot of tmpRoots) {
+    sweepOverlayTmpRoot({ tasks: ctx.tasks, releaseOverlay: ctx.releaseOverlay, persistTask: ctx.persistTask }, tmpRoot);
+  }
+}
+
+/**
+ * Throws if the persisted task store failed to load at boot, so state-dependent
+ * calls fail loudly instead of silently operating on an empty store. Extracted
+ * out of `createTaskManager`'s `ensureStateLoaded` closure; the mutable error
+ * binding is read via a getter on `ctx`.
+ * @param {{stateLoadError: Error|null, TASKS_FILE: string}} ctx
+ */
+function ensureStateLoadedFor(ctx) {
+  if (!ctx.stateLoadError) return;
+  throw new Error(`error: could not read persisted task state: ${ctx.stateLoadError.message}\nhelp: repair ${ctx.TASKS_FILE} before using opencode task tools`);
+}
+
+/**
+ * Resolves whether an advisor session id is fresh, expired, or resettable
+ * within the TTL. Extracted out of `createTaskManager`'s
+ * `resolveAdvisorSession` closure.
+ * @param {string|undefined} sessionId
+ * @param {{advisorSessions: Map<string, number>, advisorTtl: number}} ctx
+ * @returns {{sessionId: string|undefined, reset: boolean, previousSessionId: string|undefined}}
+ */
+function resolveAdvisorSessionFor(sessionId, ctx) {
+  const effectiveSessionId = sessionId ? sessionId : undefined;
+  const lastUsedAt = effectiveSessionId ? ctx.advisorSessions.get(effectiveSessionId) : undefined;
+  const fresh = effectiveSessionId != null && lastUsedAt != null && Date.now() - lastUsedAt <= ctx.advisorTtl;
+  const reset = effectiveSessionId != null && !fresh;
+  const previousSessionId = reset ? effectiveSessionId : undefined;
+  return { sessionId: fresh ? effectiveSessionId : undefined, reset, previousSessionId };
+}
+
+/**
+ * Records the current time as an advisor session's last-use marker. Extracted
+ * out of `createTaskManager`'s `touchAdvisorSession` closure.
+ * @param {string|undefined} sessionId
+ * @param {{advisorSessions: Map<string, number>}} ctx
+ */
+function touchAdvisorSessionFor(sessionId, ctx) {
+  if (sessionId) ctx.advisorSessions.set(sessionId, Date.now());
+}
+
+/**
+ * Shared upfront readiness check for the direct `summary --mode activity`
+ * path and `watch --summaries`'s subscribe-time gate: throws the same error
+ * `summaryModelAvailable` throws so a caller can fail fast. Extracted out of
+ * `createTaskManager`'s `checkSummaryModelReady` closure.
+ * @param {{summaryEnvironment: (env?: NodeJS.ProcessEnv) => NodeJS.ProcessEnv, summaryModelAvailable: (model: string, env: NodeJS.ProcessEnv) => Promise<void>, activitySummaryModel: string}} ctx
+ * @returns {Promise<void>}
+ */
+async function checkSummaryModelReadyFor(ctx) {
+  const env = ctx.summaryEnvironment();
+  await ctx.summaryModelAvailable(ctx.activitySummaryModel, env);
+}
+
+/**
+ * Routes a summarize request to the activity path or the direct summarize
+ * path based on mode. Extracted out of `createTaskManager`'s
+ * `summarizeRequest` closure.
+ * @param {string} taskId
+ * @param {{maxWords?: number, mode?: string, env?: NodeJS.ProcessEnv}} options
+ * @param {{activitySummary: (taskId: string, maxWords: number) => Promise<object>, activityWords: number, summarizeTask: (taskId: string, options?: object) => Promise<object>}} ctx
+ */
+function summarizeRequestFor(taskId, options, ctx) {
+  if (options.mode === "activity") return ctx.activitySummary(taskId, options.maxWords ?? ctx.activityWords);
+  return ctx.summarizeTask(taskId, options);
 }

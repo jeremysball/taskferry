@@ -2984,54 +2984,23 @@ export function createTaskManager({
   });
 
   /**
+   * Mutable bindings the extracted activity-schedule helper needs read/write
+   * access to (the monotonic event sequence and the summary-subscription
+   * count), exposed via getters/setters so the helper doesn't close over the
+   * factory. Same pattern as `launchScheduler` above.
+   */
+  const activityScheduleState = {
+    get eventSequence() { return eventSequence; },
+    set eventSequence(v) { eventSequence = v; },
+    get activitySummarySubscriptions() { return activitySummarySubscriptions; },
+  };
+
+  /**
    * @param {Task} task
    * @param {{force?: boolean}} [options]
    */
   function scheduleActivity(task, { force = false } = {}) {
-    if (typeof onEvent !== "function" || task.internal) return Promise.resolve();
-    const scheduledStatus = task.status;
-    const scheduledDirectory = task.directory;
-    const baseEvent = () => {
-      ++eventSequence;
-      const sequence = eventSequence;
-      return {
-        sequence,
-        type: "task.activity",
-        taskId: task.id,
-        directory: scheduledDirectory,
-        originSessionId: task.originSessionId ?? null,
-        status: scheduledStatus,
-        previousStatus: null,
-        occurredAt: new Date().toISOString(),
-      };
-    };
-    const emit = (/** @type {object} */ event) => {
-      if (scheduledStatus === "running" && task.status !== scheduledStatus) return;
-      try {
-        onEvent(event);
-      } catch {
-        // Activity is advisory and cannot interrupt task lifecycle.
-      }
-    };
-    const dirVariants = activitySubscriptions.get(scheduledDirectory);
-    const variants = dirVariants && dirVariants.size > 0
-      ? [...dirVariants]
-      : [activitySummariesEnabled && activitySummarySubscriptions > 0];
-    const refreshes = variants.map((includeSummary) =>
-      activityCache.refresh(task, { force, includeSummary })
-        .then((result) => (result ? { includeSummary, activity: result.activity, outputWatermark: result.outputWatermark } : null))
-        .catch((err) => ({ includeSummary, summaryFailed: true, summaryError: errMessage(err) }))
-    );
-    return Promise.all(refreshes).then((results) => {
-      /** @type {Record<string, {includeSummary?: boolean, activity?: string, outputWatermark?: number, summaryFailed?: boolean, summaryError?: string}>} */
-      const activityVariants = {};
-      for (const r of results) {
-        if (!r) continue;
-        activityVariants[String(r.includeSummary)] = r;
-      }
-      if (Object.keys(activityVariants).length === 0) return;
-      emit({ ...baseEvent(), activityVariants });
-    });
+    return scheduleActivityFor(task, { force }, { onEvent, state: activityScheduleState, activitySubscriptions, activitySummariesEnabled, activityCache });
   }
 
   loadPersistedTasks({
@@ -3146,24 +3115,7 @@ export function createTaskManager({
    * @returns {TaskSummary & {next: string}}
    */
   function dispatch({ prompt, directory, model, variant, sessionId, internal = false, finalMarker = null, originSessionId, noSandbox = false, noOverlay = false, allowedDirs: dispatchAllowedDirs, executor: executorName, env, role = "dispatch" }) {
-    ensureStateLoaded();
-    const priorSessionTask = resolvePriorSessionTask(tasks, sessionId, executorName);
-    const executor = resolveDispatchExecutor(priorSessionTask, executorName, defaultExecutor);
-    validateDispatchParameters({ prompt, directory });
-    validateDispatchFinalMarker(finalMarker);
-    const normalizedDirectory = resolveDispatchDirectory(directory);
-    // Task IDs retain the literal "oc_" prefix for compatibility; WorkerExecutor.taskIdPrefix is not wired in this issue.
-    const id = `oc_${Date.now().toString(36)}_${randomUUID().slice(0, 8)}`;
-    const logPath = path.join(LOG_DIR, `${id}.ndjson`);
-    const task = buildDispatchTask({ id, prompt, model, executor, priorSessionTask, variant, sessionId, originSessionId, internal, finalMarker, role, logPath, directory: normalizedDirectory });
-    queueDispatchLaunch({ tasks, persistTask, pendingLaunches, launchQueue, launchQueuedTasks }, { id, task, prompt, sessionId, env, noSandbox, noOverlay, executor, role, allowedDirs: dispatchAllowedDirs });
-    const summary = summarize(task);
-    return {
-      ...summary,
-      next: task.status === "queued"
-        ? `Task is queued; run taskferry wait or taskferry status with task id "${id}" to check when it starts`
-        : `Run taskferry wait or taskferry status with task id "${id}" to check progress`,
-    };
+    return dispatchTask({ prompt, directory, model, variant, sessionId, internal, finalMarker, originSessionId, noSandbox, noOverlay, allowedDirs: dispatchAllowedDirs, executor: executorName, env, role }, { ensureStateLoaded, tasks, defaultExecutor, LOG_DIR, persistTask, pendingLaunches, launchQueue, launchQueuedTasks });
   }
 
   
@@ -3388,58 +3340,7 @@ export function createTaskManager({
    * @returns {TaskSummary & {note: string}}
    */
   function cancel(taskId, { graceMs = cancelGrace } = {}) {
-    ensureStateLoaded();
-    const task = tasks.get(taskId);
-    if (!task) throw noSuchTask(taskId);
-    if (task.status === "queued") {
-      const index = launchQueue.indexOf(taskId);
-      if (index !== -1) launchQueue.splice(index, 1);
-      const launch = pendingLaunches.get(taskId);
-      pendingLaunches.delete(taskId);
-      if (launch?.snapshotPath) removeFileIfPresent(launch.snapshotPath);
-      task.status = "cancelled";
-      task.endedAt = new Date().toISOString();
-      persistTask(task.id);
-      void scheduleActivity(task, { force: true }).then(() => activityCache.evictTask(task.id));
-      logHasEventCache.delete(task.logPath);
-      settleWaiters(taskId);
-      if (!launchQueue.length && launchTimer) {
-        clearTimeout(launchTimer);
-        launchTimer = null;
-      }
-      return { ...summarize(task), note: "queued task cancelled before launch" };
-    }
-    if (task.status !== "running") {
-      return { ...summarize(task), note: `task is already ${task.status}; nothing to cancel` };
-    }
-    if (task.pid == null) {
-      throw new Error(`error: task ${taskId} has no pid on record; cannot signal it\nhelp: run taskferry status to inspect its recorded state`);
-    }
-
-    task.cancelRequested = true;
-    // Don't clobber a failureReason the watchdog already set (e.g. it fired
-    // a provider failure bucket such as rate_limited just before this
-    // cancel() call arrived) --
-    // failureReason starts null at task creation, so leaving it alone here
-    // preserves that diagnostic instead of erasing it under "cancelled".
-    stopRunningWatcher(taskId);
-    const existingTimer = escalationTimers.get(taskId);
-    if (existingTimer) {
-      clearTimeout(existingTimer);
-      escalationTimers.delete(taskId);
-    }
-    sendSignal(task.pid, "SIGTERM");
-
-    const timer = setTimeout(() => {
-      escalationTimers.delete(taskId);
-      if (tasks.get(taskId)?.status === "running") {
-        sendSignal(/** @type {number} */ (task.pid), "SIGKILL");
-      }
-    }, graceMs);
-    escalationTimers.set(taskId, timer);
-    persistTask(task.id);
-
-    return { ...summarize(task), note: `SIGTERM sent to process group ${task.pid}; escalates to SIGKILL after ${graceMs}ms if it hasn't exited` };
+    return cancelTask(taskId, { graceMs }, { ensureStateLoaded, tasks, noSuchTask, launchScheduler, pendingLaunches, persistTask, scheduleActivity, activityCache, logHasEventCache, settleWaiters, stopRunningWatcher, escalationTimers, sendSignal });
   }
 
   /** @param {Task} task */
@@ -4826,4 +4727,161 @@ function startRunningWatcherFor(task, ctx) {
   // firing an 'exit' event.
   timer.unref();
   ctx.runningWatchers.set(task.id, timer);
+}
+
+/**
+ * Dispatches a new task: resolves the prior session/executor, validates and
+ * normalizes the request, builds the task record, queues its launch, and
+ * returns the summary plus a next-step hint. Extracted out of
+ * `createTaskManager`'s `dispatch` closure; all the validation/build/queue
+ * helpers are plain module-level functions called directly. The factory
+ * bindings are threaded in via `ctx`.
+ * @param {{prompt: string, directory: string, model?: string, variant?: string, sessionId?: string, internal?: boolean, finalMarker?: string|null, originSessionId?: string, noSandbox?: boolean, noOverlay?: boolean, allowedDirs?: string[], executor?: string, env?: NodeJS.ProcessEnv, role?: "dispatch"|"advisor"}} params
+ * @param {{ensureStateLoaded: () => void, tasks: Map<string, Task>, defaultExecutor: import("./executor.js").WorkerExecutor, LOG_DIR: string, persistTask: (taskId: string) => void, pendingLaunches: Map<string, LaunchSpec>, launchQueue: string[], launchQueuedTasks: () => void}} ctx
+ * @returns {TaskSummary & {next: string}}
+ */
+function dispatchTask(params, ctx) {
+  const { prompt, directory, model, variant, sessionId, internal = false, finalMarker = null, originSessionId, noSandbox = false, noOverlay = false, allowedDirs: dispatchAllowedDirs, executor: executorName, env, role = "dispatch" } = params;
+  ctx.ensureStateLoaded();
+  const priorSessionTask = resolvePriorSessionTask(ctx.tasks, sessionId, executorName);
+  const executor = resolveDispatchExecutor(priorSessionTask, executorName, ctx.defaultExecutor);
+  validateDispatchParameters({ prompt, directory });
+  validateDispatchFinalMarker(finalMarker);
+  const normalizedDirectory = resolveDispatchDirectory(directory);
+  // Task IDs retain the literal "oc_" prefix for compatibility; WorkerExecutor.taskIdPrefix is not wired in this issue.
+  const id = `oc_${Date.now().toString(36)}_${randomUUID().slice(0, 8)}`;
+  const logPath = path.join(ctx.LOG_DIR, `${id}.ndjson`);
+  const task = buildDispatchTask({ id, prompt, model, executor, priorSessionTask, variant, sessionId, originSessionId, internal, finalMarker, role, logPath, directory: normalizedDirectory });
+  queueDispatchLaunch({ tasks: ctx.tasks, persistTask: ctx.persistTask, pendingLaunches: ctx.pendingLaunches, launchQueue: ctx.launchQueue, launchQueuedTasks: ctx.launchQueuedTasks }, { id, task, prompt, sessionId, env, noSandbox, noOverlay, executor, role, allowedDirs: dispatchAllowedDirs });
+  const summary = summarize(task);
+  return {
+    ...summary,
+    next: task.status === "queued"
+      ? `Task is queued; run taskferry wait or taskferry status with task id "${id}" to check when it starts`
+      : `Run taskferry wait or taskferry status with task id "${id}" to check progress`,
+  };
+}
+
+/**
+ * Schedules an activity refresh for a task, fanning out per-directory
+ * subscription variants and emitting a single task.activity event. Extracted
+ * out of `createTaskManager`'s `scheduleActivity` closure; mutable bindings
+ * (event sequence, subscription count) are read/written through `ctx.state`.
+ * @param {Task} task
+ * @param {{force?: boolean}} options
+ * @param {{onEvent?: (event: object) => void, state: {eventSequence: number, activitySummarySubscriptions: number}, activitySubscriptions: Map<string, Set<boolean>>, activitySummariesEnabled: boolean, activityCache: {refresh: (task: Task, options: {force?: boolean, includeSummary?: boolean}) => Promise<{activity: string, outputWatermark: number}|null>}}} ctx
+ * @returns {Promise<unknown>}
+ */
+function scheduleActivityFor(task, { force }, ctx) {
+  if (typeof ctx.onEvent !== "function" || task.internal) return Promise.resolve();
+  const scheduledStatus = task.status;
+  const scheduledDirectory = task.directory;
+  const baseEvent = () => {
+    ++ctx.state.eventSequence;
+    const sequence = ctx.state.eventSequence;
+    return {
+      sequence,
+      type: "task.activity",
+      taskId: task.id,
+      directory: scheduledDirectory,
+      originSessionId: task.originSessionId ?? null,
+      status: scheduledStatus,
+      previousStatus: null,
+      occurredAt: new Date().toISOString(),
+    };
+  };
+  const emit = (/** @type {object} */ event) => {
+    if (scheduledStatus === "running" && task.status !== scheduledStatus) return;
+    try {
+      if (ctx.onEvent) ctx.onEvent(event);
+    } catch {
+      // Activity is advisory and cannot interrupt task lifecycle.
+    }
+  };
+  const dirVariants = ctx.activitySubscriptions.get(scheduledDirectory);
+  const variants = dirVariants && dirVariants.size > 0
+    ? [...dirVariants]
+    : [ctx.activitySummariesEnabled && ctx.state.activitySummarySubscriptions > 0];
+  const refreshes = variants.map((includeSummary) =>
+    ctx.activityCache.refresh(task, { force, includeSummary })
+      .then((result) => (result ? { includeSummary, activity: result.activity, outputWatermark: result.outputWatermark } : null))
+      .catch((err) => ({ includeSummary, summaryFailed: true, summaryError: errMessage(err) }))
+  );
+  return Promise.all(refreshes).then((results) => {
+    /** @type {Record<string, {includeSummary?: boolean, activity?: string, outputWatermark?: number, summaryFailed?: boolean, summaryError?: string}>} */
+    const activityVariants = {};
+    for (const r of results) {
+      if (!r) continue;
+      activityVariants[String(r.includeSummary)] = r;
+    }
+    if (Object.keys(activityVariants).length === 0) return;
+    emit({ ...baseEvent(), activityVariants });
+  });
+}
+
+/**
+ * Cancels a task: removes a queued task from the queue (and clears its
+ * pending launch scratch files), or SIGTERM-escalates a running task to
+ * SIGKILL after the grace period. Extracted out of `createTaskManager`'s
+ * `cancel` closure; the scheduler bindings (queue, launch timer) are reached
+ * through `ctx.launchScheduler` and the rest of the factory bindings via
+ * `ctx`. `summarize`/`removeFileIfPresent` are module-level helpers.
+ * @param {string} taskId
+ * @param {{graceMs: number}} options
+ * @param {{ensureStateLoaded: () => void, tasks: Map<string, Task>, noSuchTask: (taskId: string) => Error, launchScheduler: {launchQueue: string[], launchTimer: NodeJS.Timeout|null}, pendingLaunches: Map<string, LaunchSpec>, persistTask: (taskId: string) => void, scheduleActivity: (task: Task, options?: {force?: boolean}) => Promise<unknown>, activityCache: {evictTask: (taskId: string) => void}, logHasEventCache: Set<string>, settleWaiters: (taskId: string) => void, stopRunningWatcher: (taskId: string) => void, escalationTimers: Map<string, NodeJS.Timeout>, sendSignal: (pid: number, signal: NodeJS.Signals) => void}} ctx
+ * @returns {TaskSummary & {note: string}}
+ */
+function cancelTask(taskId, { graceMs }, ctx) {
+  ctx.ensureStateLoaded();
+  const task = ctx.tasks.get(taskId);
+  if (!task) throw ctx.noSuchTask(taskId);
+  if (task.status === "queued") {
+    const index = ctx.launchScheduler.launchQueue.indexOf(taskId);
+    if (index !== -1) ctx.launchScheduler.launchQueue.splice(index, 1);
+    const launch = ctx.pendingLaunches.get(taskId);
+    ctx.pendingLaunches.delete(taskId);
+    if (launch?.snapshotPath) removeFileIfPresent(launch.snapshotPath);
+    task.status = "cancelled";
+    task.endedAt = new Date().toISOString();
+    ctx.persistTask(task.id);
+    void ctx.scheduleActivity(task, { force: true }).then(() => ctx.activityCache.evictTask(task.id));
+    ctx.logHasEventCache.delete(task.logPath);
+    ctx.settleWaiters(taskId);
+    if (!ctx.launchScheduler.launchQueue.length && ctx.launchScheduler.launchTimer) {
+      clearTimeout(ctx.launchScheduler.launchTimer);
+      ctx.launchScheduler.launchTimer = null;
+    }
+    return { ...summarize(task), note: "queued task cancelled before launch" };
+  }
+  if (task.status !== "running") {
+    return { ...summarize(task), note: `task is already ${task.status}; nothing to cancel` };
+  }
+  if (task.pid == null) {
+    throw new Error(`error: task ${taskId} has no pid on record; cannot signal it\nhelp: run taskferry status to inspect its recorded state`);
+  }
+
+  task.cancelRequested = true;
+  // Don't clobber a failureReason the watchdog already set (e.g. it fired
+  // a provider failure bucket such as rate_limited just before this
+  // cancel() call arrived) --
+  // failureReason starts null at task creation, so leaving it alone here
+  // preserves that diagnostic instead of erasing it under "cancelled".
+  ctx.stopRunningWatcher(taskId);
+  const existingTimer = ctx.escalationTimers.get(taskId);
+  if (existingTimer) {
+    clearTimeout(existingTimer);
+    ctx.escalationTimers.delete(taskId);
+  }
+  ctx.sendSignal(task.pid, "SIGTERM");
+
+  const timer = setTimeout(() => {
+    ctx.escalationTimers.delete(taskId);
+    if (ctx.tasks.get(taskId)?.status === "running") {
+      ctx.sendSignal(/** @type {number} */ (task.pid), "SIGKILL");
+    }
+  }, graceMs);
+  ctx.escalationTimers.set(taskId, timer);
+  ctx.persistTask(task.id);
+
+  return { ...summarize(task), note: `SIGTERM sent to process group ${task.pid}; escalates to SIGKILL after ${graceMs}ms if it hasn't exited` };
 }

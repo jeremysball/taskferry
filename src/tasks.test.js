@@ -4334,10 +4334,10 @@ describe("list()", () => {
     assert.deepEqual(mgr.list().counts, { queued: 0, running: 0, done: 1, crashed: 1, cancelled: 1, unknown: 1 });
   });
 
-  test("rows use the minimal schema plus failureReason, not the full detail object", () => {
+  test("rows use the minimal schema plus failureReason and directory, not the full detail object", () => {
     const mgr = makeManager({ tasksFixture: [baseTask({ id: "t1" })] });
     const row = mgr.list().tasks[0];
-    assert.deepEqual(Object.keys(row).sort(), ["failureReason", "id", "model", "startedAt", "status"]);
+    assert.deepEqual(Object.keys(row).sort(), ["directory", "failureReason", "id", "model", "startedAt", "status"]);
   });
 
   test("sorts newest first by startedAt", () => {

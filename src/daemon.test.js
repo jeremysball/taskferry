@@ -68,7 +68,7 @@ function fakeManagerFactory(tasks = [], { checkSummaryModelReady } = {}) {
       return {
         counts: { queued: 0, running: 0, done: tasks.length, crashed: 0, cancelled: 0, unknown: 0 },
         tasks: tasks.length
-          ? tasks.map(({ id, status, model = "test/model", startedAt = "2026-07-15T00:00:00.000Z" }) => ({ id, status, model, startedAt }))
+          ? tasks.map(({ id, status, model = "test/model", startedAt = "2026-07-15T00:00:00.000Z", directory }) => ({ id, status, model, startedAt, directory }))
           : "none found (this server process's lifetime)",
       };
     },
@@ -409,6 +409,27 @@ describe("Unix socket daemon", () => {
     assert.equal(context.result.directory, fs.realpathSync(paths.root));
     assert.deepEqual(context.result.tasks.map((task) => task.id), ["here"]);
     assert.equal(context.result.tasks[0].directory, paths.root);
+  });
+
+  test("does not call manager.status() for tasks outside the requested workspace", async (t) => {
+    const paths = temporaryPaths(t);
+    const otherDirectory = path.join(paths.root, "other");
+    fs.mkdirSync(otherDirectory);
+    const tasks = [
+      { id: "here", status: "done", directory: paths.root, model: "test/model", startedAt: "2026-07-15T02:00:00.000Z" },
+      { id: "there-1", status: "done", directory: otherDirectory, model: "test/model", startedAt: "2026-07-15T01:00:00.000Z" },
+      { id: "there-2", status: "done", directory: otherDirectory, model: "test/model", startedAt: "2026-07-15T00:00:00.000Z" },
+    ];
+    const fake = fakeManagerFactory(tasks);
+    const daemon = await startDaemon({ ...paths, taskManagerFactory: fake.factory });
+    t.after(() => daemon.close());
+    const peer = await openPeer(paths.socketPath);
+    t.after(() => peer.close());
+
+    await peer.request("context", "task.context", { directory: paths.root });
+
+    const statusCalls = fake.calls.filter((call) => call[0] === "status").map((call) => call[1]);
+    assert.deepEqual(statusCalls, ["here"]);
   });
 
   test("supports multiple clients and multiple filtered subscriptions per connection", async (t) => {

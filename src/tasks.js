@@ -1261,11 +1261,11 @@ export function createTaskManager({
   // round-trip per crashed row just to learn that.
   /**
    * @param {Task} task
-   * @returns {{id: string, status: string, model: string, startedAt: string, failureReason: string|null}}
+   * @returns {{id: string, status: string, model: string, startedAt: string, failureReason: string|null, directory: string}}
    */
   function summarizeRow(task) {
-    const { id, status, model, startedAt, failureReason } = task;
-    return { id, status, model, startedAt, failureReason: failureReason ?? null };
+    const { id, status, model, startedAt, failureReason, directory } = task;
+    return { id, status, model, startedAt, failureReason: failureReason ?? null, directory };
   }
 
   /**

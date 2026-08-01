@@ -2695,156 +2695,415 @@ function watchdogTick(state, ctx) {
 // Factory rather than a module-level singleton, so tests can construct an
 // isolated instance with an injected spawnFn/killFn (no real `opencode`
 // process, no real OS signals) and its own state directory, instead of
+// sharing process-wide state with every other test or the real server.
 
+/**
+ * Resolves a positiveInteger option from the caller → env-var →
+ * config-value → default priority chain. The caller (`rawValue`) wins
+ * when defined -- this preserves the original destructured-parameter
+ * default behavior, where a caller's `{ maxDispatchesPerWindow: 10 }`
+ * override skipped the env/config fallback entirely.
+ * @param {number|undefined} rawValue
+ * @param {string|undefined} envValue
+ * @param {number|undefined} configValue
+ * @param {number} defaultValue
+ * @returns {number}
+ */
+function resolvePositiveIntOption(rawValue, envValue, configValue, defaultValue) {
+  if (rawValue !== undefined) return rawValue;
+  return positiveInteger(Number(envValue), positiveInteger(/** @type {number} */ (configValue), defaultValue));
+}
 
-export function createTaskManager({
-  spawnFn = spawn,
-  killFn = (pid, signal) => process.kill(pid, signal),
-  stateDir = DEFAULT_STATE_DIR,
-  config = {},
-  defaultExecutor = resolveExecutor(
-    process.env.TASKFERRY_DEFAULT_EXECUTOR || /** @type {string|undefined} */ (config.defaultExecutor)
-  ),
-  // Defaults to whichever executor is actually the manager's default, so a
-  // pi-only install (no opencode CLI on PATH) doesn't ENOENT the first time
-  // it touches `taskferry summary` or `watch --summaries`.
-  listModelsFn = opencodeExecutor().listModelsFn,
-  maxDispatchesPerWindow = positiveInteger(
-    Number(process.env.TASKFERRY_MAX_DISPATCHES_PER_WINDOW),
-    positiveInteger(/** @type {number} */ (config.maxDispatchesPerWindow), DEFAULT_MAX_DISPATCHES_PER_WINDOW)
-  ),
-  dispatchWindowMs = positiveInteger(
-    Number(process.env.TASKFERRY_DISPATCH_WINDOW_MS),
-    positiveInteger(/** @type {number} */ (config.dispatchWindowMs), DEFAULT_DISPATCH_WINDOW_MS)
-  ),
-  maxConcurrentTasks = positiveInteger(
-    Number(process.env.TASKFERRY_MAX_CONCURRENT_TASKS),
-    positiveInteger(/** @type {number} */ (config.maxConcurrentTasks), DEFAULT_MAX_CONCURRENT_TASKS)
-  ),
-  advisorSessionTtlMs = positiveInteger(
-    Number(process.env.TASKFERRY_ADVISOR_SESSION_TTL_MS),
-    positiveInteger(/** @type {number} */ (config.advisorSessionTtlMs), DEFAULT_ADVISOR_SESSION_TTL_MS)
-  ),
-  noOutputTimeoutMs = positiveInteger(
-    Number(process.env.TASKFERRY_NO_OUTPUT_TIMEOUT_MS),
-    positiveInteger(/** @type {number} */ (config.noOutputTimeoutMs), DEFAULT_NO_OUTPUT_TIMEOUT_MS)
-  ),
-  postOutputNoOutputTimeoutMs = positiveInteger(
-    Number(process.env.TASKFERRY_POST_OUTPUT_NO_OUTPUT_TIMEOUT_MS),
-    positiveInteger(/** @type {number} */ (config.postOutputNoOutputTimeoutMs), DEFAULT_POST_OUTPUT_NO_OUTPUT_TIMEOUT_MS)
-  ),
-  watchdogPollMs = DEFAULT_WATCHDOG_POLL_MS,
-  watchdogGraceMs = positiveInteger(
-    Number(process.env.TASKFERRY_WATCHDOG_GRACE_MS),
-    positiveInteger(/** @type {number} */ (config.watchdogGraceMs), DEFAULT_WATCHDOG_GRACE_MS)
-  ),
-  cancelGraceMs = positiveInteger(
-    Number(process.env.TASKFERRY_CANCEL_GRACE_MS),
-    positiveInteger(/** @type {number} */ (config.cancelGraceMs), DEFAULT_CANCEL_GRACE_MS)
-  ),
-  maxWaitMs = MAX_WAIT_MS,
-  activitySummariesEnabled = process.env.TASKFERRY_ACTIVITY_SUMMARIES !== undefined
-    ? process.env.TASKFERRY_ACTIVITY_SUMMARIES !== "0"
-    : (/** @type {boolean|undefined} */ (config.activitySummariesEnabled) ?? true),
-  summarizerTimeoutMs = nonNegativeInteger(
-    Number(process.env.TASKFERRY_SUMMARIZER_TIMEOUT_MS),
-    nonNegativeInteger(/** @type {number} */ (config.summarizerTimeoutMs), DEFAULT_SUMMARIZER_TIMEOUT_MS)
-  ),
-  activitySummaryModel = process.env.TASKFERRY_SUMMARY_MODEL || /** @type {string|undefined} */ (config.summaryModel) || DEFAULT_SUMMARY_MODEL,
-  activityMaxWords = positiveInteger(
-    Number(process.env.TASKFERRY_ACTIVITY_MAX_WORDS),
-    positiveInteger(/** @type {number} */ (config.activityMaxWords), 75)
-  ),
-  platform = process.platform,
-  sandboxEnabled = process.env.TASKFERRY_DISABLE_SANDBOX !== undefined
-    ? !["1", "true"].includes(process.env.TASKFERRY_DISABLE_SANDBOX)
-    : (/** @type {boolean|undefined} */ (config.sandboxEnabled) ?? true),
-  allowedDirs = parseAllowedDirs(process.env.TASKFERRY_ALLOWED_DIRS ?? /** @type {string|undefined} */ (config.allowedDirs)),
-  envDenylist = parseEnvDenylist(process.env.TASKFERRY_ENV_DENYLIST ?? /** @type {string|undefined} */ (config.envDenylist)),
-  overlayEnabled = process.env.TASKFERRY_DISABLE_OVERLAY !== undefined
-    ? !["1", "true"].includes(process.env.TASKFERRY_DISABLE_OVERLAY)
-    : (/** @type {boolean|undefined} */ (config.overlayEnabled) ?? true),
-  checkOverlaySupportFn = checkOverlaySupport,
-  overlayTmpRoot = os.tmpdir(),
-  runOverlayCommandFn = defaultOverlayRunCommand,
-  rmOverlayTreeFn,
-  resolveGitCommonDirFn = resolveGitCommonDir,
-  resolveGitDirFn = resolveGitDir,
-  checkBwrapAvailableFn = checkBwrapAvailable,
-  existsFn = fs.existsSync,
-  statFn = (/** @type {string} */ p) => { try { return fs.statSync(p); } catch { return null; } },
-  readdirFn = (/** @type {string} */ p) => fs.readdirSync(p),
-  runtimeDir = path.join(stateDir, "run"),
-  cacheDir = resolveCacheDir(process.env),
-  onEvent,
-} = {}) {
-  const LOG_DIR = path.join(stateDir, "logs");
-  const SUMMARY_DIR = path.join(stateDir, "summaries");
-  const PROMPT_DIR = path.join(stateDir, "prompts");
-  const TASKS_FILE = path.join(stateDir, "tasks.json");
-  const LOCK_FILE = path.join(stateDir, "tasks.lock");
-  const dispatchLimit = positiveInteger(maxDispatchesPerWindow, DEFAULT_MAX_DISPATCHES_PER_WINDOW);
-  const dispatchWindow = positiveInteger(dispatchWindowMs, DEFAULT_DISPATCH_WINDOW_MS);
-  const concurrencyLimit = positiveInteger(maxConcurrentTasks, DEFAULT_MAX_CONCURRENT_TASKS);
+/**
+ * Same caller → env → config → default chain as
+ * {@link resolvePositiveIntOption}, but for non-negative budgets (e.g.
+ * `summarizerTimeoutMs`, which is allowed to be 0 to disable the
+ * throttle).
+ * @param {number|undefined} rawValue
+ * @param {string|undefined} envValue
+ * @param {number|undefined} configValue
+ * @param {number} defaultValue
+ * @returns {number}
+ */
+function resolveNonNegativeIntOption(rawValue, envValue, configValue, defaultValue) {
+  if (rawValue !== undefined) return rawValue;
+  return nonNegativeInteger(Number(envValue), nonNegativeInteger(/** @type {number} */ (configValue), defaultValue));
+}
+
+/**
+ * Resolves a boolean toggle from the env-var-or-config-value-or-default
+ * triple. `invert=true` matches the `TASKFERRY_DISABLE_*` family (where
+ * 1/true DISABLES, anything else enables); `invert=false` matches
+ * `TASKFERRY_ACTIVITY_SUMMARIES` (where 0 disables, anything else enables).
+ * The env value wins when defined; otherwise `configValue` (or the default
+ * if undefined) is used.
+ * @param {string|undefined} envValue
+ * @param {boolean|undefined} configValue
+ * @param {boolean} defaultValue
+ * @param {boolean} [invert]
+ * @returns {boolean}
+ */
+function resolveBooleanToggle(envValue, configValue, defaultValue, invert = false) {
+  if (envValue === undefined) return configValue ?? defaultValue;
+  return invert ? !["1", "true"].includes(envValue) : envValue !== "0";
+}
+
+/**
+ * The subset of `createTaskManager`'s options whose resolution doesn't read
+ * `process.env` env vars at all (or only inside the executor
+ * sub-resolution): the constructor's option-bag defaults and the
+ * process/platform dependencies (`spawnFn`/`killFn`/`stateDir`/`config`/
+ * `defaultExecutor`/`listModelsFn`/`platform`/`onEvent`).
+ * @param {Record<string, any>} rawOptions
+ */
+function resolveCoreOptions(rawOptions) {
+  const config = rawOptions.config || {};
+  return {
+    spawnFn: rawOptions.spawnFn ?? spawn,
+    killFn: rawOptions.killFn ?? /** @type {(pid: number, signal: NodeJS.Signals) => void} */ ((pid, signal) => process.kill(pid, signal)),
+    stateDir: rawOptions.stateDir ?? DEFAULT_STATE_DIR,
+    // Caller's defaultExecutor wins when defined; otherwise fall through
+    // to the env → config → resolveExecutor(undefined) chain. The chained
+    // `??` would unconditionally call `resolveExecutor` even on a caller
+    // override (e.g. a test-injected fake executor object), which would
+    // throw because `resolveExecutor` expects a name string.
+    defaultExecutor: rawOptions.defaultExecutor ?? resolveExecutor(process.env.TASKFERRY_DEFAULT_EXECUTOR || config.defaultExecutor),
+    listModelsFn: rawOptions.listModelsFn ?? opencodeExecutor().listModelsFn,
+    platform: rawOptions.platform ?? process.platform,
+    onEvent: rawOptions.onEvent,
+    config,
+  };
+}
+
+/**
+ * The numeric-budget options: the dispatch rate/concurrency caps, the
+ * watchdog timeouts, the advisor session TTL, the activity cache budgets.
+ * All follow the env → config → default chain via
+ * {@link resolvePositiveIntOption} or {@link resolveNonNegativeIntOption}.
+ * @param {Record<string, any>} rawOptions
+ */
+function resolveTimeoutOptions(rawOptions) {
+  const config = rawOptions.config || {};
+  return {
+    maxDispatchesPerWindow: resolvePositiveIntOption(rawOptions.maxDispatchesPerWindow, process.env.TASKFERRY_MAX_DISPATCHES_PER_WINDOW, config.maxDispatchesPerWindow, DEFAULT_MAX_DISPATCHES_PER_WINDOW),
+    dispatchWindowMs: resolvePositiveIntOption(rawOptions.dispatchWindowMs, process.env.TASKFERRY_DISPATCH_WINDOW_MS, config.dispatchWindowMs, DEFAULT_DISPATCH_WINDOW_MS),
+    maxConcurrentTasks: resolvePositiveIntOption(rawOptions.maxConcurrentTasks, process.env.TASKFERRY_MAX_CONCURRENT_TASKS, config.maxConcurrentTasks, DEFAULT_MAX_CONCURRENT_TASKS),
+    advisorSessionTtlMs: resolvePositiveIntOption(rawOptions.advisorSessionTtlMs, process.env.TASKFERRY_ADVISOR_SESSION_TTL_MS, config.advisorSessionTtlMs, DEFAULT_ADVISOR_SESSION_TTL_MS),
+    noOutputTimeoutMs: resolvePositiveIntOption(rawOptions.noOutputTimeoutMs, process.env.TASKFERRY_NO_OUTPUT_TIMEOUT_MS, config.noOutputTimeoutMs, DEFAULT_NO_OUTPUT_TIMEOUT_MS),
+    postOutputNoOutputTimeoutMs: resolvePositiveIntOption(rawOptions.postOutputNoOutputTimeoutMs, process.env.TASKFERRY_POST_OUTPUT_NO_OUTPUT_TIMEOUT_MS, config.postOutputNoOutputTimeoutMs, DEFAULT_POST_OUTPUT_NO_OUTPUT_TIMEOUT_MS),
+    watchdogPollMs: rawOptions.watchdogPollMs ?? DEFAULT_WATCHDOG_POLL_MS,
+    watchdogGraceMs: resolvePositiveIntOption(rawOptions.watchdogGraceMs, process.env.TASKFERRY_WATCHDOG_GRACE_MS, config.watchdogGraceMs, DEFAULT_WATCHDOG_GRACE_MS),
+    cancelGraceMs: resolvePositiveIntOption(rawOptions.cancelGraceMs, process.env.TASKFERRY_CANCEL_GRACE_MS, config.cancelGraceMs, DEFAULT_CANCEL_GRACE_MS),
+    maxWaitMs: rawOptions.maxWaitMs ?? MAX_WAIT_MS,
+    summarizerTimeoutMs: resolveNonNegativeIntOption(rawOptions.summarizerTimeoutMs, process.env.TASKFERRY_SUMMARIZER_TIMEOUT_MS, config.summarizerTimeoutMs, DEFAULT_SUMMARIZER_TIMEOUT_MS),
+    activityMaxWords: resolvePositiveIntOption(rawOptions.activityMaxWords, process.env.TASKFERRY_ACTIVITY_MAX_WORDS, config.activityMaxWords, 75),
+  };
+}
+
+/**
+ * The boolean-toggle options: `activitySummariesEnabled`, `sandboxEnabled`,
+ * `overlayEnabled`. Each has its own env var (`TASKFERRY_ACTIVITY_SUMMARIES`,
+ * `TASKFERRY_DISABLE_SANDBOX`, `TASKFERRY_DISABLE_OVERLAY`) and config key;
+ * the helper unifies the "is 1/true the off or on value" distinction. The
+ * caller's top-level option wins when defined (`rawOptions.X ?? ...`) so a
+ * `{ sandboxEnabled: false }` override skips the env/config fallback --
+ * mirroring the original destructured default's behavior.
+ * @param {Record<string, any>} rawOptions
+ */
+function resolveToggleOptions(rawOptions) {
+  const config = rawOptions.config || {};
+  return {
+    activitySummariesEnabled: rawOptions.activitySummariesEnabled ?? resolveBooleanToggle(process.env.TASKFERRY_ACTIVITY_SUMMARIES, config.activitySummariesEnabled, true),
+    sandboxEnabled: rawOptions.sandboxEnabled ?? resolveBooleanToggle(process.env.TASKFERRY_DISABLE_SANDBOX, config.sandboxEnabled, true, true),
+    overlayEnabled: rawOptions.overlayEnabled ?? resolveBooleanToggle(process.env.TASKFERRY_DISABLE_OVERLAY, config.overlayEnabled, true, true),
+  };
+}
+
+/**
+ * The string option whose default chain crosses env, config, and a
+ * constant: `activitySummaryModel` (the only manager option that does).
+ * @param {Record<string, any>} rawOptions
+ */
+function resolveStringOptions(rawOptions) {
+  const config = rawOptions.config || {};
+  return {
+    activitySummaryModel: rawOptions.activitySummaryModel ?? process.env.TASKFERRY_SUMMARY_MODEL ?? config.summaryModel ?? DEFAULT_SUMMARY_MODEL,
+  };
+}
+
+/**
+ * The simple test-inject seams: every field is a direct
+ * `rawOptions.X ?? DEFAULT` mapping (or, for `rmOverlayTreeFn`, the raw
+ * option, no default). Extracted from {@link resolveFilesystemOptions} so
+ * that helper's `??`/|| count stays under the complexity ceiling.
+ * @param {Record<string, any>} rawOptions
+ */
+function resolveFilesystemSimpleOptions(rawOptions) {
+  return {
+    checkOverlaySupportFn: rawOptions.checkOverlaySupportFn ?? checkOverlaySupport,
+    overlayTmpRoot: rawOptions.overlayTmpRoot ?? os.tmpdir(),
+    runOverlayCommandFn: rawOptions.runOverlayCommandFn ?? defaultOverlayRunCommand,
+    rmOverlayTreeFn: rawOptions.rmOverlayTreeFn,
+    resolveGitCommonDirFn: rawOptions.resolveGitCommonDirFn ?? resolveGitCommonDir,
+    resolveGitDirFn: rawOptions.resolveGitDirFn ?? resolveGitDir,
+    checkBwrapAvailableFn: rawOptions.checkBwrapAvailableFn ?? checkBwrapAvailable,
+    existsFn: rawOptions.existsFn ?? fs.existsSync,
+    statFn: rawOptions.statFn ?? ((/** @type {string} */ p) => { try { return fs.statSync(p); } catch { return null; } }),
+    readdirFn: rawOptions.readdirFn ?? ((/** @type {string} */ p) => fs.readdirSync(p)),
+  };
+}
+
+/**
+ * The derived filesystem options: the allow/deny lists, `runtimeDir`
+ * (derived from `stateDir`), and `cacheDir` (derived from `process.env`).
+ * Each pulls an env-var-or-config-value-or-raw triple, which is two
+ * `??`s per field (one for the raw-options override, one nested for the
+ * env-vs-config fallback inside the parser). Extracted from
+ * {@link resolveFilesystemOptions} for the same complexity reason as
+ * {@link resolveFilesystemSimpleOptions}.
+ * @param {Record<string, any>} rawOptions
+ */
+function resolveFilesystemDerivedOptions(rawOptions) {
+  const config = rawOptions.config || {};
+  return {
+    allowedDirs: rawOptions.allowedDirs ?? parseAllowedDirs(process.env.TASKFERRY_ALLOWED_DIRS ?? config.allowedDirs),
+    envDenylist: rawOptions.envDenylist ?? parseEnvDenylist(process.env.TASKFERRY_ENV_DENYLIST ?? config.envDenylist),
+    runtimeDir: rawOptions.runtimeDir ?? path.join(rawOptions.stateDir ?? DEFAULT_STATE_DIR, "run"),
+    cacheDir: rawOptions.cacheDir ?? resolveCacheDir(process.env),
+  };
+}
+
+/**
+ * The filesystem/inject options: the directories the manager owns
+ * (`runtimeDir`/`cacheDir`/`overlayTmpRoot`), the allow/deny lists, and the
+ * test inject seams (`checkOverlaySupportFn`, `runOverlayCommandFn`,
+ * `rmOverlayTreeFn`, `resolveGitCommonDirFn`, `resolveGitDirFn`,
+ * `checkBwrapAvailableFn`, `existsFn`, `statFn`, `readdirFn`).
+ * `stateDir` is in {@link resolveCoreOptions}; this helper just consumes it
+ * to derive `runtimeDir`.
+ * @param {Record<string, any>} rawOptions
+ */
+function resolveFilesystemOptions(rawOptions) {
+  return {
+    ...resolveFilesystemSimpleOptions(rawOptions),
+    ...resolveFilesystemDerivedOptions(rawOptions),
+  };
+}
+
+/**
+ * Resolves the raw `createTaskManager` options object -- env vars, the
+ * `config` sub-object, and the constructor defaults -- into a flat object
+ * with every key non-undefined. Extracted out of `createTaskManager`'s
+ * parameter destructuring so the factory's own body doesn't carry the
+ * env-var/config/default ternaries that drove the cyclomatic and overall
+ * complexity counts above the rule ceilings.
+ * @param {Record<string, any>} [rawOptions]
+ */
+function resolveTaskManagerOptions(rawOptions = {}) {
+  return {
+    ...resolveCoreOptions(rawOptions),
+    ...resolveTimeoutOptions(rawOptions),
+    ...resolveToggleOptions(rawOptions),
+    ...resolveStringOptions(rawOptions),
+    ...resolveFilesystemOptions(rawOptions),
+  };
+}
+
+export function createTaskManager(options = {}) {
+  return buildTaskManagerWithOptions(resolveTaskManagerOptions(options));
+}
+
+/**
+ * @typedef {ReturnType<typeof resolveTaskManagerOptions>} ResolvedTaskManagerOptions
+ */
+
+/**
+ * The shape of the per-manager context object assembled by
+ * {@link createManagerContext} and threaded through every helper. Declared
+ * explicitly (rather than `ReturnType<typeof createManagerContext>`) so
+ * the helper-function bodies that reference `ctx.X` can be type-checked
+ * before `createManagerContext` itself is parsed.
+ * @typedef {object} ManagerContext
+ * @property {ResolvedTaskManagerOptions} opts
+ * @property {{stateDir: string, LOG_DIR: string, SUMMARY_DIR: string, PROMPT_DIR: string, TASKS_FILE: string, LOCK_FILE: string}} paths
+ * @property {ReturnType<typeof initManagerLimits>} limits
+ * @property {ReturnType<typeof initManagerState>} state
+ * @property {ReturnType<typeof initManagerEvents>} events
+ * @property {ReturnType<typeof initManagerMaps>} maps
+ * @property {ReturnType<typeof initManagerSchedulers>} schedulers
+ * @property {ReturnType<typeof buildManagerEnvHelpers>} env
+ * @property {ReturnType<typeof buildManagerActivity>} activity
+ * @property {ReturnType<typeof buildManagerInternalHelpers>} helpers
+ * @property {Record<string, any>} api
+ */
+
+/**
+ * @param {ResolvedTaskManagerOptions} opts
+ * @returns {{stateDir: string, LOG_DIR: string, SUMMARY_DIR: string, PROMPT_DIR: string, TASKS_FILE: string, LOCK_FILE: string}}
+ */
+function initManagerPaths(opts) {
+  return {
+    stateDir: opts.stateDir,
+    LOG_DIR: path.join(opts.stateDir, "logs"),
+    SUMMARY_DIR: path.join(opts.stateDir, "summaries"),
+    PROMPT_DIR: path.join(opts.stateDir, "prompts"),
+    TASKS_FILE: path.join(opts.stateDir, "tasks.json"),
+    LOCK_FILE: path.join(opts.stateDir, "tasks.lock"),
+  };
+}
+
+/**
+ * Creates the state-dir subdirectories the manager owns, with the 0o700
+ * permission bit on every level. The `mkdirSync`+`chmodSync` pair is the
+ * documented fix for a `mkdirSync({mode:0o700})` whose parent path was
+ * already on disk without that bit set: the inner dirs then inherit
+ * whatever umask gave the parent, not the requested 0o700.
+ * @param {{stateDir: string, LOG_DIR: string, SUMMARY_DIR: string, PROMPT_DIR: string}} paths
+ */
+function ensureManagerDirectories(paths) {
+  for (const dir of [paths.stateDir, paths.LOG_DIR, paths.SUMMARY_DIR, paths.PROMPT_DIR]) {
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    fs.chmodSync(dir, 0o700);
+  }
+}
+
+/**
+ * @param {ResolvedTaskManagerOptions} opts
+ */
+function initManagerLimits(opts) {
   // Summarizer sub-tasks spawned by the activity-refresh path share the
   // launch queue and runningCount with real dispatches. Reserving half the
   // pool stops a burst of lifecycle-triggered summaries from occupying every
   // concurrency slot and starving real dispatches.
-  const summaryConcurrencyLimit = Math.max(1, Math.floor(concurrencyLimit / 2));
-  const advisorTtl = positiveInteger(advisorSessionTtlMs, DEFAULT_ADVISOR_SESSION_TTL_MS);
-  const noOutputTimeout = positiveInteger(noOutputTimeoutMs, DEFAULT_NO_OUTPUT_TIMEOUT_MS);
-  const postOutputNoOutputTimeout = positiveInteger(postOutputNoOutputTimeoutMs, DEFAULT_POST_OUTPUT_NO_OUTPUT_TIMEOUT_MS);
-  const watchdogPoll = positiveInteger(watchdogPollMs, DEFAULT_WATCHDOG_POLL_MS);
-  const watchdogGrace = positiveInteger(watchdogGraceMs, DEFAULT_WATCHDOG_GRACE_MS);
-  const cancelGrace = positiveInteger(cancelGraceMs, DEFAULT_CANCEL_GRACE_MS);
-  const maxWait = positiveInteger(maxWaitMs, MAX_WAIT_MS);
-  const summarizerTimeout = nonNegativeInteger(summarizerTimeoutMs, DEFAULT_SUMMARIZER_TIMEOUT_MS);
-  const activityWords = positiveInteger(activityMaxWords, 75);
-  let eventSequence = 0;
+  return {
+    dispatchLimit: positiveInteger(opts.maxDispatchesPerWindow, DEFAULT_MAX_DISPATCHES_PER_WINDOW),
+    dispatchWindow: positiveInteger(opts.dispatchWindowMs, DEFAULT_DISPATCH_WINDOW_MS),
+    concurrencyLimit: positiveInteger(opts.maxConcurrentTasks, DEFAULT_MAX_CONCURRENT_TASKS),
+    summaryConcurrencyLimit: Math.max(1, Math.floor(positiveInteger(opts.maxConcurrentTasks, DEFAULT_MAX_CONCURRENT_TASKS) / 2)),
+    advisorTtl: positiveInteger(opts.advisorSessionTtlMs, DEFAULT_ADVISOR_SESSION_TTL_MS),
+    noOutputTimeout: positiveInteger(opts.noOutputTimeoutMs, DEFAULT_NO_OUTPUT_TIMEOUT_MS),
+    postOutputNoOutputTimeout: positiveInteger(opts.postOutputNoOutputTimeoutMs, DEFAULT_POST_OUTPUT_NO_OUTPUT_TIMEOUT_MS),
+    watchdogPoll: positiveInteger(opts.watchdogPollMs, DEFAULT_WATCHDOG_POLL_MS),
+    watchdogGrace: positiveInteger(opts.watchdogGraceMs, DEFAULT_WATCHDOG_GRACE_MS),
+    cancelGrace: positiveInteger(opts.cancelGraceMs, DEFAULT_CANCEL_GRACE_MS),
+    maxWait: positiveInteger(opts.maxWaitMs, MAX_WAIT_MS),
+    summarizerTimeout: nonNegativeInteger(opts.summarizerTimeoutMs, DEFAULT_SUMMARIZER_TIMEOUT_MS),
+    activityWords: positiveInteger(opts.activityMaxWords, 75),
+  };
+}
+
+/**
+ * The bundle of `let` bindings the original factory carried: the monotonic
+ * event sequence, the launch scheduler's timer + running count, the
+ * activity-subscription counter, and the load-failure error pointer. Kept
+ * in a plain mutable object so the helper functions can read/write them
+ * via property access (instead of the original closures' `let`).
+ */
+function initManagerState() {
+  return {
+    eventSequence: 0,
+    launchTimer: null,
+    runningCount: 0,
+    activitySummarySubscriptions: 0,
+    /** @type {Error|null} */
+    stateLoadError: null,
+  };
+}
+
+/**
+ * @param {ResolvedTaskManagerOptions} opts
+ * @param {{eventSequence: number}} state
+ */
+function initManagerEvents(opts, state) {
   const taskEvents = createTaskEvents((event) => {
-    eventSequence = Math.max(eventSequence, /** @type {{sequence: number}} */ (event).sequence);
-    if (onEvent) onEvent(event);
+    state.eventSequence = Math.max(state.eventSequence, /** @type {{sequence: number}} */ (event).sequence);
+    if (opts.onEvent) opts.onEvent(event);
   });
+  return { taskEvents };
+}
 
-  /** @type {{checked: boolean, available: boolean, reason?: string}|null} */
-  /** @type {{available: ({checked: boolean, available: boolean, reason?: string}|null)}} */
+/**
+ * In-memory state of the manager. Each map/set is a fresh instance, just
+ * like the original factory's. The `runningCount`/`launchTimer`/`eventSequence`
+ * bindings live in `state` (returned by {@link initManagerState}), not here.
+ */
+function initManagerMaps() {
+  return {
+    tasks: new Map(),
+    escalationTimers: new Map(),
+    runningWatchers: new Map(),
+    runningWatcherState: new Map(),
+    waiters: new Map(),
+    advisorSessions: new Map(),
+    pendingLaunches: new Map(),
+    launchQueue: [],
+    launchTimes: [],
+    modelsCache: new Map(),
+    modelsCacheInFlight: new Map(),
+    activitySubscriptions: new Map(),
+    logHasEventCache: new Set(),
+  };
+}
+
+/**
+ * @param {{launchTimer: NodeJS.Timeout|null, runningCount: number, eventSequence: number, activitySummarySubscriptions: number}} state
+ * @param {{launchTimes: number[], launchQueue: string[]}} maps
+ */
+function initManagerSchedulers(state, maps) {
+  return {
+    // Getter/setter pair lets the module-level launch helpers
+    // read/write `launchTimer` and `runningCount` (the factory's own
+    // `let` bindings) without closing over the factory, while
+    // `launchTimes`/`launchQueue` are shared by reference.
+    launchScheduler: {
+      launchTimes: maps.launchTimes,
+      launchQueue: maps.launchQueue,
+      get runningCount() { return state.runningCount; },
+      get launchTimer() { return state.launchTimer; },
+      set launchTimer(v) { state.launchTimer = v; },
+    },
+    // Mutable bindings the extracted activity-schedule helper needs
+    // read/write access to (the monotonic event sequence and the
+    // summary-subscription count), exposed via getters/setters so the
+    // helper doesn't close over the factory.
+    activityScheduleState: {
+      get eventSequence() { return state.eventSequence; },
+      set eventSequence(v) { state.eventSequence = v; },
+      get activitySummarySubscriptions() { return state.activitySummarySubscriptions; },
+    },
+  };
+}
+
+// Re-probe a negative overlay-support result after this many ms so a
+// transient failure (bwrap version-too-old mid-upgrade, PATH temporarily
+// missing the binary, a freshly-installed package not yet on the daemon's
+// PATH, etc.) can self-heal without a full daemon restart. A positive
+// result is cached forever -- once the host supports the overlay, it
+// stays supported unless someone uninstalls bwrap, which is not a
+// transient failure.
+const OVERLAY_SUPPORT_TTL_MS = 60_000;
+
+// A log is append-only, so once a parseable event has landed it's there
+// for good -- cache that fact per log file so a task polled repeatedly
+// while running doesn't pay the open+read+line-by-line-JSON.parse cost on
+// every single status() call after its first event, just the stat.
+const LOG_ACTIVITY_SCAN_BYTES = 64 * 1024;
+
+/**
+ * The bundle of sandbox-/env-/overlay-related helpers that bind the
+ * factory's `bwrapState`/`overlayState` and the inject seams the
+ * sandboxed-spawn path needs. Each entry is a closure over `ctx` so the
+ * callers see the same API as the original factory.
+ * @param {ManagerContext} ctx
+ */
+function buildManagerEnvHelpers(ctx) {
   const bwrapState = { available: null };
-  function requireBwrap() {
-    return requireBwrapCapability(bwrapState, { checkBwrapAvailableFn });
-  }
-
-  /** @type {{supported: boolean, reason?: string, checkedAt: number}|null} */
-  /** @type {{support: ({supported: boolean, reason?: string, checkedAt: number}|null)}} */
   const overlayState = { support: null };
-  // Re-probe a negative result after this many ms so a transient failure
-  // (bwrap version-too-old mid-upgrade, PATH temporarily missing the binary,
-  // a freshly-installed package not yet on the daemon's PATH, etc.) can
-  // self-heal without a full daemon restart. A positive result is cached
-  // forever — once the host supports the overlay, it stays supported unless
-  // someone uninstalls bwrap, which is not a transient failure.
-  const OVERLAY_SUPPORT_TTL_MS = 60_000;
-  function requireOverlaySupport() {
-    return requireOverlayCapability(overlayState, { checkOverlaySupportFn, OVERLAY_SUPPORT_TTL_MS });
-  }
-
   /**
-   * Removes a task's overlay using the tmp root recorded when that overlay
-   * was created. A failed removal leaves overlayDirs intact for the startup
-   * sweep to retry.
    * @param {{overlayDirs?: {root:string,tmpRoot:string}|null}} task
    * @returns {boolean} whether cleanup failed
    */
-  function releaseOverlay(task) {
-    return releaseOverlayForTask(task, { rmOverlayTreeFn });
-  }
-
-  /**
-   * @param {Task} finishedTask
-   */
-  function extractChangesetForTask(finishedTask) {
-    extractChangesetForTaskRecord(finishedTask, { stateDir, runtimeDir, existsFn, runOverlayCommandFn, persistTask, releaseOverlay });
-  }
-
+  const releaseOverlay = (task) => releaseOverlayForTask(task, { rmOverlayTreeFn: ctx.opts.rmOverlayTreeFn });
   /**
    * Builds the final base environment for a spawned child: the daemon's own
    * ambient environment (read fresh at call time), overlaid with the
@@ -2861,657 +3120,360 @@ export function createTaskManager({
    * @param {NodeJS.ProcessEnv} [env]
    * @returns {NodeJS.ProcessEnv}
    */
-  function sanitizedEnvironment(env = {}) {
-    return buildSanitizedEnvironment(env, { envDenylist });
-  }
-
-  /** @param {NodeJS.ProcessEnv} [env] */
-  function dispatchEnvironment(env) {
-    return buildDispatchEnvironment({ sanitizedEnvironment }, env);
-  }
-
-  /** @param {NodeJS.ProcessEnv} [env] */
-  function summaryEnvironment(env) {
-    return buildSummaryEnvironment({ sanitizedEnvironment }, env);
-  }
-
-  for (const dir of [stateDir, LOG_DIR, SUMMARY_DIR, PROMPT_DIR]) {
-    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-    fs.chmodSync(dir, 0o700);
-  }
-
-  // In-memory state is the source of truth for queued and running tasks while this server
-  // process is alive: process exit is delivered via the 'exit' event on our
-  // own child_process handle, which only exists in the process that spawned
-  // it. tasks.json is a best-effort record for taskferry list/debugging across
-  // a server restart, not a re-attach mechanism. A restarted server has no
-  // handle to a child spawned by its previous instance, so any task still
-  // "running" in the file when we reload it is relabeled "unknown" rather
-  // than reported as a stale, possibly-wrong "running".
-  /** @type {Map<string, Task>} */
-  const tasks = new Map();
-
-  // Escalation timers for taskferry cancel, keyed by task id. Kept out of the
-  // task object itself: task objects get JSON.stringify'd wholesale in
-  // persist(), and a Timeout isn't serializable data.
-  /** @type {Map<string, NodeJS.Timeout>} */
-  const escalationTimers = new Map();
-
-  // No-output watchdog tickers, keyed by task id. Each one polls the task's
-  // log file on a fixed interval; if no parseable event has landed by the
-  // configured deadline, failRunningTask() escalates the child. Same
-  // "not in the task object" reason as escalationTimers.
-  const runningWatchers = new Map();
-
-  // Per-task incremental-scan progress for the running watcher, exposing
-  // bytesRead and carry to classifyTrailingLogFailure() at exit time so the
-  // trailing reclassification only re-reads bytes the watcher hadn't seen
-  // yet, not the whole log from scratch.
-  const runningWatcherState = new Map();
-
-  // Pending `wait` callbacks, keyed by task id. Lets a single `taskferry wait`
-  // call block until the child's exit event fires (or a timeout elapses)
-  // instead of the caller round-tripping taskferry status in a loop. Not
-  // persisted or shared across a server restart, same as the tasks map itself.
-  /** @type {Map<string, Array<(timedOut?: boolean) => void>>} */
-  const waiters = new Map();
-
-  // Advisor session recency, keyed by opencode session id. Process-lifetime
-  // only, same as `tasks` and `waiters` -- a taskferry restart means every
-  // session id is "unknown," which resolveAdvisorSession() treats identically
-  // to "expired" rather than special-casing it. Prevents taskferry advisor
-  // from silently resuming a conversation whose prompt cache has gone cold.
-  /** @type {Map<string, number>} */
-  const advisorSessions = new Map();
-
-  // Queued launches retain full prompts only in memory. Persisted queued tasks
-  // become unknown on restart, just like running tasks, rather than launching
-  // a prompt the replacement server cannot safely reconstruct.
-  /** @type {Map<string, LaunchSpec>} */
-  const pendingLaunches = new Map();
-  /** @type {string[]} */
-  const launchQueue = [];
-  /** @type {number[]} */
-  const launchTimes = [];
-  /** @type {NodeJS.Timeout|null} */
-  let launchTimer = null;
-  let runningCount = 0;
-  // Mutable scheduler state handed to the module-level launch helpers. The
-  // getter/setter pair lets the helpers read/write `launchTimer` and
-  // `runningCount` (the factory's own `let` bindings) without closing over
-  // the factory, while `launchTimes`/`launchQueue` are shared by reference.
-  const launchScheduler = {
-    launchTimes,
-    launchQueue,
-    get runningCount() { return runningCount; },
-    get launchTimer() { return launchTimer; },
-    set launchTimer(v) { launchTimer = v; },
-  };
-  // Per-caller cache of provider model listings: keyed by a fingerprint of
-  // the caller env's model-relevant vars (provider API keys, opencode
-  // config-path overrides, pi agent dir), not by time alone. Two callers
-  // with different credentials must not read each other's listings -- the
-  // shared single-entry cache used to let caller A's listModelsFn output
-  // satisfy caller B's availability check (and let two concurrent populate
-  // writes interleave). The 5-minute TTL still applies per entry.
-  // `modelsCacheInFlight` coalesces concurrent reads for the same key so
-  // the underlying `opencode models` shell-out runs at most once per
-  // fingerprint per TTL window.
-  /** @type {Map<string, {expiresAt: number, output: string}>} */
-  const modelsCache = new Map();
-  /** @type {Map<string, Promise<{expiresAt: number, output: string}>>} */
-  const modelsCacheInFlight = new Map();
-  let activitySummarySubscriptions = 0;
-  /** @type {Map<string, Set<boolean>>} */
-  const activitySubscriptions = new Map();
-  /** @type {Error|null} */
-  let stateLoadError = null;
-
-  const activityCache = createActivityCache({
-    summariesEnabled: false,
-    summarizerTimeoutMs: summarizerTimeout,
-    summaryModel: activitySummaryModel,
-    maxWords: activityWords,
-    snapshot: (task) => readActivitySnapshot(task.logPath || ""),
-    summarize: ({ task, maxWords, previousActivity }) => summarizeActivity(task.id, maxWords, previousActivity),
-  });
-
-  /**
-   * Mutable bindings the extracted activity-schedule helper needs read/write
-   * access to (the monotonic event sequence and the summary-subscription
-   * count), exposed via getters/setters so the helper doesn't close over the
-   * factory. Same pattern as `launchScheduler` above.
-   */
-  const activityScheduleState = {
-    get eventSequence() { return eventSequence; },
-    set eventSequence(v) { eventSequence = v; },
-    get activitySummarySubscriptions() { return activitySummarySubscriptions; },
-  };
-
-  /**
-   * @param {Task} task
-   * @param {{force?: boolean}} [options]
-   */
-  function scheduleActivity(task, { force = false } = {}) {
-    return scheduleActivityFor(task, { force }, { onEvent, activitySubscriptions, activitySummariesEnabled, activityCache, state: activityScheduleState });
-  }
-
-  loadPersistedTasks({
-    TASKS_FILE,
-    overlayTmpRoot,
-    tasks,
-    taskEvents,
-    setStateLoadError: (err) => {
-      stateLoadError = err;
-    },
-  });
-
-  // Scrub prompt scratch files left behind by a daemon crash or forced
-  // restart. Each oversized dispatch writes its prompt to PROMPT_DIR as
-  // `${task.id}.prompt.txt` (mode 0o600) and removes it from the task's own
-  // exit/error paths -- but a SIGKILL of the daemon mid-task skips both
-  // cleanup paths and orphans the file forever. Anything in PROMPT_DIR that
-  // doesn't belong to a task this process can still run is leftover from such
-  // a crash; deleting it at boot keeps the directory from accumulating
-  // unread prompt contents across restarts.
-  function sweepOrphanedPromptFiles() {
-    sweepOrphanedPromptFilesFor({ PROMPT_DIR, tasks });
-  }
-  sweepOrphanedPromptFiles();
-
-  // Mirrors sweepOrphanedPromptFiles() above: a daemon that crashed after an
-  // overlay was created but before its cleanup (reject/accept, or the
-  // advisor auto-reject in extractChangesetForTask()) ever ran leaves a
-  // /tmp/taskferry-cow-<task-id> dir behind. /tmp being a tmpfs clears these
-  // on a real reboot for free; this only matters for a same-boot daemon
-  // restart. A task whose changesetStatus is still "pending" legitimately
-  // owns its overlay and must never be swept here -- only unknown task ids
-  // and already-resolved (accepted/rejected) tasks with a leftover
-  // overlayDirs (their own cleanupOverlay() call crashed mid-removal) are
-  // orphans.
-  function sweepOrphanedOverlays() {
-    sweepOrphanedOverlaysFor({ tasks, overlayTmpRoot, releaseOverlay, persistTask });
-  }
-  sweepOrphanedOverlays();
-
-  function ensureStateLoaded() {
-    ensureStateLoadedFor({ get stateLoadError() { return stateLoadError; }, TASKS_FILE });
-  }
-
-  /**
-   * @param {string} taskId
-   */
-  function persistTask(taskId) {
-    persistTaskRecord(taskId, { LOCK_FILE, TASKS_FILE, stateDir, tasks, taskEvents });
-  }
-
-  
-
-  
-
-  // Minimal per-row schema for taskferry list: an agent scanning a task list
-  // needs id/status/model/startedAt to decide what to poll next, not the full
-  // detail (directory, pid, logPath, ...) that summarize() carries for a
-  // single-task lookup. failureReason is included despite that otherwise-thin
-  // schema because a "crashed" status alone doesn't tell a scanning agent
-  // whether the task is worth retrying immediately (a provider failure bucket
-  // such as rate_limited, payment_required, or authentication_failed)
-  // or not (any other crash) -- omitting it here forces a task.status
-  // round-trip per crashed row just to learn that.
-  
-
-  
-
-  /**
-   * @param {string|undefined} sessionId
-   * @returns {{sessionId: string|undefined, reset: boolean, previousSessionId: string|undefined}}
-   */
-  function resolveAdvisorSession(sessionId) {
-    return resolveAdvisorSessionFor(sessionId, { advisorSessions, advisorTtl });
-  }
-
-  /** @param {string|undefined} sessionId */
-  function touchAdvisorSession(sessionId) {
-    touchAdvisorSessionFor(sessionId, { advisorSessions });
-  }
-
-  /**
-   * @param {object} params
-   * @param {string} params.prompt
-   * @param {string} params.directory
-   * @param {string} [params.model]
-   * @param {string} [params.variant]
-   * @param {string|undefined} [params.sessionId]
-   * @param {string|undefined} [params.originSessionId]
-   * @param {NodeJS.ProcessEnv} [params.env]
-   * @param {boolean} [params.internal]
-   * @param {string|null} [params.finalMarker]
-   * @param {boolean} [params.noSandbox]
-   * @param {boolean} [params.noOverlay]
-   * @param {"dispatch"|"advisor"} [params.role]
-   * @param {string[]} [params.allowedDirs] - extra directories bound read-write for this dispatch only, on
-   *   top of the manager-level default (see createTaskManager's `allowedDirs` option)
-   * @param {string} [params.executor] - "opencode" | "pi". When omitted on a `sessionId` resume, inherits
-   *   the executor that originally created the session (a different executor can't continue another CLI's
-   *   session file); otherwise defaults to the manager's defaultExecutor (itself the result of
-   *   `resolveExecutor(undefined)` at construction). An unknown name throws before any validation runs, so a
-   *   misrouted CLI/RPC call fails fast rather than silently picking the default.
-   * @returns {TaskSummary & {next: string}}
-   */
-  function dispatch({ prompt, directory, model, variant, sessionId, internal = false, finalMarker = null, originSessionId, noSandbox = false, noOverlay = false, allowedDirs: dispatchAllowedDirs, executor: executorName, env, role = "dispatch" }) {
-    return dispatchTask({ prompt, directory, model, variant, sessionId, internal, finalMarker, originSessionId, noSandbox, noOverlay, env, role, allowedDirs: dispatchAllowedDirs, executor: executorName }, { ensureStateLoaded, tasks, defaultExecutor, LOG_DIR, persistTask, pendingLaunches, launchQueue, launchQueuedTasks });
-  }
-
-  
-
-  /**
-   * Validate `model` against opencode's installed-models list, NOT against
-   * the dispatch-default executor's list. `summarizeTask()` deliberately
-   * hardcodes `opencodeExecutor()` for the actual summary work -- a separate
-   * scope boundary from the dispatch-default executor flip -- so a model
-   * available in pi but not in opencode (e.g. an opencode-only Zen model
-   * like the default `opencode/mimo-v2.5-free`) would silently fail the
-   * check on a default pi install. The cached `modelsCache` is shared with
-   * the check, so a follow-up dispatch doesn't re-shell-out for the list
-   * within the 5-minute TTL.
-   *
-   * @param {string} model
-   * @param {NodeJS.ProcessEnv} env
-   */
-  async function summaryModelAvailable(model, env) {
-    await checkModelAvailable(model, env, { modelsCache, modelsCacheInFlight, listModelsFn });
-  }
-
-  /** Shared upfront readiness check for both the direct `summary --mode
-   * activity` path and `watch --summaries`'s subscribe-time gate: throws the
-   * same error `summaryModelAvailable` throws, so a caller can fail fast
-   * before doing any work. */
-  async function checkSummaryModelReady() {
-    await checkSummaryModelReadyFor({ summaryEnvironment, summaryModelAvailable, activitySummaryModel });
-  }
-
-  /**
-   * Drives a single secondary-model summary call from the activity cache:
-   * spawns the summary child, polls it, extracts the session id and message,
-   * and -- when the activity cache had a prior summary session on file and
-   * the resulting session id doesn't match it -- retries with a fresh
-   * session so the summarize call stays a best-effort feature rather than
-   * poisoning the underlying task on a stale-cache or unknown-session-id
-   * condition. Returns the model output text and the opencode session id of
-   * the call that produced it (for the cache to persist for the next turn).
-   *
-   * @param {string} taskId
-   * @param {number} maxWords
-   * @param {string|null} [previousActivity]
-   * @returns {Promise<{text: string, sessionId: string|null}>}
-   */
-  async function summarizeActivity(taskId, maxWords, previousActivity) {
-    // Thin wrapper over the extracted module-level pipeline (see
-    // `runSummarizeActivity`/`summarizeActivityAttempt`/`runContinuationRetry`
-    // /`runSummarizeActivityAttempt`), threading the handful of closure
-    // dependencies it needs in explicitly.
-    const ctx = {
-      checkSummaryModelReady,
-      activityCache,
-      summarizeTask,
-      poll,
-      tasks,
-      result,
-      cancel,
-      MAX_WAIT_MS,
-    };
-    return runSummarizeActivity(ctx, taskId, maxWords, previousActivity);
-  }
-
-  /** @param {string} taskId @param {number} maxWords @returns {Promise<object>} */
-  async function activitySummary(taskId, maxWords) {
-    return activitySummaryFor(taskId, maxWords, { ensureStateLoaded, tasks, noSuchTask, activityCache, activitySummariesEnabled });
-  }
-
-  /** @param {string} taskId @param {{maxWords?: number, mode?: string, env?: NodeJS.ProcessEnv}} [options] */
-  function summarizeRequest(taskId, options = {}) {
-    return summarizeRequestFor(taskId, options, { activitySummary, activityWords, summarizeTask });
-  }
-
-  
-
-  
-
-  /**
-   * @param {string} taskId
-   * @param {{maxWords?: number, allowPromptFallback?: boolean, previousActivity?: string|null, summarySessionId?: string|null, lastSummarizedWatermark?: number|null, respectConcurrencyReserve?: boolean, env?: NodeJS.ProcessEnv}} [options]
-   * @returns {Promise<{sourceTaskId: string, sourceStatus: string, summary?: string, help?: string, capturedAt?: string, sourceLogBytes?: number, summaryInputBytes?: number, next?: string, summaryTask?: {id: string, status: string, model: string}}>}
-   */
-  async function summarizeTask(taskId, options = {}) {
-    // Thin wrapper over the extracted module-level pipeline; the handful of
-    // closure dependencies it needs are threaded in explicitly via `ctx`.
-    return summarizeTaskFor(taskId, options, {
-      ensureStateLoaded,
-      tasks,
-      noSuchTask,
-      summaryConcurrencyLimit,
-      activityCache,
-      activitySummaryModel,
-      summaryModelAvailable,
-      readNarrationExcerpt,
-      LOG_DIR,
-      SUMMARY_DIR,
-      persistTask,
-      pendingLaunches,
-      opencodeExecutor,
-      launchQueue,
-      launchQueuedTasks,
-    });
-  }
-
-  function launchQueuedTasks() {
-    runLaunchQueuedTasks(launchScheduler, {
-      dispatchLimit,
-      dispatchWindow,
-      concurrencyLimit,
-      tasks,
-      startTask,
-      reschedule: launchQueuedTasks,
-    });
-  }
-
-  /** @param {Task} task */
-  /**
-   * Spawns a queued launch's worker process. The launch's pre-parsed
-   * metadata (target dir, prompt-file routing, buildSpawnArgs output) comes
-   * from resolveStartTaskLaunch; the actual spawn + child lifecycle is
-   * delegated to the module-level helpers below, which take every factory
-   * closure dependency explicitly via `ctx`.
-   * @param {Task} task
-   */
-  function startTask(task) {
-    // Thin wrapper over the extracted module-level spawn pipeline (see
-    // `startTaskFor`); every factory closure dependency is threaded in
-    // explicitly via `ctx`.
-    return startTaskFor(task, {
-      pendingLaunches,
-      SUMMARY_DIR,
-      PROMPT_DIR,
-      spawnFn,
-      runOverlayCommandFn,
-      sandboxEnabled,
-      platform,
-      overlayEnabled,
-      overlayTmpRoot,
-      allowedDirs,
-      stateDir,
-      cacheDir,
-      runtimeDir,
-      existsFn,
-      statFn,
-      readdirFn,
-      resolveGitCommonDirFn,
-      resolveGitDirFn,
-      requireBwrap,
-      requireOverlaySupport,
-      dispatchEnvironment,
-      summaryEnvironment,
-      settleWaiters,
-      launchQueuedTasks,
-      persistTask,
-      scheduleActivity,
-      classifyTrailingLogFailure,
-      startRunningWatcher,
-      stopRunningWatcher,
-      readSessionIdFromLog,
-      evaluateOutputCompleteness,
-      extractChangesetForTask,
-      sendSignal,
-      activityCache,
-      logHasEventCache,
-      escalationTimers,
-      tasks,
-      decRunning: () => { runningCount--; },
-      incRunning: () => { runningCount++; },
-    });
-  }
-
-  /**
-   * @param {string} taskId
-   * @param {{graceMs?: number}} [options]
-   * @returns {TaskSummary & {note: string}}
-   */
-  function cancel(taskId, { graceMs = cancelGrace } = {}) {
-    return cancelTask(taskId, { graceMs }, { ensureStateLoaded, tasks, noSuchTask, launchScheduler, pendingLaunches, persistTask, scheduleActivity, activityCache, logHasEventCache, settleWaiters, stopRunningWatcher, escalationTimers, sendSignal });
-  }
-
-  /** @param {Task} task */
-  function hasLiveOverlay(task) {
-    return hasLiveOverlayForTask(task, { existsFn });
-  }
-
-  /**
-   * @param {string} taskId
-   * @returns {{taskId: string, changesetStatus: string, applied: boolean, reason?: string|null, cleanupFailed?: boolean}}
-   */
-  function accept(taskId) {
-    return acceptTaskChangeset(taskId, { ensureStateLoaded, tasks, noSuchTask, existsFn, hasLiveOverlay, stateDir, runtimeDir, runOverlayCommandFn, persistTask, releaseOverlay });
-  }
-
-  /**
-   * @param {string} taskId
-   * @returns {{taskId: string, changesetStatus: string, cleanupFailed?: boolean}}
-   */
-  function reject(taskId) {
-    return rejectTaskChangeset(taskId, { ensureStateLoaded, tasks, noSuchTask, persistTask, releaseOverlay });
-  }
-
-  /** @param {string} taskId */
-  function stopRunningWatcher(taskId) {
-    stopRunningWatcherFor(taskId, { runningWatchers, runningWatcherState });
-  }
-
-  // Forces a running task to stop for a reason other than user cancellation
-  // (watchdog timeout, or provider-exhaustion detection added in Task 6).
-  // Mirrors cancel()'s SIGTERM-then-SIGKILL escalation, but records
-  // failureReason instead of cancelRequested so the exit handler's status
-  // computation (unchanged) still lands on "crashed", distinguishable from a
-  // user-requested "cancelled".
-  /**
-   * @param {Task} task
-   * @param {string} failureReason
-   * @param {string} [failureDetail]
-   */
-  function failRunningTask(task, failureReason, failureDetail) {
-    failRunningTaskFor(task, failureReason, { stopRunningWatcher, persistTask, sendSignal, escalationTimers, tasks, watchdogGrace }, failureDetail);
-  }
-
-  // classifyProviderFailure() only ever runs from the watcher's interval
-  // tick, so a provider-error event that lands after the last tick but
-  // before/at process exit would otherwise never be classified and silently
-  // lose the failureReason (issue #81). Rather than re-read the whole log from
-  // scratch (the cost startRunningWatcher's incremental byte-offset
-  // reader exists to avoid), only the bytes the watcher hadn't seen yet
-  // are read here, concatenated with whatever partial line the watcher
-  // was still carrying -- which is empty when the watcher had been
-  // keeping up, and the whole file otherwise.
-  /** @param {Task} task */
-  function classifyTrailingLogFailure(task) {
-    classifyTrailingLogFailureFor(task, { runningWatcherState, resolveExecutor });
-  }
-
-  /** @param {Task} task */
-  function startRunningWatcher(task) {
-    startRunningWatcherFor(task, { noOutputTimeout, runningWatcherState, tasks, stopRunningWatcher, failRunningTask, scheduleActivity, postOutputNoOutputTimeout, watchdogPoll, runningWatchers });
-  }
-
-  // Targets the process group (negative pid), which reaches opencode and any
-  // subprocess it spawned (e.g. a bash command it's mid-way through running),
-  // since dispatch() makes the child a process group leader for exactly this.
-  // Falls back to the plain pid if group signaling isn't available (ESRCH on
-  // -pid can mean the group is already gone even though a stray pid isn't,
-  // though in practice these move together since detached: true makes them
-  // the same process).
-  /**
-   * @param {number} pid
-   * @param {NodeJS.Signals} signal
-   */
-  function sendSignal(pid, signal) {
-    sendSignalToProcess(pid, signal, { killFn });
-  }
-
-  // Distinguishes "opencode never wrote a byte" (still starting up, or stuck
-  // before its first event -- e.g. hung on a usage-limit retry) from "wrote
-  // bytes but no parseable event yet" from "at least one event landed". A
-  // caller polling taskferry status on a task that's been "running" for a
-  // long time can use this to tell a genuinely stuck process apart from one
-  // that's just slow, without waiting out a full taskferry wait timeout.
-  const LOG_ACTIVITY_SCAN_BYTES = 64 * 1024;
-  // A log is append-only, so once a parseable event has landed it's there
-  // for good -- cache that fact per log file so a task polled repeatedly
-  // while running doesn't pay the open+read+line-by-line-JSON.parse cost on
-  // every single status() call after its first event, just the stat.
-  /** @type {Set<string>} */
-  const logHasEventCache = new Set();
-  /**
-   * @param {string} logPath
-   * @returns {LogActivity}
-   */
-  function logActivity(logPath) {
-    return computeLogActivity(logPath, { logHasEventCache, LOG_ACTIVITY_SCAN_BYTES });
-  }
-
-  /**
-   * @param {string} taskId
-   * @returns {TaskStatus}
-   */
-  function status(taskId) {
-    return statusFor(taskId, { ensureStateLoaded, tasks, noSuchTask, logActivity });
-  }
-
-  /**
-   * @param {string} taskId
-   * @returns {string}
-   */
-  function taskDirectory(taskId) {
-    return taskDirectoryFor(taskId, { ensureStateLoaded, tasks, noSuchTask });
-  }
-
-  /**
-   * @param {string} taskId
-   * @param {{timeoutMs?: number, tailChars?: number}} [options]
-   * @returns {Promise<TaskStatus>}
-   */
-  function poll(taskId, { timeoutMs, tailChars } = {}) {
-    return pollTask(taskId, { timeoutMs, tailChars }, { ensureStateLoaded, tasks, noSuchTask, waiters });
-  }
-
-  /**
-   * @param {object} [params]
-   * @param {string} [params.prompt]
-   * @param {string} [params.directory]
-   * @param {string} [params.model]
-   * @param {string} [params.variant]
-   * @param {string} [params.sessionId]
-   * @param {number} [params.timeoutMs]
-   * @param {string} [params.executor] - optional "opencode" | "pi" forwarded to dispatch().
-   * @param {NodeJS.ProcessEnv} [params.env] - caller environment forwarded to the worker.
-   */
-  async function advisor({ prompt, directory, model, variant, sessionId, timeoutMs, executor, env } = {}) {
-    // Thin wrapper over the extracted module-level pipeline (see
-    // `runAdvisor`/`dispatchAdvisorTask`/`buildAdvisorActiveResponse`/
-    // `buildAdvisorSettledResponse`), threading the closure dependencies it
-    // needs in explicitly. `role: "advisor"` keeps overlay mandatory.
-    const ctx = {
-      ensureStateLoaded,
-      resolveAdvisorSession,
-      dispatch,
-      errMessage,
-      poll,
-      maxWait,
-      readSessionIdFromLog,
-      touchAdvisorSession,
-      result,
-    };
-    return runAdvisor(ctx, { prompt, directory, model, variant, sessionId, timeoutMs, executor, env });
-  }
-
-  /** @param {string} taskId */
-  function settleWaiters(taskId) {
-    settleWaitersFor(taskId, { waiters });
-  }
-
-  function list() {
-    return listTasks({ ensureStateLoaded, tasks });
-  }
-
-  
-
-  
-
-  
-
-  
-
-  /**
-   * @param {string} taskId
-   * @param {{chars?: number}} [options]
-   */
-  function tail(taskId, { chars = 1000 } = {}) {
-    return tailTask(taskId, { chars }, { ensureStateLoaded, tasks, noSuchTask });
-  }
-
-  
-
-  
-
-  // Settlement-time check for "done but no real output": an otherwise clean
-  // exit whose extracted final message is empty (after trimming) is flagged
-  // with task.incomplete = true, and a task dispatched with --require-final-marker
-  // is also flagged when the final message doesn't match the persisted pattern.
-  // Runs only on "done" status: cancelled/crashed already carry failureReason,
-  // and overloading them with a second failure axis muddies the existing
-  // "is this an error or not?" branching in callers.
-  
-
-  
-
-  /**
-   * @param {string} taskId
-   * @param {{full?: boolean, fields?: string[]}} [options]
-   * @returns {ResultDetail}
-   */
-  function result(taskId, { full = false, fields } = {}) {
-    return resultFor(taskId, { full, fields }, { ensureStateLoaded, tasks, noSuchTask, runOverlayCommandFn });
-  }
-
+  const sanitizedEnvironment = (env = {}) => buildSanitizedEnvironment(env, { envDenylist: ctx.opts.envDenylist });
   return {
-    dispatch,
-    cancel,
-    accept,
-    reject,
-    status,
-    taskDirectory,
-    poll,
-    list,
-    result,
-    tail,
-    advisor,
-    checkSummaryModelReady,
+    bwrapState,
+    overlayState,
+    releaseOverlay,
+    sanitizedEnvironment,
+    requireBwrap: () => requireBwrapCapability(bwrapState, { checkBwrapAvailableFn: ctx.opts.checkBwrapAvailableFn }),
+    requireOverlaySupport: () => requireOverlayCapability(overlayState, { checkOverlaySupportFn: ctx.opts.checkOverlaySupportFn, OVERLAY_SUPPORT_TTL_MS }),
+    /** @param {Task} finishedTask */
+    extractChangesetForTask: (finishedTask) => extractChangesetForTaskRecord(finishedTask, { stateDir: ctx.opts.stateDir, runtimeDir: ctx.opts.runtimeDir, existsFn: ctx.opts.existsFn, runOverlayCommandFn: ctx.opts.runOverlayCommandFn, persistTask: (taskId) => ctx.helpers.persistTask(taskId), releaseOverlay }),
+    /** @param {NodeJS.ProcessEnv} [env] */
+    dispatchEnvironment: (env) => buildDispatchEnvironment({ sanitizedEnvironment }, env),
+    /** @param {NodeJS.ProcessEnv} [env] */
+    summaryEnvironment: (env) => buildSummaryEnvironment({ sanitizedEnvironment }, env),
+  };
+}
+
+/**
+ * @param {ManagerContext} ctx
+ */
+function buildManagerActivity(ctx) {
+  const cache = createActivityCache({
+    summariesEnabled: false,
+    summarizerTimeoutMs: ctx.limits.summarizerTimeout,
+    summaryModel: ctx.opts.activitySummaryModel,
+    maxWords: ctx.limits.activityWords,
+    snapshot: (task) => readActivitySnapshot(task.logPath || ""),
+    // Defer: ctx.helpers.summarizeActivity is created after this cache, so
+    // look it up at call time (not definition time).
+    summarize: ({ task, maxWords, previousActivity }) => ctx.helpers.summarizeActivity(task.id, maxWords, previousActivity),
+  });
+  return { cache };
+}
+
+/**
+ * @param {ManagerContext} ctx
+ */
+function buildManagerInternalHelpers(ctx) {
+  return {
+    /** @param {string} taskId */
+    persistTask: (taskId) => persistTaskRecord(taskId, { LOCK_FILE: ctx.paths.LOCK_FILE, TASKS_FILE: ctx.paths.TASKS_FILE, stateDir: ctx.opts.stateDir, tasks: ctx.maps.tasks, taskEvents: ctx.events.taskEvents }),
+    ensureStateLoaded: () => ensureStateLoadedFor({ get stateLoadError() { return ctx.state.stateLoadError; }, TASKS_FILE: ctx.paths.TASKS_FILE }),
+    /**
+     * @param {Task} task
+     * @param {{force?: boolean}} [options]
+     */
+    scheduleActivity: (task, options = {}) => scheduleActivityFor(task, options, { onEvent: ctx.opts.onEvent, activitySubscriptions: ctx.maps.activitySubscriptions, activitySummariesEnabled: ctx.opts.activitySummariesEnabled, activityCache: ctx.activity.cache, state: ctx.schedulers.activityScheduleState }),
+    /**
+     * @param {string|undefined} sessionId
+     * @returns {{sessionId: string|undefined, reset: boolean, previousSessionId: string|undefined}}
+     */
+    resolveAdvisorSession: (sessionId) => resolveAdvisorSessionFor(sessionId, { advisorSessions: ctx.maps.advisorSessions, advisorTtl: ctx.limits.advisorTtl }),
+    /** @param {string|undefined} sessionId */
+    touchAdvisorSession: (sessionId) => touchAdvisorSessionFor(sessionId, { advisorSessions: ctx.maps.advisorSessions }),
+    /**
+     * Distinguishes "opencode never wrote a byte" (still starting up, or stuck
+     * before its first event -- e.g. hung on a usage-limit retry) from "wrote
+     * bytes but no parseable event yet" from "at least one event landed". A
+     * caller polling taskferry status on a task that's been "running" for a
+     * long time can use this to tell a genuinely stuck process apart from one
+     * that's just slow, without waiting out a full taskferry wait timeout.
+     * @param {string} logPath
+     * @returns {LogActivity}
+     */
+    logActivity: (logPath) => computeLogActivity(logPath, { logHasEventCache: ctx.maps.logHasEventCache, LOG_ACTIVITY_SCAN_BYTES }),
+    /** @param {string} taskId */
+    settleWaiters: (taskId) => settleWaitersFor(taskId, { waiters: ctx.maps.waiters }),
+    /** @param {Task} task */
+    hasLiveOverlay: (task) => hasLiveOverlayForTask(task, { existsFn: ctx.opts.existsFn }),
+    sweepOrphanedPromptFiles: () => sweepOrphanedPromptFilesFor({ PROMPT_DIR: ctx.paths.PROMPT_DIR, tasks: ctx.maps.tasks }),
+    sweepOrphanedOverlays: () => sweepOrphanedOverlaysFor({ tasks: ctx.maps.tasks, overlayTmpRoot: ctx.opts.overlayTmpRoot, releaseOverlay: (task) => ctx.env.releaseOverlay(task), persistTask: (taskId) => ctx.helpers.persistTask(taskId) }),
+    /**
+     * Validate `model` against opencode's installed-models list, NOT against
+     * the dispatch-default executor's list. `summarizeTask()` deliberately
+     * hardcodes `opencodeExecutor()` for the actual summary work -- a separate
+     * scope boundary from the dispatch-default executor flip -- so a model
+     * available in pi but not in opencode (e.g. an opencode-only Zen model
+     * like the default `opencode/mimo-v2.5-free`) would silently fail the
+     * check on a default pi install. The cached `modelsCache` is shared with
+     * the check, so a follow-up dispatch doesn't re-shell-out for the list
+     * within the 5-minute TTL.
+     * @param {string} model
+     * @param {NodeJS.ProcessEnv} env
+     */
+    summaryModelAvailable: (model, env) => checkModelAvailable(model, env, { modelsCache: ctx.maps.modelsCache, modelsCacheInFlight: ctx.maps.modelsCacheInFlight, listModelsFn: ctx.opts.listModelsFn }),
+    /** Shared upfront readiness check for both the direct `summary --mode
+     * activity` path and `watch --summaries`'s subscribe-time gate: throws the
+     * same error `summaryModelAvailable` throws, so a caller can fail fast
+     * before doing any work. */
+    checkSummaryModelReady: () => checkSummaryModelReadyFor({ summaryEnvironment: (env) => ctx.env.summaryEnvironment(env), summaryModelAvailable: (model, env) => ctx.helpers.summaryModelAvailable(model, env), activitySummaryModel: ctx.opts.activitySummaryModel }),
+    /**
+     * Drives a single secondary-model summary call from the activity cache.
+     * Defers lookups of `ctx.api.poll`/`result`/`cancel` so this can be built
+     * before the public API object.
+     * @param {string} taskId
+     * @param {number} maxWords
+     * @param {string|null} [previousActivity]
+     * @returns {Promise<{text: string, sessionId: string|null}>}
+     */
+    summarizeActivity: (taskId, maxWords, previousActivity) => runSummarizeActivity({ checkSummaryModelReady: () => ctx.helpers.checkSummaryModelReady(), activityCache: ctx.activity.cache, summarizeTask: (id, options = {}) => ctx.helpers.summarizeTask(id, options), poll: (id, options) => ctx.api.poll(id, options), tasks: ctx.maps.tasks, result: (id, options) => ctx.api.result(id, options), cancel: (id) => ctx.api.cancel(id), MAX_WAIT_MS }, taskId, maxWords, previousActivity),
+    /** @param {string} taskId @param {number} maxWords @returns {Promise<object>} */
+    activitySummary: (taskId, maxWords) => activitySummaryFor(taskId, maxWords, { ensureStateLoaded: () => ctx.helpers.ensureStateLoaded(), tasks: ctx.maps.tasks, activityCache: ctx.activity.cache, activitySummariesEnabled: ctx.opts.activitySummariesEnabled, noSuchTask }),
+    /** @param {string} taskId @param {{maxWords?: number, mode?: string, env?: NodeJS.ProcessEnv}} [options] */
+    summarizeRequest: (taskId, options = {}) => summarizeRequestFor(taskId, options, { activitySummary: (id, mw) => ctx.helpers.activitySummary(id, mw), activityWords: ctx.limits.activityWords, summarizeTask: (id, options2 = {}) => ctx.helpers.summarizeTask(id, options2) }),
+    /**
+     * @param {string} taskId
+     * @param {{maxWords?: number, allowPromptFallback?: boolean, previousActivity?: string|null, summarySessionId?: string|null, lastSummarizedWatermark?: number|null, respectConcurrencyReserve?: boolean, env?: NodeJS.ProcessEnv}} [options]
+     * @returns {Promise<{sourceTaskId: string, sourceStatus: string, summary?: string, help?: string, capturedAt?: string, sourceLogBytes?: number, summaryInputBytes?: number, next?: string, summaryTask?: {id: string, status: string, model: string}}>}
+     */
+    summarizeTask: (taskId, options = {}) => summarizeTaskFor(taskId, options, { ensureStateLoaded: () => ctx.helpers.ensureStateLoaded(), tasks: ctx.maps.tasks, summaryConcurrencyLimit: ctx.limits.summaryConcurrencyLimit, activityCache: ctx.activity.cache, activitySummaryModel: ctx.opts.activitySummaryModel, summaryModelAvailable: (model, env) => ctx.helpers.summaryModelAvailable(model, env), LOG_DIR: ctx.paths.LOG_DIR, SUMMARY_DIR: ctx.paths.SUMMARY_DIR, persistTask: (taskId) => ctx.helpers.persistTask(taskId), pendingLaunches: ctx.maps.pendingLaunches, launchQueue: ctx.maps.launchQueue, launchQueuedTasks: () => ctx.helpers.launchQueuedTasks(), noSuchTask, readNarrationExcerpt, opencodeExecutor }),
+    /** @returns {void} */
+    launchQueuedTasks: () => { runLaunchQueuedTasks(ctx.schedulers.launchScheduler, { dispatchLimit: ctx.limits.dispatchLimit, dispatchWindow: ctx.limits.dispatchWindow, concurrencyLimit: ctx.limits.concurrencyLimit, tasks: ctx.maps.tasks, startTask: (task) => ctx.helpers.startTask(task), reschedule: () => ctx.helpers.launchQueuedTasks() }); },
+    /** Spawns a queued launch's worker process. The launch's pre-parsed
+     * metadata (target dir, prompt-file routing, buildSpawnArgs output) comes
+     * from resolveStartTaskLaunch; the actual spawn + child lifecycle is
+     * delegated to {@link startTaskFor}, which takes every factory closure
+     * dependency explicitly via `ctx`.
+     * @param {Task} task */
+    startTask: (task) => startTaskFor(task, { pendingLaunches: ctx.maps.pendingLaunches, SUMMARY_DIR: ctx.paths.SUMMARY_DIR, PROMPT_DIR: ctx.paths.PROMPT_DIR, spawnFn: ctx.opts.spawnFn, runOverlayCommandFn: ctx.opts.runOverlayCommandFn, sandboxEnabled: ctx.opts.sandboxEnabled, platform: ctx.opts.platform, overlayEnabled: ctx.opts.overlayEnabled, overlayTmpRoot: ctx.opts.overlayTmpRoot, allowedDirs: ctx.opts.allowedDirs, stateDir: ctx.opts.stateDir, cacheDir: ctx.opts.cacheDir, runtimeDir: ctx.opts.runtimeDir, existsFn: ctx.opts.existsFn, statFn: ctx.opts.statFn, readdirFn: ctx.opts.readdirFn, resolveGitCommonDirFn: ctx.opts.resolveGitCommonDirFn, resolveGitDirFn: ctx.opts.resolveGitDirFn, requireBwrap: () => ctx.env.requireBwrap(), requireOverlaySupport: () => ctx.env.requireOverlaySupport(), dispatchEnvironment: (env) => ctx.env.dispatchEnvironment(env), summaryEnvironment: (env) => ctx.env.summaryEnvironment(env), settleWaiters: (taskId) => ctx.helpers.settleWaiters(taskId), launchQueuedTasks: () => ctx.helpers.launchQueuedTasks(), persistTask: (taskId) => ctx.helpers.persistTask(taskId), scheduleActivity: (task, options) => ctx.helpers.scheduleActivity(task, options), classifyTrailingLogFailure: (task) => ctx.helpers.classifyTrailingLogFailure(task), startRunningWatcher: (task) => ctx.helpers.startRunningWatcher(task), stopRunningWatcher: (taskId) => ctx.helpers.stopRunningWatcher(taskId), extractChangesetForTask: (task) => ctx.env.extractChangesetForTask(task), sendSignal: (pid, signal) => ctx.helpers.sendSignal(pid, signal), activityCache: ctx.activity.cache, logHasEventCache: ctx.maps.logHasEventCache, escalationTimers: ctx.maps.escalationTimers, tasks: ctx.maps.tasks, decRunning: () => { ctx.state.runningCount--; }, incRunning: () => { ctx.state.runningCount++; }, readSessionIdFromLog, evaluateOutputCompleteness }),
+    /**
+     * @param {string} taskId
+     * @returns {{taskId: string, changesetStatus: string, applied: boolean, reason?: string|null, cleanupFailed?: boolean}}
+     */
+    accept: (taskId) => acceptTaskChangeset(taskId, { ensureStateLoaded: () => ctx.helpers.ensureStateLoaded(), tasks: ctx.maps.tasks, existsFn: ctx.opts.existsFn, hasLiveOverlay: (task) => ctx.helpers.hasLiveOverlay(task), stateDir: ctx.opts.stateDir, runtimeDir: ctx.opts.runtimeDir, runOverlayCommandFn: ctx.opts.runOverlayCommandFn, persistTask: (taskId) => ctx.helpers.persistTask(taskId), releaseOverlay: (task) => ctx.env.releaseOverlay(task), noSuchTask }),
+    /**
+     * @param {string} taskId
+     * @returns {{taskId: string, changesetStatus: string, cleanupFailed?: boolean}}
+     */
+    reject: (taskId) => rejectTaskChangeset(taskId, { ensureStateLoaded: () => ctx.helpers.ensureStateLoaded(), tasks: ctx.maps.tasks, persistTask: (taskId) => ctx.helpers.persistTask(taskId), releaseOverlay: (task) => ctx.env.releaseOverlay(task), noSuchTask }),
+    /** @param {string} taskId */
+    stopRunningWatcher: (taskId) => stopRunningWatcherFor(taskId, { runningWatchers: ctx.maps.runningWatchers, runningWatcherState: ctx.maps.runningWatcherState }),
+    /** Forces a running task to stop for a reason other than user cancellation
+     * (watchdog timeout, or provider-exhaustion detection added in Task 6).
+     * Mirrors `cancel()`'s SIGTERM-then-SIGKILL escalation, but records
+     * `failureReason` instead of `cancelRequested` so the exit handler's status
+     * computation (unchanged) still lands on "crashed", distinguishable from a
+     * user-requested "cancelled".
+     * @param {Task} task
+     * @param {string} failureReason
+     * @param {string} [failureDetail] */
+    failRunningTask: (task, failureReason, failureDetail) => failRunningTaskFor(task, failureReason, { stopRunningWatcher: (taskId) => ctx.helpers.stopRunningWatcher(taskId), persistTask: (taskId) => ctx.helpers.persistTask(taskId), sendSignal: (pid, signal) => ctx.helpers.sendSignal(pid, signal), escalationTimers: ctx.maps.escalationTimers, tasks: ctx.maps.tasks, watchdogGrace: ctx.limits.watchdogGrace }, failureDetail),
+    /** `classifyProviderFailure()` only ever runs from the watcher's interval
+     * tick, so a provider-error event that lands after the last tick but
+     * before/at process exit would otherwise never be classified and silently
+     * lose the `failureReason` (issue #81). Rather than re-read the whole log
+     * from scratch (the cost `startRunningWatcher`'s incremental byte-offset
+     * reader exists to avoid), only the bytes the watcher hadn't seen yet
+     * are read here, concatenated with whatever partial line the watcher
+     * was still carrying.
+     * @param {Task} task */
+    classifyTrailingLogFailure: (task) => classifyTrailingLogFailureFor(task, { runningWatcherState: ctx.maps.runningWatcherState, resolveExecutor }),
+    /** @param {Task} task */
+    startRunningWatcher: (task) => startRunningWatcherFor(task, { noOutputTimeout: ctx.limits.noOutputTimeout, runningWatcherState: ctx.maps.runningWatcherState, tasks: ctx.maps.tasks, stopRunningWatcher: (taskId) => ctx.helpers.stopRunningWatcher(taskId), failRunningTask: (task, reason, detail) => ctx.helpers.failRunningTask(task, reason, detail), scheduleActivity: (task, options) => ctx.helpers.scheduleActivity(task, options), postOutputNoOutputTimeout: ctx.limits.postOutputNoOutputTimeout, watchdogPoll: ctx.limits.watchdogPoll, runningWatchers: ctx.maps.runningWatchers }),
+    /** Targets the process group (negative pid), which reaches opencode and any
+     * subprocess it spawned (e.g. a bash command it's mid-way through running),
+     * since `dispatch()` makes the child a process group leader for exactly
+     * this. Falls back to the plain pid if group signaling isn't available.
+     * @param {number} pid
+     * @param {NodeJS.Signals} signal */
+    sendSignal: (pid, signal) => sendSignalToProcess(pid, signal, { killFn: ctx.opts.killFn }),
+    /** @param {string} taskId
+     * @param {{graceMs?: number}} [options] */
+    cancel: (taskId, { graceMs = ctx.limits.cancelGrace } = {}) => cancelTask(taskId, { graceMs }, { noSuchTask, ensureStateLoaded: () => ctx.helpers.ensureStateLoaded(), tasks: ctx.maps.tasks, launchScheduler: { get launchQueue() { return ctx.maps.launchQueue; }, get launchTimer() { return ctx.state.launchTimer; }, set launchTimer(value) { ctx.state.launchTimer = value; } }, pendingLaunches: ctx.maps.pendingLaunches, persistTask: (id) => ctx.helpers.persistTask(id), scheduleActivity: (task, options2) => ctx.helpers.scheduleActivity(task, options2), activityCache: ctx.activity.cache, logHasEventCache: ctx.maps.logHasEventCache, settleWaiters: (id) => ctx.helpers.settleWaiters(id), stopRunningWatcher: (id) => ctx.helpers.stopRunningWatcher(id), escalationTimers: ctx.maps.escalationTimers, sendSignal: (pid, signal) => ctx.helpers.sendSignal(pid, signal) }),
+  };
+}
+
+/**
+ * The public method object returned by `createTaskManager`. Each method
+ * is a thin arrow that closes over `ctx` (so it can reach the relevant
+ * helper) and uses `self` for cross-references between public methods
+ * (e.g. `advisor` -> `dispatch`/`poll`/`result`), so the order in which
+ * the properties are listed below does not matter.
+ * @param {ManagerContext} ctx
+ */
+function buildTaskManagerApi(ctx) {
+  /** @type {Record<string, any>} */
+  const self = {};
+  const api = {
+    /**
+     * @param {object} params
+     * @param {string} params.prompt
+     * @param {string} params.directory
+     * @param {string} [params.model]
+     * @param {string} [params.variant]
+     * @param {string|undefined} [params.sessionId]
+     * @param {string|undefined} [params.originSessionId]
+     * @param {NodeJS.ProcessEnv} [params.env]
+     * @param {boolean} [params.internal]
+     * @param {string|null} [params.finalMarker]
+     * @param {boolean} [params.noSandbox]
+     * @param {boolean} [params.noOverlay]
+     * @param {"dispatch"|"advisor"} [params.role]
+     * @param {string[]} [params.allowedDirs] - extra directories bound read-write for this dispatch only, on
+     *   top of the manager-level default (see createTaskManager's `allowedDirs` option)
+     * @param {string} [params.executor] - "opencode" | "pi". When omitted on a `sessionId` resume, inherits
+     *   the executor that originally created the session (a different executor can't continue another CLI's
+     *   session file); otherwise defaults to the manager's defaultExecutor (itself the result of
+     *   `resolveExecutor(undefined)` at construction). An unknown name throws before any validation runs, so a
+     *   misrouted CLI/RPC call fails fast rather than silently picking the default.
+     * @returns {TaskSummary & {next: string}}
+     */
+    dispatch: (params) => dispatchTask(params, { ensureStateLoaded: () => ctx.helpers.ensureStateLoaded(), tasks: ctx.maps.tasks, defaultExecutor: ctx.opts.defaultExecutor, LOG_DIR: ctx.paths.LOG_DIR, persistTask: (taskId) => ctx.helpers.persistTask(taskId), pendingLaunches: ctx.maps.pendingLaunches, launchQueue: ctx.maps.launchQueue, launchQueuedTasks: () => ctx.helpers.launchQueuedTasks() }),
+    /**
+     * @param {string} taskId
+     * @param {{graceMs?: number}} [options]
+     * @returns {TaskSummary & {note: string}}
+     */
+    cancel: (taskId, options) => ctx.helpers.cancel(taskId, options),
+    /**
+     * @param {string} taskId
+     * @returns {{taskId: string, changesetStatus: string, applied: boolean, reason?: string|null, cleanupFailed?: boolean}}
+     */
+    accept: (taskId) => ctx.helpers.accept(taskId),
+    /**
+     * @param {string} taskId
+     * @returns {{taskId: string, changesetStatus: string, cleanupFailed?: boolean}}
+     */
+    reject: (taskId) => ctx.helpers.reject(taskId),
+    /**
+     * @param {string} taskId
+     * @returns {TaskStatus}
+     */
+    status: (taskId) => statusFor(taskId, { ensureStateLoaded: () => ctx.helpers.ensureStateLoaded(), tasks: ctx.maps.tasks, logActivity: (logPath) => ctx.helpers.logActivity(logPath), noSuchTask }),
+    /**
+     * @param {string} taskId
+     * @returns {string}
+     */
+    taskDirectory: (taskId) => taskDirectoryFor(taskId, { ensureStateLoaded: () => ctx.helpers.ensureStateLoaded(), tasks: ctx.maps.tasks, noSuchTask }),
+    /**
+     * @param {string} taskId
+     * @param {{timeoutMs?: number, tailChars?: number}} [options]
+     * @returns {Promise<TaskStatus>}
+     */
+    poll: (taskId, options = {}) => pollTask(taskId, options, { ensureStateLoaded: () => ctx.helpers.ensureStateLoaded(), tasks: ctx.maps.tasks, waiters: ctx.maps.waiters, noSuchTask }),
+    list: () => listTasks({ ensureStateLoaded: () => ctx.helpers.ensureStateLoaded(), tasks: ctx.maps.tasks }),
+    /**
+     * @param {string} taskId
+     * @param {{full?: boolean, fields?: string[]}} [options]
+     * @returns {ResultDetail}
+     */
+    result: (taskId, { full = false, fields } = {}) => resultFor(taskId, { full, fields }, { ensureStateLoaded: () => ctx.helpers.ensureStateLoaded(), tasks: ctx.maps.tasks, runOverlayCommandFn: ctx.opts.runOverlayCommandFn, noSuchTask }),
+    /**
+     * @param {string} taskId
+     * @param {{chars?: number}} [options]
+     */
+    tail: (taskId, { chars = 1000 } = {}) => tailTask(taskId, { chars }, { ensureStateLoaded: () => ctx.helpers.ensureStateLoaded(), tasks: ctx.maps.tasks, noSuchTask }),
+    /**
+     * @param {object} [params]
+     * @param {string} [params.prompt]
+     * @param {string} [params.directory]
+     * @param {string} [params.model]
+     * @param {string} [params.variant]
+     * @param {string} [params.sessionId]
+     * @param {number} [params.timeoutMs]
+     * @param {string} [params.executor] - optional "opencode" | "pi" forwarded to dispatch().
+     * @param {NodeJS.ProcessEnv} [params.env] - caller environment forwarded to the worker.
+     */
+    advisor: (params = {}) => runAdvisor({ ensureStateLoaded: () => ctx.helpers.ensureStateLoaded(), resolveAdvisorSession: (id) => ctx.helpers.resolveAdvisorSession(id), dispatch: (params2) => self.dispatch(params2), poll: (id, options) => self.poll(id, options), maxWait: ctx.limits.maxWait, touchAdvisorSession: (id) => ctx.helpers.touchAdvisorSession(id), result: (id, options) => self.result(id, options), errMessage, readSessionIdFromLog }, params),
+    checkSummaryModelReady: () => ctx.helpers.checkSummaryModelReady(),
     // Exposed primarily so tests can seed the summary session id and watermark
     // (the activity cache owns the "last successful summary" state shared
     // between the activity path and the direct summarize path).
-    activityCache,
-    summarize: summarizeRequest,
-    setActivitySummarySubscriptions: /** @param {number} count */ (count) => {
-      activitySummarySubscriptions = Math.max(0, Number.isSafeInteger(count) ? count : 0);
-      activityCache.setSummariesEnabled(activitySummariesEnabled && activitySummarySubscriptions > 0);
+    activityCache: ctx.activity.cache,
+    /**
+     * @param {string} taskId
+     * @param {{maxWords?: number, mode?: string, env?: NodeJS.ProcessEnv}} [options]
+     */
+    summarize: (taskId, options = {}) => ctx.helpers.summarizeRequest(taskId, options),
+    /** @param {number} count */
+    setActivitySummarySubscriptions: (count) => {
+      ctx.state.activitySummarySubscriptions = Math.max(0, Number.isSafeInteger(count) ? count : 0);
+      ctx.activity.cache.setSummariesEnabled(ctx.opts.activitySummariesEnabled && ctx.state.activitySummarySubscriptions > 0);
     },
     /** @param {Map<string, Set<boolean>>} subs */
     setActivitySubscriptions: (subs) => {
-      activitySubscriptions.clear();
-      for (const [dir, variants] of subs) activitySubscriptions.set(dir, new Set(variants));
+      ctx.maps.activitySubscriptions.clear();
+      for (const [dir, variants] of subs) ctx.maps.activitySubscriptions.set(dir, new Set(variants));
       const totalCount = Array.from(subs.values()).reduce((sum, v) => sum + (v.has(true) ? 1 : 0), 0);
-      activitySummarySubscriptions = totalCount;
-      activityCache.setSummariesEnabled(activitySummariesEnabled && totalCount > 0);
+      ctx.state.activitySummarySubscriptions = totalCount;
+      ctx.activity.cache.setSummariesEnabled(ctx.opts.activitySummariesEnabled && totalCount > 0);
     },
-    paths: { STATE_DIR: stateDir, LOG_DIR, SUMMARY_DIR, TASKS_FILE },
+    paths: { STATE_DIR: ctx.opts.stateDir, LOG_DIR: ctx.paths.LOG_DIR, SUMMARY_DIR: ctx.paths.SUMMARY_DIR, TASKS_FILE: ctx.paths.TASKS_FILE },
   };
+  Object.assign(self, api);
+  return api;
+}
+
+/**
+ * @param {ManagerContext} ctx
+ */
+function bootstrapManagerContext(ctx) {
+  loadPersistedTasks({
+    TASKS_FILE: ctx.paths.TASKS_FILE,
+    overlayTmpRoot: ctx.opts.overlayTmpRoot,
+    tasks: ctx.maps.tasks,
+    taskEvents: ctx.events.taskEvents,
+    setStateLoadError: (err) => { ctx.state.stateLoadError = err; },
+  });
+  // Scrub prompt scratch files left behind by a daemon crash or forced
+  // restart. Each oversized dispatch writes its prompt to PROMPT_DIR as
+  // `${task.id}.prompt.txt` (mode 0o600) and removes it from the task's
+  // own exit/error paths -- but a SIGKILL of the daemon mid-task skips
+  // both cleanup paths and orphans the file forever.
+  ctx.helpers.sweepOrphanedPromptFiles();
+  // Mirrors sweepOrphanedPromptFiles() above: a daemon that crashed after
+  // an overlay was created but before its cleanup (reject/accept, or the
+  // advisor auto-reject in extractChangesetForTask()) ever ran leaves a
+  // /tmp/taskferry-cow-<task-id> dir behind. /tmp being a tmpfs clears
+  // these on a real reboot for free; this only matters for a same-boot
+  // daemon restart.
+  ctx.helpers.sweepOrphanedOverlays();
+}
+
+/**
+ * @param {ResolvedTaskManagerOptions} opts
+ * @returns {ManagerContext}
+ */
+function createManagerContext(opts) {
+  const paths = initManagerPaths(opts);
+  ensureManagerDirectories(paths);
+  const limits = initManagerLimits(opts);
+  const state = initManagerState();
+  const events = initManagerEvents(opts, state);
+  const maps = initManagerMaps();
+  const schedulers = initManagerSchedulers(state, maps);
+  // The env/activity/helpers/api layers each take a `ctx` matching
+  // `ManagerContext`. They're built in dependency order: env first (it
+  // only needs paths/maps/state), then activity (which may invoke
+  // `ctx.helpers.summarizeActivity` at call time, deferred), then helpers
+  // (which may invoke `ctx.helpers.X` or `ctx.api.X` at call time, also
+  // deferred). The api is populated last via `Object.assign` onto the
+  // pre-set `ctx.api` so the forward references resolve.
+  //
+  // A single stable object, mutated in place rather than spread into copies
+  // -- env/activity's closures below capture `ctx` itself, so a later
+  // `ctx.helpers = ...` (or `ctx.api = ...`) only resolves for those
+  // closures' deferred lookups if it's the same object reference, not a
+  // spread copy that leaves the original without the field.
+  const ctx = /** @type {ManagerContext} */ (/** @type {unknown} */ ({ opts, paths, limits, state, events, maps, schedulers }));
+  ctx.env = buildManagerEnvHelpers(ctx);
+  ctx.activity = buildManagerActivity(ctx);
+  ctx.api = /** @type {ManagerContext["api"]} */ ({});
+  ctx.helpers = buildManagerInternalHelpers(ctx);
+  Object.assign(ctx.api, buildTaskManagerApi(ctx));
+  return ctx;
+}
+
+/**
+ * @param {ResolvedTaskManagerOptions} opts
+ */
+function buildTaskManagerWithOptions(opts) {
+  const ctx = createManagerContext(opts);
+  bootstrapManagerContext(ctx);
+  return ctx.api;
 }
 
 

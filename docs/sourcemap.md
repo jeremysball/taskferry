@@ -63,7 +63,7 @@ obviously belong to args parsing or output formatting, start there.
 | `errors.js` | 20 | Shared error-message helpers. |
 | `numbers.js` | 14 | Shared numeric-parsing helpers (`positiveInteger`, `nonNegativeInteger`, etc.). |
 | `setup.js` | 268 | `taskferry setup`: npm install, managed symlinks, per-client integration registration (see `.superpowers/.completed/specs/2026-07-16-taskferry-setup-design.md`). |
-| `tf-sl.sh` | 109 | `tf-sl` Claude Code statusline segment: reads the statusline JSON from stdin, emits a width-responsive `tf: ...` ANSI segment or nothing. |
+| `tf-sl.sh` | 113 | `tf-sl` Claude Code statusline segment: reads the statusline JSON from stdin, emits a width-responsive `tf: ...` ANSI segment or nothing. Always calls `taskferry` with `TASKFERRY_AUTO_START=0` — a statusline poll must never be the call that boots the daemon, since the daemon inherits its first caller's env for its whole lifetime. |
 | `scripts/generate-skill.js` | — | Regenerates `integrations/*/skills/using-taskferry/SKILL.md` from `skills/using-taskferry/SKILL.md`; `--check` fails on drift. The two generated copies are committed, not gitignored — they're what the Claude Code and Codex plugin marketplaces actually read (`integrations.test.js` pins the plugin `source` to those exact paths), so a missing or stale copy ships wrong skill content to real installs, not just a rebuildable artifact. |
 
 Most `*.js` files above have a co-located `*.test.js` (`node --test`, no

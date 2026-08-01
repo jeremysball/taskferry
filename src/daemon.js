@@ -113,7 +113,10 @@ export async function prepareSocket(runtimeDir, socketPath, healthCheckTimeoutMs
     try {
       checkedIdentity = fs.statSync(socketPath);
     } catch (error) {
-      if (error.code === "ENOENT") continue;
+      if (error.code === "ENOENT") {
+        await delay(retryDelayMs);
+        continue;
+      }
       throw error;
     }
     const health = await socketHealth(socketPath, healthCheckTimeoutMs);

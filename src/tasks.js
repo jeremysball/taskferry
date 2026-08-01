@@ -2807,21 +2807,15 @@ export function createTaskManager({
   });
 
   /** @type {{checked: boolean, available: boolean, reason?: string}|null} */
-  let bwrapAvailable = null;
+  /** @type {{available: ({checked: boolean, available: boolean, reason?: string}|null)}} */
+  const bwrapState = { available: null };
   function requireBwrap() {
-    if (bwrapAvailable == null) {
-      bwrapAvailable = checkBwrapAvailableFn();
-    }
-    if (!bwrapAvailable.available) {
-      throw new Error(
-        "error: bwrap is required for sandboxing but was not found\n" +
-        "help: install bubblewrap (e.g. apt install bubblewrap) or opt out with --no-sandbox or TASKFERRY_DISABLE_SANDBOX=1"
-      );
-    }
+    return requireBwrapCapability(bwrapState, { checkBwrapAvailableFn });
   }
 
   /** @type {{supported: boolean, reason?: string, checkedAt: number}|null} */
-  let overlaySupport = null;
+  /** @type {{support: ({supported: boolean, reason?: string, checkedAt: number}|null)}} */
+  const overlayState = { support: null };
   // Re-probe a negative result after this many ms so a transient failure
   // (bwrap version-too-old mid-upgrade, PATH temporarily missing the binary,
   // a freshly-installed package not yet on the daemon's PATH, etc.) can
@@ -2830,27 +2824,13 @@ export function createTaskManager({
   // someone uninstalls bwrap, which is not a transient failure.
   const OVERLAY_SUPPORT_TTL_MS = 60_000;
   function requireOverlaySupport() {
-    const now = Date.now();
-    if (overlaySupport == null || (!overlaySupport.supported && now - overlaySupport.checkedAt >= OVERLAY_SUPPORT_TTL_MS)) {
-      overlaySupport = { ...checkOverlaySupportFn(), checkedAt: now };
-    }
-    const result = /** @type {{supported: boolean, reason?: string}} */ (overlaySupport);
-    if (!result.supported) {
-      throw new Error(
-        `error: overlay is required for gated dispatch writes but is unsupported (${result.reason})\n` +
-        "help: upgrade bubblewrap to >= 0.8, or opt out explicitly with --no-overlay or TASKFERRY_DISABLE_OVERLAY=1 (writes will not be gated)"
-      );
-    }
+    return requireOverlayCapability(overlayState, { checkOverlaySupportFn, OVERLAY_SUPPORT_TTL_MS });
   }
 
   /**
    * Removes a task's overlay using the tmp root recorded when that overlay
    * was created. A failed removal leaves overlayDirs intact for the startup
    * sweep to retry.
-   * @param {{overlayDirs?: {root:string,tmpRoot:string}|null}} task
-   * @returns {boolean} whether cleanup failed
-   */
-  /**
    * @param {{overlayDirs?: {root:string,tmpRoot:string}|null}} task
    * @returns {boolean} whether cleanup failed
    */
@@ -3497,47 +3477,7 @@ export function createTaskManager({
    * @returns {{taskId: string, changesetStatus: string, applied: boolean, reason?: string|null, cleanupFailed?: boolean}}
    */
   function accept(taskId) {
-    ensureStateLoaded();
-    const task = tasks.get(taskId);
-    if (!task) throw noSuchTask(taskId);
-    const isGitTarget = validateAcceptable(task, { existsFn, hasLiveOverlay });
-    const denyList = defaultDenyList(os.homedir(), stateDir).filter(existsFn);
-    const applied = applyChangeset({
-      isGitTarget,
-      stateDir,
-      runtimeDir,
-      denyList,
-      directory: task.directory,
-      // validateAcceptable() threw above if diffPath were null, but that
-      // narrowing lives inside the helper, so assert the invariant here.
-      diffPath: /** @type {string} */ (task.diffPath),
-      overlay: task.overlayDirs ?? undefined,
-      homeDir: os.homedir(),
-      runCommand: runOverlayCommandFn,
-    });
-    if (!applied.applied) {
-      // validateAcceptable() threw above if changesetStatus weren't pending,
-      // so it is non-undefined here; assert it for the type checker.
-      return { taskId, changesetStatus: /** @type {string} */ (task.changesetStatus), applied: false, reason: applied.reason };
-    }
-    task.changesetStatus = "accepted";
-    // Persist before cleanup: a crash between apply and persist would leave
-    // the task reading as "pending" after a restart even though the patch
-    // was already applied, risking a double-apply on the next accept()
-    // retry. The cleanup may still fail (review finding #11), but that
-    // failure surfaces in the return value and overlayDirs stays set so the
-    // daemon-startup sweep (Task 12) retries the removal.
-    persistTask(task.id);
-    const cleanupFailed = releaseOverlay(task);
-    // If cleanup succeeded, releaseOverlay() cleared overlayDirs in memory
-    // (review finding #11). Persist once more so the durable task record
-    // reflects the cleared overlay metadata instead of claiming an overlay
-    // still exists for an overlay that was just removed. If cleanup failed,
-    // overlayDirs stays set on disk and the startup sweep (Task 12) retries
-    // the removal on the next daemon start -- consistent with the pre-fix
-    // behavior for the cleanup-failure path.
-    if (!cleanupFailed) persistTask(task.id);
-    return { taskId, changesetStatus: task.changesetStatus, applied: true, ...(cleanupFailed ? { cleanupFailed: true } : {}) };
+    return acceptTaskChangeset(taskId, { ensureStateLoaded, tasks, noSuchTask, existsFn, hasLiveOverlay, stateDir, runtimeDir, runOverlayCommandFn, persistTask, releaseOverlay });
   }
 
   /**
@@ -3545,27 +3485,7 @@ export function createTaskManager({
    * @returns {{taskId: string, changesetStatus: string, cleanupFailed?: boolean}}
    */
   function reject(taskId) {
-    ensureStateLoaded();
-    const task = tasks.get(taskId);
-    if (!task) throw noSuchTask(taskId);
-    if (task.changesetStatus !== "pending") {
-      throw new Error(`error: task ${taskId} has no pending changeset (changesetStatus: ${task.changesetStatus ?? "none"})\nhelp: only a task with changesetStatus "pending" can be rejected`);
-    }
-    task.changesetStatus = "rejected";
-    // Persist before cleanup (parallel to accept()'s fix): the status is
-    // the committed outcome, the cleanup is the side effect. A crash
-    // between cleanup and persist would leave the task reading as
-    // "pending" after a restart; the next reject() would re-run the
-    // cleanup (idempotent -- rm -rf on a missing path is fine) and then
-    // persist, so the pre-fix order is benign for reject(); matching
-    // accept()'s order keeps the two paths consistent.
-    persistTask(task.id);
-    const cleanupFailed = releaseOverlay(task);
-    // If cleanup succeeded, releaseOverlay() cleared overlayDirs in memory;
-    // persist once more so the durable task record reflects the cleared
-    // overlay metadata (parallel to accept()).
-    if (!cleanupFailed) persistTask(task.id);
-    return { taskId, changesetStatus: task.changesetStatus, ...(cleanupFailed ? { cleanupFailed: true } : {}) };
+    return rejectTaskChangeset(taskId, { ensureStateLoaded, tasks, noSuchTask, persistTask, releaseOverlay });
   }
 
   /** @param {string} taskId */
@@ -3731,41 +3651,7 @@ export function createTaskManager({
    * @returns {Promise<TaskStatus>}
    */
   function poll(taskId, { timeoutMs, tailChars } = {}) {
-    ensureStateLoaded();
-    const task = tasks.get(taskId);
-    if (!task) throw noSuchTask(taskId);
-    if (task.status !== "running" && task.status !== "queued") {
-      return Promise.resolve(summarize(task));
-    }
-    return new Promise((resolve) => {
-      const settle = (timedOut = false) => {
-        const list = waiters.get(taskId);
-        if (list) {
-          const idx = list.indexOf(settle);
-          if (idx !== -1) list.splice(idx, 1);
-        }
-        if (timer) clearTimeout(timer);
-        const current = /** @type {Task} */ (tasks.get(taskId));
-        const summary = summarize(current);
-        if (!timedOut || current.status !== "running" || tailChars == null) {
-          resolve(timedOut ? { ...summary, timedOut: true } : summary);
-          return;
-        }
-        const output = readNarration(current.logPath);
-        resolve({
-          ...summary,
-          timedOut: true,
-          outputTail: output.slice(-tailChars),
-          outputTailTotalChars: output.length,
-          outputTailTruncated: output.length > tailChars,
-        });
-      };
-      const timer = timeoutMs != null ? setTimeout(() => settle(true), timeoutMs) : undefined;
-      if (!waiters.has(taskId)) {
-        waiters.set(taskId, []);
-      }
-      /** @type {Array<(timedOut?: boolean) => void>} */ (waiters.get(taskId)).push(settle);
-    });
+    return pollTask(taskId, { timeoutMs, tailChars }, { ensureStateLoaded, tasks, noSuchTask, waiters });
   }
 
   /**
@@ -4659,4 +4545,179 @@ function computeLogActivity(logPath, ctx) {
   }
   if (hasEvent) ctx.logHasEventCache.add(logPath);
   return { logBytesWritten: stat.size, logLastWriteAt: stat.mtime.toISOString(), logHasEvent: hasEvent };
+}
+
+/**
+ * Throws when bubblewrap isn't available for sandboxing, caching the probe
+ * result in the shared `state` holder so a follow-up dispatch doesn't re-run
+ * the check. Extracted out of `createTaskManager`'s `requireBwrap` closure.
+ * @param {{available: ({checked: boolean, available: boolean, reason?: string}|null)}} state
+ * @param {{checkBwrapAvailableFn: () => {checked: boolean, available: boolean, reason?: string}}} ctx
+ */
+function requireBwrapCapability(state, ctx) {
+  if (state.available == null) {
+    state.available = ctx.checkBwrapAvailableFn();
+  }
+  if (!state.available.available) {
+    throw new Error(
+      "error: bwrap is required for sandboxing but was not found\n" +
+      "help: install bubblewrap (e.g. apt install bubblewrap) or opt out with --no-sandbox or TASKFERRY_DISABLE_SANDBOX=1"
+    );
+  }
+}
+
+/**
+ * Throws when the overlay (bwrap >= 0.8 CoW) isn't supported for gated
+ * dispatch writes, re-probing a negative result after the TTL so a transient
+ * failure can self-heal without a daemon restart while a positive result is
+ * cached forever. Extracted out of `createTaskManager`'s
+ * `requireOverlaySupport` closure.
+ * @param {{support: ({supported: boolean, reason?: string, checkedAt: number}|null)}} state
+ * @param {{checkOverlaySupportFn: () => {supported: boolean, reason?: string}, OVERLAY_SUPPORT_TTL_MS: number}} ctx
+ */
+function requireOverlayCapability(state, ctx) {
+  const now = Date.now();
+  if (state.support == null || (!state.support.supported && now - state.support.checkedAt >= ctx.OVERLAY_SUPPORT_TTL_MS)) {
+    state.support = { ...ctx.checkOverlaySupportFn(), checkedAt: now };
+  }
+  const result = /** @type {{supported: boolean, reason?: string}} */ (state.support);
+  if (!result.supported) {
+    throw new Error(
+      `error: overlay is required for gated dispatch writes but is unsupported (${result.reason})\n` +
+      "help: upgrade bubblewrap to >= 0.8, or opt out explicitly with --no-overlay or TASKFERRY_DISABLE_OVERLAY=1 (writes will not be gated)"
+    );
+  }
+}
+
+/**
+ * Applies a task's pending changeset (git or non-git), persisting the status
+ * before cleanup and re-persisting after a successful cleanup so the durable
+ * record reflects the cleared overlay. Extracted out of `createTaskManager`'s
+ * `accept` closure; every factory binding is threaded in via `ctx`.
+ * @param {string} taskId
+ * @param {{ensureStateLoaded: () => void, tasks: Map<string, Task>, noSuchTask: (taskId: string) => Error, existsFn: (path: string) => boolean, hasLiveOverlay: (task: Task) => boolean, stateDir: string, runtimeDir: string, runOverlayCommandFn: (command: string, args: string[]) => {status: number|null, stdout: string, stderr: string, error?: Error}, persistTask: (taskId: string) => void, releaseOverlay: (task: {overlayDirs?: {root:string,tmpRoot:string}|null}) => boolean}} ctx
+ * @returns {{taskId: string, changesetStatus: string, applied: boolean, reason?: string|null, cleanupFailed?: boolean}}
+ */
+function acceptTaskChangeset(taskId, ctx) {
+  ctx.ensureStateLoaded();
+  const task = ctx.tasks.get(taskId);
+  if (!task) throw ctx.noSuchTask(taskId);
+  const isGitTarget = validateAcceptable(task, { existsFn: ctx.existsFn, hasLiveOverlay: ctx.hasLiveOverlay });
+  const denyList = defaultDenyList(os.homedir(), ctx.stateDir).filter(ctx.existsFn);
+  const applied = applyChangeset({
+    isGitTarget,
+    stateDir: ctx.stateDir,
+    runtimeDir: ctx.runtimeDir,
+    denyList,
+    directory: task.directory,
+    // validateAcceptable() threw above if diffPath were null, but that
+    // narrowing lives inside the helper, so assert the invariant here.
+    diffPath: /** @type {string} */ (task.diffPath),
+    overlay: task.overlayDirs ?? undefined,
+    homeDir: os.homedir(),
+    runCommand: ctx.runOverlayCommandFn,
+  });
+  if (!applied.applied) {
+    // validateAcceptable() threw above if changesetStatus weren't pending,
+    // so it is non-undefined here; assert it for the type checker.
+    return { taskId, changesetStatus: /** @type {string} */ (task.changesetStatus), applied: false, reason: applied.reason };
+  }
+  task.changesetStatus = "accepted";
+  // Persist before cleanup: a crash between apply and persist would leave
+  // the task reading as "pending" after a restart even though the patch
+  // was already applied, risking a double-apply on the next accept()
+  // retry. The cleanup may still fail (review finding #11), but that
+  // failure surfaces in the return value and overlayDirs stays set so the
+  // daemon-startup sweep (Task 12) retries the removal.
+  ctx.persistTask(task.id);
+  const cleanupFailed = ctx.releaseOverlay(task);
+  // If cleanup succeeded, releaseOverlay() cleared overlayDirs in memory
+  // (review finding #11). Persist once more so the durable task record
+  // reflects the cleared overlay metadata instead of claiming an overlay
+  // still exists for an overlay that was just removed. If cleanup failed,
+  // overlayDirs stays set on disk and the startup sweep (Task 12) retries
+  // the removal on the next daemon start -- consistent with the pre-fix
+  // behavior for the cleanup-failure path.
+  if (!cleanupFailed) ctx.persistTask(task.id);
+  return { taskId, changesetStatus: task.changesetStatus, applied: true, ...(cleanupFailed ? { cleanupFailed: true } : {}) };
+}
+
+/**
+ * Marks a task's pending changeset as rejected, persisting before cleanup
+ * (parallel to accept()). Extracted out of `createTaskManager`'s `reject`
+ * closure.
+ * @param {string} taskId
+ * @param {{ensureStateLoaded: () => void, tasks: Map<string, Task>, noSuchTask: (taskId: string) => Error, persistTask: (taskId: string) => void, releaseOverlay: (task: {overlayDirs?: {root:string,tmpRoot:string}|null}) => boolean}} ctx
+ * @returns {{taskId: string, changesetStatus: string, cleanupFailed?: boolean}}
+ */
+function rejectTaskChangeset(taskId, ctx) {
+  ctx.ensureStateLoaded();
+  const task = ctx.tasks.get(taskId);
+  if (!task) throw ctx.noSuchTask(taskId);
+  if (task.changesetStatus !== "pending") {
+    throw new Error(`error: task ${taskId} has no pending changeset (changesetStatus: ${task.changesetStatus ?? "none"})\nhelp: only a task with changesetStatus "pending" can be rejected`);
+  }
+  task.changesetStatus = "rejected";
+  // Persist before cleanup (parallel to accept()'s fix): the status is
+  // the committed outcome, the cleanup is the side effect. A crash
+  // between cleanup and persist would leave the task reading as
+  // "pending" after a restart; the next reject() would re-run the
+  // cleanup (idempotent -- rm -rf on a missing path is fine) and then
+  // persist, so the pre-fix order is benign for reject(); matching
+  // accept()'s order keeps the two paths consistent.
+  ctx.persistTask(task.id);
+  const cleanupFailed = ctx.releaseOverlay(task);
+  // If cleanup succeeded, releaseOverlay() cleared overlayDirs in memory;
+  // persist once more so the durable task record reflects the cleared
+  // overlay metadata (parallel to accept()).
+  if (!cleanupFailed) ctx.persistTask(task.id);
+  return { taskId, changesetStatus: task.changesetStatus, ...(cleanupFailed ? { cleanupFailed: true } : {}) };
+}
+
+/**
+ * Waits for a running/queued task to settle, resolving immediately (or with a
+ * timeout) via the shared per-task waiter list. Extracted out of
+ * `createTaskManager`'s `poll` closure; `summarize`/`readNarration` are plain
+ * module-level helpers called directly. `waiters` is threaded in via `ctx`.
+ * @param {string} taskId
+ * @param {{timeoutMs?: number, tailChars?: number}} options
+ * @param {{ensureStateLoaded: () => void, tasks: Map<string, Task>, noSuchTask: (taskId: string) => Error, waiters: Map<string, Array<(timedOut?: boolean) => void>>}} ctx
+ * @returns {Promise<TaskStatus>}
+ */
+function pollTask(taskId, { timeoutMs, tailChars }, ctx) {
+  ctx.ensureStateLoaded();
+  const task = ctx.tasks.get(taskId);
+  if (!task) throw ctx.noSuchTask(taskId);
+  if (task.status !== "running" && task.status !== "queued") {
+    return Promise.resolve(summarize(task));
+  }
+  return new Promise((resolve) => {
+    const settle = (timedOut = false) => {
+      const list = ctx.waiters.get(taskId);
+      if (list) {
+        const idx = list.indexOf(settle);
+        if (idx !== -1) list.splice(idx, 1);
+      }
+      if (timer) clearTimeout(timer);
+      const current = /** @type {Task} */ (ctx.tasks.get(taskId));
+      const summary = summarize(current);
+      if (!timedOut || current.status !== "running" || tailChars == null) {
+        resolve(timedOut ? { ...summary, timedOut: true } : summary);
+        return;
+      }
+      const output = readNarration(current.logPath);
+      resolve({
+        ...summary,
+        timedOut: true,
+        outputTail: output.slice(-tailChars),
+        outputTailTotalChars: output.length,
+        outputTailTruncated: output.length > tailChars,
+      });
+    };
+    const timer = timeoutMs != null ? setTimeout(() => settle(true), timeoutMs) : undefined;
+    if (!ctx.waiters.has(taskId)) {
+      ctx.waiters.set(taskId, []);
+    }
+    /** @type {Array<(timedOut?: boolean) => void>} */ (ctx.waiters.get(taskId)).push(settle);
+  });
 }

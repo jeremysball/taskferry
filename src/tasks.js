@@ -489,6 +489,748 @@ export function isOutsideDirectory(directory, candidate) {
   return rel === ".." || rel.startsWith(".." + path.sep) || path.isAbsolute(rel);
 }
 
+/**
+ * The closure dependencies that `startTask`'s helper pipeline needs threaded
+ * in from `createTaskManager`. Every value here is a reference to (or a thin
+ * mutator over) a `createTaskManager` closure binding -- no helper reads the
+ * outer factory's variables directly, so each helper is a genuine standalone
+ * module-level function rather than a hidden closure over the factory.
+ * @typedef {object} StartTaskContext
+ * @property {string} SUMMARY_DIR
+ * @property {string} PROMPT_DIR
+ * @property {typeof import("node:child_process").spawn} spawnFn
+ * @property {(command: string, args: string[]) => {status: number|null, stdout: string, stderr: string, error?: Error}} runOverlayCommandFn
+ * @property {boolean} sandboxEnabled
+ * @property {NodeJS.Platform} platform
+ * @property {boolean} overlayEnabled
+ * @property {string} overlayTmpRoot
+ * @property {string[]} allowedDirs
+ * @property {string} stateDir
+ * @property {string} cacheDir
+ * @property {string} runtimeDir
+ * @property {(path: string) => boolean} existsFn
+ * @property {(path: string) => {isDirectory: () => boolean}|null} statFn
+ * @property {(path: string) => string[]} readdirFn
+ * @property {(directory: string) => string|null} resolveGitCommonDirFn
+ * @property {(directory: string) => string|null} resolveGitDirFn
+ * @property {() => void} requireBwrap
+ * @property {() => void} requireOverlaySupport
+ * @property {(env?: NodeJS.ProcessEnv) => NodeJS.ProcessEnv} dispatchEnvironment
+ * @property {(env?: NodeJS.ProcessEnv) => NodeJS.ProcessEnv} summaryEnvironment
+ * @property {(taskId: string) => void} settleWaiters
+ * @property {() => void} launchQueuedTasks
+ * @property {(taskId: string) => void} persistTask
+ * @property {(task: Task, opts?: {force?: boolean}) => Promise<unknown>} scheduleActivity
+ * @property {(task: Task) => void} classifyTrailingLogFailure
+ * @property {(task: Task) => void} startRunningWatcher
+ * @property {(taskId: string) => void} stopRunningWatcher
+ * @property {(taskId: string) => string|null} readSessionIdFromLog
+ * @property {(task: Task) => void} evaluateOutputCompleteness
+ * @property {(task: Task) => void} extractChangesetForTask
+ * @property {(pid: number, signal: NodeJS.Signals) => void} sendSignal
+ * @property {{evictTask: (id: string) => void, setSummarySessionId: (srcTaskId: string, sessionId: string) => void, setLastSummarizedWatermark: (srcTaskId: string, bytes: number) => void}} activityCache
+ * @property {Set<string>} logHasEventCache
+ * @property {Map<string, NodeJS.Timeout>} escalationTimers
+ * @property {Map<string, Task>} tasks
+ * @property {() => void} decRunning
+ * @property {() => void} incRunning
+ */
+
+/**
+ * Mutable state shared between a spawned child's stdout/exit/error handlers.
+ * Threading it explicitly (rather than closing over a single `startTask`
+ * frame) is what lets each lifecycle step live as its own standalone helper.
+ * @typedef {object} SharedChildState
+ * @property {boolean} settled
+ * @property {number} capturedLogFd
+ * @property {string} stdoutCarry
+ * @property {import("node:child_process").ChildProcess} child
+ * @property {Task} task
+ * @property {import("./executor.js").WorkerExecutor} executor
+ * @property {() => void} cleanUpScratchFiles
+ */
+
+/**
+ * Resolves the per-launch metadata a dispatch needs before it can spawn:
+ * which kind of launch this is (summary vs dispatch), the target directory,
+ * whether the prompt must be routed through a prompt file to dodge the argv
+ * E2BIG limit (issue #78), and the executor's buildSpawnArgs output. Also
+ * returns the closure that cleans up scratch files (the summary snapshot and
+ * any prompt file) on settlement -- shared by every settle path.
+ * @param {Task} task
+ * @param {LaunchSpec} launch
+ * @param {{SUMMARY_DIR: string, PROMPT_DIR: string}} ctx
+ * @returns {{isSummary: boolean, summaryLaunch: SummaryLaunch, dispatchLaunch: DispatchLaunch, executor: import("./executor.js").WorkerExecutor, launchDirectory: string, promptFilePath: string|null, args: string[], cleanUpScratchFiles: () => void}}
+ */
+function resolveStartTaskLaunch(task, launch, ctx) {
+  const isSummary = launch.kind === "summary";
+  const summaryLaunch = /** @type {SummaryLaunch} */ (launch);
+  const dispatchLaunch = /** @type {DispatchLaunch} */ (launch);
+  const executor = launch.executor;
+  const launchDirectory = isSummary ? ctx.SUMMARY_DIR : dispatchLaunch.directory;
+  // A prompt over PROMPT_ARGV_SAFE_BYTES can't survive as a single argv
+  // element (issue #78: `spawn E2BIG`). Route it through a prompt file
+  // instead -- the executor's buildSpawnArgs attaches it however that
+  // executor's CLI expects (opencode: `-f`; pi: a positional `@path`).
+  const promptFilePath = !isSummary && Buffer.byteLength(dispatchLaunch.prompt, "utf8") > PROMPT_ARGV_SAFE_BYTES
+    ? path.join(ctx.PROMPT_DIR, `${task.id}.prompt.txt`)
+    : null;
+  const args = executor.buildSpawnArgs({
+    isSummary,
+    model: isSummary ? summaryLaunch.model : dispatchLaunch.model,
+    variant: isSummary ? undefined : dispatchLaunch.variant,
+    launchDirectory,
+    promptFilePath,
+    snapshotPath: isSummary ? summaryLaunch.snapshotPath : undefined,
+    prompt: isSummary ? "" : dispatchLaunch.prompt,
+    sessionId: isSummary ? summaryLaunch.summarySessionId ?? null : dispatchLaunch.sessionId ?? null,
+  });
+  const cleanUpScratchFiles = () => {
+    if (isSummary && summaryLaunch.snapshotPath) {
+      try {
+        fs.unlinkSync(summaryLaunch.snapshotPath);
+      } catch (err) {
+        if (errCode(err) !== "ENOENT") throw err;
+      }
+    }
+    if (promptFilePath) {
+      try {
+        fs.unlinkSync(promptFilePath);
+      } catch (err) {
+        if (errCode(err) !== "ENOENT") throw err;
+      }
+    }
+  };
+  return { isSummary, summaryLaunch, dispatchLaunch, executor, launchDirectory, promptFilePath, args, cleanUpScratchFiles };
+}
+
+/**
+ * Computes the pre-spawn plan shared by every launch path before sandboxing
+ * is applied: the base child env (summary vs dispatch variant), the
+ * sandbox-disable flag, the executor's raw command/args, and the role. Also
+ * enforces the fail-closed advisor check (review finding #5): an advisor may
+ * never launch with a plain, unoverlayed writable bind, so when sandboxing is
+ * unavailable it throws here instead of degrading to unsandboxed writes.
+ * @param {StartTaskContext} ctx
+ * @param {ReturnType<typeof resolveStartTaskLaunch>} launchInfo
+ * @returns {{noSandbox: boolean, spawnCommand: string, spawnArgs: string[], spawnEnv: NodeJS.ProcessEnv, role: "dispatch"|"advisor"|null}}
+ */
+function resolveSpawnPlan(ctx, launchInfo) {
+  const { isSummary, summaryLaunch, dispatchLaunch, executor, args } = launchInfo;
+  const spawnEnv = isSummary ? ctx.summaryEnvironment(summaryLaunch.env) : ctx.dispatchEnvironment(dispatchLaunch.env);
+  const noSandbox = !isSummary && dispatchLaunch.noSandbox === true;
+  const spawnCommand = executor.binaryName;
+  const spawnArgs = args;
+  // Summary/report children never get an overlay -- they don't write
+  // to the target directory in any sense the changeset model cares
+  // about, so the plain v1 bind is correct and unchanged for them.
+  const role = isSummary ? null : (dispatchLaunch.role ?? "dispatch");
+  // Review finding #5 (dispatch-launch side): overlay-gating lives inside
+  // the bwrap block below, so when sandboxing is force-disabled
+  // (--no-sandbox / TASKFERRY_DISABLE_SANDBOX=1) or unsupported on this
+  // platform (non-Linux) an advisor would silently launch with a plain
+  // writable bind on the target -- a path to persist a write,
+  // contradicting ADR 0001's "an advisor has no path to persist a write."
+  // Fail closed at dispatch-launch time, mirroring the overlay-disabled
+  // check inside the sandbox block below, instead of degrading to
+  // unsandboxed writes.
+  if (role === "advisor" && !(ctx.sandboxEnabled && !noSandbox && platformSupportsSandbox(ctx.platform))) {
+    throw new Error(
+      "error: advisor dispatch requires overlay-gated writes, but the sandbox is unavailable\n" +
+      "help: advisor writes must be gated by a copy-on-write overlay (docs/adr/0001-cow-overlays-and-diff-gated-writes.md), which requires the bwrap sandbox -- unset TASKFERRY_DISABLE_SANDBOX (or drop --no-sandbox) and run on a supported platform with bubblewrap >= 0.8"
+    );
+  }
+  return { noSandbox, spawnCommand, spawnArgs, spawnEnv, role };
+}
+
+/**
+ * When sandboxing is active, replaces the plain spawn command with the bwrap
+ * invocation: builds the deny-list, ro-binds the executor's auth file and (for
+ * a dispatch) creates the copy-on-write overlay tree, wires the git-common-dir
+ * and allowed-dirs rw binds, and assembles buildBwrapArgs. Side effects on the
+ * task mirror the original dispatch pipeline: the overlay the worker will run
+ * with is persisted onto `task` (review finding #1) so settlement-time
+ * extraction re-mounts the same sub-overlays, and the pre-dispatch HEAD is
+ * captured while the overlay is freshly created. When sandboxing is disabled
+ * (or unsupported on this platform) it returns the plan's plain command
+ * unchanged.
+ * @param {StartTaskContext} ctx
+ * @param {ReturnType<typeof resolveStartTaskLaunch>} launchInfo
+ * @param {ReturnType<typeof resolveSpawnPlan>} plan
+ * @param {Task} task
+ * @returns {{spawnCommand: string, spawnArgs: string[], spawnEnv: NodeJS.ProcessEnv}}
+ */
+function buildSandboxedSpawn(ctx, launchInfo, plan, task) {
+  const { noSandbox, spawnEnv, role, spawnCommand, spawnArgs } = plan;
+  if (!(ctx.sandboxEnabled && !noSandbox && platformSupportsSandbox(ctx.platform))) {
+    return { spawnCommand, spawnArgs, spawnEnv };
+  }
+  const binds = buildBwrapBinds(ctx, launchInfo, task, spawnEnv, role);
+  const assembled = assembleBwrapSpawn(ctx, launchInfo, binds, task);
+  // bwrap owns the process group: the child is spawned through bwrap with the
+  // sandboxed argv it assembled, so cancellation/signalling still targets the
+  // whole group.
+  return { spawnCommand: "bwrap", spawnArgs: assembled.spawnArgs, spawnEnv: assembled.spawnEnv };
+}
+
+/**
+ * Creates the copy-on-write overlay tree for a dispatch launch following the
+ * exclusive-root mkdir protocol (review finding #12): the non-recursive mkdir
+ * fails closed (EEXIST -> spawnError via the outer catch) if the path already
+ * exists -- e.g. a pre-planted symlink. Returns null when no overlay is
+ * wanted. An advisor dispatched with overlay globally disabled fails closed
+ * here (review finding #5); a regular dispatch without an overlay gets a
+ * warning that its writes land ungated.
+ * @param {StartTaskContext} ctx
+ * @param {ReturnType<typeof resolveStartTaskLaunch>} launchInfo
+ * @param {Task} task
+ * @param {"dispatch"|"advisor"|null} role
+ * @returns {{root: string, upperDir: string, workDir: string}|null}
+ */
+function createOverlayIfNeeded(ctx, launchInfo, task, role) {
+  const { isSummary, dispatchLaunch, launchDirectory } = launchInfo;
+  const wantsOverlay = !isSummary && ctx.overlayEnabled && dispatchLaunch.noOverlay !== true;
+  if (wantsOverlay) {
+    ctx.requireOverlaySupport();
+    const overlayInfo = overlayPaths(task.id, ctx.overlayTmpRoot);
+    fs.mkdirSync(ctx.overlayTmpRoot, { recursive: true, mode: 0o700 });
+    fs.mkdirSync(overlayInfo.root, { mode: 0o700 });
+    fs.mkdirSync(overlayInfo.upperDir, { recursive: true, mode: 0o700 });
+    fs.mkdirSync(overlayInfo.workDir, { recursive: true, mode: 0o700 });
+    return overlayInfo;
+  } else if (role === "advisor") {
+    // Review finding #5: an advisor without an overlay gets a plain writable
+    // bind -- a path to persist writes, contradicting ADR 0001.
+    throw new Error(
+      "error: advisor dispatch requires overlay-gated writes, but overlay is disabled\n" +
+      "help: unset TASKFERRY_DISABLE_OVERLAY or set overlayEnabled: true in config -- advisor writes must be gated, see docs/adr/0001-cow-overlays-and-diff-gated-writes.md"
+    );
+  } else if (!isSummary) {
+    process.stderr.write(`warning: overlay disabled -- writes land directly on ${launchDirectory}, not gated by accept/reject\n`);
+  }
+  return null;
+}
+
+/**
+ * Computes the bwrap bind set for a sandboxed dispatch: the deny-list (with
+ * entries the user simply doesn't have dropped, since bwrap --tmpfs fails if
+ * the mount point doesn't exist), the executor's ro-bind auth file, the
+ * executor data-home rw bind (overlayfs needs the source to pre-exist, hence
+ * the mkdir), the optional copy-on-write overlay tree, the git-common-dir
+ * flows, and the allowed-dirs rw binds. Overlay creation follows the
+ * exclusive-root mkdir protocol (review finding #12) and the advisor-overlay
+ * fail-closed checks (review finding #5); see createOverlayIfNeeded.
+ * @param {StartTaskContext} ctx
+ * @param {ReturnType<typeof resolveStartTaskLaunch>} launchInfo
+ * @param {Task} task
+ * @param {NodeJS.ProcessEnv} spawnEnv
+ * @param {"dispatch"|"advisor"|null} role
+ * @returns {{homeDir: string, denyList: string[], extraRoBinds: [string, string][], extraRwBinds: string[], overlayInfo: {root: string, upperDir: string, workDir: string}|null, overlayRwBinds: Array<{path: string, upperDir: string, workDir: string}>, overlayRwFileBinds: Array<{path: string, bindSrc: string}>, executorRwPairBinds: [string, string][], sandboxEnv: NodeJS.ProcessEnv, spawnEnv: NodeJS.ProcessEnv, role: "dispatch"|"advisor"|null}}
+ */
+function buildBwrapBinds(ctx, launchInfo, task, spawnEnv, role) {
+  const { isSummary, dispatchLaunch, executor, launchDirectory, promptFilePath } = launchInfo;
+  ctx.requireBwrap();
+  const homeDir = os.homedir();
+  const denyList = defaultDenyList(homeDir, ctx.stateDir).filter(ctx.existsFn);
+  // The executor decides which env var overrides point at its sandboxed data
+  // home (opencode: XDG_DATA_HOME; pi: PI_CODING_AGENT_DIR) and which
+  // destination to ro-bind the real auth file into, so each executor's bound
+  // auth destination matches its own environment directory.
+  const {
+    extraRoBinds: executorRoBinds,
+    extraRwPairBinds: executorRwPairBinds = [],
+    sandboxedDataHome,
+    sandboxEnv,
+  } = executor.sandboxAuthFile({
+    homeDir,
+    dataDir: ctx.cacheDir,
+    spawnEnv,
+    existsFn: ctx.existsFn,
+    statFn: ctx.statFn,
+    readdirFn: ctx.readdirFn,
+    ...(isSummary ? {} : { sessionId: dispatchLaunch.sessionId ?? null, launchDirectory: launchDirectory || null }),
+  });
+  /** @type {[string, string][]} */
+  const extraRoBinds = [...executorRoBinds];
+  if (promptFilePath) extraRoBinds.push([ctx.PROMPT_DIR, ctx.PROMPT_DIR]);
+  /** @type {string[]} */
+  const extraRwBinds = [];
+  // The root filesystem is read-only bound by default, so the executor's
+  // real-disk data home (cacheDir, not the tmpfs runtime dir) needs an
+  // explicit read-write bind. bwrap requires the source to already exist,
+  // hence the mkdir here rather than leaving it for the sandboxed process.
+  fs.mkdirSync(sandboxedDataHome, { recursive: true, mode: 0o700 });
+  extraRwBinds.push(sandboxedDataHome);
+  const overlayInfo = createOverlayIfNeeded(ctx, launchInfo, task, role);
+  const gitBinds = buildGitBinds(ctx, launchDirectory, overlayInfo, extraRwBinds);
+  for (const dir of [...ctx.allowedDirs, ...(isSummary ? [] : dispatchLaunch.allowedDirs || [])]) {
+    const resolved = path.isAbsolute(dir) ? dir : path.resolve(launchDirectory, dir);
+    if (ctx.existsFn(resolved)) extraRwBinds.push(resolved);
+  }
+  return {
+    homeDir, denyList, extraRoBinds, extraRwBinds, overlayInfo, executorRwPairBinds, sandboxEnv, spawnEnv, role,
+    overlayRwBinds: gitBinds.overlayRwBinds,
+    overlayRwFileBinds: gitBinds.overlayRwFileBinds,
+  };
+}
+
+/**
+ * Builds the write-through binds for a git dispatch directory whose real
+ * gitdir lives outside the read-write mount: the gitdir (or git-common-dir)
+ * becomes a rw overlay sub-mount or a scratch-copied file bind, depending on
+ * whether the target is a directory or a file (overlayfs is directory-only).
+ * A git worktree's real gitdir (objects/refs it shares with the main
+ * checkout, plus its own HEAD/index) lives outside `launchDirectory` and is
+ * otherwise invisible to the read-write bind on it alone -- without this,
+ * `git commit` inside the sandbox fails read-only.
+ * @param {StartTaskContext} ctx
+ * @param {string} launchDirectory
+ * @param {{root: string, upperDir: string, workDir: string}|null} overlayInfo
+ * @param {string[]} extraRwBinds
+ * @returns {{overlayRwBinds: Array<{path: string, upperDir: string, workDir: string}>, overlayRwFileBinds: Array<{path: string, bindSrc: string}>}}
+ */
+function buildGitBinds(ctx, launchDirectory, overlayInfo, extraRwBinds) {
+  /** @type {Array<{path: string, upperDir: string, workDir: string}>} */
+  const overlayRwBinds = [];
+  /** @type {Array<{path: string, bindSrc: string}>} */
+  const overlayRwFileBinds = [];
+  const gitCommonDir = ctx.resolveGitCommonDirFn(launchDirectory);
+  if (gitCommonDir && ctx.existsFn(gitCommonDir) && isOutsideDirectory(launchDirectory, gitCommonDir)) {
+    const gitDir = ctx.resolveGitDirFn(launchDirectory);
+    /** @param {string} p */
+    const addWritable = (p) => {
+      if (overlayInfo) {
+        if (ctx.statFn(p)?.isDirectory()) {
+          const sub = subOverlayPaths(overlayInfo.root, p);
+          fs.mkdirSync(sub.upperDir, { recursive: true, mode: 0o700 });
+          fs.mkdirSync(sub.workDir, { recursive: true, mode: 0o700 });
+          overlayRwBinds.push(sub);
+        } else {
+          // Overlayfs mounts are directory-only (bwrap dies with "Can't mkdir
+          // <file>: Not a directory"), so a writable FILE gets a scratch copy
+          // under the overlay root bound rw onto the host path instead.
+          const bind = subFilePaths(overlayInfo.root, p);
+          fs.mkdirSync(path.dirname(bind.bindSrc), { recursive: true, mode: 0o700 });
+          fs.copyFileSync(p, bind.bindSrc);
+          overlayRwFileBinds.push(bind);
+        }
+      } else {
+        extraRwBinds.push(p);
+      }
+    };
+    if (gitDir && ctx.existsFn(gitDir) && gitDir !== gitCommonDir) {
+      addWritable(gitDir);
+      for (const rel of ["objects", "refs", path.join("logs", "refs")]) {
+        const resolved = path.join(gitCommonDir, rel);
+        fs.mkdirSync(resolved, { recursive: true });
+        addWritable(resolved);
+      }
+      const packedRefs = path.join(gitCommonDir, "packed-refs");
+      if (ctx.existsFn(packedRefs)) addWritable(packedRefs);
+    } else {
+      addWritable(gitCommonDir);
+    }
+  }
+  return { overlayRwBinds, overlayRwFileBinds };
+}
+
+/**
+ * Assembles the final bwrap argv from the computed binds, merges the sandbox
+ * env over the spawn env, and -- when an overlay was created for a dispatch --
+ * persists the overlay + rw binds onto the task (review finding #1) and
+ * captures the pre-dispatch HEAD while the overlay is freshly created.
+ * @param {StartTaskContext} ctx
+ * @param {ReturnType<typeof resolveStartTaskLaunch>} launchInfo
+ * @param {ReturnType<typeof buildBwrapBinds>} binds
+ * @param {Task} task
+ * @returns {{spawnArgs: string[], spawnEnv: NodeJS.ProcessEnv}}
+ */
+function assembleBwrapSpawn(ctx, launchInfo, binds, task) {
+  const { executor, args, launchDirectory, isSummary } = launchInfo;
+  const spawnArgs = buildBwrapArgs({
+    directory: launchDirectory,
+    stateDir: ctx.stateDir,
+    runtimeDir: ctx.runtimeDir,
+    homeDir: binds.homeDir,
+    denyList: binds.denyList,
+    extraRwBinds: binds.extraRwBinds,
+    extraRwPairBinds: binds.executorRwPairBinds,
+    extraRoBinds: binds.extraRoBinds,
+    ...(binds.overlayInfo ? { overlay: { upperDir: binds.overlayInfo.upperDir, workDir: binds.overlayInfo.workDir }, overlayRwBinds: binds.overlayRwBinds, overlayRwFileBinds: binds.overlayRwFileBinds } : {}),
+    runtimeDirWritable: binds.role !== "advisor",
+  }).concat(["--", executor.binaryName, ...args]);
+  const spawnEnv = { ...binds.spawnEnv, ...binds.sandboxEnv };
+  if (binds.overlayInfo && !isSummary) {
+    // rwBinds persisted onto the task (review finding #1): settlement-time
+    // extraction (Task 10) must re-mount the exact git-common-dir sub-overlays
+    // the worker ran with, so the diff sees the worker's writes.
+    task.overlayDirs = { ...binds.overlayInfo, tmpRoot: ctx.overlayTmpRoot, rwBinds: binds.overlayRwBinds, rwFileBinds: binds.overlayRwFileBinds };
+    task.changesetStatus = "pending";
+    task.preDispatchHead = resolvePreDispatchHead(launchDirectory, ctx.runOverlayCommandFn);
+  }
+  return { spawnArgs, spawnEnv };
+}
+
+/**
+ * Writes a normalized log event (or a structured ExecutorNormalizationError
+ * when the executor's normalizeLogEvent throws) to the captured log fd. A
+ * throw out of an EventEmitter callback is an unhandled exception that would
+ * crash the daemon and orphan every child, so the throw is caught here and
+ * turned into a canonical `type:"error"` event instead.
+ * @param {SharedChildState} shared
+ * @param {unknown} parsed
+ * @param {string} rawLine
+ */
+function writeNormalizedLogLine(shared, parsed, rawLine) {
+  let normalized;
+  try {
+    normalized = shared.executor.normalizeLogEvent(parsed);
+  } catch (err) {
+    const message = errMessage(err);
+    const errorEvent = {
+      type: "error",
+      message: `executor.normalizeLogEvent threw: ${message}`,
+      error: {
+        name: "ExecutorNormalizationError",
+        data: { message, raw: rawLine },
+      },
+    };
+    try {
+      fs.writeSync(shared.capturedLogFd, `${JSON.stringify(errorEvent)}\n`);
+    } catch {
+      // Log fd closed out from under us (task already settled / cleaned up)
+    }
+    return;
+  }
+  if (normalized == null) return;
+  try {
+    fs.writeSync(shared.capturedLogFd, `${JSON.stringify(normalized)}\n`);
+  } catch {
+    // Log fd closed out from under us (task already settled / cleaned up)
+  }
+}
+
+/**
+ * Inline stdout handler: buffers until a newline, then routes each complete
+ * line through writeNormalizedLogLine, preserving verbatim any non-JSON
+ * stdout (so non-event-emitting providers still have text to classify).
+ * @param {SharedChildState} shared
+ * @param {Buffer} chunk
+ */
+function onChildData(shared, chunk) {
+  shared.stdoutCarry += chunk.toString("utf8");
+  let nl;
+  while ((nl = shared.stdoutCarry.indexOf("\n")) !== -1) {
+    const line = shared.stdoutCarry.slice(0, nl);
+    shared.stdoutCarry = shared.stdoutCarry.slice(nl + 1);
+    if (!line.trim()) continue;
+    let parsed;
+    try {
+      parsed = JSON.parse(line);
+    } catch {
+      // Non-JSON stdout -- preserve verbatim so classifyProviderFailure has
+      // the line's text even without a parseable event shape.
+      try {
+        fs.writeSync(shared.capturedLogFd, `${line}\n`);
+      } catch {
+        // Log fd closed out from under us (task already settled / cleaned up)
+      }
+      continue;
+    }
+    writeNormalizedLogLine(shared, parsed, line);
+  }
+}
+
+/**
+ * Trailing-fragment stdout handler: a final partial/malformed line at process
+ * end is preserved verbatim for the same reason as the inline branch above.
+ * @param {SharedChildState} shared
+ */
+function onChildEnd(shared) {
+  const tail = shared.stdoutCarry;
+  shared.stdoutCarry = "";
+  if (!tail.trim()) return;
+  let parsed;
+  try {
+    parsed = JSON.parse(tail);
+  } catch {
+    // Trailing partial / malformed line at process end -- preserve verbatim.
+    try {
+      fs.writeSync(shared.capturedLogFd, `${tail}\n`);
+    } catch {
+      // Same as the inline branch: fd may already be closed.
+    }
+    return;
+  }
+  writeNormalizedLogLine(shared, parsed, tail);
+}
+
+/**
+ * The shared settle path for a launched child: persists the terminal state,
+ * prunes the activity cache, evicts the log-event cache, cleans up scratch
+ * files, and releases the concurrency slot (decrementing runningCount and
+ * kicking the launch queue so the next queued task can start).
+ * @param {StartTaskContext} ctx
+ * @param {SharedChildState} shared
+ */
+function finishChildSettlement(ctx, shared) {
+  const task = shared.task;
+  try {
+    ctx.persistTask(task.id);
+  } catch {
+    // In-memory child settlement is authoritative; a failed best-effort
+    // state write must not strand the concurrency slot.
+  }
+  // Prune the activity cache only after the terminal snapshot above has had
+  // a chance to land, so `watch --summaries` still sees the final status
+  // transition instead of a cache miss.
+  void ctx.scheduleActivity(task, { force: true }).then(() => ctx.activityCache.evictTask(task.id));
+  ctx.logHasEventCache.delete(task.logPath);
+  try {
+    shared.cleanUpScratchFiles();
+  } catch (err) {
+    // EBUSY/EACCES unlink failures during scratch cleanup must not throw from
+    // this child exit handler: no uncaughtException handler upstream, so an
+    // unhandled throw crashes the daemon and orphans every other in-flight task.
+    console.error(`taskferry: failed to clean up scratch files for task ${task.id}: ${errMessage(err)}`);
+  } finally {
+    ctx.decRunning();
+    ctx.settleWaiters(task.id);
+    ctx.launchQueuedTasks();
+  }
+}
+
+/**
+ * Child exit handler: marks settled, closes the shared log fd, clears the
+ * escalation timer, classifies trailing failures, computes the terminal
+ * status (including boot-crash surfacing), stamps session/exit metadata, runs
+ * output-completeness and changeset extraction for terminal states, carries a
+ * successful summary child's session id forward, then settles the task.
+ * @param {StartTaskContext} ctx
+ * @param {SharedChildState} shared
+ * @param {number|null} code
+ * @param {NodeJS.Signals|null} signal
+ */
+function onChildExit(ctx, shared, code, signal) {
+  const task = shared.task;
+  if (shared.settled) return;
+  shared.settled = true;
+  // The stdout handler and stderr (wired through stdio[2] -> logFd) share
+  // this fd; close it now that nothing else can write.
+  try {
+    fs.closeSync(shared.capturedLogFd);
+  } catch {
+    // Already closed (e.g. concurrent exit/error path), or the fd table
+    // entry is gone -- nothing to clean up.
+  }
+  const timer = ctx.escalationTimers.get(task.id);
+  if (timer) {
+    clearTimeout(timer);
+    ctx.escalationTimers.delete(task.id);
+  }
+  ctx.classifyTrailingLogFailure(task);
+  ctx.stopRunningWatcher(task.id);
+  task.status = resolveChildExitStatus(task, code, signal);
+  surfaceBootCrashFailure(task, code);
+  task.exitCode = code;
+  task.signal = signal;
+  task.endedAt = new Date().toISOString();
+  const parsedSessionId = ctx.readSessionIdFromLog(task.logPath);
+  if (parsedSessionId) task.sessionId = parsedSessionId;
+  if (task.status === "done") ctx.evaluateOutputCompleteness(task);
+  if (task.status === "done" || task.status === "crashed" || task.status === "cancelled") ctx.extractChangesetForTask(task);
+  carrySummarySession(ctx, task, parsedSessionId);
+  finishChildSettlement(ctx, shared);
+}
+
+/**
+ * Computes a child's terminal status from its exit code/signal: a pending
+ * cancel wins, a pre-set failureReason (e.g. from the watchdog) is preserved
+ * as "crashed", and a clean zero exit with no signal is "done". A
+ * watchdog-killed child (task.failureReason already set) can still exit
+ * 0/unsignaled if it traps SIGTERM and shuts down gracefully -- don't let
+ * that read as "done" and bury the failureReason behind a healthy status.
+ * @param {Task} task
+ * @param {number|null} code
+ * @param {NodeJS.Signals|null} signal
+ * @returns {"cancelled"|"crashed"|"done"}
+ */
+function resolveChildExitStatus(task, code, signal) {
+  return task.cancelRequested ? "cancelled" : task.failureReason ? "crashed" : code === 0 && !signal ? "done" : "crashed";
+}
+
+/**
+ * Boot-crash surfacing: an explicit non-zero exit (signal deaths stay
+ * unclassified: code is null there, and an external kill is not a boot
+ * failure even when it lands during startup), nothing set by the curated
+ * classifier, and not a single parseable event anywhere in the log -- the
+ * child never did any work, so its raw capture becomes failureReason/detail.
+ * Skipped once any event exists: raw stderr after real work started is
+ * ambiguous and stays the curated classifier's job.
+ * @param {Task} task
+ * @param {number|null} code
+ */
+function surfaceBootCrashFailure(task, code) {
+  if (task.status === "crashed" && !task.failureReason && code != null && code !== 0 && !logHasAnyEvent(task.logPath)) {
+    const bootFailure = extractBootFailureDetail(task.logPath);
+    if (bootFailure) {
+      task.failureReason = bucketFor(resolveExecutor(task.executorId).errorBucketPrefix, bootFailure.bucket);
+      task.failureDetail = bootFailure.detail;
+    }
+  }
+}
+
+/**
+ * Persists the opencode session id of a successful summary child so the next
+ * summarize turn can resume the same prompt-cached conversation via
+ * `--continue --session <id>`, and stamps the watermark so the next turn only
+ * re-sends narration from this point on. Applies to both the activity-cache
+ * path (`watch --summaries`) and the direct `taskferry summary` path -- they
+ * share this exit handler, so the direct path gets session continuity too.
+ * @param {StartTaskContext} ctx
+ * @param {Task} task
+ * @param {string|null} parsedSessionId
+ */
+function carrySummarySession(ctx, task, parsedSessionId) {
+  if (task.summaryOf && task.status === "done" && parsedSessionId) {
+    ctx.activityCache.setSummarySessionId(task.summaryOf.sourceTaskId, parsedSessionId);
+    const source = ctx.tasks.get(task.summaryOf.sourceTaskId);
+    if (source) {
+      try {
+        const size = fs.statSync(source.logPath).size;
+        ctx.activityCache.setLastSummarizedWatermark(task.summaryOf.sourceTaskId, size);
+      } catch {
+        // Source log unreadable at settlement time (rotated or deleted). The
+        // next summarize call's watermark-vs-size check detects the
+        // inconsistency and clears the cache state.
+      }
+    }
+  }
+}
+
+/**
+ * Child spawn-error handler: mirrors the exit handler (close the shared fd,
+ * mark settled, stamp crash metadata) and runs the same extraction/cleanup
+ * path so a spawn-failed task -- whose overlay was already created -- is not
+ * stranded on disk with no extraction ever booked against it.
+ * @param {StartTaskContext} ctx
+ * @param {SharedChildState} shared
+ * @param {Error} err
+ */
+function onChildError(ctx, shared, err) {
+  const task = shared.task;
+  ctx.stopRunningWatcher(task.id);
+  if (shared.settled) return;
+  shared.settled = true;
+  // Mirrors the exit handler: the stdout handler shares this fd and stops
+  // writing once settled; close it so the OS doesn't keep an entry on its fd
+  // table for a task that's about to settle.
+  try {
+    fs.closeSync(shared.capturedLogFd);
+  } catch {
+    // Already closed or gone -- nothing to clean up.
+  }
+  task.status = "crashed";
+  task.spawnError = errMessage(err);
+  task.endedAt = new Date().toISOString();
+  // Spawn failure (e.g. ENOENT) lands here AFTER the sandbox/overlay block
+  // already ran: overlayDirs is set, changesetStatus is still "pending", and
+  // the overlay would otherwise sit on disk with no extraction ever booked
+  // against it. extractChangesetForTask is internally error-safe and handles
+  // an empty overlay the same way the exit path does.
+  ctx.extractChangesetForTask(task);
+  finishChildSettlement(ctx, shared);
+}
+
+/**
+ * Opens the task's log, computes the spawn plan, applies sandboxing/overlay
+ * setup, spawns the child, wires the stdout/exit/error handlers, and performs
+ * post-spawn bookkeeping (status/pid/running count/persist/watcher). Any sync
+ * throw along the way -- prompt-file write, log open, sandbox or overlay
+ * setup, or spawn itself -- is caught and turned into a crashed task with a
+ * spawnError, mirroring the original dispatch pipeline's error handling.
+ * @param {StartTaskContext} ctx
+ * @param {ReturnType<typeof resolveStartTaskLaunch>} launchInfo
+ * @param {Task} task
+ */
+function spawnTaskChild(ctx, launchInfo, task) {
+  const { dispatchLaunch, executor, launchDirectory, promptFilePath, cleanUpScratchFiles } = launchInfo;
+  let logFd;
+  let child;
+  try {
+    if (promptFilePath) fs.writeFileSync(promptFilePath, dispatchLaunch.prompt, { mode: 0o600, flag: "wx" });
+    logFd = fs.openSync(task.logPath, "a", 0o600);
+    fs.chmodSync(task.logPath, 0o600);
+    const plan = resolveSpawnPlan(ctx, launchInfo);
+    const sandbox = buildSandboxedSpawn(ctx, launchInfo, plan, task);
+    // No tmux: the child has no shared session to introspect. It is its own
+    // process group so cancellation can stop any subprocesses it creates.
+    // stdout is normalized line-by-line through executor.normalizeLogEvent
+    // before it reaches the log file; stderr writes straight to the log fd.
+    child = ctx.spawnFn(sandbox.spawnCommand, sandbox.spawnArgs, {
+      cwd: launchDirectory,
+      stdio: ["ignore", "pipe", logFd],
+      detached: true,
+      env: sandbox.spawnEnv,
+    });
+    // Capture the fd so the stdout handler can keep writing to it until the
+    // child exits; closing it here (as the pre-refactor code did) would break
+    // the handler's fs.writeSync before the child has a chance to drain.
+    const shared = /** @type {SharedChildState} */ ({
+      settled: false,
+      capturedLogFd: logFd,
+      stdoutCarry: "",
+      child,
+      task,
+      executor,
+      cleanUpScratchFiles,
+    });
+    // stdio[1] = "pipe" guarantees stdout is non-null for the real
+    // child_process.ChildProcess. Test fakes also expose a stdout
+    // EventEmitter via fakeChild().
+    const childStdout = /** @type {import("node:stream").Readable} */ (child.stdout);
+    childStdout.on("data", (chunk) => onChildData(shared, chunk));
+    childStdout.on("end", () => onChildEnd(shared));
+    child.on("exit", (code, signal) => onChildExit(ctx, shared, code, signal));
+    child.on("error", (err) => onChildError(ctx, shared, err));
+    task.status = "running";
+    task.pid = child.pid ?? null;
+    ctx.incRunning();
+    ctx.persistTask(task.id);
+    ctx.scheduleActivity(task, { force: true });
+    ctx.startRunningWatcher(task);
+    child.unref();
+  } catch (err) {
+    if (logFd != null) fs.closeSync(logFd);
+    task.status = "crashed";
+    task.spawnError = errMessage(err);
+    task.endedAt = new Date().toISOString();
+    if (child?.pid != null) ctx.sendSignal(child.pid, "SIGKILL");
+    // Mirrors the child.on("error") spawn-failure path above: a sync throw
+    // from spawnFn (or resolvePreDispatchHead / any other code in this try
+    // block after overlay creation) lands here AFTER overlayDirs was set, so
+    // the overlay would otherwise sit on the tmpfs with no extraction ever
+    // booked against it. extractChangesetForTask is internally error-safe and
+    // on an empty overlay produces the correct terminal state. Doing this
+    // BEFORE the explicit persistTask() below ensures the durable record
+    // reflects the post-extract changesetStatus.
+    ctx.extractChangesetForTask(task);
+    ctx.persistTask(task.id);
+    void ctx.scheduleActivity(task, { force: true }).then(() => ctx.activityCache.evictTask(task.id));
+    ctx.logHasEventCache.delete(task.logPath);
+    try {
+      cleanUpScratchFiles();
+    } catch (cleanupErr) {
+      // Same reasoning as finishChildSettlement's cleanUpScratchFiles guard
+      // above: a non-ENOENT unlink failure here must not throw out of this
+      // spawn-failure catch block, which would crash the daemon the same way
+      // an unguarded call in the exit handler would.
+      console.error(`taskferry: failed to clean up scratch files for task ${task.id}: ${errMessage(cleanupErr)}`);
+    }
+    ctx.settleWaiters(task.id);
+  }
+}
+
 const DEFAULT_MAX_DISPATCHES_PER_WINDOW = 2;
 const DEFAULT_DISPATCH_WINDOW_MS = 5000;
 const DEFAULT_MAX_CONCURRENT_TASKS = 4;
@@ -1833,537 +2575,60 @@ export function createTaskManager({
   }
 
   /** @param {Task} task */
+  /**
+   * Spawns a queued launch's worker process. The launch's pre-parsed
+   * metadata (target dir, prompt-file routing, buildSpawnArgs output) comes
+   * from resolveStartTaskLaunch; the actual spawn + child lifecycle is
+   * delegated to the module-level helpers below, which take every factory
+   * closure dependency explicitly via `ctx`.
+   * @param {Task} task
+   */
   function startTask(task) {
     const launch = pendingLaunches.get(task.id);
     pendingLaunches.delete(task.id);
     if (!launch) return;
-
-    const isSummary = launch.kind === "summary";
-    const summaryLaunch = /** @type {SummaryLaunch} */ (launch);
-    const dispatchLaunch = /** @type {DispatchLaunch} */ (launch);
-    const executor = launch.executor;
-    const launchDirectory = isSummary ? SUMMARY_DIR : dispatchLaunch.directory;
-    // A prompt over PROMPT_ARGV_SAFE_BYTES can't survive as a single argv
-    // element (issue #78: `spawn E2BIG`). Route it through a prompt file
-    // instead -- the executor's buildSpawnArgs attaches it however that
-    // executor's CLI expects (opencode: `-f`; pi: a positional `@path`).
-    const promptFilePath = !isSummary && Buffer.byteLength(dispatchLaunch.prompt, "utf8") > PROMPT_ARGV_SAFE_BYTES
-      ? path.join(PROMPT_DIR, `${task.id}.prompt.txt`)
-      : null;
-    const args = executor.buildSpawnArgs({
-      isSummary,
-      model: isSummary ? summaryLaunch.model : dispatchLaunch.model,
-      variant: isSummary ? undefined : dispatchLaunch.variant,
-      launchDirectory,
-      promptFilePath,
-      snapshotPath: isSummary ? summaryLaunch.snapshotPath : undefined,
-      prompt: isSummary ? "" : dispatchLaunch.prompt,
-      sessionId: isSummary ? summaryLaunch.summarySessionId ?? null : dispatchLaunch.sessionId ?? null,
-    });
-
-    const cleanUpScratchFiles = () => {
-      if (isSummary && summaryLaunch.snapshotPath) {
-        try {
-          fs.unlinkSync(summaryLaunch.snapshotPath);
-        } catch (err) {
-          if (errCode(err) !== "ENOENT") throw err;
-        }
-      }
-      if (promptFilePath) {
-        try {
-          fs.unlinkSync(promptFilePath);
-        } catch (err) {
-          if (errCode(err) !== "ENOENT") throw err;
-        }
-      }
+    const ctx = {
+      SUMMARY_DIR,
+      PROMPT_DIR,
+      spawnFn,
+      runOverlayCommandFn,
+      sandboxEnabled,
+      platform,
+      overlayEnabled,
+      overlayTmpRoot,
+      allowedDirs,
+      stateDir,
+      cacheDir,
+      runtimeDir,
+      existsFn,
+      statFn,
+      readdirFn,
+      resolveGitCommonDirFn,
+      resolveGitDirFn,
+      requireBwrap,
+      requireOverlaySupport,
+      dispatchEnvironment,
+      summaryEnvironment,
+      settleWaiters,
+      launchQueuedTasks,
+      persistTask,
+      scheduleActivity,
+      classifyTrailingLogFailure,
+      startRunningWatcher,
+      stopRunningWatcher,
+      readSessionIdFromLog,
+      evaluateOutputCompleteness,
+      extractChangesetForTask,
+      sendSignal,
+      activityCache,
+      logHasEventCache,
+      escalationTimers,
+      tasks,
+      decRunning: () => { runningCount--; },
+      incRunning: () => { runningCount++; },
     };
-
-    let logFd;
-    let child;
-    try {
-      if (promptFilePath) fs.writeFileSync(promptFilePath, dispatchLaunch.prompt, { mode: 0o600, flag: "wx" });
-      logFd = fs.openSync(task.logPath, "a", 0o600);
-      fs.chmodSync(task.logPath, 0o600);
-      let spawnEnv = isSummary ? summaryEnvironment(summaryLaunch.env) : dispatchEnvironment(dispatchLaunch.env);
-      const noSandbox = !isSummary && dispatchLaunch.noSandbox === true;
-      let spawnCommand = executor.binaryName;
-      let spawnArgs = args;
-      // Summary/report children never get an overlay -- they don't write
-      // to the target directory in any sense the changeset model cares
-      // about, so the plain v1 bind is correct and unchanged for them.
-      const role = isSummary ? null : (dispatchLaunch.role ?? "dispatch");
-      // Review finding #5 (dispatch-launch side): overlay-gating lives inside
-      // the bwrap block below, so when sandboxing is force-disabled
-      // (--no-sandbox / TASKFERRY_DISABLE_SANDBOX=1) or unsupported on this
-      // platform (non-Linux) an advisor would silently launch with a plain
-      // writable bind on the target -- a path to persist a write,
-      // contradicting ADR 0001's "an advisor has no path to persist a write."
-      // Fail closed at dispatch-launch time, mirroring the overlay-disabled
-      // check inside the sandbox block below, instead of degrading to
-      // unsandboxed writes.
-      if (role === "advisor" && !(sandboxEnabled && !noSandbox && platformSupportsSandbox(platform))) {
-        throw new Error(
-          "error: advisor dispatch requires overlay-gated writes, but the sandbox is unavailable\n" +
-          "help: advisor writes must be gated by a copy-on-write overlay (docs/adr/0001-cow-overlays-and-diff-gated-writes.md), which requires the bwrap sandbox -- unset TASKFERRY_DISABLE_SANDBOX (or drop --no-sandbox) and run on a supported platform with bubblewrap >= 0.8"
-        );
-      }
-      if (sandboxEnabled && !noSandbox && platformSupportsSandbox(platform)) {
-        requireBwrap();
-        spawnCommand = "bwrap";
-        const homeDir = os.homedir();
-        // bwrap's --tmpfs fails ("Read-only file system") if the mount point
-        // doesn't already exist under the --ro-bind / / root, so any
-        // deny-list entry the user simply doesn't have (e.g. no ~/.aws) must
-        // be dropped before it reaches buildBwrapArgs, not passed through.
-        const denyList = defaultDenyList(homeDir, stateDir).filter(existsFn);
-        // The executor decides which env var overrides point at its
-        // sandboxed data home (opencode: XDG_DATA_HOME; pi:
-        // PI_CODING_AGENT_DIR) and which destination to ro-bind the real
-        // auth file into, so each executor's bound auth destination matches
-        // its own environment directory. Threading the dispatch's
-        // sessionId + launchDirectory through lets pi scope any sessions
-        // bind to just the resumed session's file -- a worker can write
-        // its own session, but not touch every other session in the
-        // user's pi history.
-        const {
-          extraRoBinds: executorRoBinds,
-          extraRwPairBinds: executorRwPairBinds = [],
-          sandboxedDataHome,
-          sandboxEnv,
-        } = executor.sandboxAuthFile({
-          homeDir,
-          dataDir: cacheDir,
-          spawnEnv,
-          existsFn,
-          statFn,
-          readdirFn,
-          ...(isSummary ? {} : { sessionId: dispatchLaunch.sessionId ?? null, launchDirectory: launchDirectory || null }),
-        });
-        /** @type {[string, string][]} */
-        const extraRoBinds = [...executorRoBinds];
-        if (promptFilePath) extraRoBinds.push([PROMPT_DIR, PROMPT_DIR]);
-        // A git worktree's real gitdir (objects/refs it shares with the main
-        // checkout, plus its own HEAD/index) lives outside `launchDirectory`
-        // and is otherwise invisible to the read-write bind on it alone --
-        // without this, `git commit` inside the sandbox fails read-only.
-        /** @type {string[]} */
-        const extraRwBinds = [];
-        // The root filesystem is read-only bound by default, so the
-        // executor's real-disk data home (cacheDir, not the tmpfs runtime
-        // dir -- see resolveCacheDir) needs an explicit read-write bind.
-        // bwrap requires the source to already exist, hence the mkdir here
-        // rather than leaving it for the sandboxed process to create.
-        fs.mkdirSync(sandboxedDataHome, { recursive: true, mode: 0o700 });
-        extraRwBinds.push(sandboxedDataHome);
-
-        const wantsOverlay = !isSummary && overlayEnabled && dispatchLaunch.noOverlay !== true;
-        /** @type {{root: string, upperDir: string, workDir: string}|null} */
-        let overlayInfo = null;
-        if (wantsOverlay) {
-          requireOverlaySupport();
-          overlayInfo = overlayPaths(task.id, overlayTmpRoot);
-          // Exclusive creation of the overlay root (review finding #12): the
-          // non-recursive mkdir fails closed (EEXIST -> spawnError via the
-          // outer catch) if the path already exists -- e.g. a pre-planted
-          // symlink, which a recursive mkdir would follow. Fresh random task
-          // ids make a genuine collision impossible in practice; upper/work
-          // are then created recursively *under* the safely-exclusive root.
-          fs.mkdirSync(overlayTmpRoot, { recursive: true, mode: 0o700 });
-          fs.mkdirSync(overlayInfo.root, { mode: 0o700 });
-          fs.mkdirSync(overlayInfo.upperDir, { recursive: true, mode: 0o700 });
-          fs.mkdirSync(overlayInfo.workDir, { recursive: true, mode: 0o700 });
-        } else if (role === "advisor") {
-          // Review finding #5: an advisor without an overlay gets a plain
-          // writable bind -- a path to persist writes, contradicting ADR
-          // 0001's "an advisor has no path to persist a write." Overlay is
-          // mandatory for the advisor role whenever sandboxing is active, so
-          // a globally-disabled overlay fails closed here. (Per-call
-          // --no-overlay never reaches here for advisors: the CLI/protocol
-          // surface rejects it, see Task 15.)
-          throw new Error(
-            "error: advisor dispatch requires overlay-gated writes, but overlay is disabled\n" +
-            "help: unset TASKFERRY_DISABLE_OVERLAY or set overlayEnabled: true in config -- advisor writes must be gated, see docs/adr/0001-cow-overlays-and-diff-gated-writes.md"
-          );
-        } else if (!isSummary) {
-          process.stderr.write(`warning: overlay disabled -- writes land directly on ${launchDirectory}, not gated by accept/reject\n`);
-        }
-
-        /** @type {Array<{path: string, upperDir: string, workDir: string}>} */
-        const overlayRwBinds = [];
-        /** @type {Array<{path: string, bindSrc: string}>} */
-        const overlayRwFileBinds = [];
-        const gitCommonDir = resolveGitCommonDirFn(launchDirectory);
-        if (gitCommonDir && existsFn(gitCommonDir) && isOutsideDirectory(launchDirectory, gitCommonDir)) {
-          const gitDir = resolveGitDirFn(launchDirectory);
-          /** @param {string} p */
-          const addWritable = (p) => {
-            if (overlayInfo) {
-              if (statFn(p)?.isDirectory()) {
-                const sub = subOverlayPaths(overlayInfo.root, p);
-                fs.mkdirSync(sub.upperDir, { recursive: true, mode: 0o700 });
-                fs.mkdirSync(sub.workDir, { recursive: true, mode: 0o700 });
-                overlayRwBinds.push(sub);
-              } else {
-                // Overlayfs mounts are directory-only (bwrap dies with "Can't
-                // mkdir <file>: Not a directory"), so a writable FILE gets a
-                // scratch copy under the overlay root bound rw onto the host
-                // path instead. Extraction re-mounts the same bind (persisted
-                // as rwFileBinds) so the diff sees the worker's writes;
-                // accept applies them, reject discards the scratch copy.
-                const bind = subFilePaths(overlayInfo.root, p);
-                fs.mkdirSync(path.dirname(bind.bindSrc), { recursive: true, mode: 0o700 });
-                fs.copyFileSync(p, bind.bindSrc);
-                overlayRwFileBinds.push(bind);
-              }
-            } else {
-              extraRwBinds.push(p);
-            }
-          };
-          if (gitDir && existsFn(gitDir) && gitDir !== gitCommonDir) {
-            addWritable(gitDir);
-            for (const rel of ["objects", "refs", path.join("logs", "refs")]) {
-              const resolved = path.join(gitCommonDir, rel);
-              fs.mkdirSync(resolved, { recursive: true });
-              addWritable(resolved);
-            }
-            const packedRefs = path.join(gitCommonDir, "packed-refs");
-            if (existsFn(packedRefs)) addWritable(packedRefs);
-          } else {
-            addWritable(gitCommonDir);
-          }
-        }
-        for (const dir of [...allowedDirs, ...(isSummary ? [] : dispatchLaunch.allowedDirs || [])]) {
-          const resolved = path.isAbsolute(dir) ? dir : path.resolve(launchDirectory, dir);
-          if (existsFn(resolved)) extraRwBinds.push(resolved);
-        }
-        spawnArgs = buildBwrapArgs({
-          directory: launchDirectory,
-          stateDir,
-          runtimeDir,
-          homeDir,
-          denyList,
-          extraRwBinds,
-          extraRwPairBinds: executorRwPairBinds,
-          extraRoBinds,
-          ...(overlayInfo ? { overlay: { upperDir: overlayInfo.upperDir, workDir: overlayInfo.workDir }, overlayRwBinds, overlayRwFileBinds } : {}),
-          runtimeDirWritable: role !== "advisor",
-        }).concat(["--", executor.binaryName, ...args]);
-        spawnEnv = { ...spawnEnv, ...sandboxEnv };
-
-        if (overlayInfo && !isSummary) {
-          // rwBinds persisted onto the task (review finding #1): settlement-time
-          // extraction (Task 10) must re-mount the exact git-common-dir sub-overlays
-          // the worker ran with. They are not reliably re-derivable later -- the
-          // packed-refs/objects/refs selection above depends on live filesystem
-          // state that can change between dispatch and extraction.
-          task.overlayDirs = { ...overlayInfo, tmpRoot: overlayTmpRoot, rwBinds: overlayRwBinds, rwFileBinds: overlayRwFileBinds };
-          task.changesetStatus = "pending";
-          task.preDispatchHead = resolvePreDispatchHead(launchDirectory, runOverlayCommandFn);
-        }
-      }
-      // No tmux: the child has no shared session to introspect. It is its own
-      // process group so cancellation can stop any subprocesses it creates.
-      // stdout is normalized line-by-line through executor.normalizeLogEvent
-      // before it reaches the log file, so every downstream reader
-      // (readNarration, classifyProviderFailure, activity.js, ...) keeps
-      // seeing exactly taskferry's canonical NDJSON shape regardless of
-      // which executor produced it. stderr is unaffected -- it still writes
-      // straight to the log fd (logFd, passed to stdio[2] below), so crash
-      // dumps and unparseable noise land in the log unfiltered, same as
-      // before this change. Non-JSON stdout lines (e.g. pi's plain-text
-      // auth failure text "No API key found for openai.") are preserved
-      // verbatim -- they bypass normalizeLogEvent entirely so a child that
-      // emits no parseable JSON events and exits 0 still leaves
-      // classifyProviderFailure something to classify (issue #94).
-      child = spawnFn(spawnCommand, spawnArgs, {
-        cwd: launchDirectory,
-        stdio: ["ignore", "pipe", logFd],
-        detached: true,
-        env: spawnEnv,
-      });
-      // Capture the fd so the stdout handler can keep writing to it until
-      // the child exits; closing it here (as the pre-refactor code did)
-      // would break the handler's fs.writeSync before the child has a
-      // chance to drain.
-      const capturedLogFd = logFd;
-      /** @type {string} */
-      let stdoutCarry = "";
-      // stdio[1] = "pipe" guarantees stdout is non-null for the real
-      // child_process.ChildProcess. Test fakes also expose a stdout
-      // EventEmitter via fakeChild().
-      const childStdout = /** @type {import("node:stream").Readable} */ (child.stdout);
-      // Single normalization helper used by both the inline (.on("data"))
-      // and trailing-fragment (.on("end")) paths. A throw out of an
-      // EventEmitter callback is an unhandled exception -- it propagates
-      // up the synchronous emit and crashes the daemon, which orphans
-      // every child. Catching the throw here turns "daemon crash" into
-      // "task settles with a structured failure reason" by:
-      //   1. Writing a canonical taskferry `type:"error"` event with a
-      //      stable error class name (`ExecutorNormalizationError`) and
-      //      the thrown message so classifyProviderFailure can see it
-      //      on the trailing-log path and produce an executor-prefixed
-      //      bucket (the structured-error fallthrough branch).
-      //   2. Preserving the original line as the error detail so the
-      //      diagnostic retains what came off the wire.
-      // We do not silently swallow: the error event is observable in
-      // the log and the task's failureReason is set by the existing
-      // watcher/exit lifecycle. The errorBucketPrefix is read off the
-      // executor object captured in this scope (same source as the
-      // spawn-time executorId), keeping the structured-error prefix
-      // contract identical to every other structured error the
-      // classifier sees.
-      /**
-       * @param {unknown} parsed
-       * @param {string} rawLine
-       */
-      const normalizeAndWrite = (parsed, rawLine) => {
-        let normalized;
-        try {
-          normalized = executor.normalizeLogEvent(parsed);
-        } catch (err) {
-          const message = errMessage(err);
-          const errorEvent = {
-            type: "error",
-            message: `executor.normalizeLogEvent threw: ${message}`,
-            error: {
-              name: "ExecutorNormalizationError",
-              data: { message, raw: rawLine },
-            },
-          };
-          try {
-            fs.writeSync(capturedLogFd, `${JSON.stringify(errorEvent)}\n`);
-          } catch {
-            // Log fd closed out from under us (task already settled /
-            // cleaned up) -- drop the trailing write rather than crash
-            // the handler.
-          }
-          return;
-        }
-        if (normalized == null) return;
-        try {
-          fs.writeSync(capturedLogFd, `${JSON.stringify(normalized)}\n`);
-        } catch {
-          // Log fd closed out from under us (task already settled /
-          // cleaned up) -- drop the trailing write rather than crash
-          // the handler.
-        }
-      };
-      childStdout.on("data", (chunk) => {
-        stdoutCarry += chunk.toString("utf8");
-        let nl;
-        while ((nl = stdoutCarry.indexOf("\n")) !== -1) {
-          const line = stdoutCarry.slice(0, nl);
-          stdoutCarry = stdoutCarry.slice(nl + 1);
-          if (!line.trim()) continue;
-          let parsed;
-          try {
-            parsed = JSON.parse(line);
-          } catch {
-            // Non-JSON stdout -- preserve verbatim so a non-event-emitting
-            // provider (e.g. pi on a missing API key) still has its text
-            // routed through classifyProviderFailure. Drop the parsed
-            // event classification on the floor: there is no executor
-            // event shape to apply, and the line's text is what we need.
-            try {
-              fs.writeSync(capturedLogFd, `${line}\n`);
-            } catch {
-              // Log fd closed out from under us (task already settled /
-              // cleaned up) -- drop the trailing write rather than crash
-              // the handler.
-            }
-            continue;
-          }
-          normalizeAndWrite(parsed, line);
-        }
-      });
-      childStdout.on("end", () => {
-        const tail = stdoutCarry;
-        stdoutCarry = "";
-        if (!tail.trim()) return;
-        let parsed;
-        try {
-          parsed = JSON.parse(tail);
-        } catch {
-          // Trailing partial / malformed line at process end -- preserve
-          // verbatim for the same reason as the inline branch above.
-          try {
-            fs.writeSync(capturedLogFd, `${tail}\n`);
-          } catch {
-            // Same as the inline branch: fd may already be closed.
-          }
-          return;
-        }
-        normalizeAndWrite(parsed, tail);
-      });
-      let settled = false;
-      const finishSettlement = () => {
-        try {
-          persistTask(task.id);
-        } catch {
-          // In-memory child settlement is authoritative; a failed best-effort
-          // state write must not strand the concurrency slot.
-        }
-        // Prune the activity cache only after the terminal snapshot above has
-        // had a chance to land, so `watch --summaries` still sees the final
-        // status transition instead of a cache miss.
-        void scheduleActivity(task, { force: true }).then(() => activityCache.evictTask(task.id));
-        logHasEventCache.delete(task.logPath);
-        try {
-          cleanUpScratchFiles();
-        } catch (err) {
-          // EBUSY/EACCES unlink failures during scratch cleanup must not
-          // throw from this child exit handler: no uncaughtException handler
-          // upstream, so an unhandled throw crashes the daemon and orphans
-          // every other in-flight task.
-          console.error(`taskferry: failed to clean up scratch files for task ${task.id}: ${errMessage(err)}`);
-        } finally {
-          runningCount--;
-          settleWaiters(task.id);
-          launchQueuedTasks();
-        }
-      };
-
-      child.on("exit", (code, signal) => {
-        if (settled) return;
-        settled = true;
-        // The stdout handler and stderr (wired through stdio[2] -> logFd)
-        // share this fd; close it now that nothing else can write.
-        try {
-          fs.closeSync(capturedLogFd);
-        } catch {
-          // Already closed (e.g. concurrent exit/error path), or the fd
-          // table entry is gone -- nothing to clean up.
-        }
-        const timer = escalationTimers.get(task.id);
-        if (timer) {
-          clearTimeout(timer);
-          escalationTimers.delete(task.id);
-        }
-        classifyTrailingLogFailure(task);
-        stopRunningWatcher(task.id);
-        // A watchdog-killed child (task.failureReason already set) can still exit
-        // 0/unsignaled if it traps SIGTERM and shuts down gracefully -- don't let
-        // that read as "done" and bury the failureReason behind a healthy status.
-        task.status = task.cancelRequested ? "cancelled" : task.failureReason ? "crashed" : code === 0 && !signal ? "done" : "crashed";
-        // Boot-crash surfacing: an explicit non-zero exit (signal deaths
-        // stay unclassified: code is null there, and an external kill is
-        // not a boot failure even when it lands during startup), nothing
-        // set by the curated classifier, and not a single parseable event
-        // anywhere in the log -- the child never did any work, so its raw
-        // capture is unambiguous and becomes failureReason/failureDetail.
-        // Skipped once any event exists: raw stderr after real work
-        // started is ambiguous and stays the curated classifier's job.
-        if (task.status === "crashed" && !task.failureReason && code != null && code !== 0 && !logHasAnyEvent(task.logPath)) {
-          const bootFailure = extractBootFailureDetail(task.logPath);
-          if (bootFailure) {
-            task.failureReason = bucketFor(resolveExecutor(task.executorId).errorBucketPrefix, bootFailure.bucket);
-            task.failureDetail = bootFailure.detail;
-          }
-        }
-        task.exitCode = code;
-        task.signal = signal;
-        task.endedAt = new Date().toISOString();
-        const parsedSessionId = readSessionIdFromLog(task.logPath);
-        if (parsedSessionId) task.sessionId = parsedSessionId;
-        if (task.status === "done") evaluateOutputCompleteness(task);
-        if (task.status === "done" || task.status === "crashed" || task.status === "cancelled") extractChangesetForTask(task);
-        // Persist the opencode session id of a successful summary child so the
-        // next summarize turn can resume the same prompt-cached conversation
-        // via `--continue --session <id>`, and stamp the watermark so the next
-        // turn only re-sends narration from this point on. Applies to both the
-        // activity-cache path (`watch --summaries`) and the direct
-        // `taskferry summary` path -- they share this exit handler, so the
-        // direct path gets session continuity for free too.
-        if (task.summaryOf && task.status === "done" && parsedSessionId) {
-          activityCache.setSummarySessionId(task.summaryOf.sourceTaskId, parsedSessionId);
-          const source = tasks.get(task.summaryOf.sourceTaskId);
-          if (source) {
-            try {
-              const size = fs.statSync(source.logPath).size;
-              activityCache.setLastSummarizedWatermark(task.summaryOf.sourceTaskId, size);
-            } catch {
-              // Source log unreadable at settlement time (rotated or deleted).
-              // The next summarize call's watermark-vs-size check in
-              // summarizeTask() will detect the inconsistency and clear the
-              // cache state, so leaving the existing watermark in place is
-              // safe.
-            }
-          }
-        }
-        finishSettlement();
-      });
-
-      child.on("error", (err) => {
-        stopRunningWatcher(task.id);
-        if (settled) return;
-        settled = true;
-        // Mirrors the exit handler: the stdout handler shares this fd and
-        // stops writing once settled; close it so the OS doesn't keep an
-        // entry on its fd table for a task that's about to settle.
-        try {
-          fs.closeSync(capturedLogFd);
-        } catch {
-          // Already closed or gone -- nothing to clean up.
-        }
-        task.status = "crashed";
-        task.spawnError = errMessage(err);
-        task.endedAt = new Date().toISOString();
-        // Spawn failure (e.g. ENOENT) lands here AFTER the sandbox/overlay
-        // block already ran: overlayDirs is set, changesetStatus is still
-        // "pending", and the overlay would otherwise sit on disk with no
-        // extraction ever booked against it. Run the same extraction/cleanup
-        // path the exit handler does so the task isn't stranded (review
-        // finding -- spawn-failure path missed the cleanup the exit path
-        // already does). extractChangesetForTask is internally error-safe
-        // (extract+failure paths both go through its own try/catch) and
-        // handles an empty overlay the same way the exit path does: no
-        // diff produced, status moves to "accepted" (or "rejected" for an
-        // advisor), overlayDirs cleared.
-        extractChangesetForTask(task);
-        finishSettlement();
-      });
-
-      task.status = "running";
-      task.pid = child.pid ?? null;
-      runningCount++;
-      persistTask(task.id);
-      scheduleActivity(task, { force: true });
-      startRunningWatcher(task);
-      child.unref();
-    } catch (err) {
-      if (logFd != null) fs.closeSync(logFd);
-      task.status = "crashed";
-      task.spawnError = errMessage(err);
-      task.endedAt = new Date().toISOString();
-      if (child?.pid != null) sendSignal(child.pid, "SIGKILL");
-      // Mirrors the child.on("error") spawn-failure path above: a sync throw
-      // from spawnFn (or from resolvePreDispatchHead / any other code in this
-      // try block after overlay creation) lands here AFTER overlayDirs +
-      // changesetStatus === "pending" were already set, so the overlay would
-      // otherwise sit on the tmpfs with no extraction ever booked against it
-      // and the startup sweep skip (line ~960) deliberately protecting
-      // "pending" owners never cleans it. Run the same
-      // extractChangesetForTask() the async-error path does so a
-      // sync-spawn-failed task isn't stranded -- it's internally error-safe
-      // and on an empty overlay produces the correct terminal state
-      // ("accepted" + no diff for dispatch, "rejected" + cleanup for
-      // advisor). Doing this BEFORE the explicit persistTask() below ensures
-      // the durable record reflects the post-extract changesetStatus.
-      extractChangesetForTask(task);
-      persistTask(task.id);
-      void scheduleActivity(task, { force: true }).then(() => activityCache.evictTask(task.id));
-      logHasEventCache.delete(task.logPath);
-      try {
-        cleanUpScratchFiles();
-      } catch (cleanupErr) {
-        // Same reasoning as finishSettlement()'s cleanUpScratchFiles() guard
-        // above: a non-ENOENT unlink failure here must not throw out of this
-        // spawn-failure catch block, which would crash the daemon the same
-        // way an unguarded call in the exit handler would.
-        console.error(`taskferry: failed to clean up scratch files for task ${task.id}: ${errMessage(cleanupErr)}`);
-      }
-      settleWaiters(task.id);
-    }
+    const launchInfo = resolveStartTaskLaunch(task, launch, ctx);
+    spawnTaskChild(ctx, launchInfo, task);
   }
 
   /**

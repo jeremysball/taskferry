@@ -104,7 +104,7 @@ Vars marked "config.json" also have a config-file equivalent — see
 | Var | Default | Config file? | Purpose |
 |---|---|---|---|
 | `TASKFERRY_STATE_DIR` | `$XDG_STATE_HOME/taskferry` or `~/.local/state/taskferry` | no | Task state, logs, summary prompts |
-| `TASKFERRY_RUNTIME_DIR` | `$XDG_RUNTIME_DIR/taskferry` or `<state-dir>/run` | no | Socket + lock files |
+| `TASKFERRY_RUNTIME_DIR` | `$XDG_RUNTIME_DIR/taskferry`, or `/run/user/<uid>/taskferry` if that var is merely unexported but the dir exists, or `<state-dir>/run` | no | Socket + lock files |
 | `TASKFERRY_SOCKET_PATH` | `<runtime-dir>/daemon.sock` | no | Explicit socket override |
 | `TASKFERRY_CACHE_DIR` | `$XDG_CACHE_HOME/taskferry` or `~/.cache/taskferry` | no | Real-disk data home for sandboxed workers (opencode/pi auth + unbounded snapshot caches); see `docs/security.md` |
 | `TASKFERRY_AUTO_START` | `1` (auto-start enabled) | no | Set to `0` to stop the CLI from auto-spawning a daemon on first use |

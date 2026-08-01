@@ -46,9 +46,39 @@ export function normalizeDirectory(directory) {
   return normalized;
 }
 
-export function resolveRuntimeDir({ env = process.env, stateDir = resolveStateDir(env) } = {}) {
+/**
+ * @param {string} candidate
+ * @returns {boolean}
+ */
+function isDirectory(candidate) {
+  try {
+    return fs.statSync(candidate).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+// XDG_RUNTIME_DIR is set by the login session (pam_systemd), not exported by
+// every process that inherits that session -- a cron job, a stripped-env
+// subshell, or an orphaned/backgrounded daemon booter can all lack the var
+// while still running under a session where /run/user/<uid> genuinely
+// exists and is writable. Treating an unexported var as "XDG_RUNTIME_DIR
+// doesn't apply here" made two callers on the *same machine* resolve to two
+// different runtime dirs (and so boot two independent, mutually invisible
+// daemons) purely because one of them happened not to have the var
+// exported. Compute the real value instead of trusting only the export.
+export function resolveRuntimeDir({
+  env = process.env,
+  stateDir = resolveStateDir(env),
+  uid = typeof process.getuid === "function" ? process.getuid() : undefined,
+  pathExists = isDirectory,
+} = {}) {
   if (env.TASKFERRY_RUNTIME_DIR) return env.TASKFERRY_RUNTIME_DIR;
   if (env.XDG_RUNTIME_DIR) return path.join(env.XDG_RUNTIME_DIR, "taskferry");
+  if (uid != null) {
+    const candidate = path.join("/run/user", String(uid));
+    if (pathExists(candidate)) return path.join(candidate, "taskferry");
+  }
   return path.join(stateDir, "run");
 }
 

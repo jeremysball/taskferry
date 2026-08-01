@@ -51,6 +51,30 @@ test("parses each command's required arguments and defaults", () => {
   assert.equal(parseArgs(["doctor"]).options.full, false);
 });
 
+test("doctor --stats sets options.stats", () => {
+  const parsed = parseArgs(["doctor", "--stats"]);
+  assert.equal(parsed.options.stats, true);
+});
+
+test("doctor with no --stats defaults options.stats to false", () => {
+  const parsed = parseArgs(["doctor"]);
+  assert.equal(parsed.options.stats, false);
+});
+
+test("doctor --stats --full is rejected", () => {
+  assert.throws(
+    () => parseArgs(["doctor", "--stats", "--full"]),
+    (err) => err instanceof UsageError && /--stats cannot be combined with --full/.test(err.message)
+  );
+});
+
+test("doctor --full --stats is rejected regardless of flag order", () => {
+  assert.throws(
+    () => parseArgs(["doctor", "--full", "--stats"]),
+    (err) => err instanceof UsageError && /--stats cannot be combined with --full/.test(err.message)
+  );
+});
+
 test("parses every documented command's help without requiring operation arguments", () => {
   for (const command of commands) {
     const parsed = parseArgs([command, "--help"]);

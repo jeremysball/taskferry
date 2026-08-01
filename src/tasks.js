@@ -4010,98 +4010,11 @@ export function createTaskManager({
 
   
 
-  /**
-   * @param {string} logPath
-   * @returns {string}
-   */
-  function readNarration(logPath) {
-    /** @type {Map<string, string[]>} */
-    const textByMessageId = new Map();
-    /** @type {string[]} */
-    const textOrder = [];
-    /** @type {string} */
-    let raw;
-    try {
-      raw = fs.readFileSync(logPath, "utf8");
-    } catch {
-      return "";
-    }
-    for (const line of raw.split("\n")) {
-      if (!line.trim()) continue;
-      /** @type {any} */
-      let evt;
-      let parsed = false;
-      try {
-        evt = JSON.parse(line);
-        parsed = true;
-      } catch {
-        // Not a text event line -- not narration.
-      }
-      if (parsed && evt.type === "text" && evt.part && typeof evt.part.text === "string") {
-        const mid = evt.part.messageID;
-        if (!textByMessageId.has(mid)) {
-          textByMessageId.set(mid, []);
-          textOrder.push(mid);
-        }
-        /** @type {string[]} */ (textByMessageId.get(mid)).push(evt.part.text);
-      }
-    }
-    return textOrder.map((mid) => /** @type {string[]} */ (textByMessageId.get(mid)).join("")).join("\n\n");
-  }
+  
 
-  /**
-   * @param {string} logPath
-   * @returns {string}
-   */
-  function readLastText(logPath) {
-    /** @type {number|undefined} */
-    let fd;
-    try {
-      const size = fs.statSync(logPath).size;
-      const bytes = Math.min(size, TAIL_READ_BYTES);
-      const buffer = Buffer.alloc(bytes);
-      fd = fs.openSync(logPath, "r");
-      fs.readSync(fd, buffer, 0, bytes, size - bytes);
-      const lines = buffer.toString("utf8").split("\n");
-      for (let i = lines.length - 1; i >= 0; i--) {
-        const line = lines[i].trim();
-        if (!line) continue;
-        const evt = isParseableJson(line) ? JSON.parse(line) : null;
-        if (evt && evt.type === "text" && typeof evt.part?.text === "string") return evt.part.text;
-      }
-    } catch {
-      return "";
-    } finally {
-      if (fd != null) fs.closeSync(fd);
-    }
-    return "";
-  }
+  
 
-  /**
-   * @param {string} logPath
-   * @returns {string}
-   */
-  function readRawCaptureTail(logPath) {
-    /** @type {number|undefined} */
-    let fd;
-    try {
-      const size = fs.statSync(logPath).size;
-      if (size === 0) return "";
-      const bytes = Math.min(size, TAIL_READ_BYTES);
-      const buffer = Buffer.alloc(bytes);
-      fd = fs.openSync(logPath, "r");
-      fs.readSync(fd, buffer, 0, bytes, size - bytes);
-      return buffer
-        .toString("utf8")
-        .split("\n")
-        .filter((line) => line.trim())
-        .join("\n");
-    } catch {
-      return "";
-    } finally {
-      if (fd != null) fs.closeSync(fd);
-    }
-  }
+  
 
   /**
    * @param {string} taskId
@@ -4145,57 +4058,9 @@ export function createTaskManager({
     };
   }
 
-  /**
-   * @param {ResultDetail} detail
-   * @param {string[]|undefined} fields
-   * @returns {ResultDetail}
-   */
-  function projectResult(detail, fields) {
-    if (!fields) return detail;
-    /** @type {any} */
-    const projected = { taskId: detail.taskId, status: detail.status };
-    for (const field of fields) projected[field] = /** @type {any} */ (detail)[field] ?? null;
-    return projected;
-  }
+  
 
-  /**
-   * Review finding #13 (root-cause fix): parse stat counts via real git
-   * tooling instead of hand-rolling a header scan. `git apply --numstat`
-   * reads either git-style (`diff --git`) or plain unified (`diff -ruN`,
-   * the format non-git changesets use) diffs and emits one
-   * `<adds>\t<dels>\t<path>` line per file, which we just sum. Delegating
-   * to git keeps the stat correct for both extraction kinds without
-   * re-deriving the parsing rules. Falls back to a zero stat on any
-   * non-zero exit status (e.g. a plain `diff -ru` without `-N` whose
-   * "Only in ..." lines git apply can't grok, or parsing stdout from a
-   * failed invocation that would have given a misleading non-zero count);
-   * the diff itself stays readable via `result --diff`, only the
-   * human-readable summary is uncomputable.
-   * @param {string} diffPath
-   * @param {(command: string, args: string[]) => {status: number|null, stdout: string, stderr: string, error?: Error}} [runCommand]
-   * @returns {{files: number, additions: number, deletions: number}}
-   */
-  function computeDiffStat(diffPath, runCommand = defaultOverlayRunCommand) {
-    const result = runCommand("git", ["apply", "--numstat", diffPath]);
-    // `git apply --numstat` exits 0 on success and a non-zero status on
-    // any failure (corrupt patch, parse error, etc.). Treat any non-zero
-    // status as "the stat is uncomputable" and return the zero fallback
-    // rather than parsing partial stdout from a failed invocation.
-    if (result.error || result.status !== 0) {
-      return { files: 0, additions: 0, deletions: 0 };
-    }
-    let files = 0;
-    let additions = 0;
-    let deletions = 0;
-    for (const line of result.stdout.split("\n")) {
-      const parsed = parseNumstatLine(line);
-      if (!parsed) continue;
-      files += 1;
-      additions += parsed.additions;
-      deletions += parsed.deletions;
-    }
-    return { files, additions, deletions };
-  }
+  
 
   // Settlement-time check for "done but no real output": an otherwise clean
   // exit whose extracted final message is empty (after trimming) is flagged
@@ -4204,70 +4069,9 @@ export function createTaskManager({
   // Runs only on "done" status: cancelled/crashed already carry failureReason,
   // and overloading them with a second failure axis muddies the existing
   // "is this an error or not?" branching in callers.
-  /**
-   * @param {Task} task
-   */
-  function evaluateOutputCompleteness(task) {
-    const message = extractFinalMessage(task.logPath);
-    if (!message.trim()) {
-      task.incomplete = true;
-      return;
-    }
-    if (task.finalMarker) {
-      try {
-        if (!new RegExp(task.finalMarker).test(message)) task.incomplete = true;
-      } catch {
-        // A finalMarker that survived dispatch-time validation shouldn't
-        // throw here, but if it does (e.g. an impossible pathological input),
-        // fail closed: treat the task as incomplete rather than silently
-        // reporting success.
-        task.incomplete = true;
-      }
-    }
-  }
+  
 
-  /**
-   * @param {string} logPath
-   * @returns {string}
-   */
-  function extractFinalMessage(logPath) {
-    let raw;
-    try {
-      raw = fs.readFileSync(logPath, "utf8");
-    } catch {
-      return "";
-    }
-    /** @type {Map<string, string[]>} */
-    const textByMessageId = new Map();
-    /** @type {string[]} */
-    const textOrder = [];
-    /** @type {string|null} */
-    let finalMessageId = null;
-    for (const line of raw.split("\n")) {
-      if (!line.trim()) continue;
-      /** @type {any} */
-      let evt;
-      let parsed = false;
-      try {
-        evt = JSON.parse(line);
-        parsed = true;
-      } catch {
-        // Not a parseable event line -- not final-message evidence.
-      }
-      if (parsed) {
-        const stepId = collectFinalMessageLine(evt, textByMessageId, textOrder);
-        if (stepId) finalMessageId = stepId;
-      }
-    }
-    // Same fallback rule as result(): the last messageID seen wins if no
-    // explicit step_finish reason "stop" landed (e.g. a crashed run that never
-    // reached one). The settlement-time check uses this same fallback so a
-    // clean exit with no step_finish still gets its final turn inspected.
-    const targetId = finalMessageId ?? textOrder[textOrder.length - 1];
-    return targetId && textByMessageId.has(targetId)
-      ? /** @type {string[]} */ (textByMessageId.get(targetId)).join("")
-      : "";
-  }
+  
 
   /**
    * @param {string} taskId
@@ -4507,4 +4311,215 @@ function summarize(task) {
 /** @param {Task} task */
 function failureFields(task) {
   return { failureReason: task.failureReason ?? null, failureDetail: task.failureDetail ?? null };
+}
+
+
+/**
+ * @param {string} logPath
+ * @returns {string}
+ */
+function extractFinalMessage(logPath) {
+  let raw;
+  try {
+    raw = fs.readFileSync(logPath, "utf8");
+  } catch {
+    return "";
+  }
+  /** @type {Map<string, string[]>} */
+  const textByMessageId = new Map();
+  /** @type {string[]} */
+  const textOrder = [];
+  /** @type {string|null} */
+  let finalMessageId = null;
+  for (const line of raw.split("\n")) {
+    if (!line.trim()) continue;
+    /** @type {any} */
+    let evt;
+    let parsed = false;
+    try {
+      evt = JSON.parse(line);
+      parsed = true;
+    } catch {
+      // Not a parseable event line -- not final-message evidence.
+    }
+    if (parsed) {
+      const stepId = collectFinalMessageLine(evt, textByMessageId, textOrder);
+      if (stepId) finalMessageId = stepId;
+    }
+  }
+  // Same fallback rule as result(): the last messageID seen wins if no
+  // explicit step_finish reason "stop" landed (e.g. a crashed run that never
+  // reached one). The settlement-time check uses this same fallback so a
+  // clean exit with no step_finish still gets its final turn inspected.
+  const targetId = finalMessageId ?? textOrder[textOrder.length - 1];
+  return targetId && textByMessageId.has(targetId)
+    ? /** @type {string[]} */ (textByMessageId.get(targetId)).join("")
+    : "";
+}
+
+/**
+ * @param {Task} task
+ */
+function evaluateOutputCompleteness(task) {
+  const message = extractFinalMessage(task.logPath);
+  if (!message.trim()) {
+    task.incomplete = true;
+    return;
+  }
+  if (task.finalMarker) {
+    try {
+      if (!new RegExp(task.finalMarker).test(message)) task.incomplete = true;
+    } catch {
+      // A finalMarker that survived dispatch-time validation shouldn't
+      // throw here, but if it does (e.g. an impossible pathological input),
+      // fail closed: treat the task as incomplete rather than silently
+      // reporting success.
+      task.incomplete = true;
+    }
+  }
+}
+
+/**
+ * Review finding #13 (root-cause fix): parse stat counts via real git
+ * tooling instead of hand-rolling a header scan. `git apply --numstat`
+ * reads either git-style (`diff --git`) or plain unified (`diff -ruN`,
+ * the format non-git changesets use) diffs and emits one
+ * `<adds>\t<dels>\t<path>` line per file, which we just sum. Delegating
+ * to git keeps the stat correct for both extraction kinds without
+ * re-deriving the parsing rules. Falls back to a zero stat on any
+ * non-zero exit status (e.g. a plain `diff -ru` without `-N` whose
+ * "Only in ..." lines git apply can't grok, or parsing stdout from a
+ * failed invocation that would have given a misleading non-zero count);
+ * the diff itself stays readable via `result --diff`, only the
+ * human-readable summary is uncomputable.
+ * @param {string} diffPath
+ * @param {(command: string, args: string[]) => {status: number|null, stdout: string, stderr: string, error?: Error}} [runCommand]
+ * @returns {{files: number, additions: number, deletions: number}}
+ */
+function computeDiffStat(diffPath, runCommand = defaultOverlayRunCommand) {
+  const result = runCommand("git", ["apply", "--numstat", diffPath]);
+  // `git apply --numstat` exits 0 on success and a non-zero status on
+  // any failure (corrupt patch, parse error, etc.). Treat any non-zero
+  // status as "the stat is uncomputable" and return the zero fallback
+  // rather than parsing partial stdout from a failed invocation.
+  if (result.error || result.status !== 0) {
+    return { files: 0, additions: 0, deletions: 0 };
+  }
+  let files = 0;
+  let additions = 0;
+  let deletions = 0;
+  for (const line of result.stdout.split("\n")) {
+    const parsed = parseNumstatLine(line);
+    if (!parsed) continue;
+    files += 1;
+    additions += parsed.additions;
+    deletions += parsed.deletions;
+  }
+  return { files, additions, deletions };
+}
+
+/**
+ * @param {ResultDetail} detail
+ * @param {string[]|undefined} fields
+ * @returns {ResultDetail}
+ */
+function projectResult(detail, fields) {
+  if (!fields) return detail;
+  /** @type {any} */
+  const projected = { taskId: detail.taskId, status: detail.status };
+  for (const field of fields) projected[field] = /** @type {any} */ (detail)[field] ?? null;
+  return projected;
+}
+
+/**
+ * @param {string} logPath
+ * @returns {string}
+ */
+function readRawCaptureTail(logPath) {
+  /** @type {number|undefined} */
+  let fd;
+  try {
+    const size = fs.statSync(logPath).size;
+    if (size === 0) return "";
+    const bytes = Math.min(size, TAIL_READ_BYTES);
+    const buffer = Buffer.alloc(bytes);
+    fd = fs.openSync(logPath, "r");
+    fs.readSync(fd, buffer, 0, bytes, size - bytes);
+    return buffer
+      .toString("utf8")
+      .split("\n")
+      .filter((line) => line.trim())
+      .join("\n");
+  } catch {
+    return "";
+  } finally {
+    if (fd != null) fs.closeSync(fd);
+  }
+}
+
+/**
+ * @param {string} logPath
+ * @returns {string}
+ */
+function readLastText(logPath) {
+  /** @type {number|undefined} */
+  let fd;
+  try {
+    const size = fs.statSync(logPath).size;
+    const bytes = Math.min(size, TAIL_READ_BYTES);
+    const buffer = Buffer.alloc(bytes);
+    fd = fs.openSync(logPath, "r");
+    fs.readSync(fd, buffer, 0, bytes, size - bytes);
+    const lines = buffer.toString("utf8").split("\n");
+    for (let i = lines.length - 1; i >= 0; i--) {
+      const line = lines[i].trim();
+      if (!line) continue;
+      const evt = isParseableJson(line) ? JSON.parse(line) : null;
+      if (evt && evt.type === "text" && typeof evt.part?.text === "string") return evt.part.text;
+    }
+  } catch {
+    return "";
+  } finally {
+    if (fd != null) fs.closeSync(fd);
+  }
+  return "";
+}
+
+/**
+ * @param {string} logPath
+ * @returns {string}
+ */
+function readNarration(logPath) {
+  /** @type {Map<string, string[]>} */
+  const textByMessageId = new Map();
+  /** @type {string[]} */
+  const textOrder = [];
+  /** @type {string} */
+  let raw;
+  try {
+    raw = fs.readFileSync(logPath, "utf8");
+  } catch {
+    return "";
+  }
+  for (const line of raw.split("\n")) {
+    if (!line.trim()) continue;
+    /** @type {any} */
+    let evt;
+    let parsed = false;
+    try {
+      evt = JSON.parse(line);
+      parsed = true;
+    } catch {
+      // Not a text event line -- not narration.
+    }
+    if (parsed && evt.type === "text" && evt.part && typeof evt.part.text === "string") {
+      const mid = evt.part.messageID;
+      if (!textByMessageId.has(mid)) {
+        textByMessageId.set(mid, []);
+        textOrder.push(mid);
+      }
+      /** @type {string[]} */ (textByMessageId.get(mid)).push(evt.part.text);
+    }
+  }
+  return textOrder.map((mid) => /** @type {string[]} */ (textByMessageId.get(mid)).join("")).join("\n\n");
 }

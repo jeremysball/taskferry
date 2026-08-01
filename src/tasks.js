@@ -232,6 +232,25 @@ function capDetail(text) {
   return text.length > FAILURE_DETAIL_MAX_CHARS ? text.slice(0, FAILURE_DETAIL_MAX_CHARS - 1) + "…" : text;
 }
 
+/** @param {string} text @returns {boolean} */
+function isParseableJson(text) {
+  try {
+    JSON.parse(text);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Unlink a file, tolerating it already being gone (ENOENT). @param {string} filePath */
+function removeFileIfPresent(filePath) {
+  try {
+    fs.unlinkSync(filePath);
+  } catch (err) {
+    if (errCode(err) !== "ENOENT") throw err;
+  }
+}
+
 // Boot failures: the child exited non-zero having produced zero parseable
 // events -- opencode/pi died during startup (a malformed provider extension,
 // a broken config) before ever reaching the model. classifyProviderFailure
@@ -272,17 +291,11 @@ function extractBootFailureDetail(logPath) {
     let lastNonJson = null;
     for (const line of lines) {
       const trimmed = line.trim();
-      if (!trimmed) continue;
-      try {
-        JSON.parse(trimmed);
-        // Parseable event lines are owned by the curated classifier and
-        // are never boot-failure evidence. (A startsWith("{") test is not
-        // enough here: an unparseable brace-starting stderr dump -- an
-        // object literal, not JSON -- is evidence and must not be skipped.)
-        continue;
-      } catch {
-        // Non-JSON output: boot-failure evidence.
-      }
+      // Parseable event lines are owned by the curated classifier and are
+      // never boot-failure evidence. (A startsWith("{") test is not enough
+      // here: an unparseable brace-starting stderr dump -- an object literal,
+      // not JSON -- is evidence and must not be skipped.)
+      if (!trimmed || isParseableJson(trimmed)) continue;
       if (/^error\b[:\s]/i.test(trimmed)) lastError = trimmed;
       else lastNonJson = trimmed;
     }
@@ -318,13 +331,7 @@ function logHasAnyEvent(logPath) {
     return false;
   }
   for (const line of raw.split("\n")) {
-    if (!line.trim()) continue;
-    try {
-      JSON.parse(line);
-      return true;
-    } catch {
-      continue;
-    }
+    if (line.trim() && isParseableJson(line)) return true;
   }
   return false;
 }
@@ -365,7 +372,10 @@ export function bucketFor(errorBucketPrefix, bucket) {
 function sumTokens(prev, next) {
   if (!prev) return next;
   /** @param {any} a @param {any} b */
-  const sum = (a, b) => (typeof a === "number" || typeof b === "number" ? (a ?? 0) + (b ?? 0) : (a ?? b));
+  const sum = (a, b) => {
+    if (typeof a === "number" || typeof b === "number") return (a ?? 0) + (b ?? 0);
+    return a ?? b;
+  };
   return {
     ...prev,
     ...next,
@@ -394,45 +404,62 @@ function sumTokens(prev, next) {
 function classifyProviderFailure(lines, errorBucketPrefix) {
   let hasParseableLine = false;
   for (const line of lines) {
-    if (!line.trim()) continue;
-    let evt;
-    try {
-      evt = JSON.parse(line);
-      hasParseableLine = true;
-    } catch {
-      for (const [bucket, patterns] of PROVIDER_FAILURE_BUCKETS) {
-        if (patterns.some((pattern) => pattern.test(line))) {
-          return { failure: { bucket: bucketFor(errorBucketPrefix, bucket), detail: capDetail(line) }, hasParseableLine };
-        }
-      }
-      continue;
+    const classified = line.trim() ? classifyProviderLine(line, errorBucketPrefix) : null;
+    if (!classified) continue;
+    if (classified.hasParseableLine) hasParseableLine = true;
+    if (classified.failure) {
+      return { failure: classified.failure, hasParseableLine };
     }
-    if (evt.type !== "error") continue;
-    const text = typeof evt.message === "string" ? evt.message : JSON.stringify(evt);
-    for (const [bucket, patterns] of PROVIDER_FAILURE_BUCKETS) {
-      if (patterns.some((pattern) => pattern.test(text))) {
-        return { failure: { bucket: bucketFor(errorBucketPrefix, bucket), detail: capDetail(text) }, hasParseableLine };
-      }
-    }
-    // A structured `type:"error"` event is never noise -- unlike the raw
-    // non-JSON line branch above, this is opencode's own error signal, so an
-    // event that misses all three named buckets still deserves a reason
-    // rather than leaving failureReason/failureDetail null (e.g. a
-    // mid-stream "UnknownError: Streaming response failed" with zero model
-    // output, oc_mrutsm8i_764c0067). opencode's own error class name
-    // (UnknownError, ContextOverflowError, APIError, ...) becomes the
-    // bucket; its message becomes the detail.
-    const errorName = typeof evt.error?.name === "string" ? evt.error.name : "error";
-    const errorMessage = typeof evt.error?.data?.message === "string" ? evt.error.data.message : text;
-    return {
-      failure: {
-        bucket: `${errorBucketPrefix}_${errorName.replace(/[^a-zA-Z0-9]+/g, "_").toLowerCase()}`,
-        detail: capDetail(errorMessage),
-      },
-      hasParseableLine,
-    };
   }
   return { failure: null, hasParseableLine };
+}
+
+/**
+ * Classify a single log line into a failure bucket, or null when the line
+ * is not boot-crash evidence. Parseable `type:"text"` events and unknown
+ * non-JSON stderr lines yield null (skip); everything else yields a failure
+ * tuple carrying whether this line was parseable.
+ * @param {string} line
+ * @param {string} errorBucketPrefix
+ * @returns {{failure: {bucket: string, detail: string} | null, hasParseableLine: boolean} | null}
+ */
+function classifyProviderLine(line, errorBucketPrefix) {
+  let evt;
+  try {
+    evt = JSON.parse(line);
+  } catch {
+    // Non-JSON output: boot-failure evidence if it matches a curated bucket.
+    for (const [bucket, patterns] of PROVIDER_FAILURE_BUCKETS) {
+      if (patterns.some((pattern) => pattern.test(line))) {
+        return { failure: { bucket: bucketFor(errorBucketPrefix, bucket), detail: capDetail(line) }, hasParseableLine: false };
+      }
+    }
+    return null;
+  }
+  if (evt.type !== "error") return { failure: null, hasParseableLine: true };
+  const text = typeof evt.message === "string" ? evt.message : JSON.stringify(evt);
+  for (const [bucket, patterns] of PROVIDER_FAILURE_BUCKETS) {
+    if (patterns.some((pattern) => pattern.test(text))) {
+      return { failure: { bucket: bucketFor(errorBucketPrefix, bucket), detail: capDetail(text) }, hasParseableLine: true };
+    }
+  }
+  // A structured `type:"error"` event is never noise -- unlike the raw
+  // non-JSON line branch above, this is opencode's own error signal, so an
+  // event that misses all three named buckets still deserves a reason
+  // rather than leaving failureReason/failureDetail null (e.g. a
+  // mid-stream "UnknownError: Streaming response failed" with zero model
+  // output, oc_mrutsm8i_764c0067). opencode's own error class name
+  // (UnknownError, ContextOverflowError, APIError, ...) becomes the
+  // bucket; its message becomes the detail.
+  const errorName = typeof evt.error?.name === "string" ? evt.error.name : "error";
+  const errorMessage = typeof evt.error?.data?.message === "string" ? evt.error.data.message : text;
+  return {
+    failure: {
+      bucket: `${errorBucketPrefix}_${errorName.replace(/[^a-zA-Z0-9]+/g, "_").toLowerCase()}`,
+      detail: capDetail(errorMessage),
+    },
+    hasParseableLine: true,
+  };
 }
 
 /**
@@ -577,10 +604,10 @@ function resolveStartTaskLaunch(task, launch, ctx) {
     : null;
   const args = executor.buildSpawnArgs({
     isSummary,
-    model: isSummary ? summaryLaunch.model : dispatchLaunch.model,
-    variant: isSummary ? undefined : dispatchLaunch.variant,
     launchDirectory,
     promptFilePath,
+    model: isSummary ? summaryLaunch.model : dispatchLaunch.model,
+    variant: isSummary ? undefined : dispatchLaunch.variant,
     snapshotPath: isSummary ? summaryLaunch.snapshotPath : undefined,
     prompt: isSummary ? "" : dispatchLaunch.prompt,
     sessionId: isSummary ? summaryLaunch.summarySessionId ?? null : dispatchLaunch.sessionId ?? null,
@@ -698,14 +725,16 @@ function createOverlayIfNeeded(ctx, launchInfo, task, role) {
     fs.mkdirSync(overlayInfo.upperDir, { recursive: true, mode: 0o700 });
     fs.mkdirSync(overlayInfo.workDir, { recursive: true, mode: 0o700 });
     return overlayInfo;
-  } else if (role === "advisor") {
+  }
+  if (role === "advisor") {
     // Review finding #5: an advisor without an overlay gets a plain writable
     // bind -- a path to persist writes, contradicting ADR 0001.
     throw new Error(
       "error: advisor dispatch requires overlay-gated writes, but overlay is disabled\n" +
       "help: unset TASKFERRY_DISABLE_OVERLAY or set overlayEnabled: true in config -- advisor writes must be gated, see docs/adr/0001-cow-overlays-and-diff-gated-writes.md"
     );
-  } else if (!isSummary) {
+  }
+  if (!isSummary) {
     process.stderr.write(`warning: overlay disabled -- writes land directly on ${launchDirectory}, not gated by accept/reject\n`);
   }
   return null;
@@ -925,19 +954,20 @@ function onChildData(shared, chunk) {
     shared.stdoutCarry = shared.stdoutCarry.slice(nl + 1);
     if (!line.trim()) continue;
     let parsed;
+    let isJson = true;
     try {
       parsed = JSON.parse(line);
     } catch {
       // Non-JSON stdout -- preserve verbatim so classifyProviderFailure has
       // the line's text even without a parseable event shape.
+      isJson = false;
       try {
         fs.writeSync(shared.capturedLogFd, `${line}\n`);
       } catch {
         // Log fd closed out from under us (task already settled / cleaned up)
       }
-      continue;
     }
-    writeNormalizedLogLine(shared, parsed, line);
+    if (isJson) writeNormalizedLogLine(shared, parsed, line);
   }
 }
 
@@ -1056,7 +1086,10 @@ function onChildExit(ctx, shared, code, signal) {
  * @returns {"cancelled"|"crashed"|"done"}
  */
 function resolveChildExitStatus(task, code, signal) {
-  return task.cancelRequested ? "cancelled" : task.failureReason ? "crashed" : code === 0 && !signal ? "done" : "crashed";
+  if (task.cancelRequested) return "cancelled";
+  if (task.failureReason) return "crashed";
+  if (code === 0 && !signal) return "done";
+  return "crashed";
 }
 
 /**
@@ -1071,7 +1104,8 @@ function resolveChildExitStatus(task, code, signal) {
  * @param {number|null} code
  */
 function surfaceBootCrashFailure(task, code) {
-  if (task.status === "crashed" && !task.failureReason && code != null && code !== 0 && !logHasAnyEvent(task.logPath)) {
+  const explicitNonZeroExit = code != null && code !== 0;
+  if (task.status === "crashed" && !task.failureReason && explicitNonZeroExit && !logHasAnyEvent(task.logPath)) {
     const bootFailure = extractBootFailureDetail(task.logPath);
     if (bootFailure) {
       task.failureReason = bucketFor(resolveExecutor(task.executorId).errorBucketPrefix, bootFailure.bucket);
@@ -1421,6 +1455,7 @@ function computeResultDetail(task, { taskId, full, fields }, ctx) {
   const parsed = parseTaskLog(raw, task.sessionId);
   const narration = shapeNarration(parsed, full);
   const { diffText, diffStat } = readTaskDiff(task, ctx, fields);
+  const next = resultNextAction(task, taskId, narration.narrationTruncated);
   return {
     taskId,
     status: task.status,
@@ -1441,13 +1476,31 @@ function computeResultDetail(task, { taskId, full, fields }, ctx) {
     ...(task.summaryOf ? { summaryOf: task.summaryOf } : {}),
     ...(task.incomplete === true ? { incomplete: true } : {}),
     ...(task.finalMarker != null ? { finalMarker: task.finalMarker } : {}),
-    ...(task.incomplete === true
-      ? { next: `Task ${taskId} exited cleanly but produced no usable final output${task.finalMarker ? ` (--require-final-marker ${JSON.stringify(task.finalMarker)} did not match)` : " (empty message)"}; treat as incomplete` }
-      : narration.narrationTruncated
-        ? { next: `Run taskferry result with full: true on task id "${taskId}" to see the complete narration` }
-        : {}),
+    ...(next ? { next } : {}),
     logPath: task.logPath,
   };
+}
+
+/**
+ * The `next` hint a non-`--full` result surfaces: a clean-but-empty exit
+ * (optionally with the required-final-marker mismatch called out) reads as
+ * incomplete, otherwise a truncated narration points at `--full`.
+ * @param {Task} task
+ * @param {string} taskId
+ * @param {boolean} narrationTruncated
+ * @returns {string | null}
+ */
+function resultNextAction(task, taskId, narrationTruncated) {
+  if (task.incomplete === true) {
+    const markerNote = task.finalMarker
+      ? ` (--require-final-marker ${JSON.stringify(task.finalMarker)} did not match)`
+      : " (empty message)";
+    return `Task ${taskId} exited cleanly but produced no usable final output${markerNote}; treat as incomplete`;
+  }
+  if (narrationTruncated) {
+    return `Run taskferry result with full: true on task id "${taskId}" to see the complete narration`;
+  }
+  return null;
 }
 
 /**
@@ -1579,8 +1632,10 @@ function buildDispatchTask({ id, directory, prompt, model, executor, priorSessio
   const resolvedModel = model || priorSessionTask?.model || executor.defaultModel;
   return {
     id,
-    status: "queued",
     directory,
+    logPath,
+    role,
+    status: "queued",
     model: resolvedModel,
     executorId: executor.id,
     variant: usingDefaultModel ? "high" : variant || null,
@@ -1591,7 +1646,6 @@ function buildDispatchTask({ id, directory, prompt, model, executor, priorSessio
     endedAt: null,
     exitCode: null,
     signal: null,
-    logPath,
     promptPreview: prompt.length > 200 ? prompt.slice(0, 200) + "…" : prompt,
     promptTotalChars: prompt.length > 200 ? prompt.length : null,
     spawnError: null,
@@ -1601,7 +1655,6 @@ function buildDispatchTask({ id, directory, prompt, model, executor, priorSessio
     failureDetail: null,
     incomplete: false,
     finalMarker: finalMarker == null ? null : finalMarker,
-    role,
     changesetStatus: "none",
     diffPath: null,
     overlayDirs: null,
@@ -1630,16 +1683,16 @@ function queueDispatchLaunch(ctx, { id, task, prompt, sessionId, env, noSandbox,
   const capturedEnv = env === undefined ? undefined : { ...env };
   ctx.pendingLaunches.set(id, {
     prompt,
-    directory: task.directory,
-    model: task.model,
-    variant: task.variant,
     sessionId,
-    env: capturedEnv,
-    noSandbox: noSandbox === true,
-    noOverlay: noOverlay === true,
     allowedDirs,
     executor,
     role,
+    directory: task.directory,
+    model: task.model,
+    variant: task.variant,
+    env: capturedEnv,
+    noSandbox: noSandbox === true,
+    noOverlay: noOverlay === true,
   });
   ctx.launchQueue.push(id);
   ctx.launchQueuedTasks();
@@ -1809,12 +1862,12 @@ function launchSummaryTask(ctx, p) {
   const snapshotPath = path.join(ctx.SUMMARY_DIR, `${id}.json`);
   /** @type {SummaryOf} */
   const summaryOf = {
-    sourceTaskId: taskId,
     sourceStatus,
     capturedAt,
+    maxWords,
+    sourceTaskId: taskId,
     sourceLogBytes: snapshot.sourceLogBytes,
     summaryInputBytes: snapshot.inputBytes,
-    maxWords,
   };
   fs.writeFileSync(
     snapshotPath,
@@ -1829,6 +1882,8 @@ function launchSummaryTask(ctx, p) {
   /** @type {Task} */
   const task = {
     id,
+    logPath,
+    summaryOf,
     status: "queued",
     directory: fs.realpathSync(ctx.SUMMARY_DIR),
     model: ctx.activitySummaryModel,
@@ -1841,7 +1896,6 @@ function launchSummaryTask(ctx, p) {
     endedAt: null,
     exitCode: null,
     signal: null,
-    logPath,
     promptPreview: "Summarize the attached task transcript.",
     promptTotalChars: null,
     spawnError: null,
@@ -1849,7 +1903,6 @@ function launchSummaryTask(ctx, p) {
     internal: true,
     failureReason: null,
     failureDetail: null,
-    summaryOf,
   };
   ctx.tasks.set(id, task);
   ctx.persistTask(task.id);
@@ -1864,9 +1917,9 @@ function launchSummaryTask(ctx, p) {
   ctx.launchQueue.push(id);
   ctx.launchQueuedTasks();
   return {
-    sourceTaskId: taskId,
     sourceStatus,
     capturedAt,
+    sourceTaskId: taskId,
     sourceLogBytes: snapshot.sourceLogBytes,
     summaryInputBytes: snapshot.inputBytes,
     summaryTask: { id, status: task.status, model: task.model },
@@ -2041,6 +2094,64 @@ function dispatchAdvisorTask(ctx, params) {
 }
 
 /**
+ * Accumulates a single parseable log line's narration contribution. Text
+ * parts are concatenated per message id so a message split across multiple
+ * events reads as one block; tool-use parts are recorded in order.
+ * @param {any} evt
+ * @param {Map<string, string[]>} textByMessageId
+ * @param {Array<{kind: "text", mid: string}|{kind: "tool", line: string}>} order
+ */
+function collectNarrationLine(evt, textByMessageId, order) {
+  if (evt.type === "text" && typeof evt.part?.text === "string") {
+    const mid = evt.part.messageID;
+    if (!textByMessageId.has(mid)) {
+      textByMessageId.set(mid, []);
+      order.push({ kind: "text", mid });
+    }
+    /** @type {string[]} */ (textByMessageId.get(mid)).push(evt.part.text);
+  }
+  if (evt.type === "tool_use" && evt.part?.type === "tool") {
+    order.push({ kind: "tool", line: formatToolEventForNarration(evt.part) });
+  }
+}
+
+/**
+ * Reads up to `bytes` from the head of a log and reports whether any
+ * complete parseable JSON event line was present. A read failure or a
+ * closed-out fd is treated as "no event" rather than thrown.
+ * @param {string} logPath
+ * @param {number} bytes
+ * @returns {boolean}
+ */
+function scanLogForEvent(logPath, bytes) {
+  /** @type {number|undefined} */
+  let fd;
+  try {
+    const buffer = Buffer.alloc(bytes);
+    fd = fs.openSync(logPath, "r");
+    fs.readSync(fd, buffer, 0, bytes, 0);
+    for (const line of buffer.toString("utf8").split("\n")) {
+      if (line.trim() && isParseableJson(line)) return true;
+    }
+    return false;
+  } catch {
+    return false;
+  } finally {
+    if (fd != null) fs.closeSync(fd);
+  }
+}
+
+/** Return the first truthy sessionID parsed from `text`, or null. @param {string} text @returns {string|null} */
+function sessionIdInJson(text) {
+  try {
+    const evt = JSON.parse(text);
+    return evt.sessionID ? evt.sessionID : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Shape the response for an advisor task that is still running or queued.
  * When a session id is known (from the poll result or the log), keep it warm
  * in the advisor-session map so a follow-up call can continue it.
@@ -2110,6 +2221,65 @@ async function runAdvisor(ctx, { prompt, directory, model, variant, sessionId, t
     return buildAdvisorActiveResponse(ctx, { settled, dispatched, resolved });
   }
   return buildAdvisorSettledResponse(ctx, { dispatched, resolved });
+}
+
+/**
+ * Drains complete `\n`-terminated lines out of `carry`, returning the first
+ * session id found (with the still-pending remainder) or the remainder alone.
+ * @param {string} carry
+ * @returns {{sessionId: string|null, remainder: string}}
+ */
+function extractSessionId(carry) {
+  let nl;
+  while ((nl = carry.indexOf("\n")) !== -1) {
+    const line = carry.slice(0, nl);
+    carry = carry.slice(nl + 1);
+    const sessionId = line.trim() ? sessionIdInJson(line) : null;
+    if (sessionId) return { sessionId, remainder: carry };
+  }
+  return { sessionId: null, remainder: carry };
+}
+
+/**
+ * Parse a `git apply --numstat` line (`adds\tdels\tpath`) into its two
+ * numeric columns, or null when the line is empty or malformed.
+ * @param {string} line
+ * @returns {{additions: number, deletions: number} | null}
+ */
+function parseNumstatLine(line) {
+  if (!line) return null;
+  const firstTab = line.indexOf("\t");
+  if (firstTab === -1) return null;
+  const secondTab = line.indexOf("\t", firstTab + 1);
+  if (secondTab === -1) return null;
+  const adds = Number(line.slice(0, firstTab));
+  const dels = Number(line.slice(firstTab + 1, secondTab));
+  if (Number.isNaN(adds) || Number.isNaN(dels)) return null;
+  return { additions: adds, deletions: dels };
+}
+
+/**
+ * Accumulates one parseable log line's contribution to final-message
+ * extraction: text parts by message id, and (when a `step_finish` stop event
+ * lands) returns that message id as the final turn.
+ * @param {any} evt
+ * @param {Map<string, string[]>} textByMessageId
+ * @param {string[]} textOrder
+ * @returns {string|null}
+ */
+function collectFinalMessageLine(evt, textByMessageId, textOrder) {
+  if (evt.type === "text" && evt.part && typeof evt.part.text === "string") {
+    const mid = evt.part.messageID;
+    if (!textByMessageId.has(mid)) {
+      textByMessageId.set(mid, []);
+      textOrder.push(mid);
+    }
+    /** @type {string[]} */ (textByMessageId.get(mid)).push(evt.part.text);
+  }
+  if (evt.type === "step_finish" && evt.part && evt.part.reason === "stop") {
+    return evt.part.messageID;
+  }
+  return null;
 }
 
 /**
@@ -2346,26 +2516,26 @@ export function createTaskManager({
     try {
       extracted = isGitTarget
         ? extractGitDiff({
+            stateDir,
+            runtimeDir,
+            denyList,
+            diffPath,
             directory: finishedTask.directory,
             overlay: { upperDir: finishedTask.overlayDirs.upperDir, workDir: finishedTask.overlayDirs.workDir },
             overlayRwBinds: finishedTask.overlayDirs.rwBinds ?? [],
             overlayRwFileBinds: finishedTask.overlayDirs.rwFileBinds ?? [],
             preDispatchHead: /** @type {string} */ (finishedTask.preDispatchHead),
-            stateDir,
-            runtimeDir,
             homeDir: os.homedir(),
-            denyList,
-            diffPath,
             runCommand: runOverlayCommandFn,
           })
         : extractNonGitDiff({
-            directory: finishedTask.directory,
-            overlay: finishedTask.overlayDirs,
             stateDir,
             runtimeDir,
-            homeDir: os.homedir(),
             denyList,
             diffPath,
+            directory: finishedTask.directory,
+            overlay: finishedTask.overlayDirs,
+            homeDir: os.homedir(),
             runCommand: runOverlayCommandFn,
           });
     } catch (err) {
@@ -2537,16 +2707,20 @@ export function createTaskManager({
     if (typeof onEvent !== "function" || task.internal) return Promise.resolve();
     const scheduledStatus = task.status;
     const scheduledDirectory = task.directory;
-    const baseEvent = () => ({
-      sequence: ++eventSequence,
-      type: "task.activity",
-      taskId: task.id,
-      directory: scheduledDirectory,
-      originSessionId: task.originSessionId ?? null,
-      status: scheduledStatus,
-      previousStatus: null,
-      occurredAt: new Date().toISOString(),
-    });
+    const baseEvent = () => {
+      ++eventSequence;
+      const sequence = eventSequence;
+      return {
+        sequence,
+        type: "task.activity",
+        taskId: task.id,
+        directory: scheduledDirectory,
+        originSessionId: task.originSessionId ?? null,
+        status: scheduledStatus,
+        previousStatus: null,
+        occurredAt: new Date().toISOString(),
+      };
+    };
     const emit = (/** @type {object} */ event) => {
       if (scheduledStatus === "running" && task.status !== scheduledStatus) return;
       try {
@@ -2625,12 +2799,8 @@ export function createTaskManager({
       if (!entry.endsWith(".prompt.txt")) continue;
       const taskId = entry.slice(0, -".prompt.txt".length);
       const task = tasks.get(taskId);
-      if (task?.status === "running" || task?.status === "queued") continue;
-      try {
-        fs.unlinkSync(path.join(PROMPT_DIR, entry));
-      } catch (err) {
-        if (errCode(err) !== "ENOENT") throw err;
-      }
+      const isActive = task?.status === "running" || task?.status === "queued";
+      if (!isActive) removeFileIfPresent(path.join(PROMPT_DIR, entry));
     }
   }
   sweepOrphanedPromptFiles();
@@ -2658,12 +2828,12 @@ export function createTaskManager({
         continue;
       }
       for (const entry of entries) {
-        if (!entry.startsWith("taskferry-cow-")) continue;
-        const taskId = entry.slice("taskferry-cow-".length);
-        const task = tasks.get(taskId);
+        const taskId = entry.startsWith("taskferry-cow-") ? entry.slice("taskferry-cow-".length) : null;
+        const task = taskId ? tasks.get(taskId) : undefined;
         const root = path.join(tmpRoot, entry);
         const ownsThisOverlay = task?.overlayDirs?.root === root;
-        if (ownsThisOverlay && task.changesetStatus === "pending") continue;
+        const isOwnedPending = ownsThisOverlay && task.changesetStatus === "pending";
+        if (!taskId || isOwnedPending) continue;
         const cleanupTarget = ownsThisOverlay
           ? task
           : { overlayDirs: { root, tmpRoot } };
@@ -2779,12 +2949,12 @@ export function createTaskManager({
    * @returns {{sessionId: string|undefined, reset: boolean, previousSessionId: string|undefined}}
    */
   function resolveAdvisorSession(sessionId) {
-    if (!sessionId) return { sessionId: undefined, reset: false, previousSessionId: undefined };
-    const lastUsedAt = advisorSessions.get(sessionId);
-    if (lastUsedAt != null && Date.now() - lastUsedAt <= advisorTtl) {
-      return { sessionId, reset: false, previousSessionId: undefined };
-    }
-    return { sessionId: undefined, reset: true, previousSessionId: sessionId };
+    const effectiveSessionId = sessionId ? sessionId : undefined;
+    const lastUsedAt = effectiveSessionId ? advisorSessions.get(effectiveSessionId) : undefined;
+    const fresh = effectiveSessionId != null && lastUsedAt != null && Date.now() - lastUsedAt <= advisorTtl;
+    const reset = effectiveSessionId != null && !fresh;
+    const previousSessionId = reset ? effectiveSessionId : undefined;
+    return { sessionId: fresh ? effectiveSessionId : undefined, reset, previousSessionId };
   }
 
   /** @param {string|undefined} sessionId */
@@ -2825,8 +2995,8 @@ export function createTaskManager({
     // Task IDs retain the literal "oc_" prefix for compatibility; WorkerExecutor.taskIdPrefix is not wired in this issue.
     const id = `oc_${Date.now().toString(36)}_${randomUUID().slice(0, 8)}`;
     const logPath = path.join(LOG_DIR, `${id}.ndjson`);
-    const task = buildDispatchTask({ id, directory: normalizedDirectory, prompt, model, executor, priorSessionTask, variant, sessionId, originSessionId, internal, finalMarker, role, logPath });
-    queueDispatchLaunch({ tasks, persistTask, pendingLaunches, launchQueue, launchQueuedTasks }, { id, task, prompt, sessionId, env, noSandbox, noOverlay, allowedDirs: dispatchAllowedDirs, executor, role });
+    const task = buildDispatchTask({ id, prompt, model, executor, priorSessionTask, variant, sessionId, originSessionId, internal, finalMarker, role, logPath, directory: normalizedDirectory });
+    queueDispatchLaunch({ tasks, persistTask, pendingLaunches, launchQueue, launchQueuedTasks }, { id, task, prompt, sessionId, env, noSandbox, noOverlay, executor, role, allowedDirs: dispatchAllowedDirs });
     const summary = summarize(task);
     return {
       ...summary,
@@ -2856,20 +3026,20 @@ export function createTaskManager({
    * @returns {string}
    */
   function modelsCacheFingerprint(env = {}) {
+    const suffixNames = ["_API_KEY", "_BASE_URL"];
+    const exactNames = [
+      "OPENCODE_CONFIG",
+      "OPENCODE_CONFIG_DIR",
+      "OPENCODE_CONFIG_CONTENT",
+      "OPENCODE_AUTH_CONTENT",
+      "OPENCODE_MODELS_PATH",
+      "OPENCODE_MODELS_URL",
+      "PI_CODING_AGENT_DIR",
+    ];
     /** @type {string[]} */
     const parts = [];
     for (const name of Object.keys(env)) {
-      if (
-        name.endsWith("_API_KEY")
-        || name.endsWith("_BASE_URL")
-        || name === "OPENCODE_CONFIG"
-        || name === "OPENCODE_CONFIG_DIR"
-        || name === "OPENCODE_CONFIG_CONTENT"
-        || name === "OPENCODE_AUTH_CONTENT"
-        || name === "OPENCODE_MODELS_PATH"
-        || name === "OPENCODE_MODELS_URL"
-        || name === "PI_CODING_AGENT_DIR"
-      ) {
+      if (suffixNames.some((suffix) => name.endsWith(suffix)) || exactNames.includes(name)) {
         parts.push(`${name}=${env[name]}`);
       }
     }
@@ -3036,21 +3206,14 @@ export function createTaskManager({
       if (!line.trim()) continue;
       /** @type {any} */
       let evt;
+      let parsed = false;
       try {
         evt = JSON.parse(line);
+        parsed = true;
       } catch {
-        continue;
+        // Not a parseable event line -- not narration.
       }
-      if (evt.type === "text" && typeof evt.part?.text === "string") {
-        const mid = evt.part.messageID;
-        if (!textByMessageId.has(mid)) {
-          textByMessageId.set(mid, []);
-          order.push({ kind: "text", mid });
-        }
-        /** @type {string[]} */ (textByMessageId.get(mid)).push(evt.part.text);
-      } else if (evt.type === "tool_use" && evt.part?.type === "tool") {
-        order.push({ kind: "tool", line: formatToolEventForNarration(evt.part) });
-      }
+      if (parsed) collectNarrationLine(evt, textByMessageId, order);
     }
     return order
       .map((entry) => (entry.kind === "text" ? /** @type {string[]} */ (textByMessageId.get(entry.mid)).join("") : entry.line))
@@ -3123,8 +3286,8 @@ export function createTaskManager({
       sourceStatus,
       maxWords,
       previousActivity,
-      resolvedSummarySessionId: session.resolvedSummarySessionId,
       queuedCallerEnv,
+      resolvedSummarySessionId: session.resolvedSummarySessionId,
     });
   }
 
@@ -3222,13 +3385,7 @@ export function createTaskManager({
       if (index !== -1) launchQueue.splice(index, 1);
       const launch = pendingLaunches.get(taskId);
       pendingLaunches.delete(taskId);
-      if (launch?.snapshotPath) {
-        try {
-          fs.unlinkSync(launch.snapshotPath);
-        } catch (err) {
-          if (errCode(err) !== "ENOENT") throw err;
-        }
-      }
+      if (launch?.snapshotPath) removeFileIfPresent(launch.snapshotPath);
       task.status = "cancelled";
       task.endedAt = new Date().toISOString();
       persistTask(task.id);
@@ -3297,9 +3454,10 @@ export function createTaskManager({
       // The extraction at settlement failed (Task 10 records why in
       // changesetError); there is no patch to apply, but the overlay was
       // deliberately kept so the changes remain recoverable.
+      const overlayLocation = task.overlayDirs ? ` at ${task.overlayDirs.root}` : "";
       throw new Error(
         `error: task ${taskId}'s changeset was never extracted (${task.changesetError ?? "unknown reason"})\n` +
-        `help: the overlay was preserved${task.overlayDirs ? ` at ${task.overlayDirs.root}` : ""} -- inspect it there directly, or "taskferry reject ${taskId}" to discard it`
+        `help: the overlay was preserved${overlayLocation} -- inspect it there directly, or "taskferry reject ${taskId}" to discard it`
       );
     }
     // The diff file lives under stateDir; a partial cleanup (or a tampered
@@ -3327,14 +3485,14 @@ export function createTaskManager({
     }
     const denyList = defaultDenyList(os.homedir(), stateDir).filter(existsFn);
     const applied = applyChangeset({
-      directory: task.directory,
-      diffPath: task.diffPath,
       isGitTarget,
-      overlay: task.overlayDirs ?? undefined,
       stateDir,
       runtimeDir,
-      homeDir: os.homedir(),
       denyList,
+      directory: task.directory,
+      diffPath: task.diffPath,
+      overlay: task.overlayDirs ?? undefined,
+      homeDir: os.homedir(),
       runCommand: runOverlayCommandFn,
     });
     if (!applied.applied) {
@@ -3534,17 +3692,15 @@ export function createTaskManager({
             failRunningTask(current, providerFailure.bucket, providerFailure.detail);
             return;
           }
-          if (linesResult.hasParseableLine) {
-            lastActivityMs = Date.now();
-            // Latch the budget escalation: once any parseable JSON line has
-            // landed for this task, every subsequent tick compares against
-            // `postOutputNoOutputTimeout` regardless of how much later silence
-            // follows. This is the only assignment to either flag/variable
-            // outside their initializers, so the latch is unconditional.
-            if (!outputSeen) {
-              outputSeen = true;
-              currentNoOutputTimeout = postOutputNoOutputTimeout;
-            }
+          // Latch the budget escalation: once any parseable JSON line has
+          // landed for this task, every subsequent tick compares against
+          // `postOutputNoOutputTimeout` regardless of how much later silence
+          // follows. This is the only assignment to either flag/variable
+          // outside their initializers, so the latch is unconditional.
+          if (linesResult.hasParseableLine) lastActivityMs = Date.now();
+          if (linesResult.hasParseableLine && !outputSeen) {
+            outputSeen = true;
+            currentNoOutputTimeout = postOutputNoOutputTimeout;
           }
           void scheduleActivity(current);
         }
@@ -3620,28 +3776,7 @@ export function createTaskManager({
     }
     let hasEvent = false;
     if (stat.size > 0) {
-      /** @type {number|undefined} */
-      let fd;
-      try {
-        const bytes = Math.min(stat.size, LOG_ACTIVITY_SCAN_BYTES);
-        const buffer = Buffer.alloc(bytes);
-        fd = fs.openSync(logPath, "r");
-        fs.readSync(fd, buffer, 0, bytes, 0);
-        for (const line of buffer.toString("utf8").split("\n")) {
-          if (!line.trim()) continue;
-          try {
-            JSON.parse(line);
-            hasEvent = true;
-            break;
-          } catch {
-            continue;
-          }
-        }
-      } catch {
-        hasEvent = false;
-      } finally {
-        if (fd != null) fs.closeSync(fd);
-      }
+      hasEvent = scanLogForEvent(logPath, Math.min(stat.size, LOG_ACTIVITY_SCAN_BYTES));
     }
     if (hasEvent) logHasEventCache.add(logPath);
     return { logBytesWritten: stat.size, logLastWriteAt: stat.mtime.toISOString(), logHasEvent: hasEvent };
@@ -3705,7 +3840,9 @@ export function createTaskManager({
         });
       };
       const timer = timeoutMs != null ? setTimeout(() => settle(true), timeoutMs) : undefined;
-      if (!waiters.has(taskId)) waiters.set(taskId, []);
+      if (!waiters.has(taskId)) {
+        waiters.set(taskId, []);
+      }
       /** @type {Array<(timedOut?: boolean) => void>} */ (waiters.get(taskId)).push(settle);
     });
   }
@@ -3781,33 +3918,16 @@ export function createTaskManager({
         const bytesRead = fs.readSync(fd, buf, 0, CHUNK_SIZE, null);
         if (bytesRead === 0) break;
         carry += buf.toString("utf8", 0, bytesRead);
-        let nl;
-        while ((nl = carry.indexOf("\n")) !== -1) {
-          const line = carry.slice(0, nl);
-          carry = carry.slice(nl + 1);
-          if (!line.trim()) continue;
-          try {
-            const evt = JSON.parse(line);
-            if (evt.sessionID) return evt.sessionID;
-          } catch {
-            continue;
-          }
-        }
+        const result = extractSessionId(carry);
+        if (result.sessionId) return result.sessionId;
+        carry = result.remainder;
       }
-      if (carry.trim()) {
-        try {
-          const evt = JSON.parse(carry);
-          if (evt.sessionID) return evt.sessionID;
-        } catch {
-          // trailing partial/malformed line, ignore
-        }
-      }
+      return carry.trim() ? sessionIdInJson(carry) : null;
     } catch {
       return null;
     } finally {
       fs.closeSync(fd);
     }
-    return null;
   }
 
   /**
@@ -3828,17 +3948,22 @@ export function createTaskManager({
     }
     for (const line of raw.split("\n")) {
       if (!line.trim()) continue;
+      /** @type {any} */
+      let evt;
+      let parsed = false;
       try {
-        const evt = JSON.parse(line);
-        if (evt.type !== "text" || !evt.part || typeof evt.part.text !== "string") continue;
+        evt = JSON.parse(line);
+        parsed = true;
+      } catch {
+        // Not a text event line -- not narration.
+      }
+      if (parsed && evt.type === "text" && evt.part && typeof evt.part.text === "string") {
         const mid = evt.part.messageID;
         if (!textByMessageId.has(mid)) {
           textByMessageId.set(mid, []);
           textOrder.push(mid);
         }
         /** @type {string[]} */ (textByMessageId.get(mid)).push(evt.part.text);
-      } catch {
-        continue;
       }
     }
     return textOrder.map((mid) => /** @type {string[]} */ (textByMessageId.get(mid)).join("")).join("\n\n");
@@ -3859,13 +3984,10 @@ export function createTaskManager({
       fs.readSync(fd, buffer, 0, bytes, size - bytes);
       const lines = buffer.toString("utf8").split("\n");
       for (let i = lines.length - 1; i >= 0; i--) {
-        if (!lines[i].trim()) continue;
-        try {
-          const evt = JSON.parse(lines[i]);
-          if (evt.type === "text" && typeof evt.part?.text === "string") return evt.part.text;
-        } catch {
-          continue;
-        }
+        const line = lines[i].trim();
+        if (!line) continue;
+        const evt = isParseableJson(line) ? JSON.parse(line) : null;
+        if (evt && evt.type === "text" && typeof evt.part?.text === "string") return evt.part.text;
       }
     } catch {
       return "";
@@ -3986,17 +4108,11 @@ export function createTaskManager({
     let additions = 0;
     let deletions = 0;
     for (const line of result.stdout.split("\n")) {
-      if (!line) continue;
-      const firstTab = line.indexOf("\t");
-      if (firstTab === -1) continue;
-      const secondTab = line.indexOf("\t", firstTab + 1);
-      if (secondTab === -1) continue;
-      const adds = Number(line.slice(0, firstTab));
-      const dels = Number(line.slice(firstTab + 1, secondTab));
-      if (Number.isNaN(adds) || Number.isNaN(dels)) continue;
+      const parsed = parseNumstatLine(line);
+      if (!parsed) continue;
       files += 1;
-      additions += adds;
-      deletions += dels;
+      additions += parsed.additions;
+      deletions += parsed.deletions;
     }
     return { files, additions, deletions };
   }
@@ -4051,21 +4167,16 @@ export function createTaskManager({
       if (!line.trim()) continue;
       /** @type {any} */
       let evt;
+      let parsed = false;
       try {
         evt = JSON.parse(line);
+        parsed = true;
       } catch {
-        continue;
+        // Not a parseable event line -- not final-message evidence.
       }
-      if (evt.type === "text" && evt.part && typeof evt.part.text === "string") {
-        const mid = evt.part.messageID;
-        if (!textByMessageId.has(mid)) {
-          textByMessageId.set(mid, []);
-          textOrder.push(mid);
-        }
-        /** @type {string[]} */ (textByMessageId.get(mid)).push(evt.part.text);
-      }
-      if (evt.type === "step_finish" && evt.part && evt.part.reason === "stop") {
-        finalMessageId = evt.part.messageID;
+      if (parsed) {
+        const stepId = collectFinalMessageLine(evt, textByMessageId, textOrder);
+        if (stepId) finalMessageId = stepId;
       }
     }
     // Same fallback rule as result(): the last messageID seen wins if no
@@ -4122,8 +4233,13 @@ export function createTaskManager({
     list,
     result,
     tail,
-    summarize: summarizeRequest,
+    advisor,
     checkSummaryModelReady,
+    // Exposed primarily so tests can seed the summary session id and watermark
+    // (the activity cache owns the "last successful summary" state shared
+    // between the activity path and the direct summarize path).
+    activityCache,
+    summarize: summarizeRequest,
     setActivitySummarySubscriptions: /** @param {number} count */ (count) => {
       activitySummarySubscriptions = Math.max(0, Number.isSafeInteger(count) ? count : 0);
       activityCache.setSummariesEnabled(activitySummariesEnabled && activitySummarySubscriptions > 0);
@@ -4136,11 +4252,6 @@ export function createTaskManager({
       activitySummarySubscriptions = totalCount;
       activityCache.setSummariesEnabled(activitySummariesEnabled && totalCount > 0);
     },
-    advisor,
     paths: { STATE_DIR: stateDir, LOG_DIR, SUMMARY_DIR, TASKS_FILE },
-    // Exposed primarily so tests can seed the summary session id and watermark
-    // (the activity cache owns the "last successful summary" state shared
-    // between the activity path and the direct summarize path).
-    activityCache,
   };
 }

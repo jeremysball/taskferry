@@ -1451,6 +1451,201 @@ function computeResultDetail(task, { taskId, full, fields }, ctx) {
 }
 
 /**
+ * The subset of `createTaskManager`'s closure that `dispatch`'s extracted
+ * helper pipeline needs threaded in explicitly -- the same convention the
+ * `startTask`/`result` extractions use. `dispatch` is the actual spawn path
+ * for every task this tool runs, so its helpers preserve the exact
+ * sequencing of side-effecting operations (task-record persistence,
+ * pending-launch registration, queue push, and the launch trigger) rather
+ * than reordering anything.
+ * @typedef {object} DispatchContext
+ * @property {Map<string, Task>} tasks
+ * @property {(taskId: string) => void} persistTask
+ * @property {Map<string, LaunchSpec>} pendingLaunches
+ * @property {string[]} launchQueue
+ * @property {() => void} launchQueuedTasks
+ */
+
+/**
+ * On a `sessionId` resume, finds the most recent matching prior task so the
+ * dispatch can inherit the executor (and, downstream, the model) the session
+ * was actually created under instead of silently falling back to the
+ * manager's default. When `--executor` is given explicitly the lookup is
+ * scoped to tasks that match it too: session ids are only unique per
+ * executor, so an explicit `--executor pi` alongside a sessionId that
+ * collides with an unrelated opencode task must not let that opencode task's
+ * model leak into this pi dispatch. Equivalent to the original compound
+ * condition, decomposed per-field so the expression stays under the
+ * expression-complexity ceiling.
+ * @param {Map<string, Task>} tasks
+ * @param {string|undefined} sessionId
+ * @param {string|undefined} executorName
+ * @returns {Task|null}
+ */
+function resolvePriorSessionTask(tasks, sessionId, executorName) {
+  /** @type {Task|null} */
+  let priorSessionTask = null;
+  if (sessionId) {
+    for (const t of tasks.values()) {
+      if (t.sessionId !== sessionId || (executorName !== undefined && t.executorId !== executorName)) continue;
+      if (!priorSessionTask || t.startedAt > priorSessionTask.startedAt) {
+        priorSessionTask = t;
+      }
+    }
+  }
+  return priorSessionTask;
+}
+
+/**
+ * Reuses the manager's single pre-built defaultExecutor instance when the
+ * inherited/explicit executor matches it, instead of allocating a fresh
+ * WorkerExecutor on every session-inheriting resume.
+ * @param {Task|null} priorSessionTask
+ * @param {string|undefined} executorName
+ * @param {import("./executor.js").WorkerExecutor} defaultExecutor
+ * @returns {import("./executor.js").WorkerExecutor}
+ */
+function resolveDispatchExecutor(priorSessionTask, executorName, defaultExecutor) {
+  if (executorName !== undefined) {
+    return executorName === defaultExecutor.id ? defaultExecutor : resolveExecutor(executorName);
+  }
+  if (priorSessionTask) {
+    return priorSessionTask.executorId === defaultExecutor.id ? defaultExecutor : resolveExecutor(priorSessionTask.executorId);
+  }
+  return defaultExecutor;
+}
+
+/**
+ * Validates a dispatch's prompt/directory arguments, matching the
+ * user-facing error strings the CLI surfaces for a missing prompt, a
+ * non-absolute path, or a nonexistent directory.
+ * @param {{prompt: string, directory: string}} params
+ */
+function validateDispatchParameters({ prompt, directory }) {
+  if (!prompt || typeof prompt !== "string") {
+    throw new Error("error: prompt is required\nhelp: taskferry dispatch requires a non-empty prompt string");
+  }
+  if (!directory || !path.isAbsolute(directory)) {
+    throw new Error(`error: directory must be an absolute path (got ${JSON.stringify(directory)})\nhelp: pass the full path, e.g. "/workspace/my-repo"`);
+  }
+  if (!fs.existsSync(directory) || !fs.statSync(directory).isDirectory()) {
+    throw new Error(`error: directory does not exist: ${directory}\nhelp: check the path or create the directory first`);
+  }
+}
+
+/**
+ * Validates `--require-final-marker` (a regex source that must compile as a
+ * standard JS RegExp) when one is supplied.
+ * @param {string|null} finalMarker
+ */
+function validateDispatchFinalMarker(finalMarker) {
+  if (finalMarker != null) {
+    if (typeof finalMarker !== "string") {
+      throw new Error("error: finalMarker must be a string regex source\nhelp: pass --require-final-marker with a pattern that compiles as a standard JS RegExp");
+    }
+    try {
+      new RegExp(finalMarker);
+    } catch (err) {
+      throw new Error(`error: --require-final-marker is not a valid RegExp (${errMessage(err)})\nhelp: use standard JS RegExp syntax, e.g. '^Status: (DONE|DONE_WITH_CONCERNS|BLOCKED)$'`, { cause: err });
+    }
+  }
+}
+
+/**
+ * Resolves the dispatch target directory to its real path. Runs after the
+ * prompt/finalMarker validation (preserving the original throw order) and
+ * surfaces the same user-facing guidance when resolution fails.
+ * @param {string} directory
+ * @returns {string}
+ */
+function resolveDispatchDirectory(directory) {
+  try {
+    return fs.realpathSync(directory);
+  } catch (err) {
+    throw new Error(`error: directory does not exist: ${directory}\nhelp: check the path or create the directory first (${errMessage(err)})`, { cause: err });
+  }
+}
+
+/**
+ * Builds the queued `Task` record for a dispatch. Task IDs retain the literal
+ * `oc_` prefix for compatibility. A resume with no `--model` inherits the
+ * model the session was created under (a different model can mean a different
+ * provider, breaking the whole point of resuming that exact session).
+ * @param {{id: string, directory: string, prompt: string, model: string|undefined, executor: import("./executor.js").WorkerExecutor, priorSessionTask: Task|null, variant: string|undefined, sessionId: string|undefined, originSessionId: string|undefined, internal: boolean, finalMarker: string|null, role: "dispatch"|"advisor", logPath: string}} params
+ * @returns {Task}
+ */
+function buildDispatchTask({ id, directory, prompt, model, executor, priorSessionTask, variant, sessionId, originSessionId, internal, finalMarker, role, logPath }) {
+  const usingDefaultModel = !model;
+  const resolvedModel = model || priorSessionTask?.model || executor.defaultModel;
+  return {
+    id,
+    status: "queued",
+    directory,
+    model: resolvedModel,
+    executorId: executor.id,
+    variant: usingDefaultModel ? "high" : variant || null,
+    sessionId: sessionId || null,
+    originSessionId: originSessionId || null,
+    pid: null,
+    startedAt: new Date().toISOString(),
+    endedAt: null,
+    exitCode: null,
+    signal: null,
+    logPath,
+    promptPreview: prompt.length > 200 ? prompt.slice(0, 200) + "…" : prompt,
+    promptTotalChars: prompt.length > 200 ? prompt.length : null,
+    spawnError: null,
+    cancelRequested: false,
+    internal: internal === true,
+    failureReason: null,
+    failureDetail: null,
+    incomplete: false,
+    finalMarker: finalMarker == null ? null : finalMarker,
+    role,
+    changesetStatus: "none",
+    diffPath: null,
+    overlayDirs: null,
+    preDispatchHead: null,
+    changesetError: null,
+  };
+}
+
+/**
+ * Commits a queued dispatch to the manager's shared state in the exact order
+ * the monolithic `dispatch` always used: persist the task record, snapshot
+ * the caller's env at queue time (freezing it against later caller
+ * mutations), register the pending launch, push the queue, and trigger
+ * launch. The env snapshot is not redundant with `sanitizedEnvironment()`'s
+ * one-pass merge -- that reads Object.keys() and each value lazily at spawn
+ * time, so without this snapshot a caller mutating their original env object
+ * between queue time and the queued launch's actual spawn would change what
+ * reaches the child. Pinned by tasks.test.js's "dispatch()'s queued env is
+ * frozen against later caller mutations" gate.
+ * @param {DispatchContext} ctx
+ * @param {{id: string, task: Task, prompt: string, sessionId: string|undefined, env: NodeJS.ProcessEnv|undefined, noSandbox: boolean, noOverlay: boolean, allowedDirs: string[]|undefined, executor: import("./executor.js").WorkerExecutor, role: "dispatch"|"advisor"}} params
+ */
+function queueDispatchLaunch(ctx, { id, task, prompt, sessionId, env, noSandbox, noOverlay, allowedDirs, executor, role }) {
+  ctx.tasks.set(id, task);
+  ctx.persistTask(task.id);
+  const capturedEnv = env === undefined ? undefined : { ...env };
+  ctx.pendingLaunches.set(id, {
+    prompt,
+    directory: task.directory,
+    model: task.model,
+    variant: task.variant,
+    sessionId,
+    env: capturedEnv,
+    noSandbox: noSandbox === true,
+    noOverlay: noOverlay === true,
+    allowedDirs,
+    executor,
+    role,
+  });
+  ctx.launchQueue.push(id);
+  ctx.launchQueuedTasks();
+}
+
+/**
  * @param {object} [options]
  * @param {typeof spawn} [options.spawnFn]
  * @param {(pid: number, signal: NodeJS.Signals) => void} [options.killFn]
@@ -2154,126 +2349,16 @@ export function createTaskManager({
    */
   function dispatch({ prompt, directory, model, variant, sessionId, internal = false, finalMarker = null, originSessionId, noSandbox = false, noOverlay = false, allowedDirs: dispatchAllowedDirs, executor: executorName, env, role = "dispatch" }) {
     ensureStateLoaded();
-    // A resume (--session-id with no --executor) should inherit the executor
-    // the session was actually created under, not silently fall back to the
-    // manager's default -- a different executor has no way to continue a
-    // session file another CLI's binary wrote. When --executor is given
-    // explicitly, scope the lookup to tasks that match it too: session ids
-    // are only unique per executor, so an explicit --executor pi alongside a
-    // sessionId that collides with an unrelated opencode task must not let
-    // that opencode task's model leak into this pi dispatch.
-    /** @type {Task|null} */
-    let priorSessionTask = null;
-    if (sessionId) {
-      for (const t of tasks.values()) {
-        if (
-          t.sessionId === sessionId
-          && (executorName === undefined || t.executorId === executorName)
-          && (!priorSessionTask || t.startedAt > priorSessionTask.startedAt)
-        ) {
-          priorSessionTask = t;
-        }
-      }
-    }
-    // Reuse the manager's single pre-built defaultExecutor instance when the
-    // inherited/explicit executor matches it, instead of allocating a fresh
-    // WorkerExecutor on every session-inheriting resume.
-    const executor =
-      executorName !== undefined
-        ? (executorName === defaultExecutor.id ? defaultExecutor : resolveExecutor(executorName))
-        : priorSessionTask
-          ? (priorSessionTask.executorId === defaultExecutor.id ? defaultExecutor : resolveExecutor(priorSessionTask.executorId))
-          : defaultExecutor;
-    if (!prompt || typeof prompt !== "string") {
-      throw new Error("error: prompt is required\nhelp: taskferry dispatch requires a non-empty prompt string");
-    }
-    if (!directory || !path.isAbsolute(directory)) {
-      throw new Error(`error: directory must be an absolute path (got ${JSON.stringify(directory)})\nhelp: pass the full path, e.g. "/workspace/my-repo"`);
-    }
-    if (!fs.existsSync(directory) || !fs.statSync(directory).isDirectory()) {
-      throw new Error(`error: directory does not exist: ${directory}\nhelp: check the path or create the directory first`);
-    }
-    if (finalMarker != null) {
-      if (typeof finalMarker !== "string") {
-        throw new Error("error: finalMarker must be a string regex source\nhelp: pass --require-final-marker with a pattern that compiles as a standard JS RegExp");
-      }
-      try {
-        new RegExp(finalMarker);
-      } catch (err) {
-        throw new Error(`error: --require-final-marker is not a valid RegExp (${errMessage(err)})\nhelp: use standard JS RegExp syntax, e.g. '^Status: (DONE|DONE_WITH_CONCERNS|BLOCKED)$'`, { cause: err });
-      }
-    }
-    let normalizedDirectory;
-    try {
-      normalizedDirectory = fs.realpathSync(directory);
-    } catch (err) {
-      throw new Error(`error: directory does not exist: ${directory}\nhelp: check the path or create the directory first (${errMessage(err)})`, { cause: err });
-    }
-
+    const priorSessionTask = resolvePriorSessionTask(tasks, sessionId, executorName);
+    const executor = resolveDispatchExecutor(priorSessionTask, executorName, defaultExecutor);
+    validateDispatchParameters({ prompt, directory });
+    validateDispatchFinalMarker(finalMarker);
+    const normalizedDirectory = resolveDispatchDirectory(directory);
     // Task IDs retain the literal "oc_" prefix for compatibility; WorkerExecutor.taskIdPrefix is not wired in this issue.
     const id = `oc_${Date.now().toString(36)}_${randomUUID().slice(0, 8)}`;
     const logPath = path.join(LOG_DIR, `${id}.ndjson`);
-
-    // A resume (--session-id with no --model) should inherit the model the
-    // session was actually created under, not silently fall back to the
-    // hardcoded default -- a different model can mean a different provider,
-    // breaking the whole point of resuming that exact session.
-    const usingDefaultModel = !model;
-    const resolvedModel = model || priorSessionTask?.model || executor.defaultModel;
-
-    /** @type {Task} */
-    const task = {
-      id,
-      status: "queued",
-      directory: normalizedDirectory,
-      model: resolvedModel,
-      executorId: executor.id,
-      variant: usingDefaultModel ? "high" : variant || null,
-      sessionId: sessionId || null,
-      originSessionId: originSessionId || null,
-      pid: null,
-      startedAt: new Date().toISOString(),
-      endedAt: null,
-      exitCode: null,
-      signal: null,
-      logPath,
-      promptPreview: prompt.length > 200 ? prompt.slice(0, 200) + "…" : prompt,
-      promptTotalChars: prompt.length > 200 ? prompt.length : null,
-      spawnError: null,
-      cancelRequested: false,
-      internal: internal === true,
-      failureReason: null,
-      failureDetail: null,
-      incomplete: false,
-      finalMarker: finalMarker == null ? null : finalMarker,
-      role,
-      changesetStatus: "none",
-      diffPath: null,
-      overlayDirs: null,
-      preDispatchHead: null,
-      changesetError: null,
-    };
-    tasks.set(id, task);
-    persistTask(task.id);
-    // Capture the caller env at dispatch time rather than holding the caller's
-    // reference directly: later in-place mutations by the caller (or
-    // accidental reuse across retries) must not be able to silently change
-    // what's already queued for spawn. dispatchEnvironment() still reads
-    // process.env fresh at spawn time, so the daemon's own ambient overrides
-    // track process state, not the dispatch-time snapshot.
-    //
-    // Note: this clone is NOT redundant despite what one might guess from
-    // sanitizedEnvironment()'s one-pass merge -- it reads Object.keys() and
-    // each value lazily at spawn time, so without this snapshot a caller
-    // mutating their original env object between queue time and the queued
-    // launch's actual spawn would change what reaches the child. Pinned by
-    // tasks.test.js's "dispatch()'s queued env is frozen against later
-    // caller mutations" gate; removing the clone makes that test fail.
-    const capturedEnv = env === undefined ? undefined : { ...env };
-    pendingLaunches.set(id, { prompt, directory: normalizedDirectory, model: resolvedModel, variant: task.variant, sessionId, env: capturedEnv, noSandbox: noSandbox === true, noOverlay: noOverlay === true, allowedDirs: dispatchAllowedDirs, executor, role });
-    launchQueue.push(id);
-    launchQueuedTasks();
-
+    const task = buildDispatchTask({ id, directory: normalizedDirectory, prompt, model, executor, priorSessionTask, variant, sessionId, originSessionId, internal, finalMarker, role, logPath });
+    queueDispatchLaunch({ tasks, persistTask, pendingLaunches, launchQueue, launchQueuedTasks }, { id, task, prompt, sessionId, env, noSandbox, noOverlay, allowedDirs: dispatchAllowedDirs, executor, role });
     const summary = summarize(task);
     return {
       ...summary,

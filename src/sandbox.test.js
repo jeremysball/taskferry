@@ -3,6 +3,27 @@ import assert from "node:assert/strict";
 import path from "node:path";
 import { buildBwrapArgs, buildBwrapBaseArgs, checkBwrapAvailable, checkOverlaySupport, parseBwrapVersion, platformSupportsSandbox, resolveGitCommonDir, resolveGitDir } from "./sandbox.js";
 
+// Repeated literals lifted to module-level constants to satisfy
+// sonarjs/no-duplicate-string in this file.
+const BWRAP_VERSION = "bubblewrap 0.11.2\n";
+const REPO_DIR = "/workspace/repo";
+const WORKTREE_DIR = "/workspace/repo/.worktrees/issue-1";
+const GIT_COMMON_DIR_OUT = REPO_DIR + "/.git\n";
+const GIT_DIR = REPO_DIR + "/.git";
+const MY_REPO_DIR = "/workspace/my-repo";
+const STATE_DIR = "/home/user/.local/state/taskferry";
+const RUNTIME_DIR = "/home/user/.local/state/taskferry/run";
+const HOME_DIR = "/home/user";
+const UNSHARE_ALL = "--unshare-all";
+const SHARE_NET = "--share-net";
+const DIE_WITH_PARENT = "--die-with-parent";
+const STATE_RUN_DIR = "/state/run";
+const SSH_DIR = "/home/user/.ssh";
+const MAIN_WORKTREE_GITDIR = "/workspace/main-repo/.git/worktrees/my-repo";
+const COW_UPPER_MAIN = "/tmp/taskferry-cow-t1/upper/main";
+const COW_WORK_MAIN = "/tmp/taskferry-cow-t1/work/main";
+const OVERLAY_SRC = "--overlay-src";
+
 describe("platformSupportsSandbox()", () => {
   test("is true on linux", () => {
     assert.equal(platformSupportsSandbox("linux"), true);
@@ -26,9 +47,9 @@ describe("checkBwrapAvailable()", () => {
     const runCommand = (command, args) => {
       assert.equal(command, "bwrap");
       assert.deepEqual(args, ["--version"]);
-      return { status: 0, stdout: "bubblewrap 0.11.2\n", stderr: "", error: undefined };
+      return { status: 0, stdout: BWRAP_VERSION, stderr: "", error: null };
     };
-    assert.deepEqual(checkBwrapAvailable(runCommand), { checked: true, available: true, raw: "bubblewrap 0.11.2\n" });
+    assert.deepEqual(checkBwrapAvailable(runCommand), { checked: true, available: true, raw: BWRAP_VERSION });
   });
 
   test("reports unavailable with an ENOENT-derived reason when the binary is missing", () => {
@@ -47,7 +68,7 @@ describe("checkBwrapAvailable()", () => {
   });
 
   test("reports unavailable when the probe exits non-zero with no spawn error", () => {
-    const runCommand = () => ({ status: 1, stdout: "", stderr: "boom", error: undefined });
+    const runCommand = () => ({ status: 1, stdout: "", stderr: "boom", error: null });
     const result = checkBwrapAvailable(runCommand);
     assert.equal(result.available, false);
     assert.match(result.reason, /status 1/);
@@ -56,15 +77,15 @@ describe("checkBwrapAvailable()", () => {
 
 describe("checkBwrapAvailable() raw stdout", () => {
   test("includes the raw probe stdout when available", () => {
-    const runCommand = () => ({ status: 0, stdout: "bubblewrap 0.11.2\n", stderr: "", error: undefined });
+    const runCommand = () => ({ status: 0, stdout: BWRAP_VERSION, stderr: "", error: null });
     const result = checkBwrapAvailable(runCommand);
-    assert.equal(result.raw, "bubblewrap 0.11.2\n");
+    assert.equal(result.raw, BWRAP_VERSION);
   });
 });
 
 describe("parseBwrapVersion()", () => {
   test("parses a standard version string", () => {
-    assert.deepEqual(parseBwrapVersion("bubblewrap 0.11.2\n"), [0, 11, 2]);
+    assert.deepEqual(parseBwrapVersion(BWRAP_VERSION), [0, 11, 2]);
   });
 
   test("returns null for unparseable output", () => {
@@ -78,22 +99,22 @@ describe("parseBwrapVersion()", () => {
 
 describe("checkOverlaySupport()", () => {
   test("supports bwrap 0.8.0 exactly", () => {
-    const runCommand = () => ({ status: 0, stdout: "bubblewrap 0.8.0\n", stderr: "", error: undefined });
+    const runCommand = () => ({ status: 0, stdout: "bubblewrap 0.8.0\n", stderr: "", error: null });
     assert.deepEqual(checkOverlaySupport(runCommand), { supported: true });
   });
 
   test("supports a version newer than 0.8", () => {
-    const runCommand = () => ({ status: 0, stdout: "bubblewrap 0.11.2\n", stderr: "", error: undefined });
+    const runCommand = () => ({ status: 0, stdout: BWRAP_VERSION, stderr: "", error: null });
     assert.deepEqual(checkOverlaySupport(runCommand), { supported: true });
   });
 
   test("supports a future major version", () => {
-    const runCommand = () => ({ status: 0, stdout: "bubblewrap 1.0.0\n", stderr: "", error: undefined });
+    const runCommand = () => ({ status: 0, stdout: "bubblewrap 1.0.0\n", stderr: "", error: null });
     assert.deepEqual(checkOverlaySupport(runCommand), { supported: true });
   });
 
   test("rejects a version below 0.8", () => {
-    const runCommand = () => ({ status: 0, stdout: "bubblewrap 0.7.1\n", stderr: "", error: undefined });
+    const runCommand = () => ({ status: 0, stdout: "bubblewrap 0.7.1\n", stderr: "", error: null });
     const result = checkOverlaySupport(runCommand);
     assert.equal(result.supported, false);
     assert.match(result.reason, /0\.7\.1 < 0\.8/);
@@ -107,14 +128,14 @@ describe("checkOverlaySupport()", () => {
   });
 
   test("reports unsupported when the version string can't be parsed", () => {
-    const runCommand = () => ({ status: 0, stdout: "unexpected output\n", stderr: "", error: undefined });
+    const runCommand = () => ({ status: 0, stdout: "unexpected output\n", stderr: "", error: null });
     const result = checkOverlaySupport(runCommand);
     assert.equal(result.supported, false);
     assert.match(result.reason, /could not parse/);
   });
 
   test("reports unsupported when an unrelated digit triple has no bubblewrap prefix", () => {
-    const runCommand = () => ({ status: 0, stdout: "wrapper 1.0.0\n", stderr: "", error: undefined });
+    const runCommand = () => ({ status: 0, stdout: "wrapper 1.0.0\n", stderr: "", error: null });
     const result = checkOverlaySupport(runCommand);
     assert.equal(result.supported, false);
     assert.match(result.reason, /could not parse/);
@@ -125,15 +146,15 @@ describe("resolveGitCommonDir()", () => {
   test("resolves a worktree's shared .git dir, outside the worktree's own directory", () => {
     const runCommand = (command, args) => {
       assert.equal(command, "git");
-      assert.deepEqual(args, ["-C", "/workspace/repo/.worktrees/issue-1", "rev-parse", "--git-common-dir"]);
-      return { status: 0, stdout: "/workspace/repo/.git\n", stderr: "" };
+      assert.deepEqual(args, ["-C", WORKTREE_DIR, "rev-parse", "--git-common-dir"]);
+      return { status: 0, stdout: GIT_COMMON_DIR_OUT, stderr: "" };
     };
-    assert.equal(resolveGitCommonDir("/workspace/repo/.worktrees/issue-1", runCommand), "/workspace/repo/.git");
+    assert.equal(resolveGitCommonDir(WORKTREE_DIR, runCommand), GIT_DIR);
   });
 
   test("resolves a relative --git-common-dir output against the given directory", () => {
     const runCommand = () => ({ status: 0, stdout: ".git\n", stderr: "" });
-    assert.equal(resolveGitCommonDir("/workspace/repo", runCommand), "/workspace/repo/.git");
+    assert.equal(resolveGitCommonDir(REPO_DIR, runCommand), GIT_DIR);
   });
 
   test("returns null when the directory is not a git repo", () => {
@@ -143,7 +164,7 @@ describe("resolveGitCommonDir()", () => {
 
   test("returns null when git is not installed", () => {
     const runCommand = () => ({ status: null, stdout: "", stderr: "", error: /** @type {NodeJS.ErrnoException} */ (Object.assign(new Error("not found"), { code: "ENOENT" })) });
-    assert.equal(resolveGitCommonDir("/workspace/repo", runCommand), null);
+    assert.equal(resolveGitCommonDir(REPO_DIR, runCommand), null);
   });
 });
 
@@ -151,15 +172,15 @@ describe("resolveGitDir()", () => {
   test("resolves a linked worktree's own private gitdir, distinct from the common dir (taskferry#224)", () => {
     const runCommand = (command, args) => {
       assert.equal(command, "git");
-      assert.deepEqual(args, ["-C", "/workspace/repo/.worktrees/issue-1", "rev-parse", "--absolute-git-dir"]);
+      assert.deepEqual(args, ["-C", WORKTREE_DIR, "rev-parse", "--absolute-git-dir"]);
       return { status: 0, stdout: "/workspace/repo/.git/worktrees/issue-1\n", stderr: "" };
     };
-    assert.equal(resolveGitDir("/workspace/repo/.worktrees/issue-1", runCommand), "/workspace/repo/.git/worktrees/issue-1");
+    assert.equal(resolveGitDir(WORKTREE_DIR, runCommand), "/workspace/repo/.git/worktrees/issue-1");
   });
 
   test("resolves to the same directory as the common dir for the main checkout itself", () => {
-    const runCommand = () => ({ status: 0, stdout: "/workspace/repo/.git\n", stderr: "" });
-    assert.equal(resolveGitDir("/workspace/repo", runCommand), "/workspace/repo/.git");
+    const runCommand = () => ({ status: 0, stdout: GIT_COMMON_DIR_OUT, stderr: "" });
+    assert.equal(resolveGitDir(REPO_DIR, runCommand), GIT_DIR);
   });
 
   test("returns null when the directory is not a git repo", () => {
@@ -169,17 +190,17 @@ describe("resolveGitDir()", () => {
 
   test("returns null when git is not installed", () => {
     const runCommand = () => ({ status: null, stdout: "", stderr: "", error: /** @type {NodeJS.ErrnoException} */ (Object.assign(new Error("not found"), { code: "ENOENT" })) });
-    assert.equal(resolveGitDir("/workspace/repo", runCommand), null);
+    assert.equal(resolveGitDir(REPO_DIR, runCommand), null);
   });
 });
 
 describe("buildBwrapArgs()", () => {
   test("orders ro-bind, then /proc+/dev+/tmp scaffolding, then deny-list tmpfs, then read-write binds, then standard flags", () => {
     const args = buildBwrapArgs({
-      directory: "/workspace/my-repo",
-      stateDir: "/home/user/.local/state/taskferry",
-      runtimeDir: "/home/user/.local/state/taskferry/run",
-      homeDir: "/home/user",
+      directory: MY_REPO_DIR,
+      stateDir: STATE_DIR,
+      runtimeDir: RUNTIME_DIR,
+      homeDir: HOME_DIR,
     });
 
     assert.deepEqual(args.slice(0, 3), ["--ro-bind", "/", "/"]);
@@ -192,12 +213,12 @@ describe("buildBwrapArgs()", () => {
     assert.deepEqual(args.slice(3, 9), ["--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp"]);
 
     const deniedPaths = [
-      "/home/user/.local/state/taskferry",
-      path.join("/home/user", ".ssh"),
-      path.join("/home/user", ".aws"),
-      path.join("/home/user", ".config", "gcloud"),
-      path.join("/home/user", ".config", "gh"),
-      path.join("/home/user", ".gnupg"),
+      STATE_DIR,
+      path.join(HOME_DIR, ".ssh"),
+      path.join(HOME_DIR, ".aws"),
+      path.join(HOME_DIR, ".config", "gcloud"),
+      path.join(HOME_DIR, ".config", "gh"),
+      path.join(HOME_DIR, ".gnupg"),
     ];
     for (const denied of deniedPaths) {
       const index = args.indexOf(denied);
@@ -209,41 +230,41 @@ describe("buildBwrapArgs()", () => {
     // The state dir's tmpfs deny must come before the runtime dir's read-write
     // bind, since runtimeDir is nested under stateDir in the default layout
     // and bwrap applies rules in argument order.
-    const stateDirTmpfsIndex = args.indexOf("/home/user/.local/state/taskferry");
-    const runtimeDirBindIndex = args.lastIndexOf("/home/user/.local/state/taskferry/run");
+    const stateDirTmpfsIndex = args.indexOf(STATE_DIR);
+    const runtimeDirBindIndex = args.lastIndexOf(RUNTIME_DIR);
     assert.ok(stateDirTmpfsIndex < runtimeDirBindIndex);
-    assert.equal(args[runtimeDirBindIndex - 1], "/home/user/.local/state/taskferry/run");
+    assert.equal(args[runtimeDirBindIndex - 1], RUNTIME_DIR);
     assert.equal(args[runtimeDirBindIndex - 2], "--bind");
 
-    const directoryBindIndex = args.lastIndexOf("/workspace/my-repo");
-    assert.equal(args[directoryBindIndex - 1], "/workspace/my-repo");
+    const directoryBindIndex = args.lastIndexOf(MY_REPO_DIR);
+    assert.equal(args[directoryBindIndex - 1], MY_REPO_DIR);
     assert.equal(args[directoryBindIndex - 2], "--bind");
     // The read-write binds must be the very last mounts, so they win over
     // every other mount above regardless of path nesting.
     assert.ok(directoryBindIndex < runtimeDirBindIndex);
 
-    assert.deepEqual(args.slice(-3), ["--unshare-all", "--share-net", "--die-with-parent"]);
+    assert.deepEqual(args.slice(-3), [UNSHARE_ALL, SHARE_NET, DIE_WITH_PARENT]);
   });
 
   test("accepts an injected denyList override", () => {
     const args = buildBwrapArgs({
-      directory: "/workspace/my-repo",
+      directory: MY_REPO_DIR,
       stateDir: "/state",
-      runtimeDir: "/state/run",
-      homeDir: "/home/user",
+      runtimeDir: STATE_RUN_DIR,
+      homeDir: HOME_DIR,
       denyList: ["/only/this/path"],
     });
     assert.equal(args[9], "--tmpfs");
     assert.equal(args[10], "/only/this/path");
-    assert.equal(args.indexOf("/home/user/.ssh"), -1);
+    assert.equal(args.indexOf(SSH_DIR), -1);
   });
 
   test("binds a directory and runtimeDir nested under /tmp after the /tmp tmpfs, so the fresh /tmp mount doesn't shadow them", () => {
     const args = buildBwrapArgs({
       directory: "/tmp/my-scratch-repo",
-      stateDir: "/home/user/.local/state/taskferry",
+      stateDir: STATE_DIR,
       runtimeDir: "/tmp/taskferry-runtime",
-      homeDir: "/home/user",
+      homeDir: HOME_DIR,
     });
 
     const tmpTmpfsIndex = args.indexOf("--tmpfs");
@@ -260,32 +281,32 @@ describe("buildBwrapArgs()", () => {
 
   test("appends extraRwBinds after directory/runtimeDir and before extraRoBinds", () => {
     const args = buildBwrapArgs({
-      directory: "/workspace/my-repo",
-      stateDir: "/home/user/.local/state/taskferry",
-      runtimeDir: "/home/user/.local/state/taskferry/run",
-      homeDir: "/home/user",
-      extraRwBinds: ["/workspace/main-repo/.git/worktrees/my-repo"],
+      directory: MY_REPO_DIR,
+      stateDir: STATE_DIR,
+      runtimeDir: RUNTIME_DIR,
+      homeDir: HOME_DIR,
+      extraRwBinds: [MAIN_WORKTREE_GITDIR],
     });
-    const runtimeDirBindIndex = args.lastIndexOf("/home/user/.local/state/taskferry/run");
-    const extraBindIndex = args.indexOf("/workspace/main-repo/.git/worktrees/my-repo");
+    const runtimeDirBindIndex = args.lastIndexOf(RUNTIME_DIR);
+    const extraBindIndex = args.indexOf(MAIN_WORKTREE_GITDIR);
     assert.notEqual(extraBindIndex, -1);
     assert.equal(args[extraBindIndex - 1], "--bind");
-    assert.equal(args[extraBindIndex + 1], "/workspace/main-repo/.git/worktrees/my-repo");
+    assert.equal(args[extraBindIndex + 1], MAIN_WORKTREE_GITDIR);
     assert.ok(extraBindIndex > runtimeDirBindIndex);
   });
 
   test("appends extraRwPairBinds after extraRwBinds and before extraRoBinds, as a --bind (not --ro-bind) with different src/dest", () => {
     const args = buildBwrapArgs({
-      directory: "/workspace/my-repo",
-      stateDir: "/home/user/.local/state/taskferry",
-      runtimeDir: "/home/user/.local/state/taskferry/run",
-      homeDir: "/home/user",
-      extraRwBinds: ["/workspace/main-repo/.git/worktrees/my-repo"],
+      directory: MY_REPO_DIR,
+      stateDir: STATE_DIR,
+      runtimeDir: RUNTIME_DIR,
+      homeDir: HOME_DIR,
+      extraRwBinds: [MAIN_WORKTREE_GITDIR],
       extraRwPairBinds: [["/home/user/.pi/agent/sessions", "/home/user/.local/state/taskferry/run/pi-data/sessions"]],
       extraRoBinds: [["/home/user/.pi/agent/auth.json", "/home/user/.local/state/taskferry/run/pi-data/auth.json"]],
     });
 
-    const extraRwBindIndex = args.indexOf("/workspace/main-repo/.git/worktrees/my-repo");
+    const extraRwBindIndex = args.indexOf(MAIN_WORKTREE_GITDIR);
     const rwPairBindIndex = args.indexOf("--bind", extraRwBindIndex + 1);
     assert.notEqual(rwPairBindIndex, -1);
     assert.equal(args[rwPairBindIndex + 1], "/home/user/.pi/agent/sessions");
@@ -299,77 +320,77 @@ describe("buildBwrapArgs()", () => {
 
   test("appends extraRoBinds after the read-write binds, so a specific file wins over a broader writable parent", () => {
     const args = buildBwrapArgs({
-      directory: "/workspace/my-repo",
-      stateDir: "/home/user/.local/state/taskferry",
-      runtimeDir: "/home/user/.local/state/taskferry/run",
-      homeDir: "/home/user",
+      directory: MY_REPO_DIR,
+      stateDir: STATE_DIR,
+      runtimeDir: RUNTIME_DIR,
+      homeDir: HOME_DIR,
       extraRoBinds: [["/home/user/.local/share/opencode/auth.json", "/home/user/.local/state/taskferry/run/opencode-data/opencode/auth.json"]],
     });
 
-    const runtimeDirBindIndex = args.lastIndexOf("/home/user/.local/state/taskferry/run");
+    const runtimeDirBindIndex = args.lastIndexOf(RUNTIME_DIR);
     const roBindIndex = args.indexOf("--ro-bind", runtimeDirBindIndex);
     assert.notEqual(roBindIndex, -1);
     assert.equal(args[roBindIndex + 1], "/home/user/.local/share/opencode/auth.json");
     assert.equal(args[roBindIndex + 2], "/home/user/.local/state/taskferry/run/opencode-data/opencode/auth.json");
     assert.ok(roBindIndex > runtimeDirBindIndex);
-    assert.deepEqual(args.slice(-3), ["--unshare-all", "--share-net", "--die-with-parent"]);
+    assert.deepEqual(args.slice(-3), [UNSHARE_ALL, SHARE_NET, DIE_WITH_PARENT]);
   });
 
   test("mounts an overlay on the target directory instead of a plain bind when overlay is given", () => {
     const args = buildBwrapArgs({
-      directory: "/workspace/my-repo",
-      stateDir: "/home/user/.local/state/taskferry",
-      runtimeDir: "/home/user/.local/state/taskferry/run",
-      homeDir: "/home/user",
-      overlay: { upperDir: "/tmp/taskferry-cow-t1/upper/main", workDir: "/tmp/taskferry-cow-t1/work/main" },
+      directory: MY_REPO_DIR,
+      stateDir: STATE_DIR,
+      runtimeDir: RUNTIME_DIR,
+      homeDir: HOME_DIR,
+      overlay: { upperDir: COW_UPPER_MAIN, workDir: COW_WORK_MAIN },
     });
-    const overlayIndex = args.indexOf("--overlay-src");
+    const overlayIndex = args.indexOf(OVERLAY_SRC);
     assert.notEqual(overlayIndex, -1);
     assert.deepEqual(args.slice(overlayIndex, overlayIndex + 6), [
-      "--overlay-src", "/workspace/my-repo",
-      "--overlay", "/tmp/taskferry-cow-t1/upper/main", "/tmp/taskferry-cow-t1/work/main", "/workspace/my-repo",
+      OVERLAY_SRC, MY_REPO_DIR,
+      "--overlay", COW_UPPER_MAIN, COW_WORK_MAIN, MY_REPO_DIR,
     ]);
-    assert.equal(args.some((v, i) => v === "--bind" && args[i + 1] === "/workspace/my-repo"), false, "no plain --bind for the target directory when overlay is active");
+    assert.equal(args.some((v, i) => v === "--bind" && args[i + 1] === MY_REPO_DIR), false, "no plain --bind for the target directory when overlay is active");
   });
 
   test("keeps the plain --bind on the target directory when overlay is omitted", () => {
     const args = buildBwrapArgs({
-      directory: "/workspace/my-repo",
-      stateDir: "/home/user/.local/state/taskferry",
-      runtimeDir: "/home/user/.local/state/taskferry/run",
-      homeDir: "/home/user",
+      directory: MY_REPO_DIR,
+      stateDir: STATE_DIR,
+      runtimeDir: RUNTIME_DIR,
+      homeDir: HOME_DIR,
     });
-    assert.equal(args.includes("--overlay-src"), false);
+    assert.equal(args.includes(OVERLAY_SRC), false);
     const bindIndex = args.indexOf("--bind");
-    assert.equal(args[bindIndex + 1], "/workspace/my-repo");
+    assert.equal(args[bindIndex + 1], MY_REPO_DIR);
   });
 
   test("mounts each overlayRwBinds entry as its own overlay, after extraRwBinds and before extraRwPairBinds", () => {
     const args = buildBwrapArgs({
-      directory: "/workspace/my-repo",
-      stateDir: "/home/user/.local/state/taskferry",
-      runtimeDir: "/home/user/.local/state/taskferry/run",
-      homeDir: "/home/user",
+      directory: MY_REPO_DIR,
+      stateDir: STATE_DIR,
+      runtimeDir: RUNTIME_DIR,
+      homeDir: HOME_DIR,
       extraRwBinds: ["/home/user/.cache/taskferry/opencode-data"],
       overlayRwBinds: [
-        { path: "/workspace/main-repo/.git/worktrees/my-repo", upperDir: "/tmp/taskferry-cow-t1/upper/extra/a", workDir: "/tmp/taskferry-cow-t1/work/extra/a" },
+        { path: MAIN_WORKTREE_GITDIR, upperDir: "/tmp/taskferry-cow-t1/upper/extra/a", workDir: "/tmp/taskferry-cow-t1/work/extra/a" },
       ],
     });
     const extraRwBindIndex = args.indexOf("/home/user/.cache/taskferry/opencode-data");
-    const overlayRwIndex = args.indexOf("--overlay-src", extraRwBindIndex);
+    const overlayRwIndex = args.indexOf(OVERLAY_SRC, extraRwBindIndex);
     assert.notEqual(overlayRwIndex, -1);
     assert.deepEqual(args.slice(overlayRwIndex, overlayRwIndex + 6), [
-      "--overlay-src", "/workspace/main-repo/.git/worktrees/my-repo",
-      "--overlay", "/tmp/taskferry-cow-t1/upper/extra/a", "/tmp/taskferry-cow-t1/work/extra/a", "/workspace/main-repo/.git/worktrees/my-repo",
+      OVERLAY_SRC, MAIN_WORKTREE_GITDIR,
+      "--overlay", "/tmp/taskferry-cow-t1/upper/extra/a", "/tmp/taskferry-cow-t1/work/extra/a", MAIN_WORKTREE_GITDIR,
     ]);
   });
 
   test("emits --share-net by default and --unshare-net when shareNet is false", () => {
-    const withNet = buildBwrapArgs({ directory: "/workspace/my-repo", stateDir: "/state", runtimeDir: "/state/run", homeDir: "/home/user" });
-    assert.deepEqual(withNet.slice(-3), ["--unshare-all", "--share-net", "--die-with-parent"]);
+    const withNet = buildBwrapArgs({ directory: MY_REPO_DIR, stateDir: "/state", runtimeDir: STATE_RUN_DIR, homeDir: HOME_DIR });
+    assert.deepEqual(withNet.slice(-3), [UNSHARE_ALL, SHARE_NET, DIE_WITH_PARENT]);
 
-    const withoutNet = buildBwrapArgs({ directory: "/workspace/my-repo", stateDir: "/state", runtimeDir: "/state/run", homeDir: "/home/user", shareNet: false });
-    assert.deepEqual(withoutNet.slice(-3), ["--unshare-all", "--unshare-net", "--die-with-parent"]);
+    const withoutNet = buildBwrapArgs({ directory: MY_REPO_DIR, stateDir: "/state", runtimeDir: STATE_RUN_DIR, homeDir: HOME_DIR, shareNet: false });
+    assert.deepEqual(withoutNet.slice(-3), [UNSHARE_ALL, "--unshare-net", DIE_WITH_PARENT]);
   });
 
   test("binds runtimeDir read-only when runtimeDirWritable is false (advisor isolation)", () => {
@@ -407,47 +428,47 @@ describe("buildBwrapArgs() byte-identical output (Task 5: post-refactor regressi
   // change any element of these arrays -- this is the safety net.
   test("non-overlay case is byte-identical to the pre-refactor output", () => {
     const args = buildBwrapArgs({
-      directory: "/workspace/my-repo",
-      stateDir: "/home/user/.local/state/taskferry",
-      runtimeDir: "/home/user/.local/state/taskferry/run",
-      homeDir: "/home/user",
+      directory: MY_REPO_DIR,
+      stateDir: STATE_DIR,
+      runtimeDir: RUNTIME_DIR,
+      homeDir: HOME_DIR,
     });
     assert.deepEqual(args, [
       "--ro-bind", "/", "/",
       "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp",
-      "--tmpfs", "/home/user/.local/state/taskferry",
-      "--tmpfs", "/home/user/.ssh",
+      "--tmpfs", STATE_DIR,
+      "--tmpfs", SSH_DIR,
       "--tmpfs", "/home/user/.aws",
       "--tmpfs", "/home/user/.config/gcloud",
       "--tmpfs", "/home/user/.config/gh",
       "--tmpfs", "/home/user/.gnupg",
-      "--bind", "/workspace/my-repo", "/workspace/my-repo",
-      "--bind", "/home/user/.local/state/taskferry/run", "/home/user/.local/state/taskferry/run",
-      "--unshare-all", "--share-net", "--die-with-parent",
+      "--bind", MY_REPO_DIR, MY_REPO_DIR,
+      "--bind", RUNTIME_DIR, RUNTIME_DIR,
+      UNSHARE_ALL, SHARE_NET, DIE_WITH_PARENT,
     ]);
   });
 
   test("overlay case is byte-identical to the pre-refactor output", () => {
     const args = buildBwrapArgs({
-      directory: "/workspace/my-repo",
-      stateDir: "/home/user/.local/state/taskferry",
-      runtimeDir: "/home/user/.local/state/taskferry/run",
-      homeDir: "/home/user",
-      overlay: { upperDir: "/tmp/taskferry-cow-t1/upper/main", workDir: "/tmp/taskferry-cow-t1/work/main" },
+      directory: MY_REPO_DIR,
+      stateDir: STATE_DIR,
+      runtimeDir: RUNTIME_DIR,
+      homeDir: HOME_DIR,
+      overlay: { upperDir: COW_UPPER_MAIN, workDir: COW_WORK_MAIN },
     });
     assert.deepEqual(args, [
       "--ro-bind", "/", "/",
       "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp",
-      "--tmpfs", "/home/user/.local/state/taskferry",
-      "--tmpfs", "/home/user/.ssh",
+      "--tmpfs", STATE_DIR,
+      "--tmpfs", SSH_DIR,
       "--tmpfs", "/home/user/.aws",
       "--tmpfs", "/home/user/.config/gcloud",
       "--tmpfs", "/home/user/.config/gh",
       "--tmpfs", "/home/user/.gnupg",
-      "--overlay-src", "/workspace/my-repo",
-      "--overlay", "/tmp/taskferry-cow-t1/upper/main", "/tmp/taskferry-cow-t1/work/main", "/workspace/my-repo",
-      "--bind", "/home/user/.local/state/taskferry/run", "/home/user/.local/state/taskferry/run",
-      "--unshare-all", "--share-net", "--die-with-parent",
+      OVERLAY_SRC, MY_REPO_DIR,
+      "--overlay", COW_UPPER_MAIN, COW_WORK_MAIN, MY_REPO_DIR,
+      "--bind", RUNTIME_DIR, RUNTIME_DIR,
+      UNSHARE_ALL, SHARE_NET, DIE_WITH_PARENT,
     ]);
   });
 });

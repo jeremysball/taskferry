@@ -1875,6 +1875,244 @@ function launchSummaryTask(ctx, p) {
 }
 
 /**
+ * The subset of `createTaskManager`'s closure that `summarizeActivity`'s
+ * extracted helper pipeline needs threaded in explicitly -- the same
+ * convention the `summarizeTask`/`startTask`/`result`/`dispatch` extractions
+ * use. The retry-on-stale-session flow is best-effort by design (a summary is
+ * an advisory feature, never a hard dependency of the underlying task's
+ * status), so the helpers only touch the activity cache and the summary-task
+ * lifecycle.
+ * @typedef {object} SummarizeActivityContext
+ * @property {() => Promise<void>} checkSummaryModelReady
+ * @property {{getSummarySessionId: (taskId: string) => string|null, clearSummaryState: (taskId: string) => void}} activityCache
+ * @property {(taskId: string, options: object) => Promise<{summaryTask?: {id: string}}>} summarizeTask
+ * @property {(taskId: string, options: object) => Promise<{status: string, sessionId?: string|null}>} poll
+ * @property {Map<string, Task>} tasks
+ * @property {(taskId: string, options: object) => {message?: string}} result
+ * @property {(taskId: string) => void} cancel
+ * @property {number} MAX_WAIT_MS
+ */
+
+/**
+ * Run a single summarize attempt and reduce its three-step shape (spawn,
+ * poll, read the message) into one result. Used both for the first attempt
+ * and for the stale-session continuation retry; the retry simply passes
+ * explicit `summarySessionId: null` / `lastSummarizedWatermark: 0` to force a
+ * fresh no-continuation launch. Returns `{spawned: false}` when the launch
+ * never produced a summary task (so the caller can clear the bad session
+ * state), otherwise the settled status, session id, and message text.
+ * @param {SummarizeActivityContext} ctx
+ * @param {{taskId: string, maxWords: number, previousActivity: string|null|undefined, summarySessionId?: string|null, lastSummarizedWatermark?: number|null}} opts
+ * @returns {Promise<{spawned: false}|{spawned: true, settled: {status: string, sessionId?: string|null}, sessionId: string|null, text: string, summaryTaskId: string}>}
+ */
+async function runSummarizeActivityAttempt(ctx, { taskId, maxWords, previousActivity, summarySessionId, lastSummarizedWatermark }) {
+  const started = await ctx.summarizeTask(taskId, {
+    maxWords,
+    allowPromptFallback: true,
+    previousActivity,
+    ...(summarySessionId !== undefined ? { summarySessionId } : {}),
+    ...(lastSummarizedWatermark !== undefined ? { lastSummarizedWatermark } : {}),
+    respectConcurrencyReserve: true,
+  });
+  if (!started.summaryTask?.id) return { spawned: false };
+  const settled = await ctx.poll(started.summaryTask.id, { timeoutMs: ctx.MAX_WAIT_MS });
+  const summaryTask = ctx.tasks.get(started.summaryTask.id);
+  const sessionId = summaryTask?.sessionId || null;
+  const detail = ctx.result(started.summaryTask.id, { fields: ["message"] });
+  const text = settled.status === "done" && typeof detail.message === "string" ? detail.message : "";
+  return { spawned: true, settled, sessionId, text, summaryTaskId: started.summaryTask.id };
+}
+
+/**
+ * The stale-session continuation path: the first attempt took but opencode
+ * rejected the cached session id (or silently started a new one / crashed
+ * before logging one), so the prior session id is no longer usable for this
+ * source task. Discard the first attempt's possibly-misleading output, cancel
+ * it if it is still occupying a concurrency slot, and relaunch with no
+ * continuation. Every failed outcome clears the cached summary state so the
+ * next pass retries from scratch. Best-effort by design.
+ * @param {SummarizeActivityContext} ctx
+ * @param {{taskId: string, maxWords: number, previousActivity: string|null|undefined, first: {spawned: true, settled: {status: string, sessionId?: string|null}, sessionId: string|null, text: string, summaryTaskId: string}}} opts
+ * @returns {Promise<{text: string, sessionId: string|null}>}
+ */
+async function runContinuationRetry(ctx, { taskId, maxWords, previousActivity, first }) {
+  const source = ctx.tasks.get(taskId);
+  if (!source) return { text: "", sessionId: null };
+  // The first attempt may still be running (it hit the poll timeout rather
+  // than settling). Cancel it before launching the retry so both don't occupy
+  // a concurrency slot at once.
+  if (first.settled.status === "running") {
+    try {
+      ctx.cancel(first.summaryTaskId);
+    } catch {
+      // Settled or gone between the poll timeout and here: both fine.
+    }
+  }
+  const retry = await runSummarizeActivityAttempt(ctx, { taskId, maxWords, previousActivity, summarySessionId: null, lastSummarizedWatermark: 0 });
+  if (!retry.spawned || retry.settled.status !== "done" || !retry.text) {
+    // Both attempts failed to even spawn, or the retry settled without a
+    // usable summary. Signal the failure so the cache clears the bad session
+    // id and retries from scratch later.
+    ctx.activityCache.clearSummaryState(taskId);
+    return { text: "", sessionId: null };
+  }
+  return { text: retry.text, sessionId: retry.sessionId };
+}
+
+/**
+ * Run the first summarize attempt, then decide whether continuation is even
+ * worth attempting. Continuation is skipped when there was no cached session
+ * id to continue, or when opencode actually honored the requested `--session`
+ * (logged the same session id back) -- in both cases the first attempt's
+ * output is trusted. Otherwise fall through to the stale-session retry.
+ * @param {SummarizeActivityContext} ctx
+ * @param {{taskId: string, maxWords: number, previousActivity: string|null|undefined, continueSessionId: string|null}} opts
+ * @returns {Promise<{text: string, sessionId: string|null}>}
+ */
+async function summarizeActivityAttempt(ctx, { taskId, maxWords, previousActivity, continueSessionId }) {
+  const first = await runSummarizeActivityAttempt(ctx, { taskId, maxWords, previousActivity });
+  if (!first.spawned) return { text: "", sessionId: null };
+  // No continuation was attempted, or the continuation actually took
+  // (opencode honored --session and logged the same session id back): trust
+  // the first attempt's output.
+  const continuationTook = !continueSessionId || (first.settled.status === "done" && first.sessionId === continueSessionId);
+  if (continuationTook) return { text: first.text, sessionId: first.sessionId };
+  return runContinuationRetry(ctx, { taskId, maxWords, previousActivity, first });
+}
+
+/**
+ * The module-level body of `createTaskManager`'s `summarizeActivity` method.
+ * Run the model-availability check up front (outside the try/catch below --
+ * that catch exists for the stale-session retry logic, while a genuine
+ * "model unavailable" error must propagate instead of being swallowed into an
+ * empty result), then attempt the summary with an optional stale-session
+ * retry. Any unexpected failure clears the cached session state and returns an
+ * empty result.
+ * @param {SummarizeActivityContext} ctx
+ * @param {string} taskId
+ * @param {number} maxWords
+ * @param {string|null} [previousActivity]
+ * @returns {Promise<{text: string, sessionId: string|null}>}
+ */
+async function runSummarizeActivity(ctx, taskId, maxWords, previousActivity) {
+  await ctx.checkSummaryModelReady();
+  const continueSessionId = ctx.activityCache.getSummarySessionId(taskId);
+  try {
+    return await summarizeActivityAttempt(ctx, { taskId, maxWords, previousActivity, continueSessionId });
+  } catch {
+    ctx.activityCache.clearSummaryState(taskId);
+    return { text: "", sessionId: null };
+  }
+}
+
+/**
+ * The subset of `createTaskManager`'s closure that the `advisor` extraction
+ * needs threaded in explicitly. Advisor reuses `dispatch` (with `role:
+ * "advisor"`), `poll`, `result`, and the advisor-session helpers, plus the
+ * errMessage rewrap and the max-wait poll deadline.
+ * @typedef {object} AdvisorContext
+ * @property {() => void} ensureStateLoaded
+ * @property {(sessionId: string|undefined) => {sessionId: string|undefined, reset: boolean, previousSessionId: string|undefined}} resolveAdvisorSession
+ * @property {(params: {prompt: string, directory: string, model?: string, variant?: string, sessionId?: string|undefined, executor?: string, env?: NodeJS.ProcessEnv, role: "advisor"}) => TaskSummary & {next: string}} dispatch
+ * @property {(err: unknown) => string} errMessage
+ * @property {(taskId: string, options: object) => Promise<{status: string, sessionId?: string|null}>} poll
+ * @property {number} maxWait
+ * @property {(logPath: string) => string|null} readSessionIdFromLog
+ * @property {(sessionId: string|undefined) => void} touchAdvisorSession
+ * @property {(taskId: string, options: object) => {status: string, message?: string, sessionId?: string|null, tokens?: unknown, cost?: number|null, exitCode?: number|null, signal?: NodeJS.Signals|null, spawnError?: string|null}} result
+ */
+
+/**
+ * Dispatch an advisor-role task, rewrapping any dispatch error so the
+ * advisory's error text references `taskferry advisor` rather than `taskferry
+ * dispatch`. Overlay is mandatory for the advisor role, so it is not a
+ * parameter here -- the role itself carries that guarantee.
+ * @param {AdvisorContext} ctx
+ * @param {{prompt?: string, directory?: string, model?: string, variant?: string, sessionId?: string|undefined, executor?: string, env?: NodeJS.ProcessEnv}} params
+ * @returns {TaskSummary & {next: string}}
+ */
+function dispatchAdvisorTask(ctx, params) {
+  const { prompt, directory, model, variant, sessionId, executor, env } = params;
+  try {
+    return ctx.dispatch({ prompt: /** @type {string} */ (prompt), directory: /** @type {string} */ (directory), model, variant, sessionId, executor, env, role: "advisor" });
+  } catch (err) {
+    throw new Error(ctx.errMessage(err).replaceAll("taskferry dispatch", "taskferry advisor"), { cause: err });
+  }
+}
+
+/**
+ * Shape the response for an advisor task that is still running or queued.
+ * When a session id is known (from the poll result or the log), keep it warm
+ * in the advisor-session map so a follow-up call can continue it.
+ * @param {AdvisorContext} ctx
+ * @param {{settled: {status: string, sessionId?: string|null}, dispatched: TaskSummary & {next: string}, resolved: {reset: boolean, previousSessionId: string|undefined}}} p
+ * @returns {object}
+ */
+function buildAdvisorActiveResponse(ctx, { settled, dispatched, resolved }) {
+  const logSessionId = settled.sessionId || ctx.readSessionIdFromLog(dispatched.logPath);
+  if (logSessionId) ctx.touchAdvisorSession(logSessionId);
+  const resetFields = resolved.reset ? { previous_session_id: resolved.previousSessionId } : {};
+  return {
+    status: settled.status,
+    task_id: dispatched.id,
+    session_id: logSessionId ?? null,
+    session_reset: resolved.reset,
+    ...resetFields,
+    note: logSessionId
+      ? `still ${settled.status}; call taskferry wait or taskferry advisor again with session_id "${logSessionId}" to continue`
+      : `still ${settled.status}; call taskferry wait with task id "${dispatched.id}" to continue (no session_id yet)`,
+  };
+}
+
+/**
+ * Shape the response for an advisor task that has settled. Reads the full
+ * result (message/sessionId/tokens/cost/exitCode/signal/spawnError), keeps a
+ * returned session id warm, and projects the tokens/cost only on `done` and
+ * the failure fields only on any other status.
+ * @param {AdvisorContext} ctx
+ * @param {{dispatched: TaskSummary & {next: string}, resolved: {reset: boolean, previousSessionId: string|undefined}}} p
+ * @returns {object}
+ */
+function buildAdvisorSettledResponse(ctx, { dispatched, resolved }) {
+  const detail = ctx.result(dispatched.id, { fields: ["message", "sessionId", "tokens", "cost", "exitCode", "signal", "spawnError"] });
+  if (detail.sessionId) ctx.touchAdvisorSession(detail.sessionId);
+  const resetFields = resolved.reset ? { previous_session_id: resolved.previousSessionId } : {};
+  return {
+    status: detail.status,
+    task_id: dispatched.id,
+    session_id: detail.sessionId ?? null,
+    session_reset: resolved.reset,
+    ...resetFields,
+    message: detail.message,
+    ...(detail.status === "done" ? { tokens: detail.tokens, cost: detail.cost } : {}),
+    ...(detail.status !== "done" ? { exitCode: detail.exitCode, signal: detail.signal, spawnError: detail.spawnError } : {}),
+  };
+}
+
+/**
+ * The module-level body of `createTaskManager`'s `advisor` method. Validate
+ * the model, resolve the advisor session (possibly forcing a reset), dispatch
+ * the advisor-role task, poll it to settlement, and shape either the
+ * still-active or settled response.
+ * @param {AdvisorContext} ctx
+ * @param {{prompt?: string, directory?: string, model?: string, variant?: string, sessionId?: string, timeoutMs?: number, executor?: string, env?: NodeJS.ProcessEnv}} params
+ * @returns {Promise<object>}
+ */
+async function runAdvisor(ctx, { prompt, directory, model, variant, sessionId, timeoutMs, executor, env } = {}) {
+  ctx.ensureStateLoaded();
+  if (!model || typeof model !== "string") {
+    throw new Error("error: model is required\nhelp: taskferry advisor requires a provider/model string, e.g. \"openai/gpt-5.6-sol\"");
+  }
+  const resolved = ctx.resolveAdvisorSession(sessionId);
+  const dispatched = dispatchAdvisorTask(ctx, { prompt, directory, model, variant, executor, env, sessionId: resolved.sessionId });
+  const settled = await ctx.poll(dispatched.id, { timeoutMs: timeoutMs ?? ctx.maxWait });
+  if (settled.status === "running" || settled.status === "queued") {
+    return buildAdvisorActiveResponse(ctx, { settled, dispatched, resolved });
+  }
+  return buildAdvisorSettledResponse(ctx, { dispatched, resolved });
+}
+
+/**
  * @param {object} [options]
  * @param {typeof spawn} [options.spawnFn]
  * @param {(pid: number, signal: NodeJS.Signals) => void} [options.killFn]
@@ -2710,81 +2948,21 @@ export function createTaskManager({
    * @returns {Promise<{text: string, sessionId: string|null}>}
    */
   async function summarizeActivity(taskId, maxWords, previousActivity) {
-    // Run the model-availability check up front, outside the try/catch below
-    // -- that catch exists for the stale-session retry logic (a spawn or poll
-    // failure is legitimately best-effort), but a genuine "model unavailable"
-    // error must propagate instead of being swallowed into an empty result.
-    // This duplicates the same check `summarizeTask()` performs internally
-    // further down, but `summaryModelAvailable()` self-memoizes its model
-    // list for 5 minutes, so the repeat call is a cache hit, not a second
-    // real check.
-    await checkSummaryModelReady();
-    const continueSessionId = activityCache.getSummarySessionId(taskId);
-    try {
-      const firstStarted = await summarizeTask(taskId, { maxWords, allowPromptFallback: true, previousActivity, respectConcurrencyReserve: true });
-      if (!firstStarted.summaryTask?.id) return { text: "", sessionId: null };
-      const firstSettled = await poll(firstStarted.summaryTask.id, { timeoutMs: MAX_WAIT_MS });
-      const firstSummaryTask = tasks.get(firstStarted.summaryTask.id);
-      const firstSessionId = firstSummaryTask?.sessionId || null;
-      const firstDetail = result(firstStarted.summaryTask.id, { fields: ["message"] });
-      const firstText = firstSettled.status === "done" && typeof firstDetail.message === "string" ? firstDetail.message : "";
-
-      // No continuation was attempted, or the continuation actually took
-      // (opencode honored --session and logged the same session id back):
-      // trust the first attempt's output.
-      const continuationTook = !continueSessionId || (firstSettled.status === "done" && firstSessionId === continueSessionId);
-      if (continuationTook) {
-        return { text: firstText, sessionId: firstSessionId };
-      }
-
-      // Continuation failed: opencode either rejected the stale session id,
-      // silently started a new one, or the summary task crashed before
-      // logging any session id. Either way, the prior session id is no
-      // longer usable for this source task, so we discard the first attempt's
-      // (possibly misleading) output and retry with no continuation. This is
-      // best-effort by design -- a summary is an advisory feature, never a
-      // hard dependency of the underlying task's status.
-      const source = tasks.get(taskId);
-      if (!source) return { text: "", sessionId: null };
-      // The first attempt may still be running (it hit the poll timeout
-      // above rather than settling). Cancel it before launching the retry
-      // so both don't occupy a concurrency slot at once.
-      if (firstSettled.status === "running") {
-        try {
-          cancel(firstStarted.summaryTask.id);
-        } catch {
-          // Settled or gone between the poll timeout and here: both fine.
-        }
-      }
-      const retryStarted = await summarizeTask(taskId, {
-        maxWords,
-        allowPromptFallback: true,
-        previousActivity,
-        summarySessionId: null,
-        lastSummarizedWatermark: 0,
-        respectConcurrencyReserve: true,
-      });
-      if (!retryStarted.summaryTask?.id) {
-        // Both attempts failed to even spawn -- signal the failure so the
-        // cache clears the bad session id and retries from scratch later.
-        activityCache.clearSummaryState(taskId);
-        return { text: "", sessionId: null };
-      }
-      const retrySettled = await poll(retryStarted.summaryTask.id, { timeoutMs: MAX_WAIT_MS });
-      const retrySummaryTask = tasks.get(retryStarted.summaryTask.id);
-      const retrySessionId = retrySummaryTask?.sessionId || null;
-      if (retrySettled.status !== "done") {
-        activityCache.clearSummaryState(taskId);
-        return { text: "", sessionId: null };
-      }
-      const retryDetail = result(retryStarted.summaryTask.id, { fields: ["message"] });
-      const retryText = typeof retryDetail.message === "string" ? retryDetail.message : "";
-      if (!retryText) activityCache.clearSummaryState(taskId);
-      return { text: retryText, sessionId: retrySessionId };
-    } catch {
-      activityCache.clearSummaryState(taskId);
-      return { text: "", sessionId: null };
-    }
+    // Thin wrapper over the extracted module-level pipeline (see
+    // `runSummarizeActivity`/`summarizeActivityAttempt`/`runContinuationRetry`
+    // /`runSummarizeActivityAttempt`), threading the handful of closure
+    // dependencies it needs in explicitly.
+    const ctx = {
+      checkSummaryModelReady,
+      activityCache,
+      summarizeTask,
+      poll,
+      tasks,
+      result,
+      cancel,
+      MAX_WAIT_MS,
+    };
+    return runSummarizeActivity(ctx, taskId, maxWords, previousActivity);
   }
 
   /** @param {string} taskId @param {number} maxWords @returns {Promise<object>} */
@@ -3544,50 +3722,22 @@ export function createTaskManager({
    * @param {NodeJS.ProcessEnv} [params.env] - caller environment forwarded to the worker.
    */
   async function advisor({ prompt, directory, model, variant, sessionId, timeoutMs, executor, env } = {}) {
-    ensureStateLoaded();
-    if (!model || typeof model !== "string") {
-      throw new Error("error: model is required\nhelp: taskferry advisor requires a provider/model string, e.g. \"openai/gpt-5.6-sol\"");
-    }
-    const resolved = resolveAdvisorSession(sessionId);
-    /** @type {TaskSummary & {next: string}} */
-    let dispatched;
-    try {
-      dispatched = dispatch({ prompt: /** @type {string} */ (prompt), directory: /** @type {string} */ (directory), model, variant, sessionId: resolved.sessionId, executor, env, role: "advisor" });
-    } catch (err) {
-      throw new Error(errMessage(err).replaceAll("taskferry dispatch", "taskferry advisor"), { cause: err });
-    }
-    const settled = await poll(dispatched.id, { timeoutMs: timeoutMs ?? maxWait });
-
-    const resetFields = resolved.reset ? { previous_session_id: resolved.previousSessionId } : {};
-
-    if (settled.status === "running" || settled.status === "queued") {
-      const logSessionId = settled.sessionId || readSessionIdFromLog(dispatched.logPath);
-      if (logSessionId) touchAdvisorSession(logSessionId);
-      return {
-        status: settled.status,
-        task_id: dispatched.id,
-        session_id: logSessionId ?? null,
-        session_reset: resolved.reset,
-        ...resetFields,
-        note: logSessionId
-          ? `still ${settled.status}; call taskferry wait or taskferry advisor again with session_id "${logSessionId}" to continue`
-          : `still ${settled.status}; call taskferry wait with task id "${dispatched.id}" to continue (no session_id yet)`,
-      };
-    }
-
-    const detail = result(dispatched.id, { fields: ["message", "sessionId", "tokens", "cost", "exitCode", "signal", "spawnError"] });
-    if (detail.sessionId) touchAdvisorSession(detail.sessionId);
-
-    return {
-      status: detail.status,
-      task_id: dispatched.id,
-      session_id: detail.sessionId ?? null,
-      session_reset: resolved.reset,
-      ...resetFields,
-      message: detail.message,
-      ...(detail.status === "done" ? { tokens: detail.tokens, cost: detail.cost } : {}),
-      ...(detail.status !== "done" ? { exitCode: detail.exitCode, signal: detail.signal, spawnError: detail.spawnError } : {}),
+    // Thin wrapper over the extracted module-level pipeline (see
+    // `runAdvisor`/`dispatchAdvisorTask`/`buildAdvisorActiveResponse`/
+    // `buildAdvisorSettledResponse`), threading the closure dependencies it
+    // needs in explicitly. `role: "advisor"` keeps overlay mandatory.
+    const ctx = {
+      ensureStateLoaded,
+      resolveAdvisorSession,
+      dispatch,
+      errMessage,
+      poll,
+      maxWait,
+      readSessionIdFromLog,
+      touchAdvisorSession,
+      result,
     };
+    return runAdvisor(ctx, { prompt, directory, model, variant, sessionId, timeoutMs, executor, env });
   }
 
   /** @param {string} taskId */

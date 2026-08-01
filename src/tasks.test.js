@@ -8,6 +8,57 @@ import path from "node:path";
 import { createTaskManager, isOutsideDirectory, DEFAULT_SUMMARY_MODEL, bucketFor, parseEnvDenylist, parseSandboxDenylist } from "./tasks.js";
 import { defaultRunCommand as changesetDefaultRunCommand } from "./changeset.js";
 
+const EXTENSION_CONFIG_ERROR = 'Error: Extension "/x/y.js" error: Provider y: "baseUrl" is required when defining models.';
+const NO_API_KEY_FOUND = "No API key found for openai.";
+const AXI_TASKS_TEST_DIR = "axi-tasks-test-";
+const AXI_TASKS_CACHE_DIR = "axi-tasks-cache-";
+const TASKS_STATE_FILE = "tasks.json";
+const LUNA_MODEL = "openai/gpt-5.6-luna";
+const MIMIMAX_MODEL = "opencode-go/minimax-m3";
+const UNUSED_TMP = "/tmp/unused";
+const SPAWN_OPENCODE_ENOENT = "spawn opencode ENOENT";
+const SOL_MODEL = "openai/gpt-5.6-sol";
+const WS_REPO = "/workspace/repo";
+const AXI_GIT_COMMON_DIR = "axi-git-common-dir-";
+const AXI_ALLOWED_DIR = "axi-allowed-dir-";
+const OPENCODE_DATA = "opencode-data";
+const INVESTIGATED_TEXT = "Investigated the issue";
+const SOURCE_LOG = "source.ndjson";
+const OVERLAY_SRC = "--overlay-src";
+const DIFF_LINE = "diff --git a/x b/x\n";
+const SPAWN_BWRAP_TIMEOUT = "spawn bwrap ETIMEDOUT";
+const AXI_TASKS_ORPHAN = "axi-tasks-orphan-";
+const OVERLAY_DIR_PENDING = "taskferry-cow-t_pending";
+const FINAL_ANSWER = "Final answer";
+const STATUS_DONE_RE = "^Status: DONE$";
+const QUOTA_ERROR = "insufficient_quota: out of credits";
+const RATE_LIMIT_ERROR = "rate_limit_exceeded: please retry after 60s";
+const RATE_LIMIT_PLAIN = "rate limit exceeded";
+const UNAUTHORIZED_ERROR = "Unauthorized: invalid API key provided";
+const USAGE_LIMIT_ERROR = "usage_limit_exceeded: monthly quota reached";
+const UNAUTHORIZED_SHORT = "Unauthorized: invalid API key";
+const EBUSY_ERROR = "EBUSY: resource busy or locked";
+const NOT_REACHED = "not reached in this test";
+const SHARD_QUESTION = "how should I shard this counter?";
+const SHARD_ANSWER = "Shard by key, sum on read.";
+const MINIMAX_MODEL = "minimax/MiniMax-M2.7";
+const LONG_QUESTION = "long question";
+const OCCUPYING_TASK = "occupying task";
+const CONTINUE_FLAG = "--continue";
+const TOOL_CALLS = "tool-calls";
+const NONE_OBSERVED = "none observed yet";
+const SRCA_LOG = "srcA.ndjson";
+const SRCB_LOG = "srcB.ndjson";
+const DID_A = "did the A thing";
+const DID_B = "did the B thing";
+const READING_CONFIG = "Reading the config";
+const FROM_CALLER = "from-caller";
+const SRC1_LOG = "src1.ndjson";
+const DID_THING = "did the thing";
+const CAPTURED_DISPATCH = "captured-at-dispatch-time";
+const MIMO_MODEL = "opencode/mimo-v2.5-free";
+const AXI_TASKS_CACHE_PI = "axi-tasks-cache-pi-";
+
 // Builds an isolated task manager backed by a temp state dir and, unless
 // overridden, fake spawnFn/killFn so no test ever touches a real `opencode`
 // process or a real OS signal. `tasksFixture`/`logs` seed tasks.json and
@@ -16,13 +67,13 @@ import { defaultRunCommand as changesetDefaultRunCommand } from "./changeset.js"
 // did at import time). `tasksFixture` may be an array or `(logDir) => array`
 // for fixtures whose logPath needs to point inside the real log dir.
 function makeManager({ tasksFixture = [], logs = {}, spawnFn, killFn, listModelsFn, defaultExecutor, maxDispatchesPerWindow, dispatchWindowMs, advisorSessionTtlMs, maxConcurrentTasks, noOutputTimeoutMs, postOutputNoOutputTimeoutMs, watchdogPollMs, maxWaitMs, envDenylistSpec, sandboxDenylist, sandboxEnabled = false, checkBwrapAvailableFn, existsFn, statFn, readdirFn, runtimeDir, cacheDir, platform, onEvent, allowedDirs, resolveGitCommonDirFn, resolveGitDirFn, overlayEnabled = false, checkOverlaySupportFn, overlayTmpRoot, runOverlayCommandFn, rmOverlayTreeFn, envFileVars } = {}) {
-  const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-test-"));
+  const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), AXI_TASKS_TEST_DIR));
   const logDir = path.join(stateDir, "logs");
   fs.mkdirSync(logDir, { recursive: true });
   // Sandboxing always mkdir's the resolved sandboxedDataHome (real disk, not
   // tmpfs -- see resolveCacheDir), so give every test an isolated temp
   // cacheDir by default instead of falling through to the real ~/.cache.
-  const defaultCacheDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-cache-"));
+  const defaultCacheDir = fs.mkdtempSync(path.join(os.tmpdir(), AXI_TASKS_CACHE_DIR));
   // createTaskManager() runs sweepOrphanedOverlays() synchronously at
   // construction, scanning overlayTmpRoot for real "taskferry-cow-*" dirs --
   // its default is the real os.tmpdir(). Without an isolated default here,
@@ -32,7 +83,7 @@ function makeManager({ tasksFixture = [], logs = {}, spawnFn, killFn, listModels
   const defaultOverlayTmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-overlay-"));
 
   const fixtureTasks = typeof tasksFixture === "function" ? tasksFixture(logDir) : tasksFixture;
-  fs.writeFileSync(path.join(stateDir, "tasks.json"), JSON.stringify(fixtureTasks, null, 2));
+  fs.writeFileSync(path.join(stateDir, TASKS_STATE_FILE), JSON.stringify(fixtureTasks, null, 2));
   for (const [name, content] of Object.entries(logs)) {
     fs.writeFileSync(path.join(logDir, name), content);
   }
@@ -91,7 +142,7 @@ function baseTask(overrides = {}) {
     id: "t_base",
     status: "done",
     directory: "/tmp/somewhere",
-    model: "openai/gpt-5.6-luna",
+    model: LUNA_MODEL,
     variant: "high",
     sessionId: "ses_base",
     pid: 12345,
@@ -135,7 +186,7 @@ describe("parseSandboxDenylist()", () => {
 
 describe("persistTask() durability across concurrent manager instances", () => {
   test("two manager instances writing concurrently both keep their own task record", () => {
-    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-test-"));
+    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), AXI_TASKS_TEST_DIR));
     const mgrA = createTaskManager({
       stateDir,
       sandboxEnabled: false,
@@ -151,15 +202,15 @@ describe("persistTask() durability across concurrent manager instances", () => {
     const a = mgrA.dispatch({ prompt: "from A", directory: os.tmpdir() });
     const b = mgrB.dispatch({ prompt: "from B", directory: os.tmpdir() });
 
-    const onDisk = JSON.parse(fs.readFileSync(path.join(stateDir, "tasks.json"), "utf8"));
+    const onDisk = JSON.parse(fs.readFileSync(path.join(stateDir, TASKS_STATE_FILE), "utf8"));
     const ids = onDisk.map((t) => t.id);
     assert.ok(ids.includes(a.id), "manager A's task must survive manager B's write");
     assert.ok(ids.includes(b.id), "manager B's task must survive manager A's write");
   });
 
   test("malformed tasks.json surfaces as a structured error instead of throwing at construction", () => {
-    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-test-"));
-    fs.writeFileSync(path.join(stateDir, "tasks.json"), "{ not valid json");
+    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), AXI_TASKS_TEST_DIR));
+    fs.writeFileSync(path.join(stateDir, TASKS_STATE_FILE), "{ not valid json");
     const mgr = createTaskManager({ stateDir, sandboxEnabled: false, spawnFn: () => fakeChild(), killFn: () => {} });
     assert.throws(
       () => mgr.dispatch({ prompt: "hi", directory: os.tmpdir() }),
@@ -213,11 +264,11 @@ describe("dispatch() lifecycle, driven through an injected spawnFn (no real open
         return fakeChild();
       },
     });
-    mgr.dispatch({ prompt: "hello", directory: os.tmpdir(), model: "opencode-go/minimax-m3", variant: "max", executor: "opencode" });
+    mgr.dispatch({ prompt: "hello", directory: os.tmpdir(), model: MIMIMAX_MODEL, variant: "max", executor: "opencode" });
     assert.equal(captured.cmd, "opencode");
     assert.deepEqual(captured.args, [
       "run", "--dir", os.tmpdir(), "--auto", "--format", "json",
-      "-m", "opencode-go/minimax-m3", "--variant", "max", "--", "hello",
+      "-m", MIMIMAX_MODEL, "--variant", "max", "--", "hello",
     ]);
     assert.equal(captured.opts.cwd, os.tmpdir());
     assert.equal(captured.opts.detached, true);
@@ -225,9 +276,9 @@ describe("dispatch() lifecycle, driven through an injected spawnFn (no real open
 
   test("defaults to openai/gpt-5.6-luna --variant high when no model is given", () => {
     let captured = null;
-    const mgr = makeManager({ spawnFn: (cmd, args) => { captured = args; return fakeChild(); } });
+    const mgr = makeManager({ spawnFn: (_cmd, args) => { captured = args; return fakeChild(); } });
     mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), executor: "opencode" });
-    assert.deepEqual(captured.slice(6, 10), ["-m", "openai/gpt-5.6-luna", "--variant", "high"]);
+    assert.deepEqual(captured.slice(6, 10), ["-m", LUNA_MODEL, "--variant", "high"]);
   });
 
   /** @param {string[]} args @param {string} model */
@@ -237,25 +288,25 @@ describe("dispatch() lifecycle, driven through an injected spawnFn (no real open
 
   test("resuming with --session-id and no --model inherits the model of the task that owned that session (issue #47)", () => {
     let captured = null;
-    const mgr = makeManager({ spawnFn: (cmd, args) => { captured = args; return fakeChild(); } });
-    mgr.dispatch({ prompt: "first", directory: os.tmpdir(), model: "opencode-go/minimax-m3", sessionId: "ses_abc", executor: "opencode" });
+    const mgr = makeManager({ spawnFn: (_cmd, args) => { captured = args; return fakeChild(); } });
+    mgr.dispatch({ prompt: "first", directory: os.tmpdir(), model: MIMIMAX_MODEL, sessionId: "ses_abc", executor: "opencode" });
     mgr.dispatch({ prompt: "resume", directory: os.tmpdir(), sessionId: "ses_abc", executor: "opencode" });
-    assertDispatchedModel(captured, "opencode-go/minimax-m3");
+    assertDispatchedModel(captured, MIMIMAX_MODEL);
   });
 
   test("resuming with --session-id and an explicit --model still uses the explicit model", () => {
     let captured = null;
-    const mgr = makeManager({ spawnFn: (cmd, args) => { captured = args; return fakeChild(); } });
-    mgr.dispatch({ prompt: "first", directory: os.tmpdir(), model: "opencode-go/minimax-m3", sessionId: "ses_abc", executor: "opencode" });
+    const mgr = makeManager({ spawnFn: (_cmd, args) => { captured = args; return fakeChild(); } });
+    mgr.dispatch({ prompt: "first", directory: os.tmpdir(), model: MIMIMAX_MODEL, sessionId: "ses_abc", executor: "opencode" });
     mgr.dispatch({ prompt: "resume", directory: os.tmpdir(), model: "opencode/other-model", sessionId: "ses_abc", executor: "opencode" });
     assertDispatchedModel(captured, "opencode/other-model");
   });
 
   test("an unrecognized --session-id with no --model still falls back to the hardcoded default", () => {
     let captured = null;
-    const mgr = makeManager({ spawnFn: (cmd, args) => { captured = args; return fakeChild(); } });
+    const mgr = makeManager({ spawnFn: (_cmd, args) => { captured = args; return fakeChild(); } });
     mgr.dispatch({ prompt: "resume", directory: os.tmpdir(), sessionId: "ses_never_seen", executor: "opencode" });
-    assertDispatchedModel(captured, "openai/gpt-5.6-luna");
+    assertDispatchedModel(captured, LUNA_MODEL);
   });
 
   test("resuming with --session-id and no --executor inherits the executor of the task that owned that session", () => {
@@ -291,9 +342,9 @@ describe("dispatch() lifecycle, driven through an injected spawnFn (no real open
       buildSpawnArgs: () => ["--fake-pi-marker"],
       buildSummaryPrompt: () => "",
       normalizeLogEvent: (parsed) => parsed,
-      sandboxAuthFile: () => ({ extraRoBinds: [], extraRwPairBinds: [], sandboxedDataHome: "/tmp/unused", sandboxEnv: {} }),
+      sandboxAuthFile: () => ({ extraRoBinds: [], extraRwPairBinds: [], sandboxedDataHome: UNUSED_TMP, sandboxEnv: {} }),
     };
-    const mgr = makeManager({ spawnFn: (cmd, args) => { captured = args; return fakeChild(); }, defaultExecutor: fakePi });
+    const mgr = makeManager({ spawnFn: (_cmd, args) => { captured = args; return fakeChild(); }, defaultExecutor: fakePi });
     mgr.dispatch({ prompt: "first", directory: os.tmpdir(), sessionId: "ses_reuse", executor: "pi" });
     mgr.dispatch({ prompt: "resume", directory: os.tmpdir(), sessionId: "ses_reuse" });
     assert.deepEqual(captured, ["--fake-pi-marker"]);
@@ -308,15 +359,15 @@ describe("dispatch() lifecycle, driven through an injected spawnFn (no real open
 
   test("a sessionId that collides across executors does not leak the other executor's model when --executor is given explicitly", () => {
     let captured = null;
-    const mgr = makeManager({ spawnFn: (cmd, args) => { captured = args; return fakeChild(); } });
+    const mgr = makeManager({ spawnFn: (_cmd, args) => { captured = args; return fakeChild(); } });
     // Same literal sessionId string, but the earlier task belongs to a
     // different executor -- resolving executor: "pi" here must not inherit
     // the opencode task's model just because the sessionId string matches.
-    mgr.dispatch({ prompt: "first", directory: os.tmpdir(), model: "opencode-go/minimax-m3", sessionId: "ses_collide", executor: "opencode" });
+    mgr.dispatch({ prompt: "first", directory: os.tmpdir(), model: MIMIMAX_MODEL, sessionId: "ses_collide", executor: "opencode" });
     mgr.dispatch({ prompt: "resume", directory: os.tmpdir(), sessionId: "ses_collide", executor: "pi" });
     // pi's buildSpawnArgs splits a slashed model into --provider/--model,
     // unlike opencode's single -m flag -- assert pi's own default model
-    // ("minimax/MiniMax-M2.7"), not the opencode task's "opencode-go/minimax-m3".
+    // (MINIMAX_MODEL), not the opencode task's MIMIMAX_MODEL.
     assert.equal(captured[captured.indexOf("--provider") + 1], "minimax");
     assert.equal(captured[captured.indexOf("--model") + 1], "MiniMax-M2.7");
   });
@@ -413,12 +464,12 @@ describe("dispatch() lifecycle, driven through an injected spawnFn (no real open
     const mgr = makeManager({ spawnFn: () => child });
     const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
 
-    child.emit("error", new Error("spawn opencode ENOENT"));
+    child.emit("error", new Error(SPAWN_OPENCODE_ENOENT));
 
     const settled = mgr.status(dispatched.id);
     assert.equal(settled.status, "crashed");
     const full = mgr.result(dispatched.id);
-    assert.equal(full.spawnError, "spawn opencode ENOENT");
+    assert.equal(full.spawnError, SPAWN_OPENCODE_ENOENT);
   });
 
   test("child.on('error') still runs changeset extraction/cleanup so a spawn-failed task doesn't strand its overlay", () => {
@@ -438,14 +489,14 @@ describe("dispatch() lifecycle, driven through an injected spawnFn (no real open
       overlayEnabled: true,
       checkOverlaySupportFn: () => ({ supported: true }),
       platform: "linux",
+      runOverlayCommandFn: () => { extractCalls++; return { status: 0, stdout: "", stderr: "" }; },
       overlayTmpRoot,
-      runOverlayCommandFn: () => { extractCalls++; return { status: 0, stdout: "", stderr: "", error: undefined }; },
     });
 
     const dispatched = mgr.dispatch({ prompt: "hi", directory });
     const preErrorCalls = extractCalls;
 
-    child.emit("error", new Error("spawn opencode ENOENT"));
+    child.emit("error", new Error(SPAWN_OPENCODE_ENOENT));
 
     const status = mgr.status(dispatched.id);
     assert.equal(status.status, "crashed");
@@ -464,21 +515,21 @@ describe("dispatch() lifecycle, driven through an injected spawnFn (no real open
     let cleanedRoot = null;
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "axi-spawn-error-advisor-"));
     const overlayTmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "axi-spawn-error-advisor-tmp-"));
-    const child = fakeChild();
+    let child = fakeChild();
     const mgr = makeManager({
-      spawnFn: () => child,
+      spawnFn: (_cmd, _args) => { child = fakeChild(); return child; },
       sandboxEnabled: true,
       checkBwrapAvailableFn: () => ({ checked: true, available: true }),
       overlayEnabled: true,
       checkOverlaySupportFn: () => ({ supported: true }),
       platform: "linux",
-      overlayTmpRoot,
-      runOverlayCommandFn: () => ({ status: 0, stdout: "", stderr: "", error: undefined }),
+      runOverlayCommandFn: () => ({ status: 0, stdout: "", stderr: "" }),
       rmOverlayTreeFn: (p) => { cleanedRoot = p; },
+      overlayTmpRoot,
     });
 
-    const advisePromise = mgr.advisor({ prompt: "hi", directory, model: "openai/gpt-5.6-sol" });
-    child.emit("error", new Error("spawn opencode ENOENT"));
+    const advisePromise = mgr.advisor({ prompt: "hi", model: SOL_MODEL, directory });
+    child.emit("error", new Error(SPAWN_OPENCODE_ENOENT));
     const advised = await advisePromise;
 
     const status = mgr.status(advised.task_id);
@@ -510,8 +561,8 @@ describe("dispatch() lifecycle, driven through an injected spawnFn (no real open
       overlayEnabled: true,
       checkOverlaySupportFn: () => ({ supported: true }),
       platform: "linux",
+      runOverlayCommandFn: () => { extractCalls++; return { status: 0, stdout: "", stderr: "" }; },
       overlayTmpRoot,
-      runOverlayCommandFn: () => { extractCalls++; return { status: 0, stdout: "", stderr: "", error: undefined }; },
     });
 
     const preDispatchCalls = extractCalls;
@@ -530,19 +581,19 @@ describe("dispatch() lifecycle, driven through an injected spawnFn (no real open
 
 describe("isOutsideDirectory()", () => {
   test("is true for a genuinely outside sibling path", () => {
-    assert.equal(isOutsideDirectory("/workspace/repo", "/workspace/other"), true);
+    assert.equal(isOutsideDirectory(WS_REPO, "/workspace/other"), true);
   });
 
   test("is false for a path nested inside the directory", () => {
-    assert.equal(isOutsideDirectory("/workspace/repo", "/workspace/repo/.git"), false);
+    assert.equal(isOutsideDirectory(WS_REPO, "/workspace/repo/.git"), false);
   });
 
   test("does not misclassify a nested directory whose name happens to start with '..' as outside", () => {
-    assert.equal(isOutsideDirectory("/workspace/repo", "/workspace/repo/..foo"), false);
+    assert.equal(isOutsideDirectory(WS_REPO, "/workspace/repo/..foo"), false);
   });
 
   test("is true for the parent directory itself", () => {
-    assert.equal(isOutsideDirectory("/workspace/repo/sub", "/workspace/repo"), true);
+    assert.equal(isOutsideDirectory("/workspace/repo/sub", WS_REPO), true);
   });
 });
 
@@ -558,7 +609,7 @@ describe("bwrap sandboxing", () => {
       runtimeDir,
     });
 
-    mgr.dispatch({ prompt: "hello", directory: os.tmpdir(), model: "opencode-go/minimax-m3", variant: "max", executor: "opencode" });
+    mgr.dispatch({ prompt: "hello", directory: os.tmpdir(), model: MIMIMAX_MODEL, variant: "max", executor: "opencode" });
 
     assert.equal(captured.cmd, "bwrap");
     assert.deepEqual(captured.args.slice(0, 3), ["--ro-bind", "/", "/"]);
@@ -569,7 +620,7 @@ describe("bwrap sandboxing", () => {
     assert.ok(captured.args.includes(runtimeDir));
     assert.deepEqual(captured.args.slice(-14), [
       "--", "opencode", "run", "--dir", os.tmpdir(), "--auto", "--format", "json",
-      "-m", "opencode-go/minimax-m3", "--variant", "max", "--", "hello",
+      "-m", MIMIMAX_MODEL, "--variant", "max", "--", "hello",
     ]);
     assert.equal(captured.opts.cwd, os.tmpdir());
   });
@@ -577,7 +628,7 @@ describe("bwrap sandboxing", () => {
   test("binds a git worktree's real gitdir read-write, since it lives outside the dispatch directory itself (issue #103's underlying blocker)", () => {
     let captured = null;
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "axi-worktree-dir-"));
-    const gitCommonDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-git-common-dir-"));
+    const gitCommonDir = fs.mkdtempSync(path.join(os.tmpdir(), AXI_GIT_COMMON_DIR));
     const mgr = makeManager({
       spawnFn: (cmd, args, opts) => { captured = { cmd, args, opts }; return fakeChild(); },
       sandboxEnabled: true,
@@ -620,7 +671,7 @@ describe("bwrap sandboxing", () => {
   test("falls back to binding the whole common dir for a submodule layout, where gitDir resolves to the same path as gitCommonDir", () => {
     let captured = null;
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "axi-submodule-dir-"));
-    const gitCommonDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-git-common-dir-"));
+    const gitCommonDir = fs.mkdtempSync(path.join(os.tmpdir(), AXI_GIT_COMMON_DIR));
     const mgr = makeManager({
       spawnFn: (cmd, args, opts) => { captured = { cmd, args, opts }; return fakeChild(); },
       sandboxEnabled: true,
@@ -640,7 +691,7 @@ describe("bwrap sandboxing", () => {
   test("falls back to binding the whole common dir when gitDir resolution fails outright", () => {
     let captured = null;
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "axi-resolve-fail-dir-"));
-    const gitCommonDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-git-common-dir-"));
+    const gitCommonDir = fs.mkdtempSync(path.join(os.tmpdir(), AXI_GIT_COMMON_DIR));
     const mgr = makeManager({
       spawnFn: (cmd, args, opts) => { captured = { cmd, args, opts }; return fakeChild(); },
       sandboxEnabled: true,
@@ -660,7 +711,7 @@ describe("bwrap sandboxing", () => {
   test("scopes the bind (never the whole common dir) even when gitDir resolves to a non-standard layout outside gitCommonDir's own tree", () => {
     let captured = null;
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "axi-separate-gitdir-dir-"));
-    const gitCommonDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-git-common-dir-"));
+    const gitCommonDir = fs.mkdtempSync(path.join(os.tmpdir(), AXI_GIT_COMMON_DIR));
     // A gitDir that lives entirely outside gitCommonDir's own tree (e.g. a
     // manually re-pointed `gitdir:`/`commondir` file) -- the earlier version
     // of this fix fell through to binding the whole common dir for this
@@ -733,7 +784,7 @@ describe("bwrap sandboxing", () => {
 
   test("binds the manager-level allowedDirs config default read-write", () => {
     let captured = null;
-    const allowed = fs.mkdtempSync(path.join(os.tmpdir(), "axi-allowed-dir-"));
+    const allowed = fs.mkdtempSync(path.join(os.tmpdir(), AXI_ALLOWED_DIR));
     const mgr = makeManager({
       spawnFn: (cmd, args, opts) => { captured = { cmd, args, opts }; return fakeChild(); },
       sandboxEnabled: true,
@@ -752,8 +803,8 @@ describe("bwrap sandboxing", () => {
 
   test("binds a per-dispatch --allowed-dirs entry read-write, in addition to the manager-level default", () => {
     let captured = null;
-    const managerDefault = fs.mkdtempSync(path.join(os.tmpdir(), "axi-allowed-dir-"));
-    const perDispatch = fs.mkdtempSync(path.join(os.tmpdir(), "axi-allowed-dir-"));
+    const managerDefault = fs.mkdtempSync(path.join(os.tmpdir(), AXI_ALLOWED_DIR));
+    const perDispatch = fs.mkdtempSync(path.join(os.tmpdir(), AXI_ALLOWED_DIR));
     const mgr = makeManager({
       spawnFn: (cmd, args, opts) => { captured = { cmd, args, opts }; return fakeChild(); },
       sandboxEnabled: true,
@@ -838,7 +889,7 @@ describe("bwrap sandboxing", () => {
 
   test("points XDG_DATA_HOME at a writable spot under cacheDir when sandboxing, so opencode's own log/session db isn't blocked by the read-only root", () => {
     let captured = null;
-    const cacheDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-cache-"));
+    const cacheDir = fs.mkdtempSync(path.join(os.tmpdir(), AXI_TASKS_CACHE_DIR));
     const mgr = makeManager({
       spawnFn: (cmd, args, opts) => { captured = { cmd, args, opts }; return fakeChild(); },
       sandboxEnabled: true,
@@ -849,12 +900,12 @@ describe("bwrap sandboxing", () => {
 
     mgr.dispatch({ prompt: "hello", directory: os.tmpdir(), executor: "opencode" });
 
-    assert.equal(captured.opts.env.XDG_DATA_HOME, path.join(cacheDir, "opencode-data"));
+    assert.equal(captured.opts.env.XDG_DATA_HOME, path.join(cacheDir, OPENCODE_DATA));
   });
 
   test("ro-binds the real opencode auth.json into the sandboxed XDG_DATA_HOME when it exists, so credentialed providers still resolve", () => {
     let captured = null;
-    const cacheDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-cache-"));
+    const cacheDir = fs.mkdtempSync(path.join(os.tmpdir(), AXI_TASKS_CACHE_DIR));
     const realAuthFile = path.join(os.homedir(), ".local", "share", "opencode", "auth.json");
     const mgr = makeManager({
       spawnFn: (cmd, args, opts) => { captured = { cmd, args, opts }; return fakeChild(); },
@@ -870,7 +921,7 @@ describe("bwrap sandboxing", () => {
     const srcIndex = captured.args.indexOf(realAuthFile);
     assert.notEqual(srcIndex, -1);
     assert.equal(captured.args[srcIndex - 1], "--ro-bind");
-    assert.equal(captured.args[srcIndex + 1], path.join(cacheDir, "opencode-data", "opencode", "auth.json"));
+    assert.equal(captured.args[srcIndex + 1], path.join(cacheDir, OPENCODE_DATA, "opencode", "auth.json"));
   });
 
   test("omits the auth.json ro-bind when the real file doesn't exist on disk", () => {
@@ -888,7 +939,7 @@ describe("bwrap sandboxing", () => {
     // "--ro-bind" still appears once, for the base "/" root bind — the extra
     // auth.json ro-bind (destination ".../opencode-data/opencode/auth.json")
     // is absent, even though the data home itself is still read-write bound.
-    assert.equal(captured.args.some((arg) => typeof arg === "string" && arg.includes(path.join("opencode-data", "opencode", "auth.json"))), false);
+    assert.equal(captured.args.some((arg) => typeof arg === "string" && arg.includes(path.join(OPENCODE_DATA, "opencode", "auth.json"))), false);
   });
 
   test("leaves XDG_DATA_HOME untouched when sandboxing is disabled", () => {
@@ -1003,10 +1054,10 @@ describe("bwrap sandboxing", () => {
   test("wraps a summary launch's spawn in bwrap too, binding SUMMARY_DIR", async () => {
     let captured;
     const child = fakeChild();
-    const log = JSON.stringify({ type: "text", part: { messageID: "m1", text: "Investigated the issue" } });
+    const log = JSON.stringify({ type: "text", part: { messageID: "m1", text: INVESTIGATED_TEXT } });
     const mgr = makeManager({
-      tasksFixture: (logDir) => [baseTask({ id: "source", logPath: path.join(logDir, "source.ndjson") })],
-      logs: { "source.ndjson": log },
+      tasksFixture: (logDir) => [baseTask({ id: "source", logPath: path.join(logDir, SOURCE_LOG) })],
+      logs: { [SOURCE_LOG]: log },
       sandboxEnabled: true,
       checkBwrapAvailableFn: () => ({ checked: true, available: true }),
       platform: "linux",
@@ -1040,8 +1091,8 @@ describe("bwrap sandboxing", () => {
 
     const result = mgr.dispatch({ prompt: "hello", directory });
 
-    assert.ok(captured.args.includes("--overlay-src"));
-    const overlayIndex = captured.args.indexOf("--overlay-src");
+    assert.ok(captured.args.includes(OVERLAY_SRC));
+    const overlayIndex = captured.args.indexOf(OVERLAY_SRC);
     assert.equal(captured.args[overlayIndex + 1], directory);
     const status = mgr.status(result.id);
     assert.equal(status.changesetStatus, "pending");
@@ -1065,7 +1116,6 @@ describe("bwrap sandboxing", () => {
       overlayEnabled: true,
       checkOverlaySupportFn: () => ({ supported: true }),
       platform: "linux",
-      overlayTmpRoot,
       runOverlayCommandFn: (command, args) => {
         preDispatchCalls.push({ command, args });
         // Only the pre-dispatch HEAD probe runs here (the child never
@@ -1073,13 +1123,14 @@ describe("bwrap sandboxing", () => {
         // for the first probe + a git-dir for the fallback to land on the
         // git target path.
         if (command === "git" && args.includes("rev-parse") && args.includes("HEAD")) {
-          return { status: 0, stdout: `${FAKE_HEAD}\n`, stderr: "", error: undefined };
+          return { status: 0, stdout: `${FAKE_HEAD}\n`, stderr: "" };
         }
         if (command === "git" && args.includes("--git-dir")) {
-          return { status: 0, stdout: ".git\n", stderr: "", error: undefined };
+          return { status: 0, stdout: ".git\n", stderr: "" };
         }
-        return { status: 0, stdout: "", stderr: "", error: undefined };
+        return { status: 0, stdout: "", stderr: "" };
       },
+      overlayTmpRoot,
     });
 
     mgr.dispatch({ prompt: "hello", directory: os.tmpdir() });
@@ -1114,7 +1165,7 @@ describe("bwrap sandboxing", () => {
         platform: "linux",
       });
       const result = mgr.dispatch({ prompt: "hello", directory });
-      assert.equal(captured.args.includes("--overlay-src"), false);
+      assert.equal(captured.args.includes(OVERLAY_SRC), false);
       assert.equal("changesetStatus" in mgr.status(result.id), false);
       assert.match(warned, /overlay disabled/);
     } finally {
@@ -1221,7 +1272,7 @@ describe("bwrap sandboxing", () => {
     // resolves to the same as gitCommonDir via the real `git` binary failing in
     // this temp dir, matching the existing "falls back to binding the whole
     // common dir" test's setup) must appear as an overlay, not a plain --bind.
-    const overlaySrcIndex = captured.args.indexOf("--overlay-src", captured.args.indexOf("--overlay-src") + 1);
+    const overlaySrcIndex = captured.args.indexOf(OVERLAY_SRC, captured.args.indexOf(OVERLAY_SRC) + 1);
     assert.notEqual(overlaySrcIndex, -1, "expected a second --overlay-src for the git-common-dir slice");
     assert.equal(captured.args[overlaySrcIndex + 1], gitCommonDir);
   });
@@ -1238,7 +1289,7 @@ describe("bwrap sandboxing", () => {
     let dispatchArgs = null;
     let advisorArgs = null;
     const mgr = makeManager({
-      spawnFn: (cmd, args) => { if (!dispatchArgs) dispatchArgs = args; else advisorArgs = args; const child = fakeChild(); setImmediate(() => child.emit("exit", 0, null)); return child; },
+      spawnFn: (_cmd, args) => { if (!dispatchArgs) dispatchArgs = args; else advisorArgs = args; const child = fakeChild(); setImmediate(() => child.emit("exit", 0, null)); return child; },
       sandboxEnabled: true,
       overlayEnabled: true,
       checkBwrapAvailableFn: () => ({ checked: true, available: true }),
@@ -1249,7 +1300,7 @@ describe("bwrap sandboxing", () => {
     assert.ok(dispatchArgs.includes("--share-net"));
     assert.ok(!dispatchArgs.includes("--unshare-net"));
 
-    await mgr.advisor({ prompt: "hello", directory: os.tmpdir(), model: "openai/gpt-5.6-sol" });
+    await mgr.advisor({ prompt: "hello", directory: os.tmpdir(), model: SOL_MODEL });
     assert.ok(advisorArgs.includes("--share-net"));
     assert.ok(!advisorArgs.includes("--unshare-net"));
   });
@@ -1306,7 +1357,7 @@ describe("bwrap sandboxing", () => {
     const result = mgr.dispatch({ prompt: "hello", directory });
 
     // No directory overlay may target the packed-refs file...
-    for (let i = captured.args.indexOf("--overlay-src"); i !== -1 && i < captured.args.length; i = captured.args.indexOf("--overlay-src", i + 1)) {
+    for (let i = captured.args.indexOf(OVERLAY_SRC); i !== -1 && i < captured.args.length; i = captured.args.indexOf(OVERLAY_SRC, i + 1)) {
       assert.notEqual(captured.args[i + 1], packedRefs, "packed-refs must not be mounted as a directory overlay");
     }
     // ...instead it is bound rw from a scratch copy onto its host path.
@@ -1365,7 +1416,7 @@ describe("bwrap sandboxing", () => {
     let dispatchArgs = null;
     let advisorArgs = null;
     const mgr = makeManager({
-      spawnFn: (cmd, args) => { if (!dispatchArgs) dispatchArgs = args; else advisorArgs = args; const child = fakeChild(); setImmediate(() => child.emit("exit", 0, null)); return child; },
+      spawnFn: (_cmd, args) => { if (!dispatchArgs) dispatchArgs = args; else advisorArgs = args; const child = fakeChild(); setImmediate(() => child.emit("exit", 0, null)); return child; },
       sandboxEnabled: true,
       overlayEnabled: true,
       checkBwrapAvailableFn: () => ({ checked: true, available: true }),
@@ -1384,7 +1435,7 @@ describe("bwrap sandboxing", () => {
     };
     assert.ok(flagPairs(dispatchArgs).some(([flag, p]) => flag === "--bind" && p === runtimeDir), "dispatch keeps today's writable runtimeDir bind");
 
-    await mgr.advisor({ prompt: "hello", directory: os.tmpdir(), model: "openai/gpt-5.6-sol" });
+    await mgr.advisor({ prompt: "hello", directory: os.tmpdir(), model: SOL_MODEL });
     assert.ok(flagPairs(advisorArgs).some(([flag, p]) => flag === "--ro-bind" && p === runtimeDir), "advisor must get a read-only runtimeDir bind");
     assert.ok(!flagPairs(advisorArgs).some(([flag, p]) => flag === "--bind" && p === runtimeDir), "advisor must not get a writable runtimeDir bind");
   });
@@ -1399,7 +1450,7 @@ describe("bwrap sandboxing", () => {
       overlayEnabled: false,
       platform: "linux",
     });
-    const advised = await mgr.advisor({ prompt: "hello", directory: os.tmpdir(), model: "openai/gpt-5.6-sol" });
+    const advised = await mgr.advisor({ prompt: "hello", directory: os.tmpdir(), model: SOL_MODEL });
     const status = mgr.status(advised.task_id);
     assert.equal(status.status, "crashed");
     assert.match(status.spawnError, /advisor dispatch requires overlay-gated writes/);
@@ -1418,7 +1469,7 @@ describe("bwrap sandboxing", () => {
       checkOverlaySupportFn: () => ({ supported: true }),
       platform: "linux",
     });
-    const advised = await mgr.advisor({ prompt: "hello", directory: os.tmpdir(), model: "openai/gpt-5.6-sol" });
+    const advised = await mgr.advisor({ prompt: "hello", directory: os.tmpdir(), model: SOL_MODEL });
     const status = mgr.status(advised.task_id);
     assert.equal(status.status, "crashed");
     assert.match(status.spawnError, /advisor dispatch requires overlay-gated writes/);
@@ -1439,7 +1490,7 @@ describe("bwrap sandboxing", () => {
       checkOverlaySupportFn: () => ({ supported: true }),
       platform: "darwin",
     });
-    const advised = await mgr.advisor({ prompt: "hello", directory: os.tmpdir(), model: "openai/gpt-5.6-sol" });
+    const advised = await mgr.advisor({ prompt: "hello", directory: os.tmpdir(), model: SOL_MODEL });
     const status = mgr.status(advised.task_id);
     assert.equal(status.status, "crashed");
     assert.match(status.spawnError, /advisor dispatch requires overlay-gated writes/);
@@ -1454,14 +1505,14 @@ describe("changeset extraction at settlement", () => {
     const overlayTmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "axi-extract-tmp-"));
     let child;
     const mgr = makeManager({
-      spawnFn: (cmd, args) => { child = fakeChild(); return child; },
+      spawnFn: (_cmd, _args) => { child = fakeChild(); return child; },
       sandboxEnabled: true,
       checkBwrapAvailableFn: () => ({ checked: true, available: true }),
       overlayEnabled: true,
       checkOverlaySupportFn: () => ({ supported: true }),
       platform: "linux",
+      runOverlayCommandFn: (command, args) => { extractCommand = { command, args }; return { status: 0, stdout: DIFF_LINE, stderr: "" }; },
       overlayTmpRoot,
-      runOverlayCommandFn: (command, args) => { extractCommand = { command, args }; return { status: 0, stdout: "diff --git a/x b/x\n", stderr: "", error: undefined }; },
     });
 
     const result = mgr.dispatch({ prompt: "hello", directory });
@@ -1469,7 +1520,7 @@ describe("changeset extraction at settlement", () => {
 
     const status = mgr.status(result.id);
     assert.equal(status.changesetStatus, "pending");
-    assert.equal(mgr.result(result.id, { fields: ["diff"] }).diff, "diff --git a/x b/x\n");
+    assert.equal(mgr.result(result.id, { fields: ["diff"] }).diff, DIFF_LINE);
     assert.equal(extractCommand.command, "bwrap");
   });
 
@@ -1479,18 +1530,18 @@ describe("changeset extraction at settlement", () => {
     const overlayTmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "axi-advisor-extract-tmp-"));
     let child;
     const mgr = makeManager({
-      spawnFn: (cmd, args) => { child = fakeChild(); return child; },
+      spawnFn: (_cmd, _args) => { child = fakeChild(); return child; },
       sandboxEnabled: true,
       checkBwrapAvailableFn: () => ({ checked: true, available: true }),
       overlayEnabled: true,
       checkOverlaySupportFn: () => ({ supported: true }),
       platform: "linux",
-      overlayTmpRoot,
-      runOverlayCommandFn: () => ({ status: 0, stdout: "", stderr: "", error: undefined }),
+      runOverlayCommandFn: () => ({ status: 0, stdout: "", stderr: "" }),
       rmOverlayTreeFn: (p) => { cleanedRoot = p; },
+      overlayTmpRoot,
     });
 
-    const advisePromise = mgr.advisor({ prompt: "hello", directory, model: "openai/gpt-5.6-sol" });
+    const advisePromise = mgr.advisor({ prompt: "hello", model: SOL_MODEL, directory });
     setImmediate(() => child.emit("exit", 0, null));
     const advised = await advisePromise;
 
@@ -1510,7 +1561,7 @@ describe("changeset extraction at settlement", () => {
     let extractArgs = null;
     let child;
     const mgr = makeManager({
-      spawnFn: (cmd, args) => { child = fakeChild(); return child; },
+      spawnFn: (_cmd, _args) => { child = fakeChild(); return child; },
       sandboxEnabled: true,
       checkBwrapAvailableFn: () => ({ checked: true, available: true }),
       overlayEnabled: true,
@@ -1518,13 +1569,13 @@ describe("changeset extraction at settlement", () => {
       platform: "linux",
       resolveGitCommonDirFn: () => gitCommonDir,
       resolveGitDirFn: () => gitWorktreeAdminDir,
-      runOverlayCommandFn: (command, args) => { extractArgs = args; return { status: 0, stdout: "diff --git a/f.txt b/f.txt\n", stderr: "", error: undefined }; },
+      runOverlayCommandFn: (_command, args) => { extractArgs = args; return { status: 0, stdout: "diff --git a/f.txt b/f.txt\n", stderr: "" }; },
     });
 
     const result = mgr.dispatch({ prompt: "hello", directory });
     child.emit("exit", 0, null);
 
-    const overlaySrcCount = extractArgs.filter((a) => a === "--overlay-src").length;
+    const overlaySrcCount = extractArgs.filter((a) => a === OVERLAY_SRC).length;
     assert.ok(overlaySrcCount >= 2);
     assert.ok(extractArgs.includes(gitWorktreeAdminDir));
     assert.equal(mgr.status(result.id).changesetStatus, "pending");
@@ -1536,15 +1587,15 @@ describe("changeset extraction at settlement", () => {
     const overlayTmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "axi-empty-extract-tmp-"));
     let child;
     const mgr = makeManager({
-      spawnFn: (cmd, args) => { child = fakeChild(); return child; },
+      spawnFn: (_cmd, _args) => { child = fakeChild(); return child; },
       sandboxEnabled: true,
       checkBwrapAvailableFn: () => ({ checked: true, available: true }),
       overlayEnabled: true,
       checkOverlaySupportFn: () => ({ supported: true }),
       platform: "linux",
-      overlayTmpRoot,
-      runOverlayCommandFn: () => ({ status: 0, stdout: "", stderr: "", error: undefined }),
+      runOverlayCommandFn: () => ({ status: 0, stdout: "", stderr: "" }),
       rmOverlayTreeFn: (p) => { cleanedRoot = p; },
+      overlayTmpRoot,
     });
 
     const result = mgr.dispatch({ prompt: "hello", directory });
@@ -1560,14 +1611,14 @@ describe("changeset extraction at settlement", () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "axi-cancel-extract-dir-"));
     let child;
     const mgr = makeManager({
-      spawnFn: (cmd, args) => { child = fakeChild(); return child; },
+      spawnFn: (_cmd, _args) => { child = fakeChild(); return child; },
       killFn: () => {},
       sandboxEnabled: true,
       checkBwrapAvailableFn: () => ({ checked: true, available: true }),
       overlayEnabled: true,
       checkOverlaySupportFn: () => ({ supported: true }),
       platform: "linux",
-      runOverlayCommandFn: () => ({ status: 0, stdout: "diff --git a/x b/x\n", stderr: "", error: undefined }),
+      runOverlayCommandFn: () => ({ status: 0, stdout: DIFF_LINE, stderr: "" }),
     });
 
     const result = mgr.dispatch({ prompt: "hello", directory });
@@ -1577,7 +1628,7 @@ describe("changeset extraction at settlement", () => {
     const status = mgr.status(result.id);
     assert.equal(status.status, "cancelled");
     assert.equal(status.changesetStatus, "pending");
-    assert.equal(mgr.result(result.id, { fields: ["diff"] }).diff, "diff --git a/x b/x\n");
+    assert.equal(mgr.result(result.id, { fields: ["diff"] }).diff, DIFF_LINE);
   });
 
   test("records extraction errors and keeps the overlay for recovery", () => {
@@ -1586,15 +1637,15 @@ describe("changeset extraction at settlement", () => {
     let cleanedAny = false;
     let child;
     const mgr = makeManager({
-      spawnFn: (cmd, args) => { child = fakeChild(); return child; },
+      spawnFn: (_cmd, _args) => { child = fakeChild(); return child; },
       sandboxEnabled: true,
       checkBwrapAvailableFn: () => ({ checked: true, available: true }),
       overlayEnabled: true,
       checkOverlaySupportFn: () => ({ supported: true }),
       platform: "linux",
-      overlayTmpRoot,
-      runOverlayCommandFn: () => ({ status: null, stdout: "", stderr: "", error: Object.assign(new Error("spawn bwrap ETIMEDOUT"), { code: "ETIMEDOUT" }) }),
+      runOverlayCommandFn: () => ({ status: null, stdout: "", stderr: "", error: Object.assign(new Error(SPAWN_BWRAP_TIMEOUT), { code: "ETIMEDOUT" }) }),
       rmOverlayTreeFn: () => { cleanedAny = true; },
+      overlayTmpRoot,
     });
 
     const result = mgr.dispatch({ prompt: "hello", directory });
@@ -1620,10 +1671,10 @@ describe("dispatch() role/changeset fields", () => {
 
   test("advisor() dispatches internally with role 'advisor'", async () => {
     const mgr = makeManager({
-      spawnFn: (cmd, args, opts) => { const child = fakeChild(); setImmediate(() => child.emit("exit", 0, null)); return child; },
+      spawnFn: (_cmd, _args, _opts) => { const child = fakeChild(); setImmediate(() => child.emit("exit", 0, null)); return child; },
       sandboxEnabled: false,
     });
-    const advised = await mgr.advisor({ prompt: "hello", directory: os.tmpdir(), model: "openai/gpt-5.6-sol" });
+    const advised = await mgr.advisor({ prompt: "hello", directory: os.tmpdir(), model: SOL_MODEL });
     const status = mgr.status(advised.task_id);
     assert.equal(status.role, "advisor");
   });
@@ -1632,7 +1683,7 @@ describe("dispatch() role/changeset fields", () => {
 describe("dispatch() with a prompt over the argv-safe size (issue #78: spawn E2BIG)", () => {
   test("a prompt at or under the argv-safe threshold is still passed inline, no -f attachment", () => {
     let captured = null;
-    const mgr = makeManager({ spawnFn: (cmd, args, opts) => { captured = { args, opts }; return fakeChild(); } });
+    const mgr = makeManager({ spawnFn: (_cmd, args, opts) => { captured = { args, opts }; return fakeChild(); } });
     const prompt = "x".repeat(96 * 1024);
 
     mgr.dispatch({ prompt, directory: os.tmpdir() });
@@ -1643,7 +1694,7 @@ describe("dispatch() with a prompt over the argv-safe size (issue #78: spawn E2B
 
   test("a prompt over the argv-safe threshold is written to a scratch file and attached via -f, never appearing in argv", () => {
     let captured = null;
-    const mgr = makeManager({ spawnFn: (cmd, args, opts) => { captured = { args, opts }; return fakeChild(); } });
+    const mgr = makeManager({ spawnFn: (_cmd, args, opts) => { captured = { args, opts }; return fakeChild(); } });
     const prompt = "x".repeat(96 * 1024 + 1);
 
     mgr.dispatch({ prompt, directory: os.tmpdir(), executor: "opencode" });
@@ -1661,7 +1712,7 @@ describe("dispatch() with a prompt over the argv-safe size (issue #78: spawn E2B
   test("the scratch prompt file is deleted once the task settles", () => {
     const child = fakeChild();
     let captured = null;
-    const mgr = makeManager({ spawnFn: (cmd, args, opts) => { captured = { args, opts }; return child; } });
+    const mgr = makeManager({ spawnFn: (_cmd, args, opts) => { captured = { args, opts }; return child; } });
     const prompt = "x".repeat(96 * 1024 + 1);
 
     mgr.dispatch({ prompt, directory: os.tmpdir(), executor: "opencode" });
@@ -1676,13 +1727,13 @@ describe("dispatch() with a prompt over the argv-safe size (issue #78: spawn E2B
   test("the scratch prompt file is deleted even when the spawned child errors before exiting", () => {
     const child = fakeChild();
     let captured = null;
-    const mgr = makeManager({ spawnFn: (cmd, args, opts) => { captured = { args, opts }; return child; } });
+    const mgr = makeManager({ spawnFn: (_cmd, args, opts) => { captured = { args, opts }; return child; } });
     const prompt = "x".repeat(96 * 1024 + 1);
 
     mgr.dispatch({ prompt, directory: os.tmpdir() });
     const attachment = captured.args[captured.args.indexOf("-f") + 1];
 
-    child.emit("error", new Error("spawn opencode ENOENT"));
+    child.emit("error", new Error(SPAWN_OPENCODE_ENOENT));
 
     assert.equal(fs.existsSync(attachment), false);
   });
@@ -1696,7 +1747,7 @@ describe("boot-time sweep of orphaned prompt scratch files in PROMPT_DIR", () =>
   }
 
   test("removes prompt files whose task id is not in the loaded task set", () => {
-    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-orphan-"));
+    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), AXI_TASKS_ORPHAN));
     seedPromptDir(stateDir, [
       "oc_orphan_aaaaaaaa.prompt.txt",
       "oc_orphan_bbbbbbbb.prompt.txt",
@@ -1713,11 +1764,11 @@ describe("boot-time sweep of orphaned prompt scratch files in PROMPT_DIR", () =>
   });
 
   test("removes prompt files that belong to a tracked terminal task", () => {
-    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-orphan-"));
+    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), AXI_TASKS_ORPHAN));
     const tracked = "oc_keepme_cccccccc";
     seedPromptDir(stateDir, [`${tracked}.prompt.txt`, "oc_orphan_dddddddd.prompt.txt"]);
     fs.writeFileSync(
-      path.join(stateDir, "tasks.json"),
+      path.join(stateDir, TASKS_STATE_FILE),
       JSON.stringify([baseTask({ id: tracked, status: "done" })], null, 2)
     );
 
@@ -1732,11 +1783,11 @@ describe("boot-time sweep of orphaned prompt scratch files in PROMPT_DIR", () =>
   });
 
   test("removes prompt files for persisted tasks already marked 'unknown' after a crash", () => {
-    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-orphan-"));
+    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), AXI_TASKS_ORPHAN));
     const crashed = "oc_running_eeeeeeee";
     seedPromptDir(stateDir, [`${crashed}.prompt.txt`]);
     fs.writeFileSync(
-      path.join(stateDir, "tasks.json"),
+      path.join(stateDir, TASKS_STATE_FILE),
       JSON.stringify([baseTask({ id: crashed, status: "unknown" })], null, 2)
     );
 
@@ -1751,7 +1802,7 @@ describe("boot-time sweep of orphaned prompt scratch files in PROMPT_DIR", () =>
   });
 
   test("ignores unrelated files in PROMPT_DIR that don't match the prompt-file naming pattern", () => {
-    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-orphan-"));
+    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), AXI_TASKS_ORPHAN));
     seedPromptDir(stateDir, ["unrelated.txt", ".DS_Store", "README"]);
 
     createTaskManager({
@@ -1765,7 +1816,7 @@ describe("boot-time sweep of orphaned prompt scratch files in PROMPT_DIR", () =>
   });
 
   test("removes prompt files for both orphaned and tracked terminal tasks", () => {
-    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-orphan-"));
+    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), AXI_TASKS_ORPHAN));
     const tracked = "oc_trackedfffffff";
     seedPromptDir(stateDir, [
       `${tracked}.prompt.txt`,
@@ -1773,7 +1824,7 @@ describe("boot-time sweep of orphaned prompt scratch files in PROMPT_DIR", () =>
       "oc_orphan_22222222.prompt.txt",
     ]);
     fs.writeFileSync(
-      path.join(stateDir, "tasks.json"),
+      path.join(stateDir, TASKS_STATE_FILE),
       JSON.stringify([baseTask({ id: tracked, status: "done" })], null, 2)
     );
 
@@ -1788,7 +1839,7 @@ describe("boot-time sweep of orphaned prompt scratch files in PROMPT_DIR", () =>
   });
 
   test("boot-time sweep is a no-op when PROMPT_DIR is empty", () => {
-    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-orphan-"));
+    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), AXI_TASKS_ORPHAN));
     seedPromptDir(stateDir, []);
 
     createTaskManager({
@@ -1802,7 +1853,7 @@ describe("boot-time sweep of orphaned prompt scratch files in PROMPT_DIR", () =>
   });
 
   test("removes prompt files for every persisted status after running and queued reload as unknown", () => {
-    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-orphan-"));
+    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), AXI_TASKS_ORPHAN));
     const ids = {
       done: "oc_done_00000001",
       crashed: "oc_crash_00000002",
@@ -1812,7 +1863,7 @@ describe("boot-time sweep of orphaned prompt scratch files in PROMPT_DIR", () =>
     };
     seedPromptDir(stateDir, Object.values(ids).map((id) => `${id}.prompt.txt`));
     fs.writeFileSync(
-      path.join(stateDir, "tasks.json"),
+      path.join(stateDir, TASKS_STATE_FILE),
       JSON.stringify([
         baseTask({ id: ids.done, status: "done" }),
         baseTask({ id: ids.crashed, status: "crashed", exitCode: 1 }),
@@ -1833,7 +1884,7 @@ describe("boot-time sweep of orphaned prompt scratch files in PROMPT_DIR", () =>
   });
 
   test("boot-time sweep creates PROMPT_DIR when it doesn't exist (first daemon boot ever)", () => {
-    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-orphan-"));
+    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), AXI_TASKS_ORPHAN));
     // Deliberately don't create PROMPT_DIR; the manager's mkdir loop at
     // line 512 creates it, and the sweep then has nothing to do.
     assert.equal(fs.existsSync(path.join(stateDir, "prompts")), false);
@@ -1849,7 +1900,7 @@ describe("boot-time sweep of orphaned prompt scratch files in PROMPT_DIR", () =>
   });
 
   test("removes every scratch prompt from a mixed orphaned and tracked terminal directory", () => {
-    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-orphan-"));
+    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), AXI_TASKS_ORPHAN));
     const tracked = ["oc_track11111111", "oc_track22222222"];
     const orphans = ["oc_orphan_aaaaaaa1", "oc_orphan_aaaaaaa2", "oc_orphan_aaaaaaa3", "oc_orphan_aaaaaaa4"];
     seedPromptDir(stateDir, [
@@ -1857,7 +1908,7 @@ describe("boot-time sweep of orphaned prompt scratch files in PROMPT_DIR", () =>
       ...orphans.map((id) => `${id}.prompt.txt`),
     ]);
     fs.writeFileSync(
-      path.join(stateDir, "tasks.json"),
+      path.join(stateDir, TASKS_STATE_FILE),
       JSON.stringify([
         baseTask({ id: tracked[0], status: "done" }),
         baseTask({ id: tracked[1], status: "crashed", exitCode: 1 }),
@@ -1929,7 +1980,7 @@ describe("sweepOrphanedOverlays()", () => {
 
   test("does not sweep an overlay directory whose task still has a pending changeset", () => {
     const overlayTmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "axi-orphan-tmp-"));
-    const overlayRoot = path.join(overlayTmpRoot, "taskferry-cow-t_pending");
+    const overlayRoot = path.join(overlayTmpRoot, OVERLAY_DIR_PENDING);
     fs.mkdirSync(path.join(overlayRoot, "upper", "main"), { recursive: true });
     let cleanedAny = false;
     makeManager({
@@ -1967,7 +2018,7 @@ describe("sweepOrphanedOverlays()", () => {
         workDir: path.join(overlayRoot, "work", "main"),
       },
     };
-    const tasksFile = path.join(stateDir, "tasks.json");
+    const tasksFile = path.join(stateDir, TASKS_STATE_FILE);
     fs.writeFileSync(tasksFile, JSON.stringify([task], null, 2));
     const mgr = createTaskManager({
       stateDir,
@@ -2045,7 +2096,7 @@ describe("output-completeness check at settlement time (issue #35)", () => {
     const mgr = makeManager({
       tasksFixture: [],
       spawnFn: () => child,
-      listModelsFn: () => "openai/gpt-5.6-luna\n",
+      listModelsFn: () => LUNA_MODEL + "\n",
       onEvent: (event) => events.push(event),
     });
     mgr.setActivitySummarySubscriptions(1);
@@ -2067,7 +2118,7 @@ describe("output-completeness check at settlement time (issue #35)", () => {
     const mgr = makeManager({ spawnFn: () => child });
     const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
     writeLog(dispatched.logPath, [
-      { type: "text", part: { messageID: "m1", text: "Final answer" } },
+      { type: "text", part: { messageID: "m1", text: FINAL_ANSWER } },
       { type: "step_finish", part: { messageID: "m1", reason: "stop" } },
     ]);
     child.emit("exit", 0, null);
@@ -2075,7 +2126,7 @@ describe("output-completeness check at settlement time (issue #35)", () => {
     assert.equal(settled.status, "done");
     assert.equal("incomplete" in settled, false);
     assert.equal("finalMarker" in settled, false);
-    assert.equal(mgr.result(dispatched.id).message, "Final answer");
+    assert.equal(mgr.result(dispatched.id).message, FINAL_ANSWER);
   });
 
   test("a clean done task with an empty final message is flagged incomplete", () => {
@@ -2113,7 +2164,7 @@ describe("output-completeness check at settlement time (issue #35)", () => {
     const dispatched = mgr.dispatch({
       prompt: "hi",
       directory: os.tmpdir(),
-      finalMarker: "^Status: DONE$",
+      finalMarker: STATUS_DONE_RE,
     });
     writeLog(dispatched.logPath, [
       { type: "text", part: { messageID: "m1", text: "Status: DONE" } },
@@ -2123,10 +2174,10 @@ describe("output-completeness check at settlement time (issue #35)", () => {
     const settled = mgr.status(dispatched.id);
     assert.equal(settled.status, "done");
     assert.equal("incomplete" in settled, false);
-    assert.equal(settled.finalMarker, "^Status: DONE$");
+    assert.equal(settled.finalMarker, STATUS_DONE_RE);
     const r = mgr.result(dispatched.id, { fields: ["message", "incomplete", "finalMarker"] });
     assert.equal(r.incomplete, null);
-    assert.equal(r.finalMarker, "^Status: DONE$");
+    assert.equal(r.finalMarker, STATUS_DONE_RE);
     assert.equal(r.message, "Status: DONE");
   });
 
@@ -2136,7 +2187,7 @@ describe("output-completeness check at settlement time (issue #35)", () => {
     const dispatched = mgr.dispatch({
       prompt: "hi",
       directory: os.tmpdir(),
-      finalMarker: "^Status: DONE$",
+      finalMarker: STATUS_DONE_RE,
     });
     writeLog(dispatched.logPath, [
       { type: "text", part: { messageID: "m1", text: "I forgot to follow the contract" } },
@@ -2146,7 +2197,7 @@ describe("output-completeness check at settlement time (issue #35)", () => {
     const settled = mgr.status(dispatched.id);
     assert.equal(settled.status, "done");
     assert.equal(settled.incomplete, true);
-    assert.equal(settled.finalMarker, "^Status: DONE$");
+    assert.equal(settled.finalMarker, STATUS_DONE_RE);
     const r = mgr.result(dispatched.id);
     assert.equal(r.incomplete, true);
     assert.match(r.next, /--require-final-marker "\^Status: DONE\$" did not match/);
@@ -2158,7 +2209,7 @@ describe("output-completeness check at settlement time (issue #35)", () => {
     const dispatched = mgr.dispatch({
       prompt: "hi",
       directory: os.tmpdir(),
-      finalMarker: "^Status: DONE$",
+      finalMarker: STATUS_DONE_RE,
     });
     writeLog(dispatched.logPath, [
       { type: "text", part: { messageID: "m1", text: "" } },
@@ -2233,7 +2284,7 @@ describe("output-completeness check at settlement time (issue #35)", () => {
     const dispatched = mgr1.dispatch({
       prompt: "hi",
       directory: os.tmpdir(),
-      finalMarker: "^Status: DONE$",
+      finalMarker: STATUS_DONE_RE,
     });
     const logPath = dispatched.logPath;
     writeLog(logPath, [
@@ -2253,7 +2304,7 @@ describe("output-completeness check at settlement time (issue #35)", () => {
     const reloaded = mgr2.status(dispatched.id);
     assert.equal(reloaded.status, "done");
     assert.equal(reloaded.incomplete, true);
-    assert.equal(reloaded.finalMarker, "^Status: DONE$");
+    assert.equal(reloaded.finalMarker, STATUS_DONE_RE);
   });
 });
 
@@ -2364,7 +2415,7 @@ describe("active-task concurrency cap (regressions)", () => {
     assert.equal(dispatched.filter((d) => statusOf(d.id) === "queued").length, 2);
 
     // Double-settle children[0] synchronously: emit error first, then exit.
-    children[0].emit("error", new Error("spawn opencode ENOENT"));
+    children[0].emit("error", new Error(SPAWN_OPENCODE_ENOENT));
     children[0].emit("exit", 1, null);
 
     // children[0] settled to "crashed" once (the error wins), and exactly ONE
@@ -2381,7 +2432,7 @@ describe("active-task concurrency cap (regressions)", () => {
   });
 
   test("a persistence failure after spawn kills the child and releases its concurrency slot when it exits", () => {
-    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-test-"));
+    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), AXI_TASKS_TEST_DIR));
     const lockPath = path.join(stateDir, "tasks.lock");
     const children = [];
     const killCalls = [];
@@ -2432,6 +2483,7 @@ describe("config file precedence (maxConcurrentTasks)", () => {
     });
     const manager = createTaskManager({
       stateDir,
+      config,
       sandboxEnabled: false,
       spawnFn: () => {
         const child = fakeChild();
@@ -2439,7 +2491,6 @@ describe("config file precedence (maxConcurrentTasks)", () => {
         return child;
       },
       killFn: () => {},
-      config,
     });
     t.after(() => {
       for (const child of children) child.emit("exit", null, "SIGTERM");
@@ -2455,14 +2506,14 @@ describe("config file precedence (maxConcurrentTasks)", () => {
   });
 
   test("config value used when env var is unset", (t) => {
-    const mgr = managerWithLimit(t, { env: undefined, config: { maxConcurrentTasks: 1 } });
+    const mgr = managerWithLimit(t, { env: void 0, config: { maxConcurrentTasks: 1 } });
     mgr.dispatch({ prompt: "a", directory: process.cwd(), model: "m" });
     const second = mgr.dispatch({ prompt: "b", directory: process.cwd(), model: "m" });
     assert.equal(mgr.status(second.id).status, "queued");
   });
 
   test("built-in default used when both env and config are unset", (t) => {
-    const mgr = managerWithLimit(t, { env: undefined, config: {} });
+    const mgr = managerWithLimit(t, { env: void 0, config: {} });
     for (let i = 0; i < 4; i++) mgr.dispatch({ prompt: `p${i}`, directory: process.cwd(), model: "m" });
     const fifth = mgr.dispatch({ prompt: "p5", directory: process.cwd(), model: "m" });
     assert.equal(mgr.status(fifth.id).status, "queued");
@@ -2500,12 +2551,12 @@ describe("no-output watchdog", () => {
     const child = fakeChild(7201);
     const mgr = makeManager({ spawnFn: () => child, killFn: () => {}, noOutputTimeoutMs: 60000, watchdogPollMs: 5 });
     const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), executor: "opencode" });
-    fs.writeFileSync(mgr.status(dispatched.id).logPath, JSON.stringify({ type: "error", message: "insufficient_quota: out of credits" }) + "\n");
+    fs.writeFileSync(mgr.status(dispatched.id).logPath, JSON.stringify({ type: "error", message: QUOTA_ERROR }) + "\n");
     await new Promise((r) => setTimeout(r, 40));
     child.emit("exit", 1, null);
     const r = mgr.result(dispatched.id, { fields: ["failureReason", "failureDetail"] });
     assert.equal(r.failureReason, "payment_required");
-    assert.equal(r.failureDetail, "insufficient_quota: out of credits");
+    assert.equal(r.failureDetail, QUOTA_ERROR);
   });
 
   test("a structured error event that matches none of the three named buckets still gets a failureReason instead of null (opencode's own UnknownError class)", async () => {
@@ -2738,7 +2789,7 @@ describe("provider-failure classification", () => {
     const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), executor: "opencode" });
     fs.writeFileSync(
       mgr.status(dispatched.id).logPath,
-      JSON.stringify({ type: "error", message: "rate_limit_exceeded: please retry after 60s" }) + "\n"
+      JSON.stringify({ type: "error", message: RATE_LIMIT_ERROR }) + "\n"
     );
 
     await new Promise((r) => setTimeout(r, 40));
@@ -2747,7 +2798,7 @@ describe("provider-failure classification", () => {
     child.emit("exit", null, "SIGTERM");
     const s = mgr.status(dispatched.id, { full: true });
     assert.equal(s.failureReason, "rate_limited");
-    assert.equal(s.failureDetail, "rate_limit_exceeded: please retry after 60s");
+    assert.equal(s.failureDetail, RATE_LIMIT_ERROR);
   });
 
   test("an unterminated rate-limit diagnostic stops the child early", async () => {
@@ -2760,7 +2811,7 @@ describe("provider-failure classification", () => {
       watchdogPollMs: 5,
     });
     const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), executor: "opencode" });
-    fs.writeFileSync(mgr.status(dispatched.id).logPath, "rate limit exceeded");
+    fs.writeFileSync(mgr.status(dispatched.id).logPath, RATE_LIMIT_PLAIN);
 
     await new Promise((r) => setTimeout(r, 40));
     assert.ok(killed.some((k) => k.signal === "SIGTERM"));
@@ -2768,7 +2819,7 @@ describe("provider-failure classification", () => {
     child.emit("exit", null, "SIGTERM");
     const s = mgr.status(dispatched.id, { full: true });
     assert.equal(s.failureReason, "rate_limited");
-    assert.equal(s.failureDetail, "rate limit exceeded");
+    assert.equal(s.failureDetail, RATE_LIMIT_PLAIN);
   });
 
   test("a matched log line longer than 500 chars is truncated to exactly the 500-char cap", async () => {
@@ -2781,7 +2832,7 @@ describe("provider-failure classification", () => {
       watchdogPollMs: 5,
     });
     const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), executor: "opencode" });
-    const longLine = "rate limit exceeded " + "x".repeat(1000);
+    const longLine = RATE_LIMIT_PLAIN + " " + "x".repeat(1000);
     fs.writeFileSync(mgr.status(dispatched.id).logPath, longLine);
 
     await new Promise((r) => setTimeout(r, 40));
@@ -2804,7 +2855,7 @@ describe("provider-failure classification", () => {
     const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), executor: "opencode" });
     fs.writeFileSync(
       mgr.status(dispatched.id).logPath,
-      JSON.stringify({ type: "error", message: "rate_limit_exceeded: please retry after 60s" }) + "\n"
+      JSON.stringify({ type: "error", message: RATE_LIMIT_ERROR }) + "\n"
     );
 
     await new Promise((r) => setTimeout(r, 40));
@@ -2933,14 +2984,14 @@ describe("provider-failure classification", () => {
     const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), executor: "opencode" });
     fs.writeFileSync(
       mgr.status(dispatched.id).logPath,
-      JSON.stringify({ type: "error", message: "Unauthorized: invalid API key provided" }) + "\n"
+      JSON.stringify({ type: "error", message: UNAUTHORIZED_ERROR }) + "\n"
     );
 
     await new Promise((r) => setTimeout(r, 40));
     child.emit("exit", null, "SIGTERM");
     const s = mgr.status(dispatched.id, { full: true });
     assert.equal(s.failureReason, "authentication_failed");
-    assert.equal(s.failureDetail, "Unauthorized: invalid API key provided");
+    assert.equal(s.failureDetail, UNAUTHORIZED_ERROR);
   });
 
   test("a raw non-JSON line with an unrelated 3-digit number is not misclassified as authentication_failed", () => {
@@ -2957,7 +3008,7 @@ describe("provider-failure classification", () => {
     assert.equal(s.failureDetail, "401 tests passed, 0 failed");
   });
 
-  test("pi's plain-text 'No API key found for openai.' stderr line lands on authentication_failed (issue #94)", async () => {
+  test("pi's plain-text NO_API_KEY_FOUND stderr line lands on authentication_failed (issue #94)", async () => {
     // pi's auth-failure stderr text reads "No API key found for <provider>."
     // -- plain English, not the `unauthorized`/`invalid api key`/`status 401`
     // surface the existing regex set covers. Without an additional pattern,
@@ -2976,14 +3027,14 @@ describe("provider-failure classification", () => {
     const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), executor: "opencode" });
     fs.writeFileSync(
       mgr.status(dispatched.id).logPath,
-      "No API key found for openai.\n"
+      NO_API_KEY_FOUND + "\n"
     );
 
     await new Promise((r) => setTimeout(r, 40));
     child.emit("exit", null, "SIGTERM");
     const s = mgr.status(dispatched.id, { full: true });
     assert.equal(s.failureReason, "authentication_failed");
-    assert.equal(s.failureDetail, "No API key found for openai.");
+    assert.equal(s.failureDetail, NO_API_KEY_FOUND);
   });
 
   test("a structured status_code: 401 diagnostic without the word 'unauthorized' still lands on authentication_failed", async () => {
@@ -3038,7 +3089,7 @@ describe("provider-failure classification", () => {
     const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), executor: "opencode" });
     fs.writeFileSync(
       mgr.status(dispatched.id).logPath,
-      JSON.stringify({ type: "error", message: "rate_limit_exceeded: please retry after 60s" }) + "\n"
+      JSON.stringify({ type: "error", message: RATE_LIMIT_ERROR }) + "\n"
     );
     await new Promise((r) => setTimeout(r, 20));
 
@@ -3046,14 +3097,14 @@ describe("provider-failure classification", () => {
     // certainly already classified and started killing the task.
     fs.appendFileSync(
       mgr.status(dispatched.id).logPath,
-      JSON.stringify({ type: "error", message: "Unauthorized: invalid API key provided" }) + "\n"
+      JSON.stringify({ type: "error", message: UNAUTHORIZED_ERROR }) + "\n"
     );
     await new Promise((r) => setTimeout(r, 20));
 
     child.emit("exit", null, "SIGTERM");
     const s = mgr.status(dispatched.id, { full: true });
     assert.equal(s.failureReason, "rate_limited", "the first classification wins");
-    assert.equal(s.failureDetail, "rate_limit_exceeded: please retry after 60s");
+    assert.equal(s.failureDetail, RATE_LIMIT_ERROR);
   });
 });
 
@@ -3069,7 +3120,7 @@ describe("trailing provider-error events that land after the last watcher poll (
     const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), executor: "opencode" });
     fs.writeFileSync(
       mgr.status(dispatched.id).logPath,
-      JSON.stringify({ type: "error", message: "usage_limit_exceeded: monthly quota reached" }) + "\n"
+      JSON.stringify({ type: "error", message: USAGE_LIMIT_ERROR }) + "\n"
     );
 
     // The provider process exits immediately after logging the error --
@@ -3079,7 +3130,7 @@ describe("trailing provider-error events that land after the last watcher poll (
     const s = mgr.status(dispatched.id, { full: true });
     assert.equal(s.status, "crashed");
     assert.equal(s.failureReason, "rate_limited");
-    assert.equal(s.failureDetail, "usage_limit_exceeded: monthly quota reached");
+    assert.equal(s.failureDetail, USAGE_LIMIT_ERROR);
   });
 
   test("a trailing provider-error event is classified even when the child traps the signal-less exit and exits 0", () => {
@@ -3092,7 +3143,7 @@ describe("trailing provider-error events that land after the last watcher poll (
     const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), executor: "opencode" });
     fs.writeFileSync(
       mgr.status(dispatched.id).logPath,
-      JSON.stringify({ type: "error", message: "Unauthorized: invalid API key provided" }) + "\n"
+      JSON.stringify({ type: "error", message: UNAUTHORIZED_ERROR }) + "\n"
     );
 
     child.emit("exit", 0, null);
@@ -3114,7 +3165,7 @@ describe("trailing provider-error events that land after the last watcher poll (
     const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), executor: "opencode" });
     fs.writeFileSync(
       mgr.status(dispatched.id).logPath,
-      JSON.stringify({ type: "error", message: "rate_limit_exceeded: please retry after 60s" }) + "\n"
+      JSON.stringify({ type: "error", message: RATE_LIMIT_ERROR }) + "\n"
     );
     await new Promise((r) => setTimeout(r, 40));
     assert.ok(killed.some((k) => k.signal === "SIGTERM"));
@@ -3123,13 +3174,13 @@ describe("trailing provider-error events that land after the last watcher poll (
     // watcher-classified reason must still win.
     fs.appendFileSync(
       mgr.status(dispatched.id).logPath,
-      JSON.stringify({ type: "error", message: "Unauthorized: invalid API key provided" }) + "\n"
+      JSON.stringify({ type: "error", message: UNAUTHORIZED_ERROR }) + "\n"
     );
     child.emit("exit", null, "SIGTERM");
 
     const s = mgr.status(dispatched.id, { full: true });
     assert.equal(s.failureReason, "rate_limited");
-    assert.equal(s.failureDetail, "rate_limit_exceeded: please retry after 60s");
+    assert.equal(s.failureDetail, RATE_LIMIT_ERROR);
   });
 
   test("a clean exit reuses the watcher's incremental offset and does not reclassify bytes the watcher already scanned", async () => {
@@ -3181,7 +3232,7 @@ describe("trailing provider-error events that land after the last watcher poll (
     assert.ok(readCalls.some((call) => call.position === 0 && call.length === prefixBytes));
     readCalls.length = 0;
 
-    const trailing = JSON.stringify({ type: "error", message: "usage_limit_exceeded: monthly quota reached" }) + "\n";
+    const trailing = JSON.stringify({ type: "error", message: USAGE_LIMIT_ERROR }) + "\n";
     fs.appendFileSync(logPath, trailing);
     child.emit("exit", 1, null);
 
@@ -3226,7 +3277,7 @@ describe("trailing provider-error events that land after the last watcher poll (
       watchdogPollMs: 5,
     });
     const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), executor: "opencode" });
-    const fullLine = JSON.stringify({ type: "error", message: "rate_limit_exceeded: please retry after 60s" }) + "\n";
+    const fullLine = JSON.stringify({ type: "error", message: RATE_LIMIT_ERROR }) + "\n";
     // Write a partial line so the watcher's first tick stores it as carry,
     // then write the rest of the line plus a terminating \n. The exit
     // happens immediately after, before another watcher tick can finalize
@@ -3282,7 +3333,7 @@ describe("trailing provider-error events that land after the last watcher poll (
     child.emit("exit", 1, null);
     // Overwrite the (now-closed-by-the-exit-handler) log with a small file
     // containing a provider error.
-    fs.writeFileSync(logPath, JSON.stringify({ type: "error", message: "Unauthorized: invalid API key" }) + "\n");
+    fs.writeFileSync(logPath, JSON.stringify({ type: "error", message: UNAUTHORIZED_SHORT }) + "\n");
     // The exit handler has already classified (and found nothing); the
     // shrink branch in classifyTrailingLogFailure would re-rescan from
     // offset 0 in a real run. This test pins down that we don't crash
@@ -3430,7 +3481,7 @@ describe("accept()/reject()", () => {
   // os.tmpdir() made every test in this block scan (and act on) whatever a
   // real, concurrently-running daemon actually has in /tmp (issue #253).
   const fixtureTmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "axi-accept-reject-tmp-"));
-  const fixtureRoot = path.join(fixtureTmpRoot, "taskferry-cow-t_pending");
+  const fixtureRoot = path.join(fixtureTmpRoot, OVERLAY_DIR_PENDING);
   // Each pendingTaskFixture() call writes a real .patch file to the host
   // tmpdir; track them here and remove them once the whole suite finishes
   // instead of leaking one per invocation (issue #253).
@@ -3450,8 +3501,8 @@ describe("accept()/reject()", () => {
     // actually exists on disk. The content is irrelevant -- runCommand is
     // mocked -- only the file's existence matters. A unique tmp path per
     // fixture call keeps parallel tests from clobbering each other.
-    const diffPath = path.join(os.tmpdir(), `taskferry-accept-diff-${process.pid}-${Math.random().toString(36).slice(2)}.patch`);
-    fs.writeFileSync(diffPath, "diff --git a/x b/x\n");
+    const diffPath = path.join(os.tmpdir(), `taskferry-accept-diff-${process.pid}-${Math.random().toString(36).slice(2)}.patch`); // eslint-disable-line sonarjs/pseudo-random -- test fixture randomness, not security-sensitive
+    fs.writeFileSync(diffPath, DIFF_LINE);
     createdDiffPaths.push(diffPath);
     return {
       ...baseTask({ id: "t_pending", status: "done" }),
@@ -3471,7 +3522,7 @@ describe("accept()/reject()", () => {
       tasksFixture: [pendingTaskFixture()],
       runOverlayCommandFn: (command, args) => {
         if (command === "git" && args[2] === "apply") applyCalled = true;
-        return { status: 0, stdout: "", stderr: "", error: undefined };
+        return { status: 0, stdout: "", stderr: "" };
       },
       rmOverlayTreeFn: (p) => { cleanedRoot = p; },
     });
@@ -3488,8 +3539,8 @@ describe("accept()/reject()", () => {
     const mgr = makeManager({
       tasksFixture: [pendingTaskFixture()],
       runOverlayCommandFn: (command) => {
-        if (command === "git") return { status: 1, stdout: "", stderr: "error: patch does not apply\n", error: undefined };
-        return { status: 0, stdout: "", stderr: "", error: undefined };
+        if (command === "git") return { status: 1, stdout: "", stderr: "error: patch does not apply\n" };
+        return { status: 0, stdout: "", stderr: "" };
       },
       rmOverlayTreeFn: (p) => { cleanedRoot = p; },
     });
@@ -3507,7 +3558,7 @@ describe("accept()/reject()", () => {
       tasksFixture: [pendingTaskFixture()],
       runOverlayCommandFn: (command, args) => {
         if (command === "git" && args[2] === "apply") applyCalled = true;
-        return { status: 0, stdout: "", stderr: "", error: undefined };
+        return { status: 0, stdout: "", stderr: "" };
       },
       rmOverlayTreeFn: (p) => { cleanedRoot = p; },
     });
@@ -3521,7 +3572,7 @@ describe("accept()/reject()", () => {
   test("reject() cleans an overlay using its recorded tmpRoot after the live tmpRoot changes", () => {
     const recordedTmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "axi-recorded-overlay-"));
     const liveTmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "axi-live-overlay-"));
-    const root = path.join(recordedTmpRoot, "taskferry-cow-t_pending");
+    const root = path.join(recordedTmpRoot, OVERLAY_DIR_PENDING);
     fs.mkdirSync(path.join(root, "upper", "main"), { recursive: true });
     fs.mkdirSync(path.join(root, "work", "main"), { recursive: true });
     const mgr = makeManager({
@@ -3555,7 +3606,7 @@ describe("accept()/reject()", () => {
 
   test("accept() on a task whose extraction failed errors usefully and keeps the overlay (regression: review finding #2)", () => {
     const mgr = makeManager({
-      tasksFixture: [pendingTaskFixture({ diffPath: null, changesetError: "spawn bwrap ETIMEDOUT" })],
+      tasksFixture: [pendingTaskFixture({ diffPath: null, changesetError: SPAWN_BWRAP_TIMEOUT })],
     });
     assert.throws(() => mgr.accept("t_pending"), /changeset was never extracted.*ETIMEDOUT/s);
     assert.ok(mgr.status("t_pending").overlayDirs, "the preserved overlay is the user's only copy of the changes");
@@ -3567,7 +3618,7 @@ describe("accept()/reject()", () => {
     // check, git apply would surface its own "can't open patch" message
     // against a path the user has no reason to suspect -- fail with a
     // clear, actionable error before that happens.
-    const missingDiffPath = path.join(os.tmpdir(), `taskferry-does-not-exist-${process.pid}-${Math.random().toString(36).slice(2)}.patch`);
+    const missingDiffPath = path.join(os.tmpdir(), `taskferry-does-not-exist-${process.pid}-${Math.random().toString(36).slice(2)}.patch`); // eslint-disable-line sonarjs/pseudo-random -- test fixture randomness, not security-sensitive
     const mgr = makeManager({
       tasksFixture: [pendingTaskFixture({ diffPath: missingDiffPath })],
     });
@@ -3590,8 +3641,8 @@ describe("accept()/reject()", () => {
   test("accept() surfaces a failed cleanup via cleanupFailed and leaves overlayDirs for the sweep (regression: review finding #11)", () => {
     const mgr = makeManager({
       tasksFixture: [pendingTaskFixture()],
-      runOverlayCommandFn: () => ({ status: 0, stdout: "", stderr: "", error: undefined }),
-      rmOverlayTreeFn: () => { throw new Error("EBUSY: resource busy or locked"); },
+      runOverlayCommandFn: () => ({ status: 0, stdout: "", stderr: "" }),
+      rmOverlayTreeFn: () => { throw new Error(EBUSY_ERROR); },
     });
     const result = mgr.accept("t_pending");
     assert.equal(result.applied, true);
@@ -3603,7 +3654,7 @@ describe("accept()/reject()", () => {
   test("reject() surfaces a failed cleanup and leaves overlayDirs for the sweep", () => {
     const mgr = makeManager({
       tasksFixture: [pendingTaskFixture()],
-      rmOverlayTreeFn: () => { throw new Error("EBUSY: resource busy or locked"); },
+      rmOverlayTreeFn: () => { throw new Error(EBUSY_ERROR); },
     });
     const result = mgr.reject("t_pending");
     assert.equal(result.changesetStatus, "rejected");
@@ -3626,7 +3677,7 @@ describe("accept()/reject()", () => {
   test("accept() persists the cleared overlay metadata after successful cleanup (regression: review followup #1)", () => {
     const mgr = makeManager({
       tasksFixture: [pendingTaskFixture()],
-      runOverlayCommandFn: () => ({ status: 0, stdout: "", stderr: "", error: undefined }),
+      runOverlayCommandFn: () => ({ status: 0, stdout: "", stderr: "" }),
       rmOverlayTreeFn: () => {},
     });
     const result = mgr.accept("t_pending");
@@ -3657,8 +3708,8 @@ describe("accept()/reject()", () => {
     // daemon-startup sweep can pick up the orphan and retry the removal.
     const mgr = makeManager({
       tasksFixture: [pendingTaskFixture()],
-      runOverlayCommandFn: () => ({ status: 0, stdout: "", stderr: "", error: undefined }),
-      rmOverlayTreeFn: () => { throw new Error("EBUSY: resource busy or locked"); },
+      runOverlayCommandFn: () => ({ status: 0, stdout: "", stderr: "" }),
+      rmOverlayTreeFn: () => { throw new Error(EBUSY_ERROR); },
     });
     const result = mgr.accept("t_pending");
     assert.equal(result.cleanupFailed, true);
@@ -3672,17 +3723,17 @@ describe("accept()/reject()", () => {
 describe("summarize() changeset exposure", () => {
   test("exposes changeset fields only when they are meaningful", () => {
     const overlayDirs = {
-      root: path.join(os.tmpdir(), "taskferry-cow-t_pending"),
+      root: path.join(os.tmpdir(), OVERLAY_DIR_PENDING),
       tmpRoot: os.tmpdir(),
-      upperDir: path.join(os.tmpdir(), "taskferry-cow-t_pending", "upper", "main"),
-      workDir: path.join(os.tmpdir(), "taskferry-cow-t_pending", "work", "main"),
+      upperDir: path.join(os.tmpdir(), OVERLAY_DIR_PENDING, "upper", "main"),
+      workDir: path.join(os.tmpdir(), OVERLAY_DIR_PENDING, "work", "main"),
       rwBinds: [],
     };
     const mgr = makeManager({
       tasksFixture: [
         baseTask({ id: "t_plain", role: "dispatch", changesetStatus: "none", overlayDirs: null, changesetError: null }),
         baseTask({ id: "t_advisor", role: "advisor", changesetStatus: "none" }),
-        baseTask({ id: "t_pending", role: "dispatch", changesetStatus: "pending", overlayDirs, changesetError: "spawn bwrap ETIMEDOUT" }),
+        baseTask({ id: "t_pending", role: "dispatch", changesetStatus: "pending", changesetError: SPAWN_BWRAP_TIMEOUT, overlayDirs }),
       ],
     });
 
@@ -3700,7 +3751,7 @@ describe("summarize() changeset exposure", () => {
     assert.equal(pending.role, "dispatch");
     assert.equal(pending.changesetStatus, "pending");
     assert.deepEqual(pending.overlayDirs, overlayDirs);
-    assert.equal(pending.changesetError, "spawn bwrap ETIMEDOUT");
+    assert.equal(pending.changesetError, SPAWN_BWRAP_TIMEOUT);
   });
 });
 
@@ -3708,7 +3759,7 @@ describe("executorId on persisted tasks (Task 5: legacy records default to openc
   test("a persisted task with no executorId defaults to \"opencode\" on load", () => {
     const mgr = makeManager({
       tasksFixture: (logDir) => [{
-        id: "oc_legacy", status: "done", directory: "/tmp", model: "openai/gpt-5.6-luna", variant: "high",
+        id: "oc_legacy", status: "done", directory: "/tmp", model: LUNA_MODEL, variant: "high",
         sessionId: null, originSessionId: null, pid: null, startedAt: "2026-07-13T10:00:00.000Z",
         endedAt: "2026-07-13T10:01:00.000Z", exitCode: 0, signal: null, logPath: path.join(logDir, "oc_legacy.ndjson"),
         promptPreview: "legacy task", promptTotalChars: null, spawnError: null, cancelRequested: false, internal: false,
@@ -3727,21 +3778,21 @@ describe("executorId on persisted tasks (Task 5: legacy records default to openc
 
 describe("dispatch() executor selection (Task 6: optional executor name resolves and stamps task.executorId)", () => {
   test("dispatch() with executor: \"pi\" resolves piExecutor and stamps task.executorId", () => {
-    const mgr = makeManager({ spawnFn: () => { throw new Error("not reached in this test"); } });
+    const mgr = makeManager({ spawnFn: () => { throw new Error(NOT_REACHED); } });
     const dispatched = mgr.dispatch({ prompt: "hi", directory: process.cwd(), executor: "pi" });
     const status = mgr.status(dispatched.id);
     assert.equal(status.executorId, "pi");
   });
 
   test("dispatch() with no executor defaults to pi", () => {
-    const mgr = makeManager({ spawnFn: () => { throw new Error("not reached in this test"); } });
+    const mgr = makeManager({ spawnFn: () => { throw new Error(NOT_REACHED); } });
     const dispatched = mgr.dispatch({ prompt: "hi", directory: process.cwd() });
     const status = mgr.status(dispatched.id);
     assert.equal(status.executorId, "pi");
   });
 
   test("dispatch() with an unknown executor name throws", () => {
-    const mgr = makeManager({ spawnFn: () => { throw new Error("not reached in this test"); } });
+    const mgr = makeManager({ spawnFn: () => { throw new Error(NOT_REACHED); } });
     assert.throws(() => mgr.dispatch({ prompt: "hi", directory: process.cwd(), executor: "bogus" }), /unknown executor: bogus/);
   });
 });
@@ -3967,7 +4018,7 @@ describe("advisor()", () => {
     const child = fakeChild();
     let captured = null;
     const mgr = makeManager({
-      spawnFn: (cmd, args, _opts) => {
+      spawnFn: (_cmd, args, _opts) => {
         captured = args;
         return child;
       },
@@ -3979,9 +4030,9 @@ describe("advisor()", () => {
     });
 
     const advisorPromise = mgr.advisor({
-      prompt: "how should I shard this counter?",
+      prompt: SHARD_QUESTION,
       directory: os.tmpdir(),
-      model: "openai/gpt-5.6-sol",
+      model: SOL_MODEL,
       variant: "max",
       timeoutMs: 5000,
       executor: "opencode",
@@ -3992,7 +4043,7 @@ describe("advisor()", () => {
     assert.deepEqual(captured.slice(captured.indexOf("--") + 1), [
       "opencode",
       "run", "--dir", os.tmpdir(), "--auto", "--format", "json",
-      "-m", "openai/gpt-5.6-sol", "--variant", "max", "--", "how should I shard this counter?",
+      "-m", SOL_MODEL, "--variant", "max", "--", SHARD_QUESTION,
     ]);
 
     // Simulate opencode writing its result log, then exiting.
@@ -4001,7 +4052,7 @@ describe("advisor()", () => {
     fs.writeFileSync(
       dispatched.logPath,
       [
-        JSON.stringify({ type: "text", part: { messageID: "m1", text: "Shard by key, sum on read." } }),
+        JSON.stringify({ type: "text", part: { messageID: "m1", text: SHARD_ANSWER } }),
         JSON.stringify({ type: "step_finish", part: { messageID: "m1", reason: "stop", tokens: { total: 50 }, cost: 0.002 } }),
         JSON.stringify({ sessionID: "ses_new" }),
       ].join("\n")
@@ -4010,7 +4061,7 @@ describe("advisor()", () => {
 
     const advised = await advisorPromise;
     assert.equal(advised.status, "done");
-    assert.equal(advised.message, "Shard by key, sum on read.");
+    assert.equal(advised.message, SHARD_ANSWER);
     assert.deepEqual(advised.tokens, { total: 50 });
     assert.equal(advised.cost, 0.002);
     assert.equal(advised.session_id, "ses_new");
@@ -4034,9 +4085,9 @@ describe("advisor()", () => {
     });
 
     const advisorPromise = mgr.advisor({
-      prompt: "how should I shard this counter?",
+      prompt: SHARD_QUESTION,
       directory: os.tmpdir(),
-      model: "minimax/MiniMax-M2.7",
+      model: MINIMAX_MODEL,
       executor: "pi",
       timeoutMs: 5000,
     });
@@ -4056,7 +4107,7 @@ describe("advisor()", () => {
       "data",
       Buffer.from(
         [
-          JSON.stringify({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "Shard by key, sum on read." }, message: { responseId: "m1" } }),
+          JSON.stringify({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: SHARD_ANSWER }, message: { responseId: "m1" } }),
           JSON.stringify({ type: "agent_end", messages: [{ role: "assistant", responseId: "m1", usage: { total: 50, cost: { total: 0.002 } } }] }),
         ].join("\n") + "\n"
       )
@@ -4065,7 +4116,7 @@ describe("advisor()", () => {
 
     const advised = await advisorPromise;
     assert.equal(advised.status, "done");
-    assert.equal(advised.message, "Shard by key, sum on read.");
+    assert.equal(advised.message, SHARD_ANSWER);
   });
 
   test("returns status: running with a task_id and session_id when the timeout elapses first", async () => {
@@ -4080,9 +4131,9 @@ describe("advisor()", () => {
     });
 
     const advisorPromise = mgr.advisor({
-      prompt: "long question",
+      prompt: LONG_QUESTION,
       directory: os.tmpdir(),
-      model: "openai/gpt-5.6-sol",
+      model: SOL_MODEL,
       timeoutMs: 20,
     });
     const row2 = mgr.list().tasks[0];
@@ -4110,12 +4161,12 @@ describe("advisor()", () => {
 
     // Occupy the only concurrency slot so the advisor dispatch below queues
     // instead of running.
-    mgr.dispatch({ prompt: "occupying task", directory: os.tmpdir(), model: "openai/gpt-5.6-sol" });
+    mgr.dispatch({ prompt: OCCUPYING_TASK, directory: os.tmpdir(), model: SOL_MODEL });
 
     const advisorPromise = mgr.advisor({
-      prompt: "long question",
+      prompt: LONG_QUESTION,
       directory: os.tmpdir(),
-      model: "openai/gpt-5.6-sol",
+      model: SOL_MODEL,
       timeoutMs: 20,
     });
 
@@ -4139,9 +4190,9 @@ describe("advisor()", () => {
     });
 
     const advisorPromise = mgr.advisor({
-      prompt: "long question",
+      prompt: LONG_QUESTION,
       directory: os.tmpdir(),
-      model: "openai/gpt-5.6-sol",
+      model: SOL_MODEL,
       timeoutMs: 20,
     });
     // No log file written at all -- opencode hasn't emitted a session id yet.
@@ -4156,7 +4207,7 @@ describe("advisor()", () => {
   test("a dispatch validation error is reported under taskferry advisor, not taskferry dispatch", async () => {
     const mgr = makeManager();
     await assert.rejects(
-      () => mgr.advisor({ prompt: "", directory: os.tmpdir(), model: "openai/gpt-5.6-sol" }),
+      () => mgr.advisor({ prompt: "", directory: os.tmpdir(), model: SOL_MODEL }),
       (err) => {
         assert.match(err.message, /taskferry advisor requires a non-empty prompt string/);
         assert.equal(err.message.includes("taskferry dispatch"), false);
@@ -4170,7 +4221,7 @@ describe("advisor()", () => {
     let captured = null;
     const mgr = makeManager({
       advisorSessionTtlMs: 60000,
-      spawnFn: (cmd, args) => {
+      spawnFn: (_cmd, args) => {
         captured = args;
         return child;
       },
@@ -4182,7 +4233,7 @@ describe("advisor()", () => {
     });
 
     // First call establishes ses_live in the registry via its own result.
-    const firstPromise = mgr.advisor({ prompt: "q1", directory: os.tmpdir(), model: "openai/gpt-5.6-sol" });
+    const firstPromise = mgr.advisor({ prompt: "q1", directory: os.tmpdir(), model: SOL_MODEL });
     const firstRow = mgr.list().tasks[0];
     const firstTask = { id: firstRow.id, logPath: path.join(mgr.paths.LOG_DIR, `${firstRow.id}.ndjson`) };
     fs.writeFileSync(
@@ -4201,10 +4252,10 @@ describe("advisor()", () => {
     const secondPromise = mgr.advisor({
       prompt: "q2 follow-up",
       directory: os.tmpdir(),
-      model: "openai/gpt-5.6-sol",
+      model: SOL_MODEL,
       sessionId: "ses_live",
     });
-    assert.equal(captured.includes("--continue"), true);
+    assert.equal(captured.includes(CONTINUE_FLAG), true);
     assert.equal(captured[captured.indexOf("--session") + 1], "ses_live");
 
     const secondTask = mgr.list().tasks[0];
@@ -4228,7 +4279,7 @@ describe("advisor()", () => {
     let captured = null;
     const mgr = makeManager({
       advisorSessionTtlMs: 10,
-      spawnFn: (cmd, args) => {
+      spawnFn: (_cmd, args) => {
         captured = args;
         return child;
       },
@@ -4242,11 +4293,11 @@ describe("advisor()", () => {
     const advisorPromise = mgr.advisor({
       prompt: "resuming after a nap",
       directory: os.tmpdir(),
-      model: "openai/gpt-5.6-sol",
+      model: SOL_MODEL,
       sessionId: "ses_long_gone",
     });
 
-    assert.equal(captured.includes("--continue"), false);
+    assert.equal(captured.includes(CONTINUE_FLAG), false);
 
     const row4 = mgr.list().tasks[0];
     const dispatched = { id: row4.id, logPath: path.join(mgr.paths.LOG_DIR, `${row4.id}.ndjson`) };
@@ -4277,7 +4328,7 @@ describe("advisor()", () => {
       platform: "linux",
     });
 
-    const advisorPromise = mgr.advisor({ prompt: "hi", directory: os.tmpdir(), model: "openai/gpt-5.6-sol" });
+    const advisorPromise = mgr.advisor({ prompt: "hi", directory: os.tmpdir(), model: SOL_MODEL });
     child.emit("exit", 1, null);
 
     const advised = await advisorPromise;
@@ -4298,9 +4349,9 @@ describe("advisor()", () => {
     });
 
     const advisorPromise = mgr.advisor({
-      prompt: "long question",
+      prompt: LONG_QUESTION,
       directory: os.tmpdir(),
-      model: "openai/gpt-5.6-sol",
+      model: SOL_MODEL,
     });
     const row = mgr.list().tasks[0];
     const dispatched = { id: row.id, logPath: path.join(mgr.paths.LOG_DIR, `${row.id}.ndjson`) };
@@ -4355,7 +4406,7 @@ describe("result()", () => {
   test("joins only the final step's text as `message`, keeps everything as `narration`", () => {
     const log = [
       JSON.stringify({ type: "text", part: { messageID: "m1", text: "I'm about to run ls" } }),
-      JSON.stringify({ type: "step_finish", part: { messageID: "m1", reason: "tool-calls" } }),
+      JSON.stringify({ type: "step_finish", part: { messageID: "m1", reason: TOOL_CALLS } }),
       JSON.stringify({ type: "text", part: { messageID: "m2", text: "Final answer text" } }),
       JSON.stringify({
         type: "step_finish",
@@ -4385,7 +4436,7 @@ describe("result()", () => {
         type: "step_finish",
         part: {
           messageID: "m1",
-          reason: "tool-calls",
+          reason: TOOL_CALLS,
           tokens: { total: 100, input: 10, output: 20, reasoning: 5, cache: { write: 1, read: 2 } },
           cost: 0.001,
         },
@@ -4423,7 +4474,7 @@ describe("result()", () => {
     const filler = "x".repeat(3000);
     const log = [
       JSON.stringify({ type: "text", part: { messageID: "m1", text: filler } }),
-      JSON.stringify({ type: "step_finish", part: { messageID: "m1", reason: "tool-calls" } }),
+      JSON.stringify({ type: "step_finish", part: { messageID: "m1", reason: TOOL_CALLS } }),
       JSON.stringify({ type: "text", part: { messageID: "m2", text: "final" } }),
       JSON.stringify({ type: "step_finish", part: { messageID: "m2", reason: "stop" } }),
     ].join("\n");
@@ -4476,7 +4527,7 @@ describe("result()", () => {
 
   test("projects only requested fields while retaining the task envelope", () => {
     const log = [
-      JSON.stringify({ type: "text", part: { messageID: "m1", text: "Final answer" } }),
+      JSON.stringify({ type: "text", part: { messageID: "m1", text: FINAL_ANSWER } }),
       JSON.stringify({ type: "step_finish", part: { messageID: "m1", reason: "stop" } }),
     ].join("\n");
     const mgr = makeManager({
@@ -4486,7 +4537,7 @@ describe("result()", () => {
     assert.deepEqual(mgr.result("t1", { fields: ["message"] }), {
       taskId: "t1",
       status: "done",
-      message: "Final answer",
+      message: FINAL_ANSWER,
     });
   });
 
@@ -4530,9 +4581,9 @@ describe("result() diffStat field", () => {
       logs: { "t_stat.ndjson": "" },
       runOverlayCommandFn: (command, args) => {
         if (command === "git" && args[0] === "apply" && args[1] === "--numstat") {
-          return { status: 0, stdout: "2\t1\tone.txt\n0\t1\ttwo.txt\n", stderr: "", error: undefined };
+          return { status: 0, stdout: "2\t1\tone.txt\n0\t1\ttwo.txt\n", stderr: "" };
         }
-        return { status: 0, stdout: "", stderr: "", error: undefined };
+        return { status: 0, stdout: "", stderr: "" };
       },
     });
     fs.mkdirSync(path.join(mgr.paths.STATE_DIR, "diffs"), { recursive: true });
@@ -4574,9 +4625,9 @@ describe("result() diffStat field", () => {
       logs: { "t_nongit.ndjson": "" },
       runOverlayCommandFn: (command, args) => {
         if (command === "git" && args[0] === "apply" && args[1] === "--numstat") {
-          return { status: 0, stdout: "2\t1\tmerged/existing.txt\n1\t0\tmerged/newfile.txt\n", stderr: "", error: undefined };
+          return { status: 0, stdout: "2\t1\tmerged/existing.txt\n1\t0\tmerged/newfile.txt\n", stderr: "" };
         }
-        return { status: 0, stdout: "", stderr: "", error: undefined };
+        return { status: 0, stdout: "", stderr: "" };
       },
     });
     fs.mkdirSync(path.join(mgr.paths.STATE_DIR, "diffs"), { recursive: true });
@@ -4643,9 +4694,9 @@ describe("result() diffStat field", () => {
       logs: { "t_unparsable.ndjson": "" },
       runOverlayCommandFn: (command, args) => {
         if (command === "git" && args[0] === "apply" && args[1] === "--numstat") {
-          return { status: 128, stdout: "", stderr: "error: No valid patches in input\n", error: undefined };
+          return { status: 128, stdout: "", stderr: "error: No valid patches in input\n" };
         }
-        return { status: 0, stdout: "", stderr: "", error: undefined };
+        return { status: 0, stdout: "", stderr: "" };
       },
     });
     fs.mkdirSync(path.join(mgr.paths.STATE_DIR, "diffs"), { recursive: true });
@@ -4668,9 +4719,9 @@ describe("result() diffStat field", () => {
       logs: { "t_status1.ndjson": "" },
       runOverlayCommandFn: (command, args) => {
         if (command === "git" && args[0] === "apply" && args[1] === "--numstat") {
-          return { status: 1, stdout: "5\t3\tmerged/leftover.txt\n", stderr: "error: corrupt patch\n", error: undefined };
+          return { status: 1, stdout: "5\t3\tmerged/leftover.txt\n", stderr: "error: corrupt patch\n" };
         }
-        return { status: 0, stdout: "", stderr: "", error: undefined };
+        return { status: 0, stdout: "", stderr: "" };
       },
     });
     fs.mkdirSync(path.join(mgr.paths.STATE_DIR, "diffs"), { recursive: true });
@@ -4690,9 +4741,9 @@ describe("result() diff field", () => {
       logs: { "t_diff.ndjson": "" },
     });
     fs.mkdirSync(path.join(mgr.paths.STATE_DIR, "diffs"), { recursive: true });
-    fs.writeFileSync(path.join(mgr.paths.STATE_DIR, "diffs", "t_diff.patch"), "diff --git a/x b/x\n");
+    fs.writeFileSync(path.join(mgr.paths.STATE_DIR, "diffs", "t_diff.patch"), DIFF_LINE);
     const result = mgr.result("t_diff", { fields: ["diff"] });
-    assert.equal(result.diff, "diff --git a/x b/x\n");
+    assert.equal(result.diff, DIFF_LINE);
   });
 
   test("returns null for a task with no diffPath", () => {
@@ -4724,7 +4775,7 @@ describe("tail()", () => {
   test("returns a definitive no-text response", () => {
     const mgr = makeManager({ tasksFixture: [baseTask({ id: "t1" })] });
     const r = mgr.tail("t1");
-    assert.equal(r.text, "none observed yet");
+    assert.equal(r.text, NONE_OBSERVED);
     assert.equal(r.textTotalChars, 0);
     assert.equal(r.truncated, false);
   });
@@ -4741,7 +4792,7 @@ describe("tail()", () => {
   });
 
   test("falls back to raw captured output for a crashed task that never emitted an event", () => {
-    const raw = 'Error: Extension "/x/y.js" error: Provider y: "baseUrl" is required when defining models.';
+    const raw = EXTENSION_CONFIG_ERROR;
     const mgr = makeManager({
       tasksFixture: (logDir) => [baseTask({ id: "t1", status: "crashed", logPath: path.join(logDir, "t1.ndjson") })],
       logs: { "t1.ndjson": raw + "\n" },
@@ -4757,7 +4808,7 @@ describe("tail()", () => {
       tasksFixture: (logDir) => [baseTask({ id: "t1", status: "crashed", logPath: path.join(logDir, "t1.ndjson") })],
       logs: { "t1.ndjson": JSON.stringify({ type: "step_start", part: {} }) + "\nError: mid-run stderr noise\n" },
     });
-    assert.equal(mgr.tail("t1").text, "none observed yet");
+    assert.equal(mgr.tail("t1").text, NONE_OBSERVED);
   });
 
   test("raw-capture fallback respects the chars suffix and reports truncation", () => {
@@ -4777,7 +4828,7 @@ describe("tail()", () => {
       tasksFixture: (logDir) => [baseTask({ id: "t1", status: "crashed", logPath: path.join(logDir, "t1.ndjson") })],
       logs: { "t1.ndjson": "" },
     });
-    assert.equal(mgr.tail("t1").text, "none observed yet");
+    assert.equal(mgr.tail("t1").text, NONE_OBSERVED);
   });
 
   test("a watchdog-killed eventless task shows its raw capture (failureReason does not gate tail)", () => {
@@ -4794,10 +4845,10 @@ describe("summarize()", () => {
   test("uses --pure and a private attachment", async () => {
     let captured;
     const child = fakeChild();
-    const log = JSON.stringify({ type: "text", part: { messageID: "m1", text: "Investigated the issue" } });
+    const log = JSON.stringify({ type: "text", part: { messageID: "m1", text: INVESTIGATED_TEXT } });
     const mgr = makeManager({
-      tasksFixture: (logDir) => [baseTask({ id: "source", logPath: path.join(logDir, "source.ndjson") })],
-      logs: { "source.ndjson": log },
+      tasksFixture: (logDir) => [baseTask({ id: "source", logPath: path.join(logDir, SOURCE_LOG) })],
+      logs: { [SOURCE_LOG]: log },
       spawnFn: (command, args, options) => {
         captured = { command, args, options };
         return child;
@@ -4821,11 +4872,11 @@ describe("summarize()", () => {
   test("writes a previous_summary field into the snapshot attachment when previousActivity is given", async () => {
     let capturedSnapshot;
     const child = fakeChild();
-    const log = JSON.stringify({ type: "text", part: { messageID: "m1", text: "Investigated the issue" } });
+    const log = JSON.stringify({ type: "text", part: { messageID: "m1", text: INVESTIGATED_TEXT } });
     const mgr = makeManager({
-      tasksFixture: (logDir) => [baseTask({ id: "source", logPath: path.join(logDir, "source.ndjson") })],
-      logs: { "source.ndjson": log },
-      spawnFn: (command, args) => {
+      tasksFixture: (logDir) => [baseTask({ id: "source", logPath: path.join(logDir, SOURCE_LOG) })],
+      logs: { [SOURCE_LOG]: log },
+      spawnFn: (_command, args) => {
         const attachment = args[args.indexOf("-f") + 1];
         capturedSnapshot = JSON.parse(fs.readFileSync(attachment, "utf8"));
         return child;
@@ -4841,11 +4892,11 @@ describe("summarize()", () => {
   test("omits previous_summary from the snapshot attachment when there is no prior activity", async () => {
     let capturedSnapshot;
     const child = fakeChild();
-    const log = JSON.stringify({ type: "text", part: { messageID: "m1", text: "Investigated the issue" } });
+    const log = JSON.stringify({ type: "text", part: { messageID: "m1", text: INVESTIGATED_TEXT } });
     const mgr = makeManager({
-      tasksFixture: (logDir) => [baseTask({ id: "source", logPath: path.join(logDir, "source.ndjson") })],
-      logs: { "source.ndjson": log },
-      spawnFn: (command, args) => {
+      tasksFixture: (logDir) => [baseTask({ id: "source", logPath: path.join(logDir, SOURCE_LOG) })],
+      logs: { [SOURCE_LOG]: log },
+      spawnFn: (_command, args) => {
         const attachment = args[args.indexOf("-f") + 1];
         capturedSnapshot = JSON.parse(fs.readFileSync(attachment, "utf8"));
         return child;
@@ -4870,9 +4921,9 @@ describe("summarize()", () => {
       JSON.stringify({ type: "text", part: { messageID: "m2", text: "Now editing the file" } }),
     ].join("\n");
     const mgr = makeManager({
-      tasksFixture: (logDir) => [baseTask({ id: "source", logPath: path.join(logDir, "source.ndjson") })],
-      logs: { "source.ndjson": log },
-      spawnFn: (command, args) => {
+      tasksFixture: (logDir) => [baseTask({ id: "source", logPath: path.join(logDir, SOURCE_LOG) })],
+      logs: { [SOURCE_LOG]: log },
+      spawnFn: (_command, args) => {
         const attachment = args[args.indexOf("-f") + 1];
         capturedSnapshot = JSON.parse(fs.readFileSync(attachment, "utf8"));
         return child;
@@ -4901,16 +4952,16 @@ describe("summarize()", () => {
   test("rejects an unavailable configured summary model before creating a task", async () => {
     const log = JSON.stringify({ type: "text", part: { messageID: "m1", text: "progress" } });
     const mgr = makeManager({
-      tasksFixture: (logDir) => [baseTask({ id: "source", logPath: path.join(logDir, "source.ndjson") })],
-      logs: { "source.ndjson": log },
-      listModelsFn: () => "openai/gpt-5.6-luna\n",
+      tasksFixture: (logDir) => [baseTask({ id: "source", logPath: path.join(logDir, SOURCE_LOG) })],
+      logs: { [SOURCE_LOG]: log },
+      listModelsFn: () => LUNA_MODEL + "\n",
     });
     await assert.rejects(mgr.summarize("source"), /summary model is unavailable/);
     assert.equal(mgr.list().tasks.length, 1);
   });
 
   test("checkSummaryModelReady rejects when the configured summary model is unavailable", async () => {
-    const mgr = makeManager({ listModelsFn: () => "openai/gpt-5.6-luna\n" });
+    const mgr = makeManager({ listModelsFn: () => LUNA_MODEL + "\n" });
     await assert.rejects(mgr.checkSummaryModelReady(), /summary model is unavailable/);
   });
 
@@ -4921,25 +4972,25 @@ describe("summarize()", () => {
     // (hardcoded `opencode models`) defaults. We want to prove the new
     // default is opencodeExecutor().listModelsFn regardless of the
     // configured dispatch-default executor.
-    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-test-"));
+    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), AXI_TASKS_TEST_DIR));
     let piListModelsCalled = false;
     const fakePi = {
       id: "pi",
       taskIdPrefix: "pi",
       errorBucketPrefix: "pi",
-      defaultModel: "minimax/MiniMax-M2.7",
-      defaultSummaryModel: "minimax/MiniMax-M2.7",
+      defaultModel: MINIMAX_MODEL,
+      defaultSummaryModel: MINIMAX_MODEL,
       binaryName: "pi",
       listModelsFn: async () => {
         piListModelsCalled = true;
         // Whatever pi returns here is irrelevant: summaries always run
         // through opencode, so this list must NOT be used for the check.
-        return "minimax/MiniMax-M2.7\n";
+        return MINIMAX_MODEL + "\n";
       },
       buildSpawnArgs: () => [],
       buildSummaryPrompt: () => "",
       normalizeLogEvent: (parsed) => parsed,
-      sandboxAuthFile: () => ({ extraRoBinds: [], extraRwPairBinds: [], sandboxedDataHome: "/tmp/unused", sandboxEnv: {} }),
+      sandboxAuthFile: () => ({ extraRoBinds: [], extraRwPairBinds: [], sandboxedDataHome: UNUSED_TMP, sandboxEnv: {} }),
     };
     const mgr = createTaskManager({
       stateDir,
@@ -4971,20 +5022,20 @@ describe("summarize()", () => {
     // on being able to inject a custom listModelsFn. Verify that
     // explicit injection still works -- just that the new *default* (used
     // when no override is given) is opencode's, not pi's.
-    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-test-"));
+    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), AXI_TASKS_TEST_DIR));
     let injectedCalled = false;
     const fakePi = {
       id: "pi",
       taskIdPrefix: "pi",
       errorBucketPrefix: "pi",
-      defaultModel: "minimax/MiniMax-M2.7",
-      defaultSummaryModel: "minimax/MiniMax-M2.7",
+      defaultModel: MINIMAX_MODEL,
+      defaultSummaryModel: MINIMAX_MODEL,
       binaryName: "pi",
-      listModelsFn: async () => "minimax/MiniMax-M2.7\n",
+      listModelsFn: async () => MINIMAX_MODEL + "\n",
       buildSpawnArgs: () => [],
       buildSummaryPrompt: () => "",
       normalizeLogEvent: (parsed) => parsed,
-      sandboxAuthFile: () => ({ extraRoBinds: [], extraRwPairBinds: [], sandboxedDataHome: "/tmp/unused", sandboxEnv: {} }),
+      sandboxAuthFile: () => ({ extraRoBinds: [], extraRwPairBinds: [], sandboxedDataHome: UNUSED_TMP, sandboxEnv: {} }),
     };
     const mgr = createTaskManager({
       stateDir,
@@ -5013,12 +5064,12 @@ describe("summarize()", () => {
     let listModelsCalls = 0;
     const mgr = makeManager({
       tasksFixture: (logDir) => [
-        baseTask({ id: "srcA", status: "done", logPath: path.join(logDir, "srcA.ndjson") }),
-        baseTask({ id: "srcB", status: "done", logPath: path.join(logDir, "srcB.ndjson") }),
+        baseTask({ id: "srcA", status: "done", logPath: path.join(logDir, SRCA_LOG) }),
+        baseTask({ id: "srcB", status: "done", logPath: path.join(logDir, SRCB_LOG) }),
       ],
       logs: {
-        "srcA.ndjson": JSON.stringify({ type: "text", part: { messageID: "m1", text: "did the A thing" } }) + "\n",
-        "srcB.ndjson": JSON.stringify({ type: "text", part: { messageID: "m1", text: "did the B thing" } }) + "\n",
+        [SRCA_LOG]: JSON.stringify({ type: "text", part: { messageID: "m1", text: DID_A } }) + "\n",
+        [SRCB_LOG]: JSON.stringify({ type: "text", part: { messageID: "m1", text: DID_B } }) + "\n",
       },
       listModelsFn: async (env) => {
         listModelsCalls++;
@@ -5056,12 +5107,12 @@ describe("summarize()", () => {
     let listModelsCalls = 0;
     const mgr = makeManager({
       tasksFixture: (logDir) => [
-        baseTask({ id: "srcA", status: "done", logPath: path.join(logDir, "srcA.ndjson") }),
-        baseTask({ id: "srcB", status: "done", logPath: path.join(logDir, "srcB.ndjson") }),
+        baseTask({ id: "srcA", status: "done", logPath: path.join(logDir, SRCA_LOG) }),
+        baseTask({ id: "srcB", status: "done", logPath: path.join(logDir, SRCB_LOG) }),
       ],
       logs: {
-        "srcA.ndjson": JSON.stringify({ type: "text", part: { messageID: "m1", text: "did the A thing" } }) + "\n",
-        "srcB.ndjson": JSON.stringify({ type: "text", part: { messageID: "m1", text: "did the B thing" } }) + "\n",
+        [SRCA_LOG]: JSON.stringify({ type: "text", part: { messageID: "m1", text: DID_A } }) + "\n",
+        [SRCB_LOG]: JSON.stringify({ type: "text", part: { messageID: "m1", text: DID_B } }) + "\n",
       },
       listModelsFn: async () => {
         listModelsCalls++;
@@ -5091,12 +5142,12 @@ describe("summarize()", () => {
     let listModelsCalls = 0;
     const mgr = makeManager({
       tasksFixture: (logDir) => [
-        baseTask({ id: "srcA", status: "done", logPath: path.join(logDir, "srcA.ndjson") }),
-        baseTask({ id: "srcB", status: "done", logPath: path.join(logDir, "srcB.ndjson") }),
+        baseTask({ id: "srcA", status: "done", logPath: path.join(logDir, SRCA_LOG) }),
+        baseTask({ id: "srcB", status: "done", logPath: path.join(logDir, SRCB_LOG) }),
       ],
       logs: {
-        "srcA.ndjson": JSON.stringify({ type: "text", part: { messageID: "m1", text: "did the A thing" } }) + "\n",
-        "srcB.ndjson": JSON.stringify({ type: "text", part: { messageID: "m1", text: "did the B thing" } }) + "\n",
+        [SRCA_LOG]: JSON.stringify({ type: "text", part: { messageID: "m1", text: DID_A } }) + "\n",
+        [SRCB_LOG]: JSON.stringify({ type: "text", part: { messageID: "m1", text: DID_B } }) + "\n",
       },
       listModelsFn: async () => {
         listModelsCalls++;
@@ -5131,12 +5182,12 @@ describe("summarize()", () => {
     let listModelsCalls = 0;
     const mgr = makeManager({
       tasksFixture: (logDir) => [
-        baseTask({ id: "srcA", status: "done", logPath: path.join(logDir, "srcA.ndjson") }),
-        baseTask({ id: "srcB", status: "done", logPath: path.join(logDir, "srcB.ndjson") }),
+        baseTask({ id: "srcA", status: "done", logPath: path.join(logDir, SRCA_LOG) }),
+        baseTask({ id: "srcB", status: "done", logPath: path.join(logDir, SRCB_LOG) }),
       ],
       logs: {
-        "srcA.ndjson": JSON.stringify({ type: "text", part: { messageID: "m1", text: "did the A thing" } }) + "\n",
-        "srcB.ndjson": JSON.stringify({ type: "text", part: { messageID: "m1", text: "did the B thing" } }) + "\n",
+        [SRCA_LOG]: JSON.stringify({ type: "text", part: { messageID: "m1", text: DID_A } }) + "\n",
+        [SRCB_LOG]: JSON.stringify({ type: "text", part: { messageID: "m1", text: DID_B } }) + "\n",
       },
       listModelsFn: async () => {
         listModelsCalls++;
@@ -5187,12 +5238,12 @@ describe("summarize()", () => {
     let listModelsCalls = 0;
     const mgr = makeManager({
       tasksFixture: (logDir) => [
-        baseTask({ id: "srcA", status: "done", logPath: path.join(logDir, "srcA.ndjson") }),
-        baseTask({ id: "srcB", status: "done", logPath: path.join(logDir, "srcB.ndjson") }),
+        baseTask({ id: "srcA", status: "done", logPath: path.join(logDir, SRCA_LOG) }),
+        baseTask({ id: "srcB", status: "done", logPath: path.join(logDir, SRCB_LOG) }),
       ],
       logs: {
-        "srcA.ndjson": JSON.stringify({ type: "text", part: { messageID: "m1", text: "did the A thing" } }) + "\n",
-        "srcB.ndjson": JSON.stringify({ type: "text", part: { messageID: "m1", text: "did the B thing" } }) + "\n",
+        [SRCA_LOG]: JSON.stringify({ type: "text", part: { messageID: "m1", text: DID_A } }) + "\n",
+        [SRCB_LOG]: JSON.stringify({ type: "text", part: { messageID: "m1", text: DID_B } }) + "\n",
       },
       listModelsFn: async () => {
         listModelsCalls++;
@@ -5250,9 +5301,9 @@ describe("summarize()", () => {
   test("summary --mode activity rejects when the summary model is unavailable, instead of masking the failure with local narration", async () => {
     const log = JSON.stringify({ type: "text", part: { messageID: "m1", text: "progress" } });
     const mgr = makeManager({
-      tasksFixture: (logDir) => [baseTask({ id: "source", logPath: path.join(logDir, "source.ndjson") })],
-      logs: { "source.ndjson": log },
-      listModelsFn: () => "openai/gpt-5.6-luna\n",
+      tasksFixture: (logDir) => [baseTask({ id: "source", logPath: path.join(logDir, SOURCE_LOG) })],
+      logs: { [SOURCE_LOG]: log },
+      listModelsFn: () => LUNA_MODEL + "\n",
     });
     await assert.rejects(mgr.summarize("source", { mode: "activity", maxWords: 150 }), /summary model is unavailable/);
   });
@@ -5269,8 +5320,8 @@ describe("summarize()", () => {
       JSON.stringify({ type: "text", part: { messageID: "tail", text: "TAIL_MARKER" } }),
     ].join("\n");
     const mgr = makeManager({
-      tasksFixture: (logDir) => [baseTask({ id: "source", logPath: path.join(logDir, "source.ndjson") })],
-      logs: { "source.ndjson": events },
+      tasksFixture: (logDir) => [baseTask({ id: "source", logPath: path.join(logDir, SOURCE_LOG) })],
+      logs: { [SOURCE_LOG]: events },
       spawnFn: (_command, args) => {
         attachment = args[args.indexOf("-f") + 1];
         return child;
@@ -5310,8 +5361,8 @@ describe("summarize()", () => {
     const child = fakeChild();
     const log = JSON.stringify({ type: "text", part: { messageID: "m1", text: "Inspect the daemon" } });
     const mgr = makeManager({
-      tasksFixture: (logDir) => [baseTask({ id: "source", logPath: path.join(logDir, "source.ndjson") })],
-      logs: { "source.ndjson": log },
+      tasksFixture: (logDir) => [baseTask({ id: "source", logPath: path.join(logDir, SOURCE_LOG) })],
+      logs: { [SOURCE_LOG]: log },
       spawnFn: (_command, args) => {
         firstArgs = args;
         firstSnapshot = JSON.parse(fs.readFileSync(args[args.indexOf("-f") + 1], "utf8"));
@@ -5322,7 +5373,7 @@ describe("summarize()", () => {
     const started = await mgr.summarize("source", { maxWords: 150 });
     assert.ok(started.summaryTask);
 
-    assert.equal(firstArgs.includes("--continue"), false);
+    assert.equal(firstArgs.includes(CONTINUE_FLAG), false);
     assert.equal(firstArgs.includes("--session"), false);
     assert.match(firstSnapshot.narration, /Inspect the daemon/);
     assert.equal(firstSnapshot.narration_is_delta, undefined);
@@ -5334,10 +5385,10 @@ describe("summarize()", () => {
   test("second summarize call continues the prior session and sends only the narration delta (not the full bounded excerpt)", async () => {
     const children = [];
     const captures = [];
-    const initialLog = JSON.stringify({ type: "text", part: { messageID: "m1", text: "Reading the config" } });
+    const initialLog = JSON.stringify({ type: "text", part: { messageID: "m1", text: READING_CONFIG } });
     const mgr = makeManager({
-      tasksFixture: (logDir) => [baseTask({ id: "source", logPath: path.join(logDir, "source.ndjson") })],
-      logs: { "source.ndjson": initialLog },
+      tasksFixture: (logDir) => [baseTask({ id: "source", logPath: path.join(logDir, SOURCE_LOG) })],
+      logs: { [SOURCE_LOG]: initialLog },
       spawnFn: (_command, args) => {
         const child = fakeChild(5000 + children.length);
         children.push(child);
@@ -5349,7 +5400,7 @@ describe("summarize()", () => {
     // First call: no continuation flags, snapshot uses the full bounded excerpt.
     const firstStarted = await mgr.summarize("source", { maxWords: 150 });
     const firstSnapshot = JSON.parse(fs.readFileSync(captures[0].attachment, "utf8"));
-    assert.equal(captures[0].args.includes("--continue"), false);
+    assert.equal(captures[0].args.includes(CONTINUE_FLAG), false);
     assert.equal(captures[0].args.includes("--session"), false);
     assert.match(firstSnapshot.narration, /Reading the config/);
 
@@ -5376,13 +5427,13 @@ describe("summarize()", () => {
     const secondSnapshot = JSON.parse(fs.readFileSync(captures[1].attachment, "utf8"));
 
     assert.ok(secondStarted.summaryTask);
-    assert.equal(secondArgs.includes("--continue"), true);
+    assert.equal(secondArgs.includes(CONTINUE_FLAG), true);
     assert.ok(secondArgs.includes("--session"));
     const sessionIdx = secondArgs.indexOf("--session");
     assert.equal(secondArgs[sessionIdx + 1], "ses_first");
     // Delta-only: includes the newly appended narration, omits the old prefix.
     assert.match(secondSnapshot.narration, /New step completed/);
-    assert.equal(secondSnapshot.narration.includes("Reading the config"), false);
+    assert.equal(secondSnapshot.narration.includes(READING_CONFIG), false);
     assert.equal(secondSnapshot.narration_is_delta, true);
     assert.equal(secondSnapshot.previous_summary, "Read the config.");
 
@@ -5394,10 +5445,10 @@ describe("summarize()", () => {
   test("continue-fails-so-fresh: summarizeActivity detects a session-id mismatch and retries fresh, leaving the cache clear of the stale id", async () => {
     const captures = [];
     const children = [];
-    const initialLog = JSON.stringify({ type: "text", part: { messageID: "m1", text: "Reading the config" } }) + "\n";
+    const initialLog = JSON.stringify({ type: "text", part: { messageID: "m1", text: READING_CONFIG } }) + "\n";
     const mgr = makeManager({
-      tasksFixture: (logDir) => [baseTask({ id: "source", logPath: path.join(logDir, "source.ndjson") })],
-      logs: { "source.ndjson": initialLog },
+      tasksFixture: (logDir) => [baseTask({ id: "source", logPath: path.join(logDir, SOURCE_LOG) })],
+      logs: { [SOURCE_LOG]: initialLog },
       spawnFn: (_command, args) => {
         captures.push({ args, attachment: args[args.indexOf("-f") + 1] });
         const child = fakeChild(7000 + captures.length);
@@ -5411,7 +5462,7 @@ describe("summarize()", () => {
     // session id and the source-log watermark at summarize time. The watermark
     // is the byte size of the source log right now, so summarizeTask's
     // rotation check (`watermark > currentSize`) won't kick in and discard it.
-    const sourceLogPath = path.join(fs.realpathSync(mgr.paths.LOG_DIR), "source.ndjson");
+    const sourceLogPath = path.join(fs.realpathSync(mgr.paths.LOG_DIR), SOURCE_LOG);
     const initialSize = fs.statSync(sourceLogPath).size;
     mgr.activityCache.setSummarySessionId("source", "ses_cached");
     mgr.activityCache.setLastSummarizedWatermark("source", initialSize);
@@ -5431,7 +5482,7 @@ describe("summarize()", () => {
 
     // Wait for spawn #1 to land (synchronous inside summarizeTask).
     while (captures.length < 1) await new Promise((resolve) => setImmediate(resolve));
-    assert.ok(captures[0].args.includes("--continue"));
+    assert.ok(captures[0].args.includes(CONTINUE_FLAG));
     assert.ok(captures[0].args.includes("--session"));
     assert.equal(captures[0].args[captures[0].args.indexOf("--session") + 1], "ses_cached");
     // Spawn #1's snapshot is a delta (we have a prior watermark and growth).
@@ -5446,7 +5497,7 @@ describe("summarize()", () => {
 
     // Spawn #2 is the fresh retry: no --continue, no --session, full bounded excerpt.
     const retryArgs = captures[1].args;
-    assert.equal(retryArgs.includes("--continue"), false);
+    assert.equal(retryArgs.includes(CONTINUE_FLAG), false);
     assert.equal(retryArgs.includes("--session"), false);
     const retrySnapshot = JSON.parse(fs.readFileSync(captures[1].attachment, "utf8"));
     assert.equal(retrySnapshot.narration_is_delta, undefined);
@@ -5477,8 +5528,8 @@ describe("summarize()", () => {
     const child = fakeChild();
     const initialLog = JSON.stringify({ type: "text", part: { messageID: "m1", text: "Investigating issue" } }) + "\n";
     const mgr = makeManager({
-      tasksFixture: (logDir) => [baseTask({ id: "source", logPath: path.join(logDir, "source.ndjson") })],
-      logs: { "source.ndjson": initialLog },
+      tasksFixture: (logDir) => [baseTask({ id: "source", logPath: path.join(logDir, SOURCE_LOG) })],
+      logs: { [SOURCE_LOG]: initialLog },
       spawnFn: () => child,
     });
 
@@ -5566,11 +5617,11 @@ describe("caller-env union (sanitizedEnvironment)", () => {
     delete process.env.AXI_TEST_CALLER_VAR;
     t.after(() => delete process.env.AXI_TEST_CALLER_VAR);
     let capturedOpts = null;
-    const mgr = makeManager({ spawnFn: (cmd, args, opts) => { capturedOpts = opts; return fakeChild(); } });
+    const mgr = makeManager({ spawnFn: (_cmd, _args, opts) => { capturedOpts = opts; return fakeChild(); } });
 
-    mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), env: { AXI_TEST_CALLER_VAR: "from-caller" } });
+    mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), env: { AXI_TEST_CALLER_VAR: FROM_CALLER } });
 
-    assert.equal(capturedOpts.env.AXI_TEST_CALLER_VAR, "from-caller");
+    assert.equal(capturedOpts.env.AXI_TEST_CALLER_VAR, FROM_CALLER);
   });
 
   test("caller env cannot override the fixed excluded set of daemon-controlled vars", (t) => {
@@ -5578,7 +5629,7 @@ describe("caller-env union (sanitizedEnvironment)", () => {
     for (const name of excluded) process.env[name] = `real-${name}`;
     t.after(() => { for (const name of excluded) delete process.env[name]; });
     let capturedOpts = null;
-    const mgr = makeManager({ spawnFn: (cmd, args, opts) => { capturedOpts = opts; return fakeChild(); } });
+    const mgr = makeManager({ spawnFn: (_cmd, _args, opts) => { capturedOpts = opts; return fakeChild(); } });
 
     const maliciousEnv = Object.fromEntries(excluded.map((name) => [name, `malicious-${name}`]));
     mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), env: maliciousEnv });
@@ -5588,10 +5639,10 @@ describe("caller-env union (sanitizedEnvironment)", () => {
     }
   });
 
-  test("a denylisted name is stripped even when the caller's env explicitly sets it", (t) => {
+  test("a denylisted name is stripped even when the caller's env explicitly sets it", (_t) => {
     let capturedOpts = null;
     const mgr = makeManager({
-      spawnFn: (cmd, args, opts) => { capturedOpts = opts; return fakeChild(); },
+      spawnFn: (_cmd, _args, opts) => { capturedOpts = opts; return fakeChild(); },
       envDenylistSpec: "AXI_TEST_DENIED_VAR",
     });
 
@@ -5600,10 +5651,10 @@ describe("caller-env union (sanitizedEnvironment)", () => {
     assert.equal("AXI_TEST_DENIED_VAR" in capturedOpts.env, false);
   });
 
-  test("TASKFERRY_CHILD survives even when denylisted", (t) => {
+  test("TASKFERRY_CHILD survives even when denylisted", (_t) => {
     let capturedOpts = null;
     const mgr = makeManager({
-      spawnFn: (cmd, args, opts) => { capturedOpts = opts; return fakeChild(); },
+      spawnFn: (_cmd, _args, opts) => { capturedOpts = opts; return fakeChild(); },
       envDenylistSpec: "TASKFERRY_CHILD",
     });
 
@@ -5654,7 +5705,7 @@ describe("caller-env union (sanitizedEnvironment)", () => {
     process.env.AXI_TEST_AMBIENT_ONLY = "ambient-value";
     t.after(() => delete process.env.AXI_TEST_AMBIENT_ONLY);
     let capturedOpts = null;
-    const mgr = makeManager({ spawnFn: (cmd, args, opts) => { capturedOpts = opts; return fakeChild(); } });
+    const mgr = makeManager({ spawnFn: (_cmd, _args, opts) => { capturedOpts = opts; return fakeChild(); } });
 
     mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
 
@@ -6020,12 +6071,12 @@ describe("caller-env union (sanitizedEnvironment)", () => {
     assert.equal(closeCalls, 1);
   });
 
-  test("summaryEnvironment strips OPENCODE_CONFIG* even when the caller's env explicitly sets one", async (t) => {
+  test("summaryEnvironment strips OPENCODE_CONFIG* even when the caller's env explicitly sets one", async (_t) => {
     let capturedEnv = null;
     const mgr = makeManager({
-      tasksFixture: (logDir) => [{ ...baseTask({ id: "src1", status: "done", logPath: path.join(logDir, "src1.ndjson") }) }],
-      logs: { "src1.ndjson": JSON.stringify({ type: "text", part: { messageID: "m1", text: "did the thing" } }) + "\n" },
-      spawnFn: (cmd, args, opts) => { capturedEnv = opts.env; return fakeChild(); },
+      tasksFixture: (logDir) => [{ ...baseTask({ id: "src1", status: "done", logPath: path.join(logDir, SRC1_LOG) }) }],
+      logs: { [SRC1_LOG]: JSON.stringify({ type: "text", part: { messageID: "m1", text: DID_THING } }) + "\n" },
+      spawnFn: (_cmd, _args, opts) => { capturedEnv = opts.env; return fakeChild(); },
       listModelsFn: () => `${DEFAULT_SUMMARY_MODEL}\n`,
     });
 
@@ -6041,7 +6092,7 @@ describe("caller-env union (sanitizedEnvironment)", () => {
     let capturedOpts = null;
     const child = fakeChild();
     const mgr = makeManager({
-      spawnFn: (cmd, args, opts) => { capturedOpts = opts; return child; },
+      spawnFn: (_cmd, _args, opts) => { capturedOpts = opts; return child; },
       sandboxEnabled: true,
       overlayEnabled: true,
       checkBwrapAvailableFn: () => ({ checked: true, available: true }),
@@ -6052,7 +6103,7 @@ describe("caller-env union (sanitizedEnvironment)", () => {
     const advisorPromise = mgr.advisor({
       prompt: "hi",
       directory: os.tmpdir(),
-      model: "openai/gpt-5.6-sol",
+      model: SOL_MODEL,
       env: { AXI_TEST_ADVISOR_CALLER_VAR: "from-advisor-caller" },
     });
     child.emit("exit", 1, null);
@@ -6067,9 +6118,9 @@ describe("caller-env union (sanitizedEnvironment)", () => {
     t.after(() => delete process.env.AXI_TEST_REPORT_CALLER_VAR);
     let capturedEnv = null;
     const mgr = makeManager({
-      tasksFixture: (logDir) => [{ ...baseTask({ id: "src1", status: "done", logPath: path.join(logDir, "src1.ndjson") }) }],
-      logs: { "src1.ndjson": JSON.stringify({ type: "text", part: { messageID: "m1", text: "did the thing" } }) + "\n" },
-      spawnFn: (cmd, args, opts) => { capturedEnv = opts.env; return fakeChild(); },
+      tasksFixture: (logDir) => [{ ...baseTask({ id: "src1", status: "done", logPath: path.join(logDir, SRC1_LOG) }) }],
+      logs: { [SRC1_LOG]: JSON.stringify({ type: "text", part: { messageID: "m1", text: DID_THING } }) + "\n" },
+      spawnFn: (_cmd, _args, opts) => { capturedEnv = opts.env; return fakeChild(); },
       listModelsFn: () => `${DEFAULT_SUMMARY_MODEL}\n`,
     });
 
@@ -6088,7 +6139,7 @@ describe("caller-env union (sanitizedEnvironment)", () => {
     let spawnCount = 0;
     const mgr = makeManager({
       maxConcurrentTasks: 1,
-      spawnFn: (cmd, args, opts) => {
+      spawnFn: (_cmd, _args, opts) => {
         spawnCount++;
         if (spawnCount === 1) return occupyingChild;
         secondCapturedOpts = opts;
@@ -6097,9 +6148,9 @@ describe("caller-env union (sanitizedEnvironment)", () => {
     });
 
     // Occupy the only concurrency slot.
-    mgr.dispatch({ prompt: "occupying task", directory: os.tmpdir() });
+    mgr.dispatch({ prompt: OCCUPYING_TASK, directory: os.tmpdir() });
     // This one queues behind the slot, with its own env captured now.
-    mgr.dispatch({ prompt: "queued task", directory: os.tmpdir(), env: { AXI_TEST_MARKER: "captured-at-dispatch-time" } });
+    mgr.dispatch({ prompt: "queued task", directory: os.tmpdir(), env: { AXI_TEST_MARKER: CAPTURED_DISPATCH } });
 
     // Simulate ambient env changing while the second dispatch sits queued.
     process.env.AXI_TEST_LATE_AMBIENT = "set-after-queuing";
@@ -6109,7 +6160,7 @@ describe("caller-env union (sanitizedEnvironment)", () => {
     await new Promise((resolve) => setTimeout(resolve, 20));
 
     assert.ok(secondCapturedOpts, "the queued task should have spawned");
-    assert.equal(secondCapturedOpts.env.AXI_TEST_MARKER, "captured-at-dispatch-time", "caller env is frozen at dispatch() time");
+    assert.equal(secondCapturedOpts.env.AXI_TEST_MARKER, CAPTURED_DISPATCH, "caller env is frozen at dispatch() time");
     assert.equal(secondCapturedOpts.env.AXI_TEST_LATE_AMBIENT, "set-after-queuing", "the daemon's own ambient env is still read fresh at spawn time");
   });
 
@@ -6135,7 +6186,7 @@ describe("caller-env union (sanitizedEnvironment)", () => {
     let spawnCount = 0;
     const mgr = makeManager({
       maxConcurrentTasks: 1,
-      spawnFn: (cmd, args, opts) => {
+      spawnFn: (_cmd, _args, opts) => {
         spawnCount++;
         if (spawnCount === 1) return occupyingChild;
         secondCapturedOpts = opts;
@@ -6143,10 +6194,10 @@ describe("caller-env union (sanitizedEnvironment)", () => {
       },
     });
 
-    mgr.dispatch({ prompt: "occupying task", directory: os.tmpdir() });
+    mgr.dispatch({ prompt: OCCUPYING_TASK, directory: os.tmpdir() });
     // Hold a reference to the caller's original env object after dispatch()
     // returns -- the queued launch must NOT observe these mutations.
-    const callerEnv = { AXI_TEST_QUEUE_REASSIGN: "captured-at-dispatch-time" };
+    const callerEnv = { AXI_TEST_QUEUE_REASSIGN: CAPTURED_DISPATCH };
     mgr.dispatch({ prompt: "queued task", directory: os.tmpdir(), env: callerEnv });
 
     callerEnv.AXI_TEST_QUEUE_REASSIGN = "mutated-after-queue";
@@ -6156,7 +6207,7 @@ describe("caller-env union (sanitizedEnvironment)", () => {
     await new Promise((resolve) => setTimeout(resolve, 20));
 
     assert.ok(secondCapturedOpts, "the queued task should have spawned");
-    assert.equal(secondCapturedOpts.env.AXI_TEST_QUEUE_REASSIGN, "captured-at-dispatch-time", "the dispatch-time value must reach the spawned child, not the post-queue mutated value");
+    assert.equal(secondCapturedOpts.env.AXI_TEST_QUEUE_REASSIGN, CAPTURED_DISPATCH, "the dispatch-time value must reach the spawned child, not the post-queue mutated value");
     assert.equal("AXI_TEST_QUEUE_ADDED" in secondCapturedOpts.env, false, "a var added after queue must not reach the spawned child");
   });
 
@@ -6178,10 +6229,10 @@ describe("caller-env union (sanitizedEnvironment)", () => {
     let spawnCount = 0;
     const mgr = makeManager({
       maxConcurrentTasks: 1,
-      tasksFixture: (logDir) => [{ ...baseTask({ id: "src1", status: "done", logPath: path.join(logDir, "src1.ndjson") }) }],
-      logs: { "src1.ndjson": JSON.stringify({ type: "text", part: { messageID: "m1", text: "did the thing" } }) + "\n" },
+      tasksFixture: (logDir) => [{ ...baseTask({ id: "src1", status: "done", logPath: path.join(logDir, SRC1_LOG) }) }],
+      logs: { [SRC1_LOG]: JSON.stringify({ type: "text", part: { messageID: "m1", text: DID_THING } }) + "\n" },
       listModelsFn: () => `${DEFAULT_SUMMARY_MODEL}\n`,
-      spawnFn: (cmd, args, opts) => {
+      spawnFn: (_cmd, _args, opts) => {
         spawnCount++;
         if (spawnCount === 1) return occupyingChild;
         summaryCapturedOpts = opts;
@@ -6190,7 +6241,7 @@ describe("caller-env union (sanitizedEnvironment)", () => {
     });
 
     // Occupy the only concurrency slot.
-    mgr.dispatch({ prompt: "occupying task", directory: os.tmpdir() });
+    mgr.dispatch({ prompt: OCCUPYING_TASK, directory: os.tmpdir() });
 
     // Request the summary -- this queues it (concurrency slot is full).
     // The env snapshot is captured here, but summaryEnvironment(env) is NOT
@@ -6217,7 +6268,7 @@ describe("caller-env union (sanitizedEnvironment)", () => {
     });
     let capturedOpts = null;
     const mgr = makeManager({
-      spawnFn: (cmd, args, opts) => { capturedOpts = opts; return fakeChild(); },
+      spawnFn: (_cmd, _args, opts) => { capturedOpts = opts; return fakeChild(); },
       envDenylistSpec: "AXI_TEST_DENY_AMBIENT,AXI_TEST_DENY_CALLER",
     });
 
@@ -6225,13 +6276,13 @@ describe("caller-env union (sanitizedEnvironment)", () => {
       TASKFERRY_STATE_DIR: "malicious-state",
       AXI_TEST_DENY_AMBIENT: "caller-overrides-ambient",
       AXI_TEST_DENY_CALLER: "caller-only",
-      AXI_TEST_KEEP: "from-caller",
+      AXI_TEST_KEEP: FROM_CALLER,
     } });
 
     assert.equal(capturedOpts.env.TASKFERRY_STATE_DIR, "real-state", "excluded name keeps the daemon's ambient value even when the caller sets it");
     assert.equal("AXI_TEST_DENY_AMBIENT" in capturedOpts.env, false, "denylist strips a name that came in from the daemon's own ambient env");
     assert.equal("AXI_TEST_DENY_CALLER" in capturedOpts.env, false, "denylist strips a name the caller set on the env param");
-    assert.equal(capturedOpts.env.AXI_TEST_KEEP, "from-caller", "non-excluded, non-denylist caller names overlay the ambient env");
+    assert.equal(capturedOpts.env.AXI_TEST_KEEP, FROM_CALLER, "non-excluded, non-denylist caller names overlay the ambient env");
   });
 
   test("the exclusion set is sourced from paths.js's plumbing export -- any new TASKFERRY_* plumbing var added there lands here automatically", (t) => {
@@ -6252,7 +6303,7 @@ describe("caller-env union (sanitizedEnvironment)", () => {
       }
     });
     let capturedOpts = null;
-    const mgr = makeManager({ spawnFn: (cmd, args, opts) => { capturedOpts = opts; return fakeChild(); } });
+    const mgr = makeManager({ spawnFn: (_cmd, _args, opts) => { capturedOpts = opts; return fakeChild(); } });
 
     mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), env: {
       TASKFERRY_STATE_DIR: "malicious-state",
@@ -6312,7 +6363,7 @@ describe("caller-env union (sanitizedEnvironment)", () => {
     let spawnCalled = false;
     const mgr = makeManager({ spawnFn: () => { spawnCalled = true; return fakeChild(); } });
 
-    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), env: { AXI_TEST_UNDEFINED: undefined } });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), env: { AXI_TEST_UNDEFINED: void 0 } });
 
     assert.equal(mgr.status(dispatched.id).status, "crashed");
     assert.match(mgr.status(dispatched.id).spawnError, /env value for "AXI_TEST_UNDEFINED" must be a string, got undefined/);
@@ -6328,14 +6379,14 @@ describe("startTask() writes stdout through executor.normalizeLogEvent (Task 7: 
       id: "opencode",
       taskIdPrefix: "oc",
       errorBucketPrefix: "opencode",
-      defaultModel: "openai/gpt-5.6-luna",
-      defaultSummaryModel: "opencode/mimo-v2.5-free",
+      defaultModel: LUNA_MODEL,
+      defaultSummaryModel: MIMO_MODEL,
       binaryName: "opencode",
       listModelsFn: async () => "",
       buildSpawnArgs: () => ["run", "--dir", process.cwd(), "--auto", "--format", "json", "-m", "x", "--", "hi"],
       buildSummaryPrompt: () => "",
       normalizeLogEvent: (evt) => (evt.type === "drop-me" ? null : { ...evt, normalized: true }),
-      sandboxAuthFile: () => ({ extraRoBinds: [], sandboxedDataHome: "/tmp/unused", sandboxEnv: {} }),
+      sandboxAuthFile: () => ({ extraRoBinds: [], sandboxedDataHome: UNUSED_TMP, sandboxEnv: {} }),
     };
     const mgr = makeManager({ spawnFn, defaultExecutor: fakeExecutor });
     const dispatched = mgr.dispatch({ prompt: "hi", directory: process.cwd() });
@@ -6359,22 +6410,22 @@ describe("startTask() writes stdout through executor.normalizeLogEvent (Task 7: 
       id: "opencode",
       taskIdPrefix: "oc",
       errorBucketPrefix: "opencode",
-      defaultModel: "openai/gpt-5.6-luna",
-      defaultSummaryModel: "opencode/mimo-v2.5-free",
+      defaultModel: LUNA_MODEL,
+      defaultSummaryModel: MIMO_MODEL,
       binaryName: "opencode",
       listModelsFn: async () => "",
       buildSpawnArgs: () => ["run", "--dir", process.cwd(), "--auto", "--format", "json", "-m", "x", "--", "hi"],
       buildSummaryPrompt: () => "",
       normalizeLogEvent: (parsed) => parsed, // identity, so dropped means JSON.parse failed
-      sandboxAuthFile: () => ({ extraRoBinds: [], sandboxedDataHome: "/tmp/unused", sandboxEnv: {} }),
+      sandboxAuthFile: () => ({ extraRoBinds: [], sandboxedDataHome: UNUSED_TMP, sandboxEnv: {} }),
     };
     const mgr = makeManager({ spawnFn, defaultExecutor: fakeExecutor });
     const dispatched = mgr.dispatch({ prompt: "hi", directory: process.cwd() });
     const logPath = mgr.status(dispatched.id).logPath;
-    child.stdout.emit("data", Buffer.from('No API key found for openai.\n'));
+    child.stdout.emit("data", Buffer.from(NO_API_KEY_FOUND + "\n"));
     child.emit("exit", 0, null);
     const contents = fs.readFileSync(logPath, "utf8");
-    assert.ok(contents.includes("No API key found for openai."));
+    assert.ok(contents.includes(NO_API_KEY_FOUND));
   });
 
   test("a non-empty trailing partial line at process end is preserved verbatim (no terminating newline required)", () => {
@@ -6384,14 +6435,14 @@ describe("startTask() writes stdout through executor.normalizeLogEvent (Task 7: 
       id: "opencode",
       taskIdPrefix: "oc",
       errorBucketPrefix: "opencode",
-      defaultModel: "openai/gpt-5.6-luna",
-      defaultSummaryModel: "opencode/mimo-v2.5-free",
+      defaultModel: LUNA_MODEL,
+      defaultSummaryModel: MIMO_MODEL,
       binaryName: "opencode",
       listModelsFn: async () => "",
       buildSpawnArgs: () => ["run", "--dir", process.cwd(), "--auto", "--format", "json", "-m", "x", "--", "hi"],
       buildSummaryPrompt: () => "",
       normalizeLogEvent: (parsed) => parsed,
-      sandboxAuthFile: () => ({ extraRoBinds: [], sandboxedDataHome: "/tmp/unused", sandboxEnv: {} }),
+      sandboxAuthFile: () => ({ extraRoBinds: [], sandboxedDataHome: UNUSED_TMP, sandboxEnv: {} }),
     };
     const mgr = makeManager({ spawnFn, defaultExecutor: fakeExecutor });
     const dispatched = mgr.dispatch({ prompt: "hi", directory: process.cwd() });
@@ -6411,14 +6462,14 @@ describe("startTask() spawns the executor's CLI binary, not a hardcoded command 
       id: "pi",
       taskIdPrefix: "pi",
       errorBucketPrefix: "pi",
-      defaultModel: "minimax/MiniMax-M2.7",
-      defaultSummaryModel: "minimax/MiniMax-M2.7",
+      defaultModel: MINIMAX_MODEL,
+      defaultSummaryModel: MINIMAX_MODEL,
       binaryName: "pi",
       listModelsFn: async () => "",
       buildSpawnArgs: (ctx) => ["--model", ctx.model, "--mode", "json", "-p", ctx.prompt],
       buildSummaryPrompt: () => "",
       normalizeLogEvent: (parsed) => parsed,
-      sandboxAuthFile: () => ({ extraRoBinds: [], sandboxedDataHome: "/tmp/unused", sandboxEnv: {} }),
+      sandboxAuthFile: () => ({ extraRoBinds: [], sandboxedDataHome: UNUSED_TMP, sandboxEnv: {} }),
     };
     const mgr = makeManager({
       spawnFn: (cmd, args, opts) => { captured = { cmd, args, opts }; return fakeChild(); },
@@ -6426,7 +6477,7 @@ describe("startTask() spawns the executor's CLI binary, not a hardcoded command 
     });
     mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
     assert.equal(captured.cmd, "pi");
-    assert.deepEqual(captured.args, ["--model", "minimax/MiniMax-M2.7", "--mode", "json", "-p", "hi"]);
+    assert.deepEqual(captured.args, ["--model", MINIMAX_MODEL, "--mode", "json", "-p", "hi"]);
   });
 
   test("a default (pi) dispatch still spawns `pi`", () => {
@@ -6451,19 +6502,19 @@ describe("startTask() merges executor.sandboxAuthFile().sandboxEnv into spawnEnv
       cacheDir,
     });
     mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), executor: "opencode" });
-    assert.equal(captured.opts.env.XDG_DATA_HOME, path.join(cacheDir, "opencode-data"));
+    assert.equal(captured.opts.env.XDG_DATA_HOME, path.join(cacheDir, OPENCODE_DATA));
   });
 
   test("pi's sandboxEnv rewrites PI_CODING_AGENT_DIR, not XDG_DATA_HOME, and the auth bind destination matches", () => {
     let captured = null;
-    const cacheDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-cache-pi-"));
+    const cacheDir = fs.mkdtempSync(path.join(os.tmpdir(), AXI_TASKS_CACHE_PI));
     const realAuthFile = path.join(os.tmpdir(), "fake-pi-home", "auth.json");
     const fakePi = {
       id: "pi",
       taskIdPrefix: "pi",
       errorBucketPrefix: "pi",
-      defaultModel: "minimax/MiniMax-M2.7",
-      defaultSummaryModel: "minimax/MiniMax-M2.7",
+      defaultModel: MINIMAX_MODEL,
+      defaultSummaryModel: MINIMAX_MODEL,
       binaryName: "pi",
       listModelsFn: async () => "",
       buildSpawnArgs: (ctx) => ["--model", ctx.model, "--mode", "json", "-p", ctx.prompt],
@@ -6473,8 +6524,8 @@ describe("startTask() merges executor.sandboxAuthFile().sandboxEnv into spawnEnv
         const sandboxedDataHome = path.join(dataDir, "pi-data");
         return {
           extraRoBinds: existsFn(realAuthFile) ? [/** @type {[string, string]} */ ([realAuthFile, path.join(sandboxedDataHome, "auth.json")])] : [],
-          sandboxedDataHome,
           sandboxEnv: { PI_CODING_AGENT_DIR: sandboxedDataHome },
+          sandboxedDataHome,
         };
       },
     };
@@ -6484,8 +6535,8 @@ describe("startTask() merges executor.sandboxAuthFile().sandboxEnv into spawnEnv
       sandboxEnabled: true,
       checkBwrapAvailableFn: () => ({ checked: true, available: true }),
       platform: "linux",
-      cacheDir,
       existsFn: (p) => p === realAuthFile,
+      cacheDir,
     });
     mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
     // The pi binary was launched inside bwrap
@@ -6513,14 +6564,14 @@ describe("startTask() merges executor.sandboxAuthFile().sandboxEnv into spawnEnv
 
   test("a pi dispatch's sandboxAuthFile call is invoked with the dispatch's sessionId + launchDirectory, so the bind can scope to a single session file", () => {
     let capturedArgs = null;
-    const cacheDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-cache-pi-"));
+    const cacheDir = fs.mkdtempSync(path.join(os.tmpdir(), AXI_TASKS_CACHE_PI));
     const realAuthFile = path.join(os.tmpdir(), "fake-pi-home", "auth.json");
     const fakePi = {
       id: "pi",
       taskIdPrefix: "pi",
       errorBucketPrefix: "pi",
-      defaultModel: "minimax/MiniMax-M2.7",
-      defaultSummaryModel: "minimax/MiniMax-M2.7",
+      defaultModel: MINIMAX_MODEL,
+      defaultSummaryModel: MINIMAX_MODEL,
       binaryName: "pi",
       listModelsFn: async () => "",
       buildSpawnArgs: (ctx) => ["--model", ctx.model, "--mode", "json", "-p", ctx.prompt],
@@ -6532,8 +6583,8 @@ describe("startTask() merges executor.sandboxAuthFile().sandboxEnv into spawnEnv
         return {
           extraRoBinds: [],
           extraRwPairBinds: [],
-          sandboxedDataHome,
           sandboxEnv: { PI_CODING_AGENT_DIR: sandboxedDataHome },
+          sandboxedDataHome,
         };
       },
     };
@@ -6545,8 +6596,8 @@ describe("startTask() merges executor.sandboxAuthFile().sandboxEnv into spawnEnv
       sandboxEnabled: true,
       checkBwrapAvailableFn: () => ({ checked: true, available: true }),
       platform: "linux",
-      cacheDir,
       existsFn: (p) => p === realAuthFile,
+      cacheDir,
     });
     mgr.dispatch({ prompt: "resume me", directory, sessionId });
     assert.notEqual(capturedArgs, null, "sandboxAuthFile must be invoked for a sandboxed dispatch");
@@ -6558,13 +6609,13 @@ describe("startTask() merges executor.sandboxAuthFile().sandboxEnv into spawnEnv
 
   test("a fresh (non-resume) pi dispatch does not pass a sessionId to sandboxAuthFile, so no sessions bind is added", () => {
     let capturedArgs = null;
-    const cacheDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-cache-pi-"));
+    const cacheDir = fs.mkdtempSync(path.join(os.tmpdir(), AXI_TASKS_CACHE_PI));
     const fakePi = {
       id: "pi",
       taskIdPrefix: "pi",
       errorBucketPrefix: "pi",
-      defaultModel: "minimax/MiniMax-M2.7",
-      defaultSummaryModel: "minimax/MiniMax-M2.7",
+      defaultModel: MINIMAX_MODEL,
+      defaultSummaryModel: MINIMAX_MODEL,
       binaryName: "pi",
       listModelsFn: async () => "",
       buildSpawnArgs: (ctx) => ["--model", ctx.model, "--mode", "json", "-p", ctx.prompt],
@@ -6586,8 +6637,8 @@ describe("startTask() merges executor.sandboxAuthFile().sandboxEnv into spawnEnv
       sandboxEnabled: true,
       checkBwrapAvailableFn: () => ({ checked: true, available: true }),
       platform: "linux",
-      cacheDir,
       existsFn: () => false,
+      cacheDir,
     });
     mgr.dispatch({ prompt: "fresh", directory: os.tmpdir() });
     assert.notEqual(capturedArgs, null);
@@ -6609,7 +6660,7 @@ describe("startTask() merges executor.sandboxAuthFile().sandboxEnv into spawnEnv
     // realSessionsDir, even when pi's own sandboxAuthFile decides to
     // bind a single file.
     let captured = null;
-    const cacheDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-cache-pi-"));
+    const cacheDir = fs.mkdtempSync(path.join(os.tmpdir(), AXI_TASKS_CACHE_PI));
     const realSessionsDir = path.join(os.homedir(), ".pi", "agent", "sessions");
     const realSessionFile = path.join(realSessionsDir, "--tmp--", "2026-07-23T21-42-41-761Z_019f90ea-1234-70e0-98dc-6847db316eb4.jsonl");
     const realAuthFile = path.join(os.homedir(), ".pi", "agent", "auth.json");
@@ -6617,8 +6668,8 @@ describe("startTask() merges executor.sandboxAuthFile().sandboxEnv into spawnEnv
       id: "pi",
       taskIdPrefix: "pi",
       errorBucketPrefix: "pi",
-      defaultModel: "minimax/MiniMax-M2.7",
-      defaultSummaryModel: "minimax/MiniMax-M2.7",
+      defaultModel: MINIMAX_MODEL,
+      defaultSummaryModel: MINIMAX_MODEL,
       binaryName: "pi",
       listModelsFn: async () => "",
       buildSpawnArgs: (ctx) => ["--model", ctx.model, "--mode", "json", "-p", ctx.prompt],
@@ -6645,9 +6696,9 @@ describe("startTask() merges executor.sandboxAuthFile().sandboxEnv into spawnEnv
         }
         return {
           extraRoBinds: existsFn(realAuthFile) ? [[realAuthFile, path.join(sandboxedDataHome, "auth.json")]] : [],
+          sandboxEnv: { PI_CODING_AGENT_DIR: sandboxedDataHome },
           extraRwPairBinds,
           sandboxedDataHome,
-          sandboxEnv: { PI_CODING_AGENT_DIR: sandboxedDataHome },
         };
       },
     };
@@ -6658,13 +6709,13 @@ describe("startTask() merges executor.sandboxAuthFile().sandboxEnv into spawnEnv
       sandboxEnabled: true,
       checkBwrapAvailableFn: () => ({ checked: true, available: true }),
       platform: "linux",
-      cacheDir,
       // Pretend the host has both a sessions/ dir and the specific file.
       existsFn: (p) => p === realSessionsDir || p === realAuthFile,
       statFn: (p) => (p === realSessionsDir ? { isDirectory: () => true } : null),
       readdirFn: (p) => (p === path.join(realSessionsDir, "--tmp--") ? [path.basename(realSessionFile)] : []),
+      cacheDir,
     });
-    mgr.dispatch({ prompt: "resume", directory, sessionId: "019f90ea-1234-70e0-98dc-6847db316eb4" });
+    mgr.dispatch({ prompt: "resume", sessionId: "019f90ea-1234-70e0-98dc-6847db316eb4", directory });
     assert.equal(captured.cmd, "bwrap");
     // Look for a --bind whose src is the whole realSessionsDir (not the
     // single file). Pre-fix this would appear; post-fix it must not.
@@ -6683,19 +6734,19 @@ describe("startTask() merges executor.sandboxAuthFile().sandboxEnv into spawnEnv
 });
 
 describe("provider-failure classification is task-aware via task.executorId (Task 7: end-to-end pi bucket)", () => {
-  test("a pi executor task receiving plain 'No API key found for openai.' settles with failureReason: 'pi_authentication_failed'", async () => {
+  test("a pi executor task receiving plain NO_API_KEY_FOUND settles with failureReason: 'pi_authentication_failed'", async () => {
     const fakePi = {
       id: "pi",
       taskIdPrefix: "pi",
       errorBucketPrefix: "pi",
-      defaultModel: "minimax/MiniMax-M2.7",
-      defaultSummaryModel: "minimax/MiniMax-M2.7",
+      defaultModel: MINIMAX_MODEL,
+      defaultSummaryModel: MINIMAX_MODEL,
       binaryName: "pi",
       listModelsFn: async () => "",
-      buildSpawnArgs: () => ["--model", "minimax/MiniMax-M2.7", "--mode", "json", "-p", "hi"],
+      buildSpawnArgs: () => ["--model", MINIMAX_MODEL, "--mode", "json", "-p", "hi"],
       buildSummaryPrompt: () => "",
       normalizeLogEvent: (parsed) => parsed,
-      sandboxAuthFile: () => ({ extraRoBinds: [], sandboxedDataHome: "/tmp/unused", sandboxEnv: {} }),
+      sandboxAuthFile: () => ({ extraRoBinds: [], sandboxedDataHome: UNUSED_TMP, sandboxEnv: {} }),
     };
     const child = fakeChild(9119);
     const mgr = makeManager({
@@ -6709,13 +6760,13 @@ describe("provider-failure classification is task-aware via task.executorId (Tas
     // pi exits 0 after printing the plain-text auth failure on stdout;
     // startTask's stdout handler must preserve that line so the watcher
     // can classify it.
-    child.stdout.emit("data", Buffer.from("No API key found for openai.\n"));
+    child.stdout.emit("data", Buffer.from(NO_API_KEY_FOUND + "\n"));
     child.emit("exit", 0, null);
     // Watcher is async -- give one tick so classifyProviderFailure runs.
     await new Promise((r) => setTimeout(r, 20));
     const s = mgr.status(dispatched.id, { full: true });
     assert.equal(s.failureReason, "pi_authentication_failed");
-    assert.equal(s.failureDetail, "No API key found for openai.");
+    assert.equal(s.failureDetail, NO_API_KEY_FOUND);
   });
 });
 
@@ -6737,13 +6788,13 @@ describe("classifyProviderFailure() honors the binding compatibility contract (T
     // come back as the historical string every doc, watcher, and CLI
     // output is keyed off (no `opencode_` prefix).
     const cases = [
-      { line: JSON.stringify({ type: "error", message: "rate_limit_exceeded: please retry after 60s" }), bucket: "rate_limited" },
-      { line: JSON.stringify({ type: "error", message: "insufficient_quota: out of credits" }), bucket: "payment_required" },
-      { line: JSON.stringify({ type: "error", message: "Unauthorized: invalid API key" }), bucket: "authentication_failed" },
+      { line: JSON.stringify({ type: "error", message: RATE_LIMIT_ERROR }), bucket: "rate_limited" },
+      { line: JSON.stringify({ type: "error", message: QUOTA_ERROR }), bucket: "payment_required" },
+      { line: JSON.stringify({ type: "error", message: UNAUTHORIZED_SHORT }), bucket: "authentication_failed" },
       // Raw non-JSON line that matches a known bucket (e.g. a future pi
       // shape leaking into an opencode task -- the prefix-stripping rule
       // must apply on this branch too).
-      { line: "No API key found for openai.", bucket: "authentication_failed" },
+      { line: NO_API_KEY_FOUND, bucket: "authentication_failed" },
     ];
     for (const { line, bucket } of cases) {
       const child = fakeChild(9300 + cases.indexOf({ line, bucket }));
@@ -6770,22 +6821,22 @@ describe("classifyProviderFailure() honors the binding compatibility contract (T
       id: "pi",
       taskIdPrefix: "pi",
       errorBucketPrefix: "pi",
-      defaultModel: "minimax/MiniMax-M2.7",
-      defaultSummaryModel: "minimax/MiniMax-M2.7",
+      defaultModel: MINIMAX_MODEL,
+      defaultSummaryModel: MINIMAX_MODEL,
       binaryName: "pi",
       listModelsFn: async () => "",
-      buildSpawnArgs: () => ["--model", "minimax/MiniMax-M2.7", "--mode", "json", "-p", "hi"],
+      buildSpawnArgs: () => ["--model", MINIMAX_MODEL, "--mode", "json", "-p", "hi"],
       buildSummaryPrompt: () => "",
       normalizeLogEvent: (parsed) => parsed,
-      sandboxAuthFile: () => ({ extraRoBinds: [], sandboxedDataHome: "/tmp/unused", sandboxEnv: {} }),
+      sandboxAuthFile: () => ({ extraRoBinds: [], sandboxedDataHome: UNUSED_TMP, sandboxEnv: {} }),
     };
     // Each line is the equivalent pi shape for the opencode buckets above;
     // the same regex set must classify it, but with the pi_ prefix added.
     const cases = [
-      { line: JSON.stringify({ type: "error", message: "rate_limit_exceeded: please retry after 60s" }), bucket: "pi_rate_limited" },
-      { line: JSON.stringify({ type: "error", message: "insufficient_quota: out of credits" }), bucket: "pi_payment_required" },
-      { line: JSON.stringify({ type: "error", message: "Unauthorized: invalid API key" }), bucket: "pi_authentication_failed" },
-      { line: "No API key found for openai.", bucket: "pi_authentication_failed" },
+      { line: JSON.stringify({ type: "error", message: RATE_LIMIT_ERROR }), bucket: "pi_rate_limited" },
+      { line: JSON.stringify({ type: "error", message: QUOTA_ERROR }), bucket: "pi_payment_required" },
+      { line: JSON.stringify({ type: "error", message: UNAUTHORIZED_SHORT }), bucket: "pi_authentication_failed" },
+      { line: NO_API_KEY_FOUND, bucket: "pi_authentication_failed" },
     ];
     for (let i = 0; i < cases.length; i++) {
       const { line, bucket } = cases[i];
@@ -6844,14 +6895,14 @@ describe("classifyProviderFailure() honors the binding compatibility contract (T
       id: "pi",
       taskIdPrefix: "pi",
       errorBucketPrefix: "pi",
-      defaultModel: "minimax/MiniMax-M2.7",
-      defaultSummaryModel: "minimax/MiniMax-M2.7",
+      defaultModel: MINIMAX_MODEL,
+      defaultSummaryModel: MINIMAX_MODEL,
       binaryName: "pi",
       listModelsFn: async () => "",
-      buildSpawnArgs: () => ["--model", "minimax/MiniMax-M2.7", "--mode", "json", "-p", "hi"],
+      buildSpawnArgs: () => ["--model", MINIMAX_MODEL, "--mode", "json", "-p", "hi"],
       buildSummaryPrompt: () => "",
       normalizeLogEvent: (parsed) => parsed,
-      sandboxAuthFile: () => ({ extraRoBinds: [], sandboxedDataHome: "/tmp/unused", sandboxEnv: {} }),
+      sandboxAuthFile: () => ({ extraRoBinds: [], sandboxedDataHome: UNUSED_TMP, sandboxEnv: {} }),
     };
     const childPi = fakeChild(9501);
     const mgrPi = makeManager({
@@ -6889,14 +6940,14 @@ describe("startTask() never lets normalizeLogEvent() throws escape the stdout ha
       id: "opencode",
       taskIdPrefix: "oc",
       errorBucketPrefix: "opencode",
-      defaultModel: "openai/gpt-5.6-luna",
-      defaultSummaryModel: "opencode/mimo-v2.5-free",
+      defaultModel: LUNA_MODEL,
+      defaultSummaryModel: MIMO_MODEL,
       binaryName: "opencode",
       listModelsFn: async () => "",
       buildSpawnArgs: () => ["run", "--dir", process.cwd(), "--auto", "--format", "json", "-m", "x", "--", "hi"],
       buildSummaryPrompt: () => "",
       normalizeLogEvent: () => { throw new Error("boom from inside normalizeLogEvent"); },
-      sandboxAuthFile: () => ({ extraRoBinds: [], sandboxedDataHome: "/tmp/unused", sandboxEnv: {} }),
+      sandboxAuthFile: () => ({ extraRoBinds: [], sandboxedDataHome: UNUSED_TMP, sandboxEnv: {} }),
     };
     const mgr = makeManager({ spawnFn, defaultExecutor: fakeExecutor });
     const dispatched = mgr.dispatch({ prompt: "hi", directory: process.cwd() });
@@ -6922,14 +6973,14 @@ describe("startTask() never lets normalizeLogEvent() throws escape the stdout ha
       id: "opencode",
       taskIdPrefix: "oc",
       errorBucketPrefix: "opencode",
-      defaultModel: "openai/gpt-5.6-luna",
-      defaultSummaryModel: "opencode/mimo-v2.5-free",
+      defaultModel: LUNA_MODEL,
+      defaultSummaryModel: MIMO_MODEL,
       binaryName: "opencode",
       listModelsFn: async () => "",
       buildSpawnArgs: () => ["run", "--dir", process.cwd(), "--auto", "--format", "json", "-m", "x", "--", "hi"],
       buildSummaryPrompt: () => "",
       normalizeLogEvent: () => { throw new Error("trailing throw"); },
-      sandboxAuthFile: () => ({ extraRoBinds: [], sandboxedDataHome: "/tmp/unused", sandboxEnv: {} }),
+      sandboxAuthFile: () => ({ extraRoBinds: [], sandboxedDataHome: UNUSED_TMP, sandboxEnv: {} }),
     };
     const mgr = makeManager({ spawnFn, defaultExecutor: fakeExecutor });
     const dispatched = mgr.dispatch({ prompt: "hi", directory: process.cwd() });
@@ -6960,14 +7011,14 @@ describe("startTask() never lets normalizeLogEvent() throws escape the stdout ha
       id: "opencode",
       taskIdPrefix: "oc",
       errorBucketPrefix: "opencode",
-      defaultModel: "openai/gpt-5.6-luna",
-      defaultSummaryModel: "opencode/mimo-v2.5-free",
+      defaultModel: LUNA_MODEL,
+      defaultSummaryModel: MIMO_MODEL,
       binaryName: "opencode",
       listModelsFn: async () => "",
       buildSpawnArgs: () => ["run", "--dir", process.cwd(), "--auto", "--format", "json", "-m", "x", "--", "hi"],
       buildSummaryPrompt: () => "",
       normalizeLogEvent: () => { throw new Error("always throws"); },
-      sandboxAuthFile: () => ({ extraRoBinds: [], sandboxedDataHome: "/tmp/unused", sandboxEnv: {} }),
+      sandboxAuthFile: () => ({ extraRoBinds: [], sandboxedDataHome: UNUSED_TMP, sandboxEnv: {} }),
     };
     const mgr = makeManager({
       spawnFn: () => child,
@@ -6996,14 +7047,14 @@ describe("boot-failure surfacing (exit non-zero with zero parseable events)", ()
     fs.writeFileSync(
       mgr.status(dispatched.id).logPath,
       'Warning: No models match pattern "kimi-coding/k2p5"\n' +
-        'Error: Extension "/x/y.js" error: Provider y: "baseUrl" is required when defining models.\n'
+        EXTENSION_CONFIG_ERROR + "\n"
     );
     child.emit("exit", 1, null);
     const r = mgr.result(dispatched.id, { fields: ["failureReason", "failureDetail", "exitCode"] });
     assert.equal(r.failureReason, "boot_failure");
     assert.equal(
       r.failureDetail,
-      'Error: Extension "/x/y.js" error: Provider y: "baseUrl" is required when defining models.'
+      EXTENSION_CONFIG_ERROR
     );
     assert.equal(r.exitCode, 1);
     assert.equal(

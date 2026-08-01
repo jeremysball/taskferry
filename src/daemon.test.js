@@ -7,7 +7,7 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { removeStaleSocketIfUnchanged, startDaemon } from "./daemon.js";
+import { prepareSocket, removeStaleSocketIfUnchanged, startDaemon } from "./daemon.js";
 import { connectClient, ensureDaemonStarted, startDaemonBooter } from "./client.js";
 import { withFileLock } from "./state-lock.js";
 import { resolveRuntimeDir } from "./paths.js";
@@ -635,6 +635,47 @@ describe("Unix socket daemon", () => {
 
     assert.equal(removeStaleSocketIfUnchanged(paths.socketPath, checkedIdentity, paths.runtimeDir), false);
     assert.equal(fs.readFileSync(paths.socketPath, "utf8"), "replacement");
+  });
+
+  test("prepareSocket backs off between retries instead of busy-spinning under sustained contention", async (t) => {
+    // Regression test: a competing daemon boot that keeps replacing the
+    // socket file (so removeStaleSocketIfUnchanged's CAS never wins) used to
+    // make prepareSocket's retry loop spin as fast as socketHealth resolves
+    // (sub-millisecond on a refused/missing socket), pegging a CPU core with
+    // no backoff. Fabricate that contention deterministically instead of
+    // racing real timers/files: each loop iteration does exactly 2
+    // fs.statSync calls on the socket path (prepareSocket's own identity
+    // check, then removeStaleSocketIfUnchanged's re-check). Make the first
+    // `rounds` pairs return two *different* fabricated ctimeMs values each
+    // (so the CAS always sees a mismatch and retries), then fall back to
+    // the real, unmodified stat so the identity naturally matches and the
+    // loop can finally converge. Assert real wall-clock time elapsed
+    // roughly matches retryDelayMs * rounds rather than ~0ms.
+    const paths = temporaryPaths(t);
+    fs.mkdirSync(paths.runtimeDir, { recursive: true });
+    fs.writeFileSync(paths.socketPath, "contender");
+    const rounds = 5;
+    const retryDelayMs = 20;
+    let statCalls = 0;
+
+    const originalStatSync = fs.statSync;
+    t.mock.method(fs, "statSync", (target, ...rest) => {
+      const real = originalStatSync(target, ...rest);
+      if (target !== paths.socketPath) return real;
+      statCalls++;
+      if (statCalls <= rounds * 2) return { ...real, ctimeMs: statCalls };
+      return real;
+    });
+
+    const started = Date.now();
+    await prepareSocket(paths.runtimeDir, paths.socketPath, 250, retryDelayMs);
+    const elapsedMs = Date.now() - started;
+
+    assert.ok(statCalls > rounds * 2, `expected contention to force retries past round ${rounds}, only reached ${statCalls} stat calls`);
+    assert.ok(
+      elapsedMs >= retryDelayMs * rounds * 0.5,
+      `expected backoff to make this take roughly ${retryDelayMs * rounds}ms+, took ${elapsedMs}ms`,
+    );
   });
 
   test("preserves a socket when a listener accepts the health check", async (t) => {

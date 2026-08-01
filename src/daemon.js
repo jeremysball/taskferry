@@ -94,7 +94,17 @@ function socketHealth(socketPath, timeoutMs) {
   });
 }
 
-async function prepareSocket(runtimeDir, socketPath, healthCheckTimeoutMs) {
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// Retries with a short backoff between iterations: without one, concurrent
+// daemon boots racing over the same socket path can keep invalidating each
+// other's removeStaleSocketIfUnchanged CAS indefinitely, and each iteration
+// resolves near-instantly (an ECONNREFUSED/ENOENT socketHealth check fires in
+// well under a millisecond), so the loop busy-spins a full CPU core for as
+// long as the race lasts instead of actually converging.
+export async function prepareSocket(runtimeDir, socketPath, healthCheckTimeoutMs, retryDelayMs = 25) {
   fs.mkdirSync(runtimeDir, { recursive: true, mode: 0o700 });
   fs.chmodSync(runtimeDir, 0o700);
   for (;;) {
@@ -112,6 +122,7 @@ async function prepareSocket(runtimeDir, socketPath, healthCheckTimeoutMs) {
       throw new Error(`error: ${qualifier} is already listening on ${socketPath}\nhelp: use the existing daemon or choose another TASKFERRY_RUNTIME_DIR`);
     }
     if (removeStaleSocketIfUnchanged(socketPath, checkedIdentity, runtimeDir)) return;
+    await delay(retryDelayMs);
   }
 }
 

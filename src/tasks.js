@@ -1248,6 +1248,209 @@ const DEFAULT_WATCHDOG_GRACE_MS = 5000;
 const DEFAULT_CANCEL_GRACE_MS = 5000;
 
 /**
+ * The subset of `createTaskManager`'s closure that `result`'s extracted
+ * helper pipeline needs threaded in explicitly. Keeping the factory's inner
+ * `result` a thin wrapper and moving the heavy lifting to module-level
+ * functions (the same extraction pattern the `startTask` helpers use) lets
+ * each helper stay under the family's complexity / max-lines-per-function
+ * ceilings on its own instead of concentrating them in one 99-line method.
+ * @typedef {object} ResultContext
+ * @property {(task: Task) => {failureReason: string|null, failureDetail: string|null}} failureFields
+ * @property {(diffPath: string, runCommand: (command: string, args: string[]) => {status: number|null, stdout: string, stderr: string, error?: Error}) => {files: number, additions: number, deletions: number}} computeDiffStat
+ * @property {(command: string, args: string[]) => {status: number|null, stdout: string, stderr: string, error?: Error}} runOverlayCommandFn
+ */
+
+/**
+ * Validate the `--fields`/`--full` projection options before any detail
+ * building runs. Mirrors the user-facing error strings the CLI surfaces for
+ * an unsupported field list or a `--full` request that omits `narration`.
+ * @param {boolean} full
+ * @param {string[]} [fields]
+ */
+function validateResultFields(full, fields) {
+  if (fields != null) {
+    if (!Array.isArray(fields) || !fields.length || fields.some((field) => !TASK_MANAGER_RESULT_FIELDS.has(field))) {
+      throw new Error(`error: fields must contain one or more supported result fields\nhelp: use one of: ${[...TASK_MANAGER_RESULT_FIELDS].join(", ")}`);
+    }
+    if (full && !fields.includes("narration")) {
+      throw new Error("error: full requires narration in fields\nhelp: omit full or include narration in fields");
+    }
+  }
+}
+
+/**
+ * Parse a task log's NDJSON lines into the accumulated session/usage/step
+ * state that `result` reports. Extracted out of `result` because the loop's
+ * branching (text events keyed by messageID, step_finish usage accumulation,
+ * `stop`-reason tracking) is the single largest cyclomatic contributor to the
+ * old monolithic function. `sumTokens` is module-level, so it needs no ctx.
+ * @param {string} raw
+ * @param {string|null} initialSessionId
+ * @returns {{sessionId: string|null, tokens: unknown, cost: number|null, textByMessageId: Map<string, string[]>, textOrder: string[], finalMessageId: string|null}}
+ */
+function parseTaskLog(raw, initialSessionId) {
+  const parsed = {
+    sessionId: initialSessionId,
+    tokens: null,
+    cost: null,
+    textByMessageId: new Map(),
+    textOrder: [],
+    finalMessageId: null,
+  };
+  for (const line of raw.split("\n")) {
+    if (!line.trim()) continue;
+    consumeLogLine(line, parsed);
+  }
+  return parsed;
+}
+
+/**
+ * Parse and dispatch a single NDJSON line into the running `parsed` state.
+ * Decomposed out of the loop (which otherwise carried the bulk of `result`'s
+ * cognitive/cyclomatic cost) so each event-type handler stays flat. Non-JSON
+ * lines (e.g. a crash stack trace on stderr, interleaved into the same fd)
+ * are skipped.
+ * @param {string} line
+ * @param {{sessionId: string|null, tokens: unknown, cost: number|null, textByMessageId: Map<string, string[]>, textOrder: string[], finalMessageId: string|null}} parsed
+ */
+function consumeLogLine(line, parsed) {
+  /** @type {any} */
+  let evt;
+  try {
+    evt = JSON.parse(line);
+  } catch {
+    return;
+  }
+  if (evt.sessionID) parsed.sessionId = evt.sessionID;
+  if (evt.type === "text" && evt.part && typeof evt.part.text === "string") {
+    accumulateTextEvent(evt, parsed);
+  }
+  if (evt.type === "step_finish" && evt.part) {
+    accumulateStepFinishEvent(evt, parsed);
+  }
+}
+
+/**
+ * Accumulate a text event under its messageID (creating the bucket on first
+ * sight and recording order), matching how `result` glues one step's narration.
+ * @param {any} evt
+ * @param {{textByMessageId: Map<string, string[]>, textOrder: string[]}} parsed
+ */
+function accumulateTextEvent(evt, parsed) {
+  const mid = evt.part.messageID;
+  if (!parsed.textByMessageId.has(mid)) {
+    parsed.textByMessageId.set(mid, []);
+    parsed.textOrder.push(mid);
+  }
+  /** @type {string[]} */ (parsed.textByMessageId.get(mid)).push(evt.part.text);
+}
+
+/**
+ * Accumulate a step_finish event's usage/token/cost deltas and record the
+ * messageID whose step ended in reason "stop" as the final turn.
+ * @param {any} evt
+ * @param {{tokens: unknown, cost: number|null, finalMessageId: string|null}} parsed
+ */
+function accumulateStepFinishEvent(evt, parsed) {
+  if (evt.part.tokens) parsed.tokens = sumTokens(parsed.tokens, evt.part.tokens);
+  if (typeof evt.part.cost === "number") parsed.cost = (parsed.cost ?? 0) + evt.part.cost;
+  if (evt.part.reason === "stop") parsed.finalMessageId = evt.part.messageID;
+}
+
+/**
+ * Shape the final `message`/`narration` pair from the parsed log state.
+ * `message` is only the messageID whose step ended in `stop` (falling back to
+ * the last messageID seen for crashed runs); everything earlier is kept as
+ * `narration`, preview-truncated unless `--full` is set.
+ * @param {{textByMessageId: Map<string, string[]>, textOrder: string[], finalMessageId: string|null}} parsed
+ * @param {boolean} full
+ * @returns {{message: string, narration: string, narrationTotalChars: number, narrationTruncated: boolean}}
+ */
+function shapeNarration(parsed, full) {
+  const { textByMessageId, textOrder, finalMessageId } = parsed;
+  const targetId = finalMessageId ?? textOrder[textOrder.length - 1];
+  const message = targetId && textByMessageId.has(targetId) ? /** @type {string[]} */ (textByMessageId.get(targetId)).join("") : "";
+  const fullNarration = textOrder.map((mid) => /** @type {string[]} */ (textByMessageId.get(mid)).join("")).join("\n\n");
+  const truncated = !full && fullNarration.length > NARRATION_PREVIEW_CHARS;
+  const narration = truncated ? fullNarration.slice(0, NARRATION_PREVIEW_CHARS) + "…" : fullNarration;
+  return { message, narration, narrationTotalChars: fullNarration.length, narrationTruncated: truncated };
+}
+
+/**
+ * Read the task's diff and diffStat. `diff` is copied from disk verbatim;
+ * `diffStat` is routed through `computeDiffStat` (the same `git apply
+ * --numstat` parser used for both git and non-git changesets), independently
+ * of whether `diff` itself was requested, matching the original projection
+ * rules.
+ * @param {Task} task
+ * @param {ResultContext} ctx
+ * @param {string[]} [fields]
+ * @returns {{diffText: string|null, diffStat: {files: number, additions: number, deletions: number}|null}}
+ */
+function readTaskDiff(task, ctx, fields) {
+  let diffText = null;
+  if (task.diffPath && (fields == null || fields.includes("diff"))) {
+    try {
+      diffText = fs.readFileSync(task.diffPath, "utf8");
+    } catch {
+      diffText = null;
+    }
+  }
+  const diffStat = task.diffPath != null && (fields == null || fields.includes("diffStat")) ? ctx.computeDiffStat(task.diffPath, ctx.runOverlayCommandFn) : null;
+  return { diffText, diffStat };
+}
+
+/**
+ * Build the full `ResultDetail` for an already-finished (not running/queued)
+ * task from its parsed log, narration, and diff. The conditional extra fields
+ * (`summaryOf`/`incomplete`/`finalMarker`) and the `next` guidance stay here;
+ * the heavy parsing/reading work is delegated to the helpers above so no
+ * single function crosses the complexity ceiling.
+ * @param {Task} task
+ * @param {{taskId: string, full: boolean, fields?: string[]}} options
+ * @param {ResultContext} ctx
+ * @returns {ResultDetail}
+ */
+function computeResultDetail(task, { taskId, full, fields }, ctx) {
+  let raw;
+  try {
+    raw = fs.readFileSync(task.logPath, "utf8");
+  } catch {
+    raw = "";
+  }
+  const parsed = parseTaskLog(raw, task.sessionId);
+  const narration = shapeNarration(parsed, full);
+  const { diffText, diffStat } = readTaskDiff(task, ctx, fields);
+  return {
+    taskId,
+    status: task.status,
+    exitCode: task.exitCode,
+    signal: task.signal,
+    spawnError: task.spawnError,
+    ...ctx.failureFields(task),
+    diff: diffText,
+    diffStat,
+    changesetError: task.changesetError ?? null,
+    sessionId: parsed.sessionId,
+    tokens: parsed.tokens,
+    cost: parsed.cost,
+    message: narration.message,
+    narration: narration.narration,
+    narrationTotalChars: narration.narrationTotalChars,
+    narrationTruncated: narration.narrationTruncated,
+    ...(task.summaryOf ? { summaryOf: task.summaryOf } : {}),
+    ...(task.incomplete === true ? { incomplete: true } : {}),
+    ...(task.finalMarker != null ? { finalMarker: task.finalMarker } : {}),
+    ...(task.incomplete === true
+      ? { next: `Task ${taskId} exited cleanly but produced no usable final output${task.finalMarker ? ` (--require-final-marker ${JSON.stringify(task.finalMarker)} did not match)` : " (empty message)"}; treat as incomplete` }
+      : narration.narrationTruncated
+        ? { next: `Run taskferry result with full: true on task id "${taskId}" to see the complete narration` }
+        : {}),
+    logPath: task.logPath,
+  };
+}
+
+/**
  * @param {object} [options]
  * @param {typeof spawn} [options.spawnFn]
  * @param {(pid: number, signal: NodeJS.Signals) => void} [options.killFn]
@@ -3538,14 +3741,7 @@ export function createTaskManager({
     ensureStateLoaded();
     const task = tasks.get(taskId);
     if (!task) throw noSuchTask(taskId);
-    if (fields != null) {
-      if (!Array.isArray(fields) || !fields.length || fields.some((field) => !TASK_MANAGER_RESULT_FIELDS.has(field))) {
-        throw new Error(`error: fields must contain one or more supported result fields\nhelp: use one of: ${[...TASK_MANAGER_RESULT_FIELDS].join(", ")}`);
-      }
-      if (full && !fields.includes("narration")) {
-        throw new Error("error: full requires narration in fields\nhelp: omit full or include narration in fields");
-      }
-    }
+    validateResultFields(full, fields);
     if (task.status === "running" || task.status === "queued") {
       return projectResult({ taskId, status: task.status, message: `task is still ${task.status}; poll taskferry status first` }, fields);
     }
@@ -3556,109 +3752,17 @@ export function createTaskManager({
         message: "summary task became unknown after the server restarted; its partial output is unavailable",
       }, fields);
     }
-
-    // opencode's own steps look like: text (narration) -> tool_use -> step_finish
-    // (reason "tool-calls") -> text -> step_finish (reason "stop"), one messageID
-    // per step. Naively joining every text event across every step glues
-    // "I'm about to run ls" onto the actual answer with no separator -- neither
-    // a clean final answer nor a real transcript. Only the messageID whose step
-    // ended in reason "stop" is the model's actual final turn; everything
-    // earlier is intermediate narration, kept separately as `narration` so
-    // nothing is silently dropped, but not returned as `message`.
-    let sessionId = task.sessionId;
-    /** @type {unknown} */
-    let tokens = null;
-    /** @type {number|null} */
-    let cost = null;
-    /** @type {Map<string, string[]>} */
-    const textByMessageId = new Map();
-    /** @type {string[]} */
-    const textOrder = [];
-    /** @type {string|null} */
-    let finalMessageId = null;
-
-    let raw;
-    try {
-      raw = fs.readFileSync(task.logPath, "utf8");
-    } catch {
-      raw = "";
-    }
-
-    for (const line of raw.split("\n")) {
-      if (!line.trim()) continue;
-      /** @type {any} */
-      let evt;
-      try {
-        evt = JSON.parse(line);
-      } catch {
-        continue; // non-JSON line (e.g. a crash stack trace on stderr, interleaved into the same fd)
-      }
-      if (evt.sessionID) sessionId = evt.sessionID;
-      if (evt.type === "text" && evt.part && typeof evt.part.text === "string") {
-        const mid = evt.part.messageID;
-        if (!textByMessageId.has(mid)) {
-          textByMessageId.set(mid, []);
-          textOrder.push(mid);
-        }
-        /** @type {string[]} */ (textByMessageId.get(mid)).push(evt.part.text);
-      }
-      if (evt.type === "step_finish" && evt.part) {
-        if (evt.part.tokens) tokens = sumTokens(tokens, evt.part.tokens);
-        if (typeof evt.part.cost === "number") cost = (cost ?? 0) + evt.part.cost;
-        if (evt.part.reason === "stop") finalMessageId = evt.part.messageID;
-      }
-    }
-
-    // Fall back to the last messageID seen if no explicit "stop" step_finish
-    // was found (e.g. a crashed run that never reached one).
-    const targetId = finalMessageId ?? textOrder[textOrder.length - 1];
-    const message = targetId && textByMessageId.has(targetId) ? /** @type {string[]} */ (textByMessageId.get(targetId)).join("") : "";
-    const fullNarration = textOrder.map((mid) => /** @type {string[]} */ (textByMessageId.get(mid)).join("")).join("\n\n");
-    const truncated = !full && fullNarration.length > NARRATION_PREVIEW_CHARS;
-    const narration = truncated ? fullNarration.slice(0, NARRATION_PREVIEW_CHARS) + "…" : fullNarration;
-
-    let diffText = null;
-    if (task.diffPath && (fields == null || fields.includes("diff"))) {
-      try {
-        diffText = fs.readFileSync(task.diffPath, "utf8");
-      } catch {
-        diffText = null;
-      }
-    }
-    // Review finding #13: spec §5.3 requires a diffStat summary (files changed,
-    // +/- counts) on result --full. Routed through `git apply --numstat`
-    // (see computeDiffStat) so the same parser handles both git and non-git
-    // changesets -- the prior hand-rolled scan only counted `diff --git`
-    // headers and silently reported files:0 for every non-git result.
-    const diffStat = task.diffPath != null && (fields == null || fields.includes("diffStat")) ? computeDiffStat(task.diffPath, runOverlayCommandFn) : null;
-
-    return projectResult({
-      taskId,
-      status: task.status,
-      exitCode: task.exitCode,
-      signal: task.signal,
-      spawnError: task.spawnError,
-      ...failureFields(task),
-      diff: diffText,
-      diffStat,
-      changesetError: task.changesetError ?? null,
-      sessionId,
-      tokens,
-      cost,
-      message,
-      narration,
-      narrationTotalChars: fullNarration.length,
-      narrationTruncated: truncated,
-      ...(task.summaryOf ? { summaryOf: task.summaryOf } : {}),
-      ...(task.incomplete === true ? { incomplete: true } : {}),
-      ...(task.finalMarker != null ? { finalMarker: task.finalMarker } : {}),
-      ...(task.incomplete === true
-        ? { next: `Task ${taskId} exited cleanly but produced no usable final output${task.finalMarker ? ` (--require-final-marker ${JSON.stringify(task.finalMarker)} did not match)` : " (empty message)"}; treat as incomplete` }
-        : truncated
-          ? { next: `Run taskferry result with full: true on task id "${taskId}" to see the complete narration` }
-          : {}),
-      logPath: task.logPath,
-    }, fields);
+    // opencode's steps are text (narration) -> tool_use -> step_finish per
+    // messageID; only the messageID whose step ended in reason "stop" is the
+    // model's final turn. Everything earlier is intermediate narration, kept
+    // separately (not returned as `message`) so nothing is silently dropped.
+    // See parseTaskLog / shapeNarration for the decomposition below.
+    const ctx = {
+      failureFields,
+      computeDiffStat,
+      runOverlayCommandFn,
+    };
+    return projectResult(computeResultDetail(task, { taskId, full, fields }, ctx), fields);
   }
 
   return {

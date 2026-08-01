@@ -160,9 +160,10 @@ export function subOverlaySlug(targetPath) {
  * @param {object} params
  * @param {string} params.directory
  * @param {{upperDir: string, workDir: string}} params.overlay
- * @param {string} params.stateDir
+ * @param {string} params.stateDir - unused by this function; kept in the options object so the
+ *   shared buildMergedViewBwrapArgs() scaffolding stays symmetric with buildBwrapArgs().
  * @param {string} params.runtimeDir
- * @param {string} params.homeDir
+ * @param {string} params.homeDir - unused by this function; kept for scaffolding symmetry with buildBwrapArgs().
  * @param {string[]} params.denyList
  * @param {string} params.mergedMountPoint
  * @param {boolean} [params.writable] - also rw-bind directory itself, for the apply step (Task 7); omit for
@@ -171,7 +172,7 @@ export function subOverlaySlug(targetPath) {
  *   ancestor) is under /tmp.
  * @returns {string[]}
  */
-export function buildMergedViewBwrapArgs({ directory, overlay, stateDir, runtimeDir, homeDir, denyList, mergedMountPoint, writable = false }) {
+export function buildMergedViewBwrapArgs({ directory, overlay, runtimeDir, denyList, mergedMountPoint, writable = false, stateDir: _stateDir, homeDir: _homeDir }) {
   const args = buildBwrapBaseArgs({ denyList });
   args.push("--dir", mergedMountPoint);
   args.push("--overlay-src", directory, "--overlay", overlay.upperDir, overlay.workDir, mergedMountPoint);
@@ -267,15 +268,66 @@ export function subFilePaths(root, targetPath) {
  */
 export function applyChangeset({ directory, diffPath, isGitTarget, overlay, stateDir, runtimeDir, homeDir, denyList, runCommand = defaultRunCommand }) {
   if (isGitTarget) {
-    const result = runCommand("git", ["-C", directory, "apply", diffPath]);
-    if (result.status === 0) return { applied: true, reason: null };
-    return { applied: false, reason: result.stderr.trim() || result.error?.message || `git apply exited with status ${result.status}` };
+    return applyGitChangeset({ directory, diffPath, runCommand });
   }
-  if (!overlay || stateDir == null || runtimeDir == null || homeDir == null || denyList == null) {
-    throw new Error(
-      "error: non-git changeset apply requires a live overlay, stateDir, runtimeDir, homeDir, and denyList\n" +
-      "help: preserve the pending overlay and retry through taskferry accept with a complete task record"
-    );
+  return applyNonGitChangeset({ directory, overlay, stateDir, runtimeDir, homeDir, denyList, runCommand });
+}
+
+// Shared by the two live-overlay-input guard clauses below (thrown from two
+// places, so lifted to one module constant to keep no-duplicate-string quiet).
+const NON_GIT_APPLY_ERROR =
+  "error: non-git changeset apply requires a live overlay, stateDir, runtimeDir, homeDir, and denyList\n" +
+  "help: preserve the pending overlay and retry through taskferry accept with a complete task record";
+
+/**
+ * Applies a git-target changeset via `git apply`. Mirrors the original
+ * in-place logic; split out so applyChangeset stays under the complexity
+ * budget.
+ * @param {object} params
+ * @param {string} params.directory
+ * @param {string} params.diffPath
+ * @param {typeof defaultRunCommand} params.runCommand
+ * @returns {{applied: boolean, reason: string|null}}
+ */
+function applyGitChangeset({ directory, diffPath, runCommand }) {
+  const result = runCommand("git", ["-C", directory, "apply", diffPath]);
+  if (result.status !== 0) {
+    return { applied: false, reason: gitApplyFailureReason(result) };
+  }
+  return { applied: true, reason: null };
+}
+
+/** @param {{status: number|null, stderr: string, error?: Error}} result */
+function gitApplyFailureReason(result) {
+  if (result.stderr.trim()) return result.stderr.trim();
+  if (result.error?.message) return result.error.message;
+  return `git apply exited with status ${result.status}`;
+}
+
+/**
+ * Applies a non-git-target changeset by rsyncing the merged overlay view
+ * onto directory inside one writable remount. Split out of applyChangeset
+ * (which routes to this or applyGitChangeset) to keep branching shallow.
+ * @param {object} params
+ * @param {string} params.directory
+ * @param {{root: string, upperDir: string, workDir: string}} [params.overlay]
+ * @param {string} [params.stateDir]
+ * @param {string} [params.runtimeDir]
+ * @param {string} [params.homeDir]
+ * @param {string[]} [params.denyList]
+ * @param {typeof defaultRunCommand} params.runCommand
+ * @returns {{applied: boolean, reason: string|null}}
+ */
+function applyNonGitChangeset({ directory, overlay, stateDir, runtimeDir, homeDir, denyList, runCommand }) {
+  // Guard clauses (split so each stays under the expression-complexity cap)
+  // double as the TS narrowing the rsync remount below needs: a missing input
+  // means a partial/tampered task record, which must surface as a hard error
+  // rather than a silent mis-apply.
+  if (stateDir == null || runtimeDir == null || homeDir == null || denyList == null) {
+    throw new Error(NON_GIT_APPLY_ERROR);
+  }
+  if (overlay == null) {
+    throw new Error(NON_GIT_APPLY_ERROR);
   }
   const mergedMountPoint = path.join(overlay.root, "merged");
   const bwrapArgs = buildMergedViewBwrapArgs({ directory, overlay, stateDir, runtimeDir, homeDir, denyList, mergedMountPoint, writable: true });
@@ -287,8 +339,16 @@ export function applyChangeset({ directory, diffPath, isGitTarget, overlay, stat
   // (spec §5.4), so the overlay survives for a second attempt.
   const script = `rsync -a --delete --delay-updates ${shQuote(mergedMountPoint)}/ ${shQuote(directory)}/`;
   const result = runCommand("bwrap", [...bwrapArgs, "--", "sh", "-c", script]);
-  if (result.status === 0) return { applied: true, reason: null };
-  return { applied: false, reason: result.stderr.trim() || `apply copy exited with status ${result.status}` };
+  if (result.status !== 0) {
+    return { applied: false, reason: copyApplyFailureReason(result) };
+  }
+  return { applied: true, reason: null };
+}
+
+/** @param {{status: number|null, stderr: string}} result */
+function copyApplyFailureReason(result) {
+  if (result.stderr.trim()) return result.stderr.trim();
+  return `apply copy exited with status ${result.status}`;
 }
 
 /**
@@ -317,7 +377,8 @@ export function applyChangeset({ directory, diffPath, isGitTarget, overlay, stat
 export function cleanupOverlay({ root, tmpRoot, rmFn = (p) => {
     const result = spawnSync("rm", ["-rf", p]);
     if (result.status !== 0) {
-      throw new Error(`rm -rf ${p} failed: ${(result.stderr || "").toString().trim() || `exit ${result.status}`}`);
+      const detail = (result.stderr || "").toString().trim() || `exit ${result.status}`;
+      throw new Error(`rm -rf ${p} failed: ${detail}`);
     }
   } }) {
   const resolved = path.resolve(root);

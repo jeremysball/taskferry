@@ -785,6 +785,48 @@ test("advisor with an explicit --prompt and no context source sends the canned p
   assert.doesNotMatch(capturedPrompt, /attached context/);
 });
 
+test("advisor --summarize-context condenses the gathered context via a dispatch+wait+result round trip", async () => {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-commands-test-")));
+  const calls = [];
+  let capturedPrompt;
+  const client = {
+    request: async (method, params) => {
+      calls.push(method);
+      if (method === "task.tail") return { taskId: "oc_self", status: "running", text: "verbose ferry log text", textTotalChars: 20, truncated: false };
+      if (method === "task.dispatch") return { id: "oc_summarizer", status: "queued" };
+      if (method === "task.wait") return { id: "oc_summarizer", status: "done" };
+      if (method === "task.result") return { message: "condensed summary" };
+      capturedPrompt = params.prompt;
+      return { status: "done", message: "advice" };
+    },
+  };
+
+  await runCommand("advisor", { directory: root, model: "m", summarizeContext: true }, { client, cwd: root, env: { TASKFERRY_TASK_ID: "oc_self" } });
+
+  assert.deepEqual(calls, ["task.tail", "task.dispatch", "task.wait", "task.result", "task.advisor"]);
+  assert.match(capturedPrompt, /condensed summary/);
+  assert.match(capturedPrompt, /attached context \(summarized ferry-log/);
+  assert.doesNotMatch(capturedPrompt, /verbose ferry log text/);
+});
+
+test("advisor --summarize-context falls back to the raw text when the condense dispatch fails", async () => {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-commands-test-")));
+  let capturedPrompt;
+  const client = {
+    request: async (method, params) => {
+      if (method === "task.tail") return { taskId: "oc_self", status: "running", text: "verbose ferry log text", textTotalChars: 20, truncated: false };
+      if (method === "task.dispatch") throw new Error("daemon unavailable");
+      capturedPrompt = params.prompt;
+      return { status: "done", message: "advice" };
+    },
+  };
+
+  await runCommand("advisor", { directory: root, model: "m", summarizeContext: true }, { client, cwd: root, env: { TASKFERRY_TASK_ID: "oc_self" } });
+
+  assert.match(capturedPrompt, /verbose ferry log text/);
+  assert.match(capturedPrompt, /attached context \(ferry-log/);
+});
+
 test("summary forwards the caller's env to the RPC payload", async () => {
   let capturedParams;
   const client = {

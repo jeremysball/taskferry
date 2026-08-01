@@ -66,6 +66,7 @@ const commandSpecs = {
       "--session-id <id>": "continue a recent advisor session",
       "--timeout <duration>": "maximum wait, e.g. 10000 (ms), 30s, 5m, 1h",
       "--executor <opencode|pi>": "worker backend to dispatch through, default pi",
+      "--summarize-context": "condense the auto-attached context through a throwaway model call before sending it (off by default)",
     },
     examples: [
       'taskferry advisor --prompt "How should I split this module?" --model openai/gpt-5.6-sol',
@@ -270,7 +271,7 @@ function defaultOptions(command, cwd) {
     case "dispatch":
       return { prompt: undefined, directory: cwd, model: undefined, variant: undefined, sessionId: undefined, finalMarker: undefined, noSandbox: false, noOverlay: false, allowedDirs: undefined, executor: undefined };
     case "advisor":
-      return { prompt: undefined, model: undefined, directory: undefined, variant: undefined, sessionId: undefined, timeoutMs: undefined, executor: undefined };
+      return { prompt: undefined, model: undefined, directory: undefined, variant: undefined, sessionId: undefined, timeoutMs: undefined, executor: undefined, summarizeContext: false };
     case "cancel":
       return { taskId: undefined, graceMs: undefined };
     case "wait":
@@ -374,11 +375,12 @@ export function parseArgs(argv, { cwd = process.cwd() } = {}) {
       "--wait": ["summary"],
       "--summaries": ["watch"],
       "--summarize": ["wait"],
+      "--summarize-context": ["advisor"],
       "--no-sandbox": ["dispatch"],
       "--no-overlay": ["dispatch"], // advisor deliberately excluded -- review finding #5
       "--diff": ["result"],
     };
-    const booleanKeyOverrides = { "--no-sandbox": "noSandbox", "--no-overlay": "noOverlay" };
+    const booleanKeyOverrides = { "--no-sandbox": "noSandbox", "--no-overlay": "noOverlay", "--summarize-context": "summarizeContext" };
     if (booleanCommands[name]) {
       if (!booleanCommands[name].includes(command)) throw usageError(`unknown flag ${name} for \`${command}\``, command);
       if (inlineValue !== undefined) throw usageError(`${name} does not take a value`, command);
@@ -489,7 +491,7 @@ function commandAllows(command, flag) {
     dispatch: ["--prompt", "--directory", "--model", "--variant", "--session-id", "--require-final-marker", "--allowed-dirs", "--executor"],
     cancel: ["--grace-ms"],
     wait: ["--timeout", "--tail-chars"],
-    advisor: ["--prompt", "--model", "--directory", "--variant", "--session-id", "--timeout", "--executor"],
+    advisor: ["--prompt", "--model", "--directory", "--variant", "--session-id", "--timeout", "--executor", "--summarize-context"],
     status: [],
     tail: ["--chars"],
     summary: ["--mode", "--max-words"],

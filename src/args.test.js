@@ -410,6 +410,20 @@ test("advisor rejects --no-overlay (overlay is mandatory for the advisor role; r
   );
 });
 
+test("advisor accepts --summarize-context", () => {
+  const parsed = parseArgs(["advisor", "--model", "m", "--summarize-context"]);
+  assert.equal(parsed.options.summarizeContext, true);
+});
+
+test("advisor defaults --summarize-context to false", () => {
+  const parsed = parseArgs(["advisor", "--model", "m"]);
+  assert.equal(parsed.options.summarizeContext, false);
+});
+
+test("--summarize-context is rejected on dispatch", () => {
+  assert.throws(() => parseArgs(["dispatch", "--prompt", "p", "--summarize-context"]), /unknown flag --summarize-context/);
+});
+
 test("result accepts --diff", () => {
   const parsed = parseArgs(["result", "t1", "--diff"]);
   assert.equal(parsed.options.diff, true);

@@ -472,8 +472,8 @@ describe("dispatch() lifecycle, driven through an injected spawnFn (no real open
       overlayEnabled: true,
       checkOverlaySupportFn: () => ({ supported: true }),
       platform: "linux",
+      runOverlayCommandFn: () => { extractCalls++; return { status: 0, stdout: "", stderr: "" }; },
       overlayTmpRoot,
-      runOverlayCommandFn: () => { extractCalls++; return { status: 0, stdout: "", stderr: "", error: undefined }; },
     });
 
     const dispatched = mgr.dispatch({ prompt: "hi", directory });
@@ -498,20 +498,20 @@ describe("dispatch() lifecycle, driven through an injected spawnFn (no real open
     let cleanedRoot = null;
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "axi-spawn-error-advisor-"));
     const overlayTmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "axi-spawn-error-advisor-tmp-"));
-    const child = fakeChild();
+    let child = fakeChild();
     const mgr = makeManager({
-      spawnFn: () => child,
+      spawnFn: (_cmd, _args) => { child = fakeChild(); return child; },
       sandboxEnabled: true,
       checkBwrapAvailableFn: () => ({ checked: true, available: true }),
       overlayEnabled: true,
       checkOverlaySupportFn: () => ({ supported: true }),
       platform: "linux",
-      overlayTmpRoot,
-      runOverlayCommandFn: () => ({ status: 0, stdout: "", stderr: "", error: undefined }),
+      runOverlayCommandFn: () => ({ status: 0, stdout: "", stderr: "" }),
       rmOverlayTreeFn: (p) => { cleanedRoot = p; },
+      overlayTmpRoot,
     });
 
-    const advisePromise = mgr.advisor({ prompt: "hi", directory, model: SOL_MODEL });
+    const advisePromise = mgr.advisor({ prompt: "hi", model: SOL_MODEL, directory });
     child.emit("error", new Error(SPAWN_OPENCODE_ENOENT));
     const advised = await advisePromise;
 
@@ -544,8 +544,8 @@ describe("dispatch() lifecycle, driven through an injected spawnFn (no real open
       overlayEnabled: true,
       checkOverlaySupportFn: () => ({ supported: true }),
       platform: "linux",
+      runOverlayCommandFn: () => { extractCalls++; return { status: 0, stdout: "", stderr: "" }; },
       overlayTmpRoot,
-      runOverlayCommandFn: () => { extractCalls++; return { status: 0, stdout: "", stderr: "", error: undefined }; },
     });
 
     const preDispatchCalls = extractCalls;
@@ -1072,7 +1072,6 @@ describe("bwrap sandboxing", () => {
       overlayEnabled: true,
       checkOverlaySupportFn: () => ({ supported: true }),
       platform: "linux",
-      overlayTmpRoot,
       runOverlayCommandFn: (command, args) => {
         preDispatchCalls.push({ command, args });
         // Only the pre-dispatch HEAD probe runs here (the child never
@@ -1080,13 +1079,14 @@ describe("bwrap sandboxing", () => {
         // for the first probe + a git-dir for the fallback to land on the
         // git target path.
         if (command === "git" && args.includes("rev-parse") && args.includes("HEAD")) {
-          return { status: 0, stdout: `${FAKE_HEAD}\n`, stderr: "", error: undefined };
+          return { status: 0, stdout: `${FAKE_HEAD}\n`, stderr: "" };
         }
         if (command === "git" && args.includes("--git-dir")) {
-          return { status: 0, stdout: ".git\n", stderr: "", error: undefined };
+          return { status: 0, stdout: ".git\n", stderr: "" };
         }
-        return { status: 0, stdout: "", stderr: "", error: undefined };
+        return { status: 0, stdout: "", stderr: "" };
       },
+      overlayTmpRoot,
     });
 
     mgr.dispatch({ prompt: "hello", directory: os.tmpdir() });
@@ -1467,8 +1467,8 @@ describe("changeset extraction at settlement", () => {
       overlayEnabled: true,
       checkOverlaySupportFn: () => ({ supported: true }),
       platform: "linux",
+      runOverlayCommandFn: (command, args) => { extractCommand = { command, args }; return { status: 0, stdout: DIFF_LINE, stderr: "" }; },
       overlayTmpRoot,
-      runOverlayCommandFn: (command, args) => { extractCommand = { command, args }; return { status: 0, stdout: DIFF_LINE, stderr: "", error: undefined }; },
     });
 
     const result = mgr.dispatch({ prompt: "hello", directory });
@@ -1492,12 +1492,12 @@ describe("changeset extraction at settlement", () => {
       overlayEnabled: true,
       checkOverlaySupportFn: () => ({ supported: true }),
       platform: "linux",
-      overlayTmpRoot,
-      runOverlayCommandFn: () => ({ status: 0, stdout: "", stderr: "", error: undefined }),
+      runOverlayCommandFn: () => ({ status: 0, stdout: "", stderr: "" }),
       rmOverlayTreeFn: (p) => { cleanedRoot = p; },
+      overlayTmpRoot,
     });
 
-    const advisePromise = mgr.advisor({ prompt: "hello", directory, model: SOL_MODEL });
+    const advisePromise = mgr.advisor({ prompt: "hello", model: SOL_MODEL, directory });
     setImmediate(() => child.emit("exit", 0, null));
     const advised = await advisePromise;
 
@@ -1525,7 +1525,7 @@ describe("changeset extraction at settlement", () => {
       platform: "linux",
       resolveGitCommonDirFn: () => gitCommonDir,
       resolveGitDirFn: () => gitWorktreeAdminDir,
-      runOverlayCommandFn: (_command, args) => { extractArgs = args; return { status: 0, stdout: "diff --git a/f.txt b/f.txt\n", stderr: "", error: undefined }; },
+      runOverlayCommandFn: (_command, args) => { extractArgs = args; return { status: 0, stdout: "diff --git a/f.txt b/f.txt\n", stderr: "" }; },
     });
 
     const result = mgr.dispatch({ prompt: "hello", directory });
@@ -1549,9 +1549,9 @@ describe("changeset extraction at settlement", () => {
       overlayEnabled: true,
       checkOverlaySupportFn: () => ({ supported: true }),
       platform: "linux",
-      overlayTmpRoot,
-      runOverlayCommandFn: () => ({ status: 0, stdout: "", stderr: "", error: undefined }),
+      runOverlayCommandFn: () => ({ status: 0, stdout: "", stderr: "" }),
       rmOverlayTreeFn: (p) => { cleanedRoot = p; },
+      overlayTmpRoot,
     });
 
     const result = mgr.dispatch({ prompt: "hello", directory });
@@ -1574,7 +1574,7 @@ describe("changeset extraction at settlement", () => {
       overlayEnabled: true,
       checkOverlaySupportFn: () => ({ supported: true }),
       platform: "linux",
-      runOverlayCommandFn: () => ({ status: 0, stdout: DIFF_LINE, stderr: "", error: undefined }),
+      runOverlayCommandFn: () => ({ status: 0, stdout: DIFF_LINE, stderr: "" }),
     });
 
     const result = mgr.dispatch({ prompt: "hello", directory });
@@ -1599,9 +1599,9 @@ describe("changeset extraction at settlement", () => {
       overlayEnabled: true,
       checkOverlaySupportFn: () => ({ supported: true }),
       platform: "linux",
-      overlayTmpRoot,
       runOverlayCommandFn: () => ({ status: null, stdout: "", stderr: "", error: Object.assign(new Error(SPAWN_BWRAP_TIMEOUT), { code: "ETIMEDOUT" }) }),
       rmOverlayTreeFn: () => { cleanedAny = true; },
+      overlayTmpRoot,
     });
 
     const result = mgr.dispatch({ prompt: "hello", directory });
@@ -2366,6 +2366,7 @@ describe("config file precedence (maxConcurrentTasks)", () => {
     });
     const manager = createTaskManager({
       stateDir,
+      config,
       sandboxEnabled: false,
       spawnFn: () => {
         const child = fakeChild();
@@ -2373,7 +2374,6 @@ describe("config file precedence (maxConcurrentTasks)", () => {
         return child;
       },
       killFn: () => {},
-      config,
     });
     t.after(() => {
       for (const child of children) child.emit("exit", null, "SIGTERM");
@@ -2389,14 +2389,14 @@ describe("config file precedence (maxConcurrentTasks)", () => {
   });
 
   test("config value used when env var is unset", (t) => {
-    const mgr = managerWithLimit(t, { env: undefined, config: { maxConcurrentTasks: 1 } });
+    const mgr = managerWithLimit(t, { env: void 0, config: { maxConcurrentTasks: 1 } });
     mgr.dispatch({ prompt: "a", directory: process.cwd(), model: "m" });
     const second = mgr.dispatch({ prompt: "b", directory: process.cwd(), model: "m" });
     assert.equal(mgr.status(second.id).status, "queued");
   });
 
   test("built-in default used when both env and config are unset", (t) => {
-    const mgr = managerWithLimit(t, { env: undefined, config: {} });
+    const mgr = managerWithLimit(t, { env: void 0, config: {} });
     for (let i = 0; i < 4; i++) mgr.dispatch({ prompt: `p${i}`, directory: process.cwd(), model: "m" });
     const fifth = mgr.dispatch({ prompt: "p5", directory: process.cwd(), model: "m" });
     assert.equal(mgr.status(fifth.id).status, "queued");
@@ -3384,7 +3384,7 @@ describe("accept()/reject()", () => {
     // actually exists on disk. The content is irrelevant -- runCommand is
     // mocked -- only the file's existence matters. A unique tmp path per
     // fixture call keeps parallel tests from clobbering each other.
-    const diffPath = path.join(os.tmpdir(), `taskferry-accept-diff-${process.pid}-${Math.random().toString(36).slice(2)}.patch`);
+    const diffPath = path.join(os.tmpdir(), `taskferry-accept-diff-${process.pid}-${Math.random().toString(36).slice(2)}.patch`); // eslint-disable-line sonarjs/pseudo-random -- test fixture randomness, not security-sensitive
     fs.writeFileSync(diffPath, DIFF_LINE);
     createdDiffPaths.push(diffPath);
     return {
@@ -3405,7 +3405,7 @@ describe("accept()/reject()", () => {
       tasksFixture: [pendingTaskFixture()],
       runOverlayCommandFn: (command, args) => {
         if (command === "git" && args[2] === "apply") applyCalled = true;
-        return { status: 0, stdout: "", stderr: "", error: undefined };
+        return { status: 0, stdout: "", stderr: "" };
       },
       rmOverlayTreeFn: (p) => { cleanedRoot = p; },
     });
@@ -3422,8 +3422,8 @@ describe("accept()/reject()", () => {
     const mgr = makeManager({
       tasksFixture: [pendingTaskFixture()],
       runOverlayCommandFn: (command) => {
-        if (command === "git") return { status: 1, stdout: "", stderr: "error: patch does not apply\n", error: undefined };
-        return { status: 0, stdout: "", stderr: "", error: undefined };
+        if (command === "git") return { status: 1, stdout: "", stderr: "error: patch does not apply\n" };
+        return { status: 0, stdout: "", stderr: "" };
       },
       rmOverlayTreeFn: (p) => { cleanedRoot = p; },
     });
@@ -3441,7 +3441,7 @@ describe("accept()/reject()", () => {
       tasksFixture: [pendingTaskFixture()],
       runOverlayCommandFn: (command, args) => {
         if (command === "git" && args[2] === "apply") applyCalled = true;
-        return { status: 0, stdout: "", stderr: "", error: undefined };
+        return { status: 0, stdout: "", stderr: "" };
       },
       rmOverlayTreeFn: (p) => { cleanedRoot = p; },
     });
@@ -3501,7 +3501,7 @@ describe("accept()/reject()", () => {
     // check, git apply would surface its own "can't open patch" message
     // against a path the user has no reason to suspect -- fail with a
     // clear, actionable error before that happens.
-    const missingDiffPath = path.join(os.tmpdir(), `taskferry-does-not-exist-${process.pid}-${Math.random().toString(36).slice(2)}.patch`);
+    const missingDiffPath = path.join(os.tmpdir(), `taskferry-does-not-exist-${process.pid}-${Math.random().toString(36).slice(2)}.patch`); // eslint-disable-line sonarjs/pseudo-random -- test fixture randomness, not security-sensitive
     const mgr = makeManager({
       tasksFixture: [pendingTaskFixture({ diffPath: missingDiffPath })],
     });
@@ -3524,7 +3524,7 @@ describe("accept()/reject()", () => {
   test("accept() surfaces a failed cleanup via cleanupFailed and leaves overlayDirs for the sweep (regression: review finding #11)", () => {
     const mgr = makeManager({
       tasksFixture: [pendingTaskFixture()],
-      runOverlayCommandFn: () => ({ status: 0, stdout: "", stderr: "", error: undefined }),
+      runOverlayCommandFn: () => ({ status: 0, stdout: "", stderr: "" }),
       rmOverlayTreeFn: () => { throw new Error(EBUSY_ERROR); },
     });
     const result = mgr.accept("t_pending");
@@ -3560,7 +3560,7 @@ describe("accept()/reject()", () => {
   test("accept() persists the cleared overlay metadata after successful cleanup (regression: review followup #1)", () => {
     const mgr = makeManager({
       tasksFixture: [pendingTaskFixture()],
-      runOverlayCommandFn: () => ({ status: 0, stdout: "", stderr: "", error: undefined }),
+      runOverlayCommandFn: () => ({ status: 0, stdout: "", stderr: "" }),
       rmOverlayTreeFn: () => {},
     });
     const result = mgr.accept("t_pending");
@@ -3591,7 +3591,7 @@ describe("accept()/reject()", () => {
     // daemon-startup sweep can pick up the orphan and retry the removal.
     const mgr = makeManager({
       tasksFixture: [pendingTaskFixture()],
-      runOverlayCommandFn: () => ({ status: 0, stdout: "", stderr: "", error: undefined }),
+      runOverlayCommandFn: () => ({ status: 0, stdout: "", stderr: "" }),
       rmOverlayTreeFn: () => { throw new Error(EBUSY_ERROR); },
     });
     const result = mgr.accept("t_pending");
@@ -3616,7 +3616,7 @@ describe("summarize() changeset exposure", () => {
       tasksFixture: [
         baseTask({ id: "t_plain", role: "dispatch", changesetStatus: "none", overlayDirs: null, changesetError: null }),
         baseTask({ id: "t_advisor", role: "advisor", changesetStatus: "none" }),
-        baseTask({ id: "t_pending", role: "dispatch", changesetStatus: "pending", overlayDirs, changesetError: SPAWN_BWRAP_TIMEOUT }),
+        baseTask({ id: "t_pending", role: "dispatch", changesetStatus: "pending", changesetError: SPAWN_BWRAP_TIMEOUT, overlayDirs }),
       ],
     });
 
@@ -4464,9 +4464,9 @@ describe("result() diffStat field", () => {
       logs: { "t_stat.ndjson": "" },
       runOverlayCommandFn: (command, args) => {
         if (command === "git" && args[0] === "apply" && args[1] === "--numstat") {
-          return { status: 0, stdout: "2\t1\tone.txt\n0\t1\ttwo.txt\n", stderr: "", error: undefined };
+          return { status: 0, stdout: "2\t1\tone.txt\n0\t1\ttwo.txt\n", stderr: "" };
         }
-        return { status: 0, stdout: "", stderr: "", error: undefined };
+        return { status: 0, stdout: "", stderr: "" };
       },
     });
     fs.mkdirSync(path.join(mgr.paths.STATE_DIR, "diffs"), { recursive: true });
@@ -4508,9 +4508,9 @@ describe("result() diffStat field", () => {
       logs: { "t_nongit.ndjson": "" },
       runOverlayCommandFn: (command, args) => {
         if (command === "git" && args[0] === "apply" && args[1] === "--numstat") {
-          return { status: 0, stdout: "2\t1\tmerged/existing.txt\n1\t0\tmerged/newfile.txt\n", stderr: "", error: undefined };
+          return { status: 0, stdout: "2\t1\tmerged/existing.txt\n1\t0\tmerged/newfile.txt\n", stderr: "" };
         }
-        return { status: 0, stdout: "", stderr: "", error: undefined };
+        return { status: 0, stdout: "", stderr: "" };
       },
     });
     fs.mkdirSync(path.join(mgr.paths.STATE_DIR, "diffs"), { recursive: true });
@@ -4577,9 +4577,9 @@ describe("result() diffStat field", () => {
       logs: { "t_unparsable.ndjson": "" },
       runOverlayCommandFn: (command, args) => {
         if (command === "git" && args[0] === "apply" && args[1] === "--numstat") {
-          return { status: 128, stdout: "", stderr: "error: No valid patches in input\n", error: undefined };
+          return { status: 128, stdout: "", stderr: "error: No valid patches in input\n" };
         }
-        return { status: 0, stdout: "", stderr: "", error: undefined };
+        return { status: 0, stdout: "", stderr: "" };
       },
     });
     fs.mkdirSync(path.join(mgr.paths.STATE_DIR, "diffs"), { recursive: true });
@@ -4602,9 +4602,9 @@ describe("result() diffStat field", () => {
       logs: { "t_status1.ndjson": "" },
       runOverlayCommandFn: (command, args) => {
         if (command === "git" && args[0] === "apply" && args[1] === "--numstat") {
-          return { status: 1, stdout: "5\t3\tmerged/leftover.txt\n", stderr: "error: corrupt patch\n", error: undefined };
+          return { status: 1, stdout: "5\t3\tmerged/leftover.txt\n", stderr: "error: corrupt patch\n" };
         }
-        return { status: 0, stdout: "", stderr: "", error: undefined };
+        return { status: 0, stdout: "", stderr: "" };
       },
     });
     fs.mkdirSync(path.join(mgr.paths.STATE_DIR, "diffs"), { recursive: true });
@@ -5841,7 +5841,7 @@ describe("caller-env union (sanitizedEnvironment)", () => {
     let spawnCalled = false;
     const mgr = makeManager({ spawnFn: () => { spawnCalled = true; return fakeChild(); } });
 
-    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), env: { AXI_TEST_UNDEFINED: undefined } });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), env: { AXI_TEST_UNDEFINED: void 0 } });
 
     assert.equal(mgr.status(dispatched.id).status, "crashed");
     assert.match(mgr.status(dispatched.id).spawnError, /env value for "AXI_TEST_UNDEFINED" must be a string, got undefined/);
@@ -6002,8 +6002,8 @@ describe("startTask() merges executor.sandboxAuthFile().sandboxEnv into spawnEnv
         const sandboxedDataHome = path.join(dataDir, "pi-data");
         return {
           extraRoBinds: existsFn(realAuthFile) ? [/** @type {[string, string]} */ ([realAuthFile, path.join(sandboxedDataHome, "auth.json")])] : [],
-          sandboxedDataHome,
           sandboxEnv: { PI_CODING_AGENT_DIR: sandboxedDataHome },
+          sandboxedDataHome,
         };
       },
     };
@@ -6013,8 +6013,8 @@ describe("startTask() merges executor.sandboxAuthFile().sandboxEnv into spawnEnv
       sandboxEnabled: true,
       checkBwrapAvailableFn: () => ({ checked: true, available: true }),
       platform: "linux",
-      cacheDir,
       existsFn: (p) => p === realAuthFile,
+      cacheDir,
     });
     mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
     // The pi binary was launched inside bwrap
@@ -6061,8 +6061,8 @@ describe("startTask() merges executor.sandboxAuthFile().sandboxEnv into spawnEnv
         return {
           extraRoBinds: [],
           extraRwPairBinds: [],
-          sandboxedDataHome,
           sandboxEnv: { PI_CODING_AGENT_DIR: sandboxedDataHome },
+          sandboxedDataHome,
         };
       },
     };
@@ -6074,8 +6074,8 @@ describe("startTask() merges executor.sandboxAuthFile().sandboxEnv into spawnEnv
       sandboxEnabled: true,
       checkBwrapAvailableFn: () => ({ checked: true, available: true }),
       platform: "linux",
-      cacheDir,
       existsFn: (p) => p === realAuthFile,
+      cacheDir,
     });
     mgr.dispatch({ prompt: "resume me", directory, sessionId });
     assert.notEqual(capturedArgs, null, "sandboxAuthFile must be invoked for a sandboxed dispatch");
@@ -6115,8 +6115,8 @@ describe("startTask() merges executor.sandboxAuthFile().sandboxEnv into spawnEnv
       sandboxEnabled: true,
       checkBwrapAvailableFn: () => ({ checked: true, available: true }),
       platform: "linux",
-      cacheDir,
       existsFn: () => false,
+      cacheDir,
     });
     mgr.dispatch({ prompt: "fresh", directory: os.tmpdir() });
     assert.notEqual(capturedArgs, null);
@@ -6174,9 +6174,9 @@ describe("startTask() merges executor.sandboxAuthFile().sandboxEnv into spawnEnv
         }
         return {
           extraRoBinds: existsFn(realAuthFile) ? [[realAuthFile, path.join(sandboxedDataHome, "auth.json")]] : [],
+          sandboxEnv: { PI_CODING_AGENT_DIR: sandboxedDataHome },
           extraRwPairBinds,
           sandboxedDataHome,
-          sandboxEnv: { PI_CODING_AGENT_DIR: sandboxedDataHome },
         };
       },
     };
@@ -6187,13 +6187,13 @@ describe("startTask() merges executor.sandboxAuthFile().sandboxEnv into spawnEnv
       sandboxEnabled: true,
       checkBwrapAvailableFn: () => ({ checked: true, available: true }),
       platform: "linux",
-      cacheDir,
       // Pretend the host has both a sessions/ dir and the specific file.
       existsFn: (p) => p === realSessionsDir || p === realAuthFile,
       statFn: (p) => (p === realSessionsDir ? { isDirectory: () => true } : null),
       readdirFn: (p) => (p === path.join(realSessionsDir, "--tmp--") ? [path.basename(realSessionFile)] : []),
+      cacheDir,
     });
-    mgr.dispatch({ prompt: "resume", directory, sessionId: "019f90ea-1234-70e0-98dc-6847db316eb4" });
+    mgr.dispatch({ prompt: "resume", sessionId: "019f90ea-1234-70e0-98dc-6847db316eb4", directory });
     assert.equal(captured.cmd, "bwrap");
     // Look for a --bind whose src is the whole realSessionsDir (not the
     // single file). Pre-fix this would appear; post-fix it must not.

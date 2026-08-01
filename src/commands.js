@@ -87,7 +87,7 @@ function readTailChars(filePath, maxChars) {
     const message = err instanceof Error ? err.message : String(err);
     throw new UsageError(
       `advisor could not read the Claude session transcript at ${filePath}: ${message}`,
-      "CLAUDE_CODE_SESSION_ID was set but its transcript file wasn't readable -- pass --prompt explicitly to skip auto-context, or check the transcript path"
+      "CLAUDE_CODE_SESSION_ID was set but its transcript file wasn't readable -- --prompt does not skip auto-context (it's prepended to it), so this still fails even with --prompt set; unset CLAUDE_CODE_SESSION_ID for this call, or check the transcript path"
     );
   }
   const bytes = Math.min(size, maxChars * 4);

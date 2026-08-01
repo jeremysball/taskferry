@@ -3053,19 +3053,7 @@ export function createTaskManager({
   // a crash; deleting it at boot keeps the directory from accumulating
   // unread prompt contents across restarts.
   function sweepOrphanedPromptFiles() {
-    let entries;
-    try {
-      entries = fs.readdirSync(PROMPT_DIR);
-    } catch {
-      return;
-    }
-    for (const entry of entries) {
-      if (!entry.endsWith(".prompt.txt")) continue;
-      const taskId = entry.slice(0, -".prompt.txt".length);
-      const task = tasks.get(taskId);
-      const isActive = task?.status === "running" || task?.status === "queued";
-      if (!isActive) removeFileIfPresent(path.join(PROMPT_DIR, entry));
-    }
+    sweepOrphanedPromptFilesFor({ PROMPT_DIR, tasks });
   }
   sweepOrphanedPromptFiles();
 
@@ -3242,20 +3230,7 @@ export function createTaskManager({
 
   /** @param {string} taskId @param {number} maxWords @returns {Promise<object>} */
   async function activitySummary(taskId, maxWords) {
-    ensureStateLoaded();
-    const source = tasks.get(taskId);
-    if (!source) throw noSuchTask(taskId);
-    if (!Number.isSafeInteger(maxWords) || maxWords < 75 || maxWords > 300) {
-      throw new Error("error: max_words must be an integer from 75 through 300\nhelp: run taskferry summary with max_words between 75 and 300");
-    }
-    const result = await activityCache.refresh(source, { force: true, includeSummary: activitySummariesEnabled, maxWords });
-    if (!result) throw new Error("error: activity summary was not refreshed\nhelp: retry the activity summary request");
-    return {
-      sourceTaskId: taskId,
-      sourceStatus: source.status,
-      activity: result.activity,
-      outputWatermark: result.outputWatermark,
-    };
+    return activitySummaryFor(taskId, maxWords, { ensureStateLoaded, tasks, noSuchTask, activityCache, activitySummariesEnabled });
   }
 
   /** @param {string} taskId @param {{maxWords?: number, mode?: string, env?: NodeJS.ProcessEnv}} [options] */
@@ -3505,22 +3480,7 @@ export function createTaskManager({
    * @param {string} [failureDetail]
    */
   function failRunningTask(task, failureReason, failureDetail) {
-    if (task.failureReason) return; // already stopping this task
-    task.failureReason = failureReason;
-    task.failureDetail = failureDetail ?? null;
-    stopRunningWatcher(task.id);
-    try {
-      persistTask(task.id);
-    } catch (err) {
-      // The child still needs stopping if the state directory became unwritable.
-      console.error(`taskferry: failed to persist failing task ${task.id}: ${errMessage(err)}`);
-    }
-    sendSignal(/** @type {number} */ (task.pid), "SIGTERM");
-    const timer = setTimeout(() => {
-      escalationTimers.delete(task.id);
-      if (tasks.get(task.id)?.status === "running") sendSignal(/** @type {number} */ (task.pid), "SIGKILL");
-    }, watchdogGrace);
-    escalationTimers.set(task.id, timer);
+    failRunningTaskFor(task, failureReason, { stopRunningWatcher, persistTask, sendSignal, escalationTimers, tasks, watchdogGrace }, failureDetail);
   }
 
   // classifyProviderFailure() only ever runs from the watcher's interval
@@ -3539,52 +3499,7 @@ export function createTaskManager({
 
   /** @param {Task} task */
   function startRunningWatcher(task) {
-    // Mutable per-task watch state threaded into the module-level watchdog
-    // helpers so each tick reads and regexes only the bytes appended since
-    // the last one instead of the whole file (O(1) amortized per tick, not
-    // O(n) per tick / O(n²) over a long-running task). `carry` holds a
-    // trailing partial line from the previous read until it's completed by
-    // the next chunk.
-    const watchState = {
-      bytesRead: 0,
-      carry: "",
-      outputSeen: false,
-      currentNoOutputTimeout: noOutputTimeout,
-      lastActivityMs: Date.now(),
-    };
-    runningWatcherState.set(task.id, {
-      get bytesRead() { return watchState.bytesRead; },
-      get carry() { return watchState.carry; },
-    });
-    // Two-phase no-output budget:
-    //   - Before the task has produced any parseable log event, the watcher
-    //     compares against `noOutputTimeout`. A task that is silent from the
-    //     start is most likely genuinely wedged (bad spawn, auth failure,
-    //     provider hang) and should die fast.
-    //   - The moment the watcher sees its first parseable JSON line in the
-    //     log, the latch flips and the deadline jumps to
-    //     `postOutputNoOutputTimeout` for the rest of the task's life.
-    //     Silence after real work is far more likely a long generation
-    //     (opencode writes step-level events, not token deltas, so a long
-    //     final answer can produce zero log lines for minutes) than a hang.
-    const timer = setInterval(() => {
-      watchdogTick(watchState, {
-        taskId: task.id,
-        tasks,
-        stopRunningWatcher,
-        failRunningTask,
-        scheduleActivity,
-        postOutputNoOutputTimeout,
-      });
-    }, watchdogPoll);
-    // Same as child.unref() in startTask: the watchdog is a background
-    // observer, not something that should pin the server's event loop alive.
-    // An unref'd interval still fires while the loop is otherwise busy, but
-    // lets the process exit if nothing else (real work, child subprocesses,
-    // waiters) is keeping it alive -- e.g. tests that cancel a task without
-    // firing an 'exit' event.
-    timer.unref();
-    runningWatchers.set(task.id, timer);
+    startRunningWatcherFor(task, { noOutputTimeout, runningWatcherState, tasks, stopRunningWatcher, failRunningTask, scheduleActivity, postOutputNoOutputTimeout, watchdogPoll, runningWatchers });
   }
 
   // Targets the process group (negative pid), which reaches opencode and any
@@ -4774,4 +4689,141 @@ function tailTask(taskId, { chars }, ctx) {
     textTotalChars: codePoints.length,
     truncated: codePoints.length > chars,
   };
+}
+
+/**
+ * Scrub prompt scratch files left behind by a daemon crash: anything in
+ * PROMPT_DIR not belonging to a running/queued task this process still holds
+ * is leftover and is deleted. Extracted out of `createTaskManager`'s
+ * `sweepOrphanedPromptFiles` closure.
+ * @param {{PROMPT_DIR: string, tasks: Map<string, Task>}} ctx
+ */
+function sweepOrphanedPromptFilesFor(ctx) {
+  let entries;
+  try {
+    entries = fs.readdirSync(ctx.PROMPT_DIR);
+  } catch {
+    return;
+  }
+  for (const entry of entries) {
+    if (!entry.endsWith(".prompt.txt")) continue;
+    const taskId = entry.slice(0, -".prompt.txt".length);
+    const task = ctx.tasks.get(taskId);
+    const isActive = task?.status === "running" || task?.status === "queued";
+    if (!isActive) removeFileIfPresent(path.join(ctx.PROMPT_DIR, entry));
+  }
+}
+
+/**
+ * Forces a refresh of a task's activity summary via the activity cache and
+ * returns the refreshed snapshot. Extracted out of `createTaskManager`'s
+ * `activitySummary` closure.
+ * @param {string} taskId
+ * @param {number} maxWords
+ * @param {{ensureStateLoaded: () => void, tasks: Map<string, Task>, noSuchTask: (taskId: string) => Error, activityCache: {refresh: (task: Task, options: {force: boolean, includeSummary: boolean, maxWords?: number}) => Promise<{activity: string, outputWatermark: number}|null>}, activitySummariesEnabled: boolean}} ctx
+ * @returns {Promise<object>}
+ */
+async function activitySummaryFor(taskId, maxWords, ctx) {
+  ctx.ensureStateLoaded();
+  const source = ctx.tasks.get(taskId);
+  if (!source) throw ctx.noSuchTask(taskId);
+  if (!Number.isSafeInteger(maxWords) || maxWords < 75 || maxWords > 300) {
+    throw new Error("error: max_words must be an integer from 75 through 300\nhelp: run taskferry summary with max_words between 75 and 300");
+  }
+  const result = await ctx.activityCache.refresh(source, { force: true, includeSummary: ctx.activitySummariesEnabled, maxWords });
+  if (!result) throw new Error("error: activity summary was not refreshed\nhelp: retry the activity summary request");
+  return {
+    sourceTaskId: taskId,
+    sourceStatus: source.status,
+    activity: result.activity,
+    outputWatermark: result.outputWatermark,
+  };
+}
+
+/**
+ * Forces a running task to stop for a reason other than user cancellation
+ * (watchdog timeout, provider exhaustion), recording failureReason instead of
+ * cancelRequested so the exit handler lands on "crashed". Mirrors cancel()'s
+ * SIGTERM-then-SIGKILL escalation. Extracted out of `createTaskManager`'s
+ * `failRunningTask` closure; every factory binding is threaded in via `ctx`.
+ * @param {Task} task
+ * @param {string} failureReason
+ * @param {{stopRunningWatcher: (taskId: string) => void, persistTask: (taskId: string) => void, sendSignal: (pid: number, signal: NodeJS.Signals) => void, escalationTimers: Map<string, NodeJS.Timeout>, tasks: Map<string, Task>, watchdogGrace: number}} ctx
+ * @param {string} [failureDetail]
+ */
+function failRunningTaskFor(task, failureReason, ctx, failureDetail) {
+  if (task.failureReason) return; // already stopping this task
+  task.failureReason = failureReason;
+  task.failureDetail = failureDetail ?? null;
+  ctx.stopRunningWatcher(task.id);
+  try {
+    ctx.persistTask(task.id);
+  } catch (err) {
+    // The child still needs stopping if the state directory became unwritable.
+    console.error(`taskferry: failed to persist failing task ${task.id}: ${errMessage(err)}`);
+  }
+  ctx.sendSignal(/** @type {number} */ (task.pid), "SIGTERM");
+  const timer = setTimeout(() => {
+    ctx.escalationTimers.delete(task.id);
+    if (ctx.tasks.get(task.id)?.status === "running") ctx.sendSignal(/** @type {number} */ (task.pid), "SIGKILL");
+  }, ctx.watchdogGrace);
+  ctx.escalationTimers.set(task.id, timer);
+}
+
+/**
+ * Arms the no-output watchdog for a task: an unref'd interval whose tick
+ * reads only the bytes appended since the last tick, with a two-phase
+ * no-output budget. Extracted out of `createTaskManager`'s
+ * `startRunningWatcher` closure; every factory binding is threaded in via
+ * `ctx` and the mutable per-task watch state lives on `ctx.runningWatcherState`.
+ * @param {Task} task
+ * @param {{noOutputTimeout: number, runningWatcherState: Map<string, {bytesRead: number, carry: string}>, tasks: Map<string, Task>, stopRunningWatcher: (taskId: string) => void, failRunningTask: (task: Task, failureReason: string, failureDetail?: string) => void, scheduleActivity: (task: Task, options?: {force?: boolean}) => Promise<unknown>, postOutputNoOutputTimeout: number, watchdogPoll: number, runningWatchers: Map<string, NodeJS.Timeout>}} ctx
+ */
+function startRunningWatcherFor(task, ctx) {
+  // Mutable per-task watch state threaded into the module-level watchdog
+  // helpers so each tick reads and regexes only the bytes appended since
+  // the last one instead of the whole file (O(1) amortized per tick, not
+  // O(n) per tick / O(n²) over a long-running task). `carry` holds a
+  // trailing partial line from the previous read until it's completed by
+  // the next chunk.
+  const watchState = {
+    bytesRead: 0,
+    carry: "",
+    outputSeen: false,
+    currentNoOutputTimeout: ctx.noOutputTimeout,
+    lastActivityMs: Date.now(),
+  };
+  ctx.runningWatcherState.set(task.id, {
+    get bytesRead() { return watchState.bytesRead; },
+    get carry() { return watchState.carry; },
+  });
+  // Two-phase no-output budget:
+  //   - Before the task has produced any parseable log event, the watcher
+  //     compares against `noOutputTimeout`. A task that is silent from the
+  //     start is most likely genuinely wedged (bad spawn, auth failure,
+  //     provider hang) and should die fast.
+  //   - The moment the watcher sees its first parseable JSON line in the
+  //     log, the latch flips and the deadline jumps to
+  //     `postOutputNoOutputTimeout` for the rest of the task's life.
+  //     Silence after real work is far more likely a long generation
+  //     (opencode writes step-level events, not token deltas, so a long
+  //     final answer can produce zero log lines for minutes) than a hang.
+  const timer = setInterval(() => {
+    watchdogTick(watchState, {
+      taskId: task.id,
+      tasks: ctx.tasks,
+      stopRunningWatcher: ctx.stopRunningWatcher,
+      failRunningTask: ctx.failRunningTask,
+      scheduleActivity: ctx.scheduleActivity,
+      postOutputNoOutputTimeout: ctx.postOutputNoOutputTimeout,
+    });
+  }, ctx.watchdogPoll);
+  // Same as child.unref() in startTask: the watchdog is a background
+  // observer, not something that should pin the server's event loop alive.
+  // An unref'd interval still fires while the loop is otherwise busy, but
+  // lets the process exit if nothing else (real work, child subprocesses,
+  // waiters) is keeping it alive -- e.g. tests that cancel a task without
+  // firing an 'exit' event.
+  timer.unref();
+  ctx.runningWatchers.set(task.id, timer);
 }

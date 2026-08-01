@@ -15,6 +15,7 @@ export const TASKFERRY_PLUMBING_ENV_VARS = Object.freeze([
   "TASKFERRY_RUNTIME_DIR",
   "TASKFERRY_CACHE_DIR",
   "TASKFERRY_SOCKET_PATH",
+  "TASKFERRY_OVERLAY_TMP_DIR",
 ]);
 
 export function resolveStateDir(env = process.env) {
@@ -50,6 +51,18 @@ export function resolveRuntimeDir({ env = process.env, stateDir = resolveStateDi
   if (env.TASKFERRY_RUNTIME_DIR) return env.TASKFERRY_RUNTIME_DIR;
   if (env.XDG_RUNTIME_DIR) return path.join(env.XDG_RUNTIME_DIR, "taskferry");
   return path.join(stateDir, "run");
+}
+
+// Plain os.tmpdir() ("/tmp" on Linux) is shared by every taskferry daemon
+// on the host regardless of TASKFERRY_STATE_DIR/RUNTIME_DIR isolation, so a
+// daemon's startup orphan-overlay sweep (tasks.js's sweepOrphanedOverlays())
+// could delete a *different* daemon's in-flight overlay -- see taskferry#286.
+// Scoping under the already-isolated runtime dir (itself keyed off
+// TASKFERRY_RUNTIME_DIR/XDG_RUNTIME_DIR/stateDir) gives every daemon instance
+// its own overlay namespace for free, with TASKFERRY_OVERLAY_TMP_DIR as an
+// explicit escape hatch for callers that want to pin it elsewhere.
+export function resolveOverlayTmpRoot({ env = process.env, runtimeDir = resolveRuntimeDir({ env }) } = {}) {
+  return env.TASKFERRY_OVERLAY_TMP_DIR || path.join(runtimeDir, "overlay");
 }
 
 // Sandboxed workers' data homes (opencode/pi auth + growing caches like

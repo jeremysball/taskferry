@@ -1943,6 +1943,39 @@ describe("sweepOrphanedOverlays()", () => {
     const persisted = JSON.parse(fs.readFileSync(tasksFile, "utf8"));
     assert.equal(persisted[0].overlayDirs, null);
   });
+
+  test("two managers with distinct runtimeDirs and no explicit overlayTmpRoot never collide on the same overlay namespace (taskferry#286)", () => {
+    // Regression for the shared-/tmp sweep collision: before scoping
+    // overlayTmpRoot under runtimeDir, every manager's real default was the
+    // same plain os.tmpdir(), so a second (e.g. restarting) daemon's startup
+    // sweep could delete a first daemon's in-flight overlay out from under
+    // it even though the two had fully isolated stateDir/runtimeDir.
+    const runtimeDirA = fs.mkdtempSync(path.join(os.tmpdir(), "axi-runtime-a-"));
+    const runtimeDirB = fs.mkdtempSync(path.join(os.tmpdir(), "axi-runtime-b-"));
+    const stateDirA = fs.mkdtempSync(path.join(os.tmpdir(), "axi-state-a-"));
+    const stateDirB = fs.mkdtempSync(path.join(os.tmpdir(), "axi-state-b-"));
+    const mgrA = createTaskManager({
+      stateDir: stateDirA,
+      runtimeDir: runtimeDirA,
+      sandboxEnabled: false,
+      cacheDir: fs.mkdtempSync(path.join(os.tmpdir(), "axi-cache-a-")),
+      spawnFn: () => { throw new Error("not used"); },
+      killFn: () => {},
+      listModelsFn: () => `${DEFAULT_SUMMARY_MODEL}\n`,
+    });
+    const mgrB = createTaskManager({
+      stateDir: stateDirB,
+      runtimeDir: runtimeDirB,
+      sandboxEnabled: false,
+      cacheDir: fs.mkdtempSync(path.join(os.tmpdir(), "axi-cache-b-")),
+      spawnFn: () => { throw new Error("not used"); },
+      killFn: () => {},
+      listModelsFn: () => `${DEFAULT_SUMMARY_MODEL}\n`,
+    });
+    assert.notEqual(mgrA.paths.OVERLAY_TMP_ROOT, mgrB.paths.OVERLAY_TMP_ROOT);
+    assert.ok(mgrA.paths.OVERLAY_TMP_ROOT.startsWith(runtimeDirA));
+    assert.ok(mgrB.paths.OVERLAY_TMP_ROOT.startsWith(runtimeDirB));
+  });
 });
 
 describe("output-completeness check at settlement time (issue #35)", () => {
@@ -5810,11 +5843,11 @@ describe("caller-env union (sanitizedEnvironment)", () => {
     // set is now built from paths.js's TASKFERRY_PLUMBING_ENV_VARS export
     // plus PATH and HOME; this test exercises every name in that export to
     // pin the derivation.
-    for (const name of ["TASKFERRY_STATE_DIR", "TASKFERRY_RUNTIME_DIR", "TASKFERRY_CACHE_DIR", "TASKFERRY_SOCKET_PATH"]) {
+    for (const name of ["TASKFERRY_STATE_DIR", "TASKFERRY_RUNTIME_DIR", "TASKFERRY_CACHE_DIR", "TASKFERRY_SOCKET_PATH", "TASKFERRY_OVERLAY_TMP_DIR"]) {
       process.env[name] = `real-${name}`;
     }
     t.after(() => {
-      for (const name of ["TASKFERRY_STATE_DIR", "TASKFERRY_RUNTIME_DIR", "TASKFERRY_CACHE_DIR", "TASKFERRY_SOCKET_PATH"]) {
+      for (const name of ["TASKFERRY_STATE_DIR", "TASKFERRY_RUNTIME_DIR", "TASKFERRY_CACHE_DIR", "TASKFERRY_SOCKET_PATH", "TASKFERRY_OVERLAY_TMP_DIR"]) {
         delete process.env[name];
       }
     });
@@ -5826,12 +5859,14 @@ describe("caller-env union (sanitizedEnvironment)", () => {
       TASKFERRY_RUNTIME_DIR: "malicious-runtime",
       TASKFERRY_CACHE_DIR: "malicious-cache",
       TASKFERRY_SOCKET_PATH: "malicious-socket",
+      TASKFERRY_OVERLAY_TMP_DIR: "malicious-overlay",
     } });
 
     assert.equal(capturedOpts.env.TASKFERRY_STATE_DIR, "real-TASKFERRY_STATE_DIR");
     assert.equal(capturedOpts.env.TASKFERRY_RUNTIME_DIR, "real-TASKFERRY_RUNTIME_DIR");
     assert.equal(capturedOpts.env.TASKFERRY_CACHE_DIR, "real-TASKFERRY_CACHE_DIR");
     assert.equal(capturedOpts.env.TASKFERRY_SOCKET_PATH, "real-TASKFERRY_SOCKET_PATH");
+    assert.equal(capturedOpts.env.TASKFERRY_OVERLAY_TMP_DIR, "real-TASKFERRY_OVERLAY_TMP_DIR");
   });
 
   test("a caller-supplied env key containing '=' is rejected synchronously and the task settles as crashed with a matching spawnError", () => {

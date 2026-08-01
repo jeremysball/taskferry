@@ -6,7 +6,7 @@ import path from "node:path";
 import { createTaskEvents } from "./events.js";
 import { createActivityCache, readActivitySnapshot, readDeltaNarration, DEFAULT_SUMMARIZER_TIMEOUT_MS } from "./activity.js";
 import { withFileLock } from "./state-lock.js";
-import { resolveStateDir, resolveCacheDir, TASKFERRY_PLUMBING_ENV_VARS } from "./paths.js";
+import { resolveStateDir, resolveCacheDir, resolveOverlayTmpRoot, TASKFERRY_PLUMBING_ENV_VARS } from "./paths.js";
 import { RESULT_FIELDS } from "./protocol.js";
 import { formatToolEventForNarration } from "./narration-format.js";
 import { errCode } from "./errors.js";
@@ -648,7 +648,6 @@ export function createTaskManager({
     ? !["1", "true"].includes(process.env.TASKFERRY_DISABLE_OVERLAY)
     : (/** @type {boolean|undefined} */ (config.overlayEnabled) ?? true),
   checkOverlaySupportFn = checkOverlaySupport,
-  overlayTmpRoot = os.tmpdir(),
   runOverlayCommandFn = defaultOverlayRunCommand,
   rmOverlayTreeFn,
   resolveGitCommonDirFn = resolveGitCommonDir,
@@ -658,6 +657,10 @@ export function createTaskManager({
   statFn = (/** @type {string} */ p) => { try { return fs.statSync(p); } catch { return null; } },
   readdirFn = (/** @type {string} */ p) => fs.readdirSync(p),
   runtimeDir = path.join(stateDir, "run"),
+  // Scoped under runtimeDir (not plain os.tmpdir()) so two daemon instances
+  // -- isolated via TASKFERRY_STATE_DIR/RUNTIME_DIR or not -- never share an
+  // overlay namespace; see resolveOverlayTmpRoot()'s doc comment (taskferry#286).
+  overlayTmpRoot = resolveOverlayTmpRoot({ env: process.env, runtimeDir }),
   cacheDir = resolveCacheDir(process.env),
   onEvent,
 } = {}) {
@@ -3441,7 +3444,7 @@ export function createTaskManager({
       activityCache.setSummariesEnabled(activitySummariesEnabled && totalCount > 0);
     },
     advisor,
-    paths: { STATE_DIR: stateDir, LOG_DIR, SUMMARY_DIR, TASKS_FILE },
+    paths: { STATE_DIR: stateDir, LOG_DIR, SUMMARY_DIR, TASKS_FILE, OVERLAY_TMP_ROOT: overlayTmpRoot },
     // Exposed primarily so tests can seed the summary session id and watermark
     // (the activity cache owns the "last successful summary" state shared
     // between the activity path and the direct summarize path).

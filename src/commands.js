@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import os from "node:os";
+import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { UsageError } from "./args.js";
 import { PROTOCOL_VERSION } from "./protocol.js";
@@ -25,6 +26,80 @@ import { loadConfig } from "./config.js";
 // 45 s MAX_WAIT_MS in tasks.js is for advisor's internal polling — a different,
 // much shorter-lived use case.
 const DEFAULT_WAIT_TIMEOUT_MS = 900000;
+
+// Default budget for advisor's auto-attached context: ~30k tokens, well
+// under any provider's context window even after the canned prompt and the
+// caller's own --prompt are added on top.
+const DEFAULT_ADVISOR_CONTEXT_CHARS = 120000;
+
+/**
+ * Resolve the effective advisor context budget: explicit env var override,
+ * then the config file's `advisorContextChars`, then the built-in default.
+ * Mirrors resolveWaitDefaultTimeoutMs()'s resolution order.
+ * @param {NodeJS.ProcessEnv} env
+ * @returns {number}
+ */
+function resolveAdvisorContextChars(env) {
+  const envChars = Number(env.TASKFERRY_ADVISOR_CONTEXT_CHARS);
+  if (Number.isFinite(envChars) && envChars > 0) return envChars;
+  const configChars = Number(loadConfig({ env }).advisorContextChars);
+  return Number.isFinite(configChars) && configChars > 0 ? configChars : DEFAULT_ADVISOR_CONTEXT_CHARS;
+}
+
+/**
+ * The Claude Code project-directory slug for a given absolute cwd: the path
+ * with every separator replaced by "-" (e.g. "/workspace/taskferry" ->
+ * "-workspace-taskferry"), matching the convention Claude Code itself uses
+ * under ~/.claude/projects/.
+ * @param {string} cwd
+ * @returns {string}
+ */
+function claudeProjectSlug(cwd) {
+  return cwd.split(path.sep).join("-");
+}
+
+/**
+ * @param {string} homeDirectory
+ * @param {string} cwd
+ * @param {string} sessionId
+ * @returns {string}
+ */
+function claudeTranscriptPath(homeDirectory, cwd, sessionId) {
+  return path.join(homeDirectory, ".claude", "projects", claudeProjectSlug(cwd), `${sessionId}.jsonl`);
+}
+
+/**
+ * Reads the last `maxChars` Unicode code points of `filePath` without
+ * loading the whole file into memory -- a real transcript can be large.
+ * UTF-8 code points are at most 4 bytes, so reading `maxChars * 4` bytes
+ * from the tail guarantees enough raw bytes to yield `maxChars` code
+ * points once decoded.
+ * @param {string} filePath
+ * @param {number} maxChars
+ * @returns {string}
+ */
+function readTailChars(filePath, maxChars) {
+  let size;
+  try {
+    size = fs.statSync(filePath).size;
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    throw new UsageError(
+      `advisor could not read the Claude session transcript at ${filePath}: ${message}`,
+      "CLAUDE_CODE_SESSION_ID was set but its transcript file wasn't readable -- pass --prompt explicitly to skip auto-context, or check the transcript path"
+    );
+  }
+  const bytes = Math.min(size, maxChars * 4);
+  const buffer = Buffer.alloc(bytes);
+  const fd = fs.openSync(filePath, "r");
+  try {
+    fs.readSync(fd, buffer, 0, bytes, size - bytes);
+  } finally {
+    fs.closeSync(fd);
+  }
+  const codePoints = Array.from(buffer.toString("utf8"));
+  return codePoints.length > maxChars ? codePoints.slice(-maxChars).join("") : codePoints.join("");
+}
 
 const PACKAGE_JSON_PATH = fileURLToPath(new URL("../package.json", import.meta.url));
 
@@ -63,6 +138,8 @@ async function checkClaudeIntegration(runShellCommand) {
   return { installed: pluginInstalled(probe.stdout || "") };
 }
 
+
+export { resolveAdvisorContextChars, claudeTranscriptPath, readTailChars };
 
 export async function runCommand(command, options, { client, io = process, signal, executablePath, cwd = process.cwd(), homeDirectory = os.homedir(), env = process.env, runShellCommand = defaultShellRunner, platform = process.platform, checkSkills = defaultCheckSkills, resolveWorkspaceRoot: resolveWorkspaceRootFn = resolveWorkspaceRoot } = {}) {
   switch (command) {

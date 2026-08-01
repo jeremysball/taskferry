@@ -1,9 +1,10 @@
-import { test } from "node:test";
+import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { runCommand } from "./commands.js";
+import { runCommand, resolveAdvisorContextChars, claudeTranscriptPath, readTailChars } from "./commands.js";
+import { UsageError } from "./args.js";
 
 function fakeIo({ isTTY } = {}) {
   const stdout = [];
@@ -1063,4 +1064,46 @@ test("watch --flush-interval flushes buffered events on abort instead of silentl
   assert.equal(io.lines.length, 2, "both buffered events must be flushed on abort, not silently dropped");
   assert.match(io.lines[0], /oc_1/);
   assert.match(io.lines[1], /oc_2/);
+});
+
+describe("advisor context helpers", () => {
+  test("resolveAdvisorContextChars() defaults to 120000", () => {
+    assert.equal(resolveAdvisorContextChars({}), 120000);
+  });
+
+  test("resolveAdvisorContextChars() honors TASKFERRY_ADVISOR_CONTEXT_CHARS", () => {
+    assert.equal(resolveAdvisorContextChars({ TASKFERRY_ADVISOR_CONTEXT_CHARS: "50000" }), 50000);
+  });
+
+  test("resolveAdvisorContextChars() falls back to the config file when the env var is unset", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-advisor-config-"));
+    const configDir = path.join(dir, "taskferry");
+    fs.mkdirSync(configDir, { recursive: true });
+    const configPath = path.join(configDir, "config.json");
+    fs.writeFileSync(configPath, JSON.stringify({ advisorContextChars: 75000 }));
+    assert.equal(resolveAdvisorContextChars({ XDG_CONFIG_HOME: dir }), 75000);
+  });
+
+  test("claudeTranscriptPath() slugifies cwd the same way the account's project dirs are named", () => {
+    const result = claudeTranscriptPath("/home/user", "/workspace/taskferry", "sess-1");
+    assert.equal(result, path.join("/home/user", ".claude", "projects", "-workspace-taskferry", "sess-1.jsonl"));
+  });
+
+  test("readTailChars() returns the last N characters of a file", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-tail-chars-"));
+    const filePath = path.join(dir, "transcript.jsonl");
+    fs.writeFileSync(filePath, "0123456789");
+    assert.equal(readTailChars(filePath, 4), "6789");
+  });
+
+  test("readTailChars() returns the whole file when it's shorter than the budget", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-tail-chars-"));
+    const filePath = path.join(dir, "transcript.jsonl");
+    fs.writeFileSync(filePath, "short");
+    assert.equal(readTailChars(filePath, 4000), "short");
+  });
+
+  test("readTailChars() throws a UsageError naming the path when the file doesn't exist", () => {
+    assert.throws(() => readTailChars("/nonexistent/transcript.jsonl", 100), (err) => err instanceof UsageError && /\/nonexistent\/transcript\.jsonl/.test(err.message));
+  });
 });

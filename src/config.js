@@ -23,6 +23,7 @@ const CONFIG_FIELD_TYPES = {
   waitDefaultTimeoutMs: "number",
   cancelGraceMs: "number",
   defaultExecutor: "string",
+  advisorContextChars: "number",
 };
 
 /**

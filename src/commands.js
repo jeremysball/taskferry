@@ -414,7 +414,7 @@ export async function runCommand(command, options, { client, io = process, signa
     case "doctor": {
       if (options.stats) {
         const listed = await client.request("task.list", {});
-        return computeDoctorStats(listed.tasks);
+        return computeDoctorStats(Array.isArray(listed.tasks) ? listed.tasks : []);
       }
       const checks = await Promise.allSettled([
         client.request("system.health", {}),

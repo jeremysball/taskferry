@@ -1044,6 +1044,23 @@ test("doctor --stats calls task.list and returns computeDoctorStats() output, sk
   assert.equal(result.warnings, undefined);
 });
 
+test("doctor --stats on a daemon with zero tasks returns empty stats, not garbage", async (t) => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-doctor-stats-empty-"));
+  const client = {
+    request: async () => ({
+      counts: { queued: 0, running: 0, done: 0, crashed: 0, cancelled: 0, unknown: 0 },
+      tasks: "none found (this server process's lifetime)",
+    }),
+  };
+  const runShellCommand = async () => ({ stdout: "", stderr: "", code: 0 });
+
+  const result = await runCommand("doctor", { stats: true }, { client, homeDirectory: home, env: {}, runShellCommand });
+
+  assert.equal(result.statusMix.overall.total, 0);
+  assert.deepEqual(result.byModel, []);
+  assert.deepEqual(result.failureReasons, []);
+});
+
 test("doctor without --stats does not call task.list", async (t) => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-doctor-stats-home-"));
   const calledMethods = [];

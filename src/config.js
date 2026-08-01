@@ -24,6 +24,7 @@ const CONFIG_FIELD_TYPES = {
   cancelGraceMs: "number",
   defaultExecutor: "string",
   advisorContextChars: "number",
+  envFile: "string",
 };
 
 /**

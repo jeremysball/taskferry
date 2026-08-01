@@ -40,6 +40,36 @@ that, `taskferry dispatch`, `taskferry advisor`, and `taskferry summary`
 environment to the daemon over the same socket, which the daemon unions on
 top of its own ambient environment before spawning — caller wins.
 
+There are three layers, unioned low-to-high priority: `envFile` (see
+below), the daemon's own ambient `process.env`, then the caller's
+forwarded env. Each layer overrides the one below it key-by-key; a caller
+that sets nothing for a given var falls through to the daemon's ambient
+value, which in turn falls through to the env-file value, which finally
+falls through to nothing (the var is simply absent from the spawned
+child).
+
+### The `envFile` gap this closes
+
+Caller-env forwarding only helps when the *caller itself* has the secret
+in its own environment. A caller launched from a minimal, non-interactive
+environment — a cron job, a systemd timer, a CI runner — typically doesn't:
+secrets exported in an interactive shell's rc file (`.bashrc`, `.zshrc`,
+`config.fish`) are invisible to a process cron spawns, since cron never
+sources that file. In that case the caller forwards a stripped-down env,
+the daemon's own ambient env may be equally stripped (if the daemon itself
+was started from a similarly minimal launch context), and every dispatch
+fails at the worker's own auth/boot step — indistinguishable, from the
+caller's side, from the credential simply being wrong.
+
+`TASKFERRY_ENV_FILE` (or the `envFile` config field; see `docs/config.md`)
+points the daemon at a `.env`-style file to load once at startup and union
+in as the base layer beneath its own ambient environment, so a
+non-interactive caller's dispatch still authenticates correctly even
+though neither the caller's own env nor the daemon's ambient env carries
+the secret. It does not need to duplicate everything already in the
+daemon's ambient environment — only the subset that a non-interactive
+caller would otherwise be missing.
+
 - The daemon and every caller run as the same local user over a `0600`
   socket (see "Filesystem and socket permissions" above) — there's no
   trust boundary being crossed by a live caller handing over its own

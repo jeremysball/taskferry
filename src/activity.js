@@ -19,24 +19,37 @@ function decodeUtf8(buffer, side) {
   return text;
 }
 
+/**
+ * @param {any[]} order
+ * @param {Map<string, string[]>} textByMessageId
+ * @param {any} event
+ */
+function pushParsedEvent(order, textByMessageId, event) {
+  if (event.type === "text" && typeof event.part?.text === "string") {
+    const messageId = event.part.messageID ?? "__unknown_message__";
+    const parts = textByMessageId.get(messageId);
+    if (!parts) {
+      textByMessageId.set(messageId, [event.part.text]);
+      order.push({ kind: "text", messageId });
+    } else {
+      parts.push(event.part.text);
+    }
+    return;
+  }
+  if (event.type === "tool_use" && event.part?.type === "tool") {
+    order.push({ kind: "tool", line: formatToolEventForNarration(event.part) });
+  }
+}
+
 /** @param {string} raw @returns {string} */
 function narrationFromRaw(raw) {
   const textByMessageId = new Map();
+  /** @type {any[]} */
   const order = [];
   for (const line of raw.split("\n")) {
     if (!line.trim()) continue;
     try {
-      const event = JSON.parse(line);
-      if (event.type === "text" && typeof event.part?.text === "string") {
-        const messageId = event.part.messageID ?? "__unknown_message__";
-        if (!textByMessageId.has(messageId)) {
-          textByMessageId.set(messageId, []);
-          order.push({ kind: "text", messageId });
-        }
-        textByMessageId.get(messageId).push(event.part.text);
-      } else if (event.type === "tool_use" && event.part?.type === "tool") {
-        order.push({ kind: "tool", line: formatToolEventForNarration(event.part) });
-      }
+      pushParsedEvent(order, textByMessageId, JSON.parse(line));
     } catch {
       // Logs can contain stderr lines and partial NDJSON records.
     }
@@ -67,8 +80,8 @@ export function snapshotNarration(raw, { maxBytes = DEFAULT_ACTIVITY_SNAPSHOT_BY
   }
   const narration = boundedText(narrationFromRaw(excerpt), Math.max(1, maxChars));
   return {
-    text: narration,
     narration,
+    text: narration,
     outputWatermark: watermark,
     sourceLogBytes: watermark,
     inputBytes: Buffer.byteLength(excerpt),
@@ -144,7 +157,7 @@ export function readDeltaNarration(logPath, fromOffset, { maxChars = DEFAULT_ACT
   }
   // maxBytes > deltaBytes preserves the entire delta (no head+tail bounding);
   // only the char cap trims.
-  return snapshotNarration(buffer, { maxBytes: deltaBytes + 1, maxChars, outputWatermark: size });
+  return snapshotNarration(buffer, { maxChars, maxBytes: deltaBytes + 1, outputWatermark: size });
 }
 
 /** @param {unknown} value @param {number} [maxChars] */
@@ -171,6 +184,27 @@ export function buildLocalActivity({ status, prompt, promptPreview, narration, t
 /** @param {{id: string, status: string}} task @param {number} outputWatermark @param {string} summaryModel @param {number} maxWords @param {boolean} includeSummary */
 export function activityCacheKey(task, outputWatermark, summaryModel, maxWords, includeSummary) {
   return JSON.stringify([task.id, task.status, outputWatermark, summaryModel, maxWords, !!includeSummary]);
+}
+
+/**
+ * @param {{force: boolean, previous: {outputWatermark: number, refreshedAt: number}|undefined, task: ActivityTask, outputWatermark: number, refreshBytes: number, summarizerTimeoutMs: number, now: () => number}} args
+ */
+function shouldSkipRefresh({ force, previous, task, outputWatermark, refreshBytes, summarizerTimeoutMs, now }) {
+  if (!force && previous) {
+    if (task.status === "running" && outputWatermark - previous.outputWatermark < refreshBytes) return true;
+    if (now() - previous.refreshedAt < summarizerTimeoutMs) return true;
+  }
+  return false;
+}
+
+/** @param {SummarizeOutcome} summarized */
+function hasSessionId(summarized) {
+  return Boolean(summarized && typeof summarized.sessionId === "string" && summarized.sessionId);
+}
+
+/** @param {SummarizeOutcome} summarized */
+function textOf(summarized) {
+  return summarized && typeof summarized.text === "string" ? summarized.text : "";
 }
 
 /**
@@ -230,9 +264,8 @@ export function createActivityCache({
     if (pending) return pending;
 
     const previous = lastRefresh.get(task.id);
-    if (!force && previous) {
-      if (task.status === "running" && outputWatermark - previous.outputWatermark < refreshBytes) return Promise.resolve(null);
-      if (now() - previous.refreshedAt < summarizerTimeoutMs) return Promise.resolve(null);
+    if (shouldSkipRefresh({ force, previous, task, outputWatermark, refreshBytes, summarizerTimeoutMs, now })) {
+      return Promise.resolve(null);
     }
     lastRefresh.set(task.id, { outputWatermark, refreshedAt: now() });
 
@@ -244,7 +277,7 @@ export function createActivityCache({
     });
     const promise = (async () => {
       if (!resolvedIncludeSummary) {
-        const result = { activity: fallback, outputWatermark, cached: false };
+        const result = { outputWatermark, activity: fallback, cached: false };
         cache.set(key, result);
         inFlight.delete(key);
         return result;
@@ -255,22 +288,23 @@ export function createActivityCache({
         const priorWatermark = lastSummarizedWatermarks.get(task.id) || 0;
         const summarized = await summarize({
           task,
-          snapshot: current,
-          maxWords: resolvedMaxWords,
           summaryModel,
           previousActivity,
           previousSessionId,
+          snapshot: current,
+          maxWords: resolvedMaxWords,
           lastSummarizedWatermark: priorWatermark,
         });
-        const summarizedText = summarized && typeof summarized.text === "string" ? summarized.text : "";
+        const summarizedText = textOf(summarized);
         const text = sanitizeActivityText(summarizedText);
         if (!text) throw new Error("summarize() returned no usable text");
         lastSummarizedActivity.set(task.id, text);
         lastSummarizedWatermarks.set(task.id, outputWatermark);
-        if (summarized && typeof summarized.sessionId === "string" && summarized.sessionId) {
-          summarySessions.set(task.id, summarized.sessionId);
+        if (hasSessionId(summarized)) {
+          const sessionId = summarized.sessionId;
+          if (sessionId) summarySessions.set(task.id, sessionId);
         }
-        const result = { activity: text, outputWatermark, cached: false };
+        const result = { outputWatermark, activity: text, cached: false };
         cache.set(key, result);
         inFlight.delete(key);
         return result;

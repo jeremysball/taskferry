@@ -2,6 +2,12 @@ import { describe, test } from "node:test";
 import assert from "node:assert/strict";
 import { colorize, errorValue, formatWatchEvent, leanStatus, writeToon } from "./output.js";
 
+const TASK_ACTIVITY = "task.activity";
+const TASK_STATE = "task.state";
+const WORKSPACE_PROJ = "/workspace/proj";
+const OCCURRED_AT_MID = "2026-07-18T00:06:12.414Z";
+const OCCURRED_AT_LATE = "2026-07-18T00:24:11.282Z";
+
 function fakeStdoutIo(isTTY) {
   let stdout = "";
   return { io: { stdout: { isTTY, write: (chunk) => { stdout += chunk; } } }, output: () => stdout };
@@ -12,7 +18,7 @@ function resumeHint(detail) {
 }
 
 describe("leanStatus crashed-resume hint", () => {
-  const base = { id: "oc_1", status: "crashed", sessionId: "ses_1", directory: "/workspace/proj" };
+  const base = { id: "oc_1", status: "crashed", sessionId: "ses_1", directory: WORKSPACE_PROJ };
 
   test("quotes a benign session id and directory in single quotes", () => {
     assert.equal(
@@ -22,7 +28,7 @@ describe("leanStatus crashed-resume hint", () => {
   });
 
   test("quotes a session id containing a single quote literally", () => {
-    const hint = resumeHint({ ...base, sessionId: "ses_'x", directory: "/workspace/proj" });
+    const hint = resumeHint({ ...base, sessionId: "ses_'x", directory: WORKSPACE_PROJ });
     assert.ok(hint.includes("--session-id 'ses_'\\''x'"));
     assert.ok(!hint.includes("ses_x"));
   });
@@ -46,12 +52,12 @@ describe("formatWatchEvent toon format for activity/state events", () => {
   test("collapses a task.activity event to one line, dropping protocol plumbing", () => {
     const line = formatWatchEvent({
       sequence: 138,
-      type: "task.activity",
+      type: TASK_ACTIVITY,
       taskId: "oc_1",
-      directory: "/workspace/proj",
+      directory: WORKSPACE_PROJ,
       status: "running",
       previousStatus: null,
-      occurredAt: "2026-07-18T00:06:12.414Z",
+      occurredAt: OCCURRED_AT_MID,
       activity: "Reading the config file.",
       outputWatermark: 67276,
     }, "toon");
@@ -68,9 +74,9 @@ describe("formatWatchEvent toon format for activity/state events", () => {
   test("collapses a task.state event to a status transition, omitting a null previousStatus", () => {
     const line = formatWatchEvent({
       sequence: 89,
-      type: "task.state",
+      type: TASK_STATE,
       taskId: "oc_1",
-      directory: "/workspace/proj",
+      directory: WORKSPACE_PROJ,
       status: "running",
       previousStatus: null,
       occurredAt: "2026-07-18T00:05:00.000Z",
@@ -85,11 +91,11 @@ describe("formatWatchEvent toon format for activity/state events", () => {
 
   test("shows a status transition when previousStatus differs from status", () => {
     const line = formatWatchEvent({
-      type: "task.state",
+      type: TASK_STATE,
       taskId: "oc_1",
       status: "crashed",
       previousStatus: "running",
-      occurredAt: "2026-07-18T00:24:11.282Z",
+      occurredAt: OCCURRED_AT_LATE,
     }, "toon");
 
     assert.match(line, /running -> crashed/);
@@ -97,10 +103,10 @@ describe("formatWatchEvent toon format for activity/state events", () => {
 
   test("collapses multi-line activity text to a single line", () => {
     const line = formatWatchEvent({
-      type: "task.activity",
+      type: TASK_ACTIVITY,
       taskId: "oc_1",
       status: "running",
-      occurredAt: "2026-07-18T00:06:12.414Z",
+      occurredAt: OCCURRED_AT_MID,
       activity: "Line one.\nLine two.\r\nLine three.",
     }, "toon");
 
@@ -110,10 +116,10 @@ describe("formatWatchEvent toon format for activity/state events", () => {
 
   test("shows a distinct message for a task.activity event carrying an explicit summarize failure", () => {
     const line = formatWatchEvent({
-      type: "task.activity",
+      type: TASK_ACTIVITY,
       taskId: "oc_1",
       status: "running",
-      occurredAt: "2026-07-18T00:06:12.414Z",
+      occurredAt: OCCURRED_AT_MID,
       summaryFailed: true,
       summaryError: "summary model is unavailable: opencode/mimo-v2.5-free",
     }, "toon");
@@ -209,11 +215,11 @@ describe("colorize", () => {
 describe("formatWatchEvent color (TTY-gated)", () => {
   test("colors a done status when useColor is true", () => {
     const line = formatWatchEvent({
-      type: "task.state",
+      type: TASK_STATE,
       taskId: "oc_1",
       status: "done",
       previousStatus: "running",
-      occurredAt: "2026-07-18T00:24:11.282Z",
+      occurredAt: OCCURRED_AT_LATE,
     }, "toon", true);
 
     assert.ok(line.includes("running -> \x1b[32mdone\x1b[0m"));
@@ -221,11 +227,11 @@ describe("formatWatchEvent color (TTY-gated)", () => {
 
   test("emits no ANSI codes when useColor is false (piped/non-TTY output)", () => {
     const line = formatWatchEvent({
-      type: "task.state",
+      type: TASK_STATE,
       taskId: "oc_1",
       status: "done",
       previousStatus: "running",
-      occurredAt: "2026-07-18T00:24:11.282Z",
+      occurredAt: OCCURRED_AT_LATE,
     }, "toon", false);
 
     assert.ok(!line.includes("\x1b["));
@@ -234,10 +240,10 @@ describe("formatWatchEvent color (TTY-gated)", () => {
 
   test("emits no ANSI codes by default when useColor is omitted", () => {
     const line = formatWatchEvent({
-      type: "task.activity",
+      type: TASK_ACTIVITY,
       taskId: "oc_1",
       status: "crashed",
-      occurredAt: "2026-07-18T00:24:11.282Z",
+      occurredAt: OCCURRED_AT_LATE,
       activity: "boom",
     }, "toon");
 
@@ -246,11 +252,11 @@ describe("formatWatchEvent color (TTY-gated)", () => {
 
   test("never colors ndjson output even when useColor is true", () => {
     const line = formatWatchEvent({
-      type: "task.state",
+      type: TASK_STATE,
       taskId: "oc_1",
       status: "done",
       previousStatus: "running",
-      occurredAt: "2026-07-18T00:24:11.282Z",
+      occurredAt: OCCURRED_AT_LATE,
     }, "ndjson", true);
 
     assert.ok(!line.includes("\x1b["));

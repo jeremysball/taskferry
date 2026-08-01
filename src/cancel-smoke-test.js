@@ -5,8 +5,8 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const cliEntry = path.join(__dirname, "cli.js");
+const scriptDir = path.dirname(fileURLToPath(import.meta.url));
+const cliEntry = path.join(scriptDir, "cli.js");
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-cancel-smoke-"));
 const env = {
@@ -14,7 +14,7 @@ const env = {
   TASKFERRY_STATE_DIR: path.join(root, "state"),
   TASKFERRY_RUNTIME_DIR: path.join(root, "run"),
 };
-const dirArg = process.argv[2] || path.join(__dirname, "..");
+const dirArg = process.argv[2] || path.join(scriptDir, "..");
 
 function taskferry(args) {
   const output = execFileSync(process.execPath, [cliEntry, ...args], { env, encoding: "utf8" });

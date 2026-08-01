@@ -1,8 +1,16 @@
 import fs from "node:fs";
 import path from "node:path";
 
+const ISOLATED_FLAG = "--isolated";
+
 export function stripJsonComments(text) {
-  return text.replace(/("(?:\\.|[^"\\])*")|(\/\/.*$|\/\*[\s\S]*?\*\/)/gm, (_match, str) => str || "");
+  // One pass, left-to-right: a quoted string keeps its exact contents (and any
+  // // or /* inside it), while a line or block comment is dropped. The
+  // alternatives are disjoint so the match is linear, not backtracking-heavy.
+  return text.replace(
+    /"(?:[^"\\]|\\.)*"|\/\/[^\n]*|\/\*[\s\S]*?\*\//gm,
+    (match) => (match.startsWith('"') ? match : "")
+  );
 }
 
 function resolveOpencodeConfigDir(homeDirectory, env) {
@@ -23,7 +31,7 @@ export function checkOpencodePlaywrightIsolation(homeDirectory, env) {
       return { checked: false, path: configPath, reason: `failed to parse: ${message}` };
     }
     if (Array.isArray(parsed?.mcp?.playwright?.command)) {
-      return { checked: true, path: configPath, isolated: parsed.mcp.playwright.command.includes("--isolated") };
+      return { checked: true, path: configPath, isolated: parsed.mcp.playwright.command.includes(ISOLATED_FLAG) };
     }
   }
   return { checked: false, reason: "no opencode config with a playwright MCP entry found" };
@@ -45,10 +53,10 @@ export function ensureOpencodePlaywrightIsolation(homeDirectory, env) {
   if (!Array.isArray(parsed?.mcp?.playwright?.command)) {
     return { changed: false, reason: "no writable opencode.json with a playwright MCP entry found" };
   }
-  if (parsed.mcp.playwright.command.includes("--isolated")) {
+  if (parsed.mcp.playwright.command.includes(ISOLATED_FLAG)) {
     return { changed: false, path: jsonPath };
   }
-  parsed.mcp.playwright.command.push("--isolated");
+  parsed.mcp.playwright.command.push(ISOLATED_FLAG);
   fs.writeFileSync(jsonPath, JSON.stringify(parsed, null, 2));
   return { changed: true, path: jsonPath };
 }

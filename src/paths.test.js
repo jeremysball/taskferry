@@ -2,6 +2,13 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { resolveWorkspaceRoot, TASKFERRY_PLUMBING_ENV_VARS } from "./paths.js";
 
+const REPO_ROOT = "/workspace/repo";
+const GIT_COMMON_DIR = "/workspace/repo/.git\n";
+const NOT_A_REPO_3 = "/tmp/not-a-repo-3";
+const VENDOR_LIB_ROOT = "/workspace/repo/vendor-lib";
+const VENDOR_LIB_COMMON_DIR = "/workspace/repo/vendor-lib\n";
+const VENDOR_LIB_GIT_MODULES = "/workspace/repo/.git/modules/vendor-lib\n";
+
 test("TASKFERRY_PLUMBING_ENV_VARS is a frozen array of the TASKFERRY_* plumbing names tasks.js excludes from caller-env forwarding", () => {
   assert.ok(Array.isArray(TASKFERRY_PLUMBING_ENV_VARS));
   assert.ok(Object.isFrozen(TASKFERRY_PLUMBING_ENV_VARS));
@@ -19,18 +26,18 @@ test("TASKFERRY_PLUMBING_ENV_VARS contains only uppercase TASKFERRY_* names", ()
 });
 
 test("resolves the parent directory of the git-common-dir for a plain repo", () => {
-  const runCommand = () => ({ status: 0, stdout: "/workspace/repo/.git\n", stderr: "" });
-  assert.equal(resolveWorkspaceRoot("/workspace/repo", { runCommand }), "/workspace/repo");
+  const runCommand = () => ({ status: 0, stdout: GIT_COMMON_DIR, stderr: "" });
+  assert.equal(resolveWorkspaceRoot(REPO_ROOT, { runCommand }), REPO_ROOT);
 });
 
 test("resolves a nested worktree (.worktrees/x) to the main checkout's root, not the worktree's own directory", () => {
-  const runCommand = () => ({ status: 0, stdout: "/workspace/repo/.git\n", stderr: "" });
-  assert.equal(resolveWorkspaceRoot("/workspace/repo/.worktrees/issue-1", { runCommand }), "/workspace/repo");
+  const runCommand = () => ({ status: 0, stdout: GIT_COMMON_DIR, stderr: "" });
+  assert.equal(resolveWorkspaceRoot("/workspace/repo/.worktrees/issue-1", { runCommand }), REPO_ROOT);
 });
 
 test("resolves a sibling worktree (git worktree add ../repo-feat) to the main checkout's root", () => {
-  const runCommand = () => ({ status: 0, stdout: "/workspace/repo/.git\n", stderr: "" });
-  assert.equal(resolveWorkspaceRoot("/workspace/repo-feat", { runCommand }), "/workspace/repo");
+  const runCommand = () => ({ status: 0, stdout: GIT_COMMON_DIR, stderr: "" });
+  assert.equal(resolveWorkspaceRoot("/workspace/repo-feat", { runCommand }), REPO_ROOT);
 });
 
 test("treats a submodule as its own repo boundary, not the parent repo's root", () => {
@@ -42,14 +49,14 @@ test("treats a submodule as its own repo boundary, not the parent repo's root", 
   // of whichever repo the startDir belongs to.
   const runCommand = (_cmd, args) => {
     if (args.includes("--git-common-dir")) {
-      return { status: 0, stdout: "/workspace/repo/.git/modules/vendor-lib\n", stderr: "" };
+      return { status: 0, stdout: VENDOR_LIB_GIT_MODULES, stderr: "" };
     }
     if (args.includes("--show-toplevel")) {
-      return { status: 0, stdout: "/workspace/repo/vendor-lib\n", stderr: "" };
+      return { status: 0, stdout: VENDOR_LIB_COMMON_DIR, stderr: "" };
     }
     throw new Error(`unexpected runCommand call: ${args.join(" ")}`);
   };
-  assert.equal(resolveWorkspaceRoot("/workspace/repo/vendor-lib", { runCommand }), "/workspace/repo/vendor-lib");
+  assert.equal(resolveWorkspaceRoot(VENDOR_LIB_ROOT, { runCommand }), VENDOR_LIB_ROOT);
 });
 
 test("falls back to the input directory unchanged when no git repo is found, warning once per directory (not once per process)", () => {
@@ -70,8 +77,8 @@ test("still suppresses repeat warnings for the same directory (not warn-on-every
   const warnings = [];
   const runCommand = () => ({ status: 128, stdout: "", stderr: "fatal: not a git repository" });
   const warn = (message) => warnings.push(message);
-  assert.equal(resolveWorkspaceRoot("/tmp/not-a-repo-3", { runCommand, warn }), "/tmp/not-a-repo-3");
-  assert.equal(resolveWorkspaceRoot("/tmp/not-a-repo-3", { runCommand, warn }), "/tmp/not-a-repo-3");
+  assert.equal(resolveWorkspaceRoot(NOT_A_REPO_3, { runCommand, warn }), NOT_A_REPO_3);
+  assert.equal(resolveWorkspaceRoot(NOT_A_REPO_3, { runCommand, warn }), NOT_A_REPO_3);
   assert.equal(warnings.length, 1, "repeated calls with the same directory should only warn once");
 });
 

@@ -13,16 +13,16 @@ dir.
 
 ## Goals
 
-- `taskferry doctor --stats` reports, from persisted task history:
-  - Status mix overall, plus 24h and 7d windows.
-  - Per-model breakdown: dispatch count, done rate, crash rate, dominant
-    failure reason.
-  - Failure-reason histogram across all crashed tasks.
-  - The unknown backlog as its own capped list.
-  - Trend: crash rate this 24h window vs the previous 24h window.
-- Recompute from live task history per invocation; no stored aggregates.
-- Point-in-time report only. No live monitoring of in-flight tasks, no
-  auto-remediation (no reaping unknowns, no blacklisting models).
+`taskferry doctor --stats` reports the following, recomputed from live task
+history per invocation (no stored aggregates), as a point-in-time report only
+(no live monitoring of in-flight tasks, no auto-remediation):
+
+- Status mix overall, plus 24h and 7d windows.
+- Per-model breakdown: dispatch count, done rate, crash rate, dominant
+  failure reason.
+- Failure-reason histogram across all crashed tasks.
+- The unknown backlog as its own capped list.
+- Trend: crash rate this 24h window vs the previous 24h window.
 
 ## Non-goals
 
@@ -33,6 +33,18 @@ dir.
   report. They read the same underlying task history, so the computation
   here is written as a standalone pure function future work can reuse, but
   building that streak-tracking feature itself is out of scope here.
+
+## Data source
+
+No new daemon RPC. `client.request("task.list", {})` (the same call
+`taskferry list --all` already makes) returns every task across all
+directories and daemon restarts — the daemon loads `tasks.json` into memory
+at startup, relabeling any task still "running" as "unknown" — with exactly
+the fields needed: `id`, `status`, `model`, `startedAt`, `failureReason`
+(`summarizeRow()` in `src/tasks.js`).
+
+`doctor --stats` fetches that list once and computes the report entirely
+client-side (in the CLI process, not the daemon).
 
 ## Command surface
 
@@ -52,18 +64,6 @@ client but never stubs `task.list`) keeps passing unmodified.
 `--stats` is a usage error (mirrors the existing `--diff`/`--full` mutual
 exclusion pattern on `result`).
 
-## Data source
-
-No new daemon RPC. `client.request("task.list", {})` (the same call
-`taskferry list --all` already makes) returns every task across all
-directories and daemon restarts — the daemon loads `tasks.json` into memory
-at startup, relabeling any task still "running" as "unknown" — with exactly
-the fields needed: `id`, `status`, `model`, `startedAt`, `failureReason`
-(`summarizeRow()` in `src/tasks.js`).
-
-`doctor --stats` fetches that list once and computes the report entirely
-client-side (in the CLI process, not the daemon).
-
 ## Computation module
 
 A new pure function in a new file, `src/doctor-stats.js`:
@@ -82,7 +82,7 @@ plumbing.
 
 ### Output schema
 
-```
+```text
 {
   computedAt: "<ISO>",
   statusMix: {
@@ -138,38 +138,46 @@ plumbing.
 
 ## Wiring
 
-- `src/args.js`: add `--stats` to the `doctor` command spec's `options` and
-  an example; default `stats: false` in `defaultOptions()`; reject
+- **`src/args.js`**: add `--stats` to the `doctor` command spec's `options`
+  and an example; default `stats: false` in `defaultOptions()`; reject
   `--stats` combined with `--full` at validation time.
-- `src/commands.js`: in `case "doctor"`, branch on `options.stats` before the
-  existing `Promise.allSettled` env-check block — if set, call
+- **`src/commands.js`**: in `case "doctor"`, branch on `options.stats` before
+  the existing `Promise.allSettled` env-check block — if set, call
   `client.request("task.list", {})`, pass the rows through
   `computeDoctorStats`, and return that object directly (no `integrations`/
   `warnings`/`info` wrapper).
-- Output rendering is unchanged: `writeToon()` already renders any plain
+- **`src/output.js`**: no change — `writeToon()` already renders any plain
   object generically, so no new formatter is needed.
 
 ## Testing
 
-- `src/doctor-stats.test.js` (new): unit tests against synthetic rows, no
-  daemon —
-  - status mix math (overall/24h/7d window filtering)
-  - per-model dispatch counts, rates, dominant-failure-reason selection,
-    and the null-rate case for an all-non-terminal model
-  - failure-reason histogram ordering
-  - unknown backlog capping (>20 unknowns) and ordering
-  - all four trend directions, including the zero-terminal-window
-    `"unknown"` case
-- `src/commands.test.js`: one new case wiring a mocked
-  `client.request("task.list")` through `doctor --stats` end to end, and one
-  case asserting `--stats --full` is rejected.
-- `src/args.test.js`: parsing coverage for the new flag and its mutual
-  exclusion with `--full`.
+### `src/doctor-stats.test.js` (new)
+
+Unit tests against synthetic rows, no daemon involved:
+
+- status mix math (overall/24h/7d window filtering)
+- per-model dispatch counts, rates, dominant-failure-reason selection, and
+  the null-rate case for an all-non-terminal model
+- failure-reason histogram ordering
+- unknown backlog capping (>20 unknowns) and ordering
+- all four trend directions, including the zero-terminal-window `"unknown"`
+  case
+
+### `src/commands.test.js`
+
+One new case wiring a mocked `client.request("task.list")` through
+`doctor --stats` end to end, and one case asserting `--stats --full` is
+rejected.
+
+### `src/args.test.js`
+
+Parsing coverage for the new flag and its mutual exclusion with `--full`.
 
 ## Docs
 
-- `docs/sourcemap.md`: new `src/doctor-stats.js` row; update the `doctor`
-  case description in `src/commands.js`'s row.
+- `docs/sourcemap.md`: add a new `src/doctor-stats.js` row; update the
+  `doctor` case description in the `src/commands.js` row.
 - `docs/cli-reference.md`: document `--stats`.
-- `skills/using-taskferry/SKILL.md` (and its Codex/Claude integration
-  copies, if they describe `doctor`): mention `--stats`.
+- `skills/using-taskferry/SKILL.md` and its Codex/Claude integration copies:
+  regenerate them after adding `--stats`, so any copy describing `doctor`
+  picks up the new flag.

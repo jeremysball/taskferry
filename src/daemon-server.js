@@ -139,11 +139,12 @@ export function createDaemonServer({ clients, subscriptions, manager, writeMessa
   });
 }
 
-export function makeClose({ clients, server, socketPath, restart }) {
+export function makeClose({ manager, clients, server, socketPath, restart }) {
   let closing;
   return function close() {
     if (closing) return closing;
     closing = new Promise((resolve, reject) => {
+      manager.close?.();
       for (const socket of clients) {
         socket.write(encodeMessage({ version: PROTOCOL_VERSION, type: "shutdown", reason: restart.restarting ? "restart" : "shutdown" }));
         socket.destroy();

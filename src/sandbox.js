@@ -107,10 +107,22 @@ export async function checkBwrapAvailableAsync(runCommand) {
 }
 
 /**
- * The fixed v1 deny-list. Callers building a real bwrap invocation must
+ * The default deny-list. Callers building a real bwrap invocation must
  * filter out entries that don't exist on disk before passing this to
  * buildBwrapArgs() — bwrap's --tmpfs fails if the mount point doesn't
  * already exist under the read-only-bound root.
+ *
+ * Covers two distinct risk categories, not just one: `.ssh`/`.aws`/gcloud/
+ * gh/gnupg are pivot-capable credentials (grant outbound access to other
+ * systems); `.claude` is personal instruction/context content (a global
+ * CLAUDE.md carries user preferences and private context, not a credential,
+ * but has no legitimate reason to be readable by a worker either). Extendable
+ * per-install via TASKFERRY_SANDBOX_DENYLIST / config.sandboxDenylist (see
+ * tasks.js) for paths beyond this fixed set — those extra paths are always
+ * directories, same as this list; a file-shaped credential deny-list
+ * (.npmrc, .netrc, .git-credentials, etc.) needs a different bwrap mechanism
+ * (masking a file mount point, not a directory tmpfs) and is tracked
+ * separately, not covered by this function.
  * @param {string} homeDir
  * @param {string} stateDir
  * @returns {string[]}
@@ -123,6 +135,7 @@ export function defaultDenyList(homeDir, stateDir) {
     path.join(homeDir, ".config", "gcloud"),
     path.join(homeDir, ".config", "gh"),
     path.join(homeDir, ".gnupg"),
+    path.join(homeDir, ".claude"),
   ];
 }
 

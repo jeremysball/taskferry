@@ -34,10 +34,23 @@ const commandSpecs = {
     examples: ['taskferry wait <id>', 'taskferry wait <id> --timeout 10s --tail-chars 1000', 'taskferry wait <id> --summarize'],
   },
   advisor: {
-    usage: "taskferry advisor --prompt <text> --model <id> [options]",
-    description: "Ask a model for advice and wait for its response.",
-    options: { "--prompt <text>": "required", "--model <id>": "required", "--directory <path>": "defaults to the current workspace", "--variant <name>": "optional model reasoning variant", "--session-id <id>": "continue a recent advisor session", "--timeout <duration>": "maximum wait, e.g. 10000 (ms), 30s, 5m, 1h", "--executor <opencode|pi>": "worker backend to dispatch through, default pi" },
-    examples: ['taskferry advisor --prompt "How should I split this module?" --model openai/gpt-5.6-sol', 'taskferry advisor --prompt "Review this design" --model zai/glm-5.2 --timeout 30s'],
+    usage: "taskferry advisor --model <id> [--prompt <text>] [options]",
+    description: "Consult a stronger model for a second opinion and block until it answers. With no --prompt, auto-attaches the caller's own recent context (a Claude Code session transcript, or the calling ferry's own task log) and asks for structured, actionable pushback.",
+    options: {
+      "--model <id>": "required",
+      "--prompt <text>": "optional; auto-attaches context and asks for methodical review when omitted",
+      "--directory <path>": "defaults to the current workspace",
+      "--variant <name>": "optional model reasoning variant",
+      "--session-id <id>": "continue a recent advisor session",
+      "--timeout <duration>": "maximum wait, e.g. 10000 (ms), 30s, 5m, 1h",
+      "--executor <opencode|pi>": "worker backend to dispatch through, default pi",
+      "--summarize-context": "condense the auto-attached context through a throwaway model call before sending it (off by default)",
+    },
+    examples: [
+      'taskferry advisor --model openai/gpt-5.6-sol',
+      'taskferry advisor --prompt "How should I split this module?" --model openai/gpt-5.6-sol',
+      'taskferry advisor --prompt "Review this design" --model zai/glm-5.2 --timeout 30s',
+    ],
   },
   status: {
     usage: "taskferry status <id> [--full]",
@@ -48,7 +61,7 @@ const commandSpecs = {
   tail: {
     usage: "taskferry tail <id> [--chars <number>]",
     description: "Read the latest model text for a task.",
-    options: { "--chars <number>": "characters to return, default 1000, maximum 65536" },
+    options: { "--chars <number>": "characters to return, default 1000, maximum 131072" },
     examples: ['taskferry tail <id>', 'taskferry tail <id> --chars 2000'],
   },
   summary: {
@@ -82,10 +95,13 @@ const commandSpecs = {
     examples: ['taskferry context', 'taskferry context --format claude-hook', 'taskferry context --format codex-hook'],
   },
   doctor: {
-    usage: "taskferry doctor [--full]",
-    description: "Check daemon health and installation details.",
-    options: { "--full": "include complete health details" },
-    examples: ['taskferry doctor', 'taskferry doctor --full'],
+    usage: "taskferry doctor [--full] [--stats]",
+    description: "Check daemon health and installation details, or report aggregate task-history stats.",
+    options: {
+      "--full": "include complete health details",
+      "--stats": "report aggregate task-history stats instead of environment checks (mutually exclusive with --full)",
+    },
+    examples: ['taskferry doctor', 'taskferry doctor --full', 'taskferry doctor --stats'],
   },
   setup: {
     usage: "taskferry setup",
@@ -96,7 +112,7 @@ const commandSpecs = {
 };
 
 const POSITIONAL_TASK_COMMANDS = ["cancel", "wait", "status", "tail", "summary", "result", "accept", "reject"];
-const PROMPT_REQUIRED_COMMANDS = ["dispatch", "advisor"];
+const PROMPT_REQUIRED_COMMANDS = ["dispatch"];
 
 export { UsageError };
 
@@ -129,7 +145,7 @@ function migrationError(name, args) {
     taskferry_dispatch: `Use: taskferry dispatch --prompt "<text>"${received}`,
     taskferry_cancel: "Use: taskferry cancel <id>",
     taskferry_poll: `Use: taskferry wait ${args[0] || "<id>"}`,
-    taskferry_advisor: "Use: taskferry advisor --prompt \"<text>\" --model <id>",
+    taskferry_advisor: "Use: taskferry advisor --model <id>  (--prompt is optional)",
     taskferry_status: "Use: taskferry status <id>",
     taskferry_tail: "Use: taskferry tail <id>",
     taskferry_summary: "Use: taskferry summary <id>",
@@ -143,7 +159,7 @@ function parseNumber(value, flag, { min = 0, max = Number.MAX_SAFE_INTEGER } = {
   if (!/^\d+$/.test(value)) throw new UsageError(`${flag} must be an integer`, `Use ${flag} with a number from ${min} through ${max}`);
   const number = Number(value);
   if (!Number.isSafeInteger(number) || number < min || number > max) {
-    const qualifier = min === 1 ? "a positive integer" : `from ${min} through ${max}`;
+    const qualifier = min === 1 ? (number > max ? `a positive integer from ${min} through ${max}` : "a positive integer") : `from ${min} through ${max}`;
     throw new UsageError(`${flag} must be ${qualifier}`, `Use ${flag} with a number from ${min} through ${max}`);
   }
   return number;
@@ -204,7 +220,7 @@ function parseFields(value) {
 
 const DEFAULT_OPTIONS = {
   dispatch: (c) => ({ prompt: void 0, directory: c, model: void 0, variant: void 0, sessionId: void 0, finalMarker: void 0, noSandbox: false, noOverlay: false, allowedDirs: void 0, executor: void 0 }),
-  advisor: () => ({ prompt: void 0, model: void 0, directory: void 0, variant: void 0, sessionId: void 0, timeoutMs: void 0, executor: void 0 }),
+  advisor: () => ({ prompt: void 0, model: void 0, directory: void 0, variant: void 0, sessionId: void 0, timeoutMs: void 0, executor: void 0, summarizeContext: false }),
   cancel: () => ({ taskId: void 0, graceMs: void 0 }),
   wait: () => ({ taskId: void 0, timeoutMs: void 0, tailChars: void 0, full: false, summarize: false }),
   status: () => ({ taskId: void 0, full: false }),
@@ -216,7 +232,7 @@ const DEFAULT_OPTIONS = {
   list: () => ({ directory: void 0, all: false, limit: void 0 }),
   watch: () => ({ directory: void 0, format: "toon", summaries: false, taskId: void 0, flushIntervalMs: void 0 }),
   context: () => ({ directory: void 0, format: "toon" }),
-  doctor: () => ({ full: false }),
+  doctor: () => ({ full: false, stats: false }),
   setup: () => ({}),
 };
 
@@ -284,6 +300,8 @@ const FLAGS = {
   "--wait": { allow: ["summary"], bool: true },
   "--summaries": { allow: ["watch"], bool: true },
   "--summarize": { allow: ["wait"], bool: true },
+  "--summarize-context": { allow: ["advisor"], bool: true, key: "summarizeContext" },
+  "--stats": { allow: ["doctor"], bool: true },
   "--no-sandbox": { allow: ["dispatch"], bool: true, key: "noSandbox" },
   "--no-overlay": { allow: ["dispatch"], bool: true, key: "noOverlay" }, // advisor deliberately excluded -- review finding #5
   "--diff": { allow: ["result"], bool: true },
@@ -408,6 +426,11 @@ function validateWatch(command, options) {
   if (options.flushIntervalMs === 0) throw usageError("--flush-interval must be greater than zero", command);
 }
 
+function validateDoctor(command, options) {
+  if (command !== "doctor") return;
+  if (options.stats && options.full) throw usageError("--stats cannot be combined with --full", command);
+}
+
 function validateCommand(command, options) {
   if (POSITIONAL_TASK_COMMANDS.includes(command) && !options.taskId) throw usageError("task id is required", command);
   if (PROMPT_REQUIRED_COMMANDS.includes(command) && !options.prompt) throw usageError("--prompt is required", command);
@@ -415,6 +438,7 @@ function validateCommand(command, options) {
   validateResult(command, options);
   validateWait(command, options);
   validateWatch(command, options);
+  validateDoctor(command, options);
 }
 
 export function parseArgs(argv, { cwd = process.cwd() } = {}) {

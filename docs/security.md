@@ -40,6 +40,65 @@ that, `taskferry dispatch`, `taskferry advisor`, and `taskferry summary`
 environment to the daemon over the same socket, which the daemon unions on
 top of its own ambient environment before spawning — caller wins.
 
+There are three layers, unioned low-to-high priority: `envFile` (see
+below), the daemon's own ambient `process.env`, then the caller's
+forwarded env. Each layer overrides the one below it key-by-key; a caller
+that sets nothing for a given var falls through to the daemon's ambient
+value, which in turn falls through to the env-file value, which finally
+falls through to nothing (the var is simply absent from the spawned
+child).
+
+### The `envFile` gap this closes
+
+Caller-env forwarding only helps when the *caller itself* has the secret
+in its own environment. A caller launched from a minimal, non-interactive
+environment — a cron job, a systemd timer, a CI runner — typically doesn't:
+secrets exported in an interactive shell's rc file (`.bashrc`, `.zshrc`,
+`config.fish`) are invisible to a process cron spawns, since cron never
+sources that file. In that case the caller forwards a stripped-down env,
+the daemon's own ambient env may be equally stripped (if the daemon itself
+was started from a similarly minimal launch context), and every dispatch
+fails at the worker's own auth/boot step — indistinguishable, from the
+caller's side, from the credential simply being wrong.
+
+`TASKFERRY_ENV_FILE` (or the `envFile` config field; see `docs/config.md`)
+points the daemon at a `.env`-style file, loaded at startup and unioned in
+as the base layer beneath its own ambient environment, so a
+non-interactive caller's dispatch still authenticates correctly even
+though neither the caller's own env nor the daemon's ambient env carries
+the secret. It does not need to duplicate everything already in the
+daemon's ambient environment — only the subset that a non-interactive
+caller would otherwise be missing.
+
+After that initial load, the daemon keeps watching the file and re-applies
+it whenever it changes, so rotating a secret (e.g. re-running a
+`secrets-unlock`-style decrypt-and-replace) reaches every subsequent spawn
+without a daemon restart. This watches the file's *parent directory*,
+filtered by filename, rather than the file itself: a decrypt-and-replace
+rewrite typically goes through `mktemp`+`rename`, which swaps the file's
+inode out from under a watch held on the file directly, but a directory
+watch survives that. Multiple filesystem events from one rewrite are
+coalesced with a short debounce. A reload that fails partway (a partial
+write caught mid-rename, a permission regression, the file briefly
+missing) is logged to stderr and otherwise ignored — the daemon keeps
+serving whatever it last loaded successfully rather than dropping every
+env-file-supplied secret because of one transient read failure. A failure
+to establish the watch in the first place (as opposed to a later reload)
+is likewise logged and non-fatal: the mandatory initial load has already
+succeeded by that point, so the daemon still starts, it just falls back to
+the old restart-required behavior for that one field.
+
+- The file itself must be owner-only (`chmod 600`) — `loadEnvFile()` fails
+  daemon startup on any file readable by group or other, the same
+  fail-loud stance as a missing/malformed file (see `docs/config.md`).
+- The fixed set of daemon-controlled plumbing variables below (`PATH`,
+  `HOME`, and the `TASKFERRY_*` names in `TASKFERRY_PLUMBING_ENV_VARS`) is
+  excluded from the env-file layer exactly the same way it's excluded from
+  the caller layer — a value for `TASKFERRY_SOCKET_PATH` (for instance) set
+  in the env file can never reach a spawned child, even when the daemon's
+  own ambient environment happens not to have that variable set (in which
+  case a naive union would otherwise let the file's value through
+  unopposed).
 - The daemon and every caller run as the same local user over a `0600`
   socket (see "Filesystem and socket permissions" above) — there's no
   trust boundary being crossed by a live caller handing over its own
@@ -134,6 +193,58 @@ task whose log contains secrets you don't want sent there. Specifics:
 default is unsuitable or unavailable; `--max-words` on `taskferry summary`
 bounds the target length between 75 and 300 words (default 200).
 
+## Advisor auto-context
+
+`taskferry advisor`'s `--prompt` is optional. When it is omitted (or when
+it is supplied but a context source is available), advisor auto-attaches
+up to 120,000 chars of caller-side text to the prompt before dispatching
+the advisor role — a real, secondary call to a model provider, which can
+differ from whatever model/provider the calling session itself uses. Do
+not invoke advisor in an environment whose caller-side text contains
+secrets you don't want sent there. Specifics:
+
+- **Trigger sources.** Two environment variables, each independently,
+  cause advisor to attach caller-side text:
+  - `CLAUDE_CODE_SESSION_ID` set in the caller's own environment makes
+    advisor tail the corresponding Claude Code session transcript
+    (`~/.claude/projects/<slug>/<session>.jsonl`) and attach that tail.
+  - `TASKFERRY_TASK_ID` set in the caller's own environment makes advisor
+    tail the calling ferry's own task log (via `task.tail`) and attach
+    that tail.
+  When both are set, the Claude Code session transcript wins; the calling
+  ferry's task log is only read when no Claude session is available.
+- **Automatic, not opt-in.** There is no `--no-context` flag — the auto
+  attachment happens whenever a source is available, with no per-call
+  opt-out. The only ways to suppress it are to unset the relevant env
+  var, or unset both, or invoke advisor in an environment with neither
+  set. Passing an explicit `--prompt` does *not* suppress it either —
+  the auto-attached context is prepended to whatever `--prompt` you
+  supply, when a source is available.
+- **Bounded.** At most 120,000 chars (`TASKFERRY_ADVISOR_CONTEXT_CHARS`
+  default, in chars / code points) of the chosen tail are attached, read
+  via `commands.js`'s `readTailChars()`; an unreadable transcript
+  surfaces as a `UsageError` at parse time rather than a silently empty
+  context, so a misconfigured caller fails loudly instead of sending a
+  prompt with no context the caller expected to be there. The budget is
+  overridable via the `TASKFERRY_ADVISOR_CONTEXT_CHARS` env var or the
+  `advisorContextChars` config field (`docs/config.md`); the env var wins
+  over the config file.
+
+The Claude Code session path is resolved by
+`commands.js`'s `claudeTranscriptPath()`, so a future change to how
+Claude Code organizes its transcripts will be picked up there; the budget
+and the priority order live next to it. `--summarize-context` on
+`taskferry advisor` (off by default) is a separate, additional
+condensation pass on top of this auto-attached text, dispatched through a
+throwaway `task.dispatch`/`task.wait`/`task.result` against an env-
+overridable model (`TASKFERRY_ADVISOR_SUMMARIZER_MODEL`,
+default `opencode/mimo-v2.5-free`) — best-effort, returns the input
+unchanged on any failure so condensation can never break an otherwise-
+valid advisor call. See [Activity summaries](#activity-summaries) above
+for the same-shape concern around the model's `summary --mode report`
+child, which reads the same task log without the same auto-context
+budget.
+
 ## `TASKFERRY_CHILD`
 
 Every dispatched worker child (OpenCode or pi), and every summary child,
@@ -157,13 +268,22 @@ runs wrapped in
   - `TASKFERRY_STATE_DIR` (every task's NDJSON logs, including other tasks'
     prompt/tool output)
   - `~/.ssh`, `~/.aws`, `~/.config/gcloud`, `~/.config/gh`, `~/.gnupg`
+  - `~/.claude` — not a credential, but a global instructions/context file
+    (`CLAUDE.md`) with no legitimate reason to be readable by a worker;
+    OpenCode reads `CLAUDE.md` the same way it reads `AGENTS.md`, so without
+    this entry a worker's context (and therefore its output) silently picks
+    up the caller's personal instructions
 - **Read-write access** is then re-granted only for the task's own working
   directory and `TASKFERRY_RUNTIME_DIR` (needed so a nested/recursive
   dispatch from inside the sandbox can still reach the daemon socket at
   `<runtimeDir>/daemon.sock`).
-- **Deny-list is fixed** in this version — no config override. It covers
-  taskferry's own state dir plus the standard credential locations; a
-  config override can be added later if a real need surfaces.
+- **Deny-list has a fixed base plus an optional extension.** The paths above
+  are always denied; `sandboxDenylist` / `TASKFERRY_SANDBOX_DENYLIST` (see
+  `docs/config.md`) adds extra directories on top, merged with — not
+  replacing — the fixed base. Entries are directories only: a file mount
+  point (e.g. `~/.npmrc`, `~/.netrc`, `~/.git-credentials`) needs a
+  different bwrap mechanism (masking the file, not tmpfs-ing a directory)
+  and isn't covered by this list yet.
 - **Git worktrees get a scoped slice of their real gitdir bound read-write
   automatically.** A worktree's `.git` is just a pointer file to its actual
   gitdir under the main checkout's `.git/worktrees/<name>` — outside the

@@ -2,7 +2,6 @@
 import fs from "node:fs";
 import net from "node:net";
 import path from "node:path";
-import { randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { createTaskManager } from "./tasks.js";
@@ -14,12 +13,16 @@ import {
   ProtocolError,
   encodeMessage,
   errorResponse,
-  eventMessage,
-  parseRequestLine,
-  successResponse,
 } from "./protocol.js";
+import {
+  MAX_BUFFER_BYTES,
+  createDaemonServer,
+  deliverEvent,
+  makeClose,
+  makeMaybeRestart,
+  syncActivitySubscriptions,
+} from "./daemon-server.js";
 
-const MAX_BUFFER_BYTES = 1024 * 1024;
 const DAEMON_ENTRY = fileURLToPath(import.meta.url);
 const SOURCE_DIR = path.dirname(DAEMON_ENTRY);
 
@@ -173,58 +176,6 @@ function countTasks(tasks) {
   return counts;
 }
 
-async function invoke(manager, request) {
-  const params = request.params;
-  switch (request.method) {
-    case "system.health":
-      return { healthy: true, pid: process.pid, version: PROTOCOL_VERSION };
-    case "task.dispatch":
-      return manager.dispatch(params);
-    case "task.cancel":
-      return manager.cancel(params.taskId, params.graceMs === undefined ? undefined : { graceMs: params.graceMs });
-    case "task.status":
-      return manager.status(params.taskId);
-    case "task.wait":
-      return manager.poll(params.taskId, {
-        ...(params.timeoutMs !== undefined ? { timeoutMs: params.timeoutMs } : {}),
-        ...(params.tailChars !== undefined ? { tailChars: params.tailChars } : {}),
-      });
-    case "task.list":
-      return filteredList(manager, params.directory);
-    case "task.result":
-      return manager.result(params.taskId, {
-        ...(params.full !== undefined ? { full: params.full } : {}),
-        ...(params.fields !== undefined ? { fields: params.fields } : {}),
-      });
-    case "task.tail":
-      return manager.tail(params.taskId, params.chars === undefined ? undefined : { chars: params.chars });
-    case "task.summary":
-      // Forward the whole validated params object as the manager's options
-      // argument. The explicit field-list rebuild was the shape that
-      // silently dropped newly-added fields (the previous fix that landed
-      // this env forwarding had to be its own commit because the rebuild
-      // here was filtering it out); forwarding the whole params matches
-      // task.dispatch's pattern and means new fields arrive at the manager
-      // without a separate code change here.
-      return manager.summarize(params.taskId, params);
-    case "task.advisor":
-      // Same as task.summary: forward the whole validated params object
-      // rather than rebuilding a field list. manager.advisor() destructures
-      // the fields it consumes and ignores the rest.
-      return manager.advisor(params);
-    case "task.context": {
-      const context = filteredTaskDetails(manager, params.directory);
-      return { ...context, counts: countTasks(context.tasks) };
-    }
-    case "task.accept":
-      return manager.accept(params.taskId);
-    case "task.reject":
-      return manager.reject(params.taskId);
-    default:
-      throw new Error(`unsupported method after validation: ${request.method}`);
-  }
-}
-
 function responseError(error, requestId) {
   if (error instanceof ProtocolError) {
     return errorResponse(error.requestId, error.code, error.message, error.help);
@@ -237,22 +188,98 @@ function responseError(error, requestId) {
   return errorResponse(requestId, code, message, help);
 }
 
-export async function startDaemon({
-  platform = process.platform,
-  env = process.env,
-  stateDir = resolveStateDir(env),
-  runtimeDir = resolveRuntimeDir({ env, stateDir }),
-  socketPath = resolveSocketPath({ env, stateDir, runtimeDir }),
-  healthCheckTimeoutMs = 250,
-  maxOutboundBytes = MAX_BUFFER_BYTES,
-  maxInFlightRequests = 256,
-  taskManagerFactory = createTaskManager,
-  taskManagerOptions = {},
-  sourceDir = SOURCE_DIR,
-  daemonEntry = DAEMON_ENTRY,
-  spawnReplacement = defaultSpawnReplacement,
-  exitProcess = () => process.exit(0),
-} = {}) {
+// RPC method routing: each method is a small handler that forwards to the task
+// manager. task.summary/task.advisor forward the whole validated params object
+// rather than rebuilding a field list -- the explicit rebuild was the shape
+// that silently dropped newly-added fields, whereas forwarding (task.dispatch's
+// pattern) means new fields arrive at the manager without a daemon.js change.
+const invokeHandlers = {
+  "system.health": () => ({ healthy: true, pid: process.pid, version: PROTOCOL_VERSION }),
+  "task.dispatch": (manager, params) => manager.dispatch(params),
+  "task.cancel": (manager, params) => manager.cancel(params.taskId, params.graceMs === undefined ? undefined : { graceMs: params.graceMs }),
+  "task.status": (manager, params) => manager.status(params.taskId),
+  "task.wait": (manager, params) => manager.poll(params.taskId, {
+    ...(params.timeoutMs !== undefined ? { timeoutMs: params.timeoutMs } : {}),
+    ...(params.tailChars !== undefined ? { tailChars: params.tailChars } : {}),
+  }),
+  "task.list": (manager, params) => filteredList(manager, params.directory),
+  "task.result": (manager, params) => manager.result(params.taskId, {
+    ...(params.full !== undefined ? { full: params.full } : {}),
+    ...(params.fields !== undefined ? { fields: params.fields } : {}),
+  }),
+  "task.tail": (manager, params) => manager.tail(params.taskId, params.chars === undefined ? undefined : { chars: params.chars }),
+  "task.summary": (manager, params) => manager.summarize(params.taskId, params),
+  "task.advisor": (manager, params) => manager.advisor(params),
+  "task.context": (manager, params) => {
+    const context = filteredTaskDetails(manager, params.directory);
+    return { ...context, counts: countTasks(context.tasks) };
+  },
+  "task.accept": (manager, params) => manager.accept(params.taskId),
+  "task.reject": (manager, params) => manager.reject(params.taskId),
+};
+
+function invoke(manager, request) {
+  const handler = invokeHandlers[request.method];
+  if (!handler) throw new Error(`unsupported method after validation: ${request.method}`);
+  return handler(manager, request.params);
+}
+
+const DAEMON_DEFAULTS = {
+  platform: process.platform,
+  env: process.env,
+  healthCheckTimeoutMs: 250,
+  maxOutboundBytes: MAX_BUFFER_BYTES,
+  maxInFlightRequests: 256,
+  taskManagerFactory: createTaskManager,
+  taskManagerOptions: {},
+  sourceDir: SOURCE_DIR,
+  daemonEntry: DAEMON_ENTRY,
+  spawnReplacement: defaultSpawnReplacement,
+  exitProcess: () => process.exit(0),
+};
+
+function resolveDaemonOptions(options = {}) {
+  const merged = { ...DAEMON_DEFAULTS, ...options };
+  const env = merged.env;
+  const stateDir = merged.stateDir ?? resolveStateDir(env);
+  const runtimeDir = merged.runtimeDir ?? resolveRuntimeDir({ env, stateDir });
+  const socketPath = merged.socketPath ?? resolveSocketPath({ env, stateDir, runtimeDir });
+  return {
+    env,
+    stateDir,
+    runtimeDir,
+    socketPath,
+    platform: merged.platform,
+    healthCheckTimeoutMs: merged.healthCheckTimeoutMs,
+    maxOutboundBytes: merged.maxOutboundBytes,
+    maxInFlightRequests: merged.maxInFlightRequests,
+    taskManagerFactory: merged.taskManagerFactory,
+    taskManagerOptions: merged.taskManagerOptions,
+    sourceDir: merged.sourceDir,
+    daemonEntry: merged.daemonEntry,
+    spawnReplacement: merged.spawnReplacement,
+    exitProcess: merged.exitProcess,
+  };
+}
+
+export async function startDaemon(options = {}) {
+  const {
+    platform,
+    env,
+    stateDir,
+    runtimeDir,
+    socketPath,
+    healthCheckTimeoutMs,
+    maxOutboundBytes,
+    maxInFlightRequests,
+    taskManagerFactory,
+    taskManagerOptions,
+    sourceDir,
+    daemonEntry,
+    spawnReplacement,
+    exitProcess,
+  } = resolveDaemonOptions(options);
+
   if (platform !== "linux" && platform !== "darwin") {
     throw new Error("error: taskferry daemon supports Linux and macOS only\nhelp: run taskferry on a Unix host with Unix-domain socket support");
   }
@@ -260,7 +287,7 @@ export async function startDaemon({
 
   const clients = new Set();
   const subscriptions = new Map();
-  let inFlightRequests = 0;
+  const inFlightRef = { current: 0 };
   const writeMessage = (socket, message) => {
     if (socket.destroyed) return false;
     const encoded = encodeMessage(message);
@@ -271,115 +298,23 @@ export async function startDaemon({
     socket.write(encoded);
     return true;
   };
-  const onEvent = (event) => {
-    for (const [subscriptionId, subscription] of subscriptions) {
-      if (event.directory !== subscription.directory || subscription.socket.destroyed) continue;
-      if (subscription.originSessionId && event.originSessionId && subscription.originSessionId !== event.originSessionId) continue;
-      if (event.activityVariants) {
-        const variant = event.activityVariants[String(subscription.summaries)];
-        if (!variant) continue;
-        const { activityVariants, ...rest } = event;
-        writeMessage(subscription.socket, eventMessage(subscriptionId, { ...rest, ...variant }));
-      } else {
-        writeMessage(subscription.socket, eventMessage(subscriptionId, event));
-      }
-    }
-  };
-  const manager = taskManagerFactory({ ...taskManagerOptions, stateDir, runtimeDir, onEvent });
+  const onEvent = (event) => deliverEvent(subscriptions, writeMessage, event);
+  const manager = taskManagerFactory({ ...taskManagerOptions, onEvent, stateDir, runtimeDir });
   const startupSourceSignature = sourceSignature(sourceDir);
-  let restartPending = false;
-  let restarting = false;
-  const updateSummarySubscriptions = () => {
-    if (typeof manager.setActivitySubscriptions === "function") {
-      /** @type {Map<string, Set<boolean>>} */
-      const subs = new Map();
-      for (const subscription of subscriptions.values()) {
-        let variants = subs.get(subscription.directory);
-        if (!variants) {
-          variants = new Set();
-          subs.set(subscription.directory, variants);
-        }
-        variants.add(subscription.summaries);
-      }
-      manager.setActivitySubscriptions(subs);
-    }
-  };
-  const server = net.createServer((socket) => {
-    clients.add(socket);
-    socket.setEncoding("utf8");
-    let buffer = "";
-
-    const cleanup = () => {
-      clients.delete(socket);
-      for (const [subscriptionId, subscription] of subscriptions) {
-        if (subscription.socket === socket) subscriptions.delete(subscriptionId);
-      }
-      updateSummarySubscriptions();
-    };
-    socket.on("close", cleanup);
-    socket.on("error", cleanup);
-
-    socket.on("data", (chunk) => {
-      buffer += chunk;
-      if (Buffer.byteLength(buffer) > MAX_BUFFER_BYTES) {
-        writeMessage(socket, errorResponse(null, "REQUEST_TOO_LARGE", "request exceeds 1 MiB", "Send a smaller request"));
-        socket.destroy();
-        return;
-      }
-      for (;;) {
-        const newline = buffer.indexOf("\n");
-        if (newline === -1) break;
-        const line = buffer.slice(0, newline);
-        buffer = buffer.slice(newline + 1);
-        if (!line) continue;
-        let request;
-        try {
-          request = parseRequestLine(line);
-        } catch (error) {
-          writeMessage(socket, responseError(error, null));
-          continue;
-        }
-        if (inFlightRequests >= maxInFlightRequests) {
-          writeMessage(socket, errorResponse(
-            request.id,
-            "SERVER_BUSY",
-            "daemon has too many requests in flight",
-            "Wait for an outstanding request to finish, then retry"
-          ));
-          continue;
-        }
-        inFlightRequests++;
-        void (async () => {
-          try {
-            if (request.method === "event.subscribe") {
-              if (request.params.summaries === true && typeof manager.checkSummaryModelReady === "function") {
-                await manager.checkSummaryModelReady();
-              }
-              const directory = request.params.directory !== undefined
-                ? normalizeDirectory(request.params.directory)
-                : normalizeDirectory(manager.taskDirectory(request.params.taskId));
-              const subscriptionId = randomUUID();
-              subscriptions.set(subscriptionId, {
-                socket,
-                directory,
-                summaries: request.params.summaries === true,
-                originSessionId: request.params.originSessionId || null,
-              });
-              updateSummarySubscriptions();
-              writeMessage(socket, successResponse(request.id, { subscriptionId }));
-              return;
-            }
-            const result = await invoke(manager, request);
-            writeMessage(socket, successResponse(request.id, result));
-          } catch (error) {
-            if (!socket.destroyed) writeMessage(socket, responseError(error, request?.id ?? null));
-          } finally {
-            inFlightRequests--;
-            maybeRestart();
-          }
-        })();
-      }
-    });
+  const syncActivity = () => syncActivitySubscriptions(manager, subscriptions);
+  const restart = { pending: false, restarting: false };
+  const maybeRestartRef = { current: null };
+  const server = createDaemonServer({
+    clients,
+    subscriptions,
+    manager,
+    writeMessage,
+    syncActivity,
+    inFlightRef,
+    maxInFlightRequests,
+    invoke,
+    responseError,
+    maybeRestart: () => maybeRestartRef.current?.(),
   });
 
   await new Promise((resolve, reject) => {
@@ -392,55 +327,24 @@ export async function startDaemon({
   });
   fs.chmodSync(socketPath, 0o600);
 
-  let closing;
-  function close() {
-    if (closing) return closing;
-    closing = new Promise((resolve, reject) => {
-      for (const socket of clients) {
-        socket.write(encodeMessage({ version: PROTOCOL_VERSION, type: "shutdown", reason: restarting ? "restart" : "shutdown" }));
-        socket.destroy();
-      }
-      server.close((error) => {
-        if (error) {
-          reject(error);
-          return;
-        }
-        try {
-          fs.unlinkSync(socketPath);
-        } catch (unlinkError) {
-          if (unlinkError.code !== "ENOENT") {
-            reject(unlinkError);
-            return;
-          }
-        }
-        resolve();
-      });
-    });
-    return closing;
-  }
-
-  // Deferred-until-idle restart: a source change is detected any time after
-  // startup, but the actual restart waits for zero running/queued tasks so an
-  // in-flight opencode child is never orphaned mid-task by the daemon
-  // swapping itself out from under it.
-  function maybeRestart() {
-    if (restarting) return;
-    if (!restartPending && sourceSignature(sourceDir) !== startupSourceSignature) restartPending = true;
-    if (!restartPending) return;
-    const { counts } = manager.list();
-    if (counts.running > 0 || counts.queued > 0) return;
-    restarting = true;
-    void (async () => {
-      await close();
-      spawnReplacement({ daemonEntry, env });
-      exitProcess();
-    })();
-  }
+  const close = makeClose({ clients, server, socketPath, restart });
+  maybeRestartRef.current = makeMaybeRestart({
+    manager,
+    sourceDir,
+    sourceSignature,
+    startupSourceSignature,
+    close,
+    spawnReplacement,
+    daemonEntry,
+    env,
+    exitProcess,
+    restart,
+  });
 
   return {
     socketPath,
-    stats: () => ({ connections: clients.size, subscriptions: subscriptions.size }),
     close,
+    stats: () => ({ connections: clients.size, subscriptions: subscriptions.size }),
   };
 }
 

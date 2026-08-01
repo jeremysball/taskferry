@@ -341,6 +341,10 @@ over persisted task history: status mix (`overall`/`last24h`/`last7d`), a
 per-model breakdown (dispatch count, done/crash rate, dominant failure
 reason), a failure-reason histogram, the unknown-status backlog (capped at
 20 entries, newest first), and a 24h-vs-prior-24h crash-rate trend.
+`done`/`crash` rates are computed against *settled* tasks (`done` +
+`crashed`) only — `cancelled` (a deliberate stop) and `unknown` (lost track
+of after a daemon restart) are excluded from the denominator so a backlog
+of unknown tasks doesn't dilute the reported crash rate.
 Recomputed from `task.list` on every call — nothing is cached. Cannot be
 combined with `--full`.
 

@@ -40,7 +40,7 @@ describe("computeDoctorStats: status mix", () => {
 });
 
 describe("computeDoctorStats: byModel", () => {
-  test("dispatches counts every status; rates are terminal-only", () => {
+  test("dispatches counts every status; rates are settled-only (done+crashed)", () => {
     const rows = [
       row({ id: "a", status: "done", model: "m1", hoursAgo: 1 }),
       row({ id: "b", status: "crashed", model: "m1", hoursAgo: 1 }),
@@ -55,12 +55,34 @@ describe("computeDoctorStats: byModel", () => {
     assert.equal(m1.crashRate, 0.5);
   });
 
-  test("doneRate and crashRate are null, not zero, when a model has no terminal tasks", () => {
+  test("doneRate and crashRate are null, not zero, when a model has no settled tasks", () => {
     const rows = [row({ id: "a", status: "running", model: "m1", hoursAgo: 0.1 })];
     const stats = computeDoctorStats(rows, { now: NOW });
     const m1 = stats.byModel.find((entry) => entry.model === "m1");
     assert.equal(m1.doneRate, null);
     assert.equal(m1.crashRate, null);
+  });
+
+  test("cancelled and unknown tasks are excluded from doneRate/crashRate's denominator", () => {
+    const rows = [
+      row({ id: "a", status: "crashed", model: "m1", hoursAgo: 1 }),
+      row({ id: "b", status: "unknown", model: "m1", hoursAgo: 2 }),
+      row({ id: "c", status: "unknown", model: "m1", hoursAgo: 3 }),
+      row({ id: "d", status: "unknown", model: "m1", hoursAgo: 4 }),
+      row({ id: "e", status: "unknown", model: "m1", hoursAgo: 5 }),
+      row({ id: "f", status: "unknown", model: "m1", hoursAgo: 6 }),
+      row({ id: "g", status: "unknown", model: "m1", hoursAgo: 7 }),
+      row({ id: "h", status: "unknown", model: "m1", hoursAgo: 8 }),
+      row({ id: "i", status: "unknown", model: "m1", hoursAgo: 9 }),
+      row({ id: "j", status: "cancelled", model: "m1", hoursAgo: 10 }),
+    ];
+    const stats = computeDoctorStats(rows, { now: NOW });
+    const m1 = stats.byModel.find((entry) => entry.model === "m1");
+    // 1 crashed out of 1 settled (done+crashed) task -- not diluted to 1/10
+    // by the 8 unknown + 1 cancelled tasks sitting alongside it.
+    assert.equal(m1.crashRate, 1);
+    assert.equal(m1.unknown, 8);
+    assert.equal(m1.cancelled, 1);
   });
 
   test("dominantFailureReason picks the most common reason among this model's crashed tasks", () => {
@@ -153,10 +175,10 @@ describe("computeDoctorStats: trend", () => {
     assert.equal(stats.trend.direction, "flat");
   });
 
-  test("unknown when either window has zero terminal tasks", () => {
+  test("unknown when either window has zero settled tasks", () => {
     const rows = [row({ id: "a", status: "crashed", model: "m1", hoursAgo: 1 })];
     const stats = computeDoctorStats(rows, { now: NOW });
     assert.equal(stats.trend.direction, "unknown");
-    assert.equal(stats.trend.previous.terminal, 0);
+    assert.equal(stats.trend.previous.settled, 0);
   });
 });

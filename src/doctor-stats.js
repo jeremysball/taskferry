@@ -19,14 +19,23 @@ function statusMixFor(rows) {
   return mix;
 }
 
-/** @param {Array<{status: string}>} rows */
-function terminalCounts(rows) {
+/**
+ * Per-status counts plus `settled`: done+crashed only. Rates (`doneRate`,
+ * `crashRate`, the trend) are computed against `settled`, not every
+ * terminal-ish status -- `cancelled` was a deliberate stop, not a run
+ * outcome, and `unknown` means "we lost track after a daemon restart," not
+ * "this task succeeded." Folding either into the denominator dilutes the
+ * reported crash rate: 8 unknown + 2 crashed would otherwise read as a 20%
+ * crash rate instead of the true 100% of tasks whose outcome we do know.
+ * @param {Array<{status: string}>} rows
+ */
+function settledCounts(rows) {
   const counts = { done: 0, crashed: 0, cancelled: 0, unknown: 0 };
   for (const row of rows) {
     if (counts[row.status] != null) counts[row.status]++;
   }
-  const terminal = counts.done + counts.crashed + counts.cancelled + counts.unknown;
-  return { ...counts, terminal };
+  const settled = counts.done + counts.crashed;
+  return { ...counts, settled };
 }
 
 /**
@@ -64,7 +73,7 @@ export function computeDoctorStats(rows, { now = Date.now() } = {}) {
   }
   const byModel = [...byModelMap.entries()]
     .map(([model, modelRows]) => {
-      const t = terminalCounts(modelRows);
+      const t = settledCounts(modelRows);
       return {
         model,
         dispatches: modelRows.length,
@@ -72,8 +81,8 @@ export function computeDoctorStats(rows, { now = Date.now() } = {}) {
         crashed: t.crashed,
         cancelled: t.cancelled,
         unknown: t.unknown,
-        doneRate: rateOrNull(t.done, t.terminal),
-        crashRate: rateOrNull(t.crashed, t.terminal),
+        doneRate: rateOrNull(t.done, t.settled),
+        crashRate: rateOrNull(t.crashed, t.settled),
         dominantFailureReason: dominantReason(modelRows),
       };
     })
@@ -97,12 +106,12 @@ export function computeDoctorStats(rows, { now = Date.now() } = {}) {
   };
 
   const previousWindow = rows.filter((row) => toMs(row.startedAt) >= now - 2 * DAY_MS && toMs(row.startedAt) < now - DAY_MS);
-  const currentTerminal = terminalCounts(last24h);
-  const previousTerminal = terminalCounts(previousWindow);
-  const currentCrashRate = rateOrNull(currentTerminal.crashed, currentTerminal.terminal);
-  const previousCrashRate = rateOrNull(previousTerminal.crashed, previousTerminal.terminal);
+  const currentSettled = settledCounts(last24h);
+  const previousSettled = settledCounts(previousWindow);
+  const currentCrashRate = rateOrNull(currentSettled.crashed, currentSettled.settled);
+  const previousCrashRate = rateOrNull(previousSettled.crashed, previousSettled.settled);
   let direction = "unknown";
-  if (currentTerminal.terminal > 0 && previousTerminal.terminal > 0) {
+  if (currentSettled.settled > 0 && previousSettled.settled > 0) {
     direction = currentCrashRate > previousCrashRate ? "worsening" : currentCrashRate < previousCrashRate ? "improving" : "flat";
   }
 
@@ -118,8 +127,8 @@ export function computeDoctorStats(rows, { now = Date.now() } = {}) {
     unknownBacklog,
     trend: {
       window: "24h",
-      current: { crashRate: currentCrashRate, terminal: currentTerminal.terminal },
-      previous: { crashRate: previousCrashRate, terminal: previousTerminal.terminal },
+      current: { crashRate: currentCrashRate, settled: currentSettled.settled },
+      previous: { crashRate: previousCrashRate, settled: previousSettled.settled },
       direction,
     },
   };

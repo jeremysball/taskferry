@@ -67,6 +67,7 @@ export function resolveCacheDir(env = process.env) {
 // module path. A bare path.resolve() compares the symlink path against the
 // real module path, so invoking cli.js or client.js through a symlink (an
 // installed bin entry) never matches and the direct-execution guard never runs.
+/** @param {string} invoked */
 export function resolveInvokedPath(invoked) {
   try {
     return fs.realpathSync(invoked);

@@ -75,8 +75,18 @@ Resolution order, same for state and runtime directories:
    `TASKFERRY_RUNTIME_DIR` — explicit overrides.
 2. `XDG_STATE_HOME`/`taskferry` for state; `XDG_RUNTIME_DIR`/`taskferry` for
    the runtime directory.
-3. `~/.local/state/taskferry` for state; the state directory's `run/`
-   subdirectory for runtime, if `XDG_RUNTIME_DIR` is unset.
+3. For the runtime directory only, if `XDG_RUNTIME_DIR` isn't exported but
+   `/run/user/<uid>` genuinely exists (the login session set it up, this
+   process just didn't inherit the export — a cron job, a stripped-env
+   subshell, an orphaned daemon booter), resolve to
+   `/run/user/<uid>/taskferry` anyway rather than treating the missing
+   export as "no XDG runtime dir." Two callers on the same machine that
+   disagreed only on whether they happened to export this var used to boot
+   two independent, mutually invisible daemons at two different socket
+   paths — this step exists to make that convergent instead.
+4. `~/.local/state/taskferry` for state; the state directory's `run/`
+   subdirectory for runtime, only if neither `XDG_RUNTIME_DIR` nor a real
+   `/run/user/<uid>` is available.
 
 The socket is `<runtime-dir>/daemon.sock`. The runtime directory is created
 with mode `0700`; the socket file is `chmod`ed to `0600` right after

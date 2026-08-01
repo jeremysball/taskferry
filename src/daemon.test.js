@@ -170,8 +170,10 @@ describe("Unix socket daemon", () => {
       resolveRuntimeDir({ env: {}, stateDir: "/state", uid: 1000, pathExists: () => false }),
       path.join("/state", "run")
     );
-    // No uid available at all (non-POSIX platform) also falls back.
-    assert.equal(resolveRuntimeDir({ env: {}, stateDir: "/state", uid: undefined }), path.join("/state", "run"));
+    // No uid available at all (non-POSIX platform) also falls back. `null`,
+    // not `undefined` -- an explicit `undefined` in a destructured param
+    // re-triggers that param's default value instead of overriding it.
+    assert.equal(resolveRuntimeDir({ env: {}, stateDir: "/state", uid: null }), path.join("/state", "run"));
   });
 
   test("rejects unsupported operating systems before touching the socket", async (t) => {

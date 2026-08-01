@@ -46,6 +46,10 @@ export function normalizeDirectory(directory) {
   return normalized;
 }
 
+/**
+ * @param {string} candidate
+ * @returns {boolean}
+ */
 function isDirectory(candidate) {
   try {
     return fs.statSync(candidate).isDirectory();
@@ -66,12 +70,12 @@ function isDirectory(candidate) {
 export function resolveRuntimeDir({
   env = process.env,
   stateDir = resolveStateDir(env),
-  uid = typeof os.getuid === "function" ? os.getuid() : undefined,
+  uid = typeof process.getuid === "function" ? process.getuid() : undefined,
   pathExists = isDirectory,
 } = {}) {
   if (env.TASKFERRY_RUNTIME_DIR) return env.TASKFERRY_RUNTIME_DIR;
   if (env.XDG_RUNTIME_DIR) return path.join(env.XDG_RUNTIME_DIR, "taskferry");
-  if (uid !== undefined) {
+  if (uid != null) {
     const candidate = path.join("/run/user", String(uid));
     if (pathExists(candidate)) return path.join(candidate, "taskferry");
   }

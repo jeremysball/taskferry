@@ -189,6 +189,45 @@ export function buildBwrapBaseArgs({ denyList }) {
 }
 
 /**
+ * Appends a `--bind <path> <path>` read-write bind at the same path for each
+ * entry. Shared so buildBwrapArgs() stays under the complexity ceiling.
+ * @param {string[]} args
+ * @param {string[]} paths
+ */
+function pushSamePathBinds(args, paths) {
+  for (const extra of paths) {
+    args.push("--bind", extra, extra);
+  }
+}
+
+/**
+ * Appends a `--bind <src> <dest>`-style bind for each [src, dest] pair using
+ * the given flag. Shared so buildBwrapArgs() stays under the complexity
+ * ceiling.
+ * @param {string[]} args
+ * @param {[string, string][]} pairs
+ * @param {string} flag - the bind flag to emit (e.g. "--bind" or "--ro-bind").
+ */
+function pushPairBinds(args, pairs, flag) {
+  for (const [src, dest] of pairs) {
+    args.push(flag, src, dest);
+  }
+}
+
+/**
+ * Appends one independent `--overlay-src <path> --overlay <upper> <work>
+ * <path>` copy-on-write mount per entry. Shared so buildBwrapArgs() stays
+ * under the complexity ceiling.
+ * @param {string[]} args
+ * @param {Array<{path: string, upperDir: string, workDir: string}>} overlays
+ */
+function pushOverlayRwBinds(args, overlays) {
+  for (const { path: overlayPath, upperDir, workDir } of overlays) {
+    args.push("--overlay-src", overlayPath, "--overlay", upperDir, workDir, overlayPath);
+  }
+}
+
+/**
  * @param {object} options
  * @param {string} options.directory
  * @param {string} options.stateDir
@@ -244,21 +283,13 @@ export function buildBwrapArgs({
     args.push("--bind", directory, directory);
   }
   args.push(runtimeDirWritable ? "--bind" : "--ro-bind", runtimeDir, runtimeDir);
-  for (const extra of extraRwBinds) {
-    args.push("--bind", extra, extra);
-  }
-  for (const { path: overlayPath, upperDir, workDir } of overlayRwBinds) {
-    args.push("--overlay-src", overlayPath, "--overlay", upperDir, workDir, overlayPath);
-  }
+  pushSamePathBinds(args, extraRwBinds);
+  pushOverlayRwBinds(args, overlayRwBinds);
   for (const { bindSrc, path: filePath } of overlayRwFileBinds) {
     args.push("--bind", bindSrc, filePath);
   }
-  for (const [src, dest] of extraRwPairBinds) {
-    args.push("--bind", src, dest);
-  }
-  for (const [src, dest] of extraRoBinds) {
-    args.push("--ro-bind", src, dest);
-  }
+  pushPairBinds(args, extraRwPairBinds, "--bind");
+  pushPairBinds(args, extraRoBinds, "--ro-bind");
   args.push("--unshare-all", shareNet ? "--share-net" : "--unshare-net", "--die-with-parent");
   return args;
 }

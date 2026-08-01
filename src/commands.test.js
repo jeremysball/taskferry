@@ -1016,6 +1016,50 @@ test("doctor integrations.playwrightMcpIsolation shape is present when both side
   assert.equal(result.integrations.playwrightMcpIsolation.claudeCode.isolated, true);
 });
 
+test("doctor --stats calls task.list and returns computeDoctorStats() output, skipping env checks", async (t) => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-doctor-stats-home-"));
+  let calledMethod;
+  const client = {
+    request: async (method, params) => {
+      calledMethod = method;
+      assert.deepEqual(params, {});
+      return {
+        counts: { queued: 0, running: 0, done: 1, crashed: 1, cancelled: 0, unknown: 0 },
+        tasks: [
+          { id: "a", status: "done", model: "m1", startedAt: "2026-08-01T10:00:00.000Z", failureReason: null },
+          { id: "b", status: "crashed", model: "m1", startedAt: "2026-08-01T11:00:00.000Z", failureReason: "no_output_timeout" },
+        ],
+      };
+    },
+  };
+  const runShellCommand = async () => ({ stdout: "", stderr: "", code: 0 });
+
+  const result = await runCommand("doctor", { stats: true }, { client, homeDirectory: home, env: {}, runShellCommand });
+
+  assert.equal(calledMethod, "task.list");
+  assert.ok(Array.isArray(result.byModel));
+  assert.equal(result.byModel[0].model, "m1");
+  assert.equal(result.byModel[0].dispatches, 2);
+  assert.equal(result.integrations, undefined);
+  assert.equal(result.warnings, undefined);
+});
+
+test("doctor without --stats does not call task.list", async (t) => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-doctor-stats-home-"));
+  const calledMethods = [];
+  const client = {
+    request: async (method) => {
+      calledMethods.push(method);
+      return { healthy: true, pid: 1, version: 1 };
+    },
+  };
+  const runShellCommand = async () => ({ stdout: "", stderr: "", code: 0 });
+
+  await runCommand("doctor", {}, { client, homeDirectory: home, env: {}, runShellCommand });
+
+  assert.ok(!calledMethods.includes("task.list"));
+});
+
 test("watch --flush-interval batches multiple events for the same and different taskIds into one flushed block", async () => {
   const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-commands-test-")));
   const controller = new AbortController();

@@ -188,7 +188,7 @@ function migrationError(name, args) {
     taskferry_dispatch: `Use: taskferry dispatch --prompt "<text>"${args.length ? ` (received ${args.join(" ")})` : ""}`,
     taskferry_cancel: "Use: taskferry cancel <id>",
     taskferry_poll: `Use: taskferry wait ${args[0] || "<id>"}`,
-    taskferry_advisor: "Use: taskferry advisor --prompt \"<text>\" --model <id>",
+    taskferry_advisor: "Use: taskferry advisor --model <id>  (--prompt is optional)",
     taskferry_status: "Use: taskferry status <id>",
     taskferry_tail: "Use: taskferry tail <id>",
     taskferry_summary: "Use: taskferry summary <id>",

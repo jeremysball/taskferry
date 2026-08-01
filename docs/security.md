@@ -134,6 +134,58 @@ task whose log contains secrets you don't want sent there. Specifics:
 default is unsuitable or unavailable; `--max-words` on `taskferry summary`
 bounds the target length between 75 and 300 words (default 200).
 
+## Advisor auto-context
+
+`taskferry advisor`'s `--prompt` is optional. When it is omitted (or when
+it is supplied but a context source is available), advisor auto-attaches
+up to 120,000 chars of caller-side text to the prompt before dispatching
+the advisor role — a real, secondary call to a model provider, which can
+differ from whatever model/provider the calling session itself uses. Do
+not invoke advisor in an environment whose caller-side text contains
+secrets you don't want sent there. Specifics:
+
+- **Trigger sources.** Two environment variables, each independently,
+  cause advisor to attach caller-side text:
+  - `CLAUDE_CODE_SESSION_ID` set in the caller's own environment makes
+    advisor tail the corresponding Claude Code session transcript
+    (`~/.claude/projects/<slug>/<session>.jsonl`) and attach that tail.
+  - `TASKFERRY_TASK_ID` set in the caller's own environment makes advisor
+    tail the calling ferry's own task log (via `task.tail`) and attach
+    that tail.
+  When both are set, the Claude Code session transcript wins; the calling
+  ferry's task log is only read when no Claude session is available.
+- **Automatic, not opt-in.** There is no `--no-context` flag — the auto
+  attachment happens whenever a source is available, with no per-call
+  opt-out. The only ways to suppress it are to unset the relevant env
+  var, or unset both, or invoke advisor in an environment with neither
+  set. Passing an explicit `--prompt` does *not* suppress it either —
+  the auto-attached context is prepended to whatever `--prompt` you
+  supply, when a source is available.
+- **Bounded.** At most 120,000 chars (`TASKFERRY_ADVISOR_CONTEXT_CHARS`
+  default, in chars / code points) of the chosen tail are attached, read
+  via `commands.js`'s `readTailChars()`; an unreadable transcript
+  surfaces as a `UsageError` at parse time rather than a silently empty
+  context, so a misconfigured caller fails loudly instead of sending a
+  prompt with no context the caller expected to be there. The budget is
+  overridable via the `TASKFERRY_ADVISOR_CONTEXT_CHARS` env var or the
+  `advisorContextChars` config field (`docs/config.md`); the env var wins
+  over the config file.
+
+The Claude Code session path is resolved by
+`commands.js`'s `claudeTranscriptPath()`, so a future change to how
+Claude Code organizes its transcripts will be picked up there; the budget
+and the priority order live next to it. `--summarize-context` on
+`taskferry advisor` (off by default) is a separate, additional
+condensation pass on top of this auto-attached text, dispatched through a
+throwaway `task.dispatch`/`task.wait`/`task.result` against an env-
+overridable model (`TASKFERRY_ADVISOR_SUMMARIZER_MODEL`,
+default `opencode/mimo-v2.5-free`) — best-effort, returns the input
+unchanged on any failure so condensation can never break an otherwise-
+valid advisor call. See [Activity summaries](#activity-summaries) above
+for the same-shape concern around the model's `summary --mode report`
+child, which reads the same task log without the same auto-context
+budget.
+
 ## `TASKFERRY_CHILD`
 
 Every dispatched worker child (OpenCode or pi), and every summary child,

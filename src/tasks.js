@@ -2993,7 +2993,7 @@ export function createTaskManager({
    * @param {{force?: boolean}} [options]
    */
   function scheduleActivity(task, { force = false } = {}) {
-    return scheduleActivityFor(task, { force }, { onEvent, state: activityScheduleState, activitySubscriptions, activitySummariesEnabled, activityCache });
+    return scheduleActivityFor(task, { force }, { onEvent, activitySubscriptions, activitySummariesEnabled, activityCache, state: activityScheduleState });
   }
 
   loadPersistedTasks({
@@ -3099,7 +3099,7 @@ export function createTaskManager({
    * @returns {TaskSummary & {next: string}}
    */
   function dispatch({ prompt, directory, model, variant, sessionId, internal = false, finalMarker = null, originSessionId, noSandbox = false, noOverlay = false, allowedDirs: dispatchAllowedDirs, executor: executorName, env, role = "dispatch" }) {
-    return dispatchTask({ prompt, directory, model, variant, sessionId, internal, finalMarker, originSessionId, noSandbox, noOverlay, allowedDirs: dispatchAllowedDirs, executor: executorName, env, role }, { ensureStateLoaded, tasks, defaultExecutor, LOG_DIR, persistTask, pendingLaunches, launchQueue, launchQueuedTasks });
+    return dispatchTask({ prompt, directory, model, variant, sessionId, internal, finalMarker, originSessionId, noSandbox, noOverlay, env, role, allowedDirs: dispatchAllowedDirs, executor: executorName }, { ensureStateLoaded, tasks, defaultExecutor, LOG_DIR, persistTask, pendingLaunches, launchQueue, launchQueuedTasks });
   }
 
   
@@ -4137,10 +4137,10 @@ function extractChangesetForTaskRecord(finishedTask, ctx) {
   try {
     extracted = isGitTarget
       ? extractGitDiff({
-          stateDir: ctx.stateDir,
-          runtimeDir: ctx.runtimeDir,
           denyList,
           diffPath,
+          stateDir: ctx.stateDir,
+          runtimeDir: ctx.runtimeDir,
           directory: finishedTask.directory,
           overlay: { upperDir: finishedTask.overlayDirs.upperDir, workDir: finishedTask.overlayDirs.workDir },
           overlayRwBinds: finishedTask.overlayDirs.rwBinds ?? [],
@@ -4150,10 +4150,10 @@ function extractChangesetForTaskRecord(finishedTask, ctx) {
           runCommand: ctx.runOverlayCommandFn,
         })
       : extractNonGitDiff({
-          stateDir: ctx.stateDir,
-          runtimeDir: ctx.runtimeDir,
           denyList,
           diffPath,
+          stateDir: ctx.stateDir,
+          runtimeDir: ctx.runtimeDir,
           directory: finishedTask.directory,
           overlay: finishedTask.overlayDirs,
           homeDir: os.homedir(),
@@ -4351,9 +4351,9 @@ function acceptTaskChangeset(taskId, ctx) {
   const denyList = defaultDenyList(os.homedir(), ctx.stateDir).filter(ctx.existsFn);
   const applied = applyChangeset({
     isGitTarget,
+    denyList,
     stateDir: ctx.stateDir,
     runtimeDir: ctx.runtimeDir,
-    denyList,
     directory: task.directory,
     // validateAcceptable() threw above if diffPath were null, but that
     // narrowing lives inside the helper, so assert the invariant here.

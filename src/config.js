@@ -19,6 +19,7 @@ const CONFIG_FIELD_TYPES = {
   overlayEnabled: "boolean",
   allowedDirs: "string",
   envDenylist: "string",
+  sandboxDenylist: "string",
   waitDefaultTimeoutMs: "number",
   cancelGraceMs: "number",
   defaultExecutor: "string",

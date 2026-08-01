@@ -396,6 +396,7 @@ export async function startDaemon({
   function close() {
     if (closing) return closing;
     closing = new Promise((resolve, reject) => {
+      manager.close?.();
       for (const socket of clients) {
         socket.write(encodeMessage({ version: PROTOCOL_VERSION, type: "shutdown", reason: restarting ? "restart" : "shutdown" }));
         socket.destroy();

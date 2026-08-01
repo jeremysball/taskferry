@@ -2862,53 +2862,7 @@ export function createTaskManager({
    * @param {Task} finishedTask
    */
   function extractChangesetForTask(finishedTask) {
-    if (!finishedTask.overlayDirs) return;
-    const denyList = defaultDenyList(os.homedir(), stateDir).filter(existsFn);
-    const diffPath = path.join(stateDir, "diffs", `${finishedTask.id}.patch`);
-    const isGitTarget = finishedTask.preDispatchHead != null;
-    let extracted;
-    try {
-      extracted = isGitTarget
-        ? extractGitDiff({
-            stateDir,
-            runtimeDir,
-            denyList,
-            diffPath,
-            directory: finishedTask.directory,
-            overlay: { upperDir: finishedTask.overlayDirs.upperDir, workDir: finishedTask.overlayDirs.workDir },
-            overlayRwBinds: finishedTask.overlayDirs.rwBinds ?? [],
-            overlayRwFileBinds: finishedTask.overlayDirs.rwFileBinds ?? [],
-            preDispatchHead: /** @type {string} */ (finishedTask.preDispatchHead),
-            homeDir: os.homedir(),
-            runCommand: runOverlayCommandFn,
-          })
-        : extractNonGitDiff({
-            stateDir,
-            runtimeDir,
-            denyList,
-            diffPath,
-            directory: finishedTask.directory,
-            overlay: finishedTask.overlayDirs,
-            homeDir: os.homedir(),
-            runCommand: runOverlayCommandFn,
-          });
-    } catch (err) {
-      finishedTask.changesetStatus = "pending";
-      finishedTask.changesetError = err instanceof Error ? err.message : String(err);
-      persistTask(finishedTask.id);
-      return;
-    }
-    finishedTask.diffPath = extracted.diffPath;
-    finishedTask.changesetError = null;
-    if (finishedTask.role === "advisor") {
-      finishedTask.changesetStatus = "rejected";
-      releaseOverlay(finishedTask);
-    } else if (extracted.hasChanges) {
-      finishedTask.changesetStatus = "pending";
-    } else {
-      finishedTask.changesetStatus = "accepted";
-      releaseOverlay(finishedTask);
-    }
+    extractChangesetForTaskRecord(finishedTask, { stateDir, runtimeDir, existsFn, runOverlayCommandFn, persistTask, releaseOverlay });
   }
 
   /**
@@ -3261,35 +3215,7 @@ export function createTaskManager({
    * @param {NodeJS.ProcessEnv} env
    */
   async function summaryModelAvailable(model, env) {
-    const fingerprint = modelsCacheFingerprint(env);
-    let entry = modelsCache.get(fingerprint);
-    const now = Date.now();
-    if (!entry || now >= entry.expiresAt) {
-      let inFlight = modelsCacheInFlight.get(fingerprint);
-      if (!inFlight) {
-        inFlight = (async () => {
-          try {
-            const output = await listModelsFn(env);
-            const result = { expiresAt: Date.now() + 5 * 60 * 1000, output };
-            modelsCache.set(fingerprint, result);
-            return result;
-          } catch (err) {
-            throw new Error(`error: could not list available OpenCode models: ${errMessage(err)}\nhelp: verify that opencode is installed and authenticated, then retry taskferry summary`, { cause: err });
-          } finally {
-            modelsCacheInFlight.delete(fingerprint);
-          }
-        })();
-        modelsCacheInFlight.set(fingerprint, inFlight);
-      }
-      await inFlight;
-      // The populate either set the cache entry (success) or threw (we
-      // never reach this line). The non-null assertion is just to placate
-      // TypeScript, which can't track the await-vs-set dependency.
-      entry = /** @type {{expiresAt: number, output: string}} */ (modelsCache.get(fingerprint));
-    }
-    if (!entry.output.split("\n").some((line) => line.trim() === model)) {
-      throw new Error(`error: summary model is unavailable: ${model}\nhelp: set TASKFERRY_SUMMARY_MODEL to an installed model, then retry taskferry summary`);
-    }
+    await checkModelAvailable(model, env, { modelsCache, modelsCacheInFlight, listModelsFn });
   }
 
   /** Shared upfront readiness check for both the direct `summary --mode
@@ -3688,39 +3614,7 @@ export function createTaskManager({
   // keeping up, and the whole file otherwise.
   /** @param {Task} task */
   function classifyTrailingLogFailure(task) {
-    if (task.failureReason) return; // watcher already classified this task
-    const watcherState = runningWatcherState.get(task.id);
-    /** @type {number} */
-    let bytesRead = watcherState?.bytesRead ?? 0;
-    const carry = watcherState?.carry ?? "";
-    /** @type {number} */
-    let size;
-    try {
-      size = fs.statSync(task.logPath).size;
-    } catch {
-      return; // log never created or already gone; nothing to classify
-    }
-    if (size < bytesRead) bytesRead = 0; // log shrank out from under the watcher; rescan
-    if (size === bytesRead && !carry) return; // watcher saw everything
-    let text = carry;
-    if (size > bytesRead) {
-      const chunkSize = size - bytesRead;
-      const buf = Buffer.alloc(chunkSize);
-      const fd = fs.openSync(task.logPath, "r");
-      try {
-        fs.readSync(fd, buf, 0, chunkSize, bytesRead);
-      } finally {
-        fs.closeSync(fd);
-      }
-      text += buf.toString("utf8");
-    }
-    if (!text) return; // nothing to classify
-    const errorBucketPrefix = resolveExecutor(task.executorId).errorBucketPrefix;
-    const { failure } = classifyProviderFailure(text.split("\n"), errorBucketPrefix);
-    if (failure) {
-      task.failureReason = failure.bucket;
-      task.failureDetail = failure.detail;
-    }
+    classifyTrailingLogFailureFor(task, { runningWatcherState, resolveExecutor });
   }
 
   /** @param {Task} task */
@@ -3806,22 +3700,7 @@ export function createTaskManager({
    * @returns {LogActivity}
    */
   function logActivity(logPath) {
-    /** @type {fs.Stats|undefined} */
-    let stat;
-    try {
-      stat = fs.statSync(logPath);
-    } catch {
-      return { logBytesWritten: 0, logLastWriteAt: null, logHasEvent: false };
-    }
-    if (logHasEventCache.has(logPath)) {
-      return { logBytesWritten: stat.size, logLastWriteAt: stat.mtime.toISOString(), logHasEvent: true };
-    }
-    let hasEvent = false;
-    if (stat.size > 0) {
-      hasEvent = scanLogForEvent(logPath, Math.min(stat.size, LOG_ACTIVITY_SCAN_BYTES));
-    }
-    if (hasEvent) logHasEventCache.add(logPath);
-    return { logBytesWritten: stat.size, logLastWriteAt: stat.mtime.toISOString(), logHasEvent: hasEvent };
+    return computeLogActivity(logPath, { logHasEventCache, LOG_ACTIVITY_SCAN_BYTES });
   }
 
   /**
@@ -4608,4 +4487,176 @@ function persistTaskRecord(taskId, ctx) {
   });
   const task = ctx.tasks.get(taskId);
   if (task) ctx.taskEvents.emitState(task);
+}
+
+/**
+ * Resolves a task's changeset from its overlay at settlement time, persisting
+ * the outcome (and releasing the overlay for advisor / no-change cases).
+ * Mirrors the original `extractChangesetForTask` closure exactly; every
+ * factory binding is threaded in via `ctx`.
+ * @param {Task} finishedTask
+ * @param {{stateDir: string, runtimeDir: string, existsFn: (path: string) => boolean, runOverlayCommandFn: (command: string, args: string[]) => {status: number|null, stdout: string, stderr: string, error?: Error}, persistTask: (taskId: string) => void, releaseOverlay: (task: {overlayDirs?: {root:string,tmpRoot:string}|null}) => boolean}} ctx
+ */
+function extractChangesetForTaskRecord(finishedTask, ctx) {
+  if (!finishedTask.overlayDirs) return;
+  const denyList = defaultDenyList(os.homedir(), ctx.stateDir).filter(ctx.existsFn);
+  const diffPath = path.join(ctx.stateDir, "diffs", `${finishedTask.id}.patch`);
+  const isGitTarget = finishedTask.preDispatchHead != null;
+  let extracted;
+  try {
+    extracted = isGitTarget
+      ? extractGitDiff({
+          stateDir: ctx.stateDir,
+          runtimeDir: ctx.runtimeDir,
+          denyList,
+          diffPath,
+          directory: finishedTask.directory,
+          overlay: { upperDir: finishedTask.overlayDirs.upperDir, workDir: finishedTask.overlayDirs.workDir },
+          overlayRwBinds: finishedTask.overlayDirs.rwBinds ?? [],
+          overlayRwFileBinds: finishedTask.overlayDirs.rwFileBinds ?? [],
+          preDispatchHead: /** @type {string} */ (finishedTask.preDispatchHead),
+          homeDir: os.homedir(),
+          runCommand: ctx.runOverlayCommandFn,
+        })
+      : extractNonGitDiff({
+          stateDir: ctx.stateDir,
+          runtimeDir: ctx.runtimeDir,
+          denyList,
+          diffPath,
+          directory: finishedTask.directory,
+          overlay: finishedTask.overlayDirs,
+          homeDir: os.homedir(),
+          runCommand: ctx.runOverlayCommandFn,
+        });
+  } catch (err) {
+    finishedTask.changesetStatus = "pending";
+    finishedTask.changesetError = err instanceof Error ? err.message : String(err);
+    ctx.persistTask(finishedTask.id);
+    return;
+  }
+  finishedTask.diffPath = extracted.diffPath;
+  finishedTask.changesetError = null;
+  if (finishedTask.role === "advisor") {
+    finishedTask.changesetStatus = "rejected";
+    ctx.releaseOverlay(finishedTask);
+  } else if (extracted.hasChanges) {
+    finishedTask.changesetStatus = "pending";
+  } else {
+    finishedTask.changesetStatus = "accepted";
+    ctx.releaseOverlay(finishedTask);
+  }
+}
+
+/**
+ * Validates `model` against the opencode installed-models list, caching the
+ * listing per caller-env fingerprint for 5 minutes and coalescing concurrent
+ * populates for the same key. Extracted out of `createTaskManager`'s
+ * `summaryModelAvailable` closure; the two cache maps and the listFn are
+ * threaded in via `ctx`.
+ * @param {string} model
+ * @param {NodeJS.ProcessEnv} env
+ * @param {{modelsCache: Map<string, {expiresAt: number, output: string}>, modelsCacheInFlight: Map<string, Promise<{expiresAt: number, output: string}>>, listModelsFn: (env: NodeJS.ProcessEnv) => Promise<string>}} ctx
+ */
+async function checkModelAvailable(model, env, ctx) {
+  const fingerprint = modelsCacheFingerprint(env);
+  let entry = ctx.modelsCache.get(fingerprint);
+  const now = Date.now();
+  if (!entry || now >= entry.expiresAt) {
+    let inFlight = ctx.modelsCacheInFlight.get(fingerprint);
+    if (!inFlight) {
+      inFlight = (async () => {
+        try {
+          const output = await ctx.listModelsFn(env);
+          const result = { expiresAt: Date.now() + 5 * 60 * 1000, output };
+          ctx.modelsCache.set(fingerprint, result);
+          return result;
+        } catch (err) {
+          throw new Error(`error: could not list available OpenCode models: ${errMessage(err)}\nhelp: verify that opencode is installed and authenticated, then retry taskferry summary`, { cause: err });
+        } finally {
+          ctx.modelsCacheInFlight.delete(fingerprint);
+        }
+      })();
+      ctx.modelsCacheInFlight.set(fingerprint, inFlight);
+    }
+    await inFlight;
+    // The populate either set the cache entry (success) or threw (we
+    // never reach this line). The non-null assertion is just to placate
+    // TypeScript, which can't track the await-vs-set dependency.
+    entry = /** @type {{expiresAt: number, output: string}} */ (ctx.modelsCache.get(fingerprint));
+  }
+  if (!entry.output.split("\n").some((line) => line.trim() === model)) {
+    throw new Error(`error: summary model is unavailable: ${model}\nhelp: set TASKFERRY_SUMMARY_MODEL to an installed model, then retry taskferry summary`);
+  }
+}
+
+/**
+ * Reclassifies a running task's trailing (post-watcher-tick) log bytes into a
+ * provider failure bucket, only reading the chunk the watcher hadn't yet seen.
+ * Extracted out of `createTaskManager`'s `classifyTrailingLogFailure` closure.
+ * @param {Task} task
+ * @param {{runningWatcherState: Map<string, {bytesRead: number, carry: string}>, resolveExecutor: (name?: string) => import("./executor.js").WorkerExecutor}} ctx
+ */
+function classifyTrailingLogFailureFor(task, ctx) {
+  if (task.failureReason) return; // watcher already classified this task
+  const watcherState = ctx.runningWatcherState.get(task.id);
+  /** @type {number} */
+  let bytesRead = watcherState?.bytesRead ?? 0;
+  const carry = watcherState?.carry ?? "";
+  /** @type {number} */
+  let size;
+  try {
+    size = fs.statSync(task.logPath).size;
+  } catch {
+    return; // log never created or already gone; nothing to classify
+  }
+  if (size < bytesRead) bytesRead = 0; // log shrank out from under the watcher; rescan
+  if (size === bytesRead && !carry) return; // watcher saw everything
+  let text = carry;
+  if (size > bytesRead) {
+    const chunkSize = size - bytesRead;
+    const buf = Buffer.alloc(chunkSize);
+    const fd = fs.openSync(task.logPath, "r");
+    try {
+      fs.readSync(fd, buf, 0, chunkSize, bytesRead);
+    } finally {
+      fs.closeSync(fd);
+    }
+    text += buf.toString("utf8");
+  }
+  if (!text) return; // nothing to classify
+  const errorBucketPrefix = ctx.resolveExecutor(task.executorId).errorBucketPrefix;
+  const { failure } = classifyProviderFailure(text.split("\n"), errorBucketPrefix);
+  if (failure) {
+    task.failureReason = failure.bucket;
+    task.failureDetail = failure.detail;
+  }
+}
+
+/**
+ * Distinguishes "opencode never wrote a byte" from "wrote bytes but no
+ * parseable event yet" from "at least one event landed", using a per-log-file
+ * cache so a task polled repeatedly while running doesn't re-scan the whole
+ * log after its first event. Extracted out of `createTaskManager`'s
+ * `logActivity` closure; the cache set is threaded in via `ctx`.
+ * @param {string} logPath
+ * @param {{logHasEventCache: Set<string>, LOG_ACTIVITY_SCAN_BYTES: number}} ctx
+ * @returns {LogActivity}
+ */
+function computeLogActivity(logPath, ctx) {
+  /** @type {fs.Stats|undefined} */
+  let stat;
+  try {
+    stat = fs.statSync(logPath);
+  } catch {
+    return { logBytesWritten: 0, logLastWriteAt: null, logHasEvent: false };
+  }
+  if (ctx.logHasEventCache.has(logPath)) {
+    return { logBytesWritten: stat.size, logLastWriteAt: stat.mtime.toISOString(), logHasEvent: true };
+  }
+  let hasEvent = false;
+  if (stat.size > 0) {
+    hasEvent = scanLogForEvent(logPath, Math.min(stat.size, ctx.LOG_ACTIVITY_SCAN_BYTES));
+  }
+  if (hasEvent) ctx.logHasEventCache.add(logPath);
+  return { logBytesWritten: stat.size, logLastWriteAt: stat.mtime.toISOString(), logHasEvent: hasEvent };
 }

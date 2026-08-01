@@ -1973,7 +1973,7 @@ async function runSummarizeActivityAttempt(ctx, { taskId, maxWords, previousActi
   const sessionId = summaryTask?.sessionId || null;
   const detail = ctx.result(started.summaryTask.id, { fields: ["message"] });
   const text = settled.status === "done" && typeof detail.message === "string" ? detail.message : "";
-  return { spawned: true, settled, sessionId, text, summaryTaskId: started.summaryTask.id };
+  return { settled, sessionId, text, spawned: true, summaryTaskId: started.summaryTask.id };
 }
 
 /**
@@ -2087,7 +2087,7 @@ async function runSummarizeActivity(ctx, taskId, maxWords, previousActivity) {
 function dispatchAdvisorTask(ctx, params) {
   const { prompt, directory, model, variant, sessionId, executor, env } = params;
   try {
-    return ctx.dispatch({ prompt: /** @type {string} */ (prompt), directory: /** @type {string} */ (directory), model, variant, sessionId, executor, env, role: "advisor" });
+    return ctx.dispatch({ model, variant, sessionId, executor, env, prompt: /** @type {string} */ (prompt), directory: /** @type {string} */ (directory), role: "advisor" });
   } catch (err) {
     throw new Error(ctx.errMessage(err).replaceAll("taskferry dispatch", "taskferry advisor"), { cause: err });
   }

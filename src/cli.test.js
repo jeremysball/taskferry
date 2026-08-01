@@ -115,10 +115,15 @@ test("advisor --prompt - reads the prompt from piped stdin", async () => {
   const result = await runCli(["advisor", "--prompt", "-", "--model", "opencode/some-model"], {
     io: capture.io,
     connectClient: async () => client,
+    env: {},
   });
 
   assert.equal(result.exitCode, 0);
-  assert.equal(calls[0].params.prompt, "advisor question");
+  // The new wiring prepends ADVISOR_CANNED_PROMPT (and would attach context
+  // if any source were available in env); the contract under test is that
+  // the caller's piped stdin ends up in the prompt verbatim, not that the
+  // prompt is exactly equal to the input.
+  assert.match(calls[0].params.prompt, /advisor question/);
 });
 
 test("dispatch --prompt - rejects with a usage error and never contacts the daemon when stdin is a TTY", async () => {
@@ -465,6 +470,7 @@ test("advisor's directory is never passed through resolveWorkspaceRoot even when
     io: capture.io,
     connectClient: async () => client,
     resolveWorkspaceRoot: () => { called = true; return "/should/never/be/used"; },
+    env: {},
   });
 
   assert.equal(result.exitCode, 0);

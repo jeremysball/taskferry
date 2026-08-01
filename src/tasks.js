@@ -3628,10 +3628,7 @@ export function createTaskManager({
    * @returns {TaskStatus}
    */
   function status(taskId) {
-    ensureStateLoaded();
-    const task = tasks.get(taskId);
-    if (!task) throw noSuchTask(taskId);
-    return { ...summarize(task), ...logActivity(task.logPath) };
+    return statusFor(taskId, { ensureStateLoaded, tasks, noSuchTask, logActivity });
   }
 
   /**
@@ -3639,10 +3636,7 @@ export function createTaskManager({
    * @returns {string}
    */
   function taskDirectory(taskId) {
-    ensureStateLoaded();
-    const task = tasks.get(taskId);
-    if (!task) throw noSuchTask(taskId);
-    return task.directory;
+    return taskDirectoryFor(taskId, { ensureStateLoaded, tasks, noSuchTask });
   }
 
   /**
@@ -3686,24 +3680,11 @@ export function createTaskManager({
 
   /** @param {string} taskId */
   function settleWaiters(taskId) {
-    const list = waiters.get(taskId);
-    if (!list) return;
-    waiters.delete(taskId);
-    for (const settle of list.slice()) settle();
+    settleWaitersFor(taskId, { waiters });
   }
 
   function list() {
-    ensureStateLoaded();
-    const all = Array.from(tasks.values()).sort((a, b) => (a.startedAt < b.startedAt ? 1 : -1));
-    /** @type {Record<string, number>} */
-    const counts = { queued: 0, running: 0, done: 0, crashed: 0, cancelled: 0, unknown: 0 };
-    for (const t of all) {
-      if (counts[t.status] != null) counts[t.status]++;
-    }
-    return {
-      counts,
-      tasks: all.length ? all.map(summarizeRow) : "none found (this server process's lifetime)",
-    };
+    return listTasks({ ensureStateLoaded, tasks });
   }
 
   
@@ -3719,41 +3700,7 @@ export function createTaskManager({
    * @param {{chars?: number}} [options]
    */
   function tail(taskId, { chars = 1000 } = {}) {
-    ensureStateLoaded();
-    const task = tasks.get(taskId);
-    if (!task) throw noSuchTask(taskId);
-    if (!Number.isSafeInteger(chars) || chars <= 0 || chars > 65536) {
-      throw new Error("error: chars must be a positive integer no greater than 65536\nhelp: run taskferry tail with chars between 1 and 65536");
-    }
-    let text = readLastText(task.logPath);
-    // Eventless crash: narration is never coming (the log has no parseable
-    // events at all, checked over the whole log), so the raw capture IS the
-    // task's output -- show it instead of "none observed yet", which reads
-    // as "still waiting". Deliberately broader than the settlement gate
-    // (no failureReason requirement): tail is display-only, and a
-    // watchdog-killed eventless task's stderr is just as much its only
-    // output as a boot crash's is.
-    if (!text && task.status === "crashed" && !logHasAnyEvent(task.logPath)) {
-      text = readRawCaptureTail(task.logPath);
-    }
-    if (!text) {
-      return {
-        taskId,
-        status: task.status,
-        text: "none observed yet",
-        textTotalChars: 0,
-        truncated: false,
-        help: `Run taskferry wait with task id "${taskId}" to wait for task output`,
-      };
-    }
-    const codePoints = Array.from(text);
-    return {
-      taskId,
-      status: task.status,
-      text: codePoints.length > chars ? codePoints.slice(-chars).join("") : text,
-      textTotalChars: codePoints.length,
-      truncated: codePoints.length > chars,
-    };
+    return tailTask(taskId, { chars }, { ensureStateLoaded, tasks, noSuchTask });
   }
 
   
@@ -4720,4 +4667,111 @@ function pollTask(taskId, { timeoutMs, tailChars }, ctx) {
     }
     /** @type {Array<(timedOut?: boolean) => void>} */ (ctx.waiters.get(taskId)).push(settle);
   });
+}
+
+/**
+ * Builds a task's status summary plus log-activity info. Extracted out of
+ * `createTaskManager`'s `status` closure; `summarize` is a module-level
+ * helper, the rest is threaded in via `ctx`.
+ * @param {string} taskId
+ * @param {{ensureStateLoaded: () => void, tasks: Map<string, Task>, noSuchTask: (taskId: string) => Error, logActivity: (logPath: string) => LogActivity}} ctx
+ * @returns {TaskStatus}
+ */
+function statusFor(taskId, ctx) {
+  ctx.ensureStateLoaded();
+  const task = ctx.tasks.get(taskId);
+  if (!task) throw ctx.noSuchTask(taskId);
+  return { ...summarize(task), ...ctx.logActivity(task.logPath) };
+}
+
+/**
+ * @param {string} taskId
+ * @param {{ensureStateLoaded: () => void, tasks: Map<string, Task>, noSuchTask: (taskId: string) => Error}} ctx
+ * @returns {string}
+ */
+function taskDirectoryFor(taskId, ctx) {
+  ctx.ensureStateLoaded();
+  const task = ctx.tasks.get(taskId);
+  if (!task) throw ctx.noSuchTask(taskId);
+  return task.directory;
+}
+
+/**
+ * Resolves every pending waiter callback for a task id and clears the list.
+ * Extracted out of `createTaskManager`'s `settleWaiters` closure.
+ * @param {string} taskId
+ * @param {{waiters: Map<string, Array<(timedOut?: boolean) => void>>}} ctx
+ */
+function settleWaitersFor(taskId, ctx) {
+  const list = ctx.waiters.get(taskId);
+  if (!list) return;
+  ctx.waiters.delete(taskId);
+  for (const settle of list.slice()) settle();
+}
+
+/**
+ * Sorts all live tasks newest-first and buckets them by status for the list
+ * view. Extracted out of `createTaskManager`'s `list` closure; `summarizeRow`
+ * is a module-level helper.
+ * @param {{ensureStateLoaded: () => void, tasks: Map<string, Task>}} ctx
+ */
+function listTasks(ctx) {
+  ctx.ensureStateLoaded();
+  const all = Array.from(ctx.tasks.values()).sort((a, b) => (a.startedAt < b.startedAt ? 1 : -1));
+  /** @type {Record<string, number>} */
+  const counts = { queued: 0, running: 0, done: 0, crashed: 0, cancelled: 0, unknown: 0 };
+  for (const t of all) {
+    if (counts[t.status] != null) counts[t.status]++;
+  }
+  return {
+    counts,
+    tasks: all.length ? all.map(summarizeRow) : "none found (this server process's lifetime)",
+  };
+}
+
+/**
+ * Returns the tail of a task's narration (with a raw-capture fallback for an
+ * eventless crashed task). Extracted out of `createTaskManager`'s `tail`
+ * closure; `readLastText`/`readRawCaptureTail`/`logHasAnyEvent` are module
+ * helpers called directly.
+ * @param {string} taskId
+ * @param {{chars: number}} options
+ * @param {{ensureStateLoaded: () => void, tasks: Map<string, Task>, noSuchTask: (taskId: string) => Error}} ctx
+ */
+function tailTask(taskId, { chars }, ctx) {
+  ctx.ensureStateLoaded();
+  const task = ctx.tasks.get(taskId);
+  if (!task) throw ctx.noSuchTask(taskId);
+  if (!Number.isSafeInteger(chars) || chars <= 0 || chars > 65536) {
+    throw new Error("error: chars must be a positive integer no greater than 65536\nhelp: run taskferry tail with chars between 1 and 65536");
+  }
+  let text = readLastText(task.logPath);
+  // Eventless crash: narration is never coming (the log has no parseable
+  // events at all, checked over the whole log), so the raw capture IS the
+  // task's output -- show it instead of "none observed yet", which reads
+  // as "still waiting". Deliberately broader than the settlement gate
+  // (no failureReason requirement): tail is display-only, and a
+  // watchdog-killed eventless task's stderr is just as much its only
+  // output as a boot crash's is.
+  if (!text && task.status === "crashed" && !logHasAnyEvent(task.logPath)) {
+    text = readRawCaptureTail(task.logPath);
+  }
+  if (!text) {
+    return {
+      taskId,
+      status: task.status,
+      text: "none observed yet",
+      textTotalChars: 0,
+      truncated: false,
+      help: `Run taskferry wait with task id "${taskId}" to wait for task output`,
+    };
+  }
+  const codePoints = Array.from(text);
+  return {
+    taskId,
+    status: task.status,
+    text: codePoints.length > chars ? codePoints.slice(-chars).join("") : text,
+    textTotalChars: codePoints.length,
+    truncated: codePoints.length > chars,
+  };
 }

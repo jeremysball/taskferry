@@ -2850,15 +2850,12 @@ export function createTaskManager({
    * @param {{overlayDirs?: {root:string,tmpRoot:string}|null}} task
    * @returns {boolean} whether cleanup failed
    */
+  /**
+   * @param {{overlayDirs?: {root:string,tmpRoot:string}|null}} task
+   * @returns {boolean} whether cleanup failed
+   */
   function releaseOverlay(task) {
-    if (!task.overlayDirs) return false;
-    const removal = cleanupOverlay({
-      root: task.overlayDirs.root,
-      tmpRoot: task.overlayDirs.tmpRoot,
-      rmFn: rmOverlayTreeFn,
-    });
-    if (removal.removed) task.overlayDirs = null;
-    return !removal.removed;
+    return releaseOverlayForTask(task, { rmOverlayTreeFn });
   }
 
   /**
@@ -2914,8 +2911,6 @@ export function createTaskManager({
     }
   }
 
-  const CALLER_ENV_EXCLUDED = new Set(["PATH", "HOME", ...TASKFERRY_PLUMBING_ENV_VARS]);
-
   /**
    * Builds the final base environment for a spawned child: the daemon's own
    * ambient environment (read fresh at call time), overlaid with the
@@ -2933,20 +2928,7 @@ export function createTaskManager({
    * @returns {NodeJS.ProcessEnv}
    */
   function sanitizedEnvironment(env = {}) {
-    const callerEnv = env ?? {};
-    const merged = { ...process.env };
-    for (const name of Object.keys(callerEnv)) {
-      if (name === "" || name.includes("=")) {
-        throw new Error(`error: invalid env key in caller-supplied env: ${JSON.stringify(name)}\nhelp: env keys must be non-empty strings without '=' characters`);
-      }
-      if (typeof callerEnv[name] !== "string") {
-        throw new Error(`error: env value for ${JSON.stringify(name)} must be a string, got ${typeof callerEnv[name]}\nhelp: cast values to strings before dispatching`);
-      }
-      if (CALLER_ENV_EXCLUDED.has(name)) continue;
-      merged[name] = callerEnv[name];
-    }
-    for (const name of envDenylist) delete merged[name];
-    return merged;
+    return buildSanitizedEnvironment(env, { envDenylist });
   }
 
   /** @param {NodeJS.ProcessEnv} [env] */
@@ -3180,41 +3162,7 @@ export function createTaskManager({
    * @param {string} taskId
    */
   function persistTask(taskId) {
-    withFileLock(LOCK_FILE, () => {
-      /** @type {Task[]} */
-      let current = [];
-      try {
-        current = JSON.parse(fs.readFileSync(TASKS_FILE, "utf8"));
-      } catch (err) {
-        if (errCode(err) !== "ENOENT") throw err;
-      }
-      const byId = new Map(current.map((t) => [t.id, t]));
-      const local = tasks.get(taskId);
-      if (local) byId.set(taskId, local);
-      else byId.delete(taskId);
-      const all = Array.from(byId.values());
-      const temporary = path.join(stateDir, `.tasks-${randomUUID()}.json`);
-      // Throwing from a `finally` would mask a real error from the try block
-      // above (e.g. a full disk on writeFileSync) with an unrelated cleanup
-      // failure. Defer the cleanup error and only surface it once the try
-      // block itself has succeeded.
-      /** @type {unknown} */
-      let cleanupError;
-      try {
-        fs.writeFileSync(temporary, JSON.stringify(all, null, 2), { mode: 0o600 });
-        fs.renameSync(temporary, TASKS_FILE);
-        fs.chmodSync(TASKS_FILE, 0o600);
-      } finally {
-        try {
-          fs.unlinkSync(temporary);
-        } catch (err) {
-          if (errCode(err) !== "ENOENT") cleanupError = err;
-        }
-      }
-      if (cleanupError) throw cleanupError;
-    });
-    const task = tasks.get(taskId);
-    if (task) taskEvents.emitState(task);
+    persistTaskRecord(taskId, { LOCK_FILE, TASKS_FILE, stateDir, tasks, taskEvents });
   }
 
   
@@ -3615,7 +3563,7 @@ export function createTaskManager({
 
   /** @param {Task} task */
   function hasLiveOverlay(task) {
-    return task.overlayDirs != null && existsFn(task.overlayDirs.upperDir);
+    return hasLiveOverlayForTask(task, { existsFn });
   }
 
   /**
@@ -3696,12 +3644,7 @@ export function createTaskManager({
 
   /** @param {string} taskId */
   function stopRunningWatcher(taskId) {
-    const timer = runningWatchers.get(taskId);
-    if (timer) {
-      clearInterval(timer);
-      runningWatchers.delete(taskId);
-    }
-    runningWatcherState.delete(taskId);
+    stopRunningWatcherFor(taskId, { runningWatchers, runningWatcherState });
   }
 
   // Forces a running task to stop for a reason other than user cancellation
@@ -3842,17 +3785,7 @@ export function createTaskManager({
    * @param {NodeJS.Signals} signal
    */
   function sendSignal(pid, signal) {
-    try {
-      killFn(-pid, signal);
-      return;
-    } catch (err) {
-      if (errCode(err) !== "ESRCH") throw err;
-    }
-    try {
-      killFn(pid, signal);
-    } catch (err) {
-      if (errCode(err) !== "ESRCH") throw err;
-    }
+    sendSignalToProcess(pid, signal, { killFn });
   }
 
   // Distinguishes "opencode never wrote a byte" (still starting up, or stuck
@@ -4522,4 +4455,157 @@ function readNarration(logPath) {
     }
   }
   return textOrder.map((mid) => /** @type {string[]} */ (textByMessageId.get(mid)).join("")).join("\n\n");
+}
+
+const CALLER_ENV_EXCLUDED = new Set(["PATH", "HOME", ...TASKFERRY_PLUMBING_ENV_VARS]);
+
+/**
+ * Removes a task's overlay using the tmp root recorded when that overlay was
+ * created. A failed removal leaves overlayDirs intact for the startup sweep
+ * to retry. Extracted out of `createTaskManager`'s `releaseOverlay` closure;
+ * `rmOverlayTreeFn` is threaded in explicitly via `ctx`.
+ * @param {{overlayDirs?: {root:string,tmpRoot:string}|null}} task
+ * @param {{rmOverlayTreeFn?: (path: string) => void}} ctx
+ * @returns {boolean} whether cleanup failed
+ */
+function releaseOverlayForTask(task, ctx) {
+  if (!task.overlayDirs) return false;
+  const removal = cleanupOverlay({
+    root: task.overlayDirs.root,
+    tmpRoot: task.overlayDirs.tmpRoot,
+    rmFn: ctx.rmOverlayTreeFn,
+  });
+  if (removal.removed) task.overlayDirs = null;
+  return !removal.removed;
+}
+
+/**
+ * Builds the final base environment for a spawned child: the daemon's own
+ * ambient environment (read fresh at call time), overlaid with the
+ * caller-supplied `env` (caller wins, except for CALLER_ENV_EXCLUDED --
+ * daemon-controlled plumbing resolved once at the daemon's own startup),
+ * with the manager's `envDenylist` stripped last regardless of which side
+ * the value came from. Applies the same key/value rules as the RPC-level
+ * isEnvironment so a programmatic caller that bypasses the socket (no
+ * isEnvironment gate) can't smuggle a malformed key past the spawn
+ * boundary -- bad keys throw synchronously here, which startTask() catches
+ * and surfaces as a spawnError on a crashed task rather than a
+ * silently-dropped value. Null or undefined env is treated as empty (as
+ * the pre-validation spread did) rather than rejected.
+ * @param {NodeJS.ProcessEnv} env
+ * @param {{envDenylist: string[]}} ctx
+ * @returns {NodeJS.ProcessEnv}
+ */
+function buildSanitizedEnvironment(env, ctx) {
+  const callerEnv = env ?? {};
+  const merged = { ...process.env };
+  for (const name of Object.keys(callerEnv)) {
+    if (name === "" || name.includes("=")) {
+      throw new Error(`error: invalid env key in caller-supplied env: ${JSON.stringify(name)}\nhelp: env keys must be non-empty strings without '=' characters`);
+    }
+    if (typeof callerEnv[name] !== "string") {
+      throw new Error(`error: env value for ${JSON.stringify(name)} must be a string, got ${typeof callerEnv[name]}\nhelp: cast values to strings before dispatching`);
+    }
+    if (CALLER_ENV_EXCLUDED.has(name)) continue;
+    merged[name] = callerEnv[name];
+  }
+  for (const name of ctx.envDenylist) delete merged[name];
+  return merged;
+}
+
+/**
+ * Whether a task still has a live overlay (its upper dir still exists on
+ * disk). Extracted out of `createTaskManager`'s `hasLiveOverlay` closure.
+ * @param {Task} task
+ * @param {{existsFn: (path: string) => boolean}} ctx
+ */
+function hasLiveOverlayForTask(task, ctx) {
+  return task.overlayDirs != null && ctx.existsFn(task.overlayDirs.upperDir);
+}
+
+/**
+ * Targets the process group (negative pid), which reaches opencode and any
+ * subprocess it spawned, since dispatch() makes the child a process group
+ * leader. Falls back to the plain pid if group signaling isn't available
+ * (ESRCH on -pid can mean the group is already gone). Extracted out of
+ * `createTaskManager`'s `sendSignal` closure; `killFn` threaded via `ctx`.
+ * @param {number} pid
+ * @param {NodeJS.Signals} signal
+ * @param {{killFn: (pid: number, signal: NodeJS.Signals) => void}} ctx
+ */
+function sendSignalToProcess(pid, signal, ctx) {
+  try {
+    ctx.killFn(-pid, signal);
+    return;
+  } catch (err) {
+    if (errCode(err) !== "ESRCH") throw err;
+  }
+  try {
+    ctx.killFn(pid, signal);
+  } catch (err) {
+    if (errCode(err) !== "ESRCH") throw err;
+  }
+}
+
+/**
+ * Stops the no-output watchdog timer for a task and clears its incremental
+ * scan state. Extracted out of `createTaskManager`'s `stopRunningWatcher`
+ * closure; the two mutable maps are threaded in via `ctx`.
+ * @param {string} taskId
+ * @param {{runningWatchers: Map<string, NodeJS.Timeout>, runningWatcherState: Map<string, unknown>}} ctx
+ */
+function stopRunningWatcherFor(taskId, ctx) {
+  const timer = ctx.runningWatchers.get(taskId);
+  if (timer) {
+    clearInterval(timer);
+    ctx.runningWatchers.delete(taskId);
+  }
+  ctx.runningWatcherState.delete(taskId);
+}
+
+/**
+ * Persists a single task's record to tasks.json under the cross-process file
+ * lock, replacing the persisted record for that id (or dropping it when the
+ * live task map no longer holds it), then emits a state event for the
+ * in-memory task. Extracted out of `createTaskManager`'s `persistTask`
+ * closure; every factory binding is threaded in via `ctx`.
+ * @param {string} taskId
+ * @param {{LOCK_FILE: string, TASKS_FILE: string, stateDir: string, tasks: Map<string, Task>, taskEvents: {emitState: (task: Task, previousStatus?: string) => void}}} ctx
+ */
+function persistTaskRecord(taskId, ctx) {
+  withFileLock(ctx.LOCK_FILE, () => {
+    /** @type {Task[]} */
+    let current = [];
+    try {
+      current = JSON.parse(fs.readFileSync(ctx.TASKS_FILE, "utf8"));
+    } catch (err) {
+      if (errCode(err) !== "ENOENT") throw err;
+    }
+    const byId = new Map(current.map((t) => [t.id, t]));
+    const local = ctx.tasks.get(taskId);
+    if (local) byId.set(taskId, local);
+    else byId.delete(taskId);
+    const all = Array.from(byId.values());
+    const temporary = path.join(ctx.stateDir, `.tasks-${randomUUID()}.json`);
+    // Throwing from a `finally` would mask a real error from the try block
+    // above (e.g. a full disk on writeFileSync) with an unrelated cleanup
+    // failure. Defer the cleanup error and only surface it once the try
+    // block itself has succeeded.
+    /** @type {unknown} */
+    let cleanupError;
+    try {
+      fs.writeFileSync(temporary, JSON.stringify(all, null, 2), { mode: 0o600 });
+      fs.renameSync(temporary, ctx.TASKS_FILE);
+      fs.chmodSync(ctx.TASKS_FILE, 0o600);
+    } finally {
+      try {
+        fs.unlinkSync(temporary);
+      } catch (err) {
+        if (errCode(err) !== "ENOENT") cleanupError = err;
+      }
+    }
+    if (cleanupError) throw cleanupError;
+  });
+  const task = ctx.tasks.get(taskId);
+  if (task) ctx.taskEvents.emitState(task);
 }

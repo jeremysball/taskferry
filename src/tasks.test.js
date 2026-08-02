@@ -13,6 +13,9 @@ const NO_API_KEY_FOUND = "No API key found for openai.";
 const AXI_TASKS_TEST_DIR = "axi-tasks-test-";
 const AXI_TASKS_CACHE_DIR = "axi-tasks-cache-";
 const TASKS_STATE_FILE = "tasks.json";
+const AXI_TASKS_OVERLAY_DIR = "axi-tasks-overlay-";
+const AMBIENT_VALUE = "ambient-value";
+const FAKE_SECRETS_ENV_PATH = "/fake/secrets.env";
 const LUNA_MODEL = "openai/gpt-5.6-luna";
 const MIMIMAX_MODEL = "opencode-go/minimax-m3";
 const UNUSED_TMP = "/tmp/unused";
@@ -80,7 +83,7 @@ function makeManager({ tasksFixture = [], logs = {}, spawnFn, killFn, listModels
   // any test that doesn't explicitly pass its own overlayTmpRoot ends up
   // scanning (and acting on) whatever a real, concurrently-running daemon
   // has actually left in /tmp on this host.
-  const defaultOverlayTmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-overlay-"));
+  const defaultOverlayTmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), AXI_TASKS_OVERLAY_DIR));
 
   const fixtureTasks = typeof tasksFixture === "function" ? tasksFixture(logDir) : tasksFixture;
   fs.writeFileSync(path.join(stateDir, TASKS_STATE_FILE), JSON.stringify(fixtureTasks, null, 2));
@@ -1289,7 +1292,12 @@ describe("bwrap sandboxing", () => {
     let dispatchArgs = null;
     let advisorArgs = null;
     const mgr = makeManager({
-      spawnFn: (_cmd, args) => { if (!dispatchArgs) dispatchArgs = args; else advisorArgs = args; const child = fakeChild(); setImmediate(() => child.emit("exit", 0, null)); return child; },
+      spawnFn: (_cmd, args) => {
+        if (!dispatchArgs) { dispatchArgs = args; } else { advisorArgs = args; }
+        const child = fakeChild();
+        setImmediate(() => child.emit("exit", 0, null));
+        return child;
+      },
       sandboxEnabled: true,
       overlayEnabled: true,
       checkBwrapAvailableFn: () => ({ checked: true, available: true }),
@@ -1416,7 +1424,12 @@ describe("bwrap sandboxing", () => {
     let dispatchArgs = null;
     let advisorArgs = null;
     const mgr = makeManager({
-      spawnFn: (_cmd, args) => { if (!dispatchArgs) dispatchArgs = args; else advisorArgs = args; const child = fakeChild(); setImmediate(() => child.emit("exit", 0, null)); return child; },
+      spawnFn: (_cmd, args) => {
+        if (!dispatchArgs) { dispatchArgs = args; } else { advisorArgs = args; }
+        const child = fakeChild();
+        setImmediate(() => child.emit("exit", 0, null));
+        return child;
+      },
       sandboxEnabled: true,
       overlayEnabled: true,
       checkBwrapAvailableFn: () => ({ checked: true, available: true }),
@@ -1962,7 +1975,9 @@ describe("sweepOrphanedOverlays()", () => {
         changesetStatus: "accepted",
         overlayDirs: {
           root: legacyRoot,
-          tmpRoot: undefined,
+          // tmpRoot deliberately omitted: simulates a legacy record that
+          // predates tmpRoot persistence (tasks.js backfills it via
+          // `tmpRoot === undefined`, which an absent key also satisfies).
           upperDir: path.join(legacyRoot, "upper", "main"),
           workDir: path.join(legacyRoot, "work", "main"),
         },
@@ -5667,7 +5682,7 @@ describe("caller-env union (sanitizedEnvironment)", () => {
     let dispatchOpts = null;
     let advisorOpts = null;
     const mgr = makeManager({
-      spawnFn: (cmd, args, opts) => {
+      spawnFn: (_cmd, _args, opts) => {
         if (!dispatchOpts) dispatchOpts = opts; else advisorOpts = opts;
         const child = fakeChild();
         setImmediate(() => child.emit("exit", 0, null));
@@ -5693,7 +5708,7 @@ describe("caller-env union (sanitizedEnvironment)", () => {
     const mgr = makeManager({
       tasksFixture: (logDir) => [baseTask({ id: "source", logPath: path.join(logDir, "source.ndjson") })],
       logs: { "source.ndjson": log },
-      spawnFn: (cmd, args, opts) => { capturedOpts = opts; return fakeChild(); },
+      spawnFn: (_cmd, _args, opts) => { capturedOpts = opts; return fakeChild(); },
     });
 
     await mgr.summarize("source", { maxWords: 150 });
@@ -5702,21 +5717,21 @@ describe("caller-env union (sanitizedEnvironment)", () => {
   });
 
   test("omitting env behaves as ambient-only, same as before caller-env forwarding existed", (t) => {
-    process.env.AXI_TEST_AMBIENT_ONLY = "ambient-value";
+    process.env.AXI_TEST_AMBIENT_ONLY = AMBIENT_VALUE;
     t.after(() => delete process.env.AXI_TEST_AMBIENT_ONLY);
     let capturedOpts = null;
     const mgr = makeManager({ spawnFn: (_cmd, _args, opts) => { capturedOpts = opts; return fakeChild(); } });
 
     mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
 
-    assert.equal(capturedOpts.env.AXI_TEST_AMBIENT_ONLY, "ambient-value");
+    assert.equal(capturedOpts.env.AXI_TEST_AMBIENT_ONLY, AMBIENT_VALUE);
   });
 
   test("envFileVars supplies a var missing from both the daemon's ambient env and the caller's env", () => {
     delete process.env.AXI_TEST_FILE_ONLY;
     let capturedOpts = null;
     const mgr = makeManager({
-      spawnFn: (cmd, args, opts) => { capturedOpts = opts; return fakeChild(); },
+      spawnFn: (_cmd, _args, opts) => { capturedOpts = opts; return fakeChild(); },
       envFileVars: { AXI_TEST_FILE_ONLY: "from-file" },
     });
 
@@ -5726,35 +5741,35 @@ describe("caller-env union (sanitizedEnvironment)", () => {
   });
 
   test("the daemon's own ambient env overrides the same key in envFileVars", (t) => {
-    process.env.AXI_TEST_FILE_VS_AMBIENT = "ambient-value";
+    process.env.AXI_TEST_FILE_VS_AMBIENT = AMBIENT_VALUE;
     t.after(() => delete process.env.AXI_TEST_FILE_VS_AMBIENT);
     let capturedOpts = null;
     const mgr = makeManager({
-      spawnFn: (cmd, args, opts) => { capturedOpts = opts; return fakeChild(); },
+      spawnFn: (_cmd, _args, opts) => { capturedOpts = opts; return fakeChild(); },
       envFileVars: { AXI_TEST_FILE_VS_AMBIENT: "file-value" },
     });
 
     mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
 
-    assert.equal(capturedOpts.env.AXI_TEST_FILE_VS_AMBIENT, "ambient-value");
+    assert.equal(capturedOpts.env.AXI_TEST_FILE_VS_AMBIENT, AMBIENT_VALUE);
   });
 
   test("caller-supplied env overrides the same key in envFileVars", () => {
     let capturedOpts = null;
     const mgr = makeManager({
-      spawnFn: (cmd, args, opts) => { capturedOpts = opts; return fakeChild(); },
+      spawnFn: (_cmd, _args, opts) => { capturedOpts = opts; return fakeChild(); },
       envFileVars: { AXI_TEST_FILE_VS_CALLER: "file-value" },
     });
 
-    mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), env: { AXI_TEST_FILE_VS_CALLER: "from-caller" } });
+    mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), env: { AXI_TEST_FILE_VS_CALLER: FROM_CALLER } });
 
-    assert.equal(capturedOpts.env.AXI_TEST_FILE_VS_CALLER, "from-caller");
+    assert.equal(capturedOpts.env.AXI_TEST_FILE_VS_CALLER, FROM_CALLER);
   });
 
   test("envDenylist strips a var that came from envFileVars", () => {
     let capturedOpts = null;
     const mgr = makeManager({
-      spawnFn: (cmd, args, opts) => { capturedOpts = opts; return fakeChild(); },
+      spawnFn: (_cmd, _args, opts) => { capturedOpts = opts; return fakeChild(); },
       envFileVars: { AXI_TEST_DENIED_FROM_FILE: "leaked-value" },
       envDenylistSpec: "AXI_TEST_DENIED_FROM_FILE",
     });
@@ -5769,7 +5784,7 @@ describe("caller-env union (sanitizedEnvironment)", () => {
     t.after(() => delete process.env.PATH);
     let capturedOpts = null;
     const mgr = makeManager({
-      spawnFn: (cmd, args, opts) => { capturedOpts = opts; return fakeChild(); },
+      spawnFn: (_cmd, _args, opts) => { capturedOpts = opts; return fakeChild(); },
       envFileVars: { PATH: "malicious-path-from-file" },
     });
 
@@ -5783,7 +5798,7 @@ describe("caller-env union (sanitizedEnvironment)", () => {
     t.after(() => delete process.env.TASKFERRY_SOCKET_PATH);
     let capturedOpts = null;
     const mgr = makeManager({
-      spawnFn: (cmd, args, opts) => { capturedOpts = opts; return fakeChild(); },
+      spawnFn: (_cmd, _args, opts) => { capturedOpts = opts; return fakeChild(); },
       envFileVars: { TASKFERRY_SOCKET_PATH: "/tmp/attacker-controlled.sock" },
     });
 
@@ -5798,7 +5813,7 @@ describe("caller-env union (sanitizedEnvironment)", () => {
     t.after(() => { process.env.HOME = realHome; });
     let capturedOpts = null;
     const mgr = makeManager({
-      spawnFn: (cmd, args, opts) => { capturedOpts = opts; return fakeChild(); },
+      spawnFn: (_cmd, _args, opts) => { capturedOpts = opts; return fakeChild(); },
       envFileVars: { HOME: "/tmp/attacker-controlled-home" },
     });
 
@@ -5808,10 +5823,10 @@ describe("caller-env union (sanitizedEnvironment)", () => {
   });
 
   test("createTaskManager() with envFilePath but no envFileVars override loads via loadEnvFileFn once at construction", () => {
-    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-test-"));
-    fs.writeFileSync(path.join(stateDir, "tasks.json"), "[]");
-    const cacheDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-cache-"));
-    const overlayTmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-overlay-"));
+    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), AXI_TASKS_TEST_DIR));
+    fs.writeFileSync(path.join(stateDir, TASKS_STATE_FILE), "[]");
+    const cacheDir = fs.mkdtempSync(path.join(os.tmpdir(), AXI_TASKS_CACHE_DIR));
+    const overlayTmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), AXI_TASKS_OVERLAY_DIR));
     let loadCalls = 0;
     let capturedOpts = null;
 
@@ -5821,10 +5836,10 @@ describe("caller-env union (sanitizedEnvironment)", () => {
       overlayTmpRoot,
       sandboxEnabled: false,
       overlayEnabled: false,
-      spawnFn: (cmd, args, opts) => { capturedOpts = opts; return fakeChild(); },
+      spawnFn: (_cmd, _args, opts) => { capturedOpts = opts; return fakeChild(); },
       killFn: () => {},
-      envFilePath: "/fake/secrets.env",
-      loadEnvFileFn: (p) => { loadCalls++; assert.equal(p, "/fake/secrets.env"); return { AXI_TEST_FROM_LOADER: "loaded-once" }; },
+      envFilePath: FAKE_SECRETS_ENV_PATH,
+      loadEnvFileFn: (p) => { loadCalls++; assert.equal(p, FAKE_SECRETS_ENV_PATH); return { AXI_TEST_FROM_LOADER: "loaded-once" }; },
       watchEnvFileFn: () => ({ close: () => {} }),
     });
 
@@ -5836,10 +5851,10 @@ describe("caller-env union (sanitizedEnvironment)", () => {
   });
 
   test("createTaskManager() propagates a loadEnvFileFn throw synchronously, before any dispatch is possible", () => {
-    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-test-"));
-    fs.writeFileSync(path.join(stateDir, "tasks.json"), "[]");
-    const cacheDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-cache-"));
-    const overlayTmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-overlay-"));
+    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), AXI_TASKS_TEST_DIR));
+    fs.writeFileSync(path.join(stateDir, TASKS_STATE_FILE), "[]");
+    const cacheDir = fs.mkdtempSync(path.join(os.tmpdir(), AXI_TASKS_CACHE_DIR));
+    const overlayTmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), AXI_TASKS_OVERLAY_DIR));
 
     assert.throws(
       () => createTaskManager({
@@ -5858,10 +5873,10 @@ describe("caller-env union (sanitizedEnvironment)", () => {
   });
 
   test("omitting envFilePath never calls loadEnvFileFn and defaults envFileVars to {}", () => {
-    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-test-"));
-    fs.writeFileSync(path.join(stateDir, "tasks.json"), "[]");
-    const cacheDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-cache-"));
-    const overlayTmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-overlay-"));
+    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), AXI_TASKS_TEST_DIR));
+    fs.writeFileSync(path.join(stateDir, TASKS_STATE_FILE), "[]");
+    const cacheDir = fs.mkdtempSync(path.join(os.tmpdir(), AXI_TASKS_CACHE_DIR));
+    const overlayTmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), AXI_TASKS_OVERLAY_DIR));
     let loadCalls = 0;
 
     createTaskManager({
@@ -5881,10 +5896,10 @@ describe("caller-env union (sanitizedEnvironment)", () => {
   test("an explicit empty-string TASKFERRY_ENV_FILE disables loading rather than falling through to config.envFile (review finding: the old `||` check treated \"\" as unset)", (t) => {
     process.env.TASKFERRY_ENV_FILE = "";
     t.after(() => delete process.env.TASKFERRY_ENV_FILE);
-    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-test-"));
-    fs.writeFileSync(path.join(stateDir, "tasks.json"), "[]");
-    const cacheDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-cache-"));
-    const overlayTmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-overlay-"));
+    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), AXI_TASKS_TEST_DIR));
+    fs.writeFileSync(path.join(stateDir, TASKS_STATE_FILE), "[]");
+    const cacheDir = fs.mkdtempSync(path.join(os.tmpdir(), AXI_TASKS_CACHE_DIR));
+    const overlayTmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), AXI_TASKS_OVERLAY_DIR));
     let loadCalls = 0;
 
     createTaskManager({
@@ -5903,10 +5918,10 @@ describe("caller-env union (sanitizedEnvironment)", () => {
   });
 
   test("createTaskManager() starts a live watch via watchEnvFileFn, passed the resolved envFilePath", () => {
-    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-test-"));
-    fs.writeFileSync(path.join(stateDir, "tasks.json"), "[]");
-    const cacheDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-cache-"));
-    const overlayTmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-overlay-"));
+    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), AXI_TASKS_TEST_DIR));
+    fs.writeFileSync(path.join(stateDir, TASKS_STATE_FILE), "[]");
+    const cacheDir = fs.mkdtempSync(path.join(os.tmpdir(), AXI_TASKS_CACHE_DIR));
+    const overlayTmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), AXI_TASKS_OVERLAY_DIR));
     const watchCalls = [];
 
     createTaskManager({
@@ -5917,22 +5932,22 @@ describe("caller-env union (sanitizedEnvironment)", () => {
       overlayEnabled: false,
       spawnFn: () => fakeChild(),
       killFn: () => {},
-      envFilePath: "/fake/secrets.env",
+      envFilePath: FAKE_SECRETS_ENV_PATH,
       loadEnvFileFn: () => ({ AXI_TEST_INITIAL: "initial" }),
       watchEnvFileFn: (p, options) => { watchCalls.push([p, options]); return { close: () => {} }; },
     });
 
     assert.equal(watchCalls.length, 1, "watchEnvFileFn must run exactly once, at construction");
-    assert.equal(watchCalls[0][0], "/fake/secrets.env");
+    assert.equal(watchCalls[0][0], FAKE_SECRETS_ENV_PATH);
     assert.equal(typeof watchCalls[0][1].onReload, "function");
     assert.equal(typeof watchCalls[0][1].onError, "function");
   });
 
   test("omitting envFilePath never calls watchEnvFileFn", () => {
-    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-test-"));
-    fs.writeFileSync(path.join(stateDir, "tasks.json"), "[]");
-    const cacheDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-cache-"));
-    const overlayTmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-overlay-"));
+    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), AXI_TASKS_TEST_DIR));
+    fs.writeFileSync(path.join(stateDir, TASKS_STATE_FILE), "[]");
+    const cacheDir = fs.mkdtempSync(path.join(os.tmpdir(), AXI_TASKS_CACHE_DIR));
+    const overlayTmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), AXI_TASKS_OVERLAY_DIR));
     let watchCalls = 0;
 
     createTaskManager({
@@ -5950,10 +5965,10 @@ describe("caller-env union (sanitizedEnvironment)", () => {
   });
 
   test("a watchEnvFileFn onReload call updates envFileVars for every dispatch after it fires, not ones already in flight", () => {
-    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-test-"));
-    fs.writeFileSync(path.join(stateDir, "tasks.json"), "[]");
-    const cacheDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-cache-"));
-    const overlayTmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-overlay-"));
+    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), AXI_TASKS_TEST_DIR));
+    fs.writeFileSync(path.join(stateDir, TASKS_STATE_FILE), "[]");
+    const cacheDir = fs.mkdtempSync(path.join(os.tmpdir(), AXI_TASKS_CACHE_DIR));
+    const overlayTmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), AXI_TASKS_OVERLAY_DIR));
     let capturedOpts = null;
     let onReload;
 
@@ -5963,11 +5978,11 @@ describe("caller-env union (sanitizedEnvironment)", () => {
       overlayTmpRoot,
       sandboxEnabled: false,
       overlayEnabled: false,
-      spawnFn: (cmd, args, opts) => { capturedOpts = opts; return fakeChild(); },
+      spawnFn: (_cmd, _args, opts) => { capturedOpts = opts; return fakeChild(); },
       killFn: () => {},
-      envFilePath: "/fake/secrets.env",
+      envFilePath: FAKE_SECRETS_ENV_PATH,
       loadEnvFileFn: () => ({ AXI_TEST_ROTATE: "before-rotation" }),
-      watchEnvFileFn: (p, options) => { onReload = options.onReload; return { close: () => {} }; },
+      watchEnvFileFn: (_p, options) => { onReload = options.onReload; return { close: () => {} }; },
     });
 
     mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
@@ -5980,10 +5995,10 @@ describe("caller-env union (sanitizedEnvironment)", () => {
   });
 
   test("a watchEnvFileFn onError call (a failed reload) leaves envFileVars at its last-known-good value", () => {
-    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-test-"));
-    fs.writeFileSync(path.join(stateDir, "tasks.json"), "[]");
-    const cacheDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-cache-"));
-    const overlayTmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-overlay-"));
+    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), AXI_TASKS_TEST_DIR));
+    fs.writeFileSync(path.join(stateDir, TASKS_STATE_FILE), "[]");
+    const cacheDir = fs.mkdtempSync(path.join(os.tmpdir(), AXI_TASKS_CACHE_DIR));
+    const overlayTmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), AXI_TASKS_OVERLAY_DIR));
     let capturedOpts = null;
     let onError;
     const warnings = [];
@@ -5998,11 +6013,11 @@ describe("caller-env union (sanitizedEnvironment)", () => {
         overlayTmpRoot,
         sandboxEnabled: false,
         overlayEnabled: false,
-        spawnFn: (cmd, args, opts) => { capturedOpts = opts; return fakeChild(); },
+        spawnFn: (_cmd, _args, opts) => { capturedOpts = opts; return fakeChild(); },
         killFn: () => {},
-        envFilePath: "/fake/secrets.env",
+        envFilePath: FAKE_SECRETS_ENV_PATH,
         loadEnvFileFn: () => ({ AXI_TEST_STABLE: "good-value" }),
-        watchEnvFileFn: (p, options) => { onError = options.onError; return { close: () => {} }; },
+        watchEnvFileFn: (_p, options) => { onError = options.onError; return { close: () => {} }; },
       });
 
       onError(new Error("transient mid-rename read failure"));
@@ -6016,10 +6031,10 @@ describe("caller-env union (sanitizedEnvironment)", () => {
   });
 
   test("a watchEnvFileFn setup failure is caught and logged rather than blocking daemon startup", () => {
-    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-test-"));
-    fs.writeFileSync(path.join(stateDir, "tasks.json"), "[]");
-    const cacheDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-cache-"));
-    const overlayTmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-overlay-"));
+    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), AXI_TASKS_TEST_DIR));
+    fs.writeFileSync(path.join(stateDir, TASKS_STATE_FILE), "[]");
+    const cacheDir = fs.mkdtempSync(path.join(os.tmpdir(), AXI_TASKS_CACHE_DIR));
+    const overlayTmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), AXI_TASKS_OVERLAY_DIR));
     const warnings = [];
     const originalWrite = process.stderr.write;
     process.stderr.write = (chunk) => { warnings.push(chunk); return true; };
@@ -6035,7 +6050,7 @@ describe("caller-env union (sanitizedEnvironment)", () => {
           overlayEnabled: false,
           spawnFn: () => fakeChild(),
           killFn: () => {},
-          envFilePath: "/fake/secrets.env",
+          envFilePath: FAKE_SECRETS_ENV_PATH,
           loadEnvFileFn: () => ({ AXI_TEST_STILL_WORKS: "yes" }),
           watchEnvFileFn: () => { throw new Error("ENOENT: fake watch setup failure"); },
         });
@@ -6048,10 +6063,10 @@ describe("caller-env union (sanitizedEnvironment)", () => {
   });
 
   test("manager.close() closes the env-file watcher returned by watchEnvFileFn", () => {
-    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-test-"));
-    fs.writeFileSync(path.join(stateDir, "tasks.json"), "[]");
-    const cacheDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-cache-"));
-    const overlayTmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-overlay-"));
+    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), AXI_TASKS_TEST_DIR));
+    fs.writeFileSync(path.join(stateDir, TASKS_STATE_FILE), "[]");
+    const cacheDir = fs.mkdtempSync(path.join(os.tmpdir(), AXI_TASKS_CACHE_DIR));
+    const overlayTmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), AXI_TASKS_OVERLAY_DIR));
     let closeCalls = 0;
 
     const mgr = createTaskManager({
@@ -6062,7 +6077,7 @@ describe("caller-env union (sanitizedEnvironment)", () => {
       overlayEnabled: false,
       spawnFn: () => fakeChild(),
       killFn: () => {},
-      envFilePath: "/fake/secrets.env",
+      envFilePath: FAKE_SECRETS_ENV_PATH,
       loadEnvFileFn: () => ({}),
       watchEnvFileFn: () => ({ close: () => { closeCalls++; } }),
     });

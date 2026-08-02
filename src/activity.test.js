@@ -92,7 +92,6 @@ describe("activity snapshots", () => {
 describe("task activity events", () => {
   test("emits state transitions immediately and activity enrichment afterward", async (t) => {
     const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-activity-test-"));
-    t.after(() => fs.rmSync(stateDir, { recursive: true, force: true }));
     const child = fakeChild();
     const events = [];
     const manager = createTaskManager({
@@ -104,6 +103,7 @@ describe("task activity events", () => {
       summarizerTimeoutMs: 0,
       onEvent: (event) => events.push(event),
     });
+    t.after(() => { manager.close(); fs.rmSync(stateDir, { recursive: true, force: true }); });
 
     const task = manager.dispatch({ prompt: "Check the server", directory: os.tmpdir() });
     await new Promise((resolve) => setImmediate(resolve));
@@ -125,7 +125,6 @@ describe("task activity events", () => {
 
   test("refreshes running activity only after 4096 more log bytes", async (t) => {
     const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-activity-test-"));
-    t.after(() => fs.rmSync(stateDir, { recursive: true, force: true }));
     const child = fakeChild();
     const events = [];
     const manager = createTaskManager({
@@ -139,6 +138,7 @@ describe("task activity events", () => {
       watchdogPollMs: 5,
       onEvent: (event) => events.push(event),
     });
+    t.after(() => { manager.close(); fs.rmSync(stateDir, { recursive: true, force: true }); });
 
     const task = manager.dispatch({ prompt: "Watch output", directory: os.tmpdir() });
     await new Promise((resolve) => setImmediate(resolve));
@@ -155,7 +155,6 @@ describe("task activity events", () => {
 
   test("publishes one internal summary result without exposing the summary job", async (t) => {
     const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-activity-test-"));
-    t.after(() => fs.rmSync(stateDir, { recursive: true, force: true }));
     const children = [];
     const events = [];
     const manager = createTaskManager({
@@ -172,10 +171,12 @@ describe("task activity events", () => {
       onEvent: (event) => events.push(event),
       listModelsFn: () => `${DEFAULT_SUMMARY_MODEL}\n`,
     });
+    t.after(() => { manager.close(); fs.rmSync(stateDir, { recursive: true, force: true }); });
     manager.setActivitySummarySubscriptions(1);
 
     const source = manager.dispatch({ prompt: "Inspect the daemon", directory: os.tmpdir() });
     await new Promise((resolve) => setImmediate(resolve));
+    manager.flushPersist();
     const persisted = JSON.parse(fs.readFileSync(manager.paths.TASKS_FILE, "utf8"));
     const summary = persisted.find((task) => task.summaryOf);
     assert.ok(summary);

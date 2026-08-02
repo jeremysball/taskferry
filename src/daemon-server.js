@@ -57,6 +57,10 @@ export function syncActivitySubscriptions(manager, subscriptions) {
   manager.setActivitySubscriptions(subs);
 }
 
+// Returns whether the subscription-ack response was actually delivered
+// (writeMessage's return value), not just whether this function ran to
+// completion -- a destroyed/over-limit socket means the caller never saw
+// the subscriptionId even though subscribeRequest itself didn't throw.
 async function subscribeRequest({ manager, subscriptions, socket, writeMessage, syncActivity }, request) {
   if (request.params.summaries === true && typeof manager.checkSummaryModelReady === "function") {
     await manager.checkSummaryModelReady();
@@ -72,31 +76,39 @@ async function subscribeRequest({ manager, subscriptions, socket, writeMessage, 
     originSessionId: request.params.originSessionId || null,
   });
   syncActivity();
-  writeMessage(socket, successResponse(request.id, { subscriptionId }));
+  return writeMessage(socket, successResponse(request.id, { subscriptionId }));
 }
 
+// startedAt is only captured when a timer is actually wired up (onRequestTimed
+// truthy) -- with profiling disabled, performance.now() is never called and
+// no timing record is built, so an opted-out daemon pays none of this cost.
+// Every return path (parse failure, SERVER_BUSY, and the normal try/finally)
+// reports through onRequestTimed so "every RPC request" in the profiling
+// docs is literally true, not just the ones that reach invoke().
 export async function dispatchRequest({ subscriptions, manager, writeMessage, syncActivity, inFlightRef, maxInFlightRequests, maybeRestart, invoke, responseError, onRequestTimed }, socket, line) {
+  const startedAt = onRequestTimed ? performance.now() : 0;
   let request;
   try {
     request = parseRequestLine(line);
   } catch (error) {
     writeMessage(socket, responseError(error, null));
+    onRequestTimed?.({ method: "parse_error", durationMs: performance.now() - startedAt, ok: false });
     return;
   }
   if (inFlightRef.current >= maxInFlightRequests) {
     writeMessage(socket, errorResponse(request.id, "SERVER_BUSY", "daemon has too many requests in flight", "Wait for an outstanding request to finish, then retry"));
+    onRequestTimed?.({ method: request.method, durationMs: performance.now() - startedAt, ok: false });
     return;
   }
   inFlightRef.current++;
-  const startedAt = performance.now();
   let ok = true;
   try {
     if (request.method === "event.subscribe") {
-      await subscribeRequest({ manager, subscriptions, socket, writeMessage, syncActivity }, request);
+      ok = await subscribeRequest({ manager, subscriptions, socket, writeMessage, syncActivity }, request);
       return;
     }
     const result = await invoke(manager, request);
-    writeMessage(socket, successResponse(request.id, result));
+    ok = writeMessage(socket, successResponse(request.id, result));
   } catch (error) {
     ok = false;
     if (!socket.destroyed) writeMessage(socket, responseError(error, request?.id ?? null));

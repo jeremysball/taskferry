@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import { createTaskManager } from "./tasks.js";
 import { loadConfig } from "./config.js";
 import { withFileLock } from "./state-lock.js";
+import { isNonNegativeInteger, isPositiveInteger } from "./numbers.js";
 import { normalizeDirectory, resolveRuntimeDir, resolveStateDir } from "./paths.js";
 import {
   PROTOCOL_VERSION,
@@ -81,12 +82,17 @@ function profilingEnabled(env, config) {
   return config?.profilingEnabled ?? false;
 }
 
+// makeRequestTimer() runs after taskManagerFactory() in startDaemon, which
+// already creates and chmods stateDir at startup -- no mkdirSync needed here.
 function makeRequestTimer({ stateDir, env, config, appendLine = (filePath, line) => fs.appendFileSync(filePath, line) }) {
   if (!profilingEnabled(env, config)) return null;
-  fs.mkdirSync(stateDir, { recursive: true, mode: 0o700 });
   const perfLogPath = path.join(stateDir, "perf.log");
-  const maxBytes = Number(env?.TASKFERRY_PERF_LOG_MAX_BYTES ?? DEFAULT_PERF_LOG_MAX_BYTES);
-  const slowRequestMs = Number(env?.TASKFERRY_SLOW_REQUEST_MS ?? DEFAULT_SLOW_REQUEST_MS);
+  const maxBytes = isPositiveInteger(Number(env?.TASKFERRY_PERF_LOG_MAX_BYTES))
+    ? Number(env.TASKFERRY_PERF_LOG_MAX_BYTES)
+    : DEFAULT_PERF_LOG_MAX_BYTES;
+  const slowRequestMs = isNonNegativeInteger(Number(env?.TASKFERRY_SLOW_REQUEST_MS))
+    ? Number(env.TASKFERRY_SLOW_REQUEST_MS)
+    : DEFAULT_SLOW_REQUEST_MS;
   return function onRequestTimed({ method, durationMs, ok }) {
     const rounded = Math.round(durationMs * 100) / 100;
     const record = { method, ok, ts: new Date().toISOString(), durationMs: rounded };
@@ -300,7 +306,6 @@ function invoke(manager, request) {
 const DAEMON_DEFAULTS = {
   platform: process.platform,
   env: process.env,
-  config: {},
   healthCheckTimeoutMs: 250,
   maxOutboundBytes: MAX_BUFFER_BYTES,
   maxInFlightRequests: 256,
@@ -323,7 +328,6 @@ function resolveDaemonOptions(options = {}) {
     runtimeDir,
     socketPath,
     env,
-    config: merged.config,
     platform: merged.platform,
     healthCheckTimeoutMs: merged.healthCheckTimeoutMs,
     maxOutboundBytes: merged.maxOutboundBytes,
@@ -341,7 +345,6 @@ export async function startDaemon(options = {}) {
   const {
     platform,
     env,
-    config,
     stateDir,
     runtimeDir,
     socketPath,
@@ -371,7 +374,7 @@ export async function startDaemon(options = {}) {
   const syncActivity = () => syncActivitySubscriptions(manager, subscriptions);
   const restart = { pending: false, restarting: false };
   const maybeRestartRef = { current: null };
-  const onRequestTimed = makeRequestTimer({ stateDir, env, config });
+  const onRequestTimed = makeRequestTimer({ stateDir, env, config: taskManagerOptions.config });
   const server = createDaemonServer({
     clients,
     subscriptions,
@@ -418,8 +421,7 @@ export async function startDaemon(options = {}) {
 }
 
 async function main() {
-  const config = loadConfig();
-  const daemon = await startDaemon({ config, taskManagerOptions: { config } });
+  const daemon = await startDaemon({ taskManagerOptions: { config: loadConfig() } });
   const stop = async () => {
     await daemon.close();
     process.exit(0);

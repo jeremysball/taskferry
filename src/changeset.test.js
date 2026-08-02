@@ -29,6 +29,7 @@ const BWRAP_CMD = "bwrap";
 const DIR_FLAG = "--dir";
 const OVERLAY_SRC_FLAG = "--overlay-src";
 const OVERLAY_FLAG = "--overlay";
+const SAMPLE_DIFF_X = "diff --git a/x b/x\n";
 const BIND_FLAG = "--bind";
 const RO_BIND_FLAG = "--ro-bind";
 const ROOT_BIND = "/";
@@ -238,7 +239,7 @@ describe("extractGitDiff()", () => {
     let capturedArgs = null;
     const written = {};
     const runCommand = (command, args) => {
-      if (command === "git") return { status: 0, stdout: "abc123\n", stderr: "", error: undefined };
+      if (command === "git") return { status: 0, stdout: "abc123\n", stderr: "", error: null };
       capturedCommand = command;
       capturedArgs = args;
       return { status: 0, stdout: "diff --git a/foo b/foo\n+bar\n", stderr: "", error: null };
@@ -274,8 +275,8 @@ describe("extractGitDiff()", () => {
 
   test("reports hasChanges: false for an empty diff", () => {
     const runCommand = (command) => command === "git"
-      ? { status: 0, stdout: "abc123\n", stderr: "", error: undefined }
-      : { status: 0, stdout: "", stderr: "", error: undefined };
+      ? { status: 0, stdout: "abc123\n", stderr: "", error: null }
+      : { status: 0, stdout: "", stderr: "", error: null };
     const result = extractGitDiff({
       runCommand,
       directory: REPO_DIR,
@@ -296,7 +297,7 @@ describe("extractGitDiff()", () => {
   test("re-mounts persisted rwFileBinds as scratch-copy binds so the diff sees the worker's file writes", () => {
     let capturedArgs = null;
     const runCommand = (command, args) => {
-      if (command === "git") return { status: 0, stdout: "abc123\n", stderr: "", error: undefined };
+      if (command === "git") return { status: 0, stdout: "abc123\n", stderr: "", error: null };
       capturedArgs = args;
       return { status: 0, stdout: "", stderr: "", error: null };
     };
@@ -338,7 +339,7 @@ describe("extraction fail-closed behavior", () => {
   test("extractGitDiff throws on a bwrap execution error and writes nothing", () => {
     let written = null;
     const runCommand = (command) => command === "git"
-      ? { status: 0, stdout: "abc123\n", stderr: "", error: undefined }
+      ? { status: 0, stdout: "abc123\n", stderr: "", error: null }
       : { status: null, stdout: "", stderr: "", error: Object.assign(new Error("spawn bwrap ETIMEDOUT"), { code: "ETIMEDOUT" }) };
     assert.throws(
       () => extractGitDiff({ ...baseGitParams, runCommand, writeFileFn: (p) => { written = p; } }),
@@ -350,8 +351,8 @@ describe("extraction fail-closed behavior", () => {
   test("extractGitDiff throws on a non-zero exit status and writes nothing", () => {
     let written = null;
     const runCommand = (command) => command === "git"
-      ? { status: 0, stdout: "abc123\n", stderr: "", error: undefined }
-      : { status: 128, stdout: "", stderr: "fatal: bad revision 'abc123'\n", error: undefined };
+      ? { status: 0, stdout: "abc123\n", stderr: "", error: null }
+      : { status: 128, stdout: "", stderr: "fatal: bad revision 'abc123'\n", error: null };
     assert.throws(
       () => extractGitDiff({ ...baseGitParams, runCommand, writeFileFn: (p) => { written = p; } }),
       /git diff extraction failed.*bad revision/
@@ -362,9 +363,9 @@ describe("extraction fail-closed behavior", () => {
   test("extractGitDiff's extraction script propagates the diff's exit status, not reset's", () => {
     let capturedArgs = null;
     const runCommand = (command, args) => {
-      if (command === "git") return { status: 0, stdout: "abc123\n", stderr: "", error: undefined };
+      if (command === "git") return { status: 0, stdout: "abc123\n", stderr: "", error: null };
       capturedArgs = args;
-      return { status: 0, stdout: "diff --git a/x b/x\n", stderr: "", error: undefined };
+      return { status: 0, stdout: SAMPLE_DIFF_X, stderr: "", error: null };
     };
     extractGitDiff({ ...baseGitParams, runCommand, writeFileFn: () => {}, mkdirFn: () => {} });
     const script = capturedArgs[capturedArgs.indexOf(SH_CMD) + 2];
@@ -375,9 +376,9 @@ describe("extraction fail-closed behavior", () => {
   test("extractGitDiff refuses to extract when the directory's HEAD moved since preDispatchHead, without invoking bwrap", () => {
     let bwrapCalled = false;
     const runCommand = (command) => {
-      if (command === "git") return { status: 0, stdout: "def456\n", stderr: "", error: undefined };
+      if (command === "git") return { status: 0, stdout: "def456\n", stderr: "", error: null };
       bwrapCalled = true;
-      return { status: 0, stdout: "diff --git a/x b/x\n", stderr: "", error: undefined };
+      return { status: 0, stdout: SAMPLE_DIFF_X, stderr: "", error: null };
     };
     assert.throws(
       () => extractGitDiff({ ...baseGitParams, runCommand, writeFileFn: () => {}, mkdirFn: () => {} }),
@@ -389,9 +390,9 @@ describe("extraction fail-closed behavior", () => {
   test("extractGitDiff proceeds normally when the HEAD re-check itself can't resolve (git failure)", () => {
     let capturedArgs = null;
     const runCommand = (command, args) => {
-      if (command === "git") return { status: 128, stdout: "", stderr: "fatal: not a git repository\n", error: undefined };
+      if (command === "git") return { status: 128, stdout: "", stderr: "fatal: not a git repository\n", error: null };
       capturedArgs = args;
-      return { status: 0, stdout: "diff --git a/x b/x\n", stderr: "", error: undefined };
+      return { status: 0, stdout: SAMPLE_DIFF_X, stderr: "", error: null };
     };
     const result = extractGitDiff({ ...baseGitParams, runCommand, writeFileFn: () => {}, mkdirFn: () => {} });
     assert.ok(capturedArgs, "bwrap must still run when the HEAD re-check is inconclusive rather than a confirmed drift");

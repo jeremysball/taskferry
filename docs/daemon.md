@@ -263,10 +263,10 @@ Opt-in, off by default: set `TASKFERRY_PROFILING_ENABLED=1`, or the
 equivalent `profilingEnabled: true` in `config.json` (see
 [config.md](config.md); the env var, if set, takes precedence over the
 config value, same as every other field there), to have every RPC request
-(including `event.subscribe`, `SERVER_BUSY` rejections, and unparseable
-lines) timed from the moment the daemon starts handling it to the moment
-its response is written, and appended as one JSONL line to
-`<state-dir>/perf.log`:
+(including `event.subscribe`, `SERVER_BUSY` rejections, oversized/
+unterminated buffers, and unparseable lines) timed from the moment the
+daemon starts handling it to the moment its response is written, and
+appended as one JSONL line to `<state-dir>/perf.log`:
 
 ```json
 {"method":"task.dispatch","ok":true,"ts":"2026-08-01T12:00:00.000Z","durationMs":4.21}
@@ -280,15 +280,20 @@ daemon restart to take effect (see
 [config.md#no-hot-reload](config.md#no-hot-reload)).
 
 `durationMs` is wall-clock time inside the daemon process only — it does not
-include time spent in transit on the socket. `ok` reflects whether a
-response was actually delivered to the client, not just whether an
-exception was thrown — a request whose response write failed (a destroyed
-socket, an oversized message) records `ok: false` even though the daemon's
-own handling succeeded. A request whose `durationMs` meets or exceeds
-`TASKFERRY_SLOW_REQUEST_MS` (default `500`) also gets an immediate
-`slow request: <method> took <ms>ms (>= <threshold>ms threshold)` line on the
-daemon's stderr, so a spike shows up live without having to tail the log
-file.
+include time spent in transit on the socket. `ok` reflects whether the
+response write was accepted (not skipped because the socket was already
+destroyed or the message exceeded `maxOutboundBytes`), not just whether an
+exception was thrown — a request whose write was skipped for either of
+those reasons records `ok: false` even though the daemon's own handling
+succeeded. This is a best-effort signal, not a delivery receipt: a write
+Node accepts can still fail to reach the client after the fact (e.g. the
+peer resets the connection immediately after). A request whose `durationMs`
+meets or exceeds `TASKFERRY_SLOW_REQUEST_MS` (default `500`) also gets an
+immediate `slow request: <method> took <ms>ms (>= <threshold>ms threshold)`
+line on the daemon's stderr — visible when running the daemon in the
+foreground, but not when it's auto-spawned in the background the normal
+way (`client.js` spawns it with `stdio: "ignore"`), so `perf.log` is the
+reliable place to look for a spike either way.
 
 `perf.log` rotates: once appending the next line would push it past
 `TASKFERRY_PERF_LOG_MAX_BYTES` (default `5242880`, 5 MiB), the live file is

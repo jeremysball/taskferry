@@ -590,6 +590,75 @@ describe("Unix socket daemon", () => {
     assert.ok(lines.some((line) => line.method === "parse_error" && line.ok === false), "expected the malformed request to be logged");
   });
 
+  test("records ok:true for an error response that was successfully delivered, not just ok:false on any thrown exception", async (t) => {
+    const paths = temporaryPaths(t);
+    const fake = fakeManagerFactory();
+    const daemon = await startDaemon({
+      ...paths,
+      env: profilingTestEnv({ TASKFERRY_PROFILING_ENABLED: "1" }),
+      taskManagerFactory: fake.factory,
+    });
+    t.after(() => daemon.close());
+    const peer = await openPeer(paths.socketPath);
+    t.after(() => peer.close());
+
+    const response = await peer.request("bad-task", "task.status", { taskId: "does-not-exist" });
+    assert.equal(response.ok, false, "the RPC response itself should still report the error");
+
+    const perfLogPath = path.join(paths.stateDir, "perf.log");
+    const lines = fs.readFileSync(perfLogPath, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+    const entry = lines.find((line) => line.method === "task.status");
+    assert.ok(entry, "expected a perf.log entry for the unknown-task request");
+    assert.equal(entry.ok, true, "ok should be true once the error response was actually delivered over a healthy socket");
+  });
+
+  test("falls back to the default slow-request-ms on an empty-string env override instead of flagging every request as slow", async (t) => {
+    const paths = temporaryPaths(t);
+    const fake = fakeManagerFactory();
+    const daemon = await startDaemon({
+      ...paths,
+      env: profilingTestEnv({ TASKFERRY_PROFILING_ENABLED: "1", TASKFERRY_SLOW_REQUEST_MS: "" }),
+      taskManagerFactory: fake.factory,
+    });
+    t.after(() => daemon.close());
+    const peer = await openPeer(paths.socketPath);
+    t.after(() => peer.close());
+
+    const stderrChunks = [];
+    const originalWrite = process.stderr.write.bind(process.stderr);
+    process.stderr.write = (chunk, ...rest) => {
+      stderrChunks.push(String(chunk));
+      return originalWrite(chunk, ...rest);
+    };
+    t.after(() => {
+      process.stderr.write = originalWrite;
+    });
+
+    await peer.request("health-1", "system.health");
+
+    assert.ok(!stderrChunks.some((chunk) => chunk.includes("slow request:")), "an empty-string threshold must fall back to the default, not become 0");
+  });
+
+  test("times and logs oversized/unterminated buffers too, not just parseable request lines", async (t) => {
+    const paths = temporaryPaths(t);
+    const fake = fakeManagerFactory();
+    const daemon = await startDaemon({
+      ...paths,
+      env: profilingTestEnv({ TASKFERRY_PROFILING_ENABLED: "1" }),
+      taskManagerFactory: fake.factory,
+    });
+    t.after(() => daemon.close());
+    const peer = await openPeer(paths.socketPath);
+    t.after(() => peer.close());
+
+    peer.socket.write("x".repeat(1024 * 1024 + 1));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    const perfLogPath = path.join(paths.stateDir, "perf.log");
+    const lines = fs.readFileSync(perfLogPath, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+    assert.ok(lines.some((line) => line.method === "request_too_large" && line.ok === false), "expected the oversized buffer to be logged");
+  });
+
   test("filters list/context by workspace and builds context from list plus status", async (t) => {
     const paths = temporaryPaths(t);
     const otherDirectory = path.join(paths.root, "other");

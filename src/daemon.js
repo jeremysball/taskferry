@@ -53,6 +53,17 @@ function profilingEnabled(env, config) {
   return config?.profilingEnabled ?? false;
 }
 
+// An unset var is undefined and Number(undefined) is already NaN, but an
+// empty-string value (a blank .env line, an empty -e in Docker) is
+// Number("") === 0 -- a false "valid, explicit zero" that would otherwise
+// slip past isPositiveInteger/isNonNegativeInteger instead of falling back
+// to the default the same way a genuinely non-numeric value does.
+function parsedEnvNumber(rawValue, isValid, fallback) {
+  if (!rawValue) return fallback;
+  const parsed = Number(rawValue);
+  return isValid(parsed) ? parsed : fallback;
+}
+
 // Rotates perf.log to perf.log.1 (clobbering any previous perf.log.1) once
 // the live file would exceed maxBytes, so profiling can be left on
 // indefinitely without the log growing unbounded. A rename right before the
@@ -80,12 +91,8 @@ function rotateIfOversized(perfLogPath, maxBytes, nextLineBytes) {
 function makeRequestTimer({ stateDir, env, config, appendLine = (filePath, line) => fs.appendFileSync(filePath, line) }) {
   if (!profilingEnabled(env, config)) return null;
   const perfLogPath = path.join(stateDir, "perf.log");
-  const maxBytes = isPositiveInteger(Number(env?.TASKFERRY_PERF_LOG_MAX_BYTES))
-    ? Number(env.TASKFERRY_PERF_LOG_MAX_BYTES)
-    : DEFAULT_PERF_LOG_MAX_BYTES;
-  const slowRequestMs = isNonNegativeInteger(Number(env?.TASKFERRY_SLOW_REQUEST_MS))
-    ? Number(env.TASKFERRY_SLOW_REQUEST_MS)
-    : DEFAULT_SLOW_REQUEST_MS;
+  const maxBytes = parsedEnvNumber(env?.TASKFERRY_PERF_LOG_MAX_BYTES, isPositiveInteger, DEFAULT_PERF_LOG_MAX_BYTES);
+  const slowRequestMs = parsedEnvNumber(env?.TASKFERRY_SLOW_REQUEST_MS, isNonNegativeInteger, DEFAULT_SLOW_REQUEST_MS);
   return function onRequestTimed({ method, durationMs, ok }) {
     const rounded = Math.round(durationMs * 100) / 100;
     const record = { method, ok, ts: new Date().toISOString(), durationMs: rounded };
@@ -405,7 +412,9 @@ export async function startDaemon({
     socket.on("data", (chunk) => {
       buffer += chunk;
       if (Buffer.byteLength(buffer) > MAX_BUFFER_BYTES) {
+        const requestTooLargeStartedAt = onRequestTimed ? performance.now() : 0;
         writeMessage(socket, errorResponse(null, "REQUEST_TOO_LARGE", "request exceeds 1 MiB", "Send a smaller request"));
+        onRequestTimed?.({ method: "request_too_large", durationMs: performance.now() - requestTooLargeStartedAt, ok: false });
         socket.destroy();
         return;
       }
@@ -466,8 +475,10 @@ export async function startDaemon({
             const result = await invoke(manager, request);
             ok = writeMessage(socket, successResponse(request.id, result));
           } catch (error) {
-            ok = false;
-            if (!socket.destroyed) writeMessage(socket, responseError(error, request?.id ?? null));
+            // ok tracks whether a response reached the client, not merely
+            // whether invoke() threw -- an error response that was
+            // successfully written is still a delivered response.
+            ok = !socket.destroyed && writeMessage(socket, responseError(error, request.id));
           } finally {
             inFlightRequests--;
             onRequestTimed?.({ method: request.method, durationMs: performance.now() - startedAt, ok });

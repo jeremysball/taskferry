@@ -69,17 +69,35 @@ function claudeTranscriptPath(homeDirectory, cwd, sessionId) {
   return path.join(homeDirectory, ".claude", "projects", claudeProjectSlug(cwd), `${sessionId}.jsonl`);
 }
 
+// Raw transcript bytes are dominated by non-dialogue noise (thinking blocks,
+// tool_use calls, tool_result dumps) that extractTranscriptText() filters
+// out, so the tail read has to pull in more raw bytes than `maxChars` to
+// have a good chance of finding `maxChars` worth of real user/assistant
+// text. EXTRACT_TAIL_BYTES_CAP is a hard ceiling independent of the budget,
+// so a large `maxChars` can't defeat the bound and read the whole file.
+const EXTRACT_TAIL_BYTES_MULTIPLIER = 8;
+const EXTRACT_TAIL_BYTES_CAP = 16 * 1024 * 1024;
+// A single JSONL line (one turn) can run to a few KB even in an ordinary
+// transcript; without a floor, a small `maxChars` (or a short/near-empty
+// file) could bound the read to fewer bytes than one whole line, silently
+// discarding it as the "possibly truncated" leading fragment.
+const EXTRACT_TAIL_BYTES_FLOOR = 4096;
+
 /**
- * Reads the last `maxChars` Unicode code points of `filePath` without
- * loading the whole file into memory -- a real transcript can be large.
- * UTF-8 code points are at most 4 bytes, so reading `maxChars * 4` bytes
- * from the tail guarantees enough raw bytes to yield `maxChars` code
- * points once decoded.
+ * Reads a Claude Code session transcript and extracts just the plain-text
+ * user and assistant turns, dropping thinking blocks, tool_use calls, and
+ * raw tool_result/toolUseResult dumps -- the bulk of a transcript's bytes,
+ * and mostly noise for advisor's job of critiquing a decision in flight.
+ * Reads only a bounded tail of the file (see EXTRACT_TAIL_BYTES_MULTIPLIER)
+ * rather than the whole thing, since a real transcript can be hundreds of
+ * MB. Malformed lines -- including the leading line the tail read may have
+ * truncated mid-write -- are skipped rather than failing the whole read.
+ * Returns the last `maxChars` Unicode code points of the extracted text.
  * @param {string} filePath
  * @param {number} maxChars
  * @returns {string}
  */
-function readTailChars(filePath, maxChars) {
+function extractTranscriptText(filePath, maxChars) {
   let size;
   try {
     size = fs.statSync(filePath).size;
@@ -90,16 +108,48 @@ function readTailChars(filePath, maxChars) {
       "CLAUDE_CODE_SESSION_ID was set but its transcript file wasn't readable -- --prompt does not skip auto-context (it's prepended to it), so this still fails even with --prompt set; unset CLAUDE_CODE_SESSION_ID for this call, or check the transcript path"
     );
   }
-  const bytes = Math.min(size, maxChars * 4);
-  const buffer = Buffer.alloc(bytes);
+  const readBytes = Math.min(size, Math.max(EXTRACT_TAIL_BYTES_FLOOR, Math.min(maxChars * EXTRACT_TAIL_BYTES_MULTIPLIER, EXTRACT_TAIL_BYTES_CAP)));
+  const buffer = Buffer.alloc(readBytes);
   const fd = fs.openSync(filePath, "r");
   try {
-    fs.readSync(fd, buffer, 0, bytes, size - bytes);
+    fs.readSync(fd, buffer, 0, readBytes, size - readBytes);
   } finally {
     fs.closeSync(fd);
   }
-  const codePoints = Array.from(buffer.toString("utf8"));
-  return codePoints.length > maxChars ? codePoints.slice(-maxChars).join("") : codePoints.join("");
+  let raw = buffer.toString("utf8");
+  if (raw.charCodeAt(0) === 0xfeff) raw = raw.slice(1);
+  const lines = raw.split("\n");
+  // A tail read that didn't start at byte 0 may have landed mid-line;
+  // that leading fragment isn't valid JSON on its own and would otherwise
+  // just be silently dropped by the parse-error skip below anyway, but
+  // dropping it explicitly avoids relying on that as the mechanism.
+  if (readBytes < size) lines.shift();
+
+  const turns = [];
+  for (const line of lines) {
+    if (!line) continue;
+    let entry;
+    try {
+      entry = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (!entry || (entry.type !== "user" && entry.type !== "assistant")) continue;
+    const content = entry.message?.content;
+    let text;
+    if (typeof content === "string") {
+      text = content;
+    } else if (Array.isArray(content)) {
+      text = content
+        .filter((block) => block?.type === "text" && typeof block.text === "string")
+        .map((block) => block.text)
+        .join("\n");
+    }
+    if (text) turns.push(`${entry.type}: ${text}`);
+  }
+  const joined = turns.join("\n\n");
+  const codePoints = Array.from(joined);
+  return codePoints.length > maxChars ? codePoints.slice(-maxChars).join("") : joined;
 }
 
 const ADVISOR_TAIL_CHARS_CAP = 131072;
@@ -129,13 +179,17 @@ async function gatherAdvisorContext({ client, env, cwd, homeDirectory }) {
   const budget = resolveAdvisorContextChars(env);
   if (env.CLAUDE_CODE_SESSION_ID) {
     const transcriptPath = claudeTranscriptPath(homeDirectory, cwd, env.CLAUDE_CODE_SESSION_ID);
-    const text = readTailChars(transcriptPath, budget);
-    return { source: "claude-session", text };
+    const text = extractTranscriptText(transcriptPath, budget);
+    // A transcript made up entirely of thinking/tool_use/tool_result entries
+    // (no user/assistant text) extracts to "" -- treat that the same as "no
+    // source available" rather than returning a truthy-but-empty object that
+    // would silently bypass the no-context UsageError below.
+    return text ? { source: "claude-session", text } : null;
   }
   if (env.TASKFERRY_TASK_ID) {
     const tailed = await client.request("task.tail", { taskId: env.TASKFERRY_TASK_ID, chars: Math.min(budget, ADVISOR_TAIL_CHARS_CAP) });
     const text = tailed.text === "none observed yet" ? "" : tailed.text;
-    return { source: "ferry-log", text };
+    return text ? { source: "ferry-log", text } : null;
   }
   return null;
 }
@@ -214,7 +268,7 @@ async function checkClaudeIntegration(runShellCommand) {
 }
 
 
-export { resolveAdvisorContextChars, claudeTranscriptPath, readTailChars };
+export { resolveAdvisorContextChars, claudeTranscriptPath, extractTranscriptText };
 
 export async function runCommand(command, options, { client, io = process, signal, executablePath, cwd = process.cwd(), homeDirectory = os.homedir(), env = process.env, runShellCommand = defaultShellRunner, platform = process.platform, checkSkills = defaultCheckSkills, resolveWorkspaceRoot: resolveWorkspaceRootFn = resolveWorkspaceRoot } = {}) {
   switch (command) {

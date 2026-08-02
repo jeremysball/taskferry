@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { runCommand, resolveAdvisorContextChars, claudeTranscriptPath, readTailChars } from "./commands.js";
+import { runCommand, resolveAdvisorContextChars, claudeTranscriptPath, extractTranscriptText } from "./commands.js";
 import { UsageError } from "./args.js";
 
 function fakeIo({ isTTY } = {}) {
@@ -715,7 +715,7 @@ test("advisor auto-attaches a Claude session transcript tail when CLAUDE_CODE_SE
   const slug = root.split(path.sep).join("-");
   const projectDir = path.join(home, ".claude", "projects", slug);
   fs.mkdirSync(projectDir, { recursive: true });
-  fs.writeFileSync(path.join(projectDir, "sess-1.jsonl"), '{"role":"user","text":"do the thing"}\n');
+  fs.writeFileSync(path.join(projectDir, "sess-1.jsonl"), '{"type":"user","message":{"role":"user","content":"do the thing"}}\n');
 
   let capturedPrompt;
   const client = { request: async (method, params) => { capturedPrompt = params.prompt; return { status: "done", message: "advice" }; } };
@@ -724,6 +724,23 @@ test("advisor auto-attaches a Claude session transcript tail when CLAUDE_CODE_SE
 
   assert.match(capturedPrompt, /do the thing/);
   assert.match(capturedPrompt, /attached context \(claude-session/);
+});
+
+test("advisor fails fast when the transcript exists but extracts to no user/assistant text, instead of silently sending empty context", async () => {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-commands-test-")));
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-commands-home-"));
+  const slug = root.split(path.sep).join("-");
+  const projectDir = path.join(home, ".claude", "projects", slug);
+  fs.mkdirSync(projectDir, { recursive: true });
+  // Entirely tool_use/thinking -- no user/assistant text turns to extract.
+  fs.writeFileSync(path.join(projectDir, "sess-1.jsonl"), '{"type":"assistant","message":{"role":"assistant","content":[{"type":"thinking","thinking":"hmm"}]}}\n');
+
+  const client = { request: async () => { throw new Error("must not reach the daemon"); } };
+
+  await assert.rejects(
+    runCommand("advisor", { directory: root, model: "m" }, { client, cwd: root, homeDirectory: home, env: { CLAUDE_CODE_SESSION_ID: "sess-1" } }),
+    (err) => err instanceof UsageError && /no context source found/.test(err.message)
+  );
 });
 
 test("advisor fails fast when CLAUDE_CODE_SESSION_ID is set but the transcript file is missing", async () => {
@@ -1281,21 +1298,107 @@ describe("advisor context helpers", () => {
     assert.equal(result, path.join("/home/user", ".claude", "projects", "-workspace-taskferry", "sess-1.jsonl"));
   });
 
-  test("readTailChars() returns the last N characters of a file", () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-tail-chars-"));
+  test("extractTranscriptText() keeps only user/assistant text turns, dropping thinking, tool_use, and tool_result noise", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-extract-transcript-"));
     const filePath = path.join(dir, "transcript.jsonl");
-    fs.writeFileSync(filePath, "0123456789");
-    assert.equal(readTailChars(filePath, 4), "6789");
+    const lines = [
+      { type: "user", message: { role: "user", content: "please fix the bug" } },
+      { type: "assistant", message: { role: "assistant", content: [{ type: "thinking", thinking: "let me think about this" }] } },
+      { type: "assistant", message: { role: "assistant", content: [{ type: "tool_use", id: "1", name: "Read", input: {} }] } },
+      { type: "user", message: { role: "user", content: [{ type: "tool_result", tool_use_id: "1", content: "huge file dump here" }] } },
+      { type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "found it, fixing now" }] } },
+      { type: "system", subtype: "hook", hookInfos: [] },
+    ];
+    fs.writeFileSync(filePath, lines.map((l) => JSON.stringify(l)).join("\n") + "\n");
+
+    const result = extractTranscriptText(filePath, 10000);
+
+    assert.match(result, /please fix the bug/);
+    assert.match(result, /found it, fixing now/);
+    assert.doesNotMatch(result, /let me think about this/);
+    assert.doesNotMatch(result, /huge file dump here/);
+    assert.doesNotMatch(result, /Read/);
   });
 
-  test("readTailChars() returns the whole file when it's shorter than the budget", () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-tail-chars-"));
+  test("extractTranscriptText() returns the last N characters of the extracted text when it exceeds the budget", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-extract-transcript-"));
     const filePath = path.join(dir, "transcript.jsonl");
-    fs.writeFileSync(filePath, "short");
-    assert.equal(readTailChars(filePath, 4000), "short");
+    const lines = [
+      { type: "user", message: { role: "user", content: "first message" } },
+      { type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "second message" }] } },
+    ];
+    fs.writeFileSync(filePath, lines.map((l) => JSON.stringify(l)).join("\n") + "\n");
+
+    const result = extractTranscriptText(filePath, 10);
+
+    // Pin both the code-point count (not String#length, which counts UTF-16
+    // code units and would misreport a result containing a surrogate pair)
+    // and the exact tail slice, so a regression that flips the slice
+    // direction (head instead of tail) fails this test.
+    assert.equal(Array.from(result).length, 10);
+    assert.equal(result, "nd message");
   });
 
-  test("readTailChars() throws a UsageError naming the path when the file doesn't exist", () => {
-    assert.throws(() => readTailChars("/nonexistent/transcript.jsonl", 100), (err) => err instanceof UsageError && /\/nonexistent\/transcript\.jsonl/.test(err.message));
+  test("extractTranscriptText() skips malformed lines instead of throwing", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-extract-transcript-"));
+    const filePath = path.join(dir, "transcript.jsonl");
+    fs.writeFileSync(filePath, 'not valid json\n{"type":"user","message":{"role":"user","content":"still readable"}}\n');
+
+    const result = extractTranscriptText(filePath, 10000);
+
+    assert.match(result, /still readable/);
+  });
+
+  test("extractTranscriptText() skips a line that parses to the JSON literal null instead of crashing on entry.type", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-extract-transcript-"));
+    const filePath = path.join(dir, "transcript.jsonl");
+    fs.writeFileSync(filePath, 'null\n{"type":"user","message":{"role":"user","content":"still readable"}}\n');
+
+    const result = extractTranscriptText(filePath, 10000);
+
+    assert.match(result, /still readable/);
+  });
+
+  test("extractTranscriptText() strips a leading UTF-8 BOM instead of silently dropping the first line", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-extract-transcript-"));
+    const filePath = path.join(dir, "transcript.jsonl");
+    fs.writeFileSync(filePath, '﻿{"type":"user","message":{"role":"user","content":"first turn"}}\n');
+
+    const result = extractTranscriptText(filePath, 10000);
+
+    assert.match(result, /first turn/);
+  });
+
+  test("extractTranscriptText() drops a text block with no text field instead of rendering the literal string 'undefined'", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-extract-transcript-"));
+    const filePath = path.join(dir, "transcript.jsonl");
+    const lines = [
+      { type: "assistant", message: { role: "assistant", content: [{ type: "text" }] } },
+      { type: "user", message: { role: "user", content: "still readable" } },
+    ];
+    fs.writeFileSync(filePath, lines.map((l) => JSON.stringify(l)).join("\n") + "\n");
+
+    const result = extractTranscriptText(filePath, 10000);
+
+    assert.doesNotMatch(result, /undefined/);
+    assert.match(result, /still readable/);
+  });
+
+  test("extractTranscriptText() bounds its read to a tail of the file instead of loading the whole thing", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-extract-transcript-"));
+    const filePath = path.join(dir, "transcript.jsonl");
+    // Pad with a huge noise line so the file is far bigger than the small
+    // budget below would need if the read were properly bounded.
+    const noise = JSON.stringify({ type: "assistant", message: { role: "assistant", content: [{ type: "tool_use", id: "1", name: "Read", input: { data: "x".repeat(500000) } }] } });
+    const tail = { type: "user", message: { role: "user", content: "the real message" } };
+    fs.writeFileSync(filePath, noise + "\n" + JSON.stringify(tail) + "\n");
+
+    const result = extractTranscriptText(filePath, 100);
+
+    assert.match(result, /real message/);
+  });
+
+  test("extractTranscriptText() throws a UsageError naming the path when the file doesn't exist", () => {
+    assert.throws(() => extractTranscriptText("/nonexistent/transcript.jsonl", 100), (err) => err instanceof UsageError && /\/nonexistent\/transcript\.jsonl/.test(err.message));
   });
 });

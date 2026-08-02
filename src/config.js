@@ -58,31 +58,10 @@ export function resolveConfigPath(env = process.env) {
 }
 
 /**
- * @param {object} [options]
- * @param {NodeJS.ProcessEnv} [options.env]
- * @param {string} [options.configPath]
+ * @param {string} configPath
  * @returns {Record<string, unknown>}
  */
-export function loadConfig({ env = process.env, configPath = resolveConfigPath(env) } = {}) {
-  // Fast path: stat the file and return the cached result if mtime is unchanged.
-  let currentMtimeMs;
-  try {
-    currentMtimeMs = fs.statSync(configPath).mtimeMs;
-  } catch (err) {
-    if (err.code === "ENOENT") {
-      const cached = _configCache.get(configPath);
-      if (cached && cached.mtimeMs === null) return cached.result;
-      const result = {};
-      _configCache.set(configPath, { mtimeMs: null, result });
-      return result;
-    }
-    throw err;
-  }
-
-  const cached = _configCache.get(configPath);
-  if (cached && cached.mtimeMs === currentMtimeMs) return cached.result;
-
-  // Cache miss or stale — full read, parse, and validate.
+function parseAndValidateConfig(configPath) {
   const raw = fs.readFileSync(configPath, "utf8");
 
   let parsed;
@@ -111,6 +90,35 @@ export function loadConfig({ env = process.env, configPath = resolveConfigPath(e
     throw new Error(`error: config key "defaultExecutor" in ${configPath} must be one of ${KNOWN_EXECUTORS.join(", ")} (got ${JSON.stringify(parsed.defaultExecutor)})\nhelp: fix the value in ${configPath}`);
   }
 
+  return parsed;
+}
+
+/**
+ * @param {object} [options]
+ * @param {NodeJS.ProcessEnv} [options.env]
+ * @param {string} [options.configPath]
+ * @returns {Record<string, unknown>}
+ */
+export function loadConfig({ env = process.env, configPath = resolveConfigPath(env) } = {}) {
+  // Fast path: stat the file and return the cached result if mtime is unchanged.
+  let currentMtimeMs;
+  try {
+    currentMtimeMs = fs.statSync(configPath).mtimeMs;
+  } catch (err) {
+    if (err.code === "ENOENT") {
+      const cached = _configCache.get(configPath);
+      if (cached && cached.mtimeMs === null) return cached.result;
+      const result = {};
+      _configCache.set(configPath, { mtimeMs: null, result });
+      return result;
+    }
+    throw err;
+  }
+
+  const cached = _configCache.get(configPath);
+  if (cached && cached.mtimeMs === currentMtimeMs) return cached.result;
+
+  const parsed = parseAndValidateConfig(configPath);
   _configCache.set(configPath, { mtimeMs: currentMtimeMs, result: parsed });
   return parsed;
 }

@@ -410,10 +410,16 @@ export function cleanupOverlay({ root, tmpRoot, spawnFn = spawnSync, rmFn = (p) 
     const chmodResult = spawnFn("chmod", ["-R", "u+rwX", p]);
     const rmResult = spawnFn("rm", ["-rf", p]);
     if (rmResult.status !== 0) {
-      const details = [
-        chmodResult.status !== 0 ? `chmod failed: ${(chmodResult.stderr || "").toString().trim() || `exit ${chmodResult.status}`}` : null,
-        `rm -rf failed: ${(rmResult.stderr || "").toString().trim() || `exit ${rmResult.status}`}`,
-      ].filter(Boolean).join("; ");
+      let chmodDetail = null;
+      if (chmodResult.status !== 0) {
+        const chmodStderr = (chmodResult.stderr || "").toString().trim();
+        const chmodFallback = `exit ${chmodResult.status}`;
+        chmodDetail = `chmod failed: ${chmodStderr || chmodFallback}`;
+      }
+      const rmStderr = (rmResult.stderr || "").toString().trim();
+      const rmFallback = `exit ${rmResult.status}`;
+      const rmDetail = `rm -rf failed: ${rmStderr || rmFallback}`;
+      const details = [chmodDetail, rmDetail].filter(Boolean).join("; ");
       throw new Error(details);
     }
   } }) {

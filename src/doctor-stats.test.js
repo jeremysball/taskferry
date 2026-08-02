@@ -7,10 +7,10 @@ const HOUR = 60 * 60 * 1000;
 
 function row({ id, status, model, hoursAgo, failureReason = null }) {
   return {
+    startedAt: new Date(NOW - hoursAgo * HOUR).toISOString(),
     id,
     status,
     model,
-    startedAt: new Date(NOW - hoursAgo * HOUR).toISOString(),
     failureReason,
   };
 }

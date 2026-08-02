@@ -9,6 +9,8 @@ const NOT_A_REPO_3 = "/tmp/not-a-repo-3";
 const VENDOR_LIB_ROOT = "/workspace/repo/vendor-lib";
 const VENDOR_LIB_COMMON_DIR = "/workspace/repo/vendor-lib\n";
 const VENDOR_LIB_GIT_MODULES = "/workspace/repo/.git/modules/vendor-lib\n";
+const RUNTIME_DIR = "/run/user/1000/taskferry";
+const RUNTIME_DIR_A = "/run/user/1000/taskferry-a";
 
 test("TASKFERRY_PLUMBING_ENV_VARS is a frozen array of the TASKFERRY_* plumbing names tasks.js excludes from caller-env forwarding", () => {
   assert.ok(Array.isArray(TASKFERRY_PLUMBING_ENV_VARS));
@@ -22,28 +24,28 @@ test("TASKFERRY_PLUMBING_ENV_VARS is a frozen array of the TASKFERRY_* plumbing 
 
 test("resolveOverlayTmpRoot() scopes the overlay dir under the given runtimeDir, not the shared os.tmpdir()", () => {
   assert.equal(
-    resolveOverlayTmpRoot({ env: {}, runtimeDir: "/run/user/1000/taskferry" }),
-    path.join("/run/user/1000/taskferry", "overlay")
+    resolveOverlayTmpRoot({ env: {}, runtimeDir: RUNTIME_DIR }),
+    path.join(RUNTIME_DIR, "overlay")
   );
 });
 
 test("resolveOverlayTmpRoot() gives two differently-scoped runtimeDirs (e.g. two isolated daemon instances) distinct overlay namespaces", () => {
-  const a = resolveOverlayTmpRoot({ env: {}, runtimeDir: "/run/user/1000/taskferry-a" });
+  const a = resolveOverlayTmpRoot({ env: {}, runtimeDir: RUNTIME_DIR_A });
   const b = resolveOverlayTmpRoot({ env: {}, runtimeDir: "/run/user/1000/taskferry-b" });
   assert.notEqual(a, b);
 });
 
 test("resolveOverlayTmpRoot() honors an explicit TASKFERRY_OVERLAY_TMP_DIR override, ignoring runtimeDir", () => {
   assert.equal(
-    resolveOverlayTmpRoot({ env: { TASKFERRY_OVERLAY_TMP_DIR: "/mnt/scratch/overlay" }, runtimeDir: "/run/user/1000/taskferry" }),
+    resolveOverlayTmpRoot({ env: { TASKFERRY_OVERLAY_TMP_DIR: "/mnt/scratch/overlay" }, runtimeDir: RUNTIME_DIR }),
     "/mnt/scratch/overlay"
   );
 });
 
 test("resolveOverlayTmpRoot() derives runtimeDir from env when not given explicitly, mirroring resolveRuntimeDir()", () => {
   assert.equal(
-    resolveOverlayTmpRoot({ env: { TASKFERRY_RUNTIME_DIR: "/run/user/1000/taskferry" } }),
-    path.join("/run/user/1000/taskferry", "overlay")
+    resolveOverlayTmpRoot({ env: { TASKFERRY_RUNTIME_DIR: RUNTIME_DIR } }),
+    path.join(RUNTIME_DIR, "overlay")
   );
 });
 

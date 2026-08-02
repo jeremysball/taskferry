@@ -208,16 +208,20 @@ export function homeView(value, { executablePath, workspace }) {
   const displayPath = absolutePath === home || absolutePath.startsWith(`${home}${path.sep}`)
     ? `~${absolutePath.slice(home.length)}`
     : absolutePath;
-  const rows = Array.isArray(value.tasks) ? value.tasks : [];
+  const allRows = Array.isArray(value.tasks) ? value.tasks : [];
+  const total = allRows.length;
+  const rows = allRows.slice(0, DEFAULT_LIST_LIMIT);
+  const truncated = rows.length < total;
+  const next = rows.length
+    ? ["Run taskferry status <id> for activity", "Run taskferry wait <id> to wait for settlement", "Run taskferry result <id> for the final answer"]
+    : ["Run taskferry dispatch --prompt \"<text>\" to start a task", "Run taskferry list --all to inspect every workspace"];
   return {
     bin: displayPath,
     description: "Manage background OpenCode tasks in the current workspace.",
     workspace,
     counts: value.counts,
-    tasks: value.tasks,
-    next: rows.length
-      ? ["Run taskferry status <id> for activity", "Run taskferry wait <id> to wait for settlement", "Run taskferry result <id> for the final answer"]
-      : ["Run taskferry dispatch --prompt \"<text>\" to start a task", "Run taskferry list --all to inspect every workspace"],
+    tasks: rows,
+    next: truncated ? [...next, `Run taskferry list --limit ${total} for all ${total} tasks`] : next,
   };
 }
 

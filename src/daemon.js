@@ -205,17 +205,17 @@ async function invoke(manager, request) {
     case "task.status":
       return manager.status(params.taskId);
     case "task.wait":
-      return manager.poll(params.taskId, {
-        ...(params.timeoutMs !== undefined ? { timeoutMs: params.timeoutMs } : {}),
-        ...(params.tailChars !== undefined ? { tailChars: params.tailChars } : {}),
-      });
+      // Forward the whole validated params object, same as task.summary/
+      // task.advisor below -- manager.poll() destructures what it consumes
+      // and ignores the rest, so a rebuilt field list here would just be
+      // another spot for a newly-added field to silently vanish.
+      return manager.poll(params.taskId, params);
     case "task.list":
       return filteredList(manager, params.directory);
     case "task.result":
-      return manager.result(params.taskId, {
-        ...(params.full !== undefined ? { full: params.full } : {}),
-        ...(params.fields !== undefined ? { fields: params.fields } : {}),
-      });
+      // Same reasoning as task.wait above -- manager.result() destructures
+      // { full, fields } and ignores the rest.
+      return manager.result(params.taskId, params);
     case "task.tail":
       return manager.tail(params.taskId, params.chars === undefined ? undefined : { chars: params.chars });
     case "task.summary":

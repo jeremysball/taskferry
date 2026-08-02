@@ -1,6 +1,6 @@
 import { describe, test } from "node:test";
 import assert from "node:assert/strict";
-import { colorize, errorValue, formatWatchEvent, leanStatus, projectList, writeToon } from "./output.js";
+import { colorize, errorValue, formatWatchEvent, leanStatus, projectContext, projectList, writeToon } from "./output.js";
 
 function fakeStdoutIo(isTTY) {
   let stdout = "";
@@ -348,5 +348,45 @@ describe("projectList default row cap", () => {
   test("omits next[] when an explicit --limit already covers the full total", () => {
     const result = projectList(fakeListValue(12), { limit: 100 });
     assert.equal(result.next, undefined);
+  });
+});
+
+describe("projectContext default row cap (SessionStart hook payload)", () => {
+  function fakeContextValue(totalCount) {
+    return {
+      directory: "/workspace/example",
+      counts: { queued: 0, running: 0, done: totalCount, crashed: 0, cancelled: 0, unknown: 0 },
+      tasks: Array.from({ length: totalCount }, (_, i) => ({
+        id: `task-${i}`,
+        status: "done",
+        model: "openai/gpt-5.6-sol",
+        startedAt: "2026-08-01T00:00:00.000Z",
+      })),
+    };
+  }
+
+  test("caps to 10 rows by default when the total exceeds 10", () => {
+    const result = projectContext(fakeContextValue(805));
+    assert.equal(result.tasks.length, 10);
+  });
+
+  test("does not cap when the total is at or under 10", () => {
+    const result = projectContext(fakeContextValue(4));
+    assert.equal(result.tasks.length, 4);
+  });
+
+  test("adds a reveal-hint next[] when rows are truncated", () => {
+    const result = projectContext(fakeContextValue(805));
+    assert.deepEqual(result.next, ["Run taskferry list --limit 805 for all 805 tasks"]);
+  });
+
+  test("omits next[] when nothing was truncated", () => {
+    const result = projectContext(fakeContextValue(4));
+    assert.equal(result.next, undefined);
+  });
+
+  test("an explicit limit override still works (used only by tests, not by the CLI)", () => {
+    const result = projectContext(fakeContextValue(805), { limit: 2 });
+    assert.equal(result.tasks.length, 2);
   });
 });

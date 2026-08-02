@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 import { createTaskManager } from "./tasks.js";
 import { loadConfig } from "./config.js";
 import { withFileLock, withFileLockAsync } from "./state-lock.js";
+import { isNonNegativeInteger, isPositiveInteger } from "./numbers.js";
 import { normalizeDirectory, resolveRuntimeDir, resolveStateDir } from "./paths.js";
 import {
   PROTOCOL_VERSION,
@@ -38,6 +39,74 @@ function sourceSignature(dir = SOURCE_DIR) {
 
 function resolveSocketPath(options = {}) {
   return options.socketPath || options.env?.TASKFERRY_SOCKET_PATH || path.join(resolveRuntimeDir(options), "daemon.sock");
+}
+
+const DEFAULT_SLOW_REQUEST_MS = 500;
+const DEFAULT_PERF_LOG_MAX_BYTES = 5 * 1024 * 1024; // 5 MiB
+
+function isEnabledFlag(value) {
+  return ["1", "true"].includes(value);
+}
+
+function profilingEnabled(env, config) {
+  if (env?.TASKFERRY_PROFILING_ENABLED !== undefined) return isEnabledFlag(env.TASKFERRY_PROFILING_ENABLED);
+  return config?.profilingEnabled ?? false;
+}
+
+// An unset var is undefined and Number(undefined) is already NaN, but an
+// empty-string value (a blank .env line, an empty -e in Docker) is
+// Number("") === 0 -- a false "valid, explicit zero" that would otherwise
+// slip past isPositiveInteger/isNonNegativeInteger instead of falling back
+// to the default the same way a genuinely non-numeric value does.
+function parsedEnvNumber(rawValue, isValid, fallback) {
+  if (!rawValue) return fallback;
+  const parsed = Number(rawValue);
+  return isValid(parsed) ? parsed : fallback;
+}
+
+// Rotates perf.log to perf.log.1 (clobbering any previous perf.log.1) once
+// the live file would exceed maxBytes, so profiling can be left on
+// indefinitely without the log growing unbounded. A rename right before the
+// write that would tip it over keeps this a single stat+rename per request,
+// not a periodic sweep.
+function rotateIfOversized(perfLogPath, maxBytes, nextLineBytes) {
+  let size;
+  try {
+    ({ size } = fs.statSync(perfLogPath));
+  } catch (error) {
+    if (error.code === "ENOENT") return;
+    throw error;
+  }
+  if (size + nextLineBytes <= maxBytes) return;
+  fs.renameSync(perfLogPath, `${perfLogPath}.1`);
+}
+
+// One JSONL line per handled request in <state-dir>/perf.log, so a latency
+// spike (the kind that shows up as "the daemon felt slow for a second") has
+// a durable per-method trail instead of only ever being visible live.
+// Opt-in via TASKFERRY_PROFILING_ENABLED=1 or config.json's profilingEnabled
+// -- disabled by default so every daemon isn't paying an append-per-request
+// write it never asked for. Returns null when disabled, so the caller can
+// skip performance.now() entirely rather than timing into a discarded value.
+function makeRequestTimer({ stateDir, env, config, appendLine = (filePath, line) => fs.appendFileSync(filePath, line) }) {
+  if (!profilingEnabled(env, config)) return null;
+  const perfLogPath = path.join(stateDir, "perf.log");
+  const maxBytes = parsedEnvNumber(env?.TASKFERRY_PERF_LOG_MAX_BYTES, isPositiveInteger, DEFAULT_PERF_LOG_MAX_BYTES);
+  const slowRequestMs = parsedEnvNumber(env?.TASKFERRY_SLOW_REQUEST_MS, isNonNegativeInteger, DEFAULT_SLOW_REQUEST_MS);
+  return function onRequestTimed({ method, durationMs, ok }) {
+    const rounded = Math.round(durationMs * 100) / 100;
+    const record = { method, ok, ts: new Date().toISOString(), durationMs: rounded };
+    const line = `${JSON.stringify(record)}\n`;
+    try {
+      rotateIfOversized(perfLogPath, maxBytes, Buffer.byteLength(line));
+      appendLine(perfLogPath, line);
+    } catch (error) {
+      process.stderr.write(`warn: failed to write perf.log: ${error instanceof Error ? error.message : String(error)}\n`);
+    }
+    if (rounded >= slowRequestMs) {
+      process.stderr.write(`slow request: ${method} took ${rounded}ms (>= ${slowRequestMs}ms threshold)\n`);
+    }
+  };
 }
 
 function defaultSpawnReplacement({ daemonEntry, env }) {
@@ -306,6 +375,7 @@ export async function startDaemon({
     }
   };
   const manager = taskManagerFactory({ ...taskManagerOptions, stateDir, runtimeDir, onEvent });
+  const onRequestTimed = makeRequestTimer({ stateDir, env, config: taskManagerOptions.config });
   const startupSourceSignature = sourceSignature(sourceDir);
   let restartPending = false;
   let restarting = false;
@@ -342,7 +412,9 @@ export async function startDaemon({
     socket.on("data", (chunk) => {
       buffer += chunk;
       if (Buffer.byteLength(buffer) > MAX_BUFFER_BYTES) {
+        const requestTooLargeStartedAt = onRequestTimed ? performance.now() : 0;
         writeMessage(socket, errorResponse(null, "REQUEST_TOO_LARGE", "request exceeds 1 MiB", "Send a smaller request"));
+        onRequestTimed?.({ method: "request_too_large", durationMs: performance.now() - requestTooLargeStartedAt, ok: false });
         socket.destroy();
         return;
       }
@@ -352,11 +424,20 @@ export async function startDaemon({
         const line = buffer.slice(0, newline);
         buffer = buffer.slice(newline + 1);
         if (!line) continue;
+        // startedAt is only captured when a timer is actually wired up
+        // (onRequestTimed truthy) -- with profiling disabled, performance.now()
+        // is never called, so an opted-out daemon pays none of this cost.
+        // Every path below (parse failure, SERVER_BUSY, and the normal
+        // try/finally) reports through onRequestTimed so "every RPC request"
+        // in the profiling docs is literally true, not just the ones that
+        // reach invoke().
+        const startedAt = onRequestTimed ? performance.now() : 0;
         let request;
         try {
           request = parseRequestLine(line);
         } catch (error) {
           writeMessage(socket, responseError(error, null));
+          onRequestTimed?.({ method: "parse_error", durationMs: performance.now() - startedAt, ok: false });
           continue;
         }
         if (inFlightRequests >= maxInFlightRequests) {
@@ -366,10 +447,12 @@ export async function startDaemon({
             "daemon has too many requests in flight",
             "Wait for an outstanding request to finish, then retry"
           ));
+          onRequestTimed?.({ method: request.method, durationMs: performance.now() - startedAt, ok: false });
           continue;
         }
         inFlightRequests++;
         void (async () => {
+          let ok = true;
           try {
             if (request.method === "event.subscribe") {
               if (request.params.summaries === true && typeof manager.checkSummaryModelReady === "function") {
@@ -386,15 +469,19 @@ export async function startDaemon({
                 originSessionId: request.params.originSessionId || null,
               });
               updateSummarySubscriptions();
-              writeMessage(socket, successResponse(request.id, { subscriptionId }));
+              ok = writeMessage(socket, successResponse(request.id, { subscriptionId }));
               return;
             }
             const result = await invoke(manager, request);
-            writeMessage(socket, successResponse(request.id, result));
+            ok = writeMessage(socket, successResponse(request.id, result));
           } catch (error) {
-            if (!socket.destroyed) writeMessage(socket, responseError(error, request?.id ?? null));
+            // ok tracks whether a response reached the client, not merely
+            // whether invoke() threw -- an error response that was
+            // successfully written is still a delivered response.
+            ok = !socket.destroyed && writeMessage(socket, responseError(error, request.id));
           } finally {
             inFlightRequests--;
+            onRequestTimed?.({ method: request.method, durationMs: performance.now() - startedAt, ok });
             maybeRestart();
           }
         })();

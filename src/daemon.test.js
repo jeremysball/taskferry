@@ -12,6 +12,18 @@ import { connectClient, ensureDaemonStarted, startDaemonBooter } from "./client.
 import { withFileLock } from "./state-lock.js";
 import { resolveRuntimeDir } from "./paths.js";
 
+// Explicitly resets the three profiling-related vars before applying
+// per-test overrides, so an ambient TASKFERRY_PROFILING_ENABLED (etc.) set
+// in the developer's own shell can't leak into these tests via the
+// `...process.env` spread and flip their pass/fail outcome.
+function profilingTestEnv(overrides = {}) {
+  const env = { ...process.env };
+  delete env.TASKFERRY_PROFILING_ENABLED;
+  delete env.TASKFERRY_SLOW_REQUEST_MS;
+  delete env.TASKFERRY_PERF_LOG_MAX_BYTES;
+  return { ...env, ...overrides };
+}
+
 function temporaryPaths(t) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-daemon-test-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
@@ -94,6 +106,10 @@ function fakeManagerFactory(tasks = [], { checkSummaryModelReady } = {}) {
 
   return {
     factory(options) {
+      // Real createTaskManager() always creates stateDir at construction
+      // time; mirror that here so tests relying on stateDir already
+      // existing (e.g. profiling's perf.log) match production behavior.
+      fs.mkdirSync(options.stateDir, { recursive: true, mode: 0o700 });
       capturedOptions = options;
       onEvent = options.onEvent;
       return manager;
@@ -385,6 +401,262 @@ describe("Unix socket daemon", () => {
     assert.equal(rejected.ok, false);
     assert.equal(rejected.error.code, "SERVER_BUSY");
     assert.equal((await slow).ok, true);
+  });
+
+  test("does not write perf.log or flag slow requests unless TASKFERRY_PROFILING_ENABLED=1", async (t) => {
+    const paths = temporaryPaths(t);
+    const fake = fakeManagerFactory();
+    const daemon = await startDaemon({
+      ...paths,
+      env: profilingTestEnv({ TASKFERRY_SLOW_REQUEST_MS: "0" }),
+      taskManagerFactory: fake.factory,
+    });
+    t.after(() => daemon.close());
+    const peer = await openPeer(paths.socketPath);
+    t.after(() => peer.close());
+
+    await peer.request("health-1", "system.health");
+
+    assert.equal(fs.existsSync(path.join(paths.stateDir, "perf.log")), false);
+  });
+
+  test("enables profiling from config.json's profilingEnabled when the env var is unset", async (t) => {
+    const paths = temporaryPaths(t);
+    const fake = fakeManagerFactory();
+    const daemon = await startDaemon({
+      ...paths,
+      env: profilingTestEnv(),
+      taskManagerFactory: fake.factory,
+      taskManagerOptions: { config: { profilingEnabled: true } },
+    });
+    t.after(() => daemon.close());
+    const peer = await openPeer(paths.socketPath);
+    t.after(() => peer.close());
+
+    await peer.request("health-1", "system.health");
+
+    const perfLogPath = path.join(paths.stateDir, "perf.log");
+    const lines = fs.readFileSync(perfLogPath, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+    assert.ok(lines.some((line) => line.method === "system.health"));
+  });
+
+  test("TASKFERRY_PROFILING_ENABLED=0 overrides a config.json profilingEnabled: true", async (t) => {
+    const paths = temporaryPaths(t);
+    const fake = fakeManagerFactory();
+    const daemon = await startDaemon({
+      ...paths,
+      env: profilingTestEnv({ TASKFERRY_PROFILING_ENABLED: "0" }),
+      taskManagerFactory: fake.factory,
+      taskManagerOptions: { config: { profilingEnabled: true } },
+    });
+    t.after(() => daemon.close());
+    const peer = await openPeer(paths.socketPath);
+    t.after(() => peer.close());
+
+    await peer.request("health-1", "system.health");
+
+    assert.equal(fs.existsSync(path.join(paths.stateDir, "perf.log")), false);
+  });
+
+  test("writes per-request latency to perf.log and flags slow requests via env threshold when enabled", async (t) => {
+    const paths = temporaryPaths(t);
+    const fake = fakeManagerFactory();
+    const daemon = await startDaemon({
+      ...paths,
+      env: profilingTestEnv({ TASKFERRY_PROFILING_ENABLED: "1", TASKFERRY_SLOW_REQUEST_MS: "10" }),
+      taskManagerFactory: fake.factory,
+    });
+    t.after(() => daemon.close());
+    const peer = await openPeer(paths.socketPath);
+    t.after(() => peer.close());
+
+    const stderrChunks = [];
+    const originalWrite = process.stderr.write.bind(process.stderr);
+    process.stderr.write = (chunk, ...rest) => {
+      stderrChunks.push(String(chunk));
+      return originalWrite(chunk, ...rest);
+    };
+    t.after(() => {
+      process.stderr.write = originalWrite;
+    });
+
+    await peer.request("health-1", "system.health");
+    await peer.request("slow-1", "task.wait", { taskId: "slow", timeoutMs: 100 });
+
+    const perfLogPath = path.join(paths.stateDir, "perf.log");
+    const lines = fs.readFileSync(perfLogPath, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+    assert.ok(lines.some((line) => line.method === "system.health" && line.ok === true));
+    assert.ok(lines.some((line) => line.method === "task.wait" && line.durationMs >= 10));
+    assert.ok(stderrChunks.some((chunk) => chunk.includes("slow request: task.wait")));
+  });
+
+  test("rotates perf.log to perf.log.1 once it would exceed TASKFERRY_PERF_LOG_MAX_BYTES", async (t) => {
+    const paths = temporaryPaths(t);
+    const fake = fakeManagerFactory();
+    const daemon = await startDaemon({
+      ...paths,
+      env: profilingTestEnv({ TASKFERRY_PROFILING_ENABLED: "1", TASKFERRY_PERF_LOG_MAX_BYTES: "120" }),
+      taskManagerFactory: fake.factory,
+    });
+    t.after(() => daemon.close());
+    const peer = await openPeer(paths.socketPath);
+    t.after(() => peer.close());
+
+    for (let i = 0; i < 5; i++) {
+      await peer.request(`health-${i}`, "system.health");
+    }
+
+    const perfLogPath = path.join(paths.stateDir, "perf.log");
+    const rotatedPath = `${perfLogPath}.1`;
+    assert.ok(fs.existsSync(rotatedPath), "expected perf.log.1 to exist after rotation");
+    assert.ok(fs.statSync(perfLogPath).size <= 120, "live perf.log should stay under the configured max");
+  });
+
+  test("falls back to the default max-bytes/slow-request-ms on a non-numeric env override instead of rotating every write", async (t) => {
+    const paths = temporaryPaths(t);
+    const fake = fakeManagerFactory();
+    const daemon = await startDaemon({
+      ...paths,
+      env: profilingTestEnv({
+        TASKFERRY_PROFILING_ENABLED: "1",
+        TASKFERRY_PERF_LOG_MAX_BYTES: "garbage",
+        TASKFERRY_SLOW_REQUEST_MS: "not-a-number",
+      }),
+      taskManagerFactory: fake.factory,
+    });
+    t.after(() => daemon.close());
+    const peer = await openPeer(paths.socketPath);
+    t.after(() => peer.close());
+
+    for (let i = 0; i < 5; i++) {
+      await peer.request(`health-${i}`, "system.health");
+    }
+
+    const perfLogPath = path.join(paths.stateDir, "perf.log");
+    assert.equal(fs.existsSync(`${perfLogPath}.1`), false, "a garbage max-bytes value must not rotate on every write");
+    const lines = fs.readFileSync(perfLogPath, "utf8").trim().split("\n");
+    assert.equal(lines.length, 5, "all 5 requests should have accumulated in one file, not been rotated away individually");
+  });
+
+  test("reports ok:false when the response could not be delivered even though invoke() itself did not throw", async (t) => {
+    const paths = temporaryPaths(t);
+    const fake = fakeManagerFactory();
+    const daemon = await startDaemon({
+      ...paths,
+      env: profilingTestEnv({ TASKFERRY_PROFILING_ENABLED: "1" }),
+      taskManagerFactory: fake.factory,
+      maxOutboundBytes: 1,
+    });
+    t.after(() => daemon.close());
+    const peer = await openPeer(paths.socketPath);
+    t.after(() => peer.close());
+
+    // The oversized-response write destroys the socket before a reply ever
+    // arrives, so this request's promise never settles -- fire it without
+    // awaiting and instead wait for the server-side write/destroy to happen.
+    void peer.request("health-1", "system.health");
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    const perfLogPath = path.join(paths.stateDir, "perf.log");
+    const lines = fs.readFileSync(perfLogPath, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+    const entry = lines.find((line) => line.method === "system.health");
+    assert.ok(entry, "expected a perf.log entry for the oversized-response request");
+    assert.equal(entry.ok, false, "ok should be false when writeMessage could not deliver the response");
+  });
+
+  test("times and logs SERVER_BUSY-rejected and malformed requests too, not just ones that reach invoke()", async (t) => {
+    const paths = temporaryPaths(t);
+    const fake = fakeManagerFactory();
+    const daemon = await startDaemon({
+      ...paths,
+      env: profilingTestEnv({ TASKFERRY_PROFILING_ENABLED: "1" }),
+      taskManagerFactory: fake.factory,
+      maxInFlightRequests: 1,
+    });
+    t.after(() => daemon.close());
+    const peer = await openPeer(paths.socketPath);
+    t.after(() => peer.close());
+
+    const slow = peer.request("slow-request", "task.wait", { taskId: "slow", timeoutMs: 100 });
+    const rejected = await peer.request("overflow", "system.health");
+    assert.equal(rejected.error.code, "SERVER_BUSY");
+    await slow;
+    peer.socket.write("not valid json\n");
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    const perfLogPath = path.join(paths.stateDir, "perf.log");
+    const lines = fs.readFileSync(perfLogPath, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+    assert.ok(lines.some((line) => line.method === "system.health" && line.ok === false), "expected the SERVER_BUSY rejection to be logged");
+    assert.ok(lines.some((line) => line.method === "parse_error" && line.ok === false), "expected the malformed request to be logged");
+  });
+
+  test("records ok:true for an error response that was successfully delivered, not just ok:false on any thrown exception", async (t) => {
+    const paths = temporaryPaths(t);
+    const fake = fakeManagerFactory();
+    const daemon = await startDaemon({
+      ...paths,
+      env: profilingTestEnv({ TASKFERRY_PROFILING_ENABLED: "1" }),
+      taskManagerFactory: fake.factory,
+    });
+    t.after(() => daemon.close());
+    const peer = await openPeer(paths.socketPath);
+    t.after(() => peer.close());
+
+    const response = await peer.request("bad-task", "task.status", { taskId: "does-not-exist" });
+    assert.equal(response.ok, false, "the RPC response itself should still report the error");
+
+    const perfLogPath = path.join(paths.stateDir, "perf.log");
+    const lines = fs.readFileSync(perfLogPath, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+    const entry = lines.find((line) => line.method === "task.status");
+    assert.ok(entry, "expected a perf.log entry for the unknown-task request");
+    assert.equal(entry.ok, true, "ok should be true once the error response was actually delivered over a healthy socket");
+  });
+
+  test("falls back to the default slow-request-ms on an empty-string env override instead of flagging every request as slow", async (t) => {
+    const paths = temporaryPaths(t);
+    const fake = fakeManagerFactory();
+    const daemon = await startDaemon({
+      ...paths,
+      env: profilingTestEnv({ TASKFERRY_PROFILING_ENABLED: "1", TASKFERRY_SLOW_REQUEST_MS: "" }),
+      taskManagerFactory: fake.factory,
+    });
+    t.after(() => daemon.close());
+    const peer = await openPeer(paths.socketPath);
+    t.after(() => peer.close());
+
+    const stderrChunks = [];
+    const originalWrite = process.stderr.write.bind(process.stderr);
+    process.stderr.write = (chunk, ...rest) => {
+      stderrChunks.push(String(chunk));
+      return originalWrite(chunk, ...rest);
+    };
+    t.after(() => {
+      process.stderr.write = originalWrite;
+    });
+
+    await peer.request("health-1", "system.health");
+
+    assert.ok(!stderrChunks.some((chunk) => chunk.includes("slow request:")), "an empty-string threshold must fall back to the default, not become 0");
+  });
+
+  test("times and logs oversized/unterminated buffers too, not just parseable request lines", async (t) => {
+    const paths = temporaryPaths(t);
+    const fake = fakeManagerFactory();
+    const daemon = await startDaemon({
+      ...paths,
+      env: profilingTestEnv({ TASKFERRY_PROFILING_ENABLED: "1" }),
+      taskManagerFactory: fake.factory,
+    });
+    t.after(() => daemon.close());
+    const peer = await openPeer(paths.socketPath);
+    t.after(() => peer.close());
+
+    peer.socket.write("x".repeat(1024 * 1024 + 1));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    const perfLogPath = path.join(paths.stateDir, "perf.log");
+    const lines = fs.readFileSync(perfLogPath, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+    assert.ok(lines.some((line) => line.method === "request_too_large" && line.ok === false), "expected the oversized buffer to be logged");
   });
 
   test("filters list/context by workspace and builds context from list plus status", async (t) => {

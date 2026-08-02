@@ -43,6 +43,7 @@ const CONFIG_FIELD_TYPES = {
   defaultExecutor: "string",
   advisorContextChars: "number",
   envFile: "string",
+  profilingEnabled: "boolean",
 };
 
 /**

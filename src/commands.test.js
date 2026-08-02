@@ -447,6 +447,15 @@ test("home/context resolve their default directory via resolveWorkspaceRoot when
   assert.equal(seenDirectory, resolvedRoot);
 });
 
+test("home passes an unbounded limit into projectList so homeView sees the true total (regression: double-truncation would silently drop the real count and reveal hint)", async () => {
+  const cwd = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-commands-test-")));
+  const tasks = Array.from({ length: 805 }, (_, i) => ({ id: `t${i}`, status: "done", model: "x", startedAt: "2026-01-01T00:00:00.000Z" }));
+  const client = { request: async () => ({ directory: cwd, counts: { queued: 0, running: 0, done: 805, crashed: 0, cancelled: 0, unknown: 0 }, tasks }) };
+  const result = await runCommand("home", { directory: cwd }, { client, cwd, resolveWorkspaceRoot: () => cwd });
+  assert.equal(result.tasks.length, 30);
+  assert.deepEqual(result.next.slice(-1), ["Run taskferry list --limit 805 for all 805 tasks"]);
+});
+
 test("advisor does NOT resolve via resolveWorkspaceRoot (regression test mirroring the dispatch one)", async () => {
   // advisor is grouped with dispatch at the args/cli/commands layers
   // because tasks.js's advisor() forwards its directory straight into

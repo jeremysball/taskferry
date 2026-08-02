@@ -488,6 +488,48 @@ describe("dispatch() lifecycle, driven through an injected spawnFn (no real open
     assert.ok(cleanedRoot, "advisor's overlay must be cleaned up on the spawn-error path");
   });
 
+  test("advisor: extraction failure settles to 'rejected', not 'pending' (regression: silent reject() no-op on advisor tasks)", async () => {
+    // Without this fix, extractChangesetForTask()'s catch block set
+    // changesetStatus: "pending" regardless of role whenever extraction threw
+    // (e.g. the target directory's HEAD moved mid-dispatch) -- unlike the
+    // success path three lines below it, which already special-cases
+    // role === "advisor" to "rejected". That left a later `taskferry reject
+    // <id>` silently returning exit 0 on an advisor task that never had a
+    // real changeset to reject in the first place.
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "axi-advisor-extract-fail-"));
+    const overlayTmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "axi-advisor-extract-fail-tmp-"));
+    const child = fakeChild();
+    const mgr = makeManager({
+      spawnFn: () => child,
+      sandboxEnabled: true,
+      checkBwrapAvailableFn: () => ({ checked: true, available: true }),
+      overlayEnabled: true,
+      checkOverlaySupportFn: () => ({ supported: true }),
+      platform: "linux",
+      overlayTmpRoot,
+      // resolvePreDispatchHead's rev-parse calls run as bare "git" (not
+      // "bwrap"), both at dispatch time and again inside extractGitDiff --
+      // they must succeed identically so the HEAD-drift check doesn't
+      // itself throw. Only the extraction's own "bwrap"-wrapped diff call
+      // should fail, isolating the extraction-throw path under test.
+      runOverlayCommandFn: (command) =>
+        command === "git"
+          ? { status: 0, stdout: "abc123\n", stderr: "", error: undefined }
+          : { status: 2, stdout: "", stderr: "fatal: HEAD moved", error: undefined },
+    });
+
+    const advisePromise = mgr.advisor({ prompt: "hi", directory, model: "openai/gpt-5.6-sol" });
+    child.emit("exit", 0, null);
+    const advised = await advisePromise;
+
+    const status = mgr.status(advised.task_id);
+    assert.equal(status.status, "done");
+    assert.equal(status.changesetStatus, "rejected");
+    assert.ok(status.changesetError, "changesetError should still record why extraction failed");
+
+    assert.throws(() => mgr.reject(advised.task_id), /no pending changeset/);
+  });
+
   test("dispatch() synchronous throw from spawnFn still runs changeset extraction/cleanup so a sync-spawn-failed task doesn't strand its overlay", () => {
     // Companion to the child.on('error') test above: child.emit("error")
     // exercises the async spawn-failure path inside the dispatch() body,

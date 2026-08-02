@@ -220,7 +220,7 @@ export function homeView(value, { executablePath, workspace }) {
     description: "Manage background OpenCode tasks in the current workspace.",
     workspace,
     counts: value.counts,
-    tasks: rows,
+    tasks: Array.isArray(value.tasks) ? rows : value.tasks,
     next: truncated ? [...next, `Run taskferry list --limit ${total} for all ${total} tasks`] : next,
   };
 }

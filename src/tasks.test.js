@@ -513,9 +513,9 @@ describe("dispatch() lifecycle, driven through an injected spawnFn (no real open
       // itself throw. Only the extraction's own "bwrap"-wrapped diff call
       // should fail, isolating the extraction-throw path under test.
       runOverlayCommandFn: (command) =>
-        command === "git"
-          ? { status: 0, stdout: "abc123\n", stderr: "", error: undefined }
-          : { status: 2, stdout: "", stderr: "fatal: HEAD moved", error: undefined },
+        command === "bwrap"
+          ? { status: 2, stdout: "", stderr: "fatal: HEAD moved", error: undefined }
+          : { status: 0, stdout: "abc123\n", stderr: "", error: undefined },
     });
 
     const advisePromise = mgr.advisor({ prompt: "hi", directory, model: "openai/gpt-5.6-sol" });

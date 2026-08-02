@@ -424,4 +424,10 @@ describe("homeView default row cap", () => {
     const result = homeView(fakeHomeValue(12), { executablePath: "/bin/taskferry", workspace: "/workspace/example" });
     assert.equal(result.next.length, 3);
   });
+
+  test("passes through a non-array tasks value (e.g. projectList's 'none found' string) unchanged, instead of coercing it to an empty array", () => {
+    const value = { counts: { queued: 0, running: 0, done: 0, crashed: 0, cancelled: 0, unknown: 0 }, tasks: "none found in this workspace" };
+    const result = homeView(value, { executablePath: "/bin/taskferry", workspace: "/workspace/example" });
+    assert.equal(result.tasks, "none found in this workspace");
+  });
 });

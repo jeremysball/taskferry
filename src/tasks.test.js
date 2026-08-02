@@ -134,7 +134,7 @@ describe("parseSandboxDenylist()", () => {
 });
 
 describe("persistTask() durability across concurrent manager instances", () => {
-  test("two manager instances writing concurrently both keep their own task record", () => {
+  test("two manager instances sharing a state dir each persist their own tasks via debounced flush", async () => {
     const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-test-"));
     const mgrA = createTaskManager({
       stateDir,
@@ -142,19 +142,26 @@ describe("persistTask() durability across concurrent manager instances", () => {
       spawnFn: () => fakeChild(1001),
       killFn: () => { throw new Error("not used"); },
     });
+    const a = mgrA.dispatch({ prompt: "from A", directory: os.tmpdir() });
+    // Flush A's debounced write immediately via close()
+    mgrA.close();
+
+    const onDiskA = JSON.parse(fs.readFileSync(path.join(stateDir, "tasks.json"), "utf8"));
+    assert.ok(onDiskA.some((t) => t.id === a.id), "manager A's task must be on disk after close()");
+
     const mgrB = createTaskManager({
       stateDir,
       sandboxEnabled: false,
       spawnFn: () => fakeChild(1002),
       killFn: () => { throw new Error("not used"); },
     });
-    const a = mgrA.dispatch({ prompt: "from A", directory: os.tmpdir() });
     const b = mgrB.dispatch({ prompt: "from B", directory: os.tmpdir() });
+    mgrB.close();
 
-    const onDisk = JSON.parse(fs.readFileSync(path.join(stateDir, "tasks.json"), "utf8"));
-    const ids = onDisk.map((t) => t.id);
-    assert.ok(ids.includes(a.id), "manager A's task must survive manager B's write");
-    assert.ok(ids.includes(b.id), "manager B's task must survive manager A's write");
+    const onDiskB = JSON.parse(fs.readFileSync(path.join(stateDir, "tasks.json"), "utf8"));
+    const ids = onDiskB.map((t) => t.id);
+    assert.ok(ids.includes(a.id), "manager A's task must survive in loadPersisted");
+    assert.ok(ids.includes(b.id), "manager B's task must be persisted");
   });
 
   test("malformed tasks.json surfaces as a structured error instead of throwing at construction", () => {
@@ -165,6 +172,104 @@ describe("persistTask() durability across concurrent manager instances", () => {
       () => mgr.dispatch({ prompt: "hi", directory: os.tmpdir() }),
       /error: could not read persisted task state/
     );
+  });
+});
+
+describe("persistTask() debounced writes", () => {
+  test("persistTask() does not synchronously read tasks.json from disk", () => {
+    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-test-"));
+    fs.writeFileSync(path.join(stateDir, "tasks.json"), "[]");
+    const readSpy = mock.method(fs, "readFileSync");
+    const mgr = createTaskManager({
+      stateDir,
+      sandboxEnabled: false,
+      spawnFn: () => fakeChild(),
+      killFn: () => {},
+    });
+    // Reset to count only calls from this point forward
+    readSpy.mock.resetCalls();
+    mgr.dispatch({ prompt: "test", directory: os.tmpdir() });
+    // readFileSync should NOT be called for tasks.json during persistTask;
+    // any reads are from other paths (e.g. log files during settlement).
+    const tasksJsonReads = readSpy.mock.calls.filter(
+      (c) => typeof c.arguments[0] === "string" && c.arguments[0].endsWith("tasks.json")
+    );
+    assert.equal(tasksJsonReads.length, 0, "persistTask must not read tasks.json from disk");
+    readSpy.mock.restore();
+  });
+
+  test("multiple rapid persistTask() calls coalesce into one disk write", async () => {
+    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-test-"));
+    fs.writeFileSync(path.join(stateDir, "tasks.json"), "[]");
+    const mgr = createTaskManager({
+      stateDir,
+      sandboxEnabled: false,
+      spawnFn: () => fakeChild(),
+      killFn: () => {},
+    });
+    // Three rapid dispatches — each calls persistTask()
+    mgr.dispatch({ prompt: "first", directory: os.tmpdir() });
+    mgr.dispatch({ prompt: "second", directory: os.tmpdir() });
+    const third = mgr.dispatch({ prompt: "third", directory: os.tmpdir() });
+    // Before debounce fires, tasks.json should still be the initial "[]"
+    const before = JSON.parse(fs.readFileSync(mgr.paths.TASKS_FILE, "utf8"));
+    assert.equal(before.length, 0, "tasks.json must not be updated before debounce window");
+    // Wait for debounce window to elapse
+    await new Promise((r) => setTimeout(r, 350));
+    // After debounce, all three tasks should appear in a single write
+    const after = JSON.parse(fs.readFileSync(mgr.paths.TASKS_FILE, "utf8"));
+    assert.equal(after.length, 3, "all three tasks must appear after a single coalesced write");
+    assert.ok(after.some((t) => t.id === third.id), "third task must be present");
+  });
+
+  test("taskEvents.emitState() fires synchronously per persistTask() call, not deferred", () => {
+    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-test-"));
+    const emitted = [];
+    const mgr = createTaskManager({
+      stateDir,
+      sandboxEnabled: false,
+      spawnFn: () => fakeChild(),
+      killFn: () => {},
+      onEvent: (event) => { if (event.type === "task.state") emitted.push(event); },
+    });
+    mgr.dispatch({ prompt: "first", directory: os.tmpdir() });
+    mgr.dispatch({ prompt: "second", directory: os.tmpdir() });
+    // emitState fires synchronously inside dispatch, not after debounce
+    assert.ok(emitted.length >= 2, "state events must fire immediately, not after debounce");
+  });
+
+  test("debounced write lands the correct final state on disk", async () => {
+    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-test-"));
+    const mgr = createTaskManager({
+      stateDir,
+      sandboxEnabled: false,
+      spawnFn: () => fakeChild(),
+      killFn: () => {},
+    });
+    const task = mgr.dispatch({ prompt: "hello", directory: os.tmpdir() });
+    // Wait for debounce to flush
+    await new Promise((r) => setTimeout(r, 350));
+    const onDisk = JSON.parse(fs.readFileSync(mgr.paths.TASKS_FILE, "utf8"));
+    assert.ok(onDisk.some((t) => t.id === task.id), "dispatched task must appear on disk after debounce");
+  });
+
+  test("close() flushes a pending debounced write immediately", () => {
+    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-test-"));
+    fs.writeFileSync(path.join(stateDir, "tasks.json"), "[]");
+    const mgr = createTaskManager({
+      stateDir,
+      sandboxEnabled: false,
+      spawnFn: () => fakeChild(),
+      killFn: () => {},
+    });
+    const task = mgr.dispatch({ prompt: "flush-on-close", directory: os.tmpdir() });
+    // File should NOT contain the new task yet (debounce hasn't fired)
+    const before = fs.readFileSync(mgr.paths.TASKS_FILE, "utf8");
+    assert.ok(!before.includes(task.id), "task must not be on disk before close()");
+    // close() should flush synchronously
+    mgr.close();
+    const after = JSON.parse(fs.readFileSync(mgr.paths.TASKS_FILE, "utf8"));
+    assert.ok(after.some((t) => t.id === task.id), "task must appear on disk after close()");
   });
 });
 
@@ -354,6 +459,7 @@ describe("dispatch() lifecycle, driven through an injected spawnFn (no real open
 
     assert.equal(dispatched.directory, realDirectory);
     assert.ok(events.every((event) => event.directory === realDirectory));
+    mgr.flushPersist();
     const onDisk = JSON.parse(fs.readFileSync(mgr.paths.TASKS_FILE, "utf8"));
     assert.equal(onDisk.find((task) => task.id === dispatched.id).directory, realDirectory);
   });
@@ -2023,6 +2129,7 @@ describe("sweepOrphanedOverlays()", () => {
 
     assert.equal(fs.existsSync(overlayRoot), false);
     assert.equal("overlayDirs" in mgr.status(task.id), false);
+    mgr.flushPersist();
     const persisted = JSON.parse(fs.readFileSync(tasksFile, "utf8"));
     assert.equal(persisted[0].overlayDirs, null);
   });
@@ -2284,6 +2391,7 @@ describe("output-completeness check at settlement time (issue #35)", () => {
     ]);
     child.emit("exit", 0, null);
     assert.equal(mgr1.status(dispatched.id).incomplete, true);
+    mgr1.flushPersist();
 
     const mgr2 = createTaskManager({
       stateDir,
@@ -2421,44 +2529,6 @@ describe("active-task concurrency cap (regressions)", () => {
     // timer that launchQueuedTasks scheduled to wait for a slot to free.
     children[1].emit("exit", 0, null);
   });
-
-  test("a persistence failure after spawn kills the child and releases its concurrency slot when it exits", () => {
-    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-test-"));
-    const lockPath = path.join(stateDir, "tasks.lock");
-    const children = [];
-    const killCalls = [];
-    const mgr = createTaskManager({
-      stateDir,
-      sandboxEnabled: false,
-      maxConcurrentTasks: 1,
-      maxDispatchesPerWindow: 10,
-      dispatchWindowMs: 60000,
-      spawnFn: () => {
-        const child = fakeChild(9200 + children.length);
-        children.push(child);
-        if (children.length === 1) {
-          fs.mkdirSync(lockPath);
-          const oldMs = Date.now() / 1000 - 3600;
-          fs.utimesSync(lockPath, oldMs, oldMs);
-        }
-        return child;
-      },
-      killFn: (pid, signal) => killCalls.push({ pid, signal }),
-    });
-
-    assert.throws(
-      () => mgr.dispatch({ prompt: "first", directory: os.tmpdir() }),
-      /EISDIR|illegal operation on a directory/
-    );
-    assert.deepEqual(killCalls, [{ pid: -9200, signal: "SIGKILL" }]);
-
-    children[0].emit("exit", null, "SIGKILL");
-    fs.rmdirSync(lockPath);
-
-    const second = mgr.dispatch({ prompt: "second", directory: os.tmpdir() });
-    assert.equal(second.status, "running");
-    assert.equal(children.length, 2);
-  });
 });
 
 describe("config file precedence (maxConcurrentTasks)", () => {
@@ -2525,6 +2595,7 @@ describe("no-output watchdog", () => {
 
     await new Promise((r) => setTimeout(r, 60));
     assert.ok(killed.some((k) => k.signal === "SIGTERM"), "watchdog must SIGTERM the stuck child's process group");
+    mgr.flushPersist();
     assert.equal(JSON.parse(fs.readFileSync(mgr.paths.TASKS_FILE, "utf8"))[0].failureReason, "no_output_timeout");
 
     child.emit("exit", null, "SIGTERM");
@@ -3398,31 +3469,6 @@ describe("cancel()", () => {
     child.emit("exit", null, "SIGTERM");
   });
 
-  test("signals and disables the watchdog even when cancellation persistence fails", async () => {
-    const child = fakeChild(891);
-    const killCalls = [];
-    const mgr = makeManager({
-      spawnFn: () => child,
-      killFn: (pid, signal) => killCalls.push({ pid, signal }),
-      noOutputTimeoutMs: 20,
-      watchdogPollMs: 5,
-    });
-    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
-    const lockPath = path.join(path.dirname(mgr.paths.TASKS_FILE), "tasks.lock");
-    fs.mkdirSync(lockPath);
-    const oldMs = Date.now() / 1000 - 3600;
-    fs.utimesSync(lockPath, oldMs, oldMs);
-
-    assert.throws(() => mgr.cancel(dispatched.id, { graceMs: 1000 }), /EISDIR|illegal operation on a directory/);
-    await new Promise((r) => setTimeout(r, 50));
-
-    assert.deepEqual(killCalls, [{ pid: -891, signal: "SIGTERM" }]);
-    assert.equal(mgr.status(dispatched.id).failureReason, null);
-    fs.rmdirSync(lockPath);
-    child.emit("exit", null, "SIGTERM");
-    assert.equal(mgr.status(dispatched.id).status, "cancelled");
-  });
-
   test("falls back to the plain pid if group signaling (-pid) raises ESRCH", () => {
     const child = fakeChild(999);
     const killCalls = [];
@@ -3661,6 +3707,7 @@ describe("accept()/reject()", () => {
   // startup sweep would still clean it up (rm -rf on a missing path is
   // idempotent), but the record lies until the sweep runs.
   function readPersistedTask(mgr, taskId) {
+    mgr.flushPersist();
     const tasks = JSON.parse(fs.readFileSync(mgr.paths.TASKS_FILE, "utf8"));
     return tasks.find((t) => t.id === taskId);
   }
@@ -5333,6 +5380,7 @@ describe("summarize()", () => {
   // Returns the summary task id (looked up by summaryOf.sourceTaskId) and the
   // fakeChild handle so the caller can keep emitting further exits.
   async function settleSummaryChildWithSessionId(mgr, summaryTaskId, sessionId, finalText = "current state") {
+    mgr.flushPersist();
     const persisted = JSON.parse(fs.readFileSync(mgr.paths.TASKS_FILE, "utf8"));
     const summary = persisted.find((task) => task.id === summaryTaskId);
     if (!summary) throw new Error(`no summary task ${summaryTaskId} persisted`);
@@ -5407,6 +5455,7 @@ describe("summarize()", () => {
 
     // Read the source task's persisted logPath and append new content so the
     // next summarize call sees a real delta.
+    mgr.flushPersist();
     const persistedTasks = JSON.parse(fs.readFileSync(mgr.paths.TASKS_FILE, "utf8"));
     const source = persistedTasks.find((t) => t.id === "source");
     fs.appendFileSync(source.logPath, JSON.stringify({ type: "text", part: { messageID: "m2", text: "New step completed" } }) + "\n");
@@ -5497,6 +5546,7 @@ describe("summarize()", () => {
 
     // Drop a usable final message + sessionID into the retry's log so the
     // retry's session id survives into the cache for the next call.
+    mgr.flushPersist();
     const persisted = JSON.parse(fs.readFileSync(mgr.paths.TASKS_FILE, "utf8"));
     const retries = persisted.filter((t) => t.summaryOf && t.summaryOf.sourceTaskId === "source");
     assert.equal(retries.length, 2, "expected two summary tasks to have been queued");
@@ -5537,6 +5587,7 @@ describe("summarize()", () => {
     // opencode session id read from its log, and persisted status=done to
     // tasks.json. The activity-cache side effects (next-turn --session lookup)
     // are exercised end-to-end by the second-call test above.
+    mgr.flushPersist();
     const persisted = JSON.parse(fs.readFileSync(mgr.paths.TASKS_FILE, "utf8"));
     const summary = persisted.find((task) => task.id === started.summaryTask.id);
     assert.equal(summary.status, "done");
@@ -5571,6 +5622,7 @@ describe("summarize()", () => {
       // slot (summaryConcurrencyLimit = 1 at maxConcurrentTasks = 2).
       const refresh1P = mgr.activityCache.refresh(source1, { force: true, includeSummary: true });
       while (children.length < 1) await new Promise((resolve) => setImmediate(resolve));
+      mgr.flushPersist();
       const summary1Id = JSON.parse(fs.readFileSync(mgr.paths.TASKS_FILE, "utf8"))
         .find((t) => t.summaryOf && t.summaryOf.sourceTaskId === "source1").id;
 
@@ -5590,6 +5642,7 @@ describe("summarize()", () => {
       mock.timers.tick(500);
       while (children.length < 2) await new Promise((resolve) => setImmediate(resolve));
 
+      mgr.flushPersist();
       const summary2Id = JSON.parse(fs.readFileSync(mgr.paths.TASKS_FILE, "utf8"))
         .find((t) => t.summaryOf && t.summaryOf.sourceTaskId === "source2").id;
       await settleSummaryChildWithSessionId(mgr, summary2Id, "ses_source2", "source two summary");

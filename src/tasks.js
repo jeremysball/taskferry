@@ -5,7 +5,6 @@ import os from "node:os";
 import path from "node:path";
 import { createTaskEvents } from "./events.js";
 import { createActivityCache, readActivitySnapshot, readDeltaNarration, DEFAULT_SUMMARIZER_TIMEOUT_MS } from "./activity.js";
-import { withFileLock } from "./state-lock.js";
 import { resolveStateDir, resolveCacheDir, resolveOverlayTmpRoot, TASKFERRY_PLUMBING_ENV_VARS } from "./paths.js";
 import { RESULT_FIELDS } from "./protocol.js";
 import { formatToolEventForNarration } from "./narration-format.js";
@@ -696,7 +695,6 @@ export function createTaskManager({
   const SUMMARY_DIR = path.join(stateDir, "summaries");
   const PROMPT_DIR = path.join(stateDir, "prompts");
   const TASKS_FILE = path.join(stateDir, "tasks.json");
-  const LOCK_FILE = path.join(stateDir, "tasks.lock");
   const dispatchLimit = positiveInteger(maxDispatchesPerWindow, DEFAULT_MAX_DISPATCHES_PER_WINDOW);
   const dispatchWindow = positiveInteger(dispatchWindowMs, DEFAULT_DISPATCH_WINDOW_MS);
   const concurrencyLimit = positiveInteger(maxConcurrentTasks, DEFAULT_MAX_CONCURRENT_TASKS);
@@ -1116,6 +1114,70 @@ export function createTaskManager({
   }
   loadPersisted();
 
+  // Debounced persistence: persistTask() marks state dirty and schedules a
+  // coalesced flush instead of rewriting tasks.json on every single call.
+  // The in-memory `tasks` Map is the source of truth (see comment at line 941);
+  // tasks.json is a best-effort snapshot for debugging across restarts.
+  // Serializing from the Map directly avoids the old read-parse-merge cycle
+  // that blocked the event loop for ~400ms on a 10MB tasks.json.
+  const PERSIST_DEBOUNCE_MS = 250;
+  /** @type {NodeJS.Timeout|null} */
+  let persistTimer = null;
+  let persistDirty = false;
+
+  function flushPersist() {
+    if (!persistDirty) return;
+    persistDirty = false;
+    if (persistTimer != null) {
+      clearTimeout(persistTimer);
+      persistTimer = null;
+    }
+    const all = Array.from(tasks.values());
+    const temporary = path.join(stateDir, `.tasks-${randomUUID()}.json`);
+    /** @type {unknown} */
+    let cleanupError;
+    try {
+      fs.writeFileSync(temporary, JSON.stringify(all, null, 2), { mode: 0o600 });
+      fs.renameSync(temporary, TASKS_FILE);
+      fs.chmodSync(TASKS_FILE, 0o600);
+    } finally {
+      try {
+        fs.unlinkSync(temporary);
+      } catch (err) {
+        if (errCode(err) !== "ENOENT") cleanupError = err;
+      }
+    }
+    if (cleanupError) throw cleanupError;
+  }
+
+  /**
+   * @param {string} taskId
+   */
+  function persistTask(taskId) {
+    persistDirty = true;
+    if (persistTimer == null) {
+      persistTimer = setTimeout(() => {
+        persistTimer = null;
+        try {
+          flushPersist();
+        } catch (err) {
+          // Callers used to wrap a synchronous persistTask() in try/catch
+          // specifically so a failed best-effort state write (e.g. a full
+          // disk) couldn't strand a concurrency slot or crash the daemon --
+          // see the finishSettlement()/cancel() call sites. Now that the
+          // actual write happens on this timer instead of inline, those
+          // try/catches no longer see it: nothing upstream of a bare
+          // setTimeout callback catches a throw, and there's no
+          // uncaughtException handler, so an unhandled failure here would
+          // crash the daemon and orphan every other in-flight task.
+          console.error(`taskferry: failed to persist task state: ${errMessage(err)}`);
+        }
+      }, PERSIST_DEBOUNCE_MS);
+    }
+    const task = tasks.get(taskId);
+    if (task) taskEvents.emitState(task);
+  }
+
   // Scrub prompt scratch files left behind by a daemon crash or forced
   // restart. Each oversized dispatch writes its prompt to PROMPT_DIR as
   // `${task.id}.prompt.txt` (mode 0o600) and removes it from the task's own
@@ -1190,47 +1252,6 @@ export function createTaskManager({
   function ensureStateLoaded() {
     if (!stateLoadError) return;
     throw new Error(`error: could not read persisted task state: ${stateLoadError.message}\nhelp: repair ${TASKS_FILE} before using opencode task tools`);
-  }
-
-  /**
-   * @param {string} taskId
-   */
-  function persistTask(taskId) {
-    withFileLock(LOCK_FILE, () => {
-      /** @type {Task[]} */
-      let current = [];
-      try {
-        current = JSON.parse(fs.readFileSync(TASKS_FILE, "utf8"));
-      } catch (err) {
-        if (errCode(err) !== "ENOENT") throw err;
-      }
-      const byId = new Map(current.map((t) => [t.id, t]));
-      const local = tasks.get(taskId);
-      if (local) byId.set(taskId, local);
-      else byId.delete(taskId);
-      const all = Array.from(byId.values());
-      const temporary = path.join(stateDir, `.tasks-${randomUUID()}.json`);
-      // Throwing from a `finally` would mask a real error from the try block
-      // above (e.g. a full disk on writeFileSync) with an unrelated cleanup
-      // failure. Defer the cleanup error and only surface it once the try
-      // block itself has succeeded.
-      /** @type {unknown} */
-      let cleanupError;
-      try {
-        fs.writeFileSync(temporary, JSON.stringify(all, null, 2), { mode: 0o600 });
-        fs.renameSync(temporary, TASKS_FILE);
-        fs.chmodSync(TASKS_FILE, 0o600);
-      } finally {
-        try {
-          fs.unlinkSync(temporary);
-        } catch (err) {
-          if (errCode(err) !== "ENOENT") cleanupError = err;
-        }
-      }
-      if (cleanupError) throw cleanupError;
-    });
-    const task = tasks.get(taskId);
-    if (task) taskEvents.emitState(task);
   }
 
   /** @param {Task} task */
@@ -3554,6 +3575,12 @@ export function createTaskManager({
     // handles keep the event loop alive regardless of unref, so a test
     // process that constructs many managers without ever exiting needs an
     // explicit way to release them -- daemon.js's close() calls this too.
-    close: () => envFileWatcher?.close(),
+    // Also flushes any pending debounced tasks.json write so a clean
+    // shutdown never drops the last transition(s) before the timer fires.
+    close: () => {
+      flushPersist();
+      envFileWatcher?.close();
+    },
+    flushPersist,
   };
 }

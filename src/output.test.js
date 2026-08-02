@@ -1,6 +1,6 @@
 import { describe, test } from "node:test";
 import assert from "node:assert/strict";
-import { colorize, errorValue, formatWatchEvent, leanStatus, writeToon } from "./output.js";
+import { colorize, errorValue, formatWatchEvent, homeView, leanStatus, projectContext, projectList, writeToon } from "./output.js";
 
 function fakeStdoutIo(isTTY) {
   let stdout = "";
@@ -303,5 +303,131 @@ describe("writeToon status coloring", () => {
 
     assert.ok(!output().includes("\x1b["));
     assert.ok(output().includes("status: unknown"));
+  });
+});
+
+describe("projectList default row cap", () => {
+  function fakeListValue(totalCount) {
+    return {
+      directory: "/workspace/example",
+      counts: { queued: 0, running: 0, done: totalCount, crashed: 0, cancelled: 0, unknown: 0 },
+      tasks: Array.from({ length: totalCount }, (_, i) => ({
+        id: `task-${i}`,
+        status: "done",
+        model: "openai/gpt-5.6-sol",
+        startedAt: "2026-08-01T00:00:00.000Z",
+      })),
+    };
+  }
+
+  test("caps to 30 rows by default when the total exceeds 30", () => {
+    const result = projectList(fakeListValue(805));
+    assert.equal(result.tasks.length, 30);
+  });
+
+  test("does not cap when the total is at or under 30", () => {
+    const result = projectList(fakeListValue(12));
+    assert.equal(result.tasks.length, 12);
+  });
+
+  test("an explicit --limit still overrides the default", () => {
+    const result = projectList(fakeListValue(805), { limit: 5 });
+    assert.equal(result.tasks.length, 5);
+  });
+
+  test("adds a reveal-hint next[] when rows are truncated", () => {
+    const result = projectList(fakeListValue(805));
+    assert.deepEqual(result.next, ["Run taskferry list --limit 805 for all 805 tasks"]);
+  });
+
+  test("omits next[] when nothing was truncated", () => {
+    const result = projectList(fakeListValue(12));
+    assert.equal(result.next, undefined);
+  });
+
+  test("omits next[] when an explicit --limit already covers the full total", () => {
+    const result = projectList(fakeListValue(12), { limit: 100 });
+    assert.equal(result.next, undefined);
+  });
+});
+
+describe("projectContext default row cap (SessionStart hook payload)", () => {
+  function fakeContextValue(totalCount) {
+    return {
+      directory: "/workspace/example",
+      counts: { queued: 0, running: 0, done: totalCount, crashed: 0, cancelled: 0, unknown: 0 },
+      tasks: Array.from({ length: totalCount }, (_, i) => ({
+        id: `task-${i}`,
+        status: "done",
+        model: "openai/gpt-5.6-sol",
+        startedAt: "2026-08-01T00:00:00.000Z",
+      })),
+    };
+  }
+
+  test("caps to 10 rows by default when the total exceeds 10", () => {
+    const result = projectContext(fakeContextValue(805));
+    assert.equal(result.tasks.length, 10);
+  });
+
+  test("does not cap when the total is at or under 10", () => {
+    const result = projectContext(fakeContextValue(4));
+    assert.equal(result.tasks.length, 4);
+  });
+
+  test("adds a reveal-hint next[] when rows are truncated", () => {
+    const result = projectContext(fakeContextValue(805));
+    assert.deepEqual(result.next, ["Run taskferry list --limit 805 for all 805 tasks"]);
+  });
+
+  test("omits next[] when nothing was truncated", () => {
+    const result = projectContext(fakeContextValue(4));
+    assert.equal(result.next, undefined);
+  });
+
+  test("an explicit limit override still works (used only by tests, not by the CLI)", () => {
+    const result = projectContext(fakeContextValue(805), { limit: 2 });
+    assert.equal(result.tasks.length, 2);
+  });
+});
+
+describe("homeView default row cap", () => {
+  function fakeHomeValue(totalCount) {
+    return {
+      counts: { queued: 0, running: 0, done: totalCount, crashed: 0, cancelled: 0, unknown: 0 },
+      tasks: Array.from({ length: totalCount }, (_, i) => ({
+        id: `task-${i}`,
+        status: "done",
+        model: "openai/gpt-5.6-sol",
+        startedAt: "2026-08-01T00:00:00.000Z",
+      })),
+    };
+  }
+
+  test("caps to 30 rows by default when the total exceeds 30", () => {
+    const result = homeView(fakeHomeValue(805), { executablePath: "/bin/taskferry", workspace: "/workspace/example" });
+    assert.equal(result.tasks.length, 30);
+  });
+
+  test("does not cap when the total is at or under 30", () => {
+    const result = homeView(fakeHomeValue(12), { executablePath: "/bin/taskferry", workspace: "/workspace/example" });
+    assert.equal(result.tasks.length, 12);
+  });
+
+  test("appends a reveal-hint to the existing non-empty next[] when rows are truncated", () => {
+    const result = homeView(fakeHomeValue(805), { executablePath: "/bin/taskferry", workspace: "/workspace/example" });
+    assert.equal(result.next.length, 4);
+    assert.equal(result.next[3], "Run taskferry list --limit 805 for all 805 tasks");
+  });
+
+  test("does not append a reveal-hint when nothing was truncated", () => {
+    const result = homeView(fakeHomeValue(12), { executablePath: "/bin/taskferry", workspace: "/workspace/example" });
+    assert.equal(result.next.length, 3);
+  });
+
+  test("passes through a non-array tasks value (e.g. projectList's 'none found' string) unchanged, instead of coercing it to an empty array", () => {
+    const value = { counts: { queued: 0, running: 0, done: 0, crashed: 0, cancelled: 0, unknown: 0 }, tasks: "none found in this workspace" };
+    const result = homeView(value, { executablePath: "/bin/taskferry", workspace: "/workspace/example" });
+    assert.equal(result.tasks, "none found in this workspace");
   });
 });

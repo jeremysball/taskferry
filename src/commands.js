@@ -275,7 +275,7 @@ export async function runCommand(command, options, { client, io = process, signa
     case "home": {
       const directory = normalizeDirectory(options.directory || resolveWorkspaceRootFn(cwd));
       const listed = await client.request("task.list", { directory });
-      return homeView(projectList(listed), { executablePath, workspace: directory });
+      return homeView(projectList(listed, { limit: Infinity }), { executablePath, workspace: directory });
     }
     case "version":
       return { name: "taskferry", version: readPackageVersion(), protocolVersion: PROTOCOL_VERSION };

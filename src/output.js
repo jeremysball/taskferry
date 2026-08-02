@@ -166,24 +166,39 @@ function listRow(row) {
   };
 }
 
+const DEFAULT_LIST_LIMIT = 30;
+
 export function projectList(value, { limit } = {}) {
   const rows = Array.isArray(value.tasks)
     ? (value.tasks.length ? value.tasks.map(listRow) : "none found in this workspace")
     : value.tasks;
+  const total = Array.isArray(rows) ? rows.length : 0;
+  const effectiveLimit = limit !== undefined ? limit : DEFAULT_LIST_LIMIT;
+  const tasks = Array.isArray(rows) ? rows.slice(0, effectiveLimit) : rows;
+  const truncated = Array.isArray(tasks) && tasks.length < total;
   return {
     ...(value.directory ? { directory: value.directory } : {}),
     counts: value.counts,
-    tasks: Array.isArray(rows) && limit !== undefined ? rows.slice(0, limit) : rows,
+    tasks,
+    ...(truncated ? { next: [`Run taskferry list --limit ${total} for all ${total} tasks`] } : {}),
   };
 }
 
-export function projectContext(value) {
+const DEFAULT_CONTEXT_LIMIT = 10;
+
+export function projectContext(value, { limit } = {}) {
+  const rows = Array.isArray(value.tasks)
+    ? (value.tasks.length ? value.tasks.map(listRow) : "none found in this workspace")
+    : value.tasks;
+  const total = Array.isArray(rows) ? rows.length : 0;
+  const effectiveLimit = limit !== undefined ? limit : DEFAULT_CONTEXT_LIMIT;
+  const tasks = Array.isArray(rows) ? rows.slice(0, effectiveLimit) : rows;
+  const truncated = Array.isArray(tasks) && tasks.length < total;
   return {
     directory: value.directory,
     counts: value.counts,
-    tasks: Array.isArray(value.tasks)
-      ? (value.tasks.length ? value.tasks.map(listRow) : "none found in this workspace")
-      : value.tasks,
+    tasks,
+    ...(truncated ? { next: [`Run taskferry list --limit ${total} for all ${total} tasks`] } : {}),
   };
 }
 
@@ -193,16 +208,20 @@ export function homeView(value, { executablePath, workspace }) {
   const displayPath = absolutePath === home || absolutePath.startsWith(`${home}${path.sep}`)
     ? `~${absolutePath.slice(home.length)}`
     : absolutePath;
-  const rows = Array.isArray(value.tasks) ? value.tasks : [];
+  const allRows = Array.isArray(value.tasks) ? value.tasks : [];
+  const total = allRows.length;
+  const rows = allRows.slice(0, DEFAULT_LIST_LIMIT);
+  const truncated = rows.length < total;
+  const next = rows.length
+    ? ["Run taskferry status <id> for activity", "Run taskferry wait <id> to wait for settlement", "Run taskferry result <id> for the final answer"]
+    : ["Run taskferry dispatch --prompt \"<text>\" to start a task", "Run taskferry list --all to inspect every workspace"];
   return {
     bin: displayPath,
     description: "Manage background OpenCode tasks in the current workspace.",
     workspace,
     counts: value.counts,
-    tasks: value.tasks,
-    next: rows.length
-      ? ["Run taskferry status <id> for activity", "Run taskferry wait <id> to wait for settlement", "Run taskferry result <id> for the final answer"]
-      : ["Run taskferry dispatch --prompt \"<text>\" to start a task", "Run taskferry list --all to inspect every workspace"],
+    tasks: Array.isArray(value.tasks) ? rows : value.tasks,
+    next: truncated ? [...next, `Run taskferry list --limit ${total} for all ${total} tasks`] : next,
   };
 }
 

@@ -830,8 +830,19 @@ export function createTaskManager({
             runCommand: runOverlayCommandFn,
           });
     } catch (err) {
-      finishedTask.changesetStatus = "pending";
       finishedTask.changesetError = err instanceof Error ? err.message : String(err);
+      if (finishedTask.role === "advisor") {
+        // An advisor task's changeset was never meant to be applied -- whether
+        // extraction succeeds or throws, it settles as "rejected", never
+        // "pending". Without this branch, a throw here (e.g. the target
+        // directory's HEAD moved mid-dispatch) left changesetStatus: "pending"
+        // regardless of role, so a later `taskferry reject <id>` would silently
+        // succeed on a task that never had anything to reject.
+        finishedTask.changesetStatus = "rejected";
+        releaseOverlay(finishedTask);
+      } else {
+        finishedTask.changesetStatus = "pending";
+      }
       persistTask(finishedTask.id);
       return;
     }

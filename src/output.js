@@ -166,14 +166,21 @@ function listRow(row) {
   };
 }
 
+const DEFAULT_LIST_LIMIT = 30;
+
 export function projectList(value, { limit } = {}) {
   const rows = Array.isArray(value.tasks)
     ? (value.tasks.length ? value.tasks.map(listRow) : "none found in this workspace")
     : value.tasks;
+  const total = Array.isArray(rows) ? rows.length : 0;
+  const effectiveLimit = limit !== undefined ? limit : DEFAULT_LIST_LIMIT;
+  const tasks = Array.isArray(rows) ? rows.slice(0, effectiveLimit) : rows;
+  const truncated = Array.isArray(tasks) && tasks.length < total;
   return {
     ...(value.directory ? { directory: value.directory } : {}),
     counts: value.counts,
-    tasks: Array.isArray(rows) && limit !== undefined ? rows.slice(0, limit) : rows,
+    tasks,
+    ...(truncated ? { next: [`Run taskferry list --limit ${total} for all ${total} tasks`] } : {}),
   };
 }
 

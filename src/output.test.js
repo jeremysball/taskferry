@@ -1,6 +1,6 @@
 import { describe, test } from "node:test";
 import assert from "node:assert/strict";
-import { colorize, errorValue, formatWatchEvent, leanStatus, writeToon } from "./output.js";
+import { colorize, errorValue, formatWatchEvent, leanStatus, projectList, writeToon } from "./output.js";
 
 function fakeStdoutIo(isTTY) {
   let stdout = "";
@@ -303,5 +303,50 @@ describe("writeToon status coloring", () => {
 
     assert.ok(!output().includes("\x1b["));
     assert.ok(output().includes("status: unknown"));
+  });
+});
+
+describe("projectList default row cap", () => {
+  function fakeListValue(totalCount) {
+    return {
+      directory: "/workspace/example",
+      counts: { queued: 0, running: 0, done: totalCount, crashed: 0, cancelled: 0, unknown: 0 },
+      tasks: Array.from({ length: totalCount }, (_, i) => ({
+        id: `task-${i}`,
+        status: "done",
+        model: "openai/gpt-5.6-sol",
+        startedAt: "2026-08-01T00:00:00.000Z",
+      })),
+    };
+  }
+
+  test("caps to 30 rows by default when the total exceeds 30", () => {
+    const result = projectList(fakeListValue(805));
+    assert.equal(result.tasks.length, 30);
+  });
+
+  test("does not cap when the total is at or under 30", () => {
+    const result = projectList(fakeListValue(12));
+    assert.equal(result.tasks.length, 12);
+  });
+
+  test("an explicit --limit still overrides the default", () => {
+    const result = projectList(fakeListValue(805), { limit: 5 });
+    assert.equal(result.tasks.length, 5);
+  });
+
+  test("adds a reveal-hint next[] when rows are truncated", () => {
+    const result = projectList(fakeListValue(805));
+    assert.deepEqual(result.next, ["Run taskferry list --limit 805 for all 805 tasks"]);
+  });
+
+  test("omits next[] when nothing was truncated", () => {
+    const result = projectList(fakeListValue(12));
+    assert.equal(result.next, undefined);
+  });
+
+  test("omits next[] when an explicit --limit already covers the full total", () => {
+    const result = projectList(fakeListValue(12), { limit: 100 });
+    assert.equal(result.next, undefined);
   });
 });

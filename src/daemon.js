@@ -43,8 +43,81 @@ function resolveSocketPath(options = {}) {
   return options.socketPath || options.env?.TASKFERRY_SOCKET_PATH || path.join(resolveRuntimeDir(options), "daemon.sock");
 }
 
+const DEFAULT_SLOW_REQUEST_MS = 500;
+const DEFAULT_PERF_LOG_MAX_BYTES = 5 * 1024 * 1024; // 5 MiB
+
+function isEnabledFlag(value) {
+  return ["1", "true"].includes(value);
+}
+
+// Rotates perf.log to perf.log.1 (clobbering any previous perf.log.1) once
+// the live file would exceed maxBytes, so profiling can be left on
+// indefinitely without the log growing unbounded. A rename right before the
+// write that would tip it over keeps this a single stat+rename per request,
+// not a periodic sweep.
+function rotateIfOversized(perfLogPath, maxBytes, nextLineBytes) {
+  let size;
+  try {
+    ({ size } = fs.statSync(perfLogPath));
+  } catch (error) {
+    if (error.code === "ENOENT") return;
+    throw error;
+  }
+  if (size + nextLineBytes <= maxBytes) return;
+  fs.renameSync(perfLogPath, `${perfLogPath}.1`);
+}
+
+// One JSONL line per handled request in <state-dir>/perf.log, so a latency
+// spike (the kind that shows up as "the daemon felt slow for a second") has
+// a durable per-method trail instead of only ever being visible live.
+// Opt-in via TASKFERRY_PROFILING_ENABLED=1 -- disabled by default so every
+// daemon isn't paying an append-per-request write it never asked for.
+// fs.appendFileSync is used deliberately -- this runs in dispatchRequest's
+// finally block on every request, so it needs to be cheap and ordered, not
+// fire-and-forget async where write order (and therefore log order) isn't
+// guaranteed under concurrent in-flight requests.
+function profilingEnabled(env, config) {
+  if (env?.TASKFERRY_PROFILING_ENABLED !== undefined) return isEnabledFlag(env.TASKFERRY_PROFILING_ENABLED);
+  return config?.profilingEnabled ?? false;
+}
+
+function makeRequestTimer({ stateDir, env, config, appendLine = (filePath, line) => fs.appendFileSync(filePath, line) }) {
+  if (!profilingEnabled(env, config)) return null;
+  fs.mkdirSync(stateDir, { recursive: true, mode: 0o700 });
+  const perfLogPath = path.join(stateDir, "perf.log");
+  const maxBytes = Number(env?.TASKFERRY_PERF_LOG_MAX_BYTES ?? DEFAULT_PERF_LOG_MAX_BYTES);
+  const slowRequestMs = Number(env?.TASKFERRY_SLOW_REQUEST_MS ?? DEFAULT_SLOW_REQUEST_MS);
+  return function onRequestTimed({ method, durationMs, ok }) {
+    const rounded = Math.round(durationMs * 100) / 100;
+    const record = { method, ok, ts: new Date().toISOString(), durationMs: rounded };
+    const line = `${JSON.stringify(record)}\n`;
+    try {
+      rotateIfOversized(perfLogPath, maxBytes, Buffer.byteLength(line));
+      appendLine(perfLogPath, line);
+    } catch (error) {
+      process.stderr.write(`warn: failed to write perf.log: ${error instanceof Error ? error.message : String(error)}\n`);
+    }
+    if (rounded >= slowRequestMs) {
+      process.stderr.write(`slow request: ${method} took ${rounded}ms (>= ${slowRequestMs}ms threshold)\n`);
+    }
+  };
+}
+
 function defaultSpawnReplacement({ daemonEntry, env }) {
   spawn(process.execPath, [daemonEntry], { detached: true, stdio: "ignore", env }).unref();
+}
+
+function makeWriteMessage(maxOutboundBytes) {
+  return (socket, message) => {
+    if (socket.destroyed) return false;
+    const encoded = encodeMessage(message);
+    if (socket.writableLength + Buffer.byteLength(encoded) > maxOutboundBytes) {
+      socket.destroy();
+      return false;
+    }
+    socket.write(encoded);
+    return true;
+  };
 }
 
 function socketHealth(socketPath, timeoutMs) {
@@ -227,6 +300,7 @@ function invoke(manager, request) {
 const DAEMON_DEFAULTS = {
   platform: process.platform,
   env: process.env,
+  config: {},
   healthCheckTimeoutMs: 250,
   maxOutboundBytes: MAX_BUFFER_BYTES,
   maxInFlightRequests: 256,
@@ -245,10 +319,11 @@ function resolveDaemonOptions(options = {}) {
   const runtimeDir = merged.runtimeDir ?? resolveRuntimeDir({ env, stateDir });
   const socketPath = merged.socketPath ?? resolveSocketPath({ env, stateDir, runtimeDir });
   return {
-    env,
     stateDir,
     runtimeDir,
     socketPath,
+    env,
+    config: merged.config,
     platform: merged.platform,
     healthCheckTimeoutMs: merged.healthCheckTimeoutMs,
     maxOutboundBytes: merged.maxOutboundBytes,
@@ -266,6 +341,7 @@ export async function startDaemon(options = {}) {
   const {
     platform,
     env,
+    config,
     stateDir,
     runtimeDir,
     socketPath,
@@ -288,22 +364,14 @@ export async function startDaemon(options = {}) {
   const clients = new Set();
   const subscriptions = new Map();
   const inFlightRef = { current: 0 };
-  const writeMessage = (socket, message) => {
-    if (socket.destroyed) return false;
-    const encoded = encodeMessage(message);
-    if (socket.writableLength + Buffer.byteLength(encoded) > maxOutboundBytes) {
-      socket.destroy();
-      return false;
-    }
-    socket.write(encoded);
-    return true;
-  };
+  const writeMessage = makeWriteMessage(maxOutboundBytes);
   const onEvent = (event) => deliverEvent(subscriptions, writeMessage, event);
   const manager = taskManagerFactory({ ...taskManagerOptions, onEvent, stateDir, runtimeDir });
   const startupSourceSignature = sourceSignature(sourceDir);
   const syncActivity = () => syncActivitySubscriptions(manager, subscriptions);
   const restart = { pending: false, restarting: false };
   const maybeRestartRef = { current: null };
+  const onRequestTimed = makeRequestTimer({ stateDir, env, config });
   const server = createDaemonServer({
     clients,
     subscriptions,
@@ -314,6 +382,7 @@ export async function startDaemon(options = {}) {
     maxInFlightRequests,
     invoke,
     responseError,
+    onRequestTimed,
     maybeRestart: () => maybeRestartRef.current?.(),
   });
 
@@ -349,7 +418,8 @@ export async function startDaemon(options = {}) {
 }
 
 async function main() {
-  const daemon = await startDaemon({ taskManagerOptions: { config: loadConfig() } });
+  const config = loadConfig();
+  const daemon = await startDaemon({ config, taskManagerOptions: { config } });
   const stop = async () => {
     await daemon.close();
     process.exit(0);

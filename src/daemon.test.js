@@ -365,6 +365,114 @@ describe("Unix socket daemon: concurrency and workspace filtering", () => {
     assert.ok(fake.calls.some((call) => call[0] === "poll"));
   });
 
+  test("does not write perf.log or flag slow requests unless TASKFERRY_PROFILING_ENABLED=1", async (t) => {
+    const paths = temporaryPaths(t);
+    const fake = fakeManagerFactory();
+    const daemon = await startDaemon({
+      ...paths,
+      env: { ...process.env, TASKFERRY_SLOW_REQUEST_MS: "0" },
+      taskManagerFactory: fake.factory,
+    });
+    t.after(() => daemon.close());
+    const peer = await openPeer(paths.socketPath);
+    t.after(() => peer.close());
+
+    await peer.request("health-1", SYSTEM_HEALTH);
+
+    assert.equal(fs.existsSync(path.join(paths.stateDir, "perf.log")), false);
+  });
+
+  test("enables profiling from config.json's profilingEnabled when the env var is unset", async (t) => {
+    const paths = temporaryPaths(t);
+    const fake = fakeManagerFactory();
+    const daemon = await startDaemon({
+      ...paths,
+      config: { profilingEnabled: true },
+      taskManagerFactory: fake.factory,
+    });
+    t.after(() => daemon.close());
+    const peer = await openPeer(paths.socketPath);
+    t.after(() => peer.close());
+
+    await peer.request("health-1", SYSTEM_HEALTH);
+
+    const perfLogPath = path.join(paths.stateDir, "perf.log");
+    const lines = fs.readFileSync(perfLogPath, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+    assert.ok(lines.some((line) => line.method === SYSTEM_HEALTH));
+  });
+
+  test("TASKFERRY_PROFILING_ENABLED=0 overrides a config.json profilingEnabled: true", async (t) => {
+    const paths = temporaryPaths(t);
+    const fake = fakeManagerFactory();
+    const daemon = await startDaemon({
+      ...paths,
+      env: { ...process.env, TASKFERRY_PROFILING_ENABLED: "0" },
+      config: { profilingEnabled: true },
+      taskManagerFactory: fake.factory,
+    });
+    t.after(() => daemon.close());
+    const peer = await openPeer(paths.socketPath);
+    t.after(() => peer.close());
+
+    await peer.request("health-1", SYSTEM_HEALTH);
+
+    assert.equal(fs.existsSync(path.join(paths.stateDir, "perf.log")), false);
+  });
+
+  test("writes per-request latency to perf.log and flags slow requests via env threshold when enabled", async (t) => {
+    const paths = temporaryPaths(t);
+    const fake = fakeManagerFactory();
+    const daemon = await startDaemon({
+      ...paths,
+      env: { ...process.env, TASKFERRY_PROFILING_ENABLED: "1", TASKFERRY_SLOW_REQUEST_MS: "10" },
+      taskManagerFactory: fake.factory,
+    });
+    t.after(() => daemon.close());
+    const peer = await openPeer(paths.socketPath);
+    t.after(() => peer.close());
+
+    const stderrChunks = [];
+    const originalWrite = process.stderr.write.bind(process.stderr);
+    process.stderr.write = (chunk, ...rest) => {
+      stderrChunks.push(String(chunk));
+      return originalWrite(chunk, ...rest);
+    };
+    t.after(() => {
+      process.stderr.write = originalWrite;
+    });
+
+    await peer.request("health-1", SYSTEM_HEALTH);
+    await peer.request("slow-1", "task.wait", { taskId: "slow", timeoutMs: 100 });
+
+    const perfLogPath = path.join(paths.stateDir, "perf.log");
+    const lines = fs.readFileSync(perfLogPath, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+    assert.ok(lines.some((line) => line.method === SYSTEM_HEALTH && line.ok === true));
+    assert.ok(lines.some((line) => line.method === "task.wait" && line.durationMs >= 10));
+    assert.ok(stderrChunks.some((chunk) => chunk.includes("slow request: task.wait")));
+  });
+
+  test("rotates perf.log to perf.log.1 once it would exceed TASKFERRY_PERF_LOG_MAX_BYTES", async (t) => {
+    const paths = temporaryPaths(t);
+    const fake = fakeManagerFactory();
+    const daemon = await startDaemon({
+      ...paths,
+      env: { ...process.env, TASKFERRY_PROFILING_ENABLED: "1", TASKFERRY_PERF_LOG_MAX_BYTES: "120" },
+      taskManagerFactory: fake.factory,
+    });
+    t.after(() => daemon.close());
+    const peer = await openPeer(paths.socketPath);
+    t.after(() => peer.close());
+
+    for (let i = 0; i < 5; i++) {
+      await peer.request(`health-${i}`, SYSTEM_HEALTH);
+    }
+
+    const perfLogPath = path.join(paths.stateDir, "perf.log");
+    const rotatedPath = `${perfLogPath}.1`;
+    assert.ok(fs.existsSync(rotatedPath), "expected perf.log.1 to exist after rotation");
+    assert.ok(fs.statSync(perfLogPath).size <= 120, "live perf.log should stay under the configured max");
+  });
+
   test("caps globally in-flight requests so disconnected waits stay bounded", async (t) => {
     const paths = temporaryPaths(t);
     const fake = fakeManagerFactory();

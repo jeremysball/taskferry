@@ -246,3 +246,43 @@ out rather than done half right.
 
 No log rotation or cleanup: `logs/` grows unbounded. Fine for interactive
 use; long-lived automation wants an external retention policy.
+
+## Request-latency profiling
+
+Opt-in, off by default: set `TASKFERRY_PROFILING_ENABLED=1`, or the
+equivalent `profilingEnabled: true` in `config.json` (see
+[config.md](config.md); the env var, if set, takes precedence over the
+config value, same as every other field there), to have every RPC request
+(including `event.subscribe`) timed from the moment `dispatchRequest`
+starts handling it to the moment its response is written, and appended as
+one JSONL line to `<state-dir>/perf.log`. Like every other config field,
+this is read once at daemon startup — flipping it takes a daemon restart
+to take effect (see [config.md#no-hot-reload](config.md#no-hot-reload)).
+
+```json
+{"method":"task.dispatch","ok":true,"ts":"2026-08-01T12:00:00.000Z","durationMs":4.21}
+```
+
+With profiling disabled (the default), no timing happens, nothing is
+written, and there's no `slow request` stderr output either — a daemon
+nobody has opted into profiling pays none of this cost.
+
+`durationMs` is wall-clock time inside the daemon process only — it does not
+include time spent in transit on the socket or queued behind
+`SERVER_BUSY`/backpressure. A request whose `durationMs` meets or exceeds
+`TASKFERRY_SLOW_REQUEST_MS` (default `500`) also gets an immediate
+`slow request: <method> took <ms>ms (>= <threshold>ms threshold)` line on the
+daemon's stderr, so a spike shows up live without having to tail the log
+file.
+
+`perf.log` rotates: once appending the next line would push it past
+`TASKFERRY_PERF_LOG_MAX_BYTES` (default `5242880`, 5 MiB), the live file is
+renamed to `perf.log.1` (clobbering any previous `perf.log.1`) and a fresh
+`perf.log` starts from that line — one backup generation, checked on every
+write rather than on a timer, so profiling can be left on indefinitely
+without unbounded growth. This is independent of `logs/`'s lack of rotation
+above.
+
+A failure to write `perf.log` itself (e.g. a full disk) is caught and
+reported as a `warn:` line on stderr rather than crashing request handling —
+profiling is diagnostic, not on the request's critical path.

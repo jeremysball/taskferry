@@ -2882,6 +2882,18 @@ function resolveFilesystemSimpleOptions(rawOptions) {
 }
 
 /**
+ * @param {Record<string, any>} rawOptions
+ * @param {Record<string, any>} config
+ */
+function resolveFilesystemDenylists(rawOptions, config) {
+  return {
+    allowedDirs: rawOptions.allowedDirs ?? parseAllowedDirs(process.env.TASKFERRY_ALLOWED_DIRS ?? config.allowedDirs),
+    envDenylist: rawOptions.envDenylist ?? parseEnvDenylist(process.env.TASKFERRY_ENV_DENYLIST ?? config.envDenylist),
+    sandboxDenylist: rawOptions.sandboxDenylist ?? parseSandboxDenylist(process.env.TASKFERRY_SANDBOX_DENYLIST ?? config.sandboxDenylist),
+  };
+}
+
+/**
  * The derived filesystem options: the allow/deny lists, `runtimeDir`
  * (derived from `stateDir`), and `cacheDir` (derived from `process.env`).
  * Each pulls an env-var-or-config-value-or-raw triple, which is two
@@ -2895,16 +2907,14 @@ function resolveFilesystemDerivedOptions(rawOptions) {
   const config = rawOptions.config || {};
   const runtimeDir = rawOptions.runtimeDir ?? path.join(rawOptions.stateDir ?? DEFAULT_STATE_DIR, "run");
   return {
-    allowedDirs: rawOptions.allowedDirs ?? parseAllowedDirs(process.env.TASKFERRY_ALLOWED_DIRS ?? config.allowedDirs),
-    envDenylist: rawOptions.envDenylist ?? parseEnvDenylist(process.env.TASKFERRY_ENV_DENYLIST ?? config.envDenylist),
-    sandboxDenylist: rawOptions.sandboxDenylist ?? parseSandboxDenylist(process.env.TASKFERRY_SANDBOX_DENYLIST ?? config.sandboxDenylist),
-    runtimeDir,
+    ...resolveFilesystemDenylists(rawOptions, config),
     // Scoped under runtimeDir (not plain os.tmpdir()) so two daemon
     // instances -- isolated via TASKFERRY_STATE_DIR/RUNTIME_DIR or not --
     // never share an overlay namespace; see resolveOverlayTmpRoot()'s doc
     // comment (taskferry#286).
     overlayTmpRoot: rawOptions.overlayTmpRoot ?? resolveOverlayTmpRoot({ env: process.env, runtimeDir }),
     cacheDir: rawOptions.cacheDir ?? resolveCacheDir(process.env),
+    runtimeDir,
   };
 }
 
@@ -3555,6 +3565,11 @@ function createManagerContext(opts) {
   // `ctx.helpers = ...` (or `ctx.api = ...`) only resolves for those
   // closures' deferred lookups if it's the same object reference, not a
   // spread copy that leaves the original without the field.
+  // The inner parens below are required for the JSDoc double-cast
+  // (`as unknown as T`) idiom to apply to the object literal; removing
+  // them changes what TypeScript attaches the cast to, it's not a
+  // stylistic redundancy.
+  // eslint-disable-next-line sonarjs/no-redundant-parentheses
   const ctx = /** @type {ManagerContext} */ (/** @type {unknown} */ ({ opts, paths, limits, state, events, maps, schedulers }));
   ctx.env = buildManagerEnvHelpers(ctx);
   ctx.activity = buildManagerActivity(ctx);
@@ -3980,6 +3995,38 @@ function releaseOverlayForTask(task, ctx) {
 }
 
 /**
+ * Validates caller-supplied env keys/values up front so bad input throws
+ * synchronously (startTask() catches and surfaces as spawnError on a
+ * crashed task).
+ * @param {NodeJS.ProcessEnv} callerEnv
+ */
+function assertValidCallerEnv(callerEnv) {
+  for (const name of Object.keys(callerEnv)) {
+    if (name === "" || name.includes("=")) {
+      throw new Error(`error: invalid env key in caller-supplied env: ${JSON.stringify(name)}\nhelp: env keys must be non-empty strings without '=' characters`);
+    }
+    if (typeof callerEnv[name] !== "string") {
+      throw new Error(`error: env value for ${JSON.stringify(name)} must be a string, got ${typeof callerEnv[name]}\nhelp: cast values to strings before dispatching`);
+    }
+  }
+}
+
+/**
+ * Copies `source`'s own keys into `result`, skipping protected
+ * (`CALLER_ENV_EXCLUDED`) and denylisted keys.
+ * @param {NodeJS.ProcessEnv} result
+ * @param {NodeJS.ProcessEnv} source
+ * @param {Set<string>} denySet
+ */
+function layerEnvInto(result, source, denySet) {
+  for (const key of Object.keys(source)) {
+    if (!CALLER_ENV_EXCLUDED.has(key) && !denySet.has(key)) {
+      result[key] = source[key];
+    }
+  }
+}
+
+/**
  * Builds the final base environment for a spawned child, three layers
  * unioned low-to-high priority: `envFileVars` (loaded once from
  * `envFilePath` at daemon startup, and kept live by
@@ -4004,27 +4051,14 @@ function releaseOverlayForTask(task, ctx) {
  */
 function buildSanitizedEnvironment(env, ctx) {
   const callerEnv = env ?? {};
-  // Validate caller-supplied keys up front so bad input throws
-  // synchronously (same behavior as before: startTask() catches and
-  // surfaces as spawnError on a crashed task).
-  for (const name of Object.keys(callerEnv)) {
-    if (name === "" || name.includes("=")) {
-      throw new Error(`error: invalid env key in caller-supplied env: ${JSON.stringify(name)}\nhelp: env keys must be non-empty strings without '=' characters`);
-    }
-    if (typeof callerEnv[name] !== "string") {
-      throw new Error(`error: env value for ${JSON.stringify(name)} must be a string, got ${typeof callerEnv[name]}\nhelp: cast values to strings before dispatching`);
-    }
-  }
+  assertValidCallerEnv(callerEnv);
+
   // Build the merged env in one pass instead of spreading process.env
   // and layering envFileVars/callerEnv with deletes afterward.
   const denySet = new Set(ctx.envDenylist);
   /** @type {NodeJS.ProcessEnv} */
   const result = {};
-  for (const key of Object.keys(ctx.envFileVars)) {
-    if (!CALLER_ENV_EXCLUDED.has(key) && !denySet.has(key)) {
-      result[key] = ctx.envFileVars[key];
-    }
-  }
+  layerEnvInto(result, ctx.envFileVars, denySet);
   for (const key of Object.keys(process.env)) {
     if (!denySet.has(key)) {
       result[key] = process.env[key];
@@ -4032,11 +4066,7 @@ function buildSanitizedEnvironment(env, ctx) {
   }
   // Overlay caller env: caller wins except for protected (excluded) and
   // denylisted keys.
-  for (const key of Object.keys(callerEnv)) {
-    if (!CALLER_ENV_EXCLUDED.has(key) && !denySet.has(key)) {
-      result[key] = callerEnv[key];
-    }
-  }
+  layerEnvInto(result, callerEnv, denySet);
   return result;
 }
 

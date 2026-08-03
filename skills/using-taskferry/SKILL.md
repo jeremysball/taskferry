@@ -228,6 +228,20 @@ taskferry wait <id>
 taskferry tail <id> --chars 2000
 ```
 
+**Never read a task's raw log file directly** (`~/.local/state/taskferry/logs/*.ndjson`,
+or any `--directory`/workspace-scoped equivalent) with `cat`/`grep`/`jq`/a
+one-off script in place of a CLI command. `taskferry tail`, `wait
+--summarize`, `result`, and `summary` are the sanctioned interface — they
+exist specifically so nothing has to parse the raw event stream by hand.
+Reaching around them costs the same context a raw `tail`/`cat` would, gains
+nothing a CLI command doesn't already give more cheaply, and drifts from
+whatever the CLI does to redact or bound output. The **only** standing
+exception is the `workdir`-mismatch diagnostic in "When a worker's tool
+calls don't honor `--directory`" below, which specifically needs the raw
+`type=="tool_use"` `workdir` field the CLI commands don't surface — that one
+stays scoped to that failure mode, not a general license to grep logs
+whenever a CLI command feels slower.
+
 Do not pass `--timeout` to `taskferry wait`. The process exits on its own the
 moment the task settles; a timeout only makes the caller re-issue `wait` in a
 polling loop for no benefit.

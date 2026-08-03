@@ -240,6 +240,9 @@ const DAEMON_DEFAULTS = {
 
 function resolveDaemonOptions(options = {}) {
   const merged = { ...DAEMON_DEFAULTS, ...options };
+  for (const key of Object.keys(DAEMON_DEFAULTS)) {
+    if (merged[key] === undefined) merged[key] = DAEMON_DEFAULTS[key];
+  }
   const env = merged.env;
   const stateDir = merged.stateDir ?? resolveStateDir(env);
   const runtimeDir = merged.runtimeDir ?? resolveRuntimeDir({ env, stateDir });

@@ -1,6 +1,5 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { EventEmitter } from "node:events";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -9,18 +8,11 @@ import { runCli } from "./cli.js";
 import { parseRequestLine } from "./protocol.js";
 import { createTaskManager, DEFAULT_SUMMARY_MODEL } from "./tasks.js";
 import { resolveWorkspaceRoot } from "./paths.js";
+import { fakeChild } from "./tasks.test-helpers.js";
 
 const TASK_ACTIVITY = "task.activity";
 const TASK_STATE = "task.state";
 const ACTIVITY_DIR_PREFIX = "taskferry-activity-test-";
-
-function fakeChild(pid = 4242) {
-  const child = new EventEmitter();
-  child.pid = pid;
-  child.unref = () => {};
-  child.stdout = new EventEmitter();
-  return child;
-}
 
 describe("activity snapshots", () => {
   test("keeps bounded narration Unicode-safe when the byte limit cuts through an emoji", () => {

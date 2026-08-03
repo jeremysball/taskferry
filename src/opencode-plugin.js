@@ -2,7 +2,7 @@ import fs from "node:fs";
 import { connectClient } from "./client.js";
 
 const ACTIVE_STATUSES = new Set(["queued", "running"]);
-const TERMINAL_STATUSES = new Set(["done", "crashed", "cancelled"]);
+export const TERMINAL_STATUSES = new Set(["done", "crashed", "cancelled"]);
 const TOAST_VARIANTS = {
   queued: "info",
   running: "info",

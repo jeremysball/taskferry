@@ -104,6 +104,7 @@ export async function dispatchRequest({ subscriptions, manager, writeMessage, sy
 }
 
 export function createDaemonServer({ clients, subscriptions, manager, writeMessage, syncActivity, inFlightRef, maxInFlightRequests, maybeRestart, invoke, responseError }) {
+  const dispatchDeps = { subscriptions, manager, writeMessage, syncActivity, inFlightRef, maxInFlightRequests, maybeRestart, invoke, responseError };
   return net.createServer((socket) => {
     clients.add(socket);
     socket.setEncoding("utf8");
@@ -132,7 +133,7 @@ export function createDaemonServer({ clients, subscriptions, manager, writeMessa
         const line = buffer.slice(0, newline);
         buffer = buffer.slice(newline + 1);
         if (line) {
-          void dispatchRequest({ subscriptions, manager, writeMessage, syncActivity, inFlightRef, maxInFlightRequests, maybeRestart, invoke, responseError }, socket, line);
+          void dispatchRequest(dispatchDeps, socket, line);
         }
       }
     });

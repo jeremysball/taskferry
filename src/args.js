@@ -117,21 +117,45 @@ function parseFields(value) {
   return fields;
 }
 
+// The key a flag definition writes to: its explicit `key` when the flag
+// renames or camelCases its name, otherwise the flag name itself with the
+// leading `--` and any `-word` hyphenation collapsed to camelCase.
+function flagKeyName(flagName, def) {
+  return def.key ?? flagName.slice(2).replace(/-([a-z])/g, (_, letter) => letter.toUpperCase());
+}
+
+// Every flag command allows gets its default here: bare booleans default
+// false, everything else defaults to undefined (omitted from the RPC
+// payload -- see isSet() in commands.js) until the caller sets it. Derived
+// from FLAGS' own per-command allow-lists so a command's default-option
+// shape can't drift out of sync with which flags it actually accepts.
+// Migration-only entries (no `allow`) are never a real command's default.
+function flagDefaultsFor(command) {
+  const defaults = {};
+  for (const [flagName, def] of Object.entries(FLAGS)) {
+    if (def.mention || !def.allow?.includes(command)) continue;
+    defaults[flagKeyName(flagName, def)] = def.bool ? false : void 0;
+  }
+  return defaults;
+}
+
+// Fields FLAGS can't express (the positional task id, and defaults that
+// aren't simply false/undefined) are layered on top of the derived shape.
 const DEFAULT_OPTIONS = {
-  dispatch: (c) => ({ prompt: void 0, directory: c, model: void 0, variant: void 0, sessionId: void 0, finalMarker: void 0, noSandbox: false, noOverlay: false, allowedDirs: void 0, executor: void 0 }),
-  advisor: () => ({ prompt: void 0, model: void 0, directory: void 0, variant: void 0, sessionId: void 0, timeoutMs: void 0, executor: void 0, summarizeContext: false }),
-  cancel: () => ({ taskId: void 0, graceMs: void 0 }),
-  wait: () => ({ taskId: void 0, timeoutMs: void 0, tailChars: void 0, full: false, summarize: false }),
-  status: () => ({ taskId: void 0, full: false }),
-  tail: () => ({ taskId: void 0, chars: void 0 }),
-  summary: () => ({ taskId: void 0, mode: "report", maxWords: void 0, wait: false }),
-  result: () => ({ taskId: void 0, full: false, fields: void 0, diff: false }),
+  dispatch: (c) => ({ ...flagDefaultsFor("dispatch"), directory: c }),
+  advisor: () => flagDefaultsFor("advisor"),
+  cancel: () => ({ taskId: void 0, ...flagDefaultsFor("cancel") }),
+  wait: () => ({ taskId: void 0, ...flagDefaultsFor("wait") }),
+  status: () => ({ taskId: void 0, ...flagDefaultsFor("status") }),
+  tail: () => ({ taskId: void 0, ...flagDefaultsFor("tail") }),
+  summary: () => ({ taskId: void 0, ...flagDefaultsFor("summary"), mode: "report" }),
+  result: () => ({ taskId: void 0, ...flagDefaultsFor("result") }),
   accept: () => ({ taskId: void 0 }),
   reject: () => ({ taskId: void 0 }),
-  list: () => ({ directory: void 0, all: false, limit: void 0 }),
-  watch: () => ({ directory: void 0, format: "toon", summaries: false, taskId: void 0, flushIntervalMs: void 0 }),
-  context: () => ({ directory: void 0, format: "toon" }),
-  doctor: () => ({ full: false, stats: false }),
+  list: () => flagDefaultsFor("list"),
+  watch: () => ({ ...flagDefaultsFor("watch"), format: "toon", taskId: void 0 }),
+  context: () => ({ ...flagDefaultsFor("context"), format: "toon" }),
+  doctor: () => flagDefaultsFor("doctor"),
   setup: () => ({}),
 };
 

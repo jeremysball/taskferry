@@ -564,8 +564,8 @@ export function isOutsideDirectory(directory, candidate) {
  * @property {() => void} launchQueuedTasks
  * @property {(taskId: string) => void} persistTask
  * @property {(task: Task, opts?: {force?: boolean}) => Promise<unknown>} scheduleActivity
- * @property {(task: Task) => void} classifyTrailingLogFailure
- * @property {(task: Task) => void} startRunningWatcher
+ * @property {(task: Task, executor: import("./executor.js").WorkerExecutor) => void} classifyTrailingLogFailure
+ * @property {(task: Task, executor: import("./executor.js").WorkerExecutor) => void} startRunningWatcher
  * @property {(taskId: string) => void} stopRunningWatcher
  * @property {(taskId: string) => string|null} readSessionIdFromLog
  * @property {(task: Task) => void} evaluateOutputCompleteness
@@ -1082,7 +1082,7 @@ function onChildExit(ctx, shared, code, signal) {
     clearTimeout(timer);
     ctx.escalationTimers.delete(task.id);
   }
-  ctx.classifyTrailingLogFailure(task);
+  ctx.classifyTrailingLogFailure(task, shared.executor);
   ctx.stopRunningWatcher(task.id);
   task.status = resolveChildExitStatus(task, code, signal);
   surfaceBootCrashFailure(task, code);
@@ -1256,7 +1256,7 @@ function spawnTaskChild(ctx, launchInfo, task) {
     ctx.incRunning();
     ctx.persistTask(task.id);
     ctx.scheduleActivity(task, { force: true });
-    ctx.startRunningWatcher(task);
+    ctx.startRunningWatcher(task, executor);
     child.unref();
   } catch (err) {
     if (logFd != null) fs.closeSync(logFd);
@@ -2594,7 +2594,7 @@ function resolveChunkProviderFailure(lines, carry, errorBucketPrefix) {
  * interval callback's complexity under the family's ceilings.
  * @param {{bytesRead: number, carry: string, outputSeen: boolean, currentNoOutputTimeout: number, lastActivityMs: number}} state
  * @param {Task} current
- * @param {{failRunningTask: (task: Task, reason: string, detail?: string) => void, scheduleActivity: (task: Task) => Promise<unknown>, postOutputNoOutputTimeout: number}} ctx
+ * @param {{failRunningTask: (task: Task, reason: string, detail?: string) => void, scheduleActivity: (task: Task) => Promise<unknown>, postOutputNoOutputTimeout: number, errorBucketPrefix: string}} ctx
  * @returns {boolean}
  */
 function consumeWatchdogLogChunk(state, current, ctx) {
@@ -2625,7 +2625,7 @@ function consumeWatchdogLogChunk(state, current, ctx) {
   const { failure, hasParseableLine } = resolveChunkProviderFailure(
     lines,
     state.carry,
-    resolveExecutor(current.executorId).errorBucketPrefix
+    ctx.errorBucketPrefix
   );
   if (failure) {
     ctx.failRunningTask(current, failure.bucket, failure.detail);
@@ -2648,7 +2648,7 @@ function consumeWatchdogLogChunk(state, current, ctx) {
  * task on a provider failure) and enforce the no-output timeout. Errors from
  * log reads (rotated/removed log) are swallowed and retried next tick.
  * @param {{bytesRead: number, carry: string, outputSeen: boolean, currentNoOutputTimeout: number, lastActivityMs: number}} state
- * @param {{taskId: string, tasks: Map<string, Task>, stopRunningWatcher: (taskId: string) => void, failRunningTask: (task: Task, reason: string, detail?: string) => void, scheduleActivity: (task: Task) => Promise<unknown>, postOutputNoOutputTimeout: number}} ctx
+ * @param {{taskId: string, tasks: Map<string, Task>, stopRunningWatcher: (taskId: string) => void, failRunningTask: (task: Task, reason: string, detail?: string) => void, scheduleActivity: (task: Task) => Promise<unknown>, postOutputNoOutputTimeout: number, errorBucketPrefix: string}} ctx
  */
 function watchdogTick(state, ctx) {
   const current = ctx.tasks.get(ctx.taskId);
@@ -3337,7 +3337,7 @@ function buildManagerInternalHelpers(ctx) {
      * delegated to {@link startTaskFor}, which takes every factory closure
      * dependency explicitly via `ctx`.
      * @param {Task} task */
-    startTask: (task) => startTaskFor(task, { pendingLaunches: ctx.maps.pendingLaunches, SUMMARY_DIR: ctx.paths.SUMMARY_DIR, PROMPT_DIR: ctx.paths.PROMPT_DIR, spawnFn: ctx.opts.spawnFn, runOverlayCommandFn: ctx.opts.runOverlayCommandFn, sandboxEnabled: ctx.opts.sandboxEnabled, platform: ctx.opts.platform, overlayEnabled: ctx.opts.overlayEnabled, overlayTmpRoot: ctx.opts.overlayTmpRoot, allowedDirs: ctx.opts.allowedDirs, stateDir: ctx.opts.stateDir, cacheDir: ctx.opts.cacheDir, runtimeDir: ctx.opts.runtimeDir, existsFn: ctx.opts.existsFn, statFn: ctx.opts.statFn, readdirFn: ctx.opts.readdirFn, sandboxDenylist: ctx.opts.sandboxDenylist, resolveGitCommonDirFn: ctx.opts.resolveGitCommonDirFn, resolveGitDirFn: ctx.opts.resolveGitDirFn, requireBwrap: () => ctx.env.requireBwrap(), requireOverlaySupport: () => ctx.env.requireOverlaySupport(), dispatchEnvironment: (env, taskId) => ctx.env.dispatchEnvironment(env, taskId), summaryEnvironment: (env) => ctx.env.summaryEnvironment(env), settleWaiters: (taskId) => ctx.helpers.settleWaiters(taskId), launchQueuedTasks: () => ctx.helpers.launchQueuedTasks(), persistTask: (taskId) => ctx.helpers.persistTask(taskId), scheduleActivity: (task, options) => ctx.helpers.scheduleActivity(task, options), classifyTrailingLogFailure: (task) => ctx.helpers.classifyTrailingLogFailure(task), startRunningWatcher: (task) => ctx.helpers.startRunningWatcher(task), stopRunningWatcher: (taskId) => ctx.helpers.stopRunningWatcher(taskId), extractChangesetForTask: (task) => ctx.env.extractChangesetForTask(task), sendSignal: (pid, signal) => ctx.helpers.sendSignal(pid, signal), activityCache: ctx.activity.cache, logHasEventCache: ctx.maps.logHasEventCache, escalationTimers: ctx.maps.escalationTimers, tasks: ctx.maps.tasks, decRunning: () => { ctx.state.runningCount--; }, incRunning: () => { ctx.state.runningCount++; }, readSessionIdFromLog, evaluateOutputCompleteness }),
+    startTask: (task) => startTaskFor(task, { pendingLaunches: ctx.maps.pendingLaunches, SUMMARY_DIR: ctx.paths.SUMMARY_DIR, PROMPT_DIR: ctx.paths.PROMPT_DIR, spawnFn: ctx.opts.spawnFn, runOverlayCommandFn: ctx.opts.runOverlayCommandFn, sandboxEnabled: ctx.opts.sandboxEnabled, platform: ctx.opts.platform, overlayEnabled: ctx.opts.overlayEnabled, overlayTmpRoot: ctx.opts.overlayTmpRoot, allowedDirs: ctx.opts.allowedDirs, stateDir: ctx.opts.stateDir, cacheDir: ctx.opts.cacheDir, runtimeDir: ctx.opts.runtimeDir, existsFn: ctx.opts.existsFn, statFn: ctx.opts.statFn, readdirFn: ctx.opts.readdirFn, sandboxDenylist: ctx.opts.sandboxDenylist, resolveGitCommonDirFn: ctx.opts.resolveGitCommonDirFn, resolveGitDirFn: ctx.opts.resolveGitDirFn, requireBwrap: () => ctx.env.requireBwrap(), requireOverlaySupport: () => ctx.env.requireOverlaySupport(), dispatchEnvironment: (env, taskId) => ctx.env.dispatchEnvironment(env, taskId), summaryEnvironment: (env) => ctx.env.summaryEnvironment(env), settleWaiters: (taskId) => ctx.helpers.settleWaiters(taskId), launchQueuedTasks: () => ctx.helpers.launchQueuedTasks(), persistTask: (taskId) => ctx.helpers.persistTask(taskId), scheduleActivity: (task, options) => ctx.helpers.scheduleActivity(task, options), classifyTrailingLogFailure: (task, executor) => ctx.helpers.classifyTrailingLogFailure(task, executor), startRunningWatcher: (task, executor) => ctx.helpers.startRunningWatcher(task, executor), stopRunningWatcher: (taskId) => ctx.helpers.stopRunningWatcher(taskId), extractChangesetForTask: (task) => ctx.env.extractChangesetForTask(task), sendSignal: (pid, signal) => ctx.helpers.sendSignal(pid, signal), activityCache: ctx.activity.cache, logHasEventCache: ctx.maps.logHasEventCache, escalationTimers: ctx.maps.escalationTimers, tasks: ctx.maps.tasks, decRunning: () => { ctx.state.runningCount--; }, incRunning: () => { ctx.state.runningCount++; }, readSessionIdFromLog, evaluateOutputCompleteness }),
     /**
      * @param {string} taskId
      * @returns {{taskId: string, changesetStatus: string, applied: boolean, reason?: string|null, cleanupFailed?: boolean}}
@@ -3368,10 +3368,13 @@ function buildManagerInternalHelpers(ctx) {
      * reader exists to avoid), only the bytes the watcher hadn't seen yet
      * are read here, concatenated with whatever partial line the watcher
      * was still carrying.
-     * @param {Task} task */
-    classifyTrailingLogFailure: (task) => classifyTrailingLogFailureFor(task, { runningWatcherState: ctx.maps.runningWatcherState, resolveExecutor }),
-    /** @param {Task} task */
-    startRunningWatcher: (task) => startRunningWatcherFor(task, { noOutputTimeout: ctx.limits.noOutputTimeout, runningWatcherState: ctx.maps.runningWatcherState, tasks: ctx.maps.tasks, stopRunningWatcher: (taskId) => ctx.helpers.stopRunningWatcher(taskId), failRunningTask: (task, reason, detail) => ctx.helpers.failRunningTask(task, reason, detail), scheduleActivity: (task, options) => ctx.helpers.scheduleActivity(task, options), postOutputNoOutputTimeout: ctx.limits.postOutputNoOutputTimeout, watchdogPoll: ctx.limits.watchdogPoll, runningWatchers: ctx.maps.runningWatchers }),
+     * @param {Task} task
+     * @param {import("./executor.js").WorkerExecutor} executor */
+    classifyTrailingLogFailure: (task, executor) => classifyTrailingLogFailureFor(task, { runningWatcherState: ctx.maps.runningWatcherState, errorBucketPrefix: executor.errorBucketPrefix }),
+    /**
+     * @param {Task} task
+     * @param {import("./executor.js").WorkerExecutor} executor */
+    startRunningWatcher: (task, executor) => startRunningWatcherFor(task, { noOutputTimeout: ctx.limits.noOutputTimeout, runningWatcherState: ctx.maps.runningWatcherState, tasks: ctx.maps.tasks, stopRunningWatcher: (taskId) => ctx.helpers.stopRunningWatcher(taskId), failRunningTask: (task, reason, detail) => ctx.helpers.failRunningTask(task, reason, detail), scheduleActivity: (task, options) => ctx.helpers.scheduleActivity(task, options), postOutputNoOutputTimeout: ctx.limits.postOutputNoOutputTimeout, watchdogPoll: ctx.limits.watchdogPoll, runningWatchers: ctx.maps.runningWatchers, errorBucketPrefix: executor.errorBucketPrefix }),
     /** Targets the process group (negative pid), which reaches opencode and any
      * subprocess it spawned (e.g. a bash command it's mid-way through running),
      * since `dispatch()` makes the child a process group leader for exactly
@@ -3495,8 +3498,11 @@ function buildTaskManagerApi(ctx) {
     /** @param {Map<string, Set<boolean>>} subs */
     setActivitySubscriptions: (subs) => {
       ctx.maps.activitySubscriptions.clear();
-      for (const [dir, variants] of subs) ctx.maps.activitySubscriptions.set(dir, new Set(variants));
-      const totalCount = Array.from(subs.values()).reduce((sum, v) => sum + (v.has(true) ? 1 : 0), 0);
+      let totalCount = 0;
+      for (const [dir, variants] of subs) {
+        ctx.maps.activitySubscriptions.set(dir, new Set(variants));
+        if (variants.has(true)) totalCount++;
+      }
       ctx.state.activitySummarySubscriptions = totalCount;
       ctx.activity.cache.setSummariesEnabled(ctx.opts.activitySummariesEnabled && totalCount > 0);
     },
@@ -4272,7 +4278,7 @@ async function checkModelAvailable(model, env, ctx) {
  * provider failure bucket, only reading the chunk the watcher hadn't yet seen.
  * Extracted out of `createTaskManager`'s `classifyTrailingLogFailure` closure.
  * @param {Task} task
- * @param {{runningWatcherState: Map<string, {bytesRead: number, carry: string}>, resolveExecutor: (name?: string) => import("./executor.js").WorkerExecutor}} ctx
+ * @param {{runningWatcherState: Map<string, {bytesRead: number, carry: string}>, errorBucketPrefix: string}} ctx
  */
 function classifyTrailingLogFailureFor(task, ctx) {
   if (task.failureReason) return; // watcher already classified this task
@@ -4302,8 +4308,7 @@ function classifyTrailingLogFailureFor(task, ctx) {
     text += buf.toString("utf8");
   }
   if (!text) return; // nothing to classify
-  const errorBucketPrefix = ctx.resolveExecutor(task.executorId).errorBucketPrefix;
-  const { failure } = classifyProviderFailure(text.split("\n"), errorBucketPrefix);
+  const { failure } = classifyProviderFailure(text.split("\n"), ctx.errorBucketPrefix);
   if (failure) {
     task.failureReason = failure.bucket;
     task.failureDetail = failure.detail;
@@ -4707,7 +4712,7 @@ function failRunningTaskFor(task, failureReason, ctx, failureDetail) {
  * `startRunningWatcher` closure; every factory binding is threaded in via
  * `ctx` and the mutable per-task watch state lives on `ctx.runningWatcherState`.
  * @param {Task} task
- * @param {{noOutputTimeout: number, runningWatcherState: Map<string, {bytesRead: number, carry: string}>, tasks: Map<string, Task>, stopRunningWatcher: (taskId: string) => void, failRunningTask: (task: Task, failureReason: string, failureDetail?: string) => void, scheduleActivity: (task: Task, options?: {force?: boolean}) => Promise<unknown>, postOutputNoOutputTimeout: number, watchdogPoll: number, runningWatchers: Map<string, NodeJS.Timeout>}} ctx
+ * @param {{noOutputTimeout: number, runningWatcherState: Map<string, {bytesRead: number, carry: string}>, tasks: Map<string, Task>, stopRunningWatcher: (taskId: string) => void, failRunningTask: (task: Task, failureReason: string, failureDetail?: string) => void, scheduleActivity: (task: Task, options?: {force?: boolean}) => Promise<unknown>, postOutputNoOutputTimeout: number, watchdogPoll: number, runningWatchers: Map<string, NodeJS.Timeout>, errorBucketPrefix: string}} ctx
  */
 function startRunningWatcherFor(task, ctx) {
   // Mutable per-task watch state threaded into the module-level watchdog
@@ -4746,6 +4751,7 @@ function startRunningWatcherFor(task, ctx) {
       failRunningTask: ctx.failRunningTask,
       scheduleActivity: ctx.scheduleActivity,
       postOutputNoOutputTimeout: ctx.postOutputNoOutputTimeout,
+      errorBucketPrefix: ctx.errorBucketPrefix,
     });
   }, ctx.watchdogPoll);
   // Same as child.unref() in startTask: the watchdog is a background
@@ -5115,6 +5121,7 @@ function startTaskFor(task, ctx) {
  * @returns {ResultDetail}
  */
 function resultFor(taskId, { full, fields }, ctx) {
+  ctx.ensureStateLoaded();
   const task = ctx.tasks.get(taskId);
   if (!task) throw ctx.noSuchTask(taskId);
   validateResultFields(full, fields);

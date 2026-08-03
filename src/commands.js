@@ -590,7 +590,7 @@ function resolveRunCommandDeps(deps) {
 export { resolveAdvisorContextChars, claudeTranscriptPath, readTailChars };
 
 export async function runCommand(command, options, deps = {}) {
+  if (!Object.hasOwn(HANDLERS, command)) throw new Error(`unknown command: ${command}`);
   const handler = HANDLERS[command];
-  if (!handler) throw new Error(`unknown command: ${command}`);
   return handler(options, resolveRunCommandDeps(deps));
 }

@@ -88,11 +88,12 @@ function isEnvironment(value) {
     );
 }
 
-/** @param {Record<string, unknown>} params @param {string[]} names @returns {boolean} */
-function hasOnly(params, names) {
-  const allowed = new Set(names);
+/** @param {Record<string, unknown>} params @param {ReadonlySet<string>} allowed @returns {boolean} */
+function hasOnly(params, allowed) {
   return Object.keys(params).every((name) => allowed.has(name));
 }
+
+const ENVELOPE_KEYS = new Set(["version", "id", "method", "params"]);
 
 const positiveInteger = isPositiveInteger;
 const nonNegativeInteger = isNonNegativeInteger;
@@ -119,7 +120,7 @@ function isResultFields(value) {
 
 /** @param {unknown} value @returns {value is number} */
 function isTailChars(value) {
-  return positiveInteger(value) && value <= 65536;
+  return positiveInteger(value) && value <= 131072;
 }
 
 /** @param {unknown} value @returns {value is number} */
@@ -265,10 +266,17 @@ const METHOD_PARAMS = {
   },
 };
 
+/** @type {WeakMap<MethodSpec, Set<string>>} */
+const SPEC_ALLOWED_NAMES = new WeakMap(
+  Object.values(METHOD_PARAMS).map((spec) => [
+    spec,
+    new Set([...spec.required.map(([name]) => name), ...spec.optional.map(([name]) => name)]),
+  ])
+);
+
 /** @param {Record<string, unknown>} params @param {MethodSpec} spec @returns {boolean} */
 function isWithinParams(params, spec) {
-  const allowed = [...spec.required.map(([name]) => name), ...spec.optional.map(([name]) => name)];
-  if (!hasOnly(params, allowed)) {
+  if (!hasOnly(params, /** @type {Set<string>} */ (SPEC_ALLOWED_NAMES.get(spec)))) {
     return false;
   }
   if (!spec.required.every(([name, validate]) => name in params && validate(params[name]))) {
@@ -309,7 +317,7 @@ function invalidParamsError(method, params) {
 
 /** @param {unknown} value @returns {value is Record<string, unknown>} */
 function isRequestEnvelope(value) {
-  return isObject(value) && hasOnly(value, ["version", "id", "method", "params"]);
+  return isObject(value) && hasOnly(value, ENVELOPE_KEYS);
 }
 
 /** @param {unknown} value @returns {value is Record<string, unknown>} */

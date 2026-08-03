@@ -1,13 +1,15 @@
 import { normalizeDirectory, resolveWorkspaceRoot } from "./paths.js";
 import { formatWatchEvent } from "./output.js";
+import { TERMINAL_STATUSES as CORE_TERMINAL_STATUSES } from "./opencode-plugin.js";
 
 const TASK_STATUS_METHOD = "task.status";
 const TASK_STATE_EVENT_TYPE = "task.state";
 
 // Watch considers a task "settled" (no further events worth emitting) when
 // the daemon reports one of these states; matches the same set the daemon
-// uses to gate terminal events. Re-exported so tests can pin it.
-const TERMINAL_STATUSES = new Set(["done", "crashed", "cancelled", "unknown"]);
+// uses to gate terminal events, plus "unknown" for a task the daemon can no
+// longer classify. Re-exported so tests can pin it.
+const TERMINAL_STATUSES = new Set([...CORE_TERMINAL_STATUSES, "unknown"]);
 
 function terminalEventFromStatus(detail) {
   return {

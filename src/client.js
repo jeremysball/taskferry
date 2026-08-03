@@ -6,6 +6,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { withFileLock } from "./state-lock.js";
 import { PROTOCOL_VERSION, encodeMessage } from "./protocol.js";
+import { MAX_BUFFER_BYTES } from "./daemon-server.js";
 import { loadConfig } from "./config.js";
 import { isObject } from "./numbers.js";
 import { resolveRuntimeDir, resolveStateDir, resolveInvokedPath } from "./paths.js";
@@ -385,7 +386,7 @@ export async function connectClient({
   autoStart = env.TASKFERRY_AUTO_START !== "0",
   startupTimeoutMs = 5000,
   retryDelayMs = 25,
-  maxBufferBytes = 1024 * 1024,
+  maxBufferBytes = MAX_BUFFER_BYTES,
   maxQueuedEvents = 1000,
   ensureDaemonFn = startDaemonBooter,
   ...startupOptions

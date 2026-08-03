@@ -5,7 +5,6 @@ import os from "node:os";
 import path from "node:path";
 import { createTaskEvents } from "./events.js";
 import { createActivityCache, readActivitySnapshot, readDeltaNarration, DEFAULT_SUMMARIZER_TIMEOUT_MS } from "./activity.js";
-import { withFileLock } from "./state-lock.js";
 import { resolveStateDir, resolveCacheDir, resolveOverlayTmpRoot, TASKFERRY_PLUMBING_ENV_VARS } from "./paths.js";
 import { RESULT_FIELDS } from "./protocol.js";
 import { formatToolEventForNarration } from "./narration-format.js";
@@ -3079,6 +3078,12 @@ function initManagerState(opts) {
     envFileVars: opts.envFileVars,
     /** @type {ReturnType<typeof import("./env-file.js").watchEnvFile>|null} */
     envFileWatcher: null,
+    // Debounced-persistence flags for persistTaskRecord()/flushPersistRecords()
+    // -- per-instance state, not a plain closure `let`, so two managers
+    // constructed in the same process (e.g. in tests) don't share a timer.
+    persistDirty: false,
+    /** @type {NodeJS.Timeout|null} */
+    persistTimer: null,
   };
 }
 
@@ -3200,22 +3205,9 @@ function buildManagerEnvHelpers(ctx) {
    * @returns {boolean} whether cleanup failed
    */
   const releaseOverlay = (task) => releaseOverlayForTask(task, { rmOverlayTreeFn: ctx.opts.rmOverlayTreeFn });
-  /**
-   * Builds the final base environment for a spawned child: the daemon's own
-   * ambient environment (read fresh at call time), overlaid with the
-   * caller-supplied `env` (caller wins, except for CALLER_ENV_EXCLUDED --
-   * daemon-controlled plumbing resolved once at the daemon's own startup),
-   * with `envDenylist` stripped last regardless of which side the value
-   * came from. Applies the same key/value rules as the RPC-level
-   * isEnvironment so a programmatic caller that bypasses the socket (no
-   * isEnvironment gate) can't smuggle a malformed key past the spawn
-   * boundary -- bad keys throw synchronously here, which startTask() catches
-   * and surfaces as a spawnError on a crashed task rather than a
-   * silently-dropped value. Null or undefined env is treated as empty (as
-   * the pre-validation spread did) rather than rejected.
-   * @param {NodeJS.ProcessEnv} [env]
-   * @returns {NodeJS.ProcessEnv}
-   */
+  // sanitizedEnvironment() delegates to buildSanitizedEnvironment() (module
+  // scope, fully documented there) -- see that function's doc comment for
+  // the three-layer env-precedence rules.
   // Reads ctx.state.envFileVars fresh on every call (not a closed-over
   // value) so a live env-file reload (see startEnvFileWatch()) is picked
   // up without a daemon restart, the same way process.env already is.
@@ -3259,7 +3251,8 @@ function buildManagerActivity(ctx) {
 function buildManagerInternalHelpers(ctx) {
   return {
     /** @param {string} taskId */
-    persistTask: (taskId) => persistTaskRecord(taskId, { LOCK_FILE: ctx.paths.LOCK_FILE, TASKS_FILE: ctx.paths.TASKS_FILE, stateDir: ctx.opts.stateDir, tasks: ctx.maps.tasks, taskEvents: ctx.events.taskEvents }),
+    persistTask: (taskId) => persistTaskRecord(taskId, { LOCK_FILE: ctx.paths.LOCK_FILE, TASKS_FILE: ctx.paths.TASKS_FILE, stateDir: ctx.opts.stateDir, tasks: ctx.maps.tasks, taskEvents: ctx.events.taskEvents, state: ctx.state }),
+    flushPersist: () => flushPersistRecords({ TASKS_FILE: ctx.paths.TASKS_FILE, stateDir: ctx.opts.stateDir, tasks: ctx.maps.tasks, state: ctx.state }),
     ensureStateLoaded: () => ensureStateLoadedFor({ get stateLoadError() { return ctx.state.stateLoadError; }, TASKS_FILE: ctx.paths.TASKS_FILE }),
     /**
      * @param {Task} task
@@ -3513,7 +3506,13 @@ function buildTaskManagerApi(ctx) {
     // handles keep the event loop alive regardless of unref, so a test
     // process that constructs many managers without ever exiting needs an
     // explicit way to release them -- daemon.js's close() calls this too.
-    close: () => ctx.state.envFileWatcher?.close(),
+    // Also flushes any pending debounced tasks.json write so a clean
+    // shutdown never drops the last transition(s) before the timer fires.
+    close: () => {
+      flushPersistRecords({ TASKS_FILE: ctx.paths.TASKS_FILE, stateDir: ctx.opts.stateDir, tasks: ctx.maps.tasks, state: ctx.state });
+      ctx.state.envFileWatcher?.close();
+    },
+    flushPersist: () => flushPersistRecords({ TASKS_FILE: ctx.paths.TASKS_FILE, stateDir: ctx.opts.stateDir, tasks: ctx.maps.tasks, state: ctx.state }),
   };
   Object.assign(self, api);
   return api;
@@ -3736,13 +3735,24 @@ function noSuchTask(taskId) {
   return new Error(`error: unknown task id: ${taskId}\nhelp: run taskferry list to see valid task ids`);
 }
 
+// Minimal per-row schema for taskferry list: an agent scanning a task list
+// needs id/status/model/startedAt to decide what to poll next, not the full
+// detail (directory, pid, logPath, ...) that summarize() carries for a
+// single-task lookup. failureReason is included despite that otherwise-thin
+// schema because a "crashed" status alone doesn't tell a scanning agent
+// whether the task is worth retrying immediately (a provider failure bucket
+// such as rate_limited, payment_required, or authentication_failed)
+// or not (any other crash) -- omitting it here forces a task.status
+// round-trip per crashed row just to learn that. `directory` is included so
+// filteredTaskDetails() (daemon.js) can filter the in-memory row by
+// workspace before calling manager.status() per task (taskferry#287).
 /**
  * @param {Task} task
- * @returns {{id: string, status: string, model: string, startedAt: string, failureReason: string|null}}
+ * @returns {{id: string, status: string, model: string, startedAt: string, failureReason: string|null, directory: string}}
  */
 function summarizeRow(task) {
-  const { id, status, model, startedAt, failureReason } = task;
-  return { id, status, model, startedAt, failureReason: failureReason ?? null };
+  const { id, status, model, startedAt, failureReason, directory } = task;
+  return { id, status, model, startedAt, directory, failureReason: failureReason ?? null };
 }
 
 /**
@@ -4135,40 +4145,82 @@ function stopRunningWatcherFor(taskId, ctx) {
  * @param {string} taskId
  * @param {{LOCK_FILE: string, TASKS_FILE: string, stateDir: string, tasks: Map<string, Task>, taskEvents: {emitState: (task: Task, previousStatus?: string) => void}}} ctx
  */
-function persistTaskRecord(taskId, ctx) {
-  withFileLock(ctx.LOCK_FILE, () => {
-    /** @type {Task[]} */
-    let current = [];
+// Debounced persistence: persistTaskRecord() marks state dirty and schedules
+// a coalesced flush instead of rewriting tasks.json on every single call. The
+// in-memory `tasks` Map is the source of truth; tasks.json is a best-effort
+// snapshot for debugging across restarts. Serializing from the Map directly
+// (instead of the old read-parse-merge cycle) avoids blocking the event loop
+// for ~400ms on a 10MB tasks.json.
+const PERSIST_DEBOUNCE_MS = 250;
+
+/**
+ * Writes every in-memory task to tasks.json, if a persist is actually
+ * pending. Extracted out of `createTaskManager`'s `flushPersist` closure;
+ * the dirty/timer flags live on `ctx.state` (per-manager-instance, not a
+ * plain closure `let`) so two managers constructed in the same process
+ * (e.g. in tests) don't share persistence state.
+ * @param {{TASKS_FILE: string, stateDir: string, tasks: Map<string, Task>, state: {persistDirty: boolean, persistTimer: NodeJS.Timeout|null}}} ctx
+ */
+function flushPersistRecords(ctx) {
+  if (!ctx.state.persistDirty) return;
+  ctx.state.persistDirty = false;
+  if (ctx.state.persistTimer != null) {
+    clearTimeout(ctx.state.persistTimer);
+    ctx.state.persistTimer = null;
+  }
+  const all = Array.from(ctx.tasks.values());
+  const temporary = path.join(ctx.stateDir, `.tasks-${randomUUID()}.json`);
+  // Throwing from a `finally` would mask a real error from the try block
+  // above (e.g. a full disk on writeFileSync) with an unrelated cleanup
+  // failure. Defer the cleanup error and only surface it once the try
+  // block itself has succeeded.
+  /** @type {unknown} */
+  let cleanupError;
+  try {
+    fs.writeFileSync(temporary, JSON.stringify(all, null, 2), { mode: 0o600 });
+    fs.renameSync(temporary, ctx.TASKS_FILE);
+    fs.chmodSync(ctx.TASKS_FILE, 0o600);
+  } finally {
     try {
-      current = JSON.parse(fs.readFileSync(ctx.TASKS_FILE, "utf8"));
+      fs.unlinkSync(temporary);
     } catch (err) {
-      if (errCode(err) !== "ENOENT") throw err;
+      if (errCode(err) !== "ENOENT") cleanupError = err;
     }
-    const byId = new Map(current.map((t) => [t.id, t]));
-    const local = ctx.tasks.get(taskId);
-    if (local) byId.set(taskId, local);
-    else byId.delete(taskId);
-    const all = Array.from(byId.values());
-    const temporary = path.join(ctx.stateDir, `.tasks-${randomUUID()}.json`);
-    // Throwing from a `finally` would mask a real error from the try block
-    // above (e.g. a full disk on writeFileSync) with an unrelated cleanup
-    // failure. Defer the cleanup error and only surface it once the try
-    // block itself has succeeded.
-    /** @type {unknown} */
-    let cleanupError;
-    try {
-      fs.writeFileSync(temporary, JSON.stringify(all, null, 2), { mode: 0o600 });
-      fs.renameSync(temporary, ctx.TASKS_FILE);
-      fs.chmodSync(ctx.TASKS_FILE, 0o600);
-    } finally {
+  }
+  if (cleanupError) throw cleanupError;
+}
+
+/**
+ * Marks a task's record dirty and schedules a coalesced flush of the whole
+ * in-memory tasks Map to tasks.json (see {@link flushPersistRecords}),
+ * instead of rewriting the file inline on every call. Emits a state event
+ * for the in-memory task immediately; the on-disk snapshot itself lags by
+ * up to PERSIST_DEBOUNCE_MS. Extracted out of `createTaskManager`'s
+ * `persistTask` closure; every factory binding is threaded in via `ctx`.
+ * @param {string} taskId
+ * @param {{LOCK_FILE: string, TASKS_FILE: string, stateDir: string, tasks: Map<string, Task>, taskEvents: {emitState: (task: Task, previousStatus?: string) => void}, state: {persistDirty: boolean, persistTimer: NodeJS.Timeout|null}}} ctx
+ */
+function persistTaskRecord(taskId, ctx) {
+  ctx.state.persistDirty = true;
+  if (ctx.state.persistTimer == null) {
+    ctx.state.persistTimer = setTimeout(() => {
+      ctx.state.persistTimer = null;
       try {
-        fs.unlinkSync(temporary);
+        flushPersistRecords(ctx);
       } catch (err) {
-        if (errCode(err) !== "ENOENT") cleanupError = err;
+        // Callers used to wrap a synchronous persistTask() in try/catch
+        // specifically so a failed best-effort state write (e.g. a full
+        // disk) couldn't strand a concurrency slot or crash the daemon --
+        // see the finishSettlement()/cancel() call sites. Now that the
+        // actual write happens on this timer instead of inline, those
+        // try/catches no longer see it: nothing upstream of a bare
+        // setTimeout callback catches a throw, and there's no
+        // uncaughtException handler, so an unhandled failure here would
+        // crash the daemon and orphan every other in-flight task.
+        console.error(`taskferry: failed to persist task state: ${errMessage(err)}`);
       }
-    }
-    if (cleanupError) throw cleanupError;
-  });
+    }, PERSIST_DEBOUNCE_MS);
+  }
   const task = ctx.tasks.get(taskId);
   if (task) ctx.taskEvents.emitState(task);
 }
@@ -4213,8 +4265,19 @@ function extractChangesetForTaskRecord(finishedTask, ctx) {
           runCommand: ctx.runOverlayCommandFn,
         });
   } catch (err) {
-    finishedTask.changesetStatus = "pending";
     finishedTask.changesetError = err instanceof Error ? err.message : String(err);
+    if (finishedTask.role === "advisor") {
+      // An advisor task's changeset was never meant to be applied -- whether
+      // extraction succeeds or throws, it settles as "rejected", never
+      // "pending". Without this branch, a throw here (e.g. the target
+      // directory's HEAD moved mid-dispatch) left changesetStatus: "pending"
+      // regardless of role, so a later `taskferry reject <id>` would silently
+      // succeed on a task that never had anything to reject.
+      finishedTask.changesetStatus = "rejected";
+      ctx.releaseOverlay(finishedTask);
+    } else {
+      finishedTask.changesetStatus = "pending";
+    }
     ctx.persistTask(finishedTask.id);
     return;
   }

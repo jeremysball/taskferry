@@ -6,7 +6,8 @@ import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { createTaskManager } from "./tasks.js";
 import { loadConfig } from "./config.js";
-import { withFileLock } from "./state-lock.js";
+import { withFileLock, withFileLockAsync } from "./state-lock.js";
+import { isNonNegativeInteger, isPositiveInteger } from "./numbers.js";
 import { normalizeDirectory, resolveRuntimeDir, resolveStateDir } from "./paths.js";
 import {
   PROTOCOL_VERSION,
@@ -41,6 +42,74 @@ function sourceSignature(dir = SOURCE_DIR) {
 
 function resolveSocketPath(options = {}) {
   return options.socketPath || options.env?.TASKFERRY_SOCKET_PATH || path.join(resolveRuntimeDir(options), "daemon.sock");
+}
+
+const DEFAULT_SLOW_REQUEST_MS = 500;
+const DEFAULT_PERF_LOG_MAX_BYTES = 5 * 1024 * 1024; // 5 MiB
+
+function isEnabledFlag(value) {
+  return ["1", "true"].includes(value);
+}
+
+function profilingEnabled(env, config) {
+  if (env?.TASKFERRY_PROFILING_ENABLED !== undefined) return isEnabledFlag(env.TASKFERRY_PROFILING_ENABLED);
+  return config?.profilingEnabled ?? false;
+}
+
+// An unset var is undefined and Number(undefined) is already NaN, but an
+// empty-string value (a blank .env line, an empty -e in Docker) is
+// Number("") === 0 -- a false "valid, explicit zero" that would otherwise
+// slip past isPositiveInteger/isNonNegativeInteger instead of falling back
+// to the default the same way a genuinely non-numeric value does.
+function parsedEnvNumber(rawValue, isValid, fallback) {
+  if (!rawValue) return fallback;
+  const parsed = Number(rawValue);
+  return isValid(parsed) ? parsed : fallback;
+}
+
+// Rotates perf.log to perf.log.1 (clobbering any previous perf.log.1) once
+// the live file would exceed maxBytes, so profiling can be left on
+// indefinitely without the log growing unbounded. A rename right before the
+// write that would tip it over keeps this a single stat+rename per request,
+// not a periodic sweep.
+function rotateIfOversized(perfLogPath, maxBytes, nextLineBytes) {
+  let size;
+  try {
+    ({ size } = fs.statSync(perfLogPath));
+  } catch (error) {
+    if (error.code === "ENOENT") return;
+    throw error;
+  }
+  if (size + nextLineBytes <= maxBytes) return;
+  fs.renameSync(perfLogPath, `${perfLogPath}.1`);
+}
+
+// One JSONL line per handled request in <state-dir>/perf.log, so a latency
+// spike (the kind that shows up as "the daemon felt slow for a second") has
+// a durable per-method trail instead of only ever being visible live.
+// Opt-in via TASKFERRY_PROFILING_ENABLED=1 or config.json's profilingEnabled
+// -- disabled by default so every daemon isn't paying an append-per-request
+// write it never asked for. Returns null when disabled, so the caller can
+// skip performance.now() entirely rather than timing into a discarded value.
+function makeRequestTimer({ stateDir, env, config, appendLine = (filePath, line) => fs.appendFileSync(filePath, line) }) {
+  if (!profilingEnabled(env, config)) return null;
+  const perfLogPath = path.join(stateDir, "perf.log");
+  const maxBytes = parsedEnvNumber(env?.TASKFERRY_PERF_LOG_MAX_BYTES, isPositiveInteger, DEFAULT_PERF_LOG_MAX_BYTES);
+  const slowRequestMs = parsedEnvNumber(env?.TASKFERRY_SLOW_REQUEST_MS, isNonNegativeInteger, DEFAULT_SLOW_REQUEST_MS);
+  return function onRequestTimed({ method, durationMs, ok }) {
+    const rounded = Math.round(durationMs * 100) / 100;
+    const record = { method, ok, ts: new Date().toISOString(), durationMs: rounded };
+    const line = `${JSON.stringify(record)}\n`;
+    try {
+      rotateIfOversized(perfLogPath, maxBytes, Buffer.byteLength(line));
+      appendLine(perfLogPath, line);
+    } catch (error) {
+      process.stderr.write(`warn: failed to write perf.log: ${error instanceof Error ? error.message : String(error)}\n`);
+    }
+    if (rounded >= slowRequestMs) {
+      process.stderr.write(`slow request: ${method} took ${rounded}ms (>= ${slowRequestMs}ms threshold)\n`);
+    }
+  };
 }
 
 function defaultSpawnReplacement({ daemonEntry, env }) {
@@ -97,7 +166,17 @@ function socketHealth(socketPath, timeoutMs) {
   });
 }
 
-async function prepareSocket(runtimeDir, socketPath, healthCheckTimeoutMs) {
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// Retries with a short backoff between iterations: without one, concurrent
+// daemon boots racing over the same socket path can keep invalidating each
+// other's removeStaleSocketIfUnchanged CAS indefinitely, and each iteration
+// resolves near-instantly (an ECONNREFUSED/ENOENT socketHealth check fires in
+// well under a millisecond), so the loop busy-spins a full CPU core for as
+// long as the race lasts instead of actually converging.
+export async function prepareSocket(runtimeDir, socketPath, healthCheckTimeoutMs, retryDelayMs = 25) {
   fs.mkdirSync(runtimeDir, { recursive: true, mode: 0o700 });
   fs.chmodSync(runtimeDir, 0o700);
   for (;;) {
@@ -106,7 +185,10 @@ async function prepareSocket(runtimeDir, socketPath, healthCheckTimeoutMs) {
     try {
       checkedIdentity = fs.statSync(socketPath);
     } catch (error) {
-      if (error.code === "ENOENT") continue;
+      if (error.code === "ENOENT") {
+        await delay(retryDelayMs);
+        continue;
+      }
       throw error;
     }
     const health = await socketHealth(socketPath, healthCheckTimeoutMs);
@@ -115,6 +197,7 @@ async function prepareSocket(runtimeDir, socketPath, healthCheckTimeoutMs) {
       throw new Error(`error: ${qualifier} is already listening on ${socketPath}\nhelp: use the existing daemon or choose another TASKFERRY_RUNTIME_DIR`);
     }
     if (removeStaleSocketIfUnchanged(socketPath, checkedIdentity, runtimeDir)) return;
+    await delay(retryDelayMs);
   }
 }
 
@@ -154,9 +237,15 @@ function filteredTaskDetails(manager, directory) {
   const normalized = normalizeDirectory(directory);
   return {
     directory: normalized,
+    // Filter the cheap in-memory row (which already carries `directory`)
+    // before calling manager.status() -- status() does per-task log I/O
+    // (statSync/open/read), so calling it for every task ever recorded
+    // instead of just the ones in this workspace turns a routine
+    // statusline poll into O(all-time task count) synchronous I/O on the
+    // daemon's single thread (taskferry#287).
     tasks: listRows(manager)
-      .map((row) => manager.status(row.id))
-      .filter((task) => task.directory === normalized),
+      .filter((row) => row.directory === normalized)
+      .map((row) => manager.status(row.id)),
   };
 }
 
@@ -265,6 +354,49 @@ function resolveDaemonOptions(options = {}) {
   };
 }
 
+// Hold one lock across the whole check-decide-bind sequence, not just
+// around the stale-socket unlink inside removeStaleSocketIfUnchanged().
+// This does NOT prevent two processes from ever truly binding the same
+// path at once -- the OS's own bind(2) already guarantees only one
+// AF_UNIX listen() on a given path can succeed, the loser gets
+// EADDRINUSE regardless. What this closes is two concurrent invocations
+// each independently deciding "no socket exists yet, safe to proceed"
+// and both racing into server.listen() -- without this lock the loser
+// fails via a raw EADDRINUSE bubbling out of the listen() promise
+// instead of prepareSocket()'s clean "already listening" error, and both
+// do the existence/health-check work redundantly.
+//
+// The actual "two daemon.js processes observed bound to the identical
+// socket path at once" symptom from taskferry#287 has a different root
+// cause: under CPU starvation (the O(n)-over-all-tasks list/status scan
+// fixed alongside this), socketHealth()'s `connect` event can fail to
+// fire within healthCheckTimeoutMs even though the existing daemon is
+// still alive and still bound -- `connected` stays false, so
+// prepareSocket() reads `listening: false` and falls through to
+// removeStaleSocketIfUnchanged(), which finds the socket file's identity
+// unchanged (nobody replaced it) and unlinks a merely-slow, not actually
+// dead, daemon's live socket. A second daemon then binds fresh at the
+// freed path while the first is still running, unreachable, in the
+// background. Fixing the CPU-starvation root cause removes the trigger
+// for this; the identity check itself doesn't distinguish "dead" from
+// "alive but didn't answer in 250ms" and remains a latent gap worth a
+// follow-up (e.g. a short retry before concluding stale).
+async function bindDaemonSocket({ server, runtimeDir, socketPath, healthCheckTimeoutMs }) {
+  const bindLockPath = path.join(runtimeDir, "socket-bind.lock");
+  await withFileLockAsync(bindLockPath, async () => {
+    await prepareSocket(runtimeDir, socketPath, healthCheckTimeoutMs);
+    await new Promise((resolve, reject) => {
+      const onError = (error) => reject(error);
+      server.once("error", onError);
+      server.listen(socketPath, () => {
+        server.off("error", onError);
+        resolve();
+      });
+    });
+  });
+  fs.chmodSync(socketPath, 0o600);
+}
+
 export async function startDaemon(options = {}) {
   const {
     platform,
@@ -286,7 +418,7 @@ export async function startDaemon(options = {}) {
   if (platform !== "linux" && platform !== "darwin") {
     throw new Error("error: taskferry daemon supports Linux and macOS only\nhelp: run taskferry on a Unix host with Unix-domain socket support");
   }
-  await prepareSocket(runtimeDir, socketPath, healthCheckTimeoutMs);
+  fs.mkdirSync(runtimeDir, { recursive: true, mode: 0o700 });
 
   const clients = new Set();
   const subscriptions = new Map();
@@ -303,6 +435,7 @@ export async function startDaemon(options = {}) {
   };
   const onEvent = (event) => deliverEvent(subscriptions, writeMessage, event);
   const manager = taskManagerFactory({ ...taskManagerOptions, onEvent, stateDir, runtimeDir });
+  const onRequestTimed = makeRequestTimer({ stateDir, env, config: taskManagerOptions.config });
   const startupSourceSignature = sourceSignature(sourceDir);
   const syncActivity = () => syncActivitySubscriptions(manager, subscriptions);
   const restart = { pending: false, restarting: false };
@@ -317,18 +450,11 @@ export async function startDaemon(options = {}) {
     maxInFlightRequests,
     invoke,
     responseError,
+    onRequestTimed,
     maybeRestart: () => maybeRestartRef.current?.(),
   });
 
-  await new Promise((resolve, reject) => {
-    const onError = (error) => reject(error);
-    server.once("error", onError);
-    server.listen(socketPath, () => {
-      server.off("error", onError);
-      resolve();
-    });
-  });
-  fs.chmodSync(socketPath, 0o600);
+  await bindDaemonSocket({ server, runtimeDir, socketPath, healthCheckTimeoutMs });
 
   const close = makeClose({ manager, clients, server, socketPath, restart });
   maybeRestartRef.current = makeMaybeRestart({

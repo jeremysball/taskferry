@@ -72,39 +72,53 @@ async function subscribeRequest({ manager, subscriptions, socket, writeMessage, 
     originSessionId: request.params.originSessionId || null,
   });
   syncActivity();
-  writeMessage(socket, successResponse(request.id, { subscriptionId }));
+  return writeMessage(socket, successResponse(request.id, { subscriptionId }));
 }
 
-export async function dispatchRequest({ subscriptions, manager, writeMessage, syncActivity, inFlightRef, maxInFlightRequests, maybeRestart, invoke, responseError }, socket, line) {
+// startedAt is only captured when a timer is actually wired up (onRequestTimed
+// truthy) -- with profiling disabled, performance.now() is never called, so an
+// opted-out daemon pays none of this cost. Every path below (parse failure,
+// SERVER_BUSY, and the normal try/finally) reports through onRequestTimed so
+// "every RPC request" in the profiling docs is literally true, not just the
+// ones that reach invoke().
+export async function dispatchRequest({ subscriptions, manager, writeMessage, syncActivity, inFlightRef, maxInFlightRequests, maybeRestart, invoke, responseError, onRequestTimed }, socket, line) {
+  const startedAt = onRequestTimed ? performance.now() : 0;
   let request;
   try {
     request = parseRequestLine(line);
   } catch (error) {
     writeMessage(socket, responseError(error, null));
+    onRequestTimed?.({ method: "parse_error", durationMs: performance.now() - startedAt, ok: false });
     return;
   }
   if (inFlightRef.current >= maxInFlightRequests) {
     writeMessage(socket, errorResponse(request.id, "SERVER_BUSY", "daemon has too many requests in flight", "Wait for an outstanding request to finish, then retry"));
+    onRequestTimed?.({ method: request.method, durationMs: performance.now() - startedAt, ok: false });
     return;
   }
   inFlightRef.current++;
+  let ok = true;
   try {
     if (request.method === "event.subscribe") {
-      await subscribeRequest({ manager, subscriptions, socket, writeMessage, syncActivity }, request);
+      ok = await subscribeRequest({ manager, subscriptions, socket, writeMessage, syncActivity }, request);
       return;
     }
     const result = await invoke(manager, request);
-    writeMessage(socket, successResponse(request.id, result));
+    ok = writeMessage(socket, successResponse(request.id, result));
   } catch (error) {
-    if (!socket.destroyed) writeMessage(socket, responseError(error, request?.id ?? null));
+    // ok tracks whether a response reached the client, not merely whether
+    // invoke() threw -- an error response that was successfully written is
+    // still a delivered response.
+    ok = !socket.destroyed && writeMessage(socket, responseError(error, request?.id ?? null));
   } finally {
     inFlightRef.current--;
+    onRequestTimed?.({ method: request.method, durationMs: performance.now() - startedAt, ok });
     maybeRestart();
   }
 }
 
-export function createDaemonServer({ clients, subscriptions, manager, writeMessage, syncActivity, inFlightRef, maxInFlightRequests, maybeRestart, invoke, responseError }) {
-  const dispatchDeps = { subscriptions, manager, writeMessage, syncActivity, inFlightRef, maxInFlightRequests, maybeRestart, invoke, responseError };
+export function createDaemonServer({ clients, subscriptions, manager, writeMessage, syncActivity, inFlightRef, maxInFlightRequests, maybeRestart, invoke, responseError, onRequestTimed }) {
+  const dispatchDeps = { subscriptions, manager, writeMessage, syncActivity, inFlightRef, maxInFlightRequests, maybeRestart, invoke, responseError, onRequestTimed };
   return net.createServer((socket) => {
     clients.add(socket);
     socket.setEncoding("utf8");
@@ -123,7 +137,9 @@ export function createDaemonServer({ clients, subscriptions, manager, writeMessa
     socket.on("data", (chunk) => {
       buffer += chunk;
       if (Buffer.byteLength(buffer) > MAX_BUFFER_BYTES) {
+        const requestTooLargeStartedAt = onRequestTimed ? performance.now() : 0;
         writeMessage(socket, errorResponse(null, "REQUEST_TOO_LARGE", "request exceeds 1 MiB", "Send a smaller request"));
+        onRequestTimed?.({ method: "request_too_large", durationMs: performance.now() - requestTooLargeStartedAt, ok: false });
         socket.destroy();
         return;
       }

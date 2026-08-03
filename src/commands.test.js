@@ -1,9 +1,9 @@
-import { test, describe } from "node:test";
+import { test } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { runCommand, resolveAdvisorContextChars, claudeTranscriptPath, readTailChars } from "./commands.js";
+import { runCommand } from "./commands.js";
 import { UsageError } from "./args.js";
 
 // -- Constants --------------------------------------------------------------
@@ -31,12 +31,12 @@ const TASK_STARTED_AT = "2026-07-17T00:00:00.000Z";
 // tmp dir is trivially attributable to its owning test (and t.after(rm) is
 // scoped to that one dir).
 const TASKFERRY_TEST_TMP_PREFIX = "taskferry-commands-test-";
+const MUST_NOT_REACH_DAEMON_MESSAGE = "must not reach the daemon";
+const SESS_1_TRANSCRIPT_FILENAME = "sess-1.jsonl";
 const TASKFERRY_DOCTOR_HOME_PREFIX = "taskferry-doctor-home-";
 const TASKFERRY_DOCTOR_STATS_HOME_PREFIX = "taskferry-doctor-stats-home-";
 const TASKFERRY_DOCTOR_STATS_EMPTY_PREFIX = "taskferry-doctor-stats-empty-";
-const TASKFERRY_ADVISOR_CONFIG_PREFIX = "taskferry-advisor-config-";
 const TASKFERRY_ADVISOR_HOME_PREFIX = "taskferry-advisor-home-";
-const TASKFERRY_TAIL_CHARS_PREFIX = "taskferry-tail-chars-";
 
 // What `claude plugin list --json` returns when the taskferry plugin is
 // installed -- reused across every doctor test that exercises the happy
@@ -464,6 +464,15 @@ test("home/context resolve their default directory via resolveWorkspaceRoot when
   assert.equal(seenDirectory, resolvedRoot);
 });
 
+test("home passes an unbounded limit into projectList so homeView sees the true total (regression: double-truncation would silently drop the real count and reveal hint)", async () => {
+  const cwd = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), TASKFERRY_TEST_TMP_PREFIX)));
+  const tasks = Array.from({ length: 805 }, (_, i) => ({ id: `t${i}`, status: "done", model: "x", startedAt: "2026-01-01T00:00:00.000Z" }));
+  const client = { request: async () => ({ directory: cwd, counts: { queued: 0, running: 0, done: 805, crashed: 0, cancelled: 0, unknown: 0 }, tasks }) };
+  const result = await runCommand("home", { directory: cwd }, { client, cwd, resolveWorkspaceRoot: () => cwd });
+  assert.equal(result.tasks.length, 30);
+  assert.deepEqual(result.next.slice(-1), ["Run taskferry list --limit 805 for all 805 tasks"]);
+});
+
 test("advisor does NOT resolve via resolveWorkspaceRoot (regression test mirroring the dispatch one)", async () => {
   // advisor is grouped with dispatch at the args/cli/commands layers
   // because tasks.js's advisor() forwards its directory straight into
@@ -685,7 +694,7 @@ test("advisor forwards the caller's env to the RPC payload", async () => {
 
 test("advisor fails fast with no --prompt and no context source in env", async () => {
   const root = mkTmpRoot(TASKFERRY_TEST_TMP_PREFIX);
-  const client = { request: async () => { throw new Error("must not reach the daemon"); } };
+  const client = { request: async () => { throw new Error(MUST_NOT_REACH_DAEMON_MESSAGE); } };
 
   await assert.rejects(
     runCommand("advisor", { directory: root, model: "m" }, { client, cwd: root, env: {} }),
@@ -699,7 +708,7 @@ test("advisor auto-attaches a Claude session transcript tail when CLAUDE_CODE_SE
   const slug = root.split(path.sep).join("-");
   const projectDir = path.join(home, ".claude", "projects", slug);
   fs.mkdirSync(projectDir, { recursive: true });
-  fs.writeFileSync(path.join(projectDir, "sess-1.jsonl"), '{"role":"user","text":"do the thing"}\n');
+  fs.writeFileSync(path.join(projectDir, SESS_1_TRANSCRIPT_FILENAME), '{"type":"user","message":{"role":"user","content":"do the thing"}}\n');
 
   let capturedPrompt;
   const client = { request: async (_method, params) => { capturedPrompt = params.prompt; return { status: "done", message: "advice" }; } };
@@ -710,10 +719,27 @@ test("advisor auto-attaches a Claude session transcript tail when CLAUDE_CODE_SE
   assert.match(capturedPrompt, /attached context \(claude-session/);
 });
 
+test("advisor fails fast when the transcript exists but extracts to no user/assistant text, instead of silently sending empty context", async () => {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), TASKFERRY_TEST_TMP_PREFIX)));
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-commands-home-"));
+  const slug = root.split(path.sep).join("-");
+  const projectDir = path.join(home, ".claude", "projects", slug);
+  fs.mkdirSync(projectDir, { recursive: true });
+  // Entirely tool_use/thinking -- no user/assistant text turns to extract.
+  fs.writeFileSync(path.join(projectDir, SESS_1_TRANSCRIPT_FILENAME), '{"type":"assistant","message":{"role":"assistant","content":[{"type":"thinking","thinking":"hmm"}]}}\n');
+
+  const client = { request: async () => { throw new Error(MUST_NOT_REACH_DAEMON_MESSAGE); } };
+
+  await assert.rejects(
+    runCommand("advisor", { directory: root, model: "m" }, { client, cwd: root, homeDirectory: home, env: { CLAUDE_CODE_SESSION_ID: "sess-1" } }),
+    (err) => err instanceof UsageError && /no context source found/.test(err.message)
+  );
+});
+
 test("advisor fails fast when CLAUDE_CODE_SESSION_ID is set but the transcript file is missing", async () => {
   const root = mkTmpRoot(TASKFERRY_TEST_TMP_PREFIX);
   const home = mkTmpDir(TASKFERRY_ADVISOR_HOME_PREFIX);
-  const client = { request: async () => { throw new Error("must not reach the daemon"); } };
+  const client = { request: async () => { throw new Error(MUST_NOT_REACH_DAEMON_MESSAGE); } };
 
   await assert.rejects(
     runCommand("advisor", { directory: root, model: "m" }, { client, cwd: root, homeDirectory: home, env: { CLAUDE_CODE_SESSION_ID: "sess-missing" } }),
@@ -1154,46 +1180,4 @@ test("watch --flush-interval flushes buffered events on abort instead of silentl
   assert.equal(io.lines.length, 2, "both buffered events must be flushed on abort, not silently dropped");
   assert.match(io.lines[0], /oc_1/);
   assert.match(io.lines[1], /oc_2/);
-});
-
-describe("advisor context helpers", () => {
-  test("resolveAdvisorContextChars() defaults to 120000", () => {
-    assert.equal(resolveAdvisorContextChars({}), 120000);
-  });
-
-  test("resolveAdvisorContextChars() honors TASKFERRY_ADVISOR_CONTEXT_CHARS", () => {
-    assert.equal(resolveAdvisorContextChars({ TASKFERRY_ADVISOR_CONTEXT_CHARS: "50000" }), 50000);
-  });
-
-  test("resolveAdvisorContextChars() falls back to the config file when the env var is unset", () => {
-    const dir = mkTmpDir(TASKFERRY_ADVISOR_CONFIG_PREFIX);
-    const configDir = path.join(dir, "taskferry");
-    fs.mkdirSync(configDir, { recursive: true });
-    const configPath = path.join(configDir, "config.json");
-    fs.writeFileSync(configPath, JSON.stringify({ advisorContextChars: 75000 }));
-    assert.equal(resolveAdvisorContextChars({ XDG_CONFIG_HOME: dir }), 75000);
-  });
-
-  test("claudeTranscriptPath() slugifies cwd the same way the account's project dirs are named", () => {
-    const result = claudeTranscriptPath("/home/user", "/workspace/taskferry", "sess-1");
-    assert.equal(result, path.join("/home/user", ".claude", "projects", "-workspace-taskferry", "sess-1.jsonl"));
-  });
-
-  test("readTailChars() returns the last N characters of a file", () => {
-    const dir = mkTmpDir(TASKFERRY_TAIL_CHARS_PREFIX);
-    const filePath = path.join(dir, "transcript.jsonl");
-    fs.writeFileSync(filePath, "0123456789");
-    assert.equal(readTailChars(filePath, 4), "6789");
-  });
-
-  test("readTailChars() returns the whole file when it's shorter than the budget", () => {
-    const dir = mkTmpDir(TASKFERRY_TAIL_CHARS_PREFIX);
-    const filePath = path.join(dir, "transcript.jsonl");
-    fs.writeFileSync(filePath, "short");
-    assert.equal(readTailChars(filePath, 4000), "short");
-  });
-
-  test("readTailChars() throws a UsageError naming the path when the file doesn't exist", () => {
-    assert.throws(() => readTailChars("/nonexistent/transcript.jsonl", 100), (err) => err instanceof UsageError && /\/nonexistent\/transcript\.jsonl/.test(err.message));
-  });
 });

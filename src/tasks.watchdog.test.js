@@ -243,6 +243,7 @@ describe("output-completeness check at settlement time: validation, originSessio
     ]);
     child.emit("exit", 0, null);
     assert.equal(mgr1.status(dispatched.id).incomplete, true);
+    mgr1.flushPersist();
 
     const mgr2 = createTaskManager({
       stateDir,
@@ -272,6 +273,7 @@ describe("no-output watchdog", () => {
 
     await new Promise((r) => setTimeout(r, 60));
     assert.ok(killed.some((k) => k.signal === "SIGTERM"), "watchdog must SIGTERM the stuck child's process group");
+    mgr.flushPersist();
     assert.equal(JSON.parse(fs.readFileSync(mgr.paths.TASKS_FILE, "utf8"))[0].failureReason, "no_output_timeout");
 
     child.emit("exit", null, "SIGTERM");

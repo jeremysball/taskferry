@@ -53,6 +53,7 @@ message — there is no silent typo tolerance.
 | `cancelGraceMs` | `TASKFERRY_CANCEL_GRACE_MS` | number | `5000`; overridden per-call by `cancel --grace-ms` |
 | `defaultExecutor` | `TASKFERRY_DEFAULT_EXECUTOR` | string (`opencode` or `pi`) | `pi` |
 | `envFile` | `TASKFERRY_ENV_FILE` | string (path to a `.env`-style file) | (none) |
+| `profilingEnabled` | `TASKFERRY_PROFILING_ENABLED` | boolean | `false`; see `docs/daemon.md#request-latency-profiling` |
 
 `envDenylist` uses the same comma-separated grammar as `allowedDirs` — a
 flat list of env var names, always stripped from every spawned child

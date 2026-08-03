@@ -11,6 +11,9 @@ export const DEFAULT_SUMMARIZER_TIMEOUT_MS = 360000;
 const DEFAULT_ACTIVITY_SNAPSHOT_BYTES = 96 * 1024;
 const DEFAULT_ACTIVITY_MAX_CHARS = 4000;
 
+const ANSI_ESCAPE_PATTERN = new RegExp(`${String.fromCharCode(27)}\\[[0-?]*[ -/]*[@-~]`, "g");
+const CONTROL_CHAR_PATTERN = new RegExp(`[${String.fromCharCode(0)}-${String.fromCharCode(31)}${String.fromCharCode(127)}]`, "g");
+
 /** @param {Buffer} buffer @param {string} side @returns {string} */
 function decodeUtf8(buffer, side) {
   let text = buffer.toString("utf8");
@@ -163,12 +166,10 @@ export function readDeltaNarration(logPath, fromOffset, { maxChars = DEFAULT_ACT
 /** @param {unknown} value @param {number} [maxChars] */
 export function sanitizeActivityText(value, maxChars = DEFAULT_ACTIVITY_MAX_CHARS) {
   if (typeof value !== "string") return "";
-  const ansiPattern = new RegExp(`${String.fromCharCode(27)}\\[[0-?]*[ -/]*[@-~]`, "g");
-  const controlPattern = new RegExp(`[${String.fromCharCode(0)}-${String.fromCharCode(31)}${String.fromCharCode(127)}]`, "g");
   return boundedText(
     value
-      .replace(ansiPattern, "")
-      .replace(controlPattern, " ")
+      .replace(ANSI_ESCAPE_PATTERN, "")
+      .replace(CONTROL_CHAR_PATTERN, " ")
       .replace(/\s+/g, " ")
       .trim(),
     Math.max(1, maxChars)

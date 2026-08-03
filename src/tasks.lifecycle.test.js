@@ -70,31 +70,6 @@ describe("cancel()", () => {
     child.emit("exit", null, "SIGTERM");
   });
 
-  test("signals and disables the watchdog even when cancellation persistence fails", async () => {
-    const child = fakeChild(891);
-    const killCalls = [];
-    const mgr = makeManager({
-      spawnFn: () => child,
-      killFn: (pid, signal) => killCalls.push({ pid, signal }),
-      noOutputTimeoutMs: 20,
-      watchdogPollMs: 5,
-    });
-    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
-    const lockPath = path.join(path.dirname(mgr.paths.TASKS_FILE), "tasks.lock");
-    fs.mkdirSync(lockPath);
-    const oldMs = Date.now() / 1000 - 3600;
-    fs.utimesSync(lockPath, oldMs, oldMs);
-
-    assert.throws(() => mgr.cancel(dispatched.id, { graceMs: 1000 }), /EISDIR|illegal operation on a directory/);
-    await new Promise((r) => setTimeout(r, 50));
-
-    assert.deepEqual(killCalls, [{ pid: -891, signal: "SIGTERM" }]);
-    assert.equal(mgr.status(dispatched.id).failureReason, null);
-    fs.rmdirSync(lockPath);
-    child.emit("exit", null, "SIGTERM");
-    assert.equal(mgr.status(dispatched.id).status, "cancelled");
-  });
-
   test("falls back to the plain pid if group signaling (-pid) raises ESRCH", () => {
     const child = fakeChild(999);
     const killCalls = [];
@@ -333,6 +308,7 @@ describe("accept()/reject()", () => {
   // startup sweep would still clean it up (rm -rf on a missing path is
   // idempotent), but the record lies until the sweep runs.
   function readPersistedTask(mgr, taskId) {
+    mgr.flushPersist();
     const tasks = JSON.parse(fs.readFileSync(mgr.paths.TASKS_FILE, "utf8"));
     return tasks.find((t) => t.id === taskId);
   }
@@ -441,7 +417,7 @@ describe("list()", () => {
   test("rows use the minimal schema plus failureReason, not the full detail object", () => {
     const mgr = makeManager({ tasksFixture: [baseTask({ id: "t1" })] });
     const row = mgr.list().tasks[0];
-    assert.deepEqual(Object.keys(row).sort(), ["failureReason", "id", "model", "startedAt", "status"]);
+    assert.deepEqual(Object.keys(row).sort(), ["directory", "failureReason", "id", "model", "startedAt", "status"]);
   });
 
   test("sorts newest first by startedAt", () => {

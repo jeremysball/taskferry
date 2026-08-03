@@ -2,6 +2,7 @@ import { RESULT_FIELDS } from "./protocol.js";
 import { UsageError } from "./errors.js";
 import { KNOWN_EXECUTORS } from "./executor.js";
 import { commandSpecs } from "./command-specs.js";
+import { isNonNegativeInteger } from "./numbers.js";
 
 const POSITIONAL_TASK_COMMANDS = ["cancel", "wait", "status", "tail", "summary", "result", "accept", "reject"];
 const PROMPT_REQUIRED_COMMANDS = ["dispatch"];
@@ -50,7 +51,7 @@ function migrationError(name, args) {
 function parseNumber(value, flag, { min = 0, max = Number.MAX_SAFE_INTEGER } = {}) {
   if (!/^\d+$/.test(value)) throw new UsageError(`${flag} must be an integer`, `Use ${flag} with a number from ${min} through ${max}`);
   const number = Number(value);
-  if (!Number.isSafeInteger(number) || number < min || number > max) {
+  if (!isNonNegativeInteger(number) || number < min || number > max) {
     let qualifier;
     if (min !== 1) {
       qualifier = `from ${min} through ${max}`;

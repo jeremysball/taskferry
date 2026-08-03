@@ -3,14 +3,64 @@ import path from "node:path";
 
 const ISOLATED_FLAG = "--isolated";
 
+// A JSON string can't legally contain a raw newline, so if we can't find a
+// closing quote before one, this is an unterminated string -- return null
+// rather than hunting across lines for the next real quote, which is what
+// let a comment on a later line survive unstripped.
+// @returns {number|null} index just past the closing quote, or null
+function findStringEnd(text, start) {
+  const n = text.length;
+  let j = start + 1;
+  while (j < n) {
+    const cj = text[j];
+    if (cj === "\n") return null;
+    if (cj === '"') return j + 1;
+    j += cj === "\\" && j + 1 < n && text[j + 1] !== "\n" ? 2 : 1;
+  }
+  return null;
+}
+
+// @returns {number|null} index just past a `//`/`/* */` comment starting at
+// `i`, or null if `i` isn't a comment start (including an unterminated
+// block comment, which is left as literal text rather than swallowing the
+// rest of the file).
+function commentSkipEnd(text, i) {
+  if (text[i] !== "/") return null;
+  if (text[i + 1] === "/") {
+    const newline = text.indexOf("\n", i + 2);
+    return newline === -1 ? text.length : newline;
+  }
+  if (text[i + 1] === "*") {
+    const end = text.indexOf("*/", i + 2);
+    return end === -1 ? null : end + 2;
+  }
+  return null;
+}
+
+// Manual scan instead of a regex: matching a possibly-unterminated JSON
+// string with backtracking alternation (`\\.` vs `[^"\\\n]`) is exactly the
+// super-linear shape sonarjs flags, and this parses config files whose
+// content isn't guaranteed trusted. A single forward pass is O(n) by
+// construction, so there's nothing left to backtrack.
 export function stripJsonComments(text) {
-  // One pass, left-to-right: a quoted string keeps its exact contents (and any
-  // // or /* inside it), while a line or block comment is dropped. The
-  // alternatives are disjoint so the match is linear, not backtracking-heavy.
-  return text.replace(
-    /"(?:[^"\\]|\\.)*"|\/\/[^\n]*|\/\*[\s\S]*?\*\//gm,
-    (match) => (match.startsWith('"') ? match : "")
-  );
+  let result = "";
+  let i = 0;
+  const n = text.length;
+  while (i < n) {
+    const ch = text[i];
+    const stringEnd = ch === '"' ? findStringEnd(text, i) : null;
+    const commentEnd = ch === "/" ? commentSkipEnd(text, i) : null;
+    if (stringEnd !== null) {
+      result += text.slice(i, stringEnd);
+      i = stringEnd;
+    } else if (commentEnd !== null) {
+      i = commentEnd;
+    } else {
+      result += ch;
+      i += 1;
+    }
+  }
+  return result;
 }
 
 function resolveOpencodeConfigDir(homeDirectory, env) {

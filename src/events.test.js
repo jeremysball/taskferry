@@ -169,6 +169,7 @@ describe("task lifecycle events", () => {
     child.emit("exit", 0, null);
 
     assert.deepEqual(events, []);
+    manager.flushPersist();
     const onDisk = JSON.parse(fs.readFileSync(manager.paths.TASKS_FILE, "utf8"));
     assert.equal(onDisk.find((entry) => entry.id === task.id).internal, true);
   });

@@ -134,6 +134,18 @@ describe("loadConfig()", () => {
     assert.throws(() => loadConfig({ configPath }), /error: config key "envFile".*must be a string.*\nhelp:/s);
   });
 
+  test("accepts a valid profilingEnabled value", () => {
+    const dir = tmpConfigDir();
+    const configPath = writeConfig(dir, JSON.stringify({ profilingEnabled: true }));
+    assert.deepEqual(loadConfig({ configPath }), { profilingEnabled: true });
+  });
+
+  test("rejects a wrong-typed profilingEnabled value", () => {
+    const dir = tmpConfigDir();
+    const configPath = writeConfig(dir, JSON.stringify({ profilingEnabled: "true" }));
+    assert.throws(() => loadConfig({ configPath }), /error: config key "profilingEnabled".*must be a boolean.*\nhelp:/s);
+  });
+
   test("accepts a valid sandboxDenylist value", () => {
     const dir = tmpConfigDir();
     const configPath = writeConfig(dir, JSON.stringify({ sandboxDenylist: "/home/user/.docker,/home/user/.kube" }));

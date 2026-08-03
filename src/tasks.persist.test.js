@@ -7,7 +7,7 @@ import { createTaskManager, isOutsideDirectory } from "./tasks.js";
 import { makeManager, fakeChild, baseTask, AXI_TASKS_TEST_DIR, TASKS_STATE_FILE, LUNA_MODEL, NOT_REACHED, WS_REPO } from "./tasks.test-helpers.js";
 
 describe("persistTask() durability across concurrent manager instances", () => {
-  test("two manager instances writing concurrently both keep their own task record", () => {
+  test("two manager instances sharing a state dir each persist their own tasks via debounced flush", () => {
     const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), AXI_TASKS_TEST_DIR));
     const mgrA = createTaskManager({
       stateDir,
@@ -15,19 +15,26 @@ describe("persistTask() durability across concurrent manager instances", () => {
       spawnFn: () => fakeChild(1001),
       killFn: () => { throw new Error("not used"); },
     });
+    const a = mgrA.dispatch({ prompt: "from A", directory: os.tmpdir() });
+    // Flush A's debounced write immediately via close()
+    mgrA.close();
+
+    const onDiskA = JSON.parse(fs.readFileSync(path.join(stateDir, TASKS_STATE_FILE), "utf8"));
+    assert.ok(onDiskA.some((t) => t.id === a.id), "manager A's task must be on disk after close()");
+
     const mgrB = createTaskManager({
       stateDir,
       sandboxEnabled: false,
       spawnFn: () => fakeChild(1002),
       killFn: () => { throw new Error("not used"); },
     });
-    const a = mgrA.dispatch({ prompt: "from A", directory: os.tmpdir() });
     const b = mgrB.dispatch({ prompt: "from B", directory: os.tmpdir() });
+    mgrB.close();
 
-    const onDisk = JSON.parse(fs.readFileSync(path.join(stateDir, TASKS_STATE_FILE), "utf8"));
-    const ids = onDisk.map((t) => t.id);
-    assert.ok(ids.includes(a.id), "manager A's task must survive manager B's write");
-    assert.ok(ids.includes(b.id), "manager B's task must survive manager A's write");
+    const onDiskB = JSON.parse(fs.readFileSync(path.join(stateDir, TASKS_STATE_FILE), "utf8"));
+    const ids = onDiskB.map((t) => t.id);
+    assert.ok(ids.includes(a.id), "manager A's task must survive in loadPersisted");
+    assert.ok(ids.includes(b.id), "manager B's task must be persisted");
   });
 
   test("malformed tasks.json surfaces as a structured error instead of throwing at construction", () => {

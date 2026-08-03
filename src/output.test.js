@@ -1,12 +1,26 @@
 import { describe, test } from "node:test";
 import assert from "node:assert/strict";
-import { colorize, errorValue, formatWatchEvent, leanStatus, writeToon } from "./output.js";
+import { colorize, errorValue, formatWatchEvent, homeView, leanStatus, projectContext, projectList, writeToon } from "./output.js";
 
 const TASK_ACTIVITY = "task.activity";
 const TASK_STATE = "task.state";
 const WORKSPACE_PROJ = "/workspace/proj";
 const OCCURRED_AT_MID = "2026-07-18T00:06:12.414Z";
 const OCCURRED_AT_LATE = "2026-07-18T00:24:11.282Z";
+const WORKSPACE_EXAMPLE = "/workspace/example";
+const TASKFERRY_BIN = "/bin/taskferry";
+const TASK_MODEL_SOL = "openai/gpt-5.6-sol";
+const TASK_STARTED_AT_EXAMPLE = "2026-08-01T00:00:00.000Z";
+const REVEAL_HINT_805 = "Run taskferry list --limit 805 for all 805 tasks";
+
+function fakeCappedTasks(totalCount) {
+  return Array.from({ length: totalCount }, (_, i) => ({
+    id: `task-${i}`,
+    status: "done",
+    model: TASK_MODEL_SOL,
+    startedAt: TASK_STARTED_AT_EXAMPLE,
+  }));
+}
 
 function fakeStdoutIo(isTTY) {
   let stdout = "";
@@ -309,5 +323,109 @@ describe("writeToon status coloring", () => {
 
     assert.ok(!output().includes("\x1b["));
     assert.ok(output().includes("status: unknown"));
+  });
+});
+
+function fakeCappedListValue(totalCount) {
+  return {
+    directory: WORKSPACE_EXAMPLE,
+    counts: { queued: 0, running: 0, done: totalCount, crashed: 0, cancelled: 0, unknown: 0 },
+    tasks: fakeCappedTasks(totalCount),
+  };
+}
+
+describe("projectList default row cap", () => {
+  test("caps to 30 rows by default when the total exceeds 30", () => {
+    const result = projectList(fakeCappedListValue(805));
+    assert.equal(result.tasks.length, 30);
+  });
+
+  test("does not cap when the total is at or under 30", () => {
+    const result = projectList(fakeCappedListValue(12));
+    assert.equal(result.tasks.length, 12);
+  });
+
+  test("an explicit --limit still overrides the default", () => {
+    const result = projectList(fakeCappedListValue(805), { limit: 5 });
+    assert.equal(result.tasks.length, 5);
+  });
+
+  test("adds a reveal-hint next[] when rows are truncated", () => {
+    const result = projectList(fakeCappedListValue(805));
+    assert.deepEqual(result.next, [REVEAL_HINT_805]);
+  });
+
+  test("omits next[] when nothing was truncated", () => {
+    const result = projectList(fakeCappedListValue(12));
+    assert.equal(result.next, undefined);
+  });
+
+  test("omits next[] when an explicit --limit already covers the full total", () => {
+    const result = projectList(fakeCappedListValue(12), { limit: 100 });
+    assert.equal(result.next, undefined);
+  });
+});
+
+describe("projectContext default row cap (SessionStart hook payload)", () => {
+  test("caps to 10 rows by default when the total exceeds 10", () => {
+    const result = projectContext(fakeCappedListValue(805));
+    assert.equal(result.tasks.length, 10);
+  });
+
+  test("does not cap when the total is at or under 10", () => {
+    const result = projectContext(fakeCappedListValue(4));
+    assert.equal(result.tasks.length, 4);
+  });
+
+  test("adds a reveal-hint next[] when rows are truncated", () => {
+    const result = projectContext(fakeCappedListValue(805));
+    assert.deepEqual(result.next, [REVEAL_HINT_805]);
+  });
+
+  test("omits next[] when nothing was truncated", () => {
+    const result = projectContext(fakeCappedListValue(4));
+    assert.equal(result.next, undefined);
+  });
+
+  test("an explicit limit override still works (used only by tests, not by the CLI)", () => {
+    const result = projectContext(fakeCappedListValue(805), { limit: 2 });
+    assert.equal(result.tasks.length, 2);
+  });
+});
+
+describe("homeView default row cap", () => {
+  function fakeHomeValue(totalCount) {
+    return {
+      counts: { queued: 0, running: 0, done: totalCount, crashed: 0, cancelled: 0, unknown: 0 },
+      tasks: fakeCappedTasks(totalCount),
+    };
+  }
+  const homeOpts = { executablePath: TASKFERRY_BIN, workspace: WORKSPACE_EXAMPLE };
+
+  test("caps to 30 rows by default when the total exceeds 30", () => {
+    const result = homeView(fakeHomeValue(805), homeOpts);
+    assert.equal(result.tasks.length, 30);
+  });
+
+  test("does not cap when the total is at or under 30", () => {
+    const result = homeView(fakeHomeValue(12), homeOpts);
+    assert.equal(result.tasks.length, 12);
+  });
+
+  test("appends a reveal-hint to the existing non-empty next[] when rows are truncated", () => {
+    const result = homeView(fakeHomeValue(805), homeOpts);
+    assert.equal(result.next.length, 4);
+    assert.equal(result.next[3], REVEAL_HINT_805);
+  });
+
+  test("does not append a reveal-hint when nothing was truncated", () => {
+    const result = homeView(fakeHomeValue(12), homeOpts);
+    assert.equal(result.next.length, 3);
+  });
+
+  test("passes through a non-array tasks value (e.g. projectList's 'none found' string) unchanged, instead of coercing it to an empty array", () => {
+    const value = { counts: { queued: 0, running: 0, done: 0, crashed: 0, cancelled: 0, unknown: 0 }, tasks: "none found in this workspace" };
+    const result = homeView(value, homeOpts);
+    assert.equal(result.tasks, "none found in this workspace");
   });
 });

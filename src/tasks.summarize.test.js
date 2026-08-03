@@ -269,6 +269,7 @@ import { DEFAULT_SUMMARY_MODEL } from "./tasks.js";
 // Returns the summary task id (looked up by summaryOf.sourceTaskId) and the
 // fakeChild handle so the caller can keep emitting further exits.
 async function settleSummaryChildWithSessionId(mgr, summaryTaskId, sessionId, finalText = "current state") {
+  mgr.flushPersist();
   const persisted = JSON.parse(fs.readFileSync(mgr.paths.TASKS_FILE, "utf8"));
   const summary = persisted.find((task) => task.id === summaryTaskId);
   if (!summary) throw new Error(`no summary task ${summaryTaskId} persisted`);
@@ -436,6 +437,7 @@ describe("summarize(): continue-fail-so-fresh retry", () => {
 
     // Drop a usable final message + sessionID into the retry's log so the
     // retry's session id survives into the cache for the next call.
+    mgr.flushPersist();
     const persisted = JSON.parse(fs.readFileSync(mgr.paths.TASKS_FILE, "utf8"));
     const retries = persisted.filter((t) => t.summaryOf && t.summaryOf.sourceTaskId === "source");
     assert.equal(retries.length, 2, "expected two summary tasks to have been queued");
@@ -478,6 +480,7 @@ describe("summarize(): exit handler persistence and concurrency reserve", () => 
     // opencode session id read from its log, and persisted status=done to
     // tasks.json. The activity-cache side effects (next-turn --session lookup)
     // are exercised end-to-end by the second-call test above.
+    mgr.flushPersist();
     const persisted = JSON.parse(fs.readFileSync(mgr.paths.TASKS_FILE, "utf8"));
     const summary = persisted.find((task) => task.id === started.summaryTask.id);
     assert.equal(summary.status, "done");
@@ -512,6 +515,7 @@ describe("summarize(): exit handler persistence and concurrency reserve", () => 
       // slot (summaryConcurrencyLimit = 1 at maxConcurrentTasks = 2).
       const refresh1P = mgr.activityCache.refresh(source1, { force: true, includeSummary: true });
       while (children.length < 1) await new Promise((resolve) => setImmediate(resolve));
+      mgr.flushPersist();
       const summary1Id = JSON.parse(fs.readFileSync(mgr.paths.TASKS_FILE, "utf8"))
         .find((t) => t.summaryOf && t.summaryOf.sourceTaskId === "source1").id;
 
@@ -531,6 +535,7 @@ describe("summarize(): exit handler persistence and concurrency reserve", () => 
       mock.timers.tick(500);
       while (children.length < 2) await new Promise((resolve) => setImmediate(resolve));
 
+      mgr.flushPersist();
       const summary2Id = JSON.parse(fs.readFileSync(mgr.paths.TASKS_FILE, "utf8"))
         .find((t) => t.summaryOf && t.summaryOf.sourceTaskId === "source2").id;
       await settleSummaryChildWithSessionId(mgr, summary2Id, "ses_source2", "source two summary");

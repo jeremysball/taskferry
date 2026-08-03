@@ -43,6 +43,35 @@ export function withFileLock(lockPath, fn, { staleMs = 10000, retryMs = 25, time
   return result;
 }
 
+/**
+ * Same contract as withFileLock, but for a critical section that itself
+ * needs to await -- e.g. the daemon's socket-prepare-then-bind sequence,
+ * which spans an async health-check round trip and must hold exclusivity
+ * across that whole span, not just around a single synchronous read-modify-
+ * write (taskferry#287).
+ * @template T
+ * @param {string} lockPath
+ * @param {() => Promise<T>} fn
+ * @param {{staleMs?: number, retryMs?: number, timeoutMs?: number}} [options]
+ * @returns {Promise<T>}
+ */
+export async function withFileLockAsync(lockPath, fn, { staleMs = 10000, retryMs = 25, timeoutMs = 5000 } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  const ownershipToken = `${process.pid}-${Date.now()}-${randomUUID()}`;
+  acquireFileLock(lockPath, ownershipToken, staleMs, retryMs, deadline);
+  /** @type {T} */
+  let result;
+  /** @type {unknown} */
+  let cleanupError;
+  try {
+    result = await fn();
+  } finally {
+    cleanupError = releaseFileLock(lockPath, ownershipToken);
+  }
+  if (cleanupError) throw cleanupError;
+  return result;
+}
+
 // Attempt to create the lock file exclusively. Returns null once we hold the
 // lock, the EEXIST error when the lock is already held (so the caller can
 // carry it as the timeout error's cause), and throws on any other failure.

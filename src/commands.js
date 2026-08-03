@@ -1,6 +1,5 @@
 import fs from "node:fs";
 import os from "node:os";
-import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { UsageError } from "./args.js";
 import { PROTOCOL_VERSION } from "./protocol.js";
@@ -20,6 +19,7 @@ import { normalizeDirectory, resolveWorkspaceRoot } from "./paths.js";
 import { loadConfig } from "./config.js";
 import { computeDoctorStats } from "./doctor-stats.js";
 import { streamTaskEvents, watchCommand } from "./commands-stream.js";
+import { ADVISOR_CANNED_PROMPT, gatherAdvisorContext } from "./advisor-context.js";
 
 // Default timeout for the CLI `wait` command (and `summary --wait`) when no
 // explicit --timeout is given. Kept generous (15 min) so real tasks aren't
@@ -28,123 +28,11 @@ import { streamTaskEvents, watchCommand } from "./commands-stream.js";
 // much shorter-lived use case.
 const DEFAULT_WAIT_TIMEOUT_MS = 900000;
 
-// Default budget for advisor's auto-attached context: ~30k tokens, well
-// under any provider's context window even after the canned prompt and the
-// caller's own --prompt are added on top.
-const DEFAULT_ADVISOR_CONTEXT_CHARS = 120000;
-
 // Sentinel placeholder a Promise.allSettled slot lands on when its corresponding
 // async check threw. Distinct from `null` (which `null` results also use, e.g.
 // the bwrap check on non-Linux platforms) so callers can tell "we tried and it
 // blew up" apart from "we deliberately skipped this check".
 const CHECK_FAILED = "check failed";
-
-/**
- * Resolve the effective advisor context budget: explicit env var override,
- * then the config file's `advisorContextChars`, then the built-in default.
- * Mirrors resolveWaitDefaultTimeoutMs()'s resolution order.
- * @param {NodeJS.ProcessEnv} env
- * @returns {number}
- */
-function resolveAdvisorContextChars(env) {
-  const envChars = Number(env.TASKFERRY_ADVISOR_CONTEXT_CHARS);
-  if (Number.isFinite(envChars) && envChars > 0) return envChars;
-  const configChars = Number(loadConfig({ env }).advisorContextChars);
-  return Number.isFinite(configChars) && configChars > 0 ? configChars : DEFAULT_ADVISOR_CONTEXT_CHARS;
-}
-
-/**
- * The Claude Code project-directory slug for a given absolute cwd: the path
- * with every separator replaced by "-" (e.g. "/workspace/taskferry" ->
- * "-workspace-taskferry"), matching the convention Claude Code itself uses
- * under ~/.claude/projects/.
- * @param {string} cwd
- * @returns {string}
- */
-function claudeProjectSlug(cwd) {
-  return cwd.split(path.sep).join("-");
-}
-
-/**
- * @param {string} homeDirectory
- * @param {string} cwd
- * @param {string} sessionId
- * @returns {string}
- */
-function claudeTranscriptPath(homeDirectory, cwd, sessionId) {
-  return path.join(homeDirectory, ".claude", "projects", claudeProjectSlug(cwd), `${sessionId}.jsonl`);
-}
-
-/**
- * Reads the last `maxChars` Unicode code points of `filePath` without
- * loading the whole file into memory -- a real transcript can be large.
- * UTF-8 code points are at most 4 bytes, so reading `maxChars * 4` bytes
- * from the tail guarantees enough raw bytes to yield `maxChars` code
- * points once decoded.
- * @param {string} filePath
- * @param {number} maxChars
- * @returns {string}
- */
-function readTailChars(filePath, maxChars) {
-  let size;
-  try {
-    size = fs.statSync(filePath).size;
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    throw new UsageError(
-      `advisor could not read the Claude session transcript at ${filePath}: ${message}`,
-      "CLAUDE_CODE_SESSION_ID was set but its transcript file wasn't readable -- pass --prompt explicitly to skip auto-context, or check the transcript path"
-    );
-  }
-  const bytes = Math.min(size, maxChars * 4);
-  const buffer = Buffer.alloc(bytes);
-  const fd = fs.openSync(filePath, "r");
-  try {
-    fs.readSync(fd, buffer, 0, bytes, size - bytes);
-  } finally {
-    fs.closeSync(fd);
-  }
-  const codePoints = Array.from(buffer.toString("utf8"));
-  return codePoints.length > maxChars ? codePoints.slice(-maxChars).join("") : codePoints.join("");
-}
-
-const ADVISOR_TAIL_CHARS_CAP = 131072;
-
-const ADVISOR_CANNED_PROMPT = `You are an advisor reviewing the in-progress work of a cheaper dispatcher agent. The text that follows is a tail of its session log: its current task, what it has read, what it has decided, and what it is about to do next. Treat it as suspect, not as a draft to refine.
-
-Your reply goes directly back to that autonomous agent mid-task; it will not be read by a human first. Do not summarize what the ferry did and do not validate its choices for politeness. Push back.
-
-Interrogate its assumptions: list each one the ferry is acting on without verifying, and say whether it is load-bearing. Hunt for blind spots: what did it not read, not run, not check, and where is a known foot-gun pattern it is about to step on (silent error swallow, mock-green-real-fail, off-by-one on the boundary it is touching, an unverified config default). Propose concrete alternatives: for each decision it is about to lock in, name at least one it has not considered, with the file and approximate line, not just an abstraction. Rank so the single highest-leverage change comes first.
-
-Format: bulleted, terse, no preamble, no closing summary. Short sentences. Reference code as \`path/to/file.js:NNN\`. Prefer "should" and "must" over "you might consider." If there is nothing material to add, reply \`no change, proceed\` and stop.`;
-
-/**
- * Resolves advisor's auto-attached context: a Claude session transcript
- * tail when CLAUDE_CODE_SESSION_ID is set (this call came directly from a
- * Claude Code session), else the calling ferry's own task.tail when
- * TASKFERRY_TASK_ID is set (this call came from inside a taskferry-spawned
- * worker), else null (no source available).
- * @param {object} params
- * @param {{request: (method: string, params: object) => Promise<any>}} params.client
- * @param {NodeJS.ProcessEnv} params.env
- * @param {string} params.cwd
- * @param {string} params.homeDirectory
- * @returns {Promise<{source: string, text: string} | null>}
- */
-async function gatherAdvisorContext({ client, env, cwd, homeDirectory }) {
-  const budget = resolveAdvisorContextChars(env);
-  if (env.CLAUDE_CODE_SESSION_ID) {
-    const transcriptPath = claudeTranscriptPath(homeDirectory, cwd, env.CLAUDE_CODE_SESSION_ID);
-    const text = readTailChars(transcriptPath, budget);
-    return { source: "claude-session", text };
-  }
-  if (env.TASKFERRY_TASK_ID) {
-    const tailed = await client.request("task.tail", { taskId: env.TASKFERRY_TASK_ID, chars: Math.min(budget, ADVISOR_TAIL_CHARS_CAP) });
-    const text = tailed.text === "none observed yet" ? "" : tailed.text;
-    return { source: "ferry-log", text };
-  }
-  return null;
-}
 
 // Not the same model tasks.js's own summarizer uses for `task.summary`
 // (DEFAULT_SUMMARY_MODEL) -- commands.js is the CLI process and doesn't
@@ -235,7 +123,7 @@ function isSet(value) {
 async function runHome(options, { client, executablePath, cwd, resolveWorkspaceRoot: resolveWorkspaceRootFn }) {
   const directory = normalizeDirectory(options.directory || resolveWorkspaceRootFn(cwd));
   const listed = await client.request(TASK_LIST_METHOD, { directory });
-  return homeView(projectList(listed), { executablePath, workspace: directory });
+  return homeView(projectList(listed, { limit: Infinity }), { executablePath, workspace: directory });
 }
 
 function runVersion() {
@@ -586,8 +474,6 @@ function resolveRunCommandDeps(deps) {
     resolveWorkspaceRoot: deps.resolveWorkspaceRoot ?? resolveWorkspaceRoot,
   };
 }
-
-export { resolveAdvisorContextChars, claudeTranscriptPath, readTailChars };
 
 export async function runCommand(command, options, deps = {}) {
   if (!Object.hasOwn(HANDLERS, command)) throw new Error(`unknown command: ${command}`);

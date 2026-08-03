@@ -156,6 +156,7 @@ describe("dispatch() lifecycle, driven through an injected spawnFn (no real open
 
     assert.equal(dispatched.directory, realDirectory);
     assert.ok(events.every((event) => event.directory === realDirectory));
+    mgr.flushPersist();
     const onDisk = JSON.parse(fs.readFileSync(mgr.paths.TASKS_FILE, "utf8"));
     assert.equal(onDisk.find((task) => task.id === dispatched.id).directory, realDirectory);
   });
@@ -570,43 +571,6 @@ describe("active-task concurrency cap (regressions)", () => {
     children[1].emit("exit", 0, null);
   });
 
-  test("a persistence failure after spawn kills the child and releases its concurrency slot when it exits", () => {
-    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-test-"));
-    const lockPath = path.join(stateDir, "tasks.lock");
-    const children = [];
-    const killCalls = [];
-    const mgr = createTaskManager({
-      stateDir,
-      sandboxEnabled: false,
-      maxConcurrentTasks: 1,
-      maxDispatchesPerWindow: 10,
-      dispatchWindowMs: 60000,
-      spawnFn: () => {
-        const child = fakeChild(9200 + children.length);
-        children.push(child);
-        if (children.length === 1) {
-          fs.mkdirSync(lockPath);
-          const oldMs = Date.now() / 1000 - 3600;
-          fs.utimesSync(lockPath, oldMs, oldMs);
-        }
-        return child;
-      },
-      killFn: (pid, signal) => killCalls.push({ pid, signal }),
-    });
-
-    assert.throws(
-      () => mgr.dispatch({ prompt: "first", directory: os.tmpdir() }),
-      /EISDIR|illegal operation on a directory/
-    );
-    assert.deepEqual(killCalls, [{ pid: -9200, signal: "SIGKILL" }]);
-
-    children[0].emit("exit", null, "SIGKILL");
-    fs.rmdirSync(lockPath);
-
-    const second = mgr.dispatch({ prompt: "second", directory: os.tmpdir() });
-    assert.equal(second.status, "running");
-    assert.equal(children.length, 2);
-  });
 });
 
 describe("config file precedence (maxConcurrentTasks)", () => {

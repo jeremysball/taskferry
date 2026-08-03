@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { withFileLock } from "./state-lock.js";
+import { withFileLock, withFileLockAsync } from "./state-lock.js";
 
 function tmpLockPath() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-lock-test-"));
@@ -54,5 +54,47 @@ describe("withFileLock()", () => {
 
     assert.equal(fs.readFileSync(lockPath, "utf8"), "replacement-owner");
     fs.unlinkSync(lockPath);
+  });
+});
+
+// Note: a genuine same-process *concurrent* contention test isn't feasible
+// here -- acquireLock()'s retry loop blocks the JS thread synchronously via
+// Atomics.wait with no yield back to the event loop, so a second same-
+// process caller contending on a lock held across an async gap starves the
+// very continuation that would release it (a same-process-only artifact;
+// each real daemon-spawn race is a separate OS process with its own event
+// loop, so this doesn't arise in production). These tests instead cover the
+// async-fn contract directly: acquire/await/release around a real await
+// point, and correctness across sequential (non-contending) calls.
+describe("withFileLockAsync()", () => {
+  test("awaits fn, releases the lock file afterward, and returns its resolved value", async () => {
+    const lockPath = tmpLockPath();
+    const result = await withFileLockAsync(lockPath, async () => {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      return 42;
+    });
+    assert.equal(result, 42);
+    assert.equal(fs.existsSync(lockPath), false);
+  });
+
+  test("removes the lock file even if the async fn rejects, and rethrows", async () => {
+    const lockPath = tmpLockPath();
+    await assert.rejects(
+      () => withFileLockAsync(lockPath, async () => {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        throw new Error("boom");
+      }),
+      /boom/
+    );
+    assert.equal(fs.existsSync(lockPath), false);
+  });
+
+  test("two sequential calls on the same lock path both succeed", async () => {
+    const lockPath = tmpLockPath();
+    const first = await withFileLockAsync(lockPath, async () => "first");
+    const second = await withFileLockAsync(lockPath, async () => "second");
+    assert.equal(first, "first");
+    assert.equal(second, "second");
+    assert.equal(fs.existsSync(lockPath), false);
   });
 });

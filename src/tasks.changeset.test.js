@@ -464,6 +464,7 @@ describe("sweepOrphanedOverlays()", () => {
 
     assert.equal(fs.existsSync(overlayRoot), false);
     assert.equal("overlayDirs" in mgr.status(task.id), false);
+    mgr.flushPersist();
     const persisted = JSON.parse(fs.readFileSync(tasksFile, "utf8"));
     assert.equal(persisted[0].overlayDirs, null);
   });

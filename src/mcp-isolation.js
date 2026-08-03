@@ -2,7 +2,13 @@ import fs from "node:fs";
 import path from "node:path";
 
 export function stripJsonComments(text) {
-  return text.replace(/("(?:\\.|[^"\\])*")|(\/\/.*$|\/\*[\s\S]*?\*\/)/gm, (_match, str) => str || "");
+  // The string-content class excludes newlines: JSON strings can't legally
+  // contain a raw newline, so an unterminated string (e.g. a trailing
+  // backslash before what was meant to be the closing quote) fails to match
+  // this alternative instead of running on past end-of-line, hunting for the
+  // next real quote across subsequent lines and mangling whatever comments
+  // or code sit in between.
+  return text.replace(/("(?:\\.|[^"\\\n])*")|(\/\/.*$|\/\*[\s\S]*?\*\/)/gm, (_match, str) => str || "");
 }
 
 function resolveOpencodeConfigDir(homeDirectory, env) {

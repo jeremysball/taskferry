@@ -378,42 +378,64 @@ parallel command doing the same job.
 
 ## Fleet-Wide Monitoring
 
-On a session's first `taskferry dispatch`, also background `taskferry watch
---summaries --flush-interval 5m` (no `--directory` needed — it resolves the
-git workspace root automatically) and register the process with the harness
-`Monitor` tool. This is the only `Monitor` this skill arms for dispatch
-progress — there is no separate per-task `Monitor` alongside it (see "Inside
-Claude Code..." above). It surfaces periodic, batched updates for every
-ferry dispatched with the workspace root as its directory —
-the default when dispatching from the repo root, or from a subdirectory with an
-explicit `--directory <root>` — including ones dispatched by other concurrent
-sessions. A ferry dispatched from a subdirectory without an explicit
-`--directory` stays tagged with that subdirectory (dispatch's own directory
-default is unchanged) and won't appear in a root-scoped watch.
+**Scope the watch to the exact directory dispatches actually use, not the
+repo root.** `taskferry watch --directory <path>` (and `list`) filter tasks
+by *exact string equality* on the task's recorded `directory` — there is no
+prefix/subdirectory matching and no canonicalization to a shared git-common
+root at filter time. `--directory` is normally resolved to the repo root
+only as a *fallback* when a command omits `--directory` entirely; any
+dispatch that passes `--directory` explicitly — which "Always Use A
+Worktree" above requires for essentially every dispatch — is recorded
+verbatim as that worktree's own path, never rewritten to the root. The
+practical consequence: a `watch` armed at the repo root will **silently see
+nothing** for every ferry dispatched into a worktree, because a worktree
+path is a different exact string than the root even though it's nested
+under it and shares the same repo. `watch` also has no `--all` flag (unlike
+`list`), so there's no built-in escape hatch to see every directory's
+events in one stream. An empty fleet log therefore does not mean "no
+activity yet" — verify it actually has content soon after arming it, don't
+trust silence.
+
+Given that, arm the fleet watch scoped to whatever directory this
+session's dispatches are actually targeting — almost always a specific
+worktree, not the repo root. If a session dispatches into more than one
+worktree, arm one fleet watch per distinct worktree directory (each gets
+its own log/PID pair below); a single root-scoped watch will not cover any
+of them.
+
+On a session's first `taskferry dispatch` into a given directory, background
+`taskferry watch --summaries --flush-interval 5m --directory <that exact
+directory>` and register the process with the harness `Monitor` tool. This
+is the only kind of `Monitor` this skill arms for dispatch progress — there
+is no separate per-task `Monitor` alongside it (see "Inside Claude Code..."
+above). It surfaces periodic, batched updates for every ferry dispatched
+with that same directory — including ones dispatched by other concurrent
+sessions targeting the same directory.
 
 This is pure convention for agent sessions to follow — the `Monitor` tool is
 harness-native and can't be invoked from within taskferry's own code, so
 nothing in taskferry itself enforces it.
 
-**Scope the log path to the workspace, not a fixed filename.** A literal
-`/tmp/taskferry-fleet-watch.log` collides across concurrent sessions: two
-sessions in different repos (or two sessions/terminals in the same repo)
-both redirecting to the identical path race on the same inode — the second
-session's `>` truncates the file out from under the first session's
-already-open write fd, corrupting or dropping the first session's events
-with no error from either side. Derive the path from the workspace root
-instead, so every session working the same repo recomputes the identical
-path deterministically (no `mktemp` — a random suffix can't be
-recomputed in a later shell call, since shell state doesn't persist between
-tool calls) and reuses the same watcher rather than spawning a duplicate:
+**Scope the log path to the watched directory, not a fixed filename.** A
+literal `/tmp/taskferry-fleet-watch.log` collides across concurrent
+sessions: two sessions watching different directories (or two
+sessions/terminals watching the same one) both redirecting to the
+identical path race on the same inode — the second session's `>` truncates
+the file out from under the first session's already-open write fd,
+corrupting or dropping the first session's events with no error from
+either side. Derive the path from the watched directory instead, so every
+session targeting the same directory recomputes the identical path
+deterministically (no `mktemp` — a random suffix can't be recomputed in a
+later shell call, since shell state doesn't persist between tool calls) and
+reuses the same watcher rather than spawning a duplicate:
 
 ```sh
-WORKSPACE_ROOT=$(git rev-parse --show-toplevel)
-SLUG=$(echo "$WORKSPACE_ROOT" | tr -c 'A-Za-z0-9_-' '-')
+WATCH_DIR="<the exact --directory this session's dispatches use, e.g. the worktree path>"
+SLUG=$(echo "$WATCH_DIR" | tr -c 'A-Za-z0-9_-' '-')
 FLEET_LOG="/tmp/taskferry-fleet-watch${SLUG}.log"
 FLEET_PID="/tmp/taskferry-fleet-watch${SLUG}.pid"
 if ! kill -0 "$(cat "$FLEET_PID" 2>/dev/null)" 2>/dev/null; then
-  taskferry watch --summaries --flush-interval 5m --directory "$WORKSPACE_ROOT" > "$FLEET_LOG" 2>&1 &
+  taskferry watch --summaries --flush-interval 5m --directory "$WATCH_DIR" > "$FLEET_LOG" 2>&1 &
   disown
   echo $! > "$FLEET_PID"
 fi
@@ -422,11 +444,12 @@ fi
 Then arm a `Monitor` tailing `$FLEET_LOG` (`tail -n0 -F "$FLEET_LOG"`,
 `persistent: true`), the same pattern used for a single `wait --summarize`
 job above — one notification per flush tick instead of one per raw event.
-Recompute `$FLEET_LOG`/`$FLEET_PID` from `$WORKSPACE_ROOT` the same way in
+Recompute `$FLEET_LOG`/`$FLEET_PID` from `$WATCH_DIR` the same way in
 any later shell call in this session (e.g. to `cat` the log) — don't rely on
 the variable surviving between tool calls.
 
-Arm this once per session, on the first dispatch, not once per dispatch —
+Arm this once per distinct watched directory per session, on the first
+dispatch into that directory, not once per dispatch —
 re-arming on every subsequent dispatch would spawn a redundant background
 `watch` process each time. The `kill -0`/pid-file check above additionally
 guards the cross-session case: a second concurrent session in the same

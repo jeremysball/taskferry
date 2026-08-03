@@ -353,6 +353,12 @@ test("stripJsonComments strips a block comment", () => {
   assert.equal(JSON.parse(result).a, 1);
 });
 
+test("stripJsonComments doesn't let a trailing backslash before a would-be closing quote swallow a later line's comment", () => {
+  const input = '{"key": "val\\"\n// this comment should still be stripped\n"other": 1}';
+  const result = stripJsonComments(input);
+  assert.ok(!result.includes("this comment should still be stripped"), `comment on the line after the malformed line should have been stripped, got: ${result}`);
+});
+
 test("checkOpencodePlaywrightIsolation returns isolated true when --isolated is present", (t) => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-mcp-home-"));
   t.after(() => fs.rmSync(home, { recursive: true, force: true }));

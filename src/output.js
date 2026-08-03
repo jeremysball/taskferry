@@ -66,20 +66,32 @@ function stripPrefix(line, prefix) {
   return line.startsWith(prefix) ? line.slice(prefix.length).trim() : null;
 }
 
+// Single pass over `lines`: finds the first `error:`/`help:` line (if any)
+// and collects every other line as a detail line. Split out of errorValue()
+// so its own branch count stays low.
+function extractErrorParts(lines) {
+  let errorLine;
+  let helpLine;
+  const detailLines = [];
+  for (const line of lines) {
+    const isErrorLine = line.startsWith("error:");
+    const isHelpLine = line.startsWith("help:");
+    if (errorLine === undefined && isErrorLine) errorLine = stripPrefix(line, "error:") || errorLine;
+    if (helpLine === undefined && isHelpLine) helpLine = stripPrefix(line, "help:") || helpLine;
+    if (!isErrorLine && !isHelpLine) detailLines.push(line);
+  }
+  return { errorLine, helpLine, detailLines };
+}
+
 export function errorValue(error) {
   const text = error instanceof Error ? error.message : String(error);
   const lines = text.split("\n");
-  const errorLine = lines.map((line) => stripPrefix(line, "error:")).find(Boolean);
-  const helpLine = lines.map((line) => stripPrefix(line, "help:")).find(Boolean);
-  // Detail lines: any line not matched by `error:` or `help:`. Only folded
-  // in when we found an `error:` line as the primary, so the plain
-  // single-line fallback (no recognized prefixes) keeps returning
-  // `lines[0]` unchanged.
-  const detailLines = errorLine !== undefined
-    ? lines.filter((line) => !line.startsWith("error:") && !line.startsWith("help:"))
-    : [];
+  const { errorLine, helpLine, detailLines } = extractErrorParts(lines);
   const primary = errorLine || lines[0] || "taskferry request failed";
-  const message = detailLines.length ? `${primary}\n${detailLines.join("\n")}` : primary;
+  // Detail lines only fold in when we found an `error:` line as the primary,
+  // so the plain single-line fallback (no recognized prefixes) keeps
+  // returning `lines[0]` unchanged.
+  const message = errorLine !== undefined && detailLines.length ? `${primary}\n${detailLines.join("\n")}` : primary;
   const help = error && typeof error === "object" && typeof error.help === "string"
     ? error.help
     : helpLine || "Retry the command or run `taskferry --help`";

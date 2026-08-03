@@ -1,6 +1,7 @@
 import { RESULT_FIELDS } from "./protocol.js";
 import { UsageError } from "./errors.js";
 import { KNOWN_EXECUTORS } from "./executor.js";
+import { isNonNegativeInteger } from "./numbers.js";
 
 const commandSpecs = {
   dispatch: {
@@ -348,7 +349,7 @@ function migrationError(name, args) {
 function parseNumber(value, flag, { min = 0, max = Number.MAX_SAFE_INTEGER } = {}) {
   if (!/^\d+$/.test(value)) throw new UsageError(`${flag} must be an integer`, `Use ${flag} with a number from ${min} through ${max}`);
   const number = Number(value);
-  if (!Number.isSafeInteger(number) || number < min || number > max) {
+  if (!isNonNegativeInteger(number) || number < min || number > max) {
     const qualifier = min === 1 ? (number > max ? `a positive integer from ${min} through ${max}` : "a positive integer") : `from ${min} through ${max}`;
     throw new UsageError(`${flag} must be ${qualifier}`, `Use ${flag} with a number from ${min} through ${max}`);
   }

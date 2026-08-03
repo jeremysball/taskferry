@@ -379,7 +379,7 @@ parallel command doing the same job.
 ## Fleet-Wide Monitoring
 
 On a session's first `taskferry dispatch`, also background `taskferry watch
---summaries --flush-interval 5m` (no `--directory` needed — it resolves the
+--summaries --flush-interval 15m` (no `--directory` needed — it resolves the
 git workspace root automatically) and register the process with the harness
 `Monitor` tool. This is the only `Monitor` this skill arms for dispatch
 progress — there is no separate per-task `Monitor` alongside it (see "Inside
@@ -413,7 +413,7 @@ SLUG=$(echo "$WORKSPACE_ROOT" | tr -c 'A-Za-z0-9_-' '-')
 FLEET_LOG="/tmp/taskferry-fleet-watch${SLUG}.log"
 FLEET_PID="/tmp/taskferry-fleet-watch${SLUG}.pid"
 if ! kill -0 "$(cat "$FLEET_PID" 2>/dev/null)" 2>/dev/null; then
-  taskferry watch --summaries --flush-interval 5m --directory "$WORKSPACE_ROOT" > "$FLEET_LOG" 2>&1 &
+  taskferry watch --summaries --flush-interval 15m --directory "$WORKSPACE_ROOT" > "$FLEET_LOG" 2>&1 &
   disown
   echo $! > "$FLEET_PID"
 fi

@@ -94,9 +94,16 @@ framework) — `mcp-isolation.js`, `narration-format.js`,
 CLI, and (via the default `pi` executor) a live dispatch to
 `minimax/MiniMax-M3` (`npm run test:integration`, not part of the default
 `npm test`). They run in CI as the separate `integration` job in
-`.github/workflows/check.yml` (needs `bubblewrap` and the `pi` CLI
-installed, plus `MINIMAX_API_KEY` in the environment; skipped on fork PRs,
-which don't receive repo secrets). `smoke-test-support.js`
+`.github/workflows/check.yml` (needs the `pi` CLI installed, plus
+`MINIMAX_API_KEY` in the environment; skipped on fork PRs, which don't
+receive repo secrets). That job builds `bubblewrap` from source rather than
+`apt install`ing it — Ubuntu's apt package reports a version that
+`checkOverlaySupport()` (in `sandbox.js`) trusts as overlay-capable, but is
+actually built with `--overlay-src`/`--overlay` compiled out, so every
+sandboxed dispatch would otherwise fail with `bwrap: Unknown option
+--overlay-src`; a distro package's reported version number doesn't
+guarantee the flags it was compiled with are present.
+`smoke-test-support.js`
 (58 lines) holds their shared teardown helpers: `stopDaemonAndWait()` blocks
 until the daemon's SIGTERM-triggered exit actually completes instead of
 racing it, and `rmRoot()` shells out to `rm -rf` rather than `fs.rmSync`

@@ -14,6 +14,7 @@ const SYSTEM_HEALTH_METHOD = "system.health";
 const TASK_ADVISOR_METHOD = "task.advisor";
 const TASK_DISPATCH_METHOD = "task.dispatch";
 const TASK_LIST_METHOD = "task.list";
+const TASK_STATS_METHOD = "task.stats";
 const TASK_STATUS_METHOD = "task.status";
 const TASK_TAIL_METHOD = "task.tail";
 
@@ -990,30 +991,38 @@ test("doctor integrations.playwrightMcpIsolation shape is present when both side
   assert.equal(result.integrations.playwrightMcpIsolation.claudeCode.isolated, true);
 });
 
-test("doctor --stats calls task.list and returns computeDoctorStats() output, skipping env checks", async (_t) => {
+test("doctor --stats calls task.stats and formats its rates as percentages, skipping env checks", async (_t) => {
+  // task.stats aggregates server-side, over the daemon's own task map --
+  // never the raw per-task rows (see the task.list-based version's
+  // "daemon connection closed" bug once task history grows past
+  // MAX_BUFFER_BYTES). The CLI's only remaining job is formatting the
+  // 0..1 doneRate/crashRate floats into readable percentages for display.
   const home = mkTmpDir(TASKFERRY_DOCTOR_STATS_HOME_PREFIX);
   let calledMethod;
+  const statsResult = {
+    byModel: [{ model: "m1", dispatches: 2, done: 1, crashed: 1, cancelled: 0, unknown: 0, doneRate: 0.5, crashRate: 0.5, dominantFailureReason: "no_output_timeout" }],
+    failureReasons: [{ reason: "no_output_timeout", count: 1 }],
+    unknownBacklog: { total: 0, tasks: [] },
+    computedAt: "2026-08-01T12:00:00.000Z",
+    statusMix: { overall: { queued: 0, running: 0, done: 1, crashed: 1, cancelled: 0, unknown: 0, total: 2 }, last24h: {}, last7d: {} },
+    trend: { window: "24h", current: { crashRate: 0.25, settled: 4 }, previous: { crashRate: null, settled: 0 }, direction: "unknown" },
+  };
   const client = {
     request: async (method, params) => {
       calledMethod = method;
       assert.deepEqual(params, {});
-      return {
-        counts: { queued: 0, running: 0, done: 1, crashed: 1, cancelled: 0, unknown: 0 },
-        tasks: [
-          { id: "a", status: "done", model: "m1", startedAt: "2026-08-01T10:00:00.000Z", failureReason: null },
-          { id: "b", status: "crashed", model: "m1", startedAt: "2026-08-01T11:00:00.000Z", failureReason: "no_output_timeout" },
-        ],
-      };
+      return statsResult;
     },
   };
   const runShellCommand = async () => ({ stdout: "", stderr: "", code: 0 });
 
   const result = await runCommand("doctor", { stats: true }, { homeDirectory: home, env: {}, client, runShellCommand });
 
-  assert.equal(calledMethod, TASK_LIST_METHOD);
-  assert.ok(Array.isArray(result.byModel));
-  assert.equal(result.byModel[0].model, "m1");
-  assert.equal(result.byModel[0].dispatches, 2);
+  assert.equal(calledMethod, TASK_STATS_METHOD);
+  assert.equal(result.byModel[0].doneRate, "50.0%");
+  assert.equal(result.byModel[0].crashRate, "50.0%");
+  assert.equal(result.trend.current.crashRate, "25.0%");
+  assert.equal(result.trend.previous.crashRate, null, "a null rate (no settled tasks yet) must stay null, not become a formatted string");
   assert.equal(result.integrations, void 0);
   assert.equal(result.warnings, void 0);
 });
@@ -1022,8 +1031,12 @@ test("doctor --stats on a daemon with zero tasks returns empty stats, not garbag
   const home = mkTmpDir(TASKFERRY_DOCTOR_STATS_EMPTY_PREFIX);
   const client = {
     request: async () => ({
-      counts: { queued: 0, running: 0, done: 0, crashed: 0, cancelled: 0, unknown: 0 },
-      tasks: "none found (this server process's lifetime)",
+      byModel: [],
+      failureReasons: [],
+      unknownBacklog: { total: 0, tasks: [] },
+      computedAt: "2026-08-01T12:00:00.000Z",
+      statusMix: { overall: { queued: 0, running: 0, done: 0, crashed: 0, cancelled: 0, unknown: 0, total: 0 }, last24h: {}, last7d: {} },
+      trend: { window: "24h", current: {}, previous: {}, direction: "unknown" },
     }),
   };
   const runShellCommand = async () => ({ stdout: "", stderr: "", code: 0 });
@@ -1035,7 +1048,7 @@ test("doctor --stats on a daemon with zero tasks returns empty stats, not garbag
   assert.deepEqual(result.failureReasons, []);
 });
 
-test("doctor without --stats does not call task.list", async (_t) => {
+test("doctor without --stats does not call task.list or task.stats", async (_t) => {
   const home = mkTmpDir(TASKFERRY_DOCTOR_STATS_HOME_PREFIX);
   const calledMethods = [];
   const client = {
@@ -1049,6 +1062,7 @@ test("doctor without --stats does not call task.list", async (_t) => {
   await runCommand("doctor", {}, { homeDirectory: home, env: {}, client, runShellCommand });
 
   assert.ok(!calledMethods.includes(TASK_LIST_METHOD));
+  assert.ok(!calledMethods.includes(TASK_STATS_METHOD));
 });
 
 test("watch --flush-interval batches multiple events for the same and different taskIds into one flushed block", async () => {

@@ -13,6 +13,39 @@ import {
 
 export const MAX_BUFFER_BYTES = 1024 * 1024;
 
+// An oversized *success* response (message.ok === true, from successResponse)
+// degrades to a small RESPONSE_TOO_LARGE error frame instead of a silent
+// socket.destroy() -- without this, the client only ever sees "daemon
+// connection closed", indistinguishable from a crash or a network blip, with
+// no hint the request's own result was the cause. Event pushes (no `ok`
+// field, see eventMessage) and already-small error responses fall straight
+// through to the destroy, same as before.
+export function makeWriteMessage(maxOutboundBytes) {
+  return function writeMessage(socket, message) {
+    if (socket.destroyed) return false;
+    const encoded = encodeMessage(message);
+    if (socket.writableLength + Buffer.byteLength(encoded) <= maxOutboundBytes) {
+      socket.write(encoded);
+      return true;
+    }
+    if (message.ok === true) {
+      const fallback = errorResponse(
+        message.id,
+        "RESPONSE_TOO_LARGE",
+        `daemon response for this request exceeds ${maxOutboundBytes} bytes`,
+        "Narrow the request (e.g. pass --directory), or use a method that summarizes server-side if one exists",
+      );
+      const fallbackEncoded = encodeMessage(fallback);
+      if (socket.writableLength + Buffer.byteLength(fallbackEncoded) <= maxOutboundBytes) {
+        socket.write(fallbackEncoded);
+        return true;
+      }
+    }
+    socket.destroy();
+    return false;
+  };
+}
+
 // The connection layer of the daemon: owns the per-client socket bookkeeping,
 // request dispatch loop, event fan-out, and the deferred-until-idle
 // self-restart. Everything here is driven by startDaemon() in daemon.js, which

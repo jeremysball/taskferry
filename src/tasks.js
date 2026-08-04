@@ -14,6 +14,7 @@ import { buildBwrapArgs, checkBwrapAvailable, checkOverlaySupport, defaultDenyLi
 import { applyChangeset, overlayPaths, resolvePreDispatchHead, subOverlayPaths, subFilePaths, cleanupOverlay, defaultRunCommand as defaultOverlayRunCommand, extractGitDiff, extractNonGitDiff } from "./changeset.js";
 import { resolveExecutor, opencodeExecutor } from "./executor.js";
 import { loadEnvFile, watchEnvFile } from "./env-file.js";
+import { computeDoctorStats } from "./doctor-stats.js";
 
 /**
  * @typedef {object} SummaryOf
@@ -3491,6 +3492,7 @@ function buildTaskManagerApi(ctx) {
      */
     poll: (taskId, options = {}) => pollTask(taskId, options, { ensureStateLoaded: () => ctx.helpers.ensureStateLoaded(), tasks: ctx.maps.tasks, waiters: ctx.maps.waiters, noSuchTask }),
     list: () => listTasks({ ensureStateLoaded: () => ctx.helpers.ensureStateLoaded(), tasks: ctx.maps.tasks }),
+    stats: () => statsTasks({ ensureStateLoaded: () => ctx.helpers.ensureStateLoaded(), tasks: ctx.maps.tasks }),
     /**
      * @param {string} taskId
      * @param {{full?: boolean, fields?: string[]}} [options]
@@ -4689,6 +4691,22 @@ function listTasks(ctx) {
     counts,
     tasks: all.length ? all.map(summarizeRow) : "none found (this server process's lifetime)",
   };
+}
+
+/**
+ * Aggregate task-history stats (`doctor --stats`), computed in-process over
+ * the daemon's own task map rather than shipping every row to the client for
+ * client-side aggregation -- with enough task history (~800+ rows observed in
+ * practice) the raw row list alone exceeds the daemon's outbound message cap
+ * (see MAX_BUFFER_BYTES in daemon-server.js), which silently destroys the
+ * socket with no error frame. Only the small aggregated result crosses the
+ * wire.
+ * @param {{ensureStateLoaded: () => void, tasks: Map<string, Task>}} ctx
+ */
+function statsTasks(ctx) {
+  ctx.ensureStateLoaded();
+  const rows = Array.from(ctx.tasks.values()).map(summarizeRow);
+  return computeDoctorStats(rows);
 }
 
 /**

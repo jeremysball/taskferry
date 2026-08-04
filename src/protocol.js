@@ -11,6 +11,7 @@ export const RPC_METHODS = Object.freeze([
   "task.status",
   "task.wait",
   "task.list",
+  "task.stats",
   "task.result",
   "task.tail",
   "task.summary",
@@ -195,6 +196,10 @@ const METHOD_PARAMS = {
   "task.list": {
     required: [],
     optional: [["directory", isAbsolutePath]],
+  },
+  "task.stats": {
+    required: [],
+    optional: [],
   },
   "task.result": {
     required: [["taskId", isNonEmptyString]],

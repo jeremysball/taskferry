@@ -21,6 +21,7 @@ import {
   deliverEvent,
   makeClose,
   makeMaybeRestart,
+  makeWriteMessage,
   syncActivitySubscriptions,
 } from "./daemon-server.js";
 
@@ -289,6 +290,7 @@ const invokeHandlers = {
   "task.status": (manager, params) => manager.status(params.taskId),
   "task.wait": (manager, params) => manager.poll(params.taskId, params),
   "task.list": (manager, params) => filteredList(manager, params.directory),
+  "task.stats": (manager) => manager.stats(),
   "task.result": (manager, params) => manager.result(params.taskId, params),
   "task.tail": (manager, params) => manager.tail(params.taskId, params.chars === undefined ? undefined : { chars: params.chars }),
   "task.summary": (manager, params) => manager.summarize(params.taskId, params),
@@ -417,16 +419,7 @@ export async function startDaemon(options = {}) {
   const clients = new Set();
   const subscriptions = new Map();
   const inFlightRef = { current: 0 };
-  const writeMessage = (socket, message) => {
-    if (socket.destroyed) return false;
-    const encoded = encodeMessage(message);
-    if (socket.writableLength + Buffer.byteLength(encoded) > maxOutboundBytes) {
-      socket.destroy();
-      return false;
-    }
-    socket.write(encoded);
-    return true;
-  };
+  const writeMessage = makeWriteMessage(maxOutboundBytes);
   const onEvent = (event) => deliverEvent(subscriptions, writeMessage, event);
   const manager = taskManagerFactory({ ...taskManagerOptions, onEvent, stateDir, runtimeDir });
   const onRequestTimed = makeRequestTimer({ stateDir, env, config: taskManagerOptions.config });

@@ -9,6 +9,7 @@ import {
   leanResult,
   leanStatus,
   projectContext,
+  projectDoctorStats,
   projectList,
 } from "./output.js";
 import { defaultRunCommandAsync as defaultShellRunner, pluginInstalled } from "./setup.js";
@@ -17,7 +18,6 @@ import { checkBwrapAvailableAsync } from "./sandbox.js";
 import { checkSkills as defaultCheckSkills } from "../scripts/generate-skill.js";
 import { normalizeDirectory, resolveWorkspaceRoot } from "./paths.js";
 import { loadConfig } from "./config.js";
-import { computeDoctorStats } from "./doctor-stats.js";
 import { streamTaskEvents, watchCommand } from "./commands-stream.js";
 import { ADVISOR_CANNED_PROMPT, gatherAdvisorContext } from "./advisor-context.js";
 
@@ -110,6 +110,7 @@ async function checkClaudeIntegration(runShellCommand) {
 const SYSTEM_HEALTH_METHOD = "system.health";
 const TASK_STATUS_METHOD = "task.status";
 const TASK_LIST_METHOD = "task.list";
+const TASK_STATS_METHOD = "task.stats";
 
 // Whether an option was set to anything other than `undefined`. The dispatch
 // helpers use this to decide whether to include a key in the RPC payload --
@@ -441,8 +442,12 @@ function shapeDoctorResult(options, checked, diagnostics) {
 }
 
 async function runDoctorStats(client) {
-  const listed = await client.request(TASK_LIST_METHOD, {});
-  return computeDoctorStats(Array.isArray(listed.tasks) ? listed.tasks : []);
+  // Aggregated server-side (task.stats), not shipped as raw rows to aggregate
+  // here: with enough task history the full unfiltered row list alone blows
+  // past the daemon's outbound message cap and the connection is silently
+  // torn down with no error frame (taskferry#doctor-stats-connection-closed).
+  const stats = await client.request(TASK_STATS_METHOD, {});
+  return projectDoctorStats(stats);
 }
 
 async function runDoctor(options, deps) {

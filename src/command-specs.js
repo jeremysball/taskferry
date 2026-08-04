@@ -1,0 +1,108 @@
+export const commandSpecs = {
+  dispatch: {
+    usage: "taskferry dispatch --prompt <text> [options]",
+    description: "Queue a background OpenCode run.",
+    options: { "--prompt <text>": "required", "--directory <path>": "defaults to the current workspace", "--model <id>": "use the default model when omitted", "--variant <name>": "optional model reasoning variant", "--session-id <id>": "resume an existing OpenCode session", "--require-final-marker <regex>": "flag the task as incomplete if the final message doesn't match this pattern (case-sensitive, standard JS RegExp semantics)", "--no-sandbox": "run this dispatch without the bwrap filesystem sandbox (default: sandboxed on Linux)", "--no-overlay": "run this dispatch without the copy-on-write overlay (writes land directly, not gated by accept/reject)", "--allowed-dirs <path,path,...>": "extra directories bound read-write inside the sandbox, in addition to the auto-detected git-common-dir for a worktree", "--executor <opencode|pi>": "worker backend to dispatch through, default pi" },
+    examples: ['taskferry dispatch --prompt "Fix the failing tests"', 'taskferry dispatch --prompt "Review this change" --model openai/gpt-5.6-sol', 'taskferry dispatch --prompt "Investigate" --require-final-marker "^Status: (DONE|DONE_WITH_CONCERNS)$"', 'taskferry dispatch --prompt "Run one-off shell tooling" --no-sandbox', 'taskferry dispatch --prompt "Update the shared cache dir" --allowed-dirs /home/user/.cache/myapp'],
+  },
+  cancel: {
+    usage: "taskferry cancel <id> [--grace-ms <number>]",
+    description: "Cancel queued or running work.",
+    options: { "--grace-ms <number>": "milliseconds before SIGKILL, default 5000" },
+    examples: ['taskferry cancel <id>', 'taskferry cancel <id> --grace-ms 10000'],
+  },
+  accept: {
+    usage: "taskferry accept <id>",
+    description: "Apply a dispatch task's pending changeset to its target directory.",
+    options: {},
+    examples: ['taskferry accept <id>'],
+  },
+  reject: {
+    usage: "taskferry reject <id>",
+    description: "Discard a task's pending changeset without applying it.",
+    options: {},
+    examples: ['taskferry reject <id>'],
+  },
+  wait: {
+    usage: "taskferry wait <id> [options]",
+    description: "Wait for a task to settle or return its current status after a timeout.",
+    options: { "--timeout <duration>": "maximum wait, e.g. 10000 (ms), 30s, 5m, 1h", "--tail-chars <number>": "include this many trailing text characters on timeout", "--full": "include directory, model, and log details", "--summarize": "print periodic live summaries while waiting; exits when the task settles" },
+    examples: ['taskferry wait <id>', 'taskferry wait <id> --timeout 10s --tail-chars 1000', 'taskferry wait <id> --summarize'],
+  },
+  advisor: {
+    usage: "taskferry advisor --model <id> [--prompt <text>] [options]",
+    description: "Consult a stronger model for a second opinion and block until it answers. With no --prompt, auto-attaches the caller's own recent context (a Claude Code session transcript, or the calling ferry's own task log) and asks for structured, actionable pushback.",
+    options: {
+      "--model <id>": "required",
+      "--prompt <text>": "optional; auto-attaches context and asks for methodical review when omitted",
+      "--directory <path>": "defaults to the current workspace",
+      "--variant <name>": "optional model reasoning variant",
+      "--session-id <id>": "continue a recent advisor session",
+      "--timeout <duration>": "maximum wait, e.g. 10000 (ms), 30s, 5m, 1h",
+      "--executor <opencode|pi>": "worker backend to dispatch through, default pi",
+      "--summarize-context": "condense the auto-attached context through a throwaway model call before sending it (off by default)",
+    },
+    examples: [
+      'taskferry advisor --model openai/gpt-5.6-sol',
+      'taskferry advisor --prompt "How should I split this module?" --model openai/gpt-5.6-sol',
+      'taskferry advisor --prompt "Review this design" --model zai/glm-5.2 --timeout 30s',
+    ],
+  },
+  status: {
+    usage: "taskferry status <id> [--full]",
+    description: "Inspect task lifecycle and log activity.",
+    options: { "--full": "include all recorded task details" },
+    examples: ['taskferry status <id>', 'taskferry status <id> --full'],
+  },
+  tail: {
+    usage: "taskferry tail <id> [--chars <number>]",
+    description: "Read the latest model text for a task.",
+    options: { "--chars <number>": "characters to return, default 1000, maximum 131072" },
+    examples: ['taskferry tail <id>', 'taskferry tail <id> --chars 2000'],
+  },
+  summary: {
+    usage: "taskferry summary <id> [options]",
+    description: "Create a bounded report or activity summary for a task.",
+    options: { "--mode report|activity": "summary mode, default report", "--max-words <number>": "target length from 75 through 300", "--wait": "wait for active work before summarizing" },
+    examples: ['taskferry summary <id>', 'taskferry summary <id> --mode activity --wait'],
+  },
+  result: {
+    usage: "taskferry result <id> [options]",
+    description: "Read the final model result for a task.",
+    options: { "--full": "include untruncated narration", "--fields <comma-list>": "request selected result fields", "--diff": "print the task's changeset diff (read-only; cannot combine with --fields or --full)" },
+    examples: ['taskferry result <id>', 'taskferry result <id> --full', 'taskferry result <id> --fields message,tokens', 'taskferry result <id> --diff'],
+  },
+  list: {
+    usage: "taskferry list [options]",
+    description: "List tasks scoped to a workspace, newest first.",
+    options: { "--directory <path>": "workspace to inspect, defaults to the current workspace", "--all": "include tasks from every workspace", "--limit <number>": "limit displayed rows while preserving counts" },
+    examples: ['taskferry list', 'taskferry list --limit 20', 'taskferry list --all'],
+  },
+  watch: {
+    usage: "taskferry watch [options]",
+    description: "Stream task state events for a workspace.",
+    options: { "--directory <path>": "workspace to watch, defaults to the current workspace", "--task-id <id>": "scope the stream to one task; exits automatically once it settles", "--format toon|ndjson": "stream format, default toon", "--summaries": "request activity summaries when available", "--flush-interval <duration>": "batch events and print them together on this interval, e.g. 30s, 5m, 1h; requires --summaries" },
+    examples: ['taskferry watch', 'taskferry watch --task-id <id> --summaries', 'taskferry watch --format ndjson', 'taskferry watch --summaries --flush-interval 5m'],
+  },
+  context: {
+    usage: "taskferry context [options]",
+    description: "Print compact current-workspace context for an agent hook.",
+    options: { "--directory <path>": "workspace to inspect, defaults to the current workspace", "--format toon|claude-hook|codex-hook": "context format, default toon" },
+    examples: ['taskferry context', 'taskferry context --format claude-hook', 'taskferry context --format codex-hook'],
+  },
+  doctor: {
+    usage: "taskferry doctor [--full] [--stats]",
+    description: "Check daemon health and installation details, or report aggregate task-history stats.",
+    options: {
+      "--full": "include complete health details",
+      "--stats": "report aggregate task-history stats instead of environment checks (mutually exclusive with --full)",
+    },
+    examples: ['taskferry doctor', 'taskferry doctor --full', 'taskferry doctor --stats'],
+  },
+  setup: {
+    usage: "taskferry setup",
+    description: "Install dependencies and create the CLI and OpenCode plugin symlinks without contacting the daemon.",
+    options: {},
+    examples: ['taskferry setup', 'node src/cli.js setup'],
+  },
+};

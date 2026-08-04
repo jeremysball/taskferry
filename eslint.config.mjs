@@ -1,5 +1,6 @@
 import js from "@eslint/js";
 import globals from "globals";
+import sonarjs from "eslint-plugin-sonarjs";
 
 // Taskferry is a Node ESM project: the AXI CLI entrypoint (src/cli.js),
 // the daemon that owns task processes (src/daemon.js), its task manager
@@ -24,17 +25,61 @@ export default [
 
   // Maintainability rules: flag files/functions that have grown hard to
   // hold in your head (or in an agent's context window) in one pass.
-  // Warnings, not errors -- they inform without blocking a commit, since
-  // fixing them usually means a real refactor, not a one-line change.
+  // Promoted to hard errors per issue #135, once the fix-up in
+  // .superpowers/plans/2026-07-31-sonarjs-lint-fixup.md landed.
   {
     files: ["**/*.js"],
     ignores: ["**/*.test.js", "**/*-test.js"],
     rules: {
-      complexity: ["warn", 15],
-      "max-depth": ["warn", 4],
-      "max-params": ["warn", 5],
-      "max-lines-per-function": ["warn", { max: 80, skipBlankLines: true, skipComments: true }],
-      "max-lines": ["warn", { max: 400, skipBlankLines: true, skipComments: true }],
+      complexity: ["error", 15],
+      "max-depth": ["error", 4],
+      "max-params": ["error", 5],
+      "max-lines-per-function": ["error", { max: 80, skipBlankLines: true, skipComments: true }],
+      "max-lines": ["error", { max: 400, skipBlankLines: true, skipComments: true }],
+    },
+  },
+
+  // SonarJS bug/code-smell detectors, layered on top of the maintainability
+  // rules above. Promoted to hard errors per issue #135, once the fix-up in
+  // .superpowers/plans/2026-07-31-sonarjs-lint-fixup.md landed.
+  {
+    files: ["**/*.js"],
+    plugins: { sonarjs },
+    rules: {
+      ...Object.fromEntries(
+        Object.entries(sonarjs.configs.recommended.rules).map(([name, value]) => [
+          name,
+          Array.isArray(value) ? ["error", ...value.slice(1)] : "error",
+        ]),
+      ),
+      // Pure style preference (parens around single-arg arrows), not a bug
+      // or maintainability signal -- disabled rather than fixed.
+      "sonarjs/arrow-function-convention": "off",
+      // Wants a license header block on every file; this project doesn't
+      // use one.
+      "sonarjs/file-header": "off",
+      // Taskferry's whole job is sandboxing: os.tmpdir()/`/tmp` use and
+      // PATH-resolved spawns of bwrap/git/opencode/pi are expected,
+      // reviewed patterns here, not accidental exposure -- disabled rather
+      // than generating permanent noise no fix can resolve.
+      "sonarjs/publicly-writable-directories": "off",
+      "sonarjs/no-os-command-from-path": "off",
+    },
+  },
+
+  // src/tasks.js is a user-approved permanent exception to the whole-file
+  // max-lines caps: splitting createTaskManager()'s home file into multiple
+  // modules was judged a materially bigger architectural change than the
+  // rest of the lint-fixup plan, with higher regression risk than it's
+  // worth (see .superpowers/plans/2026-07-31-sonarjs-lint-fixup.md). Every
+  // per-function rule (complexity, max-lines-per-function, etc.) still
+  // applies and is clean on this file -- only the two whole-file line-count
+  // rules are relaxed.
+  {
+    files: ["src/tasks.js"],
+    rules: {
+      "max-lines": "off",
+      "sonarjs/max-lines": "off",
     },
   },
 

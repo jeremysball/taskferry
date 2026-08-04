@@ -1,16 +1,20 @@
 import { describe, test } from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
 import { EventEmitter } from "node:events";
 import fs from "node:fs";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
 import { prepareSocket, removeStaleSocketIfUnchanged, startDaemon } from "./daemon.js";
-import { connectClient, ensureDaemonStarted, startDaemonBooter } from "./client.js";
-import { withFileLock } from "./state-lock.js";
 import { resolveRuntimeDir } from "./paths.js";
+
+const TEST_MODEL = "test/model";
+const TASK_ADVISOR = "task.advisor";
+const SYSTEM_HEALTH = "system.health";
+const TEST_STARTED_AT = "2026-07-15T00:00:00.000Z";
+const TASK_WAIT = "task.wait";
+const TASK_STATUS = "task.status";
+const SLOW_REQUEST_ID = "slow-request";
 
 // Explicitly resets the three profiling-related vars before applying
 // per-test overrides, so an ambient TASKFERRY_PROFILING_ENABLED (etc.) set
@@ -80,7 +84,7 @@ function fakeManagerFactory(tasks = [], { checkSummaryModelReady } = {}) {
       return {
         counts: { queued: 0, running: 0, done: tasks.length, crashed: 0, cancelled: 0, unknown: 0 },
         tasks: tasks.length
-          ? tasks.map(({ id, status, model = "test/model", startedAt = "2026-07-15T00:00:00.000Z", directory }) => ({ id, status, model, startedAt, directory }))
+          ? tasks.map(({ id, status, model = TEST_MODEL, startedAt = TEST_STARTED_AT, directory }) => ({ id, status, model, startedAt, directory }))
           : "none found (this server process's lifetime)",
       };
     },
@@ -114,13 +118,13 @@ function fakeManagerFactory(tasks = [], { checkSummaryModelReady } = {}) {
       onEvent = options.onEvent;
       return manager;
     },
-    calls,
     emit(event) {
       onEvent(event);
     },
     get options() {
       return capturedOptions;
     },
+    calls,
   };
 }
 
@@ -135,12 +139,7 @@ async function openPeer(socketPath) {
   socket.setEncoding("utf8");
   socket.on("data", (chunk) => {
     buffer += chunk;
-    for (;;) {
-      const newline = buffer.indexOf("\n");
-      if (newline === -1) break;
-      const line = buffer.slice(0, newline);
-      buffer = buffer.slice(newline + 1);
-      if (!line) continue;
+    const handleLine = (line) => {
       const message = JSON.parse(line);
       if (message.type === "event") {
         events.push(message);
@@ -149,6 +148,13 @@ async function openPeer(socketPath) {
         pending.get(message.id)?.(message);
         pending.delete(message.id);
       }
+    };
+    for (;;) {
+      const newline = buffer.indexOf("\n");
+      if (newline === -1) break;
+      const line = buffer.slice(0, newline);
+      buffer = buffer.slice(newline + 1);
+      if (line) handleLine(line);
     }
   });
 
@@ -251,7 +257,7 @@ describe("Unix socket daemon", () => {
     const peer = await openPeer(paths.socketPath);
     t.after(() => peer.close());
 
-    await peer.request("advise", "task.advisor", { prompt: "hi", directory: paths.root, model: "m", executor: "pi" });
+    await peer.request("advise", TASK_ADVISOR, { prompt: "hi", directory: paths.root, model: "m", executor: "pi" });
 
     const lastAdvisorCall = fake.calls.filter((call) => call[0] === "advisor").at(-1);
     assert.deepEqual(lastAdvisorCall, ["advisor", { prompt: "hi", directory: paths.root, model: "m", executor: "pi" }]);
@@ -293,7 +299,7 @@ describe("Unix socket daemon", () => {
     const peer = await openPeer(paths.socketPath);
     t.after(() => peer.close());
 
-    await peer.request("advise", "task.advisor", { prompt: "hi", directory: paths.root, model: "m", env: { FOO: "bar" } });
+    await peer.request("advise", TASK_ADVISOR, { prompt: "hi", directory: paths.root, model: "m", env: { FOO: "bar" } });
 
     const lastAdvisorCall = fake.calls.filter((call) => call[0] === "advisor").at(-1);
     assert.deepEqual(lastAdvisorCall, ["advisor", { prompt: "hi", directory: paths.root, model: "m", env: { FOO: "bar" } }]);
@@ -307,7 +313,7 @@ describe("Unix socket daemon", () => {
     const peer = await openPeer(paths.socketPath);
     t.after(() => peer.close());
 
-    await peer.request("advise", "task.advisor", { prompt: "hi", directory: paths.root, model: "m", variant: "high", timeoutMs: 30000 });
+    await peer.request("advise", TASK_ADVISOR, { prompt: "hi", directory: paths.root, model: "m", variant: "high", timeoutMs: 30000 });
 
     const lastAdvisorCall = fake.calls.filter((call) => call[0] === "advisor").at(-1);
     assert.deepEqual(lastAdvisorCall, ["advisor", { prompt: "hi", directory: paths.root, model: "m", variant: "high", timeoutMs: 30000 }]);
@@ -329,7 +335,7 @@ describe("Unix socket daemon", () => {
     const peer = await openPeer(paths.socketPath);
     t.after(() => peer.close());
 
-    const response = await peer.request("advise", "task.advisor", { prompt: "hi", directory: paths.root, model: "m", executor: "pi" });
+    const response = await peer.request("advise", TASK_ADVISOR, { prompt: "hi", directory: paths.root, model: "m", executor: "pi" });
 
     assert.equal(response.ok, false);
     assert.equal(response.error.code, "REQUEST_FAILED");
@@ -347,7 +353,7 @@ describe("Unix socket daemon", () => {
     assert.equal(fs.statSync(paths.socketPath).mode & 0o777, 0o600);
 
     const peer = await openPeer(paths.socketPath);
-    const health = await peer.request("health", "system.health");
+    const health = await peer.request("health", SYSTEM_HEALTH);
     const dispatched = await peer.request("dispatch", "task.dispatch", { prompt: "hello", directory: paths.root });
     peer.close();
 
@@ -366,20 +372,23 @@ describe("Unix socket daemon", () => {
     assert.equal(fake.options.runtimeDir, paths.runtimeDir);
   });
 
+});
+
+describe("Unix socket daemon: concurrency", () => {
   test("multiplexes concurrent out-of-order responses on one connection", async (t) => {
-    const paths = temporaryPaths(t);
-    const fake = fakeManagerFactory();
+      const paths = temporaryPaths(t);
+      const fake = fakeManagerFactory();
     const daemon = await startDaemon({ ...paths, taskManagerFactory: fake.factory });
     t.after(() => daemon.close());
     const peer = await openPeer(paths.socketPath);
     t.after(() => peer.close());
 
-    const slow = peer.request("slow-request", "task.wait", { taskId: "slow", timeoutMs: 100 });
-    const fast = peer.request("fast-request", "task.wait", { taskId: "fast", timeoutMs: 100 });
+    const slow = peer.request(SLOW_REQUEST_ID, TASK_WAIT, { taskId: "slow", timeoutMs: 100 });
+    const fast = peer.request("fast-request", TASK_WAIT, { taskId: "fast", timeoutMs: 100 });
     const first = await Promise.race([slow, fast]);
 
     assert.equal(first.id, "fast-request");
-    assert.equal((await slow).id, "slow-request");
+    assert.equal((await slow).id, SLOW_REQUEST_ID);
     assert.ok(fake.calls.some((call) => call[0] === "poll"));
   });
 
@@ -395,14 +404,16 @@ describe("Unix socket daemon", () => {
     const peer = await openPeer(paths.socketPath);
     t.after(() => peer.close());
 
-    const slow = peer.request("slow", "task.wait", { taskId: "slow", timeoutMs: 100 });
-    const rejected = await peer.request("overflow", "system.health");
+    const slow = peer.request("slow", TASK_WAIT, { taskId: "slow", timeoutMs: 100 });
+    const rejected = await peer.request("overflow", SYSTEM_HEALTH);
 
     assert.equal(rejected.ok, false);
     assert.equal(rejected.error.code, "SERVER_BUSY");
     assert.equal((await slow).ok, true);
   });
+});
 
+describe("Unix socket daemon: profiling (env/config toggles and rotation)", () => {
   test("does not write perf.log or flag slow requests unless TASKFERRY_PROFILING_ENABLED=1", async (t) => {
     const paths = temporaryPaths(t);
     const fake = fakeManagerFactory();
@@ -415,7 +426,7 @@ describe("Unix socket daemon", () => {
     const peer = await openPeer(paths.socketPath);
     t.after(() => peer.close());
 
-    await peer.request("health-1", "system.health");
+    await peer.request("health-1", SYSTEM_HEALTH);
 
     assert.equal(fs.existsSync(path.join(paths.stateDir, "perf.log")), false);
   });
@@ -433,11 +444,11 @@ describe("Unix socket daemon", () => {
     const peer = await openPeer(paths.socketPath);
     t.after(() => peer.close());
 
-    await peer.request("health-1", "system.health");
+    await peer.request("health-1", SYSTEM_HEALTH);
 
     const perfLogPath = path.join(paths.stateDir, "perf.log");
     const lines = fs.readFileSync(perfLogPath, "utf8").trim().split("\n").map((line) => JSON.parse(line));
-    assert.ok(lines.some((line) => line.method === "system.health"));
+    assert.ok(lines.some((line) => line.method === SYSTEM_HEALTH));
   });
 
   test("TASKFERRY_PROFILING_ENABLED=0 overrides a config.json profilingEnabled: true", async (t) => {
@@ -453,7 +464,7 @@ describe("Unix socket daemon", () => {
     const peer = await openPeer(paths.socketPath);
     t.after(() => peer.close());
 
-    await peer.request("health-1", "system.health");
+    await peer.request("health-1", SYSTEM_HEALTH);
 
     assert.equal(fs.existsSync(path.join(paths.stateDir, "perf.log")), false);
   });
@@ -480,13 +491,13 @@ describe("Unix socket daemon", () => {
       process.stderr.write = originalWrite;
     });
 
-    await peer.request("health-1", "system.health");
-    await peer.request("slow-1", "task.wait", { taskId: "slow", timeoutMs: 100 });
+    await peer.request("health-1", SYSTEM_HEALTH);
+    await peer.request("slow-1", TASK_WAIT, { taskId: "slow", timeoutMs: 100 });
 
     const perfLogPath = path.join(paths.stateDir, "perf.log");
     const lines = fs.readFileSync(perfLogPath, "utf8").trim().split("\n").map((line) => JSON.parse(line));
-    assert.ok(lines.some((line) => line.method === "system.health" && line.ok === true));
-    assert.ok(lines.some((line) => line.method === "task.wait" && line.durationMs >= 10));
+    assert.ok(lines.some((line) => line.method === SYSTEM_HEALTH && line.ok === true));
+    assert.ok(lines.some((line) => line.method === TASK_WAIT && line.durationMs >= 10));
     assert.ok(stderrChunks.some((chunk) => chunk.includes("slow request: task.wait")));
   });
 
@@ -503,7 +514,7 @@ describe("Unix socket daemon", () => {
     t.after(() => peer.close());
 
     for (let i = 0; i < 5; i++) {
-      await peer.request(`health-${i}`, "system.health");
+      await peer.request(`health-${i}`, SYSTEM_HEALTH);
     }
 
     const perfLogPath = path.join(paths.stateDir, "perf.log");
@@ -529,7 +540,7 @@ describe("Unix socket daemon", () => {
     t.after(() => peer.close());
 
     for (let i = 0; i < 5; i++) {
-      await peer.request(`health-${i}`, "system.health");
+      await peer.request(`health-${i}`, SYSTEM_HEALTH);
     }
 
     const perfLogPath = path.join(paths.stateDir, "perf.log");
@@ -537,7 +548,9 @@ describe("Unix socket daemon", () => {
     const lines = fs.readFileSync(perfLogPath, "utf8").trim().split("\n");
     assert.equal(lines.length, 5, "all 5 requests should have accumulated in one file, not been rotated away individually");
   });
+});
 
+describe("Unix socket daemon: profiling (request-timing edge cases)", () => {
   test("reports ok:false when the response could not be delivered even though invoke() itself did not throw", async (t) => {
     const paths = temporaryPaths(t);
     const fake = fakeManagerFactory();
@@ -554,12 +567,12 @@ describe("Unix socket daemon", () => {
     // The oversized-response write destroys the socket before a reply ever
     // arrives, so this request's promise never settles -- fire it without
     // awaiting and instead wait for the server-side write/destroy to happen.
-    void peer.request("health-1", "system.health");
+    void peer.request("health-1", SYSTEM_HEALTH);
     await new Promise((resolve) => setTimeout(resolve, 50));
 
     const perfLogPath = path.join(paths.stateDir, "perf.log");
     const lines = fs.readFileSync(perfLogPath, "utf8").trim().split("\n").map((line) => JSON.parse(line));
-    const entry = lines.find((line) => line.method === "system.health");
+    const entry = lines.find((line) => line.method === SYSTEM_HEALTH);
     assert.ok(entry, "expected a perf.log entry for the oversized-response request");
     assert.equal(entry.ok, false, "ok should be false when writeMessage could not deliver the response");
   });
@@ -577,8 +590,8 @@ describe("Unix socket daemon", () => {
     const peer = await openPeer(paths.socketPath);
     t.after(() => peer.close());
 
-    const slow = peer.request("slow-request", "task.wait", { taskId: "slow", timeoutMs: 100 });
-    const rejected = await peer.request("overflow", "system.health");
+    const slow = peer.request(SLOW_REQUEST_ID, TASK_WAIT, { taskId: "slow", timeoutMs: 100 });
+    const rejected = await peer.request("overflow", SYSTEM_HEALTH);
     assert.equal(rejected.error.code, "SERVER_BUSY");
     await slow;
     peer.socket.write("not valid json\n");
@@ -586,7 +599,7 @@ describe("Unix socket daemon", () => {
 
     const perfLogPath = path.join(paths.stateDir, "perf.log");
     const lines = fs.readFileSync(perfLogPath, "utf8").trim().split("\n").map((line) => JSON.parse(line));
-    assert.ok(lines.some((line) => line.method === "system.health" && line.ok === false), "expected the SERVER_BUSY rejection to be logged");
+    assert.ok(lines.some((line) => line.method === SYSTEM_HEALTH && line.ok === false), "expected the SERVER_BUSY rejection to be logged");
     assert.ok(lines.some((line) => line.method === "parse_error" && line.ok === false), "expected the malformed request to be logged");
   });
 
@@ -602,12 +615,12 @@ describe("Unix socket daemon", () => {
     const peer = await openPeer(paths.socketPath);
     t.after(() => peer.close());
 
-    const response = await peer.request("bad-task", "task.status", { taskId: "does-not-exist" });
+    const response = await peer.request("bad-task", TASK_STATUS, { taskId: "does-not-exist" });
     assert.equal(response.ok, false, "the RPC response itself should still report the error");
 
     const perfLogPath = path.join(paths.stateDir, "perf.log");
     const lines = fs.readFileSync(perfLogPath, "utf8").trim().split("\n").map((line) => JSON.parse(line));
-    const entry = lines.find((line) => line.method === "task.status");
+    const entry = lines.find((line) => line.method === TASK_STATUS);
     assert.ok(entry, "expected a perf.log entry for the unknown-task request");
     assert.equal(entry.ok, true, "ok should be true once the error response was actually delivered over a healthy socket");
   });
@@ -634,7 +647,7 @@ describe("Unix socket daemon", () => {
       process.stderr.write = originalWrite;
     });
 
-    await peer.request("health-1", "system.health");
+    await peer.request("health-1", SYSTEM_HEALTH);
 
     assert.ok(!stderrChunks.some((chunk) => chunk.includes("slow request:")), "an empty-string threshold must fall back to the default, not become 0");
   });
@@ -658,265 +671,9 @@ describe("Unix socket daemon", () => {
     const lines = fs.readFileSync(perfLogPath, "utf8").trim().split("\n").map((line) => JSON.parse(line));
     assert.ok(lines.some((line) => line.method === "request_too_large" && line.ok === false), "expected the oversized buffer to be logged");
   });
+});
 
-  test("filters list/context by workspace and builds context from list plus status", async (t) => {
-    const paths = temporaryPaths(t);
-    const otherDirectory = path.join(paths.root, "other");
-    fs.mkdirSync(otherDirectory);
-    const tasks = [
-      { id: "here", status: "done", directory: paths.root, model: "test/model", startedAt: "2026-07-15T02:00:00.000Z" },
-      { id: "there", status: "done", directory: otherDirectory, model: "test/model", startedAt: "2026-07-15T01:00:00.000Z" },
-    ];
-    const fake = fakeManagerFactory(tasks);
-    const daemon = await startDaemon({ ...paths, taskManagerFactory: fake.factory });
-    t.after(() => daemon.close());
-    const peer = await openPeer(paths.socketPath);
-    t.after(() => peer.close());
-
-    const listed = await peer.request("list", "task.list", { directory: paths.root });
-    const context = await peer.request("context", "task.context", { directory: paths.root });
-
-    assert.deepEqual(listed.result.tasks.map((task) => task.id), ["here"]);
-    assert.equal(listed.result.counts.done, 1);
-    assert.equal(context.result.directory, fs.realpathSync(paths.root));
-    assert.deepEqual(context.result.tasks.map((task) => task.id), ["here"]);
-    assert.equal(context.result.tasks[0].directory, paths.root);
-  });
-
-  test("does not call manager.status() for tasks outside the requested workspace", async (t) => {
-    const paths = temporaryPaths(t);
-    const otherDirectory = path.join(paths.root, "other");
-    fs.mkdirSync(otherDirectory);
-    const tasks = [
-      { id: "here", status: "done", directory: paths.root, model: "test/model", startedAt: "2026-07-15T02:00:00.000Z" },
-      { id: "there-1", status: "done", directory: otherDirectory, model: "test/model", startedAt: "2026-07-15T01:00:00.000Z" },
-      { id: "there-2", status: "done", directory: otherDirectory, model: "test/model", startedAt: "2026-07-15T00:00:00.000Z" },
-    ];
-    const fake = fakeManagerFactory(tasks);
-    const daemon = await startDaemon({ ...paths, taskManagerFactory: fake.factory });
-    t.after(() => daemon.close());
-    const peer = await openPeer(paths.socketPath);
-    t.after(() => peer.close());
-
-    await peer.request("context", "task.context", { directory: paths.root });
-
-    const statusCalls = fake.calls.filter((call) => call[0] === "status").map((call) => call[1]);
-    assert.deepEqual(statusCalls, ["here"]);
-  });
-
-  test("supports multiple clients and multiple filtered subscriptions per connection", async (t) => {
-    const paths = temporaryPaths(t);
-    const otherDirectory = path.join(paths.root, "other");
-    fs.mkdirSync(otherDirectory);
-    const fake = fakeManagerFactory();
-    const daemon = await startDaemon({ ...paths, taskManagerFactory: fake.factory });
-    t.after(() => daemon.close());
-    const first = await openPeer(paths.socketPath);
-    const second = await openPeer(paths.socketPath);
-    t.after(() => first.close());
-    t.after(() => second.close());
-
-    const firstHere = await first.request("sub-here", "event.subscribe", { directory: paths.root });
-    const firstThere = await first.request("sub-there", "event.subscribe", { directory: otherDirectory });
-    const secondHere = await second.request("sub-second", "event.subscribe", { directory: paths.root });
-    assert.notEqual(firstHere.result.subscriptionId, firstThere.result.subscriptionId);
-    assert.notEqual(firstHere.result.subscriptionId, secondHere.result.subscriptionId);
-
-    fake.emit({ type: "task.state", taskId: "one", directory: paths.root, status: "running" });
-    fake.emit({ type: "task.state", taskId: "two", directory: otherDirectory, status: "done" });
-
-    const firstEvents = await first.waitForEvents(2);
-    const secondEvents = await second.waitForEvents(1);
-    assert.deepEqual(firstEvents.map((message) => message.subscriptionId), [
-      firstHere.result.subscriptionId,
-      firstThere.result.subscriptionId,
-    ]);
-    assert.deepEqual(secondEvents.map((message) => message.event.taskId), ["one"]);
-    assert.equal(daemon.stats().connections, 2);
-    assert.equal(daemon.stats().subscriptions, 3);
-  });
-
-  test("event.subscribe with taskId resolves the directory server-side, without a client-side task.status round-trip (issue #59)", async (t) => {
-    const paths = temporaryPaths(t);
-    const fake = fakeManagerFactory([{ id: "one", status: "done", directory: paths.root }]);
-    const daemon = await startDaemon({ ...paths, taskManagerFactory: fake.factory });
-    t.after(() => daemon.close());
-    const peer = await openPeer(paths.socketPath);
-    t.after(() => peer.close());
-
-    const sub = await peer.request("sub", "event.subscribe", { taskId: "one" });
-    assert.equal(sub.ok, true);
-    assert.ok(sub.result.subscriptionId);
-
-    fake.emit({ type: "task.state", taskId: "one", directory: paths.root, status: "running" });
-    const events = await peer.waitForEvents(1);
-    assert.equal(events[0].event.taskId, "one");
-  });
-
-  test("event.subscribe rejects an unknown taskId", async (t) => {
-    const paths = temporaryPaths(t);
-    const fake = fakeManagerFactory([]);
-    const daemon = await startDaemon({ ...paths, taskManagerFactory: fake.factory });
-    t.after(() => daemon.close());
-    const peer = await openPeer(paths.socketPath);
-    t.after(() => peer.close());
-
-    const rejected = await peer.request("sub", "event.subscribe", { taskId: "missing" });
-    assert.equal(rejected.ok, false);
-    assert.match(rejected.error.message, /unknown task id/);
-  });
-
-  test("event.subscribe with summaries: true rejects upfront when the summary model isn't ready, without registering a subscription", async (t) => {
-    const paths = temporaryPaths(t);
-    const fake = fakeManagerFactory([], {
-      checkSummaryModelReady: async () => {
-        throw new Error("error: summary model is unavailable: opencode/mimo-v2.5-free\nhelp: set TASKFERRY_SUMMARY_MODEL to an installed model, then retry taskferry_summary");
-      },
-    });
-    const daemon = await startDaemon({ ...paths, taskManagerFactory: fake.factory });
-    t.after(() => daemon.close());
-    const peer = await openPeer(paths.socketPath);
-    t.after(() => peer.close());
-
-    const rejected = await peer.request("sub", "event.subscribe", { directory: paths.root, summaries: true });
-    assert.equal(rejected.ok, false);
-    assert.match(rejected.error.message, /summary model is unavailable/);
-
-    // Confirm no subscription was actually registered: a plain (non-summaries)
-    // subscribe still succeeds afterward, proving the daemon didn't crash or
-    // wedge its subscription state on the earlier rejection.
-    const plain = await peer.request("sub2", "event.subscribe", { directory: paths.root });
-    assert.equal(plain.ok, true);
-    assert.ok(plain.result.subscriptionId);
-  });
-
-  test("event.subscribe with originSessionId only receives same-origin events, and origin-less events broadcast to everyone", async (t) => {
-    const paths = temporaryPaths(t);
-    const fake = fakeManagerFactory();
-    const daemon = await startDaemon({ ...paths, taskManagerFactory: fake.factory });
-    t.after(() => daemon.close());
-    const first = await openPeer(paths.socketPath);
-    const second = await openPeer(paths.socketPath);
-    t.after(() => first.close());
-    t.after(() => second.close());
-
-    await first.request("sub-first", "event.subscribe", { directory: paths.root, originSessionId: "sess-A" });
-    await second.request("sub-second", "event.subscribe", { directory: paths.root, originSessionId: "sess-B" });
-
-    fake.emit({ type: "task.state", taskId: "one", directory: paths.root, status: "running", originSessionId: "sess-A" });
-    fake.emit({ type: "task.state", taskId: "two", directory: paths.root, status: "running", originSessionId: "sess-B" });
-    fake.emit({ type: "task.state", taskId: "three", directory: paths.root, status: "done" });
-
-    const firstEvents = await first.waitForEvents(2);
-    const secondEvents = await second.waitForEvents(2);
-    assert.deepEqual(firstEvents.map((message) => message.event.taskId), ["one", "three"]);
-    assert.deepEqual(secondEvents.map((message) => message.event.taskId), ["two", "three"]);
-  });
-
-  test("routes each activity subscription its own summary variant from activityVariants", async (t) => {
-    const paths = temporaryPaths(t);
-    const fake = fakeManagerFactory();
-    const daemon = await startDaemon({ ...paths, taskManagerFactory: fake.factory });
-    t.after(() => daemon.close());
-    const rawPeer = await openPeer(paths.socketPath);
-    const summaryPeer = await openPeer(paths.socketPath);
-    t.after(() => rawPeer.close());
-    t.after(() => summaryPeer.close());
-
-    const rawSub = await rawPeer.request("sub-raw", "event.subscribe", { directory: paths.root });
-    const summarySub = await summaryPeer.request("sub-summary", "event.subscribe", { directory: paths.root, summaries: true });
-
-    fake.emit({
-      type: "task.activity",
-      taskId: "oc_1",
-      directory: paths.root,
-      status: "running",
-      activityVariants: {
-        false: { includeSummary: false, activity: "raw narration", outputWatermark: 100 },
-        true: { includeSummary: true, activity: "summarized narration", outputWatermark: 100 },
-      },
-    });
-
-    const rawEvents = await rawPeer.waitForEvents(1);
-    const summaryEvents = await summaryPeer.waitForEvents(1);
-
-    assert.equal(rawEvents[0].event.activity, "raw narration");
-    assert.equal(rawEvents[0].event.includeSummary, false);
-    assert.equal(rawEvents[0].event.activityVariants, undefined);
-    assert.equal(summaryEvents[0].event.activity, "summarized narration");
-    assert.equal(summaryEvents[0].event.includeSummary, true);
-    assert.equal(summaryEvents[0].event.activityVariants, undefined);
-    assert.equal(rawEvents[0].subscriptionId, rawSub.result.subscriptionId);
-    assert.equal(summaryEvents[0].subscriptionId, summarySub.result.subscriptionId);
-  });
-
-  test("skips a subscription when activityVariants lacks its requested variant", async (t) => {
-    const paths = temporaryPaths(t);
-    const fake = fakeManagerFactory();
-    const daemon = await startDaemon({ ...paths, taskManagerFactory: fake.factory });
-    t.after(() => daemon.close());
-    const rawPeer = await openPeer(paths.socketPath);
-    const summaryPeer = await openPeer(paths.socketPath);
-    t.after(() => rawPeer.close());
-    t.after(() => summaryPeer.close());
-
-    await rawPeer.request("sub-raw", "event.subscribe", { directory: paths.root });
-    await summaryPeer.request("sub-summary", "event.subscribe", { directory: paths.root, summaries: true });
-
-    fake.emit({
-      type: "task.activity",
-      taskId: "oc_1",
-      directory: paths.root,
-      status: "running",
-      activityVariants: {
-        false: { includeSummary: false, activity: "raw only", outputWatermark: 50 },
-      },
-    });
-
-    const rawEvents = await rawPeer.waitForEvents(1);
-    assert.equal(rawEvents[0].event.activity, "raw only");
-
-    const immediate = [];
-    summaryPeer.socket.once("data", (chunk) => immediate.push(chunk));
-    await new Promise((resolve) => setTimeout(resolve, 20));
-    assert.equal(immediate.length, 0, "summary subscriber should not receive a raw-only variant");
-  });
-
-  test("cleans up all subscriptions when a client disconnects", async (t) => {
-    const paths = temporaryPaths(t);
-    const fake = fakeManagerFactory();
-    const daemon = await startDaemon({ ...paths, taskManagerFactory: fake.factory });
-    t.after(() => daemon.close());
-    const peer = await openPeer(paths.socketPath);
-    await peer.request("sub", "event.subscribe", { directory: paths.root });
-    assert.equal(daemon.stats().subscriptions, 1);
-
-    peer.socket.end();
-    await EventEmitter.once(peer.socket, "close");
-
-    assert.deepEqual(daemon.stats(), { connections: 0, subscriptions: 0 });
-    assert.doesNotThrow(() => fake.emit({ type: "task.state", directory: paths.root }));
-  });
-
-  test("disconnects a slow subscriber before its outbound queue can grow", async (t) => {
-    const paths = temporaryPaths(t);
-    const fake = fakeManagerFactory();
-    const daemon = await startDaemon({
-      ...paths,
-      taskManagerFactory: fake.factory,
-      maxOutboundBytes: 200,
-    });
-    t.after(() => daemon.close());
-    const peer = await openPeer(paths.socketPath);
-    await peer.request("sub", "event.subscribe", { directory: paths.root });
-    const closed = EventEmitter.once(peer.socket, "close");
-
-    fake.emit({ type: "task.state", taskId: "large-event", directory: paths.root, payload: "x".repeat(1000) });
-    await closed;
-
-    assert.deepEqual(daemon.stats(), { connections: 0, subscriptions: 0 });
-  });
-
+describe("Unix socket daemon: stale sockets", () => {
   test("removes a stale socket only after a refused health check", async (t) => {
     const paths = temporaryPaths(t);
     fs.mkdirSync(paths.runtimeDir, { recursive: true });
@@ -928,7 +685,7 @@ describe("Unix socket daemon", () => {
 
     assert.equal(fs.statSync(paths.socketPath).isSocket(), true);
     const peer = await openPeer(paths.socketPath);
-    assert.equal((await peer.request("health", "system.health")).ok, true);
+    assert.equal((await peer.request("health", SYSTEM_HEALTH)).ok, true);
     peer.close();
   });
 
@@ -1042,19 +799,21 @@ describe("Unix socket daemon", () => {
     );
     assert.equal(fs.existsSync(paths.socketPath), true);
   });
+});
 
+describe("Unix socket daemon: rehydration and self-restart", () => {
   test("rehydrates persisted queued/running tasks as unknown through createTaskManager", async (t) => {
     const paths = temporaryPaths(t);
     fs.mkdirSync(paths.stateDir, { recursive: true });
     const persisted = ["queued", "running"].map((status, index) => ({
-      id: `old-${index}`,
       status,
+      id: `old-${index}`,
       directory: paths.root,
-      model: "test/model",
+      model: TEST_MODEL,
       variant: null,
       sessionId: null,
       pid: 100 + index,
-      startedAt: "2026-07-15T00:00:00.000Z",
+      startedAt: TEST_STARTED_AT,
       endedAt: null,
       exitCode: null,
       signal: null,
@@ -1070,7 +829,7 @@ describe("Unix socket daemon", () => {
     const peer = await openPeer(paths.socketPath);
     t.after(() => peer.close());
 
-    const statuses = await Promise.all(persisted.map((task, index) => peer.request(`status-${index}`, "task.status", { taskId: task.id })));
+    const statuses = await Promise.all(persisted.map((task, index) => peer.request(`status-${index}`, TASK_STATUS, { taskId: task.id })));
     assert.deepEqual(statuses.map((response) => response.result.status), ["unknown", "unknown"]);
   });
 
@@ -1099,8 +858,8 @@ describe("Unix socket daemon", () => {
       const peer = await openPeer(paths.socketPath);
       t.after(() => peer.close());
 
-      await peer.request("health", "system.health");
-      await peer.request("health-2", "system.health");
+      await peer.request("health", SYSTEM_HEALTH);
+      await peer.request("health-2", SYSTEM_HEALTH);
 
       assert.equal(spawnCalls.length, 0);
     });
@@ -1127,7 +886,7 @@ describe("Unix socket daemon", () => {
       const bumped = new Date(Date.now() + 60_000);
       fs.utimesSync(entry, bumped, bumped);
 
-      await peer.request("health", "system.health");
+      await peer.request("health", SYSTEM_HEALTH);
       // The restart itself is async (close() + spawn + exit); give it a tick.
       await new Promise((resolve) => setTimeout(resolve, 20));
 
@@ -1162,309 +921,12 @@ describe("Unix socket daemon", () => {
       const bumped = new Date(Date.now() + 60_000);
       fs.utimesSync(entry, bumped, bumped);
 
-      await peer.request("health", "system.health");
+      await peer.request("health", SYSTEM_HEALTH);
       await new Promise((resolve) => setTimeout(resolve, 20));
 
       assert.equal(spawnCalls.length, 0, "must not restart while a task is still running");
       assert.equal(exitCalls, 0);
       assert.equal(fs.existsSync(paths.socketPath), true);
     });
-  });
-});
-
-describe("multiplexed daemon client", () => {
-  test("correlates concurrent responses by id on one connection", async (t) => {
-    const paths = temporaryPaths(t);
-    const fake = fakeManagerFactory();
-    const daemon = await startDaemon({ ...paths, taskManagerFactory: fake.factory });
-    t.after(() => daemon.close());
-    const client = await connectClient({ socketPath: paths.socketPath, autoStart: false });
-    t.after(() => client.close());
-
-    const slow = client.request("task.wait", { taskId: "slow", timeoutMs: 100 });
-    const fast = client.request("task.wait", { taskId: "fast", timeoutMs: 100 });
-    const first = await Promise.race([
-      slow.then((result) => ({ name: "slow", result })),
-      fast.then((result) => ({ name: "fast", result })),
-    ]);
-
-    assert.equal(first.name, "fast");
-    assert.deepEqual(await slow, { id: "slow", status: "done" });
-  });
-
-  test("routes multiple event subscriptions independently on the shared connection", async (t) => {
-    const paths = temporaryPaths(t);
-    const otherDirectory = path.join(paths.root, "other");
-    fs.mkdirSync(otherDirectory);
-    const fake = fakeManagerFactory();
-    const daemon = await startDaemon({ ...paths, taskManagerFactory: fake.factory });
-    t.after(() => daemon.close());
-    const client = await connectClient({ socketPath: paths.socketPath, autoStart: false });
-    t.after(() => client.close());
-    const hereEvents = [];
-    const thereEvents = [];
-
-    const hereSubscription = await client.subscribe({ directory: paths.root }, (event) => hereEvents.push(event));
-    const thereSubscription = await client.subscribe({ directory: otherDirectory }, (event) => thereEvents.push(event));
-    fake.emit({ type: "task.state", taskId: "here", directory: paths.root });
-    fake.emit({ type: "task.state", taskId: "there", directory: otherDirectory });
-    await new Promise((resolve) => setTimeout(resolve, 10));
-
-    assert.notEqual(hereSubscription, thereSubscription);
-    assert.deepEqual(hereEvents.map((event) => event.taskId), ["here"]);
-    assert.deepEqual(thereEvents.map((event) => event.taskId), ["there"]);
-  });
-
-  test("startDaemonBooter fires the injected spawn function once and returns without waiting on it", async (t) => {
-    const paths = temporaryPaths(t);
-    const spawnCalls = [];
-    await startDaemonBooter({
-      ...paths,
-      spawnBooterFn: (args) => spawnCalls.push(args),
-    });
-
-    assert.equal(spawnCalls.length, 1);
-    assert.deepEqual(Object.keys(spawnCalls[0]).sort(), ["env", "runtimeDir", "socketPath", "stateDir"]);
-    assert.equal(spawnCalls[0].socketPath, paths.socketPath);
-  });
-
-  test("startDaemonBooter clears a stale boot-error file before spawning", async (t) => {
-    const paths = temporaryPaths(t);
-    fs.mkdirSync(paths.runtimeDir, { recursive: true });
-    const errorPath = path.join(paths.runtimeDir, "daemon-boot.err");
-    fs.writeFileSync(errorPath, "stale failure from a previous boot attempt");
-
-    await startDaemonBooter({ ...paths, spawnBooterFn: () => {} });
-
-    assert.equal(fs.existsSync(errorPath), false);
-  });
-
-  test("client.js's direct-execution guard runs ensureDaemonStarted() when invoked through a symlink", (t) => {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-client-symlink-"));
-    t.after(() => fs.rmSync(root, { recursive: true, force: true }));
-    const realClient = fileURLToPath(new URL("./client.js", import.meta.url));
-    const link = path.join(root, "taskferry-daemon-client");
-    fs.symlinkSync(realClient, link, "file");
-
-    // A malformed config.json makes ensureDaemonStarted() fail fast, so the
-    // file's presence or absence proves whether the guard's symlink
-    // resolution ran.
-    const configHome = path.join(root, "config-home");
-    fs.mkdirSync(path.join(configHome, "taskferry"), { recursive: true });
-    fs.writeFileSync(path.join(configHome, "taskferry", "config.json"), "{ not valid json");
-    const runtimeDir = path.join(root, "run");
-
-    // The guard sets process.exitCode = 1 on this forced failure, so a
-    // non-zero subprocess exit is the expected outcome, not a test failure.
-    try {
-      execFileSync(process.execPath, [link], {
-        env: { ...process.env, XDG_CONFIG_HOME: configHome, TASKFERRY_RUNTIME_DIR: runtimeDir },
-        encoding: "utf8",
-      });
-    } catch {
-      // expected: see comment above.
-    }
-
-    const bootError = fs.readFileSync(path.join(runtimeDir, "daemon-boot.err"), "utf8");
-    assert.match(bootError, /could not parse/);
-  });
-
-  test("auto-starts after an initial connection failure and retries", async (t) => {
-    const paths = temporaryPaths(t);
-    const fake = fakeManagerFactory();
-    let daemon;
-    let starts = 0;
-    const client = await connectClient({
-      socketPath: paths.socketPath,
-      stateDir: paths.stateDir,
-      runtimeDir: paths.runtimeDir,
-      retryDelayMs: 5,
-      startupTimeoutMs: 500,
-      ensureDaemonFn: async () => {
-        starts++;
-        daemon = await startDaemon({ ...paths, taskManagerFactory: fake.factory });
-      },
-    });
-    t.after(() => client.close());
-    t.after(() => daemon.close());
-
-    assert.equal(starts, 1);
-    assert.equal((await client.request("system.health")).healthy, true);
-  });
-
-  test("default auto-start fires a detached booter and does not block on its own boot completing", async (t) => {
-    const paths = temporaryPaths(t);
-    fs.mkdirSync(paths.runtimeDir, { recursive: true });
-    const fake = fakeManagerFactory();
-    let daemon;
-    let spawnCalls = 0;
-    const client = await connectClient({
-      socketPath: paths.socketPath,
-      stateDir: paths.stateDir,
-      runtimeDir: paths.runtimeDir,
-      retryDelayMs: 5,
-      startupTimeoutMs: 500,
-      spawnBooterFn: () => {
-        spawnCalls++;
-        // Stands in for the detached subprocess: starts the real daemon
-        // well after connectClient's own auto-start call has returned, to
-        // prove connectClient isn't blocked waiting on it in-process.
-        setTimeout(() => {
-          startDaemon({ ...paths, taskManagerFactory: fake.factory }).then((started) => { daemon = started; });
-        }, 30);
-      },
-    });
-    t.after(() => client.close());
-    t.after(() => daemon?.close());
-
-    assert.equal(spawnCalls, 1);
-    assert.equal((await client.request("system.health")).healthy, true);
-  });
-
-  test("uses withFileLock so racing auto-start attempts spawn only one daemon", (t) => {
-    const paths = temporaryPaths(t);
-    fs.mkdirSync(paths.runtimeDir, { recursive: true });
-    let ready = false;
-    let spawns = 0;
-    let lockCalls = 0;
-    const options = {
-      ...paths,
-      env: { ...process.env, XDG_CONFIG_HOME: path.join(paths.root, "config") },
-      startupTimeoutMs: 100,
-      retryDelayMs: 1,
-      withLockFn(lockPath, callback, lockOptions) {
-        lockCalls++;
-        return withFileLock(lockPath, callback, lockOptions);
-      },
-      isDaemonReadySync: () => ready,
-      spawnDaemonFn: () => {
-        spawns++;
-        ready = true;
-      },
-    };
-
-    assert.equal(ensureDaemonStarted(options), true);
-    assert.equal(ensureDaemonStarted(options), false);
-    assert.equal(lockCalls, 2);
-    assert.equal(spawns, 1);
-    assert.equal(fs.existsSync(path.join(paths.runtimeDir, "daemon-start.lock")), false);
-  });
-
-  test("propagates a loadConfig() error without calling spawnDaemonFn", (t) => {
-    const paths = temporaryPaths(t);
-    fs.mkdirSync(paths.runtimeDir, { recursive: true });
-    let spawns = 0;
-    const options = {
-      ...paths,
-      startupTimeoutMs: 100,
-      retryDelayMs: 1,
-      isDaemonReadySync: () => false,
-      spawnDaemonFn: () => {
-        spawns++;
-      },
-      loadConfigFn: () => {
-        throw new Error("error: could not parse /fake/config.json: bad json\nhelp: fix it");
-      },
-    };
-
-    assert.throws(() => ensureDaemonStarted(options), /error: could not parse \/fake\/config\.json/);
-    assert.equal(spawns, 0);
-  });
-
-  test("reports bounded startup failures with actionable help", async (t) => {
-    const paths = temporaryPaths(t);
-    await assert.rejects(
-      () => connectClient({
-        socketPath: paths.socketPath,
-        stateDir: paths.stateDir,
-        runtimeDir: paths.runtimeDir,
-        startupTimeoutMs: 20,
-        retryDelayMs: 5,
-        ensureDaemonFn: () => {},
-      }),
-      /error: taskferry daemon did not become ready.*help:/s
-    );
-  });
-
-  test("includes a boot-error file's contents in the timeout error", async (t) => {
-    const paths = temporaryPaths(t);
-    fs.mkdirSync(paths.runtimeDir, { recursive: true });
-    fs.writeFileSync(
-      path.join(paths.runtimeDir, "daemon-boot.err"),
-      "error: could not parse /fake/config.json: bad json\nhelp: fix it"
-    );
-
-    await assert.rejects(
-      () => connectClient({
-        socketPath: paths.socketPath,
-        stateDir: paths.stateDir,
-        runtimeDir: paths.runtimeDir,
-        startupTimeoutMs: 20,
-        retryDelayMs: 5,
-        ensureDaemonFn: () => {},
-      }),
-      /daemon boot failed: error: could not parse \/fake\/config\.json/
-    );
-  });
-
-  test("includes a booter-stderr log's contents in the timeout error when no boot-error file exists", async (t) => {
-    const paths = temporaryPaths(t);
-    fs.mkdirSync(paths.runtimeDir, { recursive: true });
-    fs.writeFileSync(
-      path.join(paths.runtimeDir, "daemon-boot-stderr.log"),
-      "SyntaxError: Unexpected token 'x' in client.js\n    at Module._compile"
-    );
-
-    await assert.rejects(
-      () => connectClient({
-        socketPath: paths.socketPath,
-        stateDir: paths.stateDir,
-        runtimeDir: paths.runtimeDir,
-        startupTimeoutMs: 20,
-        retryDelayMs: 5,
-        ensureDaemonFn: () => {},
-      }),
-      /booter subprocess failed before startup: SyntaxError: Unexpected token 'x' in client\.js/
-    );
-  });
-
-  test("rejects oversized unterminated daemon messages", async (t) => {
-    const paths = temporaryPaths(t);
-    fs.mkdirSync(paths.runtimeDir, { recursive: true });
-    const server = net.createServer((socket) => socket.once("data", () => socket.end("x".repeat(64))));
-    await new Promise((resolve) => server.listen(paths.socketPath, resolve));
-    t.after(() => new Promise((resolve) => server.close(resolve)));
-    const client = await connectClient({ socketPath: paths.socketPath, autoStart: false, maxBufferBytes: 32 });
-    t.after(() => client.close());
-
-    await assert.rejects(() => client.request("system.health"), /exceeds 32 bytes/);
-  });
-
-  test("rejects malformed daemon event envelopes instead of queueing them", async (t) => {
-    const paths = temporaryPaths(t);
-    fs.mkdirSync(paths.runtimeDir, { recursive: true });
-    const server = net.createServer((socket) => socket.once("data", (chunk) => {
-      const request = JSON.parse(String(chunk).trim());
-      socket.write(`${JSON.stringify({ version: 1, type: "event", event: {} })}\n`);
-      socket.write(`${JSON.stringify({ version: 1, id: request.id, ok: true, result: { healthy: true } })}\n`);
-    }));
-    await new Promise((resolve) => server.listen(paths.socketPath, resolve));
-    t.after(() => new Promise((resolve) => server.close(resolve)));
-    const client = await connectClient({ socketPath: paths.socketPath, autoStart: false });
-    t.after(() => client.close());
-
-    await assert.rejects(() => client.request("system.health"), /invalid event envelope/);
-  });
-
-  test("rejects non-object daemon messages", async (t) => {
-    const paths = temporaryPaths(t);
-    fs.mkdirSync(paths.runtimeDir, { recursive: true });
-    const server = net.createServer((socket) => socket.once("data", () => socket.end("null\n")));
-    await new Promise((resolve) => server.listen(paths.socketPath, resolve));
-    t.after(() => new Promise((resolve) => server.close(resolve)));
-    const client = await connectClient({ socketPath: paths.socketPath, autoStart: false });
-    t.after(() => client.close());
-
-    await assert.rejects(() => client.request("system.health"), /invalid daemon message/);
   });
 });

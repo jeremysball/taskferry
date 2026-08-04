@@ -10,6 +10,15 @@ import { Readable } from "node:stream";
 import { runCli } from "./cli.js";
 import { resolveWorkspaceRoot } from "./paths.js";
 
+const mustNotConnect = "must not connect";
+const advisorModel = "opencode/some-model";
+const taskId = "oc_1";
+const startedAt = "2026-07-15T00:00:00.000Z";
+const testModel = "test/model";
+const noTasks = "none found in this workspace";
+const directoryFlag = "--directory";
+const setupMustNotConnect = "setup must not connect";
+
 function capturedIo({ stdin } = {}) {
   let stdout = "";
   let stderr = "";
@@ -64,7 +73,7 @@ test("rejects usage errors as TOON without contacting the daemon", async () => {
     io: capture.io,
     connectClient: async () => {
       connected = true;
-      throw new Error("must not connect");
+      throw new Error(mustNotConnect);
     },
   });
 
@@ -112,7 +121,7 @@ test("advisor --prompt - reads the prompt from piped stdin", async () => {
   const { client, calls } = fakeClient({
     "task.advisor": { id: "oc_1", status: "queued" },
   });
-  const result = await runCli(["advisor", "--prompt", "-", "--model", "opencode/some-model"], {
+  const result = await runCli(["advisor", "--prompt", "-", "--model", advisorModel], {
     io: capture.io,
     connectClient: async () => client,
     env: {},
@@ -133,7 +142,7 @@ test("dispatch --prompt - rejects with a usage error and never contacts the daem
     io: capture.io,
     connectClient: async () => {
       connected = true;
-      throw new Error("must not connect");
+      throw new Error(mustNotConnect);
     },
   });
 
@@ -151,7 +160,7 @@ test("dispatch --prompt - rejects with a usage error when piped stdin is empty",
     io: capture.io,
     connectClient: async () => {
       connected = true;
-      throw new Error("must not connect");
+      throw new Error(mustNotConnect);
     },
   });
 
@@ -172,7 +181,7 @@ test("dispatch --prompt - rejects instead of hanging forever when aborted while 
     io: capture.io,
     signal: controller.signal,
     connectClient: async () => {
-      throw new Error("must not connect");
+      throw new Error(mustNotConnect);
     },
   });
 
@@ -183,10 +192,10 @@ test("dispatch --prompt - rejects instead of hanging forever when aborted while 
 
 test("advisor --prompt - surfaces the same actionable help, with the advisor command name, when stdin is a TTY", async () => {
   const capture = capturedIo({ stdin: fakeTtyStdin() });
-  const result = await runCli(["advisor", "--prompt", "-", "--model", "opencode/some-model"], {
+  const result = await runCli(["advisor", "--prompt", "-", "--model", advisorModel], {
     io: capture.io,
     connectClient: async () => {
-      throw new Error("must not connect");
+      throw new Error(mustNotConnect);
     },
   });
 
@@ -213,7 +222,7 @@ test("dispatch --prompt - surfaces a multi-word help sentence, not just the bare
   const capture = capturedIo({ stdin: fakeTtyStdin() });
   await runCli(["dispatch", "--prompt", "-"], {
     io: capture.io,
-    connectClient: async () => { throw new Error("must not connect"); },
+    connectClient: async () => { throw new Error(mustNotConnect); },
   });
 
   const help = capture.output().value.help;
@@ -244,7 +253,7 @@ test("dispatch --prompt - treats CRLF-only piped content as empty (matches the L
     io: capture.io,
     connectClient: async () => {
       connected = true;
-      throw new Error("must not connect");
+      throw new Error(mustNotConnect);
     },
   });
 
@@ -273,9 +282,9 @@ test("no arguments show executable, description, workspace tasks, counts, and ne
   const resolvedWorkspace = resolveWorkspaceRoot(workspace);
   const { client, calls } = fakeClient({
     "task.list": {
-      directory: resolvedWorkspace,
       counts,
-      tasks: [{ id: "oc_1", status: "running", model: "test/model", startedAt: "2026-07-15T00:00:00.000Z", failureReason: null }],
+      directory: resolvedWorkspace,
+      tasks: [{ id: taskId, model: testModel, status: "running", failureReason: null, startedAt }],
     },
   });
   const result = await runCli([], {
@@ -290,7 +299,7 @@ test("no arguments show executable, description, workspace tasks, counts, and ne
   assert.equal(value.bin, "~/.local/bin/taskferry");
   assert.match(value.description, /background OpenCode tasks/);
   assert.deepEqual(value.counts, counts);
-  assert.deepEqual(value.tasks, [{ id: "oc_1", status: "running", model: "test/model", startedAt: "2026-07-15T00:00:00.000Z" }]);
+  assert.deepEqual(value.tasks, [{ id: taskId, status: "running", model: testModel, startedAt }]);
   assert.ok(value.next.some((line) => line.includes("taskferry wait <id>")));
   assert.deepEqual(calls, [{ method: "task.list", params: { directory: resolvedWorkspace } }]);
 });
@@ -302,16 +311,16 @@ test("explicit empty workspace output is definitive and uses four-field rows", a
     "task.list": {
       directory: workspace,
       counts: { queued: 0, running: 0, done: 0, crashed: 0, cancelled: 0, unknown: 0 },
-      tasks: "none found in this workspace",
+      tasks: noTasks,
     },
   });
-  const result = await runCli(["list", "--directory", workspace], {
+  const result = await runCli(["list", directoryFlag, workspace], {
     io: capture.io,
     connectClient: async () => client,
   });
 
   assert.equal(result.exitCode, 0);
-  assert.deepEqual(capture.output().value.tasks, "none found in this workspace");
+  assert.deepEqual(capture.output().value.tasks, noTasks);
   assert.deepEqual(capture.output().value.counts, { queued: 0, running: 0, done: 0, crashed: 0, cancelled: 0, unknown: 0 });
 });
 
@@ -324,21 +333,21 @@ test("normalizes workspace paths before contacting the daemon", async (t) => {
   fs.symlinkSync(real, link, "dir");
   const capture = capturedIo();
   const { client, calls } = fakeClient({
-    "task.list": { counts, tasks: "none found in this workspace" },
+    "task.list": { counts, tasks: noTasks },
   });
 
-  await runCli(["list", "--directory", link], { io: capture.io, connectClient: async () => client });
+  await runCli(["list", directoryFlag, link], { io: capture.io, connectClient: async () => client });
   assert.deepEqual(calls[0], { method: "task.list", params: { directory: real } });
 });
 
 test("rejects an invalid workspace before connecting to the daemon", async () => {
   let connected = false;
   const capture = capturedIo();
-  const result = await runCli(["list", "--directory", path.join(os.tmpdir(), "missing-taskferry-workspace")], {
+  const result = await runCli(["list", directoryFlag, path.join(os.tmpdir(), "missing-taskferry-workspace")], {
     io: capture.io,
     connectClient: async () => {
       connected = true;
-      throw new Error("must not connect");
+      throw new Error(mustNotConnect);
     },
   });
 
@@ -350,11 +359,11 @@ test("rejects an invalid workspace before connecting to the daemon", async () =>
 test("rejects a file path as a workspace before connecting to the daemon", async () => {
   let connected = false;
   const capture = capturedIo();
-  const result = await runCli(["list", "--directory", path.join(process.cwd(), "package.json")], {
+  const result = await runCli(["list", directoryFlag, path.join(process.cwd(), "package.json")], {
     io: capture.io,
     connectClient: async () => {
       connected = true;
-      throw new Error("must not connect");
+      throw new Error(mustNotConnect);
     },
   });
 
@@ -366,19 +375,19 @@ test("rejects a file path as a workspace before connecting to the daemon", async
 test("projects status and result output using the former MCP lean projections", async () => {
   const capture = capturedIo();
   const status = {
-    id: "oc_1",
+    id: taskId,
+    model: testModel,
     status: "running",
-    startedAt: "2026-07-15T00:00:00.000Z",
     directory: "/workspace/project",
-    model: "test/model",
     sessionId: null,
     logPath: "/tmp/task.log",
     outputTail: "latest",
     outputTailTotalChars: 6,
     outputTailTruncated: false,
+    startedAt,
   };
   const detail = {
-    taskId: "oc_1",
+    taskId,
     status: "done",
     message: "answer",
     narration: "internal steps",
@@ -390,23 +399,23 @@ test("projects status and result output using the former MCP lean projections", 
   };
   const { client, calls } = fakeClient({ "task.status": status, "task.result": detail });
 
-  let result = await runCli(["status", "oc_1"], { io: capture.io, connectClient: async () => client });
+  let result = await runCli(["status", taskId], { io: capture.io, connectClient: async () => client });
   assert.equal(result.exitCode, 0);
   assert.deepEqual(capture.output().value, {
-    id: "oc_1",
+    id: taskId,
     status: "running",
-    startedAt: "2026-07-15T00:00:00.000Z",
     outputTail: "latest",
     outputTailTotalChars: 6,
     outputTailTruncated: false,
     next: 'Run taskferry wait or taskferry status with task id "oc_1" to check progress; pass --full for directory/model/log path details',
+    startedAt,
   });
 
   const secondCapture = capturedIo();
-  result = await runCli(["result", "oc_1"], { io: secondCapture.io, connectClient: async () => client });
+  result = await runCli(["result", taskId], { io: secondCapture.io, connectClient: async () => client });
   assert.equal(result.exitCode, 0);
   assert.deepEqual(secondCapture.output().value, {
-    taskId: "oc_1",
+    taskId,
     status: "done",
     message: "answer",
     narrationTotalChars: 14,
@@ -416,8 +425,8 @@ test("projects status and result output using the former MCP lean projections", 
     next: 'Run taskferry result --full or --fields narration with task id "oc_1" to see intermediate step narration (14 chars total)',
   });
   assert.deepEqual(calls, [
-    { method: "task.status", params: { taskId: "oc_1" } },
-    { method: "task.result", params: { taskId: "oc_1" } },
+    { method: "task.status", params: { taskId } },
+    { method: "task.result", params: { taskId } },
   ]);
 });
 
@@ -465,7 +474,7 @@ test("advisor's directory is never passed through resolveWorkspaceRoot even when
   const workspace = process.cwd();
   const { client, calls } = fakeClient({ "task.advisor": { status: "done", message: "advice" } });
   let called = false;
-  const result = await runCli(["advisor", "--prompt", "hi", "--model", "opencode/some-model"], {
+  const result = await runCli(["advisor", "--prompt", "hi", "--model", advisorModel], {
     cwd: workspace,
     io: capture.io,
     connectClient: async () => client,
@@ -489,9 +498,8 @@ test("doctor is a structured health check and --full preserves extra daemon fiel
     status: 0,
     stdout: JSON.stringify([{ id: "taskferry@taskferry" }]),
     stderr: "",
-    error: undefined,
   });
-  const result = await runCli(["doctor", "--full"], { io: capture.io, connectClient: async () => client, runShellCommand, homeDirectory: home, env: {} });
+  const result = await runCli(["doctor", "--full"], { runShellCommand, io: capture.io, connectClient: async () => client, homeDirectory: home, env: {} });
 
   assert.equal(result.exitCode, 0);
   assert.equal(capture.output().value.healthy, true);
@@ -507,35 +515,35 @@ test("doctor is a structured health check and --full preserves extra daemon fiel
 test("summary --wait reports a not-settled note instead of summarizing when the task is still active", async () => {
   const capture = capturedIo();
   const { client, calls } = fakeClient({
-    "task.wait": { id: "oc_1", status: "running", startedAt: "2026-07-15T00:00:00.000Z" },
+    "task.wait": { id: taskId, status: "running", startedAt },
   });
-  const result = await runCli(["summary", "oc_1", "--wait"], { io: capture.io, connectClient: async () => client });
+  const result = await runCli(["summary", taskId, "--wait"], { io: capture.io, connectClient: async () => client });
 
   assert.equal(result.exitCode, 0);
   assert.deepEqual(capture.output().value, {
-    id: "oc_1",
+    id: taskId,
     status: "running",
-    startedAt: "2026-07-15T00:00:00.000Z",
     next: 'Run taskferry wait or taskferry status with task id "oc_1" to check progress; pass --full for directory/model/log path details',
     note: 'Task has not settled yet (status: running); run taskferry summary --wait again to keep waiting, or omit --wait to summarize the in-progress task',
+    startedAt,
   });
-  assert.deepEqual(calls, [{ method: "task.wait", params: { taskId: "oc_1", timeoutMs: 900000 } }]);
+  assert.deepEqual(calls, [{ method: "task.wait", params: { taskId, timeoutMs: 900000 } }]);
 });
 
 test("summary --wait proceeds to summarize once task.wait reports a settled status", async () => {
   const capture = capturedIo();
   const injectedEnv = { FOO: "bar" };
   const { client, calls } = fakeClient({
-    "task.wait": { id: "oc_1", status: "done", startedAt: "2026-07-15T00:00:00.000Z" },
+    "task.wait": { id: taskId, status: "done", startedAt },
     "task.summary": { text: "it worked" },
   });
-  const result = await runCli(["summary", "oc_1", "--wait"], { io: capture.io, connectClient: async () => client, env: injectedEnv });
+  const result = await runCli(["summary", taskId, "--wait"], { io: capture.io, connectClient: async () => client, env: injectedEnv });
 
   assert.equal(result.exitCode, 0);
   assert.deepEqual(capture.output().value, { text: "it worked" });
   assert.deepEqual(calls, [
-    { method: "task.wait", params: { taskId: "oc_1", timeoutMs: 900000 } },
-    { method: "task.summary", params: { taskId: "oc_1", env: injectedEnv } },
+    { method: "task.wait", params: { taskId, timeoutMs: 900000 } },
+    { method: "task.summary", params: { taskId, env: injectedEnv } },
   ]);
 });
 
@@ -548,7 +556,7 @@ test("runs setup without connecting to the daemon", async () => {
       called = true;
       return { cli: { path: "/home/test/.local/bin/taskferry" }, path: "available" };
     },
-    connectClient: async () => { throw new Error("setup must not connect"); },
+    connectClient: async () => { throw new Error(setupMustNotConnect); },
   });
 
   assert.equal(result.exitCode, 0);
@@ -565,7 +573,7 @@ test("surfaces setup failures on stderr and never connects to the daemon", async
       called = true;
       throw new Error("boom");
     },
-    connectClient: async () => { throw new Error("setup must not connect"); },
+    connectClient: async () => { throw new Error(setupMustNotConnect); },
   });
 
   assert.equal(called, true);
@@ -584,7 +592,7 @@ test("colors setup failures on stderr only when stderr is a TTY", async () => {
   const result = await runCli(["setup"], {
     io,
     setup: () => { throw new Error("boom"); },
-    connectClient: async () => { throw new Error("setup must not connect"); },
+    connectClient: async () => { throw new Error(setupMustNotConnect); },
   });
 
   assert.equal(result.exitCode, 1);

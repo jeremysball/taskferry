@@ -26,8 +26,9 @@ export function createTaskEvents(onEvent) {
     if (emittedStatus === task.status) return;
 
     emittedStatuses.set(task.id, task.status);
+    sequence += 1;
     const event = {
-      sequence: ++sequence,
+      sequence,
       type: "task.state",
       taskId: task.id,
       directory: task.directory,

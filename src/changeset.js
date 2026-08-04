@@ -26,6 +26,55 @@ function shQuote(value) {
   return `'${value.replaceAll("'", "'\\''")}'`;
 }
 
+// bwrap's exact wording for the taskferry#318/#326 overlay-mount race: a
+// fresh overlay mount raced against another mount namespace's teardown
+// (either a concurrent dispatch to the same lowerdir, #318, or -- #326 --
+// this same task's own just-exited dispatch bwrap, whose overlayfs
+// superblock can still be unwinding asynchronously on a kernel workqueue
+// after the process itself has been reaped). Matched against both a raw
+// bwrap stderr result and the persisted changesetError text, which can span
+// the error's own multi-line wrapping -- "s" flag so "." also matches
+// newlines.
+export const OVERLAY_MOUNT_BUSY_PATTERN = /overlay mount on .*Device or resource busy/s;
+
+// Bounded retry for the extraction bwrap specifically on the overlay-mount-
+// busy signature: the teardown this races is a kernel-internal async
+// cleanup with no user-space signal to wait on, so a short bounded backoff
+// is the only lever available short of restructuring extraction to be
+// async (see taskferry#326's fix-direction discussion for why that was
+// rejected as the first move).
+const OVERLAY_MOUNT_RETRY_BACKOFF_MS = [100, 300, 900];
+
+/** @param {number} ms */
+function sleepSync(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+/**
+ * Runs a bwrap extraction command, retrying with backoff when the failure is
+ * specifically the overlay-mount-busy race (never on any other failure --
+ * a real sandbox misconfiguration or a genuine diff error should surface
+ * immediately, not be masked behind three silent retries).
+ * @param {typeof defaultRunCommand} runCommand
+ * @param {string[]} args
+ * @param {(ms: number) => void} [sleepFn]
+ * @returns {CommandResult}
+ */
+function runExtractionBwrap(runCommand, args, sleepFn = sleepSync) {
+  for (let attempt = 0; attempt <= OVERLAY_MOUNT_RETRY_BACKOFF_MS.length; attempt++) {
+    const result = runCommand("bwrap", args);
+    const message = result.error?.message || result.stderr || "";
+    const busy = OVERLAY_MOUNT_BUSY_PATTERN.test(message);
+    if (!busy || attempt === OVERLAY_MOUNT_RETRY_BACKOFF_MS.length) return result;
+    sleepFn(OVERLAY_MOUNT_RETRY_BACKOFF_MS[attempt]);
+  }
+  // Unreachable: the loop above always returns by its final iteration
+  // (attempt === OVERLAY_MOUNT_RETRY_BACKOFF_MS.length short-circuits the
+  // busy check). Present only so control flow analysis doesn't see a
+  // function that can fall through without returning.
+  throw new Error("unreachable");
+}
+
 /**
  * @param {string} directory
  * @param {typeof defaultRunCommand} [runCommand]
@@ -71,6 +120,7 @@ export function resolvePreDispatchHead(directory, runCommand = defaultRunCommand
  * @param {typeof defaultRunCommand} [params.runCommand]
  * @param {(filePath: string, content: string) => void} [params.writeFileFn]
  * @param {(dirPath: string) => void} [params.mkdirFn]
+ * @param {(ms: number) => void} [params.sleepFn] - injectable for tests; real callers get a blocking sleep between retries
  * @returns {{diffPath: string, hasChanges: boolean}}
  * @throws {Error} when the bwrap extraction fails to start or exits non-zero
  */
@@ -88,6 +138,7 @@ export function extractGitDiff({
   runCommand = defaultRunCommand,
   writeFileFn = (filePath, content) => fs.writeFileSync(filePath, content, { mode: 0o600 }),
   mkdirFn = (dirPath) => fs.mkdirSync(dirPath, { recursive: true, mode: 0o700 }),
+  sleepFn = sleepSync,
 }) {
   // Fail closed on HEAD drift: `directory` below is a live bind to the real
   // checkout, not a snapshot from dispatch time. If something else (a manual
@@ -112,7 +163,7 @@ export function extractGitDiff({
   // the transient staging -- the upper already captured everything), then
   // the shell exits with the diff's code.
   const script = `git -C ${shQuote(directory)} add -A && { git -C ${shQuote(directory)} diff --cached ${shQuote(preDispatchHead)}; rc=$?; git -C ${shQuote(directory)} reset > /dev/null 2>&1; exit $rc; }`;
-  const result = runCommand("bwrap", [...bwrapArgs, "--", "sh", "-c", script]);
+  const result = runExtractionBwrap(runCommand, [...bwrapArgs, "--", "sh", "-c", script], sleepFn);
   if (result.error || result.status !== 0) {
     throw new Error(`error: git diff extraction failed for ${directory} (exit ${result.status ?? "null"}): ${(result.error?.message || result.stderr || "unknown error").trim()}`);
   }
@@ -211,6 +262,7 @@ export function buildMergedViewBwrapArgs({ directory, overlay, runtimeDir, denyL
  * @param {typeof defaultRunCommand} [params.runCommand]
  * @param {(filePath: string, content: string) => void} [params.writeFileFn]
  * @param {(dirPath: string) => void} [params.mkdirFn]
+ * @param {(ms: number) => void} [params.sleepFn] - injectable for tests; real callers get a blocking sleep between retries
  * @returns {{diffPath: string, hasChanges: boolean}}
  * @throws {Error} when the bwrap extraction fails to start or exits non-zero
  */
@@ -225,6 +277,7 @@ export function extractNonGitDiff({
   runCommand = defaultRunCommand,
   writeFileFn = (filePath, content) => fs.writeFileSync(filePath, content, { mode: 0o600 }),
   mkdirFn = (dirPath) => fs.mkdirSync(dirPath, { recursive: true, mode: 0o700 }),
+  sleepFn = sleepSync,
 }) {
   const mergedMountPoint = path.join(overlay.root, "merged");
   const bwrapArgs = buildMergedViewBwrapArgs({ directory, overlay, stateDir, runtimeDir, homeDir, denyList, mergedMountPoint, writable: false });
@@ -232,7 +285,7 @@ export function extractNonGitDiff({
   // created inside the overlay shows its full content (a plain -ru would
   // collapse it to a bare "Only in ... merged" line with no content, and
   // the apply step would then lose the new file entirely).
-  const result = runCommand("bwrap", [...bwrapArgs, "--", "diff", "-ruN", directory, mergedMountPoint]);
+  const result = runExtractionBwrap(runCommand, [...bwrapArgs, "--", "diff", "-ruN", directory, mergedMountPoint], sleepFn);
   // diff exits 0 = identical, 1 = differences found (success for us), >=2 =
   // real trouble. A bwrap failure (bad mount, timeout, killed) must not be
   // indistinguishable from "no changes" -- throw on anything but 0/1 so the

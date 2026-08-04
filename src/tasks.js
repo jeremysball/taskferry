@@ -11,7 +11,7 @@ import { formatToolEventForNarration } from "./narration-format.js";
 import { errCode } from "./errors.js";
 import { isNonNegativeInteger, isPositiveInteger } from "./numbers.js";
 import { buildBwrapArgs, checkBwrapAvailable, checkOverlaySupport, defaultDenyList, platformSupportsSandbox, resolveGitCommonDir, resolveGitDir } from "./sandbox.js";
-import { applyChangeset, overlayPaths, resolvePreDispatchHead, subOverlayPaths, subFilePaths, cleanupOverlay, defaultRunCommand as defaultOverlayRunCommand, extractGitDiff, extractNonGitDiff } from "./changeset.js";
+import { applyChangeset, overlayPaths, resolvePreDispatchHead, subOverlayPaths, subFilePaths, cleanupOverlay, defaultRunCommand as defaultOverlayRunCommand, extractGitDiff, extractNonGitDiff, OVERLAY_MOUNT_BUSY_PATTERN } from "./changeset.js";
 import { resolveExecutor, opencodeExecutor } from "./executor.js";
 import { loadEnvFile, watchEnvFile } from "./env-file.js";
 
@@ -231,12 +231,6 @@ const FAILURE_DETAIL_MAX_CHARS = 500;
 function capDetail(text) {
   return text.length > FAILURE_DETAIL_MAX_CHARS ? text.slice(0, FAILURE_DETAIL_MAX_CHARS - 1) + "…" : text;
 }
-
-// bwrap's exact wording for the taskferry#318 overlay-mount race (see
-// .superpowers/specs/2026-08-03-lowerdir-launch-stagger-design.md). Matched
-// against changesetError text, which can span the bwrap error's own
-// multi-line wrapping -- "s" flag so "." also matches newlines.
-const OVERLAY_MOUNT_BUSY_PATTERN = /overlay mount on .*Device or resource busy/s;
 
 /** @param {string} text @returns {boolean} */
 function isParseableJson(text) {

@@ -399,6 +399,68 @@ describe("extraction fail-closed behavior", () => {
     assert.equal(result.hasChanges, true);
   });
 
+  // taskferry#326: the extraction bwrap can race the just-exited dispatch
+  // bwrap's own mount-namespace teardown and lose with the same
+  // "Device or resource busy" overlay-mount error #318 already surfaces.
+  // These pin the bounded retry-with-backoff that absorbs that transient
+  // race instead of throwing on the first hit.
+  const OVERLAY_BUSY_STDERR =
+    "bwrap: Can't make overlay mount on /newroot/repo with options " +
+    "upperdir=/tmp/u,workdir=/tmp/w,lowerdir=/oldroot/repo,userxattr: Device or resource busy\n";
+
+  test("extractGitDiff retries a transient overlay-mount-busy bwrap failure and succeeds once it clears", () => {
+    let bwrapAttempts = 0;
+    const sleeps = [];
+    const runCommand = (command) => {
+      if (command === "git") return { status: 0, stdout: "abc123\n", stderr: "", error: null };
+      bwrapAttempts += 1;
+      if (bwrapAttempts < 3) return { status: 1, stdout: "", stderr: OVERLAY_BUSY_STDERR, error: null };
+      return { status: 0, stdout: SAMPLE_DIFF_X, stderr: "", error: null };
+    };
+    const result = extractGitDiff({
+      ...baseGitParams,
+      runCommand,
+      writeFileFn: () => {},
+      mkdirFn: () => {},
+      sleepFn: (ms) => sleeps.push(ms),
+    });
+    assert.equal(bwrapAttempts, 3, "must retry until the overlay-busy race clears");
+    assert.deepEqual(sleeps, [100, 300], "must back off between the two failed attempts, not before the first or after the last");
+    assert.equal(result.hasChanges, true);
+  });
+
+  test("extractGitDiff gives up after exhausting retries and throws the last overlay-busy error", () => {
+    let bwrapAttempts = 0;
+    const sleeps = [];
+    const runCommand = (command) => {
+      if (command === "git") return { status: 0, stdout: "abc123\n", stderr: "", error: null };
+      bwrapAttempts += 1;
+      return { status: 1, stdout: "", stderr: OVERLAY_BUSY_STDERR, error: null };
+    };
+    assert.throws(
+      () => extractGitDiff({ ...baseGitParams, runCommand, writeFileFn: () => {}, mkdirFn: () => {}, sleepFn: (ms) => sleeps.push(ms) }),
+      /Device or resource busy/
+    );
+    assert.equal(bwrapAttempts, 4, "one initial attempt plus three retries, then give up");
+    assert.deepEqual(sleeps, [100, 300, 900]);
+  });
+
+  test("extractGitDiff does not retry (or sleep) on a bwrap failure unrelated to the overlay-mount-busy race", () => {
+    let bwrapAttempts = 0;
+    let slept = false;
+    const runCommand = (command) => {
+      if (command === "git") return { status: 0, stdout: "abc123\n", stderr: "", error: null };
+      bwrapAttempts += 1;
+      return { status: 128, stdout: "", stderr: "fatal: bad revision 'abc123'\n", error: null };
+    };
+    assert.throws(
+      () => extractGitDiff({ ...baseGitParams, runCommand, writeFileFn: () => {}, mkdirFn: () => {}, sleepFn: () => { slept = true; } }),
+      /bad revision/
+    );
+    assert.equal(bwrapAttempts, 1, "a genuine failure must fail fast, not be masked behind retries");
+    assert.equal(slept, false);
+  });
+
   const baseNonGitParams = {
     directory: SCRATCH_DIR,
     overlay: { root: T1_ROOT, upperDir: T1_UPPER, workDir: T1_WORK },
@@ -422,6 +484,26 @@ describe("extraction fail-closed behavior", () => {
   test("extractNonGitDiff treats diff exit status 1 (differences found) as success", () => {
     const runCommand = () => ({ status: 1, stdout: "diff -ru a/x b/x\n", stderr: "", error: null });
     const result = extractNonGitDiff({ ...baseNonGitParams, runCommand, writeFileFn: () => {}, mkdirFn: () => {} });
+    assert.equal(result.hasChanges, true);
+  });
+
+  test("extractNonGitDiff retries a transient overlay-mount-busy bwrap failure and succeeds once it clears", () => {
+    let attempts = 0;
+    const sleeps = [];
+    const runCommand = () => {
+      attempts += 1;
+      if (attempts < 2) return { status: 1, stdout: "", stderr: OVERLAY_BUSY_STDERR, error: null };
+      return { status: 1, stdout: "diff -ru a/x b/x\n", stderr: "", error: null };
+    };
+    const result = extractNonGitDiff({
+      ...baseNonGitParams,
+      runCommand,
+      writeFileFn: () => {},
+      mkdirFn: () => {},
+      sleepFn: (ms) => sleeps.push(ms),
+    });
+    assert.equal(attempts, 2);
+    assert.deepEqual(sleeps, [100]);
     assert.equal(result.hasChanges, true);
   });
 });

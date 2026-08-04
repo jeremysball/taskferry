@@ -63,7 +63,11 @@ jobs:
       # sandbox.js's checkOverlaySupport() trusts) but is built with overlay
       # support (--overlay-src/--overlay) compiled out, so every sandboxed
       # dispatch fails with "bwrap: Unknown option --overlay-src". Build a
-      # real overlay-capable bwrap from source instead.
+      # real overlay-capable bwrap from source instead. A plain unprivileged
+      # build then hits Ubuntu 24.04's AppArmor unprivileged-userns
+      # restriction ("bwrap: setting up uid map: Permission denied") -- the
+      # apt package sidesteps this by shipping setuid-root, so do the same
+      # for our own build (bubblewrap's own documented fallback mode).
       - name: Build bubblewrap (with overlay support) from source
         run: |
           sudo apt-get update
@@ -73,6 +77,8 @@ jobs:
           meson setup build -Dman=disabled
           ninja -C build
           sudo ninja -C build install
+          sudo chown root:root /usr/local/bin/bwrap
+          sudo chmod u+s /usr/local/bin/bwrap
           bwrap --help | grep -q -- --overlay-src
 
       - name: Install pi CLI

@@ -168,6 +168,9 @@ describe("changeset extraction at settlement", () => {
     assert.equal(cleanedAny, false);
   });
 
+});
+
+describe("changeset extraction at settlement: overlay-mount-busy reclassification", () => {
   test("reclassifies a real no_output_timeout crash as overlay_mount_busy when the bwrap overlay-busy message is the real cause", async () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "axi-overlay-busy-dir-"));
     const overlayTmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "axi-overlay-busy-tmp-"));
@@ -204,6 +207,45 @@ describe("changeset extraction at settlement", () => {
     assert.equal(status.failureReason, "overlay_mount_busy", "the confirmed bwrap cause must overwrite the generic no_output_timeout guess");
     assert.match(status.failureDetail, /Device or resource busy/);
     assert.match(status.changesetError, /Device or resource busy/);
+  });
+
+  // Regression (taskferry#327 review finding): a non-git target's extraction
+  // bwrap fails with the exact status shape bwrap itself produces on a real
+  // overlay-mount-busy setup failure -- status: 1, no `error`, the busy text
+  // in stderr -- which collides with `diff -ruN`'s own exit-1-for-
+  // differences-found convention. The prior fix (mocked with {status: null,
+  // error: ...}, an ETIMEDOUT shape, not a real bwrap die()) never exercised
+  // this exact collision and would have silently accepted an empty diff.
+  test("a real bwrap status-1 overlay-busy failure on a non-git target still reclassifies as overlay_mount_busy (does not fail open as a zero-change accept)", async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "axi-overlay-busy-nongit-dir-"));
+    const overlayTmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "axi-overlay-busy-nongit-tmp-"));
+    const bwrapMessage =
+      "bwrap: Can't make overlay mount on /newroot/workspace with options " +
+      "upperdir=/tmp/upper,workdir=/tmp/work,lowerdir=/oldroot/workspace,userxattr: Device or resource busy";
+    const child = fakeChild(7200);
+    const mgr = makeManager({
+      overlayTmpRoot,
+      spawnFn: () => child,
+      killFn: () => {},
+      noOutputTimeoutMs: 20,
+      watchdogPollMs: 5,
+      sandboxEnabled: true,
+      checkBwrapAvailableFn: () => ({ checked: true, available: true }),
+      overlayEnabled: true,
+      checkOverlaySupportFn: () => ({ supported: true }),
+      platform: "linux",
+      runOverlayCommandFn: () => ({ status: 1, stdout: "", stderr: bwrapMessage, error: null }),
+      rmOverlayTreeFn: () => {},
+    });
+
+    const result = mgr.dispatch({ prompt: "hello", directory });
+    await new Promise((r) => setTimeout(r, 40));
+    child.emit("exit", null, "SIGTERM");
+
+    const status = mgr.status(result.id);
+    assert.equal(status.failureReason, "overlay_mount_busy", "a real bwrap exit-1 overlay-busy failure must never be mistaken for diff's own exit-1 (differences found)");
+    assert.notEqual(status.changesetStatus, "accepted", "must not silently accept an empty diff when extraction actually failed");
+    assert.equal(mgr.result(result.id, { fields: ["diff"] }).diff, null, "no patch may be persisted for a failed extraction");
   });
 
   test("an unrelated extraction error does not touch failureReason", () => {

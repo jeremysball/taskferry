@@ -506,6 +506,28 @@ describe("extraction fail-closed behavior", () => {
     assert.deepEqual(sleeps, [100]);
     assert.equal(result.hasChanges, true);
   });
+
+  // Regression: bwrap's own die()-on-setup-failure convention exits 1, the
+  // exact same code diff -ruN uses for "differences found" -- an
+  // overlay-mount-busy failure that survives every retry still carries
+  // status 1, which extractNonGitDiff's exit-code check alone cannot tell
+  // apart from a genuine successful diff. Without an explicit busy-pattern
+  // check the worker's real edits would be silently discarded as "no
+  // changes" instead of surfacing as a recoverable failure.
+  test("extractNonGitDiff still throws when retries exhaust with a bwrap status-1 overlay-busy failure (does not fail open)", () => {
+    let attempts = 0;
+    let written = null;
+    const runCommand = () => {
+      attempts += 1;
+      return { status: 1, stdout: "", stderr: OVERLAY_BUSY_STDERR, error: null };
+    };
+    assert.throws(
+      () => extractNonGitDiff({ ...baseNonGitParams, runCommand, writeFileFn: (p) => { written = p; }, mkdirFn: () => {}, sleepFn: () => {} }),
+      /Device or resource busy/
+    );
+    assert.equal(attempts, 4, "one initial attempt plus three retries, then give up");
+    assert.equal(written, null, "a bwrap failure disguised as diff's exit-1 must never be written out as a successful (empty) diff");
+  });
 });
 
 describe("applyChangeset()", () => {

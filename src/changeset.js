@@ -51,6 +51,21 @@ function sleepSync(ms) {
 }
 
 /**
+ * Whether a bwrap command result carries the overlay-mount-busy signature,
+ * checked against `stderr` and `error?.message` independently rather than
+ * via `stderr || error?.message`: a slow/hung mount (spawnSync's 30s
+ * timeout firing after bwrap already wrote the busy line to stderr) reports
+ * `{error: ETIMEDOUT, stderr: <busy text>}`, and `error.message` ("spawn
+ * bwrap ETIMEDOUT") would win a `||` fallback and hide the busy signature
+ * actually sitting in stderr.
+ * @param {CommandResult} result
+ * @returns {boolean}
+ */
+function isOverlayMountBusy(result) {
+  return OVERLAY_MOUNT_BUSY_PATTERN.test(result.stderr || "") || OVERLAY_MOUNT_BUSY_PATTERN.test(result.error?.message || "");
+}
+
+/**
  * Runs a bwrap extraction command, retrying with backoff when the failure is
  * specifically the overlay-mount-busy race (never on any other failure --
  * a real sandbox misconfiguration or a genuine diff error should surface
@@ -63,8 +78,7 @@ function sleepSync(ms) {
 function runExtractionBwrap(runCommand, args, sleepFn = sleepSync) {
   for (let attempt = 0; attempt <= OVERLAY_MOUNT_RETRY_BACKOFF_MS.length; attempt++) {
     const result = runCommand("bwrap", args);
-    const message = result.error?.message || result.stderr || "";
-    const busy = OVERLAY_MOUNT_BUSY_PATTERN.test(message);
+    const busy = isOverlayMountBusy(result);
     if (!busy || attempt === OVERLAY_MOUNT_RETRY_BACKOFF_MS.length) return result;
     sleepFn(OVERLAY_MOUNT_RETRY_BACKOFF_MS[attempt]);
   }
@@ -165,7 +179,7 @@ export function extractGitDiff({
   const script = `git -C ${shQuote(directory)} add -A && { git -C ${shQuote(directory)} diff --cached ${shQuote(preDispatchHead)}; rc=$?; git -C ${shQuote(directory)} reset > /dev/null 2>&1; exit $rc; }`;
   const result = runExtractionBwrap(runCommand, [...bwrapArgs, "--", "sh", "-c", script], sleepFn);
   if (result.error || result.status !== 0) {
-    throw new Error(`error: git diff extraction failed for ${directory} (exit ${result.status ?? "null"}): ${(result.error?.message || result.stderr || "unknown error").trim()}`);
+    throw new Error(`error: git diff extraction failed for ${directory} (exit ${result.status ?? "null"}): ${(result.stderr || result.error?.message || "unknown error").trim()}`);
   }
   mkdirFn(pathDirname(diffPath));
   writeFileFn(diffPath, result.stdout);
@@ -289,9 +303,14 @@ export function extractNonGitDiff({
   // diff exits 0 = identical, 1 = differences found (success for us), >=2 =
   // real trouble. A bwrap failure (bad mount, timeout, killed) must not be
   // indistinguishable from "no changes" -- throw on anything but 0/1 so the
-  // caller can record the failure and keep the overlay for recovery.
-  if (result.error || (result.status !== 0 && result.status !== 1)) {
-    throw new Error(`error: non-git diff extraction failed for ${directory} (exit ${result.status ?? "null"}): ${(result.error?.message || result.stderr || "unknown error").trim()}`);
+  // caller can record the failure and keep the overlay for recovery. bwrap
+  // itself also exits 1 on a setup failure (its own die() convention), which
+  // collides with diff's own exit-1-for-differences-found on this exact
+  // status code -- an overlay-mount-busy failure that survives every retry
+  // must still throw even though its exit code alone looks like success, or
+  // the worker's real edits get silently discarded as "no changes".
+  if (result.error || isOverlayMountBusy(result) || (result.status !== 0 && result.status !== 1)) {
+    throw new Error(`error: non-git diff extraction failed for ${directory} (exit ${result.status ?? "null"}): ${(result.stderr || result.error?.message || "unknown error").trim()}`);
   }
   mkdirFn(pathDirname(diffPath));
   writeFileFn(diffPath, result.stdout);

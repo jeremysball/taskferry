@@ -5,12 +5,37 @@ import fs from "node:fs";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
+import { spawnSync } from "node:child_process";
 import { startDaemon } from "./daemon.js";
 
 const TEST_MODEL = "test/model";
 const EVENT_SUBSCRIBE = "event.subscribe";
 const TASK_STATE = "task.state";
+const TASK_CONTEXT = "task.context";
+const IN_WORKTREE_TASK_ID = "in-worktree";
 const TEST_STARTED_AT = "2026-07-15T00:00:00.000Z";
+const GIT_EMAIL = "user.email=t@t";
+const GIT_NAME = "user.name=t";
+
+// A real main-checkout + linked-worktree pair (`git worktree add`), the
+// exact layout taskferry#315 reports as silently invisible to a root-scoped
+// watch/list: a dispatch's recorded `directory` is the worktree's own path,
+// not the main checkout's. Returns realpath'd directories so callers can
+// compare them directly against what the daemon's own realpathSync-based
+// normalizeDirectory() would produce.
+function gitWorktreeFixture(t) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-daemon-worktree-test-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const mainRepo = path.join(root, "main");
+  const worktree = path.join(root, "worktree");
+  fs.mkdirSync(mainRepo);
+  spawnSync("git", ["init", "-q", mainRepo]);
+  fs.writeFileSync(path.join(mainRepo, "tracked.txt"), "base\n");
+  spawnSync("git", ["-C", mainRepo, "add", "-A"]);
+  spawnSync("git", ["-C", mainRepo, "-c", GIT_EMAIL, "-c", GIT_NAME, "commit", "-qm", "base"]);
+  spawnSync("git", ["-C", mainRepo, "worktree", "add", "-q", worktree, "-b", "feat"]);
+  return { mainRepo: fs.realpathSync(mainRepo), worktree: fs.realpathSync(worktree) };
+}
 
 function temporaryPaths(t) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-daemon-test-"));
@@ -177,7 +202,7 @@ describe("Unix socket daemon: workspace filtering", () => {
     t.after(() => peer.close());
 
     const listed = await peer.request("list", "task.list", { directory: paths.root });
-    const context = await peer.request("context", "task.context", { directory: paths.root });
+    const context = await peer.request("context", TASK_CONTEXT, { directory: paths.root });
 
     assert.deepEqual(listed.result.tasks.map((task) => task.id), ["here"]);
     assert.equal(listed.result.counts.done, 1);
@@ -201,7 +226,7 @@ describe("Unix socket daemon: workspace filtering", () => {
     const peer = await openPeer(paths.socketPath);
     t.after(() => peer.close());
 
-    await peer.request("context", "task.context", { directory: paths.root });
+    await peer.request("context", TASK_CONTEXT, { directory: paths.root });
 
     const statusCalls = fake.calls.filter((call) => call[0] === "status").map((call) => call[1]);
     assert.deepEqual(statusCalls, ["here"]);
@@ -239,6 +264,89 @@ describe("Unix socket daemon: workspace filtering", () => {
     assert.equal(daemon.stats().subscriptions, 3);
   });
 
+});
+
+// The exact bug in taskferry#315: a dispatch that passed an explicit
+// worktree `--directory` recorded that literal worktree path, and both
+// task.list/task.context filtering and live event routing compared
+// directories with a raw `===`, so a `--directory <main repo root>` watch
+// was silently blind to it. These run without an injected resolveWorkspaceRoot
+// -- startDaemon()'s real createWorkspaceRootResolver(), spawning real git --
+// so they exercise the actual fix end to end, not a mocked comparison.
+describe("Unix socket daemon: git-worktree-aware workspace matching (taskferry#315)", () => {
+  test("task.list/task.context filtered by the main repo root also match a task dispatched into a linked worktree", async (t) => {
+    const paths = temporaryPaths(t);
+    const { mainRepo, worktree } = gitWorktreeFixture(t);
+    const tasks = [
+      { id: IN_WORKTREE_TASK_ID, status: "done", directory: worktree, model: TEST_MODEL, startedAt: TEST_STARTED_AT },
+    ];
+    const fake = fakeManagerFactory(tasks);
+    const daemon = await startDaemon({ ...paths, taskManagerFactory: fake.factory });
+    t.after(() => daemon.close());
+    const peer = await openPeer(paths.socketPath);
+    t.after(() => peer.close());
+
+    const listed = await peer.request("list", "task.list", { directory: mainRepo });
+    const context = await peer.request("context", TASK_CONTEXT, { directory: mainRepo });
+
+    assert.deepEqual(listed.result.tasks.map((task) => task.id), [IN_WORKTREE_TASK_ID]);
+    assert.deepEqual(context.result.tasks.map((task) => task.id), [IN_WORKTREE_TASK_ID]);
+  });
+
+  test("event.subscribe scoped to the main repo root also receives live events for a task dispatched into a linked worktree", async (t) => {
+    const paths = temporaryPaths(t);
+    const { mainRepo, worktree } = gitWorktreeFixture(t);
+    const fake = fakeManagerFactory();
+    const daemon = await startDaemon({ ...paths, taskManagerFactory: fake.factory });
+    t.after(() => daemon.close());
+    const peer = await openPeer(paths.socketPath);
+    t.after(() => peer.close());
+
+    const sub = await peer.request("sub", EVENT_SUBSCRIBE, { directory: mainRepo });
+    assert.equal(sub.ok, true);
+
+    fake.emit({ type: TASK_STATE, taskId: IN_WORKTREE_TASK_ID, directory: worktree, status: "running" });
+    const events = await peer.waitForEvents(1);
+    assert.equal(events[0].event.taskId, IN_WORKTREE_TASK_ID);
+  });
+
+  test("does not cross-match two unrelated repos: a subscription for one repo's root does not receive the other repo's events", async (t) => {
+    const paths = temporaryPaths(t);
+    const { mainRepo: repoA } = gitWorktreeFixture(t);
+    const { mainRepo: repoB } = gitWorktreeFixture(t);
+    const fake = fakeManagerFactory();
+    const daemon = await startDaemon({ ...paths, taskManagerFactory: fake.factory });
+    t.after(() => daemon.close());
+    const peer = await openPeer(paths.socketPath);
+    t.after(() => peer.close());
+
+    await peer.request("sub", EVENT_SUBSCRIBE, { directory: repoA });
+    fake.emit({ type: TASK_STATE, taskId: "in-repo-a", directory: repoA, status: "running" });
+    fake.emit({ type: TASK_STATE, taskId: "in-repo-b", directory: repoB, status: "running" });
+
+    const events = await peer.waitForEvents(1);
+    assert.deepEqual(events.map((message) => message.event.taskId), ["in-repo-a"]);
+  });
+
+  test("event.subscribe({ all: true }) receives every directory's events without a directory or taskId, and skips resolveWorkspaceRoot entirely", async (t) => {
+    const paths = temporaryPaths(t);
+    const otherDirectory = path.join(paths.root, "other");
+    fs.mkdirSync(otherDirectory);
+    const fake = fakeManagerFactory();
+    const daemon = await startDaemon({ ...paths, taskManagerFactory: fake.factory });
+    t.after(() => daemon.close());
+    const peer = await openPeer(paths.socketPath);
+    t.after(() => peer.close());
+
+    const sub = await peer.request("sub", EVENT_SUBSCRIBE, { all: true });
+    assert.equal(sub.ok, true);
+
+    fake.emit({ type: TASK_STATE, taskId: "one", directory: paths.root, status: "running" });
+    fake.emit({ type: TASK_STATE, taskId: "two", directory: otherDirectory, status: "running" });
+
+    const events = await peer.waitForEvents(2);
+    assert.deepEqual(events.map((message) => message.event.taskId), ["one", "two"]);
+  });
 });
 
 describe("Unix socket daemon: event subscription routing and teardown", () => {

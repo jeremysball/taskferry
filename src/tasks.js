@@ -4926,7 +4926,7 @@ function dispatchTask(params, ctx) {
  * (event sequence, subscription count) are read/written through `ctx.state`.
  * @param {Task} task
  * @param {{force?: boolean}} options
- * @param {{onEvent?: (event: object) => void, state: {eventSequence: number, activitySummarySubscriptions: number}, activitySubscriptions: Map<string, Set<boolean>>, activitySummariesEnabled: boolean, activityCache: {refresh: (task: Task, options: {force?: boolean, includeSummary?: boolean}) => Promise<{activity: string, outputWatermark: number}|null>}}} ctx
+ * @param {{onEvent?: (event: object) => void, state: {eventSequence: number, activitySummarySubscriptions: number}, activitySubscriptions: Map<string|null, Set<boolean>>, activitySummariesEnabled: boolean, activityCache: {refresh: (task: Task, options: {force?: boolean, includeSummary?: boolean}) => Promise<{activity: string, outputWatermark: number}|null>}}} ctx
  * @returns {Promise<unknown>}
  */
 function scheduleActivityFor(task, { force }, ctx) {
@@ -4955,9 +4955,15 @@ function scheduleActivityFor(task, { force }, ctx) {
       // Activity is advisory and cannot interrupt task lifecycle.
     }
   };
+  // A `watch --all` subscription groups under the null key (daemon-server.js's
+  // ALL_DIRECTORIES sentinel, taskferry#315) regardless of any task's own
+  // directory, so its variants apply to every task alongside whatever this
+  // task's own directory has subscribed to.
   const dirVariants = ctx.activitySubscriptions.get(scheduledDirectory);
-  const variants = dirVariants && dirVariants.size > 0
-    ? [...dirVariants]
+  const allVariants = ctx.activitySubscriptions.get(null);
+  const mergedVariants = new Set([...(dirVariants ?? []), ...(allVariants ?? [])]);
+  const variants = mergedVariants.size > 0
+    ? [...mergedVariants]
     : [ctx.activitySummariesEnabled && ctx.state.activitySummarySubscriptions > 0];
   const refreshes = variants.map((includeSummary) =>
     ctx.activityCache.refresh(task, { force, includeSummary })

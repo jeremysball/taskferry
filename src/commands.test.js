@@ -237,6 +237,34 @@ test("watch --task-id subscribes by taskId directly, without a task.status pre-f
   assert.equal(client.closed.value, true);
 });
 
+test("watch --all subscribes with {all: true} instead of a directory, and receives events from every workspace (taskferry#315)", async () => {
+  const here = mkTmpRoot(TASKFERRY_TEST_TMP_PREFIX);
+  const elsewhere = mkTmpRoot(TASKFERRY_TEST_TMP_PREFIX);
+  const controller = new AbortController();
+  let subscribeParams;
+  let deliverFn;
+  const client = fakeClient({
+    onSubscribe: (params, onEvent) => {
+      subscribeParams = params;
+      deliverFn = onEvent;
+    },
+  });
+  const io = fakeIo();
+
+  const pending = runCommand("watch", { directory: void 0, all: true, format: "toon", summaries: false, taskId: void 0 }, { signal: controller.signal, cwd: here, client, io });
+
+  assert.deepEqual(subscribeParams, { all: true });
+
+  deliverState({ sequence: 1, taskId: "oc_1", directory: here, status: "running", deliver: deliverFn });
+  deliverState({ sequence: 2, taskId: "oc_2", directory: elsewhere, status: "running", deliver: deliverFn });
+  controller.abort();
+  await pending;
+
+  assert.equal(io.lines.length, 2, "events from both workspaces should print, not just the cwd's");
+  assert.match(io.lines[0], /oc_1/);
+  assert.match(io.lines[1], /oc_2/);
+});
+
 test("wait --summarize streams summaries then returns the same shape as plain wait", async () => {
   const root = mkTmpRoot(TASKFERRY_TEST_TMP_PREFIX);
   let deliver;

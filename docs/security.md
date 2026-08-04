@@ -264,7 +264,17 @@ runs wrapped in
   sandboxed process can read normal system libraries, binaries, and
   OpenCode's own config without a hand-maintained whitelist, with the
   following paths overlaid as empty (`--tmpfs`) on top of that read-only
-  view:
+  view. **`/tmp` itself is always one of these tmpfs mounts** (`--tmpfs
+  /tmp`, `src/sandbox.js`), applied before any read-write binds — a path a
+  caller saved under `/tmp` for a dispatch to read (a diff file, a scratch
+  input) is invisible inside the sandbox unless it's also the dispatch's
+  own `directory`, `runtimeDir`, or an explicit `--allowed-dirs` entry, even
+  though the file exists on the host. Hitting this looks like a plain
+  missing-file error from inside the sandbox, not a sandbox-specific one,
+  and a worker prompted to read a path it can't see may silently
+  reconstruct an answer instead of reporting the read failure — the
+  dispatch itself still settles `done`/`exitCode: 0` with no signal
+  anything was wrong (taskferry#211):
   - `TASKFERRY_STATE_DIR` (every task's NDJSON logs, including other tasks'
     prompt/tool output)
   - `~/.ssh`, `~/.aws`, `~/.config/gcloud`, `~/.config/gh`, `~/.gnupg`

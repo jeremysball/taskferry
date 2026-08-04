@@ -30,6 +30,20 @@ notes or a hand-written CHANGELOG, whichever this repo uses). Don't let a
 squash-merge or a release-please rollup silently absorb their contribution
 under a generic entry with no attribution.
 
+## Always filter, then process
+
+When code needs to act on a subset of a larger collection (tasks, rows,
+files), narrow to that subset first, then run the expensive per-item work
+only on what's left — never run the expensive work across the whole
+collection and discard results afterward. The daemon already follows this
+for task lookups: `filteredTaskDetails()` filters the cheap in-memory rows
+by directory before calling `manager.status()` per task, specifically
+because `status()` does per-task log I/O and calling it for every task ever
+recorded (instead of just the ones in scope) turns a routine poll into
+O(all-time task count) synchronous I/O on the daemon's single thread
+(taskferry#287). Apply the same ordering anywhere a filter and an expensive
+per-item operation combine, not just in that one function.
+
 ## Maintain a healthy `good first issue` list
 
 Keep a standing set of open issues labeled `good first issue` — small,

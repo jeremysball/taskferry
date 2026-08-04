@@ -10,7 +10,7 @@
   "scripts": {
     "start": "node src/cli.js",
     "test": "npm run test:unit",
-    "test:unit": "env -u TASKFERRY_CHILD node --test src/tasks.test.js src/events.test.js src/protocol.test.js src/state-lock.test.js src/daemon.test.js src/args.test.js src/cli.test.js src/commands.test.js src/changeset.test.js src/changeset.integration.test.js src/integrations.test.js src/opencode-plugin.test.js src/activity.test.js src/output.test.js src/setup.test.js src/config.test.js src/sandbox.test.js src/executor.test.js src/env-file.test.js",
+    "test:unit": "env -u TASKFERRY_CHILD node --test src/tasks.parse.test.js src/tasks.persist.test.js src/tasks.dispatch.test.js src/tasks.sandbox.test.js src/tasks.changeset.test.js src/tasks.watchdog.test.js src/tasks.failure.test.js src/tasks.lifecycle.test.js src/tasks.advisor.test.js src/tasks.summarize.test.js src/tasks.env.test.js src/tasks.executor.test.js src/events.test.js src/protocol.test.js src/state-lock.test.js src/daemon.test.js src/args.test.js src/cli.test.js src/commands.test.js src/changeset.test.js src/changeset.integration.test.js src/integrations.test.js src/opencode-plugin.test.js src/activity.test.js src/output.test.js src/setup.test.js src/config.test.js src/sandbox.test.js src/executor.test.js src/env-file.test.js",
     "test:integration": "node src/smoke-test.js && node src/cancel-smoke-test.js && node src/poll-smoke-test.js",
     "skill:generate": "node scripts/generate-skill.js",
     "skill:check": "node scripts/generate-skill.js --check",
@@ -31,7 +31,15 @@
     "@eslint/js": "^10.0.1",
     "@types/node": "^26.1.1",
     "eslint": "^10.7.0",
+    "eslint-plugin-sonarjs": "^4.2.0",
     "globals": "^17.7.0",
     "typescript": "^7.0.2"
+  },
+  "overrides": {
+    "eslint-plugin-sonarjs": {
+      "ts-api-utils": {
+        "typescript": "6.0.3"
+      }
+    }
   }
 }

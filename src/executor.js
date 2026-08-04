@@ -18,7 +18,7 @@ const SUMMARY_ISOLATION_PROMPT =
 // leading / or \, then turn every remaining /, \\, or : into a dash, then wrap
 // in `-- ... --`. Must match exactly -- a drift here silently breaks every
 // --session <id> resume by looking in the wrong directory.
-const PI_SAFE_PATH_FOR_CWD = (/** @type {string} */ cwd) =>
+const piSafePathForCwd = (/** @type {string} */ cwd) =>
   `--${cwd.replace(/^[/\\]/, "").replace(/[/\\:]/g, "-")}--`;
 
 /**
@@ -59,9 +59,8 @@ function resolvePiSessionFile(realSessionsDir, sessionId, { readdirFn = (/** @ty
   }
   const matches = [];
   for (const entry of entries) {
-    if (!entry.endsWith(".jsonl")) continue;
     const underscoreIdx = entry.lastIndexOf("_");
-    if (underscoreIdx === -1) continue;
+    if (!entry.endsWith(".jsonl") || underscoreIdx === -1) continue;
     const fileSessionId = entry.slice(underscoreIdx + 1, -".jsonl".length);
     if (fileSessionId.startsWith(sessionId)) {
       matches.push(path.join(realSessionsDir, entry));
@@ -104,68 +103,82 @@ function resolvePiSessionFile(realSessionsDir, sessionId, { readdirFn = (/** @ty
  * @param {unknown} parsed
  * @returns {unknown|null}
  */
+/** @param {Record<string, unknown>} evt */
+function normalizeSessionEvent(evt) {
+  return typeof evt.id === "string" ? { sessionID: evt.id } : null;
+}
+
+/** @param {Record<string, unknown>} evt */
+function normalizeMessageUpdate(evt) {
+  const { assistantMessageEvent, message } = evt;
+  const inner = /** @type {Record<string, unknown>|undefined} */ (assistantMessageEvent);
+  if (inner?.type !== "text_start" && inner?.type !== "text_delta") return null;
+  const messageRecord = /** @type {Record<string, unknown>} */ (message);
+  const messageID = typeof messageRecord?.responseId === "string" ? messageRecord.responseId : "__unknown_message__";
+  const text = inner.type === "text_delta" && typeof inner.delta === "string" ? inner.delta : "";
+  if (inner.type === "text_start") return null;
+  return { type: "text", part: { type: "text", text, messageID } };
+}
+
+/** @param {Record<string, unknown>} evt */
+function normalizeToolExecutionEnd(evt) {
+  const { args } = evt;
+  const toolName = typeof evt.toolName === "string" ? evt.toolName : "unknown";
+  const result = /** @type {Record<string, unknown>} */ (evt.result);
+  const outputText = Array.isArray(result?.content)
+    ? result.content.filter((c) => c?.type === "text").map((c) => c.text).join("")
+    : "";
+  return {
+    type: "tool_use",
+    part: {
+      type: "tool",
+      tool: toolName,
+      state: { input: args, output: outputText || undefined },
+    },
+  };
+}
+
+/** @param {Record<string, unknown>} evt */
+function normalizeAgentEnd(evt) {
+  const messages = Array.isArray(evt.messages) ? evt.messages : [];
+  let lastAssistant = null;
+  for (const m of messages) {
+    if (m && m.role === "assistant") lastAssistant = m;
+  }
+  if (!lastAssistant) return null;
+  if (lastAssistant.stopReason === "error") {
+    const errorMessage = typeof lastAssistant.errorMessage === "string" ? lastAssistant.errorMessage : "pi agent error";
+    return {
+      type: "error",
+      message: errorMessage,
+      error: { name: "pi_error", data: { message: errorMessage } },
+    };
+  }
+  const messageID = typeof lastAssistant.responseId === "string" ? lastAssistant.responseId : "__unknown_message__";
+  return {
+    type: "step_finish",
+    part: {
+      type: "step-finish",
+      reason: "stop",
+      tokens: lastAssistant.usage,
+      cost: lastAssistant.usage?.cost?.total ?? null,
+      messageID,
+    },
+  };
+}
+
+/**
+ * @param {unknown} parsed
+ * @returns {unknown|null}
+ */
 function piNormalizeLogEvent(parsed) {
   const evt = /** @type {Record<string, unknown>} */ (parsed);
   switch (evt.type) {
-    case "session":
-      return typeof evt.id === "string" ? { sessionID: evt.id } : null;
-
-    case "message_update": {
-      const inner = /** @type {Record<string, unknown>} */ (evt.assistantMessageEvent);
-      if (inner?.type !== "text_start" && inner?.type !== "text_delta") return null;
-      const message = /** @type {Record<string, unknown>} */ (evt.message);
-      const messageID = typeof message?.responseId === "string" ? message.responseId : "__unknown_message__";
-      const text = inner.type === "text_delta" && typeof inner.delta === "string" ? inner.delta : "";
-      if (inner.type === "text_start") return null;
-      return { type: "text", part: { type: "text", text, messageID } };
-    }
-
-    case "tool_execution_end": {
-      const toolName = typeof evt.toolName === "string" ? evt.toolName : "unknown";
-      const args = evt.args;
-      const result = /** @type {Record<string, unknown>} */ (evt.result);
-      const outputText = Array.isArray(result?.content)
-        ? result.content.filter((c) => c?.type === "text").map((c) => c.text).join("")
-        : "";
-      return {
-        type: "tool_use",
-        part: {
-          type: "tool",
-          tool: toolName,
-          state: { input: args, output: outputText || undefined },
-        },
-      };
-    }
-
-    case "agent_end": {
-      const messages = Array.isArray(evt.messages) ? evt.messages : [];
-      let lastAssistant = null;
-      for (const m of messages) {
-        if (m && m.role === "assistant") lastAssistant = m;
-      }
-      if (!lastAssistant) return null;
-      if (lastAssistant.stopReason === "error") {
-        return {
-          type: "error",
-          message: typeof lastAssistant.errorMessage === "string" ? lastAssistant.errorMessage : "pi agent error",
-          error: { name: "pi_error", data: { message: typeof lastAssistant.errorMessage === "string" ? lastAssistant.errorMessage : "pi agent error" } },
-        };
-      }
-      const messageID = typeof lastAssistant.responseId === "string" ? lastAssistant.responseId : "__unknown_message__";
-      return {
-        type: "step_finish",
-        part: {
-          type: "step-finish",
-          reason: "stop",
-          messageID,
-          tokens: lastAssistant.usage,
-          cost: lastAssistant.usage?.cost?.total ?? null,
-        },
-      };
-    }
-
-    default:
-      return null;
+    case "session": return normalizeSessionEvent(evt);
+    case "message_update": return normalizeMessageUpdate(evt);
+    case "tool_execution_end": return normalizeToolExecutionEnd(evt);
+    case "agent_end": return normalizeAgentEnd(evt);
+    default: return null;
   }
 }
 
@@ -252,7 +265,7 @@ export function piExecutor({ execFileFn = execFileAsync } = {}) {
           }
         })();
         if (sessionsDirStat?.isDirectory()) {
-          const safePath = PI_SAFE_PATH_FOR_CWD(launchDirectory);
+          const safePath = piSafePathForCwd(launchDirectory);
           const realSessionFile = resolvePiSessionFile(path.join(realSessionsDir, safePath), sessionId, { readdirFn });
           if (realSessionFile) {
             const sandboxedSessionFile = path.join(sandboxedSessionsHome, safePath, path.basename(realSessionFile));
@@ -308,8 +321,8 @@ export function opencodeExecutor() {
       const realAuthFile = path.join(realDataHome, "opencode", "auth.json");
       const sandboxedDataHome = path.join(dataDir, "opencode-data");
       return {
-        extraRoBinds: existsFn(realAuthFile) ? [/** @type {[string, string]} */ ([realAuthFile, path.join(sandboxedDataHome, "opencode", "auth.json")])] : [],
         sandboxedDataHome,
+        extraRoBinds: existsFn(realAuthFile) ? [/** @type {[string, string]} */ ([realAuthFile, path.join(sandboxedDataHome, "opencode", "auth.json")])] : [],
         sandboxEnv: { XDG_DATA_HOME: sandboxedDataHome },
       };
     },

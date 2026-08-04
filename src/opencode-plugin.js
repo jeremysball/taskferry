@@ -2,7 +2,7 @@ import fs from "node:fs";
 import { connectClient } from "./client.js";
 
 const ACTIVE_STATUSES = new Set(["queued", "running"]);
-const TERMINAL_STATUSES = new Set(["done", "crashed", "cancelled"]);
+export const TERMINAL_STATUSES = new Set(["done", "crashed", "cancelled"]);
 const TOAST_VARIANTS = {
   queued: "info",
   running: "info",
@@ -43,6 +43,72 @@ function toastVariant(status) {
   return TOAST_VARIANTS[status] || "warning";
 }
 
+function makeLogFailure(client) {
+  return async (operation, error) => {
+    try {
+      await client?.app?.log?.({
+        body: {
+          service: "taskferry",
+          level: "error",
+          message: `Taskferry ${operation} failed: ${errorMessage(error)}`,
+        },
+      });
+    } catch {
+      // Logging must not turn a daemon failure into an OpenCode failure.
+    }
+  };
+}
+
+function rememberTask(activeTasks, unseenTerminalTasks, task) {
+  const row = rowFromTask(task);
+  if (!row.taskId || typeof row.status !== "string") return;
+  if (ACTIVE_STATUSES.has(row.status)) {
+    activeTasks.set(row.taskId, row);
+    unseenTerminalTasks.delete(row.taskId);
+  } else if (TERMINAL_STATUSES.has(row.status)) {
+    activeTasks.delete(row.taskId);
+    unseenTerminalTasks.set(row.taskId, row);
+  } else {
+    // Unknown statuses are neither active nor terminal: leave the row untracked.
+  }
+}
+
+function makeShowToast(client, logFailure) {
+  return async (event) => {
+    if (!event.taskId || typeof event.status !== "string") return;
+    try {
+      await client?.tui?.showToast?.({
+        body: {
+          title: `Taskferry(${event.status} · ${event.taskId})`,
+          message: typeof event.activity === "string" && event.activity
+            ? event.activity.replace(/[\r\n]+/g, " ")
+            : `Task ${event.status}`,
+          variant: toastVariant(event.status),
+        },
+      });
+    } catch (error) {
+      await logFailure("toast", error);
+    }
+  };
+}
+
+function makeOnDaemonEvent({ activeTasks, unseenTerminalTasks, showToast }) {
+  return (event) => {
+    if (!event || typeof event !== "object") return;
+    if (event.type === "task.state") {
+      rememberTask(activeTasks, unseenTerminalTasks, event);
+      void showToast(event);
+    } else if (event.type === "task.activity") {
+      if (typeof event.activity !== "string") return;
+      const target = activeTasks.has(event.taskId) ? activeTasks : unseenTerminalTasks;
+      const current = target.get(event.taskId);
+      if (current) target.set(event.taskId, { ...current, activity: event.activity });
+    } else {
+      // Unknown event types are ignored.
+    }
+  };
+}
+
 /**
  * @param {object} input
  * @param {object} input.client OpenCode's plugin client
@@ -59,64 +125,11 @@ export async function createOpenCodePlugin(
   const normalizedDirectory = realpathFn(directory);
   const activeTasks = new Map();
   const unseenTerminalTasks = new Map();
+  const logFailure = makeLogFailure(client);
+  const showToast = makeShowToast(client, logFailure);
+  const onDaemonEvent = makeOnDaemonEvent({ activeTasks, unseenTerminalTasks, showToast });
   let daemonClient = null;
   let disposed = false;
-
-  const logFailure = async (operation, error) => {
-    try {
-      await client?.app?.log?.({
-        body: {
-          service: "taskferry",
-          level: "error",
-          message: `Taskferry ${operation} failed: ${errorMessage(error)}`,
-        },
-      });
-    } catch {
-      // Logging must not turn a daemon failure into an OpenCode failure.
-    }
-  };
-
-  const rememberTask = (task) => {
-    const row = rowFromTask(task);
-    if (!row.taskId || typeof row.status !== "string") return;
-    if (ACTIVE_STATUSES.has(row.status)) {
-      activeTasks.set(row.taskId, row);
-      unseenTerminalTasks.delete(row.taskId);
-    } else if (TERMINAL_STATUSES.has(row.status)) {
-      activeTasks.delete(row.taskId);
-      unseenTerminalTasks.set(row.taskId, row);
-    }
-  };
-
-  const showToast = async (event) => {
-    if (!event.taskId || typeof event.status !== "string") return;
-    try {
-      await client?.tui?.showToast?.({
-        body: {
-          title: `Taskferry(${event.status} · ${event.taskId})`,
-          message: typeof event.activity === "string" && event.activity
-            ? event.activity.replace(/[\r\n]+/g, " ")
-            : `Task ${event.status}`,
-          variant: toastVariant(event.status),
-        },
-      });
-    } catch (error) {
-      await logFailure("toast", error);
-    }
-  };
-
-  const onDaemonEvent = (event) => {
-    if (!event || typeof event !== "object") return;
-    if (event.type === "task.state") {
-      rememberTask(event);
-      void showToast(event);
-    } else if (event.type === "task.activity") {
-      if (typeof event.activity !== "string") return;
-      const target = activeTasks.has(event.taskId) ? activeTasks : unseenTerminalTasks;
-      const current = target.get(event.taskId);
-      if (current) target.set(event.taskId, { ...current, activity: event.activity });
-    }
-  };
 
   try {
     daemonClient = await connectClientFn();
@@ -130,7 +143,9 @@ export async function createOpenCodePlugin(
   if (daemonClient) {
     try {
       const context = await daemonClient.request("task.context", { directory: normalizedDirectory });
-      for (const task of Array.isArray(context?.tasks) ? context.tasks : []) rememberTask(task);
+      for (const task of Array.isArray(context?.tasks) ? context.tasks : []) {
+        rememberTask(activeTasks, unseenTerminalTasks, task);
+      }
     } catch (error) {
       await logFailure("initial context", error);
     }

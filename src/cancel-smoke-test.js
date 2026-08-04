@@ -4,9 +4,10 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { rmRoot, stopDaemonAndWait } from "./smoke-test-support.js";
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const cliEntry = path.join(__dirname, "cli.js");
+const scriptDir = path.dirname(fileURLToPath(import.meta.url));
+const cliEntry = path.join(scriptDir, "cli.js");
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-cancel-smoke-"));
 const env = {
@@ -14,7 +15,7 @@ const env = {
   TASKFERRY_STATE_DIR: path.join(root, "state"),
   TASKFERRY_RUNTIME_DIR: path.join(root, "run"),
 };
-const dirArg = process.argv[2] || path.join(__dirname, "..");
+const dirArg = process.argv[2] || path.join(scriptDir, "..");
 
 function taskferry(args) {
   const output = execFileSync(process.execPath, [cliEntry, ...args], { env, encoding: "utf8" });
@@ -26,11 +27,13 @@ function daemonPid() {
 }
 
 function stopDaemon() {
+  let pid;
   try {
-    process.kill(daemonPid(), "SIGTERM");
+    pid = daemonPid();
   } catch {
-    // already gone
+    return; // already gone
   }
+  stopDaemonAndWait(pid);
 }
 
 function psTree(pgid) {
@@ -57,7 +60,7 @@ const dispatched = taskferry([
   "dispatch",
   "--prompt", "Run 'sleep 60' via bash, then reply SLEEP_DONE. Do not shorten the sleep duration.",
   "--directory", dirArg,
-  "--model", "opencode-go/minimax-m3",
+  "--model", "minimax/MiniMax-M3",
 ]);
 console.log(dispatched);
 const taskId = dispatched.id;
@@ -91,7 +94,7 @@ check("task settled as cancelled", last?.status === "cancelled");
 check("the complete process group was killed", groupGone);
 
 stopDaemon();
-fs.rmSync(root, { recursive: true, force: true });
+rmRoot(root);
 
 if (ok) {
   console.log("\nCANCEL SMOKE TEST PASSED");

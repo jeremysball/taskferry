@@ -5,6 +5,8 @@ import path from "node:path";
 import { ensureClaudeCodePlaywrightIsolation, ensureOpencodePlaywrightIsolation } from "./mcp-isolation.js";
 import { defaultRunCommand } from "./sandbox.js";
 
+const PLUGIN_ID = "taskferry@taskferry";
+
 const MANAGED_TARGETS = new Set([
   path.join("src", "cli.js"),
   path.join("src", "opencode-plugin.js"),
@@ -71,7 +73,8 @@ export function defaultNpmInstall(checkoutDirectory) {
   if (result.error || result.status !== 0) {
     const stderr = (result.stderr || "").trim();
     const detail = result.error ? result.error.message : `exit ${result.status}`;
-    throw new Error(`npm install failed: ${detail}${stderr ? `\n${stderr}` : ""}`);
+    const suffix = stderr ? `\n${stderr}` : "";
+    throw new Error(`npm install failed: ${detail}${suffix}`);
   }
   return result;
 }
@@ -90,13 +93,13 @@ export function defaultRunCommandAsync(command, args) {
     execFile(command, args, { encoding: "utf8", timeout: 5000 }, (error, stdout, stderr) => {
       if (error) {
         if (typeof error.code === "number") {
-          resolve({ status: error.code, stdout: stdout || "", stderr: stderr || "", error: undefined });
+          resolve({ status: error.code, stdout: stdout || "", stderr: stderr || "" });
           return;
         }
         resolve({ status: null, stdout: stdout || "", stderr: stderr || "", error });
         return;
       }
-      resolve({ status: 0, stdout: stdout || "", stderr: stderr || "", error: undefined });
+      resolve({ status: 0, stdout: stdout || "", stderr: stderr || "" });
     });
   });
 }
@@ -107,7 +110,8 @@ function ensureSuccess(result, command, args) {
   }
   if (result.status !== 0) {
     const stderr = (result.stderr || "").trim();
-    throw new Error(`${command} ${args.join(" ")} failed with status ${result.status}${stderr ? `\n${stderr}` : ""}`);
+    const suffix = stderr ? `\n${stderr}` : "";
+    throw new Error(`${command} ${args.join(" ")} failed with status ${result.status}${suffix}`);
   }
   return result;
 }
@@ -128,7 +132,46 @@ export function pluginInstalled(installedJson) {
     return false;
   }
   if (!Array.isArray(parsed)) return false;
-  return parsed.some((entry) => entry && entry.id === "taskferry@taskferry");
+  return parsed.some((entry) => entry && entry.id === PLUGIN_ID);
+}
+
+function resolveGitHash(runCommand) {
+  const hashResult = runCommand("git", ["rev-parse", "HEAD"]);
+  if (!hashResult.error && hashResult.status === 0) {
+    return (hashResult.stdout || "").trim();
+  }
+  return null;
+}
+
+function readStoredHash(hashFile) {
+  try {
+    return fs.readFileSync(hashFile, "utf8").trim();
+  } catch (error) {
+    if (error.code !== "ENOENT") throw error;
+    return null;
+  }
+}
+
+function installPlugin(runCommand) {
+  ensureSuccess(
+    runCommand("claude", ["plugin", "install", PLUGIN_ID, "--scope", "user"]),
+    "claude",
+    ["plugin", "install", PLUGIN_ID, "--scope", "user"],
+  );
+}
+
+function forceResyncPlugin(runCommand) {
+  ensureSuccess(
+    runCommand("claude", ["plugin", "uninstall", PLUGIN_ID, "--keep-data", "-y"]),
+    "claude",
+    ["plugin", "uninstall", PLUGIN_ID, "--keep-data", "-y"],
+  );
+  installPlugin(runCommand);
+}
+
+function writeHashFile(hashFile, hash) {
+  fs.mkdirSync(path.dirname(hashFile), { recursive: true });
+  fs.writeFileSync(hashFile, hash);
 }
 
 export function installClaude(checkoutDirectory, runCommand, homeDirectory, env) {
@@ -151,65 +194,37 @@ export function installClaude(checkoutDirectory, runCommand, homeDirectory, env)
   );
   const installed = pluginInstalled(listed.stdout || "");
 
-  // Compute current HEAD hash for cache-busting.
-  // git rev-parse HEAD may fail if git is absent or this isn't a git checkout.
-  let currentHash = null;
-  {
-    const hashResult = runCommand("git", ["rev-parse", "HEAD"]);
-    if (!hashResult.error && hashResult.status === 0) {
-      currentHash = (hashResult.stdout || "").trim();
-    }
-  }
-
+  const currentHash = resolveGitHash(runCommand);
   const stateDir = env.XDG_STATE_HOME || path.join(homeDirectory, ".local", "state");
   const hashFile = path.join(stateDir, "taskferry", "claude-plugin-hash");
 
   if (!installed) {
-    ensureSuccess(
-      runCommand("claude", ["plugin", "install", "taskferry@taskferry", "--scope", "user"]),
-      "claude",
-      ["plugin", "install", "taskferry@taskferry", "--scope", "user"],
-    );
+    installPlugin(runCommand);
     if (currentHash) {
-      fs.mkdirSync(path.dirname(hashFile), { recursive: true });
-      fs.writeFileSync(hashFile, currentHash);
+      writeHashFile(hashFile, currentHash);
     }
-  } else {
-    if (currentHash) {
-      let storedHash = null;
-      try {
-        storedHash = fs.readFileSync(hashFile, "utf8").trim();
-      } catch (error) {
-        if (error.code !== "ENOENT") throw error;
-      }
-      if (storedHash === currentHash) {
-        // Hash matches — no changes since last install, skip re-install
-      } else {
-        // Hash differs or never stored — force resync via uninstall + install
-        // since claude plugin update's version-gating can't be trusted
-        ensureSuccess(
-          runCommand("claude", ["plugin", "uninstall", "taskferry@taskferry", "--keep-data", "-y"]),
-          "claude",
-          ["plugin", "uninstall", "taskferry@taskferry", "--keep-data", "-y"],
-        );
-        ensureSuccess(
-          runCommand("claude", ["plugin", "install", "taskferry@taskferry", "--scope", "user"]),
-          "claude",
-          ["plugin", "install", "taskferry@taskferry", "--scope", "user"],
-        );
-        fs.mkdirSync(path.dirname(hashFile), { recursive: true });
-        fs.writeFileSync(hashFile, currentHash);
-      }
-    } else {
-      // No current hash available (git not available / not a checkout)
-      // Fall back to version-gated update as best-effort
-      ensureSuccess(
-        runCommand("claude", ["plugin", "update", "taskferry@taskferry"]),
-        "claude",
-        ["plugin", "update", "taskferry@taskferry"],
-      );
-    }
+    return { status: "installed" };
   }
+
+  if (!currentHash) {
+    // No current hash available (git not available / not a checkout)
+    // Fall back to version-gated update as best-effort
+    ensureSuccess(
+      runCommand("claude", ["plugin", "update", PLUGIN_ID]),
+      "claude",
+      ["plugin", "update", PLUGIN_ID],
+    );
+    return { status: "installed" };
+  }
+
+  const storedHash = readStoredHash(hashFile);
+  if (storedHash !== currentHash) {
+    // Hash differs or never stored — force resync via uninstall + install
+    // since claude plugin update's version-gating can't be trusted
+    forceResyncPlugin(runCommand);
+    writeHashFile(hashFile, currentHash);
+  }
+
   return { status: "installed" };
 }
 

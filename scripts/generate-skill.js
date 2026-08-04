@@ -7,10 +7,12 @@ import { fileURLToPath } from "node:url";
 // repo's git history at its own path, so a stale/missing copy ships wrong
 // content to real installs rather than just failing a rebuild.
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const skillRelativePath = path.join("skills", "using-taskferry", "SKILL.md");
+const skillFileName = "SKILL.md";
+const skillDirName = "using-taskferry";
+const skillRelativePath = path.join("skills", skillDirName, skillFileName);
 const generatedRelativePaths = [
-  path.join("integrations", "claude", "skills", "using-taskferry", "SKILL.md"),
-  path.join("integrations", "codex", "skills", "using-taskferry", "SKILL.md"),
+  path.join("integrations", "claude", "skills", skillDirName, skillFileName),
+  path.join("integrations", "codex", "skills", skillDirName, skillFileName),
 ];
 
 function canonicalSkill(root) {

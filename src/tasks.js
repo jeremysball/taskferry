@@ -2899,7 +2899,14 @@ function resolveFilesystemSimpleOptions(rawOptions) {
     // applies, same as before this option existed. Only a caller that sets
     // this explicitly (tests injecting a fast/no-op sleep to avoid eating
     // the real ~1.3s overlay-mount-busy backoff, taskferry#328) overrides it.
-    overlaySleepFn: rawOptions.overlaySleepFn,
+    // `?? undefined` folds an explicit `null` into `undefined` too -- JS
+    // default parameters (changeset.js's `sleepFn = sleepSync`) only trigger
+    // on `undefined`, not `null`, so a caller passing `overlaySleepFn: null`
+    // would otherwise reach `runExtractionBwrap`'s `sleepFn(100)` call with a
+    // literal `null` and throw a TypeError instead of falling back to the
+    // real sleep (code review finding on PR #333; no current caller passes
+    // `null`, but the guard is free).
+    overlaySleepFn: rawOptions.overlaySleepFn ?? undefined,
     resolveGitCommonDirFn: rawOptions.resolveGitCommonDirFn ?? resolveGitCommonDir,
     resolveGitDirFn: rawOptions.resolveGitDirFn ?? resolveGitDir,
     checkBwrapAvailableFn: rawOptions.checkBwrapAvailableFn ?? checkBwrapAvailable,

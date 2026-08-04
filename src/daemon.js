@@ -474,8 +474,13 @@ export async function startDaemon(options = {}) {
 async function main() {
   const daemon = await startDaemon({ taskManagerOptions: { config: loadConfig() } });
   const stop = async () => {
-    await daemon.close();
-    process.exit(0);
+    try {
+      await daemon.close();
+      process.exit(0);
+    } catch (error) {
+      process.stderr.write(`error: daemon shutdown failed: ${error instanceof Error ? error.message : String(error)}\n`);
+      process.exit(1);
+    }
   };
   process.once("SIGINT", stop);
   process.once("SIGTERM", stop);

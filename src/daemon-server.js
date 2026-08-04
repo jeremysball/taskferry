@@ -161,7 +161,16 @@ export function makeClose({ manager, clients, server, socketPath, restart }) {
   return function close() {
     if (closing) return closing;
     closing = new Promise((resolve, reject) => {
-      manager.close?.();
+      // A throw here (e.g. from envFileWatcher.close() inside manager.close())
+      // must not skip the shutdown broadcast, server.close(), or socket
+      // unlink below -- letting it propagate would reject the whole close()
+      // promise, which in turn leaves maybeRestart()'s `restarting` latch
+      // stuck true forever (the restart's spawnReplacement/exitProcess never
+      // run) and makes the SIGTERM/SIGINT handler exit nonzero for a failure
+      // that's otherwise harmless to the actual shutdown.
+      try {
+        manager.close?.();
+      } catch { /* best-effort cleanup; shutdown must proceed regardless */ }
       for (const socket of clients) {
         socket.write(encodeMessage({ version: PROTOCOL_VERSION, type: "shutdown", reason: restart.restarting ? "restart" : "shutdown" }));
         socket.destroy();

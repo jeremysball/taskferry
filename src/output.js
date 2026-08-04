@@ -118,11 +118,31 @@ function nextHint(detail, id, status) {
 }
 
 /**
+ * `--full` status is meant for the directory/model/log path details a human
+ * debugging a stuck dispatch actually reads, not the daemon's own overlay
+ * bookkeeping -- `overlayDirs` on the raw task record carries one
+ * `{path, upperDir, workDir}` entry per git-common-dir sub-overlay
+ * (gitDir, objects, refs, logs/refs) plus a `rwFileBinds` entry for a
+ * scratch-copied writable file like `packed-refs`, none of which is
+ * actionable from the CLI: those upper/work tmp paths only mean anything to
+ * `tasks.js`'s own extraction/cleanup code, which reads them straight off
+ * the task record, not off a status response. Keep just `root` (the overlay's
+ * own scratch dir, useful for manually inspecting a stuck/crashed changeset)
+ * and `tmpRoot` (its parent, `resolveOverlayTmpRoot()`'s output).
+ * @param {object} detail
+ */
+function trimOverlayDirs(detail) {
+  if (!detail.overlayDirs) return detail;
+  const { root, tmpRoot } = detail.overlayDirs;
+  return { ...detail, overlayDirs: { root, tmpRoot } };
+}
+
+/**
  * Keep polling output small. Static task metadata is available through
  * `--full`; lifecycle and log activity remain visible on every lookup.
  */
 export function leanStatus(detail, { full = false } = {}) {
-  if (full) return detail;
+  if (full) return trimOverlayDirs(detail);
   const {
     id,
     status,

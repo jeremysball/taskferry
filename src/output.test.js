@@ -289,6 +289,40 @@ test("leanStatus omits changesetStatus when it's already resolved", () => {
   assert.equal(lean.changesetStatus, undefined);
 });
 
+describe("leanStatus --full overlayDirs trimming", () => {
+  const OVERLAY_ROOT = "/run/user/1000/taskferry/overlay/taskferry-cow-t1";
+  const OVERLAY_TMP_ROOT = "/run/user/1000/taskferry/overlay";
+
+  test("keeps only root/tmpRoot, dropping the per-git-subpath upper/work/rwBinds internals", () => {
+    const detail = {
+      id: "t1",
+      status: "running",
+      overlayDirs: {
+        root: OVERLAY_ROOT,
+        tmpRoot: OVERLAY_TMP_ROOT,
+        upperDir: `${OVERLAY_ROOT}/upper/main`,
+        workDir: `${OVERLAY_ROOT}/work/main`,
+        rwBinds: [{ path: "/repo/.git", upperDir: `${OVERLAY_ROOT}/upper/extra/git-abc123`, workDir: `${OVERLAY_ROOT}/work/extra/git-abc123` }],
+        rwFileBinds: [{ path: "/repo/.git/packed-refs", bindSrc: `${OVERLAY_ROOT}/files/packed-refs-abc123` }],
+      },
+    };
+    const lean = leanStatus(detail, { full: true });
+    assert.deepEqual(lean.overlayDirs, { root: OVERLAY_ROOT, tmpRoot: OVERLAY_TMP_ROOT });
+  });
+
+  test("leaves detail untouched when there is no overlay", () => {
+    const detail = { id: "t1", status: "done", overlayDirs: null };
+    const lean = leanStatus(detail, { full: true });
+    assert.equal(lean.overlayDirs, null);
+  });
+
+  test("non-full status never surfaces overlayDirs at all", () => {
+    const detail = { id: "t1", status: "running", overlayDirs: { root: OVERLAY_ROOT, tmpRoot: OVERLAY_TMP_ROOT, upperDir: "x", workDir: "y", rwBinds: [], rwFileBinds: [] } };
+    const lean = leanStatus(detail);
+    assert.equal("overlayDirs" in lean, false);
+  });
+});
+
 describe("writeToon status coloring", () => {
   test("colors a status field in the nested (non-uniform) task layout when stdout is a TTY", () => {
     const { io, output } = fakeStdoutIo(true);

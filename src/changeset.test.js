@@ -34,6 +34,13 @@ const BIND_FLAG = "--bind";
 const RO_BIND_FLAG = "--ro-bind";
 const ROOT_BIND = "/";
 const SH_CMD = "sh";
+// Shared by both the extraction and non-git-apply overlay-mount-busy retry
+// tests (taskferry#326/#327) -- hoisted to module scope, like the fixtures
+// above, so both describe blocks pin the exact same bwrap wording.
+const OVERLAY_BUSY_STDERR =
+  "bwrap: Can't make overlay mount on /newroot/repo with options " +
+  "upperdir=/tmp/u,workdir=/tmp/w,lowerdir=/oldroot/repo,userxattr: Device or resource busy\n";
+const RETRIES_EXHAUSTED_MSG = "one initial attempt plus three retries, then give up";
 
 describe("overlayPaths()", () => {
   test("builds a per-task root plus a main upper/work pair under it", () => {
@@ -403,10 +410,8 @@ describe("extraction fail-closed behavior", () => {
   // bwrap's own mount-namespace teardown and lose with the same
   // "Device or resource busy" overlay-mount error #318 already surfaces.
   // These pin the bounded retry-with-backoff that absorbs that transient
-  // race instead of throwing on the first hit.
-  const OVERLAY_BUSY_STDERR =
-    "bwrap: Can't make overlay mount on /newroot/repo with options " +
-    "upperdir=/tmp/u,workdir=/tmp/w,lowerdir=/oldroot/repo,userxattr: Device or resource busy\n";
+  // race instead of throwing on the first hit. (OVERLAY_BUSY_STDERR is
+  // module-scoped above, shared with the non-git-apply retry tests below.)
 
   test("extractGitDiff retries a transient overlay-mount-busy bwrap failure and succeeds once it clears", () => {
     let bwrapAttempts = 0;
@@ -441,7 +446,7 @@ describe("extraction fail-closed behavior", () => {
       () => extractGitDiff({ ...baseGitParams, runCommand, writeFileFn: () => {}, mkdirFn: () => {}, sleepFn: (ms) => sleeps.push(ms) }),
       /Device or resource busy/
     );
-    assert.equal(bwrapAttempts, 4, "one initial attempt plus three retries, then give up");
+    assert.equal(bwrapAttempts, 4, RETRIES_EXHAUSTED_MSG);
     assert.deepEqual(sleeps, [100, 300, 900]);
   });
 
@@ -525,7 +530,7 @@ describe("extraction fail-closed behavior", () => {
       () => extractNonGitDiff({ ...baseNonGitParams, runCommand, writeFileFn: (p) => { written = p; }, mkdirFn: () => {}, sleepFn: () => {} }),
       /Device or resource busy/
     );
-    assert.equal(attempts, 4, "one initial attempt plus three retries, then give up");
+    assert.equal(attempts, 4, RETRIES_EXHAUSTED_MSG);
     assert.equal(written, null, "a bwrap failure disguised as diff's exit-1 must never be written out as a successful (empty) diff");
   });
 });
@@ -587,6 +592,62 @@ describe("applyChangeset()", () => {
       () => applyChangeset({ directory: SCRATCH_DIR, diffPath: DIFF_PATCH, isGitTarget: false }),
       /non-git changeset apply requires a live overlay, stateDir, runtimeDir, homeDir, and denyList/
     );
+  });
+
+  // Regression (taskferry#327 review finding): applyNonGitChangeset mounts
+  // its own overlay merged view via bwrap, the same race extraction hits
+  // (taskferry#326) -- a bwrap that just exited from a prior dispatch/accept
+  // can still be tearing down its mount namespace when this one starts.
+  // Unlike extraction, no fail-open guard is needed: rsync's exit codes
+  // don't share diff's "non-zero can mean success" convention, so a
+  // persistent busy failure already falls through to the existing
+  // `status !== 0` branch as a real failure -- these two just pin the retry.
+  test("non-git target: retries a transient overlay-mount-busy bwrap failure and succeeds once it clears", () => {
+    let attempts = 0;
+    const sleeps = [];
+    const runCommand = () => {
+      attempts += 1;
+      if (attempts < 2) return { status: 1, stdout: "", stderr: OVERLAY_BUSY_STDERR, error: null };
+      return { status: 0, stdout: "", stderr: "", error: null };
+    };
+    const result = applyChangeset({
+      directory: SCRATCH_DIR,
+      diffPath: DIFF_PATCH,
+      isGitTarget: false,
+      overlay: { root: T1_ROOT, upperDir: T1_UPPER, workDir: T1_WORK },
+      stateDir: STATE_DIR,
+      runtimeDir: RUNTIME_DIR,
+      homeDir: HOME_DIR,
+      denyList: [],
+      sleepFn: (ms) => sleeps.push(ms),
+      runCommand,
+    });
+    assert.equal(attempts, 2, "must retry until the overlay-busy race clears");
+    assert.deepEqual(sleeps, [100]);
+    assert.deepEqual(result, { applied: true, reason: null });
+  });
+
+  test("non-git target: gives up after exhausting retries and surfaces the last overlay-busy error as the failure reason", () => {
+    let attempts = 0;
+    const runCommand = () => {
+      attempts += 1;
+      return { status: 1, stdout: "", stderr: OVERLAY_BUSY_STDERR, error: null };
+    };
+    const result = applyChangeset({
+      directory: SCRATCH_DIR,
+      diffPath: DIFF_PATCH,
+      isGitTarget: false,
+      overlay: { root: T1_ROOT, upperDir: T1_UPPER, workDir: T1_WORK },
+      stateDir: STATE_DIR,
+      runtimeDir: RUNTIME_DIR,
+      homeDir: HOME_DIR,
+      denyList: [],
+      sleepFn: () => {},
+      runCommand,
+    });
+    assert.equal(attempts, 4, RETRIES_EXHAUSTED_MSG);
+    assert.equal(result.applied, false);
+    assert.match(result.reason, /Device or resource busy/);
   });
 });
 

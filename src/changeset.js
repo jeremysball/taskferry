@@ -352,13 +352,14 @@ export function subFilePaths(root, targetPath) {
  * @param {string} [params.homeDir]
  * @param {string[]} [params.denyList]
  * @param {typeof defaultRunCommand} [params.runCommand]
+ * @param {(ms: number) => void} [params.sleepFn] - injectable for tests; real callers get a blocking sleep between retries (non-git apply only -- applyGitChangeset uses `git apply`, not bwrap, so it never hits the overlay-mount race)
  * @returns {{applied: boolean, reason: string|null}}
  */
-export function applyChangeset({ directory, diffPath, isGitTarget, overlay, stateDir, runtimeDir, homeDir, denyList, runCommand = defaultRunCommand }) {
+export function applyChangeset({ directory, diffPath, isGitTarget, overlay, stateDir, runtimeDir, homeDir, denyList, runCommand = defaultRunCommand, sleepFn = sleepSync }) {
   if (isGitTarget) {
     return applyGitChangeset({ directory, diffPath, runCommand });
   }
-  return applyNonGitChangeset({ directory, overlay, stateDir, runtimeDir, homeDir, denyList, runCommand });
+  return applyNonGitChangeset({ directory, overlay, stateDir, runtimeDir, homeDir, denyList, runCommand, sleepFn });
 }
 
 // Shared by the two live-overlay-input guard clauses below (thrown from two
@@ -404,9 +405,10 @@ function gitApplyFailureReason(result) {
  * @param {string} [params.homeDir]
  * @param {string[]} [params.denyList]
  * @param {typeof defaultRunCommand} params.runCommand
+ * @param {(ms: number) => void} [params.sleepFn]
  * @returns {{applied: boolean, reason: string|null}}
  */
-function applyNonGitChangeset({ directory, overlay, stateDir, runtimeDir, homeDir, denyList, runCommand }) {
+function applyNonGitChangeset({ directory, overlay, stateDir, runtimeDir, homeDir, denyList, runCommand, sleepFn = sleepSync }) {
   // Guard clauses (split so each stays under the expression-complexity cap)
   // double as the TS narrowing the rsync remount below needs: a missing input
   // means a partial/tampered task record, which must surface as a hard error
@@ -426,7 +428,15 @@ function applyNonGitChangeset({ directory, overlay, stateDir, runtimeDir, homeDi
   // failed apply leaves changesetStatus "pending" and never runs cleanup
   // (spec §5.4), so the overlay survives for a second attempt.
   const script = `rsync -a --delete --delay-updates ${shQuote(mergedMountPoint)}/ ${shQuote(directory)}/`;
-  const result = runCommand("bwrap", [...bwrapArgs, "--", "sh", "-c", script]);
+  // Same overlay-mount-busy race as extraction (taskferry#326): this bwrap
+  // call mounts its own overlay merged view, which can race the async
+  // mount-namespace teardown of whatever bwrap just exited before this
+  // accept() ran. Routed through the same bounded retry-with-backoff rather
+  // than a bespoke copy -- unlike extractNonGitDiff, no fail-open guard is
+  // needed here: rsync doesn't share diff's "non-zero exit can mean success"
+  // convention, so a persistent busy failure (exit 1) already falls through
+  // to the existing `status !== 0` branch as a real failure.
+  const result = runExtractionBwrap(runCommand, [...bwrapArgs, "--", "sh", "-c", script], sleepFn);
   if (result.status !== 0) {
     return { applied: false, reason: copyApplyFailureReason(result) };
   }

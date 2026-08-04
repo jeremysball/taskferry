@@ -39,7 +39,7 @@ function temporaryPaths(t) {
   };
 }
 
-function fakeManagerFactory(tasks = [], { checkSummaryModelReady } = {}) {
+function fakeManagerFactory(tasks = [], { checkSummaryModelReady, throwOnClose = false } = {}) {
   let onEvent;
   let capturedOptions;
   const calls = [];
@@ -106,6 +106,10 @@ function fakeManagerFactory(tasks = [], { checkSummaryModelReady } = {}) {
     },
     checkSummaryModelReady: checkSummaryModelReady ?? (async () => {}),
     setActivitySubscriptions() {},
+    close() {
+      calls.push(["close"]);
+      if (throwOnClose) throw new Error("simulated manager.close() failure");
+    },
   };
 
   return {
@@ -201,6 +205,28 @@ describe("Unix socket daemon", () => {
   test("rejects unsupported operating systems before touching the socket", async (t) => {
     const paths = temporaryPaths(t);
     await assert.rejects(() => startDaemon({ ...paths, platform: "win32" }), /Linux and macOS/);
+    assert.equal(fs.existsSync(paths.socketPath), false);
+  });
+
+  test("daemon.close() calls manager.close() as part of shutdown", async (t) => {
+    const paths = temporaryPaths(t);
+    const fake = fakeManagerFactory();
+    const daemon = await startDaemon({ ...paths, taskManagerFactory: fake.factory });
+
+    await daemon.close();
+
+    assert.deepEqual(fake.calls.at(-1), ["close"]);
+    assert.equal(fs.existsSync(paths.socketPath), false);
+  });
+
+  test("daemon.close() still shuts down cleanly when manager.close() throws", async (t) => {
+    const paths = temporaryPaths(t);
+    const fake = fakeManagerFactory(undefined, { throwOnClose: true });
+    const daemon = await startDaemon({ ...paths, taskManagerFactory: fake.factory });
+
+    await daemon.close();
+
+    assert.deepEqual(fake.calls.at(-1), ["close"]);
     assert.equal(fs.existsSync(paths.socketPath), false);
   });
 

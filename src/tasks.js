@@ -3136,7 +3136,13 @@ function startEnvFileWatch(opts, state) {
       loadEnvFileFn: opts.loadEnvFileFn,
       onReload: (/** @type {Record<string,string>} */ vars) => { state.envFileVars = vars; },
       onError: (/** @type {unknown} */ error) => {
-        process.stderr.write(`warning: env-file reload failed for ${opts.envFilePath}: ${error instanceof Error ? error.message : String(error)} (keeping previous values)\n`);
+        // Swallow write failures (e.g. EPIPE from a rotated/closed stderr) --
+        // this handler runs inside fs.watch's 'error' listener, and letting
+        // a write failure throw there would crash the watcher instead of
+        // just skipping one warning line.
+        try {
+          process.stderr.write(`warning: env-file reload failed for ${opts.envFilePath}: ${error instanceof Error ? error.message : String(error)} (keeping previous values)\n`);
+        } catch { /* ignore */ }
       },
     });
   } catch (error) {

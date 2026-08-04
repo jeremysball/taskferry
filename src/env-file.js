@@ -166,17 +166,35 @@ export function loadEnvFile(filePath, { readFileFn = fs.readFileSync, statFn = f
  * @param {number} [options.debounceMs]
  * @param {typeof fs.watch} [options.watchFn]
  * @param {(path: string) => Record<string, string>} [options.loadEnvFileFn]
+ * @param {(path: string) => {mtimeMs: number, size: number}} [options.statFn]
  * @returns {{close: () => void}}
  */
-export function watchEnvFile(filePath, { onReload, onError = () => {}, debounceMs = 100, watchFn = fs.watch, loadEnvFileFn = loadEnvFile }) {
+export function watchEnvFile(filePath, { onReload, onError = () => {}, debounceMs = 100, watchFn = fs.watch, loadEnvFileFn = loadEnvFile, statFn = fs.statSync }) {
   const dir = path.dirname(filePath);
   const fileName = path.basename(filePath);
   /** @type {ReturnType<typeof setTimeout>} */
   let debounceTimer;
   let closed = false;
 
+  const statOrNull = () => {
+    try {
+      return statFn(filePath);
+    } catch {
+      return null;
+    }
+  };
+
   const reload = () => {
     if (closed) return;
+    // Guard against a torn read: some rotation tools write in place
+    // (truncate, then write) rather than mktemp+rename, so a read that
+    // lands mid-write can succeed while returning truncated/partial
+    // content. Comparing a stat taken before and after the read catches
+    // that window -- if the file changed size or mtime while we were
+    // reading it, the read is untrustworthy, so reschedule instead of
+    // handing a possibly-truncated `{}` to `onReload` and silently wiping
+    // every previously loaded secret.
+    const statBefore = statOrNull();
     // Deliberately split apart rather than `onReload(loadEnvFileFn(...))`
     // inlined behind a try -- keeping the fallible read and the
     // side-effecting callback on separate lines makes it obvious neither
@@ -189,11 +207,29 @@ export function watchEnvFile(filePath, { onReload, onError = () => {}, debounceM
       onError(error instanceof Error ? error : new Error(String(error)));
       return;
     }
-    onReload(vars);
+    const statAfter = statOrNull();
+    if (statBefore && statAfter && (statBefore.mtimeMs !== statAfter.mtimeMs || statBefore.size !== statAfter.size)) {
+      clearTimeout(debounceTimer);
+      debounceTimer = setTimeout(reload, debounceMs);
+      return;
+    }
+    try {
+      onReload(vars);
+    } catch (error) {
+      onError(error instanceof Error ? error : new Error(String(error)));
+    }
   };
 
   const watcher = watchFn(dir, (_eventType, changedName) => {
-    if (closed || (changedName && changedName !== fileName)) return;
+    if (closed) return;
+    // `changedName` can be null/undefined on platforms fs.watch doesn't
+    // report filenames on (see the Node docs' "Caveats" for `fs.watch`).
+    // We can't filter by name in that case, so we conservatively still
+    // reload rather than silently drop what might be the real rename
+    // event -- an extra debounced read of unrelated directory activity is
+    // harmless (the mtime/size guard above makes it idempotent), missing
+    // a real secret rotation is not.
+    if (changedName && changedName !== fileName) return;
     clearTimeout(debounceTimer);
     debounceTimer = setTimeout(reload, debounceMs);
   });

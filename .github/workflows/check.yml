@@ -65,9 +65,16 @@ jobs:
       # dispatch fails with "bwrap: Unknown option --overlay-src". Build a
       # real overlay-capable bwrap from source instead. A plain unprivileged
       # build then hits Ubuntu 24.04's AppArmor unprivileged-userns
-      # restriction ("bwrap: setting up uid map: Permission denied") -- the
-      # apt package sidesteps this by shipping setuid-root, so do the same
-      # for our own build (bubblewrap's own documented fallback mode).
+      # restriction ("bwrap: setting up uid map: Permission denied") -- and
+      # unlike the apt package, this can't be worked around with setuid-root,
+      # because bwrap itself refuses --overlay-src in setuid mode ("The
+      # --overlay-src option is not permitted in setuid mode": overlay plus
+      # setuid is a real privilege-escalation risk bwrap deliberately blocks).
+      # So relax the AppArmor restriction instead and keep bwrap unprivileged
+      # -- safe here since this is a fresh, throwaway CI VM, not a shared host.
+      - name: Allow unprivileged user namespaces (Ubuntu 24.04 AppArmor restriction)
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+
       - name: Build bubblewrap (with overlay support) from source
         run: |
           sudo apt-get update
@@ -77,8 +84,6 @@ jobs:
           meson setup build -Dman=disabled
           ninja -C build
           sudo ninja -C build install
-          sudo chown root:root /usr/local/bin/bwrap
-          sudo chmod u+s /usr/local/bin/bwrap
           bwrap --help | grep -q -- --overlay-src
 
       - name: Install pi CLI

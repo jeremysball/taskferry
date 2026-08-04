@@ -92,19 +92,30 @@ case "$tf_status" in
   running|queued) tf_status_color="$YELLOW" ;;
   *) tf_status_color="$WHITE" ;;
 esac
+# Running/queued counts are cheap horizontally ("(1r/3q)") so they show at
+# every width except compact, which is already tight with the full ctx
+# segment, acct tag, rate limits, and turn count all competing for space.
+# tf_counts is the bare "(1r/3q)" (used standalone in minimal mode);
+# tf_active is the same thing space-prefixed for appending after other text.
+tf_active=""
+tf_counts=""
+if [ "$mode" != "compact" ] && { [ "$tf_running" != "0" ] || [ "$tf_queued" != "0" ]; }; then
+  tf_counts=$(printf "${GRAY}(%sr/%sq)${RESET}" "$tf_running" "$tf_queued")
+  tf_active=" $tf_counts"
+fi
+
 if [ "$mode" = "minimal" ]; then
   if [ -n "$tf_summary_fresh" ]; then
     trimmed=$(printf '%s' "$tf_summary_fresh" | tr '\n' ' ' | cut -c1-30)
     [ "${#tf_summary_fresh}" -gt 30 ] && trimmed="${trimmed}…"
-    seg="$(printf "${GRAY}tf:${RESET}${WHITE}%s${RESET}" "$trimmed")"
+    seg="$(printf "${GRAY}tf:${RESET}${WHITE}%s${RESET}" "$trimmed")$tf_active"
   else
-    seg="$(printf "${GRAY}tf:${RESET}${tf_status_color}%s${RESET}" "$tf_status")"
+    # No status word here -- at minimal width the counts alone are more
+    # useful than a bare "running"/"queued"/"done" that adds no info the
+    # counts don't already imply.
+    seg="$(printf "${GRAY}tf:${RESET}")$tf_counts"
   fi
 else
-  tf_active=""
-  if [ "$mode" != "compact" ] && { [ "$tf_running" != "0" ] || [ "$tf_queued" != "0" ]; }; then
-    tf_active=$(printf " ${GRAY}(%sr/%sq)${RESET}" "$tf_running" "$tf_queued")
-  fi
   tf_id_shown="${tf_id: -8}"
   [ "$mode" = "compact" ] && tf_id_shown="${tf_id: -4}"
   seg="$(printf "${GRAY}tf:${RESET}%s %s" "$tf_id_shown" "$(printf "${tf_status_color}%s${RESET}" "$tf_status")")$tf_active"

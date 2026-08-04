@@ -1,14 +1,66 @@
 import fs from "node:fs";
 import path from "node:path";
 
+const ISOLATED_FLAG = "--isolated";
+
+// A JSON string can't legally contain a raw newline, so if we can't find a
+// closing quote before one, this is an unterminated string -- return null
+// rather than hunting across lines for the next real quote, which is what
+// let a comment on a later line survive unstripped.
+// @returns {number|null} index just past the closing quote, or null
+function findStringEnd(text, start) {
+  const n = text.length;
+  let j = start + 1;
+  while (j < n) {
+    const cj = text[j];
+    if (cj === "\n") return null;
+    if (cj === '"') return j + 1;
+    j += cj === "\\" && j + 1 < n && text[j + 1] !== "\n" ? 2 : 1;
+  }
+  return null;
+}
+
+// @returns {number|null} index just past a `//`/`/* */` comment starting at
+// `i`, or null if `i` isn't a comment start (including an unterminated
+// block comment, which is left as literal text rather than swallowing the
+// rest of the file).
+function commentSkipEnd(text, i) {
+  if (text[i] !== "/") return null;
+  if (text[i + 1] === "/") {
+    const newline = text.indexOf("\n", i + 2);
+    return newline === -1 ? text.length : newline;
+  }
+  if (text[i + 1] === "*") {
+    const end = text.indexOf("*/", i + 2);
+    return end === -1 ? null : end + 2;
+  }
+  return null;
+}
+
+// Manual scan instead of a regex: matching a possibly-unterminated JSON
+// string with backtracking alternation (`\\.` vs `[^"\\\n]`) is exactly the
+// super-linear shape sonarjs flags, and this parses config files whose
+// content isn't guaranteed trusted. A single forward pass is O(n) by
+// construction, so there's nothing left to backtrack.
 export function stripJsonComments(text) {
-  // The string-content class excludes newlines: JSON strings can't legally
-  // contain a raw newline, so an unterminated string (e.g. a trailing
-  // backslash before what was meant to be the closing quote) fails to match
-  // this alternative instead of running on past end-of-line, hunting for the
-  // next real quote across subsequent lines and mangling whatever comments
-  // or code sit in between.
-  return text.replace(/("(?:\\.|[^"\\\n])*")|(\/\/.*$|\/\*[\s\S]*?\*\/)/gm, (_match, str) => str || "");
+  let result = "";
+  let i = 0;
+  const n = text.length;
+  while (i < n) {
+    const ch = text[i];
+    const stringEnd = ch === '"' ? findStringEnd(text, i) : null;
+    const commentEnd = ch === "/" ? commentSkipEnd(text, i) : null;
+    if (stringEnd !== null) {
+      result += text.slice(i, stringEnd);
+      i = stringEnd;
+    } else if (commentEnd !== null) {
+      i = commentEnd;
+    } else {
+      result += ch;
+      i += 1;
+    }
+  }
+  return result;
 }
 
 function resolveOpencodeConfigDir(homeDirectory, env) {
@@ -29,7 +81,7 @@ export function checkOpencodePlaywrightIsolation(homeDirectory, env) {
       return { checked: false, path: configPath, reason: `failed to parse: ${message}` };
     }
     if (Array.isArray(parsed?.mcp?.playwright?.command)) {
-      return { checked: true, path: configPath, isolated: parsed.mcp.playwright.command.includes("--isolated") };
+      return { checked: true, path: configPath, isolated: parsed.mcp.playwright.command.includes(ISOLATED_FLAG) };
     }
   }
   return { checked: false, reason: "no opencode config with a playwright MCP entry found" };
@@ -51,10 +103,10 @@ export function ensureOpencodePlaywrightIsolation(homeDirectory, env) {
   if (!Array.isArray(parsed?.mcp?.playwright?.command)) {
     return { changed: false, reason: "no writable opencode.json with a playwright MCP entry found" };
   }
-  if (parsed.mcp.playwright.command.includes("--isolated")) {
+  if (parsed.mcp.playwright.command.includes(ISOLATED_FLAG)) {
     return { changed: false, path: jsonPath };
   }
-  parsed.mcp.playwright.command.push("--isolated");
+  parsed.mcp.playwright.command.push(ISOLATED_FLAG);
   fs.writeFileSync(jsonPath, JSON.stringify(parsed, null, 2));
   return { changed: true, path: jsonPath };
 }

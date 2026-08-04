@@ -17,89 +17,27 @@ import { errCode } from "./errors.js";
 // instead of a plain lock file. Accepted as residual risk: it only matters
 // once a holder has already overrun staleMs, which is itself anomalous.
 /**
- * Synchronously acquires the lock file, blocking via Atomics.wait while
- * contended. Shared by both the sync and async lock-holding helpers below --
- * acquisition itself never needs to await anything, only the critical
- * section guarded by it might.
- * @param {string} lockPath
- * @param {{staleMs?: number, retryMs?: number, timeoutMs?: number}} [options]
- * @returns {string} the ownership token written to the lock file
- */
-function acquireLock(lockPath, { staleMs = 10000, retryMs = 25, timeoutMs = 5000 } = {}) {
-  const deadline = Date.now() + timeoutMs;
-  const ownershipToken = `${process.pid}-${Date.now()}-${randomUUID()}`;
-  for (;;) {
-    try {
-      fs.writeFileSync(lockPath, ownershipToken, { flag: "wx", mode: 0o600 });
-      return ownershipToken;
-    } catch (err) {
-      if (errCode(err) !== "EEXIST") throw err;
-      /** @type {number} */
-      let ageMs;
-      try {
-        ageMs = Date.now() - fs.statSync(lockPath).mtimeMs;
-      } catch (statErr) {
-        if (errCode(statErr) === "ENOENT") continue; // lock disappeared between attempts
-        throw statErr;
-      }
-      if (ageMs >= staleMs) {
-        try {
-          fs.unlinkSync(lockPath);
-        } catch (unlinkErr) {
-          if (errCode(unlinkErr) !== "ENOENT") throw unlinkErr;
-        }
-        continue;
-      }
-      if (Date.now() >= deadline) {
-        throw new Error(`error: timed out waiting for lock: ${lockPath}\nhelp: another taskferry process may be stuck; remove the lock file if it is stale`, { cause: err });
-      }
-      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, retryMs);
-    }
-  }
-}
-
-/**
- * @param {string} lockPath
- * @param {string} ownershipToken
- * @returns {unknown} a cleanup error to surface, or undefined
- */
-function releaseLock(lockPath, ownershipToken) {
-  /** @type {string|undefined} */
-  let currentToken;
-  try {
-    currentToken = fs.readFileSync(lockPath, "utf8");
-  } catch (err) {
-    return errCode(err) !== "ENOENT" ? err : undefined;
-  }
-  if (currentToken !== ownershipToken) return undefined;
-  try {
-    fs.unlinkSync(lockPath);
-  } catch (err) {
-    return errCode(err) !== "ENOENT" ? err : undefined;
-  }
-  return undefined;
-}
-
-/**
  * @template T
  * @param {string} lockPath
  * @param {() => T} fn
  * @param {{staleMs?: number, retryMs?: number, timeoutMs?: number}} [options]
  * @returns {T}
  */
-export function withFileLock(lockPath, fn, options) {
-  const ownershipToken = acquireLock(lockPath, options);
+export function withFileLock(lockPath, fn, { staleMs = 10000, retryMs = 25, timeoutMs = 5000 } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  const ownershipToken = `${process.pid}-${Date.now()}-${randomUUID()}`;
+  acquireFileLock(lockPath, ownershipToken, staleMs, retryMs, deadline);
   // Throwing from a `finally` would mask a real error from fn() (e.g. a
-  // failed state write) with an unrelated cleanup failure. Defer the
-  // cleanup error and only surface it once fn() itself has succeeded.
-  /** @type {unknown} */
-  let cleanupError;
+  // failed state write) with an unrelated cleanup failure. Collect the
+  // cleanup error here and only surface it once fn() itself has succeeded.
   /** @type {T} */
   let result;
+  /** @type {unknown} */
+  let cleanupError;
   try {
     result = fn();
   } finally {
-    cleanupError = releaseLock(lockPath, ownershipToken);
+    cleanupError = releaseFileLock(lockPath, ownershipToken);
   }
   if (cleanupError) throw cleanupError;
   return result;
@@ -117,17 +55,91 @@ export function withFileLock(lockPath, fn, options) {
  * @param {{staleMs?: number, retryMs?: number, timeoutMs?: number}} [options]
  * @returns {Promise<T>}
  */
-export async function withFileLockAsync(lockPath, fn, options) {
-  const ownershipToken = acquireLock(lockPath, options);
-  /** @type {unknown} */
-  let cleanupError;
+export async function withFileLockAsync(lockPath, fn, { staleMs = 10000, retryMs = 25, timeoutMs = 5000 } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  const ownershipToken = `${process.pid}-${Date.now()}-${randomUUID()}`;
+  acquireFileLock(lockPath, ownershipToken, staleMs, retryMs, deadline);
   /** @type {T} */
   let result;
+  /** @type {unknown} */
+  let cleanupError;
   try {
     result = await fn();
   } finally {
-    cleanupError = releaseLock(lockPath, ownershipToken);
+    cleanupError = releaseFileLock(lockPath, ownershipToken);
   }
   if (cleanupError) throw cleanupError;
   return result;
+}
+
+// Attempt to create the lock file exclusively. Returns null once we hold the
+// lock, the EEXIST error when the lock is already held (so the caller can
+// carry it as the timeout error's cause), and throws on any other failure.
+/** @param {string} lockPath @param {string} ownershipToken */
+function tryCreateLock(lockPath, ownershipToken) {
+  try {
+    fs.writeFileSync(lockPath, ownershipToken, { flag: "wx", mode: 0o600 });
+    return null;
+  } catch (err) {
+    if (errCode(err) === "EEXIST") return err;
+    throw err;
+  }
+}
+
+// Inspect an existing lock file. Returns true when the caller should retry
+// creating the lock right away (the lock disappeared, or a stale lock was
+// just reclaimed), false when the lock is fresh and the caller must wait.
+/** @param {string} lockPath @param {number} staleMs */
+function tryReclaimStaleLock(lockPath, staleMs) {
+  /** @type {number} */
+  let ageMs;
+  try {
+    ageMs = Date.now() - fs.statSync(lockPath).mtimeMs;
+  } catch (statErr) {
+    if (errCode(statErr) === "ENOENT") return true; // lock disappeared between attempts
+    throw statErr;
+  }
+  if (ageMs < staleMs) return false; // fresh lock still held; wait
+  try {
+    fs.unlinkSync(lockPath);
+  } catch (unlinkErr) {
+    if (errCode(unlinkErr) !== "ENOENT") throw unlinkErr;
+  }
+  return true; // reclaimed (or already gone); retry now
+}
+
+/** @param {string} lockPath @param {string} ownershipToken @param {number} staleMs @param {number} retryMs @param {number} deadline */
+function acquireFileLock(lockPath, ownershipToken, staleMs, retryMs, deadline) {
+  let lastEexistErr;
+  for (;;) {
+    const conflict = tryCreateLock(lockPath, ownershipToken);
+    if (conflict === null) return; // lock acquired
+    lastEexistErr = conflict;
+    if (tryReclaimStaleLock(lockPath, staleMs)) continue; // retry immediately
+    if (Date.now() >= deadline) {
+      throw new Error(`error: timed out waiting for lock: ${lockPath}\nhelp: another taskferry process may be stuck; remove the lock file if it is stale`, { cause: lastEexistErr });
+    }
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, retryMs);
+  }
+}
+
+/** @param {string} lockPath @param {string} ownershipToken */
+function releaseFileLock(lockPath, ownershipToken) {
+  /** @type {unknown} */
+  let cleanupError;
+  /** @type {string|undefined} */
+  let currentToken;
+  try {
+    currentToken = fs.readFileSync(lockPath, "utf8");
+  } catch (err) {
+    if (errCode(err) !== "ENOENT") cleanupError = err;
+  }
+  if (currentToken === ownershipToken) {
+    try {
+      fs.unlinkSync(lockPath);
+    } catch (err) {
+      if (errCode(err) !== "ENOENT") cleanupError = err;
+    }
+  }
+  return cleanupError;
 }

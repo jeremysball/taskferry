@@ -164,6 +164,10 @@ describe("task activity events", () => {
       killFn: () => {},
       activitySummariesEnabled: true,
       summarizerTimeoutMs: 0,
+      // The default 3s global lowerdir stagger (taskferry#318) would
+      // otherwise queue the internal summary launch behind the source
+      // dispatch instead of letting both launch immediately.
+      lowerdirStaggerMs: 0,
       onEvent: (event) => events.push(event),
       listModelsFn: () => `${DEFAULT_SUMMARY_MODEL}\n`,
     });

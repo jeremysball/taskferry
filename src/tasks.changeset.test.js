@@ -167,6 +167,68 @@ describe("changeset extraction at settlement", () => {
     assert.ok(status.overlayDirs);
     assert.equal(cleanedAny, false);
   });
+
+  test("reclassifies a real no_output_timeout crash as overlay_mount_busy when the bwrap overlay-busy message is the real cause", async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "axi-overlay-busy-dir-"));
+    const overlayTmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "axi-overlay-busy-tmp-"));
+    const bwrapMessage =
+      "bwrap: Can't make overlay mount on /newroot/workspace with options " +
+      "upperdir=/tmp/upper,workdir=/tmp/work,lowerdir=/oldroot/workspace,userxattr: Device or resource busy";
+    const child = fakeChild(7200);
+    const mgr = makeManager({
+      overlayTmpRoot,
+      spawnFn: () => child,
+      killFn: () => {},
+      noOutputTimeoutMs: 20,
+      watchdogPollMs: 5,
+      sandboxEnabled: true,
+      checkBwrapAvailableFn: () => ({ checked: true, available: true }),
+      overlayEnabled: true,
+      checkOverlaySupportFn: () => ({ supported: true }),
+      platform: "linux",
+      runOverlayCommandFn: () => ({ status: null, stdout: "", stderr: "", error: new Error(bwrapMessage) }),
+      rmOverlayTreeFn: () => {},
+    });
+
+    const result = mgr.dispatch({ prompt: "hello", directory });
+    // Let the watchdog fire first, exactly like the real crash: the child
+    // never produces output (bwrap is stuck failing to mount), the watchdog
+    // SIGTERMs it and stamps failureReason: "no_output_timeout" BEFORE the
+    // exit handler ever runs extractChangesetForTask().
+    await new Promise((r) => setTimeout(r, 40));
+    assert.equal(mgr.status(result.id).failureReason, "no_output_timeout", "sanity: the watchdog must have fired first");
+
+    child.emit("exit", null, "SIGTERM");
+
+    const status = mgr.status(result.id);
+    assert.equal(status.failureReason, "overlay_mount_busy", "the confirmed bwrap cause must overwrite the generic no_output_timeout guess");
+    assert.match(status.failureDetail, /Device or resource busy/);
+    assert.match(status.changesetError, /Device or resource busy/);
+  });
+
+  test("an unrelated extraction error does not touch failureReason", () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "axi-overlay-unrelated-dir-"));
+    const overlayTmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "axi-overlay-unrelated-tmp-"));
+    let child;
+    const mgr = makeManager({
+      overlayTmpRoot,
+      spawnFn: () => { child = fakeChild(); return child; },
+      sandboxEnabled: true,
+      checkBwrapAvailableFn: () => ({ checked: true, available: true }),
+      overlayEnabled: true,
+      checkOverlaySupportFn: () => ({ supported: true }),
+      platform: "linux",
+      runOverlayCommandFn: () => ({ status: null, stdout: "", stderr: "", error: Object.assign(new Error(SPAWN_BWRAP_TIMEOUT), { code: "ETIMEDOUT" }) }),
+      rmOverlayTreeFn: () => {},
+    });
+
+    const result = mgr.dispatch({ prompt: "hello", directory });
+    child.emit("exit", 0, null);
+
+    const status = mgr.status(result.id);
+    assert.equal(status.failureReason, null, "an unrelated extraction error must not invent a failureReason");
+    assert.match(status.changesetError, /ETIMEDOUT/);
+  });
 });
 
 describe("boot-time sweep of orphaned prompt scratch files in PROMPT_DIR", () => {

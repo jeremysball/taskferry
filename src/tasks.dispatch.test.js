@@ -510,6 +510,96 @@ describe("dispatch queue", () => {
   });
 });
 
+describe("lowerdir launch stagger (taskferry#318: bwrap overlay-mount EBUSY under concurrent launches)", () => {
+  // Allow a few ms of scheduling jitter below the nominal stagger: the
+  // assertion cares about "roughly staggered, not simultaneous", not
+  // millisecond-exact spacing, and a strict >= threshold flakes under load.
+  const JITTER_TOLERANCE_MS = 15;
+
+  test("two queued tasks launch at least lowerdirStaggerMs apart, never simultaneously", async () => {
+    const children = [];
+    const mgr = makeManager({
+      lowerdirStaggerMs: 80,
+      maxDispatchesPerWindow: 10,
+      dispatchWindowMs: 60000,
+      maxConcurrentTasks: 10,
+      spawnFn: () => {
+        const child = fakeChild(6000 + children.length);
+        children.push({ child, at: Date.now() });
+        return child;
+      },
+    });
+
+    mgr.dispatch({ prompt: "first", directory: os.tmpdir() });
+    mgr.dispatch({ prompt: "second", directory: os.tmpdir() });
+
+    assert.equal(children.length, 1, "the second launch must not start synchronously alongside the first");
+
+    await new Promise((resolve) => setTimeout(resolve, 150));
+
+    assert.equal(children.length, 2);
+    assert.ok(
+      children[1].at - children[0].at >= 80 - JITTER_TOLERANCE_MS,
+      `expected roughly >= 80ms between launches, got ${children[1].at - children[0].at}ms`
+    );
+  });
+
+  test("three or more queued tasks each launch at least lowerdirStaggerMs after the previous one", async () => {
+    const children = [];
+    const mgr = makeManager({
+      lowerdirStaggerMs: 60,
+      maxDispatchesPerWindow: 10,
+      dispatchWindowMs: 60000,
+      maxConcurrentTasks: 10,
+      spawnFn: () => {
+        const child = fakeChild(6100 + children.length);
+        children.push({ child, at: Date.now() });
+        return child;
+      },
+    });
+
+    mgr.dispatch({ prompt: "first", directory: os.tmpdir() });
+    mgr.dispatch({ prompt: "second", directory: os.tmpdir() });
+    mgr.dispatch({ prompt: "third", directory: os.tmpdir() });
+
+    await new Promise((resolve) => setTimeout(resolve, 300));
+
+    assert.equal(children.length, 3);
+    assert.ok(children[1].at - children[0].at >= 60 - JITTER_TOLERANCE_MS);
+    assert.ok(children[2].at - children[1].at >= 60 - JITTER_TOLERANCE_MS);
+  });
+
+  test("TASKFERRY_LOWERDIR_STAGGER_MS=0 disables the gate (tasks launch as fast as rate/concurrency limits already allow)", () => {
+    const children = [];
+    const originalEnv = process.env.TASKFERRY_LOWERDIR_STAGGER_MS;
+    process.env.TASKFERRY_LOWERDIR_STAGGER_MS = "0";
+    try {
+      const mgr = createTaskManager({
+        stateDir: fs.mkdtempSync(path.join(os.tmpdir(), "axi-stagger-disabled-")),
+        sandboxEnabled: false,
+        maxDispatchesPerWindow: 10,
+        dispatchWindowMs: 60000,
+        maxConcurrentTasks: 10,
+        spawnFn: () => {
+          const child = fakeChild(6200 + children.length);
+          children.push(child);
+          return child;
+        },
+        killFn: () => {},
+      });
+
+      mgr.dispatch({ prompt: "first", directory: os.tmpdir() });
+      const second = mgr.dispatch({ prompt: "second", directory: os.tmpdir() });
+
+      assert.equal(second.status, "running", "with the stagger disabled, the second launch must start synchronously");
+      assert.equal(children.length, 2);
+    } finally {
+      if (originalEnv === undefined) delete process.env.TASKFERRY_LOWERDIR_STAGGER_MS;
+      else process.env.TASKFERRY_LOWERDIR_STAGGER_MS = originalEnv;
+    }
+  });
+});
+
 describe("active-task concurrency cap (independent of the launch-rate window)", () => {
   test("starts at most maxConcurrentTasks children; a 5th stays queued until one finishes", () => {
     const children = [];

@@ -369,6 +369,10 @@ describe("caller-env union: envFile watch reload/error/setup/close", () => {
       envFilePath: FAKE_SECRETS_ENV_PATH,
       loadEnvFileFn: () => ({ AXI_TEST_ROTATE: "before-rotation" }),
       watchEnvFileFn: (_p, options) => { onReload = options.onReload; return { close: () => {} }; },
+      // The default 3s global lowerdir stagger (taskferry#318) would
+      // otherwise queue the second dispatch instead of launching it
+      // immediately.
+      lowerdirStaggerMs: 0,
     });
 
     mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });

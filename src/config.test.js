@@ -98,6 +98,18 @@ describe("loadConfig()", () => {
     assert.throws(() => loadConfig({ configPath }), /error: config key "overlayEnabled".*must be a boolean.*\nhelp:/s);
   });
 
+  test("accepts a valid lowerdirStaggerMs value", () => {
+    const dir = tmpConfigDir();
+    const configPath = writeConfig(dir, JSON.stringify({ lowerdirStaggerMs: 5000 }));
+    assert.deepEqual(loadConfig({ configPath }), { lowerdirStaggerMs: 5000 });
+  });
+
+  test("rejects a wrong-typed lowerdirStaggerMs value", () => {
+    const dir = tmpConfigDir();
+    const configPath = writeConfig(dir, JSON.stringify({ lowerdirStaggerMs: "5000" }));
+    assert.throws(() => loadConfig({ configPath }), /error: config key "lowerdirStaggerMs".*must be a number.*\nhelp:/s);
+  });
+
   test("accepts a valid allowedDirs value", () => {
     const dir = tmpConfigDir();
     const configPath = writeConfig(dir, JSON.stringify({ allowedDirs: "/home/user/.cache/myapp,/opt/shared" }));

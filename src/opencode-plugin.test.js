@@ -7,6 +7,9 @@ import { test } from "node:test";
 import taskferryPlugin, { createOpenCodePlugin } from "./opencode-plugin.js";
 import { createTaskManager, DEFAULT_SUMMARY_MODEL } from "./tasks.js";
 
+const STATE_EVENT = "task.state";
+const ACTIVITY_EVENT = "task.activity";
+
 function temporaryDirectory() {
   return fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-opencode-plugin-test-"));
 }
@@ -83,10 +86,10 @@ test("renders task state changes as dynamic toasts with OpenCode variants", asyn
   });
   const onEvent = daemon.subscriptions[0].onEvent;
 
-  onEvent({ type: "task.state", taskId: "oc_run", status: "running", activity: "working" });
-  onEvent({ type: "task.state", taskId: "oc_done", status: "done", activity: null });
-  onEvent({ type: "task.state", taskId: "oc_crashed", status: "crashed", activity: "failed" });
-  onEvent({ type: "task.state", taskId: "oc_cancelled", status: "cancelled", activity: null });
+  onEvent({ type: STATE_EVENT, taskId: "oc_run", status: "running", activity: "working" });
+  onEvent({ type: STATE_EVENT, taskId: "oc_done", status: "done", activity: null });
+  onEvent({ type: STATE_EVENT, taskId: "oc_crashed", status: "crashed", activity: "failed" });
+  onEvent({ type: STATE_EVENT, taskId: "oc_cancelled", status: "cancelled", activity: null });
   await Promise.resolve();
 
   assert.deepEqual(opencode.toasts.map(({ body }) => ({
@@ -143,7 +146,7 @@ test("does not consume a terminal transition when it is only observed, then cons
     connectClientFn: async () => daemon,
   });
   const onEvent = daemon.subscriptions[0].onEvent;
-  onEvent({ type: "task.state", taskId: "oc_ab12", status: "done", activity: null });
+  onEvent({ type: STATE_EVENT, taskId: "oc_ab12", status: "done", activity: null });
 
   const previewOutput = { system: [] };
   await hooks["experimental.chat.system.transform"]({ sessionID: "session-1" }, previewOutput);
@@ -167,13 +170,13 @@ test("task.activity events refresh activity text for active and unseen-terminal 
   });
   const onEvent = daemon.subscriptions[0].onEvent;
 
-  onEvent({ type: "task.state", taskId: "oc_active", status: "running", activity: null });
-  onEvent({ type: "task.state", taskId: "oc_terminal", status: "done", activity: null });
+  onEvent({ type: STATE_EVENT, taskId: "oc_active", status: "running", activity: null });
+  onEvent({ type: STATE_EVENT, taskId: "oc_terminal", status: "done", activity: null });
 
-  onEvent({ type: "task.activity", taskId: "oc_active", activity: "still working" });
-  onEvent({ type: "task.activity", taskId: "oc_terminal", activity: "wrapped up" });
-  onEvent({ type: "task.activity", taskId: "oc_active", activity: 42 });
-  onEvent({ type: "task.activity", taskId: "oc_unknown", activity: "ignored, no such task" });
+  onEvent({ type: ACTIVITY_EVENT, taskId: "oc_active", activity: "still working" });
+  onEvent({ type: ACTIVITY_EVENT, taskId: "oc_terminal", activity: "wrapped up" });
+  onEvent({ type: ACTIVITY_EVENT, taskId: "oc_active", activity: 42 });
+  onEvent({ type: ACTIVITY_EVENT, taskId: "oc_unknown", activity: "ignored, no such task" });
 
   const output = { system: [] };
   await hooks["experimental.chat.system.transform"]({ sessionID: "session-1", model: {} }, output);

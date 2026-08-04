@@ -39,3 +39,57 @@ jobs:
       - name: Run unit tests
         if: matrix.leg == 'unit'
         run: npm run test:unit
+
+  integration:
+    # Fork PRs don't get repo secrets (GitHub withholds them by design), so
+    # MINIMAX_API_KEY would be empty there and every dispatch would fail on
+    # auth rather than on anything the PR actually changed. Runs only for
+    # same-repo pushes/PRs, where the secret is actually available.
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22.x'
+          cache: npm
+
+      - name: Install npm dependencies
+        run: npm ci
+
+      # Ubuntu's apt bubblewrap package reports a version >= 0.8 (the floor
+      # sandbox.js's checkOverlaySupport() trusts) but is built with overlay
+      # support (--overlay-src/--overlay) compiled out, so every sandboxed
+      # dispatch fails with "bwrap: Unknown option --overlay-src". Build a
+      # real overlay-capable bwrap from source instead. A plain unprivileged
+      # build then hits Ubuntu 24.04's AppArmor unprivileged-userns
+      # restriction ("bwrap: setting up uid map: Permission denied") -- and
+      # unlike the apt package, this can't be worked around with setuid-root,
+      # because bwrap itself refuses --overlay-src in setuid mode ("The
+      # --overlay-src option is not permitted in setuid mode": overlay plus
+      # setuid is a real privilege-escalation risk bwrap deliberately blocks).
+      # So relax the AppArmor restriction instead and keep bwrap unprivileged
+      # -- safe here since this is a fresh, throwaway CI VM, not a shared host.
+      - name: Allow unprivileged user namespaces (Ubuntu 24.04 AppArmor restriction)
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+
+      - name: Build bubblewrap (with overlay support) from source
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y meson ninja-build libcap-dev pkg-config
+          git clone --depth 1 --branch v0.11.0 https://github.com/containers/bubblewrap.git /tmp/bubblewrap-src
+          cd /tmp/bubblewrap-src
+          meson setup build -Dman=disabled
+          ninja -C build
+          sudo ninja -C build install
+          bwrap --help | grep -q -- --overlay-src
+
+      - name: Install pi CLI
+        run: npm install -g @earendil-works/pi-coding-agent
+
+      - name: Run integration (real CLI + daemon + live dispatch, no mocks)
+        env:
+          MINIMAX_API_KEY: ${{ secrets.MINIMAX_API_KEY }}
+        run: npm run test:integration

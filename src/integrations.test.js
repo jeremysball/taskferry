@@ -8,18 +8,24 @@ import { test } from "node:test";
 import { contextForHook } from "./output.js";
 import { runCli } from "./cli.js";
 
+const ENCODING = "utf8";
+const HOOKS_FILE = "hooks.json";
+const HOOK_BIN_PREFIX = "taskferry-hook-bin-";
+const SKILL_FILE = "SKILL.md";
+const SKILL_DIR = "using-taskferry";
+
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const claudeRoot = path.join(root, "integrations", "claude");
 const codexRoot = path.join(root, "integrations", "codex");
 
 function readJson(...parts) {
-  return JSON.parse(fs.readFileSync(path.join(root, ...parts), "utf8"));
+  return JSON.parse(fs.readFileSync(path.join(root, ...parts), ENCODING));
 }
 
 test("Claude plugin manifests describe only the taskferry native integration", () => {
   const plugin = readJson("integrations", "claude", ".claude-plugin", "plugin.json");
   const marketplace = readJson(".claude-plugin", "marketplace.json");
-  const hooks = readJson("integrations", "claude", "hooks", "hooks.json");
+  const hooks = readJson("integrations", "claude", "hooks", HOOKS_FILE);
 
   assert.equal(plugin.name, "taskferry");
   assert.equal(typeof plugin.description, "string");
@@ -88,17 +94,18 @@ test("SessionStart context is scoped to the current project", async () => {
 });
 
 test("SessionStart hook wraps CLI TOON context in Claude JSON output", () => {
-  const hooks = readJson("integrations", "claude", "hooks", "hooks.json");
+  const hooks = readJson("integrations", "claude", "hooks", HOOKS_FILE);
   const command = hooks.hooks.SessionStart[0].hooks[0].command;
-  const bin = fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-hook-bin-"));
+  const bin = fs.mkdtempSync(path.join(os.tmpdir(), HOOK_BIN_PREFIX));
   const taskferry = path.join(bin, "taskferry");
 
   try {
     fs.writeFileSync(taskferry, "#!/bin/sh\nprintf 'directory: /project\\n'\n");
+    // eslint-disable-next-line sonarjs/file-permissions -- 0o755 on a throwaway test script, not taskferry-set permission
     fs.chmodSync(taskferry, 0o755);
     const result = spawnSync("sh", ["-c", command], {
       env: { ...process.env, CLAUDE_PROJECT_DIR: "/project", PATH: `${bin}:${process.env.PATH}` },
-      encoding: "utf8",
+      encoding: ENCODING,
     });
 
     assert.equal(result.status, 0, result.stderr);
@@ -114,9 +121,9 @@ test("SessionStart hook wraps CLI TOON context in Claude JSON output", () => {
 });
 
 test("SessionStart hook passes CLAUDE_PROJECT_DIR as a single unquoted argument", () => {
-  const hooks = readJson("integrations", "claude", "hooks", "hooks.json");
+  const hooks = readJson("integrations", "claude", "hooks", HOOKS_FILE);
   const command = hooks.hooks.SessionStart[0].hooks[0].command;
-  const bin = fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-hook-bin-"));
+  const bin = fs.mkdtempSync(path.join(os.tmpdir(), HOOK_BIN_PREFIX));
   const taskferry = path.join(bin, "taskferry");
 
   try {
@@ -124,10 +131,11 @@ test("SessionStart hook passes CLAUDE_PROJECT_DIR as a single unquoted argument"
       taskferry,
       "#!/bin/sh\nfor a in \"$@\"; do printf '[%s]' \"$a\"; done\nprintf '\\n'\n"
     );
+    // eslint-disable-next-line sonarjs/file-permissions -- 0o755 on a throwaway test script, not taskferry-set permission
     fs.chmodSync(taskferry, 0o755);
     const result = spawnSync("sh", ["-c", command], {
       env: { ...process.env, CLAUDE_PROJECT_DIR: "/tmp/some project", PATH: `${bin}:${process.env.PATH}` },
-      encoding: "utf8",
+      encoding: ENCODING,
     });
 
     assert.equal(result.status, 0, result.stderr);
@@ -139,17 +147,18 @@ test("SessionStart hook passes CLAUDE_PROJECT_DIR as a single unquoted argument"
 });
 
 test("SessionStart hook reports a structured error when an installed taskferry fails", () => {
-  const hooks = readJson("integrations", "claude", "hooks", "hooks.json");
+  const hooks = readJson("integrations", "claude", "hooks", HOOKS_FILE);
   const command = hooks.hooks.SessionStart[0].hooks[0].command;
-  const bin = fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-hook-bin-"));
+  const bin = fs.mkdtempSync(path.join(os.tmpdir(), HOOK_BIN_PREFIX));
   const taskferry = path.join(bin, "taskferry");
 
   try {
     fs.writeFileSync(taskferry, "#!/bin/sh\nexit 1\n");
+    // eslint-disable-next-line sonarjs/file-permissions -- 0o755 on a throwaway test script, not taskferry-set permission
     fs.chmodSync(taskferry, 0o755);
     const result = spawnSync("sh", ["-c", command], {
       env: { ...process.env, CLAUDE_PROJECT_DIR: "/project", PATH: `${bin}:${process.env.PATH}` },
-      encoding: "utf8",
+      encoding: ENCODING,
     });
 
     assert.equal(result.status, 0, result.stderr);
@@ -165,7 +174,7 @@ test("SessionStart hook reports a structured error when an installed taskferry f
 });
 
 test("missing taskferry guidance is a single actionable plugin error", () => {
-  const hooks = readJson("integrations", "claude", "hooks", "hooks.json");
+  const hooks = readJson("integrations", "claude", "hooks", HOOKS_FILE);
   const command = hooks.hooks.SessionStart[0].hooks[0].command;
 
   assert.match(command, /command -v taskferry/);
@@ -177,7 +186,7 @@ test("missing taskferry guidance is a single actionable plugin error", () => {
   try {
     const result = spawnSync("/bin/sh", ["-c", command], {
       env: { ...process.env, CLAUDE_PROJECT_DIR: "/project", PATH: emptyBin },
-      encoding: "utf8",
+      encoding: ENCODING,
     });
 
     assert.equal(result.status, 0, result.stderr);
@@ -195,7 +204,7 @@ test("missing taskferry guidance is a single actionable plugin error", () => {
 test("Codex plugin manifests expose native skills and lifecycle hooks", () => {
   const plugin = readJson("integrations", "codex", ".codex-plugin", "plugin.json");
   const marketplace = readJson(".agents", "plugins", "marketplace.json");
-  const hooks = readJson("integrations", "codex", "hooks", "hooks.json");
+  const hooks = readJson("integrations", "codex", "hooks", HOOKS_FILE);
 
   assert.equal(plugin.name, "taskferry");
   assert.equal(plugin.hooks, "./hooks/hooks.json");
@@ -246,15 +255,16 @@ test("Codex lifecycle hooks emit workspace context with an isolated CODEX_HOME",
 
   try {
     fs.writeFileSync(taskferry, "#!/bin/sh\nprintf '{\"additionalContext\":\"workspace: %s\"}' \"$(pwd)\"\n");
+    // eslint-disable-next-line sonarjs/file-permissions -- 0o755 on a throwaway test script, not taskferry-set permission
     fs.chmodSync(taskferry, 0o755);
 
-    const hooks = readJson("integrations", "codex", "hooks", "hooks.json");
+    const hooks = readJson("integrations", "codex", "hooks", HOOKS_FILE);
     for (const event of ["SessionStart", "UserPromptSubmit"]) {
       const command = hooks.hooks[event][0].hooks[0].command;
       const result = spawnSync("sh", ["-c", command], {
         cwd: project,
         env: { ...process.env, CODEX_HOME: codexHome, PATH: `${bin}:${process.env.PATH}` },
-        encoding: "utf8",
+        encoding: ENCODING,
       });
 
       assert.equal(result.status, 0, result.stderr);
@@ -270,13 +280,13 @@ test("Codex lifecycle hooks emit workspace context with an isolated CODEX_HOME",
 });
 
 test("distributed skills are generated from the canonical source", () => {
-  const canonical = fs.readFileSync(path.join(root, "skills", "using-taskferry", "SKILL.md"), "utf8");
-  assert.equal(fs.readFileSync(path.join(claudeRoot, "skills", "using-taskferry", "SKILL.md"), "utf8"), canonical);
-  assert.equal(fs.readFileSync(path.join(codexRoot, "skills", "using-taskferry", "SKILL.md"), "utf8"), canonical);
+  const canonical = fs.readFileSync(path.join(root, "skills", SKILL_DIR, SKILL_FILE), ENCODING);
+  assert.equal(fs.readFileSync(path.join(claudeRoot, "skills", SKILL_DIR, SKILL_FILE), ENCODING), canonical);
+  assert.equal(fs.readFileSync(path.join(codexRoot, "skills", SKILL_DIR, SKILL_FILE), ENCODING), canonical);
 
   const result = spawnSync(process.execPath, ["scripts/generate-skill.js", "--check"], {
     cwd: root,
-    encoding: "utf8",
+    encoding: ENCODING,
   });
   assert.equal(result.status, 0, result.stderr);
 });
@@ -289,9 +299,9 @@ test("skill check detects a stale generated copy", () => {
   // (flaky "skill files are out of sync" failures in CI).
   const sandbox = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-skill-check-")));
   const skillFiles = [
-    path.join("skills", "using-taskferry", "SKILL.md"),
-    path.join("integrations", "claude", "skills", "using-taskferry", "SKILL.md"),
-    path.join("integrations", "codex", "skills", "using-taskferry", "SKILL.md"),
+    path.join("skills", SKILL_DIR, SKILL_FILE),
+    path.join("integrations", "claude", "skills", SKILL_DIR, SKILL_FILE),
+    path.join("integrations", "codex", "skills", SKILL_DIR, SKILL_FILE),
   ];
   try {
     for (const relativePath of skillFiles) {
@@ -304,13 +314,13 @@ test("skill check detects a stale generated copy", () => {
     fs.copyFileSync(path.join(root, "scripts", "generate-skill.js"), scriptDestination);
 
     fs.appendFileSync(
-      path.join(sandbox, "integrations", "codex", "skills", "using-taskferry", "SKILL.md"),
+      path.join(sandbox, "integrations", "codex", "skills", SKILL_DIR, SKILL_FILE),
       "\nstale\n"
     );
 
     const result = spawnSync(process.execPath, [scriptDestination, "--check"], {
       cwd: sandbox,
-      encoding: "utf8",
+      encoding: ENCODING,
     });
 
     assert.notEqual(result.status, 0);
@@ -322,7 +332,7 @@ test("skill check detects a stale generated copy", () => {
 });
 
 test("bundled skill teaches the AXI worker contract without extra plugin surfaces", () => {
-  const skill = fs.readFileSync(path.join(claudeRoot, "skills", "using-taskferry", "SKILL.md"), "utf8");
+  const skill = fs.readFileSync(path.join(claudeRoot, "skills", SKILL_DIR, SKILL_FILE), ENCODING);
 
   assert.match(skill, /^name: using-taskferry$/m);
   assert.match(skill, /^description: .+$/m);

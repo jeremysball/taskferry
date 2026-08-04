@@ -58,20 +58,19 @@ function dominantReason(rows) {
   return [...tally.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))[0][0];
 }
 
-/**
- * @param {Array<{id: string, status: string, model: string, startedAt: string, failureReason: string|null}>} rows
- * @param {{now?: number}} [options]
- */
-export function computeDoctorStats(rows, { now = Date.now() } = {}) {
-  const last24h = rows.filter((row) => toMs(row.startedAt) >= now - DAY_MS);
-  const last7d = rows.filter((row) => toMs(row.startedAt) >= now - 7 * DAY_MS);
+function compareStartedAtDesc(a, b) {
+  if (a.startedAt < b.startedAt) return 1;
+  if (a.startedAt > b.startedAt) return -1;
+  return 0;
+}
 
+function computeByModel(rows) {
   const byModelMap = new Map();
   for (const row of rows) {
     if (!byModelMap.has(row.model)) byModelMap.set(row.model, []);
     byModelMap.get(row.model).push(row);
   }
-  const byModel = [...byModelMap.entries()]
+  return [...byModelMap.entries()]
     .map(([model, modelRows]) => {
       const t = settledCounts(modelRows);
       return {
@@ -87,24 +86,30 @@ export function computeDoctorStats(rows, { now = Date.now() } = {}) {
       };
     })
     .sort((a, b) => b.dispatches - a.dispatches || a.model.localeCompare(b.model));
+}
 
+function computeFailureReasons(rows) {
   const reasonTally = new Map();
   for (const row of rows) {
     if (row.status !== "crashed" || !row.failureReason) continue;
     reasonTally.set(row.failureReason, (reasonTally.get(row.failureReason) ?? 0) + 1);
   }
-  const failureReasons = [...reasonTally.entries()]
+  return [...reasonTally.entries()]
     .map(([reason, count]) => ({ reason, count }))
     .sort((a, b) => b.count - a.count || a.reason.localeCompare(b.reason));
+}
 
+function computeUnknownBacklog(rows) {
   const unknownRows = rows
     .filter((row) => row.status === "unknown")
-    .sort((a, b) => (a.startedAt < b.startedAt ? 1 : a.startedAt > b.startedAt ? -1 : 0));
-  const unknownBacklog = {
+    .sort((a, b) => compareStartedAtDesc(a, b));
+  return {
     total: unknownRows.length,
     tasks: unknownRows.slice(0, 20).map(({ id, model, startedAt }) => ({ id, model, startedAt })),
   };
+}
 
+function computeTrend(rows, last24h, now) {
   const previousWindow = rows.filter((row) => toMs(row.startedAt) >= now - 2 * DAY_MS && toMs(row.startedAt) < now - DAY_MS);
   const currentSettled = settledCounts(last24h);
   const previousSettled = settledCounts(previousWindow);
@@ -112,24 +117,40 @@ export function computeDoctorStats(rows, { now = Date.now() } = {}) {
   const previousCrashRate = rateOrNull(previousSettled.crashed, previousSettled.settled);
   let direction = "unknown";
   if (currentSettled.settled > 0 && previousSettled.settled > 0) {
-    direction = currentCrashRate > previousCrashRate ? "worsening" : currentCrashRate < previousCrashRate ? "improving" : "flat";
+    if (currentCrashRate > previousCrashRate) {
+      direction = "worsening";
+    } else if (currentCrashRate < previousCrashRate) {
+      direction = "improving";
+    } else {
+      direction = "flat";
+    }
   }
+  return {
+    window: "24h",
+    current: { crashRate: currentCrashRate, settled: currentSettled.settled },
+    previous: { crashRate: previousCrashRate, settled: previousSettled.settled },
+    direction,
+  };
+}
+
+/**
+ * @param {Array<{id: string, status: string, model: string, startedAt: string, failureReason: string|null}>} rows
+ * @param {{now?: number}} [options]
+ */
+export function computeDoctorStats(rows, { now = Date.now() } = {}) {
+  const last24h = rows.filter((row) => toMs(row.startedAt) >= now - DAY_MS);
+  const last7d = rows.filter((row) => toMs(row.startedAt) >= now - 7 * DAY_MS);
 
   return {
+    byModel: computeByModel(rows),
+    failureReasons: computeFailureReasons(rows),
+    unknownBacklog: computeUnknownBacklog(rows),
     computedAt: new Date(now).toISOString(),
     statusMix: {
       overall: statusMixFor(rows),
       last24h: statusMixFor(last24h),
       last7d: statusMixFor(last7d),
     },
-    byModel,
-    failureReasons,
-    unknownBacklog,
-    trend: {
-      window: "24h",
-      current: { crashRate: currentCrashRate, settled: currentSettled.settled },
-      previous: { crashRate: previousCrashRate, settled: previousSettled.settled },
-      direction,
-    },
+    trend: computeTrend(rows, last24h, now),
   };
 }

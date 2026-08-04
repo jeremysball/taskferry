@@ -2,6 +2,14 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { parseArgs, UsageError } from "./args.js";
 
+const CWD = "/workspace/project";
+const SUMMARIES_FLAG = "--summaries";
+const SUMMARIZE_FLAG = "--summarize";
+const FINAL_MARKER_FLAG = "--require-final-marker";
+const EXECUTOR_FLAG = "--executor";
+const TIMEOUT_MS_FLAG = "--timeout-ms";
+const FLUSH_INTERVAL_FLAG = "--flush-interval";
+
 const commands = [
   "dispatch",
   "cancel",
@@ -18,28 +26,28 @@ const commands = [
 ];
 
 test("parses dispatch and applies its argument defaults", () => {
-  assert.deepEqual(parseArgs(["dispatch", "--prompt", "do it"], { cwd: "/workspace/project" }), {
+  assert.deepEqual(parseArgs(["dispatch", "--prompt", "do it"], { cwd: CWD }), {
     command: "dispatch",
     options: {
       prompt: "do it",
-      directory: "/workspace/project",
-      model: undefined,
-      variant: undefined,
-      sessionId: undefined,
-      finalMarker: undefined,
+      directory: CWD,
+      model: void 0,
+      variant: void 0,
+      sessionId: void 0,
+      finalMarker: void 0,
       noSandbox: false,
       noOverlay: false,
-      allowedDirs: undefined,
-      executor: undefined,
+      allowedDirs: void 0,
+      executor: void 0,
     },
     help: false,
   });
 });
 
 test("parses each command's required arguments and defaults", () => {
-  const cwd = "/workspace/project";
+  const cwd = CWD;
   assert.equal(parseArgs(["cancel", "oc_1"]).options.taskId, "oc_1");
-  assert.deepEqual(parseArgs(["wait", "oc_1"]).options, { taskId: "oc_1", timeoutMs: undefined, tailChars: undefined, full: false, summarize: false });
+  assert.deepEqual(parseArgs(["wait", "oc_1"]).options, { taskId: "oc_1", timeoutMs: void 0, tailChars: void 0, full: false, summarize: false });
   assert.equal(parseArgs(["advisor", "--prompt", "help", "--model", "test/model"], { cwd }).options.directory, undefined);
   assert.equal(parseArgs(["status", "oc_1"]).options.full, false);
   assert.equal(parseArgs(["tail", "oc_1"]).options.chars, undefined);
@@ -180,16 +188,16 @@ test("parses workspace, stream, and result options with their constrained values
     "/tmp/project",
     "--format",
     "ndjson",
-    "--summaries",
+    SUMMARIES_FLAG,
   ]).options, {
     directory: "/tmp/project",
     format: "ndjson",
     summaries: true,
-    taskId: undefined,
-    flushIntervalMs: undefined,
+    taskId: void 0,
+    flushIntervalMs: void 0,
   });
   assert.deepEqual(parseArgs(["list", "--all", "--limit", "10"]).options, {
-    directory: undefined,
+    directory: void 0,
     all: true,
     limit: 10,
   });
@@ -211,12 +219,12 @@ test("rejects the retired --style flag on summary with a rename hint pointing at
 });
 
 test("parses watch --task-id and rejects it for commands that don't take it", () => {
-  assert.deepEqual(parseArgs(["watch", "--task-id", "oc_1"], { cwd: "/workspace/project" }).options, {
-    directory: undefined,
+  assert.deepEqual(parseArgs(["watch", "--task-id", "oc_1"], { cwd: CWD }).options, {
+    directory: void 0,
     format: "toon",
     summaries: false,
     taskId: "oc_1",
-    flushIntervalMs: undefined,
+    flushIntervalMs: void 0,
   });
   assert.throws(() => parseArgs(["status", "oc_1", "--task-id", "oc_2"]), /task id is required|unknown flag/);
 });
@@ -228,25 +236,25 @@ test("rejects empty option values and trailing global arguments as usage errors"
 });
 
 test("parses wait --summarize and rejects it combined with --timeout or --tail-chars", () => {
-  assert.deepEqual(parseArgs(["wait", "oc_1", "--summarize"]).options, {
+  assert.deepEqual(parseArgs(["wait", "oc_1", SUMMARIZE_FLAG]).options, {
     taskId: "oc_1",
-    timeoutMs: undefined,
-    tailChars: undefined,
+    timeoutMs: void 0,
+    tailChars: void 0,
     full: false,
     summarize: true,
   });
-  assert.throws(() => parseArgs(["wait", "oc_1", "--summarize", "--timeout", "5000"]), /--summarize cannot be combined with --timeout/);
-  assert.throws(() => parseArgs(["wait", "oc_1", "--summarize", "--tail-chars", "500"]), /--summarize cannot be combined with --tail-chars/);
+  assert.throws(() => parseArgs(["wait", "oc_1", SUMMARIZE_FLAG, "--timeout", "5000"]), /--summarize cannot be combined with --timeout/);
+  assert.throws(() => parseArgs(["wait", "oc_1", SUMMARIZE_FLAG, "--tail-chars", "500"]), /--summarize cannot be combined with --tail-chars/);
 });
 
 test("parses dispatch --require-final-marker and rejects invalid regex sources", () => {
   assert.equal(
-    parseArgs(["dispatch", "--prompt", "x", "--require-final-marker", "^Status: (DONE|DONE_WITH_CONCERNS)$"]).options.finalMarker,
+    parseArgs(["dispatch", "--prompt", "x", FINAL_MARKER_FLAG, "^Status: (DONE|DONE_WITH_CONCERNS)$"]).options.finalMarker,
     "^Status: (DONE|DONE_WITH_CONCERNS)$"
   );
   assert.equal(parseArgs(["dispatch", "--prompt", "x", "--require-final-marker=foo.*bar"]).options.finalMarker, "foo.*bar");
   assert.throws(
-    () => parseArgs(["dispatch", "--prompt", "x", "--require-final-marker", "(unclosed"]),
+    () => parseArgs(["dispatch", "--prompt", "x", FINAL_MARKER_FLAG, "(unclosed"]),
     (error) => {
       assert.ok(error instanceof UsageError);
       assert.match(error.message, /--require-final-marker is not a valid RegExp/);
@@ -255,31 +263,31 @@ test("parses dispatch --require-final-marker and rejects invalid regex sources",
       return true;
     }
   );
-  assert.throws(() => parseArgs(["dispatch", "--prompt", "x", "--require-final-marker"]), /requires a value/);
-  assert.throws(() => parseArgs(["wait", "oc_1", "--require-final-marker", "foo"]), /unknown flag --require-final-marker/);
+  assert.throws(() => parseArgs(["dispatch", "--prompt", "x", FINAL_MARKER_FLAG]), /requires a value/);
+  assert.throws(() => parseArgs(["wait", "oc_1", FINAL_MARKER_FLAG, "foo"]), /unknown flag --require-final-marker/);
 });
 
 test("dispatch accepts --executor pi", () => {
-  const { options } = parseArgs(["dispatch", "--prompt", "hi", "--executor", "pi"]);
+  const { options } = parseArgs(["dispatch", "--prompt", "hi", EXECUTOR_FLAG, "pi"]);
   assert.equal(options.executor, "pi");
 });
 
 test("dispatch accepts --executor opencode", () => {
-  const { options } = parseArgs(["dispatch", "--prompt", "hi", "--executor", "opencode"]);
+  const { options } = parseArgs(["dispatch", "--prompt", "hi", EXECUTOR_FLAG, "opencode"]);
   assert.equal(options.executor, "opencode");
 });
 
 test("dispatch rejects an unknown --executor value", () => {
-  assert.throws(() => parseArgs(["dispatch", "--prompt", "hi", "--executor", "bogus"]), /must be one of opencode, pi/);
+  assert.throws(() => parseArgs(["dispatch", "--prompt", "hi", EXECUTOR_FLAG, "bogus"]), /must be one of opencode, pi/);
 });
 
 test("advisor accepts --executor pi", () => {
-  const { options } = parseArgs(["advisor", "--prompt", "hi", "--model", "m", "--executor", "pi"]);
+  const { options } = parseArgs(["advisor", "--prompt", "hi", "--model", "m", EXECUTOR_FLAG, "pi"]);
   assert.equal(options.executor, "pi");
 });
 
 test("advisor rejects an unknown --executor value", () => {
-  assert.throws(() => parseArgs(["advisor", "--prompt", "hi", "--model", "m", "--executor", "bogus"]), /must be one of opencode, pi/);
+  assert.throws(() => parseArgs(["advisor", "--prompt", "hi", "--model", "m", EXECUTOR_FLAG, "bogus"]), /must be one of opencode, pi/);
 });
 
 test("parses dispatch --no-sandbox", () => {
@@ -310,9 +318,9 @@ test("--timeout-ms and --timeout_ms both error with a migration message pointing
       && /unknown flag/.test(error.message)
       && /use --timeout/.test(error.help)
   );
-  migrationAssert(["wait", "oc_1", "--timeout-ms", "5000"]);
+  migrationAssert(["wait", "oc_1", TIMEOUT_MS_FLAG, "5000"]);
   migrationAssert(["wait", "oc_1", "--timeout_ms", "5000"]);
-  migrationAssert(["advisor", "--prompt", "p", "--model", "m", "--timeout-ms", "5000"]);
+  migrationAssert(["advisor", "--prompt", "p", "--model", "m", TIMEOUT_MS_FLAG, "5000"]);
 });
 
 test("--timeout-ms on a command that doesn't accept --timeout falls through to a plain unknown-flag error", () => {
@@ -322,7 +330,7 @@ test("--timeout-ms on a command that doesn't accept --timeout falls through to a
   // should fall through and emit the standard "Valid flags for status" hint
   // without the misleading "use --timeout" line.
   assert.throws(
-    () => parseArgs(["status", "oc_1", "--timeout-ms", "5000"]),
+    () => parseArgs(["status", "oc_1", TIMEOUT_MS_FLAG, "5000"]),
     (error) => {
       assert.ok(error instanceof UsageError);
       assert.match(error.message, /unknown flag --timeout-ms/);
@@ -369,19 +377,19 @@ test("wait --timeout rejects a duration exceeding the setTimeout maximum", () =>
 });
 
 test("home's default directory is left undefined (resolved later via resolveWorkspaceRoot), for both the empty-argv and bare --help fast-paths", () => {
-  assert.equal(parseArgs([], { cwd: "/workspace/project" }).options.directory, undefined);
-  assert.equal(parseArgs(["--help"], { cwd: "/workspace/project" }).options.directory, undefined);
+  assert.equal(parseArgs([], { cwd: CWD }).options.directory, undefined);
+  assert.equal(parseArgs(["--help"], { cwd: CWD }).options.directory, undefined);
 });
 
 test("dispatch rejects --key-slot as an unknown flag", () => {
   assert.throws(
-    () => parseArgs(["dispatch", "--prompt", "do it", "--key-slot", "primary"], { cwd: "/workspace/project" }),
+    () => parseArgs(["dispatch", "--prompt", "do it", "--key-slot", "primary"], { cwd: CWD }),
     /unknown flag --key-slot for `dispatch`/
   );
 });
 
 test("dispatch's default directory stays literal cwd, unaffected by the observation-command directory default change", () => {
-  assert.equal(parseArgs(["dispatch", "--prompt", "x"], { cwd: "/workspace/project" }).options.directory, "/workspace/project");
+  assert.equal(parseArgs(["dispatch", "--prompt", "x"], { cwd: CWD }).options.directory, CWD);
 });
 
 test("advisor's default directory stays undefined (resolved later to literal cwd, not the workspace root), unaffected by the observation-command directory default change", () => {
@@ -392,20 +400,20 @@ test("advisor's default directory stays undefined (resolved later to literal cwd
   // (which get cwd from cli.js) and advisor's callers, so an explicit
   // pin here guards the args-layer shape those downstream layers depend
   // on.
-  assert.equal(parseArgs(["advisor", "--prompt", "x", "--model", "m"], { cwd: "/workspace/project" }).options.directory, undefined);
+  assert.equal(parseArgs(["advisor", "--prompt", "x", "--model", "m"], { cwd: CWD }).options.directory, undefined);
 });
 
 test("parses watch --flush-interval as a duration and requires --summaries", () => {
   assert.equal(
-    parseArgs(["watch", "--summaries", "--flush-interval", "5m"]).options.flushIntervalMs,
+    parseArgs(["watch", SUMMARIES_FLAG, FLUSH_INTERVAL_FLAG, "5m"]).options.flushIntervalMs,
     300000
   );
   assert.equal(
-    parseArgs(["watch", "--summaries", "--flush-interval", "30000"]).options.flushIntervalMs,
+    parseArgs(["watch", SUMMARIES_FLAG, FLUSH_INTERVAL_FLAG, "30000"]).options.flushIntervalMs,
     30000
   );
   assert.throws(
-    () => parseArgs(["watch", "--flush-interval", "5m"]),
+    () => parseArgs(["watch", FLUSH_INTERVAL_FLAG, "5m"]),
     /--flush-interval requires --summaries/
   );
 });
@@ -416,11 +424,11 @@ test("watch --flush-interval 0 (and 0s) errors with a clear UsageError instead o
   // 0 as "not set" and silently fall back to per-event streaming,
   // hiding the user's intent. args.js rejects it explicitly.
   assert.throws(
-    () => parseArgs(["watch", "--summaries", "--flush-interval", "0"]),
+    () => parseArgs(["watch", SUMMARIES_FLAG, FLUSH_INTERVAL_FLAG, "0"]),
     /--flush-interval must be greater than zero/
   );
   assert.throws(
-    () => parseArgs(["watch", "--summaries", "--flush-interval", "0s"]),
+    () => parseArgs(["watch", SUMMARIES_FLAG, FLUSH_INTERVAL_FLAG, "0s"]),
     /--flush-interval must be greater than zero/
   );
 });

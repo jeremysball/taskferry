@@ -66,6 +66,12 @@ function stripPrefix(line, prefix) {
   return line.startsWith(prefix) ? line.slice(prefix.length).trim() : null;
 }
 
+/** @param {unknown} error @param {string|undefined} helpLine */
+function errorHelp(error, helpLine) {
+  if (error && typeof error === "object" && typeof error.help === "string") return error.help;
+  return helpLine || "Retry the command or run `taskferry --help`";
+}
+
 // Single pass over `lines`: finds the first `error:`/`help:` line (if any)
 // and collects every other line as a detail line. Split out of errorValue()
 // so its own branch count stays low.
@@ -92,14 +98,23 @@ export function errorValue(error) {
   // so the plain single-line fallback (no recognized prefixes) keeps
   // returning `lines[0]` unchanged.
   const message = errorLine !== undefined && detailLines.length ? `${primary}\n${detailLines.join("\n")}` : primary;
-  const help = error && typeof error === "object" && typeof error.help === "string"
-    ? error.help
-    : helpLine || "Retry the command or run `taskferry --help`";
+  const help = errorHelp(error, helpLine);
   return { error: message, help };
 }
 
 export function writeError(error, io = process) {
   writeToon(errorValue(error), io);
+}
+
+/** @param {{id: string, status: string, directory?: string, sessionId?: string}} detail @param {string} id @param {string} status */
+function nextHint(detail, id, status) {
+  if (status === "running" || status === "queued") {
+    return `Run taskferry wait or taskferry status with task id "${id}" to check progress; pass --full for directory/model/log path details`;
+  }
+  if (status === "crashed" && detail.sessionId) {
+    return `Session ${shellQuote(detail.sessionId)} may be salvageable; resume with taskferry dispatch --session-id ${shellQuote(detail.sessionId)} --directory ${shellQuote(detail.directory)} --prompt "<continuation prompt>"`;
+  }
+  return `Run taskferry result with task id "${id}" to see the final message; pass --full here for directory/model/log path details`;
 }
 
 /**
@@ -145,17 +160,15 @@ export function leanStatus(detail, { full = false } = {}) {
   if (timedOut) {
     lean.note = `wait timed out; the task may still be running. Run taskferry wait again to keep waiting, or pass --timeout to set a longer cap`;
   }
-  lean.next = status === "running" || status === "queued"
-    ? `Run taskferry wait or taskferry status with task id "${id}" to check progress; pass --full for directory/model/log path details`
-    : status === "crashed" && detail.sessionId
-      ? `Session ${shellQuote(detail.sessionId)} may be salvageable; resume with taskferry dispatch --session-id ${shellQuote(detail.sessionId)} --directory ${shellQuote(detail.directory)} --prompt "<continuation prompt>"`
-      : `Run taskferry result with task id "${id}" to see the final message; pass --full here for directory/model/log path details`;
+  lean.next = nextHint(detail, id, status);
   return lean;
 }
 
 export function leanResult(detail, { full = false, fields } = {}) {
   if (full || fields) return detail;
-  const { narration: _narration, narrationTruncated: _narrationTruncated, ...rest } = detail;
+  const rest = { ...detail };
+  delete rest.narration;
+  delete rest.narrationTruncated;
   if (detail.narrationTotalChars === undefined) {
     return {
       ...rest,
@@ -178,16 +191,26 @@ function listRow(row) {
   };
 }
 
+// Shared by projectList/projectContext: rows the raw task array down to
+// `limit`, reporting whether anything was cut off.
+function limitTasks(value, limit, defaultLimit) {
+  let rows;
+  if (Array.isArray(value.tasks)) {
+    rows = value.tasks.length ? value.tasks.map(listRow) : "none found in this workspace";
+  } else {
+    rows = value.tasks;
+  }
+  const total = Array.isArray(rows) ? rows.length : 0;
+  const effectiveLimit = limit !== undefined ? limit : defaultLimit;
+  const tasks = Array.isArray(rows) ? rows.slice(0, effectiveLimit) : rows;
+  const truncated = Array.isArray(tasks) && tasks.length < total;
+  return { tasks, truncated, total };
+}
+
 const DEFAULT_LIST_LIMIT = 30;
 
 export function projectList(value, { limit } = {}) {
-  const rows = Array.isArray(value.tasks)
-    ? (value.tasks.length ? value.tasks.map(listRow) : "none found in this workspace")
-    : value.tasks;
-  const total = Array.isArray(rows) ? rows.length : 0;
-  const effectiveLimit = limit !== undefined ? limit : DEFAULT_LIST_LIMIT;
-  const tasks = Array.isArray(rows) ? rows.slice(0, effectiveLimit) : rows;
-  const truncated = Array.isArray(tasks) && tasks.length < total;
+  const { tasks, truncated, total } = limitTasks(value, limit, DEFAULT_LIST_LIMIT);
   return {
     ...(value.directory ? { directory: value.directory } : {}),
     counts: value.counts,
@@ -199,13 +222,7 @@ export function projectList(value, { limit } = {}) {
 const DEFAULT_CONTEXT_LIMIT = 10;
 
 export function projectContext(value, { limit } = {}) {
-  const rows = Array.isArray(value.tasks)
-    ? (value.tasks.length ? value.tasks.map(listRow) : "none found in this workspace")
-    : value.tasks;
-  const total = Array.isArray(rows) ? rows.length : 0;
-  const effectiveLimit = limit !== undefined ? limit : DEFAULT_CONTEXT_LIMIT;
-  const tasks = Array.isArray(rows) ? rows.slice(0, effectiveLimit) : rows;
-  const truncated = Array.isArray(tasks) && tasks.length < total;
+  const { tasks, truncated, total } = limitTasks(value, limit, DEFAULT_CONTEXT_LIMIT);
   return {
     directory: value.directory,
     counts: value.counts,
@@ -228,9 +245,9 @@ export function homeView(value, { executablePath, workspace }) {
     ? ["Run taskferry status <id> for activity", "Run taskferry wait <id> to wait for settlement", "Run taskferry result <id> for the final answer"]
     : ["Run taskferry dispatch --prompt \"<text>\" to start a task", "Run taskferry list --all to inspect every workspace"];
   return {
+    workspace,
     bin: displayPath,
     description: "Manage background OpenCode tasks in the current workspace.",
-    workspace,
     counts: value.counts,
     tasks: Array.isArray(value.tasks) ? rows : value.tasks,
     next: truncated ? [...next, `Run taskferry list --limit ${total} for all ${total} tasks`] : next,

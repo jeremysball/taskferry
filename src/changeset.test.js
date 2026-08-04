@@ -450,6 +450,35 @@ describe("extraction fail-closed behavior", () => {
     assert.deepEqual(sleeps, [100, 300, 900]);
   });
 
+  // taskferry#329: the pre-retry HEAD guard above only catches drift that
+  // happened before the first bwrap attempt. A HEAD change landing during
+  // the up-to-1.3s retry backoff needs its own re-check right before the
+  // diff is persisted, or the eventually-successful retry silently writes a
+  // diff anchored on the now-stale preDispatchHead.
+  test("extractGitDiff re-checks HEAD after the retry loop and refuses to write a diff that drifted mid-backoff", () => {
+    let gitCalls = 0;
+    let bwrapAttempts = 0;
+    let written = null;
+    const runCommand = (command) => {
+      if (command === "git") {
+        gitCalls += 1;
+        // First check (pre-retry) sees the recorded head; second check
+        // (post-retry, immediately before the diff is written) sees a HEAD
+        // that moved during the retry backoff.
+        return { status: 0, stdout: gitCalls === 1 ? "abc123\n" : "def456\n", stderr: "", error: null };
+      }
+      bwrapAttempts += 1;
+      if (bwrapAttempts < 3) return { status: 1, stdout: "", stderr: OVERLAY_BUSY_STDERR, error: null };
+      return { status: 0, stdout: SAMPLE_DIFF_X, stderr: "", error: null };
+    };
+    assert.throws(
+      () => extractGitDiff({ ...baseGitParams, runCommand, writeFileFn: (p) => { written = p; }, mkdirFn: () => {}, sleepFn: () => {} }),
+      /HEAD moved from 'abc123' to 'def456' since dispatch/
+    );
+    assert.equal(bwrapAttempts, 3, "must have gone through the full retry loop before the post-retry HEAD re-check fires");
+    assert.equal(written, null, "no patch may be written when HEAD drifted during the retry backoff");
+  });
+
   test("extractGitDiff does not retry (or sleep) on a bwrap failure unrelated to the overlay-mount-busy race", () => {
     let bwrapAttempts = 0;
     let slept = false;

@@ -25,7 +25,17 @@ function terminalEventFromStatus(detail) {
   };
 }
 
-function streamTaskEvents({ client, io, signal, directory, taskId, summaries, format, flushIntervalMs }) {
+// `all` (watch --all) wins over a directory or taskId (args.js already
+// rejects combining them); otherwise an explicit directory beats a
+// taskId-scoped subscribe (the daemon resolves the directory server-side --
+// issue #59).
+function subscribeSelector({ all, directory, taskId }) {
+  if (all) return { all: true };
+  if (directory) return { directory };
+  return { taskId };
+}
+
+function streamTaskEvents({ client, io, signal, directory, taskId, all, summaries, format, flushIntervalMs }) {
   let settle;
   let abortHandler;
   // `directory` is only known upfront when the caller already had it (plain
@@ -91,7 +101,7 @@ function streamTaskEvents({ client, io, signal, directory, taskId, summaries, fo
       return;
     }
     signal?.addEventListener("abort", abortHandler, { once: true });
-    Promise.resolve(client.subscribe({ ...(directory ? { directory } : { taskId }), ...(summaries ? { summaries: true } : {}) }, (event) => {
+    Promise.resolve(client.subscribe({ ...subscribeSelector({ all, directory, taskId }), ...(summaries ? { summaries: true } : {}) }, (event) => {
       if (taskId && event.taskId !== taskId) return;
       resolvedDirectory = event.directory;
       if (taskId && TERMINAL_STATUSES.has(event.status)) {
@@ -127,7 +137,8 @@ function streamTaskEvents({ client, io, signal, directory, taskId, summaries, fo
 
 async function watchCommand(options, { client, io, signal, cwd, resolveWorkspaceRoot: resolveWorkspaceRootFn = resolveWorkspaceRoot }) {
   let directory;
-  if (options.directory) directory = normalizeDirectory(options.directory);
+  if (options.all) directory = null;
+  else if (options.directory) directory = normalizeDirectory(options.directory);
   else if (options.taskId) directory = null;
   else directory = normalizeDirectory(resolveWorkspaceRootFn(cwd));
   return streamTaskEvents({
@@ -136,6 +147,7 @@ async function watchCommand(options, { client, io, signal, cwd, resolveWorkspace
     signal,
     directory,
     taskId: options.taskId,
+    all: options.all,
     summaries: options.summaries,
     format: options.format,
     flushIntervalMs: options.flushIntervalMs,

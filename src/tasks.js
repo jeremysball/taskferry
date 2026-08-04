@@ -232,6 +232,12 @@ function capDetail(text) {
   return text.length > FAILURE_DETAIL_MAX_CHARS ? text.slice(0, FAILURE_DETAIL_MAX_CHARS - 1) + "…" : text;
 }
 
+// bwrap's exact wording for the taskferry#318 overlay-mount race (see
+// .superpowers/specs/2026-08-03-lowerdir-launch-stagger-design.md). Matched
+// against changesetError text, which can span the bwrap error's own
+// multi-line wrapping -- "s" flag so "." also matches newlines.
+const OVERLAY_MOUNT_BUSY_PATTERN = /overlay mount on .*Device or resource busy/s;
+
 /** @param {string} text @returns {boolean} */
 function isParseableJson(text) {
   try {
@@ -1304,6 +1310,14 @@ const DEFAULT_WATCHDOG_POLL_MS = positiveInteger(
 );
 const DEFAULT_WATCHDOG_GRACE_MS = 5000;
 const DEFAULT_CANCEL_GRACE_MS = 5000;
+// Global minimum spacing between every dispatch/advisor launch, regardless
+// of directory -- works around a bwrap overlay-mount race (taskferry#318,
+// "Device or resource busy") seen both within one worktree and across
+// different worktrees of one repo that share a git-common-dir. Deliberately
+// NOT scoped per-directory: see
+// .superpowers/specs/2026-08-03-lowerdir-launch-stagger-design.md for why a
+// per-directory gate was rejected in favor of a simpler global one.
+const DEFAULT_LOWERDIR_STAGGER_MS = 3000;
 
 /**
  * The subset of `createTaskManager`'s closure that `result`'s extracted
@@ -2464,34 +2478,46 @@ function pruneStaleLaunchTimes(launchTimes, dispatchWindow) {
 
 /**
  * Launches queued tasks while both the per-window dispatch limit and the
- * concurrency limit have headroom. A task that vanished from `tasks` (or is
- * no longer queued) is skipped but still consumed from the queue, matching
+ * concurrency limit have headroom, and the global lowerdir stagger has
+ * elapsed since the last launch (any directory -- see
+ * DEFAULT_LOWERDIR_STAGGER_MS's doc comment for why this is deliberately
+ * not scoped per-directory). A task that vanished from `tasks` (or is no
+ * longer queued) is skipped but still consumed from the queue, matching
  * the original loop.
- * @param {{launchTimes: number[], launchQueue: string[], runningCount: number}} sched
- * @param {{dispatchLimit: number, concurrencyLimit: number, tasks: Map<string, Task>, startTask: (task: Task) => void}} ctx
+ * @param {{launchTimes: number[], launchQueue: string[], runningCount: number, lastLaunchAt: number}} sched
+ * @param {{dispatchLimit: number, concurrencyLimit: number, lowerdirStagger: number, tasks: Map<string, Task>, startTask: (task: Task) => void}} ctx
  */
 function drainLaunchQueue(sched, ctx) {
-  while (sched.launchQueue.length && sched.launchTimes.length < ctx.dispatchLimit && sched.runningCount < ctx.concurrencyLimit) {
+  while (
+    sched.launchQueue.length &&
+    sched.launchTimes.length < ctx.dispatchLimit &&
+    sched.runningCount < ctx.concurrencyLimit &&
+    Date.now() - sched.lastLaunchAt >= ctx.lowerdirStagger
+  ) {
     const id = /** @type {string} */ (sched.launchQueue.shift());
     const task = ctx.tasks.get(id);
     if (!task || task.status !== "queued") continue;
-    sched.launchTimes.push(Date.now());
+    const launchedAt = Date.now();
+    sched.launchTimes.push(launchedAt);
+    sched.lastLaunchAt = launchedAt;
     ctx.startTask(task);
   }
 }
 
 /**
  * Arms the next launch tick when the queue is non-empty and no timer is
- * already pending, backing off for the remaining dispatch-window rate delay
- * or a fixed 250ms concurrency delay, whichever is longer.
- * @param {{launchTimer: NodeJS.Timeout|null, launchTimes: number[], launchQueue: string[], runningCount: number}} sched
- * @param {{dispatchLimit: number, dispatchWindow: number, concurrencyLimit: number, reschedule: () => void}} ctx
+ * already pending, backing off for the remaining dispatch-window rate delay,
+ * a fixed 250ms concurrency delay, or the remaining lowerdir stagger delay,
+ * whichever is longest.
+ * @param {{launchTimer: NodeJS.Timeout|null, launchTimes: number[], launchQueue: string[], runningCount: number, lastLaunchAt: number}} sched
+ * @param {{dispatchLimit: number, dispatchWindow: number, concurrencyLimit: number, lowerdirStagger: number, reschedule: () => void}} ctx
  */
 function scheduleNextLaunch(sched, ctx) {
   if (!sched.launchQueue.length || sched.launchTimer) return;
   const rateDelay = sched.launchTimes.length >= ctx.dispatchLimit ? sched.launchTimes[0] + ctx.dispatchWindow - Date.now() : 0;
   const concurrencyDelay = sched.runningCount >= ctx.concurrencyLimit ? 250 : 0;
-  sched.launchTimer = setTimeout(ctx.reschedule, Math.max(1, rateDelay, concurrencyDelay));
+  const staggerDelay = Math.max(0, sched.lastLaunchAt + ctx.lowerdirStagger - Date.now());
+  sched.launchTimer = setTimeout(ctx.reschedule, Math.max(1, rateDelay, concurrencyDelay, staggerDelay));
 }
 
 /**
@@ -2500,8 +2526,8 @@ function scheduleNextLaunch(sched, ctx) {
  * timer if the queue still has work. Threads the factory's mutable scheduler
  * state via `sched` so the module-level helpers can read/write `launchTimer`
  * and `runningCount` without closing over the factory.
- * @param {{launchTimer: NodeJS.Timeout|null, launchTimes: number[], launchQueue: string[], runningCount: number}} sched
- * @param {{dispatchLimit: number, dispatchWindow: number, concurrencyLimit: number, tasks: Map<string, Task>, startTask: (task: Task) => void, reschedule: () => void}} ctx
+ * @param {{launchTimer: NodeJS.Timeout|null, launchTimes: number[], launchQueue: string[], runningCount: number, lastLaunchAt: number}} sched
+ * @param {{dispatchLimit: number, dispatchWindow: number, concurrencyLimit: number, lowerdirStagger: number, tasks: Map<string, Task>, startTask: (task: Task) => void, reschedule: () => void}} ctx
  */
 function runLaunchQueuedTasks(sched, ctx) {
   if (sched.launchTimer) {
@@ -2693,6 +2719,7 @@ function watchdogTick(state, ctx) {
  * @param {number} [options.watchdogPollMs]
  * @param {number} [options.watchdogGraceMs]
  * @param {number} [options.cancelGraceMs]
+ * @param {number} [options.lowerdirStaggerMs]
  * @param {number} [options.maxWaitMs]
  * @param {boolean} [options.activitySummariesEnabled]
  * @param {number} [options.summarizerTimeoutMs]
@@ -2823,6 +2850,7 @@ function resolveTimeoutOptions(rawOptions) {
     watchdogPollMs: rawOptions.watchdogPollMs ?? DEFAULT_WATCHDOG_POLL_MS,
     watchdogGraceMs: resolvePositiveIntOption(rawOptions.watchdogGraceMs, process.env.TASKFERRY_WATCHDOG_GRACE_MS, config.watchdogGraceMs, DEFAULT_WATCHDOG_GRACE_MS),
     cancelGraceMs: resolvePositiveIntOption(rawOptions.cancelGraceMs, process.env.TASKFERRY_CANCEL_GRACE_MS, config.cancelGraceMs, DEFAULT_CANCEL_GRACE_MS),
+    lowerdirStaggerMs: resolveNonNegativeIntOption(rawOptions.lowerdirStaggerMs, process.env.TASKFERRY_LOWERDIR_STAGGER_MS, config.lowerdirStaggerMs, DEFAULT_LOWERDIR_STAGGER_MS),
     maxWaitMs: rawOptions.maxWaitMs ?? MAX_WAIT_MS,
     summarizerTimeoutMs: resolveNonNegativeIntOption(rawOptions.summarizerTimeoutMs, process.env.TASKFERRY_SUMMARIZER_TIMEOUT_MS, config.summarizerTimeoutMs, DEFAULT_SUMMARIZER_TIMEOUT_MS),
     activityMaxWords: resolvePositiveIntOption(rawOptions.activityMaxWords, process.env.TASKFERRY_ACTIVITY_MAX_WORDS, config.activityMaxWords, 75),
@@ -3052,6 +3080,7 @@ function initManagerLimits(opts) {
     watchdogPoll: positiveInteger(opts.watchdogPollMs, DEFAULT_WATCHDOG_POLL_MS),
     watchdogGrace: positiveInteger(opts.watchdogGraceMs, DEFAULT_WATCHDOG_GRACE_MS),
     cancelGrace: positiveInteger(opts.cancelGraceMs, DEFAULT_CANCEL_GRACE_MS),
+    lowerdirStagger: nonNegativeInteger(opts.lowerdirStaggerMs, DEFAULT_LOWERDIR_STAGGER_MS),
     maxWait: positiveInteger(opts.maxWaitMs, MAX_WAIT_MS),
     summarizerTimeout: nonNegativeInteger(opts.summarizerTimeoutMs, DEFAULT_SUMMARIZER_TIMEOUT_MS),
     activityWords: positiveInteger(opts.activityMaxWords, 75),
@@ -3073,6 +3102,9 @@ function initManagerState(opts) {
     eventSequence: 0,
     launchTimer: null,
     runningCount: 0,
+    // Timestamp of the most recent launch, across every directory/role --
+    // see DEFAULT_LOWERDIR_STAGGER_MS's doc comment (taskferry#318).
+    lastLaunchAt: 0,
     activitySummarySubscriptions: 0,
     /** @type {Error|null} */
     stateLoadError: null,
@@ -3148,7 +3180,7 @@ function initManagerMaps() {
 }
 
 /**
- * @param {{launchTimer: NodeJS.Timeout|null, runningCount: number, eventSequence: number, activitySummarySubscriptions: number}} state
+ * @param {{launchTimer: NodeJS.Timeout|null, runningCount: number, eventSequence: number, activitySummarySubscriptions: number, lastLaunchAt: number}} state
  * @param {{launchTimes: number[], launchQueue: string[]}} maps
  */
 function initManagerSchedulers(state, maps) {
@@ -3163,6 +3195,8 @@ function initManagerSchedulers(state, maps) {
       get runningCount() { return state.runningCount; },
       get launchTimer() { return state.launchTimer; },
       set launchTimer(v) { state.launchTimer = v; },
+      get lastLaunchAt() { return state.lastLaunchAt; },
+      set lastLaunchAt(v) { state.lastLaunchAt = v; },
     },
     // Mutable bindings the extracted activity-schedule helper needs
     // read/write access to (the monotonic event sequence and the
@@ -3324,7 +3358,7 @@ function buildManagerInternalHelpers(ctx) {
      */
     summarizeTask: (taskId, options = {}) => summarizeTaskFor(taskId, options, { ensureStateLoaded: () => ctx.helpers.ensureStateLoaded(), tasks: ctx.maps.tasks, summaryConcurrencyLimit: ctx.limits.summaryConcurrencyLimit, activityCache: ctx.activity.cache, activitySummaryModel: ctx.opts.activitySummaryModel, summaryModelAvailable: (model, env) => ctx.helpers.summaryModelAvailable(model, env), LOG_DIR: ctx.paths.LOG_DIR, SUMMARY_DIR: ctx.paths.SUMMARY_DIR, persistTask: (taskId) => ctx.helpers.persistTask(taskId), pendingLaunches: ctx.maps.pendingLaunches, launchQueue: ctx.maps.launchQueue, launchQueuedTasks: () => ctx.helpers.launchQueuedTasks(), noSuchTask, readNarrationExcerpt, opencodeExecutor }),
     /** @returns {void} */
-    launchQueuedTasks: () => { runLaunchQueuedTasks(ctx.schedulers.launchScheduler, { dispatchLimit: ctx.limits.dispatchLimit, dispatchWindow: ctx.limits.dispatchWindow, concurrencyLimit: ctx.limits.concurrencyLimit, tasks: ctx.maps.tasks, startTask: (task) => ctx.helpers.startTask(task), reschedule: () => ctx.helpers.launchQueuedTasks() }); },
+    launchQueuedTasks: () => { runLaunchQueuedTasks(ctx.schedulers.launchScheduler, { dispatchLimit: ctx.limits.dispatchLimit, dispatchWindow: ctx.limits.dispatchWindow, concurrencyLimit: ctx.limits.concurrencyLimit, lowerdirStagger: ctx.limits.lowerdirStagger, tasks: ctx.maps.tasks, startTask: (task) => ctx.helpers.startTask(task), reschedule: () => ctx.helpers.launchQueuedTasks() }); },
     /** Spawns a queued launch's worker process. The launch's pre-parsed
      * metadata (target dir, prompt-file routing, buildSpawnArgs output) comes
      * from resolveStartTaskLaunch; the actual spawn + child lifecycle is
@@ -4267,6 +4301,14 @@ function extractChangesetForTaskRecord(finishedTask, ctx) {
         });
   } catch (err) {
     finishedTask.changesetError = err instanceof Error ? err.message : String(err);
+    if (OVERLAY_MOUNT_BUSY_PATTERN.test(finishedTask.changesetError)) {
+      // The real cause is now known and specific -- always wins over
+      // whatever the exit-path classifier guessed (no_output_timeout,
+      // boot_failure, or nothing), since a generic timeout bucket is
+      // strictly less useful than "the overlay mount itself failed."
+      finishedTask.failureReason = "overlay_mount_busy";
+      finishedTask.failureDetail = capDetail(finishedTask.changesetError);
+    }
     if (finishedTask.role === "advisor") {
       // An advisor task's changeset was never meant to be applied -- whether
       // extraction succeeds or throws, it settles as "rejected", never

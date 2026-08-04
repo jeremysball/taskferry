@@ -188,6 +188,12 @@ function buildManagerOptions(options, stateDir, defaultCacheDir, defaultOverlayT
     stateDir,
     sandboxEnabled: options.sandboxEnabled ?? false,
     overlayEnabled: options.overlayEnabled ?? false,
+    // Defaulted to 0 (disabled) rather than left undefined: the manager's
+    // own DEFAULT_LOWERDIR_STAGGER_MS (3000ms) would otherwise silently
+    // serialize every dispatch test that assumes synchronous, immediate,
+    // concurrent launches. Tests exercising the stagger itself override
+    // this explicitly via options.lowerdirStaggerMs.
+    lowerdirStaggerMs: options.lowerdirStaggerMs ?? 0,
     cacheDir: options.cacheDir ?? defaultCacheDir,
     overlayTmpRoot: options.overlayTmpRoot ?? defaultOverlayTmpRoot,
     spawnFn: options.spawnFn ?? defaultSpawnFn(),

@@ -33,6 +33,7 @@ const CONFIG_FIELD_TYPES = {
   activityMaxWords: "number",
   advisorSessionTtlMs: "number",
   watchdogGraceMs: "number",
+  lowerdirStaggerMs: "number",
   sandboxEnabled: "boolean",
   overlayEnabled: "boolean",
   allowedDirs: "string",

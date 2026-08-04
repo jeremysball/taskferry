@@ -26,15 +26,11 @@ cycle costs turns and wall time for nothing.
 
 ## Sizing The Task Before Dispatching
 
-Before routing a backlog item, bug, or fix through Taskferry — worktree creation,
-a written brief, dispatch, wait, review — ask: would you finish this yourself in
-one or two edit/read/search calls if you just looked? If yes, do that instead.
-
-Reserve dispatch for work that is genuinely large or ambiguous: real design
-decisions, multi-file changes, broad multi-location research, anything where
-doing it directly would still take meaningful back-and-forth. Dispatching a
-small, mechanical, single-file fix through a full worker cycle bloats context
-and burns wall-clock time versus just doing it.
+See `deciding-to-dispatch` for the full gate and self-check before routing a
+backlog item, bug, or fix through Taskferry — worktree creation, a written
+brief, dispatch, wait, review are all costs to weigh against a one-or-two-call
+Read/Edit/Grep. That skill's gate applies unchanged here; this file assumes
+you've already passed it.
 
 ## Always Use A Worktree
 
@@ -277,14 +273,10 @@ Relay every summary-line notification with this exact template:
   it only when one is genuinely in context, and always name what kind of
   thing it is — `issue #35`, `PR #12`, never a bare `#35` that leaves the
   reader guessing issue vs. PR vs. something else.
-- `<emoji>` — pick one that actually fits what this specific update is
-  about, not a rotating decoration and not the same emoji every time. Read
-  the narration tail and choose freely: 🔨 mid-implementation, 🧪 running or
-  fixing tests, 📝 writing docs, 🔍 investigating/debugging, ✅ settled
-  clean, ⚠️ a concern worth a second look, 🚨 crashed or blocked. Treat this
-  list as a starting palette, not an enum — reach for whatever emoji best
-  matches the actual moment (including something outside this list) rather
-  than forcing the nearest listed option.
+- `<emoji>` — pick whichever fits this specific update, from the narration
+  tail; treat the following as a starting palette, not an enum: 🔨
+  mid-implementation, 🧪 tests, 📝 docs, 🔍 investigating, ✅ settled clean,
+  ⚠️ concern, 🚨 crashed/blocked.
 - `<NN%>` — required on every update, never omitted. Estimate from where the
   task brief's steps actually stand (e.g. "tests written, docs still
   pending" reads differently than "just started"), not from elapsed time

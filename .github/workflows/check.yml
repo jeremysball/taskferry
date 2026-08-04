@@ -42,8 +42,8 @@ jobs:
 
   integration:
     # Fork PRs don't get repo secrets (GitHub withholds them by design), so
-    # OPENCODE_GO_API_KEY would be empty there and every dispatch would fail
-    # on auth rather than on anything the PR actually changed. Runs only for
+    # MINIMAX_API_KEY would be empty there and every dispatch would fail on
+    # auth rather than on anything the PR actually changed. Runs only for
     # same-repo pushes/PRs, where the secret is actually available.
     if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
@@ -62,12 +62,10 @@ jobs:
       - name: Install bubblewrap
         run: sudo apt-get update && sudo apt-get install -y bubblewrap
 
-      - name: Install opencode CLI
-        run: |
-          curl -fsSL https://opencode.ai/install | bash
-          echo "$HOME/.opencode/bin" >> "$GITHUB_PATH"
+      - name: Install pi CLI
+        run: npm install -g @earendil-works/pi-coding-agent
 
       - name: Run integration (real CLI + daemon + live dispatch, no mocks)
         env:
-          OPENCODE_GO_API_KEY: ${{ secrets.OPENCODE_GO_API_KEY }}
+          MINIMAX_API_KEY: ${{ secrets.MINIMAX_API_KEY }}
         run: npm run test:integration

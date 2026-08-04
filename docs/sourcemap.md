@@ -91,11 +91,12 @@ framework) — `mcp-isolation.js`, `narration-format.js`,
 `errors.js`, and `numbers.js` are the current exceptions.
 `smoke-test.js` (129 lines) / `cancel-smoke-test.js` (105) /
 `poll-smoke-test.js` (78) are integration tests that spawn a real daemon,
-CLI, and (for `smoke-test.js`) a live dispatch to `opencode-go/minimax-m3`
-(`npm run test:integration`, not part of the default `npm test`). They run
-in CI as the separate `integration` job in `.github/workflows/check.yml`
-(needs `bubblewrap` installed and `OPENCODE_GO_API_KEY` in the environment;
-skipped on fork PRs, which don't receive repo secrets). `smoke-test-support.js`
+CLI, and (via the default `pi` executor) a live dispatch to
+`minimax/MiniMax-M3` (`npm run test:integration`, not part of the default
+`npm test`). They run in CI as the separate `integration` job in
+`.github/workflows/check.yml` (needs `bubblewrap` and the `pi` CLI
+installed, plus `MINIMAX_API_KEY` in the environment; skipped on fork PRs,
+which don't receive repo secrets). `smoke-test-support.js`
 (58 lines) holds their shared teardown helpers: `stopDaemonAndWait()` blocks
 until the daemon's SIGTERM-triggered exit actually completes instead of
 racing it, and `rmRoot()` shells out to `rm -rf` rather than `fs.rmSync`

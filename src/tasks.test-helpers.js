@@ -224,6 +224,7 @@ function buildManagerOptions(options, stateDir, defaultCacheDir, defaultOverlayT
     ...passthroughIfSet({ checkOverlaySupportFn: options.checkOverlaySupportFn }, "checkOverlaySupportFn", "checkOverlaySupportFn"),
     ...passthroughIfSet({ runOverlayCommandFn: options.runOverlayCommandFn }, "runOverlayCommandFn", "runOverlayCommandFn"),
     ...passthroughIfSet({ rmOverlayTreeFn: options.rmOverlayTreeFn }, "rmOverlayTreeFn", "rmOverlayTreeFn"),
+    ...passthroughIfSet({ overlaySleepFn: options.overlaySleepFn }, "overlaySleepFn", "overlaySleepFn"),
   };
 }
 

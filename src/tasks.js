@@ -2894,6 +2894,19 @@ function resolveFilesystemSimpleOptions(rawOptions) {
     checkOverlaySupportFn: rawOptions.checkOverlaySupportFn ?? checkOverlaySupport,
     runOverlayCommandFn: rawOptions.runOverlayCommandFn ?? defaultOverlayRunCommand,
     rmOverlayTreeFn: rawOptions.rmOverlayTreeFn,
+    // No default: undefined here means changeset.js's own extractGitDiff/
+    // extractNonGitDiff/applyChangeset default (the real blocking sleepSync)
+    // applies, same as before this option existed. Only a caller that sets
+    // this explicitly (tests injecting a fast/no-op sleep to avoid eating
+    // the real ~1.3s overlay-mount-busy backoff, taskferry#328) overrides it.
+    // `?? undefined` folds an explicit `null` into `undefined` too -- JS
+    // default parameters (changeset.js's `sleepFn = sleepSync`) only trigger
+    // on `undefined`, not `null`, so a caller passing `overlaySleepFn: null`
+    // would otherwise reach `runExtractionBwrap`'s `sleepFn(100)` call with a
+    // literal `null` and throw a TypeError instead of falling back to the
+    // real sleep (code review finding on PR #333; no current caller passes
+    // `null`, but the guard is free).
+    overlaySleepFn: rawOptions.overlaySleepFn ?? undefined,
     resolveGitCommonDirFn: rawOptions.resolveGitCommonDirFn ?? resolveGitCommonDir,
     resolveGitDirFn: rawOptions.resolveGitDirFn ?? resolveGitDir,
     checkBwrapAvailableFn: rawOptions.checkBwrapAvailableFn ?? checkBwrapAvailable,
@@ -3255,7 +3268,7 @@ function buildManagerEnvHelpers(ctx) {
     requireBwrap: () => requireBwrapCapability(bwrapState, { checkBwrapAvailableFn: ctx.opts.checkBwrapAvailableFn }),
     requireOverlaySupport: () => requireOverlayCapability(overlayState, { checkOverlaySupportFn: ctx.opts.checkOverlaySupportFn, OVERLAY_SUPPORT_TTL_MS }),
     /** @param {Task} finishedTask */
-    extractChangesetForTask: (finishedTask) => extractChangesetForTaskRecord(finishedTask, { stateDir: ctx.opts.stateDir, runtimeDir: ctx.opts.runtimeDir, existsFn: ctx.opts.existsFn, sandboxDenylist: ctx.opts.sandboxDenylist, runOverlayCommandFn: ctx.opts.runOverlayCommandFn, persistTask: (taskId) => ctx.helpers.persistTask(taskId), releaseOverlay }),
+    extractChangesetForTask: (finishedTask) => extractChangesetForTaskRecord(finishedTask, { stateDir: ctx.opts.stateDir, runtimeDir: ctx.opts.runtimeDir, existsFn: ctx.opts.existsFn, sandboxDenylist: ctx.opts.sandboxDenylist, runOverlayCommandFn: ctx.opts.runOverlayCommandFn, overlaySleepFn: ctx.opts.overlaySleepFn, persistTask: (taskId) => ctx.helpers.persistTask(taskId), releaseOverlay }),
     /** @param {NodeJS.ProcessEnv} [env] @param {string} [taskId] */
     dispatchEnvironment: (env, taskId) => buildDispatchEnvironment({ sanitizedEnvironment }, env, taskId),
     /** @param {NodeJS.ProcessEnv} [env] */
@@ -3370,7 +3383,7 @@ function buildManagerInternalHelpers(ctx) {
      * @param {string} taskId
      * @returns {{taskId: string, changesetStatus: string, applied: boolean, reason?: string|null, cleanupFailed?: boolean}}
      */
-    accept: (taskId) => acceptTaskChangeset(taskId, { ensureStateLoaded: () => ctx.helpers.ensureStateLoaded(), tasks: ctx.maps.tasks, existsFn: ctx.opts.existsFn, hasLiveOverlay: (task) => ctx.helpers.hasLiveOverlay(task), stateDir: ctx.opts.stateDir, runtimeDir: ctx.opts.runtimeDir, sandboxDenylist: ctx.opts.sandboxDenylist, runOverlayCommandFn: ctx.opts.runOverlayCommandFn, persistTask: (taskId) => ctx.helpers.persistTask(taskId), releaseOverlay: (task) => ctx.env.releaseOverlay(task), noSuchTask }),
+    accept: (taskId) => acceptTaskChangeset(taskId, { ensureStateLoaded: () => ctx.helpers.ensureStateLoaded(), tasks: ctx.maps.tasks, existsFn: ctx.opts.existsFn, hasLiveOverlay: (task) => ctx.helpers.hasLiveOverlay(task), stateDir: ctx.opts.stateDir, runtimeDir: ctx.opts.runtimeDir, sandboxDenylist: ctx.opts.sandboxDenylist, runOverlayCommandFn: ctx.opts.runOverlayCommandFn, overlaySleepFn: ctx.opts.overlaySleepFn, persistTask: (taskId) => ctx.helpers.persistTask(taskId), releaseOverlay: (task) => ctx.env.releaseOverlay(task), noSuchTask }),
     /**
      * @param {string} taskId
      * @returns {{taskId: string, changesetStatus: string, cleanupFailed?: boolean}}
@@ -4266,7 +4279,7 @@ function persistTaskRecord(taskId, ctx) {
  * Mirrors the original `extractChangesetForTask` closure exactly; every
  * factory binding is threaded in via `ctx`.
  * @param {Task} finishedTask
- * @param {{stateDir: string, runtimeDir: string, existsFn: (path: string) => boolean, sandboxDenylist: string[], runOverlayCommandFn: (command: string, args: string[]) => {status: number|null, stdout: string, stderr: string, error?: Error}, persistTask: (taskId: string) => void, releaseOverlay: (task: {overlayDirs?: {root:string,tmpRoot:string}|null}) => boolean}} ctx
+ * @param {{stateDir: string, runtimeDir: string, existsFn: (path: string) => boolean, sandboxDenylist: string[], runOverlayCommandFn: (command: string, args: string[]) => {status: number|null, stdout: string, stderr: string, error?: Error}, overlaySleepFn?: (ms: number) => void, persistTask: (taskId: string) => void, releaseOverlay: (task: {overlayDirs?: {root:string,tmpRoot:string}|null}) => boolean}} ctx
  */
 function extractChangesetForTaskRecord(finishedTask, ctx) {
   if (!finishedTask.overlayDirs) return;
@@ -4288,6 +4301,7 @@ function extractChangesetForTaskRecord(finishedTask, ctx) {
           preDispatchHead: /** @type {string} */ (finishedTask.preDispatchHead),
           homeDir: os.homedir(),
           runCommand: ctx.runOverlayCommandFn,
+          sleepFn: ctx.overlaySleepFn,
         })
       : extractNonGitDiff({
           denyList,
@@ -4298,6 +4312,7 @@ function extractChangesetForTaskRecord(finishedTask, ctx) {
           overlay: finishedTask.overlayDirs,
           homeDir: os.homedir(),
           runCommand: ctx.runOverlayCommandFn,
+          sleepFn: ctx.overlaySleepFn,
         });
   } catch (err) {
     finishedTask.changesetError = err instanceof Error ? err.message : String(err);
@@ -4498,7 +4513,7 @@ function requireOverlayCapability(state, ctx) {
  * record reflects the cleared overlay. Extracted out of `createTaskManager`'s
  * `accept` closure; every factory binding is threaded in via `ctx`.
  * @param {string} taskId
- * @param {{ensureStateLoaded: () => void, tasks: Map<string, Task>, noSuchTask: (taskId: string) => Error, existsFn: (path: string) => boolean, hasLiveOverlay: (task: Task) => boolean, stateDir: string, runtimeDir: string, sandboxDenylist: string[], runOverlayCommandFn: (command: string, args: string[]) => {status: number|null, stdout: string, stderr: string, error?: Error}, persistTask: (taskId: string) => void, releaseOverlay: (task: {overlayDirs?: {root:string,tmpRoot:string}|null}) => boolean}} ctx
+ * @param {{ensureStateLoaded: () => void, tasks: Map<string, Task>, noSuchTask: (taskId: string) => Error, existsFn: (path: string) => boolean, hasLiveOverlay: (task: Task) => boolean, stateDir: string, runtimeDir: string, sandboxDenylist: string[], runOverlayCommandFn: (command: string, args: string[]) => {status: number|null, stdout: string, stderr: string, error?: Error}, overlaySleepFn?: (ms: number) => void, persistTask: (taskId: string) => void, releaseOverlay: (task: {overlayDirs?: {root:string,tmpRoot:string}|null}) => boolean}} ctx
  * @returns {{taskId: string, changesetStatus: string, applied: boolean, reason?: string|null, cleanupFailed?: boolean}}
  */
 function acceptTaskChangeset(taskId, ctx) {
@@ -4519,6 +4534,7 @@ function acceptTaskChangeset(taskId, ctx) {
     overlay: task.overlayDirs ?? undefined,
     homeDir: os.homedir(),
     runCommand: ctx.runOverlayCommandFn,
+    sleepFn: ctx.overlaySleepFn,
   });
   if (!applied.applied) {
     // validateAcceptable() threw above if changesetStatus weren't pending,

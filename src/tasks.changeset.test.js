@@ -20,7 +20,11 @@ describe("changeset extraction at settlement", () => {
       overlayEnabled: true,
       checkOverlaySupportFn: () => ({ supported: true }),
       platform: "linux",
-      runOverlayCommandFn: (command, args) => { extractCommand = { command, args }; return { status: 0, stdout: DIFF_LINE, stderr: "" }; },
+      // Only capture the bwrap call: extraction also issues `git rev-parse
+      // HEAD` calls through this same fn (the pre-retry guard, plus the
+      // post-retry re-check added for taskferry#329), which would otherwise
+      // overwrite extractCommand and hide the bwrap call this test pins.
+      runOverlayCommandFn: (command, args) => { if (command === "bwrap") { extractCommand = { command, args }; } return { status: 0, stdout: DIFF_LINE, stderr: "" }; },
       overlayTmpRoot,
     });
 
@@ -78,7 +82,10 @@ describe("changeset extraction at settlement", () => {
       platform: "linux",
       resolveGitCommonDirFn: () => gitCommonDir,
       resolveGitDirFn: () => gitWorktreeAdminDir,
-      runOverlayCommandFn: (_command, args) => { extractArgs = args; return { status: 0, stdout: "diff --git a/f.txt b/f.txt\n", stderr: "" }; },
+      // Only capture the bwrap call's args -- see the sibling test above
+      // (taskferry#329) for why a later git rev-parse call would otherwise
+      // clobber extractArgs with something that has no --overlay-src flags.
+      runOverlayCommandFn: (command, args) => { if (command === "bwrap") { extractArgs = args; } return { status: 0, stdout: "diff --git a/f.txt b/f.txt\n", stderr: "" }; },
     });
 
     const result = mgr.dispatch({ prompt: "hello", directory });
@@ -178,6 +185,14 @@ describe("changeset extraction at settlement: overlay-mount-busy reclassificatio
       "bwrap: Can't make overlay mount on /newroot/workspace with options " +
       "upperdir=/tmp/upper,workdir=/tmp/work,lowerdir=/oldroot/workspace,userxattr: Device or resource busy";
     const child = fakeChild(7200);
+    // Every runOverlayCommandFn call below reports the busy signature, so
+    // extraction's retry-with-backoff (changeset.js's runExtractionBwrap)
+    // exhausts all three retries before giving up. Injecting overlaySleepFn
+    // (taskferry#328) keeps that ~1.3s of real backoff out of the test's
+    // wall-clock time -- and the captured `sleeps` doubles as proof the
+    // retry loop actually ran, not just that the final error classified
+    // correctly.
+    const sleeps = [];
     const mgr = makeManager({
       overlayTmpRoot,
       spawnFn: () => child,
@@ -191,6 +206,7 @@ describe("changeset extraction at settlement: overlay-mount-busy reclassificatio
       platform: "linux",
       runOverlayCommandFn: () => ({ status: null, stdout: "", stderr: "", error: new Error(bwrapMessage) }),
       rmOverlayTreeFn: () => {},
+      overlaySleepFn: (ms) => sleeps.push(ms),
     });
 
     const result = mgr.dispatch({ prompt: "hello", directory });
@@ -207,6 +223,7 @@ describe("changeset extraction at settlement: overlay-mount-busy reclassificatio
     assert.equal(status.failureReason, "overlay_mount_busy", "the confirmed bwrap cause must overwrite the generic no_output_timeout guess");
     assert.match(status.failureDetail, /Device or resource busy/);
     assert.match(status.changesetError, /Device or resource busy/);
+    assert.deepEqual(sleeps, [100, 300, 900], "must exhaust the full retry backoff, injected through the manager API, before giving up");
   });
 
   // Regression (taskferry#327 review finding): a non-git target's extraction
@@ -223,6 +240,9 @@ describe("changeset extraction at settlement: overlay-mount-busy reclassificatio
       "bwrap: Can't make overlay mount on /newroot/workspace with options " +
       "upperdir=/tmp/upper,workdir=/tmp/work,lowerdir=/oldroot/workspace,userxattr: Device or resource busy";
     const child = fakeChild(7200);
+    // See the sibling test above (taskferry#328): overlaySleepFn keeps the
+    // full retry-backoff out of this test's real wall-clock time.
+    const sleeps = [];
     const mgr = makeManager({
       overlayTmpRoot,
       spawnFn: () => child,
@@ -236,6 +256,7 @@ describe("changeset extraction at settlement: overlay-mount-busy reclassificatio
       platform: "linux",
       runOverlayCommandFn: () => ({ status: 1, stdout: "", stderr: bwrapMessage, error: null }),
       rmOverlayTreeFn: () => {},
+      overlaySleepFn: (ms) => sleeps.push(ms),
     });
 
     const result = mgr.dispatch({ prompt: "hello", directory });
@@ -246,6 +267,7 @@ describe("changeset extraction at settlement: overlay-mount-busy reclassificatio
     assert.equal(status.failureReason, "overlay_mount_busy", "a real bwrap exit-1 overlay-busy failure must never be mistaken for diff's own exit-1 (differences found)");
     assert.notEqual(status.changesetStatus, "accepted", "must not silently accept an empty diff when extraction actually failed");
     assert.equal(mgr.result(result.id, { fields: ["diff"] }).diff, null, "no patch may be persisted for a failed extraction");
+    assert.deepEqual(sleeps, [100, 300, 900], "must exhaust the full retry backoff, injected through the manager API, before giving up");
   });
 
   test("an unrelated extraction error does not touch failureReason", () => {

@@ -89,9 +89,20 @@ obviously belong to args parsing or output formatting, start there.
 Most `*.js` files above have a co-located `*.test.js` (`node --test`, no
 framework) — `mcp-isolation.js`, `narration-format.js`,
 `errors.js`, and `numbers.js` are the current exceptions.
-`smoke-test.js`/`cancel-smoke-test.js`/`poll-smoke-test.js` are
-integration tests that spawn a real daemon (`npm run test:integration`,
-not part of the default `npm test`).
+`smoke-test.js` (129 lines) / `cancel-smoke-test.js` (105) /
+`poll-smoke-test.js` (78) are integration tests that spawn a real daemon,
+CLI, and (for `smoke-test.js`) a live dispatch to `opencode-go/minimax-m3`
+(`npm run test:integration`, not part of the default `npm test`). They run
+in CI as the separate `integration` job in `.github/workflows/check.yml`
+(needs `bubblewrap` installed and `OPENCODE_GO_API_KEY` in the environment;
+skipped on fork PRs, which don't receive repo secrets). `smoke-test-support.js`
+(58 lines) holds their shared teardown helpers: `stopDaemonAndWait()` blocks
+until the daemon's SIGTERM-triggered exit actually completes instead of
+racing it, and `rmRoot()` shells out to `rm -rf` rather than `fs.rmSync`
+because a sandboxed dispatch's overlay mount leaves a kernel-zeroed
+(mode `0000`) overlayfs workdir behind — `fs.rmSync` doesn't chmod an
+inaccessible-but-owned directory before recursing into it and throws EACCES
+every time, but GNU `rm -rf` already handles this case.
 
 ## Where do I look for X?
 

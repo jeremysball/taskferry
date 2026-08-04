@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import readline from "node:readline";
 import { fileURLToPath } from "node:url";
+import { rmRoot, stopDaemonAndWait } from "./smoke-test-support.js";
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const cliEntry = path.join(scriptDir, "cli.js");
@@ -27,11 +28,13 @@ function daemonPid() {
 }
 
 function stopDaemon() {
+  let pid;
   try {
-    process.kill(daemonPid(), "SIGTERM");
+    pid = daemonPid();
   } catch {
-    // already gone
+    return; // already gone
   }
+  stopDaemonAndWait(pid);
 }
 
 const DIRECTORY_FLAG = "--directory";
@@ -115,7 +118,7 @@ check("watch process exited cleanly after SIGTERM", watchExitCode === 0);
 taskferry(["cancel", secondDispatch.id]); // no-op if it already settled; frees it either way
 
 stopDaemon();
-fs.rmSync(root, { recursive: true, force: true });
+rmRoot(root);
 
 if (ok) {
   console.log("\nSMOKE TEST PASSED");

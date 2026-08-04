@@ -4,6 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { rmRoot, stopDaemonAndWait } from "./smoke-test-support.js";
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const cliEntry = path.join(scriptDir, "cli.js");
@@ -26,11 +27,13 @@ function daemonPid() {
 }
 
 function stopDaemon() {
+  let pid;
   try {
-    process.kill(daemonPid(), "SIGTERM");
+    pid = daemonPid();
   } catch {
-    // already gone
+    return; // already gone
   }
+  stopDaemonAndWait(pid);
 }
 
 console.log("== case 1: taskferry wait resolves on real completion (short task, long-ish cap) ==");
@@ -60,7 +63,7 @@ const finalStatus = taskferry(["status", d2.id]);
 console.log("final status:", finalStatus.status);
 
 stopDaemon();
-fs.rmSync(root, { recursive: true, force: true });
+rmRoot(root);
 
 const case1Ok = w1.status === "done" && t1Elapsed < 30000;
 const case2Ok = w2.status === "running" && t2Elapsed >= 2900 && t2Elapsed < 5000;

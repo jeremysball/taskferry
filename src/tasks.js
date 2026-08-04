@@ -1084,7 +1084,7 @@ function onChildExit(ctx, shared, code, signal) {
   ctx.classifyTrailingLogFailure(task, shared.executor);
   ctx.stopRunningWatcher(task.id);
   task.status = resolveChildExitStatus(task, code, signal);
-  surfaceBootCrashFailure(task, code);
+  surfaceBootCrashFailure(task, code, shared.executor);
   task.exitCode = code;
   task.signal = signal;
   task.endedAt = new Date().toISOString();
@@ -1125,13 +1125,14 @@ function resolveChildExitStatus(task, code, signal) {
  * ambiguous and stays the curated classifier's job.
  * @param {Task} task
  * @param {number|null} code
+ * @param {import("./executor.js").WorkerExecutor} executor
  */
-function surfaceBootCrashFailure(task, code) {
+function surfaceBootCrashFailure(task, code, executor) {
   const explicitNonZeroExit = code != null && code !== 0;
   if (task.status === "crashed" && !task.failureReason && explicitNonZeroExit && !logHasAnyEvent(task.logPath)) {
     const bootFailure = extractBootFailureDetail(task.logPath);
     if (bootFailure) {
-      task.failureReason = bucketFor(resolveExecutor(task.executorId).errorBucketPrefix, bootFailure.bucket);
+      task.failureReason = bucketFor(executor.errorBucketPrefix, bootFailure.bucket);
       task.failureDetail = bootFailure.detail;
     }
   }

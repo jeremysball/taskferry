@@ -260,8 +260,7 @@ function handleMigrationFlag(ctx, name, def) {
 
 function handleBooleanFlag(ctx, name, def, inlineValue, index) {
   if (inlineValue !== undefined) throw usageError(`${name} does not take a value`, ctx.command);
-  const key = def.key ?? name.slice(2);
-  setOption(ctx.options, key, true, ctx.command, ctx.seen);
+  setOption(ctx.options, flagKeyName(name, def), true, ctx.command, ctx.seen);
   return index + 1;
 }
 

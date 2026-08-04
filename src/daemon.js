@@ -287,15 +287,9 @@ const invokeHandlers = {
   "task.dispatch": (manager, params) => manager.dispatch(params),
   "task.cancel": (manager, params) => manager.cancel(params.taskId, params.graceMs === undefined ? undefined : { graceMs: params.graceMs }),
   "task.status": (manager, params) => manager.status(params.taskId),
-  "task.wait": (manager, params) => manager.poll(params.taskId, {
-    ...(params.timeoutMs !== undefined ? { timeoutMs: params.timeoutMs } : {}),
-    ...(params.tailChars !== undefined ? { tailChars: params.tailChars } : {}),
-  }),
+  "task.wait": (manager, params) => manager.poll(params.taskId, params),
   "task.list": (manager, params) => filteredList(manager, params.directory),
-  "task.result": (manager, params) => manager.result(params.taskId, {
-    ...(params.full !== undefined ? { full: params.full } : {}),
-    ...(params.fields !== undefined ? { fields: params.fields } : {}),
-  }),
+  "task.result": (manager, params) => manager.result(params.taskId, params),
   "task.tail": (manager, params) => manager.tail(params.taskId, params.chars === undefined ? undefined : { chars: params.chars }),
   "task.summary": (manager, params) => manager.summarize(params.taskId, params),
   "task.advisor": (manager, params) => manager.advisor(params),

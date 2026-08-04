@@ -1,5 +1,63 @@
 # Changelog
 
+## [3.0.0](https://github.com/jeremysball/taskferry/compare/taskferry-v2.1.0...taskferry-v3.0.0) (2026-08-04)
+
+
+### ⚠ BREAKING CHANGES
+
+* **lint:** lint warnings that used to be informational now block commits (pre-commit hook) and CI (check.yml's lint leg). Any future sonarjs or maintainability-rule violation must be fixed before merging, not just noted.
+
+### Features
+
+* **advisor:** auto-attach caller context, --summarize-context (advisor-context-dump plan) ([#266](https://github.com/jeremysball/taskferry/issues/266)) ([7c6e69e](https://github.com/jeremysball/taskferry/commit/7c6e69eaed560d27aa4b8fa5f21b829650534633))
+* **args:** duration-string flags ([#223](https://github.com/jeremysball/taskferry/issues/223)) ([22067f3](https://github.com/jeremysball/taskferry/commit/22067f316dac109548196a993b3640da14476188))
+* **config:** add TASKFERRY_ENV_FILE for non-interactive callers with missing secrets ([#284](https://github.com/jeremysball/taskferry/issues/284)) ([3fec57d](https://github.com/jeremysball/taskferry/commit/3fec57d9f0c64c190d9123d8696af452418c53c7))
+* **config:** live-reload TASKFERRY_ENV_FILE/envFile instead of requiring a restart ([#291](https://github.com/jeremysball/taskferry/issues/291)) ([88a9387](https://github.com/jeremysball/taskferry/commit/88a9387d3d4e31e2f7b2f5a6f02c05ac755e7c80))
+* **config:** live-reload TASKFERRY_ENV_FILE/envFile instead of requiring a restart ([#320](https://github.com/jeremysball/taskferry/issues/320)) ([1521f5d](https://github.com/jeremysball/taskferry/commit/1521f5d5bdeedc9f09df6346a4960740df2f2bf6))
+* **daemon:** opt-in request-latency profiling with log rotation ([#301](https://github.com/jeremysball/taskferry/issues/301)) ([6232710](https://github.com/jeremysball/taskferry/commit/6232710d57d60caf227c6ea2ee702be202c75354))
+* **doctor:** add taskferry doctor --stats ([#272](https://github.com/jeremysball/taskferry/issues/272)) ([881107e](https://github.com/jeremysball/taskferry/commit/881107ebfa572329207b1aee917770818bf6cd55))
+* **executor:** make pi the default executor instead of opencode ([#198](https://github.com/jeremysball/taskferry/issues/198)) ([97a5497](https://github.com/jeremysball/taskferry/commit/97a5497dc10883a3d24a844da3eeb8a83c877ae5))
+* **fleet-monitor:** git-workspace-scoped directory defaults + watch --flush-interval ([#225](https://github.com/jeremysball/taskferry/issues/225)) ([fbb5694](https://github.com/jeremysball/taskferry/commit/fbb56944a4a3b16e889c92aa0121fdcba1408ce5))
+* replace key-slot system with caller-env forwarding ([#241](https://github.com/jeremysball/taskferry/issues/241)) ([656d9da](https://github.com/jeremysball/taskferry/commit/656d9dafe627978722d4dc0f05268efe2d033483))
+* **sandbox:** copy-on-write overlays and diff-gated writes ([#251](https://github.com/jeremysball/taskferry/issues/251)) ([032ac5b](https://github.com/jeremysball/taskferry/commit/032ac5b6e0bfe852a6c2b5d4382136db78f2485e))
+
+
+### Bug Fixes
+
+* **advisor:** correct misleading transcript-error hint about --prompt ([ddf63fd](https://github.com/jeremysball/taskferry/commit/ddf63fdb6f6801bd1d9a6e64de26f56937011a2f))
+* **advisor:** extract only user/assistant text from the Claude transcript ([#295](https://github.com/jeremysball/taskferry/issues/295)) ([f3b1d9d](https://github.com/jeremysball/taskferry/commit/f3b1d9d2242ed33a8690dcd9a55d38687cf1c98b))
+* **advisor:** prompt caller's --prompt ahead of canned pushback framing ([#271](https://github.com/jeremysball/taskferry/issues/271)) ([653fea6](https://github.com/jeremysball/taskferry/commit/653fea66ddfc7f63ee1ddaac15dd50edd9d3061f))
+* cap unbounded task-list payloads and settle advisor changesets correctly ([#297](https://github.com/jeremysball/taskferry/issues/297)) ([dc6177d](https://github.com/jeremysball/taskferry/commit/dc6177d288dae44630a391424afc800700248257))
+* **changeset:** overlay cleanup can't strand upper/ on kernel whiteout ([#278](https://github.com/jeremysball/taskferry/issues/278)) ([1f06572](https://github.com/jeremysball/taskferry/commit/1f06572a43b358a6c1fcffc0afd4f3530b0eb50e))
+* **changeset:** refuse to extract a diff when the directory's HEAD has moved since dispatch ([#262](https://github.com/jeremysball/taskferry/issues/262)) ([c054dfa](https://github.com/jeremysball/taskferry/commit/c054dfa0d5d2811d86c4989bcf3c68fad6a99d41))
+* **commands:** report real package version in doctor --full output ([#306](https://github.com/jeremysball/taskferry/issues/306)) ([2db1081](https://github.com/jeremysball/taskferry/commit/2db108114b7ff80385a6ae1447499f91a079a3dd))
+* **daemon:** back off between prepareSocket retries to stop a busy-spin under boot contention ([#285](https://github.com/jeremysball/taskferry/issues/285)) ([b5789cd](https://github.com/jeremysball/taskferry/commit/b5789cd39b6a52e14ad78b41290d1f91f6c49330))
+* **daemon:** forward whole params to task.wait/task.result instead of rebuilding field lists ([#296](https://github.com/jeremysball/taskferry/issues/296)) ([7da0f91](https://github.com/jeremysball/taskferry/commit/7da0f9128debaa31c7bb9151af517fbdbdf08f91)), closes [#246](https://github.com/jeremysball/taskferry/issues/246)
+* **daemon:** stop task.list/context from scanning every historical task ([#294](https://github.com/jeremysball/taskferry/issues/294)) ([4d6c4cf](https://github.com/jeremysball/taskferry/commit/4d6c4cfcd67d3cbccef9e525bfca064f176d510d))
+* **daemon:** treat XDG_RUNTIME_DIR as canonical even when unexported ([#280](https://github.com/jeremysball/taskferry/issues/280)) ([08be50a](https://github.com/jeremysball/taskferry/commit/08be50aee8a23125cf2cb33061f61b003ba761c5))
+* **lint:** promote sonarjs and maintainability rules to hard errors ([#303](https://github.com/jeremysball/taskferry/issues/303)) ([9a0a390](https://github.com/jeremysball/taskferry/commit/9a0a39070a1c8ce2652839b1c82e01ba9d7775c9))
+* **mcp-isolation:** stop stripJsonComments's string match from crossing lines ([#310](https://github.com/jeremysball/taskferry/issues/310)) ([de786e0](https://github.com/jeremysball/taskferry/commit/de786e0ad89063081524e3114ab5113ff9a9ba7f))
+* **release:** sync plugin manifests to 2.1.0, wire into release-please ([#240](https://github.com/jeremysball/taskferry/issues/240)) ([f48ef2f](https://github.com/jeremysball/taskferry/commit/f48ef2f5ab2ec63173c5f723de2d209d5697b6cc))
+* **sandbox:** bind writable git-common-dir files as scratch copies, not sub-overlays ([#259](https://github.com/jeremysball/taskferry/issues/259)) ([498952c](https://github.com/jeremysball/taskferry/commit/498952cdc275fc40d5308a60930fee444ac0441e))
+* **sandbox:** deny ~/.claude by default, make the deny-list configurable ([#264](https://github.com/jeremysball/taskferry/issues/264)) ([9da0167](https://github.com/jeremysball/taskferry/commit/9da0167386d35250d5069ddeb2122b1f37e1a4d3))
+* **sandbox:** scope a worktree dispatch's git-common-dir bind to shared data only ([#227](https://github.com/jeremysball/taskferry/issues/227)) ([26309e4](https://github.com/jeremysball/taskferry/commit/26309e4499d51ce8a4f71bf9ef02bad95e1ef9e7))
+* **sandbox:** stop unsharing network on advisor spawns ([#257](https://github.com/jeremysball/taskferry/issues/257)) ([e017001](https://github.com/jeremysball/taskferry/commit/e017001a57936098f4e49ab140f041a64b9a2b30))
+* **setup:** tighten managed-symlink guard to the exact checkout in use ([#213](https://github.com/jeremysball/taskferry/issues/213)) ([2949f04](https://github.com/jeremysball/taskferry/commit/2949f04874cbd867def5978091e7c13f7bc472a3))
+* **skill:** disambiguate the fleet-watch log path per workspace ([#268](https://github.com/jeremysball/taskferry/issues/268)) ([1303b9a](https://github.com/jeremysball/taskferry/commit/1303b9a9ed28570a1fa83d8ce7c1afb211c526bf))
+* **statusline:** never let tf-sl trigger daemon autostart ([#279](https://github.com/jeremysball/taskferry/issues/279)) ([1886fdf](https://github.com/jeremysball/taskferry/commit/1886fdf7c94c06884da11c6f9c8d56fe63c2b464))
+* **tasks:** debounce persistTask() writes instead of full rewrite per transition ([#298](https://github.com/jeremysball/taskferry/issues/298)) ([2d75153](https://github.com/jeremysball/taskferry/commit/2d751534fb219a5701d306326f5267ebf9746c5d)), closes [#55](https://github.com/jeremysball/taskferry/issues/55)
+* **tasks:** scope overlayTmpRoot under runtimeDir to stop cross-daemon sweep collisions ([#288](https://github.com/jeremysball/taskferry/issues/288)) ([e5be588](https://github.com/jeremysball/taskferry/commit/e5be588bdbe152f96ef9060a34d3d208dfa6a7e0))
+* **tasks:** stagger launches globally and surface overlay_mount_busy ([#318](https://github.com/jeremysball/taskferry/issues/318)) ([#321](https://github.com/jeremysball/taskferry/issues/321)) ([285c7a3](https://github.com/jeremysball/taskferry/commit/285c7a3e6df4a47dd81814c99185091dc5e4872b))
+* **tasks:** stop overlay tests from scanning and acting on real host /tmp ([#258](https://github.com/jeremysball/taskferry/issues/258)) ([04d5e48](https://github.com/jeremysball/taskferry/commit/04d5e48dd5114ff41b7c84b6226b70f7133fb02b))
+* **tasks:** surface boot-crash stderr as failureReason instead of silent null ([#255](https://github.com/jeremysball/taskferry/issues/255)) ([f9f279f](https://github.com/jeremysball/taskferry/commit/f9f279f2ae3d9b131ea39825722c9966cceacca0))
+
+
+### Performance Improvements
+
+* **activity:** hoist sanitizeActivityText's regexes to module scope ([#307](https://github.com/jeremysball/taskferry/issues/307)) ([b232985](https://github.com/jeremysball/taskferry/commit/b2329856924b5f576bd99b795e9460a99d84288a))
+* **config:** cache parsed config instead of re-reading on every call ([#276](https://github.com/jeremysball/taskferry/issues/276)) ([52eaac9](https://github.com/jeremysball/taskferry/commit/52eaac993daced92982274ab4ed94a7771c4df07))
+* **tasks:** build filtered env in one pass instead of spread+delete ([#275](https://github.com/jeremysball/taskferry/issues/275)) ([edd2111](https://github.com/jeremysball/taskferry/commit/edd2111f6013207240c72166b416ae86675588f2))
+
 ## [2.1.0](https://github.com/jeremysball/taskferry/compare/taskferry-v2.0.0...taskferry-v2.1.0) (2026-07-28)
 
 

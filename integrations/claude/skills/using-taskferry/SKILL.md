@@ -277,6 +277,30 @@ included, as periodic batched notifications. `run_in_background` notifies
 once, on the whole command's exit; that notification is the settlement
 signal for this specific task.
 
+**Never background `taskferry wait` with a shell `&`, `nohup … &`, `disown`,
+or any equivalent manual detacher — this is NOT ALLOWED, in Claude Code or
+any other host.** That idiom was a fallback for opencode's old
+foreground-only Bash tool and exists nowhere else; in Claude Code it is
+strictly worse than `Bash` `run_in_background: true` in every respect:
+
+- `run_in_background` notifies you once, on the wait's exit — the
+  settlement signal, delivered automatically. A `nohup … &` job never
+  notifies; you can only learn it finished by *polling* the log file on a
+  timer or re-running `cat`/`tail` on the chance it's done, which is
+  exactly the polling loop the `--timeout` rule below forbids.
+- It leaks orphaned `wait` processes and leftover `/tmp/taskferry-wait-*.log`
+  files across turns and sessions, with no tracking the harness manages.
+- It obscures the real exit status behind a log you have to remember to read.
+
+If `run_in_background` is unavailable, the correct answer is **not** to
+reach for `nohup`. Run `wait` in the foreground, or — in opencode — follow
+the "no interim updates / pull, don't push" options in the opencode section
+below, which deliberately avoid a standing background poller. The only
+standing exception to "no shell backgrounding" is the **fleet-wide
+`taskferry watch`** daemon in "Fleet-Wide Monitoring" (armed once per
+session with a pid-file guard, a different command, a different purpose),
+never a per-task `wait`.
+
 Relay every summary-line notification with this exact template:
 
 `⛴ <emoji> <short-task-id> <NN%> — <clause>`
@@ -329,27 +353,27 @@ in order of preference:
    an update nobody asked for — that reintroduces the wasted-wall-time
    pattern this whole guidance exists to avoid.
 
-Background the wait rather than blocking the turn on it directly —
-opencode's own Bash tool has nothing like `run_in_background`, so a
-foreground `wait` ties up the whole turn until settlement, with no way to
-do anything else (including answering the user) in the meantime. Use
-`--summarize` here too, same as the Claude Code case above: it periodically
-condenses the narration tail into the log instead of leaving raw NDJSON
-sitting there, which is what actually makes options 2–3's occasional peek
-worth reading rather than a wall of unprocessed events:
+Because opencode's own Bash tool has nothing like `run_in_background`, the
+default is a **foreground** `wait --summarize`: it blocks the turn until
+settlement, which is fine — the turn was going to wait on the task anyway.
+Use `--summarize` for the same reason as the Claude Code case above: it
+periodically condenses the narration tail into the stream instead of
+leaving raw NDJSON sitting there, which is what actually makes option 2's
+occasional peek worth reading rather than a wall of unprocessed events.
+For options 2–3, where you need a look at progress before it settles and a
+foreground `wait` would tie up the turn, `taskferry tail <id> --chars 2000`
+is the right move — a one-shot read that returns immediately, not a
+standing background process.
 
-```sh
-nohup taskferry wait <id> --summarize > /tmp/taskferry-wait-<id>.log 2>&1 &
-disown
-```
-
-That call returns immediately. Settlement shows up as the job's exit and a
-final line in the log; check `cat /tmp/taskferry-wait-<id>.log` (or `jobs`)
-when you're about to report on the task rather than polling it on a timer.
-For options 2–3 above, where you need a look at progress before it settles,
-reading that same log's tail (`tail -n 5 /tmp/taskferry-wait-<id>.log`) is
-the right move — it's the summarized view, cheaper to read than a raw
-`taskferry tail`.
+**Do not shell-background `wait` (`nohup … &`, `&` + `disown`, etc.) to
+fake `run_in_background` inside opencode either.** It produces an untracked
+orphan with no notification, the only way to learn it finished being a
+polled `cat`/`tail` of a `/tmp` log on a timer — the exact polling loop
+this guidance forbids — and leaks processes and log files across turns.
+The foreground `wait` (option 1) or a one-shot `tail` (options 2–3) cover
+every legitimate opencode need without that cost. This restriction is the
+same one stated for Claude Code above: there is no host in which
+`nohup taskferry wait … &` is the correct way to wait.
 
 Read the final result and request an independent review when needed:
 

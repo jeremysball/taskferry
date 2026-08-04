@@ -8,30 +8,42 @@ import { spawnSync } from "node:child_process";
 import { buildBwrapArgs, checkOverlaySupport } from "./sandbox.js";
 import { applyChangeset, cleanupOverlay, extractGitDiff, extractNonGitDiff, overlayPaths, resolvePreDispatchHead, subFilePaths, subOverlayPaths } from "./changeset.js";
 
+// Fixture literals lifted to module scope so the sonarjs
+// no-duplicate-string rule stays quiet (each appears once, in its constant)
+// and every case points at the same strings.
+const TMP_ROOT_PREFIX = "axi-int-tmp-";
+const RUN_ROOT_PREFIX = "axi-int-run-";
+const TRACKED_FILE = "tracked.txt";
+const GIT_EMAIL = "user.email=t@t";
+const GIT_NAME = "user.name=t";
+
 // Skip the whole suite unless this host can actually run overlays: Linux,
 // bwrap >= 0.8, and (for the non-git round trip) a real rsync. A missing
 // capability is an environment fact, not a test failure.
 const support = process.platform === "linux" ? checkOverlaySupport() : { supported: false, reason: "not linux" };
 const rsyncAvailable = spawnSync("rsync", ["--version"], { encoding: "utf8" }).status === 0;
-const skipReason = support.supported ? (rsyncAvailable ? null : "rsync not installed") : support.reason;
+let skipReason = support.reason;
+if (support.supported) {
+  skipReason = rsyncAvailable ? null : "rsync not installed";
+}
 const skip = skipReason ? { skip: `overlay integration skipped: ${skipReason}` } : undefined;
 
 // Runs one real bwrap invocation against a directory mounted as a CoW
 // overlay (plus any sub-overlays), executing `script` inside.
 function runInOverlay({ directory, overlay, overlayRwBinds = [], overlayRwFileBinds = [], script, runtimeDir, homeDir }) {
-  const args = buildBwrapArgs({ directory, stateDir: os.tmpdir(), runtimeDir, homeDir, denyList: [], overlay: { upperDir: overlay.upperDir, workDir: overlay.workDir }, overlayRwBinds, overlayRwFileBinds });
+  const args = buildBwrapArgs({ stateDir: os.tmpdir(), denyList: [], overlay: { upperDir: overlay.upperDir, workDir: overlay.workDir }, directory, runtimeDir, homeDir, overlayRwBinds, overlayRwFileBinds });
   return spawnSync("bwrap", [...args, "--", "sh", "-c", script], { encoding: "utf8" });
 }
 
 describe("overlay round trips (real bwrap)", () => {
   test("git target: sandboxed write + commit extracts as one flattened diff, applies, cleans up", skip ? undefined : () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "axi-int-git-"));
-    const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "axi-int-tmp-"));
-    const runtimeDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-int-run-"));
+    const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), TMP_ROOT_PREFIX));
+    const runtimeDir = fs.mkdtempSync(path.join(os.tmpdir(), RUN_ROOT_PREFIX));
     spawnSync("git", ["init", "-q", directory]);
-    fs.writeFileSync(path.join(directory, "tracked.txt"), "base\n");
+    fs.writeFileSync(path.join(directory, TRACKED_FILE), "base\n");
     spawnSync("git", ["-C", directory, "add", "-A"]);
-    spawnSync("git", ["-C", directory, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "base"]);
+    spawnSync("git", ["-C", directory, "-c", GIT_EMAIL, "-c", GIT_NAME, "commit", "-qm", "base"]);
     const preDispatchHead = resolvePreDispatchHead(directory);
     assert.ok(preDispatchHead, "fixture repo must have a HEAD");
 
@@ -46,18 +58,18 @@ describe("overlay round trips (real bwrap)", () => {
     });
     assert.equal(ran.status, 0, `sandboxed worker script failed: ${ran.stderr}`);
     // The real directory must be untouched before accept -- the whole point.
-    assert.equal(fs.readFileSync(path.join(directory, "tracked.txt"), "utf8"), "base\n");
+    assert.equal(fs.readFileSync(path.join(directory, TRACKED_FILE), "utf8"), "base\n");
     assert.equal(fs.existsSync(path.join(directory, "added.txt")), false);
 
     const diffPath = path.join(tmpRoot, "int_git.patch");
-    const extracted = extractGitDiff({ directory, overlay, overlayRwBinds: [], preDispatchHead, stateDir: tmpRoot, runtimeDir, homeDir: os.homedir(), denyList: [], diffPath });
+    const extracted = extractGitDiff({ directory, overlay, preDispatchHead, runtimeDir, diffPath, overlayRwBinds: [], stateDir: tmpRoot, homeDir: os.homedir(), denyList: [] });
     assert.equal(extracted.hasChanges, true);
     assert.match(fs.readFileSync(diffPath, "utf8"), /\+changed/);
     assert.match(fs.readFileSync(diffPath, "utf8"), /added\.txt/);
 
     const applied = applyChangeset({ directory, diffPath, isGitTarget: true });
     assert.deepEqual(applied, { applied: true, reason: null });
-    assert.equal(fs.readFileSync(path.join(directory, "tracked.txt"), "utf8"), "base\nchanged\n");
+    assert.equal(fs.readFileSync(path.join(directory, TRACKED_FILE), "utf8"), "base\nchanged\n");
     assert.equal(fs.existsSync(path.join(directory, "added.txt")), true);
     // Applied as a working-tree diff, NOT replayed as the worker's commit.
     const log = spawnSync("git", ["-C", directory, "log", "--oneline"], { encoding: "utf8" }).stdout;
@@ -77,12 +89,12 @@ describe("overlay round trips (real bwrap)", () => {
     spawnSync("git", ["init", "-q", mainRepo]);
     fs.writeFileSync(path.join(mainRepo, "f.txt"), "one\n");
     spawnSync("git", ["-C", mainRepo, "add", "-A"]);
-    spawnSync("git", ["-C", mainRepo, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "base"]);
+    spawnSync("git", ["-C", mainRepo, "-c", GIT_EMAIL, "-c", GIT_NAME, "commit", "-qm", "base"]);
     const worktree = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "axi-int-wt-")), "wt");
     spawnSync("git", ["-C", mainRepo, "worktree", "add", "-q", worktree, "-b", "wt-branch"]);
 
-    const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "axi-int-tmp-"));
-    const runtimeDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-int-run-"));
+    const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), TMP_ROOT_PREFIX));
+    const runtimeDir = fs.mkdtempSync(path.join(os.tmpdir(), RUN_ROOT_PREFIX));
     const preDispatchHead = resolvePreDispatchHead(worktree);
     const overlay = overlayPaths("int_subovl", tmpRoot);
     fs.mkdirSync(overlay.upperDir, { recursive: true, mode: 0o700 });
@@ -94,7 +106,8 @@ describe("overlay round trips (real bwrap)", () => {
       .map((p) => { const sub = subOverlayPaths(overlay.root, p); fs.mkdirSync(sub.upperDir, { recursive: true, mode: 0o700 }); fs.mkdirSync(sub.workDir, { recursive: true, mode: 0o700 }); return sub; });
 
     const ran = runInOverlay({
-      directory: worktree, overlay, overlayRwBinds, runtimeDir, homeDir: os.homedir(),
+      overlay, overlayRwBinds, runtimeDir,
+      directory: worktree, homeDir: os.homedir(),
       script: `echo two >> ${worktree}/f.txt && git -C ${worktree} add -A && git -C ${worktree} -c user.email=t@t -c user.name=t commit -qm wt-worker`,
     });
     assert.equal(ran.status, 0, `sandboxed worktree commit failed: ${ran.stderr}`);
@@ -102,7 +115,7 @@ describe("overlay round trips (real bwrap)", () => {
     assert.ok(!spawnSync("git", ["-C", mainRepo, "log", "--all", "--oneline"], { encoding: "utf8" }).stdout.includes("wt-worker"));
 
     const diffPath = path.join(tmpRoot, "int_subovl.patch");
-    const extracted = extractGitDiff({ directory: worktree, overlay, overlayRwBinds, preDispatchHead, stateDir: tmpRoot, runtimeDir, homeDir: os.homedir(), denyList: [], diffPath });
+    const extracted = extractGitDiff({ directory: worktree, stateDir: tmpRoot, homeDir: os.homedir(), denyList: [], overlay, overlayRwBinds, preDispatchHead, runtimeDir, diffPath });
     assert.equal(extracted.hasChanges, true, "with overlayRwBinds re-mounted, the flattened commit diff must be visible");
     assert.match(fs.readFileSync(diffPath, "utf8"), /\+two/);
     cleanupOverlay({ root: overlay.root, tmpRoot });
@@ -119,7 +132,7 @@ describe("overlay round trips (real bwrap)", () => {
     spawnSync("git", ["init", "-q", mainRepo]);
     fs.writeFileSync(path.join(mainRepo, "f.txt"), "one\n");
     spawnSync("git", ["-C", mainRepo, "add", "-A"]);
-    spawnSync("git", ["-C", mainRepo, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "base"]);
+    spawnSync("git", ["-C", mainRepo, "-c", GIT_EMAIL, "-c", GIT_NAME, "commit", "-qm", "base"]);
     const worktree = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "axi-int-filebind-wt-")), "wt");
     spawnSync("git", ["-C", mainRepo, "worktree", "add", "-q", worktree, "-b", "wt-filebind-branch"]);
     // pack-refs forces packed-refs into existence so it's the writable file
@@ -129,8 +142,8 @@ describe("overlay round trips (real bwrap)", () => {
     assert.ok(fs.existsSync(packedRefs), "fixture repo must have a real packed-refs file");
     const originalContent = fs.readFileSync(packedRefs, "utf8");
 
-    const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "axi-int-tmp-"));
-    const runtimeDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-int-run-"));
+    const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), TMP_ROOT_PREFIX));
+    const runtimeDir = fs.mkdtempSync(path.join(os.tmpdir(), RUN_ROOT_PREFIX));
     const preDispatchHead = resolvePreDispatchHead(worktree);
     const overlay = overlayPaths("int_filebind", tmpRoot);
     fs.mkdirSync(overlay.upperDir, { recursive: true, mode: 0o700 });
@@ -146,7 +159,8 @@ describe("overlay round trips (real bwrap)", () => {
     const overlayRwFileBinds = [fileBind];
 
     const ran = runInOverlay({
-      directory: worktree, overlay, overlayRwBinds, overlayRwFileBinds, runtimeDir, homeDir: os.homedir(),
+      overlay, overlayRwBinds, overlayRwFileBinds, runtimeDir,
+      directory: worktree, homeDir: os.homedir(),
       // Proves the bind is visible at the real host path from inside the
       // sandbox, then mutates it -- the write must land on the scratch copy,
       // never the real host file (checked below, outside the sandbox).
@@ -161,7 +175,7 @@ describe("overlay round trips (real bwrap)", () => {
     assert.match(fs.readFileSync(fileBind.bindSrc, "utf8"), /aaaa2222aaaa2222aaaa2222aaaa2222aaaa2222 refs\/heads\/wt-filebind-branch/);
 
     const diffPath = path.join(tmpRoot, "int_filebind.patch");
-    const extracted = extractGitDiff({ directory: worktree, overlay, overlayRwBinds, overlayRwFileBinds, preDispatchHead, stateDir: tmpRoot, runtimeDir, homeDir: os.homedir(), denyList: [], diffPath });
+    const extracted = extractGitDiff({ directory: worktree, stateDir: tmpRoot, homeDir: os.homedir(), denyList: [], overlay, overlayRwBinds, overlayRwFileBinds, preDispatchHead, runtimeDir, diffPath });
     assert.equal(extracted.hasChanges, true, "with overlayRwFileBinds re-mounted, the flattened commit diff must be visible");
     assert.match(fs.readFileSync(diffPath, "utf8"), /\+two/);
     cleanupOverlay({ root: overlay.root, tmpRoot });
@@ -169,8 +183,8 @@ describe("overlay round trips (real bwrap)", () => {
 
   test("non-git target: sandboxed write extracts a diff -ru, rsync-applies, cleans up", skip ? undefined : () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "axi-int-nongit-"));
-    const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "axi-int-tmp-"));
-    const runtimeDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-int-run-"));
+    const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), TMP_ROOT_PREFIX));
+    const runtimeDir = fs.mkdtempSync(path.join(os.tmpdir(), RUN_ROOT_PREFIX));
     fs.writeFileSync(path.join(directory, "keep.txt"), "stays\n");
     fs.writeFileSync(path.join(directory, "edit.txt"), "before\n");
 
@@ -185,13 +199,13 @@ describe("overlay round trips (real bwrap)", () => {
     assert.equal(fs.readFileSync(path.join(directory, "edit.txt"), "utf8"), "before\n");
 
     const diffPath = path.join(tmpRoot, "int_nongit.patch");
-    const extracted = extractNonGitDiff({ directory, overlay, stateDir: tmpRoot, runtimeDir, homeDir: os.homedir(), denyList: [], diffPath });
+    const extracted = extractNonGitDiff({ directory, overlay, runtimeDir, diffPath, stateDir: tmpRoot, homeDir: os.homedir(), denyList: [] });
     assert.equal(extracted.hasChanges, true);
     const patch = fs.readFileSync(diffPath, "utf8");
     assert.match(patch, /brand-new/);
     assert.match(patch, /Only in|keep\.txt/); // the deletion surfaces one way or the other
 
-    const applied = applyChangeset({ directory, diffPath, isGitTarget: false, overlay, stateDir: tmpRoot, runtimeDir, homeDir: os.homedir(), denyList: [] });
+    const applied = applyChangeset({ directory, diffPath, overlay, runtimeDir, isGitTarget: false, stateDir: tmpRoot, homeDir: os.homedir(), denyList: [] });
     assert.deepEqual(applied, { applied: true, reason: null });
     assert.equal(fs.readFileSync(path.join(directory, "edit.txt"), "utf8"), "after\n");
     assert.equal(fs.readFileSync(path.join(directory, "new.txt"), "utf8"), "brand-new\n");

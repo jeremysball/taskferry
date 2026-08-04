@@ -1,30 +1,18 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { EventEmitter } from "node:events";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { createTaskManager } from "./tasks.js";
 import { createTaskEvents } from "./events.js";
-
-function fakeChild(pid = 4242) {
-  const child = new EventEmitter();
-  child.pid = pid;
-  child.unref = () => {};
-  child.stdout = new EventEmitter();
-  return child;
-}
+import { fakeChild, makeManager as makeManagerBase } from "./tasks.test-helpers.js";
 
 function makeManager({ tasks = [], spawnFn, killFn, onEvent, maxConcurrentTasks = 4 } = {}) {
-  const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-events-test-"));
-  fs.writeFileSync(path.join(stateDir, "tasks.json"), JSON.stringify(tasks, null, 2));
-  return createTaskManager({
-    stateDir,
-    sandboxEnabled: false,
-    spawnFn: spawnFn ?? (() => fakeChild()),
-    killFn: killFn ?? (() => {}),
+  return makeManagerBase({
     onEvent,
     maxConcurrentTasks,
+    tasksFixture: tasks,
+    spawnFn: spawnFn ?? (() => fakeChild()),
+    killFn: killFn ?? (() => {}),
     maxDispatchesPerWindow: 100,
     dispatchWindowMs: 60000,
   });
@@ -181,6 +169,7 @@ describe("task lifecycle events", () => {
     child.emit("exit", 0, null);
 
     assert.deepEqual(events, []);
+    manager.flushPersist();
     const onDisk = JSON.parse(fs.readFileSync(manager.paths.TASKS_FILE, "utf8"));
     assert.equal(onDisk.find((entry) => entry.id === task.id).internal, true);
   });
@@ -188,7 +177,7 @@ describe("task lifecycle events", () => {
   test("keeps persisted summary tasks from older state files out of the event stream", () => {
     const events = [];
     const summary = persistedTask({
-      internal: undefined,
+      internal: null,
       summaryOf: { sourceTaskId: "source" },
     });
 

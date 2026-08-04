@@ -1,6 +1,5 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { EventEmitter } from "node:events";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -9,14 +8,11 @@ import { runCli } from "./cli.js";
 import { parseRequestLine } from "./protocol.js";
 import { createTaskManager, DEFAULT_SUMMARY_MODEL } from "./tasks.js";
 import { resolveWorkspaceRoot } from "./paths.js";
+import { fakeChild } from "./tasks.test-helpers.js";
 
-function fakeChild(pid = 4242) {
-  const child = new EventEmitter();
-  child.pid = pid;
-  child.unref = () => {};
-  child.stdout = new EventEmitter();
-  return child;
-}
+const TASK_ACTIVITY = "task.activity";
+const TASK_STATE = "task.state";
+const ACTIVITY_DIR_PREFIX = "taskferry-activity-test-";
 
 describe("activity snapshots", () => {
   test("keeps bounded narration Unicode-safe when the byte limit cuts through an emoji", () => {
@@ -91,8 +87,7 @@ describe("activity snapshots", () => {
 
 describe("task activity events", () => {
   test("emits state transitions immediately and activity enrichment afterward", async (t) => {
-    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-activity-test-"));
-    t.after(() => fs.rmSync(stateDir, { recursive: true, force: true }));
+    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), ACTIVITY_DIR_PREFIX));
     const child = fakeChild();
     const events = [];
     const manager = createTaskManager({
@@ -104,28 +99,28 @@ describe("task activity events", () => {
       summarizerTimeoutMs: 0,
       onEvent: (event) => events.push(event),
     });
+    t.after(() => { manager.close(); fs.rmSync(stateDir, { recursive: true, force: true }); });
 
     const task = manager.dispatch({ prompt: "Check the server", directory: os.tmpdir() });
     await new Promise((resolve) => setImmediate(resolve));
     assert.deepEqual(events.slice(0, 2).map((event) => [event.type, event.status]), [
-      ["task.state", "queued"],
-      ["task.state", "running"],
+      [TASK_STATE, "queued"],
+      [TASK_STATE, "running"],
     ]);
-    assert.equal(events[2].type, "task.activity");
+    assert.equal(events[2].type, TASK_ACTIVITY);
     assert.equal(events[2].activityVariants["false"].activity, "Check the server");
 
     child.emit("exit", 0, null);
     await new Promise((resolve) => setImmediate(resolve));
-    assert.equal(events.at(-2).type, "task.state");
+    assert.equal(events.at(-2).type, TASK_STATE);
     assert.equal(events.at(-2).status, "done");
-    assert.equal(events.at(-1).type, "task.activity");
+    assert.equal(events.at(-1).type, TASK_ACTIVITY);
     assert.deepEqual(events.map((event) => event.sequence), events.map((event) => event.sequence).sort((a, b) => a - b));
     assert.equal(task.status, "running");
   });
 
   test("refreshes running activity only after 4096 more log bytes", async (t) => {
-    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-activity-test-"));
-    t.after(() => fs.rmSync(stateDir, { recursive: true, force: true }));
+    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), ACTIVITY_DIR_PREFIX));
     const child = fakeChild();
     const events = [];
     const manager = createTaskManager({
@@ -139,23 +134,23 @@ describe("task activity events", () => {
       watchdogPollMs: 5,
       onEvent: (event) => events.push(event),
     });
+    t.after(() => { manager.close(); fs.rmSync(stateDir, { recursive: true, force: true }); });
 
     const task = manager.dispatch({ prompt: "Watch output", directory: os.tmpdir() });
     await new Promise((resolve) => setImmediate(resolve));
-    const before = events.filter((event) => event.type === "task.activity").length;
+    const before = events.filter((event) => event.type === TASK_ACTIVITY).length;
     fs.appendFileSync(task.logPath, "x".repeat(4095));
     await new Promise((resolve) => setTimeout(resolve, 20));
-    assert.equal(events.filter((event) => event.type === "task.activity").length, before);
+    assert.equal(events.filter((event) => event.type === TASK_ACTIVITY).length, before);
 
     fs.appendFileSync(task.logPath, "x");
     await new Promise((resolve) => setTimeout(resolve, 20));
-    assert.equal(events.filter((event) => event.type === "task.activity").length, before + 1);
+    assert.equal(events.filter((event) => event.type === TASK_ACTIVITY).length, before + 1);
     child.emit("exit", 0, null);
   });
 
   test("publishes one internal summary result without exposing the summary job", async (t) => {
-    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-activity-test-"));
-    t.after(() => fs.rmSync(stateDir, { recursive: true, force: true }));
+    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), ACTIVITY_DIR_PREFIX));
     const children = [];
     const events = [];
     const manager = createTaskManager({
@@ -172,10 +167,12 @@ describe("task activity events", () => {
       onEvent: (event) => events.push(event),
       listModelsFn: () => `${DEFAULT_SUMMARY_MODEL}\n`,
     });
+    t.after(() => { manager.close(); fs.rmSync(stateDir, { recursive: true, force: true }); });
     manager.setActivitySummarySubscriptions(1);
 
     const source = manager.dispatch({ prompt: "Inspect the daemon", directory: os.tmpdir() });
     await new Promise((resolve) => setImmediate(resolve));
+    manager.flushPersist();
     const persisted = JSON.parse(fs.readFileSync(manager.paths.TASKS_FILE, "utf8"));
     const summary = persisted.find((task) => task.summaryOf);
     assert.ok(summary);
@@ -191,7 +188,7 @@ describe("task activity events", () => {
     children.find((entry) => entry.summary).child.emit("exit", 0, null);
     await new Promise((resolve) => setImmediate(resolve));
 
-    const activity = events.find((event) => event.type === "task.activity" && event.taskId === source.id);
+    const activity = events.find((event) => event.type === TASK_ACTIVITY && event.taskId === source.id);
     assert.equal(activity.activityVariants["true"].activity, "Inspecting the daemon configuration.");
     assert.equal(events.some((event) => event.taskId === summary.id), false);
     manager.setActivitySummarySubscriptions(0);
@@ -413,7 +410,7 @@ describe("activity summary cache", () => {
     const client = {
       subscribe: async (params, onEvent) => {
         calls.push(params);
-        onEvent({ type: "task.activity", taskId: "oc_ab12", status: "running", activity: "Verifying the server\nwith new env vars via Playwright" });
+        onEvent({ type: TASK_ACTIVITY, taskId: "oc_ab12", status: "running", activity: "Verifying the server\nwith new env vars via Playwright" });
         controller.abort();
       },
       close() {},

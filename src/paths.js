@@ -15,6 +15,7 @@ export const TASKFERRY_PLUMBING_ENV_VARS = Object.freeze([
   "TASKFERRY_RUNTIME_DIR",
   "TASKFERRY_CACHE_DIR",
   "TASKFERRY_SOCKET_PATH",
+  "TASKFERRY_OVERLAY_TMP_DIR",
 ]);
 
 export function resolveStateDir(env = process.env) {
@@ -82,6 +83,18 @@ export function resolveRuntimeDir({
   return path.join(stateDir, "run");
 }
 
+// Plain os.tmpdir() ("/tmp" on Linux) is shared by every taskferry daemon
+// on the host regardless of TASKFERRY_STATE_DIR/RUNTIME_DIR isolation, so a
+// daemon's startup orphan-overlay sweep (tasks.js's sweepOrphanedOverlays())
+// could delete a *different* daemon's in-flight overlay -- see taskferry#286.
+// Scoping under the already-isolated runtime dir (itself keyed off
+// TASKFERRY_RUNTIME_DIR/XDG_RUNTIME_DIR/stateDir) gives every daemon instance
+// its own overlay namespace for free, with TASKFERRY_OVERLAY_TMP_DIR as an
+// explicit escape hatch for callers that want to pin it elsewhere.
+export function resolveOverlayTmpRoot({ env = process.env, runtimeDir = resolveRuntimeDir({ env }) } = {}) {
+  return env.TASKFERRY_OVERLAY_TMP_DIR || path.join(runtimeDir, "overlay");
+}
+
 // Sandboxed workers' data homes (opencode/pi auth + growing caches like
 // opencode's unbounded snapshot store) belong on real disk, not the small
 // XDG_RUNTIME_DIR tmpfs — that dir is meant for transient sockets/locks, and
@@ -91,6 +104,19 @@ export function resolveRuntimeDir({
 export function resolveCacheDir(env = process.env) {
   return env.TASKFERRY_CACHE_DIR
     || path.join(env.XDG_CACHE_HOME || path.join(os.homedir(), ".cache"), "taskferry");
+}
+
+// Symlink-safe, comparing the real (resolved) path against the caller's own
+// module path. A bare path.resolve() compares the symlink path against the
+// real module path, so invoking cli.js or client.js through a symlink (an
+// installed bin entry) never matches and the direct-execution guard never runs.
+/** @param {string} invoked */
+export function resolveInvokedPath(invoked) {
+  try {
+    return fs.realpathSync(invoked);
+  } catch {
+    return path.resolve(invoked);
+  }
 }
 
 // Emitted at most once per directory (not once per process): a startup-time

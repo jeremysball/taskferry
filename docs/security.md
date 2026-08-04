@@ -62,13 +62,31 @@ fails at the worker's own auth/boot step — indistinguishable, from the
 caller's side, from the credential simply being wrong.
 
 `TASKFERRY_ENV_FILE` (or the `envFile` config field; see `docs/config.md`)
-points the daemon at a `.env`-style file to load once at startup and union
-in as the base layer beneath its own ambient environment, so a
+points the daemon at a `.env`-style file, loaded at startup and unioned in
+as the base layer beneath its own ambient environment, so a
 non-interactive caller's dispatch still authenticates correctly even
 though neither the caller's own env nor the daemon's ambient env carries
 the secret. It does not need to duplicate everything already in the
 daemon's ambient environment — only the subset that a non-interactive
 caller would otherwise be missing.
+
+After that initial load, the daemon keeps watching the file and re-applies
+it whenever it changes, so rotating a secret (e.g. re-running a
+`secrets-unlock`-style decrypt-and-replace) reaches every subsequent spawn
+without a daemon restart. This watches the file's *parent directory*,
+filtered by filename, rather than the file itself: a decrypt-and-replace
+rewrite typically goes through `mktemp`+`rename`, which swaps the file's
+inode out from under a watch held on the file directly, but a directory
+watch survives that. Multiple filesystem events from one rewrite are
+coalesced with a short debounce. A reload that fails partway (a partial
+write caught mid-rename, a permission regression, the file briefly
+missing) is logged to stderr and otherwise ignored — the daemon keeps
+serving whatever it last loaded successfully rather than dropping every
+env-file-supplied secret because of one transient read failure. A failure
+to establish the watch in the first place (as opposed to a later reload)
+is likewise logged and non-fatal: the mandatory initial load has already
+succeeded by that point, so the daemon still starts, it just falls back to
+the old restart-required behavior for that one field.
 
 - The file itself must be owner-only (`chmod 600`) — `loadEnvFile()` fails
   daemon startup on any file readable by group or other, the same

@@ -176,9 +176,10 @@ export function subOverlaySlug(targetPath) {
  * @param {object} params
  * @param {string} params.directory
  * @param {{upperDir: string, workDir: string}} params.overlay
- * @param {string} params.stateDir
+ * @param {string} params.stateDir - unused by this function; kept in the options object so the
+ *   shared buildMergedViewBwrapArgs() scaffolding stays symmetric with buildBwrapArgs().
  * @param {string} params.runtimeDir
- * @param {string} params.homeDir
+ * @param {string} params.homeDir - unused by this function; kept for scaffolding symmetry with buildBwrapArgs().
  * @param {string[]} params.denyList
  * @param {string} params.mergedMountPoint
  * @param {boolean} [params.writable] - also rw-bind directory itself, for the apply step (Task 7); omit for
@@ -187,7 +188,7 @@ export function subOverlaySlug(targetPath) {
  *   ancestor) is under /tmp.
  * @returns {string[]}
  */
-export function buildMergedViewBwrapArgs({ directory, overlay, stateDir, runtimeDir, homeDir, denyList, mergedMountPoint, writable = false }) {
+export function buildMergedViewBwrapArgs({ directory, overlay, runtimeDir, denyList, mergedMountPoint, writable = false, stateDir: _stateDir, homeDir: _homeDir }) {
   const args = buildBwrapBaseArgs({ denyList });
   args.push("--dir", mergedMountPoint);
   args.push("--overlay-src", directory, "--overlay", overlay.upperDir, overlay.workDir, mergedMountPoint);
@@ -283,15 +284,66 @@ export function subFilePaths(root, targetPath) {
  */
 export function applyChangeset({ directory, diffPath, isGitTarget, overlay, stateDir, runtimeDir, homeDir, denyList, runCommand = defaultRunCommand }) {
   if (isGitTarget) {
-    const result = runCommand("git", ["-C", directory, "apply", diffPath]);
-    if (result.status === 0) return { applied: true, reason: null };
-    return { applied: false, reason: result.stderr.trim() || result.error?.message || `git apply exited with status ${result.status}` };
+    return applyGitChangeset({ directory, diffPath, runCommand });
   }
-  if (!overlay || stateDir == null || runtimeDir == null || homeDir == null || denyList == null) {
-    throw new Error(
-      "error: non-git changeset apply requires a live overlay, stateDir, runtimeDir, homeDir, and denyList\n" +
-      "help: preserve the pending overlay and retry through taskferry accept with a complete task record"
-    );
+  return applyNonGitChangeset({ directory, overlay, stateDir, runtimeDir, homeDir, denyList, runCommand });
+}
+
+// Shared by the two live-overlay-input guard clauses below (thrown from two
+// places, so lifted to one module constant to keep no-duplicate-string quiet).
+const NON_GIT_APPLY_ERROR =
+  "error: non-git changeset apply requires a live overlay, stateDir, runtimeDir, homeDir, and denyList\n" +
+  "help: preserve the pending overlay and retry through taskferry accept with a complete task record";
+
+/**
+ * Applies a git-target changeset via `git apply`. Mirrors the original
+ * in-place logic; split out so applyChangeset stays under the complexity
+ * budget.
+ * @param {object} params
+ * @param {string} params.directory
+ * @param {string} params.diffPath
+ * @param {typeof defaultRunCommand} params.runCommand
+ * @returns {{applied: boolean, reason: string|null}}
+ */
+function applyGitChangeset({ directory, diffPath, runCommand }) {
+  const result = runCommand("git", ["-C", directory, "apply", diffPath]);
+  if (result.status !== 0) {
+    return { applied: false, reason: gitApplyFailureReason(result) };
+  }
+  return { applied: true, reason: null };
+}
+
+/** @param {{status: number|null, stderr: string, error?: Error}} result */
+function gitApplyFailureReason(result) {
+  if (result.stderr.trim()) return result.stderr.trim();
+  if (result.error?.message) return result.error.message;
+  return `git apply exited with status ${result.status}`;
+}
+
+/**
+ * Applies a non-git-target changeset by rsyncing the merged overlay view
+ * onto directory inside one writable remount. Split out of applyChangeset
+ * (which routes to this or applyGitChangeset) to keep branching shallow.
+ * @param {object} params
+ * @param {string} params.directory
+ * @param {{root: string, upperDir: string, workDir: string}} [params.overlay]
+ * @param {string} [params.stateDir]
+ * @param {string} [params.runtimeDir]
+ * @param {string} [params.homeDir]
+ * @param {string[]} [params.denyList]
+ * @param {typeof defaultRunCommand} params.runCommand
+ * @returns {{applied: boolean, reason: string|null}}
+ */
+function applyNonGitChangeset({ directory, overlay, stateDir, runtimeDir, homeDir, denyList, runCommand }) {
+  // Guard clauses (split so each stays under the expression-complexity cap)
+  // double as the TS narrowing the rsync remount below needs: a missing input
+  // means a partial/tampered task record, which must surface as a hard error
+  // rather than a silent mis-apply.
+  if (stateDir == null || runtimeDir == null || homeDir == null || denyList == null) {
+    throw new Error(NON_GIT_APPLY_ERROR);
+  }
+  if (overlay == null) {
+    throw new Error(NON_GIT_APPLY_ERROR);
   }
   const mergedMountPoint = path.join(overlay.root, "merged");
   const bwrapArgs = buildMergedViewBwrapArgs({ directory, overlay, stateDir, runtimeDir, homeDir, denyList, mergedMountPoint, writable: true });
@@ -303,37 +355,72 @@ export function applyChangeset({ directory, diffPath, isGitTarget, overlay, stat
   // (spec §5.4), so the overlay survives for a second attempt.
   const script = `rsync -a --delete --delay-updates ${shQuote(mergedMountPoint)}/ ${shQuote(directory)}/`;
   const result = runCommand("bwrap", [...bwrapArgs, "--", "sh", "-c", script]);
-  if (result.status === 0) return { applied: true, reason: null };
-  return { applied: false, reason: result.stderr.trim() || `apply copy exited with status ${result.status}` };
+  if (result.status !== 0) {
+    return { applied: false, reason: copyApplyFailureReason(result) };
+  }
+  return { applied: true, reason: null };
+}
+
+/** @param {{status: number|null, stderr: string}} result */
+function copyApplyFailureReason(result) {
+  if (result.stderr.trim()) return result.stderr.trim();
+  return `apply copy exited with status ${result.status}`;
 }
 
 /**
  * Overlay upper/work dirs come back owned by the invoking (daemon's own)
  * uid, not an unmapped namespace one -- bwrap's default --unshare-user
  * identity-maps the outer uid, and nothing in this design passes
- * --uid/--gid. Verified live against the exact buildBwrapArgs() flag set
- * on the target host: overlayfs's internal work/work scratch subdir comes
- * back mode 000, but a plain rm -rf from the same uid still removes it
- * (unlink authority comes from the parent directory's permissions, not the
- * child's own mode). The default rmFn shells out to a real rm -rf via
- * spawnSync("rm", ["-rf", p]) because Node's fs.rmSync calls readdir()
- * on every directory it walks (failing with EACCES on mode-000
- * subdirectories), while a real rm -rf only needs write+execute on the
- * parent. No bwrap wrapper or elevated privilege is needed -- see
- * ADR 0001's corrected "Namespace-owned leftovers" entry.
+ * --uid/--gid. Verified live against the exact buildBwrapArgs() flag set on
+ * the target host: overlayfs's internal work/work scratch subdir comes back
+ * mode 000. An *empty* mode-000 directory is still removable by a same-uid
+ * `rm -rf` (GNU rm's optimistic rmdir() fast path needs only the parent's
+ * permissions), which is the case ADR 0001's "Namespace-owned leftovers"
+ * entry verified -- but once anything was ever deleted inside the overlay,
+ * that scratch dir holds an internal whiteout entry (confirmed live: `sudo
+ * ls -la` on a real leftover showed a mode-000 dir containing a single
+ * char-device entry) and is no longer empty. Removing a *non-empty*
+ * directory forces rm to opendir()/readdir() it first, which does require
+ * read+execute on the directory itself -- mode 000 blocks that, so rm fails
+ * with EACCES partway through and aborts, having already deleted sibling
+ * entries like upper/. That silently strands a task claiming a live overlay
+ * whose upper/ no longer exists (taskferry issue #273: "Can't find source
+ * path .../upper/main"). A same-uid `chmod -R` needs no special permission
+ * on its own targets (only the parent's, to resolve each path), so running
+ * one before rm -rf makes every entry openable regardless of how it landed
+ * in this state. The default rmFn shells out to real `chmod`/`rm` (rather
+ * than Node's fs.chmodSync/fs.rmSync) because fs.rmSync's own directory walk
+ * hits the same EACCES on a not-yet-chmod'd mode-000 entry that rm -rf does.
+ * chmod's own result isn't just discarded on failure: a chmod failure for a
+ * *different* reason than the expected mode-000 case (an immutable flag, a
+ * read-only remount) would otherwise surface only as rm's own opaque
+ * failure, losing the more specific diagnostic chmod's stderr carries.
  * @param {object} params
  * @param {string} params.root
  * @param {string} params.tmpRoot - the overlayTmpRoot the overlay was created under; removal is
  *   refused for any root that isn't a taskferry-cow tree under it (review finding #12 -- defense
  *   in depth against a corrupted/tampered tasks.json pointing rm -rf elsewhere; exploiting it
  *   already requires the daemon's own uid, which is exactly the attacker this feature targets).
+ * @param {typeof spawnSync} [params.spawnFn] - overridable for tests; the default rmFn's chmod/rm
+ *   subprocess calls both run through this.
  * @param {(path: string) => void} [params.rmFn]
  * @returns {{removed: boolean, reason: string|null}}
  */
-export function cleanupOverlay({ root, tmpRoot, rmFn = (p) => {
-    const result = spawnSync("rm", ["-rf", p]);
-    if (result.status !== 0) {
-      throw new Error(`rm -rf ${p} failed: ${(result.stderr || "").toString().trim() || `exit ${result.status}`}`);
+export function cleanupOverlay({ root, tmpRoot, spawnFn = spawnSync, rmFn = (p) => {
+    const chmodResult = spawnFn("chmod", ["-R", "u+rwX", p]);
+    const rmResult = spawnFn("rm", ["-rf", p]);
+    if (rmResult.status !== 0) {
+      let chmodDetail = null;
+      if (chmodResult.status !== 0) {
+        const chmodStderr = (chmodResult.stderr || "").toString().trim();
+        const chmodFallback = `exit ${chmodResult.status}`;
+        chmodDetail = `chmod failed: ${chmodStderr || chmodFallback}`;
+      }
+      const rmStderr = (rmResult.stderr || "").toString().trim();
+      const rmFallback = `exit ${rmResult.status}`;
+      const rmDetail = `rm -rf failed: ${rmStderr || rmFallback}`;
+      const details = [chmodDetail, rmDetail].filter(Boolean).join("; ");
+      throw new Error(details);
     }
   } }) {
   const resolved = path.resolve(root);

@@ -1,11 +1,11 @@
 #!/usr/bin/env node
 
-import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs, UsageError } from "./args.js";
 import { runSetup } from "./setup.js";
+import { resolveInvokedPath } from "./paths.js";
 
 export async function runCli(argv = process.argv.slice(2), {
   io = process,
@@ -29,32 +29,45 @@ export async function runCli(argv = process.argv.slice(2), {
   }
 
   if (parsed.help) {
-    const { writeToon } = await import("./output.js");
-    writeToon(parsed.helpText, io);
-    return { exitCode: 0 };
+    return writeHelp(parsed.helpText, io);
   }
 
   if (parsed.command === "setup") {
-    try {
-      const value = setupFn({
-        checkoutDirectory: path.resolve(path.dirname(fileURLToPath(import.meta.url)), ".."),
-        cliPath: fileURLToPath(import.meta.url),
-        homeDirectory: os.homedir(),
-        env,
-      });
-      const { writeToon } = await import("./output.js");
-      writeToon(value, io);
-      return { exitCode: 0, value };
-    } catch (error) {
-      const { colorize } = await import("./output.js");
-      const message = error instanceof Error ? error.message : String(error);
-      const tty = io.stderr.isTTY;
-      io.stderr.write(`${colorize(`error: ${message}`, "\x1b[31m", tty)}\n`);
-      io.stderr.write(`${colorize("help: fix the reported dependency or filesystem problem, then rerun node src/cli.js setup", "\x1b[2m", tty)}\n`);
-      return { exitCode: 1 };
-    }
+    return runSetupCommand(setupFn, env, io);
   }
 
+  return runDaemonCommand(parsed, { io, cwd, env, executablePath, connectClientFn, signal, runShellCommand, homeDirectory, resolveWorkspaceRootFn });
+}
+
+async function writeHelp(helpText, io) {
+  const { writeToon } = await import("./output.js");
+  writeToon(helpText, io);
+  return { exitCode: 0 };
+}
+
+async function runSetupCommand(setupFn, env, io) {
+  try {
+    const value = setupFn({
+      checkoutDirectory: path.resolve(path.dirname(fileURLToPath(import.meta.url)), ".."),
+      cliPath: fileURLToPath(import.meta.url),
+      homeDirectory: os.homedir(),
+      env,
+    });
+    const { writeToon } = await import("./output.js");
+    writeToon(value, io);
+    return { exitCode: 0, value };
+  } catch (error) {
+    const { colorize } = await import("./output.js");
+    const message = error instanceof Error ? error.message : String(error);
+    const errorLabel = `error: ${message}`;
+    const tty = io.stderr.isTTY;
+    io.stderr.write(`${colorize(errorLabel, "\x1b[31m", tty)}\n`);
+    io.stderr.write(`${colorize("help: fix the reported dependency or filesystem problem, then rerun node src/cli.js setup", "\x1b[2m", tty)}\n`);
+    return { exitCode: 1 };
+  }
+}
+
+async function runDaemonCommand(parsed, { io, cwd, env, executablePath, connectClientFn, signal, runShellCommand, homeDirectory, resolveWorkspaceRootFn }) {
   const [{ runCommand }, { normalizeDirectory, resolveWorkspaceRoot }, { connectClient: defaultConnectClient }, { writeError, writeToon }] = await Promise.all([
     import("./commands.js"),
     import("./paths.js"),
@@ -70,22 +83,8 @@ export async function runCli(argv = process.argv.slice(2), {
       writeToon(await runCommand(parsed.command, parsed.options, { io, cwd }), io);
       return { exitCode: 0 };
     }
-    const watchNeedsTaskIdResolution = parsed.command === "watch" && parsed.options.taskId && !parsed.options.directory;
-    // advisor is grouped with dispatch (literal cwd), not with the
-    // observation commands: tasks.js's advisor() forwards its directory
-    // straight into dispatch(), which uses it as both the bwrap sandbox
-    // root and the worker's spawn cwd -- so widening advisor's default
-    // to the workspace root would silently expand its sandbox from
-    // "the cwd you ran it in" to "the whole repo root".
-    if (parsed.command === "dispatch" || parsed.command === "advisor") {
-      parsed.options.directory = normalizeDirectory(parsed.options.directory || cwd);
-    } else if (parsed.command === "home"
-      || (parsed.command === "watch" && !watchNeedsTaskIdResolution)
-      || parsed.command === "context"
-      || (parsed.command === "list" && !parsed.options.all)) {
-      parsed.options.directory = normalizeDirectory(parsed.options.directory || resolveRoot(cwd));
-    }
-    if ((parsed.command === "dispatch" || parsed.command === "advisor") && parsed.options.prompt === "-") {
+    normalizeCommandDirectory(parsed, normalizeDirectory, cwd, resolveRoot);
+    if (readsPromptFromStdin(parsed)) {
       parsed.options.prompt = await readPromptFromStdin(io.stdin || process.stdin, parsed.command, signal);
     }
     client = await connectClient({ env });
@@ -114,6 +113,27 @@ export async function runCli(argv = process.argv.slice(2), {
       }
     }
   }
+}
+
+function normalizeCommandDirectory(parsed, normalizeDirectory, cwd, resolveRoot) {
+  // advisor shares dispatch's literal cwd because it becomes the sandbox root.
+  if (["dispatch", "advisor"].includes(parsed.command)) {
+    parsed.options.directory = normalizeDirectory(parsed.options.directory || cwd);
+    return;
+  }
+  if (usesWorkspaceRoot(parsed)) {
+    parsed.options.directory = normalizeDirectory(parsed.options.directory || resolveRoot(cwd));
+  }
+}
+
+function usesWorkspaceRoot({ command, options }) {
+  if (["home", "context"].includes(command)) return true;
+  if (command === "watch") return !(options.taskId && !options.directory);
+  return command === "list" && !options.all;
+}
+
+function readsPromptFromStdin({ command, options }) {
+  return ["dispatch", "advisor"].includes(command) && options.prompt === "-";
 }
 
 async function main() {
@@ -169,10 +189,4 @@ async function readPromptFromStdin(stdin, command, signal) {
   return content;
 }
 
-function resolveInvokedPath(invoked) {
-  try {
-    return fs.realpathSync(invoked);
-  } catch {
-    return path.resolve(invoked);
-  }
-}
+

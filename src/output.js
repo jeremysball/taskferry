@@ -66,28 +66,55 @@ function stripPrefix(line, prefix) {
   return line.startsWith(prefix) ? line.slice(prefix.length).trim() : null;
 }
 
+/** @param {unknown} error @param {string|undefined} helpLine */
+function errorHelp(error, helpLine) {
+  if (error && typeof error === "object" && typeof error.help === "string") return error.help;
+  return helpLine || "Retry the command or run `taskferry --help`";
+}
+
+// Single pass over `lines`: finds the first `error:`/`help:` line (if any)
+// and collects every other line as a detail line. Split out of errorValue()
+// so its own branch count stays low.
+function extractErrorParts(lines) {
+  let errorLine;
+  let helpLine;
+  const detailLines = [];
+  for (const line of lines) {
+    const isErrorLine = line.startsWith("error:");
+    const isHelpLine = line.startsWith("help:");
+    if (errorLine === undefined && isErrorLine) errorLine = stripPrefix(line, "error:") || errorLine;
+    if (helpLine === undefined && isHelpLine) helpLine = stripPrefix(line, "help:") || helpLine;
+    if (!isErrorLine && !isHelpLine) detailLines.push(line);
+  }
+  return { errorLine, helpLine, detailLines };
+}
+
 export function errorValue(error) {
   const text = error instanceof Error ? error.message : String(error);
   const lines = text.split("\n");
-  const errorLine = lines.map((line) => stripPrefix(line, "error:")).find(Boolean);
-  const helpLine = lines.map((line) => stripPrefix(line, "help:")).find(Boolean);
-  // Detail lines: any line not matched by `error:` or `help:`. Only folded
-  // in when we found an `error:` line as the primary, so the plain
-  // single-line fallback (no recognized prefixes) keeps returning
-  // `lines[0]` unchanged.
-  const detailLines = errorLine !== undefined
-    ? lines.filter((line) => !line.startsWith("error:") && !line.startsWith("help:"))
-    : [];
+  const { errorLine, helpLine, detailLines } = extractErrorParts(lines);
   const primary = errorLine || lines[0] || "taskferry request failed";
-  const message = detailLines.length ? `${primary}\n${detailLines.join("\n")}` : primary;
-  const help = error && typeof error === "object" && typeof error.help === "string"
-    ? error.help
-    : helpLine || "Retry the command or run `taskferry --help`";
+  // Detail lines only fold in when we found an `error:` line as the primary,
+  // so the plain single-line fallback (no recognized prefixes) keeps
+  // returning `lines[0]` unchanged.
+  const message = errorLine !== undefined && detailLines.length ? `${primary}\n${detailLines.join("\n")}` : primary;
+  const help = errorHelp(error, helpLine);
   return { error: message, help };
 }
 
 export function writeError(error, io = process) {
   writeToon(errorValue(error), io);
+}
+
+/** @param {{id: string, status: string, directory?: string, sessionId?: string}} detail @param {string} id @param {string} status */
+function nextHint(detail, id, status) {
+  if (status === "running" || status === "queued") {
+    return `Run taskferry wait or taskferry status with task id "${id}" to check progress; pass --full for directory/model/log path details`;
+  }
+  if (status === "crashed" && detail.sessionId) {
+    return `Session ${shellQuote(detail.sessionId)} may be salvageable; resume with taskferry dispatch --session-id ${shellQuote(detail.sessionId)} --directory ${shellQuote(detail.directory)} --prompt "<continuation prompt>"`;
+  }
+  return `Run taskferry result with task id "${id}" to see the final message; pass --full here for directory/model/log path details`;
 }
 
 /**
@@ -133,17 +160,15 @@ export function leanStatus(detail, { full = false } = {}) {
   if (timedOut) {
     lean.note = `wait timed out; the task may still be running. Run taskferry wait again to keep waiting, or pass --timeout to set a longer cap`;
   }
-  lean.next = status === "running" || status === "queued"
-    ? `Run taskferry wait or taskferry status with task id "${id}" to check progress; pass --full for directory/model/log path details`
-    : status === "crashed" && detail.sessionId
-      ? `Session ${shellQuote(detail.sessionId)} may be salvageable; resume with taskferry dispatch --session-id ${shellQuote(detail.sessionId)} --directory ${shellQuote(detail.directory)} --prompt "<continuation prompt>"`
-      : `Run taskferry result with task id "${id}" to see the final message; pass --full here for directory/model/log path details`;
+  lean.next = nextHint(detail, id, status);
   return lean;
 }
 
 export function leanResult(detail, { full = false, fields } = {}) {
   if (full || fields) return detail;
-  const { narration: _narration, narrationTruncated: _narrationTruncated, ...rest } = detail;
+  const rest = { ...detail };
+  delete rest.narration;
+  delete rest.narrationTruncated;
   if (detail.narrationTotalChars === undefined) {
     return {
       ...rest,
@@ -166,24 +191,43 @@ function listRow(row) {
   };
 }
 
+// Shared by projectList/projectContext: rows the raw task array down to
+// `limit`, reporting whether anything was cut off.
+function limitTasks(value, limit, defaultLimit) {
+  let rows;
+  if (Array.isArray(value.tasks)) {
+    rows = value.tasks.length ? value.tasks.map(listRow) : "none found in this workspace";
+  } else {
+    rows = value.tasks;
+  }
+  const total = Array.isArray(rows) ? rows.length : 0;
+  const effectiveLimit = limit !== undefined ? limit : defaultLimit;
+  const tasks = Array.isArray(rows) ? rows.slice(0, effectiveLimit) : rows;
+  const truncated = Array.isArray(tasks) && tasks.length < total;
+  return { tasks, truncated, total };
+}
+
+const DEFAULT_LIST_LIMIT = 30;
+
 export function projectList(value, { limit } = {}) {
-  const rows = Array.isArray(value.tasks)
-    ? (value.tasks.length ? value.tasks.map(listRow) : "none found in this workspace")
-    : value.tasks;
+  const { tasks, truncated, total } = limitTasks(value, limit, DEFAULT_LIST_LIMIT);
   return {
     ...(value.directory ? { directory: value.directory } : {}),
     counts: value.counts,
-    tasks: Array.isArray(rows) && limit !== undefined ? rows.slice(0, limit) : rows,
+    tasks,
+    ...(truncated ? { next: [`Run taskferry list --limit ${total} for all ${total} tasks`] } : {}),
   };
 }
 
-export function projectContext(value) {
+const DEFAULT_CONTEXT_LIMIT = 10;
+
+export function projectContext(value, { limit } = {}) {
+  const { tasks, truncated, total } = limitTasks(value, limit, DEFAULT_CONTEXT_LIMIT);
   return {
     directory: value.directory,
     counts: value.counts,
-    tasks: Array.isArray(value.tasks)
-      ? (value.tasks.length ? value.tasks.map(listRow) : "none found in this workspace")
-      : value.tasks,
+    tasks,
+    ...(truncated ? { next: [`Run taskferry list --limit ${total} for all ${total} tasks`] } : {}),
   };
 }
 
@@ -193,16 +237,20 @@ export function homeView(value, { executablePath, workspace }) {
   const displayPath = absolutePath === home || absolutePath.startsWith(`${home}${path.sep}`)
     ? `~${absolutePath.slice(home.length)}`
     : absolutePath;
-  const rows = Array.isArray(value.tasks) ? value.tasks : [];
+  const allRows = Array.isArray(value.tasks) ? value.tasks : [];
+  const total = allRows.length;
+  const rows = allRows.slice(0, DEFAULT_LIST_LIMIT);
+  const truncated = rows.length < total;
+  const next = rows.length
+    ? ["Run taskferry status <id> for activity", "Run taskferry wait <id> to wait for settlement", "Run taskferry result <id> for the final answer"]
+    : ["Run taskferry dispatch --prompt \"<text>\" to start a task", "Run taskferry list --all to inspect every workspace"];
   return {
+    workspace,
     bin: displayPath,
     description: "Manage background OpenCode tasks in the current workspace.",
-    workspace,
     counts: value.counts,
-    tasks: value.tasks,
-    next: rows.length
-      ? ["Run taskferry status <id> for activity", "Run taskferry wait <id> to wait for settlement", "Run taskferry result <id> for the final answer"]
-      : ["Run taskferry dispatch --prompt \"<text>\" to start a task", "Run taskferry list --all to inspect every workspace"],
+    tasks: Array.isArray(value.tasks) ? rows : value.tasks,
+    next: truncated ? [...next, `Run taskferry list --limit ${total} for all ${total} tasks`] : next,
   };
 }
 

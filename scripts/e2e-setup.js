@@ -56,9 +56,9 @@ try {
   console.log(JSON.stringify({
     binLink,
     resolved,
-    version: value,
-    pluginPath: pluginLink,
     pluginResolved,
+    pluginPath: pluginLink,
+    version: value,
   }, null, 2));
   console.log("E2E PASS: setup-service-installed symlink produces real CLI output");
 } catch (error) {

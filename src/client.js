@@ -6,13 +6,15 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { withFileLock } from "./state-lock.js";
 import { PROTOCOL_VERSION, encodeMessage } from "./protocol.js";
+import { MAX_BUFFER_BYTES } from "./daemon-server.js";
 import { loadConfig } from "./config.js";
 import { isObject } from "./numbers.js";
-import { resolveRuntimeDir, resolveStateDir } from "./paths.js";
+import { resolveRuntimeDir, resolveStateDir, resolveInvokedPath } from "./paths.js";
 import { errCode } from "./errors.js";
 
 const DAEMON_ENTRY = fileURLToPath(new URL("./daemon.js", import.meta.url));
 const CLIENT_ENTRY = fileURLToPath(import.meta.url);
+const SOCKET_FILENAME = "daemon.sock";
 
 const HEALTH_PROBE = String.raw`
 const net = require("node:net");
@@ -101,7 +103,7 @@ export async function startDaemonBooter({
   env = process.env,
   stateDir = resolveStateDir(env),
   runtimeDir = resolveRuntimeDir({ env, stateDir }),
-  socketPath = env.TASKFERRY_SOCKET_PATH || path.join(runtimeDir, "daemon.sock"),
+  socketPath = env.TASKFERRY_SOCKET_PATH || path.join(runtimeDir, SOCKET_FILENAME),
   spawnBooterFn = spawnDaemonBooter,
 } = {}) {
   try {
@@ -117,7 +119,7 @@ export function ensureDaemonStarted({
   env = process.env,
   stateDir = resolveStateDir(env),
   runtimeDir = resolveRuntimeDir({ env, stateDir }),
-  socketPath = env.TASKFERRY_SOCKET_PATH || path.join(runtimeDir, "daemon.sock"),
+  socketPath = env.TASKFERRY_SOCKET_PATH || path.join(runtimeDir, SOCKET_FILENAME),
   startupTimeoutMs = 5000,
   retryDelayMs = 25,
   withLockFn = withFileLock,
@@ -179,69 +181,79 @@ class DaemonClient {
       }
       const line = this.buffer.slice(0, newline);
       this.buffer = this.buffer.slice(newline + 1);
-      if (!line) continue;
-      let message;
-      try {
-        message = JSON.parse(line);
-      } catch {
-        this.failAll(new Error("taskferry daemon sent malformed JSON"));
-        this.socket.destroy();
-        return;
-      }
-      if (!isObject(message)) {
-        this.protocolFailure("taskferry daemon sent an invalid daemon message");
-        return;
-      }
-      if (message.version !== PROTOCOL_VERSION) {
-        this.protocolFailure(`taskferry daemon sent unsupported protocol version: ${String(message.version)}`);
-        return;
-      }
-      if (message.type === "shutdown") {
-        this.shutdownReason = message.reason === "restart" ? "restart" : "shutdown";
-        continue;
-      }
-      if (message.type === "event") {
-        if (!isExactObject(message, ["version", "type", "subscriptionId", "event"])
-          || typeof message.subscriptionId !== "string"
-          || !message.subscriptionId
-          || !isObject(message.event)) {
-          this.protocolFailure("taskferry daemon sent an invalid event envelope");
-          return;
-        }
-        const handler = this.eventHandlers.get(message.subscriptionId);
-        if (handler) handler(message.event);
-        else {
-          const queuedCount = Array.from(this.queuedEvents.values()).reduce((count, events) => count + events.length, 0);
-          if (queuedCount >= this.maxQueuedEvents) {
-            this.protocolFailure("taskferry daemon exceeded the queued event limit");
-            return;
-          }
-          const queued = this.queuedEvents.get(message.subscriptionId) || [];
-          queued.push(message.event);
-          this.queuedEvents.set(message.subscriptionId, queued);
-        }
-        continue;
-      }
-      const responseKeys = message.ok === true
-        ? ["version", "id", "ok", "result"]
-        : ["version", "id", "ok", "error"];
-      if (!isExactObject(message, responseKeys)
-        || typeof message.id !== "string"
-        || typeof message.ok !== "boolean"
-        || (message.ok === false && !validError(message.error))) {
-        this.protocolFailure("taskferry daemon sent an invalid response envelope");
-        return;
-      }
-      const pending = this.pending.get(message.id);
-      if (!pending) continue;
-      this.pending.delete(message.id);
-      if (message.ok === true) pending.resolve(message.result);
-      else {
-        const error = new Error(`${message.error?.message || "daemon request failed"}\nhelp: ${message.error?.help || "retry the request"}`);
-        error.code = message.error?.code || "REQUEST_FAILED";
-        pending.reject(error);
-      }
+      if (line && !this.consumeFrame(line)) return;
     }
+  }
+
+  // Process a single newline-delimited frame. Returns false when the connection
+  // must be torn down (malformed/protocol-invalid data), true to keep reading.
+  consumeFrame(line) {
+    if (!line) return true;
+    let message;
+    try {
+      message = JSON.parse(line);
+    } catch {
+      this.failAll(new Error("taskferry daemon sent malformed JSON"));
+      this.socket.destroy();
+      return false;
+    }
+    if (!isObject(message)) {
+      this.protocolFailure("taskferry daemon sent an invalid daemon message");
+      return false;
+    }
+    if (message.version !== PROTOCOL_VERSION) {
+      this.protocolFailure(`taskferry daemon sent unsupported protocol version: ${String(message.version)}`);
+      return false;
+    }
+    if (message.type === "shutdown") {
+      this.shutdownReason = message.reason === "restart" ? "restart" : "shutdown";
+      return true;
+    }
+    if (message.type === "event") return this.consumeEvent(message);
+    return this.consumeResponse(message);
+  }
+
+  consumeEvent(message) {
+    if (!isExactObject(message, ["version", "type", "subscriptionId", "event"])
+      || typeof message.subscriptionId !== "string"
+      || !message.subscriptionId
+      || !isObject(message.event)) {
+      this.protocolFailure("taskferry daemon sent an invalid event envelope");
+      return false;
+    }
+    const handler = this.eventHandlers.get(message.subscriptionId);
+    if (handler) {
+      handler(message.event);
+      return true;
+    }
+    const queuedCount = Array.from(this.queuedEvents.values()).reduce((count, events) => count + events.length, 0);
+    if (queuedCount >= this.maxQueuedEvents) {
+      this.protocolFailure("taskferry daemon exceeded the queued event limit");
+      return false;
+    }
+    const queued = this.queuedEvents.get(message.subscriptionId) || [];
+    queued.push(message.event);
+    this.queuedEvents.set(message.subscriptionId, queued);
+    return true;
+  }
+
+  consumeResponse(message) {
+    const responseKeys = message.ok === true
+      ? ["version", "id", "ok", "result"]
+      : ["version", "id", "ok", "error"];
+    if (!isValidResponseEnvelope(message, responseKeys)) {
+      this.protocolFailure("taskferry daemon sent an invalid response envelope");
+      return false;
+    }
+    const pending = this.pending.get(message.id);
+    if (!pending) return true;
+    this.pending.delete(message.id);
+    if (message.ok === true) {
+      pending.resolve(message.result);
+    } else {
+      pending.reject(buildRequestError(message.error));
+    }
+    return true;
   }
 
   protocolFailure(message) {
@@ -293,6 +305,21 @@ function validError(error) {
     && typeof error.help === "string";
 }
 
+function isValidResponseEnvelope(message, responseKeys) {
+  if (!isExactObject(message, responseKeys)
+    || typeof message.id !== "string"
+    || typeof message.ok !== "boolean") {
+    return false;
+  }
+  return !(message.ok === false && !validError(message.error));
+}
+
+function buildRequestError(error) {
+  const err = new Error(`${error?.message || "daemon request failed"}\nhelp: ${error?.help || "retry the request"}`);
+  err.code = error?.code || "REQUEST_FAILED";
+  return err;
+}
+
 async function openClient(socketPath, clientOptions) {
   const socket = net.createConnection(socketPath);
   const client = new DaemonClient(socket, clientOptions);
@@ -307,11 +334,49 @@ function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+// Read a daemon diagnostic file, tolerating a missing file (ENOENT) as "no
+// diagnostics". Any other read error is real and must propagate.
+function readStartupDiagnostic(file) {
+  try {
+    return fs.readFileSync(file, "utf8").trim();
+  } catch (err) {
+    if (errCode(err) !== "ENOENT") throw err;
+    return undefined;
+  }
+}
+
+// Capture both startup diagnostics, but read the stderr log only when
+// bootError is absent: the booter subprocess failed at import time, before
+// reaching the try/catch that writes bootError above.
+function readStartupDiagnostics(runtimeDir) {
+  const bootError = readStartupDiagnostic(bootErrorPath(runtimeDir));
+  const bootStderr = bootError ? "" : readStartupDiagnostic(bootStderrPath(runtimeDir));
+  return { bootError, bootStderr };
+}
+
+// Retry connecting to the socket until the deadline passes. Returns the first
+// successful client, or { client: null, lastError } on timeout.
+async function retryOpenClient(socketPath, clientOptions, retryDelayMs, deadline) {
+  let lastError;
+  do {
+    try {
+      return { client: await openClient(socketPath, clientOptions) };
+    } catch (error) {
+      lastError = error;
+      await delay(retryDelayMs);
+    }
+  } while (Date.now() < deadline);
+  return { client: null, lastError };
+}
+
+// Resolve the connect-time defaults, then delegate to the core connection
+// logic (kept as a separate function so the default-heavy signature doesn't
+// inflate its cyclomatic complexity).
 export async function connectClient({
   env = process.env,
   stateDir = resolveStateDir(env),
   runtimeDir = resolveRuntimeDir({ env, stateDir }),
-  socketPath = env.TASKFERRY_SOCKET_PATH || path.join(runtimeDir, "daemon.sock"),
+  socketPath = env.TASKFERRY_SOCKET_PATH || path.join(runtimeDir, SOCKET_FILENAME),
   // General-purpose escape hatch: a caller can set TASKFERRY_AUTO_START=0 to
   // fail fast on a missing daemon instead of spawning one (e.g. a script that
   // should never have side effects). Not needed for lock safety — the
@@ -321,11 +386,21 @@ export async function connectClient({
   autoStart = env.TASKFERRY_AUTO_START !== "0",
   startupTimeoutMs = 5000,
   retryDelayMs = 25,
-  maxBufferBytes = 1024 * 1024,
+  maxBufferBytes = MAX_BUFFER_BYTES,
   maxQueuedEvents = 1000,
   ensureDaemonFn = startDaemonBooter,
   ...startupOptions
 } = {}) {
+  return connectClientCore({
+    env, stateDir, runtimeDir, socketPath, autoStart, startupTimeoutMs,
+    retryDelayMs, maxBufferBytes, maxQueuedEvents, ensureDaemonFn, startupOptions,
+  });
+}
+
+async function connectClientCore({
+  env, stateDir, runtimeDir, socketPath, autoStart, startupTimeoutMs,
+  retryDelayMs, maxBufferBytes, maxQueuedEvents, ensureDaemonFn, startupOptions,
+}) {
   const clientOptions = { maxBufferBytes, maxQueuedEvents };
   try {
     return await openClient(socketPath, clientOptions);
@@ -333,61 +408,18 @@ export async function connectClient({
     if (!autoStart) throw error;
   }
 
-  await ensureDaemonFn({
-    env,
-    stateDir,
-    runtimeDir,
-    socketPath,
-    startupTimeoutMs,
-    retryDelayMs,
-    ...startupOptions,
-  });
+  await ensureDaemonFn({ env, stateDir, runtimeDir, socketPath, startupTimeoutMs, retryDelayMs, ...startupOptions });
   const deadline = Date.now() + startupTimeoutMs;
-  let lastError;
-  do {
-    try {
-      return await openClient(socketPath, clientOptions);
-    } catch (error) {
-      lastError = error;
-      await delay(retryDelayMs);
-    }
-  } while (Date.now() < deadline);
+  const { client, lastError } = await retryOpenClient(socketPath, clientOptions, retryDelayMs, deadline);
+  if (client) return client;
 
-  let bootError;
-  try {
-    bootError = fs.readFileSync(bootErrorPath(runtimeDir), "utf8").trim();
-  } catch (err) {
-    if (errCode(err) !== "ENOENT") throw err;
-  }
-  // Read the stderr log only when bootError is absent: the booter subprocess
-  // failed at import time, before reaching the try/catch that writes
-  // bootError above.
-  let bootStderr;
-  if (!bootError) {
-    try {
-      bootStderr = fs.readFileSync(bootStderrPath(runtimeDir), "utf8").trim();
-    } catch (err) {
-      if (errCode(err) !== "ENOENT") throw err;
-    }
-  }
+  const { bootError, bootStderr } = readStartupDiagnostics(runtimeDir);
   throw new Error(
     `error: taskferry daemon did not become ready within ${startupTimeoutMs}ms: ${lastError?.message || "connection failed"}\n`
     + (bootError ? `daemon boot failed: ${bootError}\n` : "")
     + (bootStderr ? `booter subprocess failed before startup: ${bootStderr}\n` : "")
     + `help: check ${runtimeDir} permissions and daemon startup diagnostics, then retry`
   );
-}
-
-// Symlink-safe, matching cli.js's own resolveInvokedPath. A bare path.resolve()
-// compares the symlink path against the real module path, so invoking
-// client.js through a symlink (an installed bin entry) never matches and the
-// booter never runs.
-function resolveInvokedPath(invoked) {
-  try {
-    return fs.realpathSync(invoked);
-  } catch {
-    return path.resolve(invoked);
-  }
 }
 
 if (process.argv[1] && resolveInvokedPath(process.argv[1]) === fileURLToPath(import.meta.url)) {

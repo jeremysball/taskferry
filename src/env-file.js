@@ -1,6 +1,7 @@
 import fs from "node:fs";
+import path from "node:path";
 
-const KEY_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
+const KEY_RE = /^[A-Za-z_]\w*$/;
 
 /**
  * Strips a single layer of matching quotes from a raw value, unescaping
@@ -20,17 +21,48 @@ const KEY_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
  * @returns {string}
  */
 function unquote(raw, sourcePath, lineNo) {
-  const opensWith = raw[0] === '"' || raw[0] === "'";
-  if (opensWith && (raw.length < 2 || raw[raw.length - 1] !== raw[0])) {
-    throw new Error(`error: ${sourcePath}:${lineNo}: unterminated ${raw[0] === '"' ? "double" : "single"}-quoted value\nhelp: close the quote, or remove the leading quote character if it wasn't meant to open one`);
+  const quoteChar = raw[0];
+  const opensWith = quoteChar === '"' || quoteChar === "'";
+  if (!opensWith) return raw;
+
+  const closesQuote = raw.length >= 2 && raw[raw.length - 1] === quoteChar;
+  if (!closesQuote) {
+    const quoteKind = quoteChar === '"' ? "double" : "single";
+    throw new Error(`error: ${sourcePath}:${lineNo}: unterminated ${quoteKind}-quoted value\nhelp: close the quote, or remove the leading quote character if it wasn't meant to open one`);
   }
-  if (raw.length >= 2 && raw[0] === '"' && raw[raw.length - 1] === '"') {
-    return raw.slice(1, -1).replace(/\\(["\\])/g, "$1");
+
+  const inner = raw.slice(1, -1);
+  return quoteChar === '"' ? inner.replace(/\\(["\\])/g, "$1") : inner;
+}
+
+/**
+ * Parses one non-blank, non-comment env-file line into a `[name, value]`
+ * pair, or returns `null` for a line the caller should skip.
+ * @param {string} trimmed
+ * @param {string} sourcePath
+ * @param {number} lineNo
+ * @returns {[string, string]}
+ */
+function parseEnvFileLine(trimmed, sourcePath, lineNo) {
+  const withoutExport = trimmed.startsWith("export ") ? trimmed.slice("export ".length).trimStart() : trimmed;
+  const eq = withoutExport.indexOf("=");
+  if (eq === -1) {
+    // Deliberately omits the line's own content from the message: this
+    // file exists to hold secrets, and a malformed line's content
+    // (e.g. a bare API key pasted without "NAME=") must never end up
+    // embedded in an Error whose .message this same module's caller
+    // (tasks.js's createTaskManager()) lets propagate into
+    // daemon-boot.err -- a file callers/cron routinely capture into
+    // their own logs on a boot failure. Naming the line number is
+    // enough to fix the file without echoing its contents anywhere.
+    throw new Error(`error: ${sourcePath}:${lineNo}: expected NAME=VALUE (line has no '=')\nhelp: each non-comment, non-blank line must be "NAME=VALUE" (optionally prefixed with "export ")`);
   }
-  if (raw.length >= 2 && raw[0] === "'" && raw[raw.length - 1] === "'") {
-    return raw.slice(1, -1);
+  const name = withoutExport.slice(0, eq).trim();
+  const rawValue = withoutExport.slice(eq + 1).trim();
+  if (!KEY_RE.test(name)) {
+    throw new Error(`error: ${sourcePath}:${lineNo}: invalid env var name ${JSON.stringify(name)}\nhelp: names must match [A-Za-z_][A-Za-z0-9_]*`);
   }
-  return raw;
+  return [name, unquote(rawValue, sourcePath, lineNo)];
 }
 
 /**
@@ -61,29 +93,10 @@ export function parseEnvFile(text, sourcePath = "<env file>") {
   const result = {};
   const lines = text.split(/\r?\n/);
   for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
-    const trimmed = line.trim();
+    const trimmed = lines[i].trim();
     if (trimmed === "" || trimmed.startsWith("#")) continue;
-
-    const withoutExport = trimmed.startsWith("export ") ? trimmed.slice("export ".length).trimStart() : trimmed;
-    const eq = withoutExport.indexOf("=");
-    if (eq === -1) {
-      // Deliberately omits the line's own content from the message: this
-      // file exists to hold secrets, and a malformed line's content
-      // (e.g. a bare API key pasted without "NAME=") must never end up
-      // embedded in an Error whose .message this same module's caller
-      // (tasks.js's createTaskManager()) lets propagate into
-      // daemon-boot.err -- a file callers/cron routinely capture into
-      // their own logs on a boot failure. Naming the line number is
-      // enough to fix the file without echoing its contents anywhere.
-      throw new Error(`error: ${sourcePath}:${i + 1}: expected NAME=VALUE (line has no '=')\nhelp: each non-comment, non-blank line must be "NAME=VALUE" (optionally prefixed with "export ")`);
-    }
-    const name = withoutExport.slice(0, eq).trim();
-    const rawValue = withoutExport.slice(eq + 1).trim();
-    if (!KEY_RE.test(name)) {
-      throw new Error(`error: ${sourcePath}:${i + 1}: invalid env var name ${JSON.stringify(name)}\nhelp: names must match [A-Za-z_][A-Za-z0-9_]*`);
-    }
-    result[name] = unquote(rawValue, sourcePath, i + 1);
+    const [name, value] = parseEnvFileLine(trimmed, sourcePath, i + 1);
+    result[name] = value;
   }
   return result;
 }
@@ -120,4 +133,77 @@ export function loadEnvFile(filePath, { readFileFn = fs.readFileSync, statFn = f
     throw new Error(`error: ${filePath} is readable by group or other (mode ${(stat.mode & 0o777).toString(8)})\nhelp: chmod 600 ${filePath}`);
   }
   return parseEnvFile(raw, filePath);
+}
+
+/**
+ * Re-applies `loadEnvFileFn(filePath)` whenever the file changes, so a
+ * secret rotated after daemon startup (e.g. a `secrets-unlock`-style
+ * decrypt-and-replace) reaches spawned children without a daemon restart.
+ * Does *not* perform the required initial load itself -- callers are
+ * expected to have already called `loadEnvFile(filePath)` once (that's
+ * what surfaces a missing/misconfigured path as the hard daemon-startup
+ * error `docs/config.md` documents) before calling this, so this function
+ * can assume the directory already exists and doesn't need a fallback for
+ * watching a not-yet-created one.
+ *
+ * Watches the parent directory rather than the file itself, filtered by
+ * filename: a decrypt-and-replace rewrite goes through mktemp+rename,
+ * which swaps the file's inode out from under a direct watch on it, but a
+ * directory watch survives that. Multiple filesystem events from one
+ * rewrite are coalesced with a short debounce.
+ *
+ * A reload that fails (a transient partial write caught mid-rename, a
+ * permission regression, the file removed) is reported via `onError` and
+ * otherwise ignored -- the caller keeps whatever `onReload` last gave it,
+ * since a live daemon dropping every secret because the file was briefly
+ * unreadable is worse than serving one more request with a
+ * stale-but-valid value.
+ *
+ * @param {string} filePath
+ * @param {object} options
+ * @param {(vars: Record<string, string>) => void} options.onReload
+ * @param {(error: Error) => void} [options.onError]
+ * @param {number} [options.debounceMs]
+ * @param {typeof fs.watch} [options.watchFn]
+ * @param {(path: string) => Record<string, string>} [options.loadEnvFileFn]
+ * @returns {{close: () => void}}
+ */
+export function watchEnvFile(filePath, { onReload, onError = () => {}, debounceMs = 100, watchFn = fs.watch, loadEnvFileFn = loadEnvFile }) {
+  const dir = path.dirname(filePath);
+  const fileName = path.basename(filePath);
+  /** @type {ReturnType<typeof setTimeout>} */
+  let debounceTimer;
+  let closed = false;
+
+  const reload = () => {
+    if (closed) return;
+    // Deliberately split apart rather than `onReload(loadEnvFileFn(...))`
+    // inlined behind a try -- keeping the fallible read and the
+    // side-effecting callback on separate lines makes it obvious neither
+    // one is accidentally skipped by short-circuiting, the failure mode
+    // that bit an earlier optional-chained version of this same pattern.
+    let vars;
+    try {
+      vars = loadEnvFileFn(filePath);
+    } catch (error) {
+      onError(error instanceof Error ? error : new Error(String(error)));
+      return;
+    }
+    onReload(vars);
+  };
+
+  const watcher = watchFn(dir, (_eventType, changedName) => {
+    if (closed || (changedName && changedName !== fileName)) return;
+    clearTimeout(debounceTimer);
+    debounceTimer = setTimeout(reload, debounceMs);
+  });
+  watcher.on("error", (error) => { if (!closed) onError(error); });
+
+  return {
+    close: () => {
+      closed = true;
+      clearTimeout(debounceTimer);
+      watcher.close();
+    },
+  };
 }

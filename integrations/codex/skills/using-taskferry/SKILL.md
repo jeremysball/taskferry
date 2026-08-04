@@ -619,6 +619,28 @@ onto the correct worktree branch, then `git revert` it in the wrong
 location to remove it — never a hard reset there, since that could disturb
 unrelated pre-existing dirty state in that checkout.
 
+## `/tmp` paths are invisible inside the sandbox by default
+
+Every sandboxed dispatch mounts a fresh, empty `--tmpfs /tmp`. If you point a
+dispatch at a scratch file you saved under `/tmp` (a diff, a prompt, any
+input the worker's supposed to read) without also passing `--allowed-dirs`
+for that path, the file doesn't exist from the worker's point of view —
+even though it's right there on the host. Pass the containing directory via
+`--allowed-dirs /tmp/your-scratch-dir` any time a dispatch needs to read
+something under `/tmp` that isn't already the dispatch's `--directory`.
+
+This bit once with a batch of code-review dispatches pointed at diff files
+saved under `/tmp/pr-reviews/pr-<N>.diff`: none of the finders could read
+them, and instead of reporting the read failure, each one silently
+reconstructed the diff itself with `git diff main...HEAD` in its own
+worktree. For PRs stacked on another open PR's branch, that reconstruction
+pulled in the whole underlying stack and produced findings that didn't
+belong to the PR under review — with no error, no `incomplete: true`, just
+a `done`/`exitCode: 0` task that quietly answered a different question than
+the one asked (taskferry#211). If a worker's report describes reading a
+specific `/tmp` path you gave it, and the content it echoes back doesn't
+match what you saved there, suspect this before suspecting the model.
+
 ## Codex Installation And Hooks
 
 Registering the taskferry checkout as a Codex marketplace (see

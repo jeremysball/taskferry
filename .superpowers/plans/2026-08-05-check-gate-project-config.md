@@ -4,7 +4,7 @@
 
 **Goal:** Repos declare one check command in `.taskferry.toml`; taskferry tells every worker to run it, then runs it itself at settle as the gate that decides whether a changeset is acceptable.
 
-**Architecture:** A new `.taskferry.toml` (TOML, project-root, read fresh per dispatch/spawn/settle via an mtime cache) supplies `check`, `check_timeout_seconds`, `read_only_paths`. Dispatch-time: the check command is appended to the worker's prompt and `read_only_paths` become extra `--ro-bind`s. Settle-time (right after changeset extraction, only when real changes exist): a new async "gate" spawns `bwrap` over the *same* copy-on-write overlay the worker ran with and runs the check command there, recording `checkStatus`/`checkCommand`/`checkExitCode`/`checkOutputTail`/timestamps on the task. `accept` refuses a `failed`/`timeout`/`interrupted`/`running` gate unless `--force` (which records `checkOverride: true`); `reject` is always allowed. A new `--parent-task` dispatch flag links fix-round dispatches to the gate failure that provoked them. `taskferry init` scaffolds the file from ecosystem detection.
+**Architecture:** A new `.taskferry.toml` (TOML, project-root, read fresh per dispatch/spawn/settle via an mtime cache) supplies `check`, `check_timeout_seconds`, `read_only_paths`. Dispatch-time: the check command is appended to the worker's prompt and `read_only_paths` become extra `--ro-bind`s. Settle-time (right after changeset extraction, only when real changes exist over a git-tracked target): a new async "gate" spawns `bwrap` over the *same* copy-on-write overlay the worker ran with and runs the check command there, recording `checkStatus`/`checkCommand`/`checkExitCode`/`checkOutputTail`/timestamps on the task. (Non-git / overlay-only targets deliberately skip the gate: `applyNonGitChangeset` rsyncs the merged overlay onto the real directory on accept, so gate side effects would land on the real tree too — these targets get no verification gate at all, and `checkStatus` stays at its default `"none"`.) `accept` refuses a `failed`/`timeout`/`interrupted`/`running` gate unless `--force` (which records `checkOverride: true`, including for `running` overrides); `reject` is always allowed. A new `--parent-task` dispatch flag links fix-round dispatches to the gate failure that provoked them. `taskferry init` scaffolds the file from ecosystem detection.
 
 **Tech Stack:** Node.js (ESM), `node:child_process` (`spawn`), `node:test`, `smol-toml` (new dependency) for TOML parsing, `bwrap` (bubblewrap) for the sandboxed/overlay spawn.
 
@@ -13,8 +13,10 @@
 - No manifest parsing at runtime, ever, outside `taskferry init` (package.json/pyproject.toml/go.mod/Cargo.toml sniffing lives only there).
 - `.taskferry.toml` is read fresh (mtime-cached, never long-lived-cached) at three independent points in a task's lifecycle: dispatch build (prompt injection), spawn (`read_only_paths`), settle (the gate's check command/timeout) — per the design's "Read per dispatch and per settle."
 - taskferry never creates `.taskferry.toml` on its own outside `taskferry init`, and `init` never overwrites an existing file.
-- The gate only ever runs for a `role: "dispatch"` task that produced a real changeset over a live overlay (`task.overlayDirs` set, `changesetStatus` about to become `"pending"`). Advisor dispatches and `--no-overlay` dispatches never get prompt injection or a gate — there is no isolated tree to gate against.
-- No new subcommands, no auto-dispatch of fix rounds, no CLI flag for `read_only_paths`, no doctor fleet-health surfacing (a later spec/plan) — all listed as this spec's explicit non-goals.
+- The gate only ever runs for a `role: "dispatch"` task that produced a real changeset over a live overlay mounted on a git-tracked directory (`task.overlayDirs` set, `task.preDispatchHead != null`, `changesetStatus` about to become `"pending"`). Advisor dispatches and `--no-overlay` dispatches never get prompt injection or a gate — there is no isolated tree to gate against. Non-git (`--no-overlay` / overlay-only) dispatches also do not run a gate, even with a live overlay: `applyNonGitChangeset` (`src/changeset.js:433-445`) rsyncs the entire merged overlay view onto the real directory on accept, so any gate side effects (test caches, build artifacts) the gate wrote into the overlay's `upper` would land on the real tree too. For these targets, `checkStatus` stays at its default `"none"` and the CLI-side "no gate ran" warning (Task 6 Step 5) tells the user that's why nothing was verified. Per-task doctor-context surfacing the design's error table calls for is deferred with the rest of the doctor fleet-health work (out of scope for this plan; see "Doctor surfacing gap" note below).
+- No new subcommands beyond `init` (Task 8) — `init` is one of the spec's stated goals, every other new command is explicitly out of scope. No auto-dispatch of fix rounds, no CLI flag for `read_only_paths`, no doctor fleet-health surfacing (a later spec/plan) — all listed as this spec's explicit non-goals.
+
+**Doctor surfacing gap (explicit deviation from the spec).** The design's "Error handling summary" table requires "loud warning in status **and doctor context**" / "surfaced as a task warning **and in doctor**" for `.taskferry.toml` issues — but the spec's own non-goals section says "the doctor fleet-health spec consumes these; this spec does not build any doctor surface." That is a genuine contradiction between the spec's error table and its non-goals, and the per-task doctor-context wiring called for by the error table is **deliberately deferred** along with the rest of doctor fleet-health work, out of scope for this plan. The error table's "loud warning in status" requirement is still met: `status --full` and `checkStatus` / `projectConfigWarning` carry the value to the user; the doctor-context aggregation is what the next spec builds. This is a documentation-only reconciliation, not a missing implementation, and it should not be read as an oversight when the next spec reader compares the two.
 - Every new/changed function keeps this repo's existing test-injection convention: dependencies (`spawnFn`, `existsFn`, `statFn`, `persistTask`, etc.) are passed in via a `ctx`/options object with real defaults, never called as bare globals, so tests can fake them without touching the filesystem or spawning real processes.
 - Follow this repo's JSDoc-typed-JS style (`@param`/`@returns` blocks, no TypeScript syntax in `.js` files) on every new exported function, matching the surrounding code.
 
@@ -319,7 +321,7 @@ git commit -m "feat(config): add .taskferry.toml loader (project-config.js)"
 This task adds every new field and every new flag end-to-end, following the exact same wiring pattern the existing `--class`/`class` field already uses (confirmed at `src/args.js:211`, `src/commands.js:149,290`, `src/tasks.js:1671,1700,2445,4918`). No gate behavior yet — Task 5/6 add that. This task is independently testable: the fields round-trip through dispatch/status/result with default (empty) values, and `--parent-task`/`--force` parse and forward correctly.
 
 **Interfaces:**
-- Produces: `Task.checkStatus: "none"|"running"|"passed"|"failed"|"timeout"|"interrupted"`, `Task.checkCommand: string|null`, `Task.checkExitCode: number|null`, `Task.checkOutputTail: string|null`, `Task.checkStartedAt: string|null`, `Task.checkEndedAt: string|null`, `Task.checkOverride: boolean`, `Task.projectConfigWarning: string|null`, `Task.parentTaskId: string|null`. `buildDispatchTask(params)` accepts `parentTaskId` in its params object. `acceptTaskChangeset(taskId, { force }, ctx)` — note the added second positional options argument (was `acceptTaskChangeset(taskId, ctx)`; every caller must update). Task 5's gate runner and Task 6's accept-gating both consume these fields by name — do not rename any of them once this task lands.
+- Produces: `Task.checkStatus: "none"|"running"|"passed"|"failed"|"timeout"|"interrupted"`, `Task.checkCommand: string|null`, `Task.checkExitCode: number|null`, `Task.checkOutputTail: string|null`, `Task.checkStartedAt: string|null`, `Task.checkEndedAt: string|null`, `Task.checkOverride: boolean`, `Task.projectConfigWarning: string|null`, `Task.parentTaskId: string|null`, `Task.checkGatePid: number|null` (set by Task 5's gate runner, cleared when the gate settles). `buildDispatchTask(params)` accepts `parentTaskId` in its params object. `acceptTaskChangeset(taskId, { force }, ctx)` — note the added second positional options argument (was `acceptTaskChangeset(taskId, ctx)`; every caller must update). Task 5's gate runner and Task 6's accept-gating both consume these fields by name — do not rename any of them once this task lands.
 
 - [ ] **Step 1: Extend the Task/TaskSummary typedefs**
 
@@ -335,7 +337,10 @@ In `src/tasks.js`, in the `Task` typedef block (ends `* @property {string|null} 
  * @property {string|null} [checkEndedAt]
  * @property {boolean} [checkOverride]
  * @property {string|null} [projectConfigWarning]
+ * @property {number|null} [checkGatePid]
 ```
+
+(`checkGatePid` is the OS pid of the bwrap child currently running the gate. Persisted alongside `checkStatus: "running"` for the in-flight gate so a concurrent `accept`/`reject` can target the right process with `ctx.sendSignal(checkGatePid, "SIGTERM")` before the overlay is released out from under it. Cleared alongside `checkStatus` in `startCheckGate`'s `settle()` and `error` handlers.)
 
 Make the identical addition to the `TaskSummary` typedef block (ends the same way, around line 95), and add the always-surfaced subset to `ResultDetail` (ends `* @property {string|null} [changesetError]` around line 163):
 
@@ -371,6 +376,7 @@ and its return object gains, right after the existing `changesetError: null,` li
     checkEndedAt: null,
     checkOverride: false,
     projectConfigWarning: null,
+    checkGatePid: null,
 ```
 
 - [ ] **Step 3: Thread `parentTaskId` through `dispatchTask`**
@@ -489,7 +495,9 @@ In `src/command-specs.js`'s `dispatch.options`, add after `"--class <name>": ...
       "--parent-task <id>": "tag this dispatch as fixing/retrying an earlier task; persisted as parentTaskId, and echoed by that task's check-gate failure message",
 ```
 
-and one new dispatch example: `'taskferry dispatch --prompt "Fix: check gate failed" --parent-task oc_msgabc12'`. Make the identical `--parent-task <id>` addition to `advisor.options`. In `accept`, change `options: {}` to:
+and one new dispatch example: `'taskferry dispatch --prompt "Fix: check gate failed" --parent-task oc_msgabc12'`. Make the identical `--parent-task <id>` addition to `advisor.options`. The design's §6 only asks for `--parent-task` on `dispatch` (the gate's suggested fix-forward command is itself a `taskferry dispatch ... --parent-task ...`), but exposing it on `advisor` too is a deliberate, useful extra: a review-fix round that uses the advisor role to read the failing task's output and re-prompt a new dispatch can tag itself with `--parent-task` and the link survives into the dashboard, which is exactly the cross-role lineage metric the spec's "retry chains" telemetry section wants. (Documenting this as intentional rather than silent out-of-scope overshoot.)
+
+In `accept`, change `options: {}` to:
 
 ```js
     options: { "--force": "apply the changeset even though its check gate failed, timed out, is still running, or was interrupted by a daemon restart; records checkOverride: true" },
@@ -522,19 +530,49 @@ In `src/daemon.js`'s `invokeHandlers`, change:
 In `src/tasks.js`, change every `accept:` binding that currently reads `accept: (taskId) => acceptTaskChangeset(taskId, {...})` (the `ctx.helpers.accept`-style closure ~line 3399, and the public API's `accept: (taskId) => ctx.helpers.accept(taskId)` ~line 3491) to thread a second `options` argument through:
 
 ```js
-    accept: (taskId, options) => acceptTaskChangeset(taskId, options, { ensureStateLoaded: () => ctx.helpers.ensureStateLoaded(), tasks: ctx.maps.tasks, existsFn: ctx.opts.existsFn, hasLiveOverlay: (task) => ctx.helpers.hasLiveOverlay(task), stateDir: ctx.opts.stateDir, runtimeDir: ctx.opts.runtimeDir, sandboxDenylist: ctx.opts.sandboxDenylist, runOverlayCommandFn: ctx.opts.runOverlayCommandFn, overlaySleepFn: ctx.opts.overlaySleepFn, persistTask: (taskId2) => ctx.helpers.persistTask(taskId2), releaseOverlay: (task) => ctx.env.releaseOverlay(task), noSuchTask }),
+    accept: (taskId, options) => acceptTaskChangeset(taskId, options, { ensureStateLoaded: () => ctx.helpers.ensureStateLoaded(), tasks: ctx.maps.tasks, existsFn: ctx.opts.existsFn, hasLiveOverlay: (task) => ctx.helpers.hasLiveOverlay(task), stateDir: ctx.opts.stateDir, runtimeDir: ctx.opts.runtimeDir, sandboxDenylist: ctx.opts.sandboxDenylist, runOverlayCommandFn: ctx.opts.runOverlayCommandFn, overlaySleepFn: ctx.opts.overlaySleepFn, persistTask: (taskId2) => ctx.helpers.persistTask(taskId2), releaseOverlay: (task) => ctx.env.releaseOverlay(task), sendSignal: (pid, signal) => ctx.helpers.sendSignal(pid, signal), noSuchTask }),
 ```
+
+(`sendSignal` is threaded here — even though Task 2 doesn't consume it — so Task 6 Step 4's in-flight-gate kill handshake can `ctx.sendSignal(task.checkGatePid, "SIGTERM")` without Task 6 having to re-edit the factory binding. Task 6 only adds the matching `sendSignal` entry to `acceptTaskChangeset`'s `@param` typedef and the `sendSignal` entry to the `reject:` factory binding's typedef/component.)
 
 ```js
     accept: (taskId, options) => ctx.helpers.accept(taskId, options),
 ```
 
-`acceptTaskChangeset`'s own signature change (`function acceptTaskChangeset(taskId, { force = false } = {}, ctx)`) and its use of `force` are Task 6's job — this task only needs the extra parameter to thread through cleanly with `force` unused (accepted and ignored) so the plumbing is provably correct before behavior lands on top of it.
+And update the `reject:` factory binding at the same scope (~line 3404) to thread `sendSignal` through. `rejectTaskChangeset`'s signature stays `rejectTaskChangeset(taskId, ctx)` (no `force` needed — `reject` is always allowed regardless of `checkStatus` per the design's §4), but the `ctx` object needs `sendSignal` so Task 6's in-flight-gate kill handshake can fire without Task 6 having to re-edit the binding:
+
+```js
+    reject: (taskId) => rejectTaskChangeset(taskId, { ensureStateLoaded: () => ctx.helpers.ensureStateLoaded(), tasks: ctx.maps.tasks, persistTask: (taskId) => ctx.helpers.persistTask(taskId), releaseOverlay: (task) => ctx.env.releaseOverlay(task), sendSignal: (pid, signal) => ctx.helpers.sendSignal(pid, signal), noSuchTask }),
+```
+
+The public-API `reject: (taskId) => ctx.helpers.reject(taskId)` binding at ~line 3496 needs no changes — it just delegates to the helpers closure above.
+
+And update `acceptTaskChangeset`'s own signature at `src/tasks.js:4536` from `function acceptTaskChangeset(taskId, ctx)` to `function acceptTaskChangeset(taskId, { force = false } = {}, ctx)` so the new positional `options` parameter (the `force` flag) lands in the function body — and is simply unused until Task 6 starts consuming it. This is the literal plumbing the caller bindings demand; threading a new positional `options` through every caller while leaving the function's own signature at the old 2-arg shape would land `options` in the `ctx` slot of `acceptTaskChangeset`, and `ctx.ensureStateLoaded()` would throw on every accept (`undefined` is not callable). The signature change must land atomically with the caller-binding changes in this step, so the unit suite run below proves the plumbing is correct as its own commit before any gating behavior builds on top. (Task 6 does not touch this signature declaration — it only adds the `validateAcceptable` `force` branch, the `buildCheckGateFailureMessage` helper, and `checkOverride` recording on top of the `{ force = false }` parameter Task 2 already landed.)
+
+- [ ] **Step 9b: Surface `checkStatus` (when not `"none"`) and `projectConfigWarning` (when set) in `leanStatus`**
+
+Without this, plain `taskferry status <id>` (no `--full`) reports nothing useful about a gate that just started or a parse error — the design requires `checkStatus: running` visible from gate start (per the design's §2 "checkStatus ... is visible from the moment the gate starts"), and Task 6's "check gate still running" error message points the user at `taskferry status <id>` for progress, which currently shows nothing (`leanStatus` in `src/output.js:144-169` is an allow-list projection that omits both fields entirely). Add this alongside the existing `changesetStatus`/`changesetError` project in the same function:
+
+```js
+  if (detail.checkStatus && detail.checkStatus !== "none") {
+    lean.checkStatus = detail.checkStatus;
+    lean.checkCommand = detail.checkCommand;
+    lean.checkExitCode = detail.checkExitCode;
+    lean.checkStartedAt = detail.checkStartedAt;
+    lean.checkEndedAt = detail.checkEndedAt;
+    if (detail.checkOverride) lean.checkOverride = true;
+  }
+  if (detail.projectConfigWarning) lean.projectConfigWarning = detail.projectConfigWarning;
+```
+
+(Place these right after the existing `if (detail.changesetError) lean.changesetError = detail.changesetError;` line, matching that line's exact pattern. `checkOutputTail` is intentionally left out of the lean projection — same large-payload reasoning as `Task 4` Step 4's `summarizeOptionalFields` / `Task 2` Step 4 below — it stays available via `taskferry result <id> --fields checkOutputTail` / `--full`.) Add a matching case to `src/output.test.js` (or wherever `leanStatus`'s existing tests live) verifying both: a task with `checkStatus: "running"` and a tasks with `projectConfigWarning` set both surface on the lean projection, and a task with `checkStatus: "none"` (the default) does not.
 
 - [ ] **Step 10: Run the full suite and commit**
 
-Run: `env -u TASKFERRY_CHILD node --test src/args.test.js src/commands.test.js src/protocol.test.js src/daemon.test.js src/tasks.dispatch.test.js`
-Expected: PASS (existing tests exercise dispatch/accept/result already; none of this task's changes should break them since every new field defaults to a neutral value and every new param is optional).
+This task changes the *signature* of `acceptTaskChangeset` (Step 9 below), so the unit tests that exercise the accept path — `src/tasks.lifecycle.test.js`, `src/tasks.changeset.test.js`, `src/tasks.persist.test.js`, `src/commands.test.js`, `src/cli.test.js`, `src/daemon.test.js` — must run alongside the dispatch/args/protocol tests, not be deferred to Task 6. Running the narrowed subset here would land a signature change without proving it doesn't break the accept path, and Task 6's own "is anything in accept's plumbing broken?" check would then be running against the same broken build.
+
+Run: `npm run test:unit`
+Expected: PASS (every existing test, plus all of this task's new cases — the new fields default to neutral values, every new param is optional, and the `acceptTaskChangeset(taskId, { force = false } = {}, ctx)` signature accepts either old-style `acceptTaskChangeset(taskId, ctx)` callsites OR new-style `acceptTaskChangeset(taskId, options, ctx)` callsites, because the optional options object has a default of `{}`).
 
 ```bash
 git add -A
@@ -744,8 +782,8 @@ git commit -m "feat(sandbox): bind .taskferry.toml read_only_paths read-only"
 This is the core of the spec. The gate spawns the project's declared check command inside the *same* bwrap overlay mount the worker ran with (`task.overlayDirs`), asynchronously, with a timeout, and records the outcome. It never blocks the daemon's event loop — everything here is event-driven, following `spawnTaskChild`'s existing async spawn pattern (`src/tasks.js:1220-1296`), never `runOverlayCommandFn`'s synchronous `spawnSync` pattern used by extraction itself.
 
 **Interfaces:**
-- Consumes: `task.overlayDirs: {upperDir, workDir, rwBinds, rwFileBinds}` (set by `assembleBwrapSpawn`, Task 5 reads it, never writes it), `loadProjectConfig` (Task 1), `buildBwrapArgs`/`defaultDenyList`/`platformSupportsSandbox` (already imported in `tasks.js` from `./sandbox.js`), Task 2's `task.checkStatus`/`checkCommand`/`checkExitCode`/`checkOutputTail`/`checkStartedAt`/`checkEndedAt`/`projectConfigWarning` fields.
-- Produces: `startCheckGate(task: Task, ctx): void` — fire-and-forget, called exactly once from `extractChangesetForTaskRecord`. Task 6's accept/reject gating consumes the `checkStatus` values this function writes (`"running"|"passed"|"failed"|"timeout"`) — do not introduce a different status string without updating Task 6 to match. Task 7's interrupted-gate sweep consumes the `"running"` status specifically as the signal that a gate was in flight when the daemon died.
+- Consumes: `task.overlayDirs: {upperDir, workDir, rwBinds, rwFileBinds}` (set by `assembleBwrapSpawn`, Task 5 reads it, never writes it), `loadProjectConfig` (Task 1), `buildBwrapArgs`/`defaultDenyList`/`platformSupportsSandbox` (already imported in `tasks.js` from `./sandbox.js`), Task 2's `task.checkStatus`/`checkCommand`/`checkExitCode`/`checkOutputTail`/`checkStartedAt`/`checkEndedAt`/`projectConfigWarning`/`checkGatePid` fields.
+- Produces: `startCheckGate(task: Task, ctx): void` — fire-and-forget, called exactly once from `extractChangesetForTaskRecord` (and only for git-tracked targets, per the `isGitTarget` gate in Step 4 below). Task 6's accept/reject gating consumes the `checkStatus` values this function writes (`"running"|"passed"|"failed"|"timeout"`) — do not introduce a different status string without updating Task 6 to match. Task 6's in-flight-gate kill handshake also consumes `task.checkGatePid` (set here, cleared in `settle()`/`error`) to target the running bwrap child with `ctx.sendSignal(checkGatePid, "SIGTERM")` before `releaseOverlay` reclaims the overlay. Task 7's interrupted-gate sweep consumes the `"running"` status specifically as the signal that a gate was in flight when the daemon died, AND re-invokes `startCheckGate` on the same task if the overlay is still live (per the design's "the gate is re-runnable" promise).
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -875,11 +913,19 @@ Expected: FAIL (`startCheckGate` doesn't exist, no second spawn ever happens).
 Add these module-level constants near the other `DEFAULT_*` constants (~line 1298):
 
 ```js
-const DEFAULT_CHECK_TIMEOUT_SECONDS = 900;
 // SIGTERM -> SIGKILL grace on a timed-out gate, matching cancel()'s own
 // default cancelGraceMs (src/args.js's --grace-ms default).
 const CHECK_GATE_KILL_GRACE_MS = 5000;
+// Cap on the gate's combined stdout+stderr buffer. Appended chunks that
+// would push `output` past this cap are not rejected outright (a gate is
+// not attacker-controlled input, unlike a client request body); instead
+// the buffer is trimmed from the front so it stays under the cap, keeping
+// the last N bytes of a chatty test suite and bounding the daemon's
+// heap regardless of how long the gate runs.
+const CHECK_GATE_OUTPUT_CAP_BYTES = 256 * 1024;
 ```
+
+(There is intentionally no `DEFAULT_CHECK_TIMEOUT_SECONDS` constant here — the real default lives in `project-config.js` (`DEFAULT_CHECK_TIMEOUT_SECONDS = 900`), is already resolved into `projectConfig.checkTimeoutSeconds` by `loadProjectConfig`, and is what `startCheckGate` reads from. Re-declaring it here would be an unused `no-unused-vars` lint trip and a second source of truth.)
 
 Add this helper near `extractChangesetForTaskRecord` (~line 4293), and the gate runner itself right after it:
 
@@ -897,6 +943,24 @@ function lastLines(text, n = 40) {
 }
 
 /**
+ * Appends a chunk to the gate's combined stdout+stderr buffer, trimming from
+ * the front when the buffer would otherwise exceed CHECK_GATE_OUTPUT_CAP_BYTES.
+ * A chatty test suite (e.g. tsc emitting a type error per line, vitest
+ * repeating the verbose reporter per file) would otherwise grow the daemon's
+ * heap unbounded for up to checkTimeoutSeconds. `tail` is severed
+ * byte-exact so a UTF-8 multi-byte sequence straddling the cut point is
+ * discarded rather than reported as a malformed tail -- the resulting
+ * `checkOutputTail` is a debug aid, not a contractual view.
+ * @param {string} tail
+ * @param {Buffer|string} chunk
+ */
+function appendBoundedOutput(tail, chunk) {
+  const next = tail + (typeof chunk === "string" ? chunk : chunk.toString("utf8"));
+  if (next.length <= CHECK_GATE_OUTPUT_CAP_BYTES) return next;
+  return next.slice(next.length - CHECK_GATE_OUTPUT_CAP_BYTES);
+}
+
+/**
  * Starts the verification gate for a task whose changeset just extracted
  * with real changes: spawns the project's declared check command inside the
  * SAME bwrap overlay mount the worker ran with (task.overlayDirs), so gate
@@ -907,10 +971,11 @@ function lastLines(text, n = 40) {
  * a check command can run up to checkTimeoutSeconds (default 900s) and must
  * never block the daemon's event loop. No-ops (leaves checkStatus at
  * buildDispatchTask's "none" default) when there's no overlay, the task
- * isn't a dispatch-role task, the platform can't sandbox, or the project
- * declares no check command -- there is no isolated tree to gate against
- * without an overlay, per the design's non-goal "Gating --no-overlay
- * dispatches."
+ * isn't a dispatch-role task, the platform can't sandbox, the task isn't
+ * a git-target dispatch (no `preDispatchHead` -> nothing git-tracked to
+ * verify against; see Step 4), or the project declares no check command --
+ * there is no isolated tree to gate against without an overlay, per the
+ * design's non-goal "Gating --no-overlay / non-git dispatches."
  * @param {Task} task
  * @param {{spawnFn: typeof import("node:child_process").spawn, stateDir: string, runtimeDir: string, existsFn: (p: string) => boolean, sandboxDenylist: string[], persistTask: (taskId: string) => void, scheduleActivity: (task: Task, options?: {force?: boolean}) => Promise<unknown>, sendSignal: (pid: number, signal: NodeJS.Signals) => void, platform: NodeJS.Platform}} ctx
  */
@@ -942,12 +1007,48 @@ function startCheckGate(task, ctx) {
   task.checkOutputTail = null;
   task.checkStartedAt = new Date().toISOString();
   task.checkEndedAt = null;
+  task.checkGatePid = null;
   ctx.persistTask(task.id);
   void ctx.scheduleActivity(task, { force: true });
 
+  // Strip every TASKFERRY_* env var from the daemon's ambient before handing
+  // it to the gate's bwrap child. This is the narrowest fix for the #292
+  // leak class when the daemon itself was auto-started by a dispatched ferry
+  // (the daemon's ambient carries TASKFERRY_CHILD=1, and a repo's gate
+  // command -- e.g. `npm test` -- sees that and branches on it). The gate
+  // is an internal spawn, not a dispatched worker, so it doesn't need the
+  // envFileVars/caller-denylist machinery sanitizedEnvironment applies to a
+  // dispatch's payload env; a per-key filter is sufficient and local to this
+  // function.
+  const gateEnv = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith("TASKFERRY_")));
+
   let output = "";
   let timedOut = false;
-  const child = ctx.spawnFn("bwrap", spawnArgs, { cwd: task.directory, stdio: ["ignore", "pipe", "pipe"] });
+  // Node can emit both `error` and `exit` for the same child (e.g. ENOENT
+  // on a missing binary fires `error` then `exit` with code null). Without
+  // this guard, both paths would independently call settle() and double-
+  // persist / double-fire scheduleActivity. The closure variable is set on
+  // first entry and skipped thereafter.
+  let settled = false;
+  let child;
+  try {
+    child = ctx.spawnFn("bwrap", spawnArgs, { cwd: task.directory, env: gateEnv, stdio: ["ignore", "pipe", "pipe"] });
+  } catch (err) {
+    // A synchronous throw (e.g. `bwrap` binary missing) would otherwise
+    // escape startCheckGate entirely, leaving the task stuck on
+    // checkStatus: "running" forever. Mirror the async `error` handler's
+    // field values so the persisted record is the same shape.
+    task.checkStatus = "failed";
+    task.checkExitCode = null;
+    task.checkOutputTail = `spawn error: ${errMessage(err)}`;
+    task.checkEndedAt = new Date().toISOString();
+    task.checkGatePid = null;
+    ctx.persistTask(task.id);
+    void ctx.scheduleActivity(task, { force: true });
+    return;
+  }
+  task.checkGatePid = child.pid ?? null;
+  ctx.persistTask(task.id);
 
   const timer = setTimeout(() => {
     timedOut = true;
@@ -959,16 +1060,29 @@ function startCheckGate(task, ctx) {
   }, projectConfig.checkTimeoutSeconds * 1000);
   timer.unref();
 
-  child.stdout?.on("data", (chunk) => { output += chunk; });
-  child.stderr?.on("data", (chunk) => { output += chunk; });
+  child.stdout?.on("data", (chunk) => { output = appendBoundedOutput(output, chunk); });
+  child.stderr?.on("data", (chunk) => { output = appendBoundedOutput(output, chunk); });
 
   /** @param {"passed"|"failed"|"timeout"} status @param {number|null} exitCode */
   const settle = (status, exitCode) => {
+    if (settled) return;
+    settled = true;
     clearTimeout(timer);
+    // A gate that finishes after an accept/reject already settled the task
+    // (changesetStatus moved off "pending") must NOT overwrite the
+    // already-decided outcome. The accept/reject path is responsible for
+    // killing the in-flight gate before releasing the overlay (Task 6
+    // wires `ctx.sendSignal(task.checkGatePid, "SIGTERM")` into
+    // acceptTaskChangeset/rejectTaskChangeset before each one's
+    // releaseOverlay() call); this guard is the right side of that
+    // handshake -- it preserves the decided outcome even if the kill
+    // arrived during/after the child's exit handler.
+    if (task.changesetStatus !== "pending") return;
     task.checkStatus = status;
     task.checkExitCode = exitCode;
     task.checkOutputTail = lastLines(output);
     task.checkEndedAt = new Date().toISOString();
+    task.checkGatePid = null;
     ctx.persistTask(task.id);
     void ctx.scheduleActivity(task, { force: true });
   };
@@ -979,16 +1093,21 @@ function startCheckGate(task, ctx) {
     settle(code === 0 ? "passed" : "failed", code);
   });
   child.on("error", (err) => {
+    if (settled) return;
+    settled = true;
     clearTimeout(timer);
     task.checkStatus = "failed";
     task.checkExitCode = null;
     task.checkOutputTail = `spawn error: ${errMessage(err)}`;
     task.checkEndedAt = new Date().toISOString();
+    task.checkGatePid = null;
     ctx.persistTask(task.id);
     void ctx.scheduleActivity(task, { force: true });
   });
 }
 ```
+
+(A note on `sendSignal` for the kill: it ultimately calls `sendSignalToProcess` (`src/tasks.js:4174`), which first tries `killFn(-pid, signal)` -- a process-group signal. The gate child is NOT spawned `detached`, so its PGID is the same as the daemon's PGID (not its own), and the group-kill attempt therefore fails harmlessly with `ESRCH` -- the OS reports "no process group with that id". The function then falls back to a plain-pid SIGTERM, which is sufficient for the gate specifically because bwrap's own `--unshare-pid` namespace teardown kills every process inside the sandbox once the top-level bwrap process dies. That's not literally the same mechanism `cancel()` uses (cancel's child is in its own process group and gets a real group kill), but the end-result is the same: every process inside the sandbox dies. Don't "fix" this into a group-kill by spawning the gate `detached: true`; that would defeat the daemon's existing shutdown semantics and isn't needed for the gate's actual kill requirement.)
 
 Add the import at the top of `src/tasks.js` (extend the existing `./project-config.js` import from Task 3):
 
@@ -1013,9 +1132,11 @@ to:
 ```js
   } else if (extracted.hasChanges) {
     finishedTask.changesetStatus = "pending";
-    ctx.startCheckGate(finishedTask);
+    if (isGitTarget) ctx.startCheckGate(finishedTask);
   } else {
 ```
+
+(`isGitTarget = finishedTask.preDispatchHead != null` is already computed in this function's scope, just above where the gate wiring goes; the gate is itself git-only, because for a non-git / overlay-only target the gate's `bwrap` overlay mount is the same `merged` view that `applyNonGitChangeset` (`src/changeset.js:433-445`) will rsync onto the real directory on accept -- so anything the gate wrote into the overlay's `upper` (test caches, build artifacts, generated `.tsbuildinfo`) would land on the real tree too, exactly the kind of contamination the gate is supposed to prevent. Skipping the gate for non-git targets matches the design's overlay-only non-goal reasoning and means overlay-only tasks get no verification gate at all. `checkStatus` stays at its default `"none"` for those tasks, and the `none` warning in `runAccept` (Task 6 Step 5) tells the user that's why no gate ran.)
 
 Add `startCheckGate` to `extractChangesetForTaskRecord`'s own `ctx` JSDoc param type (the block above its signature, ~line 4299): append `, startCheckGate: (task: Task) => void` to the object type.
 
@@ -1060,8 +1181,8 @@ git commit -m "feat(tasks): run the .taskferry.toml check command as a settle-ti
 - Test: `src/tasks.changeset.test.js`, `src/commands.test.js` (add new cases)
 
 **Interfaces:**
-- Consumes: `task.checkStatus`/`checkCommand`/`checkExitCode`/`checkOutputTail` (Task 5), `force` param threaded through in Task 2.
-- Produces: `task.checkOverride: true` when `--force` overrides a blocking gate status — nothing downstream consumes this yet beyond what Task 2 already surfaces in `summarize()`/`computeResultDetail()`.
+- Consumes: `task.checkStatus`/`checkCommand`/`checkExitCode`/`checkOutputTail`/`checkGatePid` (Task 5), `force` param threaded through in Task 2, `ctx.sendSignal` threaded through in this task's Step 4.
+- Produces: `task.checkOverride: true` when `--force` overrides a blocking gate status (including `running`) — nothing downstream consumes this yet beyond what Task 2 already surfaces in `summarize()`/`computeResultDetail()`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1093,6 +1214,33 @@ test("accept on a passed or absent (checkStatus 'none') gate needs no --force", 
 test("reject is always allowed regardless of checkStatus, even without --force", () => {
   // checkStatus: "failed", mgr.reject(id) succeeds with no force option at all.
 });
+
+test("reject while the gate is still running kills the gate first and doesn't crash/corrupt the task", () => {
+  // Arrange a task with checkStatus: "running" and a stubbed checkGatePid
+  // pointing at a fake child that records every sendSignal call. Call
+  // mgr.reject(id) and assert (a) ctx.sendSignal was called with the
+  // recorded fake pid and "SIGTERM" before releaseOverlay ran, (b) the
+  // task records changesetStatus: "rejected" and the rejected state
+  // doesn't itself re-emit the running checkStatus as the final value --
+  // the task's in-memory checkStatus may still be "running" right at the
+  // moment of reject (the gate's exit handler is racing), but the task's
+  // persisted checkStatus was last written by settle() and is overwritten
+  // by neither reject nor releaseOverlay (a deliberate non-decision: the
+  // gate's own settle()-side guard `if (task.changesetStatus !==
+  // "pending") return;` is what protects the rejected status from being
+  // clobbered by a late-arriving gate exit).
+});
+
+test("a gate that settles after a reject is a no-op (task stays 'rejected', checkStatus unchanged from whatever it was when reject killed it)", () => {
+  // After mgr.reject(id) has killed the gate, fire the fake child's
+  // `exit` handler with code 0 and assert: the task's persisted
+  // changesetStatus is still "rejected", checkOverride is NOT set on a
+  // reject (override is accept-side only), and scheduleActivity was
+  // NOT called again on the late exit. This is the test that proves
+  // Task 5's `settled` closure AND the `if (task.changesetStatus !==
+  // "pending") return;` guard inside settle() together prevent a
+  // late-arriving gate exit from clobbering the rejected outcome.
+});
 ```
 
 Write these against whatever this test file's real task-construction helpers actually look like (read the file first) rather than inventing new scaffolding — the point of each test is the assertion on `validateAcceptable`'s new branch, not how the task got into a `checkStatus`-carrying state.
@@ -1111,13 +1259,24 @@ Add near `validateAcceptable` (~line 2558) in `src/tasks.js`:
  * Builds the fix-forward error message for a check-gate-blocked accept, per
  * the design's §5. `--force` is always offered as the escape hatch; the
  * resume command prefers --session-id when the worker's session survived,
- * falling back to a fresh --directory dispatch otherwise.
+ * falling back to a fresh --directory dispatch otherwise. The "interrupted"
+ * branch is the one the design's "the gate is re-runnable" promise cares
+ * about: a daemon crash mid-gate marks the task as "interrupted" on the
+ * next boot, and the next daemon restart re-runs the gate automatically
+ * whenever the overlay survives (Task 7). Render "interrupted" as a
+ * re-run notice instead of the dead-looking `exit: null` the generic
+ * `exit: ${task.checkExitCode}` line would otherwise produce, so the user
+ * doesn't see a null exit and assume the gate's run is salvageable as-is.
  * @param {Task} task
  * @returns {string}
  */
 function buildCheckGateFailureMessage(task) {
   const commandLine = `  command: ${task.checkCommand} (from .taskferry.toml)`;
-  const exitLine = task.checkStatus === "timeout" ? "  timed out" : `  exit: ${task.checkExitCode}`;
+  const exitLine = task.checkStatus === "timeout"
+    ? "  timed out"
+    : task.checkStatus === "interrupted"
+      ? "  interrupted: the daemon died with this gate in flight; the gate will re-run automatically on the next daemon restart"
+      : `  exit: ${task.checkExitCode}`;
   const outputTail = task.checkOutputTail
     ? `\n  output tail:\n${task.checkOutputTail.split("\n").map((line) => `    ${line}`).join("\n")}`
     : "";
@@ -1171,27 +1330,53 @@ function validateAcceptable(task, { force = false, ...ctx }) {
 
 (Only the new `!force` block and the `force = false` destructuring default are additions; every existing branch above is unchanged — shown in full so the diff is unambiguous about exact insertion order relative to the existing checks.)
 
-- [ ] **Step 4: Thread `force` and `checkOverride` through `acceptTaskChangeset`**
+- [ ] **Step 4: Wire `force` into `validateAcceptable` and `checkOverride` into `acceptTaskChangeset`**
 
-Change its signature and the `validateAcceptable` call site (~line 4536):
+The signature change (`function acceptTaskChangeset(taskId, { force = false } = {}, ctx)`) and the `validateAcceptable(task, { force, ... })` call site already landed in Task 2 — this task only adds the gating *behavior* on top of them. Verify before editing: `acceptTaskChangeset`'s declared signature (around `src/tasks.js:4536`) already reads `function acceptTaskChangeset(taskId, { force = false } = {}, ctx)` and the existing `validateAcceptable(task, { existsFn: ctx.existsFn, hasLiveOverlay: ctx.hasLiveOverlay })` call already exists at the top of its body. If Task 2's commit did not land both, undo and fix Task 2 first rather than redoing it here.
 
 ```js
 function acceptTaskChangeset(taskId, { force = false } = {}, ctx) {
+  // Signature already landed in Task 2 -- this task only fills in the
+  // behavior on top of the { force = false } parameter.
   ctx.ensureStateLoaded();
   const task = ctx.tasks.get(taskId);
   if (!task) throw ctx.noSuchTask(taskId);
   const isGitTarget = validateAcceptable(task, { force, existsFn: ctx.existsFn, hasLiveOverlay: ctx.hasLiveOverlay });
 ```
 
+(`validateAcceptable` already threw — or `force` already skipped the gate refusal — before any field write, so by the time we reach the apply step the gate is either settled or we explicitly chose to override it. The running-gate handshake below is the remaining case: a non-`--force` accept never gets here on a running gate because `validateAcceptable` refused; a `--force` accept explicitly chose to override and now has to kill the in-flight child before `releaseOverlay` (the next call) reclaims the overlay out from under it. The kill is best-effort: if the child already exited between validation and here, `checkGatePid` may be `null` and the `sendSignal` call is skipped; if the child is mid-write into the overlay, the SIGTERM races the chmod/rm but `--unshare-pid` namespace teardown plus the bwrap process death guarantees no further writes land.)
+
+Then immediately before the existing `applyChangeset(...)` call (which uses the overlay's `merged` view), insert the in-flight-gate kill handshake:
+
+```js
+  if (task.checkStatus === "running" && task.checkGatePid != null) {
+    ctx.sendSignal(task.checkGatePid, "SIGTERM");
+  }
+```
+
+This requires `sendSignal` to be threaded into `acceptTaskChangeset`'s `ctx` object. Update the `@param` typedef on `acceptTaskChangeset` (the JSDoc block above its signature, ~line 4533) to add `sendSignal: (pid: number, signal: NodeJS.Signals) => void` to the object type; then update the `accept:` factory binding in Task 2 Step 9 to thread `sendSignal: (pid, signal) => ctx.helpers.sendSignal(pid, signal)` through, the same way Task 2 already threads `sendSignal` into the `cancel:` factory binding (matching `cancelTask`'s own use of `ctx.sendSignal`).
+
 and right after `task.changesetStatus = "accepted";`, add:
 
 ```js
-  if (force && (task.checkStatus === "failed" || task.checkStatus === "timeout" || task.checkStatus === "interrupted")) {
+  if (force && (task.checkStatus === "failed" || task.checkStatus === "timeout" || task.checkStatus === "interrupted" || task.checkStatus === "running")) {
     task.checkOverride = true;
   }
 ```
 
+(`"running"` is included so a `--force` accept over an in-flight gate is correctly recorded as an override — matching the `--force` help text Task 2 Step 7 already promises, "covers... is still running.")
+
 before the existing `ctx.persistTask(task.id);` call that follows it, so the override is captured in the same persisted snapshot as the acceptance.
+
+Make the identical in-flight-gate kill handshake change to `rejectTaskChangeset` (`src/tasks.js:4589`): immediately before its `ctx.persistTask(task.id);` call, add:
+
+```js
+  if (task.checkStatus === "running" && task.checkGatePid != null) {
+    ctx.sendSignal(task.checkGatePid, "SIGTERM");
+  }
+```
+
+(`reject` is always allowed regardless of `checkStatus` (per the design's §4 "reject is always allowed"), but the kill handshake still applies — `releaseOverlay` reclaims the overlay out from under any in-flight gate just the same as `accept` does. `reject` is the path the user takes when the gate refuses and they don't want to fix-forward, so the gate must be torn down cleanly: otherwise the bwrap child continues writing into the overlay's `upper` even after `releaseOverlay` chmods/`rm -rf`s it.) This requires `sendSignal` to be threaded into `rejectTaskChangeset`'s `ctx` too — update its `@param` typedef (the JSDoc block above its signature, ~line 4586) to add `sendSignal: (pid: number, signal: NodeJS.Signals) => void`, and update the `reject:` factory binding in Task 2's accept-binding neighborhood (the existing `reject: (taskId) => rejectTaskChangeset(taskId, ...)` factory binding Task 2's caller-binding rewrite also touches) to thread `sendSignal: (pid, signal) => ctx.helpers.sendSignal(pid, signal)` through, the same way `accept:` does.
 
 Also change `acceptTaskChangeset`'s two return statements to carry `checkStatus` (needed by Step 5's CLI-side "no check declared" warning — the design's §4 accept-semantics table: *"`none`: normal accept flow plus a one-line warning that the repo has no checks"*):
 
@@ -1220,6 +1405,8 @@ async function runAccept(options, { client }) {
 }
 ```
 
+This is an intentionally narrower interpretation of the design's §2 "accept prints the verdict": a passed gate is the expected/silent case and produces no accept-time output (the verdict is already visible via `taskferry status <id>` and `taskferry result <id> --full`); only anomalies — no gate declared (`"none"`), or a `--force` override (`checkOverride: true`) — warrant stderr output. The `checkOverride: true` case is already conveyed by the gate's own failure message (`buildCheckGateFailureMessage`'s output lists "Override only if you have verified manually" and the user is informed they took the override; if the design's "accept prints the verdict" literal reading is desired later, it can be added without breaking this change. Documenting the narrowing here so the absence of a "passed" verdict line doesn't read as an oversight to the implementer).
+
 Add a matching case to `src/commands.test.js` (or wherever `runAccept`'s existing tests live): a fake `client.request` resolving `{ taskId, changesetStatus: "accepted", applied: true, checkStatus: "none" }` and an assertion that `process.stderr.write` (or whatever this suite's existing stderr-capture convention is — check `warnIfCleanupFailed`'s own test for the pattern) was called with a message matching `/declares no check command/`.
 
 - [ ] **Step 6: Run the tests to verify they pass**
@@ -1247,7 +1434,7 @@ git commit -m "feat(tasks): gate accept on check-gate outcome, add --force overr
 
 **Interfaces:**
 - Consumes: `task.checkStatus === "running"` (Task 5's in-flight marker).
-- Produces: `task.checkStatus === "interrupted"` for any task whose gate was running when the daemon last exited — Task 6's `validateAcceptable` already treats `"interrupted"` as a blocking status requiring `--force`, so no further wiring is needed once this task sets the value correctly on load.
+- Produces: `task.checkStatus === "interrupted"` for any task whose gate was running when the daemon last exited AND, per the design's "the gate is re-runnable" promise, automatically re-invokes `startCheckGate` on the same task if its overlay is still live (which flips `checkStatus` back to `"running"` and starts a fresh check run). Tasks whose overlay was swept away between the daemon's death and its restart are left at `"interrupted"` only — `Task 6's validateAcceptable` keeps refusing them without `--force`, and the failure message renders the re-run path explicitly (see "interrupted" handling note below).
 
 - [ ] **Step 1: Write the failing test**
 
@@ -1274,6 +1461,18 @@ test("a task whose check gate had already settled ('passed') is left untouched o
   const mgr = makeManager({ stateDir });
   assert.equal(mgr.status("oc_settled1").checkStatus, "passed");
 });
+
+test("a task whose gate was 'running' AND whose overlay is still live is automatically re-run on next daemon restart", () => {
+  // Seed an in-flight task with a live overlay and a stubbed startCheckGate
+  // factory binding that records every call. After the manager boots,
+  // assert: startCheckGate was called exactly once with the same task, and
+  // the task's checkStatus IS "running" again (the auto re-run flipped it
+  // back from "interrupted" before the test could observe "interrupted").
+  // This is the design's "the gate is re-runnable" promise: a daemon crash
+  // mid-gate does not silently pass; the next daemon boot re-runs the gate,
+  // and the user sees "running" again on `taskferry status <id>` instead of
+  // a dead-looking "interrupted" with no further action.
+});
 ```
 
 Adjust the fixture task's other required fields to whatever minimum shape `loadPersistedTasks`/`makeManager` actually demands (read `src/tasks.lifecycle.test.js`'s existing persisted-tasks-file tests for the real minimum record shape before finalizing — this file already has at least one test that seeds `tasks.json` directly and constructs a manager over it, per the daemon-restart survival tests referenced in `findings.md`'s Finding 1 casualty description).
@@ -1293,20 +1492,28 @@ Add near `sweepOverlayEntry`/`sweepOverlayTmpRoot` (~line 4406) in `src/tasks.js
  * recorded with checkStatus: "running" forever -- nothing will ever settle
  * it, since the child that would have called startCheckGate()'s exit/error
  * handlers died with the daemon. Reclassify every such task as "interrupted"
- * on load so accept() keeps refusing it (Task 6 already treats "interrupted"
- * as a blocking status) instead of silently reading as a never-finished gate
- * that accept() would otherwise treat as harmless. The gate itself is
- * re-runnable: nothing here re-triggers it automatically (no auto-dispatch
- * of fix rounds, per this spec's non-goals) -- a human decides whether to
- * `taskferry accept --force` after manual verification, or discard with
- * `taskferry reject`.
- * @param {{tasks: Map<string, Task>, persistTask: (taskId: string) => void}} ctx
+ * on load, then per the design's "the gate is re-runnable" promise, if the
+ * task's overlay is still live, automatically re-invoke startCheckGate on
+ * it (which flips checkStatus back to "running" and starts a fresh check
+ * run -- the user sees the same "running" status they would have seen
+ * pre-crash, just on a new daemon). Tasks whose overlay was swept away
+ * between the daemon's death and its restart are left at "interrupted"
+ * only; Task 6's validateAcceptable keeps refusing them without --force,
+ * and the failure message renders the re-run path explicitly (see
+ * "interrupted" handling note in Task 6 below).
+ * @param {{tasks: Map<string, Task>, hasLiveOverlay: (task: Task) => boolean, startCheckGate: (task: Task) => void, persistTask: (taskId: string) => void}} ctx
  */
 function markInterruptedGatesFor(ctx) {
   for (const task of ctx.tasks.values()) {
-    if (task.checkStatus === "running") {
-      task.checkStatus = "interrupted";
-      ctx.persistTask(task.id);
+    if (task.checkStatus !== "running") continue;
+    task.checkStatus = "interrupted";
+    ctx.persistTask(task.id);
+    if (ctx.hasLiveOverlay(task)) {
+      // Auto re-run: the overlay survived the daemon crash, so the gate
+      // can be re-run over the same copy-on-write mount. startCheckGate
+      // flips checkStatus back to "running" and persists before spawning,
+      // so the brief "interrupted" write above is not user-visible.
+      ctx.startCheckGate(task);
     }
   }
 }
@@ -1315,8 +1522,10 @@ function markInterruptedGatesFor(ctx) {
 Wire its factory binding near the existing `sweepOrphanedOverlays`/`sweepOrphanedPromptFiles` bindings (~line 3345):
 
 ```js
-    markInterruptedGates: () => markInterruptedGatesFor({ tasks: ctx.maps.tasks, persistTask: (taskId) => ctx.helpers.persistTask(taskId) }),
+    markInterruptedGates: () => markInterruptedGatesFor({ tasks: ctx.maps.tasks, hasLiveOverlay: (task) => ctx.helpers.hasLiveOverlay(task), startCheckGate: (task) => ctx.env.startCheckGate(task), persistTask: (taskId) => ctx.helpers.persistTask(taskId) }),
 ```
+
+(`startCheckGate` lives on `ctx.env` here because `extractChangesetForTaskRecord`'s binding (Task 5 Step 5) places it on the same `ctx.env` namespace `startCheckGate` consumes. Verify the actual binding shape before applying — if `extractChangesetForTaskRecord`'s factory binding keeps `startCheckGate` flat on `ctx` rather than `ctx.env`, mirror Task 5's exact path.)
 
 Call it in `bootstrapManagerContext` (~line 3585), right after `ctx.helpers.sweepOrphanedOverlays();`:
 
@@ -1324,7 +1533,9 @@ Call it in `bootstrapManagerContext` (~line 3585), right after `ctx.helpers.swee
   // A daemon that died with a check gate mid-flight (checkStatus: "running")
   // leaves that status stuck forever -- nothing will ever call
   // startCheckGate()'s settle handlers again for that task. Reclassify as
-  // "interrupted" so accept() (Task 6) keeps refusing it without --force.
+  // "interrupted" so accept() (Task 6) keeps refusing it without --force,
+  // then auto-re-run any gate whose overlay survived the crash (per the
+  // design's "the gate is re-runnable" promise).
   ctx.helpers.markInterruptedGates();
 ```
 
@@ -1357,6 +1568,7 @@ git commit -m "feat(tasks): mark a check gate interrupted by daemon restart, not
 
 **Interfaces:**
 - Produces: `detectCheckCommand(directory, deps?): string|null`, `runInit(directory, deps?): Promise<{path: string, written: boolean, checkCommand: string|null, reason?: string}>`. No other task depends on this one — it's the last piece of the CLI surface and is independently testable end to end.
+- `init` deliberately does NOT go through `cli.js`'s `usesWorkspaceRoot()` redirect the way `list`/`watch`/`context`/`home` do. `.taskferry.toml` is meant to live at the project root a user is standing in, not redirected to wherever `--directory` (or its workspace-root resolution) might point — a `taskferry init` invoked from inside a worktree should scaffold the worktree's `.taskferry.toml`, not the main checkout's. The CLI routes `init` straight to `runInit(cwd, ...)` using literal cwd, matching the same "literal cwd" pattern `setup` already uses for its bypass. Verify by reading `src/cli.js`'s `runCli` body before wiring — the `if (parsed.command === "init")` branch must call `runInitCommand(initFn, io, cwd)` with the unmodified `cwd` (or `process.cwd()` if `cwd` isn't exposed), NOT a workspace-root-resolved value.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1729,6 +1941,8 @@ git commit -m "docs: document .taskferry.toml, the verification gate, --parent-t
 
 Per this repo's own "a mocked test is not proof at the system boundary" rule (and the design spec's own Testing section, which requires exactly this): every prior task's tests mock `spawnFn`/`runOverlayCommandFn`. None of them prove real `bwrap` can actually mount the overlay a second time and run a real check command inside it. This task is that one real exercise, run directly against this checked-out worktree (not mocked), with both a passing and a deliberately failing case.
 
+**CRITICAL: this task runs against a fully isolated daemon, NOT the shared default-state daemon.** This repo's own `CLAUDE.md` ("Isolate your own taskferry runs when testing or developing taskferry itself") explicitly forbids testing/developing taskferry against the shared `XDG_STATE_HOME`/`XDG_RUNTIME_DIR`/`XDG_CACHE_DIR` defaults — those resolve to `~/.local/state/taskferry`/`/run/user/<uid>/taskferry`/`~/.cache/taskferry` regardless of which git worktree you're in, so every worktree and every concurrent session shares one daemon process, one `tasks.json`, and one lock file. `pkill -f 'node.*src/daemon.js'` (the previous version of this step) would kill every worktree's daemon, and a `taskferry dispatch` running against the shared default state dir could collide with another session's in-flight ferries. The fix: export a unique `TASKFERRY_STATE_DIR`/`TASKFERRY_RUNTIME_DIR`/`TASKFERRY_CACHE_DIR` (matching the pattern `CLAUDE.md` itself shows, under `/tmp/taskferry-dev-<slug>`) before ANY `taskferry` command in this task, and boot the isolated daemon under those vars instead of `pkill`-ing the real one. The shared daemon on stdout is untouched; only the test daemon under `/tmp/taskferry-dev-check-gate-project-config-dogfood` lives and dies here.
+
 **Files:** none created or modified by this task beyond a scratch script deleted at the end — this task's deliverable is the recorded verification transcript in the plan's completion notes (or PR description), not a code change.
 
 - [ ] **Step 1: Confirm bwrap and Linux are actually available here**
@@ -1736,19 +1950,31 @@ Per this repo's own "a mocked test is not proof at the system boundary" rule (an
 Run: `bwrap --version && uname -s`
 Expected: a `bubblewrap X.Y.Z` version string >= 0.8, and `Linux`. If this environment can't run bwrap at all, stop here and say so explicitly rather than skipping this task silently — the whole point of Tasks 5-7 is unverifiable without it, and this plan's execution report must say plainly that the real-exercise step could not run, not quietly treat the mocked unit tests as sufficient.
 
-- [ ] **Step 2: Restart the daemon on this branch's code**
+- [ ] **Step 2: Set up the isolated dev state and boot a dedicated daemon for this task**
 
 ```bash
-taskferry doctor  # note the current daemon pid
-pkill -f 'node.*src/daemon.js' || true
-taskferry doctor  # confirm the daemon restarts and its pid is fresh
+export TASKFERRY_DEV_ROOT="/tmp/taskferry-dev-check-gate-project-config-dogfood"
+export TASKFERRY_STATE_DIR="${TASKFERRY_DEV_ROOT}/state"
+export TASKFERRY_RUNTIME_DIR="${TASKFERRY_DEV_ROOT}/runtime"
+export TASKFERRY_CACHE_DIR="${TASKFERRY_DEV_ROOT}/cache"
+mkdir -p "$TASKFERRY_STATE_DIR" "$TASKFERRY_RUNTIME_DIR" "$TASKFERRY_CACHE_DIR"
+
+# Boot ONLY the isolated dev daemon. Do NOT pkill -f 'node.*src/daemon.js' --
+# that would kill the shared default daemon every other session/worktree is
+# relying on. The "first taskferry CLI call" triggers auto-start, but for
+# the dogfood we want the daemon to be up before any dispatch to keep the
+# verification transcript clean.
+taskferry doctor >/dev/null 2>&1 && echo "isolated daemon already up" || true
 ```
+
+(The `taskferry doctor` invocation above runs under the three exported env vars already, so `paths.js` resolves the state/runtime/cache dirs to the dev root — not a typo, just no need to repeat the env). Verify with `taskferry doctor` (under the exported env) that the daemon's pid is fresh and lives under the dev root (not the shared default). Verify the shared default daemon is untouched by running a `taskferry doctor` from a different shell without the dev-root env vars exported: it should report the SAME pid it did before this task started.
 
 - [ ] **Step 3: Passing case — dispatch a trivial no-op change against this worktree**
 
 ```bash
 cd /workspace/taskferry.worktrees/check-gate-project-config
-taskferry dispatch --prompt "Add a single-line comment to the top of README.md, then stop." --directory "$(pwd)"
+TASKFERRY_STATE_DIR="$TASKFERRY_STATE_DIR" TASKFERRY_RUNTIME_DIR="$TASKFERRY_RUNTIME_DIR" TASKFERRY_CACHE_DIR="$TASKFERRY_CACHE_DIR" \
+  taskferry dispatch --prompt "Add a single-line comment to the top of README.md, then stop." --directory "$(pwd)"
 ```
 
 Wait for it (`taskferry wait <id>`), then poll `taskferry status <id> --full` until `checkStatus` leaves `"running"`.
@@ -1757,15 +1983,24 @@ Expected: `checkStatus: "passed"`, `checkExitCode: 0`, `checkCommand: "npm run c
 - [ ] **Step 4: Failing case — dispatch a change that breaks `npm run check`**
 
 ```bash
-taskferry dispatch --prompt "In src/numbers.js, change the isPositiveInteger function so it always returns false, breaking a real test. Do not fix it or run the test suite yourself -- just make the change and stop." --directory "$(pwd)"
+cd /workspace/taskferry.worktrees/check-gate-project-config
+TASKFERRY_STATE_DIR="$TASKFERRY_STATE_DIR" TASKFERRY_RUNTIME_DIR="$TASKFERRY_RUNTIME_DIR" TASKFERRY_CACHE_DIR="$TASKFERRY_CACHE_DIR" \
+  taskferry dispatch --prompt "In src/numbers.js, change the isPositiveInteger function so it always returns false, breaking a real test. Do not fix it or run the test suite yourself -- just make the change and stop." --directory "$(pwd)"
 ```
 
 Wait for it, poll `taskferry status <id> --full`.
 Expected: `checkStatus: "failed"`, non-zero `checkExitCode`, `checkOutputTail` containing real failing-test output. `taskferry accept <id>` (no `--force`) refuses with the fix-forward message from Task 6, rendering a real `sessionId` and `taskId`. `taskferry accept <id> --force` then succeeds and `taskferry status <id> --full` shows `checkOverride: true`. Immediately `taskferry reject <id>` this one instead of actually accepting it into the branch (or accept-then-`git revert` if `--force` was exercised first and left a real broken commit) — this task must not leave the intentionally-broken `isPositiveInteger` change landed in the worktree.
 
-- [ ] **Step 5: Record the outcome, clean up any scratch state, and report**
+- [ ] **Step 5: Tear down the isolated dev daemon, then record the outcome**
 
-Confirm `git status` in the worktree shows nothing unexpected left over from either dispatch (no stray accepted broken commit). State plainly in the plan's completion report: whether both cases ran for real, the actual `checkStatus`/`checkExitCode`/`checkOutputTail` observed (not paraphrased), and the exact `taskferry accept` refusal message text produced by Step 4 — this is the evidence this feature actually works end to end, not just that its unit tests pass.
+Kill the isolated dev daemon (PID goes away; the shared daemon is untouched):
+
+```bash
+pkill -f "${TASKFERRY_DEV_ROOT}.*src/daemon.js" || true
+rm -rf "$TASKFERRY_DEV_ROOT"
+```
+
+Then confirm `git status` in the worktree shows nothing unexpected left over from either dispatch (no stray accepted broken commit). State plainly in the plan's completion report: whether both cases ran for real, the actual `checkStatus`/`checkExitCode`/`checkOutputTail` observed (not paraphrased), and the exact `taskferry accept` refusal message text produced by Step 4 — this is the evidence this feature actually works end to end, not just that its unit tests pass.
 
 ---
 

@@ -340,7 +340,7 @@ In `src/tasks.js`, in the `Task` typedef block (ends `* @property {string|null} 
  * @property {number|null} [checkGatePid]
 ```
 
-(`checkGatePid` is the OS pid of the bwrap child currently running the gate. Persisted alongside `checkStatus: "running"` for the in-flight gate so a concurrent `accept`/`reject` can target the right process with `ctx.sendSignal(checkGatePid, "SIGTERM")` before the overlay is released out from under it. Cleared alongside `checkStatus` in `startCheckGate`'s `settle()` and `error` handlers.)
+(`checkGatePid` is the OS pid of the bwrap child (process-group leader — Task 5 spawns it `detached: true`) currently running the gate. Persisted alongside `checkStatus: "running"` for the in-flight gate, and also used by Task 7's restart-recovery sweep to best-effort group-kill a crash-orphaned gate on daemon boot. The live accept/reject kill-and-wait path (Task 6) does NOT read this field directly, though — it goes through `ctx.env.killGateAndWait(taskId)` (Task 5), which resolves the actual tracked `ChildProcess` from `ctx.gateChildren` so it can wait on a real `"exit"` event, not just fire a signal at a pid and hope. Cleared alongside `checkStatus` in `startCheckGate`'s `settle()` and `error` handlers.)
 
 Make the identical addition to the `TaskSummary` typedef block (ends the same way, around line 95), and add the always-surfaced subset to `ResultDetail` (ends `* @property {string|null} [changesetError]` around line 163):
 
@@ -530,19 +530,19 @@ In `src/daemon.js`'s `invokeHandlers`, change:
 In `src/tasks.js`, change every `accept:` binding that currently reads `accept: (taskId) => acceptTaskChangeset(taskId, {...})` (the `ctx.helpers.accept`-style closure ~line 3399, and the public API's `accept: (taskId) => ctx.helpers.accept(taskId)` ~line 3491) to thread a second `options` argument through:
 
 ```js
-    accept: (taskId, options) => acceptTaskChangeset(taskId, options, { ensureStateLoaded: () => ctx.helpers.ensureStateLoaded(), tasks: ctx.maps.tasks, existsFn: ctx.opts.existsFn, hasLiveOverlay: (task) => ctx.helpers.hasLiveOverlay(task), stateDir: ctx.opts.stateDir, runtimeDir: ctx.opts.runtimeDir, sandboxDenylist: ctx.opts.sandboxDenylist, runOverlayCommandFn: ctx.opts.runOverlayCommandFn, overlaySleepFn: ctx.opts.overlaySleepFn, persistTask: (taskId2) => ctx.helpers.persistTask(taskId2), releaseOverlay: (task) => ctx.env.releaseOverlay(task), sendSignal: (pid, signal) => ctx.helpers.sendSignal(pid, signal), noSuchTask }),
+    accept: (taskId, options) => acceptTaskChangeset(taskId, options, { ensureStateLoaded: () => ctx.helpers.ensureStateLoaded(), tasks: ctx.maps.tasks, existsFn: ctx.opts.existsFn, hasLiveOverlay: (task) => ctx.helpers.hasLiveOverlay(task), stateDir: ctx.opts.stateDir, runtimeDir: ctx.opts.runtimeDir, sandboxDenylist: ctx.opts.sandboxDenylist, runOverlayCommandFn: ctx.opts.runOverlayCommandFn, overlaySleepFn: ctx.opts.overlaySleepFn, persistTask: (taskId2) => ctx.helpers.persistTask(taskId2), releaseOverlay: (task) => ctx.env.releaseOverlay(task), killGateAndWait: (taskId2) => ctx.env.killGateAndWait(taskId2), noSuchTask }),
 ```
 
-(`sendSignal` is threaded here — even though Task 2 doesn't consume it — so Task 6 Step 4's in-flight-gate kill handshake can `ctx.sendSignal(task.checkGatePid, "SIGTERM")` without Task 6 having to re-edit the factory binding. Task 6 only adds the matching `sendSignal` entry to `acceptTaskChangeset`'s `@param` typedef and the `sendSignal` entry to the `reject:` factory binding's typedef/component.)
+(`killGateAndWait` is threaded here — even though Task 2 doesn't consume it — so Task 6 Step 4's in-flight-gate kill handshake can `await ctx.killGateAndWait(taskId)` without Task 6 having to re-edit the factory binding. `killGateAndWait` itself is defined and exposed on `ctx.env` in Task 5 Step 5; Task 6 only adds the matching typedef entry to `acceptTaskChangeset`/`rejectTaskChangeset` and makes both functions `async` so the await has somewhere to land — see Task 6 Step 4's "review fix" note. Note this makes `acceptTaskChangeset` return a `Promise`, which is why the `accept:` binding above and the RPC handler both need no further change: `src/daemon-server.js:131` already does `await invoke(...)` generically for every method.)
 
 ```js
     accept: (taskId, options) => ctx.helpers.accept(taskId, options),
 ```
 
-And update the `reject:` factory binding at the same scope (~line 3404) to thread `sendSignal` through. `rejectTaskChangeset`'s signature stays `rejectTaskChangeset(taskId, ctx)` (no `force` needed — `reject` is always allowed regardless of `checkStatus` per the design's §4), but the `ctx` object needs `sendSignal` so Task 6's in-flight-gate kill handshake can fire without Task 6 having to re-edit the binding:
+And update the `reject:` factory binding at the same scope (~line 3404) to thread `killGateAndWait` through. `rejectTaskChangeset`'s signature stays `rejectTaskChangeset(taskId, ctx)` (no `force` needed — `reject` is always allowed regardless of `checkStatus` per the design's §4), but the `ctx` object needs `killGateAndWait` so Task 6's in-flight-gate kill-and-wait handshake can fire without Task 6 having to re-edit the binding:
 
 ```js
-    reject: (taskId) => rejectTaskChangeset(taskId, { ensureStateLoaded: () => ctx.helpers.ensureStateLoaded(), tasks: ctx.maps.tasks, persistTask: (taskId) => ctx.helpers.persistTask(taskId), releaseOverlay: (task) => ctx.env.releaseOverlay(task), sendSignal: (pid, signal) => ctx.helpers.sendSignal(pid, signal), noSuchTask }),
+    reject: (taskId) => rejectTaskChangeset(taskId, { ensureStateLoaded: () => ctx.helpers.ensureStateLoaded(), tasks: ctx.maps.tasks, persistTask: (taskId) => ctx.helpers.persistTask(taskId), releaseOverlay: (task) => ctx.env.releaseOverlay(task), killGateAndWait: (taskId2) => ctx.env.killGateAndWait(taskId2), noSuchTask }),
 ```
 
 The public-API `reject: (taskId) => ctx.helpers.reject(taskId)` binding at ~line 3496 needs no changes — it just delegates to the helpers closure above.
@@ -671,11 +671,14 @@ git commit -m "feat(dispatch): inject the .taskferry.toml verification block int
 
 **Files:**
 - Modify: `src/tasks.js` (`buildBwrapBinds`, ~line 784)
+- Modify: `src/project-config.js` (new exported `resolveReadOnlyProjectBinds`, reused by Task 5's gate)
 - Test: `src/tasks.sandbox.test.js` (add new cases)
 
 **Interfaces:**
 - Consumes: `loadProjectConfig` from Task 1.
-- Produces: `task.projectConfigWarning` set when a `read_only_paths` entry doesn't exist on the host, or the config fails to parse — Task 5's gate also writes this same field on a parse error, so both writers must use identical semantics (overwrite, don't append/concatenate multiple warnings; the later writer in a task's lifecycle wins, which is fine since a parse error found at spawn time will also be found identically at settle time).
+- Produces: `task.projectConfigWarning` set when a `read_only_paths` entry doesn't exist on the host, fails the mount-order safety check below, or the config fails to parse — Task 5's gate also writes this same field on a parse error, so both writers must use identical semantics (overwrite, don't append/concatenate multiple warnings; the later writer in a task's lifecycle wins, which is fine since a parse error found at spawn time will also be found identically at settle time). Also produces the exported `resolveReadOnlyProjectBinds()` helper (below) that Task 5's gate reuses verbatim, so the worker and the gate always see the same read-only mount surface — see that task's "sandbox parity" step.
+
+**Security note (added after external review — verified against `src/sandbox.js:277-308` directly, not taken on faith):** `buildBwrapArgs` applies mounts in argument order via `pushPairBinds(args, extraRoBinds, "--ro-bind")`, which runs *after* the deny-list `--tmpfs` mounts (`buildBwrapBaseArgs`), the overlay mount, and the runtime-dir bind. bwrap's mount semantics mean a later mount on a parent directory shadows an earlier mount nested inside it — so an untrusted `.taskferry.toml` declaring `read_only_paths = ["/"]` or `["/home/user"]` would re-expose the tmpfs-hidden `~/.ssh`/`~/.aws`/etc. (un-hiding the deny list) and, for `"/"` specifically, shadow the overlay mount entirely (defeating the copy-on-write isolation the whole feature depends on). `read_only_paths` is project-supplied, not daemon-trusted, so every entry must be validated against the protected mount set before it ever reaches `extraRoBinds`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -725,9 +728,46 @@ test("a read_only_paths entry that doesn't exist on this host is skipped and war
 Run: `env -u TASKFERRY_CHILD node --test src/tasks.sandbox.test.js`
 Expected: FAIL (no `read_only_paths` handling yet).
 
-- [ ] **Step 3: Implement in `buildBwrapBinds`**
+- [ ] **Step 3: Add the shared, validated read-only-bind resolver**
 
-In `src/tasks.js`'s `buildBwrapBinds` (~line 784), the function already has `task` as a parameter. Replace:
+Add this to `src/project-config.js` (exported, so both `buildBwrapBinds` here and `startCheckGate` in Task 5 call the identical function — a single enforcement point rather than two copies that could drift):
+
+```js
+/**
+ * Filters a project's declared `read_only_paths` down to safe `[src, dest]`
+ * ro-bind pairs: an entry is dropped (and reported) if it doesn't exist on
+ * this host, or if it overlaps a protected mount -- equals it, is an
+ * ancestor of it, or is a descendant of it. bwrap applies mounts in argument
+ * order and `read_only_paths` binds land last (see `buildBwrapArgs`), so an
+ * overlapping entry would either shadow a protected mount (e.g.
+ * `read_only_paths = ["/"]` re-exposing the deny-listed `~/.ssh` a `--tmpfs`
+ * mount hid, or shadowing the overlay mount entirely) or punch a read hole
+ * into an otherwise-hidden protected directory (e.g.
+ * `["~/.ssh/known_hosts"]`). `.taskferry.toml` is project-supplied, not
+ * daemon-trusted, so this check is mandatory, not defensive nicety.
+ * @param {string[]} readOnlyPaths
+ * @param {{protectedPaths: string[], existsFn: (p: string) => boolean}} ctx
+ * @returns {{roBinds: [string, string][], missing: string[], unsafe: string[]}}
+ */
+export function resolveReadOnlyProjectBinds(readOnlyPaths, ctx) {
+  const overlaps = (a, b) => a === b || a.startsWith(b + path.sep) || b.startsWith(a + path.sep);
+  const roBinds = [];
+  const missing = [];
+  const unsafe = [];
+  for (const p of readOnlyPaths) {
+    if (!ctx.existsFn(p)) { missing.push(p); continue; }
+    if (ctx.protectedPaths.some((protectedPath) => overlaps(p, protectedPath))) { unsafe.push(p); continue; }
+    roBinds.push([p, p]);
+  }
+  return { roBinds, missing, unsafe };
+}
+```
+
+(`path` is already imported in `project-config.js` from Task 1.)
+
+- [ ] **Step 4: Wire it into `buildBwrapBinds`**
+
+In `src/tasks.js`'s `buildBwrapBinds` (~line 784), the function already has `task` as a parameter and already computes `denyList` above this point. Replace:
 
 ```js
   const extraRoBinds = [...executorRoBinds];
@@ -743,31 +783,35 @@ with:
   if (projectConfig.parseError) {
     task.projectConfigWarning = projectConfig.parseError;
   } else {
-    const missingReadOnlyPaths = projectConfig.readOnlyPaths.filter((p) => !ctx.existsFn(p));
-    for (const p of projectConfig.readOnlyPaths) {
-      if (ctx.existsFn(p)) extraRoBinds.push([p, p]);
-    }
-    if (missingReadOnlyPaths.length) {
-      task.projectConfigWarning = `.taskferry.toml read_only_paths not found on this host, skipped: ${missingReadOnlyPaths.join(", ")}`;
-    }
+    const { roBinds, missing, unsafe } = resolveReadOnlyProjectBinds(projectConfig.readOnlyPaths, {
+      protectedPaths: [...denyList, ctx.stateDir, ctx.runtimeDir, launchDirectory],
+      existsFn: ctx.existsFn,
+    });
+    extraRoBinds.push(...roBinds);
+    const warnings = [];
+    if (missing.length) warnings.push(`not found on this host, skipped: ${missing.join(", ")}`);
+    if (unsafe.length) warnings.push(`overlaps a protected sandbox mount, skipped: ${unsafe.join(", ")}`);
+    if (warnings.length) task.projectConfigWarning = `.taskferry.toml read_only_paths ${warnings.join("; ")}`;
   }
 ```
 
-(`loadProjectConfig` is already imported at the top of `src/tasks.js` from Task 3.)
+(`loadProjectConfig` and `resolveReadOnlyProjectBinds` are both already imported at the top of `src/tasks.js` from Task 3/this step.)
 
-- [ ] **Step 4: Run the tests to verify they pass**
+- [ ] **Step 5: Add a mount-order-safety test, then run the tests to verify they pass**
+
+Add one more case to `src/tasks.sandbox.test.js` alongside the existing two (Step 1) proving the safety check actually rejects an overlapping entry, e.g. `read_only_paths = ["/"]` (or the resolved `homeDir`) against a `directory` inside a tmpdir — assert `roBinds` excludes it and `unsafe`/`projectConfigWarning` reports it.
 
 Run: `env -u TASKFERRY_CHILD node --test src/tasks.sandbox.test.js`
 Expected: PASS.
 
-- [ ] **Step 5: Run the full unit suite and commit**
+- [ ] **Step 6: Run the full unit suite and commit**
 
 Run: `npm run test:unit`
 Expected: PASS.
 
 ```bash
-git add src/tasks.js src/tasks.sandbox.test.js
-git commit -m "feat(sandbox): bind .taskferry.toml read_only_paths read-only"
+git add src/tasks.js src/project-config.js src/tasks.sandbox.test.js
+git commit -m "feat(sandbox): bind .taskferry.toml read_only_paths read-only, reject overlapping protected mounts"
 ```
 
 ---
@@ -775,15 +819,15 @@ git commit -m "feat(sandbox): bind .taskferry.toml read_only_paths read-only"
 ## Task 5: The verification gate (async check-command runner)
 
 **Files:**
-- Modify: `src/tasks.js` (new `startCheckGate`/`lastLines`/constants near `extractChangesetForTaskRecord` ~line 4293; wiring into `extractChangesetForTaskRecord`'s `hasChanges` branch ~line 4364; wiring `ctx.startCheckGate` into the `extractChangesetForTask` factory binding ~line 3284)
+- Modify: `src/tasks.js` (new `startCheckGate`/`lastLines`/constants near `extractChangesetForTaskRecord` ~line 4293; wiring into `extractChangesetForTaskRecord`'s `hasChanges` branch ~line 4364; wiring `startCheckGate` as a genuine top-level `ctx.env.startCheckGate` key in `buildManagerEnvHelpers`, ~line 3284)
 - Test: new `src/tasks.checkgate.test.js`
 - Modify: `package.json` (register `src/tasks.checkgate.test.js` in `test:unit`)
 
 This is the core of the spec. The gate spawns the project's declared check command inside the *same* bwrap overlay mount the worker ran with (`task.overlayDirs`), asynchronously, with a timeout, and records the outcome. It never blocks the daemon's event loop — everything here is event-driven, following `spawnTaskChild`'s existing async spawn pattern (`src/tasks.js:1220-1296`), never `runOverlayCommandFn`'s synchronous `spawnSync` pattern used by extraction itself.
 
-**Interfaces:**
-- Consumes: `task.overlayDirs: {upperDir, workDir, rwBinds, rwFileBinds}` (set by `assembleBwrapSpawn`, Task 5 reads it, never writes it), `loadProjectConfig` (Task 1), `buildBwrapArgs`/`defaultDenyList`/`platformSupportsSandbox` (already imported in `tasks.js` from `./sandbox.js`), Task 2's `task.checkStatus`/`checkCommand`/`checkExitCode`/`checkOutputTail`/`checkStartedAt`/`checkEndedAt`/`projectConfigWarning`/`checkGatePid` fields.
-- Produces: `startCheckGate(task: Task, ctx): void` — fire-and-forget, called exactly once from `extractChangesetForTaskRecord` (and only for git-tracked targets, per the `isGitTarget` gate in Step 4 below). Task 6's accept/reject gating consumes the `checkStatus` values this function writes (`"running"|"passed"|"failed"|"timeout"`) — do not introduce a different status string without updating Task 6 to match. Task 6's in-flight-gate kill handshake also consumes `task.checkGatePid` (set here, cleared in `settle()`/`error`) to target the running bwrap child with `ctx.sendSignal(checkGatePid, "SIGTERM")` before `releaseOverlay` reclaims the overlay. Task 7's interrupted-gate sweep consumes the `"running"` status specifically as the signal that a gate was in flight when the daemon died, AND re-invokes `startCheckGate` on the same task if the overlay is still live (per the design's "the gate is re-runnable" promise).
+**Kill mechanism (redesigned after external review — verified empirically, not asserted).** An earlier draft of this task assumed bwrap's `--unshare-pid` namespace teardown kills every process inside the sandbox once the top-level `bwrap` monitor dies from a plain-pid `SIGTERM`/`SIGKILL`. **That assumption was tested directly on this host** (bubblewrap 0.11.2, the exact flags `buildBwrapArgs` emits) and is false: killing the monitor left the inner workload alive as an orphan in 7/7 trials. The actual fix is smaller than a redesign — it's a wiring bug. `spawnTaskChild` (`src/tasks.js:1220-1296`) already spawns the worker with `detached: true` specifically so `sendSignalToProcess` (`src/tasks.js:4174`) can group-kill it via `killFn(-pid, signal)`; the gate's spawn simply never got the same `detached: true`, so its group-kill attempt hits ESRCH (no such process group — the gate's PGID is the daemon's) and silently falls back to a plain-pid signal that only kills the monitor, not the namespace's init. Step 3 below spawns the gate `detached: true` too, reusing the exact mechanism `cancel()` already relies on for workers — no new kill primitive, no new signal-routing code.
+- Consumes: `task.overlayDirs: {upperDir, workDir, rwBinds, rwFileBinds}` (set by `assembleBwrapSpawn`, Task 5 reads it, never writes it), `loadProjectConfig` (Task 1), `resolveReadOnlyProjectBinds` (Task 4, reused here for sandbox parity — see Step 3), `buildBwrapArgs`/`defaultDenyList`/`platformSupportsSandbox` (already imported in `tasks.js` from `./sandbox.js`), Task 2's `task.checkStatus`/`checkCommand`/`checkExitCode`/`checkOutputTail`/`checkStartedAt`/`checkEndedAt`/`projectConfigWarning`/`checkGatePid` fields.
+- Produces: `startCheckGate(task: Task, ctx): void` — fire-and-forget, called exactly once from `extractChangesetForTaskRecord` (and only for git-tracked targets, per the `isGitTarget` gate in Step 4 below), and registered as `ctx.env.startCheckGate` (a genuine top-level key returned by `buildManagerEnvHelpers`, not a closure buried inside another function's argument object) so Task 7's restart-recovery sweep can call the exact same binding. Task 6's accept/reject gating consumes the `checkStatus` values this function writes (`"running"|"passed"|"failed"|"timeout"`) — do not introduce a different status string without updating Task 6 to match. Task 6's in-flight-gate kill handshake also consumes the new `ctx.env.killGateAndWait(taskId)` (Step 3, exposed via Step 5) to group-kill the running bwrap child and *wait for it to actually exit* — not just fire a signal and immediately proceed — before `releaseOverlay` reclaims the overlay. Task 7's interrupted-gate sweep consumes the `"running"` status specifically as the signal that a gate was in flight when the daemon died, AND re-invokes `startCheckGate` on the same task if the overlay is still live (per the design's "the gate is re-runnable" promise), first best-effort-killing any orphaned process group left by an *unclean* daemon crash (the one path where nothing ever sent a signal at all).
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -814,6 +858,10 @@ function dispatchAndSettleWithChanges({ directory, spawns, sandboxEnabled = true
   const mgr = makeManager({
     spawnFn: (cmd, args, opts) => { const child = spawns.length === 0 ? fakeChild() : fakeGateChild(); spawns.push({ cmd, args, opts, child }); return child; },
     sandboxEnabled,
+    // buildManagerOptions() defaults overlayEnabled to false -- without this,
+    // task.overlayDirs never gets set, startCheckGate's `!task.overlayDirs`
+    // guard always no-ops, and every test below would see only one spawn.
+    overlayEnabled: true,
     checkBwrapAvailableFn: () => ({ checked: true, available: true }),
     platform: "linux",
     runOverlayCommandFn: (command, args) => {
@@ -886,15 +934,27 @@ describe("startCheckGate", () => {
     const mgr = makeManager({
       spawnFn: (cmd, args, opts) => { const child = spawns.length === 0 ? fakeChild() : fakeGateChild(); spawns.push({ cmd, args, opts, child }); return child; },
       sandboxEnabled: true,
+      overlayEnabled: true,
       checkBwrapAvailableFn: () => ({ checked: true, available: true }),
       platform: "linux",
-      sendSignal: (pid, signal) => signals.push({ pid, signal }),
+      // buildManagerOptions() only forwards `killFn` to createTaskManager,
+      // not a `sendSignal` option -- the internal `sendSignal` binding wraps
+      // sendSignalToProcess(pid, signal, { killFn: ctx.opts.killFn }), so the
+      // fake must be injected at that seam or it's silently ignored and the
+      // real default killFn (which throws) fires instead.
+      killFn: (pid, signal) => signals.push({ pid, signal }),
       runOverlayCommandFn: (command) => (command === "bwrap" ? { status: 0, stdout: "diff\n", stderr: "" } : { status: 0, stdout: "abc\n", stderr: "" }),
     });
     const dispatched = mgr.dispatch({ prompt: "hello", directory, model: "opencode-go/minimax-m3", executor: "opencode" });
     spawns[0].child.emit("exit", 0, null);
     t.mock.timers.tick(5000);
     assert.ok(signals.some((s) => s.signal === "SIGTERM"));
+    // sendSignalToProcess tries the process-group form first (negative pid) --
+    // this only reaches the sandboxed workload at all because the gate is
+    // spawned `detached: true` (Step 3). A positive-pid-only signal here
+    // would mean the fix regressed back to killing just the bwrap monitor.
+    assert.ok(signals.some((s) => s.signal === "SIGTERM" && s.pid < 0), `expected a process-group SIGTERM (negative pid), got ${JSON.stringify(signals)}`);
+    assert.ok(spawns[1].opts.detached === true, "gate child must be spawned detached so group-kill can reach it");
     spawns[1].child.emit("exit", null, "SIGTERM");
     assert.equal(mgr.status(dispatched.id).checkStatus, "timeout");
   });
@@ -914,7 +974,8 @@ Add these module-level constants near the other `DEFAULT_*` constants (~line 129
 
 ```js
 // SIGTERM -> SIGKILL grace on a timed-out gate, matching cancel()'s own
-// default cancelGraceMs (src/args.js's --grace-ms default).
+// default cancelGraceMs (src/args.js's --grace-ms default). Also the bound
+// killGateAndWait() (below) uses for the accept/reject kill handshake.
 const CHECK_GATE_KILL_GRACE_MS = 5000;
 // Cap on the gate's combined stdout+stderr buffer. Appended chunks that
 // would push `output` past this cap are not rejected outright (a gate is
@@ -926,6 +987,8 @@ const CHECK_GATE_OUTPUT_CAP_BYTES = 256 * 1024;
 ```
 
 (There is intentionally no `DEFAULT_CHECK_TIMEOUT_SECONDS` constant here — the real default lives in `project-config.js` (`DEFAULT_CHECK_TIMEOUT_SECONDS = 900`), is already resolved into `projectConfig.checkTimeoutSeconds` by `loadProjectConfig`, and is what `startCheckGate` reads from. Re-declaring it here would be an unused `no-unused-vars` lint trip and a second source of truth.)
+
+Add one new manager-level Map to `ManagerContext`'s `maps` namespace, next to the existing `tasks`/`waiters`/`advisorSessions` Maps (wherever that object is constructed, alongside `bootstrapManagerContext` — check the real init site before editing): `gateChildren: new Map()`. This tracks each in-flight gate's live `ChildProcess` by task id so `killGateAndWait` (Step 3 below) can signal it and actually wait for it to exit — the exit/error handlers inside `startCheckGate` are the only place with a reference to the real `child` object, so without this map nothing outside `startCheckGate`'s own closure could ever confirm the kill worked.
 
 Add this helper near `extractChangesetForTaskRecord` (~line 4293), and the gate runner itself right after it:
 
@@ -977,7 +1040,7 @@ function appendBoundedOutput(tail, chunk) {
  * there is no isolated tree to gate against without an overlay, per the
  * design's non-goal "Gating --no-overlay / non-git dispatches."
  * @param {Task} task
- * @param {{spawnFn: typeof import("node:child_process").spawn, stateDir: string, runtimeDir: string, existsFn: (p: string) => boolean, sandboxDenylist: string[], persistTask: (taskId: string) => void, scheduleActivity: (task: Task, options?: {force?: boolean}) => Promise<unknown>, sendSignal: (pid: number, signal: NodeJS.Signals) => void, platform: NodeJS.Platform}} ctx
+ * @param {{spawnFn: typeof import("node:child_process").spawn, stateDir: string, runtimeDir: string, existsFn: (p: string) => boolean, sandboxDenylist: string[], persistTask: (taskId: string) => void, scheduleActivity: (task: Task, options?: {force?: boolean}) => Promise<unknown>, sendSignal: (pid: number, signal: NodeJS.Signals) => void, platform: NodeJS.Platform, gateChildren: Map<string, import("node:child_process").ChildProcess>}} ctx
  */
 function startCheckGate(task, ctx) {
   if (!task.overlayDirs || task.role !== "dispatch" || !platformSupportsSandbox(ctx.platform)) return;
@@ -990,16 +1053,43 @@ function startCheckGate(task, ctx) {
   if (!projectConfig.check) return;
 
   const denyList = [...defaultDenyList(os.homedir(), ctx.stateDir), ...ctx.sandboxDenylist].filter(ctx.existsFn);
+  // Sandbox parity (review finding): the worker's read_only_paths binds and
+  // the gate's must be identical, or a check command that reads a
+  // read-only-mounted path passes for the worker and fails in the gate (or
+  // vice versa). Reuse Task 4's exact validated resolver rather than a
+  // second, potentially-drifting copy of the mount-order safety logic.
+  const { roBinds: readOnlyBinds } = resolveReadOnlyProjectBinds(projectConfig.readOnlyPaths, {
+    protectedPaths: [...denyList, ctx.stateDir, ctx.runtimeDir, task.directory],
+    existsFn: ctx.existsFn,
+  });
   const spawnArgs = buildBwrapArgs({
     directory: task.directory,
     stateDir: ctx.stateDir,
     runtimeDir: ctx.runtimeDir,
     homeDir: os.homedir(),
     denyList,
+    extraRoBinds: readOnlyBinds,
     overlay: { upperDir: task.overlayDirs.upperDir, workDir: task.overlayDirs.workDir },
     overlayRwBinds: task.overlayDirs.rwBinds ?? [],
     overlayRwFileBinds: task.overlayDirs.rwFileBinds ?? [],
+    // Security (review finding, verified against src/sandbox.js:277-308
+    // directly): buildBwrapArgs defaults runtimeDirWritable to true, which
+    // would hand the gate's check command a writable bind onto the daemon's
+    // control socket -- a worker-controlled check (npm test, a Makefile
+    // target) could then connect out and call `taskferry accept --force` on
+    // its own pending task. The gate is verification, not a trusted daemon
+    // component; it gets read-only access to the runtime dir, same as any
+    // other untrusted sandboxed process.
+    runtimeDirWritable: false,
   }).concat(["--", "sh", "-c", projectConfig.check]);
+  // Known gap, not fixed in this pass: unlike the worker's spawn
+  // (buildBwrapBinds), the gate does not forward the worker's
+  // extraRwBinds/extraRwPairBinds (executor auth binds, allowedDirs, the
+  // sandboxed data home) -- those aren't currently persisted anywhere on
+  // `task` for the gate to reuse. A check command that specifically needs
+  // one of those (rather than read_only_paths, which IS threaded above)
+  // will diverge from the worker's view. Flagged for a follow-up if a real
+  // check command hits it; not blocking this plan.
 
   task.checkStatus = "running";
   task.checkCommand = projectConfig.check;
@@ -1032,7 +1122,12 @@ function startCheckGate(task, ctx) {
   let settled = false;
   let child;
   try {
-    child = ctx.spawnFn("bwrap", spawnArgs, { cwd: task.directory, env: gateEnv, stdio: ["ignore", "pipe", "pipe"] });
+    // detached: true (review fix, empirically required -- see the "Kill
+    // mechanism" note above this task): makes the gate its own process-group
+    // leader, the same way spawnTaskChild() already does for workers
+    // (src/tasks.js:1237), so sendSignalToProcess's group-kill actually
+    // reaches the sandboxed workload instead of only the bwrap monitor.
+    child = ctx.spawnFn("bwrap", spawnArgs, { cwd: task.directory, env: gateEnv, stdio: ["ignore", "pipe", "pipe"], detached: true });
   } catch (err) {
     // A synchronous throw (e.g. `bwrap` binary missing) would otherwise
     // escape startCheckGate entirely, leaving the task stuck on
@@ -1048,6 +1143,10 @@ function startCheckGate(task, ctx) {
     return;
   }
   task.checkGatePid = child.pid ?? null;
+  // Track the live child by task id so killGateAndWait() (below), called
+  // from accept/reject, can find the same process object this closure holds
+  // and actually wait for its "exit" event -- see the Kill mechanism note.
+  ctx.gateChildren.set(task.id, child);
   ctx.persistTask(task.id);
 
   const timer = setTimeout(() => {
@@ -1068,15 +1167,17 @@ function startCheckGate(task, ctx) {
     if (settled) return;
     settled = true;
     clearTimeout(timer);
+    ctx.gateChildren.delete(task.id);
     // A gate that finishes after an accept/reject already settled the task
     // (changesetStatus moved off "pending") must NOT overwrite the
-    // already-decided outcome. The accept/reject path is responsible for
-    // killing the in-flight gate before releasing the overlay (Task 6
-    // wires `ctx.sendSignal(task.checkGatePid, "SIGTERM")` into
-    // acceptTaskChangeset/rejectTaskChangeset before each one's
-    // releaseOverlay() call); this guard is the right side of that
-    // handshake -- it preserves the decided outcome even if the kill
-    // arrived during/after the child's exit handler.
+    // already-decided outcome. Task 6's accept/reject path is responsible
+    // for killing the in-flight gate AND awaiting its actual exit (via
+    // killGateAndWait, which reads ctx.gateChildren -- this is why the
+    // delete() above must run before releaseOverlay can proceed, not just
+    // before this function returns) before releaseOverlay reclaims the
+    // overlay; this guard is the right side of that handshake -- it
+    // preserves the decided outcome even if a late exit event still fires
+    // after the kill has already resolved.
     if (task.changesetStatus !== "pending") return;
     task.checkStatus = status;
     task.checkExitCode = exitCode;
@@ -1096,6 +1197,7 @@ function startCheckGate(task, ctx) {
     if (settled) return;
     settled = true;
     clearTimeout(timer);
+    ctx.gateChildren.delete(task.id);
     task.checkStatus = "failed";
     task.checkExitCode = null;
     task.checkOutputTail = `spawn error: ${errMessage(err)}`;
@@ -1105,9 +1207,48 @@ function startCheckGate(task, ctx) {
     void ctx.scheduleActivity(task, { force: true });
   });
 }
+
+/**
+ * Sends a process-group SIGTERM to a task's in-flight check gate and waits
+ * for it to actually exit (escalating to SIGKILL after
+ * CHECK_GATE_KILL_GRACE_MS if it hasn't) before resolving. Task 6's
+ * accept/reject must await this BEFORE calling releaseOverlay -- sending a
+ * signal and immediately proceeding (the earlier draft of this plan) is not
+ * a handshake, it's a race: the overlay's upper dir can be chmod'd/rm -rf'd
+ * out from under a gate child that is still mid-write. Best-effort bounded:
+ * if the child still hasn't exited CHECK_GATE_KILL_GRACE_MS after the
+ * SIGKILL, this gives up and resolves anyway rather than hanging
+ * accept/reject forever -- a leftover process at that point means something
+ * is genuinely wrong (worth investigating via `ps`) and is not worth
+ * blocking the user's accept/reject call on indefinitely.
+ * @param {string} taskId
+ * @param {{gateChildren: Map<string, import("node:child_process").ChildProcess>, sendSignal: (pid: number, signal: NodeJS.Signals) => void}} ctx
+ * @returns {Promise<void>}
+ */
+async function killGateAndWait(taskId, ctx) {
+  const child = ctx.gateChildren.get(taskId);
+  if (!child || child.pid == null) return; // already exited, or never tracked
+  const exited = new Promise((resolve) => child.once("exit", () => resolve()));
+  ctx.sendSignal(child.pid, "SIGTERM");
+  if (await raceTimeout(exited, CHECK_GATE_KILL_GRACE_MS)) return;
+  ctx.sendSignal(child.pid, "SIGKILL");
+  await raceTimeout(exited, CHECK_GATE_KILL_GRACE_MS);
+}
+
+/**
+ * @param {Promise<void>} promise
+ * @param {number} ms
+ * @returns {Promise<boolean>} true if `promise` settled before the timeout
+ */
+function raceTimeout(promise, ms) {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => resolve(false), ms);
+    promise.then(() => { clearTimeout(timer); resolve(true); });
+  });
+}
 ```
 
-(A note on `sendSignal` for the kill: it ultimately calls `sendSignalToProcess` (`src/tasks.js:4174`), which first tries `killFn(-pid, signal)` -- a process-group signal. The gate child is NOT spawned `detached`, so its PGID is the same as the daemon's PGID (not its own), and the group-kill attempt therefore fails harmlessly with `ESRCH` -- the OS reports "no process group with that id". The function then falls back to a plain-pid SIGTERM, which is sufficient for the gate specifically because bwrap's own `--unshare-pid` namespace teardown kills every process inside the sandbox once the top-level bwrap process dies. That's not literally the same mechanism `cancel()` uses (cancel's child is in its own process group and gets a real group kill), but the end-result is the same: every process inside the sandbox dies. Don't "fix" this into a group-kill by spawning the gate `detached: true`; that would defeat the daemon's existing shutdown semantics and isn't needed for the gate's actual kill requirement.)
+(A note on `sendSignal` for the timeout-escalation path above: it ultimately calls `sendSignalToProcess` (`src/tasks.js:4174`), which tries `killFn(-pid, signal)` first -- a process-group signal. Because the gate is now spawned `detached: true` (this step), its PGID is its own, so the group-kill actually reaches every process bwrap's namespace started, not just the monitor. This was verified empirically, not assumed: an earlier draft of this plan asserted that bwrap's own `--unshare-pid` namespace teardown alone kills the workload once the monitor dies from a plain-pid signal, and that claim was tested directly on this host (bubblewrap 0.11.2, the exact flags `buildBwrapArgs` emits) -- the inner workload survived as an orphan in 7/7 trials. `detached: true` plus the existing group-kill in `sendSignalToProcess` is the real, verified fix, and it's the exact mechanism `cancel()` already relies on for workers -- no new kill primitive.)
 
 Add the import at the top of `src/tasks.js` (extend the existing `./project-config.js` import from Task 3):
 
@@ -1140,19 +1281,38 @@ to:
 
 Add `startCheckGate` to `extractChangesetForTaskRecord`'s own `ctx` JSDoc param type (the block above its signature, ~line 4299): append `, startCheckGate: (task: Task) => void` to the object type.
 
-- [ ] **Step 5: Wire the real `startCheckGate` binding into the factory that constructs `extractChangesetForTaskRecord`'s ctx**
+- [ ] **Step 5: Wire `startCheckGate` as a genuine top-level `ctx.env` binding**
 
-In `src/tasks.js` (~line 3284), the `extractChangesetForTask:` binding currently reads:
+**Wiring fix (added after external review — verified against `buildManagerEnvHelpers`'s actual return shape at `src/tasks.js:3261-3290`, not assumed).** An earlier draft of this step nested the `startCheckGate` closure *inside* the argument object passed to `extractChangesetForTaskRecord(finishedTask, {...})` — that object is local to a single call and is never itself returned from `buildManagerEnvHelpers`, so nothing outside that one call site could ever reach it. Task 7's restart-recovery sweep needs to invoke the exact same binding independently (a daemon restart calls it directly, with no `extractChangesetForTaskRecord` call involved), so `startCheckGate` must be its own top-level key on the object `buildManagerEnvHelpers` returns (i.e. a real `ctx.env.startCheckGate`), not a value buried inside another function's parameter object.
+
+In `src/tasks.js`'s `buildManagerEnvHelpers` (~line 3261, the function whose returned object becomes `ctx.env`), the `extractChangesetForTask:` entry currently reads:
 
 ```js
     extractChangesetForTask: (finishedTask) => extractChangesetForTaskRecord(finishedTask, { stateDir: ctx.opts.stateDir, runtimeDir: ctx.opts.runtimeDir, existsFn: ctx.opts.existsFn, sandboxDenylist: ctx.opts.sandboxDenylist, runOverlayCommandFn: ctx.opts.runOverlayCommandFn, overlaySleepFn: ctx.opts.overlaySleepFn, persistTask: (taskId) => ctx.helpers.persistTask(taskId), releaseOverlay }),
 ```
 
-Add a `startCheckGate` entry to that object:
+Replace it with a real `startCheckGate` binding defined once, alongside it in the same returned object (not nested inside `extractChangesetForTask`'s own call):
 
 ```js
-    extractChangesetForTask: (finishedTask) => extractChangesetForTaskRecord(finishedTask, { stateDir: ctx.opts.stateDir, runtimeDir: ctx.opts.runtimeDir, existsFn: ctx.opts.existsFn, sandboxDenylist: ctx.opts.sandboxDenylist, runOverlayCommandFn: ctx.opts.runOverlayCommandFn, overlaySleepFn: ctx.opts.overlaySleepFn, persistTask: (taskId) => ctx.helpers.persistTask(taskId), releaseOverlay, startCheckGate: (task) => startCheckGate(task, { spawnFn: ctx.opts.spawnFn, stateDir: ctx.opts.stateDir, runtimeDir: ctx.opts.runtimeDir, existsFn: ctx.opts.existsFn, sandboxDenylist: ctx.opts.sandboxDenylist, persistTask: (taskId) => ctx.helpers.persistTask(taskId), scheduleActivity: (t, options) => ctx.helpers.scheduleActivity(t, options), sendSignal: (pid, signal) => ctx.helpers.sendSignal(pid, signal), platform: ctx.opts.platform }) }),
+    /** @param {Task} task */
+    startCheckGate: (task) => startCheckGate(task, {
+      spawnFn: ctx.opts.spawnFn,
+      stateDir: ctx.opts.stateDir,
+      runtimeDir: ctx.opts.runtimeDir,
+      existsFn: ctx.opts.existsFn,
+      sandboxDenylist: ctx.opts.sandboxDenylist,
+      persistTask: (taskId) => ctx.helpers.persistTask(taskId),
+      scheduleActivity: (t, options) => ctx.helpers.scheduleActivity(t, options),
+      sendSignal: (pid, signal) => ctx.helpers.sendSignal(pid, signal),
+      platform: ctx.opts.platform,
+      gateChildren: ctx.maps.gateChildren,
+    }),
+    /** @param {string} taskId */
+    killGateAndWait: (taskId) => killGateAndWait(taskId, { gateChildren: ctx.maps.gateChildren, sendSignal: (pid, signal) => ctx.helpers.sendSignal(pid, signal) }),
+    extractChangesetForTask: (finishedTask) => extractChangesetForTaskRecord(finishedTask, { stateDir: ctx.opts.stateDir, runtimeDir: ctx.opts.runtimeDir, existsFn: ctx.opts.existsFn, sandboxDenylist: ctx.opts.sandboxDenylist, runOverlayCommandFn: ctx.opts.runOverlayCommandFn, overlaySleepFn: ctx.opts.overlaySleepFn, persistTask: (taskId) => ctx.helpers.persistTask(taskId), releaseOverlay, startCheckGate: (task) => ctx.env.startCheckGate(task) }),
 ```
+
+(`extractChangesetForTaskRecord`'s own `ctx` param still needs a `startCheckGate` key — Step 4 above already added `startCheckGate: (task: Task) => void` to its JSDoc typedef — but now it's a one-line passthrough to the real `ctx.env.startCheckGate`, not a second copy of the construction logic. `ctx.maps.gateChildren` is the `Map` added in Step 3's constants section above; verify the actual name/location of the `maps` namespace in current source before applying — mirror wherever `ctx.maps.tasks`/`ctx.maps.waiters` already live.)
 
 - [ ] **Step 6: Run the tests to verify they pass**
 
@@ -1176,70 +1336,80 @@ git commit -m "feat(tasks): run the .taskferry.toml check command as a settle-ti
 ## Task 6: Accept/reject gating (`--force`, fix-forward failure message)
 
 **Files:**
-- Modify: `src/tasks.js` (`validateAcceptable` ~line 2558, `acceptTaskChangeset` ~line 4536, new `buildCheckGateFailureMessage`)
+- Modify: `src/tasks.js` (`validateAcceptable` ~line 2558, `acceptTaskChangeset`/`rejectTaskChangeset` ~line 4536/4589 — both now `async`, new `buildCheckGateFailureMessage`)
 - Modify: `src/commands.js` (`runAccept` — "no check declared" warning)
-- Test: `src/tasks.changeset.test.js`, `src/commands.test.js` (add new cases)
+- Modify: `src/protocol.js`, `src/daemon.js`, `src/client.js` (RPC error envelope gains a `detail` field so a multi-line check-gate failure message survives the daemon→client hop intact — Step 6)
+- Test: `src/tasks.changeset.test.js`, `src/commands.test.js`, `src/daemon.test.js`, `src/client.test.js`, `src/protocol.test.js` (add new cases)
 
 **Interfaces:**
-- Consumes: `task.checkStatus`/`checkCommand`/`checkExitCode`/`checkOutputTail`/`checkGatePid` (Task 5), `force` param threaded through in Task 2, `ctx.sendSignal` threaded through in this task's Step 4.
+- Consumes: `task.checkStatus`/`checkCommand`/`checkExitCode`/`checkOutputTail` (Task 5), `force` param threaded through in Task 2, `ctx.env.killGateAndWait` (Task 5, threaded through in this task's Step 4).
 - Produces: `task.checkOverride: true` when `--force` overrides a blocking gate status (including `running`) — nothing downstream consumes this yet beyond what Task 2 already surfaces in `summarize()`/`computeResultDetail()`.
+
+**`mgr.accept`/`mgr.reject` are now async (review fix — see Step 4).** Every test below that calls `mgr.accept(id, ...)` or `mgr.reject(id)` and reads a field off the return value, or relies on ordering relative to it, needs `await` — write these as `async` test functions. This is a real behavior change from a hypothetical pre-gate `accept`/`reject` (synchronous, since there was nothing to wait for before this feature), not a typo.
 
 - [ ] **Step 1: Write the failing tests**
 
 Add to `src/tasks.changeset.test.js` (find and reuse whatever helper that file already uses to get a task into `changesetStatus: "pending"` with a live overlay — likely the same `dispatchAndSettleWithChanges`-shaped pattern from Task 5's new test file, or an existing one already in this file; do not duplicate a second copy of that helper if one already exists here):
 
 ```js
-test("accept refuses a still-running check gate without --force", () => {
+test("accept refuses a still-running check gate without --force", async () => {
   // Arrange a task with checkStatus: "running" (a real gate mid-flight),
-  // then call mgr.accept(id) with no options and assert it throws matching
-  // /check gate still running/, and mgr.accept(id, { force: true }) succeeds.
+  // then call await mgr.accept(id) with no options and assert it throws/
+  // rejects matching /check gate still running/, and
+  // await mgr.accept(id, { force: true }) succeeds.
 });
 
-test("accept refuses a failed check gate without --force, with the fix-forward message", () => {
+test("accept refuses a failed check gate without --force, with the fix-forward message", async () => {
   // checkStatus: "failed", checkExitCode: 1, checkOutputTail: "2 tests failed",
-  // sessionId set. Assert the thrown error's message includes the command,
-  // "exit: 1", the output tail, and a `taskferry dispatch --session-id ...
-  // --parent-task <id>` resume line.
+  // sessionId set. Assert the thrown/rejected error's message includes the
+  // command, "exit: 1", the output tail, and a `taskferry dispatch
+  // --session-id ... --parent-task <id>` resume line.
 });
 
-test("accept --force on a failed gate succeeds and records checkOverride: true", () => {
-  // Assert mgr.accept(id, { force: true }).applied === true, and a
+test("accept --force on a failed gate succeeds and records checkOverride: true", async () => {
+  // Assert (await mgr.accept(id, { force: true })).applied === true, and a
   // subsequent mgr.status(id).checkOverride === true.
 });
 
-test("accept on a passed or absent (checkStatus 'none') gate needs no --force", () => {
+test("accept on a passed or absent (checkStatus 'none') gate needs no --force", async () => {
   // checkStatus: "passed" (or task never had a gate at all) accepts normally.
 });
 
-test("reject is always allowed regardless of checkStatus, even without --force", () => {
-  // checkStatus: "failed", mgr.reject(id) succeeds with no force option at all.
+test("reject is always allowed regardless of checkStatus, even without --force", async () => {
+  // checkStatus: "failed", await mgr.reject(id) succeeds with no force option at all.
 });
 
-test("reject while the gate is still running kills the gate first and doesn't crash/corrupt the task", () => {
-  // Arrange a task with checkStatus: "running" and a stubbed checkGatePid
-  // pointing at a fake child that records every sendSignal call. Call
-  // mgr.reject(id) and assert (a) ctx.sendSignal was called with the
-  // recorded fake pid and "SIGTERM" before releaseOverlay ran, (b) the
-  // task records changesetStatus: "rejected" and the rejected state
-  // doesn't itself re-emit the running checkStatus as the final value --
-  // the task's in-memory checkStatus may still be "running" right at the
-  // moment of reject (the gate's exit handler is racing), but the task's
-  // persisted checkStatus was last written by settle() and is overwritten
-  // by neither reject nor releaseOverlay (a deliberate non-decision: the
-  // gate's own settle()-side guard `if (task.changesetStatus !==
-  // "pending") return;` is what protects the rejected status from being
-  // clobbered by a late-arriving gate exit).
+test("reject while the gate is still running kills the gate and waits for it to exit before releasing the overlay", async () => {
+  // Arrange a task with checkStatus: "running" and a real fakeGateChild()
+  // (Task 5's helper) registered in ctx.gateChildren, with a killFn fake
+  // that records every call AND lets the test control when the fake
+  // child's "exit" event fires. Call `const rejectPromise = mgr.reject(id)`
+  // (don't await yet), assert killFn was called with a NEGATIVE pid
+  // (process-group SIGTERM) before the fake child has emitted "exit", THEN
+  // fire the fake child's exit event, THEN `await rejectPromise` and assert
+  // it resolved only after that -- proving reject() actually waited for the
+  // gate to die instead of racing ahead to releaseOverlay. Also assert the
+  // task records changesetStatus: "rejected" and the rejected state doesn't
+  // itself re-emit the running checkStatus as the final value -- the task's
+  // in-memory checkStatus may still be "running" right up until the fake
+  // child's exit fires (the gate's own exit handler is what would flip it),
+  // but the task's persisted checkStatus was last written by settle() and
+  // is overwritten by neither reject nor releaseOverlay (a deliberate
+  // non-decision: the gate's own settle()-side guard
+  // `if (task.changesetStatus !== "pending") return;` is what protects the
+  // rejected status from being clobbered by a late-arriving gate exit).
 });
 
-test("a gate that settles after a reject is a no-op (task stays 'rejected', checkStatus unchanged from whatever it was when reject killed it)", () => {
-  // After mgr.reject(id) has killed the gate, fire the fake child's
-  // `exit` handler with code 0 and assert: the task's persisted
-  // changesetStatus is still "rejected", checkOverride is NOT set on a
-  // reject (override is accept-side only), and scheduleActivity was
-  // NOT called again on the late exit. This is the test that proves
-  // Task 5's `settled` closure AND the `if (task.changesetStatus !==
-  // "pending") return;` guard inside settle() together prevent a
-  // late-arriving gate exit from clobbering the rejected outcome.
+test("a gate that settles after a reject is a no-op (task stays 'rejected', checkStatus unchanged from whatever it was when reject killed it)", async () => {
+  // After await mgr.reject(id) has killed the gate (per the previous test's
+  // pattern), fire the fake child's `exit` handler with code 0 and assert:
+  // the task's persisted changesetStatus is still "rejected", checkOverride
+  // is NOT set on a reject (override is accept-side only), and
+  // scheduleActivity was NOT called again on the late exit. This is the
+  // test that proves Task 5's `settled` closure AND the
+  // `if (task.changesetStatus !== "pending") return;` guard inside settle()
+  // together prevent a late-arriving gate exit from clobbering the rejected
+  // outcome.
 });
 ```
 
@@ -1334,27 +1504,32 @@ function validateAcceptable(task, { force = false, ...ctx }) {
 
 The signature change (`function acceptTaskChangeset(taskId, { force = false } = {}, ctx)`) and the `validateAcceptable(task, { force, ... })` call site already landed in Task 2 — this task only adds the gating *behavior* on top of them. Verify before editing: `acceptTaskChangeset`'s declared signature (around `src/tasks.js:4536`) already reads `function acceptTaskChangeset(taskId, { force = false } = {}, ctx)` and the existing `validateAcceptable(task, { existsFn: ctx.existsFn, hasLiveOverlay: ctx.hasLiveOverlay })` call already exists at the top of its body. If Task 2's commit did not land both, undo and fix Task 2 first rather than redoing it here.
 
+**`async` (review fix — this task, not Task 2).** `acceptTaskChangeset`/`rejectTaskChangeset` must both become `async function`s so the kill handshake below can `await` the gate's actual exit before `releaseOverlay` runs — see the "Kill mechanism" note under Task 5. This is a real signature change from whatever Task 2 landed (Task 2 had no reason to make them async, since it only added the `force` parameter). It's low-risk end to end: `src/daemon-server.js:131` already does `const result = await invoke(manager, request);` generically for every RPC method, so a manager method returning a Promise instead of a plain object works with zero daemon-side changes; the CLI's `runAccept`/`runReject` already `await client.request(...)`. The one real consequence: any test in this task (Step 1) or elsewhere that calls `mgr.accept(id, ...)` or `mgr.reject(id)` synchronously and reads `.applied`/`.changesetStatus` off the return value directly must add `await` — go back and add it to Step 1's test bodies once they're actually written, not just this step's prose.
+
 ```js
-function acceptTaskChangeset(taskId, { force = false } = {}, ctx) {
+async function acceptTaskChangeset(taskId, { force = false } = {}, ctx) {
   // Signature already landed in Task 2 -- this task only fills in the
-  // behavior on top of the { force = false } parameter.
+  // behavior on top of the { force = false } parameter, plus `async` (see
+  // note above) so the kill handshake below can be awaited.
   ctx.ensureStateLoaded();
   const task = ctx.tasks.get(taskId);
   if (!task) throw ctx.noSuchTask(taskId);
   const isGitTarget = validateAcceptable(task, { force, existsFn: ctx.existsFn, hasLiveOverlay: ctx.hasLiveOverlay });
 ```
 
-(`validateAcceptable` already threw — or `force` already skipped the gate refusal — before any field write, so by the time we reach the apply step the gate is either settled or we explicitly chose to override it. The running-gate handshake below is the remaining case: a non-`--force` accept never gets here on a running gate because `validateAcceptable` refused; a `--force` accept explicitly chose to override and now has to kill the in-flight child before `releaseOverlay` (the next call) reclaims the overlay out from under it. The kill is best-effort: if the child already exited between validation and here, `checkGatePid` may be `null` and the `sendSignal` call is skipped; if the child is mid-write into the overlay, the SIGTERM races the chmod/rm but `--unshare-pid` namespace teardown plus the bwrap process death guarantees no further writes land.)
+(`validateAcceptable` already threw — or `force` already skipped the gate refusal — before any field write, so by the time we reach the apply step the gate is either settled or we explicitly chose to override it. The running-gate handshake below is the remaining case: a non-`--force` accept never gets here on a running gate because `validateAcceptable` refused; a `--force` accept explicitly chose to override and now has to kill the in-flight child AND wait for it to actually exit before `releaseOverlay` (the next call) reclaims the overlay out from under it — see `killGateAndWait` in Task 5.)
 
 Then immediately before the existing `applyChangeset(...)` call (which uses the overlay's `merged` view), insert the in-flight-gate kill handshake:
 
 ```js
-  if (task.checkStatus === "running" && task.checkGatePid != null) {
-    ctx.sendSignal(task.checkGatePid, "SIGTERM");
+  if (task.checkStatus === "running") {
+    await ctx.killGateAndWait(taskId);
   }
 ```
 
-This requires `sendSignal` to be threaded into `acceptTaskChangeset`'s `ctx` object. Update the `@param` typedef on `acceptTaskChangeset` (the JSDoc block above its signature, ~line 4533) to add `sendSignal: (pid: number, signal: NodeJS.Signals) => void` to the object type; then update the `accept:` factory binding in Task 2 Step 9 to thread `sendSignal: (pid, signal) => ctx.helpers.sendSignal(pid, signal)` through, the same way Task 2 already threads `sendSignal` into the `cancel:` factory binding (matching `cancelTask`'s own use of `ctx.sendSignal`).
+(`killGateAndWait` — Task 5's function, threaded through here — is a no-op if the gate already exited between validation and here: it looks the child up in `ctx.gateChildren` and returns immediately if it's not there. `task.checkGatePid` is no longer read directly here; `killGateAndWait` resolves the live child from `taskId`, not the persisted pid, so it always targets the actual tracked process, not a possibly-stale field.)
+
+This requires `killGateAndWait` to be threaded into `acceptTaskChangeset`'s `ctx` object. Update the `@param` typedef on `acceptTaskChangeset` (the JSDoc block above its signature, ~line 4533) to add `killGateAndWait: (taskId: string) => Promise<void>` to the object type; then update the `accept:` factory binding (`src/tasks.js:3399`) to thread `killGateAndWait: (taskId) => ctx.env.killGateAndWait(taskId)` through (Task 5 Step 5 already put `killGateAndWait` on `ctx.env`).
 
 and right after `task.changesetStatus = "accepted";`, add:
 
@@ -1368,15 +1543,15 @@ and right after `task.changesetStatus = "accepted";`, add:
 
 before the existing `ctx.persistTask(task.id);` call that follows it, so the override is captured in the same persisted snapshot as the acceptance.
 
-Make the identical in-flight-gate kill handshake change to `rejectTaskChangeset` (`src/tasks.js:4589`): immediately before its `ctx.persistTask(task.id);` call, add:
+Make the identical in-flight-gate kill handshake change to `rejectTaskChangeset` (`src/tasks.js:4589`, also now `async function rejectTaskChangeset(taskId, ctx)` — see the `async` note above): immediately before its `ctx.persistTask(task.id);` call, add:
 
 ```js
-  if (task.checkStatus === "running" && task.checkGatePid != null) {
-    ctx.sendSignal(task.checkGatePid, "SIGTERM");
+  if (task.checkStatus === "running") {
+    await ctx.killGateAndWait(taskId);
   }
 ```
 
-(`reject` is always allowed regardless of `checkStatus` (per the design's §4 "reject is always allowed"), but the kill handshake still applies — `releaseOverlay` reclaims the overlay out from under any in-flight gate just the same as `accept` does. `reject` is the path the user takes when the gate refuses and they don't want to fix-forward, so the gate must be torn down cleanly: otherwise the bwrap child continues writing into the overlay's `upper` even after `releaseOverlay` chmods/`rm -rf`s it.) This requires `sendSignal` to be threaded into `rejectTaskChangeset`'s `ctx` too — update its `@param` typedef (the JSDoc block above its signature, ~line 4586) to add `sendSignal: (pid: number, signal: NodeJS.Signals) => void`, and update the `reject:` factory binding in Task 2's accept-binding neighborhood (the existing `reject: (taskId) => rejectTaskChangeset(taskId, ...)` factory binding Task 2's caller-binding rewrite also touches) to thread `sendSignal: (pid, signal) => ctx.helpers.sendSignal(pid, signal)` through, the same way `accept:` does.
+(`reject` is always allowed regardless of `checkStatus` (per the design's §4 "reject is always allowed"), but the kill handshake still applies — `releaseOverlay` reclaims the overlay out from under any in-flight gate just the same as `accept` does. `reject` is the path the user takes when the gate refuses and they don't want to fix-forward, so the gate must be torn down cleanly and its exit awaited: otherwise the bwrap child continues writing into the overlay's `upper` even after `releaseOverlay` chmods/`rm -rf`s it.) This requires `killGateAndWait` to be threaded into `rejectTaskChangeset`'s `ctx` too — update its `@param` typedef (the JSDoc block above its signature, ~line 4586) to add `killGateAndWait: (taskId: string) => Promise<void>`, and update the `reject:` factory binding (`src/tasks.js:3404`) to thread `killGateAndWait: (taskId) => ctx.env.killGateAndWait(taskId)` through, the same way `accept:` does.
 
 Also change `acceptTaskChangeset`'s two return statements to carry `checkStatus` (needed by Step 5's CLI-side "no check declared" warning — the design's §4 accept-semantics table: *"`none`: normal accept flow plus a one-line warning that the repo has no checks"*):
 
@@ -1409,19 +1584,78 @@ This is an intentionally narrower interpretation of the design's §2 "accept pri
 
 Add a matching case to `src/commands.test.js` (or wherever `runAccept`'s existing tests live): a fake `client.request` resolving `{ taskId, changesetStatus: "accepted", applied: true, checkStatus: "none" }` and an assertion that `process.stderr.write` (or whatever this suite's existing stderr-capture convention is — check `warnIfCleanupFailed`'s own test for the pattern) was called with a message matching `/declares no check command/`.
 
-- [ ] **Step 6: Run the tests to verify they pass**
+- [ ] **Step 6: Preserve the full failure message across the RPC boundary**
 
-Run: `env -u TASKFERRY_CHILD node --test src/tasks.changeset.test.js src/commands.test.js`
+**Review fix (Critical, verified directly against `src/daemon.js:270-280` and `src/client.js:295-321` — not asserted).** `buildCheckGateFailureMessage` (Step 3 above) produces a multi-line message: a command line, an exit/timeout/interrupted line, an indented output tail, and a resume-hint dispatch command. But `responseError` in `daemon.js` collapses any non-`ProtocolError` thrown error down to exactly one line via `lines.find((line) => line.startsWith("error:"))` for `message` and one line via `lines.find((line) => line.startsWith("help:"))` for `help` — everything else in the thrown text is silently dropped before it ever reaches the wire. `client.js`'s `buildRequestError` then reconstructs the CLI-facing `Error` from only those two fields (`${error.message}\nhelp: ${error.help}`). The net effect: a user running `taskferry accept <id>` against a failed gate would see just `error: check gate failed for <id>` and a generic help line — not the command, not the output tail, not the fix-forward resume command that's the entire point of `buildCheckGateFailureMessage`.
+
+Add a `detail` field to the wire error envelope that carries the full original text verbatim, so nothing is lost, while leaving the existing `message`/`help` two-line convention intact for every other error in the codebase (this is additive, not a rewrite of the general-purpose error path).
+
+In `src/protocol.js`, extend `errorResponse`:
+
+```js
+/** @param {string | null} id @param {string} code @param {string} message @param {string} help @param {string} [detail] */
+export function errorResponse(id, code, message, help, detail) {
+  return { version: PROTOCOL_VERSION, ok: false, error: { code, message, help, detail: detail ?? message }, id };
+}
+```
+
+In `src/daemon.js`'s `responseError`, pass the full original text as `detail`:
+
+```js
+function responseError(error, requestId) {
+  if (error instanceof ProtocolError) {
+    return errorResponse(error.requestId, error.code, error.message, error.help, error.message);
+  }
+  const text = error instanceof Error ? error.message : String(error);
+  const lines = text.split("\n");
+  const message = lines.find((line) => line.startsWith("error:"))?.slice(6).trim() || lines[0];
+  const help = lines.find((line) => line.startsWith("help:"))?.slice(5).trim() || "Retry the request or inspect the daemon logs";
+  const code = /unknown task id:/.test(text) ? "UNKNOWN_TASK" : "REQUEST_FAILED";
+  return errorResponse(requestId, code, message, help, text);
+}
+```
+
+In `src/client.js`, `isExactObject`'s call site for `validError` (~line 302) must accept the new key:
+
+```js
+function validError(error) {
+  return isExactObject(error, ["code", "message", "help", "detail"])
+    && typeof error.code === "string"
+    && typeof error.message === "string"
+    && typeof error.help === "string"
+    && typeof error.detail === "string";
+}
+```
+
+(`isExactObject` requires an exact key-count match, so every error envelope produced above must include `detail` — the `detail: detail ?? message` default in `errorResponse` guarantees that, so no caller of `errorResponse` needs updating individually.)
+
+And `buildRequestError` renders `detail` when it differs from the generic two-line reconstruction (i.e. whenever the original text had more in it than a single `error:` line), falling back to the existing short form otherwise so a plain one-line error doesn't grow a redundant duplicate line:
+
+```js
+function buildRequestError(error) {
+  const detail = error?.detail;
+  const body = detail && detail !== error?.message ? detail : `${error?.message || "daemon request failed"}\nhelp: ${error?.help || "retry the request"}`;
+  const err = new Error(body);
+  err.code = error?.code || "REQUEST_FAILED";
+  return err;
+}
+```
+
+Add a case to `src/daemon.test.js` (or wherever `responseError` is already tested) throwing a multi-line `buildCheckGateFailureMessage`-shaped error through the RPC round-trip (or a plain `errorResponse`/`buildRequestError` unit pair, whichever this suite's existing convention favors) and asserting the client-side `Error`'s message contains the output-tail and resume-hint lines, not just the first `error:` line.
+
+- [ ] **Step 7: Run the tests to verify they pass**
+
+Run: `env -u TASKFERRY_CHILD node --test src/tasks.changeset.test.js src/commands.test.js src/daemon.test.js src/client.test.js src/protocol.test.js`
 Expected: PASS.
 
-- [ ] **Step 7: Run the full unit suite and commit**
+- [ ] **Step 8: Run the full unit suite and commit**
 
 Run: `npm run test:unit`
 Expected: PASS.
 
 ```bash
-git add src/tasks.js src/tasks.changeset.test.js src/commands.js src/commands.test.js
-git commit -m "feat(tasks): gate accept on check-gate outcome, add --force override"
+git add src/tasks.js src/tasks.changeset.test.js src/commands.js src/commands.test.js src/protocol.js src/daemon.js src/client.js
+git commit -m "feat(tasks): gate accept on check-gate outcome, add --force override, preserve full RPC error detail"
 ```
 
 ---
@@ -1438,28 +1672,37 @@ git commit -m "feat(tasks): gate accept on check-gate outcome, add --force overr
 
 - [ ] **Step 1: Write the failing test**
 
+**Test-harness fix (review finding, verified against `src/tasks.test-helpers.js:186-237` directly).** `makeManager(options)` always creates its own fresh temp dir via `makeTempDirs()` and seeds it through `seedTestFixtures(stateDir, options.tasksFixture ?? [], options.logs ?? {})` — it does **not** read `options.stateDir` at all (`buildManagerOptions`'s `stateDir` parameter is the freshly-made temp dir, not anything from `options`). An earlier draft of this test manually `fs.mkdtempSync`'d its own `stateDir`, wrote a `tasks.json` into it, then passed `{ stateDir }` to `makeManager` — that file is never read; the manager boots against a different, empty temp dir instead, and the test would silently observe `mgr.status("oc_interrupted1")` as "not found," not "interrupted." The real seeding mechanism is `options.tasksFixture` (an array of task objects), used the same way already-passing tests elsewhere in this file seed persisted state — check `src/tasks.lifecycle.test.js` for the existing pattern before writing this, since the exact field names below (`preDispatchHead`, etc.) need to match what `loadPersistedTasks` actually validates.
+
 Add to `src/tasks.lifecycle.test.js`:
 
 ```js
 test("a task whose check gate was 'running' when the daemon last exited loads as 'interrupted', not silently 'passed'", () => {
-  const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-lifecycle-interrupted-"));
-  const tasksFile = path.join(stateDir, "tasks.json");
-  fs.writeFileSync(tasksFile, JSON.stringify([
-    { id: "oc_interrupted1", status: "done", directory: stateDir, checkStatus: "running", checkCommand: "npm test", changesetStatus: "pending" },
-  ]));
-  const mgr = makeManager({ stateDir });
+  const mgr = makeManager({
+    tasksFixture: [
+      { id: "oc_interrupted1", status: "done", directory: os.tmpdir(), checkStatus: "running", checkCommand: "npm test", changesetStatus: "pending" },
+    ],
+  });
   const status = mgr.status("oc_interrupted1");
   assert.equal(status.checkStatus, "interrupted");
 });
 
 test("a task whose check gate had already settled ('passed') is left untouched on daemon restart", () => {
-  const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-lifecycle-settled-"));
-  const tasksFile = path.join(stateDir, "tasks.json");
-  fs.writeFileSync(tasksFile, JSON.stringify([
-    { id: "oc_settled1", status: "done", directory: stateDir, checkStatus: "passed", checkCommand: "npm test", changesetStatus: "pending" },
-  ]));
-  const mgr = makeManager({ stateDir });
+  const mgr = makeManager({
+    tasksFixture: [
+      { id: "oc_settled1", status: "done", directory: os.tmpdir(), checkStatus: "passed", checkCommand: "npm test", changesetStatus: "pending" },
+    ],
+  });
   assert.equal(mgr.status("oc_settled1").checkStatus, "passed");
+});
+
+test("a task already force-accepted/rejected while its gate was 'running' is left alone, not flipped to 'interrupted'", () => {
+  // Review fix (I2): changesetStatus left "accepted"/"rejected" but
+  // checkStatus still "running" (the kill signal fired, but no exit event
+  // landed before the daemon died) must NOT be reclassified -- the decision
+  // is already made. Seed a tasksFixture entry with
+  // { checkStatus: "running", changesetStatus: "accepted" } and assert
+  // mgr.status(id).checkStatus is unchanged ("running"), not "interrupted".
 });
 
 test("a task whose gate was 'running' AND whose overlay is still live is automatically re-run on next daemon restart", () => {
@@ -1473,9 +1716,16 @@ test("a task whose gate was 'running' AND whose overlay is still live is automat
   // and the user sees "running" again on `taskferry status <id>` instead of
   // a dead-looking "interrupted" with no further action.
 });
-```
 
-Adjust the fixture task's other required fields to whatever minimum shape `loadPersistedTasks`/`makeManager` actually demands (read `src/tasks.lifecycle.test.js`'s existing persisted-tasks-file tests for the real minimum record shape before finalizing — this file already has at least one test that seeds `tasks.json` directly and constructs a manager over it, per the daemon-restart survival tests referenced in `findings.md`'s Finding 1 casualty description).
+test("restart with a live overlay best-effort kills any orphaned gate process before re-running", () => {
+  // Review fix: seed a task with checkStatus: "running", a live overlay,
+  // and checkGatePid set to a recorded fake pid; inject a killFn fake.
+  // After the manager boots, assert killFn was called with the negative of
+  // that pid (process-group SIGTERM) BEFORE startCheckGate was invoked --
+  // proving the sweep reaps a crash-orphaned gate before mounting a second
+  // one over the same overlay.
+});
+```
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
@@ -1501,14 +1751,40 @@ Add near `sweepOverlayEntry`/`sweepOverlayTmpRoot` (~line 4406) in `src/tasks.js
  * only; Task 6's validateAcceptable keeps refusing them without --force,
  * and the failure message renders the re-run path explicitly (see
  * "interrupted" handling note in Task 6 below).
- * @param {{tasks: Map<string, Task>, hasLiveOverlay: (task: Task) => boolean, startCheckGate: (task: Task) => void, persistTask: (taskId: string) => void}} ctx
+ *
+ * Two review fixes folded in here:
+ * (1) `changesetStatus !== "pending"` guard -- without it, a task that was
+ *     already force-accepted or rejected WHILE its gate was "running" (the
+ *     kill handshake fired, but the exit event that would flip checkStatus
+ *     away from "running" hadn't landed yet when the daemon died) gets
+ *     flipped to "interrupted" forever on every future restart, and if its
+ *     overlay happens to still be live, re-gated against an already-decided
+ *     changeset -- whose own settle() then no-ops via its own
+ *     `changesetStatus !== "pending"` guard, leaving checkStatus stuck on
+ *     "running" again, repeating the whole cycle on the next boot. A task
+ *     that's already been decided is not this sweep's concern at all.
+ * (2) Best-effort orphan kill before re-invoking startCheckGate -- an
+ *     UNCLEAN daemon death (crash, OOM-kill, force-restart) is the one path
+ *     where nothing ever sent the gate a kill signal at all (a graceful
+ *     accept/reject/shutdown always does, via killGateAndWait). Because the
+ *     gate is spawned `detached: true` (Task 5), the persisted
+ *     `task.checkGatePid` IS that process group's leader pid, so a
+ *     best-effort group-kill against it on restart reaps any surviving
+ *     orphan from the previous daemon incarnation before a second gate
+ *     mounts the same overlay -- without this, two writers (the orphan and
+ *     the fresh re-run) can be live against the same upper/work dir at
+ *     once. `sendSignal` already swallows ESRCH (nothing there), so this is
+ *     safe to call unconditionally.
+ * @param {{tasks: Map<string, Task>, hasLiveOverlay: (task: Task) => boolean, startCheckGate: (task: Task) => void, sendSignal: (pid: number, signal: NodeJS.Signals) => void, persistTask: (taskId: string) => void}} ctx
  */
 function markInterruptedGatesFor(ctx) {
   for (const task of ctx.tasks.values()) {
     if (task.checkStatus !== "running") continue;
+    if (task.changesetStatus !== "pending") continue;
     task.checkStatus = "interrupted";
     ctx.persistTask(task.id);
     if (ctx.hasLiveOverlay(task)) {
+      if (task.checkGatePid != null) ctx.sendSignal(task.checkGatePid, "SIGTERM");
       // Auto re-run: the overlay survived the daemon crash, so the gate
       // can be re-run over the same copy-on-write mount. startCheckGate
       // flips checkStatus back to "running" and persists before spawning,
@@ -1522,10 +1798,10 @@ function markInterruptedGatesFor(ctx) {
 Wire its factory binding near the existing `sweepOrphanedOverlays`/`sweepOrphanedPromptFiles` bindings (~line 3345):
 
 ```js
-    markInterruptedGates: () => markInterruptedGatesFor({ tasks: ctx.maps.tasks, hasLiveOverlay: (task) => ctx.helpers.hasLiveOverlay(task), startCheckGate: (task) => ctx.env.startCheckGate(task), persistTask: (taskId) => ctx.helpers.persistTask(taskId) }),
+    markInterruptedGates: () => markInterruptedGatesFor({ tasks: ctx.maps.tasks, hasLiveOverlay: (task) => ctx.helpers.hasLiveOverlay(task), startCheckGate: (task) => ctx.env.startCheckGate(task), sendSignal: (pid, signal) => ctx.helpers.sendSignal(pid, signal), persistTask: (taskId) => ctx.helpers.persistTask(taskId) }),
 ```
 
-(`startCheckGate` lives on `ctx.env` here because `extractChangesetForTaskRecord`'s binding (Task 5 Step 5) places it on the same `ctx.env` namespace `startCheckGate` consumes. Verify the actual binding shape before applying — if `extractChangesetForTaskRecord`'s factory binding keeps `startCheckGate` flat on `ctx` rather than `ctx.env`, mirror Task 5's exact path.)
+(`ctx.env.startCheckGate` is now a real, directly-callable binding — Task 5 Step 5 fixed the earlier draft, which nested `startCheckGate` inside a different function's argument object where `ctx.env` could never actually see it. No more "verify the actual binding shape" hedge needed here; this line is correct as written once Task 5 Step 5 lands.)
 
 Call it in `bootstrapManagerContext` (~line 3585), right after `ctx.helpers.sweepOrphanedOverlays();`:
 

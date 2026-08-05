@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { createTaskManager } from "./tasks.js";
-import { makeManager, fakeChild, DEFAULT_SUMMARY_MODEL, FINAL_ANSWER, STATUS_DONE_RE, QUOTA_ERROR } from "./tasks.test-helpers.js";
+import { makeManager, fakeChild, baseTask, DEFAULT_SUMMARY_MODEL, FINAL_ANSWER, STATUS_DONE_RE, QUOTA_ERROR } from "./tasks.test-helpers.js";
 
 const STATUS_DONE_TEXT = "Status: DONE";
 
@@ -367,6 +367,19 @@ describe("finalStatus: parsed closing Status: marker at settlement", () => {
     const reloaded = mgr2.status(dispatched.id);
     assert.equal(reloaded.status, "done");
     assert.equal(reloaded.finalStatus, "DONE");
+  });
+
+  test("summarize() includes finalStatus when non-null", () => {
+    const mgr = makeManager({
+      tasksFixture: [
+        baseTask({ id: "t_done", finalStatus: "DONE" }),
+        baseTask({ id: "t_none", finalStatus: null }),
+      ],
+    });
+    const done = mgr.status("t_done");
+    assert.equal(done.finalStatus, "DONE");
+    const none = mgr.status("t_none");
+    assert.equal("finalStatus" in none, false);
   });
 });
 

@@ -76,19 +76,19 @@ export const commandSpecs = {
   list: {
     usage: "taskferry list [options]",
     description: "List tasks scoped to a workspace, newest first.",
-    options: { "--directory <path>": "workspace to inspect, defaults to the current workspace", "--all": "include tasks from every workspace", "--limit <number>": "limit displayed rows while preserving counts" },
+    options: { "--directory <path>": "workspace to inspect, defaults to the current workspace; also matches tasks dispatched into any git worktree of the same repo", "--all": "include tasks from every workspace", "--limit <number>": "limit displayed rows while preserving counts" },
     examples: ['taskferry list', 'taskferry list --limit 20', 'taskferry list --all'],
   },
   watch: {
     usage: "taskferry watch [options]",
     description: "Stream task state events for a workspace.",
-    options: { "--directory <path>": "workspace to watch, defaults to the current workspace", "--task-id <id>": "scope the stream to one task; exits automatically once it settles", "--format toon|ndjson": "stream format, default toon", "--summaries": "request activity summaries when available", "--flush-interval <duration>": "batch events and print them together on this interval, e.g. 30s, 5m, 1h; requires --summaries" },
-    examples: ['taskferry watch', 'taskferry watch --task-id <id> --summaries', 'taskferry watch --format ndjson', 'taskferry watch --summaries --flush-interval 5m'],
+    options: { "--directory <path>": "workspace to watch, defaults to the current workspace; also matches tasks dispatched into any git worktree of the same repo", "--all": "stream events from every workspace, not just one", "--task-id <id>": "scope the stream to one task; exits automatically once it settles", "--format toon|ndjson": "stream format, default toon", "--summaries": "request activity summaries when available", "--flush-interval <duration>": "batch events and print them together on this interval, e.g. 30s, 5m, 1h; requires --summaries" },
+    examples: ['taskferry watch', 'taskferry watch --all', 'taskferry watch --task-id <id> --summaries', 'taskferry watch --format ndjson', 'taskferry watch --summaries --flush-interval 5m'],
   },
   context: {
     usage: "taskferry context [options]",
     description: "Print compact current-workspace context for an agent hook.",
-    options: { "--directory <path>": "workspace to inspect, defaults to the current workspace", "--format toon|claude-hook|codex-hook": "context format, default toon" },
+    options: { "--directory <path>": "workspace to inspect, defaults to the current workspace; also matches tasks dispatched into any git worktree of the same repo", "--format toon|claude-hook|codex-hook": "context format, default toon" },
     examples: ['taskferry context', 'taskferry context --format claude-hook', 'taskferry context --format codex-hook'],
   },
   doctor: {

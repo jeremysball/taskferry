@@ -1,9 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import path from "node:path";
-import { resolveWorkspaceRoot, resolveOverlayTmpRoot, TASKFERRY_PLUMBING_ENV_VARS } from "./paths.js";
+import { resolveWorkspaceRoot, resolveOverlayTmpRoot, createWorkspaceRootResolver, sameWorkspace, TASKFERRY_PLUMBING_ENV_VARS } from "./paths.js";
 
 const REPO_ROOT = "/workspace/repo";
+const NESTED_WORKTREE = "/workspace/repo/.worktrees/issue-1";
 const GIT_COMMON_DIR = "/workspace/repo/.git\n";
 const NOT_A_REPO_3 = "/tmp/not-a-repo-3";
 const VENDOR_LIB_ROOT = "/workspace/repo/vendor-lib";
@@ -62,7 +63,7 @@ test("resolves the parent directory of the git-common-dir for a plain repo", () 
 
 test("resolves a nested worktree (.worktrees/x) to the main checkout's root, not the worktree's own directory", () => {
   const runCommand = () => ({ status: 0, stdout: GIT_COMMON_DIR, stderr: "" });
-  assert.equal(resolveWorkspaceRoot("/workspace/repo/.worktrees/issue-1", { runCommand }), REPO_ROOT);
+  assert.equal(resolveWorkspaceRoot(NESTED_WORKTREE, { runCommand }), REPO_ROOT);
 });
 
 test("resolves a sibling worktree (git worktree add ../repo-feat) to the main checkout's root", () => {
@@ -118,4 +119,56 @@ test("uses the real defaultRunCommand and process.stderr.write when no overrides
   const root = resolveWorkspaceRoot(process.cwd());
   assert.equal(typeof root, "string");
   assert.ok(root.length > 0);
+});
+
+test("createWorkspaceRootResolver() memoizes per startDir, calling runCommand once per distinct directory rather than once per call (taskferry#315)", () => {
+  let calls = 0;
+  const runCommand = () => {
+    calls++;
+    return { status: 0, stdout: GIT_COMMON_DIR, stderr: "" };
+  };
+  const resolve = createWorkspaceRootResolver({ runCommand });
+  assert.equal(resolve(REPO_ROOT), REPO_ROOT);
+  assert.equal(resolve(REPO_ROOT), REPO_ROOT);
+  assert.equal(resolve(NESTED_WORKTREE), REPO_ROOT);
+  assert.equal(calls, 2, "one runCommand invocation per distinct startDir, not per resolve() call");
+});
+
+test("createWorkspaceRootResolver() gives two separately-created resolvers independent caches", () => {
+  let calls = 0;
+  const runCommand = () => {
+    calls++;
+    return { status: 0, stdout: GIT_COMMON_DIR, stderr: "" };
+  };
+  const a = createWorkspaceRootResolver({ runCommand });
+  const b = createWorkspaceRootResolver({ runCommand });
+  a(REPO_ROOT);
+  b(REPO_ROOT);
+  assert.equal(calls, 2, "each resolver instance owns its own cache, not a shared module-level one");
+});
+
+test("sameWorkspace() short-circuits on literal directory equality without invoking resolveRoot", () => {
+  let called = false;
+  const resolveRoot = () => {
+    called = true;
+    return "unused";
+  };
+  assert.equal(sameWorkspace("/a/b", "/a/b", resolveRoot), true);
+  assert.equal(called, false, "the literal-equality fast path must skip resolveRoot entirely");
+});
+
+test("sameWorkspace() treats a repo root and one of its linked worktrees as the same workspace (taskferry#315)", () => {
+  const runCommand = () => ({ status: 0, stdout: GIT_COMMON_DIR, stderr: "" });
+  const resolveRoot = createWorkspaceRootResolver({ runCommand });
+  assert.equal(sameWorkspace(REPO_ROOT, NESTED_WORKTREE, resolveRoot), true);
+});
+
+test("sameWorkspace() returns false for directories in two unrelated repos", () => {
+  const runCommand = (_command, args) => {
+    const target = args[args.indexOf("-C") + 1];
+    if (target === REPO_ROOT) return { status: 0, stdout: GIT_COMMON_DIR, stderr: "" };
+    return { status: 0, stdout: "/other/repo/.git\n", stderr: "" };
+  };
+  const resolveRoot = createWorkspaceRootResolver({ runCommand });
+  assert.equal(sameWorkspace(REPO_ROOT, "/other/repo", resolveRoot), false);
 });

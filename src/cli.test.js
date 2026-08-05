@@ -18,6 +18,7 @@ const testModel = "test/model";
 const noTasks = "none found in this workspace";
 const directoryFlag = "--directory";
 const setupMustNotConnect = "setup must not connect";
+const neverUsedRoot = "/should/never/be/used";
 
 function capturedIo({ stdin } = {}) {
   let stdout = "";
@@ -461,7 +462,7 @@ test("dispatch's directory is never passed through resolveWorkspaceRoot even whe
     cwd: workspace,
     io: capture.io,
     connectClient: async () => client,
-    resolveWorkspaceRoot: () => { called = true; return "/should/never/be/used"; },
+    resolveWorkspaceRoot: () => { called = true; return neverUsedRoot; },
   });
 
   assert.equal(result.exitCode, 0);
@@ -478,13 +479,43 @@ test("advisor's directory is never passed through resolveWorkspaceRoot even when
     cwd: workspace,
     io: capture.io,
     connectClient: async () => client,
-    resolveWorkspaceRoot: () => { called = true; return "/should/never/be/used"; },
+    resolveWorkspaceRoot: () => { called = true; return neverUsedRoot; },
     env: {},
   });
 
   assert.equal(result.exitCode, 0);
   assert.equal(called, false);
   assert.equal(calls[0].params.directory, workspace);
+});
+
+test("watch --all skips resolveWorkspaceRoot (even when injected) and subscribes with {all: true}, not a directory (taskferry#315)", async () => {
+  const capture = capturedIo();
+  const controller = new AbortController();
+  let subscribeParams;
+  const client = {
+    subscribe: async (params) => {
+      subscribeParams = params;
+      return "sub-1";
+    },
+    close() {},
+  };
+  let resolveCalled = false;
+  const pending = runCli(["watch", "--all"], {
+    io: capture.io,
+    signal: controller.signal,
+    connectClient: async () => client,
+    resolveWorkspaceRoot: () => { resolveCalled = true; return neverUsedRoot; },
+  });
+
+  // Let the async dispatch chain (connectClient, then watchCommand's
+  // subscribe call) actually run before asserting on it.
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(resolveCalled, false, "--all must not fall back to resolving cwd's workspace root");
+  assert.deepEqual(subscribeParams, { all: true });
+
+  controller.abort();
+  const result = await pending;
+  assert.equal(result.exitCode, 0);
 });
 
 test("doctor is a structured health check and --full preserves extra daemon fields", async (t) => {

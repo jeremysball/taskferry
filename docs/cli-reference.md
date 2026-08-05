@@ -281,7 +281,7 @@ Lists tasks scoped to a workspace, newest first, with counts by status.
 
 | Flag | Notes |
 |---|---|
-| `--directory <path>` | Workspace to inspect, defaults to the current git workspace root (falls back to the literal current directory outside a git repo) |
+| `--directory <path>` | Workspace to inspect, defaults to the current git workspace root (falls back to the literal current directory outside a git repo). Also matches a task dispatched into any linked git worktree of the same repo, not just an exact directory match — a `--directory` pointed at the main checkout sees a task dispatched into `.worktrees/x` or a sibling `git worktree add` too. |
 | `--all` | Include tasks from every workspace; cannot combine with `--directory` |
 | `--limit <number>` | Limit displayed rows while preserving the full counts |
 
@@ -292,7 +292,8 @@ SIGTERM), then exits cleanly with code `0`.
 
 | Flag | Notes |
 |---|---|
-| `--directory <path>` | Workspace to watch, defaults to the current git workspace root (falls back to the literal current directory outside a git repo) |
+| `--directory <path>` | Workspace to watch, defaults to the current git workspace root (falls back to the literal current directory outside a git repo). Also matches a task dispatched into any linked git worktree of the same repo, not just an exact directory match — a `--directory` pointed at the main checkout still sees a task dispatched into `.worktrees/x` or a sibling `git worktree add`. |
+| `--all` | Stream every workspace's events, not just one; cannot combine with `--directory` or `--task-id` |
 | `--format toon\|ndjson` | Stream format, default `toon` |
 | `--summaries` | Request live activity summaries (a secondary model call); see [security.md](security.md) |
 | `--flush-interval <duration>` | Batch `--summaries` events and print them together on this interval instead of streaming individually; milliseconds or a duration string (30s, 5m, 1h); requires `--summaries` |
@@ -301,6 +302,11 @@ SIGTERM), then exits cleanly with code `0`.
 Without `--task-id`, `watch` streams every task in the workspace until
 interrupted. With it, `--directory` is optional — it's resolved from the
 task itself when omitted.
+
+Use `--all` for fleet-wide monitoring across every workspace at once —
+otherwise a `--directory`-scoped watch only sees tasks in that repo (main
+checkout plus its worktrees), never tasks dispatched into an unrelated repo
+or a non-git directory.
 
 `ndjson` emits one JSON object per line, for scripting.
 
@@ -313,7 +319,7 @@ task counts and rows, nothing else.
 
 | Flag | Notes |
 |---|---|
-| `--directory <path>` | Workspace to inspect, defaults to the current git workspace root (falls back to the literal current directory outside a git repo) |
+| `--directory <path>` | Workspace to inspect, defaults to the current git workspace root (falls back to the literal current directory outside a git repo). Also matches a task dispatched into any linked git worktree of the same repo, not just an exact directory match. |
 | `--format toon\|claude-hook\|codex-hook` | Default `toon`; the two hook formats wrap the TOON payload in the target agent's expected envelope |
 
 ## `taskferry doctor [--full] [--stats]`

@@ -119,6 +119,39 @@ describe("task activity events", () => {
     assert.equal(task.status, "running");
   });
 
+  test("unions a `watch --all` (null-keyed) activitySubscriptions bucket with a task's own directory bucket (taskferry#315)", async (t) => {
+    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), ACTIVITY_DIR_PREFIX));
+    const child = fakeChild();
+    const events = [];
+    const manager = createTaskManager({
+      stateDir,
+      sandboxEnabled: false,
+      spawnFn: () => child,
+      killFn: () => {},
+      activitySummariesEnabled: false,
+      summarizerTimeoutMs: 0,
+      onEvent: (event) => events.push(event),
+    });
+    t.after(() => { manager.close(); fs.rmSync(stateDir, { recursive: true, force: true }); });
+
+    const directory = os.tmpdir();
+    // daemon-server.js's syncActivitySubscriptions() groups a `watch --all`
+    // subscription under the null key regardless of any task's own
+    // directory; a directory-scoped subscription for an unrelated directory
+    // is included too, to prove the union doesn't accidentally match on it.
+    manager.setActivitySubscriptions(new Map([
+      [null, new Set([false])],
+      ["/some/other/unrelated/directory", new Set([true])],
+    ]));
+
+    manager.dispatch({ prompt: "Watch the fleet", directory });
+    await new Promise((resolve) => setImmediate(resolve));
+
+    const activityEvent = events.find((event) => event.type === TASK_ACTIVITY);
+    assert.ok(activityEvent, "the null-keyed --all bucket must still trigger activity scheduling for a task in a directory it didn't explicitly subscribe to");
+    assert.deepEqual(Object.keys(activityEvent.activityVariants), ["false"], "only the --all bucket's variant applies; the unrelated directory's variant must not leak in");
+  });
+
   test("refreshes running activity only after 4096 more log bytes", async (t) => {
     const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), ACTIVITY_DIR_PREFIX));
     const child = fakeChild();

@@ -1,0 +1,6 @@
+# SDD ledger — plan: .superpowers/plans/2026-08-05-tranche2-telemetry-instrumentation.md
+Task 1: design pivot mid-flight -- user rejected hardcoded TASK_CLASSES enum, --class is now freeform (AskUserQuestion, resolved before implementer dispatch)
+Task 1: implementer v1 (oc_msg3ec3f_b35749fd) built old hardcoded-enum design correctly per original brief -- rejected after design pivot, not an implementer error
+Task 1: implementer v2 (oc_msg4eu09_eb8f95c5) built freeform-string design; accepted via manual git apply --exclude (plan-file hunk already matched worktree); committed 52f5c79..8edbb3b
+Task 1: review (oc_msg5dcyl_717aea1a, openai/gpt-5.6-luna max) -- Spec: fail, Task quality: Needs fixes. 4 findings, all independently confirmed against code: (1) advisor propagation broken -- tasks.js runAdvisor (the real ctx.advisor entry point, not dispatchAdvisorTask) never forwards class; (2) result --fields class returns nothing -- computeResultDetail never includes task.class; (3) unrequested || -> ?? refactor in buildDispatchTask beyond brief scope; (4) implementer report file never written despite being claimed done
+Task 1: fix round 1/5 dispatched (oc_msg5prcd_e8965188, resuming implementer session ses_02de5660bffepF4q2JOQPeE5Hn) -- FIX_BASE 8edbb3b

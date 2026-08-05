@@ -299,7 +299,7 @@ const invokeHandlers = {
     const context = filteredTaskDetails(manager, params.directory, resolveWorkspaceRootFn);
     return { ...context, counts: countTasks(context.tasks) };
   },
-  "task.accept": (manager, params) => manager.accept(params.taskId),
+  "task.accept": (manager, params) => manager.accept(params.taskId, { force: params.force === true }),
   "task.reject": (manager, params) => manager.reject(params.taskId),
 };
 

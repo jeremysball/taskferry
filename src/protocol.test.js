@@ -445,6 +445,18 @@ describe("protocol version, method list, and envelope", () => {
         );
       });
 
+      test("accepts task.accept with force: true", () => {
+        const parsed = parseRequestLine(request(METHOD.accept, { taskId: "oc_1", force: true }));
+        assert.equal(parsed.params.force, true);
+      });
+
+      test("rejects task.accept with non-boolean force", () => {
+        assert.throws(
+          () => parseRequestLine(request(METHOD.accept, { taskId: "oc_1", force: "yes" })),
+          (error) => error instanceof ProtocolError && error.code === "INVALID_PARAMS"
+        );
+      });
+
       test("rejects task.reject with a missing taskId", () => {
         assert.throws(
           () => parseRequestLine(request(METHOD.reject, {})),

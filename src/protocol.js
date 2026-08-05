@@ -43,6 +43,15 @@ export const RESULT_FIELDS = new Set([
   "diff",
   "diffStat",
   "changesetError",
+  "checkStatus",
+  "checkCommand",
+  "checkExitCode",
+  "checkOutputTail",
+  "checkStartedAt",
+  "checkEndedAt",
+  "checkOverride",
+  "parentTaskId",
+  "projectConfigWarning",
 ]);
 export class ProtocolError extends Error {
   /**
@@ -178,6 +187,7 @@ const METHOD_PARAMS = {
       ["allowedDirs", isNonEmptyStringArray],
       ["executor", isKnownExecutor],
       ["class", isNonEmptyString],
+      ["parentTaskId", isNonEmptyString],
     ],
   },
   "task.cancel": {
@@ -239,6 +249,7 @@ const METHOD_PARAMS = {
       ["env", isEnvironment],
       ["executor", isKnownExecutor],
       ["class", isNonEmptyString],
+      ["parentTaskId", isNonEmptyString],
     ],
   },
   "task.context": {
@@ -247,7 +258,7 @@ const METHOD_PARAMS = {
   },
   "task.accept": {
     required: [["taskId", isNonEmptyString]],
-    optional: [],
+    optional: [["force", isBoolean]],
   },
   "task.reject": {
     required: [["taskId", isNonEmptyString]],

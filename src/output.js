@@ -141,6 +141,26 @@ function trimOverlayDirs(detail) {
  * Keep polling output small. Static task metadata is available through
  * `--full`; lifecycle and log activity remain visible on every lookup.
  */
+/**
+ * Extract the conditional check-gate fields a non-`--full` lean status surfaces
+ * when a gate has actually run (status other than "none"). Split out of
+ * leanStatus to keep its cyclomatic count under the ceiling once the new
+ * fields land.
+ * @param {Record<string, unknown>} detail
+ * @returns {Record<string, unknown>}
+ */
+function leanCheckGateFields(detail) {
+  if (!detail.checkStatus || detail.checkStatus === "none") return {};
+  return {
+    checkStatus: detail.checkStatus,
+    checkCommand: detail.checkCommand,
+    checkExitCode: detail.checkExitCode,
+    checkStartedAt: detail.checkStartedAt,
+    checkEndedAt: detail.checkEndedAt,
+    ...(detail.checkOverride ? { checkOverride: true } : {}),
+  };
+}
+
 export function leanStatus(detail, { full = false } = {}) {
   if (full) return trimOverlayDirs(detail);
   const {
@@ -167,6 +187,8 @@ export function leanStatus(detail, { full = false } = {}) {
     lean.changesetStatus = changesetStatus;
   }
   if (detail.changesetError) lean.changesetError = detail.changesetError;
+  Object.assign(lean, leanCheckGateFields(detail));
+  if (detail.projectConfigWarning) lean.projectConfigWarning = detail.projectConfigWarning;
   if (logBytesWritten !== undefined) {
     lean.logBytesWritten = logBytesWritten;
     lean.logLastWriteAt = logLastWriteAt;

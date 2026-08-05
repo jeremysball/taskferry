@@ -236,34 +236,34 @@ $ node src/cli.js accept --help | grep -A1 force
 
 Four deviations, all benign and following existing precedent:
 
-1. **`acceptTaskChangeset` parameter order** — the brief specifies
-   `acceptTaskChangeset(taskId, { force = false } = {}, ctx)` (options
-   second, ctx third). I reordered to
-   `acceptTaskChangeset(taskId, ctx, _options = {})` (ctx second,
-   options third). The reason is TypeScript's TS1016 error: a required
-   parameter cannot follow an optional one, and `ctx` is required. The
-   brief's `force = false` default makes `options` technically
-   optional, which the TS compiler rejects when paired with the
-   required `ctx` parameter. The JSDoc `@param` order was rewritten to
-   match (`ctx` second, `_options` third, with `_options` prefix
-   because the function body still ignores the option until Task 6
-   consumes it — matches the brief's `_force` precedent for the
-   original 2-arg form). This is the literal plumbing change the
-   brief warns about ("threading a new positional `options` through
-   every caller"); the function body is unchanged from the brief's
-   intent, only the slot the options object lands in moves from
-   position 2 to position 3 to satisfy TS.
+1. **`acceptTaskChangeset` parameter order** (RESOLVED in fix round
+   1/5) — originally reordered to `(taskId, ctx, _options = {})`
+   citing TS1016. The reviewer correctly pointed out that the file
+   already has an established pattern
+   (`summarizeRequestFor(taskId, options, ctx)` /
+   `summarizeTaskFor(taskId, options, ctx)`) where `options` is a
+   plain required JSDoc param (no brackets, no `= {}` default at the
+   parameter list) and per-field defaults live in the body's
+   destructure — TS1016 never triggers because no optional param
+   precedes the required `ctx`. Reverted to the brief's mandated
+   `(taskId, options, ctx)` order, with the per-field `force = false`
+   default reserved for Task 6's body destructure.
 
-2. **`acceptTaskChangeset` option parameter name** — the brief
-   destructures `{ force = false }` (unused until Task 6, hence the
-   brief's `_force` rename later). I destructured `_options = {}`
-   instead, because renaming the object parameter to `_options` makes
-   the "this is plumbed but not yet consumed" intent visible at the
-   call-site without needing the inner field rename. Every factory
-   binding and the daemon's `invokeHandlers["task.accept"]` still
-   forward the same `{ force: ... }` shape; only the receiving end
-   is the underscore-prefixed placeholder until Task 6 starts
-   consuming it.
+2. **`acceptTaskChangeset` option parameter name** (RESOLVED in fix
+   round 1/5) — was renamed to `_options = {}` (instead of the
+   brief's `{ force = false } = {}`) so the "plumbed-but-not-consumed"
+   intent was visible at the call-site. With the parameter-order fix
+   applied, `options` is now a required parameter with no default
+   (matching `summarizeRequestFor`/`summarizeTaskFor`'s shape). The
+   function body still needs a reference to `options` to keep
+   `sonarjs/no-unused-vars` happy until Task 6 starts consuming
+   `force`; I added a bare `options;` reference with a comment
+   explaining "Task 6 will replace this with `const { force = false
+   } = options;` and start consuming it." `sonarjs/void-use` would
+   have rejected a `void options.force;` form, and
+   `eslint-disable-next-line sonarjs/no-unused-vars` would have
+   produced an unused-disable warning, so the bare-reference form
+   was the smallest fix.
 
 3. **`computeResultDetail`/`summarizeOptionalFields`/`leanStatus`
    complexity ceiling** — the brief's Step 4/Step 9b adds 2-3 new
@@ -324,3 +324,149 @@ updated in the same PR). The report file itself also lands in this
 commit.
 
 Status: DONE
+
+---
+
+## Fix round 1/5 — `acceptTaskChangeset` parameter order
+
+Reviewer flagged one Important finding: the `(taskId, ctx, _options = {})`
+parameter order I picked for `acceptTaskChangeset` swaps positions 2 and 3
+from the brief's mandated `(taskId, options, ctx)`. The reviewer pointed
+out that the file already has an established pattern for this exact
+situation — `summarizeRequestFor(taskId, options, ctx)` (line 5318) and
+`summarizeTaskFor(taskId, options, ctx)` (line 5334) — where `options` is
+a plain required JSDoc param (no brackets, no `= {}` default at the
+parameter list) and per-field defaults live inside the function body's
+destructure. With `options` typed as required, no parameter is optional,
+TS1016 never triggers, and the brief's mandated order holds.
+
+### What changed
+
+**`src/tasks.js` — `acceptTaskChangeset` definition (~line 4679)**
+
+Signature reverted from `function acceptTaskChangeset(taskId, ctx,
+_options = {})` back to the brief's mandated `function
+acceptTaskChangeset(taskId, options, ctx)`. The JSDoc `@param` order was
+rewritten to match (`taskId`, then `options` typed as
+`{{force?: boolean}}` with no `[options]` brackets, then `ctx`). The
+brief's intent — that Task 6 destructure `force` from `options` inside
+the body — is now expressed in a doc comment on the function plus a
+one-line comment inside the body explaining why the bare `options;`
+reference is there until Task 6 starts consuming it.
+
+`rejectTaskChangeset` was checked for consistency — it was never touched
+with the swapped order, its signature is the original
+`rejectTaskChangeset(taskId, ctx)` and the `reject:` factory binding at
+line 3539 still passes the 2-arg form correctly. No change needed.
+
+**`src/tasks.js` — `accept:` factory binding (~line 3534)**
+
+Updated to pass `(taskId, options, ctx)` instead of the
+`(taskId, ctx, options)` swap. The JSDoc `@param` order was rewritten to
+match (options second, no brackets). Same one-line of code, just the
+argument positions match the brief's mandated order now.
+
+**`src/tasks.js` — public API `accept` binding (~line 3628)**
+
+Updated the JSDoc `[options]` brackets to drop the optional marker
+(public API's `accept: (taskId, options) => ctx.helpers.accept(taskId,
+options)` doesn't need to change — it just forwards `options` to the
+helpers closure).
+
+### Commands run + outputs
+
+```
+$ /workspace/taskferry/node_modules/.bin/tsc --noEmit
+$ echo $?
+0
+```
+
+`tsc --noEmit` clean — no TS1016, no other type errors. This is the
+exact check that would have caught the original wrong parameter order
+had I run it against the brief's literal `(taskId, { force = false } = {},
+ctx)` shape in the first place.
+
+```
+$ /workspace/taskferry/node_modules/.bin/eslint src/
+$ echo $?
+0
+```
+
+ESLint clean — no `sonarjs/no-unused-vars` (the bare `options;`
+reference inside `acceptTaskChangeset`'s body keeps the parameter
+"used"), no `sonarjs/void-use` (didn't go the `void options.force;`
+route), no `eslint-disable` warnings.
+
+```
+$ env -i PATH="$PATH" HOME="$HOME" env -u TASKFERRY_CHILD \
+    env -u TASKFERRY_STATE_DIR -u TASKFERRY_RUNTIME_DIR \
+    env -u TASKFERRY_CACHE_DIR -u TASKFERRY_TASK_ID \
+    env -u TASKFERRY_SOCKET_PATH -u TASKFERRY_DEV_ROOT \
+    bash -c 'git ls-files "*.js" | xargs -P4 -I{} node --check {} \
+             && /workspace/taskferry/node_modules/.bin/eslint . \
+             && /workspace/taskferry/node_modules/.bin/tsc --noEmit'
+$ echo $?
+0
+```
+
+Full `npm run check` equivalent (syntax + lint + typecheck) — clean.
+
+```
+$ env -i PATH="$PATH" HOME="$HOME" env -u TASKFERRY_CHILD \
+    env -u TASKFERRY_STATE_DIR -u TASKFERRY_RUNTIME_DIR \
+    env -u TASKFERRY_CACHE_DIR -u TASKFERRY_TASK_ID \
+    env -u TASKFERRY_SOCKET_PATH -u TASKFERRY_DEV_ROOT \
+    npm run test:unit
+...
+ℹ tests 994
+ℹ pass 994
+ℹ fail 0
+ℹ duration_ms 14429
+```
+
+994/994 pass — same count as before the fix round; the parameter-order
+change touches no test surface.
+
+### Notes
+
+1. During this fix round the `node_modules` symlink at
+   `check-gate-project-config/` reverted back to a symlink pointing at
+   the read-only `/workspace/taskferry/node_modules/` (Task 1's real
+   directory + symlinks setup was gone when I sat down to fix). I
+   re-ran the same setup: `rm` the symlink, `mkdir node_modules`,
+   recreate the 74 per-package symlinks + the `.bin/` directory,
+   then `cp -r /home/jeremy/.bun/install/cache/smol-toml/1.6.1@@@1
+   node_modules/smol-toml` (since `smol-toml` is only declared by the
+   Task-1 package.json, not by `/workspace/taskferry/package.json`,
+   and the main checkout's `node_modules` doesn't have it). No code
+   changes — pure environment repair.
+
+2. The bare `options;` reference in `acceptTaskChangeset`'s body is a
+   temporary scaffold until Task 6's implementation lands. The
+   accompanying doc comment names the replacement (`const { force =
+   false } = options;` + the actual `force` reads) so the next agent
+   picking up Task 6 has a clear "this comment + this line go away
+   when you wire force" marker.
+
+3. No changes to `rejectTaskChangeset` — confirmed the reviewer's
+   consistency check: that function's signature was never modified by
+   Task 2 (no `options` param ever introduced), and its factory
+   binding still calls the original 2-arg `rejectTaskChangeset(taskId,
+   ctx)` shape.
+
+4. Two Minor findings from the reviewer (no end-to-end CLI smoke test
+   for the new flags; previous final message missing `Status:` line)
+   are deferred to the ledger per the reviewer's note. The reviewer
+   explicitly said no code change is required for either.
+
+### Commit hash
+
+```
+dce71a5 fix(tasks): restore mandated (taskId, options, ctx) parameter order on acceptTaskChangeset
+```
+
+On branch `check-gate-project-config`, parent `29a1af6` (Task 2's
+implementer-outcome ledger update). Conventional Commit message
+followed.
+
+Status: DONE_WITH_CONCERNS

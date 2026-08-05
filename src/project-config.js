@@ -120,3 +120,53 @@ export function loadProjectConfig(directory, { statFn = fs.statSync, readFileFn 
 export function verificationPromptBlock(checkCommand) {
   return `\n\n## Verification (required)\nThis repo declares a check command in .taskferry.toml:\n    ${checkCommand}\nRun it before declaring the task done. If it fails, fix the failures and\nre-run until it passes. State the final result in your summary.\n`;
 }
+
+/**
+ * Filters a project's declared `read_only_paths` down to safe `[src, dest]`
+ * ro-bind pairs: an entry is dropped (and reported) if it doesn't exist on
+ * this host, or if it overlaps a protected mount -- equals it, is an
+ * ancestor of it, or is a descendant of it. bwrap applies mounts in argument
+ * order and `read_only_paths` binds land last (see `buildBwrapArgs`), so an
+ * overlapping entry would either shadow a protected mount (e.g.
+ * `read_only_paths = ["/"]` re-exposing the deny-listed `~/.ssh` a `--tmpfs`
+ * mount hid, or shadowing the overlay mount entirely) or punch a read hole
+ * into an otherwise-hidden protected directory (e.g.
+ * `["~/.ssh/known_hosts"]`). `.taskferry.toml` is project-supplied, not
+ * daemon-trusted, so this check is mandatory, not defensive nicety.
+ *
+ * The `overlaps` predicate is the mount-order safety check: it must
+ * recognize `/` as an ancestor of every other absolute path. The naive
+ * `a.startsWith(b + path.sep)` form fails this case because `"/" + path.sep`
+ * is `"//"`, which never prefixes any normal absolute path -- so
+ * `read_only_paths = ["/"]` would otherwise sail through to become
+ * `--ro-bind / /`, shadowing the deny-list tmpfs mounts and the overlay
+ * mount. The `childPrefix` helper produces a non-double-slash prefix by
+ * returning `base` unchanged when `base === path.sep`, which makes
+ * `"/".startsWith("/")` (or any descendant) true and keeps the original
+ * no-double-prefix semantics for every non-root base.
+ * @param {string[]} readOnlyPaths
+ * @param {{protectedPaths: string[], existsFn: (p: string) => boolean}} ctx
+ * @returns {{roBinds: [string, string][], missing: string[], unsafe: string[]}}
+ */
+export function resolveReadOnlyProjectBinds(readOnlyPaths, ctx) {
+  /** @param {string} base */
+  const childPrefix = (base) => (base === path.sep ? base : base + path.sep);
+  /** @param {string} a @param {string} b */
+  const overlaps = (a, b) => a === b || a.startsWith(childPrefix(b)) || b.startsWith(childPrefix(a));
+  /** @param {string} p */
+  const isMissing = (p) => !ctx.existsFn(p);
+  /** @param {string} p */
+  const isUnsafe = (p) => ctx.protectedPaths.some((protectedPath) => overlaps(p, protectedPath));
+  /** @type {[string, string][]} */
+  const roBinds = [];
+  /** @type {string[]} */
+  const missing = [];
+  /** @type {string[]} */
+  const unsafe = [];
+  for (const p of readOnlyPaths) {
+    if (isMissing(p)) missing.push(p);
+    else if (isUnsafe(p)) unsafe.push(p);
+    else roBinds.push([p, p]);
+  }
+  return { roBinds, missing, unsafe };
+}

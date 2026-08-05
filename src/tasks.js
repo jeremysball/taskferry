@@ -14,7 +14,7 @@ import { buildBwrapArgs, checkBwrapAvailable, checkOverlaySupport, defaultDenyLi
 import { applyChangeset, overlayPaths, resolvePreDispatchHead, subOverlayPaths, subFilePaths, cleanupOverlay, defaultRunCommand as defaultOverlayRunCommand, extractGitDiff, extractNonGitDiff, OVERLAY_MOUNT_BUSY_PATTERN } from "./changeset.js";
 import { resolveExecutor, opencodeExecutor } from "./executor.js";
 import { loadEnvFile, watchEnvFile } from "./env-file.js";
-import { loadProjectConfig, verificationPromptBlock } from "./project-config.js";
+import { loadProjectConfig, resolveReadOnlyProjectBinds, verificationPromptBlock } from "./project-config.js";
 
 /**
  * @typedef {object} SummaryOf
@@ -795,6 +795,33 @@ function createOverlayIfNeeded(ctx, launchInfo, task, role) {
 }
 
 /**
+ * Resolves the `.taskferry.toml`-declared `read_only_paths` against the
+ * protected sandbox mount set (deny-list, stateDir, runtimeDir, launchDir)
+ * and writes the task's `projectConfigWarning` for any dropped entries.
+ * Returns the safe `[src, dest]` ro-bind pairs to append. Pure side effect
+ * on `task` is intentional -- the gate (Task 5) writes the same field on
+ * parse-error and the brief specifies overwrite-not-append semantics.
+ * @param {{launchDirectory: string, denyList: string[], stateDir: string, runtimeDir: string, existsFn: (p: string) => boolean, task: Task}} ctx
+ * @returns {[string, string][]}
+ */
+function applyProjectConfigReadOnlyBinds({ launchDirectory, denyList, stateDir, runtimeDir, existsFn, task }) {
+  const projectConfig = loadProjectConfig(launchDirectory);
+  if (projectConfig.parseError) {
+    task.projectConfigWarning = projectConfig.parseError;
+    return [];
+  }
+  const { roBinds, missing, unsafe } = resolveReadOnlyProjectBinds(projectConfig.readOnlyPaths, {
+    protectedPaths: [...denyList, stateDir, runtimeDir, launchDirectory],
+    existsFn,
+  });
+  const warnings = [];
+  if (missing.length) warnings.push(`not found on this host, skipped: ${missing.join(", ")}`);
+  if (unsafe.length) warnings.push(`overlaps a protected sandbox mount, skipped: ${unsafe.join(", ")}`);
+  if (warnings.length) task.projectConfigWarning = `.taskferry.toml read_only_paths ${warnings.join("; ")}`;
+  return roBinds;
+}
+
+/**
  * Computes the bwrap bind set for a sandboxed dispatch: the deny-list (with
  * entries the user simply doesn't have dropped, since bwrap --tmpfs fails if
  * the mount point doesn't exist), the executor's ro-bind auth file, the
@@ -840,6 +867,7 @@ function buildBwrapBinds(ctx, launchInfo, task, spawnEnv, role) {
   /** @type {[string, string][]} */
   const extraRoBinds = [...executorRoBinds];
   if (promptFilePath) extraRoBinds.push([ctx.PROMPT_DIR, ctx.PROMPT_DIR]);
+  extraRoBinds.push(...applyProjectConfigReadOnlyBinds({ launchDirectory, denyList, task, existsFn: ctx.existsFn, stateDir: ctx.stateDir, runtimeDir: ctx.runtimeDir }));
   /** @type {string[]} */
   const extraRwBinds = [];
   // The root filesystem is read-only bound by default, so the executor's

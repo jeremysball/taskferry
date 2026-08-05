@@ -12,6 +12,7 @@
 
 - Never repurpose or rename the existing `finalMarker` field (the stored `--require-final-marker` regex source, used only as a match/no-match gate) — the new parsed marker value is a distinct field, `finalStatus`.
 - Do not add a new `outcome` field — implementer/fixer changeset acceptance is already `task.changesetStatus`; telemetry reads that directly.
+- `--class` is a freeform, unvalidated string tag. taskferry must not hardcode the choosing-a-model skill's 11-item class taxonomy (or any fixed enum) into its own source — that bakes one consumer's implementation detail into a general-purpose tool. Validate `--class` the same way `--variant`/`--session-id`/`--model` already are: accept any non-empty string, no allow-list, no new `src/task-classes.js` module. Meaning and validity of a given class name are the concern of whoever aggregates the telemetry (the choosing-a-model skill), not taskferry.
 - `class` is a reserved word for JS variable/parameter declarations (not for object property keys). Every destructure of a `class` field must use an alias, e.g. `const { class: taskClass } = params`.
 - Run `npm run skill:generate` after any `src/command-specs.js` change and commit the regenerated file in the same commit — it is the canonical→generated split described in this repo's global instructions.
 - Follow this repo's existing conventions exactly: `node:test`/`node:assert/strict`, Conventional Commits messages, one task = one commit (or a tight sequence of commits) ending in a full `npm test` run.
@@ -21,7 +22,6 @@
 ### Task 1: `--class` task-classification tag
 
 **Files:**
-- Create: `src/task-classes.js`
 - Modify: `src/args.js`
 - Modify: `src/protocol.js`
 - Modify: `src/tasks.js`
@@ -33,83 +33,32 @@
 - Test: `src/tasks.dispatch.test.js`
 
 **Interfaces:**
-- Consumes: nothing from other tasks (this task is the class-tag source of truth).
-- Produces: `TASK_CLASSES` (readonly `string[]`) exported from `src/task-classes.js`, imported by both `src/args.js` and `src/protocol.js`. A `task.class` field (`string|null`) on every dispatched `Task`, set from `params.class` at dispatch time, surfaced in `summarize()` output when non-null. Task 2 does not depend on this — it can be implemented independently.
+- Consumes: nothing from other tasks.
+- Produces: a `task.class` field (`string|null`) on every dispatched `Task`, set verbatim from `params.class` at dispatch time (any non-empty string, no allow-list), surfaced in `summarize()` output when non-null. Task 2 does not depend on this — it can be implemented independently.
 
-- [ ] **Step 1: Write `src/task-classes.js` with the canonical class list**
+**Design note:** `--class` is deliberately unvalidated against any fixed list. taskferry is a general-purpose dispatch tool; the specific 11-class taxonomy that motivates this field lives in the choosing-a-model skill, outside this repo, and must not be hardcoded here. Treat `--class` exactly like `--variant`/`--session-id`: a plain string flag, non-empty-string-checked at the protocol boundary, nothing more.
+
+- [ ] **Step 1: Add `--class` to `src/args.js`**
+
+No new coercer function is needed — mirror the existing `"--variant"`/`"--session-id"` entries, which pass the raw string through untouched. Add the flag to the `FLAGS` table, directly after the `"--executor"` line:
 
 ```js
-// Canonical task-class list, validated against by `--class` on dispatch and
-// advisor. Mirrors the class -> axis mapping table documented in the
-// choosing-a-model skill (~/.claude/skills/choosing-a-model) -- taskferry
-// has no import path to that skill's markdown, so this list must be kept in
-// sync by hand if the skill's table changes.
-export const TASK_CLASSES = /** @type {readonly string[]} */ ([
-  "implementer",
-  "transcription",
-  "fixer",
-  "task-reviewer",
-  "final-reviewer",
-  "advisor-statistical",
-  "advisor-design",
-  "architecture",
-  "code-review-finder",
-  "code-review-verifier",
-  "researcher",
-]);
+  "--class": { allow: ["dispatch", "advisor"], key: "class" },
 ```
 
-- [ ] **Step 2: Add `--class` to `src/args.js`**
+- [ ] **Step 2: Write the args.js tests**
 
-Add the import near the top, alongside the existing `KNOWN_EXECUTORS` import:
-
-```js
-import { KNOWN_EXECUTORS } from "./executor.js";
-import { TASK_CLASSES } from "./task-classes.js";
-```
-
-Add a coercer next to `coerceExecutor` (same file, same pattern):
+In `src/args.test.js`, add near the existing `--variant`/`--session-id` tests:
 
 ```js
-function coerceClass(value, name) {
-  if (!TASK_CLASSES.includes(value)) throw new UsageError(`${name} must be one of ${TASK_CLASSES.join(", ")}`, `Use --class with one of: ${TASK_CLASSES.join(", ")}`);
-  return value;
-}
-```
-
-Add the flag to the `FLAGS` table, directly after the `"--executor"` line:
-
-```js
-  "--class": { allow: ["dispatch", "advisor"], key: "class", coerce: coerceClass },
-```
-
-- [ ] **Step 3: Write the args.js tests**
-
-In `src/args.test.js`, add near the existing executor tests:
-
-```js
-test("dispatch accepts a known --class value", () => {
+test("dispatch accepts an arbitrary --class value", () => {
   const { options } = parseArgs(["dispatch", "--prompt", "x", "--class", "implementer"], { cwd: CWD });
   assert.equal(options.class, "implementer");
 });
 
-test("dispatch rejects an unknown --class value", () => {
-  assert.throws(
-    () => parseArgs(["dispatch", "--prompt", "x", "--class", "bogus"], { cwd: CWD }),
-    /--class must be one of/
-  );
-});
-
-test("advisor accepts a known --class value", () => {
+test("advisor accepts an arbitrary --class value", () => {
   const { options } = parseArgs(["advisor", "--model", "m", "--class", "advisor-design"]);
   assert.equal(options.class, "advisor-design");
-});
-
-test("advisor rejects an unknown --class value", () => {
-  assert.throws(
-    () => parseArgs(["advisor", "--model", "m", "--class", "bogus"]),
-    /--class must be one of/
-  );
 });
 ```
 
@@ -137,56 +86,42 @@ test("parses dispatch and applies its argument defaults", () => {
 });
 ```
 
-- [ ] **Step 4: Run the args tests to see the new ones fail**
+- [ ] **Step 3: Run the args tests to see the new ones fail**
 
 Run: `node --test src/args.test.js`
 Expected: FAIL — `--class` is not yet a recognized flag (`unknown flag --class`), and the defaults deepEqual fails on the missing `class` key.
 
-- [ ] **Step 5: Run the args tests to see them pass**
+- [ ] **Step 4: Run the args tests to see them pass**
 
 Run: `node --test src/args.test.js`
-Expected: PASS, all tests green (Step 2's edit already lands the fix — this step is the verification checkpoint, not a further code change).
+Expected: PASS, all tests green (Step 1's edit already lands the fix — this step is the verification checkpoint, not a further code change).
 
-- [ ] **Step 6: Add `class` to the `task.dispatch`/`task.advisor` protocol schema**
+- [ ] **Step 5: Add `class` to the `task.dispatch`/`task.advisor` protocol schema**
 
-In `src/protocol.js`, add the import next to `KNOWN_EXECUTORS`:
+In `src/protocol.js`, no new validator function or import is needed — reuse the existing `isNonEmptyString` predicate, the same one already used for `["variant", isNonEmptyString]` and `["sessionId", isNonEmptyString]`.
 
-```js
-import { KNOWN_EXECUTORS } from "./executor.js";
-import { TASK_CLASSES } from "./task-classes.js";
-```
+In `METHOD_PARAMS["task.dispatch"].optional`, add `["class", isNonEmptyString],` (anywhere in that array, e.g. right after `["executor", isKnownExecutor],`).
 
-Add a validator next to `isKnownExecutor`:
-
-```js
-/** @param {unknown} value @returns {value is string} */
-function isKnownClass(value) {
-  return typeof value === "string" && TASK_CLASSES.includes(value);
-}
-```
-
-In `METHOD_PARAMS["task.dispatch"].optional`, add `["class", isKnownClass],` (anywhere in that array, e.g. right after `["executor", isKnownExecutor],`).
-
-In `METHOD_PARAMS["task.advisor"].optional`, add the same `["class", isKnownClass],` entry.
+In `METHOD_PARAMS["task.advisor"].optional`, add the same `["class", isNonEmptyString],` entry.
 
 Add `"class"` to the `RESULT_FIELDS` set (so `taskferry result --fields class` is selectable), right after `"finalMarker"`.
 
-- [ ] **Step 7: Write the protocol.js tests**
+- [ ] **Step 6: Write the protocol.js tests**
 
 In `src/protocol.test.js`, find the existing `task.dispatch`/`task.advisor` param-validation `describe` blocks and add:
 
 ```js
-test("task.dispatch accepts a known class value", () => {
+test("task.dispatch accepts an arbitrary class value", () => {
   const error = parseRequestLine(request(METHOD.dispatch, { prompt: "p", directory: TEST_DIR, class: "implementer" }));
   assert.equal(error, null);
 });
 
-test("task.dispatch rejects an unknown class value", () => {
-  const error = parseRequestLine(request(METHOD.dispatch, { prompt: "p", directory: TEST_DIR, class: "bogus" }));
+test("task.dispatch rejects an empty class value", () => {
+  const error = parseRequestLine(request(METHOD.dispatch, { prompt: "p", directory: TEST_DIR, class: "" }));
   assert.ok(error instanceof ProtocolError);
 });
 
-test("task.advisor accepts a known class value", () => {
+test("task.advisor accepts an arbitrary class value", () => {
   const error = parseRequestLine(request(METHOD.advisor, { prompt: "p", directory: TEST_DIR, model: "m", class: "advisor-design" }));
   assert.equal(error, null);
 });
@@ -194,12 +129,12 @@ test("task.advisor accepts a known class value", () => {
 
 Check `parseRequestLine`'s actual return shape first (some existing test in the same file already asserts success/failure on `task.dispatch` — match that exact pattern instead of guessing; the snippet above is illustrative of intent, not a literal copy-paste if the real helper returns something other than `null` on success).
 
-- [ ] **Step 8: Run the protocol tests to see the new ones fail, then pass**
+- [ ] **Step 7: Run the protocol tests to see the new ones fail, then pass**
 
 Run: `node --test src/protocol.test.js`
-Expected: FAIL first (unknown `class` param rejected as an unrecognized key, since it isn't in the schema yet — but Step 6 already landed the schema change, so run this after Step 6 and expect PASS directly; if it fails, Step 6's edit is incomplete).
+Expected: FAIL first (unrecognized `class` param, since it isn't in the schema yet — but Step 5 already landed the schema change, so run this after Step 5 and expect PASS directly; if it fails, Step 5's edit is incomplete).
 
-- [ ] **Step 9: Persist `class` on the task record in `src/tasks.js`**
+- [ ] **Step 8: Persist `class` on the task record in `src/tasks.js`**
 
 Update `buildDispatchTask`'s JSDoc `@param` typedef to add `class?: string|null` to the params type, and its destructure + return:
 
@@ -241,7 +176,7 @@ function dispatchAdvisorTask(ctx, params) {
 
 Also update the `AdvisorContext.dispatch` JSDoc `@property` signature (same file, just above `dispatchAdvisorTask`) to add `class?: string|null` to its params type, matching the pattern already used for `variant`/`sessionId`.
 
-- [ ] **Step 10: Surface `class` in the task summary**
+- [ ] **Step 9: Surface `class` in the task summary**
 
 In `summarizeOptionalFields(task)`, destructure `class: taskClass` from `task` (alias required) and add it to the returned spread, right after the `finalMarker` line:
 
@@ -261,7 +196,7 @@ function summarizeOptionalFields(task) {
 }
 ```
 
-- [ ] **Step 11: Write the tasks.js persistence/summary tests**
+- [ ] **Step 10: Write the tasks.js persistence/summary tests**
 
 In `src/tasks.dispatch.test.js`, add (matching the file's existing `makeManager`/`mgr.dispatch` style — check an existing test in this file for the exact manager setup helper before writing, since the helper name may differ slightly from `tasks.watchdog.test.js`'s):
 
@@ -281,12 +216,12 @@ test("dispatch without a class tag omits it from the summary", () => {
 });
 ```
 
-- [ ] **Step 12: Run the full tasks.js unit suite**
+- [ ] **Step 11: Run the full tasks.js unit suite**
 
 Run: `node --test src/tasks.dispatch.test.js`
 Expected: PASS.
 
-- [ ] **Step 13: Forward `class` through the CLI layer in `src/commands.js`**
+- [ ] **Step 12: Forward `class` through the CLI layer in `src/commands.js`**
 
 Add `"class"` to `DISPATCH_PASSTHROUGH_KEYS`:
 
@@ -310,7 +245,7 @@ In `runAdvisor`, add class forwarding to the `task.advisor` request body, right 
   });
 ```
 
-- [ ] **Step 14: Write the commands.js forwarding tests**
+- [ ] **Step 13: Write the commands.js forwarding tests**
 
 In `src/commands.test.js`, add next to the existing `noSandbox` forwarding tests:
 
@@ -340,17 +275,17 @@ test("advisor forwards class to the RPC payload when set", async () => {
 });
 ```
 
-- [ ] **Step 15: Run the commands.js tests**
+- [ ] **Step 14: Run the commands.js tests**
 
 Run: `node --test src/commands.test.js`
 Expected: PASS.
 
-- [ ] **Step 16: Document `--class` in `src/command-specs.js`**
+- [ ] **Step 15: Document `--class` in `src/command-specs.js`**
 
-Add `"--class <name>"` to the dispatch entry's `options` object, right after `"--executor <opencode|pi>"`:
+Add `"--class <name>"` to the dispatch entry's `options` object, right after `"--executor <opencode|pi>"`. Describe it as a free-text tag, not an enumerated list — taskferry does not enforce which values are valid:
 
 ```js
-"--class <name>": "optional task-class tag for telemetry: implementer, transcription, fixer, task-reviewer, final-reviewer, advisor-statistical, advisor-design, architecture, code-review-finder, code-review-verifier, researcher"
+"--class <name>": "optional free-text task-class tag for external telemetry consumers; taskferry does not validate against a fixed list"
 ```
 
 Add the same key/value to the advisor entry's `options` object, right after `"--executor <opencode|pi>"`.
@@ -361,30 +296,31 @@ Add one example to the dispatch entry's `examples` array:
 'taskferry dispatch --prompt "Fix the failing tests" --class implementer',
 ```
 
-- [ ] **Step 17: Regenerate the distributed skill file**
+- [ ] **Step 16: Regenerate the distributed skill file**
 
 Run: `npm run skill:generate`
 Expected: exits 0 and rewrites the generated `SKILL.md` (check `git status` for which file changed — it is the canonical→generated split this repo already uses).
 
-- [ ] **Step 18: Run the full test suite**
+- [ ] **Step 17: Run the full test suite**
 
 Run: `npm test`
-Expected: all 889+ tests pass (the new ones from Steps 3, 7, 11, 14 included), 0 failures.
+Expected: all 889+ tests pass (the new ones from Steps 2, 6, 10, 13 included), 0 failures.
 
-- [ ] **Step 19: Commit**
+- [ ] **Step 18: Commit**
 
 ```bash
-git add src/task-classes.js src/args.js src/args.test.js src/protocol.js src/protocol.test.js src/tasks.js src/tasks.dispatch.test.js src/commands.js src/commands.test.js src/command-specs.js SKILL.md
+git add src/args.js src/args.test.js src/protocol.js src/protocol.test.js src/tasks.js src/tasks.dispatch.test.js src/commands.js src/commands.test.js src/command-specs.js SKILL.md
 git commit -m "feat(dispatch): add --class task-classification tag
 
-A validated --class option on dispatch and advisor, persisted per task
-and surfaced in the summary, per Tranche 2 of the LiveBench-first
-model-selection spec. TASK_CLASSES is a hand-maintained mirror of the
-choosing-a-model skill's class-to-axis table -- no import path exists
-between the two repos."
+A freeform, unvalidated --class option on dispatch and advisor,
+persisted per task and surfaced in the summary, per Tranche 2 of the
+LiveBench-first model-selection spec. Deliberately not validated
+against a fixed list -- the specific taxonomy that motivates this
+field belongs to the choosing-a-model skill outside this repo, not to
+taskferry itself."
 ```
 
-(Adjust the `git add` file list to whatever the generated skill file's actual path is, found in Step 17.)
+(Adjust the `git add` file list to whatever the generated skill file's actual path is, found in Step 16.)
 
 ---
 

@@ -38,6 +38,7 @@ export const RESULT_FIELDS = new Set([
   "logPath",
   "incomplete",
   "finalMarker",
+  "class",
   "diff",
   "diffStat",
   "changesetError",
@@ -175,6 +176,7 @@ const METHOD_PARAMS = {
       ["noOverlay", isBoolean],
       ["allowedDirs", isNonEmptyStringArray],
       ["executor", isKnownExecutor],
+      ["class", isNonEmptyString],
     ],
   },
   "task.cancel": {
@@ -235,6 +237,7 @@ const METHOD_PARAMS = {
       ["timeoutMs", nonNegativeInteger],
       ["env", isEnvironment],
       ["executor", isKnownExecutor],
+      ["class", isNonEmptyString],
     ],
   },
   "task.context": {

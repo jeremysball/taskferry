@@ -208,6 +208,7 @@ const FLAGS = {
   "--require-final-marker": { allow: ["dispatch"], key: "finalMarker", coerce: coerceFinalMarker },
   "--allowed-dirs": { allow: ["dispatch"], key: "allowedDirs", coerce: coerceAllowedDirs },
   "--executor": { allow: ["dispatch", "advisor"], key: "executor", coerce: coerceExecutor },
+  "--class": { allow: ["dispatch", "advisor"], key: "class" },
   "--grace-ms": { allow: ["cancel"], key: "graceMs", coerce: (v, n) => parseNumber(v, n, { min: 0 }) },
   "--timeout": { allow: ["wait", "advisor"], key: "timeoutMs", coerce: (v, n) => parseDuration(v, n) },
   "--tail-chars": { allow: ["wait"], key: "tailChars", coerce: (v, n) => parseNumber(v, n, { min: 1, max: 65536 }) },

@@ -39,6 +39,7 @@ test("parses dispatch and applies its argument defaults", () => {
       noOverlay: false,
       allowedDirs: void 0,
       executor: void 0,
+      class: void 0,
     },
     help: false,
   });
@@ -493,4 +494,14 @@ test("reject parses a task id positional", () => {
   const parsed = parseArgs(["reject", "t1"]);
   assert.equal(parsed.command, "reject");
   assert.equal(parsed.options.taskId, "t1");
+});
+
+test("dispatch accepts an arbitrary --class value", () => {
+  const { options } = parseArgs(["dispatch", "--prompt", "x", "--class", "implementer"], { cwd: CWD });
+  assert.equal(options.class, "implementer");
+});
+
+test("advisor accepts an arbitrary --class value", () => {
+  const { options } = parseArgs(["advisor", "--model", "m", "--class", "advisor-design"]);
+  assert.equal(options.class, "advisor-design");
 });

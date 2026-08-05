@@ -50,6 +50,7 @@ import { loadEnvFile, watchEnvFile } from "./env-file.js";
  * @property {SummaryOf} [summaryOf]
  * @property {boolean} [incomplete]
  * @property {string|null} [finalMarker]
+ * @property {string|null} [class]
  * @property {"opencode"|"pi"} [executorId]
  * @property {"dispatch"|"advisor"} [role]
  * @property {"none"|"pending"|"accepted"|"rejected"} [changesetStatus]
@@ -82,6 +83,7 @@ import { loadEnvFile, watchEnvFile } from "./env-file.js";
  * @property {string|null} [spawnError]
  * @property {boolean} [incomplete]
  * @property {string|null} [finalMarker]
+ * @property {string|null} [class]
  * @property {"opencode"|"pi"} [executorId]
  * @property {"dispatch"|"advisor"} [role]
  * @property {"none"|"pending"|"accepted"|"rejected"} [changesetStatus]
@@ -1656,12 +1658,13 @@ function resolveDispatchDirectory(directory) {
  * `oc_` prefix for compatibility. A resume with no `--model` inherits the
  * model the session was created under (a different model can mean a different
  * provider, breaking the whole point of resuming that exact session).
- * @param {{id: string, directory: string, prompt: string, model: string|undefined, executor: import("./executor.js").WorkerExecutor, priorSessionTask: Task|null, variant: string|undefined, sessionId: string|undefined, originSessionId: string|undefined, internal: boolean, finalMarker: string|null, role: "dispatch"|"advisor", logPath: string}} params
+ * @param {{id: string, directory: string, prompt: string, model: string|undefined, executor: import("./executor.js").WorkerExecutor, priorSessionTask: Task|null, variant: string|undefined, sessionId: string|undefined, originSessionId: string|undefined, internal: boolean, finalMarker: string|null, role: "dispatch"|"advisor", logPath: string, class?: string|null}} params
  * @returns {Task}
  */
-function buildDispatchTask({ id, directory, prompt, model, executor, priorSessionTask, variant, sessionId, originSessionId, internal, finalMarker, role, logPath }) {
-  const usingDefaultModel = !model;
+// eslint-disable-next-line sonarjs/cyclomatic-complexity -- was 10 before --class; each ?? is a trivial null-guard
+function buildDispatchTask({ id, directory, prompt, model, executor, priorSessionTask, variant, sessionId, originSessionId, internal, finalMarker, role, logPath, class: taskClass }) {
   const resolvedModel = model || priorSessionTask?.model || executor.defaultModel;
+  const isLong = prompt.length > 200;
   return {
     id,
     directory,
@@ -1670,23 +1673,24 @@ function buildDispatchTask({ id, directory, prompt, model, executor, priorSessio
     status: "queued",
     model: resolvedModel,
     executorId: executor.id,
-    variant: usingDefaultModel ? "high" : variant || null,
-    sessionId: sessionId || null,
-    originSessionId: originSessionId || null,
+    variant: model ? variant ?? null : "high",
+    sessionId: sessionId ?? null,
+    originSessionId: originSessionId ?? null,
     pid: null,
     startedAt: new Date().toISOString(),
     endedAt: null,
     exitCode: null,
     signal: null,
-    promptPreview: prompt.length > 200 ? prompt.slice(0, 200) + "…" : prompt,
-    promptTotalChars: prompt.length > 200 ? prompt.length : null,
+    promptPreview: isLong ? prompt.slice(0, 200) + "…" : prompt,
+    promptTotalChars: isLong ? prompt.length : null,
     spawnError: null,
     cancelRequested: false,
     internal: internal === true,
     failureReason: null,
     failureDetail: null,
     incomplete: false,
-    finalMarker: finalMarker == null ? null : finalMarker,
+    finalMarker: finalMarker ?? null,
+    class: taskClass ?? null,
     changesetStatus: "none",
     diffPath: null,
     overlayDirs: null,
@@ -2098,7 +2102,7 @@ async function runSummarizeActivity(ctx, taskId, maxWords, previousActivity) {
  * @typedef {object} AdvisorContext
  * @property {() => void} ensureStateLoaded
  * @property {(sessionId: string|undefined) => {sessionId: string|undefined, reset: boolean, previousSessionId: string|undefined}} resolveAdvisorSession
- * @property {(params: {prompt: string, directory: string, model?: string, variant?: string, sessionId?: string|undefined, executor?: string, env?: NodeJS.ProcessEnv, role: "advisor"}) => TaskSummary & {next: string}} dispatch
+ * @property {(params: {prompt: string, directory: string, model?: string, variant?: string, sessionId?: string|undefined, executor?: string, env?: NodeJS.ProcessEnv, role: "advisor", class?: string|null}) => TaskSummary & {next: string}} dispatch
  * @property {(err: unknown) => string} errMessage
  * @property {(taskId: string, options: object) => Promise<{status: string, sessionId?: string|null}>} poll
  * @property {number} maxWait
@@ -2113,13 +2117,13 @@ async function runSummarizeActivity(ctx, taskId, maxWords, previousActivity) {
  * dispatch`. Overlay is mandatory for the advisor role, so it is not a
  * parameter here -- the role itself carries that guarantee.
  * @param {AdvisorContext} ctx
- * @param {{prompt?: string, directory?: string, model?: string, variant?: string, sessionId?: string|undefined, executor?: string, env?: NodeJS.ProcessEnv}} params
+ * @param {{prompt?: string, directory?: string, model?: string, variant?: string, sessionId?: string|undefined, executor?: string, env?: NodeJS.ProcessEnv, class?: string|null}} params
  * @returns {TaskSummary & {next: string}}
  */
 function dispatchAdvisorTask(ctx, params) {
-  const { prompt, directory, model, variant, sessionId, executor, env } = params;
+  const { prompt, directory, model, variant, sessionId, executor, env, class: taskClass } = params;
   try {
-    return ctx.dispatch({ model, variant, sessionId, executor, env, prompt: /** @type {string} */ (prompt), directory: /** @type {string} */ (directory), role: "advisor" });
+    return ctx.dispatch({ model, variant, sessionId, executor, env, prompt: /** @type {string} */ (prompt), directory: /** @type {string} */ (directory), role: "advisor", class: taskClass });
   } catch (err) {
     throw new Error(ctx.errMessage(err).replaceAll("taskferry dispatch", "taskferry advisor"), { cause: err });
   }
@@ -2431,12 +2435,13 @@ function sweepOverlayEntry(ctx, entry, tmpRoot) {
  * @param {Task} task
  */
 function summarizeOptionalFields(task) {
-  const { promptTotalChars, incomplete, finalMarker, executorId } = task;
+  const { promptTotalChars, incomplete, finalMarker, executorId, class: taskClass } = task;
   return {
     ...(promptTotalChars != null ? { promptTotalChars } : {}),
     ...(task.summaryOf ? { summaryOf: task.summaryOf } : {}),
     ...(incomplete === true ? { incomplete: true } : {}),
     ...(finalMarker != null ? { finalMarker } : {}),
+    ...(taskClass != null ? { class: taskClass } : {}),
     ...(executorId != null ? { executorId } : {}),
     ...(task.overlayDirs != null ? { overlayDirs: task.overlayDirs } : {}),
     ...(task.changesetError != null ? { changesetError: task.changesetError } : {}),
@@ -4893,12 +4898,12 @@ function startRunningWatcherFor(task, ctx) {
  * `createTaskManager`'s `dispatch` closure; all the validation/build/queue
  * helpers are plain module-level functions called directly. The factory
  * bindings are threaded in via `ctx`.
- * @param {{prompt: string, directory: string, model?: string, variant?: string, sessionId?: string, internal?: boolean, finalMarker?: string|null, originSessionId?: string, noSandbox?: boolean, noOverlay?: boolean, allowedDirs?: string[], executor?: string, env?: NodeJS.ProcessEnv, role?: "dispatch"|"advisor"}} params
+ * @param {{prompt: string, directory: string, model?: string, variant?: string, sessionId?: string, internal?: boolean, finalMarker?: string|null, originSessionId?: string, noSandbox?: boolean, noOverlay?: boolean, allowedDirs?: string[], executor?: string, env?: NodeJS.ProcessEnv, role?: "dispatch"|"advisor", class?: string|null}} params
  * @param {{ensureStateLoaded: () => void, tasks: Map<string, Task>, defaultExecutor: import("./executor.js").WorkerExecutor, LOG_DIR: string, persistTask: (taskId: string) => void, pendingLaunches: Map<string, LaunchSpec>, launchQueue: string[], launchQueuedTasks: () => void}} ctx
  * @returns {TaskSummary & {next: string}}
  */
 function dispatchTask(params, ctx) {
-  const { prompt, directory, model, variant, sessionId, internal = false, finalMarker = null, originSessionId, noSandbox = false, noOverlay = false, allowedDirs: dispatchAllowedDirs, executor: executorName, env, role = "dispatch" } = params;
+  const { prompt, directory, model, variant, sessionId, internal = false, finalMarker = null, originSessionId, noSandbox = false, noOverlay = false, allowedDirs: dispatchAllowedDirs, executor: executorName, env, role = "dispatch", class: taskClass = null } = params;
   ctx.ensureStateLoaded();
   const priorSessionTask = resolvePriorSessionTask(ctx.tasks, sessionId, executorName);
   const executor = resolveDispatchExecutor(priorSessionTask, executorName, ctx.defaultExecutor);
@@ -4908,7 +4913,7 @@ function dispatchTask(params, ctx) {
   // Task IDs retain the literal "oc_" prefix for compatibility; WorkerExecutor.taskIdPrefix is not wired in this issue.
   const id = `oc_${Date.now().toString(36)}_${randomUUID().slice(0, 8)}`;
   const logPath = path.join(ctx.LOG_DIR, `${id}.ndjson`);
-  const task = buildDispatchTask({ id, prompt, model, executor, priorSessionTask, variant, sessionId, originSessionId, internal, finalMarker, role, logPath, directory: normalizedDirectory });
+  const task = buildDispatchTask({ id, prompt, model, executor, priorSessionTask, variant, sessionId, originSessionId, internal, finalMarker, role, logPath, directory: normalizedDirectory, class: taskClass });
   queueDispatchLaunch({ tasks: ctx.tasks, persistTask: ctx.persistTask, pendingLaunches: ctx.pendingLaunches, launchQueue: ctx.launchQueue, launchQueuedTasks: ctx.launchQueuedTasks }, { id, task, prompt, sessionId, env, noSandbox, noOverlay, executor, role, allowedDirs: dispatchAllowedDirs });
   const summary = summarize(task);
   return {

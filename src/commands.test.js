@@ -1181,3 +1181,42 @@ test("watch --flush-interval flushes buffered events on abort instead of silentl
   assert.match(io.lines[0], /oc_1/);
   assert.match(io.lines[1], /oc_2/);
 });
+
+test("dispatch forwards class to the RPC payload when set", async () => {
+  const root = mkTmpRoot(TASKFERRY_TEST_TMP_PREFIX);
+  let capturedParams;
+  const client = {
+    request: async (_method, params) => {
+      capturedParams = params;
+      return { id: "oc_1" };
+    },
+  };
+  await runCommand("dispatch", { prompt: "hi", directory: root, class: "implementer" }, { client, cwd: root, checkSkills: () => {} });
+  assert.equal(capturedParams.class, "implementer");
+});
+
+test("dispatch omits class from the RPC payload when not set", async () => {
+  const root = mkTmpRoot(TASKFERRY_TEST_TMP_PREFIX);
+  let capturedParams;
+  const client = {
+    request: async (_method, params) => {
+      capturedParams = params;
+      return { id: "oc_1" };
+    },
+  };
+  await runCommand("dispatch", { prompt: "hi", directory: root }, { client, cwd: root, checkSkills: () => {} });
+  assert.equal("class" in capturedParams, false);
+});
+
+test("advisor forwards class to the RPC payload when set", async () => {
+  const root = mkTmpRoot(TASKFERRY_TEST_TMP_PREFIX);
+  let captured;
+  const client = {
+    request: async (method, params) => {
+      captured = { method, params };
+      return { status: "done", message: "advice" };
+    },
+  };
+  await runCommand("advisor", { prompt: "hi", directory: root, model: "m", class: "advisor-design" }, { client, cwd: root, env: {} });
+  assert.equal(captured.params.class, "advisor-design");
+});

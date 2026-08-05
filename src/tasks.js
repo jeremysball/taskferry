@@ -1367,6 +1367,17 @@ const DEFAULT_WATCHDOG_POLL_MS = positiveInteger(
 );
 const DEFAULT_WATCHDOG_GRACE_MS = 5000;
 const DEFAULT_CANCEL_GRACE_MS = 5000;
+// SIGTERM -> SIGKILL grace on a timed-out gate, matching cancel()'s own
+// default cancelGraceMs (src/args.js's --grace-ms default). Also the bound
+// killGateAndWait() (below) uses for the accept/reject kill handshake.
+const CHECK_GATE_KILL_GRACE_MS = 5000;
+// Cap on the gate's combined stdout+stderr buffer. Appended chunks that
+// would push `output` past this cap are not rejected outright (a gate is
+// not attacker-controlled input, unlike a client request body); instead
+// the buffer is trimmed from the front so it stays under the cap, keeping
+// the last N bytes of a chatty test suite and bounding the daemon's
+// heap regardless of how long the gate runs.
+const CHECK_GATE_OUTPUT_CAP_BYTES = 256 * 1024;
 // Global minimum spacing between every dispatch/advisor launch, regardless
 // of directory -- works around a bwrap overlay-mount race (taskferry#318,
 // "Device or resource busy") seen both within one worktree and across
@@ -3356,6 +3367,7 @@ function initManagerMaps() {
     modelsCacheInFlight: new Map(),
     activitySubscriptions: new Map(),
     logHasEventCache: new Set(),
+    gateChildren: new Map(),
   };
 }
 
@@ -3435,20 +3447,26 @@ function buildManagerEnvHelpers(ctx) {
     requireBwrap: () => requireBwrapCapability(bwrapState, { checkBwrapAvailableFn: ctx.opts.checkBwrapAvailableFn }),
     requireOverlaySupport: () => requireOverlayCapability(overlayState, { checkOverlaySupportFn: ctx.opts.checkOverlaySupportFn, OVERLAY_SUPPORT_TTL_MS }),
     /** @param {Task} finishedTask */
-    extractChangesetForTask: (finishedTask) => extractChangesetForTaskRecord(finishedTask, { stateDir: ctx.opts.stateDir, runtimeDir: ctx.opts.runtimeDir, existsFn: ctx.opts.existsFn, sandboxDenylist: ctx.opts.sandboxDenylist, runOverlayCommandFn: ctx.opts.runOverlayCommandFn, overlaySleepFn: ctx.opts.overlaySleepFn, persistTask: (taskId) => ctx.helpers.persistTask(taskId), releaseOverlay }),
+    extractChangesetForTask: (finishedTask) => extractChangesetForTaskRecord(finishedTask, { stateDir: ctx.opts.stateDir, runtimeDir: ctx.opts.runtimeDir, existsFn: ctx.opts.existsFn, sandboxDenylist: ctx.opts.sandboxDenylist, runOverlayCommandFn: ctx.opts.runOverlayCommandFn, overlaySleepFn: ctx.opts.overlaySleepFn, persistTask: (taskId) => ctx.helpers.persistTask(taskId), startCheckGate: (task) => ctx.env.startCheckGate(task), releaseOverlay }),
     /** @param {NodeJS.ProcessEnv} [env] @param {string} [taskId] */
     dispatchEnvironment: (env, taskId) => buildDispatchEnvironment({ sanitizedEnvironment }, env, taskId),
     /** @param {NodeJS.ProcessEnv} [env] */
     summaryEnvironment: (env) => buildSummaryEnvironment({ sanitizedEnvironment }, env),
-    /**
-     * Stub for the gate supervisor that Task 6 wires in. For now every
-     * call is a no-op so the accept/reject pipeline can be plumbed without
-     * the supervisor existing yet; Task 6 replaces this with the real
-     * SIGTERM-and-wait implementation.
-     * @param {string} _taskId
-     * @returns {Promise<void>}
-     */
-    killGateAndWait: async (_taskId) => undefined,
+    /** @param {Task} task */
+    startCheckGate: (task) => startCheckGate(task, {
+      spawnFn: ctx.opts.spawnFn,
+      stateDir: ctx.opts.stateDir,
+      runtimeDir: ctx.opts.runtimeDir,
+      existsFn: ctx.opts.existsFn,
+      sandboxDenylist: ctx.opts.sandboxDenylist,
+      persistTask: (taskId) => ctx.helpers.persistTask(taskId),
+      scheduleActivity: (t, options) => ctx.helpers.scheduleActivity(t, options),
+      sendSignal: (pid, signal) => ctx.helpers.sendSignal(pid, signal),
+      platform: ctx.opts.platform,
+      gateChildren: ctx.maps.gateChildren,
+    }),
+    /** @param {string} taskId */
+    killGateAndWait: (taskId) => killGateAndWait(taskId, { gateChildren: ctx.maps.gateChildren, sendSignal: (pid, signal) => ctx.helpers.sendSignal(pid, signal) }),
   };
 }
 
@@ -4462,7 +4480,7 @@ function persistTaskRecord(taskId, ctx) {
  * Mirrors the original `extractChangesetForTask` closure exactly; every
  * factory binding is threaded in via `ctx`.
  * @param {Task} finishedTask
- * @param {{stateDir: string, runtimeDir: string, existsFn: (path: string) => boolean, sandboxDenylist: string[], runOverlayCommandFn: (command: string, args: string[]) => {status: number|null, stdout: string, stderr: string, error?: Error}, overlaySleepFn?: (ms: number) => void, persistTask: (taskId: string) => void, releaseOverlay: (task: {overlayDirs?: {root:string,tmpRoot:string}|null}) => boolean}} ctx
+ * @param {{stateDir: string, runtimeDir: string, existsFn: (path: string) => boolean, sandboxDenylist: string[], runOverlayCommandFn: (command: string, args: string[]) => {status: number|null, stdout: string, stderr: string, error?: Error}, overlaySleepFn?: (ms: number) => void, persistTask: (taskId: string) => void, releaseOverlay: (task: {overlayDirs?: {root:string,tmpRoot:string}|null}) => boolean, startCheckGate: (task: Task) => void}} ctx
  */
 function extractChangesetForTaskRecord(finishedTask, ctx) {
   if (!finishedTask.overlayDirs) return;
@@ -4529,10 +4547,299 @@ function extractChangesetForTaskRecord(finishedTask, ctx) {
     ctx.releaseOverlay(finishedTask);
   } else if (extracted.hasChanges) {
     finishedTask.changesetStatus = "pending";
+    maybeStartCheckGate(ctx, finishedTask, isGitTarget);
   } else {
     finishedTask.changesetStatus = "accepted";
     ctx.releaseOverlay(finishedTask);
   }
+}
+
+/**
+ * Tail-trims combined stdout+stderr to the last `n` lines, per the design's
+ * "last ~40 lines of combined output" contract for checkOutputTail.
+ * @param {string} text
+ * @param {number} [n]
+ * @returns {string}
+ */
+function lastLines(text, n = 40) {
+  const lines = text.split("\n");
+  return lines.length <= n ? text : lines.slice(-n).join("\n");
+}
+
+/**
+ * Appends a chunk to the gate's combined stdout+stderr buffer, trimming from
+ * the front when the buffer would otherwise exceed CHECK_GATE_OUTPUT_CAP_BYTES.
+ * A chatty test suite (e.g. tsc emitting a type error per line, vitest
+ * repeating the verbose reporter per file) would otherwise grow the daemon's
+ * heap unbounded for up to checkTimeoutSeconds. `tail` is severed
+ * byte-exact so a UTF-8 multi-byte sequence straddling the cut point is
+ * discarded rather than reported as a malformed tail -- the resulting
+ * `checkOutputTail` is a debug aid, not a contractual view.
+ * @param {string} tail
+ * @param {Buffer|string} chunk
+ */
+function appendBoundedOutput(tail, chunk) {
+  const next = tail + (typeof chunk === "string" ? chunk : chunk.toString("utf8"));
+  if (next.length <= CHECK_GATE_OUTPUT_CAP_BYTES) return next;
+  return next.slice(next.length - CHECK_GATE_OUTPUT_CAP_BYTES);
+}
+
+/**
+ * Starts the verification gate for a task whose changeset just extracted
+ * with real changes: spawns the project's declared check command inside the
+ * SAME bwrap overlay mount the worker ran with (task.overlayDirs), so gate
+ * side effects (test caches, build artifacts) land in the overlay's upper --
+ * never on the real directory, and never contaminating the diff already
+ * written to disk by extraction, which ran first. Fire-and-forget and fully
+ * async (spawnFn, not the synchronous runOverlayCommandFn extraction uses):
+ * a check command can run up to checkTimeoutSeconds (default 900s) and must
+ * never block the daemon's event loop. No-ops (leaves checkStatus at
+ * buildDispatchTask's "none" default) when there's no overlay, the task
+ * isn't a dispatch-role task, the platform can't sandbox, or the project
+ * declares no check command -- there is no isolated tree to gate against
+ * without an overlay, per the design's non-goal "Gating --no-overlay /
+ * non-git dispatches."
+ * @param {Task} task
+ * @param {{spawnFn: typeof import("node:child_process").spawn, stateDir: string, runtimeDir: string, existsFn: (p: string) => boolean, sandboxDenylist: string[], persistTask: (taskId: string) => void, scheduleActivity: (task: Task, options?: {force?: boolean}) => Promise<unknown>, sendSignal: (pid: number, signal: NodeJS.Signals) => void, platform: NodeJS.Platform, gateChildren: Map<string, import("node:child_process").ChildProcess>}} ctx
+ */
+function startCheckGate(task, ctx) {
+  if (!task.overlayDirs || task.role !== "dispatch" || !platformSupportsSandbox(ctx.platform)) return;
+  const projectConfig = loadProjectConfig(task.directory);
+  if (projectConfig.parseError) {
+    task.projectConfigWarning = projectConfig.parseError;
+    ctx.persistTask(task.id);
+    return;
+  }
+  if (!projectConfig.check) return;
+
+  const denyList = [...defaultDenyList(os.homedir(), ctx.stateDir), ...ctx.sandboxDenylist].filter(ctx.existsFn);
+  // Sandbox parity (review finding): the worker's read_only_paths binds and
+  // the gate's must be identical, or a check command that reads a
+  // read-only-mounted path passes for the worker and fails in the gate (or
+  // vice versa). Reuse Task 4's exact validated resolver rather than a
+  // second, potentially-drifting copy of the mount-order safety logic.
+  const { roBinds: readOnlyBinds } = resolveReadOnlyProjectBinds(projectConfig.readOnlyPaths, {
+    protectedPaths: [...denyList, ctx.stateDir, ctx.runtimeDir, task.directory],
+    existsFn: ctx.existsFn,
+  });
+  const spawnArgs = buildBwrapArgs({
+    directory: task.directory,
+    stateDir: ctx.stateDir,
+    runtimeDir: ctx.runtimeDir,
+    homeDir: os.homedir(),
+    extraRoBinds: readOnlyBinds,
+    overlay: { upperDir: task.overlayDirs.upperDir, workDir: task.overlayDirs.workDir },
+    overlayRwBinds: task.overlayDirs.rwBinds ?? [],
+    overlayRwFileBinds: task.overlayDirs.rwFileBinds ?? [],
+    // Security (review finding, verified against src/sandbox.js:277-308
+    // directly): buildBwrapArgs defaults runtimeDirWritable to true, which
+    // would hand the gate's check command a writable bind onto the daemon's
+    // control socket -- a worker-controlled check (npm test, a Makefile
+    // target) could then connect out and call `taskferry accept --force` on
+    // its own pending task. The gate is verification, not a trusted daemon
+    // component; it gets read-only access to the runtime dir, same as any
+    // other untrusted sandboxed process.
+    runtimeDirWritable: false,
+    denyList,
+  }).concat(["--", "sh", "-c", projectConfig.check]);
+  // Known gap, not fixed in this pass: unlike the worker's spawn
+  // (buildBwrapBinds), the gate does not forward the worker's
+  // extraRwBinds/extraRwPairBinds (executor auth binds, allowedDirs, the
+  // sandboxed data home) -- those aren't currently persisted anywhere on
+  // `task` for the gate to reuse. A check command that specifically needs
+  // one of those (rather than read_only_paths, which IS threaded above)
+  // will diverge from the worker's view. Flagged for a follow-up if a real
+  // check command hits it; not blocking this plan.
+
+  task.checkStatus = "running";
+  task.checkCommand = projectConfig.check;
+  task.checkExitCode = null;
+  task.checkOutputTail = null;
+  task.checkStartedAt = new Date().toISOString();
+  task.checkEndedAt = null;
+  task.checkGatePid = null;
+  ctx.persistTask(task.id);
+  void ctx.scheduleActivity(task, { force: true });
+
+  // Strip every TASKFERRY_* env var from the daemon's ambient before handing
+  // it to the gate's bwrap child. This is the narrowest fix for the #292
+  // leak class when the daemon itself was auto-started by a dispatched ferry
+  // (the daemon's ambient carries TASKFERRY_CHILD=1, and a repo's gate
+  // command -- e.g. `npm test` -- sees that and branches on it). The gate
+  // is an internal spawn, not a dispatched worker, so it doesn't need the
+  // envFileVars/caller-denylist machinery sanitizedEnvironment applies to a
+  // dispatch's payload env; a per-key filter is sufficient and local to this
+  // function.
+  const gateEnv = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith("TASKFERRY_")));
+
+  let child;
+  try {
+    // detached: true (review fix, empirically required -- see the "Kill
+    // mechanism" note above this task): makes the gate its own process-group
+    // leader, the same way spawnTaskChild() already does for workers
+    // (src/tasks.js:1294), so sendSignalToProcess's group-kill actually
+    // reaches the sandboxed workload instead of only the bwrap monitor.
+    child = ctx.spawnFn("bwrap", spawnArgs, { cwd: task.directory, env: gateEnv, stdio: ["ignore", "pipe", "pipe"], detached: true });
+  } catch (err) {
+    markCheckGateFailedWithError(task, err, ctx);
+    return;
+  }
+  task.checkGatePid = child.pid ?? null;
+  // Track the live child by task id so killGateAndWait() (below), called
+  // from accept/reject, can find the same process object this closure holds
+  // and actually wait for its "exit" event -- see the Kill mechanism note.
+  ctx.gateChildren.set(task.id, child);
+  ctx.persistTask(task.id);
+
+  wireCheckGateChildHandlers(child, task, ctx, projectConfig.checkTimeoutSeconds);
+}
+
+/**
+ * Wires the bwrap child's stdout/stderr/exit/error listeners and the
+ * timeout escalation timer. Extracted out of startCheckGate so that
+ * function stays under the 80-line ceiling; the wiring + settle closure
+ * alone is ~50 lines.
+ * @param {import("node:child_process").ChildProcess} child
+ * @param {Task} task
+ * @param {{sendSignal: (pid: number, signal: NodeJS.Signals) => void, gateChildren: Map<string, import("node:child_process").ChildProcess>, persistTask: (taskId: string) => void, scheduleActivity: (task: Task, options?: {force?: boolean}) => Promise<unknown>}} ctx
+ * @param {number} timeoutSeconds
+ */
+function wireCheckGateChildHandlers(child, task, ctx, timeoutSeconds) {
+  let output = "";
+  let timedOut = false;
+  // Node can emit both `error` and `exit` for the same child (e.g. ENOENT
+  // on a missing binary fires `error` then `exit` with code null). Without
+  // this guard, both paths would independently call settle() and double-
+  // persist / double-fire scheduleActivity. The closure variable is set on
+  // first entry and skipped thereafter.
+  let settled = false;
+
+  const timer = setTimeout(() => {
+    timedOut = true;
+    if (child.pid != null) ctx.sendSignal(child.pid, "SIGTERM");
+    const killTimer = setTimeout(() => {
+      if (child.pid != null) ctx.sendSignal(child.pid, "SIGKILL");
+    }, CHECK_GATE_KILL_GRACE_MS);
+    killTimer.unref();
+  }, timeoutSeconds * 1000);
+  timer.unref();
+
+  child.stdout?.on("data", (chunk) => { output = appendBoundedOutput(output, chunk); });
+  child.stderr?.on("data", (chunk) => { output = appendBoundedOutput(output, chunk); });
+
+  /** @param {"passed"|"failed"|"timeout"} status @param {number|null} exitCode */
+  const settle = (status, exitCode) => {
+    if (settled) return;
+    settled = true;
+    clearTimeout(timer);
+    ctx.gateChildren.delete(task.id);
+    // A gate that finishes after an accept/reject already settled the task
+    // (changesetStatus moved off "pending") must NOT overwrite the
+    // already-decided outcome. Task 6's accept/reject path is responsible
+    // for killing the in-flight gate AND awaiting its actual exit (via
+    // killGateAndWait, which reads ctx.gateChildren -- this is why the
+    // delete() above must run before releaseOverlay can proceed, not just
+    // before this function returns) before releaseOverlay reclaims the
+    // overlay; this guard is the right side of that handshake -- it
+    // preserves the decided outcome even if a late exit event still fires
+    // after the kill has already resolved.
+    if (task.changesetStatus !== "pending") return;
+    task.checkStatus = status;
+    task.checkExitCode = exitCode;
+    task.checkOutputTail = lastLines(output);
+    task.checkEndedAt = new Date().toISOString();
+    task.checkGatePid = null;
+    ctx.persistTask(task.id);
+    void ctx.scheduleActivity(task, { force: true });
+  };
+
+  child.on("exit", (code, signal) => {
+    if (timedOut) { settle("timeout", code); return; }
+    if (signal) { settle("failed", code); return; }
+    settle(code === 0 ? "passed" : "failed", code);
+  });
+  child.on("error", (err) => {
+    if (settled) return;
+    settled = true;
+    clearTimeout(timer);
+    ctx.gateChildren.delete(task.id);
+    markCheckGateFailedWithError(task, err, ctx);
+  });
+}
+
+/**
+ * Persists a check-gate failure caused by a synchronous spawn throw OR an
+ * async `error` event from the bwrap child. Shared by both paths in
+ * startCheckGate so the persisted record shape is identical regardless of
+ * which one fired (a difference would make `result --fields checkOutputTail`
+ * return inconsistent shapes depending on whether the gate crashed at
+ * spawn or at exit).
+ * @param {Task} task
+ * @param {unknown} err
+ * @param {{persistTask: (taskId: string) => void, scheduleActivity: (task: Task, options?: {force?: boolean}) => Promise<unknown>}} ctx
+ */
+function markCheckGateFailedWithError(task, err, ctx) {
+  task.checkStatus = "failed";
+  task.checkExitCode = null;
+  task.checkOutputTail = `spawn error: ${errMessage(err)}`;
+  task.checkEndedAt = new Date().toISOString();
+  task.checkGatePid = null;
+  ctx.persistTask(task.id);
+  void ctx.scheduleActivity(task, { force: true });
+}
+
+/**
+ * Invokes startCheckGate for git-target dispatches only. Extracted out of
+ * extractChangesetForTaskRecord's hasChanges branch so the parent's
+ * cyclomatic complexity stays under the eslint ceiling (the brief's
+ * `isGitTarget && ctx.startCheckGate(finishedTask)` would have added 1 to
+ * its complexity counter; this wrapper keeps the call site a single
+ * statement).
+ * @param {{startCheckGate: (task: Task) => void}} ctx
+ * @param {Task} finishedTask
+ * @param {boolean} isGitTarget
+ */
+function maybeStartCheckGate(ctx, finishedTask, isGitTarget) {
+  if (isGitTarget) ctx.startCheckGate(finishedTask);
+}
+
+/**
+ * Sends a process-group SIGTERM to a task's in-flight check gate and waits
+ * for it to actually exit (escalating to SIGKILL after
+ * CHECK_GATE_KILL_GRACE_MS if it hasn't) before resolving. Task 6's
+ * accept/reject must await this BEFORE calling releaseOverlay -- sending a
+ * signal and immediately proceeding (the earlier draft of this plan) is not
+ * a handshake, it's a race: the overlay's upper dir can be chmod'd/rm -rf'd
+ * out from under a gate child that is still mid-write. Best-effort bounded:
+ * if the child still hasn't exited CHECK_GATE_KILL_GRACE_MS after the
+ * SIGKILL, this gives up and resolves anyway rather than hanging
+ * accept/reject forever -- a leftover process at that point means something
+ * is genuinely wrong (worth investigating via `ps`) and is not worth
+ * blocking the user's accept/reject call on indefinitely.
+ * @param {string} taskId
+ * @param {{gateChildren: Map<string, import("node:child_process").ChildProcess>, sendSignal: (pid: number, signal: NodeJS.Signals) => void}} ctx
+ * @returns {Promise<void>}
+ */
+async function killGateAndWait(taskId, ctx) {
+  const child = ctx.gateChildren.get(taskId);
+  if (!child || child.pid == null) return; // already exited, or never tracked
+  const exited = new Promise((resolve) => child.once("exit", () => resolve(undefined)));
+  ctx.sendSignal(child.pid, "SIGTERM");
+  if (await raceTimeout(exited, CHECK_GATE_KILL_GRACE_MS)) return;
+  ctx.sendSignal(child.pid, "SIGKILL");
+  await raceTimeout(exited, CHECK_GATE_KILL_GRACE_MS);
+}
+
+/**
+ * @param {Promise<void>} promise
+ * @param {number} ms
+ * @returns {Promise<boolean>} true if `promise` settled before the timeout
+ */
+function raceTimeout(promise, ms) {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => resolve(false), ms);
+    promise.then(() => { clearTimeout(timer); resolve(true); });
+  });
 }
 
 /**

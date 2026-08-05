@@ -324,9 +324,12 @@ aggregate real outcome data.
      per-task `outcome: accepted | rejected | none` on the task record.
    - *Final marker* for reviewer/advisor/researcher classes: parse the
      closing `Status:` marker (DONE | DONE_WITH_CONCERNS | BLOCKED |
-     NEEDS_CONTEXT) from the task message at settlement and persist it as
-     `finalMarker` — it is a worker-written line, distinct from the task
-     `status` field.
+     NEEDS_CONTEXT) from the task message at settlement and persist it as a
+     new `finalStatus` field — it is a worker-written line, distinct from
+     both the task `status` field and the existing `finalMarker` field
+     (which already means the stored regex *source* from
+     `--require-final-marker`, used only as a match/no-match gate; it is
+     not a parsed outcome value and Tranche 2 must not repurpose it).
 3. **Backfill stance.** Historical tasks carry neither signal, so outcome
    rate starts empty and accrues only on newly tagged dispatches. No
    speculative backfill from prompt text or standing model role — the

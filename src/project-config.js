@@ -17,7 +17,7 @@ const EMPTY_CONFIG = Object.freeze({ check: null, checkTimeoutSeconds: DEFAULT_C
 // observed on the next loadProjectConfig() call without an explicit reset.
 const _projectConfigCache = new Map();
 
-/** Exported for test use only. */
+/** Clears the per-path cache. Exported for test use only. @returns {void} */
 export function _resetProjectConfigCache() {
   _projectConfigCache.clear();
 }

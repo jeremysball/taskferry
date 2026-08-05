@@ -47,10 +47,12 @@ execution.
 ## Commit hash
 
 ```
-12fb0dd feat(config): add .taskferry.toml loader (project-config.js)
+a78547e feat(config): add .taskferry.toml loader (project-config.js)
 ```
 
-On branch `check-gate-project-config`, parent `00856e3`.
+On branch `check-gate-project-config`, parent `00856e3`. (Originally
+written as `12fb0dd`; corrected after the controller's applied-and-
+committed step landed under `a78547e`.)
 
 ## Test command + output summary
 
@@ -141,3 +143,104 @@ test file is the brief's Step 2 verbatim plus the `beforeEach`
 described above; the package.json test:unit insertion is in the brief's
 recommended location; the smol-toml install + lockfile are the brief's
 Step 1 verbatim.
+
+---
+
+## Fix round 1/5
+
+Reviewer flagged two Important findings and one Minor. All three
+addressed. Fix commit:
+
+```
+8c93075 fix(config): document _resetProjectConfigCache return type and bump engines.node to >=18
+```
+
+### Important 1 — `src/project-config.js` JSDoc
+
+`_resetProjectConfigCache()` was exported with a bare
+`/** Exported for test use only. */` JSDoc and no `@returns {void}`
+tag, breaking this repo's typed-JSDoc convention that every exported
+function documents its return type. Cited precedent was
+`src/tasks.js:3386-3387` (`/** @returns {void} */` immediately above
+the void-returning `launchQueuedTasks`).
+
+**Change** (`src/project-config.js:20-22`): collapsed the doc into a
+single JSDoc block that carries both notes:
+
+```js
+/** Clears the per-path cache. Exported for test use only. @returns {void} */
+export function _resetProjectConfigCache() {
+  _projectConfigCache.clear();
+}
+```
+
+### Important 2 — `package.json` `engines.node`
+
+`package.json` declared `"engines": { "node": ">=16.9" }`, but the
+newly added `smol-toml@1.7.1` dependency declares
+`"engines": { "node": ">= 18" }` (`package-lock.json:1382-1384`,
+confirmed). The repo's declared engine range silently overstated
+compatibility — a Node 17 install would `npm install` successfully
+and then fail at runtime the first time `project-config.js` is
+imported.
+
+**Change** (`package.json:25`): `">=16.9"` → `">=18"`. Nothing else
+in `engines` touched.
+
+### Minor — report commit hash
+
+Updated the audit-trail `## Commit hash` section in this report from
+`12fb0dd` to `a78547e` (the hash the controller actually applied
+after the applied-and-committed step), with a parenthetical noting
+the correction. Cheap one-line fix.
+
+### Verification
+
+Re-ran the three required gates under the same clean env as before
+(`env -i HOME=... PATH=...`, `TASKFERRY_STATE_DIR`/`RUNTIME_DIR`/
+`CACHE_DIR` redirected under `/tmp/taskferry-dev-check-gate-pc/`,
+`npm_config_cache` redirected because `/home/jeremy/.npm/_cacache`
+is on a read-only fs).
+
+```
+$ env -u TASKFERRY_CHILD node --test src/project-config.test.js
+ℹ tests 10
+ℹ pass 10
+ℹ fail 0
+ℹ duration_ms 91.79   (exit 0)
+```
+
+```
+$ npm run test:unit
+ℹ tests 981
+ℹ pass 981
+ℹ fail 0
+ℹ duration_ms 14352.3   (exit 0)
+```
+
+```
+$ npm run lint
+> eslint .                (exit 0, no output)
+```
+
+```
+$ npm run typecheck
+> tsc --noEmit            (exit 0, no output)
+```
+
+All four commands exit 0 with no failures. The 981/981 number is
+unchanged from round 1 — both fixes are doc/manifest changes that
+don't alter runtime behavior, and the JSDoc change is observable to
+the typecheck (which is clean) but doesn't add or remove any tests.
+
+One incidental note worth recording for the rest of this 11-task
+plan: between rounds the controller reset the worktree's
+`node_modules` from a real directory (with `smol-toml` installed) back
+to the symlink pointing at `/workspace/taskferry/node_modules` (the
+main worktree's install, which does NOT have `smol-toml`). I had to
+re-run `npm install smol-toml@^1.7.1` before the tests would load
+the module. Future tasks in this plan that don't touch `node_modules`
+won't be affected, but anything that exercises the new
+`smol-toml`-using code path will need a similar `npm install` step
+between rounds unless the dependency gets installed at the main
+worktree's `node_modules` instead.

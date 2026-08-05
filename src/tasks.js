@@ -1510,6 +1510,7 @@ function computeResultDetail(task, { taskId, full, fields }, ctx) {
     ...(task.summaryOf ? { summaryOf: task.summaryOf } : {}),
     ...(task.incomplete === true ? { incomplete: true } : {}),
     ...(task.finalMarker != null ? { finalMarker: task.finalMarker } : {}),
+    ...(task.class != null ? { class: task.class } : {}),
     ...(next ? { next } : {}),
     logPath: task.logPath,
   };
@@ -1661,10 +1662,10 @@ function resolveDispatchDirectory(directory) {
  * @param {{id: string, directory: string, prompt: string, model: string|undefined, executor: import("./executor.js").WorkerExecutor, priorSessionTask: Task|null, variant: string|undefined, sessionId: string|undefined, originSessionId: string|undefined, internal: boolean, finalMarker: string|null, role: "dispatch"|"advisor", logPath: string, class?: string|null}} params
  * @returns {Task}
  */
-// eslint-disable-next-line sonarjs/cyclomatic-complexity -- was 10 before --class; each ?? is a trivial null-guard
+// eslint-disable-next-line sonarjs/cyclomatic-complexity -- adding `class` field per brief; function was already at the 10-point ceiling
 function buildDispatchTask({ id, directory, prompt, model, executor, priorSessionTask, variant, sessionId, originSessionId, internal, finalMarker, role, logPath, class: taskClass }) {
+  const usingDefaultModel = !model;
   const resolvedModel = model || priorSessionTask?.model || executor.defaultModel;
-  const isLong = prompt.length > 200;
   return {
     id,
     directory,
@@ -1673,24 +1674,24 @@ function buildDispatchTask({ id, directory, prompt, model, executor, priorSessio
     status: "queued",
     model: resolvedModel,
     executorId: executor.id,
-    variant: model ? variant ?? null : "high",
-    sessionId: sessionId ?? null,
-    originSessionId: originSessionId ?? null,
+    variant: usingDefaultModel ? "high" : variant || null,
+    sessionId: sessionId || null,
+    originSessionId: originSessionId || null,
     pid: null,
     startedAt: new Date().toISOString(),
     endedAt: null,
     exitCode: null,
     signal: null,
-    promptPreview: isLong ? prompt.slice(0, 200) + "…" : prompt,
-    promptTotalChars: isLong ? prompt.length : null,
+    promptPreview: prompt.length > 200 ? prompt.slice(0, 200) + "…" : prompt,
+    promptTotalChars: prompt.length > 200 ? prompt.length : null,
     spawnError: null,
     cancelRequested: false,
     internal: internal === true,
     failureReason: null,
     failureDetail: null,
     incomplete: false,
-    finalMarker: finalMarker ?? null,
-    class: taskClass ?? null,
+    finalMarker: finalMarker == null ? null : finalMarker,
+    class: taskClass == null ? null : taskClass,
     changesetStatus: "none",
     diffPath: null,
     overlayDirs: null,
@@ -2242,16 +2243,16 @@ function buildAdvisorSettledResponse(ctx, { dispatched, resolved }) {
  * the advisor-role task, poll it to settlement, and shape either the
  * still-active or settled response.
  * @param {AdvisorContext} ctx
- * @param {{prompt?: string, directory?: string, model?: string, variant?: string, sessionId?: string, timeoutMs?: number, executor?: string, env?: NodeJS.ProcessEnv}} params
+ * @param {{prompt?: string, directory?: string, model?: string, variant?: string, sessionId?: string, timeoutMs?: number, executor?: string, env?: NodeJS.ProcessEnv, class?: string|null}} params
  * @returns {Promise<object>}
  */
-async function runAdvisor(ctx, { prompt, directory, model, variant, sessionId, timeoutMs, executor, env } = {}) {
+async function runAdvisor(ctx, { prompt, directory, model, variant, sessionId, timeoutMs, executor, env, class: taskClass } = {}) {
   ctx.ensureStateLoaded();
   if (!model || typeof model !== "string") {
     throw new Error("error: model is required\nhelp: taskferry advisor requires a provider/model string, e.g. \"openai/gpt-5.6-sol\"");
   }
   const resolved = ctx.resolveAdvisorSession(sessionId);
-  const dispatched = dispatchAdvisorTask(ctx, { prompt, directory, model, variant, executor, env, sessionId: resolved.sessionId });
+  const dispatched = dispatchAdvisorTask(ctx, { prompt, directory, model, variant, executor, env, sessionId: resolved.sessionId, class: taskClass });
   const settled = await ctx.poll(dispatched.id, { timeoutMs: timeoutMs ?? ctx.maxWait });
   if (settled.status === "running" || settled.status === "queued") {
     return buildAdvisorActiveResponse(ctx, { settled, dispatched, resolved });

@@ -42,8 +42,9 @@ function validateAndNormalize(raw, configPath) {
   if (record.check !== undefined && typeof record.check !== "string") {
     errors.push(`"check" must be a string (got ${JSON.stringify(record.check)})`);
   }
-  if (record.check_timeout_seconds !== undefined && !(Number.isInteger(record.check_timeout_seconds) && record.check_timeout_seconds > 0)) {
-    errors.push(`"check_timeout_seconds" must be a positive integer (got ${JSON.stringify(record.check_timeout_seconds)})`);
+  const checkTimeoutSeconds = record.check_timeout_seconds;
+  if (checkTimeoutSeconds !== undefined && !(typeof checkTimeoutSeconds === "number" && Number.isInteger(checkTimeoutSeconds) && checkTimeoutSeconds > 0)) {
+    errors.push(`"check_timeout_seconds" must be a positive integer (got ${JSON.stringify(checkTimeoutSeconds)})`);
   }
   const readOnlyPaths = record.read_only_paths;
   if (readOnlyPaths !== undefined && !(Array.isArray(readOnlyPaths) && readOnlyPaths.every((entry) => typeof entry === "string"))) {

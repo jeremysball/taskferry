@@ -14,6 +14,7 @@ import { buildBwrapArgs, checkBwrapAvailable, checkOverlaySupport, defaultDenyLi
 import { applyChangeset, overlayPaths, resolvePreDispatchHead, subOverlayPaths, subFilePaths, cleanupOverlay, defaultRunCommand as defaultOverlayRunCommand, extractGitDiff, extractNonGitDiff, OVERLAY_MOUNT_BUSY_PATTERN } from "./changeset.js";
 import { resolveExecutor, opencodeExecutor } from "./executor.js";
 import { loadEnvFile, watchEnvFile } from "./env-file.js";
+import { loadProjectConfig, verificationPromptBlock } from "./project-config.js";
 
 /**
  * @typedef {object} SummaryOf
@@ -5074,11 +5075,15 @@ function dispatchTask(params, ctx) {
   validateDispatchParameters({ prompt, directory });
   validateDispatchFinalMarker(finalMarker);
   const normalizedDirectory = resolveDispatchDirectory(directory);
+  const projectConfig = loadProjectConfig(normalizedDirectory);
+  const dispatchPrompt = role === "dispatch" && projectConfig.check
+    ? `${prompt}${verificationPromptBlock(projectConfig.check)}`
+    : prompt;
   // Task IDs retain the literal "oc_" prefix for compatibility; WorkerExecutor.taskIdPrefix is not wired in this issue.
   const id = `oc_${Date.now().toString(36)}_${randomUUID().slice(0, 8)}`;
   const logPath = path.join(ctx.LOG_DIR, `${id}.ndjson`);
-  const task = buildDispatchTask({ id, prompt, model, executor, priorSessionTask, variant, sessionId, originSessionId, internal, finalMarker, role, logPath, parentTaskId, class: taskClass, directory: normalizedDirectory });
-  queueDispatchLaunch({ tasks: ctx.tasks, persistTask: ctx.persistTask, pendingLaunches: ctx.pendingLaunches, launchQueue: ctx.launchQueue, launchQueuedTasks: ctx.launchQueuedTasks }, { id, task, prompt, sessionId, env, noSandbox, noOverlay, executor, role, allowedDirs: dispatchAllowedDirs });
+  const task = buildDispatchTask({ id, model, executor, priorSessionTask, variant, sessionId, originSessionId, internal, finalMarker, role, logPath, parentTaskId, class: taskClass, prompt: dispatchPrompt, directory: normalizedDirectory });
+  queueDispatchLaunch({ tasks: ctx.tasks, persistTask: ctx.persistTask, pendingLaunches: ctx.pendingLaunches, launchQueue: ctx.launchQueue, launchQueuedTasks: ctx.launchQueuedTasks }, { id, task, sessionId, env, noSandbox, noOverlay, executor, role, prompt: dispatchPrompt, allowedDirs: dispatchAllowedDirs });
   const summary = summarize(task);
   return {
     ...summary,

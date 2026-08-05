@@ -5076,7 +5076,7 @@ function dispatchTask(params, ctx) {
   validateDispatchFinalMarker(finalMarker);
   const normalizedDirectory = resolveDispatchDirectory(directory);
   const projectConfig = loadProjectConfig(normalizedDirectory);
-  const dispatchPrompt = role === "dispatch" && projectConfig.check
+  const dispatchPrompt = role === "dispatch" && !noOverlay && projectConfig.check
     ? `${prompt}${verificationPromptBlock(projectConfig.check)}`
     : prompt;
   // Task IDs retain the literal "oc_" prefix for compatibility; WorkerExecutor.taskIdPrefix is not wired in this issue.

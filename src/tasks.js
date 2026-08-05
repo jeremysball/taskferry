@@ -157,6 +157,7 @@ import { loadEnvFile, watchEnvFile } from "./env-file.js";
  * @property {boolean} [incomplete]
  * @property {string|null} [finalMarker]
  * @property {string|null} [finalStatus]
+ * @property {string|null} [class]
  * @property {string|null} [diff]
  * @property {{files: number, additions: number, deletions: number}|null} [diffStat]
  * @property {string|null} [changesetError]

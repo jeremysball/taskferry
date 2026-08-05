@@ -94,7 +94,9 @@ worktree instead of symlinking across the sandbox boundary.
   `config.json`'s `defaultExecutor` to `opencode` instead — check before
   assuming an omitted flag means pi). Pass `--executor pi`/`--executor
   opencode` explicitly whenever the task needs a specific CLI regardless of
-  that default.
+  that default. Both also accept `--class <name>` to tag the task with a
+  free-text classification for telemetry aggregation (any non-empty string;
+  taskferry does not validate against a fixed list).
 - Start fresh sessions for each separate implementation task and each reviewer.
 - Resume only the implementer session for a fix to that same task.
 - Keep the task brief and directory explicit so the worker operates in the intended

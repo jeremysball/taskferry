@@ -312,12 +312,14 @@ projection, so per CLAUDE.md they land as their own branch/PR/review before
 Tranche 2 can aggregate real outcome data.
 
 1. **Class tag.** A `--class <name>` option on `dispatch` and `advisor`,
-   validated against the class list in the mapping table (implementer,
-   transcription, fixer, task-reviewer, final-reviewer,
-   advisor-statistical, advisor-design, architecture, code-review-finder,
-   code-review-verifier, researcher), persisted per task. Unknown values are
-   rejected, not silently accepted — a mistyped class corrupts the telemetry
-   it seeds.
+   accepted as any non-empty string (validated only as non-empty at the
+   protocol boundary — `protocol.js`'s `isNonEmptyString` check, same
+   pattern as `variant`/`sessionId`), persisted per task. taskferry does not
+   validate against a fixed list — it stores whatever string it's given. If
+   consumers (e.g. the choosing-a-model skill's telemetry aggregation) need
+   a controlled vocabulary, that's the aggregator's concern to enforce on
+   read, not taskferry's concern to enforce on write. A typo simply becomes
+   its own distinct class bucket, visible in the data.
 2. **Outcome signal.** Two parts; only the second is new persisted state:
    - *Changeset acceptance* for implementer/fixer classes: `taskferry
      accept`/`reject` already persist this as the existing `changesetStatus`

@@ -304,12 +304,12 @@ rank at all. Every floor records the release and date it was set.
 
 ## Instrumentation design (written in Tranche 0, built in Tranche 2)
 
-The telemetry the spec relies on (outcome rate, per-class ranking) needs two
-new persisted signals on a dispatch. Both are a taskferry feature, not a
-skill change — they touch `src/args.js`, `src/protocol.js` (`task.dispatch`
-params), `src/tasks.js` (persistence), and the output projection, so per
-CLAUDE.md they land as their own branch/PR/review before Tranche 2 can
-aggregate real outcome data.
+The telemetry the spec relies on (outcome rate, per-class ranking) needs one
+new persisted signal plus a class tag on a dispatch. Both are a taskferry
+feature, not a skill change — they touch `src/args.js`, `src/protocol.js`
+(`task.dispatch` params), `src/tasks.js` (persistence), and the output
+projection, so per CLAUDE.md they land as their own branch/PR/review before
+Tranche 2 can aggregate real outcome data.
 
 1. **Class tag.** A `--class <name>` option on `dispatch` and `advisor`,
    validated against the class list in the mapping table (implementer,
@@ -318,10 +318,13 @@ aggregate real outcome data.
    code-review-verifier, researcher), persisted per task. Unknown values are
    rejected, not silently accepted — a mistyped class corrupts the telemetry
    it seeds.
-2. **Outcome signal.** Two parts, both persisted:
+2. **Outcome signal.** Two parts; only the second is new persisted state:
    - *Changeset acceptance* for implementer/fixer classes: `taskferry
-     accept` already records the applied changeset; surface it as a
-     per-task `outcome: accepted | rejected | none` on the task record.
+     accept`/`reject` already persist this as the existing `changesetStatus`
+     field (`none | pending | accepted | rejected`). No new field —
+     telemetry aggregation (in the choosing-a-model skill, outside
+     taskferry) reads `changesetStatus` directly for these classes. A
+     duplicate `outcome` field would only drift out of sync with it.
    - *Final marker* for reviewer/advisor/researcher classes: parse the
      closing `Status:` marker (DONE | DONE_WITH_CONCERNS | BLOCKED |
      NEEDS_CONTEXT) from the task message at settlement and persist it as a

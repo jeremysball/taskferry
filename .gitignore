@@ -1,9 +1,5 @@
 node_modules/
 .state-smoketest/
 .worktrees/
-.superpowers/*
-!.superpowers/plans/
-!.superpowers/specs/
-!.superpowers/.completed/
-.superpowers/.completed/plans/2026-07-18-dry-cleanup-redteam-issues.md
+!.superpowers/**
 .claude/

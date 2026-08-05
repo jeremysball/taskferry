@@ -219,6 +219,36 @@ describe("protocol version, method list, and envelope", () => {
       );
     });
 
+    test("task.dispatch accepts an arbitrary class value", () => {
+      const parsed = parseRequestLine(request(METHOD.dispatch, {
+        prompt: "p",
+        directory: TEST_DIR,
+        class: "implementer",
+      }));
+      assert.equal(parsed.params.class, "implementer");
+    });
+
+    test("task.dispatch rejects an empty class value", () => {
+      assert.throws(
+        () => parseRequestLine(request(METHOD.dispatch, {
+          prompt: "p",
+          directory: TEST_DIR,
+          class: "",
+        })),
+        (error) => error instanceof ProtocolError && error.code === "INVALID_PARAMS"
+      );
+    });
+
+    test("task.advisor accepts an arbitrary class value", () => {
+      const parsed = parseRequestLine(request(METHOD.advisor, {
+        prompt: "p",
+        directory: TEST_DIR,
+        model: "m",
+        class: "advisor-design",
+      }));
+      assert.equal(parsed.params.class, "advisor-design");
+    });
+
     test("task.dispatch accepts an optional env object of string values", () => {
       const parsed = parseRequestLine(request(METHOD.dispatch, {
         prompt: "hi",

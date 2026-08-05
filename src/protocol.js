@@ -38,6 +38,7 @@ export const RESULT_FIELDS = new Set([
   "logPath",
   "incomplete",
   "finalMarker",
+  "finalStatus",
   "class",
   "diff",
   "diffStat",

@@ -50,6 +50,7 @@ import { loadEnvFile, watchEnvFile } from "./env-file.js";
  * @property {SummaryOf} [summaryOf]
  * @property {boolean} [incomplete]
  * @property {string|null} [finalMarker]
+ * @property {string|null} [finalStatus]
  * @property {string|null} [class]
  * @property {"opencode"|"pi"} [executorId]
  * @property {"dispatch"|"advisor"} [role]
@@ -83,6 +84,7 @@ import { loadEnvFile, watchEnvFile } from "./env-file.js";
  * @property {string|null} [spawnError]
  * @property {boolean} [incomplete]
  * @property {string|null} [finalMarker]
+ * @property {string|null} [finalStatus]
  * @property {string|null} [class]
  * @property {"opencode"|"pi"} [executorId]
  * @property {"dispatch"|"advisor"} [role]
@@ -154,6 +156,7 @@ import { loadEnvFile, watchEnvFile } from "./env-file.js";
  * @property {string} [next]
  * @property {boolean} [incomplete]
  * @property {string|null} [finalMarker]
+ * @property {string|null} [finalStatus]
  * @property {string|null} [diff]
  * @property {{files: number, additions: number, deletions: number}|null} [diffStat]
  * @property {string|null} [changesetError]
@@ -1510,6 +1513,7 @@ function computeResultDetail(task, { taskId, full, fields }, ctx) {
     ...(task.summaryOf ? { summaryOf: task.summaryOf } : {}),
     ...(task.incomplete === true ? { incomplete: true } : {}),
     ...(task.finalMarker != null ? { finalMarker: task.finalMarker } : {}),
+    ...(task.finalStatus != null ? { finalStatus: task.finalStatus } : {}),
     ...(task.class != null ? { class: task.class } : {}),
     ...(next ? { next } : {}),
     logPath: task.logPath,
@@ -1691,6 +1695,7 @@ function buildDispatchTask({ id, directory, prompt, model, executor, priorSessio
     failureDetail: null,
     incomplete: false,
     finalMarker: finalMarker == null ? null : finalMarker,
+    finalStatus: null,
     class: taskClass == null ? null : taskClass,
     changesetStatus: "none",
     diffPath: null,
@@ -2436,12 +2441,13 @@ function sweepOverlayEntry(ctx, entry, tmpRoot) {
  * @param {Task} task
  */
 function summarizeOptionalFields(task) {
-  const { promptTotalChars, incomplete, finalMarker, executorId, class: taskClass } = task;
+  const { promptTotalChars, incomplete, finalMarker, finalStatus, executorId, class: taskClass } = task;
   return {
     ...(promptTotalChars != null ? { promptTotalChars } : {}),
     ...(task.summaryOf ? { summaryOf: task.summaryOf } : {}),
     ...(incomplete === true ? { incomplete: true } : {}),
     ...(finalMarker != null ? { finalMarker } : {}),
+    ...(finalStatus != null ? { finalStatus } : {}),
     ...(taskClass != null ? { class: taskClass } : {}),
     ...(executorId != null ? { executorId } : {}),
     ...(task.overlayDirs != null ? { overlayDirs: task.overlayDirs } : {}),
@@ -3875,6 +3881,8 @@ function extractFinalMessage(logPath) {
     : "";
 }
 
+const STATUS_MARKER_RE = /^Status:\s*(DONE_WITH_CONCERNS|DONE|BLOCKED|NEEDS_CONTEXT)\s*$/m;
+
 /**
  * @param {Task} task
  */
@@ -3895,6 +3903,8 @@ function evaluateOutputCompleteness(task) {
       task.incomplete = true;
     }
   }
+  const statusMatch = message.match(STATUS_MARKER_RE);
+  if (statusMatch) task.finalStatus = statusMatch[1];
 }
 
 /**

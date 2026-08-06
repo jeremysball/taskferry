@@ -370,7 +370,7 @@ export function buildMergedViewBwrapArgs({ directory, overlay, runtimeDir, denyL
  * @param {(filePath: string, content: string) => void} [params.writeFileFn]
  * @param {(dirPath: string) => void} [params.mkdirFn]
  * @param {(ms: number) => void} [params.sleepFn] - injectable for tests; real callers get a blocking sleep between retries
- * @returns {{diffPath: string, hasChanges: boolean}}
+ * @returns {{diffPath: string, hasChanges: boolean, headDrift: null}}
  * @throws {Error} when the bwrap extraction fails to start or exits non-zero
  */
 export function extractNonGitDiff({
@@ -407,7 +407,7 @@ export function extractNonGitDiff({
   }
   mkdirFn(pathDirname(diffPath));
   writeFileFn(diffPath, result.stdout);
-  return { diffPath, hasChanges: result.stdout.trim().length > 0 };
+  return { diffPath, hasChanges: result.stdout.trim().length > 0, headDrift: null };
 }
 
 /**

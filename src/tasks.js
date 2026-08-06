@@ -59,6 +59,9 @@ import { loadEnvFile, watchEnvFile } from "./env-file.js";
  * @property {{root:string,tmpRoot:string,upperDir:string,workDir:string,rwBinds:Array<{path:string,upperDir:string,workDir:string}>,rwFileBinds:Array<{path:string,bindSrc:string}>}|null} [overlayDirs]
  * @property {string|null} [preDispatchHead]
  * @property {string|null} [changesetError]
+ * @property {string|null} [headDriftFrom]
+ * @property {string|null} [headDriftTo]
+ * @property {boolean|null} [headDriftRecovered]
  */
 
 /**
@@ -93,6 +96,9 @@ import { loadEnvFile, watchEnvFile } from "./env-file.js";
  * @property {{root:string,tmpRoot:string,upperDir:string,workDir:string,rwBinds:Array<{path:string,upperDir:string,workDir:string}>,rwFileBinds:Array<{path:string,bindSrc:string}>}|null} [overlayDirs]
  * @property {string|null} [preDispatchHead]
  * @property {string|null} [changesetError]
+ * @property {string|null} [headDriftFrom]
+ * @property {string|null} [headDriftTo]
+ * @property {boolean|null} [headDriftRecovered]
  */
 
 /**
@@ -161,6 +167,9 @@ import { loadEnvFile, watchEnvFile } from "./env-file.js";
  * @property {string|null} [diff]
  * @property {{files: number, additions: number, deletions: number}|null} [diffStat]
  * @property {string|null} [changesetError]
+ * @property {string|null} [headDriftFrom]
+ * @property {string|null} [headDriftTo]
+ * @property {boolean|null} [headDriftRecovered]
  */
 
 const DEFAULT_STATE_DIR = resolveStateDir(process.env);
@@ -1506,6 +1515,7 @@ function computeResultDetail(task, { taskId, full, fields }, ctx) {
     diff: diffText,
     diffStat,
     changesetError: task.changesetError ?? null,
+    ...(task.headDriftFrom != null ? { headDriftFrom: task.headDriftFrom, headDriftTo: task.headDriftTo, headDriftRecovered: task.headDriftRecovered } : {}),
     sessionId: parsed.sessionId,
     tokens: parsed.tokens,
     cost: parsed.cost,
@@ -2443,10 +2453,11 @@ function summarizeOptionalFields(task) {
  * @param {Task} task
  */
 function summarizeChangesetFields(task) {
-  const { changesetStatus, role } = task;
-  return changesetStatus != null && (changesetStatus !== "none" || role === "advisor")
+  const { changesetStatus, role, headDriftFrom, headDriftTo, headDriftRecovered } = task;
+  const base = changesetStatus != null && (changesetStatus !== "none" || role === "advisor")
     ? { role, changesetStatus }
     : {};
+  return headDriftFrom != null ? { ...base, headDriftFrom, headDriftTo, headDriftRecovered } : base;
 }
 
 /**
@@ -4290,6 +4301,52 @@ function persistTaskRecord(taskId, ctx) {
 }
 
 /**
+ * Applies the post-extraction settlement decision to `finishedTask` based on
+ * the just-extracted `extracted` payload: stamps `headDrift` audit fields
+ * when present, then walks the precedence chain (advisor → recovered:false
+ * conflict → recovered:null inconclusive → normal hasChanges / no-changes).
+ * Split out of `extractChangesetForTaskRecord` to keep that function's
+ * cognitive complexity under the file cap; the per-branch settlement logic
+ * is the only thing that grows with each new headDrift classification.
+ * @param {Task} finishedTask
+ * @param {{diffPath: string, hasChanges: boolean, headDrift: null | {from: string, to: string, recovered: boolean|null, conflictDetail: string|null}}} extracted
+ * @param {{releaseOverlay: (task: {overlayDirs?: {root:string,tmpRoot:string}|null}) => boolean}} ctx
+ */
+function settleChangesetAfterExtraction(finishedTask, extracted, ctx) {
+  finishedTask.diffPath = extracted.diffPath;
+  finishedTask.changesetError = null;
+  if (extracted.headDrift) {
+    finishedTask.headDriftFrom = extracted.headDrift.from;
+    finishedTask.headDriftTo = extracted.headDrift.to;
+    finishedTask.headDriftRecovered = extracted.headDrift.recovered;
+  }
+  if (finishedTask.role === "advisor") {
+    finishedTask.changesetStatus = "rejected";
+    ctx.releaseOverlay(finishedTask);
+  } else if (extracted.headDrift?.recovered === false) {
+    // A genuine conflict: the 3-way probe already proved this changeset is
+    // DOA against the directory's current HEAD -- reject outright rather
+    // than leave "pending" and force a human to run accept just to
+    // discover the same conflict git apply --3way would report anyway.
+    finishedTask.changesetStatus = "rejected";
+    finishedTask.changesetError = extracted.headDrift.conflictDetail;
+    ctx.releaseOverlay(finishedTask);
+  } else if (extracted.headDrift?.recovered === null) {
+    // Could not evaluate (the scratch-worktree probe's own git plumbing
+    // failed) -- never silently assumed clean. Falls into the same
+    // pending + changesetError shape as a real extraction error, which is
+    // exactly what taskferry accept already knows how to report.
+    finishedTask.changesetStatus = "pending";
+    finishedTask.changesetError = extracted.headDrift.conflictDetail;
+  } else if (extracted.hasChanges) {
+    finishedTask.changesetStatus = "pending";
+  } else {
+    finishedTask.changesetStatus = "accepted";
+    ctx.releaseOverlay(finishedTask);
+  }
+}
+
+/**
  * Resolves a task's changeset from its overlay at settlement time, persisting
  * the outcome (and releasing the overlay for advisor / no-change cases).
  * Mirrors the original `extractChangesetForTask` closure exactly; every
@@ -4356,17 +4413,7 @@ function extractChangesetForTaskRecord(finishedTask, ctx) {
     ctx.persistTask(finishedTask.id);
     return;
   }
-  finishedTask.diffPath = extracted.diffPath;
-  finishedTask.changesetError = null;
-  if (finishedTask.role === "advisor") {
-    finishedTask.changesetStatus = "rejected";
-    ctx.releaseOverlay(finishedTask);
-  } else if (extracted.hasChanges) {
-    finishedTask.changesetStatus = "pending";
-  } else {
-    finishedTask.changesetStatus = "accepted";
-    ctx.releaseOverlay(finishedTask);
-  }
+  settleChangesetAfterExtraction(finishedTask, extracted, ctx);
 }
 
 /**

@@ -14,6 +14,7 @@ import { buildBwrapArgs, checkBwrapAvailable, checkOverlaySupport, defaultDenyLi
 import { applyChangeset, overlayPaths, resolvePreDispatchHead, subOverlayPaths, subFilePaths, cleanupOverlay, defaultRunCommand as defaultOverlayRunCommand, extractGitDiff, extractNonGitDiff, OVERLAY_MOUNT_BUSY_PATTERN } from "./changeset.js";
 import { resolveExecutor, opencodeExecutor } from "./executor.js";
 import { loadEnvFile, watchEnvFile } from "./env-file.js";
+import { computeDoctorStats } from "./doctor-stats.js";
 
 /**
  * @typedef {object} SummaryOf
@@ -3512,6 +3513,7 @@ function buildTaskManagerApi(ctx) {
      */
     poll: (taskId, options = {}) => pollTask(taskId, options, { ensureStateLoaded: () => ctx.helpers.ensureStateLoaded(), tasks: ctx.maps.tasks, waiters: ctx.maps.waiters, noSuchTask }),
     list: () => listTasks({ ensureStateLoaded: () => ctx.helpers.ensureStateLoaded(), tasks: ctx.maps.tasks }),
+    stats: () => statsTasks({ ensureStateLoaded: () => ctx.helpers.ensureStateLoaded(), tasks: ctx.maps.tasks }),
     /**
      * @param {string} taskId
      * @param {{full?: boolean, fields?: string[]}} [options]
@@ -3905,7 +3907,12 @@ function evaluateOutputCompleteness(task, precomputed) {
   }
   if (task.finalMarker) {
     try {
-      if (!new RegExp(task.finalMarker).test(message)) task.incomplete = true;
+      // `m` so a `^...$`-anchored marker (the documented style, e.g.
+      // '^Status: DONE$') matches against any line of a multi-paragraph
+      // final message instead of requiring the marker to be the entire
+      // message. Without it every real agent summary that ends in a
+      // standalone "Status: DONE" line was wrongly flagged incomplete.
+      if (!new RegExp(task.finalMarker, "m").test(message)) task.incomplete = true;
     } catch {
       // A finalMarker that survived dispatch-time validation shouldn't
       // throw here, but if it does (e.g. an impossible pathological input),
@@ -4763,6 +4770,32 @@ function listTasks(ctx) {
     counts,
     tasks: all.length ? all.map(summarizeRow) : "none found (this server process's lifetime)",
   };
+}
+
+/**
+ * Aggregate task-history stats (`doctor --stats`), computed in-process over
+ * the daemon's own task map rather than shipping every row to the client for
+ * client-side aggregation -- with enough task history (~800+ rows observed in
+ * practice) the raw row list alone exceeds the daemon's outbound message cap
+ * (see MAX_BUFFER_BYTES in daemon-server.js), which silently destroys the
+ * socket with no error frame. Only the small aggregated result crosses the
+ * wire.
+ *
+ * Filters out `internal: true` rows (the daemon's own activity-summary
+ * children, which `summarize()` spawns with `internal: true` for every
+ * settled user task when `activitySummary` is on) before aggregation -- those
+ * are bookkeeping, not user dispatches, and folding them in would inflate
+ * the dispatch count under the summary model and add a spurious model row.
+ * @param {{ensureStateLoaded: () => void, tasks: Map<string, Task>}} ctx
+ */
+function statsTasks(ctx) {
+  ctx.ensureStateLoaded();
+  const rows = [];
+  for (const task of ctx.tasks.values()) {
+    if (task.internal === true) continue;
+    rows.push(summarizeRow(task));
+  }
+  return computeDoctorStats(rows);
 }
 
 /**

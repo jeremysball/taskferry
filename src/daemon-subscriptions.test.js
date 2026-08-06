@@ -515,10 +515,18 @@ describe("Unix socket daemon: event subscription routing and teardown", () => {
   test("disconnects a slow subscriber before its outbound queue can grow", async (t) => {
     const paths = temporaryPaths(t);
     const fake = fakeManagerFactory();
+    // The test forces the destroy-with-no-fallback path via the outbound
+    // cap. A 110-byte cap is wide enough for the event.subscribe success
+    // response (~101 bytes) to land, but too narrow for the new small
+    // RESPONSE_TOO_LARGE fallback (~128 bytes) to fit on top. With
+    // every fallback path exhausted, the oversized event-push tears
+    // the socket down -- the same backpressure disconnect the test has
+    // always asserted, just driven through a narrower cap now that the
+    // small fallback exists.
     const daemon = await startDaemon({
       ...paths,
       taskManagerFactory: fake.factory,
-      maxOutboundBytes: 200,
+      maxOutboundBytes: 110,
     });
     t.after(() => daemon.close());
     const peer = await openPeer(paths.socketPath);

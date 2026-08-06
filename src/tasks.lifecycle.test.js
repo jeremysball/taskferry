@@ -6,6 +6,9 @@ import path from "node:path";
 import { makeManager, fakeChild, baseTask, DIFF_LINE, OVERLAY_DIR_PENDING, EBUSY_ERROR, SPAWN_BWRAP_TIMEOUT, TOOL_CALLS, NONE_OBSERVED, FINAL_ANSWER } from "./tasks.test-helpers.js";
 import { defaultRunCommand as changesetDefaultRunCommand } from "./changeset.js";
 
+const USER_MODEL = "user-model";
+const SUMMARY_MODEL = "summary-model";
+
 describe("cancel()", () => {
   test("sends SIGTERM to the negative pid (process group), then escalates to SIGKILL after graceMs if still running", async () => {
     const child = fakeChild(777);
@@ -478,6 +481,36 @@ describe("list()", () => {
       ],
     });
     assert.deepEqual(mgr.list().tasks.map((t) => t.id), ["newer", "older"]);
+  });
+});
+
+describe("stats() (doctor --stats)", () => {
+  test("filters out internal=true tasks (daemon's own activity-summary children) so they don't pollute dispatch counts", () => {
+    // The activity-summary path in tasks.js's `summarize()` spawns a child
+    // task with `internal: true` for every settled user task (when
+    // activitySummary is enabled, the default). stats() is a "real work
+    // only" view of the task map, same as any user-facing count -- those
+    // bookkeeping rows must be filtered out before aggregation, otherwise
+    // they inflate the dispatch count under the summary model and add a
+    // spurious model row.
+    const mgr = makeManager({
+      tasksFixture: [
+        baseTask({ id: "user-1", status: "done", model: USER_MODEL }),
+        baseTask({ id: "user-2", status: "crashed", model: USER_MODEL, failureReason: "no_output_timeout" }),
+        baseTask({ id: "summary-1", status: "done", model: SUMMARY_MODEL, internal: true }),
+        baseTask({ id: "summary-2", status: "done", model: SUMMARY_MODEL, internal: true }),
+        baseTask({ id: "summary-3", status: "crashed", model: SUMMARY_MODEL, internal: true, failureReason: "no_output_timeout" }),
+      ],
+    });
+    const stats = mgr.stats();
+    const modelNames = stats.byModel.map((entry) => entry.model);
+    assert.deepEqual(modelNames, ["user-model"], "summary-model row must be filtered out of byModel");
+    const userModel = stats.byModel[0];
+    assert.equal(userModel.dispatches, 2, "dispatches must count only the two user rows");
+    assert.equal(userModel.done, 1);
+    assert.equal(userModel.crashed, 1);
+    assert.deepEqual(stats.failureReasons, [{ reason: "no_output_timeout", count: 1 }], "crashes from internal summary tasks must not contribute to the failure-reason histogram");
+    assert.equal(stats.statusMix.overall.total, 2, "overall statusMix total must reflect only user tasks");
   });
 });
 

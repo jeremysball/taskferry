@@ -2679,9 +2679,13 @@ function watchdogTick(state, ctx) {
     // stall, while one that produced output and then went silent stalled
     // mid-work. Conflating the two into "no_output_timeout" made both look
     // like the same failure mode when a fleet-wide read of the logs showed
-    // most of the eventless bucket really is a dead spawn.
-    const reason = state.outputSeen ? "no_output_timeout_stalled" : "no_output_timeout_dead_spawn";
-    ctx.failRunningTask(current, reason, `no output for ${state.currentNoOutputTimeout}ms (${state.outputSeen ? "post-output" : "pre-output"} timeout)`);
+    // most of the eventless bucket really is a dead spawn. One lookup, not
+    // two independent ternaries, so the reason and the phase label in
+    // failureDetail can't drift apart.
+    const [reason, phase] = state.outputSeen
+      ? ["no_output_timeout_stalled", "post-output"]
+      : ["no_output_timeout_dead_spawn", "pre-output"];
+    ctx.failRunningTask(current, reason, `no output for ${state.currentNoOutputTimeout}ms (${phase} timeout)`);
   }
 }
 

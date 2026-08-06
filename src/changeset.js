@@ -1,6 +1,7 @@
 // src/changeset.js
 import crypto from "node:crypto";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { buildBwrapArgs, buildBwrapBaseArgs } from "./sandbox.js";
@@ -90,27 +91,98 @@ function runExtractionBwrap(runCommand, args, sleepFn = sleepSync) {
 }
 
 /**
- * Throws if `directory`'s current HEAD has confirmably moved away from
- * `preDispatchHead`. Shared by extractGitDiff's pre-retry guard and its
- * post-retry re-check (taskferry#329): the up-to-1.3s overlay-mount-busy
- * backoff between the two is exactly the window a concurrent HEAD change
- * (a manual checkout, a branch switch, another dispatch) can land in
- * undetected if only the pre-retry check ran. An inconclusive re-check
- * (git failure, non-git target) is not a confirmed drift and falls
- * through, matching the pre-retry guard's own fail-open-on-inconclusive
- * behavior.
+ * Detects whether `directory`'s current HEAD has confirmably moved away from
+ * `preDispatchHead`. Returns `null` when there's no confirmed drift — either
+ * HEAD still matches, or the check itself was inconclusive (a git failure, a
+ * non-git target) — deliberately fail-open on the inconclusive case, same as
+ * this replaced `assertNoHeadDrift`'s behavior. Unlike that function, this
+ * never throws: taskferry changed drift from a fatal abort into something
+ * `extractGitDiff` resolves via a real 3-way apply instead (see
+ * `resolveHeadDrift`).
  * @param {string} directory
  * @param {typeof defaultRunCommand} runCommand
  * @param {string} preDispatchHead
+ * @returns {{from: string, to: string} | null}
  */
-function assertNoHeadDrift(directory, runCommand, preDispatchHead) {
+export function detectHeadDrift(directory, runCommand, preDispatchHead) {
   const currentHead = resolvePreDispatchHead(directory, runCommand);
   if (currentHead !== null && currentHead !== preDispatchHead) {
-    throw new Error(
-      `error: ${directory}'s HEAD moved from '${preDispatchHead}' to '${currentHead}' since dispatch\n` +
-      `help: something else changed this directory's checkout while the task was in flight (a manual git checkout, a branch switch, or another process) -- diffing against the original HEAD would compare the wrong trees. Investigate what changed ${directory}, then retry against a stable target (a dedicated worktree avoids this)`
-    );
+    return { from: preDispatchHead, to: currentHead };
   }
+  return null;
+}
+
+// Matches a `git status --porcelain` line for any unmerged path (both
+// added, both deleted, or one/both sides modified) -- the exact signature
+// the spec's --check correction says is the only trustworthy way to detect
+// a real conflict, since --3way --check's own exit code can't be trusted
+// (see the spec's "A --check correction" section).
+const CONFLICT_STATUS_PATTERN = /^(?:UU|AA|DD|AU|UD|UA|DU) /m;
+
+/**
+ * Probes whether `diffPath` (already extracted, anchored on the original
+ * preDispatchHead) would forward-apply cleanly onto `currentHead` via a real
+ * `git apply --3way` -- never `--check`, which cannot distinguish a clean
+ * merge from a real conflict (spec "A `--check` correction"). Runs entirely
+ * inside a disposable detached worktree created off the live `directory`;
+ * `directory` itself is only ever read (as `worktree add`'s source) and is
+ * removed unconditionally afterward, whether the merge succeeded or not.
+ * @param {object} params
+ * @param {string} params.directory - live directory; read-only source for the scratch worktree
+ * @param {string} params.diffPath
+ * @param {string} params.currentHead
+ * @param {string} params.scratchDir
+ * @param {typeof defaultRunCommand} [params.runCommand]
+ * @returns {{recovered: boolean|null, conflictDetail: string|null}}
+ */
+export function resolveHeadDrift({ directory, diffPath, currentHead, scratchDir, runCommand = defaultRunCommand }) {
+  const add = runCommand("git", ["-C", directory, "worktree", "add", "--detach", scratchDir, currentHead]);
+  if (add.error || add.status !== 0) {
+    // worktree add itself failed -- nothing was created, so no cleanup
+    // work to do (and no scratch tree to leak).
+    return { recovered: null, conflictDetail: `could not evaluate: ${gitApplyFailureReason(add)}` };
+  }
+  try {
+    return evaluateApplyAndStatus(scratchDir, diffPath, runCommand);
+  } finally {
+    // Unconditional cleanup of the disposable scratch worktree once it has
+    // been created, regardless of how the try exited: a normal end, a
+    // returned result, OR a thrown runCommand (the documented contract
+    // says "runCommand" returns a result object, but defense-in-depth
+    // matters here -- a throwing wrapper would otherwise leak the worktree
+    // tree on every probe). The worktree-add failure path above doesn't
+    // need this branch because nothing was created.
+    runCommand("git", ["-C", directory, "worktree", "remove", "--force", scratchDir]);
+  }
+}
+
+/**
+ * Runs `git apply --3way` + `git status --porcelain` inside the scratch
+ * worktree and classifies the outcome. Split out of `resolveHeadDrift` to
+ * keep that function's cyclomatic complexity under the file cap; the
+ * classification logic (status failure / clean merge / conflict) is the
+ * only thing that grows with each new branch, so it lives here.
+ * @param {string} scratchDir
+ * @param {string} diffPath
+ * @param {typeof defaultRunCommand} runCommand
+ * @returns {{recovered: boolean|null, conflictDetail: string|null}}
+ */
+function evaluateApplyAndStatus(scratchDir, diffPath, runCommand) {
+  const apply = runCommand("git", ["-C", scratchDir, "apply", "--3way", diffPath]);
+  const statusResult = runCommand("git", ["-C", scratchDir, "status", "--porcelain"]);
+  // A failed status inspection (spawn error or non-zero exit) means we
+  // can't tell whether the merge produced conflict markers -- the empty
+  // stdout isn't a clean merge, it's "didn't get to read porcelain" -- so
+  // treat as could-not-evaluate rather than trusting an empty/absent
+  // match against CONFLICT_STATUS_PATTERN.
+  if (statusResult.error || statusResult.status !== 0) {
+    return { recovered: null, conflictDetail: `could not evaluate status inspection: ${gitApplyFailureReason(statusResult)}` };
+  }
+  const hasConflictMarkers = CONFLICT_STATUS_PATTERN.test(statusResult.stdout || "");
+  if (!apply.error && apply.status === 0 && !hasConflictMarkers) {
+    return { recovered: true, conflictDetail: null };
+  }
+  return { recovered: false, conflictDetail: gitApplyFailureReason(apply) || statusResult.stdout.trim() || null };
 }
 
 /**
@@ -159,7 +231,8 @@ export function resolvePreDispatchHead(directory, runCommand = defaultRunCommand
  * @param {(filePath: string, content: string) => void} [params.writeFileFn]
  * @param {(dirPath: string) => void} [params.mkdirFn]
  * @param {(ms: number) => void} [params.sleepFn] - injectable for tests; real callers get a blocking sleep between retries
- * @returns {{diffPath: string, hasChanges: boolean}}
+ * @param {() => string} [params.scratchDirFn]
+ * @returns {{diffPath: string, hasChanges: boolean, headDrift: null | {from: string, to: string, recovered: boolean|null, conflictDetail: string|null}}}
  * @throws {Error} when the bwrap extraction fails to start or exits non-zero
  */
 export function extractGitDiff({
@@ -177,14 +250,8 @@ export function extractGitDiff({
   writeFileFn = (filePath, content) => fs.writeFileSync(filePath, content, { mode: 0o600 }),
   mkdirFn = (dirPath) => fs.mkdirSync(dirPath, { recursive: true, mode: 0o700 }),
   sleepFn = sleepSync,
+  scratchDirFn = () => path.join(os.tmpdir(), `taskferry-stale-base-${crypto.randomUUID()}`),
 }) {
-  // Fail closed on HEAD drift: `directory` below is a live bind to the real
-  // checkout, not a snapshot from dispatch time. If something else (a manual
-  // checkout, a branch switch, another dispatch) moved that checkout's HEAD
-  // since preDispatchHead was recorded, the diff-cached-against-preDispatchHead
-  // script still runs successfully but compares the wrong trees -- it can
-  // report files as deleted/added that the worker never touched.
-  assertNoHeadDrift(directory, runCommand, preDispatchHead);
   const bwrapArgs = buildBwrapArgs({ directory, stateDir, runtimeDir, homeDir, denyList, overlay, overlayRwBinds, overlayRwFileBinds });
   // The final `exit $rc` propagates the diff's own status: the previous
   // `; git reset` tail made the whole script exit with reset's status, so a
@@ -196,16 +263,20 @@ export function extractGitDiff({
   if (result.error || result.status !== 0) {
     throw new Error(`error: git diff extraction failed for ${directory} (exit ${result.status ?? "null"}): ${(result.stderr || result.error?.message || "unknown error").trim()}`);
   }
-  // Re-check HEAD once more (taskferry#329): runExtractionBwrap's retry loop
-  // above can have absorbed up to 1.3s of backoff on the overlay-mount-busy
-  // race, which is enough time for a concurrent checkout/branch-switch/
-  // dispatch to move HEAD after the pre-retry guard above already passed.
-  // Catching it here, immediately before the diff is persisted, closes that
-  // window instead of silently writing a patch anchored on a stale HEAD.
-  assertNoHeadDrift(directory, runCommand, preDispatchHead);
   mkdirFn(pathDirname(diffPath));
   writeFileFn(diffPath, result.stdout);
-  return { diffPath, hasChanges: result.stdout.trim().length > 0 };
+  // Extraction always completes and the diff is always written -- nothing
+  // about the diff's content depends on live HEAD (see the module-level
+  // "key insight" comment below `resolveHeadDrift`). A drift, if any, is
+  // resolved here rather than aborting: a stale-base diff is still valid
+  // content, `git apply --3way` exists precisely to forward-apply it.
+  const drift = detectHeadDrift(directory, runCommand, preDispatchHead);
+  let headDrift = null;
+  if (drift) {
+    const { recovered, conflictDetail } = resolveHeadDrift({ directory, diffPath, runCommand, currentHead: drift.to, scratchDir: scratchDirFn() });
+    headDrift = { recovered, conflictDetail, from: drift.from, to: drift.to };
+  }
+  return { diffPath, headDrift, hasChanges: result.stdout.trim().length > 0 };
 }
 
 /**
@@ -299,7 +370,7 @@ export function buildMergedViewBwrapArgs({ directory, overlay, runtimeDir, denyL
  * @param {(filePath: string, content: string) => void} [params.writeFileFn]
  * @param {(dirPath: string) => void} [params.mkdirFn]
  * @param {(ms: number) => void} [params.sleepFn] - injectable for tests; real callers get a blocking sleep between retries
- * @returns {{diffPath: string, hasChanges: boolean}}
+ * @returns {{diffPath: string, hasChanges: boolean, headDrift: null}}
  * @throws {Error} when the bwrap extraction fails to start or exits non-zero
  */
 export function extractNonGitDiff({
@@ -336,7 +407,7 @@ export function extractNonGitDiff({
   }
   mkdirFn(pathDirname(diffPath));
   writeFileFn(diffPath, result.stdout);
-  return { diffPath, hasChanges: result.stdout.trim().length > 0 };
+  return { diffPath, hasChanges: result.stdout.trim().length > 0, headDrift: null };
 }
 
 /**
@@ -401,7 +472,7 @@ const NON_GIT_APPLY_ERROR =
  * @returns {{applied: boolean, reason: string|null}}
  */
 function applyGitChangeset({ directory, diffPath, runCommand }) {
-  const result = runCommand("git", ["-C", directory, "apply", diffPath]);
+  const result = runCommand("git", ["-C", directory, "apply", "--3way", diffPath]);
   if (result.status !== 0) {
     return { applied: false, reason: gitApplyFailureReason(result) };
   }

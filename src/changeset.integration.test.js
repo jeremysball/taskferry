@@ -6,7 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { buildBwrapArgs, checkOverlaySupport } from "./sandbox.js";
-import { applyChangeset, cleanupOverlay, extractGitDiff, extractNonGitDiff, overlayPaths, resolvePreDispatchHead, subFilePaths, subOverlayPaths } from "./changeset.js";
+import { applyChangeset, cleanupOverlay, extractGitDiff, extractNonGitDiff, overlayPaths, resolveHeadDrift, resolvePreDispatchHead, subFilePaths, subOverlayPaths } from "./changeset.js";
 
 // Fixture literals lifted to module scope so the sonarjs
 // no-duplicate-string rule stays quiet (each appears once, in its constant)
@@ -16,6 +16,8 @@ const RUN_ROOT_PREFIX = "axi-int-run-";
 const TRACKED_FILE = "tracked.txt";
 const GIT_EMAIL = "user.email=t@t";
 const GIT_NAME = "user.name=t";
+const DRIFT_TEST_FILE = "line2.txt";
+const DRIFT_WORKER_BRANCH = "worker-sim";
 
 // Skip the whole suite unless this host can actually run overlays: Linux,
 // bwrap >= 0.8, and (for the non-git round trip) a real rsync. A missing
@@ -211,5 +213,77 @@ describe("overlay round trips (real bwrap)", () => {
     assert.equal(fs.readFileSync(path.join(directory, "new.txt"), "utf8"), "brand-new\n");
     assert.equal(fs.existsSync(path.join(directory, "keep.txt")), false, "whiteout-implied deletions must land");
     cleanupOverlay({ root: overlay.root, tmpRoot });
+  });
+});
+
+// resolveHeadDrift needs no bwrap at all (it operates on the live directory
+// via plain `git worktree`/`apply`, never a sandbox) -- gate only on git
+// being present, so this coverage runs everywhere, not just on hosts with a
+// working overlay stack. This is the exact repro that caught the --check
+// false-clean bug while grounding the spec (see the spec's "A --check
+// correction" section) -- kept here as regression coverage against a future
+// git version changing --3way --check semantics again.
+describe("resolveHeadDrift() (real git, no bwrap required)", () => {
+  function initRepo() {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-drift-repo-"));
+    spawnSync("git", ["init", "-q", dir]);
+    fs.writeFileSync(path.join(dir, DRIFT_TEST_FILE), "line1\nline2\nline3\n");
+    spawnSync("git", ["-C", dir, "add", "-A"]);
+    spawnSync("git", ["-C", dir, "-c", GIT_EMAIL, "-c", GIT_NAME, "commit", "-qm", "base"]);
+    return dir;
+  }
+
+  test("non-conflicting drift: target changes a different file, patch merges cleanly", () => {
+    const dir = initRepo();
+    const base = resolvePreDispatchHead(dir);
+    // Simulate the worker's isolated diff: line2.txt's line2 changed, saved
+    // as a patch anchored on `base`, computed independently of dir's later
+    // history (mirrors what extractGitDiff would have produced).
+    spawnSync("git", ["-C", dir, "checkout", "-q", "-b", DRIFT_WORKER_BRANCH]);
+    fs.writeFileSync(path.join(dir, DRIFT_TEST_FILE), "line1\nWORKER-CHANGED\nline3\n");
+    spawnSync("git", ["-C", dir, "add", "-A"]);
+    spawnSync("git", ["-C", dir, "-c", GIT_EMAIL, "-c", GIT_NAME, "commit", "-qm", "worker"]);
+    const diff = spawnSync("git", ["-C", dir, "diff", base, DRIFT_WORKER_BRANCH], { encoding: "utf8" }).stdout;
+    const diffPath = path.join(dir, "..", "worker.patch");
+    fs.writeFileSync(diffPath, diff);
+    spawnSync("git", ["-C", dir, "checkout", "-q", "main", "--", "."]);
+    spawnSync("git", ["-C", dir, "branch", "-q", "-D", DRIFT_WORKER_BRANCH]);
+
+    // Directory independently advances on a DIFFERENT file.
+    fs.writeFileSync(path.join(dir, "other.txt"), "unrelated\n");
+    spawnSync("git", ["-C", dir, "add", "-A"]);
+    spawnSync("git", ["-C", dir, "-c", GIT_EMAIL, "-c", GIT_NAME, "commit", "-qm", "unrelated"]);
+    const currentHead = resolvePreDispatchHead(dir);
+
+    const scratchDir = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "axi-drift-scratch-")), "wt");
+    const result = resolveHeadDrift({ directory: dir, diffPath, currentHead, scratchDir });
+    assert.deepEqual(result, { recovered: true, conflictDetail: null });
+    assert.equal(fs.existsSync(scratchDir), false, "the scratch worktree must be removed after evaluation");
+  });
+
+  test("genuine conflict: target changes the same line the patch touches", () => {
+    const dir = initRepo();
+    const base = resolvePreDispatchHead(dir);
+    spawnSync("git", ["-C", dir, "checkout", "-q", "-b", DRIFT_WORKER_BRANCH]);
+    fs.writeFileSync(path.join(dir, DRIFT_TEST_FILE), "line1\nWORKER-CHANGED\nline3\n");
+    spawnSync("git", ["-C", dir, "add", "-A"]);
+    spawnSync("git", ["-C", dir, "-c", GIT_EMAIL, "-c", GIT_NAME, "commit", "-qm", "worker"]);
+    const diff = spawnSync("git", ["-C", dir, "diff", base, DRIFT_WORKER_BRANCH], { encoding: "utf8" }).stdout;
+    const diffPath = path.join(dir, "..", "worker-conflict.patch");
+    fs.writeFileSync(diffPath, diff);
+    spawnSync("git", ["-C", dir, "checkout", "-q", "main", "--", "."]);
+    spawnSync("git", ["-C", dir, "branch", "-q", "-D", DRIFT_WORKER_BRANCH]);
+
+    // Directory independently changes the SAME line -- a real conflict.
+    fs.writeFileSync(path.join(dir, DRIFT_TEST_FILE), "line1\nTARGET-CHANGED\nline3\n");
+    spawnSync("git", ["-C", dir, "add", "-A"]);
+    spawnSync("git", ["-C", dir, "-c", GIT_EMAIL, "-c", GIT_NAME, "commit", "-qm", "conflicting"]);
+    const currentHead = resolvePreDispatchHead(dir);
+
+    const scratchDir = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "axi-drift-scratch-")), "wt");
+    const result = resolveHeadDrift({ directory: dir, diffPath, currentHead, scratchDir });
+    assert.equal(result.recovered, false);
+    assert.ok(result.conflictDetail);
+    assert.equal(fs.existsSync(scratchDir), false, "the scratch worktree must be removed even after a conflict");
   });
 });

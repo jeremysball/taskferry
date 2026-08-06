@@ -137,3 +137,112 @@
 - **`detectHeadDrift` doc-comment still references `resolveHeadDrift`
   but does not link to a file/line.** Pre-existing in Task 1's
   commit; left alone.
+## Fix round 1
+
+Reviewer found two Important issues. Both addressed in commit
+`69538b5`.
+
+### Finding 1 — cleanup not unconditional across `apply`/`status`
+
+The original `resolveHeadDrift()` ran `worktree remove --force
+scratchDir` after both `apply` and `status`, but inside a plain
+sequence (no `try`/`finally`). If either `runCommand` ever threw
+rather than returning a result object (the `defaultRunCommand` contract
+in this codebase is return-result-not-throw, but the function's own
+doc comment promises "removed unconditionally afterward, whether the
+merge succeeded or not", so defense-in-depth is the right read of
+intent), the `worktree remove` call would never run, leaking the
+disposable scratch worktree on every throwing probe.
+
+**Fix:** wrapped the `apply`/`status`/conflict-classification body
+in `try { ... } finally { runCommand(worktree remove ...) }`. The
+`worktree add` failure path stays outside the try, since the
+reviewer's note confirmed that branch is correct by design — nothing
+was created, nothing to clean up.
+
+### Finding 2 — `statusResult.status`/`.error` never checked
+
+The original code ran `CONFLICT_STATUS_PATTERN.test(statusResult.stdout
+|| "")` without first validating that the `status --porcelain`
+invocation itself succeeded. A failed status call (spawn error or
+non-zero exit) leaves `stdout` empty, which the regex would not match,
+and the function would then return `{recovered: true}` — i.e.
+silently confirm a clean merge even though the conflict-marker
+inspection never actually ran.
+
+**Fix:** before the conflict-marker regex, check
+`statusResult.error || statusResult.status !== 0`. On a failed status
+inspection return
+`{recovered: null, conflictDetail: "could not evaluate status
+inspection: <gitApplyFailureReason(statusResult)>"}`. Placed inside
+the same `try`/`finally` from Finding 1 so cleanup still runs before
+this early return.
+
+### Other changes
+
+- **Cyclomatic complexity split-out.** The new structure pushed
+  `resolveHeadDrift()` to complexity 11 (file cap is 10). Extracted
+  the apply/status/conflict-classification body into a private
+  `evaluateApplyAndStatus()` helper. `resolveHeadDrift()` is now at
+  complexity 5; the helper sits at 8. Both well under the cap.
+- **7th test case** added to the `resolveHeadDrift()` describe
+  block: a `status` invocation that returns `{status: 128, stderr:
+  GIT_NOT_A_REPO_STDERR_NL, error: null}` while apply returns
+  success with empty stdout. Asserts
+  `result.recovered === null` and
+  `result.conflictDetail` matches `/not a git repository/`. This
+  pins the fix for Finding 2 — without the explicit status-result
+  check, this exact mock would have produced `{recovered: true}`
+  (the empty stdout would be read as "no conflict markers found").
+  Uses the existing `GIT_NOT_A_REPO_STDERR_NL` module constant
+  rather than re-duplicating the literal.
+- **`docs/sourcemap.md`**: line count `592 → 623`; rewrote the
+  `resolveHeadDrift()` sentence to reflect the `try`/`finally`
+  cleanup guarantee, the status-inspection-failure branch, and the
+  `evaluateApplyAndStatus()` split-out.
+
+### Test commands and results
+
+- `env -u TASKFERRY_CHILD node --test --test-name-pattern="resolveHeadDrift" src/changeset.test.js`
+  - `tests 7, pass 7, fail 0` — the 6 pre-existing tests still pass,
+    plus the new 7th.
+- `env -u TASKFERRY_CHILD node --test src/changeset.test.js`
+  - `tests 51, pass 51, fail 0` — 50 pre-existing + 1 new.
+- `env -u TASKFERRY_CHILD node --test src/changeset.integration.test.js`
+  - `tests 4, pass 4, fail 0` — unchanged, as expected.
+- `npm test` (full suite)
+  - `tests 985, pass 981, fail 4`. The 4 failures are exactly the
+    same 4 pre-existing failures from `main` (verified via
+    `git stash` round-trip before this fix) — no new regressions.
+  - Before this fix: `tests 984, pass 980, fail 4`. After this fix:
+    `tests 985, pass 981, fail 4`. +1 test (the new 7th), +1 pass,
+    no change in failure count.
+- `npm run lint` — clean.
+- `npm run typecheck` — clean.
+
+### Commit
+
+- `69538b5` —
+  `fix(changeset): ensure resolveHeadDrift cleans up and validates status inspection unconditionally`
+  (src/changeset.js, src/changeset.test.js, docs/sourcemap.md;
+  3 files, +56 / -6)
+
+### Concerns
+
+- **No test added for the throw-from-`runCommand` cleanup path.**
+  The fix's `try`/`finally` guarantee now extends to the case where
+  an injected `runCommand` throws (defense-in-depth: a future
+  `runCommand` wrapper that throws on transient errors would
+  otherwise leak the disposable scratch tree). The existing test
+  "always runs worktree remove, even after a genuine conflict"
+  pins the normal-return cleanup path, but not the throw path.
+  Worth flagging if you want regression coverage for the throw
+  case specifically; not strictly required by the review findings.
+- **`gitApplyFailureReason` is now used for three different failure
+  sources** (`worktree add`, `apply`, and `status` inspection). The
+  helper's name says "git apply" but it really formats any
+  `git ...` failure (stderr → error.message → "exited with status
+  N"). At three call sites it's borderline worth renaming to
+  `gitFailureReason`; at four I'd insist. Worth a follow-up if
+  another caller arrives, but not blocking this fix.
+

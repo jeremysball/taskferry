@@ -363,6 +363,16 @@ describe("writeToon TTY output", () => {
     assert.ok(!output().includes("\x1b["), output());
     assert.ok(output().includes("error: boom") && output().includes("help: try again"), output());
   });
+
+  test("no ANSI escapes anywhere when stdout is not a TTY, even with warnings/booleans/direction present", () => {
+    const { io, output } = fakeStdoutIo(false);
+    writeToon({ healthy: true, direction: "worsening", warnings: ["bwrap missing"] }, io);
+
+    assert.ok(!output().includes("\x1b["));
+    assert.ok(output().includes("healthy: true"));
+    assert.ok(output().includes("direction: worsening"));
+    assert.ok(output().includes("bwrap missing"));
+  });
 });
 
 describe("projectDoctorStats", () => {

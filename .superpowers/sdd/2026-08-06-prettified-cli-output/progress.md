@@ -8,3 +8,4 @@ Task 3: fix round 1/5 (1 addressed, 0 open — plan-mandated collision between t
 Task 3: complete (commits 0298805..f49cea7, review clean after fix round 1)
 Task 3: parked minor resolved — src/pretty.test.js added to package.json test:unit file list (commit 1ab2a20)
 Task 4: complete (commits a45a4c5..e4bcc16, review clean — Steps 1-2 were already delivered by Task 3's implementer ahead of this task's dispatch and verified independently by both this task's reviewer and Task 3's own reviewer; this task's own scope was Step 3, the top-of-file call-chain summary line)
+Task 5: complete (verification-only — npm run check clean, 1041/1041 test:unit, manual real-PTY TTY check via `script` for doctor/list/doctor --stats/dispatch --help all matched spec, piped non-TTY output confirmed plain TOON with zero ANSI; no code changes)

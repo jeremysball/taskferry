@@ -201,9 +201,19 @@ Run it before declaring the task done. If it fails, fix the failures and
 re-run until it passes. State the final result in your summary.
 ```
 
-Advisor dispatches never receive the block (the advisor role has no
-gate and no changeset to gate), and `--no-overlay` / non-git dispatches
-do not either (no isolated tree to gate against).
+The block is injected purely on the condition `role === "dispatch" &&
+!noOverlay && projectConfig.check` (see `dispatchTask()` in
+`src/tasks.js`). It is NOT skipped for non-git targets — a non-git
+directory dispatched without `--no-overlay` still receives the
+verification block, even though the gate itself later never actually
+runs for that target (the gate requires an overlay mounted on a
+git-tracked directory with `preDispatchHead` set, which a non-git
+dispatch never produces; see "The check-gate lifecycle" below). So a
+non-git repo can have its worker prompted to run a check that no gate
+will ever verify — a rough edge worth being aware of, but not currently
+disambiguated. Advisor dispatches never receive the block (the advisor
+role has no gate and no changeset to gate), and explicit `--no-overlay`
+dispatches do not either (no overlay, no gate).
 
 ### The check-gate lifecycle
 
@@ -215,10 +225,15 @@ null, `changesetStatus` about to become `"pending"`). Advisor dispatches,
 skip the gate. For non-git / overlay-only targets the gate would have
 side effects (test caches, build artifacts) that `applyNonGitChangeset`
 would rsync onto the real directory on `accept`, so the gate is skipped
-entirely and `checkStatus` stays at its default `"none"`; the CLI's
-"this repo declares no check command" stderr warning on `accept` does
-not fire either, since for those targets a `check` was deliberately
-ignored rather than absent.
+entirely and `checkStatus` stays at its default `"none"` — the CLI's
+`runAccept()` stderr warning "this repo declares no check command"
+still fires for these tasks today (the warning condition is purely
+`accepted.applied && (checkStatus == null || checkStatus === "none")`,
+without distinguishing "absent" from "ignored for a non-git target"),
+so it should be read as "nothing was verified before landing," not "you
+forgot to declare a check command." A future revision may split the
+two paths (a separate "ignored, not absent" warning for non-git) but
+today the message is the same in both cases.
 
 `checkStatus` is the gate's state machine:
 
@@ -285,4 +300,18 @@ contract; the per-task doctor-context aggregation is part of the doctor
 fleet-health spec (out of scope here — see the design's "Non-goals"
 section), so today's `projectConfigWarning` / `checkStatus` surfacing
 on `taskferry status <id> --full` and `taskferry result <id> --fields
-...` is the live channel for the same warnings.
+...` is the live channel for *most* of these warnings.
+
+Note that the no-check row ("no `.taskferry.toml` / no `check` key")
+is NOT covered by that surfacing: `summarizeCheckGateFields()`,
+`resultCheckGateFields()`, and `leanCheckGateFields()` each
+explicitly `return {}` (omit `checkStatus` and every other gate
+field) when `checkStatus == null || checkStatus === "none"`, so the
+no-check case carries NO signal on `taskferry status` / `taskferry
+result`, even with `--full`. The only place that row's "loud warning"
+actually surfaces today is the one-line `stderr` message
+`runAccept()` writes at accept time. The remaining rows
+(timeout / interrupted / unparseable TOML / missing `read_only_paths`
+entry / spawn-error check command) ARE covered — `checkStatus` lands
+on status/result for those, and `projectConfigWarning` carries the
+TOML parse error and the `read_only_paths` missing-entry warning.

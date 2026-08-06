@@ -98,7 +98,7 @@ fill-in template, so the file is never silently encoded with a guess
 nobody approved. Run it once per repo (or per worktree if each
 worktree wants its own gate), commit the result, and the next dispatch
 picks it up automatically — no daemon restart required. The schema is
-documented in [config.md](config.md#taskferrytoml); the gate's accept
+documented in [config.md](../../docs/config.md#taskferrytoml); the gate's accept
 refusal / `--force` override behavior is in "Verification gate (`accept`
 refusal and `--force`)" under "Verifying A Worker's Claimed Changeset"
 below. `init` never overwrites an existing `.taskferry.toml`.
@@ -180,7 +180,7 @@ the diff has now actually landed.
 
 A repo with a `.taskferry.toml` at its root that declares a `check`
 command (scaffold one with `taskferry init`; see
-[config.md](config.md#taskferrytoml) for the schema) runs that command
+[config.md](../../docs/config.md#taskferrytoml) for the schema) runs that command
 automatically inside the worker's copy-on-write overlay at settle. The
 gate's verdict is recorded on the task as `checkStatus` (`none`/`running`/
 `passed`/`failed`/`timeout`/`interrupted`) and surfaces on
@@ -209,12 +209,15 @@ taskferry accept <id> --force
 ```
 
 `--force` stamps `checkOverride: true` on the task and applies normally,
-including over a still-running gate (it group-kills the bwrap child and
-waits for it to actually exit before applying). `--force` never
-overrides anything except the gate's outcome — every other accept
-validation (pending changeset, diff present, overlay live) still applies.
-Do not reach for `--force` reflexively: if the gate refused, the
-fix-forward message is the cheaper path back to a clean accept.
+including over a still-running gate (it group-kills the bwrap child
+and best-effort waits for it to actually exit — SIGTERM, wait
+`CHECK_GATE_KILL_GRACE_MS`, escalate to SIGKILL, wait another
+`CHECK_GATE_KILL_GRACE_MS`, then resolve anyway rather than hang
+`accept` forever). `--force` never overrides anything except the gate's
+outcome — every other accept validation (pending changeset, diff
+present, overlay live) still applies. Do not reach for `--force`
+reflexively: if the gate refused, the fix-forward message is the
+cheaper path back to a clean accept.
 
 If the repo has no `.taskferry.toml` (or no `check` line in it), `accept`
 prints a one-line stderr warning that the changeset landed unverified —

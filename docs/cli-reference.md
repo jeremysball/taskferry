@@ -294,8 +294,11 @@ survived, or starting fresh against the same `--directory` otherwise):
 - `checkStatus: "running"` — refuse with `error: check gate still
   running for <id>` and a pointer at `taskferry status <id>` for
   progress. Override with `--force` only if you are confident the gate
-  will not finish cleanly; `--force` group-kills the running bwrap child
-  and waits for it to actually exit before applying the changeset.
+  will not finish cleanly; `--force` group-kills the running bwrap
+  child and best-effort waits for it to actually exit (SIGTERM, wait
+  `CHECK_GATE_KILL_GRACE_MS`, escalate to SIGKILL, wait another
+  `CHECK_GATE_KILL_GRACE_MS`, then resolve anyway rather than hang
+  `accept` forever) before applying the changeset.
 - `checkStatus: "passed"`, `checkStatus: "none"` (no `check` declared in
   `.taskferry.toml`), or non-git/overlay-only targets (the gate is
   deliberately skipped for those — see the design spec's "Gating
@@ -508,7 +511,7 @@ files). After the file exists, every later dispatch's gate reads it via
 | Found in `cwd` | Proposed `check` |
 |---|---|
 | `package.json` with a `scripts.check` string | `npm run check` |
-| `package.json` with any of `lint`/`typecheck`/`test` scripts | `npm run <first available>` joined with `&&`, in that order |
+| `package.json` with any of `lint`/`typecheck`/`test` scripts | each available script among `lint`/`typecheck`/`test`, in that order, joined with `&&` |
 | `pyproject.toml` | `uv run pytest && uv run ruff check .` |
 | `go.mod` | `go vet ./... && go test ./...` |
 | `Cargo.toml` | `cargo clippy -- -D warnings && cargo test` |
@@ -533,8 +536,13 @@ optional-field comments even on rejection.
 
 Without a TTY (a piped invocation, CI, or an unattended run), `init`
 never writes a detected command unconfirmed — it writes the fill-in
-template, regardless of whether detection succeeded, and prints a one-
-line notice pointing at the new file's `check` line. The file is never
+template (with the detected `check` line commented out, not the live
+`check =` form), and prints a two-line notice (`Detected check command:
+<cmd>` followed by `No TTY to confirm -- writing .taskferry.toml with
+a commented fill-in instead. Edit "check" in <path> to enable the
+gate.`) pointing at the new file's `check` line. The notice is only
+printed when a command was actually detected; if nothing was detected,
+no notice is printed, just the file is written. The file is never
 overwritten on a re-run: an existing `.taskferry.toml` is left alone,
 and `init` returns `{ written: false, reason: "<path> already exists --
 taskferry init never overwrites it" }` instead.

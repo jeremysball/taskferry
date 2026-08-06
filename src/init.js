@@ -4,9 +4,10 @@ import readline from "node:readline/promises";
 import { resolveProjectConfigPath } from "./project-config.js";
 
 function packageCheckCommand(packageJsonPath, readFileFn) {
+  const content = readFileFn(packageJsonPath);
   let pkg;
   try {
-    pkg = JSON.parse(readFileFn(packageJsonPath));
+    pkg = JSON.parse(content);
   } catch {
     return null;
   }
@@ -64,7 +65,7 @@ function renderConfig(checkCommand) {
  * detection, or no TTY to confirm with) writes the commented fill-in
  * template so the file never silently encodes a guess nobody approved.
  * @param {string} directory
- * @param {{existsFn?: (p: string) => boolean, writeFileFn?: (p: string, content: string) => void, io?: {stdin: {isTTY?: boolean}, stdout: {write: (s: string) => unknown}}, detect?: typeof detectCheckCommand}} [deps]
+ * @param {{existsFn?: (p: string) => boolean, writeFileFn?: (p: string, content: string) => void, io?: {stdin: {isTTY?: boolean}, stdout: {write: (s: string) => unknown}}, detect?: typeof detectCheckCommand, createReadlineInterface?: typeof readline.createInterface}} [deps]
  * @returns {Promise<{path: string, written: boolean, checkCommand: string|null, reason?: string}>}
  */
 export async function runInit(directory, {
@@ -72,6 +73,7 @@ export async function runInit(directory, {
   writeFileFn = (p, content) => fs.writeFileSync(p, content, { mode: 0o644 }),
   io = process,
   detect = detectCheckCommand,
+  createReadlineInterface = readline.createInterface,
 } = {}) {
   const configPath = resolveProjectConfigPath(directory);
   if (existsFn(configPath)) {
@@ -79,7 +81,7 @@ export async function runInit(directory, {
   }
   const detected = detect(directory);
   if (detected && io.stdin?.isTTY) {
-    const rl = readline.createInterface({ input: /** @type {NodeJS.ReadableStream} */ (io.stdin), output: /** @type {NodeJS.WritableStream} */ (io.stdout) });
+    const rl = createReadlineInterface({ input: /** @type {NodeJS.ReadableStream} */ (io.stdin), output: /** @type {NodeJS.WritableStream} */ (io.stdout) });
     let answer;
     try {
       answer = await rl.question(`Detected check command: ${detected}\nWrite .taskferry.toml with this command? [Y/n] `);

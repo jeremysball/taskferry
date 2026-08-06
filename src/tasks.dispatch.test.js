@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { createTaskManager } from "./tasks.js";
-import { trackManager, makeManager, fakeChild, LUNA_MODEL, MIMIMAX_MODEL, UNUSED_TMP, SPAWN_OPENCODE_ENOENT, mkdtempTracked } from "./tasks.test-helpers.js";
+import { trackManager, makeManager, fakeChild, LUNA_MODEL, MIMIMAX_MODEL, SOL_MODEL, UNUSED_TMP, SPAWN_OPENCODE_ENOENT, mkdtempTracked } from "./tasks.test-helpers.js";
 
 describe("dispatch() lifecycle, driven through an injected spawnFn (no real opencode process)", () => {
   test("passes the right argv and spawn options through to spawnFn", () => {
@@ -725,5 +725,78 @@ describe("dispatch() class tag persistence and summary surfacing", () => {
     const mgr = makeManager({ spawnFn: () => fakeChild() });
     const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
     assert.equal("class" in dispatched, false);
+  });
+});
+
+describe("dispatch() prompt augmentation from .taskferry.toml", () => {
+  const DISPATCH_PROMPT = "Fix the bug";
+  const TOML_CHECK_BODY = `check = "npm run check"\n`;
+  const TOML_FILENAME = ".taskferry.toml";
+  const VERIFICATION_MARKER = "Verification (required)";
+
+  test("appends the verification block to a dispatch's prompt when .taskferry.toml declares a check command", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-dispatch-checkcmd-"));
+    fs.writeFileSync(path.join(dir, TOML_FILENAME), TOML_CHECK_BODY);
+    let captured = null;
+    const mgr = makeManager({ spawnFn: (_cmd, args) => { captured = args; return fakeChild(); } });
+    mgr.dispatch({ prompt: DISPATCH_PROMPT, directory: dir, executor: "opencode", model: MIMIMAX_MODEL, variant: "max" });
+    // opencode's spawn ends with `-- "<prompt>"`; the trailing positional is the augmented prompt.
+    assert.equal(captured.at(-2), "--");
+    const spawnedPrompt = /** @type {string} */ (captured.at(-1));
+    assert.match(spawnedPrompt, /Fix the bug/);
+    assert.match(spawnedPrompt, /## Verification \(required\)/);
+    assert.match(spawnedPrompt, /npm run check/);
+  });
+
+  test("does not inject the verification block for advisor dispatches", () => {
+    // Advisor dispatches are sandbox-required by ADR 0001 (the dispatch path's
+    // pre-spawn plan refuses to launch an advisor without sandbox+overlay --
+    // resolvedSpawnPlan() throws "advisor dispatch requires overlay-gated
+    // writes" otherwise). Mirror the existing advisor tests' full bwrap mock
+    // so the spawnFn actually fires and the trailing prompt is observable.
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-advisor-checkcmd-"));
+    fs.writeFileSync(path.join(dir, TOML_FILENAME), TOML_CHECK_BODY);
+    let captured = null;
+    const mgr = makeManager({
+      spawnFn: (_cmd, args) => { captured = args; return fakeChild(); },
+      sandboxEnabled: true,
+      overlayEnabled: true,
+      checkBwrapAvailableFn: () => ({ checked: true, available: true }),
+      checkOverlaySupportFn: () => ({ supported: true }),
+      platform: "linux",
+    });
+    mgr.advisor({ prompt: "Review this", directory: dir, model: SOL_MODEL, executor: "opencode" });
+    // Advisor's argv is the bwrap invocation; the trailing positional is the unmodified prompt.
+    assert.equal(captured.at(-1), "Review this");
+    assert.ok(!captured.join(" ").includes(VERIFICATION_MARKER));
+  });
+
+  test("does not inject the verification block for --no-overlay dispatches", () => {
+    // Plan's global constraint: --no-overlay dispatches never get prompt injection
+    // (no overlay worktree to gate against). Mirror the in-block-hook dispatch's
+    // setup but pass noOverlay: true; the trailing positional must be the
+    // literal prompt, with no verification block anywhere in the spawned argv.
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-nooverlay-checkcmd-"));
+    fs.writeFileSync(path.join(dir, TOML_FILENAME), TOML_CHECK_BODY);
+    let captured = null;
+    const mgr = makeManager({ spawnFn: (_cmd, args) => { captured = args; return fakeChild(); } });
+    mgr.dispatch({ prompt: DISPATCH_PROMPT, directory: dir, noOverlay: true, executor: "opencode", model: MIMIMAX_MODEL, variant: "max" });
+    assert.equal(captured.at(-2), "--");
+    assert.equal(captured.at(-1), DISPATCH_PROMPT);
+    assert.ok(!captured.join(" ").includes(VERIFICATION_MARKER));
+  });
+
+  test("no .taskferry.toml: dispatch prompt is unmodified, no verification block appended", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-no-checkcmd-"));
+    let captured = null;
+    const mgr = makeManager({ spawnFn: (_cmd, args) => { captured = args; return fakeChild(); } });
+    const dispatched = mgr.dispatch({ prompt: DISPATCH_PROMPT, directory: dir, executor: "opencode", model: MIMIMAX_MODEL, variant: "max" });
+    // opencode's trailing positional is the literal prompt, no block appended.
+    assert.equal(captured.at(-2), "--");
+    assert.equal(captured.at(-1), DISPATCH_PROMPT);
+    assert.ok(!captured.join(" ").includes(VERIFICATION_MARKER));
+    // Prompt is well under the 200-char preview threshold, so promptTotalChars stays unset.
+    assert.equal("promptTotalChars" in dispatched, false);
+    assert.equal(dispatched.promptPreview, DISPATCH_PROMPT);
   });
 });

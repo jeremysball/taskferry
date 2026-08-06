@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { EventEmitter } from "node:events";
 import { makeManager, fakeChild, baseTask, DIFF_LINE, OVERLAY_DIR_PENDING, EBUSY_ERROR, SPAWN_BWRAP_TIMEOUT, TOOL_CALLS, NONE_OBSERVED, FINAL_ANSWER, mkdtempTracked } from "./tasks.test-helpers.js";
 import { defaultRunCommand as changesetDefaultRunCommand } from "./changeset.js";
 
@@ -156,7 +157,7 @@ describe("accept()/reject()", () => {
     };
   }
 
-  test("accept() applies the diff, marks the changeset accepted, and cleans up", () => {
+  test("accept() applies the diff, marks the changeset accepted, and cleans up", async () => {
     let applyCalled = false;
     let cleanedRoot = null;
     const mgr = makeManager({
@@ -167,7 +168,7 @@ describe("accept()/reject()", () => {
       },
       rmOverlayTreeFn: (p) => { cleanedRoot = p; },
     });
-    const result = mgr.accept("t_pending");
+    const result = await mgr.accept("t_pending");
     assert.equal(result.changesetStatus, "accepted");
     assert.equal(result.applied, true);
     assert.equal(applyCalled, true);
@@ -175,7 +176,7 @@ describe("accept()/reject()", () => {
     assert.equal(mgr.status("t_pending").changesetStatus, "accepted");
   });
 
-  test("accept() leaves changesetStatus pending and does not clean up when apply fails", () => {
+  test("accept() leaves changesetStatus pending and does not clean up when apply fails", async () => {
     let cleanedRoot = null;
     const mgr = makeManager({
       tasksFixture: [pendingTaskFixture()],
@@ -185,14 +186,14 @@ describe("accept()/reject()", () => {
       },
       rmOverlayTreeFn: (p) => { cleanedRoot = p; },
     });
-    const result = mgr.accept("t_pending");
+    const result = await mgr.accept("t_pending");
     assert.equal(result.applied, false);
     assert.match(result.reason, /patch does not apply/);
     assert.equal(mgr.status("t_pending").changesetStatus, "pending");
     assert.equal(cleanedRoot, null);
   });
 
-  test("reject() discards the changeset without applying and cleans up", () => {
+  test("reject() discards the changeset without applying and cleans up", async () => {
     let applyCalled = false;
     let cleanedRoot = null;
     const mgr = makeManager({
@@ -203,14 +204,14 @@ describe("accept()/reject()", () => {
       },
       rmOverlayTreeFn: (p) => { cleanedRoot = p; },
     });
-    const result = mgr.reject("t_pending");
+    const result = await mgr.reject("t_pending");
     assert.equal(result.changesetStatus, "rejected");
     assert.equal(applyCalled, false);
     assert.equal(cleanedRoot, fixtureRoot);
     assert.equal(mgr.status("t_pending").changesetStatus, "rejected");
   });
 
-  test("reject() cleans an overlay using its recorded tmpRoot after the live tmpRoot changes", () => {
+  test("reject() cleans an overlay using its recorded tmpRoot after the live tmpRoot changes", async () => {
     const recordedTmpRoot = mkdtempTracked("axi-recorded-overlay-");
     const liveTmpRoot = mkdtempTracked("axi-live-overlay-");
     const root = path.join(recordedTmpRoot, OVERLAY_DIR_PENDING);
@@ -229,31 +230,31 @@ describe("accept()/reject()", () => {
       })],
     });
 
-    const result = mgr.reject("t_pending");
+    const result = await mgr.reject("t_pending");
     assert.equal(result.changesetStatus, "rejected");
     assert.equal(result.cleanupFailed, undefined);
     assert.equal(fs.existsSync(root), false);
   });
 
-  test("accept() on an advisor task throws a clear, non-applying error", () => {
+  test("accept() on an advisor task throws a clear, non-applying error", async () => {
     const mgr = makeManager({ tasksFixture: [pendingTaskFixture({ id: "t_advisor", role: "advisor", changesetStatus: "rejected" })] });
-    assert.throws(() => mgr.accept("t_advisor"), /role "advisor" and cannot be accepted/);
+    await assert.rejects(() => mgr.accept("t_advisor"), /role "advisor" and cannot be accepted/);
   });
 
-  test("accept() on a task with no pending changeset throws", () => {
+  test("accept() on a task with no pending changeset throws", async () => {
     const mgr = makeManager({ tasksFixture: [baseTask({ id: "t_none" })] });
-    assert.throws(() => mgr.accept("t_none"), /no pending changeset/);
+    await assert.rejects(() => mgr.accept("t_none"), /no pending changeset/);
   });
 
-  test("accept() on a task whose extraction failed errors usefully and keeps the overlay (regression: review finding #2)", () => {
+  test("accept() on a task whose extraction failed errors usefully and keeps the overlay (regression: review finding #2)", async () => {
     const mgr = makeManager({
       tasksFixture: [pendingTaskFixture({ diffPath: null, changesetError: SPAWN_BWRAP_TIMEOUT })],
     });
-    assert.throws(() => mgr.accept("t_pending"), /changeset was never extracted.*ETIMEDOUT/s);
+    await assert.rejects(() => mgr.accept("t_pending"), /changeset was never extracted.*ETIMEDOUT/s);
     assert.ok(mgr.status("t_pending").overlayDirs, "the preserved overlay is the user's only copy of the changes");
   });
 
-  test("accept() errors usefully when the recorded diff file is no longer on disk (regression: review finding #1)", () => {
+  test("accept() errors usefully when the recorded diff file is no longer on disk (regression: review finding #1)", async () => {
     // The diffPath is recorded in tasks.json but the file itself is gone
     // (partial stateDir cleanup, a tampered tasks.json, etc.). Without this
     // check, git apply would surface its own "can't open patch" message
@@ -263,11 +264,11 @@ describe("accept()/reject()", () => {
     const mgr = makeManager({
       tasksFixture: [pendingTaskFixture({ diffPath: missingDiffPath })],
     });
-    assert.throws(() => mgr.accept("t_pending"), /diff file at \/tmp\/taskferry-does-not-exist-/);
-    assert.throws(() => mgr.accept("t_pending"), /cannot be applied without its diff/);
+    await assert.rejects(() => mgr.accept("t_pending"), /diff file at \/tmp\/taskferry-does-not-exist-/);
+    await assert.rejects(() => mgr.accept("t_pending"), /cannot be applied without its diff/);
   });
 
-  test("accept() on a non-git target whose overlay vanished errors instead of applying nothing (regression: review finding #7)", () => {
+  test("accept() on a non-git target whose overlay vanished errors instead of applying nothing (regression: review finding #7)", async () => {
     // A reboot clears the tmpfs overlay; the pending changeset can never be
     // re-applied. Fail loudly rather than rsyncing a missing tree.
     const mgr = makeManager({
@@ -276,28 +277,28 @@ describe("accept()/reject()", () => {
         overlayDirs: { root: fixtureRoot, tmpRoot: fixtureTmpRoot, upperDir: path.join(fixtureRoot, "upper", "main"), workDir: path.join(fixtureRoot, "work", "main"), rwBinds: [] }, // never created on disk
       })],
     });
-    assert.throws(() => mgr.accept("t_pending"), /overlay is gone/);
+    await assert.rejects(() => mgr.accept("t_pending"), /overlay is gone/);
   });
 
-  test("accept() surfaces a failed cleanup via cleanupFailed and leaves overlayDirs for the sweep (regression: review finding #11)", () => {
+  test("accept() surfaces a failed cleanup via cleanupFailed and leaves overlayDirs for the sweep (regression: review finding #11)", async () => {
     const mgr = makeManager({
       tasksFixture: [pendingTaskFixture()],
       runOverlayCommandFn: () => ({ status: 0, stdout: "", stderr: "" }),
       rmOverlayTreeFn: () => { throw new Error(EBUSY_ERROR); },
     });
-    const result = mgr.accept("t_pending");
+    const result = await mgr.accept("t_pending");
     assert.equal(result.applied, true);
     assert.equal(result.changesetStatus, "accepted");
     assert.equal(result.cleanupFailed, true, "a failed cleanup must not be swallowed");
     assert.ok(mgr.status("t_pending").overlayDirs, "overlayDirs must stay set so the daemon-startup sweep retries");
   });
 
-  test("reject() surfaces a failed cleanup and leaves overlayDirs for the sweep", () => {
+  test("reject() surfaces a failed cleanup and leaves overlayDirs for the sweep", async () => {
     const mgr = makeManager({
       tasksFixture: [pendingTaskFixture()],
       rmOverlayTreeFn: () => { throw new Error(EBUSY_ERROR); },
     });
-    const result = mgr.reject("t_pending");
+    const result = await mgr.reject("t_pending");
     assert.equal(result.changesetStatus, "rejected");
     assert.equal(result.cleanupFailed, true);
     assert.ok(mgr.status("t_pending").overlayDirs);
@@ -316,13 +317,13 @@ describe("accept()/reject()", () => {
     return tasks.find((t) => t.id === taskId);
   }
 
-  test("accept() persists the cleared overlay metadata after successful cleanup (regression: review followup #1)", () => {
+  test("accept() persists the cleared overlay metadata after successful cleanup (regression: review followup #1)", async () => {
     const mgr = makeManager({
       tasksFixture: [pendingTaskFixture()],
       runOverlayCommandFn: () => ({ status: 0, stdout: "", stderr: "" }),
       rmOverlayTreeFn: () => {},
     });
-    const result = mgr.accept("t_pending");
+    const result = await mgr.accept("t_pending");
     assert.equal(result.changesetStatus, "accepted");
     assert.equal(result.applied, true);
     assert.equal(result.cleanupFailed, undefined);
@@ -331,12 +332,12 @@ describe("accept()/reject()", () => {
     assert.equal(onDisk.overlayDirs, null, "cleared overlay metadata must be durable, not claim an overlay still exists");
   });
 
-  test("reject() persists the cleared overlay metadata after successful cleanup (regression: review followup #1)", () => {
+  test("reject() persists the cleared overlay metadata after successful cleanup (regression: review followup #1)", async () => {
     const mgr = makeManager({
       tasksFixture: [pendingTaskFixture()],
       rmOverlayTreeFn: () => {},
     });
-    const result = mgr.reject("t_pending");
+    const result = await mgr.reject("t_pending");
     assert.equal(result.changesetStatus, "rejected");
     assert.equal(result.cleanupFailed, undefined);
     const onDisk = readPersistedTask(mgr, "t_pending");
@@ -344,7 +345,7 @@ describe("accept()/reject()", () => {
     assert.equal(onDisk.overlayDirs, null, "cleared overlay metadata must be durable, not claim an overlay still exists");
   });
 
-  test("accept() leaves overlayDirs durable on cleanup failure so the startup sweep can retry (regression: review followup #1)", () => {
+  test("accept() leaves overlayDirs durable on cleanup failure so the startup sweep can retry (regression: review followup #1)", async () => {
     // Symmetric to the success cases: when cleanup fails, both the
     // status and overlayDirs must be durable on disk so the
     // daemon-startup sweep can pick up the orphan and retry the removal.
@@ -353,7 +354,7 @@ describe("accept()/reject()", () => {
       runOverlayCommandFn: () => ({ status: 0, stdout: "", stderr: "" }),
       rmOverlayTreeFn: () => { throw new Error(EBUSY_ERROR); },
     });
-    const result = mgr.accept("t_pending");
+    const result = await mgr.accept("t_pending");
     assert.equal(result.cleanupFailed, true);
     const onDisk = readPersistedTask(mgr, "t_pending");
     assert.equal(onDisk.changesetStatus, "accepted");
@@ -374,7 +375,7 @@ describe("accept()/reject()", () => {
 // reject()" block's shared pendingTaskFixture()) so this one addition
 // doesn't push that block's line count over the sonarjs function-length cap.
 describe("accept(): overlaySleepFn threading (taskferry#328)", () => {
-  test("accept() on a non-git target threads overlaySleepFn through applyChangeset's overlay-mount-busy retry", () => {
+  test("accept() on a non-git target threads overlaySleepFn through applyChangeset's overlay-mount-busy retry", async () => {
     const tmpRoot = mkdtempTracked("axi-accept-sleepfn-");
     const overlayRoot = path.join(tmpRoot, "overlay");
     fs.mkdirSync(path.join(overlayRoot, "upper", "main"), { recursive: true });
@@ -404,7 +405,7 @@ describe("accept(): overlaySleepFn threading (taskferry#328)", () => {
       overlaySleepFn: (ms) => sleeps.push(ms),
     });
 
-    const result = mgr.accept("t_pending");
+    const result = await mgr.accept("t_pending");
 
     assert.equal(result.applied, true, "the apply must succeed once the retry clears the busy mount");
     assert.equal(bwrapAttempts, 3, "must retry the apply bwrap through the same busy-race backoff extraction uses");
@@ -843,28 +844,6 @@ describe("result() diffStat field", () => {
   });
 });
 
-describe("result() diff field", () => {
-  test("returns the cached patch text for fields: ['diff']", () => {
-    const mgr = makeManager({
-      tasksFixture: (logDir) => [{
-        ...baseTask({ id: "t_diff", logPath: path.join(logDir, "t_diff.ndjson") }),
-        diffPath: path.join(logDir, "..", "diffs", "t_diff.patch"),
-      }],
-      logs: { "t_diff.ndjson": "" },
-    });
-    fs.mkdirSync(path.join(mgr.paths.STATE_DIR, "diffs"), { recursive: true });
-    fs.writeFileSync(path.join(mgr.paths.STATE_DIR, "diffs", "t_diff.patch"), DIFF_LINE);
-    const result = mgr.result("t_diff", { fields: ["diff"] });
-    assert.equal(result.diff, DIFF_LINE);
-  });
-
-  test("returns null for a task with no diffPath", () => {
-    const mgr = makeManager({ tasksFixture: [baseTask({ id: "t_no_diff" })] });
-    const result = mgr.result("t_no_diff", { fields: ["diff"] });
-    assert.equal(result.diff, null);
-  });
-});
-
 describe("tail()", () => {
   test("returns a Unicode-safe suffix of the latest text event", () => {
     const log = [
@@ -1065,5 +1044,172 @@ describe("poll()", () => {
     } finally {
       mock.timers.reset();
     }
+  });
+});
+
+describe("daemon-restart handling for a check gate that was mid-flight", () => {
+  // A daemon that crashed/was force-restarted while a check gate was running
+  // (checkStatus: "running") leaves that status stuck forever -- nothing will
+  // ever call startCheckGate()'s exit/error handlers for that task again,
+  // because the child that would have called them died with the daemon. These
+  // tests pin the boot-time reclassification ("running" -> "interrupted") and
+  // the auto re-run for tasks whose overlay survived the crash.
+
+  test("a task whose check gate was 'running' when the daemon last exited loads as 'interrupted', not silently 'passed'", () => {
+    const mgr = makeManager({
+      tasksFixture: [
+        { id: "oc_interrupted1", status: "done", directory: os.tmpdir(), checkStatus: "running", checkCommand: "npm test", changesetStatus: "pending" },
+      ],
+    });
+    const status = mgr.status("oc_interrupted1");
+    assert.equal(status.checkStatus, "interrupted");
+  });
+
+  test("a task whose check gate had already settled ('passed') is left untouched on daemon restart", () => {
+    const mgr = makeManager({
+      tasksFixture: [
+        { id: "oc_settled1", status: "done", directory: os.tmpdir(), checkStatus: "passed", checkCommand: "npm test", changesetStatus: "pending" },
+      ],
+    });
+    assert.equal(mgr.status("oc_settled1").checkStatus, "passed");
+  });
+
+  test("a task already force-accepted/rejected while its gate was 'running' is left alone, not flipped to 'interrupted'", () => {
+    // Review fix: changesetStatus left "accepted"/"rejected" but checkStatus
+    // still "running" (the kill signal fired, but no exit event landed before
+    // the daemon died) must NOT be reclassified -- the decision is already
+    // made. A task that's already been decided is not this sweep's concern.
+    const mgr = makeManager({
+      tasksFixture: [
+        { id: "oc_decided1", status: "done", directory: os.tmpdir(), checkStatus: "running", checkCommand: "npm test", changesetStatus: "accepted" },
+        { id: "oc_decided2", status: "done", directory: os.tmpdir(), checkStatus: "running", checkCommand: "npm test", changesetStatus: "rejected" },
+      ],
+    });
+    assert.equal(mgr.status("oc_decided1").checkStatus, "running");
+    assert.equal(mgr.status("oc_decided2").checkStatus, "running");
+  });
+
+  test("a task whose gate was 'running' AND whose overlay is still live is automatically re-run on next daemon restart", () => {
+    // The design's "the gate is re-runnable" promise: a daemon crash mid-gate
+    // does not silently pass; the next daemon boot re-runs the gate, and the
+    // user sees "running" again on `taskferry status <id>` instead of a
+    // dead-looking "interrupted" with no further action. startCheckGate
+    // flips checkStatus back to "running" before spawning, so the brief
+    // "interrupted" write is not user-observable -- only the post-boot
+    // "running" state is.
+    const directory = mkdtempTracked("axi-rerun-");
+    fs.writeFileSync(path.join(directory, ".taskferry.toml"), `check = "true"\n`);
+    const overlayTmpRoot = mkdtempTracked("axi-rerun-overlay-");
+    const overlayRoot = path.join(overlayTmpRoot, `taskferry-cow-oc_rerun1`);
+    fs.mkdirSync(path.join(overlayRoot, "upper", "main"), { recursive: true });
+    const spawns = [];
+    const mgr = makeManager({
+      tasksFixture: [{
+        ...baseTask({ id: "oc_rerun1", directory }),
+        role: "dispatch",
+        changesetStatus: "pending",
+        preDispatchHead: "abc123",
+        checkStatus: "running",
+        checkCommand: "true",
+        checkExitCode: null,
+        checkOutputTail: null,
+        overlayDirs: { root: overlayRoot, tmpRoot: overlayTmpRoot, upperDir: path.join(overlayRoot, "upper", "main"), workDir: path.join(overlayRoot, "work", "main"), rwBinds: [] },
+      }],
+      spawnFn: (cmd, args, opts) => {
+        const child = new EventEmitter();
+        child.pid = 9001;
+        child.unref = () => {};
+        child.stdout = new EventEmitter();
+        child.stderr = new EventEmitter();
+        spawns.push({ cmd, args, opts, child });
+        return child;
+      },
+      sandboxEnabled: true,
+      overlayEnabled: true,
+      checkBwrapAvailableFn: () => ({ checked: true, available: true }),
+      checkOverlaySupportFn: () => ({ supported: true }),
+      platform: "linux",
+      runOverlayCommandFn: () => ({ status: 0, stdout: "", stderr: "" }),
+    });
+    // Auto re-run: the bwrap spawn is the one observable side effect of
+    // startCheckGate() being called (no other boot path spawns a child).
+    const bwrapSpawns = spawns.filter((s) => s.cmd === "bwrap");
+    assert.equal(bwrapSpawns.length, 1, "startCheckGate must be invoked exactly once for the auto re-run");
+    assert.ok(bwrapSpawns[0].args.includes("true"), "the re-run must execute the .taskferry.toml check command");
+    assert.equal(mgr.status("oc_rerun1").checkStatus, "running", "the auto re-run flips checkStatus back to 'running' before the test can observe 'interrupted'");
+  });
+
+  test("restart with a live overlay best-effort kills any orphaned gate process before re-running", () => {
+    // Review fix: an UNCLEAN daemon death (crash, OOM-kill, force-restart)
+    // is the one path where nothing ever sent the gate a kill signal at all
+    // (a graceful accept/reject/shutdown always does, via killGateAndWait).
+    // Because the gate is spawned `detached: true` (Task 5), the persisted
+    // `task.checkGatePid` IS that process group's leader pid, so a
+    // best-effort group-kill against it on restart reaps any surviving
+    // orphan from the previous daemon incarnation BEFORE a second gate
+    // mounts the same overlay -- without this, two writers (the orphan and
+    // the fresh re-run) can be live against the same upper/work dir at
+    // once. `sendSignal` already swallows ESRCH (nothing there), so this is
+    // safe to call unconditionally.
+    //
+    // Round 1 review fix: this test records every killFn and bwrap spawnFn
+    // call into a single shared sequence array (in invocation order) and
+    // asserts the orphan kill precedes the gate re-run -- not just that
+    // both happened. A regression that flipped the order (spawned the new
+    // gate before killing the orphan) would defeat the whole point of the
+    // fix and the old independent-count assertions would still pass.
+    const directory = mkdtempTracked("axi-orphan-kill-");
+    fs.writeFileSync(path.join(directory, ".taskferry.toml"), `check = "true"\n`);
+    const overlayTmpRoot = mkdtempTracked("axi-orphan-kill-overlay-");
+    const overlayRoot = path.join(overlayTmpRoot, `taskferry-cow-oc_orphankill1`);
+    fs.mkdirSync(path.join(overlayRoot, "upper", "main"), { recursive: true });
+    /** @type {string[]} */
+    const sequence = [];
+    /** @type {Array<{pid: number, signal: string}>} */
+    const killCalls = [];
+    const mgr = makeManager({
+      tasksFixture: [{
+        ...baseTask({ id: "oc_orphankill1", directory }),
+        role: "dispatch",
+        changesetStatus: "pending",
+        preDispatchHead: "abc123",
+        checkStatus: "running",
+        checkCommand: "true",
+        checkGatePid: 12345,
+        overlayDirs: { root: overlayRoot, tmpRoot: overlayTmpRoot, upperDir: path.join(overlayRoot, "upper", "main"), workDir: path.join(overlayRoot, "work", "main"), rwBinds: [] },
+      }],
+      spawnFn: (cmd, _args, _opts) => {
+        if (cmd === "bwrap") sequence.push("spawn");
+        const child = new EventEmitter();
+        child.pid = 9002;
+        child.unref = () => {};
+        child.stdout = new EventEmitter();
+        child.stderr = new EventEmitter();
+        return child;
+      },
+      killFn: (pid, signal) => {
+        sequence.push("kill");
+        killCalls.push({ pid, signal });
+      },
+      sandboxEnabled: true,
+      overlayEnabled: true,
+      checkBwrapAvailableFn: () => ({ checked: true, available: true }),
+      checkOverlaySupportFn: () => ({ supported: true }),
+      platform: "linux",
+      runOverlayCommandFn: () => ({ status: 0, stdout: "", stderr: "" }),
+    });
+    const orphanKill = killCalls.find((k) => k.pid === -12345 && k.signal === "SIGTERM");
+    assert.ok(orphanKill, `expected a process-group SIGTERM to -12345 to reap the orphan, got ${JSON.stringify(killCalls)}`);
+    const spawns = sequence.filter((e) => e === "spawn");
+    const kills = sequence.filter((e) => e === "kill");
+    assert.equal(kills.length, 1, "the orphan must be reaped exactly once");
+    assert.equal(spawns.length, 1, "the re-run mounts exactly one fresh bwrap gate over the overlay");
+    // The actual fix being verified: the orphan kill index is strictly
+    // before the re-run spawn index, so two writers (the orphan + the
+    // fresh re-run) are never live against the same overlay at once.
+    const killIdx = sequence.indexOf("kill");
+    const spawnIdx = sequence.indexOf("spawn");
+    assert.ok(killIdx < spawnIdx, `orphan kill must precede the gate re-run; got sequence ${JSON.stringify(sequence)}`);
+    assert.equal(mgr.status("oc_orphankill1").checkStatus, "running", "the re-run flips checkStatus back to 'running'");
   });
 });

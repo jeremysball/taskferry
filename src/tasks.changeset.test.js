@@ -4,8 +4,76 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
+import { EventEmitter } from "node:events";
 import { createTaskManager, DEFAULT_SUMMARY_MODEL } from "./tasks.js";
 import { trackManager, makeManager, fakeChild, AXI_TASKS_ORPHAN, AXI_TASKS_TEST_DIR, AXI_TASKS_CACHE_DIR, TASKS_STATE_FILE, OVERLAY_DIR_PENDING, DIFF_LINE, SPAWN_BWRAP_TIMEOUT, SOL_MODEL, baseTask, mkdtempTracked } from "./tasks.test-helpers.js";
+
+const CHECK_GATE_CONFIG = `check = "npm test"\n`;
+const CHECK_GATE_HEAD = "abc123\n";
+const CHECK_GATE_DIFF = "diff --git a/f b/f\n+changed\n";
+const CHECK_GATE_SESSION_ID = "ses_gate_fix";
+
+function fakeGateChild(pid = 9000) {
+  const child = new EventEmitter();
+  child.pid = pid;
+  child.unref = () => {};
+  child.stdout = new EventEmitter();
+  child.stderr = new EventEmitter();
+  return child;
+}
+
+function dispatchAndSettleWithRunningGate({ directory, killFn = () => {}, onEvent, rmOverlayTreeFn }) {
+  fs.writeFileSync(path.join(directory, ".taskferry.toml"), CHECK_GATE_CONFIG);
+  const spawns = [];
+  const mgr = makeManager({
+    spawnFn: (cmd, args, opts) => {
+      const child = spawns.length === 0 ? fakeChild() : fakeGateChild();
+      spawns.push({ cmd, args, opts, child });
+      return child;
+    },
+    sandboxEnabled: true,
+    overlayEnabled: true,
+    checkBwrapAvailableFn: () => ({ checked: true, available: true }),
+    checkOverlaySupportFn: () => ({ supported: true }),
+    platform: "linux",
+    killFn,
+    onEvent,
+    runOverlayCommandFn: (command, args) => {
+      if (command === "bwrap") return { status: 0, stdout: CHECK_GATE_DIFF, stderr: "" };
+      if (args?.[0] === "-C") return { status: 0, stdout: CHECK_GATE_HEAD, stderr: "" };
+      return { status: 0, stdout: "", stderr: "" };
+    },
+    ...(rmOverlayTreeFn && { rmOverlayTreeFn }),
+  });
+  const dispatched = mgr.dispatch({ model: SOL_MODEL, executor: "opencode", prompt: "hello", directory });
+  spawns[0].child.stdout.emit("data", Buffer.from(`${JSON.stringify({ sessionID: CHECK_GATE_SESSION_ID })}\n`));
+  spawns[0].child.emit("exit", 0, null);
+  return { mgr, dispatched, gateChild: spawns[1].child };
+}
+
+function pendingCheckGateTask(directory, overrides = {}) {
+  const diffPath = path.join(directory, "changes.patch");
+  fs.writeFileSync(diffPath, DIFF_LINE);
+  return {
+    ...baseTask({ directory, id: "t_pending", sessionId: CHECK_GATE_SESSION_ID }),
+    role: "dispatch",
+    changesetStatus: "pending",
+    diffPath,
+    preDispatchHead: "abc123",
+    checkStatus: "none",
+    checkCommand: null,
+    checkExitCode: null,
+    checkOutputTail: null,
+    ...overrides,
+  };
+}
+
+function managerWithPendingCheckGateTask(task) {
+  return makeManager({
+    tasksFixture: [task],
+    runOverlayCommandFn: () => ({ status: 0, stdout: "", stderr: "" }),
+  });
+}
 
 describe("changeset extraction at settlement", () => {
   test("extracts a diff and leaves changesetStatus pending for a settled dispatch with an active overlay", () => {
@@ -175,6 +243,145 @@ describe("changeset extraction at settlement", () => {
     assert.equal(cleanedAny, false);
   });
 
+});
+
+describe("accept() check-gate gating", () => {
+  test("accept refuses a still-running check gate without --force", async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "axi-gate-accept-running-"));
+    const signals = [];
+    const { mgr, dispatched, gateChild } = dispatchAndSettleWithRunningGate({
+      directory,
+      killFn: (pid, signal) => signals.push({ pid, signal }),
+    });
+
+    await assert.rejects(() => mgr.accept(dispatched.id, {}), /check gate still running/);
+    const acceptPromise = mgr.accept(dispatched.id, { force: true });
+    assert.ok(signals.some(({ pid, signal }) => pid < 0 && signal === "SIGTERM"));
+    gateChild.emit("exit", null, "SIGTERM");
+    const accepted = await acceptPromise;
+
+    assert.equal(accepted.applied, true);
+    assert.equal(mgr.status(dispatched.id).changesetStatus, "accepted");
+  });
+
+  test("accept refuses a failed check gate without --force, with the fix-forward message", async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "axi-gate-accept-failed-"));
+    const task = pendingCheckGateTask(directory, {
+      checkStatus: "failed",
+      checkCommand: "npm test",
+      checkExitCode: 1,
+      checkOutputTail: "2 tests failed",
+    });
+    const mgr = managerWithPendingCheckGateTask(task);
+
+    await assert.rejects(
+      () => mgr.accept(task.id, {}),
+      (error) => {
+        assert.match(error.message, /command: npm test \(from \.taskferry\.toml\)/);
+        assert.match(error.message, /exit: 1/);
+        assert.match(error.message, /2 tests failed/);
+        assert.match(error.message, new RegExp(`taskferry dispatch --session-id ${CHECK_GATE_SESSION_ID} --parent-task ${task.id}`));
+        return true;
+      }
+    );
+  });
+
+  test("accept --force on a failed gate succeeds and records checkOverride: true", async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "axi-gate-accept-force-"));
+    const task = pendingCheckGateTask(directory, {
+      checkStatus: "failed",
+      checkCommand: "npm test",
+      checkExitCode: 1,
+      checkOutputTail: "2 tests failed",
+    });
+    const mgr = managerWithPendingCheckGateTask(task);
+
+    const accepted = await mgr.accept(task.id, { force: true });
+
+    assert.equal(accepted.applied, true);
+    assert.equal(mgr.status(task.id).checkOverride, true);
+  });
+
+  test("accept on a passed or absent (checkStatus 'none') gate needs no --force", async () => {
+    for (const checkStatus of ["passed", "none"]) {
+      const directory = fs.mkdtempSync(path.join(os.tmpdir(), `axi-gate-accept-${checkStatus}-`));
+      const task = pendingCheckGateTask(directory, { checkStatus });
+      const mgr = managerWithPendingCheckGateTask(task);
+
+      const accepted = await mgr.accept(task.id, {});
+
+      assert.equal(accepted.applied, true);
+      assert.equal(mgr.status(task.id).changesetStatus, "accepted");
+    }
+  });
+});
+
+describe("reject() check-gate gating", () => {
+  test("reject is always allowed regardless of checkStatus, even without --force", async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "axi-gate-reject-failed-"));
+    const task = pendingCheckGateTask(directory, {
+      checkStatus: "failed",
+      checkCommand: "npm test",
+      checkExitCode: 1,
+    });
+    const mgr = managerWithPendingCheckGateTask(task);
+
+    const rejected = await mgr.reject(task.id);
+
+    assert.equal(rejected.changesetStatus, "rejected");
+    assert.equal(mgr.status(task.id).checkOverride, undefined);
+  });
+
+  test("reject while the gate is still running kills the gate and waits for it to exit before releasing the overlay", async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "axi-gate-reject-running-"));
+    const signals = [];
+    let released = false;
+    const { mgr, dispatched, gateChild } = dispatchAndSettleWithRunningGate({
+      directory,
+      killFn: (pid, signal) => signals.push({ pid, signal }),
+      rmOverlayTreeFn: () => { released = true; },
+    });
+
+    const rejectPromise = mgr.reject(dispatched.id);
+    assert.ok(signals.some(({ pid, signal }) => pid < 0 && signal === "SIGTERM"));
+    assert.equal(released, false);
+    gateChild.emit("exit", null, "SIGTERM");
+    const rejected = await rejectPromise;
+
+    assert.equal(released, true);
+    assert.equal(rejected.changesetStatus, "rejected");
+    const status = mgr.status(dispatched.id);
+    assert.equal(status.changesetStatus, "rejected");
+    assert.equal(status.checkStatus, "running");
+  });
+
+  test("a gate that settles after a reject is a no-op", async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "axi-gate-reject-late-exit-"));
+    const activityEvents = [];
+    const { mgr, dispatched, gateChild } = dispatchAndSettleWithRunningGate({
+      directory,
+      killFn: () => {},
+      onEvent: (event) => {
+        if (event.type === "task.activity") activityEvents.push(event);
+      },
+      rmOverlayTreeFn: () => {},
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+
+    const rejectPromise = mgr.reject(dispatched.id);
+    gateChild.emit("exit", null, "SIGTERM");
+    await rejectPromise;
+    await new Promise((resolve) => setImmediate(resolve));
+    const activityCount = activityEvents.length;
+    gateChild.emit("exit", 0, null);
+    await new Promise((resolve) => setImmediate(resolve));
+
+    const status = mgr.status(dispatched.id);
+    assert.equal(status.changesetStatus, "rejected");
+    assert.equal(status.checkStatus, "running");
+    assert.equal(status.checkOverride, undefined);
+    assert.equal(activityEvents.length, activityCount);
+  });
 });
 
 describe("changeset extraction at settlement: stale-base drift settlement (taskferry#261)", () => {

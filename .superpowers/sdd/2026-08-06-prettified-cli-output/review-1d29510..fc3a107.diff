@@ -1,0 +1,145 @@
+# Review package: 1d29510..fc3a107
+
+## Commits
+fc3a107 fix(cli): narrow detectShape's doctor check to avoid colliding with setup's output
+
+## Files changed
+ .../sdd/2026-08-06-prettified-cli-output/task-2-report.md  | 14 ++++++++++++++
+ src/pretty.js                                              |  2 +-
+ src/pretty.test.js                                         | 10 ++++++++--
+ 3 files changed, 23 insertions(+), 3 deletions(-)
+
+## Diff
+diff --git a/.superpowers/sdd/2026-08-06-prettified-cli-output/task-2-report.md b/.superpowers/sdd/2026-08-06-prettified-cli-output/task-2-report.md
+index db9b698..08cdb67 100644
+--- a/.superpowers/sdd/2026-08-06-prettified-cli-output/task-2-report.md
++++ b/.superpowers/sdd/2026-08-06-prettified-cli-output/task-2-report.md
+@@ -54,10 +54,24 @@ The brief's tests had three issues that needed fixing to pass (the brief itself
+ 
+ - Removed unused `Table` import before Step 5 commit (re-added when list renderer was implemented in Step 8).
+ - Replaced `/\x1b\[[0-9;]*m/g` regex literal with `new RegExp(...)` using `String.fromCharCode(0x1b)` to satisfy `no-control-regex`.
+ - Replaced `exitCode: undefined` with `exitCode: void 0` to satisfy `sonarjs/no-undefined-assignment`.
+ - Extracted `"minimax/MiniMax-M3"` into a `MODEL_MINIMAX` constant to satisfy `sonarjs/no-duplicate-string` (appeared 4 times).
+ - Extracted `renderMcpIsolationSection()` and `renderDoctorExtras()` helpers from `renderDoctorReport` to bring cyclomatic complexity under the `sonarjs/cyclomatic-complexity` threshold of 10.
+ 
+ ## Concerns
+ 
+ None. The implementation matches the brief's design, all 28 tests pass, and lint is clean. The four test deviations above are straightforward assertion/data fixes that preserve test intent.
++
++## Fix round 1: narrow doctor shape detection
++
++**Commit:** `4d51f40 fix(cli): narrow detectShape's doctor check to avoid colliding with setup's output`
++
++**Problem:** `detectShape()` identified doctor payloads by the presence of a top-level `integrations` key. `src/setup.js`'s result also carries a top-level `integrations: { claude, codex }` key (plus a separate top-level `playwrightMcpIsolation`), which would be misclassified as a doctor report once Task 3 wires `renderPretty()` into `writeToon()`. The doctor renderer would silently drop the `codex` field.
++
++**Fix:** Changed the doctor check from `"integrations" in value` to `value.integrations && "playwrightMcpIsolation" in value.integrations`. Doctor payloads always nest `playwrightMcpIsolation` inside `integrations`; setup payloads have `playwrightMcpIsolation` as a sibling, not a child.
++
++**Test added:** "setup-shaped value (top-level integrations + playwrightMcpIsolation) falls through to fallback, not doctor" — asserts that a setup-shaped payload's `codex` field appears in the output (which the doctor renderer would silently drop).
++
++Extracted `"opencode.json not found"` into a `MCP_UNCHECKED_REASON` constant to satisfy `sonarjs/no-duplicate-string` (now appeared 3 times across tests).
++
++**Verification:** 29/29 tests pass, lint clean.
+diff --git a/src/pretty.js b/src/pretty.js
+index 9b5f56e..bd0f950 100644
+--- a/src/pretty.js
++++ b/src/pretty.js
+@@ -207,21 +207,21 @@ function renderStatsReport(value) {
+   if (table) lines.push(...table);
+   lines.push(...renderStatusMixSection(value.statusMix));
+   lines.push(...renderFailureReasonsSection(value.failureReasons));
+   if (value.unknownBacklog?.total) lines.push("", c.dim(`${value.unknownBacklog.total} task(s) in unknown backlog`));
+   return lines.join("\n").trimEnd();
+ }
+ 
+ function detectShape(value) {
+   if (value && typeof value === "object" && !Array.isArray(value)) {
+     if ("tasks" in value && "counts" in value) return "list";
+-    if ("integrations" in value) return "doctor";
++    if (value.integrations && "playwrightMcpIsolation" in value.integrations) return "doctor";
+     if ("trend" in value || "byModel" in value) return "stats";
+   }
+   return "fallback";
+ }
+ 
+ export function renderPretty(value) {
+   if (value === null || typeof value !== "object") return String(value);
+   const shape = detectShape(value);
+   if (shape === "list") return renderTaskGroups(value);
+   if (shape === "doctor") return renderDoctorReport(value);
+diff --git a/src/pretty.test.js b/src/pretty.test.js
+index cb4f207..895f44a 100644
+--- a/src/pretty.test.js
++++ b/src/pretty.test.js
+@@ -1,17 +1,18 @@
+ import { describe, test } from "node:test";
+ import assert from "node:assert/strict";
+ import { renderPretty } from "./pretty.js";
+ 
+ const ESC = String.fromCharCode(0x1b);
+ const ANSI_RE = new RegExp(`${ESC}\\[[0-9;]*m`, "g");
+ const MODEL_MINIMAX = "minimax/MiniMax-M3";
++const MCP_UNCHECKED_REASON = "opencode.json not found";
+ function plain(text) {
+   return text.replace(ANSI_RE, "");
+ }
+ 
+ describe("renderPretty fallback (light-touch) renderer", () => {
+   test("renders one bold-label line per top-level scalar field", () => {
+     const out = renderPretty({ id: "oc_1", model: MODEL_MINIMAX });
+     assert.equal(plain(out), `id  oc_1\nmodel  ${MODEL_MINIMAX}`);
+   });
+ 
+@@ -42,20 +43,25 @@ describe("renderPretty fallback (light-touch) renderer", () => {
+ 
+   test("flattens a nested object under an indented bold label", () => {
+     const out = renderPretty({ metadata: { claude: { installed: true } } });
+     assert.equal(plain(out), "metadata\n  claude\n    installed  true");
+   });
+ 
+   test("omits an undefined field entirely", () => {
+     const out = renderPretty({ id: "oc_1", exitCode: void 0 });
+     assert.equal(plain(out), "id  oc_1");
+   });
++
++  test("setup-shaped value (top-level integrations + playwrightMcpIsolation) falls through to fallback, not doctor", () => {
++    const out = plain(renderPretty({ integrations: { claude: { installed: true }, codex: { installed: false } }, playwrightMcpIsolation: { checked: false, reason: MCP_UNCHECKED_REASON } }));
++    assert.ok(out.includes("codex"), out);
++  });
+ });
+ 
+ describe("renderPretty grouped-list renderer", () => {
+   const listValue = {
+     directory: "/workspace/proj",
+     counts: { queued: 0, running: 1, done: 1, crashed: 0, cancelled: 0, unknown: 0 },
+     tasks: [
+       { id: "oc_a", status: "running", model: MODEL_MINIMAX, startedAt: "2026-08-06T11:10:27.000Z" },
+       { id: "oc_b", status: "done", model: "openai/gpt-5.6-luna", startedAt: "2026-08-06T02:12:34.000Z" },
+     ],
+@@ -129,25 +135,25 @@ describe("renderPretty doctor report renderer", () => {
+ 
+   test("colors the passing glyph green and the failing glyph red", () => {
+     const out = renderPretty(healthyDoctor);
+     assert.ok(out.includes(`\x1b[32m✓\x1b[39m`), out);
+     assert.ok(out.includes(`\x1b[31m✗\x1b[39m`), out);
+   });
+ 
+   test("renders an unchecked (checked: false) check with a neutral glyph, not red", () => {
+     const out = renderPretty({
+       healthy: true,
+-      integrations: { claude: { installed: true }, playwrightMcpIsolation: { opencode: { checked: false, reason: "opencode.json not found" } } },
++      integrations: { claude: { installed: true }, playwrightMcpIsolation: { opencode: { checked: false, reason: MCP_UNCHECKED_REASON } } },
+     });
+     assert.ok(!out.includes(`\x1b[31m`), out);
+     assert.ok(plain(out).includes("? opencode"), out);
+-    assert.ok(plain(out).includes("opencode.json not found"), out);
++    assert.ok(plain(out).includes(MCP_UNCHECKED_REASON), out);
+   });
+ 
+   test("renders warnings as a yellow-glyph dim-text bulleted block", () => {
+     const out = renderPretty(healthyDoctor);
+     assert.ok(out.includes(`\x1b[33m•\x1b[39m`), out);
+     assert.ok(plain(out).includes("Playwright MCP for claude-code is not isolated"), out);
+   });
+ 
+   test("omits the warnings section entirely when there are no warnings", () => {
+     const out = plain(renderPretty({ healthy: true, integrations: { claude: { installed: true } } }));

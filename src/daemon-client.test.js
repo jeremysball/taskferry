@@ -16,6 +16,14 @@ const DAEMON_BOOT_ERR = "daemon-boot.err";
 const TEST_STARTED_AT = "2026-07-15T00:00:00.000Z";
 const TASK_WAIT = "task.wait";
 const SYSTEM_HEALTH = "system.health";
+const CHECK_GATE_FAILURE_DETAIL = `error: check gate failed for t1
+  command: npm test (from .taskferry.toml)
+  exit: 1
+  output tail:
+    2 tests failed
+changeset NOT accepted. To fix forward, resume the worker session:
+  taskferry dispatch --session-id ses_1 --parent-task t1 \\
+    --prompt "Fix: check gate failed. See taskferry result t1 --fields checkOutputTail"`;
 
 function temporaryPaths(t) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-daemon-test-"));
@@ -135,6 +143,31 @@ describe("multiplexed daemon client: request correlation, subscriptions, and aut
 
     assert.equal(first.name, "fast");
     assert.deepEqual(await slow, { id: "slow", status: "done" });
+  });
+
+  test("preserves a multi-line manager failure through the daemon-client RPC round trip", async (t) => {
+    const paths = temporaryPaths(t);
+    const fake = fakeManagerFactory();
+    const managerFactory = (options) => {
+      const manager = fake.factory(options);
+      manager.accept = () => { throw new Error(CHECK_GATE_FAILURE_DETAIL); };
+      return manager;
+    };
+    const daemon = await startDaemon({ ...paths, taskManagerFactory: managerFactory });
+    t.after(() => daemon.close());
+    const client = await connectClient({ socketPath: paths.socketPath, autoStart: false });
+    t.after(() => client.close());
+
+    await assert.rejects(
+      () => client.request("task.accept", { taskId: "t1" }),
+      (error) => {
+        assert.equal(error.code, "REQUEST_FAILED");
+        assert.equal(error.message, CHECK_GATE_FAILURE_DETAIL);
+        assert.match(error.message, /output tail:\n {4}2 tests failed/);
+        assert.match(error.message, /taskferry dispatch --session-id ses_1 --parent-task t1/);
+        return true;
+      }
+    );
   });
 
   test("routes multiple event subscriptions independently on the shared connection", async (t) => {

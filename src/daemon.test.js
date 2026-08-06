@@ -53,8 +53,8 @@ function fakeManagerFactory(tasks = [], { checkSummaryModelReady, throwOnClose =
       calls.push(["cancel", taskId, options]);
       return { id: taskId, status: "cancelled" };
     },
-    accept(taskId) {
-      calls.push(["accept", taskId]);
+    accept(taskId, options) {
+      calls.push(["accept", taskId, options]);
       return { taskId, changesetStatus: "accepted", applied: true };
     },
     reject(taskId) {
@@ -246,7 +246,7 @@ describe("Unix socket daemon", () => {
       const response = await peer.request("accept", "task.accept", { taskId: "t1" });
 
       assert.equal(response.ok, true, response.error?.message);
-      assert.deepEqual(fake.calls.at(-1), ["accept", "t1"]);
+      assert.deepEqual(fake.calls.at(-1), ["accept", "t1", { force: false }]);
       assert.equal(response.result.changesetStatus, "accepted");
     });
 
@@ -391,6 +391,7 @@ describe("Unix socket daemon", () => {
     assert.equal(response.error.code, "REQUEST_FAILED");
     assert.equal(response.error.message, "executor pi failed");
     assert.equal(response.error.help, "inspect the pi worker configuration");
+    assert.equal(response.error.detail, "error: executor pi failed\nhelp: inspect the pi worker configuration");
   });
 
   test("creates protected runtime/socket paths and serves ordinary requests", async (t) => {

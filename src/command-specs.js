@@ -2,8 +2,8 @@ export const commandSpecs = {
   dispatch: {
     usage: "taskferry dispatch --prompt <text> [options]",
     description: "Queue a background OpenCode run.",
-    options: { "--prompt <text>": "required", "--directory <path>": "defaults to the current workspace", "--model <id>": "use the default model when omitted", "--variant <name>": "optional model reasoning variant", "--session-id <id>": "resume an existing OpenCode session", "--require-final-marker <regex>": "flag the task as incomplete if the final message doesn't match this pattern (case-sensitive, standard JS RegExp semantics)", "--no-sandbox": "run this dispatch without the bwrap filesystem sandbox (default: sandboxed on Linux)", "--no-overlay": "run this dispatch without the copy-on-write overlay (writes land directly, not gated by accept/reject)", "--allowed-dirs <path,path,...>": "extra directories bound read-write inside the sandbox, in addition to the auto-detected git-common-dir for a worktree; required for anything under /tmp — the sandbox mounts it empty by default, hiding paths that exist on the host", "--executor <opencode|pi>": "worker backend to dispatch through, default pi", "--class <name>": "optional free-text task-class tag for external telemetry consumers; taskferry does not validate against a fixed list" },
-    examples: ['taskferry dispatch --prompt "Fix the failing tests"', 'taskferry dispatch --prompt "Review this change" --model openai/gpt-5.6-sol', 'taskferry dispatch --prompt "Investigate" --require-final-marker "^Status: (DONE|DONE_WITH_CONCERNS)$"', 'taskferry dispatch --prompt "Run one-off shell tooling" --no-sandbox', 'taskferry dispatch --prompt "Update the shared cache dir" --allowed-dirs /home/user/.cache/myapp', 'taskferry dispatch --prompt "Fix the failing tests" --class implementer'],
+    options: { "--prompt <text>": "required", "--directory <path>": "defaults to the current workspace", "--model <id>": "use the default model when omitted", "--variant <name>": "optional model reasoning variant", "--session-id <id>": "resume an existing OpenCode session", "--require-final-marker <regex>": "flag the task as incomplete if the final message doesn't match this pattern (case-sensitive, standard JS RegExp semantics)", "--no-sandbox": "run this dispatch without the bwrap filesystem sandbox (default: sandboxed on Linux)", "--no-overlay": "run this dispatch without the copy-on-write overlay (writes land directly, not gated by accept/reject)", "--allowed-dirs <path,path,...>": "extra directories bound read-write inside the sandbox, in addition to the auto-detected git-common-dir for a worktree; required for anything under /tmp — the sandbox mounts it empty by default, hiding paths that exist on the host", "--executor <opencode|pi>": "worker backend to dispatch through, default pi", "--class <name>": "optional free-text task-class tag for external telemetry consumers; taskferry does not validate against a fixed list", "--parent-task <id>": "tag this dispatch as fixing/retrying an earlier task; persisted as parentTaskId, and echoed by that task's check-gate failure message" },
+    examples: ['taskferry dispatch --prompt "Fix the failing tests"', 'taskferry dispatch --prompt "Review this change" --model openai/gpt-5.6-sol', 'taskferry dispatch --prompt "Investigate" --require-final-marker "^Status: (DONE|DONE_WITH_CONCERNS)$"', 'taskferry dispatch --prompt "Run one-off shell tooling" --no-sandbox', 'taskferry dispatch --prompt "Update the shared cache dir" --allowed-dirs /home/user/.cache/myapp', 'taskferry dispatch --prompt "Fix the failing tests" --class implementer', 'taskferry dispatch --prompt "Fix: check gate failed" --parent-task oc_msgabc12'],
   },
   cancel: {
     usage: "taskferry cancel <id> [--grace-ms <number>]",
@@ -14,8 +14,8 @@ export const commandSpecs = {
   accept: {
     usage: "taskferry accept <id>",
     description: "Apply a dispatch task's pending changeset to its target directory.",
-    options: {},
-    examples: ['taskferry accept <id>'],
+    options: { "--force": "apply the changeset even though its check gate failed, timed out, is still running, or was interrupted by a daemon restart; records checkOverride: true" },
+    examples: ['taskferry accept <id>', 'taskferry accept <id> --force'],
   },
   reject: {
     usage: "taskferry reject <id>",
@@ -41,6 +41,7 @@ export const commandSpecs = {
       "--timeout <duration>": "maximum wait, e.g. 10000 (ms), 30s, 5m, 1h",
       "--executor <opencode|pi>": "worker backend to dispatch through, default pi",
       "--class <name>": "optional free-text task-class tag for external telemetry consumers; taskferry does not validate against a fixed list",
+      "--parent-task <id>": "tag this dispatch as fixing/retrying an earlier task; persisted as parentTaskId, and echoed by that task's check-gate failure message",
       "--summarize-context": "condense the auto-attached context through a throwaway model call before sending it (off by default)",
     },
     examples: [
@@ -105,5 +106,11 @@ export const commandSpecs = {
     description: "Install dependencies and create the CLI and OpenCode plugin symlinks without contacting the daemon.",
     options: {},
     examples: ['taskferry setup', 'node src/cli.js setup'],
+  },
+  init: {
+    usage: "taskferry init",
+    description: "Scaffold .taskferry.toml for this repo, detecting a check command from the project's ecosystem.",
+    options: {},
+    examples: ['taskferry init'],
   },
 };

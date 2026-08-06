@@ -23,7 +23,7 @@ describe("computeDoctorStats: status mix", () => {
       row({ id: "c", status: "queued", model: "m2", hoursAgo: 0.1 }),
     ];
     const stats = computeDoctorStats(rows, { now: NOW });
-    assert.deepEqual(stats.statusMix.overall, { queued: 1, running: 0, done: 1, crashed: 1, cancelled: 0, unknown: 0, total: 3 });
+    assert.deepEqual(stats.statusMix.overall, { queued: 1, running: 0, done: 1, crashed: 1, cancelled: 0, unknown: 0, other: 0, total: 3 });
   });
 
   test("last24h and last7d filter by startedAt window, overall does not", () => {
@@ -36,6 +36,26 @@ describe("computeDoctorStats: status mix", () => {
     assert.equal(stats.statusMix.overall.total, 3);
     assert.equal(stats.statusMix.last24h.total, 1);
     assert.equal(stats.statusMix.last7d.total, 2);
+  });
+
+  test("a row with an unrecognized status lands in the 'other' bucket, and the displayed counts always sum to total", () => {
+    // Regression: statusMixFor used to increment `total` unconditionally but
+    // only bucket named statuses, so a future/unknown status (e.g. a new
+    // "interrupted" or "superseded" value added in a later release that
+    // this code doesn't know about) inflated `total` past the sum of the
+    // displayed counts. The `other` bucket catches the unknown values so
+    // the invariant -- `sum(buckets) === total` -- holds regardless.
+    const rows = [
+      row({ id: "a", status: "done", model: "m1", hoursAgo: 1 }),
+      row({ id: "b", status: "interrupted", model: "m1", hoursAgo: 1 }),
+      row({ id: "c", status: "superseded", model: "m1", hoursAgo: 1 }),
+    ];
+    const stats = computeDoctorStats(rows, { now: NOW });
+    assert.equal(stats.statusMix.overall.done, 1);
+    assert.equal(stats.statusMix.overall.other, 2);
+    assert.equal(stats.statusMix.overall.total, 3);
+    const sum = stats.statusMix.overall.queued + stats.statusMix.overall.running + stats.statusMix.overall.done + stats.statusMix.overall.crashed + stats.statusMix.overall.cancelled + stats.statusMix.overall.unknown + stats.statusMix.overall.other;
+    assert.equal(sum, stats.statusMix.overall.total);
   });
 });
 
@@ -112,6 +132,39 @@ describe("computeDoctorStats: byModel", () => {
     ];
     const stats = computeDoctorStats(rows, { now: NOW });
     assert.deepEqual(stats.byModel.map((entry) => entry.model), ["big", "small"]);
+  });
+
+  test("a row with a missing model no longer crashes the entire daemon-wide task.stats aggregation", () => {
+    // Regression: a single persisted record whose `model` field is missing
+    // (legacy record, partial write, schema drift) used to throw TypeError
+    // out of `localeCompare` inside the tie-break sort, which now runs on
+    // the daemon's request thread -- so one bad record would fail
+    // `doctor --stats` for every caller, not just the CLI invocation that
+    // touched it. The missing-model row must group under an empty-string key
+    // and sort last (not crash), and the rest of the aggregation must stay
+    // intact.
+    const rows = [
+      row({ id: "a", status: "done", model: "m1", hoursAgo: 1 }),
+      row({ id: "b", status: "done", model: "m2", hoursAgo: 1 }),
+    ];
+    const noModelRow = /** @type {DoctorStatsRow} */ ({
+      id: "c",
+      status: "done",
+      model: null,
+      startedAt: new Date(NOW - 60 * 60 * 1000).toISOString(),
+      failureReason: null,
+    });
+    const stats = computeDoctorStats([rows[0], rows[1], noModelRow], { now: NOW });
+    // All three rows survive the aggregation; the missing-model one sits in
+    // its own bucket at the tail of the byModel sort (empty string sorts
+    // last, after the named models).
+    assert.equal(stats.byModel.length, 3);
+    const models = stats.byModel.map((entry) => entry.model);
+    assert.ok(models.includes("m1"));
+    assert.ok(models.includes("m2"));
+    assert.equal(models[models.length - 1], "", "missing-model row must sort last, not first");
+    const unknownBucket = stats.byModel.find((entry) => entry.model === "");
+    assert.equal(unknownBucket.dispatches, 1);
   });
 });
 

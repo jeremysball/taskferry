@@ -13,6 +13,59 @@ import {
 
 export const MAX_BUFFER_BYTES = 1024 * 1024;
 
+// An oversized response (success, error, or event push) degrades to a small
+// RESPONSE_TOO_LARGE error frame instead of a silent socket.destroy() --
+// without this, the client only ever sees "daemon connection closed",
+// indistinguishable from a crash or a network blip, with no hint the
+// request's own result was the cause. Two bounded fallback levels (a
+// "normal" envelope and a "small" envelope with shorter message/help
+// strings), so a socket whose existing backlog already sits within one
+// fallback frame's width of the cap still gets a diagnosable frame instead
+// of a zero-diagnostic destroy. If even the small fallback doesn't fit, the
+// wire is too far gone for any useful frame to land -- destroy.
+export function makeWriteMessage(maxOutboundBytes) {
+  function tryWrite(socket, message) {
+    const encoded = encodeMessage(message);
+    if (socket.writableLength + Buffer.byteLength(encoded) <= maxOutboundBytes) {
+      socket.write(encoded);
+      return true;
+    }
+    return false;
+  }
+  return function writeMessage(socket, message) {
+    if (socket.destroyed) return false;
+    if (tryWrite(socket, message)) return true;
+    // Event pushes (eventMessage) carry no request id and a different
+    // envelope shape; there's no equivalent success/error response to
+    // degrade to, so the closest we can offer is a no-id error frame
+    // that the client's consumeResponse treats as a stray (no pending
+    // request to fail) and discards. That's still strictly better than
+    // tearing the socket down: the caller loses one event, not the
+    // whole connection.
+    if (message.ok === undefined) {
+      if (tryWrite(socket, errorResponse(null, "RESPONSE_TOO_LARGE", "event dropped: response too large", ""))) {
+        return true;
+      }
+      socket.destroy();
+      return false;
+    }
+    const id = message.id ?? null;
+    if (tryWrite(socket, errorResponse(
+      id,
+      "RESPONSE_TOO_LARGE",
+      `daemon response for this request exceeds ${maxOutboundBytes} bytes`,
+      "Narrow the request (e.g. pass --directory), or use a method that summarizes server-side if one exists",
+    ))) {
+      return true;
+    }
+    if (tryWrite(socket, errorResponse(id, "RESPONSE_TOO_LARGE", "response too large", ""))) {
+      return true;
+    }
+    socket.destroy();
+    return false;
+  };
+}
+
 // Defensive fallback for a caller that omits resolveWorkspaceRootFn: falls
 // back to sameWorkspace()'s literal-equality fast path (today's pre-#315
 // behavior) rather than throwing on a directory-comparison call.

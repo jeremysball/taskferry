@@ -14,6 +14,7 @@ const SYSTEM_HEALTH_METHOD = "system.health";
 const TASK_ADVISOR_METHOD = "task.advisor";
 const TASK_DISPATCH_METHOD = "task.dispatch";
 const TASK_LIST_METHOD = "task.list";
+const TASK_STATS_METHOD = "task.stats";
 const TASK_STATUS_METHOD = "task.status";
 const TASK_TAIL_METHOD = "task.tail";
 
@@ -37,6 +38,7 @@ const TASKFERRY_DOCTOR_HOME_PREFIX = "taskferry-doctor-home-";
 const TASKFERRY_DOCTOR_STATS_HOME_PREFIX = "taskferry-doctor-stats-home-";
 const TASKFERRY_DOCTOR_STATS_EMPTY_PREFIX = "taskferry-doctor-stats-empty-";
 const TASKFERRY_ADVISOR_HOME_PREFIX = "taskferry-advisor-home-";
+const TASK_STATS_COMPUTED_AT = "2026-08-01T12:00:00.000Z";
 
 // What `claude plugin list --json` returns when the taskferry plugin is
 // installed -- reused across every doctor test that exercises the happy
@@ -842,30 +844,38 @@ test("doctor integrations.playwrightMcpIsolation shape is present when both side
   assert.equal(result.integrations.playwrightMcpIsolation.claudeCode.isolated, true);
 });
 
-test("doctor --stats calls task.list and returns computeDoctorStats() output, skipping env checks", async (_t) => {
+test("doctor --stats calls task.stats and formats its rates as percentages, skipping env checks", async (_t) => {
+  // task.stats aggregates server-side, over the daemon's own task map --
+  // never the raw per-task rows (see the task.list-based version's
+  // "daemon connection closed" bug once task history grows past
+  // MAX_BUFFER_BYTES). The CLI's only remaining job is formatting the
+  // 0..1 doneRate/crashRate floats into readable percentages for display.
   const home = mkTmpDir(TASKFERRY_DOCTOR_STATS_HOME_PREFIX);
   let calledMethod;
+  const statsResult = {
+    byModel: [{ model: "m1", dispatches: 2, done: 1, crashed: 1, cancelled: 0, unknown: 0, doneRate: 0.5, crashRate: 0.5, dominantFailureReason: "no_output_timeout" }],
+    failureReasons: [{ reason: "no_output_timeout", count: 1 }],
+    unknownBacklog: { total: 0, tasks: [] },
+    computedAt: TASK_STATS_COMPUTED_AT,
+    statusMix: { overall: { queued: 0, running: 0, done: 1, crashed: 1, cancelled: 0, unknown: 0, total: 2 }, last24h: {}, last7d: {} },
+    trend: { window: "24h", current: { crashRate: 0.25, settled: 4 }, previous: { crashRate: null, settled: 0 }, direction: "unknown" },
+  };
   const client = {
     request: async (method, params) => {
       calledMethod = method;
       assert.deepEqual(params, {});
-      return {
-        counts: { queued: 0, running: 0, done: 1, crashed: 1, cancelled: 0, unknown: 0 },
-        tasks: [
-          { id: "a", status: "done", model: "m1", startedAt: "2026-08-01T10:00:00.000Z", failureReason: null },
-          { id: "b", status: "crashed", model: "m1", startedAt: "2026-08-01T11:00:00.000Z", failureReason: "no_output_timeout_dead_spawn" },
-        ],
-      };
+      return statsResult;
     },
   };
   const runShellCommand = async () => ({ stdout: "", stderr: "", code: 0 });
 
   const result = await runCommand("doctor", { stats: true }, { homeDirectory: home, env: {}, client, runShellCommand });
 
-  assert.equal(calledMethod, TASK_LIST_METHOD);
-  assert.ok(Array.isArray(result.byModel));
-  assert.equal(result.byModel[0].model, "m1");
-  assert.equal(result.byModel[0].dispatches, 2);
+  assert.equal(calledMethod, TASK_STATS_METHOD);
+  assert.equal(result.byModel[0].doneRate, "50.0%");
+  assert.equal(result.byModel[0].crashRate, "50.0%");
+  assert.equal(result.trend.current.crashRate, "25.0%");
+  assert.equal(result.trend.previous.crashRate, null, "a null rate (no settled tasks yet) must stay null, not become a formatted string");
   assert.equal(result.integrations, void 0);
   assert.equal(result.warnings, void 0);
 });
@@ -874,8 +884,12 @@ test("doctor --stats on a daemon with zero tasks returns empty stats, not garbag
   const home = mkTmpDir(TASKFERRY_DOCTOR_STATS_EMPTY_PREFIX);
   const client = {
     request: async () => ({
-      counts: { queued: 0, running: 0, done: 0, crashed: 0, cancelled: 0, unknown: 0 },
-      tasks: "none found (this server process's lifetime)",
+      byModel: [],
+      failureReasons: [],
+      unknownBacklog: { total: 0, tasks: [] },
+      computedAt: TASK_STATS_COMPUTED_AT,
+      statusMix: { overall: { queued: 0, running: 0, done: 0, crashed: 0, cancelled: 0, unknown: 0, total: 0 }, last24h: {}, last7d: {} },
+      trend: { window: "24h", current: {}, previous: {}, direction: "unknown" },
     }),
   };
   const runShellCommand = async () => ({ stdout: "", stderr: "", code: 0 });
@@ -887,7 +901,7 @@ test("doctor --stats on a daemon with zero tasks returns empty stats, not garbag
   assert.deepEqual(result.failureReasons, []);
 });
 
-test("doctor without --stats does not call task.list", async (_t) => {
+test("doctor without --stats does not call task.list or task.stats", async (_t) => {
   const home = mkTmpDir(TASKFERRY_DOCTOR_STATS_HOME_PREFIX);
   const calledMethods = [];
   const client = {
@@ -901,6 +915,113 @@ test("doctor without --stats does not call task.list", async (_t) => {
   await runCommand("doctor", {}, { homeDirectory: home, env: {}, client, runShellCommand });
 
   assert.ok(!calledMethods.includes(TASK_LIST_METHOD));
+  assert.ok(!calledMethods.includes(TASK_STATS_METHOD));
+});
+
+test("doctor --stats falls back to task.list + client-side aggregation when the daemon rejects task.stats as UNKNOWN_METHOD (pre-PR/skewed daemon)", async (_t) => {
+  // Version-skew guard: a still-running pre-PR daemon (deferred self-restart
+  // while tasks are running/queued) rejects task.stats as UNKNOWN_METHOD
+  // before dispatchRequest's finally ever runs maybeRestart(). The CLI must
+  // not hard-fail during the upgrade window -- it reconstructs the same
+  // aggregated result from task.list on the client side, the way the pre-PR
+  // implementation did. Once the new daemon is healthy, task.stats wins.
+  const home = mkTmpDir(TASKFERRY_DOCTOR_STATS_HOME_PREFIX);
+  const calls = [];
+  const client = {
+    request: async (method, params) => {
+      calls.push({ method, params });
+      if (method === TASK_STATS_METHOD) {
+        const error = new Error("unknown method: task.stats\nhelp: use one of: ...");
+        error.code = "UNKNOWN_METHOD";
+        throw error;
+      }
+      if (method === TASK_LIST_METHOD) {
+        return {
+          counts: { queued: 0, running: 0, done: 1, crashed: 1, cancelled: 0, unknown: 0 },
+          tasks: [
+            { id: "a", status: "done", model: "m1", startedAt: "2026-08-01T11:00:00.000Z", directory: home, failureReason: null },
+            { id: "b", status: "crashed", model: "m1", startedAt: "2026-08-01T11:30:00.000Z", directory: home, failureReason: "no_output_timeout" },
+          ],
+        };
+      }
+      throw new Error(`unexpected request: ${method}`);
+    },
+  };
+  const runShellCommand = async () => ({ stdout: "", stderr: "", code: 0 });
+
+  const result = await runCommand("doctor", { stats: true }, { homeDirectory: home, env: {}, client, runShellCommand });
+
+  assert.deepEqual(calls.map((c) => c.method), [TASK_STATS_METHOD, TASK_LIST_METHOD]);
+  assert.equal(result.byModel.length, 1);
+  assert.equal(result.byModel[0].model, "m1");
+  assert.equal(result.byModel[0].dispatches, 2);
+  assert.equal(result.byModel[0].doneRate, "50.0%");
+  assert.equal(result.byModel[0].crashRate, "50.0%");
+  assert.equal(result.statusMix.overall.total, 2);
+});
+
+test("doctor --stats surfaces a non-UNKNOWN_METHOD error from task.stats instead of falling back", async (_t) => {
+  // The fallback only catches the version-skew UNKNOWN_METHOD case -- a
+  // generic request failure (server busy, connection drop, INVALID_PARAMS)
+  // must propagate, not silently retry with a different RPC.
+  const home = mkTmpDir(TASKFERRY_DOCTOR_STATS_HOME_PREFIX);
+  const calls = [];
+  const client = {
+    request: async (method) => {
+      calls.push(method);
+      if (method === TASK_STATS_METHOD) {
+        const error = new Error("daemon has too many requests in flight\nhelp: wait");
+        error.code = "SERVER_BUSY";
+        throw error;
+      }
+      throw new Error(`unexpected request: ${method}`);
+    },
+  };
+  const runShellCommand = async () => ({ stdout: "", stderr: "", code: 0 });
+
+  await assert.rejects(
+    runCommand("doctor", { stats: true }, { homeDirectory: home, env: {}, client, runShellCommand }),
+    (error) => error.code === "SERVER_BUSY",
+  );
+  assert.deepEqual(calls, [TASK_STATS_METHOD]);
+});
+
+test("doctor --stats on a daemon with zero tasks returns empty stats, not garbage", async (_t) => {
+  const home = mkTmpDir(TASKFERRY_DOCTOR_STATS_EMPTY_PREFIX);
+  const client = {
+    request: async () => ({
+      byModel: [],
+      failureReasons: [],
+      unknownBacklog: { total: 0, tasks: [] },
+      computedAt: TASK_STATS_COMPUTED_AT,
+      statusMix: { overall: { queued: 0, running: 0, done: 0, crashed: 0, cancelled: 0, unknown: 0, total: 0 }, last24h: {}, last7d: {} },
+      trend: { window: "24h", current: {}, previous: {}, direction: "unknown" },
+    }),
+  };
+  const runShellCommand = async () => ({ stdout: "", stderr: "", code: 0 });
+
+  const result = await runCommand("doctor", { stats: true }, { homeDirectory: home, env: {}, client, runShellCommand });
+
+  assert.equal(result.statusMix.overall.total, 0);
+  assert.deepEqual(result.byModel, []);
+  assert.deepEqual(result.failureReasons, []);
+});
+
+test("doctor without --stats does not call task.list or task.stats", async (_t) => {
+  const home = mkTmpDir(TASKFERRY_DOCTOR_STATS_HOME_PREFIX);
+  const calledMethods = [];
+  const client = {
+    request: async (method) => {
+      calledMethods.push(method);
+      return { healthy: true, pid: 1, version: 1 };
+    },
+  };
+  const runShellCommand = async () => ({ stdout: "", stderr: "", code: 0 });
+
+  await runCommand("doctor", {}, { homeDirectory: home, env: {}, client, runShellCommand });
+
+  assert.ok(!calledMethods.includes(TASK_LIST_METHOD));
+  assert.ok(!calledMethods.includes(TASK_STATS_METHOD));
 });
 
 test("accept calls task.accept via the client", async () => {

@@ -42,7 +42,7 @@ jobs:
 
   integration:
     # Fork PRs don't get repo secrets (GitHub withholds them by design), so
-    # MINIMAX_API_KEY would be empty there and every dispatch would fail on
+    # OPENROUTER_API_KEY would be empty there and every dispatch would fail on
     # auth rather than on anything the PR actually changed. Runs only for
     # same-repo pushes/PRs, where the secret is actually available.
     if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
@@ -86,10 +86,7 @@ jobs:
           sudo ninja -C build install
           bwrap --help | grep -q -- --overlay-src
 
-      - name: Install pi CLI
-        run: npm install -g @earendil-works/pi-coding-agent
-
       - name: Run integration (real CLI + daemon + live dispatch, no mocks)
         env:
-          MINIMAX_API_KEY: ${{ secrets.MINIMAX_API_KEY }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
         run: npm run test:integration

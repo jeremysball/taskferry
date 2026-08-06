@@ -1,0 +1,42 @@
+# Review package: a45a4c5..e4bcc16
+
+## Commits
+e4bcc16 docs(sourcemap): document pretty.js and the writeToon TTY/non-TTY split
+
+## Files changed
+ docs/sourcemap.md | 7 +++++--
+ 1 file changed, 5 insertions(+), 2 deletions(-)
+
+## Diff
+diff --git a/docs/sourcemap.md b/docs/sourcemap.md
+index 4d89782..004f065 100644
+--- a/docs/sourcemap.md
++++ b/docs/sourcemap.md
+@@ -18,22 +18,25 @@ cli.js          entrypoint: parses process.argv, dispatches to a command,
+                         owns one TaskManager, dispatches event.subscribe
+         -> tasks.js      the task lifecycle: dispatch/cancel/status/poll/
+                           list/result/tail/summarize/advisor, state
+                           persistence, watchdogs, queueing
+         -> protocol.js   RPC envelope shape, PROTOCOL_VERSION, method list
+         -> events.js     per-daemon event sequencing/emission for watch
+         -> activity.js   cached narration-to-summary snapshots (the model
+                           call behind --mode activity / watch --summaries)
+         -> state-lock.js cross-process file lock; guards
+                            daemon auto-start race
+-  -> output.js     TOON formatting, lean field projection, MCP-era hint
+-                    migration (taskferry_dispatch -> taskferry dispatch)
++  -> output.js     lean field projection, TOON encode (non-TTY) / pretty.js
++                    render (TTY), MCP-era hint migration
++                    (taskferry_dispatch -> taskferry dispatch)
++    -> pretty.js   shape-based "minimal accent" renderer for a real
++                    terminal
+ opencode-plugin.js  native OpenCode plugin: calls client.js directly,
+                      not through cli.js
+ ```
+ 
+ `src/tasks.js` (5294 lines) is the largest file by a wide margin and does
+ the real work; everything above it is thin. If a bug report doesn't
+ obviously belong to args parsing or output formatting, start there.
+ 
+ ## File-by-file
+ 

@@ -348,9 +348,22 @@ describe("piExecutor().normalizeLogEvent", () => {
     assert.equal(ex.normalizeLogEvent({ type: "turn_end", message: {} }), null);
   });
 
-  test("tool_execution_start and tool_execution_update produce no event", () => {
-    assert.equal(ex.normalizeLogEvent({ type: "tool_execution_start", toolCallId: "c1", toolName: "bash", args: { command: "echo hi" } }), null);
-    assert.equal(ex.normalizeLogEvent({ type: "tool_execution_update", toolCallId: "c1", toolName: "bash", partialResult: { content: [] } }), null);
+  test("tool_execution_start and tool_execution_update produce a minimal tool_progress heartbeat, not a full tool_use event", () => {
+    // Previously these returned null (dropped entirely), so a single
+    // long-running tool call produced zero log growth for its whole
+    // duration -- only tool_execution_end ever wrote anything. Now they
+    // write a minimal marker so the no-output watchdog sees real activity
+    // while a slow tool is still in flight, without inflating narration
+    // with a full input/output payload the way normalizeToolExecutionEnd's
+    // tool_use event does.
+    assert.deepEqual(
+      ex.normalizeLogEvent({ type: "tool_execution_start", toolCallId: "c1", toolName: "bash", args: { command: "echo hi" } }),
+      { type: "tool_progress", part: { type: "tool-progress", tool: "bash", toolCallId: "c1" } }
+    );
+    assert.deepEqual(
+      ex.normalizeLogEvent({ type: "tool_execution_update", toolCallId: "c1", toolName: "bash", partialResult: { content: [] } }),
+      { type: "tool_progress", part: { type: "tool-progress", tool: "bash", toolCallId: "c1" } }
+    );
   });
 
   test("tool_execution_end maps to a single tool_use event with lowercase tool name", () => {

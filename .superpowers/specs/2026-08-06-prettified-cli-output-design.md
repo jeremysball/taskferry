@@ -159,10 +159,15 @@ colors ndjson output.
 
 ### Error output
 
-`writeError()` (also in `output.js`, used for the top-level CLI error path)
-is out of scope for the shape-based renderers above — it already has its own
-formatting (`error:`/`help:` line extraction). Not addressed by this design;
-flagged here so it isn't assumed to be silently covered.
+`writeError()` (also in `output.js`) calls `writeToon(errorValue(error), io)`
+just like every command handler — there's no separate error code path to
+design for. `errorValue()`'s `{error, help}` shape doesn't match the
+grouped-list/doctor/stats shapes, so on a TTY it falls through to the
+light-touch fallback renderer automatically: bold `error`/`help` labels
+instead of today's raw `error: ...` / `help: ...` TOON lines. That's a
+real, intentional visual change (consistent with the "light touch
+everywhere" goal), not an oversight — call it out during implementation
+rather than let it land as an unreviewed side effect.
 
 ## Testing
 

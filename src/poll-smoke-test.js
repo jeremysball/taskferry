@@ -37,7 +37,7 @@ function stopDaemon() {
 }
 
 console.log("== case 1: taskferry wait resolves on real completion (short task, long-ish cap) ==");
-const d1 = taskferry(["dispatch", "--prompt", "Reply with the word PONG and nothing else.", "--directory", dirArg, "--model", "minimax/MiniMax-M3"]);
+const d1 = taskferry(["dispatch", "--prompt", "Reply with the word PONG and nothing else.", "--directory", dirArg, "--model", "opencode-go/minimax-m3"]);
 const t1Start = Date.now();
 const w1 = taskferry(["wait", d1.id, "--timeout", "30000"]);
 const t1Elapsed = Date.now() - t1Start;
@@ -48,7 +48,7 @@ const d2 = taskferry([
   "dispatch",
   "--prompt", "Run 'sleep 30' via bash, then reply SLEEP_DONE. Do not shorten the sleep duration.",
   "--directory", dirArg,
-  "--model", "minimax/MiniMax-M3",
+  "--model", "opencode-go/minimax-m3",
 ]);
 const t2Start = Date.now();
 const w2 = taskferry(["wait", d2.id, "--timeout", "3000"]);

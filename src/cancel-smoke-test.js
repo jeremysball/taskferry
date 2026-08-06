@@ -60,7 +60,7 @@ const dispatched = taskferry([
   "dispatch",
   "--prompt", "Run 'sleep 60' via bash, then reply SLEEP_DONE. Do not shorten the sleep duration.",
   "--directory", dirArg,
-  "--model", "minimax/MiniMax-M3",
+  "--model", "opencode-go/minimax-m3",
 ]);
 console.log(dispatched);
 const taskId = dispatched.id;

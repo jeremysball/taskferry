@@ -178,7 +178,7 @@ describe("changeset extraction at settlement", () => {
 });
 
 describe("changeset extraction at settlement: overlay-mount-busy reclassification", () => {
-  test("reclassifies a real no_output_timeout crash as overlay_mount_busy when the bwrap overlay-busy message is the real cause", async () => {
+  test("reclassifies a real no_output_timeout_dead_spawn crash as overlay_mount_busy when the bwrap overlay-busy message is the real cause", async () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "axi-overlay-busy-dir-"));
     const overlayTmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "axi-overlay-busy-tmp-"));
     const bwrapMessage =
@@ -212,7 +212,7 @@ describe("changeset extraction at settlement: overlay-mount-busy reclassificatio
     const result = mgr.dispatch({ prompt: "hello", directory });
     // Let the watchdog fire first, exactly like the real crash: the child
     // never produces output (bwrap is stuck failing to mount), the watchdog
-    // SIGTERMs it and stamps failureReason: "no_output_timeout" BEFORE the
+    // SIGTERMs it and stamps failureReason: "no_output_timeout_dead_spawn" BEFORE the
     // exit handler ever runs extractChangesetForTask().
     await new Promise((r) => setTimeout(r, 40));
     assert.equal(mgr.status(result.id).failureReason, "no_output_timeout_dead_spawn", "sanity: the watchdog must have fired first");

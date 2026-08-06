@@ -984,4 +984,35 @@ describe("crash recovery: a genuine step_finish stop overrides a crashed status"
     const s = mgr.status(dispatched.id);
     assert.equal(s.status, "cancelled");
   });
+
+  test("a real step_finish stop reaches recovery even when the watchdog is what actually killed the process (no_output_timeout_stalled)", async () => {
+    // The transcript reached a genuine "stop" before the process hung --
+    // e.g. a stuck provider keep-alive or a cleanup step that never
+    // returns. The generation itself finished; the watchdog only ended a
+    // process that failed to exit afterward, so this still recovers.
+    const child = fakeChild(7404);
+    const killed = [];
+    const mgr = makeManager({
+      spawnFn: () => child,
+      killFn: (pid, signal) => killed.push({ pid, signal }),
+      noOutputTimeoutMs: 20,
+      postOutputNoOutputTimeoutMs: 20,
+      watchdogPollMs: 5,
+    });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), executor: "opencode" });
+    fs.writeFileSync(
+      mgr.status(dispatched.id).logPath,
+      JSON.stringify({ type: "text", part: { messageID: "m1", text: "real final answer" } }) + "\n"
+      + JSON.stringify({ type: "step_finish", part: { messageID: "m1", reason: "stop" } }) + "\n"
+    );
+
+    await new Promise((r) => setTimeout(r, 60));
+    assert.ok(killed.some((k) => k.signal === "SIGTERM"), "the watchdog must have fired on the post-stop hang");
+
+    child.emit("exit", null, "SIGTERM");
+
+    const s = mgr.status(dispatched.id, { full: true });
+    assert.equal(s.status, "done");
+    assert.equal(s.failureReason, "no_output_timeout_stalled");
+  });
 });

@@ -573,8 +573,8 @@ export function isOutsideDirectory(directory, candidate) {
  * @property {(task: Task, executor: import("./executor.js").WorkerExecutor) => void} startRunningWatcher
  * @property {(taskId: string) => void} stopRunningWatcher
  * @property {(taskId: string) => string|null} readSessionIdFromLog
- * @property {(task: Task) => void} evaluateOutputCompleteness
- * @property {(task: Task) => void} attemptCrashRecovery
+ * @property {(task: Task, precomputed?: {message: string, hadExplicitStop: boolean}) => void} evaluateOutputCompleteness
+ * @property {(task: Task) => {message: string, hadExplicitStop: boolean}|null} attemptCrashRecovery
  * @property {(task: Task) => void} extractChangesetForTask
  * @property {(pid: number, signal: NodeJS.Signals) => void} sendSignal
  * @property {{evictTask: (id: string) => void, setSummarySessionId: (srcTaskId: string, sessionId: string) => void, setLastSummarizedWatermark: (srcTaskId: string, bytes: number) => void}} activityCache
@@ -1095,10 +1095,10 @@ function onChildExit(ctx, shared, code, signal) {
   task.exitCode = code;
   task.signal = signal;
   task.endedAt = new Date().toISOString();
-  ctx.attemptCrashRecovery(task);
+  const recoveredState = ctx.attemptCrashRecovery(task);
   const parsedSessionId = ctx.readSessionIdFromLog(task.logPath);
   if (parsedSessionId) task.sessionId = parsedSessionId;
-  if (task.status === "done") ctx.evaluateOutputCompleteness(task);
+  if (task.status === "done") ctx.evaluateOutputCompleteness(task, recoveredState ?? undefined);
   if (task.status === "done" || task.status === "crashed" || task.status === "cancelled") ctx.extractChangesetForTask(task);
   carrySummarySession(ctx, task, parsedSessionId);
   finishChildSettlement(ctx, shared);
@@ -2301,30 +2301,6 @@ function parseNumstatLine(line) {
   const dels = Number(line.slice(firstTab + 1, secondTab));
   if (Number.isNaN(adds) || Number.isNaN(dels)) return null;
   return { additions: adds, deletions: dels };
-}
-
-/**
- * Accumulates one parseable log line's contribution to final-message
- * extraction: text parts by message id, and (when a `step_finish` stop event
- * lands) returns that message id as the final turn.
- * @param {any} evt
- * @param {Map<string, string[]>} textByMessageId
- * @param {string[]} textOrder
- * @returns {string|null}
- */
-function collectFinalMessageLine(evt, textByMessageId, textOrder) {
-  if (evt.type === "text" && evt.part && typeof evt.part.text === "string") {
-    const mid = evt.part.messageID;
-    if (!textByMessageId.has(mid)) {
-      textByMessageId.set(mid, []);
-      textOrder.push(mid);
-    }
-    /** @type {string[]} */ (textByMessageId.get(mid)).push(evt.part.text);
-  }
-  if (evt.type === "step_finish" && evt.part && evt.part.reason === "stop") {
-    return evt.part.messageID;
-  }
-  return null;
 }
 
 // sharing process-wide state with every other test or the real server.
@@ -3850,55 +3826,23 @@ function failureFields(task) {
 
 
 /**
+ * Reads and parses a task's log for its final message, reusing `result()`'s
+ * own `parseTaskLog`/`shapeNarration` pair instead of a second NDJSON
+ * parser -- `parsed.finalMessageId` is already exactly the "did a genuine
+ * step_finish reason 'stop' land" signal `attemptCrashRecovery` needs.
  * @param {string} logPath
  * @returns {{message: string, hadExplicitStop: boolean}}
  */
-function extractFinalMessageDetail(logPath) {
+function readFinalMessageState(logPath) {
   let raw;
   try {
     raw = fs.readFileSync(logPath, "utf8");
   } catch {
     return { message: "", hadExplicitStop: false };
   }
-  /** @type {Map<string, string[]>} */
-  const textByMessageId = new Map();
-  /** @type {string[]} */
-  const textOrder = [];
-  /** @type {string|null} */
-  let finalMessageId = null;
-  for (const line of raw.split("\n")) {
-    if (!line.trim()) continue;
-    /** @type {any} */
-    let evt;
-    let parsed = false;
-    try {
-      evt = JSON.parse(line);
-      parsed = true;
-    } catch {
-      // Not a parseable event line -- not final-message evidence.
-    }
-    if (parsed) {
-      const stepId = collectFinalMessageLine(evt, textByMessageId, textOrder);
-      if (stepId) finalMessageId = stepId;
-    }
-  }
-  // Same fallback rule as result(): the last messageID seen wins if no
-  // explicit step_finish reason "stop" landed (e.g. a crashed run that never
-  // reached one). The settlement-time check uses this same fallback so a
-  // clean exit with no step_finish still gets its final turn inspected.
-  const targetId = finalMessageId ?? textOrder[textOrder.length - 1];
-  const message = targetId && textByMessageId.has(targetId)
-    ? /** @type {string[]} */ (textByMessageId.get(targetId)).join("")
-    : "";
-  return { message, hadExplicitStop: finalMessageId != null };
-}
-
-/**
- * @param {string} logPath
- * @returns {string}
- */
-function extractFinalMessage(logPath) {
-  return extractFinalMessageDetail(logPath).message;
+  const parsed = parseTaskLog(raw, null);
+  const { message } = shapeNarration(parsed, true);
+  return { message, hadExplicitStop: parsed.finalMessageId != null };
 }
 
 /**
@@ -3911,23 +3855,35 @@ function extractFinalMessage(logPath) {
  * happened partway through, rather than cleared to make the task look clean.
  * Only applies to a genuine `status: "crashed"` settlement -- a cancelled
  * task is never reinterpreted as done just because it happened to have
- * produced a final answer before the cancel landed.
+ * produced a final answer before the cancel landed. This also covers a
+ * `no_output_timeout_stalled` crash where the transcript reached "stop" but
+ * the process then hung past the post-output deadline instead of exiting --
+ * the generation genuinely finished, so recovering it to "done" is correct
+ * even though the watchdog is what ended the process.
  * @param {Task} task
+ * @returns {{message: string, hadExplicitStop: boolean}|null} the parsed log
+ *   state when recovery applied, so the caller can hand it to
+ *   `evaluateOutputCompleteness` instead of re-reading the same log again.
  */
 function attemptCrashRecovery(task) {
-  if (task.status !== "crashed") return;
-  const { message, hadExplicitStop } = extractFinalMessageDetail(task.logPath);
-  if (!hadExplicitStop || !message.trim()) return;
+  if (task.status !== "crashed") return null;
+  const state = readFinalMessageState(task.logPath);
+  if (!state.hadExplicitStop || !state.message.trim()) return null;
   task.status = "done";
+  return state;
 }
 
 const STATUS_MARKER_RE = /^Status:\s*(DONE_WITH_CONCERNS|DONE|BLOCKED|NEEDS_CONTEXT)\s*$/m;
 
 /**
  * @param {Task} task
+ * @param {{message: string, hadExplicitStop: boolean}} [precomputed] - reuse
+ *   `attemptCrashRecovery`'s already-parsed state on a recovered task
+ *   instead of re-reading and re-parsing the same log a second time on the
+ *   daemon's synchronous exit path.
  */
-function evaluateOutputCompleteness(task) {
-  const message = extractFinalMessage(task.logPath);
+function evaluateOutputCompleteness(task, precomputed) {
+  const message = (precomputed ?? readFinalMessageState(task.logPath)).message;
   if (!message.trim()) {
     task.incomplete = true;
     return;
@@ -4374,9 +4330,10 @@ function extractChangesetForTaskRecord(finishedTask, ctx) {
     finishedTask.changesetError = err instanceof Error ? err.message : String(err);
     if (OVERLAY_MOUNT_BUSY_PATTERN.test(finishedTask.changesetError)) {
       // The real cause is now known and specific -- always wins over
-      // whatever the exit-path classifier guessed (no_output_timeout,
-      // boot_failure, or nothing), since a generic timeout bucket is
-      // strictly less useful than "the overlay mount itself failed."
+      // whatever the exit-path classifier guessed (no_output_timeout_dead_spawn,
+      // no_output_timeout_stalled, boot_failure, or nothing), since a
+      // generic timeout bucket is strictly less useful than "the overlay
+      // mount itself failed."
       finishedTask.failureReason = "overlay_mount_busy";
       finishedTask.failureDetail = capDetail(finishedTask.changesetError);
     }

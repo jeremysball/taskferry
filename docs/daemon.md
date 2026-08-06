@@ -198,10 +198,14 @@ CLI usage approaches.
   exited non-zero. `failureReason`/`failureDetail` are left in place as a
   record of what happened partway through, so `status: "done"` with a
   non-null `failureReason` means "finished despite a mid-run hiccup," not
-  "nothing went wrong." A watchdog-killed task never reaches this path: by
-  definition it went silent before any stop event, so recovery cannot
-  apply to `no_output_timeout_*` crashes. A cancelled task is never
-  reinterpreted as done this way either.
+  "nothing went wrong." A `no_output_timeout_dead_spawn` crash never reaches
+  this path (by definition it went silent before any stop event), but a
+  `no_output_timeout_stalled` one can: the transcript reached a genuine stop
+  event and the process then hung past the post-output deadline instead of
+  exiting (a stuck provider keep-alive, a cleanup step that never returns).
+  That still recovers to `"done"` — the generation itself finished, the
+  watchdog only ended a process that failed to exit afterward. A cancelled
+  task is never reinterpreted as done this way either.
 - A child that exits non-zero without ever emitting a parseable event (a
   crash during CLI startup, e.g. a malformed provider extension) settles
   with `"boot_failure"` (`"pi_boot_failure"` for `pi`) and a

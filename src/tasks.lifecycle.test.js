@@ -913,7 +913,7 @@ describe("tail()", () => {
   test("a watchdog-killed eventless task shows its raw capture (failureReason does not gate tail)", () => {
     const raw = 'Error: Extension "/x/y.js" blew up at load';
     const mgr = makeManager({
-      tasksFixture: (logDir) => [baseTask({ id: "t1", status: "crashed", failureReason: "no_output_timeout", logPath: path.join(logDir, "t1.ndjson") })],
+      tasksFixture: (logDir) => [baseTask({ id: "t1", status: "crashed", failureReason: "no_output_timeout_dead_spawn", logPath: path.join(logDir, "t1.ndjson") })],
       logs: { "t1.ndjson": raw + "\n" },
     });
     assert.equal(mgr.tail("t1").text, raw);

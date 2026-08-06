@@ -1,6 +1,7 @@
 // src/changeset.js
 import crypto from "node:crypto";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { buildBwrapArgs, buildBwrapBaseArgs } from "./sandbox.js";
@@ -230,7 +231,8 @@ export function resolvePreDispatchHead(directory, runCommand = defaultRunCommand
  * @param {(filePath: string, content: string) => void} [params.writeFileFn]
  * @param {(dirPath: string) => void} [params.mkdirFn]
  * @param {(ms: number) => void} [params.sleepFn] - injectable for tests; real callers get a blocking sleep between retries
- * @returns {{diffPath: string, hasChanges: boolean}}
+ * @param {() => string} [params.scratchDirFn]
+ * @returns {{diffPath: string, hasChanges: boolean, headDrift: null | {from: string, to: string, recovered: boolean|null, conflictDetail: string|null}}}
  * @throws {Error} when the bwrap extraction fails to start or exits non-zero
  */
 export function extractGitDiff({
@@ -248,20 +250,8 @@ export function extractGitDiff({
   writeFileFn = (filePath, content) => fs.writeFileSync(filePath, content, { mode: 0o600 }),
   mkdirFn = (dirPath) => fs.mkdirSync(dirPath, { recursive: true, mode: 0o700 }),
   sleepFn = sleepSync,
+  scratchDirFn = () => path.join(os.tmpdir(), `taskferry-stale-base-${crypto.randomUUID()}`),
 }) {
-  // Fail closed on HEAD drift: `directory` below is a live bind to the real
-  // checkout, not a snapshot from dispatch time. If something else (a manual
-  // checkout, a branch switch, another dispatch) moved that checkout's HEAD
-  // since preDispatchHead was recorded, the diff-cached-against-preDispatchHead
-  // script still runs successfully but compares the wrong trees -- it can
-  // report files as deleted/added that the worker never touched.
-  const preDrift = detectHeadDrift(directory, runCommand, preDispatchHead);
-  if (preDrift) {
-    throw new Error(
-      `error: ${directory}'s HEAD moved from '${preDrift.from}' to '${preDrift.to}' since dispatch\n` +
-      `help: something else changed this directory's checkout while the task was in flight (a manual git checkout, a branch switch, or another process) -- diffing against the original HEAD would compare the wrong trees. Investigate what changed ${directory}, then retry against a stable target (a dedicated worktree avoids this)`
-    );
-  }
   const bwrapArgs = buildBwrapArgs({ directory, stateDir, runtimeDir, homeDir, denyList, overlay, overlayRwBinds, overlayRwFileBinds });
   // The final `exit $rc` propagates the diff's own status: the previous
   // `; git reset` tail made the whole script exit with reset's status, so a
@@ -273,22 +263,20 @@ export function extractGitDiff({
   if (result.error || result.status !== 0) {
     throw new Error(`error: git diff extraction failed for ${directory} (exit ${result.status ?? "null"}): ${(result.stderr || result.error?.message || "unknown error").trim()}`);
   }
-  // Re-check HEAD once more (taskferry#329): runExtractionBwrap's retry loop
-  // above can have absorbed up to 1.3s of backoff on the overlay-mount-busy
-  // race, which is enough time for a concurrent checkout/branch-switch/
-  // dispatch to move HEAD after the pre-retry guard above already passed.
-  // Catching it here, immediately before the diff is persisted, closes that
-  // window instead of silently writing a patch anchored on a stale HEAD.
-  const postDrift = detectHeadDrift(directory, runCommand, preDispatchHead);
-  if (postDrift) {
-    throw new Error(
-      `error: ${directory}'s HEAD moved from '${postDrift.from}' to '${postDrift.to}' since dispatch\n` +
-      `help: something else changed this directory's checkout while the task was in flight (a manual git checkout, a branch switch, or another process) -- diffing against the original HEAD would compare the wrong trees. Investigate what changed ${directory}, then retry against a stable target (a dedicated worktree avoids this)`
-    );
-  }
   mkdirFn(pathDirname(diffPath));
   writeFileFn(diffPath, result.stdout);
-  return { diffPath, hasChanges: result.stdout.trim().length > 0 };
+  // Extraction always completes and the diff is always written -- nothing
+  // about the diff's content depends on live HEAD (see the module-level
+  // "key insight" comment below `resolveHeadDrift`). A drift, if any, is
+  // resolved here rather than aborting: a stale-base diff is still valid
+  // content, `git apply --3way` exists precisely to forward-apply it.
+  const drift = detectHeadDrift(directory, runCommand, preDispatchHead);
+  let headDrift = null;
+  if (drift) {
+    const { recovered, conflictDetail } = resolveHeadDrift({ directory, diffPath, runCommand, currentHead: drift.to, scratchDir: scratchDirFn() });
+    headDrift = { recovered, conflictDetail, from: drift.from, to: drift.to };
+  }
+  return { diffPath, headDrift, hasChanges: result.stdout.trim().length > 0 };
 }
 
 /**

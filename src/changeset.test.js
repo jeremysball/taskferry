@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { overlayPaths, subOverlayPaths, subOverlaySlug, extractGitDiff, resolvePreDispatchHead, buildMergedViewBwrapArgs, extractNonGitDiff, applyChangeset, cleanupOverlay } from "./changeset.js";
+import { overlayPaths, subOverlayPaths, subOverlaySlug, extractGitDiff, resolvePreDispatchHead, buildMergedViewBwrapArgs, extractNonGitDiff, applyChangeset, cleanupOverlay, detectHeadDrift } from "./changeset.js";
 
 // Shared fixture literals lifted to module scope so the sonarjs
 // no-duplicate-string rule stays quiet (each literal now appears once, in
@@ -23,6 +23,8 @@ const TMP_DIR = "/tmp";
 const UPPER_DIR = "/tmp/u";
 const WORK_DIR = "/tmp/w";
 const PRE_DISPATCH_HEAD = "abc123";
+const GIT_NOT_A_REPO_STDERR = "fatal: not a git repository";
+const GIT_NOT_A_REPO_STDERR_NL = "fatal: not a git repository\n";
 const MY_REPO_WT = "/workspace/main-repo/.git/worktrees/my-repo";
 const GIT_CMD = "git";
 const BWRAP_CMD = "bwrap";
@@ -226,7 +228,7 @@ describe("resolvePreDispatchHead()", () => {
   });
 
   test("returns null for a non-git directory", () => {
-    const runCommand = () => ({ status: 128, stdout: "", stderr: "fatal: not a git repository", error: null });
+    const runCommand = () => ({ status: 128, stdout: "", stderr: GIT_NOT_A_REPO_STDERR, error: null });
     assert.equal(resolvePreDispatchHead("/tmp/scratch", runCommand), null);
   });
 
@@ -237,6 +239,23 @@ describe("resolvePreDispatchHead()", () => {
       throw new Error(`unexpected git invocation: ${args.join(" ")}`);
     };
     assert.equal(resolvePreDispatchHead("/repo", runCommand), "4b825dc642cb6eb9a060e54bf8d69288fbee4904");
+  });
+});
+
+describe("detectHeadDrift()", () => {
+  test("returns null when current HEAD matches preDispatchHead", () => {
+    const runCommand = () => ({ status: 0, stdout: "abc123\n", stderr: "", error: null });
+    assert.equal(detectHeadDrift(REPO_DIR, runCommand, PRE_DISPATCH_HEAD), null);
+  });
+
+  test("returns {from, to} when current HEAD has moved", () => {
+    const runCommand = () => ({ status: 0, stdout: "def456\n", stderr: "", error: null });
+    assert.deepEqual(detectHeadDrift(REPO_DIR, runCommand, PRE_DISPATCH_HEAD), { from: PRE_DISPATCH_HEAD, to: "def456" });
+  });
+
+  test("returns null (fail-open) when the HEAD check itself is inconclusive", () => {
+    const runCommand = () => ({ status: 128, stdout: "", stderr: GIT_NOT_A_REPO_STDERR_NL, error: null });
+    assert.equal(detectHeadDrift(REPO_DIR, runCommand, PRE_DISPATCH_HEAD), null);
   });
 });
 
@@ -397,7 +416,7 @@ describe("extraction fail-closed behavior", () => {
   test("extractGitDiff proceeds normally when the HEAD re-check itself can't resolve (git failure)", () => {
     let capturedArgs = null;
     const runCommand = (command, args) => {
-      if (command === "git") return { status: 128, stdout: "", stderr: "fatal: not a git repository\n", error: null };
+      if (command === "git") return { status: 128, stdout: "", stderr: GIT_NOT_A_REPO_STDERR_NL, error: null };
       capturedArgs = args;
       return { status: 0, stdout: SAMPLE_DIFF_X, stderr: "", error: null };
     };

@@ -90,27 +90,25 @@ function runExtractionBwrap(runCommand, args, sleepFn = sleepSync) {
 }
 
 /**
- * Throws if `directory`'s current HEAD has confirmably moved away from
- * `preDispatchHead`. Shared by extractGitDiff's pre-retry guard and its
- * post-retry re-check (taskferry#329): the up-to-1.3s overlay-mount-busy
- * backoff between the two is exactly the window a concurrent HEAD change
- * (a manual checkout, a branch switch, another dispatch) can land in
- * undetected if only the pre-retry check ran. An inconclusive re-check
- * (git failure, non-git target) is not a confirmed drift and falls
- * through, matching the pre-retry guard's own fail-open-on-inconclusive
- * behavior.
+ * Detects whether `directory`'s current HEAD has confirmably moved away from
+ * `preDispatchHead`. Returns `null` when there's no confirmed drift — either
+ * HEAD still matches, or the check itself was inconclusive (a git failure, a
+ * non-git target) — deliberately fail-open on the inconclusive case, same as
+ * this replaced `assertNoHeadDrift`'s behavior. Unlike that function, this
+ * never throws: taskferry changed drift from a fatal abort into something
+ * `extractGitDiff` resolves via a real 3-way apply instead (see
+ * `resolveHeadDrift`).
  * @param {string} directory
  * @param {typeof defaultRunCommand} runCommand
  * @param {string} preDispatchHead
+ * @returns {{from: string, to: string} | null}
  */
-function assertNoHeadDrift(directory, runCommand, preDispatchHead) {
+export function detectHeadDrift(directory, runCommand, preDispatchHead) {
   const currentHead = resolvePreDispatchHead(directory, runCommand);
   if (currentHead !== null && currentHead !== preDispatchHead) {
-    throw new Error(
-      `error: ${directory}'s HEAD moved from '${preDispatchHead}' to '${currentHead}' since dispatch\n` +
-      `help: something else changed this directory's checkout while the task was in flight (a manual git checkout, a branch switch, or another process) -- diffing against the original HEAD would compare the wrong trees. Investigate what changed ${directory}, then retry against a stable target (a dedicated worktree avoids this)`
-    );
+    return { from: preDispatchHead, to: currentHead };
   }
+  return null;
 }
 
 /**
@@ -184,7 +182,13 @@ export function extractGitDiff({
   // since preDispatchHead was recorded, the diff-cached-against-preDispatchHead
   // script still runs successfully but compares the wrong trees -- it can
   // report files as deleted/added that the worker never touched.
-  assertNoHeadDrift(directory, runCommand, preDispatchHead);
+  const preDrift = detectHeadDrift(directory, runCommand, preDispatchHead);
+  if (preDrift) {
+    throw new Error(
+      `error: ${directory}'s HEAD moved from '${preDrift.from}' to '${preDrift.to}' since dispatch\n` +
+      `help: something else changed this directory's checkout while the task was in flight (a manual git checkout, a branch switch, or another process) -- diffing against the original HEAD would compare the wrong trees. Investigate what changed ${directory}, then retry against a stable target (a dedicated worktree avoids this)`
+    );
+  }
   const bwrapArgs = buildBwrapArgs({ directory, stateDir, runtimeDir, homeDir, denyList, overlay, overlayRwBinds, overlayRwFileBinds });
   // The final `exit $rc` propagates the diff's own status: the previous
   // `; git reset` tail made the whole script exit with reset's status, so a
@@ -202,7 +206,13 @@ export function extractGitDiff({
   // dispatch to move HEAD after the pre-retry guard above already passed.
   // Catching it here, immediately before the diff is persisted, closes that
   // window instead of silently writing a patch anchored on a stale HEAD.
-  assertNoHeadDrift(directory, runCommand, preDispatchHead);
+  const postDrift = detectHeadDrift(directory, runCommand, preDispatchHead);
+  if (postDrift) {
+    throw new Error(
+      `error: ${directory}'s HEAD moved from '${postDrift.from}' to '${postDrift.to}' since dispatch\n` +
+      `help: something else changed this directory's checkout while the task was in flight (a manual git checkout, a branch switch, or another process) -- diffing against the original HEAD would compare the wrong trees. Investigate what changed ${directory}, then retry against a stable target (a dedicated worktree avoids this)`
+    );
+  }
   mkdirFn(pathDirname(diffPath));
   writeFileFn(diffPath, result.stdout);
   return { diffPath, hasChanges: result.stdout.trim().length > 0 };

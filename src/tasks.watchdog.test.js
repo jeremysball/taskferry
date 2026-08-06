@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { createTaskManager } from "./tasks.js";
-import { makeManager, fakeChild, baseTask, DEFAULT_SUMMARY_MODEL, FINAL_ANSWER, STATUS_DONE_RE, QUOTA_ERROR } from "./tasks.test-helpers.js";
+import { trackManager, makeManager, fakeChild, baseTask, DEFAULT_SUMMARY_MODEL, FINAL_ANSWER, STATUS_DONE_RE, QUOTA_ERROR, mkdtempTracked } from "./tasks.test-helpers.js";
 
 const STATUS_DONE_TEXT = "Status: DONE";
 
@@ -245,17 +245,17 @@ describe("output-completeness check at settlement time: validation, originSessio
 
   test("incomplete and finalMarker survive a daemon restart via tasks.json", () => {
     const child = fakeChild();
-    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-restart-"));
+    const stateDir = mkdtempTracked("axi-tasks-restart-");
     const logDir = path.join(stateDir, "logs");
     fs.mkdirSync(logDir, { recursive: true });
 
-    const mgr1 = createTaskManager({
+    const mgr1 = trackManager(createTaskManager({
       stateDir,
       sandboxEnabled: false,
       spawnFn: () => child,
       killFn: () => {},
       listModelsFn: () => `${DEFAULT_SUMMARY_MODEL}\n`,
-    });
+    }));
     const dispatched = mgr1.dispatch({
       prompt: "hi",
       directory: os.tmpdir(),
@@ -270,13 +270,13 @@ describe("output-completeness check at settlement time: validation, originSessio
     assert.equal(mgr1.status(dispatched.id).incomplete, true);
     mgr1.flushPersist();
 
-    const mgr2 = createTaskManager({
+    const mgr2 = trackManager(createTaskManager({
       stateDir,
       sandboxEnabled: false,
       spawnFn: () => { throw new Error("not used"); },
       killFn: () => {},
       listModelsFn: () => `${DEFAULT_SUMMARY_MODEL}\n`,
-    });
+    }));
     const reloaded = mgr2.status(dispatched.id);
     assert.equal(reloaded.status, "done");
     assert.equal(reloaded.incomplete, true);
@@ -357,17 +357,17 @@ describe("finalStatus: parsed closing Status: marker at settlement", () => {
 
   test("finalStatus survives a daemon restart via tasks.json", () => {
     const child = fakeChild();
-    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-finalstatus-"));
+    const stateDir = mkdtempTracked("axi-tasks-finalstatus-");
     const logDir = path.join(stateDir, "logs");
     fs.mkdirSync(logDir, { recursive: true });
 
-    const mgr1 = createTaskManager({
+    const mgr1 = trackManager(createTaskManager({
       stateDir,
       sandboxEnabled: false,
       spawnFn: () => child,
       killFn: () => {},
       listModelsFn: () => `${DEFAULT_SUMMARY_MODEL}\n`,
-    });
+    }));
     const dispatched = mgr1.dispatch({
       prompt: "hi",
       directory: os.tmpdir(),
@@ -380,13 +380,13 @@ describe("finalStatus: parsed closing Status: marker at settlement", () => {
     assert.equal(mgr1.status(dispatched.id).finalStatus, "DONE");
     mgr1.flushPersist();
 
-    const mgr2 = createTaskManager({
+    const mgr2 = trackManager(createTaskManager({
       stateDir,
       sandboxEnabled: false,
       spawnFn: () => { throw new Error("not used"); },
       killFn: () => {},
       listModelsFn: () => `${DEFAULT_SUMMARY_MODEL}\n`,
-    });
+    }));
     const reloaded = mgr2.status(dispatched.id);
     assert.equal(reloaded.status, "done");
     assert.equal(reloaded.finalStatus, "DONE");

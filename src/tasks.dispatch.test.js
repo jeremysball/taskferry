@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { createTaskManager } from "./tasks.js";
-import { makeManager, fakeChild, LUNA_MODEL, MIMIMAX_MODEL, SOL_MODEL, UNUSED_TMP, SPAWN_OPENCODE_ENOENT } from "./tasks.test-helpers.js";
+import { trackManager, makeManager, fakeChild, LUNA_MODEL, MIMIMAX_MODEL, SOL_MODEL, UNUSED_TMP, SPAWN_OPENCODE_ENOENT, mkdtempTracked } from "./tasks.test-helpers.js";
 
 describe("dispatch() lifecycle, driven through an injected spawnFn (no real opencode process)", () => {
   test("passes the right argv and spawn options through to spawnFn", () => {
@@ -140,13 +140,12 @@ describe("dispatch() lifecycle, driven through an injected spawnFn (no real open
     assert.equal(mgr.status(dispatched.id).promptTotalChars, 500);
   });
 
-  test("normalizes the task directory before persistence and event emission", (t) => {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-directory-"));
+  test("normalizes the task directory before persistence and event emission", () => {
+    const root = mkdtempTracked("axi-tasks-directory-");
     const realDirectory = path.join(root, "real");
     const linkedDirectory = path.join(root, "linked");
     fs.mkdirSync(realDirectory);
     fs.symlinkSync(realDirectory, linkedDirectory, "dir");
-    t.after(() => fs.rmSync(root, { recursive: true, force: true }));
     const events = [];
     const child = fakeChild();
     const mgr = makeManager({ spawnFn: () => child, onEvent: (event) => events.push(event) });
@@ -233,8 +232,8 @@ describe("dispatch() lifecycle: exit settlement and spawn-failure cleanup", () =
     // booked against it -- the spawn-error path must run the same
     // extractChangesetForTask() the exit path does.
     let extractCalls = 0;
-    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "axi-spawn-error-extract-"));
-    const overlayTmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "axi-spawn-error-extract-tmp-"));
+    const directory = mkdtempTracked("axi-spawn-error-extract-");
+    const overlayTmpRoot = mkdtempTracked("axi-spawn-error-extract-tmp-");
     const child = fakeChild();
     const mgr = makeManager({
       spawnFn: () => child,
@@ -267,8 +266,8 @@ describe("dispatch() lifecycle: exit settlement and spawn-failure cleanup", () =
     // bootstrap can otherwise leave the overlay under tmp until the startup
     // sweep next runs).
     let cleanedRoot = null;
-    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "axi-spawn-error-advisor-"));
-    const overlayTmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "axi-spawn-error-advisor-tmp-"));
+    const directory = mkdtempTracked("axi-spawn-error-advisor-");
+    const overlayTmpRoot = mkdtempTracked("axi-spawn-error-advisor-tmp-");
     let child = fakeChild();
     const mgr = makeManager({
       spawnFn: (_cmd, _args) => { child = fakeChild(); return child; },
@@ -306,8 +305,8 @@ describe("dispatch() lifecycle: exit settlement and spawn-failure cleanup", () =
     // leaves it alone -- the overlay sits on the tmpfs until a manual
     // reject or a reboot.
     let extractCalls = 0;
-    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "axi-spawn-throw-extract-"));
-    const overlayTmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "axi-spawn-throw-extract-tmp-"));
+    const directory = mkdtempTracked("axi-spawn-throw-extract-");
+    const overlayTmpRoot = mkdtempTracked("axi-spawn-throw-extract-tmp-");
     const mgr = makeManager({
       spawnFn: () => { throw new Error("spawn failed synchronously"); },
       sandboxEnabled: true,
@@ -574,8 +573,8 @@ describe("lowerdir launch stagger (taskferry#318: bwrap overlay-mount EBUSY unde
     const originalEnv = process.env.TASKFERRY_LOWERDIR_STAGGER_MS;
     process.env.TASKFERRY_LOWERDIR_STAGGER_MS = "0";
     try {
-      const mgr = createTaskManager({
-        stateDir: fs.mkdtempSync(path.join(os.tmpdir(), "axi-stagger-disabled-")),
+      const mgr = trackManager(createTaskManager({
+        stateDir: mkdtempTracked("axi-stagger-disabled-"),
         sandboxEnabled: false,
         maxDispatchesPerWindow: 10,
         dispatchWindowMs: 60000,
@@ -586,7 +585,7 @@ describe("lowerdir launch stagger (taskferry#318: bwrap overlay-mount EBUSY unde
           return child;
         },
         killFn: () => {},
-      });
+      }));
 
       mgr.dispatch({ prompt: "first", directory: os.tmpdir() });
       const second = mgr.dispatch({ prompt: "second", directory: os.tmpdir() });
@@ -665,7 +664,7 @@ describe("active-task concurrency cap (regressions)", () => {
 
 describe("config file precedence (maxConcurrentTasks)", () => {
   function managerWithLimit(t, { env, config }) {
-    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-cfg-precedence-"));
+    const stateDir = mkdtempTracked("axi-cfg-precedence-");
     const children = [];
     const originalEnv = process.env.TASKFERRY_MAX_CONCURRENT_TASKS;
     if (env === undefined) delete process.env.TASKFERRY_MAX_CONCURRENT_TASKS;
@@ -674,7 +673,7 @@ describe("config file precedence (maxConcurrentTasks)", () => {
       if (originalEnv === undefined) delete process.env.TASKFERRY_MAX_CONCURRENT_TASKS;
       else process.env.TASKFERRY_MAX_CONCURRENT_TASKS = originalEnv;
     });
-    const manager = createTaskManager({
+    const manager = trackManager(createTaskManager({
       stateDir,
       config,
       sandboxEnabled: false,
@@ -684,7 +683,7 @@ describe("config file precedence (maxConcurrentTasks)", () => {
         return child;
       },
       killFn: () => {},
-    });
+    }));
     t.after(() => {
       for (const child of children) child.emit("exit", null, "SIGTERM");
     });

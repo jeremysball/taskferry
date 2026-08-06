@@ -1,5 +1,5 @@
 // src/changeset.integration.test.js -- new file
-import { test, describe } from "node:test";
+import { test, describe, after } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -7,6 +7,12 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { buildBwrapArgs, checkOverlaySupport } from "./sandbox.js";
 import { applyChangeset, cleanupOverlay, extractGitDiff, extractNonGitDiff, overlayPaths, resolveHeadDrift, resolvePreDispatchHead, subFilePaths, subOverlayPaths } from "./changeset.js";
+
+const trackedTmpDirs = [];
+after(() => {
+  for (const d of trackedTmpDirs) fs.rmSync(d, { recursive: true, force: true });
+});
+
 
 // Fixture literals lifted to module scope so the sonarjs
 // no-duplicate-string rule stays quiet (each appears once, in its constant)
@@ -40,8 +46,11 @@ function runInOverlay({ directory, overlay, overlayRwBinds = [], overlayRwFileBi
 describe("overlay round trips (real bwrap)", () => {
   test("git target: sandboxed write + commit extracts as one flattened diff, applies, cleans up", skip ? undefined : () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "axi-int-git-"));
+    trackedTmpDirs.push(directory);
     const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), TMP_ROOT_PREFIX));
+    trackedTmpDirs.push(tmpRoot);
     const runtimeDir = fs.mkdtempSync(path.join(os.tmpdir(), RUN_ROOT_PREFIX));
+    trackedTmpDirs.push(runtimeDir);
     spawnSync("git", ["init", "-q", directory]);
     fs.writeFileSync(path.join(directory, TRACKED_FILE), "base\n");
     spawnSync("git", ["-C", directory, "add", "-A"]);
@@ -88,15 +97,18 @@ describe("overlay round trips (real bwrap)", () => {
     // (Task 9's overlayRwBinds). Extraction must re-mount those same
     // sub-overlays or the commit's metadata writes are invisible.
     const mainRepo = fs.mkdtempSync(path.join(os.tmpdir(), "axi-int-main-"));
+    trackedTmpDirs.push(mainRepo);
     spawnSync("git", ["init", "-q", mainRepo]);
     fs.writeFileSync(path.join(mainRepo, "f.txt"), "one\n");
     spawnSync("git", ["-C", mainRepo, "add", "-A"]);
     spawnSync("git", ["-C", mainRepo, "-c", GIT_EMAIL, "-c", GIT_NAME, "commit", "-qm", "base"]);
-    const worktree = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "axi-int-wt-")), "wt");
+    const worktree = path.join((() => { const p = fs.mkdtempSync(path.join(os.tmpdir(), "axi-int-wt-")); trackedTmpDirs.push(p); return p; })(), "wt");
     spawnSync("git", ["-C", mainRepo, "worktree", "add", "-q", worktree, "-b", "wt-branch"]);
 
     const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), TMP_ROOT_PREFIX));
+    trackedTmpDirs.push(tmpRoot);
     const runtimeDir = fs.mkdtempSync(path.join(os.tmpdir(), RUN_ROOT_PREFIX));
+    trackedTmpDirs.push(runtimeDir);
     const preDispatchHead = resolvePreDispatchHead(worktree);
     const overlay = overlayPaths("int_subovl", tmpRoot);
     fs.mkdirSync(overlay.upperDir, { recursive: true, mode: 0o700 });
@@ -131,11 +143,12 @@ describe("overlay round trips (real bwrap)", () => {
     // real host path *inside* the bwrap namespace -- the earlier unit tests
     // only assert on the constructed bwrap argv, never a real invocation.
     const mainRepo = fs.mkdtempSync(path.join(os.tmpdir(), "axi-int-filebind-main-"));
+    trackedTmpDirs.push(mainRepo);
     spawnSync("git", ["init", "-q", mainRepo]);
     fs.writeFileSync(path.join(mainRepo, "f.txt"), "one\n");
     spawnSync("git", ["-C", mainRepo, "add", "-A"]);
     spawnSync("git", ["-C", mainRepo, "-c", GIT_EMAIL, "-c", GIT_NAME, "commit", "-qm", "base"]);
-    const worktree = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "axi-int-filebind-wt-")), "wt");
+    const worktree = path.join((() => { const p = fs.mkdtempSync(path.join(os.tmpdir(), "axi-int-filebind-wt-")); trackedTmpDirs.push(p); return p; })(), "wt");
     spawnSync("git", ["-C", mainRepo, "worktree", "add", "-q", worktree, "-b", "wt-filebind-branch"]);
     // pack-refs forces packed-refs into existence so it's the writable file
     // under test, mirroring the real trigger for this whole mechanism.
@@ -145,7 +158,9 @@ describe("overlay round trips (real bwrap)", () => {
     const originalContent = fs.readFileSync(packedRefs, "utf8");
 
     const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), TMP_ROOT_PREFIX));
+    trackedTmpDirs.push(tmpRoot);
     const runtimeDir = fs.mkdtempSync(path.join(os.tmpdir(), RUN_ROOT_PREFIX));
+    trackedTmpDirs.push(runtimeDir);
     const preDispatchHead = resolvePreDispatchHead(worktree);
     const overlay = overlayPaths("int_filebind", tmpRoot);
     fs.mkdirSync(overlay.upperDir, { recursive: true, mode: 0o700 });
@@ -185,8 +200,11 @@ describe("overlay round trips (real bwrap)", () => {
 
   test("non-git target: sandboxed write extracts a diff -ru, rsync-applies, cleans up", skip ? undefined : () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "axi-int-nongit-"));
+    trackedTmpDirs.push(directory);
     const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), TMP_ROOT_PREFIX));
+    trackedTmpDirs.push(tmpRoot);
     const runtimeDir = fs.mkdtempSync(path.join(os.tmpdir(), RUN_ROOT_PREFIX));
+    trackedTmpDirs.push(runtimeDir);
     fs.writeFileSync(path.join(directory, "keep.txt"), "stays\n");
     fs.writeFileSync(path.join(directory, "edit.txt"), "before\n");
 
@@ -226,6 +244,7 @@ describe("overlay round trips (real bwrap)", () => {
 describe("resolveHeadDrift() (real git, no bwrap required)", () => {
   function initRepo() {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-drift-repo-"));
+    trackedTmpDirs.push(dir);
     spawnSync("git", ["init", "-q", dir]);
     fs.writeFileSync(path.join(dir, DRIFT_TEST_FILE), "line1\nline2\nline3\n");
     spawnSync("git", ["-C", dir, "add", "-A"]);
@@ -255,7 +274,7 @@ describe("resolveHeadDrift() (real git, no bwrap required)", () => {
     spawnSync("git", ["-C", dir, "-c", GIT_EMAIL, "-c", GIT_NAME, "commit", "-qm", "unrelated"]);
     const currentHead = resolvePreDispatchHead(dir);
 
-    const scratchDir = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "axi-drift-scratch-")), "wt");
+    const scratchDir = path.join((() => { const p = fs.mkdtempSync(path.join(os.tmpdir(), "axi-drift-scratch-")); trackedTmpDirs.push(p); return p; })(), "wt");
     const result = resolveHeadDrift({ directory: dir, diffPath, currentHead, scratchDir });
     assert.deepEqual(result, { recovered: true, conflictDetail: null });
     assert.equal(fs.existsSync(scratchDir), false, "the scratch worktree must be removed after evaluation");
@@ -280,7 +299,7 @@ describe("resolveHeadDrift() (real git, no bwrap required)", () => {
     spawnSync("git", ["-C", dir, "-c", GIT_EMAIL, "-c", GIT_NAME, "commit", "-qm", "conflicting"]);
     const currentHead = resolvePreDispatchHead(dir);
 
-    const scratchDir = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "axi-drift-scratch-")), "wt");
+    const scratchDir = path.join((() => { const p = fs.mkdtempSync(path.join(os.tmpdir(), "axi-drift-scratch-")); trackedTmpDirs.push(p); return p; })(), "wt");
     const result = resolveHeadDrift({ directory: dir, diffPath, currentHead, scratchDir });
     assert.equal(result.recovered, false);
     assert.ok(result.conflictDetail);

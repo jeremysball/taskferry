@@ -6,7 +6,7 @@ import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { createTaskManager, DEFAULT_SUMMARY_MODEL } from "./tasks.js";
-import { makeManager, fakeChild, AXI_TASKS_ORPHAN, AXI_TASKS_TEST_DIR, AXI_TASKS_CACHE_DIR, TASKS_STATE_FILE, OVERLAY_DIR_PENDING, DIFF_LINE, SPAWN_BWRAP_TIMEOUT, SOL_MODEL, baseTask } from "./tasks.test-helpers.js";
+import { trackManager, makeManager, fakeChild, AXI_TASKS_ORPHAN, AXI_TASKS_TEST_DIR, AXI_TASKS_CACHE_DIR, TASKS_STATE_FILE, OVERLAY_DIR_PENDING, DIFF_LINE, SPAWN_BWRAP_TIMEOUT, SOL_MODEL, baseTask, mkdtempTracked } from "./tasks.test-helpers.js";
 
 const CHECK_GATE_CONFIG = `check = "npm test"\n`;
 const CHECK_GATE_HEAD = "abc123\n";
@@ -78,8 +78,8 @@ function managerWithPendingCheckGateTask(task) {
 describe("changeset extraction at settlement", () => {
   test("extracts a diff and leaves changesetStatus pending for a settled dispatch with an active overlay", () => {
     let extractCommand = null;
-    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "axi-extract-dir-"));
-    const overlayTmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "axi-extract-tmp-"));
+    const directory = mkdtempTracked("axi-extract-dir-");
+    const overlayTmpRoot = mkdtempTracked("axi-extract-tmp-");
     let child;
     const mgr = makeManager({
       spawnFn: (_cmd, _args) => { child = fakeChild(); return child; },
@@ -107,8 +107,8 @@ describe("changeset extraction at settlement", () => {
 
   test("auto-rejects and cleans up an advisor's changeset at settlement", async () => {
     let cleanedRoot = null;
-    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "axi-advisor-extract-dir-"));
-    const overlayTmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "axi-advisor-extract-tmp-"));
+    const directory = mkdtempTracked("axi-advisor-extract-dir-");
+    const overlayTmpRoot = mkdtempTracked("axi-advisor-extract-tmp-");
     let child;
     const mgr = makeManager({
       spawnFn: (_cmd, _args) => { child = fakeChild(); return child; },
@@ -132,13 +132,13 @@ describe("changeset extraction at settlement", () => {
   });
 
   test("re-mounts persisted git-common-dir sub-overlays during extraction", () => {
-    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "axi-extract-git-dir-"));
+    const directory = mkdtempTracked("axi-extract-git-dir-");
     execFileSync("git", ["init", "-q", directory]);
     fs.writeFileSync(path.join(directory, "f.txt"), "base\n");
     execFileSync("git", ["-C", directory, "add", "-A"]);
     execFileSync("git", ["-C", directory, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "base"]);
-    const gitCommonDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-extract-common-"));
-    const gitWorktreeAdminDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-extract-gitdir-"));
+    const gitCommonDir = mkdtempTracked("axi-extract-common-");
+    const gitWorktreeAdminDir = mkdtempTracked("axi-extract-gitdir-");
     let extractArgs = null;
     let child;
     const mgr = makeManager({
@@ -167,8 +167,8 @@ describe("changeset extraction at settlement", () => {
 
   test("auto-resolves a zero-change extraction to accepted and cleans up immediately", () => {
     let cleanedRoot = null;
-    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "axi-empty-extract-dir-"));
-    const overlayTmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "axi-empty-extract-tmp-"));
+    const directory = mkdtempTracked("axi-empty-extract-dir-");
+    const overlayTmpRoot = mkdtempTracked("axi-empty-extract-tmp-");
     let child;
     const mgr = makeManager({
       spawnFn: (_cmd, _args) => { child = fakeChild(); return child; },
@@ -192,7 +192,7 @@ describe("changeset extraction at settlement", () => {
   });
 
   test("extracts a changeset for a cancelled task too", () => {
-    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "axi-cancel-extract-dir-"));
+    const directory = mkdtempTracked("axi-cancel-extract-dir-");
     let child;
     const mgr = makeManager({
       spawnFn: (_cmd, _args) => { child = fakeChild(); return child; },
@@ -216,8 +216,8 @@ describe("changeset extraction at settlement", () => {
   });
 
   test("records extraction errors and keeps the overlay for recovery", () => {
-    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "axi-failed-extract-dir-"));
-    const overlayTmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "axi-failed-extract-tmp-"));
+    const directory = mkdtempTracked("axi-failed-extract-dir-");
+    const overlayTmpRoot = mkdtempTracked("axi-failed-extract-tmp-");
     let cleanedAny = false;
     let child;
     const mgr = makeManager({
@@ -386,8 +386,8 @@ describe("reject() check-gate gating", () => {
 
 describe("changeset extraction at settlement: stale-base drift settlement (taskferry#261)", () => {
   test("a recovered stale-base drift settles pending (git target) as normal and stamps audit fields", () => {
-    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "axi-drift-recovered-dir-"));
-    const overlayTmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "axi-drift-recovered-tmp-"));
+    const directory = mkdtempTracked("axi-drift-recovered-dir-");
+    const overlayTmpRoot = mkdtempTracked("axi-drift-recovered-tmp-");
     let child;
     // First rev-parse call (during dispatch) records preDispatchHead;
     // second call (during settlement drift detection) sees a new SHA.
@@ -425,8 +425,8 @@ describe("changeset extraction at settlement: stale-base drift settlement (taskf
   });
 
   test("an unrecovered (genuinely conflicting) stale-base drift auto-rejects and releases the overlay", () => {
-    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "axi-drift-conflict-dir-"));
-    const overlayTmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "axi-drift-conflict-tmp-"));
+    const directory = mkdtempTracked("axi-drift-conflict-dir-");
+    const overlayTmpRoot = mkdtempTracked("axi-drift-conflict-tmp-");
     let cleanedRoot = null;
     let child;
     let revParseCount = 0;
@@ -464,8 +464,8 @@ describe("changeset extraction at settlement: stale-base drift settlement (taskf
   });
 
   test("a drift the scratch-worktree probe could not evaluate (git worktree add failure) settles pending with the infra failure recorded", () => {
-    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "axi-drift-noeval-dir-"));
-    const overlayTmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "axi-drift-noeval-tmp-"));
+    const directory = mkdtempTracked("axi-drift-noeval-dir-");
+    const overlayTmpRoot = mkdtempTracked("axi-drift-noeval-tmp-");
     let child;
     let revParseCount = 0;
     const mgr = makeManager({
@@ -499,8 +499,8 @@ describe("changeset extraction at settlement: stale-base drift settlement (taskf
 
 describe("changeset extraction at settlement: overlay-mount-busy reclassification", () => {
   test("reclassifies a real no_output_timeout_dead_spawn crash as overlay_mount_busy when the bwrap overlay-busy message is the real cause", async () => {
-    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "axi-overlay-busy-dir-"));
-    const overlayTmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "axi-overlay-busy-tmp-"));
+    const directory = mkdtempTracked("axi-overlay-busy-dir-");
+    const overlayTmpRoot = mkdtempTracked("axi-overlay-busy-tmp-");
     const bwrapMessage =
       "bwrap: Can't make overlay mount on /newroot/workspace with options " +
       "upperdir=/tmp/upper,workdir=/tmp/work,lowerdir=/oldroot/workspace,userxattr: Device or resource busy";
@@ -554,8 +554,8 @@ describe("changeset extraction at settlement: overlay-mount-busy reclassificatio
   // error: ...}, an ETIMEDOUT shape, not a real bwrap die()) never exercised
   // this exact collision and would have silently accepted an empty diff.
   test("a real bwrap status-1 overlay-busy failure on a non-git target still reclassifies as overlay_mount_busy (does not fail open as a zero-change accept)", async () => {
-    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "axi-overlay-busy-nongit-dir-"));
-    const overlayTmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "axi-overlay-busy-nongit-tmp-"));
+    const directory = mkdtempTracked("axi-overlay-busy-nongit-dir-");
+    const overlayTmpRoot = mkdtempTracked("axi-overlay-busy-nongit-tmp-");
     const bwrapMessage =
       "bwrap: Can't make overlay mount on /newroot/workspace with options " +
       "upperdir=/tmp/upper,workdir=/tmp/work,lowerdir=/oldroot/workspace,userxattr: Device or resource busy";
@@ -591,8 +591,8 @@ describe("changeset extraction at settlement: overlay-mount-busy reclassificatio
   });
 
   test("an unrelated extraction error does not touch failureReason", () => {
-    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "axi-overlay-unrelated-dir-"));
-    const overlayTmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "axi-overlay-unrelated-tmp-"));
+    const directory = mkdtempTracked("axi-overlay-unrelated-dir-");
+    const overlayTmpRoot = mkdtempTracked("axi-overlay-unrelated-tmp-");
     let child;
     const mgr = makeManager({
       overlayTmpRoot,
@@ -623,24 +623,24 @@ describe("boot-time sweep of orphaned prompt scratch files in PROMPT_DIR", () =>
   }
 
   test("removes prompt files whose task id is not in the loaded task set", () => {
-    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), AXI_TASKS_ORPHAN));
+    const stateDir = mkdtempTracked(AXI_TASKS_ORPHAN);
     seedPromptDir(stateDir, [
       "oc_orphan_aaaaaaaa.prompt.txt",
       "oc_orphan_bbbbbbbb.prompt.txt",
     ]);
 
-    createTaskManager({
+    trackManager(createTaskManager({
       stateDir,
       spawnFn: () => { throw new Error("not used"); },
       killFn: () => { throw new Error("not used"); },
-    });
+    }));
 
     const remaining = fs.readdirSync(path.join(stateDir, "prompts"));
     assert.deepEqual(remaining, []);
   });
 
   test("removes prompt files that belong to a tracked terminal task", () => {
-    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), AXI_TASKS_ORPHAN));
+    const stateDir = mkdtempTracked(AXI_TASKS_ORPHAN);
     const tracked = "oc_keepme_cccccccc";
     seedPromptDir(stateDir, [`${tracked}.prompt.txt`, "oc_orphan_dddddddd.prompt.txt"]);
     fs.writeFileSync(
@@ -648,18 +648,18 @@ describe("boot-time sweep of orphaned prompt scratch files in PROMPT_DIR", () =>
       JSON.stringify([baseTask({ id: tracked, status: "done" })], null, 2)
     );
 
-    createTaskManager({
+    trackManager(createTaskManager({
       stateDir,
       spawnFn: () => { throw new Error("not used"); },
       killFn: () => { throw new Error("not used"); },
-    });
+    }));
 
     const remaining = fs.readdirSync(path.join(stateDir, "prompts"));
     assert.deepEqual(remaining, []);
   });
 
   test("removes prompt files for persisted tasks already marked 'unknown' after a crash", () => {
-    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), AXI_TASKS_ORPHAN));
+    const stateDir = mkdtempTracked(AXI_TASKS_ORPHAN);
     const crashed = "oc_running_eeeeeeee";
     seedPromptDir(stateDir, [`${crashed}.prompt.txt`]);
     fs.writeFileSync(
@@ -667,32 +667,32 @@ describe("boot-time sweep of orphaned prompt scratch files in PROMPT_DIR", () =>
       JSON.stringify([baseTask({ id: crashed, status: "unknown" })], null, 2)
     );
 
-    createTaskManager({
+    trackManager(createTaskManager({
       stateDir,
       spawnFn: () => { throw new Error("not used"); },
       killFn: () => { throw new Error("not used"); },
-    });
+    }));
 
     const remaining = fs.readdirSync(path.join(stateDir, "prompts"));
     assert.deepEqual(remaining, []);
   });
 
   test("ignores unrelated files in PROMPT_DIR that don't match the prompt-file naming pattern", () => {
-    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), AXI_TASKS_ORPHAN));
+    const stateDir = mkdtempTracked(AXI_TASKS_ORPHAN);
     seedPromptDir(stateDir, ["unrelated.txt", ".DS_Store", "README"]);
 
-    createTaskManager({
+    trackManager(createTaskManager({
       stateDir,
       spawnFn: () => { throw new Error("not used"); },
       killFn: () => { throw new Error("not used"); },
-    });
+    }));
 
     const remaining = fs.readdirSync(path.join(stateDir, "prompts")).sort();
     assert.deepEqual(remaining, [".DS_Store", "README", "unrelated.txt"]);
   });
 
   test("removes prompt files for both orphaned and tracked terminal tasks", () => {
-    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), AXI_TASKS_ORPHAN));
+    const stateDir = mkdtempTracked(AXI_TASKS_ORPHAN);
     const tracked = "oc_trackedfffffff";
     seedPromptDir(stateDir, [
       `${tracked}.prompt.txt`,
@@ -704,32 +704,32 @@ describe("boot-time sweep of orphaned prompt scratch files in PROMPT_DIR", () =>
       JSON.stringify([baseTask({ id: tracked, status: "done" })], null, 2)
     );
 
-    createTaskManager({
+    trackManager(createTaskManager({
       stateDir,
       spawnFn: () => { throw new Error("not used"); },
       killFn: () => { throw new Error("not used"); },
-    });
+    }));
 
     const remaining = fs.readdirSync(path.join(stateDir, "prompts"));
     assert.deepEqual(remaining, []);
   });
 
   test("boot-time sweep is a no-op when PROMPT_DIR is empty", () => {
-    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), AXI_TASKS_ORPHAN));
+    const stateDir = mkdtempTracked(AXI_TASKS_ORPHAN);
     seedPromptDir(stateDir, []);
 
-    createTaskManager({
+    trackManager(createTaskManager({
       stateDir,
       spawnFn: () => { throw new Error("not used"); },
       killFn: () => { throw new Error("not used"); },
-    });
+    }));
 
     const remaining = fs.readdirSync(path.join(stateDir, "prompts"));
     assert.deepEqual(remaining, []);
   });
 
   test("removes prompt files for every persisted status after running and queued reload as unknown", () => {
-    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), AXI_TASKS_ORPHAN));
+    const stateDir = mkdtempTracked(AXI_TASKS_ORPHAN);
     const ids = {
       done: "oc_done_00000001",
       crashed: "oc_crash_00000002",
@@ -749,34 +749,34 @@ describe("boot-time sweep of orphaned prompt scratch files in PROMPT_DIR", () =>
       ], null, 2)
     );
 
-    createTaskManager({
+    trackManager(createTaskManager({
       stateDir,
       spawnFn: () => { throw new Error("not used"); },
       killFn: () => { throw new Error("not used"); },
-    });
+    }));
 
     const remaining = fs.readdirSync(path.join(stateDir, "prompts")).sort();
     assert.deepEqual(remaining, []);
   });
 
   test("boot-time sweep creates PROMPT_DIR when it doesn't exist (first daemon boot ever)", () => {
-    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), AXI_TASKS_ORPHAN));
+    const stateDir = mkdtempTracked(AXI_TASKS_ORPHAN);
     // Deliberately don't create PROMPT_DIR; the manager's mkdir loop at
     // line 512 creates it, and the sweep then has nothing to do.
     assert.equal(fs.existsSync(path.join(stateDir, "prompts")), false);
 
-    createTaskManager({
+    trackManager(createTaskManager({
       stateDir,
       spawnFn: () => { throw new Error("not used"); },
       killFn: () => { throw new Error("not used"); },
-    });
+    }));
 
     assert.equal(fs.existsSync(path.join(stateDir, "prompts")), true);
     assert.deepEqual(fs.readdirSync(path.join(stateDir, "prompts")), []);
   });
 
   test("removes every scratch prompt from a mixed orphaned and tracked terminal directory", () => {
-    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), AXI_TASKS_ORPHAN));
+    const stateDir = mkdtempTracked(AXI_TASKS_ORPHAN);
     const tracked = ["oc_track11111111", "oc_track22222222"];
     const orphans = ["oc_orphan_aaaaaaa1", "oc_orphan_aaaaaaa2", "oc_orphan_aaaaaaa3", "oc_orphan_aaaaaaa4"];
     seedPromptDir(stateDir, [
@@ -791,11 +791,11 @@ describe("boot-time sweep of orphaned prompt scratch files in PROMPT_DIR", () =>
       ], null, 2)
     );
 
-    createTaskManager({
+    trackManager(createTaskManager({
       stateDir,
       spawnFn: () => { throw new Error("not used"); },
       killFn: () => { throw new Error("not used"); },
-    });
+    }));
 
     const remaining = fs.readdirSync(path.join(stateDir, "prompts")).sort();
     assert.deepEqual(remaining, []);
@@ -804,7 +804,7 @@ describe("boot-time sweep of orphaned prompt scratch files in PROMPT_DIR", () =>
 
 describe("sweepOrphanedOverlays()", () => {
   test("removes an overlay directory whose task id is unknown to this manager (crash before extraction ever ran)", () => {
-    const overlayTmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "axi-orphan-tmp-"));
+    const overlayTmpRoot = mkdtempTracked("axi-orphan-tmp-");
     fs.mkdirSync(path.join(overlayTmpRoot, "taskferry-cow-oc_gone", "upper", "main"), { recursive: true });
     let cleanedRoot = null;
     makeManager({
@@ -827,7 +827,7 @@ describe("sweepOrphanedOverlays()", () => {
     // another concurrent process's real overlay on a shared host -- see
     // 04d5e48's "stop overlay tests from scanning and acting on real host
     // /tmp".
-    const overlayTmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "axi-legacy-new-root-"));
+    const overlayTmpRoot = mkdtempTracked("axi-legacy-new-root-");
     const legacyRoot = path.join(os.tmpdir(), "taskferry-cow-t_legacy");
     const cleanedRoots = [];
     const mgr = makeManager({
@@ -857,7 +857,7 @@ describe("sweepOrphanedOverlays()", () => {
   });
 
   test("does not sweep an overlay directory whose task still has a pending changeset", () => {
-    const overlayTmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "axi-orphan-tmp-"));
+    const overlayTmpRoot = mkdtempTracked("axi-orphan-tmp-");
     const overlayRoot = path.join(overlayTmpRoot, OVERLAY_DIR_PENDING);
     fs.mkdirSync(path.join(overlayRoot, "upper", "main"), { recursive: true });
     let cleanedAny = false;
@@ -875,14 +875,14 @@ describe("sweepOrphanedOverlays()", () => {
   });
 
   test("does nothing when overlayTmpRoot doesn't exist or is empty", () => {
-    const overlayTmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "axi-orphan-empty-"));
+    const overlayTmpRoot = mkdtempTracked("axi-orphan-empty-");
     assert.doesNotThrow(() => makeManager({ overlayTmpRoot }));
   });
 
   test("sweeps a resolved task overlay under its recorded non-live tmpRoot and persists clearing overlayDirs", () => {
-    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-orphan-resolved-state-"));
-    const overlayTmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "axi-orphan-resolved-overlay-"));
-    const liveOverlayTmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "axi-orphan-live-overlay-"));
+    const stateDir = mkdtempTracked("axi-orphan-resolved-state-");
+    const overlayTmpRoot = mkdtempTracked("axi-orphan-resolved-overlay-");
+    const liveOverlayTmpRoot = mkdtempTracked("axi-orphan-live-overlay-");
     const overlayRoot = path.join(overlayTmpRoot, "taskferry-cow-t_resolved");
     fs.mkdirSync(path.join(overlayRoot, "upper", "main"), { recursive: true });
     const task = {
@@ -898,15 +898,15 @@ describe("sweepOrphanedOverlays()", () => {
     };
     const tasksFile = path.join(stateDir, TASKS_STATE_FILE);
     fs.writeFileSync(tasksFile, JSON.stringify([task], null, 2));
-    const mgr = createTaskManager({
+    const mgr = trackManager(createTaskManager({
       stateDir,
       overlayTmpRoot: liveOverlayTmpRoot,
       sandboxEnabled: false,
-      cacheDir: fs.mkdtempSync(path.join(os.tmpdir(), AXI_TASKS_CACHE_DIR)),
+      cacheDir: mkdtempTracked(AXI_TASKS_CACHE_DIR),
       spawnFn: () => { throw new Error("not used"); },
       killFn: () => {},
       listModelsFn: () => `${DEFAULT_SUMMARY_MODEL}\n`,
-    });
+    }));
 
     assert.equal(fs.existsSync(overlayRoot), false);
     assert.equal("overlayDirs" in mgr.status(task.id), false);
@@ -921,28 +921,28 @@ describe("sweepOrphanedOverlays()", () => {
     // same plain os.tmpdir(), so a second (e.g. restarting) daemon's startup
     // sweep could delete a first daemon's in-flight overlay out from under
     // it even though the two had fully isolated stateDir/runtimeDir.
-    const runtimeDirA = fs.mkdtempSync(path.join(os.tmpdir(), "axi-runtime-a-"));
-    const runtimeDirB = fs.mkdtempSync(path.join(os.tmpdir(), "axi-runtime-b-"));
-    const stateDirA = fs.mkdtempSync(path.join(os.tmpdir(), AXI_TASKS_TEST_DIR));
-    const stateDirB = fs.mkdtempSync(path.join(os.tmpdir(), AXI_TASKS_TEST_DIR));
-    const mgrA = createTaskManager({
+    const runtimeDirA = mkdtempTracked("axi-runtime-a-");
+    const runtimeDirB = mkdtempTracked("axi-runtime-b-");
+    const stateDirA = mkdtempTracked(AXI_TASKS_TEST_DIR);
+    const stateDirB = mkdtempTracked(AXI_TASKS_TEST_DIR);
+    const mgrA = trackManager(createTaskManager({
       stateDir: stateDirA,
       runtimeDir: runtimeDirA,
       sandboxEnabled: false,
-      cacheDir: fs.mkdtempSync(path.join(os.tmpdir(), "axi-cache-a-")),
+      cacheDir: mkdtempTracked("axi-cache-a-"),
       spawnFn: () => { throw new Error("not used"); },
       killFn: () => {},
       listModelsFn: () => `${DEFAULT_SUMMARY_MODEL}\n`,
-    });
-    const mgrB = createTaskManager({
+    }));
+    const mgrB = trackManager(createTaskManager({
       stateDir: stateDirB,
       runtimeDir: runtimeDirB,
       sandboxEnabled: false,
-      cacheDir: fs.mkdtempSync(path.join(os.tmpdir(), "axi-cache-b-")),
+      cacheDir: mkdtempTracked("axi-cache-b-"),
       spawnFn: () => { throw new Error("not used"); },
       killFn: () => {},
       listModelsFn: () => `${DEFAULT_SUMMARY_MODEL}\n`,
-    });
+    }));
     assert.notEqual(mgrA.paths.OVERLAY_TMP_ROOT, mgrB.paths.OVERLAY_TMP_ROOT);
     assert.ok(mgrA.paths.OVERLAY_TMP_ROOT.startsWith(runtimeDirA));
     assert.ok(mgrB.paths.OVERLAY_TMP_ROOT.startsWith(runtimeDirB));

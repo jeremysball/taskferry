@@ -1,12 +1,19 @@
-import { test, describe } from "node:test";
+import { test, describe, after } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { withFileLock, withFileLockAsync } from "./state-lock.js";
 
+const trackedTmpDirs = [];
+after(() => {
+  for (const d of trackedTmpDirs) fs.rmSync(d, { recursive: true, force: true });
+});
+
+
 function tmpLockPath() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-lock-test-"));
+  trackedTmpDirs.push(dir);
   return path.join(dir, "state.lock");
 }
 

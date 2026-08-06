@@ -1,10 +1,9 @@
 import { test, describe, mock } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { createTaskManager } from "./tasks.js";
-import { makeManager, fakeChild, baseTask, INVESTIGATED_TEXT, SOURCE_LOG, LUNA_MODEL, MINIMAX_MODEL, UNUSED_TMP, READING_CONFIG, CONTINUE_FLAG, SRCA_LOG, SRCB_LOG, DID_A, DID_B } from "./tasks.test-helpers.js";
+import { trackManager, makeManager, fakeChild, baseTask, INVESTIGATED_TEXT, SOURCE_LOG, LUNA_MODEL, MINIMAX_MODEL, UNUSED_TMP, READING_CONFIG, CONTINUE_FLAG, SRCA_LOG, SRCB_LOG, DID_A, DID_B, mkdtempTracked } from "./tasks.test-helpers.js";
 
 describe("summarize(): spawn shape, attachment, and snapshot content", () => {
   test("uses --pure and a private attachment", async () => {
@@ -139,7 +138,7 @@ describe("summarize(): listModelsFn source-of-truth and oversized-log snapshot",
     // (hardcoded `opencode models`) defaults. We want to prove the new
     // default is opencodeExecutor().listModelsFn regardless of the
     // configured dispatch-default executor.
-    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-test-"));
+    const stateDir = mkdtempTracked("axi-tasks-test-");
     let piListModelsCalled = false;
     const fakePi = {
       id: "pi",
@@ -159,14 +158,14 @@ describe("summarize(): listModelsFn source-of-truth and oversized-log snapshot",
       normalizeLogEvent: (parsed) => parsed,
       sandboxAuthFile: () => ({ extraRoBinds: [], sandboxedDataHome: UNUSED_TMP, sandboxEnv: {} }),
     };
-    const mgr = createTaskManager({
+    const mgr = trackManager(createTaskManager({
       stateDir,
       sandboxEnabled: false,
       spawnFn: () => fakeChild(),
       killFn: () => {},
       defaultExecutor: fakePi,
       // listModelsFn intentionally omitted -- exercising the real default.
-    });
+    }));
     // On a host with opencode installed, the check will succeed (real
     // `opencode models` output includes the default summary model). On
     // a host without opencode, the check will fail with a "verify that
@@ -189,7 +188,7 @@ describe("summarize(): listModelsFn source-of-truth and oversized-log snapshot",
     // on being able to inject a custom listModelsFn. Verify that
     // explicit injection still works -- just that the new *default* (used
     // when no override is given) is opencode's, not pi's.
-    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-test-"));
+    const stateDir = mkdtempTracked("axi-tasks-test-");
     let injectedCalled = false;
     const fakePi = {
       id: "pi",
@@ -204,7 +203,7 @@ describe("summarize(): listModelsFn source-of-truth and oversized-log snapshot",
       normalizeLogEvent: (parsed) => parsed,
       sandboxAuthFile: () => ({ extraRoBinds: [], sandboxedDataHome: UNUSED_TMP, sandboxEnv: {} }),
     };
-    const mgr = createTaskManager({
+    const mgr = trackManager(createTaskManager({
       stateDir,
       sandboxEnabled: false,
       spawnFn: () => fakeChild(),
@@ -214,7 +213,7 @@ describe("summarize(): listModelsFn source-of-truth and oversized-log snapshot",
         injectedCalled = true;
         return `${DEFAULT_SUMMARY_MODEL}\n`;
       },
-    });
+    }));
     await mgr.checkSummaryModelReady();
     assert.equal(injectedCalled, true, "explicit listModelsFn injection must take precedence over the opencode default");
   });
@@ -257,7 +256,7 @@ describe("summarize(): listModelsFn source-of-truth and oversized-log snapshot",
   });
 });
 
-// DEFAULT_SUMMARY_MODEL is referenced by the createTaskManager()'s default
+// DEFAULT_SUMMARY_MODEL is referenced by the trackManager(createTaskManager())'s default
 // listModelsFn tests below; importing it for that purpose keeps the bare
 // identifier in those call sites from tripping 'no-undef'.
 import { DEFAULT_SUMMARY_MODEL } from "./tasks.js";

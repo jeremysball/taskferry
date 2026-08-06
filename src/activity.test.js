@@ -8,7 +8,7 @@ import { runCli } from "./cli.js";
 import { parseRequestLine } from "./protocol.js";
 import { createTaskManager, DEFAULT_SUMMARY_MODEL } from "./tasks.js";
 import { resolveWorkspaceRoot } from "./paths.js";
-import { fakeChild } from "./tasks.test-helpers.js";
+import { trackManager, fakeChild, mkdtempTracked } from "./tasks.test-helpers.js";
 
 const TASK_ACTIVITY = "task.activity";
 const TASK_STATE = "task.state";
@@ -55,9 +55,8 @@ describe("activity snapshots", () => {
     );
   });
 
-  test("readDeltaNarration returns only the narration appended since fromOffset", async (t) => {
-    const logDir = fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-delta-snap-"));
-    t.after(() => fs.rmSync(logDir, { recursive: true, force: true }));
+  test("readDeltaNarration returns only the narration appended since fromOffset", async () => {
+    const logDir = mkdtempTracked("taskferry-delta-snap-");
     const logPath = path.join(logDir, "log.ndjson");
     const first = JSON.stringify({ type: "text", part: { messageID: "first", text: "Earlier narration" } });
     fs.writeFileSync(logPath, `${first}\n`);
@@ -87,10 +86,10 @@ describe("activity snapshots", () => {
 
 describe("task activity events", () => {
   test("emits state transitions immediately and activity enrichment afterward", async (t) => {
-    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), ACTIVITY_DIR_PREFIX));
+    const stateDir = mkdtempTracked(ACTIVITY_DIR_PREFIX);
     const child = fakeChild();
     const events = [];
-    const manager = createTaskManager({
+    const manager = trackManager(createTaskManager({
       stateDir,
       sandboxEnabled: false,
       spawnFn: () => child,
@@ -98,8 +97,8 @@ describe("task activity events", () => {
       activitySummariesEnabled: false,
       summarizerTimeoutMs: 0,
       onEvent: (event) => events.push(event),
-    });
-    t.after(() => { manager.close(); fs.rmSync(stateDir, { recursive: true, force: true }); });
+    }));
+    t.after(() => manager.close());
 
     const task = manager.dispatch({ prompt: "Check the server", directory: os.tmpdir() });
     await new Promise((resolve) => setImmediate(resolve));
@@ -120,10 +119,10 @@ describe("task activity events", () => {
   });
 
   test("unions a `watch --all` (null-keyed) activitySubscriptions bucket with a task's own directory bucket (taskferry#315)", async (t) => {
-    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), ACTIVITY_DIR_PREFIX));
+    const stateDir = mkdtempTracked(ACTIVITY_DIR_PREFIX);
     const child = fakeChild();
     const events = [];
-    const manager = createTaskManager({
+    const manager = trackManager(createTaskManager({
       stateDir,
       sandboxEnabled: false,
       spawnFn: () => child,
@@ -131,8 +130,8 @@ describe("task activity events", () => {
       activitySummariesEnabled: false,
       summarizerTimeoutMs: 0,
       onEvent: (event) => events.push(event),
-    });
-    t.after(() => { manager.close(); fs.rmSync(stateDir, { recursive: true, force: true }); });
+    }));
+    t.after(() => manager.close());
 
     const directory = os.tmpdir();
     // daemon-server.js's syncActivitySubscriptions() groups a `watch --all`
@@ -153,10 +152,10 @@ describe("task activity events", () => {
   });
 
   test("refreshes running activity only after 4096 more log bytes", async (t) => {
-    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), ACTIVITY_DIR_PREFIX));
+    const stateDir = mkdtempTracked(ACTIVITY_DIR_PREFIX);
     const child = fakeChild();
     const events = [];
-    const manager = createTaskManager({
+    const manager = trackManager(createTaskManager({
       stateDir,
       sandboxEnabled: false,
       spawnFn: () => child,
@@ -166,8 +165,8 @@ describe("task activity events", () => {
       noOutputTimeoutMs: 500,
       watchdogPollMs: 5,
       onEvent: (event) => events.push(event),
-    });
-    t.after(() => { manager.close(); fs.rmSync(stateDir, { recursive: true, force: true }); });
+    }));
+    t.after(() => manager.close());
 
     const task = manager.dispatch({ prompt: "Watch output", directory: os.tmpdir() });
     await new Promise((resolve) => setImmediate(resolve));
@@ -183,10 +182,10 @@ describe("task activity events", () => {
   });
 
   test("publishes one internal summary result without exposing the summary job", async (t) => {
-    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), ACTIVITY_DIR_PREFIX));
+    const stateDir = mkdtempTracked(ACTIVITY_DIR_PREFIX);
     const children = [];
     const events = [];
-    const manager = createTaskManager({
+    const manager = trackManager(createTaskManager({
       stateDir,
       sandboxEnabled: false,
       spawnFn: (_command, args) => {
@@ -203,8 +202,8 @@ describe("task activity events", () => {
       lowerdirStaggerMs: 0,
       onEvent: (event) => events.push(event),
       listModelsFn: () => `${DEFAULT_SUMMARY_MODEL}\n`,
-    });
-    t.after(() => { manager.close(); fs.rmSync(stateDir, { recursive: true, force: true }); });
+    }));
+    t.after(() => manager.close());
     manager.setActivitySummarySubscriptions(1);
 
     const source = manager.dispatch({ prompt: "Inspect the daemon", directory: os.tmpdir() });

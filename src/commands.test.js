@@ -1,10 +1,16 @@
-import { test } from "node:test";
+import { test, after } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { runCommand } from "./commands.js";
 import { UsageError } from "./args.js";
+
+const trackedTmpDirs = [];
+after(() => {
+  for (const d of trackedTmpDirs) fs.rmSync(d, { recursive: true, force: true });
+});
+
 
 // -- Constants --------------------------------------------------------------
 
@@ -57,7 +63,7 @@ const PLAYWRIGHT_MCP_BASE_COMMAND = ["npx", "@anthropic/mcp-server-playwright"];
 // -- Helpers ----------------------------------------------------------------
 
 function mkTmpDir(prefix) {
-  return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix)); trackedTmpDirs.push(dir); return dir;
 }
 
 function mkTmpRoot(prefix) {
@@ -319,7 +325,7 @@ test("home/context resolve their default directory via resolveWorkspaceRoot when
 });
 
 test("home passes an unbounded limit into projectList so homeView sees the true total (regression: double-truncation would silently drop the real count and reveal hint)", async () => {
-  const cwd = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), TASKFERRY_TEST_TMP_PREFIX)));
+  const cwd = fs.realpathSync((() => { const p = fs.mkdtempSync(path.join(os.tmpdir(), TASKFERRY_TEST_TMP_PREFIX)); trackedTmpDirs.push(p); return p; })());
   const tasks = Array.from({ length: 805 }, (_, i) => ({ id: `t${i}`, status: "done", model: "x", startedAt: "2026-01-01T00:00:00.000Z" }));
   const client = { request: async () => ({ directory: cwd, counts: { queued: 0, running: 0, done: 805, crashed: 0, cancelled: 0, unknown: 0 }, tasks }) };
   const result = await runCommand("home", { directory: cwd }, { client, cwd, resolveWorkspaceRoot: () => cwd });
@@ -387,9 +393,8 @@ test("dispatch does NOT resolve via resolveWorkspaceRoot (regression test pinnin
   assert.equal(seenDirectory, cwd);
 });
 
-test("doctor has no warnings when the claude plugin is installed", async (t) => {
+test("doctor has no warnings when the claude plugin is installed", async () => {
   const home = mkTmpDir(TASKFERRY_DOCTOR_HOME_PREFIX);
-  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
   const client = fakeDoctorClient();
   const runShellCommand = pluginInstalledShellCommand();
 
@@ -402,9 +407,8 @@ test("doctor has no warnings when the claude plugin is installed", async (t) => 
   assert.equal(result.warnings, void 0);
 });
 
-test("doctor warns when bwrap is not installed on Linux", async (t) => {
+test("doctor warns when bwrap is not installed on Linux", async () => {
   const home = mkTmpDir(TASKFERRY_DOCTOR_HOME_PREFIX);
-  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
   const client = fakeDoctorClient();
   const runShellCommand = pluginInstalledShellCommand({ bwrap: { status: null, stdout: "", stderr: "", error: { code: "ENOENT" } } });
 
@@ -416,9 +420,8 @@ test("doctor warns when bwrap is not installed on Linux", async (t) => {
   assert.equal(result.info, void 0);
 });
 
-test("doctor has no sandbox warning or info when bwrap is installed on Linux", async (t) => {
+test("doctor has no sandbox warning or info when bwrap is installed on Linux", async () => {
   const home = mkTmpDir(TASKFERRY_DOCTOR_HOME_PREFIX);
-  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
   const client = fakeDoctorClient();
   const runShellCommand = pluginInstalledShellCommand({ bwrap: { status: 0, stdout: "bubblewrap 0.11.2\n", stderr: "", error: null } });
 
@@ -428,9 +431,8 @@ test("doctor has no sandbox warning or info when bwrap is installed on Linux", a
   assert.equal(result.info, void 0);
 });
 
-test("doctor adds an informational note instead of a bwrap check on non-Linux platforms", async (t) => {
+test("doctor adds an informational note instead of a bwrap check on non-Linux platforms", async () => {
   const home = mkTmpDir(TASKFERRY_DOCTOR_HOME_PREFIX);
-  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
   const client = fakeDoctorClient();
   const runShellCommand = (command) => {
     assert.notEqual(command, "bwrap");
@@ -574,8 +576,9 @@ test("advisor auto-attaches a Claude session transcript tail when CLAUDE_CODE_SE
 });
 
 test("advisor fails fast when the transcript exists but extracts to no user/assistant text, instead of silently sending empty context", async () => {
-  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), TASKFERRY_TEST_TMP_PREFIX)));
+  const root = fs.realpathSync((() => { const p = fs.mkdtempSync(path.join(os.tmpdir(), TASKFERRY_TEST_TMP_PREFIX)); trackedTmpDirs.push(p); return p; })());
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-commands-home-"));
+  trackedTmpDirs.push(home);
   const slug = root.split(path.sep).join("-");
   const projectDir = path.join(home, ".claude", "projects", slug);
   fs.mkdirSync(projectDir, { recursive: true });
@@ -764,9 +767,8 @@ test("dispatch proceeds normally when the generated skill copies are in sync", a
   assert.equal(result.id, "oc_1");
 });
 
-test("doctor warns when opencode playwright MCP is checked and not isolated", async (t) => {
+test("doctor warns when opencode playwright MCP is checked and not isolated", async () => {
   const home = mkTmpDir(TASKFERRY_DOCTOR_HOME_PREFIX);
-  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
   const configDir = path.join(home, ".config", "opencode");
   fs.mkdirSync(configDir, { recursive: true });
   fs.writeFileSync(path.join(configDir, "opencode.json"), JSON.stringify({
@@ -785,9 +787,8 @@ test("doctor warns when opencode playwright MCP is checked and not isolated", as
   assert.match(result.warnings[0], /SIGKILL/);
 });
 
-test("doctor warns when claude code playwright MCP is checked and not isolated", async (t) => {
+test("doctor warns when claude code playwright MCP is checked and not isolated", async () => {
   const home = mkTmpDir(TASKFERRY_DOCTOR_HOME_PREFIX);
-  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
   const configPath = path.join(home, "playwright-config.json");
   fs.writeFileSync(configPath, JSON.stringify({ browser: { isolated: false } }));
   fs.writeFileSync(path.join(home, ".claude.json"), JSON.stringify({
@@ -806,9 +807,8 @@ test("doctor warns when claude code playwright MCP is checked and not isolated",
   assert.match(mcpWarning, /SIGKILL/);
 });
 
-test("doctor emits no MCP warning when checked: false for both sides", async (t) => {
+test("doctor emits no MCP warning when checked: false for both sides", async () => {
   const home = mkTmpDir(TASKFERRY_DOCTOR_HOME_PREFIX);
-  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
   const client = fakeDoctorClient();
   const runShellCommand = pluginInstalledShellCommand();
 
@@ -819,9 +819,8 @@ test("doctor emits no MCP warning when checked: false for both sides", async (t)
   assert.equal(result.integrations.playwrightMcpIsolation.claudeCode.checked, false);
 });
 
-test("doctor integrations.playwrightMcpIsolation shape is present when both sides are isolated", async (t) => {
+test("doctor integrations.playwrightMcpIsolation shape is present when both sides are isolated", async () => {
   const home = mkTmpDir(TASKFERRY_DOCTOR_HOME_PREFIX);
-  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
   const configDir = path.join(home, ".config", "opencode");
   fs.mkdirSync(configDir, { recursive: true });
   fs.writeFileSync(path.join(configDir, "opencode.json"), JSON.stringify({

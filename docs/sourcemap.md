@@ -25,8 +25,11 @@ cli.js          entrypoint: parses process.argv, dispatches to a command,
                           call behind --mode activity / watch --summaries)
         -> state-lock.js cross-process file lock; guards
                            daemon auto-start race
-  -> output.js     TOON formatting, lean field projection, MCP-era hint
-                    migration (taskferry_dispatch -> taskferry dispatch)
+  -> output.js     lean field projection, TOON encode (non-TTY) / pretty.js
+                    render (TTY), MCP-era hint migration
+                    (taskferry_dispatch -> taskferry dispatch)
+    -> pretty.js   shape-based "minimal accent" renderer for a real
+                    terminal
 opencode-plugin.js  native OpenCode plugin: calls client.js directly,
                      not through cli.js
 ```

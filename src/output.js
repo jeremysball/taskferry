@@ -347,13 +347,27 @@ function formatRate(rate) {
 }
 
 export function projectDoctorStats(stats) {
+  // Defensive shape guards: a partial / stubbed / version-skewed response
+  // (e.g. the fallback path in commands.js's runDoctorStats that aggregates
+  // a pre-PR `task.list` on the client side, or any future server-side
+  // shape change that lands before the CLI picks it up) should still
+  // surface SOMETHING usable rather than throwing a raw TypeError on
+  // `stats.byModel.map` or `stats.trend.current`. Coerce the missing bits
+  // to their documented empty shapes; the rest of the response
+  // (`statusMix`, `failureReasons`, `unknownBacklog`, `computedAt`) is
+  // already a pass-through via the `...stats` spread.
+  const safeStats = stats && typeof stats === "object" ? stats : {};
+  const byModel = Array.isArray(safeStats.byModel) ? safeStats.byModel : [];
+  const trend = safeStats.trend && typeof safeStats.trend === "object" ? safeStats.trend : {};
+  const trendCurrent = trend.current && typeof trend.current === "object" ? trend.current : {};
+  const trendPrevious = trend.previous && typeof trend.previous === "object" ? trend.previous : {};
   return {
-    ...stats,
-    byModel: stats.byModel.map((entry) => ({ ...entry, doneRate: formatRate(entry.doneRate), crashRate: formatRate(entry.crashRate) })),
+    ...safeStats,
+    byModel: byModel.map((entry) => ({ ...entry, doneRate: formatRate(entry.doneRate), crashRate: formatRate(entry.crashRate) })),
     trend: {
-      ...stats.trend,
-      current: { ...stats.trend.current, crashRate: formatRate(stats.trend.current.crashRate) },
-      previous: { ...stats.trend.previous, crashRate: formatRate(stats.trend.previous.crashRate) },
+      ...trend,
+      current: { ...trendCurrent, crashRate: formatRate(trendCurrent.crashRate) },
+      previous: { ...trendPrevious, crashRate: formatRate(trendPrevious.crashRate) },
     },
   };
 }

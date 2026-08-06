@@ -16,14 +16,22 @@ function toMs(iso) {
 
 /** @returns {Record<string, number>} */
 function emptyStatusMix() {
-  return { queued: 0, running: 0, done: 0, crashed: 0, cancelled: 0, unknown: 0, total: 0 };
+  return { queued: 0, running: 0, done: 0, crashed: 0, cancelled: 0, unknown: 0, other: 0, total: 0 };
 }
 
 /** @param {DoctorStatsRow[]} rows */
 function statusMixFor(rows) {
   const mix = emptyStatusMix();
   for (const row of rows) {
+    // The "other" bucket is the catch-all for an unrecognized status --
+    // `unknown` is reserved for "we lost track of this task after a
+    // daemon restart" (a real, intentional status), so a future status
+    // this version doesn't know about (e.g. a newly-added
+    // "interrupted"/"superseded") can't piggyback on it. Falling through
+    // to `other` keeps `total` honest: every row contributes to exactly
+    // one bucket, and the displayed counts always sum to `total`.
     if (mix[row.status] != null) mix[row.status]++;
+    else mix.other++;
     mix.total++;
   }
   return mix;
@@ -89,11 +97,12 @@ function computeByModel(rows) {
   /** @type {Map<string, DoctorStatsRow[]>} */
   const byModelMap = new Map();
   for (const row of rows) {
-    if (!byModelMap.has(row.model)) byModelMap.set(row.model, []);
+    const modelKey = typeof row.model === "string" ? row.model : "";
+    if (!byModelMap.has(modelKey)) byModelMap.set(modelKey, []);
     // The has() check above guarantees a Map entry exists, but TS can't see
     // that get() and set() are correlated -- non-null assert instead of
     // widening every consumer below to `| undefined`.
-    const modelRows = /** @type {DoctorStatsRow[]} */ (byModelMap.get(row.model));
+    const modelRows = /** @type {DoctorStatsRow[]} */ (byModelMap.get(modelKey));
     modelRows.push(row);
   }
   return [...byModelMap.entries()]
@@ -111,7 +120,24 @@ function computeByModel(rows) {
         dominantFailureReason: dominantReason(modelRows),
       };
     })
-    .sort((a, b) => b.dispatches - a.dispatches || a.model.localeCompare(b.model));
+    .sort((a, b) => b.dispatches - a.dispatches || compareModelName(a.model, b.model));
+}
+
+// Tie-break model names alphabetically. Can crash on a missing model
+// (`String.prototype.localeCompare` throws TypeError on `undefined`/`null`)
+// so a single malformed persisted record would otherwise fail `task.stats`
+// for every caller of the daemon, not just the CLI invocation that touched
+// it. Treat missing as sorts last (its real position is meaningless -- "no
+// model" isn't a sortable value), and let the Model itself be empty string
+// in the output so it's still visibly a distinct row.
+/** @param {unknown} a @param {unknown} b */
+function compareModelName(a, b) {
+  const aMissing = typeof a !== "string" || a.length === 0;
+  const bMissing = typeof b !== "string" || b.length === 0;
+  if (aMissing && bMissing) return 0;
+  if (aMissing) return 1;
+  if (bMissing) return -1;
+  return a.localeCompare(b);
 }
 
 /** @param {DoctorStatsRow[]} rows */

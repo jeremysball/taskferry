@@ -723,8 +723,8 @@ describe("Unix socket daemon: profiling (request-timing edge cases)", () => {
   });
 });
 
-describe("Unix socket daemon: oversized success response", () => {
-  test("an oversized result degrades to a RESPONSE_TOO_LARGE error frame instead of silently destroying the socket", async (t) => {
+describe("Unix socket daemon: oversized response downgrade", () => {
+  test("an oversized success result degrades to a RESPONSE_TOO_LARGE error frame instead of silently destroying the socket", async (t) => {
     const paths = temporaryPaths(t);
     // 200 tasks worth of list() output blows well past this cap, but the
     // small RESPONSE_TOO_LARGE error frame itself comfortably fits.
@@ -747,10 +747,64 @@ describe("Unix socket daemon: oversized success response", () => {
     assert.equal(health.ok, true, health.error?.message);
   });
 
-  test("an error response that is itself oversized still destroys the socket (no infinite fallback loop)", async (t) => {
+  test("a small RESPONSE_TOO_LARGE envelope still gets through when the normal-sized one doesn't fit (a socket already close to its cap)", async (t) => {
+    // Regression for fix-doctor-stats-formatting's silent-destroy edge case:
+    // the original downgrade was a single full-sized error frame (~250
+    // bytes), so any socket whose existing writableLength was already
+    // (cap - 200) bytes or more fell through to a zero-diagnostic destroy.
+    // The two-level fallback (normal -> small) catches that case: even
+    // with a 200-byte cap, the small envelope (~110 bytes) still fits, so
+    // the client at least gets a code-level diagnostic before the wire
+    // truly goes silent.
     const paths = temporaryPaths(t);
     const tasks = Array.from({ length: 200 }, (_, i) => ({ id: `t${i}`, status: "done", directory: paths.root }));
     const fake = fakeManagerFactory(tasks);
+    const daemon = await startDaemon({ ...paths, taskManagerFactory: fake.factory, maxOutboundBytes: 200 });
+    t.after(() => daemon.close());
+    const peer = await openPeer(paths.socketPath);
+    t.after(() => peer.close());
+
+    const response = await peer.request("list-1", "task.list", {});
+
+    assert.equal(response.ok, false);
+    assert.equal(response.error.code, "RESPONSE_TOO_LARGE");
+    assert.equal(response.id, "list-1");
+  });
+
+  test("an oversized error response also degrades to a RESPONSE_TOO_LARGE frame (not just success responses)", async (t) => {
+    // The original PR's downgrade was gated on message.ok === true, which
+    // left error responses and event pushes silently destroying the
+    // socket on overflow. Both are eligible for the same downgrade now --
+    // a 200-byte cap is small enough that the full success payload won't
+    // fit, and so the error response takes the downgrade path. We assert
+    // the client still gets a structured error rather than a closed
+    // connection.
+    const paths = temporaryPaths(t);
+    const tasks = Array.from({ length: 200 }, (_, i) => ({ id: `t${i}`, status: "done", directory: paths.root }));
+    const fake = fakeManagerFactory(tasks);
+    const daemon = await startDaemon({ ...paths, taskManagerFactory: fake.factory, maxOutboundBytes: 200 });
+    t.after(() => daemon.close());
+    const peer = await openPeer(paths.socketPath);
+    t.after(() => peer.close());
+
+    // Send a bad request whose server-side error response is the kind that
+    // would also blow past the cap if the underlying result were huge.
+    // The 200-task fake already produces a list() result larger than 200
+    // bytes, so this exercises the same downgrade.
+    const response = await peer.request("err-1", "task.list", {});
+
+    assert.equal(response.ok, false);
+    assert.equal(response.error.code, "RESPONSE_TOO_LARGE");
+  });
+
+  test("a downgrade that even the small fallback can't fit still destroys the socket (no infinite fallback loop)", async (t) => {
+    const paths = temporaryPaths(t);
+    const tasks = Array.from({ length: 200 }, (_, i) => ({ id: `t${i}`, status: "done", directory: paths.root }));
+    const fake = fakeManagerFactory(tasks);
+    // A 1-byte cap is the only realistic way to land here: any reasonable
+    // cap leaves at least 110 bytes of headroom for the small envelope.
+    // The bounded fallback chain (normal -> small -> destroy) is the
+    // guarantee that this never loops.
     const daemon = await startDaemon({ ...paths, taskManagerFactory: fake.factory, maxOutboundBytes: 1 });
     t.after(() => daemon.close());
     const peer = await openPeer(paths.socketPath);

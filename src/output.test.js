@@ -435,6 +435,45 @@ describe("projectDoctorStats", () => {
     const result = projectDoctorStats(stats());
     assert.equal(result.trend.previous.crashRate, null);
   });
+
+  test("tolerates a missing/non-array byModel without throwing", () => {
+    // A partial / stubbed / version-skewed response (e.g. an old daemon
+    // that returned a different shape, or a stub injected by a test)
+    // shouldn't throw a raw TypeError out of `stats.byModel.map`. The
+    // defensive guard coerces the missing array to [], so the rest of
+    // the response is still surfaced.
+    const result = projectDoctorStats(stats({ byModel: null }));
+    assert.deepEqual(result.byModel, []);
+    assert.equal(result.trend.current.crashRate, "25.0%");
+  });
+
+  test("tolerates a missing/null trend (and missing trend.current/previous) without throwing", () => {
+    // The old code dereferenced stats.trend.current unconditionally; a
+    // partial response would throw TypeError. With the guard, a null
+    // trend degrades to an empty trend object, and crashRate stays
+    // (with `undefined` value, matching formatRate's null/undefined
+    // pass-through) instead of crashing.
+    const result = projectDoctorStats(stats({ trend: null }));
+    assert.ok(result.trend.current);
+    assert.ok(result.trend.previous);
+    assert.equal("crashRate" in result.trend.current, true);
+    assert.equal("crashRate" in result.trend.previous, true);
+  });
+
+  test("tolerates a totally missing/undefined stats payload", () => {
+    // Last-line defensive guard: a caller that wires up a no-op stats
+    // source (or a stub that returned `undefined` for any reason) must
+    // not throw. The function returns an empty-but-shaped object; the
+    // crashRate keys stay present (with `undefined` value, matching
+    // formatRate's null/undefined pass-through) so downstream code that
+    // reads them gets a consistent shape.
+    const result = projectDoctorStats(null);
+    assert.deepEqual(result.byModel, []);
+    assert.ok(result.trend.current);
+    assert.ok(result.trend.previous);
+    assert.equal("crashRate" in result.trend.current, true);
+    assert.equal("crashRate" in result.trend.previous, true);
+  });
 });
 
 function fakeCappedListValue(totalCount) {

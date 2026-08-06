@@ -18,6 +18,7 @@ import { checkBwrapAvailableAsync } from "./sandbox.js";
 import { checkSkills as defaultCheckSkills } from "../scripts/generate-skill.js";
 import { normalizeDirectory, resolveWorkspaceRoot } from "./paths.js";
 import { loadConfig } from "./config.js";
+import { computeDoctorStats } from "./doctor-stats.js";
 import { streamTaskEvents, watchCommand } from "./commands-stream.js";
 import { ADVISOR_CANNED_PROMPT, gatherAdvisorContext } from "./advisor-context.js";
 
@@ -447,8 +448,21 @@ async function runDoctorStats(client) {
   // here: with enough task history the full unfiltered row list alone blows
   // past the daemon's outbound message cap and the connection is silently
   // torn down with no error frame (taskferry#doctor-stats-connection-closed).
-  const stats = await client.request(TASK_STATS_METHOD, {});
-  return projectDoctorStats(stats);
+  try {
+    const stats = await client.request(TASK_STATS_METHOD, {});
+    return projectDoctorStats(stats);
+  } catch (error) {
+    // Version-skew fallback: a still-running pre-PR daemon (whose self-restart
+    // defers while tasks are running/queued) rejects task.stats as
+    // UNKNOWN_METHOD. The PR's stated goal is to eliminate "daemon connection
+    // closed" for `doctor --stats`, so the command must not hard-fail during
+    // the upgrade window -- reconstruct the same aggregated result from
+    // task.list on the client side, the way the pre-PR code path did. Once
+    // the upgrade completes and the daemon restarts, the new path takes over.
+    if (error?.code !== "UNKNOWN_METHOD") throw error;
+    const listed = await client.request(TASK_LIST_METHOD, {});
+    return projectDoctorStats(computeDoctorStats(Array.isArray(listed?.tasks) ? listed.tasks : []));
+  }
 }
 
 async function runDoctor(options, deps) {

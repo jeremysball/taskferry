@@ -4728,11 +4728,21 @@ function listTasks(ctx) {
  * (see MAX_BUFFER_BYTES in daemon-server.js), which silently destroys the
  * socket with no error frame. Only the small aggregated result crosses the
  * wire.
+ *
+ * Filters out `internal: true` rows (the daemon's own activity-summary
+ * children, which `summarize()` spawns with `internal: true` for every
+ * settled user task when `activitySummary` is on) before aggregation -- those
+ * are bookkeeping, not user dispatches, and folding them in would inflate
+ * the dispatch count under the summary model and add a spurious model row.
  * @param {{ensureStateLoaded: () => void, tasks: Map<string, Task>}} ctx
  */
 function statsTasks(ctx) {
   ctx.ensureStateLoaded();
-  const rows = Array.from(ctx.tasks.values()).map(summarizeRow);
+  const rows = [];
+  for (const task of ctx.tasks.values()) {
+    if (task.internal === true) continue;
+    rows.push(summarizeRow(task));
+  }
   return computeDoctorStats(rows);
 }
 

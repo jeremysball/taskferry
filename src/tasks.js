@@ -812,6 +812,10 @@ function createOverlayIfNeeded(ctx, launchInfo, task, role) {
  * Returns the safe `[src, dest]` ro-bind pairs to append. Pure side effect
  * on `task` is intentional -- the gate (Task 5) writes the same field on
  * parse-error and the brief specifies overwrite-not-append semantics.
+ * `denyList` here must be the full (unfiltered) deny-list surface, not the
+ * existence-filtered one used for the actual bwrap mounts -- an overlap is
+ * unsafe regardless of whether the specific path happens to exist on this
+ * host yet.
  * @param {{launchDirectory: string, denyList: string[], stateDir: string, runtimeDir: string, existsFn: (p: string) => boolean, task: Task}} ctx
  * @returns {[string, string][]}
  */
@@ -855,8 +859,14 @@ function buildBwrapBinds(ctx, launchInfo, task, spawnEnv, role) {
   // bwrap's --tmpfs fails ("Read-only file system") if the mount point
   // doesn't already exist under the --ro-bind / / root, so any deny-list
   // entry the user simply doesn't have (e.g. no ~/.aws) must be dropped
-  // before it reaches buildBwrapArgs, not passed through.
-  const denyList = [...defaultDenyList(homeDir, ctx.stateDir), ...ctx.sandboxDenylist].filter(ctx.existsFn);
+  // before it reaches buildBwrapArgs, not passed through. The read_only_paths
+  // safety check below needs the FULL (unfiltered) surface instead -- an
+  // entry that overlaps ~/.ssh is unsafe whether or not ~/.ssh happens to
+  // exist on this particular host yet, and filtering it out here would
+  // silently stop protecting $HOME-level entries on any host that hasn't
+  // created those dotfiles (a fresh CI runner, a new account).
+  const fullDenyList = [...defaultDenyList(homeDir, ctx.stateDir), ...ctx.sandboxDenylist];
+  const denyList = fullDenyList.filter(ctx.existsFn);
   // The executor decides which env var overrides point at its sandboxed data
   // home (opencode: XDG_DATA_HOME; pi: PI_CODING_AGENT_DIR) and which
   // destination to ro-bind the real auth file into, so each executor's bound
@@ -878,7 +888,7 @@ function buildBwrapBinds(ctx, launchInfo, task, spawnEnv, role) {
   /** @type {[string, string][]} */
   const extraRoBinds = [...executorRoBinds];
   if (promptFilePath) extraRoBinds.push([ctx.PROMPT_DIR, ctx.PROMPT_DIR]);
-  extraRoBinds.push(...applyProjectConfigReadOnlyBinds({ launchDirectory, denyList, task, existsFn: ctx.existsFn, stateDir: ctx.stateDir, runtimeDir: ctx.runtimeDir }));
+  extraRoBinds.push(...applyProjectConfigReadOnlyBinds({ launchDirectory, task, denyList: fullDenyList, existsFn: ctx.existsFn, stateDir: ctx.stateDir, runtimeDir: ctx.runtimeDir }));
   /** @type {string[]} */
   const extraRwBinds = [];
   // The root filesystem is read-only bound by default, so the executor's
@@ -4861,14 +4871,17 @@ function startCheckGate(task, ctx) {
   }
   if (!projectConfig.check) return;
 
-  const denyList = [...defaultDenyList(os.homedir(), ctx.stateDir), ...ctx.sandboxDenylist].filter(ctx.existsFn);
+  const fullDenyList = [...defaultDenyList(os.homedir(), ctx.stateDir), ...ctx.sandboxDenylist];
+  const denyList = fullDenyList.filter(ctx.existsFn);
   // Sandbox parity (review finding): the worker's read_only_paths binds and
   // the gate's must be identical, or a check command that reads a
   // read-only-mounted path passes for the worker and fails in the gate (or
   // vice versa). Reuse Task 4's exact validated resolver rather than a
-  // second, potentially-drifting copy of the mount-order safety logic.
+  // second, potentially-drifting copy of the mount-order safety logic. The
+  // safety check needs the FULL deny-list surface (fullDenyList), not the
+  // existence-filtered one -- see buildBwrapBinds's identical comment.
   const { roBinds: readOnlyBinds } = resolveReadOnlyProjectBinds(projectConfig.readOnlyPaths, {
-    protectedPaths: [...denyList, ctx.stateDir, ctx.runtimeDir, task.directory],
+    protectedPaths: [...fullDenyList, ctx.stateDir, ctx.runtimeDir, task.directory],
     existsFn: ctx.existsFn,
   });
   const spawnArgs = buildBwrapArgs({

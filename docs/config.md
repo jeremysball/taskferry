@@ -303,10 +303,10 @@ on `taskferry status <id> --full` and `taskferry result <id> --fields
 ...` is the live channel for *most* of these warnings.
 
 Note that the no-check row ("no `.taskferry.toml` / no `check` key")
-is NOT covered by that surfacing: `summarizeCheckGateFields()`,
-`resultCheckGateFields()`, and `leanCheckGateFields()` each
-explicitly `return {}` (omit `checkStatus` and every other gate
-field) when `checkStatus == null || checkStatus === "none"`, so the
+is NOT covered by that surfacing: `summarizeCheckGateFields()` and
+`resultCheckGateFields()` each explicitly `return {}` (omit
+`checkStatus` and every other gate field) when `checkStatus == null ||
+checkStatus === "none"`, so the
 no-check case carries NO signal on `taskferry status` / `taskferry
 result`, even with `--full`. The only place that row's "loud warning"
 actually surfaces today is the one-line `stderr` message

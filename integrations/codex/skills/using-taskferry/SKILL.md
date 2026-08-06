@@ -98,7 +98,7 @@ fill-in template, so the file is never silently encoded with a guess
 nobody approved. Run it once per repo (or per worktree if each
 worktree wants its own gate), commit the result, and the next dispatch
 picks it up automatically — no daemon restart required. The schema is
-documented in [config.md](../../docs/config.md#taskferrytoml); the gate's accept
+documented in `docs/config.md#taskferrytoml`; the gate's accept
 refusal / `--force` override behavior is in "Verification gate (`accept`
 refusal and `--force`)" under "Verifying A Worker's Claimed Changeset"
 below. `init` never overwrites an existing `.taskferry.toml`.
@@ -180,7 +180,7 @@ the diff has now actually landed.
 
 A repo with a `.taskferry.toml` at its root that declares a `check`
 command (scaffold one with `taskferry init`; see
-[config.md](../../docs/config.md#taskferrytoml) for the schema) runs that command
+`docs/config.md#taskferrytoml` for the schema) runs that command
 automatically inside the worker's copy-on-write overlay at settle. The
 gate's verdict is recorded on the task as `checkStatus` (`none`/`running`/
 `passed`/`failed`/`timeout`/`interrupted`) and surfaces on

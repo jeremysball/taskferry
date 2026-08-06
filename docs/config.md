@@ -310,8 +310,11 @@ checkStatus === "none"`, so the
 no-check case carries NO signal on `taskferry status` / `taskferry
 result`, even with `--full`. The only place that row's "loud warning"
 actually surfaces today is the one-line `stderr` message
-`runAccept()` writes at accept time. The remaining rows
-(timeout / interrupted / unparseable TOML / missing `read_only_paths`
-entry / spawn-error check command) ARE covered — `checkStatus` lands
-on status/result for those, and `projectConfigWarning` carries the
-TOML parse error and the `read_only_paths` missing-entry warning.
+`runAccept()` writes at accept time. The timeout / interrupted /
+spawn-error rows ARE covered by `checkStatus` landing on status/result.
+An unparseable `.taskferry.toml` is different again: `startCheckGate()`
+sets `task.projectConfigWarning` to the parse error and returns before
+ever touching `checkStatus`, which stays at its untouched `"none"`
+default — so that row is covered by `projectConfigWarning`, not by
+`checkStatus`, the same way a missing `read_only_paths` entry is
+covered by `projectConfigWarning` alone.

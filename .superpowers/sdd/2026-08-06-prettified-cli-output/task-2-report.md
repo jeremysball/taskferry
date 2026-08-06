@@ -61,3 +61,17 @@ The brief's tests had three issues that needed fixing to pass (the brief itself 
 ## Concerns
 
 None. The implementation matches the brief's design, all 28 tests pass, and lint is clean. The four test deviations above are straightforward assertion/data fixes that preserve test intent.
+
+## Fix round 1: narrow doctor shape detection
+
+**Commit:** `4d51f40 fix(cli): narrow detectShape's doctor check to avoid colliding with setup's output`
+
+**Problem:** `detectShape()` identified doctor payloads by the presence of a top-level `integrations` key. `src/setup.js`'s result also carries a top-level `integrations: { claude, codex }` key (plus a separate top-level `playwrightMcpIsolation`), which would be misclassified as a doctor report once Task 3 wires `renderPretty()` into `writeToon()`. The doctor renderer would silently drop the `codex` field.
+
+**Fix:** Changed the doctor check from `"integrations" in value` to `value.integrations && "playwrightMcpIsolation" in value.integrations`. Doctor payloads always nest `playwrightMcpIsolation` inside `integrations`; setup payloads have `playwrightMcpIsolation` as a sibling, not a child.
+
+**Test added:** "setup-shaped value (top-level integrations + playwrightMcpIsolation) falls through to fallback, not doctor" — asserts that a setup-shaped payload's `codex` field appears in the output (which the doctor renderer would silently drop).
+
+Extracted `"opencode.json not found"` into a `MCP_UNCHECKED_REASON` constant to satisfy `sonarjs/no-duplicate-string` (now appeared 3 times across tests).
+
+**Verification:** 29/29 tests pass, lint clean.

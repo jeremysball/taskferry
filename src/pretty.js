@@ -214,7 +214,7 @@ function renderStatsReport(value) {
 function detectShape(value) {
   if (value && typeof value === "object" && !Array.isArray(value)) {
     if ("tasks" in value && "counts" in value) return "list";
-    if ("integrations" in value) return "doctor";
+    if (value.integrations && "playwrightMcpIsolation" in value.integrations) return "doctor";
     if ("trend" in value || "byModel" in value) return "stats";
   }
   return "fallback";

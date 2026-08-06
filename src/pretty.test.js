@@ -5,6 +5,7 @@ import { renderPretty } from "./pretty.js";
 const ESC = String.fromCharCode(0x1b);
 const ANSI_RE = new RegExp(`${ESC}\\[[0-9;]*m`, "g");
 const MODEL_MINIMAX = "minimax/MiniMax-M3";
+const MCP_UNCHECKED_REASON = "opencode.json not found";
 function plain(text) {
   return text.replace(ANSI_RE, "");
 }
@@ -48,6 +49,11 @@ describe("renderPretty fallback (light-touch) renderer", () => {
   test("omits an undefined field entirely", () => {
     const out = renderPretty({ id: "oc_1", exitCode: void 0 });
     assert.equal(plain(out), "id  oc_1");
+  });
+
+  test("setup-shaped value (top-level integrations + playwrightMcpIsolation) falls through to fallback, not doctor", () => {
+    const out = plain(renderPretty({ integrations: { claude: { installed: true }, codex: { installed: false } }, playwrightMcpIsolation: { checked: false, reason: MCP_UNCHECKED_REASON } }));
+    assert.ok(out.includes("codex"), out);
   });
 });
 
@@ -136,11 +142,11 @@ describe("renderPretty doctor report renderer", () => {
   test("renders an unchecked (checked: false) check with a neutral glyph, not red", () => {
     const out = renderPretty({
       healthy: true,
-      integrations: { claude: { installed: true }, playwrightMcpIsolation: { opencode: { checked: false, reason: "opencode.json not found" } } },
+      integrations: { claude: { installed: true }, playwrightMcpIsolation: { opencode: { checked: false, reason: MCP_UNCHECKED_REASON } } },
     });
     assert.ok(!out.includes(`\x1b[31m`), out);
     assert.ok(plain(out).includes("? opencode"), out);
-    assert.ok(plain(out).includes("opencode.json not found"), out);
+    assert.ok(plain(out).includes(MCP_UNCHECKED_REASON), out);
   });
 
   test("renders warnings as a yellow-glyph dim-text bulleted block", () => {

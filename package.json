@@ -25,7 +25,9 @@
     "node": ">=16.9"
   },
   "dependencies": {
-    "@toon-format/toon": "^2.3.0"
+    "@toon-format/toon": "^2.3.0",
+    "cli-table3": "^0.6.5",
+    "picocolors": "^1.1.1"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",

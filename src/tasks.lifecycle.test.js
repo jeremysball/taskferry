@@ -1140,13 +1140,22 @@ describe("daemon-restart handling for a check gate that was mid-flight", () => {
     // the fresh re-run) can be live against the same upper/work dir at
     // once. `sendSignal` already swallows ESRCH (nothing there), so this is
     // safe to call unconditionally.
+    //
+    // Round 1 review fix: this test records every killFn and bwrap spawnFn
+    // call into a single shared sequence array (in invocation order) and
+    // asserts the orphan kill precedes the gate re-run -- not just that
+    // both happened. A regression that flipped the order (spawned the new
+    // gate before killing the orphan) would defeat the whole point of the
+    // fix and the old independent-count assertions would still pass.
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "axi-orphan-kill-"));
     fs.writeFileSync(path.join(directory, ".taskferry.toml"), `check = "true"\n`);
     const overlayTmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "axi-orphan-kill-overlay-"));
     const overlayRoot = path.join(overlayTmpRoot, `taskferry-cow-oc_orphankill1`);
     fs.mkdirSync(path.join(overlayRoot, "upper", "main"), { recursive: true });
+    /** @type {string[]} */
+    const sequence = [];
+    /** @type {Array<{pid: number, signal: string}>} */
     const killCalls = [];
-    const spawns = [];
     const mgr = makeManager({
       tasksFixture: [{
         ...baseTask({ id: "oc_orphankill1", directory }),
@@ -1158,16 +1167,19 @@ describe("daemon-restart handling for a check gate that was mid-flight", () => {
         checkGatePid: 12345,
         overlayDirs: { root: overlayRoot, tmpRoot: overlayTmpRoot, upperDir: path.join(overlayRoot, "upper", "main"), workDir: path.join(overlayRoot, "work", "main"), rwBinds: [] },
       }],
-      spawnFn: (cmd, args, opts) => {
+      spawnFn: (cmd, _args, _opts) => {
+        if (cmd === "bwrap") sequence.push("spawn");
         const child = new EventEmitter();
         child.pid = 9002;
         child.unref = () => {};
         child.stdout = new EventEmitter();
         child.stderr = new EventEmitter();
-        spawns.push({ cmd, args, opts, child });
         return child;
       },
-      killFn: (pid, signal) => killCalls.push({ pid, signal }),
+      killFn: (pid, signal) => {
+        sequence.push("kill");
+        killCalls.push({ pid, signal });
+      },
       sandboxEnabled: true,
       overlayEnabled: true,
       checkBwrapAvailableFn: () => ({ checked: true, available: true }),
@@ -1177,8 +1189,16 @@ describe("daemon-restart handling for a check gate that was mid-flight", () => {
     });
     const orphanKill = killCalls.find((k) => k.pid === -12345 && k.signal === "SIGTERM");
     assert.ok(orphanKill, `expected a process-group SIGTERM to -12345 to reap the orphan, got ${JSON.stringify(killCalls)}`);
-    const bwrapSpawns = spawns.filter((s) => s.cmd === "bwrap");
-    assert.equal(bwrapSpawns.length, 1, "the re-run still mounts exactly one fresh bwrap gate over the overlay");
+    const spawns = sequence.filter((e) => e === "spawn");
+    const kills = sequence.filter((e) => e === "kill");
+    assert.equal(kills.length, 1, "the orphan must be reaped exactly once");
+    assert.equal(spawns.length, 1, "the re-run mounts exactly one fresh bwrap gate over the overlay");
+    // The actual fix being verified: the orphan kill index is strictly
+    // before the re-run spawn index, so two writers (the orphan + the
+    // fresh re-run) are never live against the same overlay at once.
+    const killIdx = sequence.indexOf("kill");
+    const spawnIdx = sequence.indexOf("spawn");
+    assert.ok(killIdx < spawnIdx, `orphan kill must precede the gate re-run; got sequence ${JSON.stringify(sequence)}`);
     assert.equal(mgr.status("oc_orphankill1").checkStatus, "running", "the re-run flips checkStatus back to 'running'");
   });
 });

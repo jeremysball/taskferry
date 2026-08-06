@@ -3,3 +3,4 @@ Task 1: parked — reviewer flagged docs/sourcemap.md as stale (Important, execu
 Task 1: complete (commits 3971c51..81a2b81, 1 parked)
 Task 2: fix round 1/5 (2 addressed, 0 open; commits 9d9790e..d4c3e38)
 Task 2: complete (commits 906c444..d4c3e38, review clean)
+Task 3: complete (commits 3d88076..a3d1899, review approved; 2 minor coverage notes, not blockers)

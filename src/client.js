@@ -299,10 +299,11 @@ function isExactObject(value, keys) {
 }
 
 function validError(error) {
-  return isExactObject(error, ["code", "message", "help"])
-    && typeof error.code === "string"
+  if (!isExactObject(error, ["code", "message", "help", "detail"])) return false;
+  return typeof error.code === "string"
     && typeof error.message === "string"
-    && typeof error.help === "string";
+    && typeof error.help === "string"
+    && typeof error.detail === "string";
 }
 
 function isValidResponseEnvelope(message, responseKeys) {
@@ -315,7 +316,11 @@ function isValidResponseEnvelope(message, responseKeys) {
 }
 
 function buildRequestError(error) {
-  const err = new Error(`${error?.message || "daemon request failed"}\nhelp: ${error?.help || "retry the request"}`);
+  const message = error?.message || "daemon request failed";
+  const help = error?.help || "retry the request";
+  let body = `${message}\nhelp: ${help}`;
+  if (error?.detail && error.detail !== error.message) body = error.detail;
+  const err = new Error(body);
   err.code = error?.code || "REQUEST_FAILED";
   return err;
 }

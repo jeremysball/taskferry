@@ -13,6 +13,7 @@ import {
 } from "./protocol.js";
 
 const TEST_DIR = "/tmp/project";
+const ERROR_MESSAGE_UNKNOWN_TASK = "unknown task id: oc_123";
 
 const METHOD = Object.freeze({
   health: "system.health",
@@ -480,16 +481,21 @@ describe("protocol version, method list, and envelope", () => {
         ok: true,
         result: { healthy: true },
       });
-      assert.deepEqual(errorResponse("req-1", "UNKNOWN_TASK", "unknown task id: oc_123", "Run `taskferry list` to see valid task ids"), {
+      assert.deepEqual(errorResponse("req-1", "UNKNOWN_TASK", ERROR_MESSAGE_UNKNOWN_TASK, "Run `taskferry list` to see valid task ids"), {
         version: 1,
         id: "req-1",
         ok: false,
         error: {
           code: "UNKNOWN_TASK",
-          message: "unknown task id: oc_123",
+          message: ERROR_MESSAGE_UNKNOWN_TASK,
           help: "Run `taskferry list` to see valid task ids",
+          detail: ERROR_MESSAGE_UNKNOWN_TASK,
         },
       });
+      assert.equal(
+        errorResponse("req-2", "REQUEST_FAILED", "check gate failed", "retry", "error: check gate failed\n  output tail:\n    2 tests failed").error.detail,
+        "error: check gate failed\n  output tail:\n    2 tests failed"
+      );
       assert.deepEqual(eventMessage("sub-1", { type: "task.state", taskId: "oc_123" }), {
         version: 1,
         type: "event",

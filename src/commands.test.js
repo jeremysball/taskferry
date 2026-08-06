@@ -906,11 +906,25 @@ test("doctor without --stats does not call task.list", async (_t) => {
 test("accept calls task.accept via the client", async () => {
   let capturedMethod = null;
   let capturedParams = null;
-  const client = { request: async (method, params) => { capturedMethod = method; capturedParams = params; return { taskId: "t1", changesetStatus: "accepted", applied: true }; } };
+  const client = { request: async (method, params) => { capturedMethod = method; capturedParams = params; return { taskId: "t1", changesetStatus: "accepted", applied: true, checkStatus: "passed" }; } };
   const result = await runCommand("accept", { taskId: "t1" }, { client });
   assert.equal(capturedMethod, "task.accept");
   assert.deepEqual(capturedParams, { taskId: "t1" });
   assert.equal(result.changesetStatus, "accepted");
+});
+
+test("accept warns when the accepted changeset had no check gate", async (t) => {
+  let warning = "";
+  const originalWrite = process.stderr.write;
+  t.after(() => { process.stderr.write = originalWrite; });
+  process.stderr.write = (chunk) => { warning += String(chunk); return true; };
+  const client = {
+    request: async () => ({ taskId: "t1", changesetStatus: "accepted", applied: true, checkStatus: "none" }),
+  };
+
+  await runCommand("accept", { taskId: "t1" }, { client });
+
+  assert.match(warning, /declares no check command/);
 });
 
 test("reject calls task.reject via the client", async () => {

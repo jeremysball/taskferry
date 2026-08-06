@@ -153,7 +153,7 @@ describe("accept()/reject()", () => {
     };
   }
 
-  test("accept() applies the diff, marks the changeset accepted, and cleans up", () => {
+  test("accept() applies the diff, marks the changeset accepted, and cleans up", async () => {
     let applyCalled = false;
     let cleanedRoot = null;
     const mgr = makeManager({
@@ -164,7 +164,7 @@ describe("accept()/reject()", () => {
       },
       rmOverlayTreeFn: (p) => { cleanedRoot = p; },
     });
-    const result = mgr.accept("t_pending");
+    const result = await mgr.accept("t_pending");
     assert.equal(result.changesetStatus, "accepted");
     assert.equal(result.applied, true);
     assert.equal(applyCalled, true);
@@ -172,7 +172,7 @@ describe("accept()/reject()", () => {
     assert.equal(mgr.status("t_pending").changesetStatus, "accepted");
   });
 
-  test("accept() leaves changesetStatus pending and does not clean up when apply fails", () => {
+  test("accept() leaves changesetStatus pending and does not clean up when apply fails", async () => {
     let cleanedRoot = null;
     const mgr = makeManager({
       tasksFixture: [pendingTaskFixture()],
@@ -182,14 +182,14 @@ describe("accept()/reject()", () => {
       },
       rmOverlayTreeFn: (p) => { cleanedRoot = p; },
     });
-    const result = mgr.accept("t_pending");
+    const result = await mgr.accept("t_pending");
     assert.equal(result.applied, false);
     assert.match(result.reason, /patch does not apply/);
     assert.equal(mgr.status("t_pending").changesetStatus, "pending");
     assert.equal(cleanedRoot, null);
   });
 
-  test("reject() discards the changeset without applying and cleans up", () => {
+  test("reject() discards the changeset without applying and cleans up", async () => {
     let applyCalled = false;
     let cleanedRoot = null;
     const mgr = makeManager({
@@ -200,14 +200,14 @@ describe("accept()/reject()", () => {
       },
       rmOverlayTreeFn: (p) => { cleanedRoot = p; },
     });
-    const result = mgr.reject("t_pending");
+    const result = await mgr.reject("t_pending");
     assert.equal(result.changesetStatus, "rejected");
     assert.equal(applyCalled, false);
     assert.equal(cleanedRoot, fixtureRoot);
     assert.equal(mgr.status("t_pending").changesetStatus, "rejected");
   });
 
-  test("reject() cleans an overlay using its recorded tmpRoot after the live tmpRoot changes", () => {
+  test("reject() cleans an overlay using its recorded tmpRoot after the live tmpRoot changes", async () => {
     const recordedTmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "axi-recorded-overlay-"));
     const liveTmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "axi-live-overlay-"));
     const root = path.join(recordedTmpRoot, OVERLAY_DIR_PENDING);
@@ -226,31 +226,31 @@ describe("accept()/reject()", () => {
       })],
     });
 
-    const result = mgr.reject("t_pending");
+    const result = await mgr.reject("t_pending");
     assert.equal(result.changesetStatus, "rejected");
     assert.equal(result.cleanupFailed, undefined);
     assert.equal(fs.existsSync(root), false);
   });
 
-  test("accept() on an advisor task throws a clear, non-applying error", () => {
+  test("accept() on an advisor task throws a clear, non-applying error", async () => {
     const mgr = makeManager({ tasksFixture: [pendingTaskFixture({ id: "t_advisor", role: "advisor", changesetStatus: "rejected" })] });
-    assert.throws(() => mgr.accept("t_advisor"), /role "advisor" and cannot be accepted/);
+    await assert.rejects(() => mgr.accept("t_advisor"), /role "advisor" and cannot be accepted/);
   });
 
-  test("accept() on a task with no pending changeset throws", () => {
+  test("accept() on a task with no pending changeset throws", async () => {
     const mgr = makeManager({ tasksFixture: [baseTask({ id: "t_none" })] });
-    assert.throws(() => mgr.accept("t_none"), /no pending changeset/);
+    await assert.rejects(() => mgr.accept("t_none"), /no pending changeset/);
   });
 
-  test("accept() on a task whose extraction failed errors usefully and keeps the overlay (regression: review finding #2)", () => {
+  test("accept() on a task whose extraction failed errors usefully and keeps the overlay (regression: review finding #2)", async () => {
     const mgr = makeManager({
       tasksFixture: [pendingTaskFixture({ diffPath: null, changesetError: SPAWN_BWRAP_TIMEOUT })],
     });
-    assert.throws(() => mgr.accept("t_pending"), /changeset was never extracted.*ETIMEDOUT/s);
+    await assert.rejects(() => mgr.accept("t_pending"), /changeset was never extracted.*ETIMEDOUT/s);
     assert.ok(mgr.status("t_pending").overlayDirs, "the preserved overlay is the user's only copy of the changes");
   });
 
-  test("accept() errors usefully when the recorded diff file is no longer on disk (regression: review finding #1)", () => {
+  test("accept() errors usefully when the recorded diff file is no longer on disk (regression: review finding #1)", async () => {
     // The diffPath is recorded in tasks.json but the file itself is gone
     // (partial stateDir cleanup, a tampered tasks.json, etc.). Without this
     // check, git apply would surface its own "can't open patch" message
@@ -260,11 +260,11 @@ describe("accept()/reject()", () => {
     const mgr = makeManager({
       tasksFixture: [pendingTaskFixture({ diffPath: missingDiffPath })],
     });
-    assert.throws(() => mgr.accept("t_pending"), /diff file at \/tmp\/taskferry-does-not-exist-/);
-    assert.throws(() => mgr.accept("t_pending"), /cannot be applied without its diff/);
+    await assert.rejects(() => mgr.accept("t_pending"), /diff file at \/tmp\/taskferry-does-not-exist-/);
+    await assert.rejects(() => mgr.accept("t_pending"), /cannot be applied without its diff/);
   });
 
-  test("accept() on a non-git target whose overlay vanished errors instead of applying nothing (regression: review finding #7)", () => {
+  test("accept() on a non-git target whose overlay vanished errors instead of applying nothing (regression: review finding #7)", async () => {
     // A reboot clears the tmpfs overlay; the pending changeset can never be
     // re-applied. Fail loudly rather than rsyncing a missing tree.
     const mgr = makeManager({
@@ -273,28 +273,28 @@ describe("accept()/reject()", () => {
         overlayDirs: { root: fixtureRoot, tmpRoot: fixtureTmpRoot, upperDir: path.join(fixtureRoot, "upper", "main"), workDir: path.join(fixtureRoot, "work", "main"), rwBinds: [] }, // never created on disk
       })],
     });
-    assert.throws(() => mgr.accept("t_pending"), /overlay is gone/);
+    await assert.rejects(() => mgr.accept("t_pending"), /overlay is gone/);
   });
 
-  test("accept() surfaces a failed cleanup via cleanupFailed and leaves overlayDirs for the sweep (regression: review finding #11)", () => {
+  test("accept() surfaces a failed cleanup via cleanupFailed and leaves overlayDirs for the sweep (regression: review finding #11)", async () => {
     const mgr = makeManager({
       tasksFixture: [pendingTaskFixture()],
       runOverlayCommandFn: () => ({ status: 0, stdout: "", stderr: "" }),
       rmOverlayTreeFn: () => { throw new Error(EBUSY_ERROR); },
     });
-    const result = mgr.accept("t_pending");
+    const result = await mgr.accept("t_pending");
     assert.equal(result.applied, true);
     assert.equal(result.changesetStatus, "accepted");
     assert.equal(result.cleanupFailed, true, "a failed cleanup must not be swallowed");
     assert.ok(mgr.status("t_pending").overlayDirs, "overlayDirs must stay set so the daemon-startup sweep retries");
   });
 
-  test("reject() surfaces a failed cleanup and leaves overlayDirs for the sweep", () => {
+  test("reject() surfaces a failed cleanup and leaves overlayDirs for the sweep", async () => {
     const mgr = makeManager({
       tasksFixture: [pendingTaskFixture()],
       rmOverlayTreeFn: () => { throw new Error(EBUSY_ERROR); },
     });
-    const result = mgr.reject("t_pending");
+    const result = await mgr.reject("t_pending");
     assert.equal(result.changesetStatus, "rejected");
     assert.equal(result.cleanupFailed, true);
     assert.ok(mgr.status("t_pending").overlayDirs);
@@ -313,13 +313,13 @@ describe("accept()/reject()", () => {
     return tasks.find((t) => t.id === taskId);
   }
 
-  test("accept() persists the cleared overlay metadata after successful cleanup (regression: review followup #1)", () => {
+  test("accept() persists the cleared overlay metadata after successful cleanup (regression: review followup #1)", async () => {
     const mgr = makeManager({
       tasksFixture: [pendingTaskFixture()],
       runOverlayCommandFn: () => ({ status: 0, stdout: "", stderr: "" }),
       rmOverlayTreeFn: () => {},
     });
-    const result = mgr.accept("t_pending");
+    const result = await mgr.accept("t_pending");
     assert.equal(result.changesetStatus, "accepted");
     assert.equal(result.applied, true);
     assert.equal(result.cleanupFailed, undefined);
@@ -328,12 +328,12 @@ describe("accept()/reject()", () => {
     assert.equal(onDisk.overlayDirs, null, "cleared overlay metadata must be durable, not claim an overlay still exists");
   });
 
-  test("reject() persists the cleared overlay metadata after successful cleanup (regression: review followup #1)", () => {
+  test("reject() persists the cleared overlay metadata after successful cleanup (regression: review followup #1)", async () => {
     const mgr = makeManager({
       tasksFixture: [pendingTaskFixture()],
       rmOverlayTreeFn: () => {},
     });
-    const result = mgr.reject("t_pending");
+    const result = await mgr.reject("t_pending");
     assert.equal(result.changesetStatus, "rejected");
     assert.equal(result.cleanupFailed, undefined);
     const onDisk = readPersistedTask(mgr, "t_pending");
@@ -341,7 +341,7 @@ describe("accept()/reject()", () => {
     assert.equal(onDisk.overlayDirs, null, "cleared overlay metadata must be durable, not claim an overlay still exists");
   });
 
-  test("accept() leaves overlayDirs durable on cleanup failure so the startup sweep can retry (regression: review followup #1)", () => {
+  test("accept() leaves overlayDirs durable on cleanup failure so the startup sweep can retry (regression: review followup #1)", async () => {
     // Symmetric to the success cases: when cleanup fails, both the
     // status and overlayDirs must be durable on disk so the
     // daemon-startup sweep can pick up the orphan and retry the removal.
@@ -350,7 +350,7 @@ describe("accept()/reject()", () => {
       runOverlayCommandFn: () => ({ status: 0, stdout: "", stderr: "" }),
       rmOverlayTreeFn: () => { throw new Error(EBUSY_ERROR); },
     });
-    const result = mgr.accept("t_pending");
+    const result = await mgr.accept("t_pending");
     assert.equal(result.cleanupFailed, true);
     const onDisk = readPersistedTask(mgr, "t_pending");
     assert.equal(onDisk.changesetStatus, "accepted");
@@ -371,7 +371,7 @@ describe("accept()/reject()", () => {
 // reject()" block's shared pendingTaskFixture()) so this one addition
 // doesn't push that block's line count over the sonarjs function-length cap.
 describe("accept(): overlaySleepFn threading (taskferry#328)", () => {
-  test("accept() on a non-git target threads overlaySleepFn through applyChangeset's overlay-mount-busy retry", () => {
+  test("accept() on a non-git target threads overlaySleepFn through applyChangeset's overlay-mount-busy retry", async () => {
     const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "axi-accept-sleepfn-"));
     const overlayRoot = path.join(tmpRoot, "overlay");
     fs.mkdirSync(path.join(overlayRoot, "upper", "main"), { recursive: true });
@@ -401,7 +401,7 @@ describe("accept(): overlaySleepFn threading (taskferry#328)", () => {
       overlaySleepFn: (ms) => sleeps.push(ms),
     });
 
-    const result = mgr.accept("t_pending");
+    const result = await mgr.accept("t_pending");
 
     assert.equal(result.applied, true, "the apply must succeed once the retry clears the busy mount");
     assert.equal(bwrapAttempts, 3, "must retry the apply bwrap through the same busy-race backoff extraction uses");

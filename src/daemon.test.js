@@ -367,6 +367,7 @@ describe("Unix socket daemon", () => {
     assert.equal(response.error.code, "REQUEST_FAILED");
     assert.equal(response.error.message, "executor pi failed");
     assert.equal(response.error.help, "inspect the pi worker configuration");
+    assert.equal(response.error.detail, "error: executor pi failed\nhelp: inspect the pi worker configuration");
   });
 
   test("creates protected runtime/socket paths and serves ordinary requests", async (t) => {

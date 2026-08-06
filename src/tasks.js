@@ -2712,15 +2712,121 @@ function runLaunchQueuedTasks(sched, ctx) {
 }
 
 /**
+ * Builds the fix-forward error message for a check-gate-blocked accept, per
+ * the design's §5. `--force` is always offered as the escape hatch; the
+ * resume command prefers --session-id when the worker's session survived,
+ * falling back to a fresh --directory dispatch otherwise. The "interrupted"
+ * branch is the one the design's "the gate is re-runnable" promise cares
+ * about: a daemon crash mid-gate marks the task as "interrupted" on the
+ * next boot, and the next daemon restart re-runs the gate automatically
+ * whenever the overlay survives (Task 7). Render "interrupted" as a
+ * re-run notice instead of the dead-looking `exit: null` the generic
+ * `exit: ${task.checkExitCode}` line would otherwise produce, so the user
+ * doesn't see a null exit and assume the gate's run is salvageable as-is.
+ * @param {Task} task
+ * @returns {string}
+ */
+function buildCheckGateFailureMessage(task) {
+  const commandLine = `  command: ${task.checkCommand} (from .taskferry.toml)`;
+  let exitLine = `  exit: ${task.checkExitCode}`;
+  if (task.checkStatus === "timeout") exitLine = "  timed out";
+  if (task.checkStatus === "interrupted") {
+    exitLine = "  interrupted: the daemon died with this gate in flight; the gate will re-run automatically on the next daemon restart";
+  }
+  let outputTail = "";
+  if (task.checkOutputTail) {
+    const indentedOutputTail = task.checkOutputTail.split("\n").map((line) => `    ${line}`).join("\n");
+    outputTail = `\n  output tail:\n${indentedOutputTail}`;
+  }
+  const resumeHint = task.sessionId
+    ? `  taskferry dispatch --session-id ${task.sessionId} --parent-task ${task.id} \\\n    --prompt "Fix: check gate ${task.checkStatus}. See taskferry result ${task.id} --fields checkOutputTail"`
+    : `  taskferry dispatch --directory ${task.directory} --parent-task ${task.id} \\\n    --prompt "Fix: check gate ${task.checkStatus} for task ${task.id}. See taskferry result ${task.id} --fields checkOutputTail"`;
+  return `error: check gate ${task.checkStatus} for ${task.id}\n${commandLine}\n${exitLine}${outputTail}\nchangeset NOT accepted. To fix forward, resume the worker session:\n${resumeHint}\nOverride only if you have verified manually: taskferry accept ${task.id} --force`;
+}
+
+const BLOCKING_CHECK_STATUSES = new Set(["running", "failed", "timeout", "interrupted"]);
+
+/**
+ * @param {Task} task
+ * @param {boolean} _force
+ * @param {{stateDir: string, runtimeDir: string, sandboxDenylist: string[], runOverlayCommandFn: (command: string, args: string[]) => {status: number|null, stdout: string, stderr: string, error?: Error}, overlaySleepFn?: (ms: number) => void, existsFn: (path: string) => boolean}} ctx
+ * @returns {{applied: boolean, reason?: string|null}}
+ */
+function applyAcceptedChangeset(task, _force, ctx) {
+  const isGitTarget = task.preDispatchHead != null;
+  const denyList = [...defaultDenyList(os.homedir(), ctx.stateDir), ...ctx.sandboxDenylist].filter(ctx.existsFn);
+  return applyChangeset({
+    isGitTarget,
+    denyList,
+    stateDir: ctx.stateDir,
+    runtimeDir: ctx.runtimeDir,
+    directory: task.directory,
+    // validateAcceptable() threw above if diffPath were null, but that
+    // narrowing lives inside the helper, so assert the invariant here.
+    diffPath: /** @type {string} */ (task.diffPath),
+    overlay: task.overlayDirs ?? undefined,
+    homeDir: os.homedir(),
+    runCommand: ctx.runOverlayCommandFn,
+    sleepFn: ctx.overlaySleepFn,
+  });
+}
+
+/**
+ * @param {Task} task
+ * @param {{applied: boolean, reason?: string|null}} _applied
+ * @param {boolean} force
+ * @param {{persistTask: (taskId: string) => void, releaseOverlay: (task: {overlayDirs?: {root:string,tmpRoot:string}|null}) => boolean}} ctx
+ * @returns {{taskId: string, changesetStatus: string, applied: boolean, checkStatus?: string, cleanupFailed?: boolean}}
+ */
+function finalizeAcceptedChangeset(task, _applied, force, ctx) {
+  task.changesetStatus = "accepted";
+  if (force && BLOCKING_CHECK_STATUSES.has(task.checkStatus ?? "")) {
+    task.checkOverride = true;
+  }
+  // Persist before cleanup: a crash between apply and persist would leave
+  // the task reading as "pending" after a restart even though the patch
+  // was already applied, risking a double-apply on the next accept()
+  // retry. The cleanup may still fail (review finding #11), but that
+  // failure surfaces in the return value and overlayDirs stays set so the
+  // daemon-startup sweep (Task 12) retries the removal.
+  ctx.persistTask(task.id);
+  const cleanupFailed = ctx.releaseOverlay(task);
+  // If cleanup succeeded, releaseOverlay() cleared overlayDirs in memory
+  // (review finding #11). Persist once more so the durable task record
+  // reflects the cleared overlay metadata instead of claiming an overlay
+  // still exists for an overlay that was just removed. If cleanup failed,
+  // overlayDirs stays set on disk and the startup sweep (Task 12) retries
+  // the removal on the next daemon start -- consistent with the pre-fix
+  // behavior for the cleanup-failure path.
+  if (!cleanupFailed) ctx.persistTask(task.id);
+  return { taskId: task.id, changesetStatus: task.changesetStatus, applied: true, checkStatus: task.checkStatus, ...(cleanupFailed ? { cleanupFailed: true } : {}) };
+}
+
+/**
+ * @param {Task} task
+ * @param {boolean} _force
+ * @returns {void}
+ */
+function validateCheckGateAcceptable(task, _force) {
+  if (_force) return;
+  if (task.checkStatus === "running") {
+    throw new Error(`error: check gate still running for ${task.id}\nhelp: see \`taskferry status ${task.id}\` for progress, then retry accept once it settles, or \`taskferry accept ${task.id} --force\` to override`);
+  }
+  if (BLOCKING_CHECK_STATUSES.has(task.checkStatus ?? "")) {
+    throw new Error(buildCheckGateFailureMessage(task));
+  }
+}
+
+/**
  * Validates that a task is in a state where its pending changeset can be
  * accepted, throwing the same user-facing errors the original `accept` raised
  * inline for each guard. Returns whether the target is a git target (i.e. has
  * a persisted pre-dispatch head) so the caller can route the apply.
  * @param {Task} task
- * @param {{existsFn: (path: string) => boolean, hasLiveOverlay: (task: Task) => boolean}} ctx
+ * @param {{force?: boolean, existsFn: (path: string) => boolean, hasLiveOverlay: (task: Task) => boolean}} ctx
  * @returns {boolean}
  */
-function validateAcceptable(task, ctx) {
+function validateAcceptable(task, { force = false, ...ctx }) {
   if (task.role === "advisor") {
     throw new Error(`error: task ${task.id} has role "advisor" and cannot be accepted\nhelp: use "taskferry result ${task.id} --diff" to inspect what it wrote -- advisor writes are never applied`);
   }
@@ -2746,6 +2852,7 @@ function validateAcceptable(task, ctx) {
       `help: a non-git changeset cannot be re-applied without its overlay; use "taskferry result ${task.id} --diff" for the informational diff, then "taskferry reject ${task.id}" to clear the pending state`
     );
   }
+  validateCheckGateAcceptable(task, force);
   return task.preDispatchHead != null;
 }
 
@@ -3576,12 +3683,12 @@ function buildManagerInternalHelpers(ctx) {
     /**
      * @param {string} taskId
      * @param {{force?: boolean}} options
-     * @returns {{taskId: string, changesetStatus: string, applied: boolean, reason?: string|null, cleanupFailed?: boolean}}
+     * @returns {Promise<{taskId: string, changesetStatus: string, applied: boolean, reason?: string|null, checkStatus?: string, cleanupFailed?: boolean}>}
      */
     accept: (taskId, options) => acceptTaskChangeset(taskId, options, { ensureStateLoaded: () => ctx.helpers.ensureStateLoaded(), tasks: ctx.maps.tasks, existsFn: ctx.opts.existsFn, hasLiveOverlay: (task) => ctx.helpers.hasLiveOverlay(task), stateDir: ctx.opts.stateDir, runtimeDir: ctx.opts.runtimeDir, sandboxDenylist: ctx.opts.sandboxDenylist, runOverlayCommandFn: ctx.opts.runOverlayCommandFn, overlaySleepFn: ctx.opts.overlaySleepFn, persistTask: (taskId2) => ctx.helpers.persistTask(taskId2), releaseOverlay: (task) => ctx.env.releaseOverlay(task), killGateAndWait: (taskId2) => ctx.env.killGateAndWait(taskId2), noSuchTask }),
     /**
      * @param {string} taskId
-     * @returns {{taskId: string, changesetStatus: string, cleanupFailed?: boolean}}
+     * @returns {Promise<{taskId: string, changesetStatus: string, cleanupFailed?: boolean}>}
      */
     reject: (taskId) => rejectTaskChangeset(taskId, { ensureStateLoaded: () => ctx.helpers.ensureStateLoaded(), tasks: ctx.maps.tasks, persistTask: (taskId) => ctx.helpers.persistTask(taskId), releaseOverlay: (task) => ctx.env.releaseOverlay(task), killGateAndWait: (taskId2) => ctx.env.killGateAndWait(taskId2), noSuchTask }),
     /** @param {string} taskId */
@@ -3668,14 +3775,14 @@ function buildTaskManagerApi(ctx) {
     cancel: (taskId, options) => ctx.helpers.cancel(taskId, options),
     /**
      * @param {string} taskId
-     * @param {{force?: boolean}} options - `force: true` skips the gate
-     *   supervisor's wait (Task 6); until then it is accepted and ignored.
-     * @returns {{taskId: string, changesetStatus: string, applied: boolean, reason?: string|null, cleanupFailed?: boolean}}
+     * @param {{force?: boolean}} [options] - `force: true` overrides a blocking
+     *   check-gate result; an in-flight gate is killed and awaited first.
+     * @returns {Promise<{taskId: string, changesetStatus: string, applied: boolean, reason?: string|null, checkStatus?: string, cleanupFailed?: boolean}>}
      */
-    accept: (taskId, options) => ctx.helpers.accept(taskId, options),
+    accept: (taskId, options = {}) => ctx.helpers.accept(taskId, options),
     /**
      * @param {string} taskId
-     * @returns {{taskId: string, changesetStatus: string, cleanupFailed?: boolean}}
+     * @returns {Promise<{taskId: string, changesetStatus: string, cleanupFailed?: boolean}>}
      */
     reject: (taskId) => ctx.helpers.reject(taskId),
     /**
@@ -5013,67 +5120,33 @@ function requireOverlayCapability(state, ctx) {
  * record reflects the cleared overlay. Extracted out of `createTaskManager`'s
  * `accept` closure; every factory binding is threaded in via `ctx`.
  *
- * `options.force` (added with `--force` in Task 2) is plumbed through but is
- * a no-op here: gate-supervisor override behavior is wired in Task 6, which
- * replaces the `ctx.killGateAndWait` stub with the real supervisor and reads
- * `force` to skip the wait. `options` is a required parameter (no `[options]`
- * brackets, no `= {}` default) following the `summarizeRequestFor`/
- * `summarizeTaskFor` convention -- every real caller passes a real object,
- * and Task 6 will destructure `force` inside the body to start consuming it.
+ * `options.force` (added with `--force` in Task 2) allows accept to
+ * override a failed, timed-out, interrupted, or still-running check gate.
+ * `options` is a required parameter (no `[options]` brackets, no `= {}`
+ * default) following the `summarizeRequestFor`/`summarizeTaskFor` convention;
+ * every real caller passes a real object and per-field defaults are applied
+ * by the body destructure.
  * @param {string} taskId
  * @param {{force?: boolean}} options
  * @param {{ensureStateLoaded: () => void, tasks: Map<string, Task>, noSuchTask: (taskId: string) => Error, existsFn: (path: string) => boolean, hasLiveOverlay: (task: Task) => boolean, stateDir: string, runtimeDir: string, sandboxDenylist: string[], runOverlayCommandFn: (command: string, args: string[]) => {status: number|null, stdout: string, stderr: string, error?: Error}, overlaySleepFn?: (ms: number) => void, persistTask: (taskId: string) => void, releaseOverlay: (task: {overlayDirs?: {root:string,tmpRoot:string}|null}) => boolean, killGateAndWait: (taskId: string) => Promise<void>}} ctx
- * @returns {{taskId: string, changesetStatus: string, applied: boolean, reason?: string|null, cleanupFailed?: boolean}}
+ * @returns {Promise<{taskId: string, changesetStatus: string, applied: boolean, reason?: string|null, checkStatus?: string, cleanupFailed?: boolean}>}
  */
-function acceptTaskChangeset(taskId, options, ctx) {
-  // `options.force` is plumbed through but is a no-op until Task 6 wires
-  // the gate supervisor's force-override behavior; the bare `options;`
-  // reference below keeps the parameter "used" for sonarjs/no-unused-vars
-  // without surfacing the value to anything else yet (Task 6 will replace
-  // it with `const { force = false } = options;` and start consuming it).
-  options;
+async function acceptTaskChangeset(taskId, options, ctx) {
+  const { force = false } = options;
   ctx.ensureStateLoaded();
   const task = ctx.tasks.get(taskId);
   if (!task) throw ctx.noSuchTask(taskId);
-  const isGitTarget = validateAcceptable(task, { existsFn: ctx.existsFn, hasLiveOverlay: ctx.hasLiveOverlay });
-  const denyList = [...defaultDenyList(os.homedir(), ctx.stateDir), ...ctx.sandboxDenylist].filter(ctx.existsFn);
-  const applied = applyChangeset({
-    isGitTarget,
-    denyList,
-    stateDir: ctx.stateDir,
-    runtimeDir: ctx.runtimeDir,
-    directory: task.directory,
-    // validateAcceptable() threw above if diffPath were null, but that
-    // narrowing lives inside the helper, so assert the invariant here.
-    diffPath: /** @type {string} */ (task.diffPath),
-    overlay: task.overlayDirs ?? undefined,
-    homeDir: os.homedir(),
-    runCommand: ctx.runOverlayCommandFn,
-    sleepFn: ctx.overlaySleepFn,
-  });
+  validateAcceptable(task, { force, existsFn: ctx.existsFn, hasLiveOverlay: ctx.hasLiveOverlay });
+  if (task.checkStatus === "running") {
+    await ctx.killGateAndWait(taskId);
+  }
+  const applied = applyAcceptedChangeset(task, force, ctx);
   if (!applied.applied) {
     // validateAcceptable() threw above if changesetStatus weren't pending,
     // so it is non-undefined here; assert it for the type checker.
     return { taskId, changesetStatus: /** @type {string} */ (task.changesetStatus), applied: false, reason: applied.reason };
   }
-  task.changesetStatus = "accepted";
-  // Persist before cleanup: a crash between apply and persist would leave
-  // the task reading as "pending" after a restart even though the patch
-  // was already applied, risking a double-apply on the next accept()
-  // retry. The cleanup may still fail (review finding #11), but that
-  // failure surfaces in the return value and overlayDirs stays set so the
-  // daemon-startup sweep (Task 12) retries the removal.
-  ctx.persistTask(task.id);
-  const cleanupFailed = ctx.releaseOverlay(task);
-  // If cleanup succeeded, releaseOverlay() cleared overlayDirs in memory
-  // (review finding #11). Persist once more so the durable task record
-  // reflects the cleared overlay metadata instead of claiming an overlay
-  // still exists for an overlay that was just removed. If cleanup failed,
-  // overlayDirs stays set on disk and the startup sweep (Task 12) retries
-  // the removal on the next daemon start -- consistent with the pre-fix
-  // behavior for the cleanup-failure path.
-  if (!cleanupFailed) ctx.persistTask(task.id);
-  return { taskId, changesetStatus: task.changesetStatus, applied: true, ...(cleanupFailed ? { cleanupFailed: true } : {}) };
+  return finalizeAcceptedChangeset(task, applied, force, ctx);
 }
 
 /**
@@ -5082,9 +5155,9 @@ function acceptTaskChangeset(taskId, options, ctx) {
  * closure.
  * @param {string} taskId
  * @param {{ensureStateLoaded: () => void, tasks: Map<string, Task>, noSuchTask: (taskId: string) => Error, persistTask: (taskId: string) => void, releaseOverlay: (task: {overlayDirs?: {root:string,tmpRoot:string}|null}) => boolean, killGateAndWait: (taskId: string) => Promise<void>}} ctx
- * @returns {{taskId: string, changesetStatus: string, cleanupFailed?: boolean}}
+ * @returns {Promise<{taskId: string, changesetStatus: string, cleanupFailed?: boolean}>}
  */
-function rejectTaskChangeset(taskId, ctx) {
+async function rejectTaskChangeset(taskId, ctx) {
   ctx.ensureStateLoaded();
   const task = ctx.tasks.get(taskId);
   if (!task) throw ctx.noSuchTask(taskId);
@@ -5092,6 +5165,9 @@ function rejectTaskChangeset(taskId, ctx) {
     throw new Error(`error: task ${taskId} has no pending changeset (changesetStatus: ${task.changesetStatus ?? "none"})\nhelp: only a task with changesetStatus "pending" can be rejected`);
   }
   task.changesetStatus = "rejected";
+  if (task.checkStatus === "running") {
+    await ctx.killGateAndWait(taskId);
+  }
   // Persist before cleanup (parallel to accept()'s fix): the status is
   // the committed outcome, the cleanup is the side effect. A crash
   // between cleanup and persist would leave the task reading as

@@ -184,6 +184,9 @@ async function runAccept(options, { client }) {
   // Review finding #11: a failed cleanup must not be swallowed -- without
   // this, the leftover overlay is invisible until the daemon-restart sweep.
   warnIfCleanupFailed("changeset applied", accepted);
+  if (accepted.applied && (accepted.checkStatus == null || accepted.checkStatus === "none")) {
+    process.stderr.write("warning: changeset applied, but this repo declares no check command in .taskferry.toml -- nothing was verified before landing\n");
+  }
   return accepted;
 }
 

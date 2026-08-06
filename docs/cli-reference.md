@@ -162,7 +162,9 @@ daemon restarted while the task was still running; see
 
 Lean fields by default; pass `--full` for directory, model, session id, log
 path, and prompt preview. `failureReason` is `null` unless the task was
-stopped by the no-output watchdog (`"no_output_timeout"`), a
+stopped by the no-output watchdog (`"no_output_timeout_dead_spawn"` if it
+never produced output, `"no_output_timeout_stalled"` if it produced output
+and then went silent), a
 provider-failure diagnostic (`"rate_limited"`, `"payment_required"`, or
 `"authentication_failed"` for the `opencode` executor, the same three
 buckets prefixed with the executor name for others (e.g.

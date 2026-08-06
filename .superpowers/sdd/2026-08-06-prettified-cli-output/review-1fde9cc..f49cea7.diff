@@ -1,0 +1,45 @@
+# Review package: 1fde9cc..f49cea7
+
+## Commits
+f49cea7 test(cli): restore non-TTY doctor-shape coverage dropped in writeToon rewrite
+
+## Files changed
+ src/output.test.js | 10 ++++++++++
+ 1 file changed, 10 insertions(+)
+
+## Diff
+diff --git a/src/output.test.js b/src/output.test.js
+index 707b25c..283f492 100644
+--- a/src/output.test.js
++++ b/src/output.test.js
+@@ -356,20 +356,30 @@ describe("writeToon TTY output", () => {
+     assert.ok(!output().includes("error: boom"), output());
+   });
+ 
+   test("writeError on non-TTY is unchanged: plain TOON error:/help: lines", () => {
+     const { io, output } = fakeStdoutIo(false);
+     writeError(new Error("error: boom\nhelp: try again"), io);
+ 
+     assert.ok(!output().includes("\x1b["), output());
+     assert.ok(output().includes("error: boom") && output().includes("help: try again"), output());
+   });
++
++  test("no ANSI escapes anywhere when stdout is not a TTY, even with warnings/booleans/direction present", () => {
++    const { io, output } = fakeStdoutIo(false);
++    writeToon({ healthy: true, direction: "worsening", warnings: ["bwrap missing"] }, io);
++
++    assert.ok(!output().includes("\x1b["));
++    assert.ok(output().includes("healthy: true"));
++    assert.ok(output().includes("direction: worsening"));
++    assert.ok(output().includes("bwrap missing"));
++  });
+ });
+ 
+ describe("projectDoctorStats", () => {
+   function stats(overrides = {}) {
+     return {
+       byModel: [{ model: "m1", dispatches: 2, done: 1, crashed: 1, doneRate: 0.5, crashRate: 0.5 }],
+       failureReasons: [],
+       unknownBacklog: { total: 0, tasks: [] },
+       computedAt: TASK_STARTED_AT_EXAMPLE,
+       statusMix: { overall: {}, last24h: {}, last7d: {} },

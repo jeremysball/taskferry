@@ -1,14 +1,12 @@
 import os from "node:os";
 import path from "node:path";
 import { encode } from "@toon-format/toon";
+import { renderPretty } from "./pretty.js";
 
 const ANSI_RESET = "\x1b[0m";
 const ANSI_GREEN = "\x1b[32m";
 const ANSI_RED = "\x1b[31m";
 const ANSI_YELLOW = "\x1b[33m";
-const ANSI_GRAY = "\x1b[90m";
-const ANSI_DIM = "\x1b[2m";
-
 const ANSI_BY_STATUS = {
   done: ANSI_GREEN,
   crashed: ANSI_RED,
@@ -27,101 +25,16 @@ export function colorForStatus(status) {
   return ANSI_BY_STATUS[status] || null;
 }
 
-// doctor --stats' trend.direction. "unknown" is deliberately left uncolored
-// (falls through to null), same as an unrecognized task status below --
-// there's no evidence either way yet, so no color reads more honestly than a
-// guessed one.
-const ANSI_BY_TREND_DIRECTION = { improving: ANSI_GREEN, worsening: ANSI_RED, flat: ANSI_GRAY };
-function colorForTrendDirection(direction) {
-  return ANSI_BY_TREND_DIRECTION[direction] || null;
-}
-
-// doctor's own pass/fail booleans (healthy, and the MCP-isolation checks'
-// installed/isolated) -- true is good, false is bad, for exactly these field
-// names. `checked` is deliberately excluded from coloring entirely: false
-// there means "this check couldn't run," not "it failed," so red/green would
-// assert something the check itself doesn't know.
-function colorForPassFailToken(token) {
-  if (token === "true") return ANSI_GREEN;
-  if (token === "false") return ANSI_RED;
-  return null;
-}
-
-// Coloring these fields has to happen post-encode: encode() escapes raw ANSI
-// bytes embedded in a string value into \u escapes. encode() also reshapes a
-// status field's surroundings unpredictably -- a uniform tasks[] array
-// collapses to a comma-separated tabular block instead of one "status: x"
-// line per item -- so a fixed line pattern can't find every occurrence.
-// Instead, bracket recognized values in an invisible marker before encoding
-// (encode() passes it through unescaped -- and, being zero-width, without
-// ever triggering encode()'s own quoting -- in every layout) and swap the
-// marked span for an ANSI-colored one afterward.
-//
-// Three separate marker characters, not one: once a value round-trips through
-// encode(), the marked text has no positional/key context left, only the
-// marker and the original text. `status`/`direction`/the pass-fail booleans
-// resolve a color from that text via a fixed enum (ENUM_MARK); `warnings`/
-// `info` are arbitrary free-text sentences that must always render yellow/dim
-// regardless of their contents, so they get their own marks instead of being
-// run through the enum lookup.
-const ENUM_MARK = "\u2063";
-const WARN_MARK = "\u2064";
-const INFO_MARK = "\u2065";
-const MARK_RE = new RegExp(`[${ENUM_MARK}${WARN_MARK}${INFO_MARK}]([^${ENUM_MARK}${WARN_MARK}${INFO_MARK}]*)[${ENUM_MARK}${WARN_MARK}${INFO_MARK}]`, "g");
-
-// Every key here is scoped to the daemon method(s) that actually produce it
-// (task rows for `status`; doctor's own health/MCP checks for
-// `healthy`/`installed`/`isolated`; doctor --stats' trend for `direction`;
-// doctor's diagnostics for `warnings`/`info` -- see commands.js,
-// mcp-isolation.js, doctor-stats.js), so marking never reaches into an
-// unrelated command's same-named field.
-const ENUM_KEYS = new Set(["status", "direction", "healthy", "installed", "isolated"]);
-const WARN_KEYS = new Set(["warnings"]);
-const INFO_KEYS = new Set(["info"]);
-
-function isMarkableScalar(item) {
-  return typeof item === "string" || typeof item === "boolean";
-}
-
-function markStringArray(items, mark) {
-  return items.map((entry) => (typeof entry === "string" ? `${mark}${entry}${mark}` : entry));
-}
-
-export function markColorableFields(value) {
-  if (Array.isArray(value)) return value.map(markColorableFields);
-  if (value && typeof value === "object") {
-    return Object.fromEntries(Object.entries(value).map(([key, item]) => {
-      if (ENUM_KEYS.has(key) && isMarkableScalar(item)) return [key, `${ENUM_MARK}${item}${ENUM_MARK}`];
-      if (WARN_KEYS.has(key) && Array.isArray(item)) return [key, markStringArray(item, WARN_MARK)];
-      if (INFO_KEYS.has(key) && Array.isArray(item)) return [key, markStringArray(item, INFO_MARK)];
-      return [key, markColorableFields(item)];
-    }));
-  }
-  return value;
-}
-
-function colorForMarkedToken(markChar, token) {
-  if (markChar === WARN_MARK) return ANSI_YELLOW;
-  if (markChar === INFO_MARK) return ANSI_DIM;
-  return colorForStatus(token) || colorForTrendDirection(token) || colorForPassFailToken(token);
-}
-
-export function colorizeText(text, useColor) {
-  return text.replace(MARK_RE, (whole, token) => {
-    if (!useColor) return token;
-    const code = colorForMarkedToken(whole[0], token);
-    return code ? colorize(token, code, true) : token;
-  });
-}
-
 function shellQuote(value) {
   return `'${String(value).replaceAll("'", "'\\''")}'`;
 }
 
 export function writeToon(value, io = process) {
-  const useColor = Boolean(io.stdout.isTTY);
-  const text = encode(useColor ? markColorableFields(value) : value);
-  io.stdout.write(`${colorizeText(text, useColor)}\n`);
+  if (io.stdout.isTTY) {
+    io.stdout.write(`${renderPretty(value)}\n`);
+    return;
+  }
+  io.stdout.write(`${encode(value)}\n`);
 }
 
 function stripPrefix(line, prefix) {

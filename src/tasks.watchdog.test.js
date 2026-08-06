@@ -126,6 +126,29 @@ describe("output-completeness check at settlement time: --require-final-marker g
     assert.equal(r.message, STATUS_DONE_TEXT);
   });
 
+  test("--require-final-marker matches a standalone marker line inside a multi-paragraph summary", () => {
+    // Regression: a real agent's final message is almost never just the bare
+    // marker -- it's a multi-paragraph summary that *ends* with the marker
+    // on its own line. `^...$` without the `m` flag anchors to the start/end
+    // of the whole string, so this always failed to match and every genuine
+    // "Status: DONE" got flagged incomplete and its changeset rejected.
+    const child = fakeChild();
+    const mgr = makeManager({ spawnFn: () => child });
+    const dispatched = mgr.dispatch({
+      prompt: "hi",
+      directory: os.tmpdir(),
+      finalMarker: STATUS_DONE_RE,
+    });
+    writeLog(dispatched.logPath, [
+      { type: "text", part: { messageID: "m1", text: "## Summary\n\nDid the thing.\n\nStatus: DONE" } },
+      { type: "step_finish", part: { messageID: "m1", reason: "stop" } },
+    ]);
+    child.emit("exit", 0, null);
+    const settled = mgr.status(dispatched.id);
+    assert.equal(settled.status, "done");
+    assert.equal("incomplete" in settled, false);
+  });
+
   test("--require-final-marker with a non-matching message flags the task incomplete", () => {
     const child = fakeChild();
     const mgr = makeManager({ spawnFn: () => child });

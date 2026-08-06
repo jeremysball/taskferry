@@ -4,7 +4,9 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { createTaskManager } from "./tasks.js";
-import { makeManager, fakeChild, DEFAULT_SUMMARY_MODEL, FINAL_ANSWER, STATUS_DONE_RE, QUOTA_ERROR } from "./tasks.test-helpers.js";
+import { makeManager, fakeChild, baseTask, DEFAULT_SUMMARY_MODEL, FINAL_ANSWER, STATUS_DONE_RE, QUOTA_ERROR } from "./tasks.test-helpers.js";
+
+const STATUS_DONE_TEXT = "Status: DONE";
 
 describe("output-completeness check at settlement time (issue #35)", () => {
   function writeLog(logPath, lines) {
@@ -110,7 +112,7 @@ describe("output-completeness check at settlement time: --require-final-marker g
       finalMarker: STATUS_DONE_RE,
     });
     writeLog(dispatched.logPath, [
-      { type: "text", part: { messageID: "m1", text: "Status: DONE" } },
+      { type: "text", part: { messageID: "m1", text: STATUS_DONE_TEXT } },
       { type: "step_finish", part: { messageID: "m1", reason: "stop" } },
     ]);
     child.emit("exit", 0, null);
@@ -121,7 +123,7 @@ describe("output-completeness check at settlement time: --require-final-marker g
     const r = mgr.result(dispatched.id, { fields: ["message", "incomplete", "finalMarker"] });
     assert.equal(r.incomplete, null);
     assert.equal(r.finalMarker, STATUS_DONE_RE);
-    assert.equal(r.message, "Status: DONE");
+    assert.equal(r.message, STATUS_DONE_TEXT);
   });
 
   test("--require-final-marker matches a standalone marker line inside a multi-paragraph summary", () => {
@@ -282,6 +284,128 @@ describe("output-completeness check at settlement time: validation, originSessio
   });
 });
 
+describe("finalStatus: parsed closing Status: marker at settlement", () => {
+  function writeLog(logPath, lines) {
+    fs.mkdirSync(path.dirname(logPath), { recursive: true });
+    fs.writeFileSync(logPath, lines.map((line) => JSON.stringify(line)).join("\n"));
+  }
+
+  test("a message ending in Status: DONE persists finalStatus", () => {
+    const child = fakeChild();
+    const mgr = makeManager({ spawnFn: () => child });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+    writeLog(dispatched.logPath, [
+      { type: "text", part: { messageID: "m1", text: "All done.\nStatus: DONE" } },
+      { type: "step_finish", part: { messageID: "m1", reason: "stop" } },
+    ]);
+    child.emit("exit", 0, null);
+    const settled = mgr.status(dispatched.id);
+    assert.equal(settled.finalStatus, "DONE");
+  });
+
+  test("DONE_WITH_CONCERNS is captured whole, not truncated to DONE", () => {
+    const child = fakeChild();
+    const mgr = makeManager({ spawnFn: () => child });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+    writeLog(dispatched.logPath, [
+      { type: "text", part: { messageID: "m1", text: "Mostly done.\nStatus: DONE_WITH_CONCERNS" } },
+      { type: "step_finish", part: { messageID: "m1", reason: "stop" } },
+    ]);
+    child.emit("exit", 0, null);
+    const settled = mgr.status(dispatched.id);
+    assert.equal(settled.finalStatus, "DONE_WITH_CONCERNS");
+  });
+
+  test("BLOCKED and NEEDS_CONTEXT are both recognized", () => {
+    const child = fakeChild();
+    const mgr = makeManager({ spawnFn: () => child });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+    writeLog(dispatched.logPath, [
+      { type: "text", part: { messageID: "m1", text: "Stuck.\nStatus: BLOCKED" } },
+      { type: "step_finish", part: { messageID: "m1", reason: "stop" } },
+    ]);
+    child.emit("exit", 0, null);
+    assert.equal(mgr.status(dispatched.id).finalStatus, "BLOCKED");
+  });
+
+  test("a message with no Status: line leaves finalStatus unset", () => {
+    const child = fakeChild();
+    const mgr = makeManager({ spawnFn: () => child });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+    writeLog(dispatched.logPath, [
+      { type: "text", part: { messageID: "m1", text: "Just some prose, no marker." } },
+      { type: "step_finish", part: { messageID: "m1", reason: "stop" } },
+    ]);
+    child.emit("exit", 0, null);
+    const settled = mgr.status(dispatched.id);
+    assert.equal("finalStatus" in settled, false);
+  });
+
+  test("finalStatus is independent of --require-final-marker: parsed even when no gate is set", () => {
+    const child = fakeChild();
+    const mgr = makeManager({ spawnFn: () => child });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+    writeLog(dispatched.logPath, [
+      { type: "text", part: { messageID: "m1", text: "Status: NEEDS_CONTEXT" } },
+      { type: "step_finish", part: { messageID: "m1", reason: "stop" } },
+    ]);
+    child.emit("exit", 0, null);
+    const settled = mgr.status(dispatched.id);
+    assert.equal("finalMarker" in settled, false);
+    assert.equal(settled.finalStatus, "NEEDS_CONTEXT");
+  });
+
+  test("finalStatus survives a daemon restart via tasks.json", () => {
+    const child = fakeChild();
+    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-finalstatus-"));
+    const logDir = path.join(stateDir, "logs");
+    fs.mkdirSync(logDir, { recursive: true });
+
+    const mgr1 = createTaskManager({
+      stateDir,
+      sandboxEnabled: false,
+      spawnFn: () => child,
+      killFn: () => {},
+      listModelsFn: () => `${DEFAULT_SUMMARY_MODEL}\n`,
+    });
+    const dispatched = mgr1.dispatch({
+      prompt: "hi",
+      directory: os.tmpdir(),
+    });
+    writeLog(dispatched.logPath, [
+      { type: "text", part: { messageID: "m1", text: STATUS_DONE_TEXT } },
+      { type: "step_finish", part: { messageID: "m1", reason: "stop" } },
+    ]);
+    child.emit("exit", 0, null);
+    assert.equal(mgr1.status(dispatched.id).finalStatus, "DONE");
+    mgr1.flushPersist();
+
+    const mgr2 = createTaskManager({
+      stateDir,
+      sandboxEnabled: false,
+      spawnFn: () => { throw new Error("not used"); },
+      killFn: () => {},
+      listModelsFn: () => `${DEFAULT_SUMMARY_MODEL}\n`,
+    });
+    const reloaded = mgr2.status(dispatched.id);
+    assert.equal(reloaded.status, "done");
+    assert.equal(reloaded.finalStatus, "DONE");
+  });
+
+  test("summarize() includes finalStatus when non-null", () => {
+    const mgr = makeManager({
+      tasksFixture: [
+        baseTask({ id: "t_done", finalStatus: "DONE" }),
+        baseTask({ id: "t_none", finalStatus: null }),
+      ],
+    });
+    const done = mgr.status("t_done");
+    assert.equal(done.finalStatus, "DONE");
+    const none = mgr.status("t_none");
+    assert.equal("finalStatus" in none, false);
+  });
+});
+
 describe("no-output watchdog", () => {
   test("a running child with no parseable log event past the deadline is stopped and marked crashed with failureReason", async () => {
     const child = fakeChild(7001);
@@ -297,16 +421,16 @@ describe("no-output watchdog", () => {
     await new Promise((r) => setTimeout(r, 60));
     assert.ok(killed.some((k) => k.signal === "SIGTERM"), "watchdog must SIGTERM the stuck child's process group");
     mgr.flushPersist();
-    assert.equal(JSON.parse(fs.readFileSync(mgr.paths.TASKS_FILE, "utf8"))[0].failureReason, "no_output_timeout");
+    assert.equal(JSON.parse(fs.readFileSync(mgr.paths.TASKS_FILE, "utf8"))[0].failureReason, "no_output_timeout_dead_spawn");
 
     child.emit("exit", null, "SIGTERM");
     const s = mgr.status(dispatched.id);
     assert.equal(s.status, "crashed");
-    assert.equal(s.failureReason, "no_output_timeout");
+    assert.equal(s.failureReason, "no_output_timeout_dead_spawn");
     assert.deepEqual(mgr.result(dispatched.id, { fields: ["failureReason"] }), {
       taskId: dispatched.id,
       status: "crashed",
-      failureReason: "no_output_timeout",
+      failureReason: "no_output_timeout_dead_spawn",
     });
   });
 
@@ -409,7 +533,7 @@ describe("no-output watchdog", () => {
     assert.ok(killed.some((k) => k.signal === "SIGTERM"), "watchdog must eventually fire after the last activity, not just the start");
 
     child.emit("exit", null, "SIGTERM");
-    assert.equal(mgr.status(dispatched.id).failureReason, "no_output_timeout");
+    assert.equal(mgr.status(dispatched.id).failureReason, "no_output_timeout_stalled");
   });
 
   test("one log event then silence: the task survives well past noOutputTimeoutMs because the budget escalated", async () => {
@@ -476,7 +600,7 @@ describe("no-output watchdog", () => {
     );
 
     child.emit("exit", null, "SIGTERM");
-    assert.equal(mgr.status(dispatched.id).failureReason, "no_output_timeout");
+    assert.equal(mgr.status(dispatched.id).failureReason, "no_output_timeout_stalled");
   });
 
   test("the watcher's first tick sees pre-existing JSON in the log: latch flips and post-output budget applies from the start", async () => {
@@ -535,6 +659,6 @@ describe("no-output watchdog", () => {
     assert.ok(sigterm, "after the latch from pre-existing JSON, the post-output watchdog must still fire on continued silence");
 
     child.emit("exit", null, "SIGTERM");
-    assert.equal(mgr.status(dispatched.id).failureReason, "no_output_timeout");
+    assert.equal(mgr.status(dispatched.id).failureReason, "no_output_timeout_stalled");
   });
 });

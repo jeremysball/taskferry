@@ -1,0 +1,192 @@
+# Review package: 407de9e..12979e3
+
+## Commits
+12979e3 fix(tasks): thread errorBucketPrefix through classifyProviderFailure; recognize pi's auth-failure text
+
+## Files changed
+ src/tasks.js      | 15 ++++++++++-----
+ src/tasks.test.js | 29 +++++++++++++++++++++++++++++
+ 2 files changed, 39 insertions(+), 5 deletions(-)
+
+## Diff
+diff --git a/src/tasks.js b/src/tasks.js
+index 3d88d0e..5a67dcf 100644
+--- a/src/tasks.js
++++ b/src/tasks.js
+@@ -187,20 +187,24 @@ const PAYMENT_REQUIRED_PATTERNS = [
+ // auth signals. The bare 401 variant requires a `status`/`status_code`
+ // prefix rather than matching `\b401\b` on its own: a raw non-JSON log line
+ // (the noisiest scanning surface this classifier covers) can contain an
+ // unrelated 3-digit number (a byte count, a line number, a test count)
+ // that would otherwise false-positive.
+ const AUTHENTICATION_FAILED_PATTERNS = [
+   /unauthorized/i,
+   /invalid.api.?key/i,
+   /authentication.?failed/i,
+   /status(_code)?[:\s=]+401\b/i,
++  // pi's own plain-English auth failure text ("No API key found for
++  // <provider>.") matches none of the patterns above -- verified live
++  // against a real unauthenticated pi dispatch (issue #94 research).
++  /no api key/i,
+ ];
+ // rate_limited: the broadest, most generic bucket, checked last. Bare
+ // `quota` (without `insufficient_quota` or another payment_required
+ // signal) lands here deliberately: providers use "quota" for rate/usage
+ // budgets far more often than for billing failures, so an ambiguous bare
+ // mention defaults to the safer "transient, retry later" interpretation.
+ const RATE_LIMITED_PATTERNS = [
+   /rate.?limit/i,
+   /usage.?limit/i,
+   /too many requests/i,
+@@ -223,23 +227,24 @@ function capDetail(text) {
+ 
+ // Scoped to opencode's own structured `type:"error"` events and raw
+ // non-JSON lines (stderr, crash text), never a `type:"text"` event's
+ // content. Those events are the model's own narration and routinely
+ // contain these same words in unrelated, healthy output (writing
+ // rate-limit-handling code, narrating "the server returned 429, retry
+ // with backoff"); scanning the whole raw log killed tasks mid-run on that
+ // false-positive surface (GLM-5.2 review of 0d944df..4e75129, finding 1).
+ /**
+  * @param {string[]} lines
++ * @param {string} errorBucketPrefix
+  * @returns {{failure: {bucket: string, detail: string} | null, hasParseableLine: boolean}}
+  */
+-function classifyProviderFailure(lines) {
++function classifyProviderFailure(lines, errorBucketPrefix) {
+   let hasParseableLine = false;
+   for (const line of lines) {
+     if (!line.trim()) continue;
+     let evt;
+     try {
+       evt = JSON.parse(line);
+       hasParseableLine = true;
+     } catch {
+       for (const [bucket, patterns] of PROVIDER_FAILURE_BUCKETS) {
+         if (patterns.some((pattern) => pattern.test(line))) return { failure: { bucket, detail: capDetail(line) }, hasParseableLine };
+@@ -256,21 +261,21 @@ function classifyProviderFailure(lines) {
+     // event that misses all three named buckets still deserves a reason
+     // rather than leaving failureReason/failureDetail null (e.g. a
+     // mid-stream "UnknownError: Streaming response failed" with zero model
+     // output, oc_mrutsm8i_764c0067). opencode's own error class name
+     // (UnknownError, ContextOverflowError, APIError, ...) becomes the
+     // bucket; its message becomes the detail.
+     const errorName = typeof evt.error?.name === "string" ? evt.error.name : "error";
+     const errorMessage = typeof evt.error?.data?.message === "string" ? evt.error.data.message : text;
+     return {
+       failure: {
+-        bucket: `opencode_${errorName.replace(/[^a-zA-Z0-9]+/g, "_").toLowerCase()}`,
++        bucket: `${errorBucketPrefix}_${errorName.replace(/[^a-zA-Z0-9]+/g, "_").toLowerCase()}`,
+         detail: capDetail(errorMessage),
+       },
+       hasParseableLine,
+     };
+   }
+   return { failure: null, hasParseableLine };
+ }
+ 
+ const SUMMARY_AGENT_CONFIG = JSON.stringify({
+   agent: {
+@@ -1765,21 +1770,21 @@ export function createTaskManager({
+       const buf = Buffer.alloc(chunkSize);
+       const fd = fs.openSync(task.logPath, "r");
+       try {
+         fs.readSync(fd, buf, 0, chunkSize, bytesRead);
+       } finally {
+         fs.closeSync(fd);
+       }
+       text += buf.toString("utf8");
+     }
+     if (!text) return; // nothing to classify
+-    const { failure } = classifyProviderFailure(text.split("\n"));
++    const { failure } = classifyProviderFailure(text.split("\n"), "opencode"); // Task 7 makes this task-aware
+     if (failure) {
+       task.failureReason = failure.bucket;
+       task.failureDetail = failure.detail;
+     }
+   }
+ 
+   /** @param {Task} task */
+   function startRunningWatcher(task) {
+     let lastActivityMs = Date.now();
+     // Tracks how much of the log this watcher has already scanned, so each
+@@ -1822,23 +1827,23 @@ export function createTaskManager({
+           const fd = fs.openSync(current.logPath, "r");
+           try {
+             fs.readSync(fd, buf, 0, chunkSize, bytesRead);
+           } finally {
+             fs.closeSync(fd);
+           }
+           bytesRead = size;
+           const text = carry + buf.toString("utf8");
+           const lines = text.split("\n");
+           carry = lines.pop() ?? "";
+-          const linesResult = classifyProviderFailure(lines);
++          const linesResult = classifyProviderFailure(lines, "opencode"); // Task 7 makes this task-aware
+           const carryResult = !linesResult.failure && carry && !carry.trimStart().startsWith("{")
+-            ? classifyProviderFailure([carry])
++            ? classifyProviderFailure([carry], "opencode") // Task 7 makes this task-aware
+             : null;
+           const providerFailure = linesResult.failure ?? carryResult?.failure ?? null;
+           if (providerFailure) {
+             failRunningTask(current, providerFailure.bucket, providerFailure.detail);
+             return;
+           }
+           if (linesResult.hasParseableLine) {
+             lastActivityMs = Date.now();
+             // Latch the budget escalation: once any parseable JSON line has
+             // landed for this task, every subsequent tick compares against
+diff --git a/src/tasks.test.js b/src/tasks.test.js
+index 68cab8e..676de03 100644
+--- a/src/tasks.test.js
++++ b/src/tasks.test.js
+@@ -1826,20 +1826,49 @@ describe("provider-failure classification", () => {
+ 
+   test("a raw non-JSON line with an unrelated 3-digit number is not misclassified as authentication_failed", () => {
+     const child = fakeChild(7110);
+     const mgr = makeManager({ spawnFn: () => child, killFn: () => {} });
+     const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+     fs.writeFileSync(mgr.status(dispatched.id).logPath, "401 tests passed, 0 failed\n");
+     child.emit("exit", 1, null);
+     assert.equal(mgr.status(dispatched.id).failureReason, null);
+   });
+ 
++  test("pi's plain-text 'No API key found for openai.' stderr line lands on authentication_failed (issue #94)", async () => {
++    // pi's auth-failure stderr text reads "No API key found for <provider>."
++    // -- plain English, not the `unauthorized`/`invalid api key`/`status 401`
++    // surface the existing regex set covers. Without an additional pattern,
++    // it leaks through as the unclassified `crashed` fallback. Today the
++    // dispatch is opencode-backed (Task 6/7 will let a pi dispatch route
++    // its raw line through the same classifier with `pi_` prefix); the
++    // executor-prefixed end-to-end check lives with that task.
++    const child = fakeChild(7115);
++    const killed = [];
++    const mgr = makeManager({
++      spawnFn: () => child,
++      killFn: (pid, signal) => killed.push({ pid, signal }),
++      noOutputTimeoutMs: 60000,
++      watchdogPollMs: 5,
++    });
++    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
++    fs.writeFileSync(
++      mgr.status(dispatched.id).logPath,
++      "No API key found for openai.\n"
++    );
++
++    await new Promise((r) => setTimeout(r, 40));
++    child.emit("exit", null, "SIGTERM");
++    const s = mgr.status(dispatched.id, { full: true });
++    assert.equal(s.failureReason, "authentication_failed");
++    assert.equal(s.failureDetail, "No API key found for openai.");
++  });
++
+   test("a structured status_code: 401 diagnostic without the word 'unauthorized' still lands on authentication_failed", async () => {
+     const child = fakeChild(7111);
+     const killed = [];
+     const mgr = makeManager({
+       spawnFn: () => child,
+       killFn: (pid, signal) => killed.push({ pid, signal }),
+       noOutputTimeoutMs: 60000,
+       watchdogPollMs: 5,
+     });
+     const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });

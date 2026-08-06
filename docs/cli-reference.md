@@ -60,6 +60,7 @@ summary immediately.
 | `--session-id <id>` | Resume an existing session instead of starting fresh (`--continue --session <id>`; both pi and opencode use this syntax). When `--executor` is omitted, inherits whichever executor originally created the session; get session ids from a prior `result` or `status --full` |
 | `--allowed-dirs <path,path,...>` | Extra directories bound read-write inside the sandbox for this dispatch, on top of the auto-detected git-common-dir for a worktree and any config-level `allowedDirs`; see [security.md](security.md). **`/tmp` needs this too** — the sandbox mounts a fresh, empty `--tmpfs /tmp`, so any path under `/tmp` that isn't `--directory`, `runtimeDir`, or an `--allowed-dirs` entry is invisible inside the sandbox even though it exists on the host |
 | `--require-final-marker <regex>` | Fail the task if the final message doesn't match this pattern (case-sensitive, standard JS RegExp semantics). Sets `incomplete: true` on the settled task when the final message is empty (after trimming) or doesn't match. Patterns that don't compile as a standard JS RegExp reject the dispatch up front with a usage error. Useful for enforcing a report-format contract like `^Status: (DONE\|DONE_WITH_CONCERNS\|BLOCKED\|NEEDS_CONTEXT)$` on the last line of model output. |
+| `--class <name>` | Optional free-text task-class tag for telemetry aggregation; any non-empty string, no fixed-list validation — taskferry stores whatever is given |
 | `--no-sandbox` | Run this dispatch without the bwrap filesystem sandbox (default: sandboxed on Linux, no-op on macOS); see [security.md](security.md) |
 
 ```
@@ -130,6 +131,7 @@ planning or hard-debugging help mid-task, not for open-ended background work
 | `--variant <name>` | Optional reasoning-effort override |
 | `--executor <opencode\|pi>` | Which worker CLI to spawn. Built-in default `pi`, but an omitted flag actually falls back to the daemon's configured default executor (`TASKFERRY_DEFAULT_EXECUTOR` or `config.json`'s `defaultExecutor`) |
 | `--session-id <id>` | Resume a prior advisor exchange |
+| `--class <name>` | Optional free-text task-class tag for telemetry aggregation; any non-empty string, no fixed-list validation |
 | `--timeout <duration>` | Early-return cap — milliseconds or a duration string (30s, 5m, 1h), same semantics as `wait`; omitting it does not block indefinitely — it falls back to a 45-second internal cap, after which the "still running" response below is returned |
 
 If it times out before the advisor answers, the response is `status:
@@ -160,7 +162,9 @@ daemon restarted while the task was still running; see
 
 Lean fields by default; pass `--full` for directory, model, session id, log
 path, and prompt preview. `failureReason` is `null` unless the task was
-stopped by the no-output watchdog (`"no_output_timeout"`), a
+stopped by the no-output watchdog (`"no_output_timeout_dead_spawn"` if it
+never produced output, `"no_output_timeout_stalled"` if it produced output
+and then went silent), a
 provider-failure diagnostic (`"rate_limited"`, `"payment_required"`, or
 `"authentication_failed"` for the `opencode` executor, the same three
 buckets prefixed with the executor name for others (e.g.

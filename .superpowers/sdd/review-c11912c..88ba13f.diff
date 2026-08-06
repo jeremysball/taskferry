@@ -1,0 +1,261 @@
+# Review package: c11912c..88ba13f
+
+## Commits
+88ba13f feat(tasks): resolve requested executor in dispatch()/advisor(); keep summaries opencode-only
+
+## Files changed
+ src/tasks.js      | 21 ++++++++++++++-------
+ src/tasks.test.js | 21 +++++++++++++++++++++
+ 2 files changed, 35 insertions(+), 7 deletions(-)
+
+## Diff
+diff --git a/src/tasks.js b/src/tasks.js
+index 01a069d..1ec16d6 100644
+--- a/src/tasks.js
++++ b/src/tasks.js
+@@ -44,21 +44,21 @@ import { resolveExecutor, opencodeExecutor } from "./executor.js";
+  * @property {number|null} promptTotalChars
+  * @property {string|null} spawnError
+  * @property {boolean} cancelRequested
+  * @property {boolean} internal
+  * @property {string|null} [failureReason]
+  * @property {string|null} [failureDetail]
+  * @property {string|null} [keySlot]
+  * @property {SummaryOf} [summaryOf]
+  * @property {boolean} [incomplete]
+  * @property {string|null} [finalMarker]
+- * @property {"opencode"|"pi"} [executorId]
++ * @property {string} [executorId]
+  */
+ 
+ /**
+  * @typedef {object} TaskSummary
+  * @property {string} id
+  * @property {string} status
+  * @property {string} directory
+  * @property {string} model
+  * @property {string|null} sessionId
+  * @property {string|null} originSessionId
+@@ -71,21 +71,21 @@ import { resolveExecutor, opencodeExecutor } from "./executor.js";
+  * @property {string} promptPreview
+  * @property {number} [promptTotalChars]
+  * @property {SummaryOf} [summaryOf]
+  * @property {boolean} cancelRequested
+  * @property {string|null} [failureReason]
+  * @property {string|null} [failureDetail]
+  * @property {string|null} [keySlot]
+  * @property {string|null} [spawnError]
+  * @property {boolean} [incomplete]
+  * @property {string|null} [finalMarker]
+- * @property {"opencode"|"pi"} [executorId]
++ * @property {string} [executorId]
+  */
+ 
+ /**
+  * @typedef {object} LogActivity
+  * @property {number} logBytesWritten
+  * @property {string|null} logLastWriteAt
+  * @property {boolean} logHasEvent
+  */
+ 
+ /**
+@@ -929,24 +929,28 @@ export function createTaskManager({
+    * @param {string} [params.model]
+    * @param {string} [params.variant]
+    * @param {string|undefined} [params.sessionId]
+    * @param {string|undefined} [params.originSessionId]
+    * @param {string|null} [params.keySlot]
+    * @param {boolean} [params.internal]
+    * @param {string|null} [params.finalMarker]
+    * @param {boolean} [params.noSandbox]
+    * @param {string[]} [params.allowedDirs] - extra directories bound read-write for this dispatch only, on
+    *   top of the manager-level default (see createTaskManager's `allowedDirs` option)
++   * @param {string} [params.executor] - "opencode" | "pi", defaults to the manager's defaultExecutor
++   *   (itself the result of `resolveExecutor(undefined)` at construction). An unknown name throws before
++   *   any validation runs, so a misrouted CLI/RPC call fails fast rather than silently picking the default.
+    * @returns {TaskSummary & {next: string}}
+    */
+-  function dispatch({ prompt, directory, model, variant, sessionId, keySlot, internal = false, finalMarker = null, originSessionId, noSandbox = false, allowedDirs: dispatchAllowedDirs }) {
++  function dispatch({ prompt, directory, model, variant, sessionId, keySlot, internal = false, finalMarker = null, originSessionId, noSandbox = false, allowedDirs: dispatchAllowedDirs, executor: executorName }) {
+     ensureStateLoaded();
++    const executor = executorName === undefined ? defaultExecutor : resolveExecutor(executorName);
+     if (!prompt || typeof prompt !== "string") {
+       throw new Error("error: prompt is required\nhelp: taskferry dispatch requires a non-empty prompt string");
+     }
+     if (!directory || !path.isAbsolute(directory)) {
+       throw new Error(`error: directory must be an absolute path (got ${JSON.stringify(directory)})\nhelp: pass the full path, e.g. "/workspace/my-repo"`);
+     }
+     if (!fs.existsSync(directory) || !fs.statSync(directory).isDirectory()) {
+       throw new Error(`error: directory does not exist: ${directory}\nhelp: check the path or create the directory first`);
+     }
+     if (finalMarker != null) {
+@@ -977,41 +981,42 @@ export function createTaskManager({
+     // hardcoded default -- a different model can mean a different provider,
+     // breaking the whole point of resuming that exact session.
+     /** @type {Task|null} */
+     let priorSessionTask = null;
+     if (sessionId) {
+       for (const t of tasks.values()) {
+         if (t.sessionId === sessionId && (!priorSessionTask || t.startedAt > priorSessionTask.startedAt)) priorSessionTask = t;
+       }
+     }
+     const usingDefaultModel = !model;
+-    const resolvedModel = model || priorSessionTask?.model || "openai/gpt-5.6-luna";
++    const resolvedModel = model || priorSessionTask?.model || executor.defaultModel;
+ 
+     // Fail fast instead of letting a generic, opaque crash surface from deep
+     // inside the spawned opencode child (issue #63). Only applies when this
+     // dispatch's own provider is the one TASKFERRY_PROVIDER_KEY_ENV targets --
+     // every other provider's credentials are opencode's own responsibility
+     // (auth.json, ambient env) and outside taskferry's knowledge.
+     if (providerKeyEnvName && providerKeyEnvNameFor(resolvedModel) === providerKeyEnvName) {
+       const keyValue = resolvedKeySlot.keyEnvValue || process.env[providerKeyEnvName];
+       if (!keyValue) {
+         const provider = resolvedModel.slice(0, resolvedModel.indexOf("/"));
+         throw new Error(`error: no credentials available for ${provider} (${providerKeyEnvName} is not set)\nhelp: export ${providerKeyEnvName} in the daemon's environment (then restart the daemon) or pass a key_slot that resolves to a value`);
+       }
+     }
+ 
+     /** @type {Task} */
+     const task = {
+       id,
+       status: "queued",
+       directory: normalizedDirectory,
+       model: resolvedModel,
++      executorId: executor.id,
+       variant: usingDefaultModel ? "high" : variant || null,
+       sessionId: sessionId || null,
+       originSessionId: originSessionId || null,
+       pid: null,
+       startedAt: new Date().toISOString(),
+       endedAt: null,
+       exitCode: null,
+       signal: null,
+       logPath,
+       promptPreview: prompt.length > 200 ? prompt.slice(0, 200) + "…" : prompt,
+@@ -1020,21 +1025,21 @@ export function createTaskManager({
+       cancelRequested: false,
+       internal: internal === true,
+       failureReason: null,
+       failureDetail: null,
+       keySlot: resolvedKeySlot.keySlot,
+       incomplete: false,
+       finalMarker: finalMarker == null ? null : finalMarker,
+     };
+     tasks.set(id, task);
+     persistTask(task.id);
+-    pendingLaunches.set(id, { prompt, directory: normalizedDirectory, model: resolvedModel, variant: task.variant, sessionId, keyEnvValue: resolvedKeySlot.keyEnvValue, noSandbox: noSandbox === true, allowedDirs: dispatchAllowedDirs, executor: defaultExecutor });
++    pendingLaunches.set(id, { prompt, directory: normalizedDirectory, model: resolvedModel, variant: task.variant, sessionId, keyEnvValue: resolvedKeySlot.keyEnvValue, noSandbox: noSandbox === true, allowedDirs: dispatchAllowedDirs, executor });
+     launchQueue.push(id);
+     launchQueuedTasks();
+ 
+     const summary = summarize(task);
+     return {
+       ...summary,
+       next: task.status === "queued"
+         ? `Task is queued; run taskferry wait or taskferry status with task id "${id}" to check when it starts`
+         : `Run taskferry wait or taskferry status with task id "${id}" to check progress`,
+     };
+@@ -1354,20 +1359,21 @@ export function createTaskManager({
+         ...(isDelta ? { narration_is_delta: true } : {}),
+       }, null, 2),
+       { mode: 0o600, flag: "wx" }
+     );
+     /** @type {Task} */
+     const task = {
+       id,
+       status: "queued",
+       directory: fs.realpathSync(SUMMARY_DIR),
+       model: activitySummaryModel,
++      executorId: "opencode", // summaries stay opencode-only in this issue -- see plan Verified Findings #10
+       variant: null,
+       sessionId: null,
+       originSessionId: null,
+       pid: null,
+       startedAt: capturedAt,
+       endedAt: null,
+       exitCode: null,
+       signal: null,
+       logPath,
+       promptPreview: "Summarize the attached task transcript.",
+@@ -2033,31 +2039,32 @@ export function createTaskManager({
+   }
+ 
+   /**
+    * @param {object} [params]
+    * @param {string} [params.prompt]
+    * @param {string} [params.directory]
+    * @param {string} [params.model]
+    * @param {string} [params.variant]
+    * @param {string} [params.sessionId]
+    * @param {number} [params.timeoutMs]
++   * @param {string} [params.executor] - optional "opencode" | "pi" forwarded to dispatch().
+    */
+-  async function advisor({ prompt, directory, model, variant, sessionId, timeoutMs } = {}) {
++  async function advisor({ prompt, directory, model, variant, sessionId, timeoutMs, executor } = {}) {
+     ensureStateLoaded();
+     if (!model || typeof model !== "string") {
+       throw new Error("error: model is required\nhelp: taskferry advisor requires a provider/model string, e.g. \"openai/gpt-5.6-sol\"");
+     }
+     const resolved = resolveAdvisorSession(sessionId);
+     /** @type {TaskSummary & {next: string}} */
+     let dispatched;
+     try {
+-      dispatched = dispatch({ prompt: /** @type {string} */ (prompt), directory: /** @type {string} */ (directory), model, variant, sessionId: resolved.sessionId });
++      dispatched = dispatch({ prompt: /** @type {string} */ (prompt), directory: /** @type {string} */ (directory), model, variant, sessionId: resolved.sessionId, executor });
+     } catch (err) {
+       throw new Error(errMessage(err).replaceAll("taskferry dispatch", "taskferry advisor"), { cause: err });
+     }
+     const settled = await poll(dispatched.id, { timeoutMs: timeoutMs ?? maxWait });
+ 
+     const resetFields = resolved.reset ? { previous_session_id: resolved.previousSessionId } : {};
+ 
+     if (settled.status === "running" || settled.status === "queued") {
+       const logSessionId = settled.sessionId || readSessionIdFromLog(dispatched.logPath);
+       if (logSessionId) touchAdvisorSession(logSessionId);
+diff --git a/src/tasks.test.js b/src/tasks.test.js
+index b937b87..95b39fb 100644
+--- a/src/tasks.test.js
++++ b/src/tasks.test.js
+@@ -2310,20 +2310,41 @@ describe("executorId on persisted tasks (Task 5: legacy records default to openc
+   });
+ 
+   test("a persisted task that already has executorId \"pi\" is preserved on load", () => {
+     const mgr = makeManager({
+       tasksFixture: (logDir) => [baseTask({ id: "pi_persisted", logPath: path.join(logDir, "pi_persisted.ndjson"), executorId: "pi" })],
+     });
+     assert.equal(mgr.status("pi_persisted").executorId, "pi");
+   });
+ });
+ 
++describe("dispatch() executor selection (Task 6: optional executor name resolves and stamps task.executorId)", () => {
++  test("dispatch() with executor: \"pi\" resolves piExecutor and stamps task.executorId", () => {
++    const mgr = makeManager({ spawnFn: () => { throw new Error("not reached in this test"); } });
++    const dispatched = mgr.dispatch({ prompt: "hi", directory: process.cwd(), executor: "pi" });
++    const status = mgr.status(dispatched.id);
++    assert.equal(status.executorId, "pi");
++  });
++
++  test("dispatch() with no executor defaults to opencode", () => {
++    const mgr = makeManager({ spawnFn: () => { throw new Error("not reached in this test"); } });
++    const dispatched = mgr.dispatch({ prompt: "hi", directory: process.cwd() });
++    const status = mgr.status(dispatched.id);
++    assert.equal(status.executorId, "opencode");
++  });
++
++  test("dispatch() with an unknown executor name throws", () => {
++    const mgr = makeManager({ spawnFn: () => { throw new Error("not reached in this test"); } });
++    assert.throws(() => mgr.dispatch({ prompt: "hi", directory: process.cwd(), executor: "bogus" }), /unknown executor: bogus/);
++  });
++});
++
+ describe("unknown task id (status/cancel/wait/result share one error path)", () => {
+   test("status() throws with an actionable help line", () => {
+     const mgr = makeManager();
+     assert.throws(
+       () => mgr.status("nope"),
+       /error: unknown task id: nope\nhelp: run taskferry list to see valid task ids/
+     );
+   });
+ 
+   test("cancel() throws the same formatted error", () => {

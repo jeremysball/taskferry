@@ -1,0 +1,564 @@
+# Review package: bed35bc..b44c46a
+
+## Commits
+b44c46a feat(cli): add --executor flag to dispatch and advisor, wire through RPC
+
+## Files changed
+ src/args.js          | 13 +++++++++----
+ src/args.test.js     | 19 +++++++++++++++++++
+ src/commands.js      |  2 ++
+ src/commands.test.js | 32 ++++++++++++++++++++++++++++++++
+ src/daemon.js        |  1 +
+ src/daemon.test.js   | 51 +++++++++++++++++++++++++++++++++++++++++++++++++++
+ src/protocol.js      | 10 ++++++----
+ src/protocol.test.js | 42 ++++++++++++++++++++++++++++++++++++++++++
+ 8 files changed, 162 insertions(+), 8 deletions(-)
+
+## Diff
+diff --git a/src/args.js b/src/args.js
+index 021102d..e7c93bc 100644
+--- a/src/args.js
++++ b/src/args.js
+@@ -8,20 +8,21 @@ const commandSpecs = {
+     options: {
+       "--prompt <text>": "required",
+       "--directory <path>": "defaults to the current workspace",
+       "--model <id>": "use the default model when omitted",
+       "--variant <name>": "optional model reasoning variant",
+       "--session-id <id>": "resume an existing OpenCode session",
+       "--key-slot <name>": "use a configured provider key slot",
+       "--require-final-marker <regex>": "flag the task as incomplete if the final message doesn't match this pattern (case-sensitive, standard JS RegExp semantics)",
+       "--no-sandbox": "run this dispatch without the bwrap filesystem sandbox (default: sandboxed on Linux)",
+       "--allowed-dirs <path,path,...>": "extra directories bound read-write inside the sandbox, in addition to the auto-detected git-common-dir for a worktree",
++      "--executor <opencode|pi>": "worker backend to dispatch through, default opencode",
+     },
+     examples: [
+       'taskferry dispatch --prompt "Fix the failing tests"',
+       'taskferry dispatch --prompt "Review this change" --model openai/gpt-5.6-sol',
+       'taskferry dispatch --prompt "Investigate" --require-final-marker "^Status: (DONE|DONE_WITH_CONCERNS|BLOCKED)$"',
+       'taskferry dispatch --prompt "Run one-off shell tooling" --no-sandbox',
+       'taskferry dispatch --prompt "Update the shared cache dir" --allowed-dirs /home/user/.cache/myapp',
+     ],
+   },
+   cancel: {
+@@ -44,20 +45,21 @@ const commandSpecs = {
+   advisor: {
+     usage: "taskferry advisor --prompt <text> --model <id> [options]",
+     description: "Ask a model for advice and wait for its response.",
+     options: {
+       "--prompt <text>": "required",
+       "--model <id>": "required",
+       "--directory <path>": "defaults to the current workspace",
+       "--variant <name>": "optional model reasoning variant",
+       "--session-id <id>": "continue a recent advisor session",
+       "--timeout-ms <number>": "maximum wait in milliseconds",
++      "--executor <opencode|pi>": "worker backend to dispatch through, default opencode",
+     },
+     examples: [
+       'taskferry advisor --prompt "How should I split this module?" --model openai/gpt-5.6-sol',
+       'taskferry advisor --prompt "Review this design" --model zai/glm-5.2 --timeout-ms 30000',
+     ],
+   },
+   status: {
+     usage: "taskferry status <id> [--full]",
+     description: "Inspect task lifecycle and log activity.",
+     options: { "--full": "include all recorded task details" },
+@@ -218,23 +220,23 @@ function parseFields(value) {
+       "--fields must contain one or more supported result fields",
+       `Use one of: ${[...RESULT_FIELDS].join(", ")}`
+     );
+   }
+   return fields;
+ }
+ 
+ function defaultOptions(command, cwd) {
+   switch (command) {
+     case "dispatch":
+-      return { prompt: undefined, directory: cwd, model: undefined, variant: undefined, sessionId: undefined, keySlot: undefined, finalMarker: undefined, noSandbox: false, allowedDirs: undefined };
++      return { prompt: undefined, directory: cwd, model: undefined, variant: undefined, sessionId: undefined, keySlot: undefined, finalMarker: undefined, noSandbox: false, allowedDirs: undefined, executor: undefined };
+     case "advisor":
+-      return { prompt: undefined, model: undefined, directory: cwd, variant: undefined, sessionId: undefined, timeoutMs: undefined };
++      return { prompt: undefined, model: undefined, directory: cwd, variant: undefined, sessionId: undefined, timeoutMs: undefined, executor: undefined };
+     case "cancel":
+       return { taskId: undefined, graceMs: undefined };
+     case "wait":
+       return { taskId: undefined, timeoutMs: undefined, tailChars: undefined, full: false, summarize: false };
+     case "status":
+       return { taskId: undefined, full: false };
+     case "tail":
+       return { taskId: undefined, chars: undefined };
+     case "summary":
+       return { taskId: undefined, mode: "report", maxWords: undefined, wait: false };
+@@ -335,38 +337,41 @@ export function parseArgs(argv, { cwd = process.cwd() } = {}) {
+       "--tail-chars": "tailChars",
+       "--chars": "chars",
+       "--mode": "mode",
+       "--max-words": "maxWords",
+       "--fields": "fields",
+       "--limit": "limit",
+       "--format": "format",
+       "--task-id": "taskId",
+       "--require-final-marker": "finalMarker",
+       "--allowed-dirs": "allowedDirs",
++      "--executor": "executor",
+     };
+     const key = values[name];
+     if (!key || !commandAllows(command, name)) throw usageError(`unknown flag ${name} for \`${command}\``, command);
+     const required = requireValue(rest, index, name, inlineValue);
+     index = required.nextIndex;
+     let value = required.value;
+     if (["graceMs", "timeoutMs", "tailChars", "chars", "maxWords", "limit"].includes(key)) {
+       value = parseNumber(value, name, key === "tailChars" || key === "chars" ? { min: 1, max: 65536 } : key === "maxWords" ? { min: 75, max: 300 } : { min: key === "limit" ? 1 : 0 });
+     } else if (key === "fields") {
+       value = parseFields(value);
+     } else if (key === "allowedDirs") {
+       value = value.split(",").map((entry) => entry.trim()).filter(Boolean);
+       if (!value.length) throw new UsageError("--allowed-dirs must contain at least one path", "Use --allowed-dirs with one or more comma-separated paths");
+     } else if (key === "format") {
+       const allowed = command === "watch" ? ["toon", "ndjson"] : ["toon", "claude-hook", "codex-hook"];
+       if (!allowed.includes(value)) throw new UsageError(`${name} must be one of ${allowed.join(", ")}`, `Use ${name} with one of: ${allowed.join(", ")}`);
+     } else if (key === "mode" && !["report", "activity"].includes(value)) {
+       throw new UsageError(`${name} must be one of report, activity`, "Use --mode report or --mode activity");
++    } else if (key === "executor" && !["opencode", "pi"].includes(value)) {
++      throw new UsageError(`${name} must be one of opencode, pi`, "Use --executor opencode or --executor pi");
+     } else if (key === "finalMarker") {
+       try {
+         new RegExp(value);
+       } catch (err) {
+         throw new UsageError(`${name} is not a valid RegExp: ${err.message}`, "Use --require-final-marker with a pattern that compiles as a standard JS RegExp");
+       }
+     }
+     setOption(options, key, value, command, seen);
+   }
+ 
+@@ -388,24 +393,24 @@ export function parseArgs(argv, { cwd = process.cwd() } = {}) {
+     }
+     if (command === "wait" && options.summarize && options.tailChars !== undefined) {
+       throw usageError("--summarize cannot be combined with --tail-chars", command);
+     }
+   }
+   return { command, options, help, ...(help ? { helpText: helpText(command) } : {}) };
+ }
+ 
+ function commandAllows(command, flag) {
+   const flags = {
+-    dispatch: ["--prompt", "--directory", "--model", "--variant", "--session-id", "--key-slot", "--require-final-marker", "--allowed-dirs"],
++    dispatch: ["--prompt", "--directory", "--model", "--variant", "--session-id", "--key-slot", "--require-final-marker", "--allowed-dirs", "--executor"],
+     cancel: ["--grace-ms"],
+     wait: ["--timeout-ms", "--tail-chars"],
+-    advisor: ["--prompt", "--model", "--directory", "--variant", "--session-id", "--timeout-ms"],
++    advisor: ["--prompt", "--model", "--directory", "--variant", "--session-id", "--timeout-ms", "--executor"],
+     status: [],
+     tail: ["--chars"],
+     summary: ["--mode", "--max-words"],
+     result: ["--fields"],
+     list: ["--directory", "--limit"],
+     watch: ["--directory", "--format", "--task-id"],
+     context: ["--directory", "--format"],
+     doctor: [],
+   };
+   return flags[command]?.includes(flag) === true;
+diff --git a/src/args.test.js b/src/args.test.js
+index 34ce678..27cfb86 100644
+--- a/src/args.test.js
++++ b/src/args.test.js
+@@ -23,20 +23,21 @@ test("parses dispatch and applies its argument defaults", () => {
+     options: {
+       prompt: "do it",
+       directory: "/workspace/project",
+       model: undefined,
+       variant: undefined,
+       sessionId: undefined,
+       keySlot: undefined,
+       finalMarker: undefined,
+       noSandbox: false,
+       allowedDirs: undefined,
++      executor: undefined,
+     },
+     help: false,
+   });
+ });
+ 
+ test("parses each command's required arguments and defaults", () => {
+   const cwd = "/workspace/project";
+   assert.equal(parseArgs(["cancel", "oc_1"]).options.taskId, "oc_1");
+   assert.deepEqual(parseArgs(["wait", "oc_1"]).options, { taskId: "oc_1", timeoutMs: undefined, tailChars: undefined, full: false, summarize: false });
+   assert.equal(parseArgs(["advisor", "--prompt", "help", "--model", "test/model"], { cwd }).options.directory, cwd);
+@@ -208,15 +209,33 @@ test("parses dispatch --require-final-marker and rejects invalid regex sources",
+       assert.match(error.message, /--require-final-marker is not a valid RegExp/);
+       assert.match(error.help, /standard JS RegExp/);
+       assert.equal(error.exitCode, 2);
+       return true;
+     }
+   );
+   assert.throws(() => parseArgs(["dispatch", "--prompt", "x", "--require-final-marker"]), /requires a value/);
+   assert.throws(() => parseArgs(["wait", "oc_1", "--require-final-marker", "foo"]), /unknown flag --require-final-marker/);
+ });
+ 
++test("dispatch accepts --executor pi", () => {
++  const { options } = parseArgs(["dispatch", "--prompt", "hi", "--executor", "pi"]);
++  assert.equal(options.executor, "pi");
++});
++
++test("dispatch rejects an unknown --executor value", () => {
++  assert.throws(() => parseArgs(["dispatch", "--prompt", "hi", "--executor", "bogus"]), /must be one of opencode, pi/);
++});
++
++test("advisor accepts --executor pi", () => {
++  const { options } = parseArgs(["advisor", "--prompt", "hi", "--model", "m", "--executor", "pi"]);
++  assert.equal(options.executor, "pi");
++});
++
++test("advisor rejects an unknown --executor value", () => {
++  assert.throws(() => parseArgs(["advisor", "--prompt", "hi", "--model", "m", "--executor", "bogus"]), /must be one of opencode, pi/);
++});
++
+ test("parses dispatch --no-sandbox", () => {
+   assert.equal(parseArgs(["dispatch", "--prompt", "x", "--no-sandbox"]).options.noSandbox, true);
+   assert.throws(() => parseArgs(["dispatch", "--prompt", "x", "--no-sandbox=1"]), /--no-sandbox does not take a value/);
+   assert.throws(() => parseArgs(["wait", "oc_1", "--no-sandbox"]), /unknown flag --no-sandbox/);
+ });
+diff --git a/src/commands.js b/src/commands.js
+index 9b4feb9..ebaa7c0 100644
+--- a/src/commands.js
++++ b/src/commands.js
+@@ -73,20 +73,21 @@ export async function runCommand(command, options, { client, io = process, signa
+       return client.request("task.dispatch", {
+         prompt: options.prompt,
+         directory,
+         ...(options.model === undefined ? {} : { model: options.model }),
+         ...(options.variant === undefined ? {} : { variant: options.variant }),
+         ...(options.sessionId === undefined ? {} : { sessionId: options.sessionId }),
+         ...(options.keySlot === undefined ? {} : { keySlot: options.keySlot }),
+         ...(options.finalMarker === undefined ? {} : { finalMarker: options.finalMarker }),
+         ...(options.noSandbox === undefined ? {} : { noSandbox: options.noSandbox }),
+         ...(options.allowedDirs === undefined ? {} : { allowedDirs: options.allowedDirs }),
++        ...(options.executor === undefined ? {} : { executor: options.executor }),
+         ...(process.env.CLAUDE_CODE_SESSION_ID ? { originSessionId: process.env.CLAUDE_CODE_SESSION_ID } : {}),
+       });
+     }
+     case "cancel":
+       return client.request("task.cancel", {
+         taskId: options.taskId,
+         ...(options.graceMs === undefined ? {} : { graceMs: options.graceMs }),
+       });
+     case "wait": {
+       if (options.summarize) {
+@@ -122,20 +123,21 @@ export async function runCommand(command, options, { client, io = process, signa
+     }
+     case "advisor": {
+       const directory = normalizeDirectory(options.directory || cwd);
+       return client.request("task.advisor", {
+         prompt: options.prompt,
+         directory,
+         model: options.model,
+         ...(options.variant === undefined ? {} : { variant: options.variant }),
+         ...(options.sessionId === undefined ? {} : { sessionId: options.sessionId }),
+         ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
++        ...(options.executor === undefined ? {} : { executor: options.executor }),
+       });
+     }
+     case "status": {
+       const detail = await client.request("task.status", { taskId: options.taskId });
+       return leanStatus(detail, { full: options.full });
+     }
+     case "tail":
+       return client.request("task.tail", {
+         taskId: options.taskId,
+         ...(options.chars === undefined ? {} : { chars: options.chars }),
+diff --git a/src/commands.test.js b/src/commands.test.js
+index 5a0b93b..aad8121 100644
+--- a/src/commands.test.js
++++ b/src/commands.test.js
+@@ -491,20 +491,52 @@ test("doctor adds an informational note instead of a bwrap check on non-Linux pl
+     return { status: 0, stdout: JSON.stringify([{ id: "taskferry@taskferry" }]), stderr: "", error: undefined };
+   };
+ 
+   const result = await runCommand("doctor", {}, { client, homeDirectory: home, env: {}, runShellCommand, platform: "darwin" });
+ 
+   assert.equal(result.warnings, undefined);
+   assert.equal(result.info.length, 1);
+   assert.match(result.info[0], /only available on Linux/);
+ });
+ 
++test("dispatch forwards executor to the RPC payload when set", async () => {
++  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-commands-test-")));
++  let captured;
++  const client = {
++    request: async (method, params) => {
++      captured = { method, params };
++      return { id: "oc_1" };
++    },
++  };
++
++  await runCommand("dispatch", { prompt: "hi", directory: root, executor: "pi" }, { client, cwd: root });
++
++  assert.equal(captured.method, "task.dispatch");
++  assert.equal(captured.params.executor, "pi");
++});
++
++test("advisor forwards executor to the RPC payload when set", async () => {
++  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-commands-test-")));
++  let captured;
++  const client = {
++    request: async (method, params) => {
++      captured = { method, params };
++      return { status: "done", message: "advice" };
++    },
++  };
++
++  await runCommand("advisor", { prompt: "hi", directory: root, model: "m", executor: "pi" }, { client, cwd: root });
++
++  assert.equal(captured.method, "task.advisor");
++  assert.equal(captured.params.executor, "pi");
++});
++
+ test("dispatch forwards noSandbox to the RPC payload when set", async () => {
+   const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-commands-test-")));
+   let capturedParams;
+   const client = {
+     request: async (method, params) => {
+       capturedParams = params;
+       return { id: "oc_1" };
+     },
+   };
+   await runCommand("dispatch", { prompt: "hi", directory: root, noSandbox: true }, { client, cwd: root });
+diff --git a/src/daemon.js b/src/daemon.js
+index 3401df1..1d4bd1b 100644
+--- a/src/daemon.js
++++ b/src/daemon.js
+@@ -204,20 +204,21 @@ async function invoke(manager, request) {
+         ...(params.mode === undefined ? {} : { mode: params.mode }),
+       });
+     case "task.advisor":
+       return manager.advisor({
+         prompt: params.prompt,
+         directory: params.directory,
+         model: params.model,
+         ...(params.variant !== undefined ? { variant: params.variant } : {}),
+         ...(params.sessionId !== undefined ? { sessionId: params.sessionId } : {}),
+         ...(params.timeoutMs !== undefined ? { timeoutMs: params.timeoutMs } : {}),
++        ...(params.executor !== undefined ? { executor: params.executor } : {}),
+       });
+     case "task.context": {
+       const context = filteredTaskDetails(manager, params.directory);
+       return { ...context, counts: countTasks(context.tasks) };
+     }
+     default:
+       throw new Error(`unsupported method after validation: ${request.method}`);
+   }
+ }
+ 
+diff --git a/src/daemon.test.js b/src/daemon.test.js
+index b346848..2d0566c 100644
+--- a/src/daemon.test.js
++++ b/src/daemon.test.js
+@@ -151,20 +151,71 @@ describe("Unix socket daemon", () => {
+     assert.equal(resolveRuntimeDir({ env: { XDG_RUNTIME_DIR: "/xdg" }, stateDir: "/state" }), path.join("/xdg", "taskferry"));
+     assert.equal(resolveRuntimeDir({ env: {}, stateDir: "/state" }), path.join("/state", "run"));
+   });
+ 
+   test("rejects unsupported operating systems before touching the socket", async (t) => {
+     const paths = temporaryPaths(t);
+     await assert.rejects(() => startDaemon({ ...paths, platform: "win32" }), /Linux and macOS/);
+     assert.equal(fs.existsSync(paths.socketPath), false);
+   });
+ 
++  test("forwards an executor param on task.dispatch to manager.dispatch(params)", async (t) => {
++    const paths = temporaryPaths(t);
++    const fake = fakeManagerFactory();
++    const daemon = await startDaemon({ ...paths, taskManagerFactory: fake.factory });
++    t.after(() => daemon.close());
++    const peer = await openPeer(paths.socketPath);
++    t.after(() => peer.close());
++
++    await peer.request("dispatch", "task.dispatch", { prompt: "hi", directory: paths.root, executor: "pi" });
++
++    assert.deepEqual(fake.calls.at(-1), ["dispatch", { prompt: "hi", directory: paths.root, executor: "pi" }]);
++  });
++
++  test("forwards an executor param on task.advisor to manager.advisor({ executor })", async (t) => {
++    const paths = temporaryPaths(t);
++    const fake = fakeManagerFactory();
++    const daemon = await startDaemon({ ...paths, taskManagerFactory: fake.factory });
++    t.after(() => daemon.close());
++    const peer = await openPeer(paths.socketPath);
++    t.after(() => peer.close());
++
++    await peer.request("advise", "task.advisor", { prompt: "hi", directory: paths.root, model: "m", executor: "pi" });
++
++    const lastAdvisorCall = fake.calls.filter((call) => call[0] === "advisor").at(-1);
++    assert.deepEqual(lastAdvisorCall, ["advisor", { prompt: "hi", directory: paths.root, model: "m", executor: "pi" }]);
++  });
++
++  test("propagates manager.advisor() errors through the RPC layer", async (t) => {
++    const paths = temporaryPaths(t);
++    const fake = fakeManagerFactory();
++    const baseFactory = fake.factory;
++    const factory = (options) => {
++      const manager = baseFactory(options);
++      manager.advisor = () => {
++        throw new Error("error: executor pi failed\nhelp: inspect the pi worker configuration");
++      };
++      return manager;
++    };
++    const daemon = await startDaemon({ ...paths, taskManagerFactory: factory });
++    t.after(() => daemon.close());
++    const peer = await openPeer(paths.socketPath);
++    t.after(() => peer.close());
++
++    const response = await peer.request("advise", "task.advisor", { prompt: "hi", directory: paths.root, model: "m", executor: "pi" });
++
++    assert.equal(response.ok, false);
++    assert.equal(response.error.code, "REQUEST_FAILED");
++    assert.equal(response.error.message, "executor pi failed");
++    assert.equal(response.error.help, "inspect the pi worker configuration");
++  });
++
+   test("creates protected runtime/socket paths and serves ordinary requests", async (t) => {
+     const paths = temporaryPaths(t);
+     const fake = fakeManagerFactory();
+     const daemon = await startDaemon({ ...paths, taskManagerFactory: fake.factory });
+     t.after(() => daemon.close());
+ 
+     assert.equal(fs.statSync(paths.runtimeDir).mode & 0o777, 0o700);
+     assert.equal(fs.statSync(paths.socketPath).mode & 0o777, 0o600);
+ 
+     const peer = await openPeer(paths.socketPath);
+diff --git a/src/protocol.js b/src/protocol.js
+index 0215ce4..2c051ab 100644
+--- a/src/protocol.js
++++ b/src/protocol.js
+@@ -73,31 +73,32 @@ function hasOnly(params, names) {
+ 
+ const positiveInteger = isPositiveInteger;
+ const nonNegativeInteger = isNonNegativeInteger;
+ 
+ /** @param {string} method @param {Record<string, unknown>} params @returns {boolean} */
+ function validParams(method, params) {
+   switch (method) {
+     case "system.health":
+       return hasOnly(params, []);
+     case "task.dispatch":
+-      return hasOnly(params, ["prompt", "directory", "model", "variant", "sessionId", "keySlot", "finalMarker", "originSessionId", "noSandbox", "allowedDirs"])
++      return hasOnly(params, ["prompt", "directory", "model", "variant", "sessionId", "keySlot", "finalMarker", "originSessionId", "noSandbox", "allowedDirs", "executor"])
+         && isNonEmptyString(params.prompt)
+         && isAbsolutePath(params.directory)
+         && optional(params.model, isNonEmptyString)
+         && optional(params.variant, isNonEmptyString)
+         && optional(params.sessionId, isNonEmptyString)
+         && optional(params.keySlot, isNonEmptyString)
+         && optional(params.finalMarker, isNonEmptyString)
+         && optional(params.originSessionId, isNonEmptyString)
+         && optional(params.noSandbox, (value) => typeof value === "boolean")
+-        && optional(params.allowedDirs, (value) => Array.isArray(value) && value.length > 0 && value.every((entry) => isNonEmptyString(entry)));
++        && optional(params.allowedDirs, (value) => Array.isArray(value) && value.length > 0 && value.every((entry) => isNonEmptyString(entry)))
++        && optional(params.executor, (value) => value === "opencode" || value === "pi");
+     case "task.cancel":
+       return hasOnly(params, ["taskId", "graceMs"])
+         && isNonEmptyString(params.taskId)
+         && optional(params.graceMs, nonNegativeInteger);
+     case "task.status":
+       return hasOnly(params, ["taskId"]) && isNonEmptyString(params.taskId);
+     case "task.wait":
+       return hasOnly(params, ["taskId", "timeoutMs", "tailChars"])
+         && isNonEmptyString(params.taskId)
+         && optional(params.timeoutMs, nonNegativeInteger)
+@@ -112,27 +113,28 @@ function validParams(method, params) {
+     case "task.tail":
+       return hasOnly(params, ["taskId", "chars"])
+         && isNonEmptyString(params.taskId)
+         && optional(params.chars, (value) => positiveInteger(value) && value <= 65536);
+     case "task.summary":
+       return hasOnly(params, ["taskId", "maxWords", "mode"])
+         && isNonEmptyString(params.taskId)
+         && optional(params.maxWords, (value) => Number.isSafeInteger(value) && /** @type {number} */ (value) >= 75 && /** @type {number} */ (value) <= 300)
+         && optional(params.mode, (value) => value === "report" || value === "activity");
+     case "task.advisor":
+-      return hasOnly(params, ["prompt", "directory", "model", "variant", "sessionId", "timeoutMs"])
++      return hasOnly(params, ["prompt", "directory", "model", "variant", "sessionId", "timeoutMs", "executor"])
+         && isNonEmptyString(params.prompt)
+         && isAbsolutePath(params.directory)
+         && isNonEmptyString(params.model)
+         && optional(params.variant, isNonEmptyString)
+         && optional(params.sessionId, isNonEmptyString)
+-        && optional(params.timeoutMs, nonNegativeInteger);
++        && optional(params.timeoutMs, nonNegativeInteger)
++        && optional(params.executor, (value) => value === "opencode" || value === "pi");
+     case "task.context":
+       return hasOnly(params, ["directory"]) && isAbsolutePath(params.directory);
+     case "event.subscribe":
+       // Either an explicit directory, or a taskId the daemon resolves the
+       // directory from server-side -- lets a taskId-scoped subscribe (watch
+       // --task-id) skip a client-side task.status round-trip solely to
+       // learn which directory to subscribe to.
+       return hasOnly(params, ["directory", "taskId", "summaries", "originSessionId"])
+         && (params.directory !== undefined ? isAbsolutePath(params.directory) : isNonEmptyString(params.taskId))
+         && optional(params.summaries, (value) => typeof value === "boolean")
+diff --git a/src/protocol.test.js b/src/protocol.test.js
+index 26e6409..a9b42b3 100644
+--- a/src/protocol.test.js
++++ b/src/protocol.test.js
+@@ -107,20 +107,62 @@ describe("private daemon protocol", () => {
+   });
+ 
+   test("task.dispatch rejects a non-boolean noSandbox", () => {
+     assert.throws(() => parseRequestLine(request("task.dispatch", {
+       prompt: "hi",
+       directory: "/tmp/project",
+       noSandbox: "true",
+     })), /invalid params/i);
+   });
+ 
++  test("task.dispatch accepts an optional executor param", () => {
++    const parsed = parseRequestLine(request("task.dispatch", {
++      prompt: "hi",
++      directory: "/tmp/project",
++      executor: "pi",
++    }));
++    assert.equal(parsed.params.executor, "pi");
++  });
++
++  test("task.dispatch rejects an invalid executor param", () => {
++    assert.throws(
++      () => parseRequestLine(request("task.dispatch", {
++        prompt: "hi",
++        directory: "/tmp/project",
++        executor: "bogus",
++      })),
++      (error) => error instanceof ProtocolError && error.code === "INVALID_PARAMS"
++    );
++  });
++
++  test("task.advisor accepts an optional executor param", () => {
++    const parsed = parseRequestLine(request("task.advisor", {
++      prompt: "hi",
++      directory: "/tmp/project",
++      model: "m",
++      executor: "opencode",
++    }));
++    assert.equal(parsed.params.executor, "opencode");
++  });
++
++  test("task.advisor rejects an invalid executor param", () => {
++    assert.throws(
++      () => parseRequestLine(request("task.advisor", {
++        prompt: "hi",
++        directory: "/tmp/project",
++        model: "m",
++        executor: "bogus",
++      })),
++      (error) => error instanceof ProtocolError && error.code === "INVALID_PARAMS"
++    );
++  });
++
+   test("event.subscribe accepts an optional originSessionId string", () => {
+     const parsed = parseRequestLine(request("event.subscribe", {
+       directory: "/tmp/project",
+       originSessionId: "sess-abc",
+     }));
+     assert.equal(parsed.params.originSessionId, "sess-abc");
+   });
+ 
+   test("event.subscribe rejects a non-string originSessionId", () => {
+     assert.throws(() => parseRequestLine(request("event.subscribe", {

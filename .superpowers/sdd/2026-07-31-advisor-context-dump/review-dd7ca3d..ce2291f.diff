@@ -1,0 +1,239 @@
+# Review package: dd7ca3d..ce2291f
+
+## Commits
+ce2291f feat(tail): raise the chars ceiling from 65536 to 131072
+
+## Files changed
+ src/args.js          | 6 +++---
+ src/args.test.js     | 5 +++++
+ src/protocol.js      | 2 +-
+ src/protocol.test.js | 9 +++++++++
+ src/tasks.js         | 4 ++--
+ src/tasks.test.js    | 6 ++++++
+ 6 files changed, 26 insertions(+), 6 deletions(-)
+
+## Diff
+diff --git a/src/args.js b/src/args.js
+index 110e2af..39adafa 100644
+--- a/src/args.js
++++ b/src/args.js
+@@ -74,21 +74,21 @@ const commandSpecs = {
+   },
+   status: {
+     usage: "taskferry status <id> [--full]",
+     description: "Inspect task lifecycle and log activity.",
+     options: { "--full": "include all recorded task details" },
+     examples: ['taskferry status <id>', 'taskferry status <id> --full'],
+   },
+   tail: {
+     usage: "taskferry tail <id> [--chars <number>]",
+     description: "Read the latest model text for a task.",
+-    options: { "--chars <number>": "characters to return, default 1000, maximum 65536" },
++    options: { "--chars <number>": "characters to return, default 1000, maximum 131072" },
+     examples: ['taskferry tail <id>', 'taskferry tail <id> --chars 2000'],
+   },
+   summary: {
+     usage: "taskferry summary <id> [options]",
+     description: "Create a bounded report or activity summary for a task.",
+     options: {
+       "--mode report|activity": "summary mode, default report",
+       "--max-words <number>": "target length from 75 through 300",
+       "--wait": "wait for active work before summarizing",
+     },
+@@ -193,21 +193,21 @@ function migrationError(name, args) {
+     taskferry_result: "Use: taskferry result <id>",
+     taskferry_list: "Use: taskferry list",
+   };
+   return new UsageError(`${name} is an MCP tool name and is no longer a command`, migrations[name] || "Run `taskferry --help` for the AXI CLI commands");
+ }
+ 
+ function parseNumber(value, flag, { min = 0, max = Number.MAX_SAFE_INTEGER } = {}) {
+   if (!/^\d+$/.test(value)) throw new UsageError(`${flag} must be an integer`, `Use ${flag} with a number from ${min} through ${max}`);
+   const number = Number(value);
+   if (!Number.isSafeInteger(number) || number < min || number > max) {
+-    const qualifier = min === 1 ? "a positive integer" : `from ${min} through ${max}`;
++    const qualifier = min === 1 ? (number > max ? `a positive integer from ${min} through ${max}` : "a positive integer") : `from ${min} through ${max}`;
+     throw new UsageError(`${flag} must be ${qualifier}`, `Use ${flag} with a number from ${min} through ${max}`);
+   }
+   return number;
+ }
+ 
+ // Node's setTimeout silently clamps any delay above 2^31-1 ms (~24.8 days)
+ // down to 1ms, so a "parses fine" duration string would silently fire the
+ // wait timer after ~1ms instead of the requested duration. Reject upfront
+ // with a clear message instead of inheriting Node's vague overflow warning.
+ const MAX_TIMEOUT_MS = 2_147_483_647;
+@@ -409,21 +409,21 @@ export function parseArgs(argv, { cwd = process.cwd() } = {}) {
+       "--flush-interval": "flushIntervalMs",
+     };
+     const key = values[name];
+     if (!key || !commandAllows(command, name)) throw usageError(`unknown flag ${name} for \`${command}\``, command);
+     const required = requireValue(rest, index, name, inlineValue);
+     index = required.nextIndex;
+     let value = required.value;
+     if (key === "timeoutMs" || key === "flushIntervalMs") {
+       value = parseDuration(value, name);
+     } else if (["graceMs", "tailChars", "chars", "maxWords", "limit"].includes(key)) {
+-      value = parseNumber(value, name, key === "tailChars" || key === "chars" ? { min: 1, max: 65536 } : key === "maxWords" ? { min: 75, max: 300 } : { min: key === "limit" ? 1 : 0 });
++      value = parseNumber(value, name, key === "tailChars" || key === "chars" ? { min: 1, max: 131072 } : key === "maxWords" ? { min: 75, max: 300 } : { min: key === "limit" ? 1 : 0 });
+     } else if (key === "fields") {
+       value = parseFields(value);
+     } else if (key === "allowedDirs") {
+       value = value.split(",").map((entry) => entry.trim()).filter(Boolean);
+       if (!value.length) throw new UsageError("--allowed-dirs must contain at least one path", "Use --allowed-dirs with one or more comma-separated paths");
+     } else if (key === "format") {
+       const allowed = command === "watch" ? ["toon", "ndjson"] : ["toon", "claude-hook", "codex-hook"];
+       if (!allowed.includes(value)) throw new UsageError(`${name} must be one of ${allowed.join(", ")}`, `Use ${name} with one of: ${allowed.join(", ")}`);
+     } else if (key === "mode" && !["report", "activity"].includes(value)) {
+       throw new UsageError(`${name} must be one of report, activity`, "Use --mode report or --mode activity");
+diff --git a/src/args.test.js b/src/args.test.js
+index da0def8..15ffac8 100644
+--- a/src/args.test.js
++++ b/src/args.test.js
+@@ -61,20 +61,25 @@ test("parses every documented command's help without requiring operation argumen
+ });
+ 
+ test("requires command-specific arguments and values", () => {
+   assert.throws(() => parseArgs(["dispatch"]), /--prompt is required/);
+   assert.throws(() => parseArgs(["cancel"]), /task id is required/);
+   assert.throws(() => parseArgs(["advisor", "--prompt", "question"]), /--model is required/);
+   assert.throws(() => parseArgs(["result", "id", "--fields"]), /requires a value/);
+   assert.throws(() => parseArgs(["tail", "id", "--chars", "0"]), /positive integer/);
+ });
+ 
++test("tail --chars accepts up to the new 131072 ceiling and rejects above it", () => {
++  assert.equal(parseArgs(["tail", "oc_1", "--chars", "131072"]).options.chars, 131072);
++  assert.throws(() => parseArgs(["tail", "oc_1", "--chars", "131073"]), /from 1 through 131072/);
++});
++
+ test("rejects unknown flags and extra positional arguments before daemon access", () => {
+   assert.throws(() => parseArgs(["list", "--stat"]), (error) => {
+     assert.ok(error instanceof UsageError);
+     assert.match(error.message, /unknown flag --stat/);
+     assert.match(error.help, /--directory/);
+     assert.equal(error.exitCode, 2);
+     return true;
+   });
+   assert.throws(() => parseArgs(["status", "one", "two"]), /unexpected argument: two/);
+   assert.deepEqual(parseArgs(["setup"]), {
+diff --git a/src/protocol.js b/src/protocol.js
+index f07eb1a..c6b5cf3 100644
+--- a/src/protocol.js
++++ b/src/protocol.js
+@@ -132,21 +132,21 @@ function validParams(method, params) {
+     case "task.list":
+       return hasOnly(params, ["directory"]) && optional(params.directory, isAbsolutePath);
+     case "task.result":
+       return hasOnly(params, ["taskId", "full", "fields"])
+         && isNonEmptyString(params.taskId)
+         && optional(params.full, (value) => typeof value === "boolean")
+         && optional(params.fields, (value) => Array.isArray(value) && value.length > 0 && value.every((field) => RESULT_FIELDS.has(field)));
+     case "task.tail":
+       return hasOnly(params, ["taskId", "chars"])
+         && isNonEmptyString(params.taskId)
+-        && optional(params.chars, (value) => positiveInteger(value) && value <= 65536);
++        && optional(params.chars, (value) => positiveInteger(value) && value <= 131072);
+     case "task.summary": {
+       if (params.env !== undefined && params.mode === "activity") {
+         // env is meaningless on the activity path -- it reads the cached
+         // task activity and spawns nothing, so there's no process to forward
+         // caller env into. A caller passing it is expressing an intent the
+         // daemon can't honor; reject here so direct RPC callers see a clean
+         // error instead of silently dropping the field. The CLI gates this
+         // on its end too (commands.js), so a normal `taskferry summary
+         // --mode activity` never sends the combination.
+         return false;
+diff --git a/src/protocol.test.js b/src/protocol.test.js
+index fba3c7b..b98cce2 100644
+--- a/src/protocol.test.js
++++ b/src/protocol.test.js
+@@ -291,20 +291,29 @@ describe("private daemon protocol", () => {
+   test("task.summary rejects an env value with a non-string entry", () => {
+     assert.throws(
+       () => parseRequestLine(request("task.summary", {
+         taskId: "oc_123",
+         env: { FOO: 42 },
+       })),
+       (error) => error instanceof ProtocolError && error.code === "INVALID_PARAMS"
+     );
+   });
+ 
++  test("task.tail accepts chars up to 131072", () => {
++    const parsed = parseRequestLine(request("task.tail", { taskId: "t1", chars: 131072 }));
++    assert.equal(parsed.params.chars, 131072);
++  });
++
++  test("task.tail rejects chars above 131072", () => {
++    assert.throws(() => parseRequestLine(request("task.tail", { taskId: "t1", chars: 131073 })), /invalid params/i);
++  });
++
+   test("event.subscribe accepts an optional originSessionId string", () => {
+     const parsed = parseRequestLine(request("event.subscribe", {
+       directory: "/tmp/project",
+       originSessionId: "sess-abc",
+     }));
+     assert.equal(parsed.params.originSessionId, "sess-abc");
+   });
+ 
+   test("event.subscribe rejects a non-string originSessionId", () => {
+     assert.throws(() => parseRequestLine(request("event.subscribe", {
+diff --git a/src/tasks.js b/src/tasks.js
+index 5d59700..3a850d7 100644
+--- a/src/tasks.js
++++ b/src/tasks.js
+@@ -3088,22 +3088,22 @@ export function createTaskManager({
+   }
+ 
+   /**
+    * @param {string} taskId
+    * @param {{chars?: number}} [options]
+    */
+   function tail(taskId, { chars = 1000 } = {}) {
+     ensureStateLoaded();
+     const task = tasks.get(taskId);
+     if (!task) throw noSuchTask(taskId);
+-    if (!Number.isSafeInteger(chars) || chars <= 0 || chars > 65536) {
+-      throw new Error("error: chars must be a positive integer no greater than 65536\nhelp: run taskferry tail with chars between 1 and 65536");
++    if (!Number.isSafeInteger(chars) || chars <= 0 || chars > 131072) {
++      throw new Error("error: chars must be a positive integer no greater than 131072\nhelp: run taskferry tail with chars between 1 and 131072");
+     }
+     let text = readLastText(task.logPath);
+     // Eventless crash: narration is never coming (the log has no parseable
+     // events at all, checked over the whole log), so the raw capture IS the
+     // task's output -- show it instead of "none observed yet", which reads
+     // as "still waiting". Deliberately broader than the settlement gate
+     // (no failureReason requirement): tail is display-only, and a
+     // watchdog-killed eventless task's stderr is just as much its only
+     // output as a boot crash's is.
+     if (!text && task.status === "crashed" && !logHasAnyEvent(task.logPath)) {
+diff --git a/src/tasks.test.js b/src/tasks.test.js
+index 2b14405..8e3e516 100644
+--- a/src/tasks.test.js
++++ b/src/tasks.test.js
+@@ -4610,20 +4610,26 @@ describe("tail()", () => {
+     assert.equal(r.text, "none observed yet");
+     assert.equal(r.textTotalChars, 0);
+     assert.equal(r.truncated, false);
+   });
+ 
+   test("validates the requested suffix length", () => {
+     const mgr = makeManager({ tasksFixture: [baseTask({ id: "t1" })] });
+     assert.throws(() => mgr.tail("t1", { chars: 0 }), /chars must be a positive integer/);
+   });
+ 
++  test("accepts a request up to the 131072 ceiling and rejects above it", () => {
++    const mgr = makeManager({ tasksFixture: [baseTask({ id: "t1" })] });
++    assert.doesNotThrow(() => mgr.tail("t1", { chars: 131072 }));
++    assert.throws(() => mgr.tail("t1", { chars: 131073 }), /chars must be a positive integer no greater than 131072/);
++  });
++
+   test("falls back to raw captured output for a crashed task that never emitted an event", () => {
+     const raw = 'Error: Extension "/x/y.js" error: Provider y: "baseUrl" is required when defining models.';
+     const mgr = makeManager({
+       tasksFixture: (logDir) => [baseTask({ id: "t1", status: "crashed", logPath: path.join(logDir, "t1.ndjson") })],
+       logs: { "t1.ndjson": raw + "\n" },
+     });
+     const r = mgr.tail("t1");
+     assert.equal(r.text, raw);
+     assert.equal(r.textTotalChars, raw.length);
+     assert.equal(r.truncated, false);

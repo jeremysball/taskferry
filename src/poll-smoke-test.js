@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { rmRoot, stopDaemonAndWait } from "./smoke-test-support.js";
+import { rmRoot, scratchGitRepo, stopDaemonAndWait } from "./smoke-test-support.js";
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const cliEntry = path.join(scriptDir, "cli.js");
@@ -15,7 +15,7 @@ const env = {
   TASKFERRY_STATE_DIR: path.join(root, "state"),
   TASKFERRY_RUNTIME_DIR: path.join(root, "run"),
 };
-const dirArg = process.argv[2] || path.join(scriptDir, "..");
+const dirArg = process.argv[2] || scratchGitRepo(root);
 
 function taskferry(args) {
   const output = execFileSync(process.execPath, [cliEntry, ...args], { env, encoding: "utf8" });
@@ -37,7 +37,7 @@ function stopDaemon() {
 }
 
 console.log("== case 1: taskferry wait resolves on real completion (short task, long-ish cap) ==");
-const d1 = taskferry(["dispatch", "--prompt", "Reply with the word PONG and nothing else.", "--directory", dirArg, "--model", "minimax/MiniMax-M3"]);
+const d1 = taskferry(["dispatch", "--prompt", "Reply with the word PONG and nothing else.", "--directory", dirArg, "--model", "openrouter/deepseek/deepseek-v4-flash", "--executor", "opencode"]);
 const t1Start = Date.now();
 const w1 = taskferry(["wait", d1.id, "--timeout", "30000"]);
 const t1Elapsed = Date.now() - t1Start;
@@ -48,7 +48,8 @@ const d2 = taskferry([
   "dispatch",
   "--prompt", "Run 'sleep 30' via bash, then reply SLEEP_DONE. Do not shorten the sleep duration.",
   "--directory", dirArg,
-  "--model", "minimax/MiniMax-M3",
+  "--model", "openrouter/deepseek/deepseek-v4-flash",
+  "--executor", "opencode",
 ]);
 const t2Start = Date.now();
 const w2 = taskferry(["wait", d2.id, "--timeout", "3000"]);

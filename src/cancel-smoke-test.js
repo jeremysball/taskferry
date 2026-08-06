@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { rmRoot, stopDaemonAndWait } from "./smoke-test-support.js";
+import { rmRoot, scratchGitRepo, stopDaemonAndWait } from "./smoke-test-support.js";
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const cliEntry = path.join(scriptDir, "cli.js");
@@ -15,7 +15,7 @@ const env = {
   TASKFERRY_STATE_DIR: path.join(root, "state"),
   TASKFERRY_RUNTIME_DIR: path.join(root, "run"),
 };
-const dirArg = process.argv[2] || path.join(scriptDir, "..");
+const dirArg = process.argv[2] || scratchGitRepo(root);
 
 function taskferry(args) {
   const output = execFileSync(process.execPath, [cliEntry, ...args], { env, encoding: "utf8" });
@@ -60,7 +60,8 @@ const dispatched = taskferry([
   "dispatch",
   "--prompt", "Run 'sleep 60' via bash, then reply SLEEP_DONE. Do not shorten the sleep duration.",
   "--directory", dirArg,
-  "--model", "minimax/MiniMax-M3",
+  "--model", "openrouter/deepseek/deepseek-v4-flash",
+  "--executor", "opencode",
 ]);
 console.log(dispatched);
 const taskId = dispatched.id;

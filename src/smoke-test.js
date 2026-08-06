@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import readline from "node:readline";
 import { fileURLToPath } from "node:url";
-import { rmRoot, stopDaemonAndWait } from "./smoke-test-support.js";
+import { rmRoot, scratchGitRepo, stopDaemonAndWait } from "./smoke-test-support.js";
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const cliEntry = path.join(scriptDir, "cli.js");
@@ -16,7 +16,7 @@ const env = {
   TASKFERRY_STATE_DIR: path.join(root, "state"),
   TASKFERRY_RUNTIME_DIR: path.join(root, "run"),
 };
-const dirArg = process.argv[2] || path.join(scriptDir, "..");
+const dirArg = process.argv[2] || scratchGitRepo(root);
 
 function taskferry(args) {
   const output = execFileSync(process.execPath, [cliEntry, ...args], { env, encoding: "utf8" });
@@ -52,7 +52,7 @@ check("home view reports a workspace", typeof home.workspace === "string" && hom
 check("home view reports task counts", typeof home.counts === "object");
 
 console.log("\n== dispatch ==");
-const dispatched = taskferry(["dispatch", "--prompt", "Reply with the word PONG and nothing else.", DIRECTORY_FLAG, dirArg, "--model", "minimax/MiniMax-M3"]);
+const dispatched = taskferry(["dispatch", "--prompt", "Reply with the word PONG and nothing else.", DIRECTORY_FLAG, dirArg, "--model", "openrouter/deepseek/deepseek-v4-flash", "--executor", "opencode"]);
 console.log(dispatched);
 const taskId = dispatched.id;
 check("dispatch returned a task id", typeof taskId === "string" && taskId.length > 0);
@@ -92,7 +92,7 @@ const watch = spawn(process.execPath, [cliEntry, "watch", DIRECTORY_FLAG, dirArg
 const rl = readline.createInterface({ input: watch.stdout });
 rl.on("line", (line) => watchLines.push(line));
 await new Promise((resolve) => setTimeout(resolve, 500));
-const secondDispatch = taskferry(["dispatch", "--prompt", "Reply with the word PONG and nothing else.", DIRECTORY_FLAG, dirArg, "--model", "minimax/MiniMax-M3"]);
+const secondDispatch = taskferry(["dispatch", "--prompt", "Reply with the word PONG and nothing else.", DIRECTORY_FLAG, dirArg, "--model", "openrouter/deepseek/deepseek-v4-flash", "--executor", "opencode"]);
 let watchExitCode = null;
 const watchExited = new Promise((resolve) => watch.once("exit", (code) => {
   watchExitCode = code;

@@ -256,6 +256,7 @@ function buildManagerOptions(options, stateDir, defaultCacheDir, defaultOverlayT
     ...passthroughIfSet({ maxConcurrentTasks: options.maxConcurrentTasks }, "maxConcurrentTasks", "maxConcurrentTasks"),
     ...passthroughIfSet({ noOutputTimeoutMs: options.noOutputTimeoutMs }, "noOutputTimeoutMs", "noOutputTimeoutMs"),
     ...passthroughIfSet({ postOutputNoOutputTimeoutMs: options.postOutputNoOutputTimeoutMs }, "postOutputNoOutputTimeoutMs", "postOutputNoOutputTimeoutMs"),
+    ...passthroughIfSet({ preOutputMaxMs: options.preOutputMaxMs }, "preOutputMaxMs", "preOutputMaxMs"),
     ...passthroughIfSet({ watchdogPollMs: options.watchdogPollMs }, "watchdogPollMs", "watchdogPollMs"),
     ...passthroughIfSet({ maxWaitMs: options.maxWaitMs }, "maxWaitMs", "maxWaitMs"),
     ...passthroughIfSet({ envDenylistSpec: options.envDenylistSpec }, "envDenylistSpec", "envDenylist", (spec) => parseEnvDenylist(spec)),

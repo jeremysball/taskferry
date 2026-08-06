@@ -84,19 +84,43 @@ binary, stop the existing daemon (it started before that binary was on
 ## A task is stuck `crashed` with `failureReason: "no_output_timeout_dead_spawn"` or `"no_output_timeout_stalled"`
 
 The task went silent past the applicable no-output deadline and the
-watchdog killed it. `"no_output_timeout_dead_spawn"` means it never wrote a
-single parseable log event within `TASKFERRY_NO_OUTPUT_TIMEOUT_MS` (default
-256000ms) — the worker or provider never started producing anything.
-`"no_output_timeout_stalled"` means it did produce at least one event and
-then went silent past `TASKFERRY_POST_OUTPUT_NO_OUTPUT_TIMEOUT_MS` (default
-400000ms) — it did real work, then hung mid-task. Both apply equally to
-either executor. Read the log directly (`taskferry status <id> --full` for
-the `logPath`) to see what, if anything, the selected worker wrote before
-being killed — a common cause of the dead-spawn variant is a prompt or
-model that needs an interactive step taskferry's non-interactive invocation
-can't satisfy (`opencode run --auto` for the `opencode` executor; `pi`'s
-own non-interactive mode for `pi`). Raise the relevant timeout only if the
+watchdog killed it. The clock the watchdog tracks resets on **any log
+growth**, not just a complete parseable JSON line — an in-progress line,
+non-JSON stderr chatter, or a write straddling two ticks all count as proof
+of life. `"no_output_timeout_dead_spawn"` means either the log never grew
+at all, or it grew but never once yielded a parseable event, within
+`TASKFERRY_NO_OUTPUT_TIMEOUT_MS` (default 256000ms) — the worker or
+provider never started producing anything. `"no_output_timeout_stalled"`
+means it did produce at least one parseable event and then went silent
+(no further log growth at all) past
+`TASKFERRY_POST_OUTPUT_NO_OUTPUT_TIMEOUT_MS` (default 400000ms) — it did
+real work, then hung mid-task. Both apply equally to either executor. Read
+the log directly (`taskferry status <id> --full` for the `logPath`) to see
+what, if anything, the selected worker wrote before being killed — a
+common cause of the dead-spawn variant is a prompt or model that needs an
+interactive step taskferry's non-interactive invocation can't satisfy
+(`opencode run --auto` for the `opencode` executor; `pi`'s own
+non-interactive mode for `pi`). Raise the relevant timeout only if the
 task is legitimately slow, not to paper over a hung worker.
+
+There's also a separate, absolute ceiling on the pre-output phase:
+`TASKFERRY_PRE_OUTPUT_MAX_MS` (default 4x `TASKFERRY_NO_OUTPUT_TIMEOUT_MS`,
+so 1024000ms), measured from when the watcher armed rather than from the
+last activity. A worker that never produces a single parseable line but
+keeps the raw log growing forever (continuous non-JSON noise) would
+otherwise ride the any-growth reset indefinitely, holding a concurrency
+slot forever — this ceiling still kills it as
+`"no_output_timeout_dead_spawn"` even while raw bytes keep arriving. It
+stops applying the moment a parseable line lands; from then on the
+escalated post-output budget above is the only mechanism.
+
+**Known limitation:** stderr is piped straight to the raw log file
+unfiltered — no JSON parsing, no event normalization — so any stderr
+chatter not causally tied to real task progress (a CLI-level spinner or
+retry-loop print, a Node runtime warning) still counts as "any log
+growth" and resets the clock. This is an accepted tradeoff, not a bug:
+narrowing what counts as activity would bring back the false-positive
+kills this watchdog change exists to prevent.
 
 If the log shows the worker recovered on its own after a transient error
 mid-run and reached a genuine final answer, check `status` again: taskferry

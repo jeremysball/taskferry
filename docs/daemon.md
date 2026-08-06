@@ -150,12 +150,32 @@ CLI usage approaches.
 ## Watchdogs
 
 - `TASKFERRY_NO_OUTPUT_TIMEOUT_MS` (default `256000`): a running task that
-  writes no parseable log event before this deadline is stopped (`SIGTERM`,
+  produces no log growth at all before this deadline is stopped (`SIGTERM`,
   escalating to `SIGKILL`) and marked `crashed` with `failureReason:
-  "no_output_timeout_dead_spawn"`.
+  "no_output_timeout_dead_spawn"`. The activity clock this deadline is
+  measured against resets on **any growth of the raw log file**, not just a
+  complete parseable JSON line — an in-progress line, non-JSON stderr
+  chatter, or a write straddling two watcher ticks all count as proof the
+  process is still alive. A parseable line can't appear without the log
+  growing first, so this is a strict superset of the older
+  parseable-line-only reset; it exists because a worker that's clearly
+  alive (actively appending bytes) was previously still getting killed as a
+  false-positive dead spawn.
+- `TASKFERRY_PRE_OUTPUT_MAX_MS` (default 4x `TASKFERRY_NO_OUTPUT_TIMEOUT_MS`,
+  i.e. `1024000`): an absolute ceiling on the pre-output phase, independent
+  of the any-growth reset above. It's measured from when the watcher armed,
+  not from `lastActivityMs`, so continued raw log growth cannot push it
+  back — without it, a worker producing only non-JSON noise and never a
+  single parseable line could ride the any-growth reset forever, holding a
+  concurrency slot indefinitely. Firing this ceiling also settles the task
+  as `"no_output_timeout_dead_spawn"`, with a `failureDetail` that
+  distinguishes it from the ordinary no-output timeout above. It stops
+  applying the instant a parseable line lands; from then on the escalated
+  post-output budget below is the only silence deadline in effect.
 - `TASKFERRY_POST_OUTPUT_NO_OUTPUT_TIMEOUT_MS` (default `400000`): once a
   task has produced at least one parseable log event, the deadline for
-  further silence switches to this longer value for the rest of the task's
+  further silence (still measured by the same any-growth activity clock)
+  switches to this longer value for the rest of the task's
   life — a model that's gone quiet mid-turn (long reasoning, a slow test
   run) gets more room than a task that never started at all. A task killed
   after this deadline settles with `failureReason:
@@ -165,7 +185,22 @@ CLI usage approaches.
   work, then went silent" (stalled mid-task) without parsing
   `failureDetail`.
 - `TASKFERRY_WATCHDOG_POLL_MS` (default `2000`): how often the no-output and
-  provider-failure checks run against a running task's log.
+  provider-failure checks run against a running task's log. Each tick reads
+  at most `TAIL_READ_BYTES` (1 MiB) of new growth; a single burst larger
+  than that is picked up over however many subsequent ticks it takes,
+  rather than allocating one unbounded buffer for the whole burst. A
+  persistent log-read error other than `ENOENT` (a rotated or
+  not-yet-created log, retried next tick) fails the task explicitly with
+  `failureReason: "watchdog_log_read_error"` instead of silently freezing
+  the activity clock.
+- **Known limitation:** a running child's stderr is piped straight to the
+  raw log file unfiltered — no JSON parsing, no event normalization — so
+  any stderr chatter not causally tied to real task progress (a CLI-level
+  spinner or retry-loop print, a Node runtime warning) still counts as "any
+  log growth" for the reset above. This is an accepted tradeoff: the
+  any-growth reset is deliberately the loosest signal available, and
+  narrowing what counts as activity would reintroduce the false-positive
+  kills it exists to prevent.
 - A task stopped because its log matched a known provider-failure
   diagnostic gets a `failureReason` instead of a bare timeout, so a caller
   knows which corrective action fits. For the `opencode` executor (the

@@ -138,6 +138,27 @@ function normalizeToolExecutionEnd(evt) {
   };
 }
 
+/**
+ * A minimal marker for an in-progress tool call. pi previously dropped
+ * tool_execution_start/tool_execution_update entirely (normalizeLogEvent
+ * returned null), so a single long-running tool call -- a slow test suite,
+ * a big build -- produced zero log growth for its whole duration; only
+ * tool_execution_end ever wrote anything. That's real activity going
+ * unrepresented in the log the no-output watchdog reads, independent of
+ * this PR's own fix (log growth was already the loosest signal available;
+ * this closes the gap on pi's write side, matching what the opencode
+ * executor already does via its identity normalizeLogEvent). Keep the
+ * payload minimal -- this is a liveness marker, not narration -- so it
+ * doesn't inflate result()/summarize()'s token-visible output the way a
+ * full tool_use event (with input/output) would.
+ * @param {Record<string, unknown>} evt
+ */
+function normalizeToolExecutionHeartbeat(evt) {
+  const toolName = typeof evt.toolName === "string" ? evt.toolName : "unknown";
+  const toolCallId = typeof evt.toolCallId === "string" ? evt.toolCallId : null;
+  return { type: "tool_progress", part: { type: "tool-progress", tool: toolName, toolCallId } };
+}
+
 /** @param {Record<string, unknown>} evt */
 function normalizeAgentEnd(evt) {
   const messages = Array.isArray(evt.messages) ? evt.messages : [];
@@ -176,6 +197,8 @@ function piNormalizeLogEvent(parsed) {
   switch (evt.type) {
     case "session": return normalizeSessionEvent(evt);
     case "message_update": return normalizeMessageUpdate(evt);
+    case "tool_execution_start": return normalizeToolExecutionHeartbeat(evt);
+    case "tool_execution_update": return normalizeToolExecutionHeartbeat(evt);
     case "tool_execution_end": return normalizeToolExecutionEnd(evt);
     case "agent_end": return normalizeAgentEnd(evt);
     default: return null;

@@ -27,6 +27,7 @@ const CONFIG_FIELD_TYPES = {
   dispatchWindowMs: "number",
   noOutputTimeoutMs: "number",
   postOutputNoOutputTimeoutMs: "number",
+  preOutputMaxMs: "number",
   summaryModel: "string",
   activitySummariesEnabled: "boolean",
   summarizerTimeoutMs: "number",

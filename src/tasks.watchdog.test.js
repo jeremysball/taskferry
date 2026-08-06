@@ -7,6 +7,8 @@ import { createTaskManager } from "./tasks.js";
 import { trackManager, makeManager, fakeChild, baseTask, DEFAULT_SUMMARY_MODEL, FINAL_ANSWER, STATUS_DONE_RE, QUOTA_ERROR, mkdtempTracked } from "./tasks.test-helpers.js";
 
 const STATUS_DONE_TEXT = "Status: DONE";
+const STDERR_NOISE_LINE = "stderr noise\n";
+const workingTextEvent = (messageID = "m1") => JSON.stringify({ type: "text", part: { messageID, text: "working..." } }) + "\n";
 
 describe("output-completeness check at settlement time (issue #35)", () => {
   function writeLog(logPath, lines) {
@@ -496,7 +498,11 @@ describe("no-output watchdog", () => {
     assert.equal(mgr.status(dispatched.id).failureReason, null);
   });
 
-  test("repeated non-JSON output does not reset the no-output watchdog", async () => {
+  test("repeated non-JSON output resets the no-output watchdog (any log growth counts as activity)", async () => {
+    // A parseable line can't appear without the log growing first, so
+    // log-size growth is a strict superset of "parseable line landed" as an
+    // activity signal: raw bytes (in-progress lines, non-JSON stderr noise)
+    // are just as much proof the process is alive as a complete JSON line.
     const child = fakeChild(7004);
     const killed = [];
     const mgr = makeManager({
@@ -507,13 +513,103 @@ describe("no-output watchdog", () => {
     });
     const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
     const logPath = mgr.status(dispatched.id).logPath;
-    const interval = setInterval(() => fs.appendFileSync(logPath, "stderr noise\n"), 10);
+    const interval = setInterval(() => fs.appendFileSync(logPath, STDERR_NOISE_LINE), 10);
 
     await new Promise((r) => setTimeout(r, 70));
     clearInterval(interval);
-    assert.ok(killed.some((k) => k.signal === "SIGTERM"));
+    assert.deepEqual(killed, []);
+    assert.equal(mgr.status(dispatched.id).status, "running");
+
+    child.emit("exit", 0, null);
+    assert.equal(mgr.status(dispatched.id).failureReason, null);
+  });
+});
+
+describe("no-output watchdog: absolute pre-output ceiling", () => {
+  test("the absolute pre-output ceiling fires even while non-JSON noise keeps resetting the activity clock", async () => {
+    // The regression this test guards against: without a ceiling
+    // independent of lastActivityMs, a worker that never produces a single
+    // parseable line but keeps writing raw noise could reset its own
+    // watchdog clock forever, never tripping no_output_timeout_dead_spawn,
+    // holding a concurrency slot and growing its log indefinitely.
+    // preOutputMaxMs bounds that: it's measured from when the watcher
+    // armed, not from lastActivityMs, so continued raw growth cannot push
+    // it out. noOutputTimeoutMs is set higher than the ceiling here so the
+    // per-tick reset (which would otherwise never let noOutputTimeoutMs
+    // itself elapse) can't be what fires first -- the assertion is
+    // specifically that the ceiling, not the ordinary no-output check,
+    // is what kills this task.
+    const child = fakeChild(7009);
+    const killed = [];
+    const mgr = makeManager({
+      spawnFn: () => child,
+      killFn: (pid, signal) => killed.push({ pid, signal }),
+      noOutputTimeoutMs: 10000,
+      preOutputMaxMs: 40,
+      watchdogPollMs: 5,
+    });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+    const logPath = mgr.status(dispatched.id).logPath;
+    const interval = setInterval(() => fs.appendFileSync(logPath, STDERR_NOISE_LINE), 10);
+
+    await new Promise((r) => setTimeout(r, 90));
+    clearInterval(interval);
+    assert.ok(killed.some((k) => k.signal === "SIGTERM"), "the absolute pre-output ceiling must fire despite continuous raw growth");
 
     child.emit("exit", null, "SIGTERM");
+    assert.equal(mgr.status(dispatched.id).failureReason, "no_output_timeout_dead_spawn");
+  });
+
+  test("the pre-output ceiling does not apply once a parseable line has landed", async () => {
+    // Once outputSeen flips true, the escalated postOutputNoOutputTimeout
+    // budget is the intended mechanism, not the absolute pre-output
+    // ceiling -- a task doing real, silent-but-legitimate work past the
+    // ceiling's window must not be killed by it.
+    const child = fakeChild(7010);
+    const killed = [];
+    const mgr = makeManager({
+      spawnFn: () => child,
+      killFn: (pid, signal) => killed.push({ pid, signal }),
+      noOutputTimeoutMs: 20,
+      postOutputNoOutputTimeoutMs: 10000,
+      preOutputMaxMs: 40,
+      watchdogPollMs: 5,
+    });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+    const logPath = mgr.status(dispatched.id).logPath;
+    fs.appendFileSync(logPath, workingTextEvent());
+
+    await new Promise((r) => setTimeout(r, 90));
+    assert.deepEqual(killed, [], "a task that produced a parseable event before the ceiling must not be killed by it");
+    assert.equal(mgr.status(dispatched.id).status, "running");
+
+    child.emit("exit", 0, null);
+    assert.equal(mgr.status(dispatched.id).failureReason, null);
+  });
+});
+
+describe("no-output watchdog: escalation and latch", () => {
+  test("silence with zero log growth still fires the watchdog even after earlier non-JSON noise", async () => {
+    // Companion to the above: non-JSON growth resets the clock while it's
+    // happening, but once the log stops growing entirely (not just stops
+    // producing parseable lines), the watchdog must still fire.
+    const child = fakeChild(7008);
+    const killed = [];
+    const mgr = makeManager({
+      spawnFn: () => child,
+      killFn: (pid, signal) => killed.push({ pid, signal }),
+      noOutputTimeoutMs: 20,
+      watchdogPollMs: 5,
+    });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+    const logPath = mgr.status(dispatched.id).logPath;
+    fs.appendFileSync(logPath, STDERR_NOISE_LINE);
+
+    await new Promise((r) => setTimeout(r, 60));
+    assert.ok(killed.some((k) => k.signal === "SIGTERM"), "watchdog must still fire once the log truly stops growing");
+
+    child.emit("exit", null, "SIGTERM");
+    assert.equal(mgr.status(dispatched.id).failureReason, "no_output_timeout_dead_spawn");
   });
 
   test("a running child that goes silent again after early output is eventually stopped (GLM-5.2 review finding)", async () => {
@@ -527,7 +623,7 @@ describe("no-output watchdog", () => {
       watchdogPollMs: 5,
     });
     const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
-    fs.writeFileSync(mgr.status(dispatched.id).logPath, JSON.stringify({ type: "text", part: { messageID: "m1", text: "working..." } }) + "\n");
+    fs.writeFileSync(mgr.status(dispatched.id).logPath, workingTextEvent());
 
     await new Promise((r) => setTimeout(r, 70));
     assert.ok(killed.some((k) => k.signal === "SIGTERM"), "watchdog must eventually fire after the last activity, not just the start");
@@ -558,7 +654,7 @@ describe("no-output watchdog", () => {
 
     // One parseable line lands before the pre-output deadline, flipping the
     // latch. Everything from here to the assert is silence.
-    fs.appendFileSync(logPath, JSON.stringify({ type: "text", part: { messageID: "m1", text: "working..." } }) + "\n");
+    fs.appendFileSync(logPath, workingTextEvent());
 
     await new Promise((r) => setTimeout(r, 60));
     assert.deepEqual(killed, [], "after one parseable log event, the escalated budget must keep the task alive past noOutputTimeoutMs");
@@ -660,5 +756,88 @@ describe("no-output watchdog", () => {
 
     child.emit("exit", null, "SIGTERM");
     assert.equal(mgr.status(dispatched.id).failureReason, "no_output_timeout_stalled");
+  });
+});
+
+describe("no-output watchdog: read errors and chunk caps", () => {
+  test("a persistent non-ENOENT log-read error fails the task explicitly instead of silently freezing the activity clock", async (t) => {
+    // Only ENOENT (rotated/not-yet-created log) is meant to be swallowed
+    // and retried. Any other error -- EACCES from a chmod/ownership change
+    // mid-run, EMFILE from fd exhaustion -- must not silently prevent
+    // lastActivityMs from ever updating again while the child is still
+    // alive and producing real output; that used to let a healthy task get
+    // SIGTERM'd later with a misleading no-output failure once the stale
+    // clock finally elapsed.
+    const child = fakeChild(7011);
+    const killed = [];
+    const mgr = makeManager({
+      spawnFn: () => child,
+      killFn: (pid, signal) => killed.push({ pid, signal }),
+      noOutputTimeoutMs: 10000,
+      watchdogPollMs: 5,
+    });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+    const logPath = mgr.status(dispatched.id).logPath;
+
+    const originalOpenSync = fs.openSync;
+    const originalReadSync = fs.readSync;
+    let targetFd = null;
+    t.mock.method(fs, "openSync", (targetPath, ...rest) => {
+      const fd = originalOpenSync(targetPath, ...rest);
+      if (targetPath === logPath && rest[0] === "r") targetFd = fd;
+      return fd;
+    });
+    t.mock.method(fs, "readSync", (fd, ...rest) => {
+      if (fd === targetFd) {
+        const err = /** @type {NodeJS.ErrnoException} */ (new Error("EACCES: permission denied, read"));
+        err.code = "EACCES";
+        throw err;
+      }
+      return originalReadSync(fd, ...rest);
+    });
+
+    fs.appendFileSync(logPath, STDERR_NOISE_LINE);
+    await new Promise((r) => setTimeout(r, 40));
+
+    assert.ok(killed.some((k) => k.signal === "SIGTERM"), "a persistent (non-ENOENT) read error must fail the task instead of retrying forever");
+    child.emit("exit", null, "SIGTERM");
+    assert.equal(mgr.status(dispatched.id).failureReason, "watchdog_log_read_error");
+  });
+
+  test("a single tick's log growth is read in capped chunks, not one unbounded allocation", async (t) => {
+    // Every other bounded log-read in this file caps its allocation
+    // (BOOT_FAILURE_SCAN_BYTES/LOG_ACTIVITY_SCAN_BYTES/TAIL_READ_BYTES);
+    // consumeWatchdogLogChunk used to Buffer.alloc the entire growth since
+    // the last tick in one shot. A child that dumps a large burst between
+    // polls (a verbose error, a big stdout flush) must not spike a single
+    // large allocation on the daemon's one thread -- the read is spread
+    // over however many ticks it takes instead.
+    const child = fakeChild(7012);
+    const readLengths = [];
+    const originalReadSync = fs.readSync;
+    t.mock.method(fs, "readSync", (fd, buffer, offset, length, position) => {
+      readLengths.push(length);
+      return originalReadSync(fd, buffer, offset, length, position);
+    });
+    const mgr = makeManager({
+      spawnFn: () => child,
+      killFn: () => {},
+      noOutputTimeoutMs: 10000,
+      watchdogPollMs: 5,
+    });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+    const logPath = mgr.status(dispatched.id).logPath;
+    // A single burst comfortably larger than any of the file's other
+    // per-tick read caps, so a passing test can only mean this call site's
+    // own cap was actually applied.
+    fs.appendFileSync(logPath, "x".repeat(2 * 1024 * 1024));
+
+    await new Promise((r) => setTimeout(r, 40));
+    child.emit("exit", 0, null);
+
+    assert.ok(readLengths.length > 0, "the watchdog must have read at least one chunk");
+    for (const length of readLengths) {
+      assert.ok(length <= 1024 * 1024, `each watchdog read must be capped, got a single read of ${length} bytes`);
+    }
   });
 });

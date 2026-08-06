@@ -52,7 +52,7 @@ check("home view reports a workspace", typeof home.workspace === "string" && hom
 check("home view reports task counts", typeof home.counts === "object");
 
 console.log("\n== dispatch ==");
-const dispatched = taskferry(["dispatch", "--prompt", "Reply with the word PONG and nothing else.", DIRECTORY_FLAG, dirArg, "--model", "opencode-go/minimax-m3"]);
+const dispatched = taskferry(["dispatch", "--prompt", "Reply with the word PONG and nothing else.", DIRECTORY_FLAG, dirArg, "--model", "minimax/MiniMax-M3"]);
 console.log(dispatched);
 const taskId = dispatched.id;
 check("dispatch returned a task id", typeof taskId === "string" && taskId.length > 0);
@@ -92,7 +92,7 @@ const watch = spawn(process.execPath, [cliEntry, "watch", DIRECTORY_FLAG, dirArg
 const rl = readline.createInterface({ input: watch.stdout });
 rl.on("line", (line) => watchLines.push(line));
 await new Promise((resolve) => setTimeout(resolve, 500));
-const secondDispatch = taskferry(["dispatch", "--prompt", "Reply with the word PONG and nothing else.", DIRECTORY_FLAG, dirArg, "--model", "opencode-go/minimax-m3"]);
+const secondDispatch = taskferry(["dispatch", "--prompt", "Reply with the word PONG and nothing else.", DIRECTORY_FLAG, dirArg, "--model", "minimax/MiniMax-M3"]);
 let watchExitCode = null;
 const watchExited = new Promise((resolve) => watch.once("exit", (code) => {
   watchExitCode = code;

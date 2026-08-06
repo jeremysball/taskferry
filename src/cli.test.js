@@ -631,6 +631,38 @@ test("colors setup failures on stderr only when stderr is a TTY", async () => {
   assert.ok(stderr.includes("\x1b[2mhelp: fix the reported dependency or filesystem problem, then rerun node src/cli.js setup\x1b[0m\n"));
 });
 
+test("runs init with the literal cwd without connecting to the daemon", async () => {
+  const capture = capturedIo();
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-cli-init-"));
+  let receivedDirectory;
+  const result = await runCli(["init"], {
+    cwd,
+    io: capture.io,
+    init: async (directory) => {
+      receivedDirectory = directory;
+      return { path: path.join(directory, ".taskferry.toml"), written: true, checkCommand: null };
+    },
+    connectClient: async () => { throw new Error(setupMustNotConnect); },
+    resolveWorkspaceRoot: () => { throw new Error("init must not resolve the workspace root"); },
+  });
+
+  assert.equal(result.exitCode, 0);
+  assert.equal(receivedDirectory, cwd);
+  assert.equal(capture.output().value.written, true);
+});
+
+test("surfaces init failures without connecting to the daemon", async () => {
+  const capture = capturedIo();
+  const result = await runCli(["init"], {
+    io: capture.io,
+    init: async () => { throw new Error("boom"); },
+    connectClient: async () => { throw new Error(setupMustNotConnect); },
+  });
+
+  assert.equal(result.exitCode, 1);
+  assert.equal(capture.output().value.error, "boom");
+});
+
 test("executes main() when invoked through a symlink to src/cli.js", (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-cli-symlink-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));

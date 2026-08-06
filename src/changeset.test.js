@@ -1,10 +1,22 @@
 // src/changeset.test.js
-import { describe, test } from "node:test";
+import { describe, test, after } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { overlayPaths, subOverlayPaths, subOverlaySlug, extractGitDiff, resolvePreDispatchHead, buildMergedViewBwrapArgs, extractNonGitDiff, applyChangeset, cleanupOverlay, detectHeadDrift, resolveHeadDrift } from "./changeset.js";
+import { overlayPaths, subOverlayPaths, subOverlaySlug, extractGitDiff, resolvePreDispatchHead, buildMergedViewBwrapArgs, extractNonGitDiff, applyChangeset, cleanupOverlay, detectHeadDrift, resolveHeadDrift, defaultRunCommand } from "./changeset.js";
+
+const trackedTmpDirs = [];
+after(() => {
+  for (const d of trackedTmpDirs) {
+    try {
+      fs.rmSync(d, { recursive: true, force: true });
+    } catch {
+      // Best-effort: force:true only suppresses ENOENT, not EACCES/EPERM.
+    }
+  }
+});
+
 
 // Shared fixture literals lifted to module scope so the sonarjs
 // no-duplicate-string rule stays quiet (each literal now appears once, in
@@ -43,6 +55,22 @@ const OVERLAY_BUSY_STDERR =
   "bwrap: Can't make overlay mount on /newroot/repo with options " +
   "upperdir=/tmp/u,workdir=/tmp/w,lowerdir=/oldroot/repo,userxattr: Device or resource busy\n";
 const RETRIES_EXHAUSTED_MSG = "one initial attempt plus three retries, then give up";
+
+describe("defaultRunCommand()", () => {
+  test("does not throw ENOBUFS on stdout over spawnSync's 1 MiB default maxBuffer (taskferry#358)", () => {
+    // A real merge diff routinely exceeds Node's spawnSync default
+    // maxBuffer (1 MiB); the fix must raise it well past that so a large
+    // git diff still comes back instead of throwing.
+    const overOneMebibyte = 1024 * 1024 + 1;
+    const result = defaultRunCommand(process.execPath, [
+      "-e",
+      `process.stdout.write("x".repeat(${overOneMebibyte}))`,
+    ]);
+    assert.equal(result.error, undefined);
+    assert.equal(result.status, 0);
+    assert.equal(result.stdout.length, overOneMebibyte);
+  });
+});
 
 describe("overlayPaths()", () => {
   test("builds a per-task root plus a main upper/work pair under it", () => {
@@ -886,6 +914,7 @@ describe("cleanupOverlay()", () => {
   // exact shape.
   test("default rmFn removes a tree containing a non-empty mode-000 kernel-owned work scratch dir", () => {
     const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "cleanup-overlay-test-"));
+    trackedTmpDirs.push(tmpRoot);
     const root = path.join(tmpRoot, "taskferry-cow-modetest");
     const upperDir = path.join(root, "upper", "main");
     const workScratch = path.join(root, "work", "main", "work");

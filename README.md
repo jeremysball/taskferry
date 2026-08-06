@@ -1,3 +1,4 @@
+<!-- README documentation. -->
 # taskferry
 
 taskferry is a middleman between a frontend agent and a backend executor: a

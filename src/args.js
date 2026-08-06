@@ -151,13 +151,14 @@ const DEFAULT_OPTIONS = {
   tail: () => ({ taskId: void 0, ...flagDefaultsFor("tail") }),
   summary: () => ({ taskId: void 0, ...flagDefaultsFor("summary"), mode: "report" }),
   result: () => ({ taskId: void 0, ...flagDefaultsFor("result") }),
-  accept: () => ({ taskId: void 0 }),
+  accept: () => ({ taskId: void 0, ...flagDefaultsFor("accept") }),
   reject: () => ({ taskId: void 0 }),
   list: () => flagDefaultsFor("list"),
   watch: () => ({ ...flagDefaultsFor("watch"), format: "toon", taskId: void 0 }),
   context: () => ({ ...flagDefaultsFor("context"), format: "toon" }),
   doctor: () => flagDefaultsFor("doctor"),
   setup: () => ({}),
+  init: () => ({}),
 };
 
 function defaultOptions(command, cwd) {
@@ -209,6 +210,7 @@ const FLAGS = {
   "--allowed-dirs": { allow: ["dispatch"], key: "allowedDirs", coerce: coerceAllowedDirs },
   "--executor": { allow: ["dispatch", "advisor"], key: "executor", coerce: coerceExecutor },
   "--class": { allow: ["dispatch", "advisor"], key: "class" },
+  "--parent-task": { allow: ["dispatch", "advisor"], key: "parentTaskId" },
   "--grace-ms": { allow: ["cancel"], key: "graceMs", coerce: (v, n) => parseNumber(v, n, { min: 0 }) },
   "--timeout": { allow: ["wait", "advisor"], key: "timeoutMs", coerce: (v, n) => parseDuration(v, n) },
   "--tail-chars": { allow: ["wait"], key: "tailChars", coerce: (v, n) => parseNumber(v, n, { min: 1, max: 65536 }) },
@@ -229,6 +231,7 @@ const FLAGS = {
   "--stats": { allow: ["doctor"], bool: true },
   "--no-sandbox": { allow: ["dispatch"], bool: true, key: "noSandbox" },
   "--no-overlay": { allow: ["dispatch"], bool: true, key: "noOverlay" }, // advisor deliberately excluded -- review finding #5
+  "--force": { allow: ["accept"], bool: true },
   "--diff": { allow: ["result"], bool: true },
   "--timeout_ms": { mention: "--timeout_ms was renamed; use --timeout", target: "--timeout" },
   "--timeout-ms": { mention: "--timeout-ms was renamed; use --timeout", target: "--timeout" },

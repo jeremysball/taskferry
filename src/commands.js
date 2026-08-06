@@ -148,7 +148,7 @@ async function ensureSkillSync(checkSkills) {
 // when the caller set them. The daemon's allowed-params spec rejects unknown
 // keys, so an explicitly-undefined value (the args.js default for an omitted
 // flag) must be omitted entirely -- see isSet() above.
-const DISPATCH_PASSTHROUGH_KEYS = ["model", "variant", "sessionId", "finalMarker", "noSandbox", "noOverlay", "allowedDirs", "executor", "class"];
+const DISPATCH_PASSTHROUGH_KEYS = ["model", "variant", "sessionId", "finalMarker", "noSandbox", "noOverlay", "allowedDirs", "executor", "class", "parentTaskId"];
 
 function pickDispatchOptions(options) {
   const picked = {};
@@ -182,10 +182,13 @@ function warnIfCleanupFailed(label, result) {
 }
 
 async function runAccept(options, { client }) {
-  const accepted = await client.request("task.accept", { taskId: options.taskId });
+  const accepted = await client.request("task.accept", { taskId: options.taskId, ...(options.force === true && { force: true }) });
   // Review finding #11: a failed cleanup must not be swallowed -- without
   // this, the leftover overlay is invisible until the daemon-restart sweep.
   warnIfCleanupFailed("changeset applied", accepted);
+  if (accepted.applied && (accepted.checkStatus == null || accepted.checkStatus === "none")) {
+    process.stderr.write("warning: changeset applied, but this repo declares no check command in .taskferry.toml -- nothing was verified before landing\n");
+  }
   return accepted;
 }
 
@@ -290,6 +293,7 @@ async function runAdvisor(options, { client, env, cwd, homeDirectory }) {
     ...(isSet(options.timeoutMs) && { timeoutMs: options.timeoutMs }),
     ...(isSet(options.executor) && { executor: options.executor }),
     ...(isSet(options.class) && { class: options.class }),
+    ...(isSet(options.parentTaskId) && { parentTaskId: options.parentTaskId }),
   });
 }
 

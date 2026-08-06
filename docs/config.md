@@ -134,3 +134,188 @@ immediately when the daemon starts (or auto-starts on the first
 `taskferry` command), with a two-line `error: ...` / `help: ...` message
 naming the file. Unrecognized keys and wrong-typed values name the
 offending key; malformed JSON reports the parse error instead.
+
+## `.taskferry.toml`
+
+A per-project TOML file at the dispatch's working-tree root that
+declares the verification gate taskferry runs at settle, plus the host
+paths the gate and every worker should see read-only inside the
+sandbox. Distinct from the user-level `~/.config/taskferry/config.json`
+documented above: this file lives in the *repo* (committed to source
+control like `.eslintrc` or `pyproject.toml`), is project-supplied, and
+only one taskferry command ever writes it (`taskferry init` — see
+[cli-reference.md](cli-reference.md#taskferry-init)).
+
+### Location
+
+`<dispatch --directory>/.taskferry.toml`. A dispatch reads the file
+fresh (mtime-cached) at three independent points in a task's lifecycle —
+dispatch-time prompt injection, spawn-time read-only binds, settle-time
+gate — so editing it does not require a daemon restart, but the change
+takes effect on the next dispatch/settle in each of those three slots.
+
+### Format
+
+Plain [TOML](https://toml.io/) with a top-level table of the keys below.
+Unrecognized keys, wrong-typed values, and invalid TOML syntax are all
+"errors" rather than silent fallbacks: the loader returns an
+`EMPTY_CONFIG`-shaped result with `parseError` set, and the caller
+surfaces the message via the task's `projectConfigWarning` (visible on
+`taskferry status <id> --full` and `taskferry result <id> --fields
+projectConfigWarning`) instead of guessing a partial config. Dispatch
+proceeds, but no gate runs and no extra read-only binds are added.
+
+```toml
+check = "npm run check"
+check_timeout_seconds = 900
+read_only_paths = ["/srv/reference-docs"]
+```
+
+### Fields
+
+| Key | Type | Default | Meaning |
+|---|---|---|---|
+| `check` | string | absent → no gate | Shell command taskferry runs as the settle-time verification gate, and that workers are told (via a `## Verification (required)` block appended to their prompt) to run before declaring the task done. Empty / null / missing → no gate, no prompt injection. |
+| `check_timeout_seconds` | positive integer | `900` | Hard cap on a single gate run. On timeout the gate is SIGTERM'd, escalated to SIGKILL after a short grace, and recorded as `checkStatus: "timeout"`, which `accept` treats as a failure unless `--force` overrides. |
+| `read_only_paths` | array of strings | `[]` | Host paths to bind read-only into the bwrap sandbox for every dispatch from this project (and for the gate, with the same mount semantics — the worker and the gate see an identical read-only mount surface). An entry is dropped (and reported via `projectConfigWarning`) if it does not exist on the host, or if it overlaps a protected mount (`equals`, `is an ancestor of`, or `is a descendant of` any of the deny-list, `stateDir`, `runtimeDir`, or `launchDirectory`). `read_only_paths = ["/"]` is rejected by the ancestor check, not slipped through as `--ro-bind / /`. Ignored when sandboxing is off (`TASKFERRY_DISABLE_SANDBOX=1` or `--no-sandbox`). |
+
+### Precedence
+
+There is no user-level `.taskferry.toml` and taskferry never creates one
+outside `init`. The project file is the only source: an absent file is
+not an error, every field falls back to its default, and the daemon has
+no separate "default check command" it would substitute. If a workspace
+wants a uniform check command across many projects, set it via a shell
+init script that calls `taskferry init` in each project, not via a
+taskferry-wide override.
+
+### Prompt injection (always on)
+
+When `check` is set, every dispatched worker is told about it in a
+prompt block appended right before the worker runs:
+
+```
+## Verification (required)
+This repo declares a check command in .taskferry.toml:
+    <check command>
+Run it before declaring the task done. If it fails, fix the failures and
+re-run until it passes. State the final result in your summary.
+```
+
+The block is injected purely on the condition `role === "dispatch" &&
+!noOverlay && projectConfig.check` (see `dispatchTask()` in
+`src/tasks.js`). It is NOT skipped for non-git targets — a non-git
+directory dispatched without `--no-overlay` still receives the
+verification block, even though the gate itself later never actually
+runs for that target (the gate requires an overlay mounted on a
+git-tracked directory with `preDispatchHead` set, which a non-git
+dispatch never produces; see "The check-gate lifecycle" below). So a
+non-git repo can have its worker prompted to run a check that no gate
+will ever verify — a rough edge worth being aware of, but not currently
+disambiguated. Advisor dispatches never receive the block (the advisor
+role has no gate and no changeset to gate), and explicit `--no-overlay`
+dispatches do not either (no overlay, no gate).
+
+### The check-gate lifecycle
+
+The gate only ever fires for a `role: "dispatch"` task that produced a
+real changeset over a live copy-on-write overlay mounted on a
+git-tracked directory (`task.overlayDirs` set, `preDispatchHead` not
+null, `changesetStatus` about to become `"pending"`). Advisor dispatches,
+`--no-overlay` dispatches, and zero-change auto-accepts deliberately
+skip the gate. For non-git / overlay-only targets the gate would have
+side effects (test caches, build artifacts) that `applyNonGitChangeset`
+would rsync onto the real directory on `accept`, so the gate is skipped
+entirely and `checkStatus` stays at its default `"none"` — the CLI's
+`runAccept()` stderr warning "this repo declares no check command"
+still fires for these tasks today (the warning condition is purely
+`accepted.applied && (checkStatus == null || checkStatus === "none")`,
+without distinguishing "absent" from "ignored for a non-git target"),
+so it should be read as "nothing was verified before landing," not "you
+forgot to declare a check command." A future revision may split the
+two paths (a separate "ignored, not absent" warning for non-git) but
+today the message is the same in both cases.
+
+`checkStatus` is the gate's state machine:
+
+```
+   none ─────► running ─────► passed
+                  │  ▲         │
+                  │  │         └─► (recorded; changeset is acceptable)
+                  │  │
+                  ▼  │
+              failed
+                  ▲
+                  │
+              timeout (after check_timeout_seconds)
+
+   running ─► interrupted (on unclean daemon restart)
+                  │
+                  ▼
+              (next boot: auto re-run if overlay survived; left at
+               "interrupted" otherwise -- accept keeps refusing
+               without --force until --force or until the overlay
+               is gone and the task is rejected)
+```
+
+When a daemon restart lands mid-gate, every `checkStatus: "running"`
+task with `changesetStatus: "pending"` is reclassified as
+`"interrupted"`. If its overlay is still live, the gate is re-invoked
+automatically (which flips `checkStatus` back to `"running"`); if the
+overlay was swept away between the daemon's death and its restart, the
+task is left at `"interrupted"` and `accept` keeps refusing it without
+`--force`. The "interrupted" failure message renders the auto re-run
+path explicitly, so a user landing on a stuck task understands why the
+gate is not yet decided and what they can do about it.
+
+The recorded fields on the task record (visible via
+`taskferry status <id> --full` / `taskferry result <id> --fields ...`)
+are: `checkStatus`, `checkCommand` (verbatim from the TOML), `checkExitCode`
+(integer or `null` for `timeout`/`interrupted`/`spawn-error`), `checkStartedAt`/
+`checkEndedAt` (ISO timestamps), `checkOutputTail` (last 40 lines of
+combined stdout+stderr, capped at 256 KiB to bound the daemon's heap on
+a chatty test suite), `checkOverride` (`true` when `accept --force`
+overrode a blocking gate, including a running override), and
+`projectConfigWarning` (parse error or `read_only_paths` warning,
+`null` when both clear). All of these are omitted from a lean
+`taskferry status <id>` (without `--full`) when their value is at the
+neutral default — see [output.js](sourcemap.md) for the exact
+projection.
+
+### Error handling summary
+
+The exact same table that ships with the design spec — copied here
+verbatim so the docs and the implementation cannot drift:
+
+| situation | behavior |
+|---|---|
+| no `.taskferry.toml` / no `check` key | gate skipped, `checkStatus: none`, loud warning in status and doctor context |
+| check run exceeds timeout | killed, `checkStatus: timeout`, treated as failure |
+| daemon crashes mid-gate | task settles with `checkStatus: interrupted`; gate re-runnable; never silently passed |
+| `.taskferry.toml` unparseable | dispatch proceeds, gate skipped (`checkStatus: none`), parse error surfaced as a task warning and in doctor (fail loudly, do not guess) |
+| `read_only_paths` entry doesn't exist on host | dispatch proceeds without that binding, warning surfaced in `status --full` (paths may legitimately differ between machines) |
+| check command itself not found at runtime | `checkStatus: failed` with the spawn error in `checkOutputTail` |
+
+The "doctor context" column in this table is the design's stated
+contract; the per-task doctor-context aggregation is part of the doctor
+fleet-health spec (out of scope here — see the design's "Non-goals"
+section), so today's `projectConfigWarning` / `checkStatus` surfacing
+on `taskferry status <id> --full` and `taskferry result <id> --fields
+...` is the live channel for *most* of these warnings.
+
+Note that the no-check row ("no `.taskferry.toml` / no `check` key")
+is NOT covered by that surfacing: `summarizeCheckGateFields()` and
+`resultCheckGateFields()` each explicitly `return {}` (omit
+`checkStatus` and every other gate field) when `checkStatus == null ||
+checkStatus === "none"`, so the
+no-check case carries NO signal on `taskferry status` / `taskferry
+result`, even with `--full`. The only place that row's "loud warning"
+actually surfaces today is the one-line `stderr` message
+`runAccept()` writes at accept time. The timeout / interrupted /
+spawn-error rows ARE covered by `checkStatus` landing on status/result.
+An unparseable `.taskferry.toml` is different again: `startCheckGate()`
+sets `task.projectConfigWarning` to the parse error and returns before
+ever touching `checkStatus`, which stays at its untouched `"none"`
+default — so that row is covered by `projectConfigWarning`, not by
+`checkStatus`, the same way a missing `read_only_paths` entry is
+covered by `projectConfigWarning` alone.

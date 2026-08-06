@@ -11,11 +11,17 @@ permissions:
 
 jobs:
   check:
+    # Everything used to run as four separate jobs (lint, typecheck, unit
+    # matrix legs, plus a standalone integration job), each claiming its own
+    # GitHub-hosted runner. With several PRs open at once that saturated this
+    # account's concurrent-runner cap and left jobs sitting `queued` for
+    # 10-20+ minutes with zero billable compute -- never actually starting,
+    # just waiting on a slot. Collapsing to one job means one runner request
+    # per push/PR instead of four, which is the actual fix for the
+    # contention; it costs matrix parallelism (lint/typecheck/unit now run
+    # sequentially instead of side by side), a reasonable trade against
+    # everything queuing indefinitely.
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        leg: [lint, typecheck, unit]
     steps:
       - uses: actions/checkout@v4
 
@@ -29,35 +35,22 @@ jobs:
         run: npm ci
 
       - name: Run lint
-        if: matrix.leg == 'lint'
         run: npm run lint
 
       - name: Run typecheck
-        if: matrix.leg == 'typecheck'
         run: npm run typecheck
 
       - name: Run unit tests
-        if: matrix.leg == 'unit'
         run: npm run test:unit
 
-  integration:
-    # Fork PRs don't get repo secrets (GitHub withholds them by design), so
-    # MINIMAX_API_KEY would be empty there and every dispatch would fail on
-    # auth rather than on anything the PR actually changed. Runs only for
-    # same-repo pushes/PRs, where the secret is actually available.
-    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: '22.x'
-          cache: npm
-
-      - name: Install npm dependencies
-        run: npm ci
+      # Fork PRs don't get repo secrets (GitHub withholds them by design), so
+      # MINIMAX_API_KEY would be empty there and every dispatch would fail on
+      # auth rather than on anything the PR actually changed. Runs only for
+      # same-repo pushes/PRs, where the secret is actually available.
+      - name: Check integration eligibility
+        id: integration_gate
+        if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
+        run: echo "run=true" >> "$GITHUB_OUTPUT"
 
       # Ubuntu's apt bubblewrap package reports a version >= 0.8 (the floor
       # sandbox.js's checkOverlaySupport() trusts) but is built with overlay
@@ -73,9 +66,11 @@ jobs:
       # So relax the AppArmor restriction instead and keep bwrap unprivileged
       # -- safe here since this is a fresh, throwaway CI VM, not a shared host.
       - name: Allow unprivileged user namespaces (Ubuntu 24.04 AppArmor restriction)
+        if: steps.integration_gate.outputs.run == 'true'
         run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
 
       - name: Build bubblewrap (with overlay support) from source
+        if: steps.integration_gate.outputs.run == 'true'
         run: |
           sudo apt-get update
           sudo apt-get install -y meson ninja-build libcap-dev pkg-config
@@ -87,9 +82,11 @@ jobs:
           bwrap --help | grep -q -- --overlay-src
 
       - name: Install pi CLI
+        if: steps.integration_gate.outputs.run == 'true'
         run: npm install -g @earendil-works/pi-coding-agent
 
       - name: Run integration (real CLI + daemon + live dispatch, no mocks)
+        if: steps.integration_gate.outputs.run == 'true'
         env:
           MINIMAX_API_KEY: ${{ secrets.MINIMAX_API_KEY }}
         run: npm run test:integration

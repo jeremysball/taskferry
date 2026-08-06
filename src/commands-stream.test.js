@@ -1,9 +1,15 @@
-import { test } from "node:test";
+import { test, after } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { runCommand } from "./commands.js";
+
+const trackedTmpDirs = [];
+after(() => {
+  for (const d of trackedTmpDirs) fs.rmSync(d, { recursive: true, force: true });
+});
+
 
 // Split out of commands.test.js (sonarjs max-lines fixup, merge of #340 and
 // #334): watch/streaming coverage for the commands-stream.js delegate --
@@ -21,7 +27,7 @@ const TASK_STATUS_METHOD = "task.status";
 // -- Helpers --------------------------------------------------------------------
 
 function mkTmpDir(prefix) {
-  return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix)); trackedTmpDirs.push(dir); return dir;
 }
 
 function mkTmpRoot(prefix) {

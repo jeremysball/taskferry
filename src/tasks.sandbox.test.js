@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
-import { makeManager, fakeChild, baseTask, AXI_GIT_COMMON_DIR, AXI_ALLOWED_DIR, AXI_TASKS_CACHE_DIR, OPENCODE_DATA, INVESTIGATED_TEXT, SOURCE_LOG, OVERLAY_SRC, SOL_MODEL } from "./tasks.test-helpers.js";
+import { makeManager, fakeChild, baseTask, AXI_GIT_COMMON_DIR, AXI_ALLOWED_DIR, AXI_TASKS_CACHE_DIR, OPENCODE_DATA, INVESTIGATED_TEXT, SOURCE_LOG, OVERLAY_SRC, SOL_MODEL, MIMIMAX_MODEL, mkdtempTracked } from "./tasks.test-helpers.js";
 
 describe("bwrap sandboxing: dispatch argv shape and gitdir scoping", () => {
   test("wraps the spawn command in bwrap when sandboxing is enabled and available", () => {
@@ -36,8 +36,8 @@ describe("bwrap sandboxing: dispatch argv shape and gitdir scoping", () => {
 
   test("binds a git worktree's real gitdir read-write, since it lives outside the dispatch directory itself (issue #103's underlying blocker)", () => {
     let captured = null;
-    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "axi-worktree-dir-"));
-    const gitCommonDir = fs.mkdtempSync(path.join(os.tmpdir(), AXI_GIT_COMMON_DIR));
+    const directory = mkdtempTracked("axi-worktree-dir-");
+    const gitCommonDir = mkdtempTracked(AXI_GIT_COMMON_DIR);
     const mgr = makeManager({
       spawnFn: (cmd, args, opts) => { captured = { cmd, args, opts }; return fakeChild(); },
       sandboxEnabled: true,
@@ -79,8 +79,8 @@ describe("bwrap sandboxing: dispatch argv shape and gitdir scoping", () => {
 
   test("falls back to binding the whole common dir for a submodule layout, where gitDir resolves to the same path as gitCommonDir", () => {
     let captured = null;
-    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "axi-submodule-dir-"));
-    const gitCommonDir = fs.mkdtempSync(path.join(os.tmpdir(), AXI_GIT_COMMON_DIR));
+    const directory = mkdtempTracked("axi-submodule-dir-");
+    const gitCommonDir = mkdtempTracked(AXI_GIT_COMMON_DIR);
     const mgr = makeManager({
       spawnFn: (cmd, args, opts) => { captured = { cmd, args, opts }; return fakeChild(); },
       sandboxEnabled: true,
@@ -99,8 +99,8 @@ describe("bwrap sandboxing: dispatch argv shape and gitdir scoping", () => {
 
   test("falls back to binding the whole common dir when gitDir resolution fails outright", () => {
     let captured = null;
-    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "axi-resolve-fail-dir-"));
-    const gitCommonDir = fs.mkdtempSync(path.join(os.tmpdir(), AXI_GIT_COMMON_DIR));
+    const directory = mkdtempTracked("axi-resolve-fail-dir-");
+    const gitCommonDir = mkdtempTracked(AXI_GIT_COMMON_DIR);
     const mgr = makeManager({
       spawnFn: (cmd, args, opts) => { captured = { cmd, args, opts }; return fakeChild(); },
       sandboxEnabled: true,
@@ -119,13 +119,13 @@ describe("bwrap sandboxing: dispatch argv shape and gitdir scoping", () => {
 
   test("scopes the bind (never the whole common dir) even when gitDir resolves to a non-standard layout outside gitCommonDir's own tree", () => {
     let captured = null;
-    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "axi-separate-gitdir-dir-"));
-    const gitCommonDir = fs.mkdtempSync(path.join(os.tmpdir(), AXI_GIT_COMMON_DIR));
+    const directory = mkdtempTracked("axi-separate-gitdir-dir-");
+    const gitCommonDir = mkdtempTracked(AXI_GIT_COMMON_DIR);
     // A gitDir that lives entirely outside gitCommonDir's own tree (e.g. a
     // manually re-pointed `gitdir:`/`commondir` file) -- the earlier version
     // of this fix fell through to binding the whole common dir for this
     // case, re-admitting taskferry#224's exposure. It must not do that.
-    const gitDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-elsewhere-gitdir-"));
+    const gitDir = mkdtempTracked("axi-elsewhere-gitdir-");
     const mgr = makeManager({
       spawnFn: (cmd, args, opts) => { captured = { cmd, args, opts }; return fakeChild(); },
       sandboxEnabled: true,
@@ -146,7 +146,7 @@ describe("bwrap sandboxing: dispatch argv shape and gitdir scoping", () => {
   });
 
   test("scopes the git-common-dir bind to the worktree's own admin dir + shared objects/refs, never the main checkout's private HEAD/index/config (regression for taskferry#224)", () => {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), "axi-git-repo-"));
+    const root = mkdtempTracked("axi-git-repo-");
     const mainCheckout = path.join(root, "main");
     fs.mkdirSync(mainCheckout);
     const git = (args) => execFileSync("git", args, { cwd: mainCheckout, encoding: "utf8" });
@@ -195,7 +195,7 @@ describe("bwrap sandboxing: dispatch argv shape and gitdir scoping", () => {
 describe("bwrap sandboxing: allowedDirs and denylist", () => {
   test("binds the manager-level allowedDirs config default read-write", () => {
     let captured = null;
-    const allowed = fs.mkdtempSync(path.join(os.tmpdir(), AXI_ALLOWED_DIR));
+    const allowed = mkdtempTracked(AXI_ALLOWED_DIR);
     const mgr = makeManager({
       spawnFn: (cmd, args, opts) => { captured = { cmd, args, opts }; return fakeChild(); },
       sandboxEnabled: true,
@@ -214,8 +214,8 @@ describe("bwrap sandboxing: allowedDirs and denylist", () => {
 
   test("binds a per-dispatch --allowed-dirs entry read-write, in addition to the manager-level default", () => {
     let captured = null;
-    const managerDefault = fs.mkdtempSync(path.join(os.tmpdir(), AXI_ALLOWED_DIR));
-    const perDispatch = fs.mkdtempSync(path.join(os.tmpdir(), AXI_ALLOWED_DIR));
+    const managerDefault = mkdtempTracked(AXI_ALLOWED_DIR);
+    const perDispatch = mkdtempTracked(AXI_ALLOWED_DIR);
     const mgr = makeManager({
       spawnFn: (cmd, args, opts) => { captured = { cmd, args, opts }; return fakeChild(); },
       sandboxEnabled: true,
@@ -273,7 +273,7 @@ describe("bwrap sandboxing: allowedDirs and denylist", () => {
 
   test("tmpfs-masks a configured sandboxDenylist entry in addition to the fixed default deny-list", () => {
     let captured = null;
-    const extra = fs.mkdtempSync(path.join(os.tmpdir(), "axi-sandbox-denylist-"));
+    const extra = mkdtempTracked("axi-sandbox-denylist-");
     const mgr = makeManager({
       spawnFn: (cmd, args, opts) => { captured = { cmd, args, opts }; return fakeChild(); },
       sandboxEnabled: true,
@@ -302,7 +302,7 @@ describe("bwrap sandboxing: allowedDirs and denylist", () => {
 describe("bwrap sandboxing: opencode auth and data home", () => {
   test("points XDG_DATA_HOME at a writable spot under cacheDir when sandboxing, so opencode's own log/session db isn't blocked by the read-only root", () => {
     let captured = null;
-    const cacheDir = fs.mkdtempSync(path.join(os.tmpdir(), AXI_TASKS_CACHE_DIR));
+    const cacheDir = mkdtempTracked(AXI_TASKS_CACHE_DIR);
     const mgr = makeManager({
       spawnFn: (cmd, args, opts) => { captured = { cmd, args, opts }; return fakeChild(); },
       sandboxEnabled: true,
@@ -318,7 +318,7 @@ describe("bwrap sandboxing: opencode auth and data home", () => {
 
   test("ro-binds the real opencode auth.json into the sandboxed XDG_DATA_HOME when it exists, so credentialed providers still resolve", () => {
     let captured = null;
-    const cacheDir = fs.mkdtempSync(path.join(os.tmpdir(), AXI_TASKS_CACHE_DIR));
+    const cacheDir = mkdtempTracked(AXI_TASKS_CACHE_DIR);
     const realAuthFile = path.join(os.homedir(), ".local", "share", "opencode", "auth.json");
     const mgr = makeManager({
       spawnFn: (cmd, args, opts) => { captured = { cmd, args, opts }; return fakeChild(); },
@@ -496,8 +496,8 @@ describe("bwrap sandboxing: prompt and summary launches under bwrap", () => {
 describe("bwrap sandboxing: overlay mount and probe gating", () => {
   test("mounts an overlay on the target directory when overlayEnabled and the host supports it", () => {
     let captured = null;
-    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "axi-overlay-dir-"));
-    const overlayTmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "axi-overlay-tmp-"));
+    const directory = mkdtempTracked("axi-overlay-dir-");
+    const overlayTmpRoot = mkdtempTracked("axi-overlay-tmp-");
     const mgr = makeManager({
       spawnFn: (cmd, args, opts) => { captured = { cmd, args, opts }; return fakeChild(); },
       sandboxEnabled: true,
@@ -525,7 +525,7 @@ describe("bwrap sandboxing: overlay mount and probe gating", () => {
     // delegate every other git/command invocation in this module goes
     // through. Fake it out and assert the probe is observably routed through
     // the injected delegate (and the captured HEAD lands on the task).
-    const overlayTmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "axi-pre-dispatch-head-tmp-"));
+    const overlayTmpRoot = mkdtempTracked("axi-pre-dispatch-head-tmp-");
     const preDispatchCalls = [];
     const FAKE_HEAD = "0123456789abcdef0123456789abcdef01234567";
     const mgr = makeManager({
@@ -575,7 +575,7 @@ describe("bwrap sandboxing: overlay mount and probe gating", () => {
     const originalWrite = process.stderr.write;
     process.stderr.write = (chunk) => { warned += chunk; return true; };
     try {
-      const directory = fs.mkdtempSync(path.join(os.tmpdir(), "axi-no-overlay-dir-"));
+      const directory = mkdtempTracked("axi-no-overlay-dir-");
       const mgr = makeManager({
         spawnFn: (cmd, args, opts) => { captured = { cmd, args, opts }; return fakeChild(); },
         sandboxEnabled: true,
@@ -593,7 +593,7 @@ describe("bwrap sandboxing: overlay mount and probe gating", () => {
   });
 
   test("crashes the task with a spawnError instead of dispatching unguarded when overlay is required but unsupported", () => {
-    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "axi-unsupported-dir-"));
+    const directory = mkdtempTracked("axi-unsupported-dir-");
     const mgr = makeManager({
       spawnFn: () => fakeChild(),
       sandboxEnabled: true,
@@ -675,8 +675,8 @@ describe("bwrap sandboxing: overlay mount and probe gating", () => {
 describe("bwrap sandboxing: overlay rwBinds and shareNet", () => {
   test("converts the git-common-dir binds into per-path overlays instead of plain writable binds when overlay is active", () => {
     let captured = null;
-    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "axi-worktree-overlay-dir-"));
-    const gitCommonDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-git-common-overlay-"));
+    const directory = mkdtempTracked("axi-worktree-overlay-dir-");
+    const gitCommonDir = mkdtempTracked("axi-git-common-overlay-");
     const mgr = makeManager({
       spawnFn: (cmd, args, opts) => { captured = { cmd, args, opts }; return fakeChild(); },
       sandboxEnabled: true,
@@ -732,8 +732,8 @@ describe("bwrap sandboxing: overlay rwBinds and shareNet", () => {
   });
 
   test("persists the git-common-dir sub-overlays onto the task record for extraction", () => {
-    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "axi-rwbinds-persist-dir-"));
-    const gitCommonDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-rwbinds-common-"));
+    const directory = mkdtempTracked("axi-rwbinds-persist-dir-");
+    const gitCommonDir = mkdtempTracked("axi-rwbinds-common-");
     const mgr = makeManager({
       spawnFn: () => fakeChild(),
       sandboxEnabled: true,
@@ -762,8 +762,8 @@ describe("bwrap sandboxing: packed-refs file binds (overlayfs mounts are directo
     // the same sub-overlay machinery as objects/refs, and bwrap died at
     // spawn with "Can't mkdir <...>/packed-refs: Not a directory".
     let captured = null;
-    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "axi-filebind-dir-"));
-    const gitCommonDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-filebind-common-"));
+    const directory = mkdtempTracked("axi-filebind-dir-");
+    const gitCommonDir = mkdtempTracked("axi-filebind-common-");
     const gitDir = path.join(gitCommonDir, "worktrees", "wt");
     fs.mkdirSync(gitDir, { recursive: true });
     fs.mkdirSync(path.join(gitCommonDir, "objects"));
@@ -807,8 +807,8 @@ describe("bwrap sandboxing: packed-refs file binds (overlayfs mounts are directo
     // with no packed refs yet must not synthesize a scratch-copy bind for a
     // file that doesn't exist (existsFn(packedRefs) guards this).
     let captured = null;
-    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "axi-nofilebind-dir-"));
-    const gitCommonDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-nofilebind-common-"));
+    const directory = mkdtempTracked("axi-nofilebind-dir-");
+    const gitCommonDir = mkdtempTracked("axi-nofilebind-common-");
     const gitDir = path.join(gitCommonDir, "worktrees", "wt");
     fs.mkdirSync(gitDir, { recursive: true });
     fs.mkdirSync(path.join(gitCommonDir, "objects"));
@@ -930,5 +930,110 @@ describe("bwrap sandboxing: advisor guardrails", () => {
     assert.equal(status.status, "crashed");
     assert.match(status.spawnError, /advisor dispatch requires overlay-gated writes/);
     assert.equal(spawned, false, "advisor must not spawn an unsandboxed child");
+  });
+});
+
+describe("bwrap sandboxing: project-config read_only_paths", () => {
+  // Local constant -- the brief's `read_only_paths` handling reads this
+  // exact filename, so the test setup needs to write it three times.
+  const TOML_FILENAME = ".taskferry.toml";
+
+  test("read_only_paths from .taskferry.toml become extra --ro-bind pairs", () => {
+    const directory = mkdtempTracked("axi-readonly-dir-");
+    const roTarget = mkdtempTracked("axi-readonly-target-");
+    fs.writeFileSync(path.join(directory, TOML_FILENAME), `read_only_paths = [${JSON.stringify(roTarget)}]\n`);
+    let captured = null;
+    const mgr = makeManager({
+      spawnFn: (cmd, args, opts) => { captured = { cmd, args, opts }; return fakeChild(); },
+      sandboxEnabled: true,
+      checkBwrapAvailableFn: () => ({ checked: true, available: true }),
+      platform: "linux",
+    });
+    mgr.dispatch({ directory, prompt: "hello", model: MIMIMAX_MODEL, executor: "opencode" });
+    const roBindIndex = captured.args.indexOf("--ro-bind");
+    const roPairs = [];
+    for (let i = 0; i < captured.args.length - 2; i++) {
+      if (captured.args[i] === "--ro-bind") roPairs.push([captured.args[i + 1], captured.args[i + 2]]);
+    }
+    assert.ok(roPairs.some(([src, dest]) => src === roTarget && dest === roTarget), `expected a --ro-bind pair for ${roTarget}, got ${JSON.stringify(roPairs)}`);
+    assert.ok(roBindIndex !== -1);
+  });
+
+  test("a read_only_paths entry that doesn't exist on this host is skipped and warned, not fatal", () => {
+    const directory = mkdtempTracked("axi-readonly-missing-");
+    const missing = path.join(os.tmpdir(), "axi-readonly-does-not-exist");
+    fs.writeFileSync(path.join(directory, TOML_FILENAME), `read_only_paths = [${JSON.stringify(missing)}]\n`);
+    const mgr = makeManager({
+      spawnFn: () => fakeChild(),
+      sandboxEnabled: true,
+      checkBwrapAvailableFn: () => ({ checked: true, available: true }),
+      platform: "linux",
+    });
+    const dispatched = mgr.dispatch({ directory, prompt: "hello", model: MIMIMAX_MODEL, executor: "opencode" });
+    const status = mgr.status(dispatched.id);
+    assert.match(status.projectConfigWarning, /read_only_paths/);
+    assert.match(status.projectConfigWarning, new RegExp(missing.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  });
+
+  test("a read_only_paths entry that overlaps a protected sandbox mount is rejected and reported, never bound", () => {
+    // Mount-order safety: bwrap applies --ro-bind last, so a
+    // read_only_paths entry that is an ancestor of any protected mount
+    // (e.g. the deny-list `~/.ssh` paths inside $HOME) would re-expose
+    // the deny-list tmpfs mounts -- reject before it ever reaches
+    // extraRoBinds. Uses homeDir here -- any non-root ancestor of a
+    // protected path exercises the same code path.
+    const directory = mkdtempTracked("axi-readonly-unsafe-");
+    const homeDir = os.homedir();
+    fs.writeFileSync(path.join(directory, TOML_FILENAME), `read_only_paths = [${JSON.stringify(homeDir)}]\n`);
+    let captured = null;
+    const mgr = makeManager({
+      spawnFn: (cmd, args, opts) => { captured = { cmd, args, opts }; return fakeChild(); },
+      sandboxEnabled: true,
+      checkBwrapAvailableFn: () => ({ checked: true, available: true }),
+      platform: "linux",
+    });
+    const dispatched = mgr.dispatch({ directory, prompt: "hello", model: MIMIMAX_MODEL, executor: "opencode" });
+    const status = mgr.status(dispatched.id);
+    // No `--ro-bind <homeDir> <homeDir>` was added -- the unsafe check
+    // rejected it (homeDir is an ancestor of /home/.../.<dotfile> deny-list
+    // entries).
+    const roPairs = [];
+    for (let i = 0; i < captured.args.length - 2; i++) {
+      if (captured.args[i] === "--ro-bind") roPairs.push([captured.args[i + 1], captured.args[i + 2]]);
+    }
+    assert.ok(!roPairs.some(([src]) => src === homeDir), `unexpected ro-bind for ${homeDir}, got ${JSON.stringify(roPairs)}`);
+    // projectConfigWarning records the rejected entry.
+    assert.match(status.projectConfigWarning, /read_only_paths/);
+    assert.match(status.projectConfigWarning, /overlaps a protected sandbox mount/);
+  });
+
+  test("read_only_paths = ['/'] is rejected as overlapping every protected mount (root is an ancestor of all paths)", () => {
+    // Regression for the brief's exact canonical exploit: the resolver
+    // must treat `/` as an ancestor of every protected path so an
+    // untrusted `.taskferry.toml` declaring `read_only_paths = ["/"]`
+    // never reaches the bwrap argv as `--ro-bind / /` -- that second
+    // `--ro-bind / /` would shadow the deny-list tmpfs mounts (un-hiding
+    // `~/.ssh`/etc.) and the overlay mount itself (defeating CoW).
+    const directory = mkdtempTracked("axi-readonly-root-");
+    fs.writeFileSync(path.join(directory, TOML_FILENAME), `read_only_paths = ["/"]\n`);
+    let captured = null;
+    const mgr = makeManager({
+      spawnFn: (cmd, args, opts) => { captured = { cmd, args, opts }; return fakeChild(); },
+      sandboxEnabled: true,
+      checkBwrapAvailableFn: () => ({ checked: true, available: true }),
+      platform: "linux",
+    });
+    const dispatched = mgr.dispatch({ directory, prompt: "hello", model: MIMIMAX_MODEL, executor: "opencode" });
+    const status = mgr.status(dispatched.id);
+    // The base bwrap args always include exactly one `--ro-bind / /`
+    // (buildBwrapBaseArgs's read-only-root bind). The unsafe check must
+    // prevent a second `--ro-bind / /` from being added for the
+    // read_only_paths entry -- that second one would shadow the deny-list
+    // tmpfs mounts AND the overlay mount.
+    const roRootCount = captured.args.filter((arg) => arg === "/").length;
+    assert.equal(roRootCount, 2, `expected exactly 2 '/' occurrences (one base read-only-root bind only, no second from read_only_paths); got ${roRootCount} in ${JSON.stringify(captured.args)}`);
+    // projectConfigWarning records the rejected entry.
+    assert.match(status.projectConfigWarning, /read_only_paths/);
+    assert.match(status.projectConfigWarning, /overlaps a protected sandbox mount/);
   });
 });

@@ -1,14 +1,20 @@
-import { test, describe } from "node:test";
+import { test, describe, after } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { resolveConfigPath, loadConfig } from "./config.js";
 
+const trackedTmpDirs = [];
+after(() => {
+  for (const d of trackedTmpDirs) fs.rmSync(d, { recursive: true, force: true });
+});
+
+
 const CONFIG_FILENAME = "config.json";
 
 function tmpConfigDir() {
-  return fs.mkdtempSync(path.join(os.tmpdir(), "axi-config-test-"));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-config-test-")); trackedTmpDirs.push(dir); return dir;
 }
 
 function writeConfig(dir, content) {

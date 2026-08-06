@@ -254,6 +254,21 @@ present — so a task that itself runs `opencode` (directly, or indirectly
 through a nested taskferry dispatch) doesn't load a second copy of the
 toast/context integration inside that nested process.
 
+**Leak into a dispatched child's own test/build invocation (#292).** Any repo
+whose own tests or build steps branch on an "am I a spawned child
+process"-shaped environment variable will see spurious failures under a
+taskferry-dispatched run, because `TASKFERRY_CHILD=1` is ambient in that
+child's whole process tree, not just the top-level worker process. taskferry's
+own test suite hit exactly this: `package.json`'s `test:unit` script has to
+`env -u TASKFERRY_CHILD` before its `node --test` invocation to get a clean
+baseline, which is now also what makes `.taskferry.toml`'s own `check =
+"npm run check"` (which runs `npm test` -> `test:unit`) safe to run as a
+settle-time verification gate against this repo itself — the unset already
+happens at exactly the point a dispatched gate run needs it to. If a check
+command in another repo hits the same failure mode, apply the identical
+`env -u TASKFERRY_CHILD` workaround around whatever invocation branches on
+the variable.
+
 ## Filesystem sandboxing (bubblewrap)
 
 Every dispatched worker child (OpenCode or pi), and every summary child,

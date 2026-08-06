@@ -270,14 +270,14 @@ function countTasks(tasks) {
 
 function responseError(error, requestId) {
   if (error instanceof ProtocolError) {
-    return errorResponse(error.requestId, error.code, error.message, error.help);
+    return errorResponse(error.requestId, error.code, error.message, error.help, error.message);
   }
   const text = error instanceof Error ? error.message : String(error);
   const lines = text.split("\n");
   const message = lines.find((line) => line.startsWith("error:"))?.slice(6).trim() || lines[0];
   const help = lines.find((line) => line.startsWith("help:"))?.slice(5).trim() || "Retry the request or inspect the daemon logs";
   const code = /unknown task id:/.test(text) ? "UNKNOWN_TASK" : "REQUEST_FAILED";
-  return errorResponse(requestId, code, message, help);
+  return errorResponse(requestId, code, message, help, text);
 }
 
 // RPC method routing: each method is a small handler that forwards to the task
@@ -301,7 +301,7 @@ const invokeHandlers = {
     const context = filteredTaskDetails(manager, params.directory, resolveWorkspaceRootFn);
     return { ...context, counts: countTasks(context.tasks) };
   },
-  "task.accept": (manager, params) => manager.accept(params.taskId),
+  "task.accept": (manager, params) => manager.accept(params.taskId, { force: params.force === true }),
   "task.reject": (manager, params) => manager.reject(params.taskId),
 };
 

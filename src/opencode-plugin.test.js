@@ -3,15 +3,33 @@ import { EventEmitter } from "node:events";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { test } from "node:test";
+import { test, after } from "node:test";
 import taskferryPlugin, { createOpenCodePlugin } from "./opencode-plugin.js";
 import { createTaskManager, DEFAULT_SUMMARY_MODEL } from "./tasks.js";
+
+const trackedTmpDirs = [];
+const trackedManagers = [];
+function trackManager(manager) {
+  trackedManagers.push(manager);
+  return manager;
+}
+after(() => {
+  for (const manager of trackedManagers) {
+    try {
+      manager.flushPersist();
+    } catch {
+      // Best-effort: nothing pending, or its stateDir is already gone.
+    }
+  }
+  for (const d of trackedTmpDirs) fs.rmSync(d, { recursive: true, force: true });
+});
+
 
 const STATE_EVENT = "task.state";
 const ACTIVITY_EVENT = "task.activity";
 
 function temporaryDirectory() {
-  return fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-opencode-plugin-test-"));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-opencode-plugin-test-")); trackedTmpDirs.push(dir); return dir;
 }
 
 function fakeOpenCodeClient() {
@@ -211,7 +229,7 @@ function fakeChild(pid = 4242) {
 test("sets TASKFERRY_CHILD for dispatch and summary children", async () => {
   const stateDir = temporaryDirectory();
   const children = [];
-  const manager = createTaskManager({
+  const manager = trackManager(createTaskManager({
     stateDir,
     sandboxEnabled: false,
     spawnFn: (_command, _args, options) => {
@@ -223,7 +241,7 @@ test("sets TASKFERRY_CHILD for dispatch and summary children", async () => {
     maxDispatchesPerWindow: 100,
     dispatchWindowMs: 60000,
     listModelsFn: async () => `${DEFAULT_SUMMARY_MODEL}\n`,
-  });
+  }));
   const task = manager.dispatch({ prompt: "dispatch", directory: stateDir });
   const sourceChild = children[0];
   assert.equal(sourceChild.options.env.TASKFERRY_CHILD, "1");

@@ -1,5 +1,8 @@
 # Task 2 Report: Create `src/pretty.js` — shape-based pretty renderer
 
+> The commit list below is the implementer's point-in-time narrative. For the
+> final branch history, see [progress.md](./progress.md).
+
 ## What I did
 
 Implemented the shape-based pretty renderer following the brief's 21 steps, with four incremental commits (one per renderer: fallback, grouped-list, doctor, stats).

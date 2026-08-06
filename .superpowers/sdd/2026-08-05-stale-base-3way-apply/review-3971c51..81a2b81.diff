@@ -1,0 +1,242 @@
+# Review package: 3971c51..81a2b81
+
+## Commits
+81a2b81 refactor(changeset): replace throwing assertNoHeadDrift with detectHeadDrift
+
+## Files changed
+ src/changeset.js      | 42 ++++++++++++++++++++++++++----------------
+ src/changeset.test.js | 25 ++++++++++++++++++++++---
+ 2 files changed, 48 insertions(+), 19 deletions(-)
+
+## Diff
+diff --git a/src/changeset.js b/src/changeset.js
+index c2cde29..6581d6a 100644
+--- a/src/changeset.js
++++ b/src/changeset.js
+@@ -83,41 +83,39 @@ function runExtractionBwrap(runCommand, args, sleepFn = sleepSync) {
+     sleepFn(OVERLAY_MOUNT_RETRY_BACKOFF_MS[attempt]);
+   }
+   // Unreachable: the loop above always returns by its final iteration
+   // (attempt === OVERLAY_MOUNT_RETRY_BACKOFF_MS.length short-circuits the
+   // busy check). Present only so control flow analysis doesn't see a
+   // function that can fall through without returning.
+   throw new Error("unreachable");
+ }
+ 
+ /**
+- * Throws if `directory`'s current HEAD has confirmably moved away from
+- * `preDispatchHead`. Shared by extractGitDiff's pre-retry guard and its
+- * post-retry re-check (taskferry#329): the up-to-1.3s overlay-mount-busy
+- * backoff between the two is exactly the window a concurrent HEAD change
+- * (a manual checkout, a branch switch, another dispatch) can land in
+- * undetected if only the pre-retry check ran. An inconclusive re-check
+- * (git failure, non-git target) is not a confirmed drift and falls
+- * through, matching the pre-retry guard's own fail-open-on-inconclusive
+- * behavior.
++ * Detects whether `directory`'s current HEAD has confirmably moved away from
++ * `preDispatchHead`. Returns `null` when there's no confirmed drift — either
++ * HEAD still matches, or the check itself was inconclusive (a git failure, a
++ * non-git target) — deliberately fail-open on the inconclusive case, same as
++ * this replaced `assertNoHeadDrift`'s behavior. Unlike that function, this
++ * never throws: taskferry changed drift from a fatal abort into something
++ * `extractGitDiff` resolves via a real 3-way apply instead (see
++ * `resolveHeadDrift`).
+  * @param {string} directory
+  * @param {typeof defaultRunCommand} runCommand
+  * @param {string} preDispatchHead
++ * @returns {{from: string, to: string} | null}
+  */
+-function assertNoHeadDrift(directory, runCommand, preDispatchHead) {
++export function detectHeadDrift(directory, runCommand, preDispatchHead) {
+   const currentHead = resolvePreDispatchHead(directory, runCommand);
+   if (currentHead !== null && currentHead !== preDispatchHead) {
+-    throw new Error(
+-      `error: ${directory}'s HEAD moved from '${preDispatchHead}' to '${currentHead}' since dispatch\n` +
+-      `help: something else changed this directory's checkout while the task was in flight (a manual git checkout, a branch switch, or another process) -- diffing against the original HEAD would compare the wrong trees. Investigate what changed ${directory}, then retry against a stable target (a dedicated worktree avoids this)`
+-    );
++    return { from: preDispatchHead, to: currentHead };
+   }
++  return null;
+ }
+ 
+ /**
+  * @param {string} directory
+  * @param {typeof defaultRunCommand} [runCommand]
+  * @returns {string|null}
+  */
+ export function resolvePreDispatchHead(directory, runCommand = defaultRunCommand) {
+   const result = runCommand("git", ["-C", directory, "rev-parse", "HEAD"]);
+   if (!result.error && result.status === 0) {
+@@ -177,39 +175,51 @@ export function extractGitDiff({
+   writeFileFn = (filePath, content) => fs.writeFileSync(filePath, content, { mode: 0o600 }),
+   mkdirFn = (dirPath) => fs.mkdirSync(dirPath, { recursive: true, mode: 0o700 }),
+   sleepFn = sleepSync,
+ }) {
+   // Fail closed on HEAD drift: `directory` below is a live bind to the real
+   // checkout, not a snapshot from dispatch time. If something else (a manual
+   // checkout, a branch switch, another dispatch) moved that checkout's HEAD
+   // since preDispatchHead was recorded, the diff-cached-against-preDispatchHead
+   // script still runs successfully but compares the wrong trees -- it can
+   // report files as deleted/added that the worker never touched.
+-  assertNoHeadDrift(directory, runCommand, preDispatchHead);
++  const preDrift = detectHeadDrift(directory, runCommand, preDispatchHead);
++  if (preDrift) {
++    throw new Error(
++      `error: ${directory}'s HEAD moved from '${preDrift.from}' to '${preDrift.to}' since dispatch\n` +
++      `help: something else changed this directory's checkout while the task was in flight (a manual git checkout, a branch switch, or another process) -- diffing against the original HEAD would compare the wrong trees. Investigate what changed ${directory}, then retry against a stable target (a dedicated worktree avoids this)`
++    );
++  }
+   const bwrapArgs = buildBwrapArgs({ directory, stateDir, runtimeDir, homeDir, denyList, overlay, overlayRwBinds, overlayRwFileBinds });
+   // The final `exit $rc` propagates the diff's own status: the previous
+   // `; git reset` tail made the whole script exit with reset's status, so a
+   // failed diff still reported success. reset runs first regardless (undo
+   // the transient staging -- the upper already captured everything), then
+   // the shell exits with the diff's code.
+   const script = `git -C ${shQuote(directory)} add -A && { git -C ${shQuote(directory)} diff --cached ${shQuote(preDispatchHead)}; rc=$?; git -C ${shQuote(directory)} reset > /dev/null 2>&1; exit $rc; }`;
+   const result = runExtractionBwrap(runCommand, [...bwrapArgs, "--", "sh", "-c", script], sleepFn);
+   if (result.error || result.status !== 0) {
+     throw new Error(`error: git diff extraction failed for ${directory} (exit ${result.status ?? "null"}): ${(result.stderr || result.error?.message || "unknown error").trim()}`);
+   }
+   // Re-check HEAD once more (taskferry#329): runExtractionBwrap's retry loop
+   // above can have absorbed up to 1.3s of backoff on the overlay-mount-busy
+   // race, which is enough time for a concurrent checkout/branch-switch/
+   // dispatch to move HEAD after the pre-retry guard above already passed.
+   // Catching it here, immediately before the diff is persisted, closes that
+   // window instead of silently writing a patch anchored on a stale HEAD.
+-  assertNoHeadDrift(directory, runCommand, preDispatchHead);
++  const postDrift = detectHeadDrift(directory, runCommand, preDispatchHead);
++  if (postDrift) {
++    throw new Error(
++      `error: ${directory}'s HEAD moved from '${postDrift.from}' to '${postDrift.to}' since dispatch\n` +
++      `help: something else changed this directory's checkout while the task was in flight (a manual git checkout, a branch switch, or another process) -- diffing against the original HEAD would compare the wrong trees. Investigate what changed ${directory}, then retry against a stable target (a dedicated worktree avoids this)`
++    );
++  }
+   mkdirFn(pathDirname(diffPath));
+   writeFileFn(diffPath, result.stdout);
+   return { diffPath, hasChanges: result.stdout.trim().length > 0 };
+ }
+ 
+ /**
+  * @param {string} filePath
+  * @returns {string}
+  */
+ function pathDirname(filePath) {
+diff --git a/src/changeset.test.js b/src/changeset.test.js
+index 779569a..8977c2d 100644
+--- a/src/changeset.test.js
++++ b/src/changeset.test.js
+@@ -1,35 +1,37 @@
+ // src/changeset.test.js
+ import { describe, test } from "node:test";
+ import assert from "node:assert/strict";
+ import fs from "node:fs";
+ import os from "node:os";
+ import path from "node:path";
+-import { overlayPaths, subOverlayPaths, subOverlaySlug, extractGitDiff, resolvePreDispatchHead, buildMergedViewBwrapArgs, extractNonGitDiff, applyChangeset, cleanupOverlay } from "./changeset.js";
++import { overlayPaths, subOverlayPaths, subOverlaySlug, extractGitDiff, resolvePreDispatchHead, buildMergedViewBwrapArgs, extractNonGitDiff, applyChangeset, cleanupOverlay, detectHeadDrift } from "./changeset.js";
+ 
+ // Shared fixture literals lifted to module scope so the sonarjs
+ // no-duplicate-string rule stays quiet (each literal now appears once, in
+ // its constant definition) and so every test case points at the same paths.
+ const REPO_DIR = "/workspace/repo";
+ const SCRATCH_DIR = "/workspace/scratch";
+ const STATE_DIR = "/state";
+ const RUNTIME_DIR = "/state/run";
+ const HOME_DIR = "/home/user";
+ const DIFF_PATCH = "/state/diffs/t1.patch";
+ const T1_ROOT = "/tmp/taskferry-cow-t1";
+ const T1_UPPER = "/tmp/taskferry-cow-t1/upper/main";
+ const T1_WORK = "/tmp/taskferry-cow-t1/work/main";
+ const T1_MERGED = "/tmp/taskferry-cow-t1/merged";
+ const TMP_DIR = "/tmp";
+ const UPPER_DIR = "/tmp/u";
+ const WORK_DIR = "/tmp/w";
+ const PRE_DISPATCH_HEAD = "abc123";
++const GIT_NOT_A_REPO_STDERR = "fatal: not a git repository";
++const GIT_NOT_A_REPO_STDERR_NL = "fatal: not a git repository\n";
+ const MY_REPO_WT = "/workspace/main-repo/.git/worktrees/my-repo";
+ const GIT_CMD = "git";
+ const BWRAP_CMD = "bwrap";
+ const DIR_FLAG = "--dir";
+ const OVERLAY_SRC_FLAG = "--overlay-src";
+ const OVERLAY_FLAG = "--overlay";
+ const SAMPLE_DIFF_X = "diff --git a/x b/x\n";
+ const BIND_FLAG = "--bind";
+ const RO_BIND_FLAG = "--ro-bind";
+ const ROOT_BIND = "/";
+@@ -219,34 +221,51 @@ describe("resolvePreDispatchHead()", () => {
+   test("returns the trimmed HEAD sha for a git directory", () => {
+     const runCommand = (command, args) => {
+       assert.equal(command, GIT_CMD);
+       assert.deepEqual(args, ["-C", REPO_DIR, "rev-parse", "HEAD"]);
+       return { status: 0, stdout: "abc123\n", stderr: "", error: null };
+     };
+     assert.equal(resolvePreDispatchHead(REPO_DIR, runCommand), PRE_DISPATCH_HEAD);
+   });
+ 
+   test("returns null for a non-git directory", () => {
+-    const runCommand = () => ({ status: 128, stdout: "", stderr: "fatal: not a git repository", error: null });
++    const runCommand = () => ({ status: 128, stdout: "", stderr: GIT_NOT_A_REPO_STDERR, error: null });
+     assert.equal(resolvePreDispatchHead("/tmp/scratch", runCommand), null);
+   });
+ 
+   test("returns the empty-tree hash for a git repo with an unborn HEAD (zero commits)", () => {
+     const runCommand = (_command, args) => {
+       if (args.includes("HEAD")) return { status: 128, stdout: "", stderr: "fatal: ambiguous argument 'HEAD'\n", error: null };
+       if (args.includes("--git-dir")) return { status: 0, stdout: ".git\n", stderr: "", error: null };
+       throw new Error(`unexpected git invocation: ${args.join(" ")}`);
+     };
+     assert.equal(resolvePreDispatchHead("/repo", runCommand), "4b825dc642cb6eb9a060e54bf8d69288fbee4904");
+   });
+ });
+ 
++describe("detectHeadDrift()", () => {
++  test("returns null when current HEAD matches preDispatchHead", () => {
++    const runCommand = () => ({ status: 0, stdout: "abc123\n", stderr: "", error: null });
++    assert.equal(detectHeadDrift(REPO_DIR, runCommand, PRE_DISPATCH_HEAD), null);
++  });
++
++  test("returns {from, to} when current HEAD has moved", () => {
++    const runCommand = () => ({ status: 0, stdout: "def456\n", stderr: "", error: null });
++    assert.deepEqual(detectHeadDrift(REPO_DIR, runCommand, PRE_DISPATCH_HEAD), { from: PRE_DISPATCH_HEAD, to: "def456" });
++  });
++
++  test("returns null (fail-open) when the HEAD check itself is inconclusive", () => {
++    const runCommand = () => ({ status: 128, stdout: "", stderr: GIT_NOT_A_REPO_STDERR_NL, error: null });
++    assert.equal(detectHeadDrift(REPO_DIR, runCommand, PRE_DISPATCH_HEAD), null);
++  });
++});
++
+ describe("extractGitDiff()", () => {
+   test("remounts the overlay and runs a stage-diff-reset script anchored on preDispatchHead, writing stdout to diffPath", () => {
+     let capturedCommand = null;
+     let capturedArgs = null;
+     const written = {};
+     const runCommand = (command, args) => {
+       if (command === "git") return { status: 0, stdout: "abc123\n", stderr: "", error: null };
+       capturedCommand = command;
+       capturedArgs = args;
+       return { status: 0, stdout: "diff --git a/foo b/foo\n+bar\n", stderr: "", error: null };
+@@ -390,21 +409,21 @@ describe("extraction fail-closed behavior", () => {
+     assert.throws(
+       () => extractGitDiff({ ...baseGitParams, runCommand, writeFileFn: () => {}, mkdirFn: () => {} }),
+       /HEAD moved from 'abc123' to 'def456' since dispatch/
+     );
+     assert.equal(bwrapCalled, false, "extraction must never run against a directory whose HEAD has drifted");
+   });
+ 
+   test("extractGitDiff proceeds normally when the HEAD re-check itself can't resolve (git failure)", () => {
+     let capturedArgs = null;
+     const runCommand = (command, args) => {
+-      if (command === "git") return { status: 128, stdout: "", stderr: "fatal: not a git repository\n", error: null };
++      if (command === "git") return { status: 128, stdout: "", stderr: GIT_NOT_A_REPO_STDERR_NL, error: null };
+       capturedArgs = args;
+       return { status: 0, stdout: SAMPLE_DIFF_X, stderr: "", error: null };
+     };
+     const result = extractGitDiff({ ...baseGitParams, runCommand, writeFileFn: () => {}, mkdirFn: () => {} });
+     assert.ok(capturedArgs, "bwrap must still run when the HEAD re-check is inconclusive rather than a confirmed drift");
+     assert.equal(result.hasChanges, true);
+   });
+ 
+   // taskferry#326: the extraction bwrap can race the just-exited dispatch
+   // bwrap's own mount-namespace teardown and lose with the same

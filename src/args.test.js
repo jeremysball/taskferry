@@ -39,6 +39,7 @@ test("parses dispatch and applies its argument defaults", () => {
       noOverlay: false,
       allowedDirs: void 0,
       executor: void 0,
+      class: void 0,
     },
     help: false,
   });
@@ -195,12 +196,26 @@ test("parses workspace, stream, and result options with their constrained values
     summaries: true,
     taskId: void 0,
     flushIntervalMs: void 0,
+    all: false,
   });
   assert.deepEqual(parseArgs(["list", "--all", "--limit", "10"]).options, {
     directory: void 0,
     all: true,
     limit: 10,
   });
+});
+
+test("watch --all parses like list --all: directory cleared, all: true, and rejects combining with --directory or --task-id (taskferry#315)", () => {
+  assert.deepEqual(parseArgs(["watch", "--all"]).options, {
+    directory: void 0,
+    all: true,
+    format: "toon",
+    summaries: false,
+    taskId: void 0,
+    flushIntervalMs: void 0,
+  });
+  assert.throws(() => parseArgs(["watch", "--all", "--directory", "/tmp/some-workspace"]), /--all cannot be combined with --directory/);
+  assert.throws(() => parseArgs(["watch", "--all", "--task-id", "oc_1"]), /--all cannot be combined with --task-id/);
 });
 
 test("accepts --flag=value and rejects invalid enumerated values", () => {
@@ -225,6 +240,7 @@ test("parses watch --task-id and rejects it for commands that don't take it", ()
     summaries: false,
     taskId: "oc_1",
     flushIntervalMs: void 0,
+    all: false,
   });
   assert.throws(() => parseArgs(["status", "oc_1", "--task-id", "oc_2"]), /task id is required|unknown flag/);
 });
@@ -493,4 +509,14 @@ test("reject parses a task id positional", () => {
   const parsed = parseArgs(["reject", "t1"]);
   assert.equal(parsed.command, "reject");
   assert.equal(parsed.options.taskId, "t1");
+});
+
+test("dispatch accepts an arbitrary --class value", () => {
+  const { options } = parseArgs(["dispatch", "--prompt", "x", "--class", "implementer"], { cwd: CWD });
+  assert.equal(options.class, "implementer");
+});
+
+test("advisor accepts an arbitrary --class value", () => {
+  const { options } = parseArgs(["advisor", "--model", "m", "--class", "advisor-design"]);
+  assert.equal(options.class, "advisor-design");
 });

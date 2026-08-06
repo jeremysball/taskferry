@@ -128,8 +128,12 @@ function normalizeCommandDirectory(parsed, normalizeDirectory, cwd, resolveRoot)
 
 function usesWorkspaceRoot({ command, options }) {
   if (["home", "context"].includes(command)) return true;
+  // --all (list and watch) means "every workspace" -- resolving cwd's root
+  // here would overwrite the `directory: void 0` applyAllFlag() already set
+  // and silently scope an --all request back down to one workspace.
+  if (options.all) return false;
   if (command === "watch") return !(options.taskId && !options.directory);
-  return command === "list" && !options.all;
+  return command === "list";
 }
 
 function readsPromptFromStdin({ command, options }) {

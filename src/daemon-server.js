@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import net from "node:net";
 import { randomUUID } from "node:crypto";
-import { normalizeDirectory } from "./paths.js";
+import { normalizeDirectory, sameWorkspace } from "./paths.js";
 import {
   PROTOCOL_VERSION,
   encodeMessage,
@@ -46,6 +46,16 @@ export function makeWriteMessage(maxOutboundBytes) {
   };
 }
 
+// Defensive fallback for a caller that omits resolveWorkspaceRootFn: falls
+// back to sameWorkspace()'s literal-equality fast path (today's pre-#315
+// behavior) rather than throwing on a directory-comparison call.
+const identityWorkspaceRoot = (directory) => directory;
+
+// Sentinel subscription.directory for `event.subscribe({ all: true })`
+// (watch --all, taskferry#315's escape hatch): matches every task
+// regardless of directory instead of being compared against one.
+const ALL_DIRECTORIES = null;
+
 // The connection layer of the daemon: owns the per-client socket bookkeeping,
 // request dispatch loop, event fan-out, and the deferred-until-idle
 // self-restart. Everything here is driven by startDaemon() in daemon.js, which
@@ -63,9 +73,14 @@ function eventPayload(event, summaries) {
   return { ...rest, ...variant };
 }
 
-export function deliverEvent(subscriptions, writeMessage, event) {
+export function deliverEvent(subscriptions, writeMessage, event, resolveWorkspaceRootFn = identityWorkspaceRoot) {
   for (const [subscriptionId, subscription] of subscriptions) {
-    let passes = event.directory === subscription.directory && !subscription.socket.destroyed;
+    // ALL_DIRECTORIES bypasses the directory check entirely (watch --all).
+    // Otherwise sameWorkspace(), not a raw `===`, so a subscription scoped
+    // to a repo root also receives events for a task dispatched into a
+    // linked worktree of the same repo (taskferry#315).
+    let passes = (subscription.directory === ALL_DIRECTORIES || sameWorkspace(event.directory, subscription.directory, resolveWorkspaceRootFn))
+      && !subscription.socket.destroyed;
     if (subscription.originSessionId && event.originSessionId && subscription.originSessionId !== event.originSessionId) {
       passes = false;
     }
@@ -77,7 +92,10 @@ export function deliverEvent(subscriptions, writeMessage, event) {
 
 export function syncActivitySubscriptions(manager, subscriptions) {
   if (typeof manager.setActivitySubscriptions !== "function") return;
-  /** @type {Map<string, Set<boolean>>} */
+  // A `watch --all` subscription groups under the ALL_DIRECTORIES (null)
+  // key here; tasks.js's scheduleActivityFor() unions that bucket's variants
+  // into every task's lookup regardless of the task's own directory.
+  /** @type {Map<string|null, Set<boolean>>} */
   const subs = new Map();
   for (const subscription of subscriptions.values()) {
     let variants = subs.get(subscription.directory);
@@ -90,13 +108,20 @@ export function syncActivitySubscriptions(manager, subscriptions) {
   manager.setActivitySubscriptions(subs);
 }
 
+// `all: true` (watch --all) short-circuits to ALL_DIRECTORIES; otherwise an
+// explicit directory wins, falling back to the daemon resolving it from
+// taskId server-side (watch --task-id, issue #59).
+function subscriptionDirectory(params, manager) {
+  if (params.all === true) return ALL_DIRECTORIES;
+  if (params.directory !== undefined) return normalizeDirectory(params.directory);
+  return normalizeDirectory(manager.taskDirectory(params.taskId));
+}
+
 async function subscribeRequest({ manager, subscriptions, socket, writeMessage, syncActivity }, request) {
   if (request.params.summaries === true && typeof manager.checkSummaryModelReady === "function") {
     await manager.checkSummaryModelReady();
   }
-  const directory = request.params.directory !== undefined
-    ? normalizeDirectory(request.params.directory)
-    : normalizeDirectory(manager.taskDirectory(request.params.taskId));
+  const directory = subscriptionDirectory(request.params, manager);
   const subscriptionId = randomUUID();
   subscriptions.set(subscriptionId, {
     socket,

@@ -177,3 +177,46 @@ export function resolveWorkspaceRoot(startDir, { runCommand = defaultRunCommand,
   }
   return path.dirname(gitCommonDir);
 }
+
+/**
+ * Memoizing wrapper around resolveWorkspaceRoot(): a long-lived caller (the
+ * daemon) compares directories against each other repeatedly over its whole
+ * lifetime -- every watch/list filter check and every live event delivery
+ * (taskferry#315) -- and re-running `git rev-parse --git-common-dir` for the
+ * same directory on every comparison would spawn a process per check. A
+ * directory's git-common-dir doesn't change while the daemon is running, so
+ * caching it for the resolver's lifetime is safe. Callers that live for the
+ * daemon's lifetime should create exactly one resolver at startup and reuse
+ * it, rather than calling this factory per comparison.
+ * @param {object} [options]
+ * @param {(command: string, args: readonly string[]) => {status: number|null, stdout: string, stderr: string, error?: NodeJS.ErrnoException}} [options.runCommand]
+ * @returns {(startDir: string) => string}
+ */
+export function createWorkspaceRootResolver({ runCommand = defaultRunCommand } = {}) {
+  const cache = new Map();
+  return function resolveCachedWorkspaceRoot(startDir) {
+    if (cache.has(startDir)) return cache.get(startDir);
+    const root = resolveWorkspaceRoot(startDir, { runCommand });
+    cache.set(startDir, root);
+    return root;
+  };
+}
+
+/**
+ * True when `a` and `b` are the exact same directory, or resolve to the same
+ * git workspace root (e.g. a repo's root and one of its linked worktrees,
+ * both dispatched into by `--directory`) -- the shared "same workspace" check
+ * behind watch/list's directory filter and live event-subscription routing
+ * (taskferry#315: a root-scoped `watch` was silently blind to any dispatch
+ * that passed an explicit worktree `--directory`, since both compared raw
+ * directory strings with `===`). The literal-equality fast path skips
+ * `resolveRoot` (and, on a cache miss, a git spawn) for the overwhelmingly
+ * common case where both sides are already the same directory.
+ * @param {string} a
+ * @param {string} b
+ * @param {(startDir: string) => string} resolveRoot
+ * @returns {boolean}
+ */
+export function sameWorkspace(a, b, resolveRoot) {
+  return a === b || resolveRoot(a) === resolveRoot(b);
+}

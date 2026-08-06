@@ -26,6 +26,93 @@ function shQuote(value) {
   return `'${value.replaceAll("'", "'\\''")}'`;
 }
 
+// bwrap's exact wording for the taskferry#318/#326 overlay-mount race: a
+// fresh overlay mount raced against another mount namespace's teardown
+// (either a concurrent dispatch to the same lowerdir, #318, or -- #326 --
+// this same task's own just-exited dispatch bwrap, whose overlayfs
+// superblock can still be unwinding asynchronously on a kernel workqueue
+// after the process itself has been reaped). Matched against both a raw
+// bwrap stderr result and the persisted changesetError text, which can span
+// the error's own multi-line wrapping -- "s" flag so "." also matches
+// newlines.
+export const OVERLAY_MOUNT_BUSY_PATTERN = /overlay mount on .*Device or resource busy/s;
+
+// Bounded retry for the extraction bwrap specifically on the overlay-mount-
+// busy signature: the teardown this races is a kernel-internal async
+// cleanup with no user-space signal to wait on, so a short bounded backoff
+// is the only lever available short of restructuring extraction to be
+// async (see taskferry#326's fix-direction discussion for why that was
+// rejected as the first move).
+const OVERLAY_MOUNT_RETRY_BACKOFF_MS = [100, 300, 900];
+
+/** @param {number} ms */
+function sleepSync(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+/**
+ * Whether a bwrap command result carries the overlay-mount-busy signature,
+ * checked against `stderr` and `error?.message` independently rather than
+ * via `stderr || error?.message`: a slow/hung mount (spawnSync's 30s
+ * timeout firing after bwrap already wrote the busy line to stderr) reports
+ * `{error: ETIMEDOUT, stderr: <busy text>}`, and `error.message` ("spawn
+ * bwrap ETIMEDOUT") would win a `||` fallback and hide the busy signature
+ * actually sitting in stderr.
+ * @param {CommandResult} result
+ * @returns {boolean}
+ */
+function isOverlayMountBusy(result) {
+  return OVERLAY_MOUNT_BUSY_PATTERN.test(result.stderr || "") || OVERLAY_MOUNT_BUSY_PATTERN.test(result.error?.message || "");
+}
+
+/**
+ * Runs a bwrap extraction command, retrying with backoff when the failure is
+ * specifically the overlay-mount-busy race (never on any other failure --
+ * a real sandbox misconfiguration or a genuine diff error should surface
+ * immediately, not be masked behind three silent retries).
+ * @param {typeof defaultRunCommand} runCommand
+ * @param {string[]} args
+ * @param {(ms: number) => void} [sleepFn]
+ * @returns {CommandResult}
+ */
+function runExtractionBwrap(runCommand, args, sleepFn = sleepSync) {
+  for (let attempt = 0; attempt <= OVERLAY_MOUNT_RETRY_BACKOFF_MS.length; attempt++) {
+    const result = runCommand("bwrap", args);
+    const busy = isOverlayMountBusy(result);
+    if (!busy || attempt === OVERLAY_MOUNT_RETRY_BACKOFF_MS.length) return result;
+    sleepFn(OVERLAY_MOUNT_RETRY_BACKOFF_MS[attempt]);
+  }
+  // Unreachable: the loop above always returns by its final iteration
+  // (attempt === OVERLAY_MOUNT_RETRY_BACKOFF_MS.length short-circuits the
+  // busy check). Present only so control flow analysis doesn't see a
+  // function that can fall through without returning.
+  throw new Error("unreachable");
+}
+
+/**
+ * Throws if `directory`'s current HEAD has confirmably moved away from
+ * `preDispatchHead`. Shared by extractGitDiff's pre-retry guard and its
+ * post-retry re-check (taskferry#329): the up-to-1.3s overlay-mount-busy
+ * backoff between the two is exactly the window a concurrent HEAD change
+ * (a manual checkout, a branch switch, another dispatch) can land in
+ * undetected if only the pre-retry check ran. An inconclusive re-check
+ * (git failure, non-git target) is not a confirmed drift and falls
+ * through, matching the pre-retry guard's own fail-open-on-inconclusive
+ * behavior.
+ * @param {string} directory
+ * @param {typeof defaultRunCommand} runCommand
+ * @param {string} preDispatchHead
+ */
+function assertNoHeadDrift(directory, runCommand, preDispatchHead) {
+  const currentHead = resolvePreDispatchHead(directory, runCommand);
+  if (currentHead !== null && currentHead !== preDispatchHead) {
+    throw new Error(
+      `error: ${directory}'s HEAD moved from '${preDispatchHead}' to '${currentHead}' since dispatch\n` +
+      `help: something else changed this directory's checkout while the task was in flight (a manual git checkout, a branch switch, or another process) -- diffing against the original HEAD would compare the wrong trees. Investigate what changed ${directory}, then retry against a stable target (a dedicated worktree avoids this)`
+    );
+  }
+}
+
 /**
  * @param {string} directory
  * @param {typeof defaultRunCommand} [runCommand]
@@ -71,6 +158,7 @@ export function resolvePreDispatchHead(directory, runCommand = defaultRunCommand
  * @param {typeof defaultRunCommand} [params.runCommand]
  * @param {(filePath: string, content: string) => void} [params.writeFileFn]
  * @param {(dirPath: string) => void} [params.mkdirFn]
+ * @param {(ms: number) => void} [params.sleepFn] - injectable for tests; real callers get a blocking sleep between retries
  * @returns {{diffPath: string, hasChanges: boolean}}
  * @throws {Error} when the bwrap extraction fails to start or exits non-zero
  */
@@ -88,23 +176,15 @@ export function extractGitDiff({
   runCommand = defaultRunCommand,
   writeFileFn = (filePath, content) => fs.writeFileSync(filePath, content, { mode: 0o600 }),
   mkdirFn = (dirPath) => fs.mkdirSync(dirPath, { recursive: true, mode: 0o700 }),
+  sleepFn = sleepSync,
 }) {
   // Fail closed on HEAD drift: `directory` below is a live bind to the real
   // checkout, not a snapshot from dispatch time. If something else (a manual
   // checkout, a branch switch, another dispatch) moved that checkout's HEAD
   // since preDispatchHead was recorded, the diff-cached-against-preDispatchHead
   // script still runs successfully but compares the wrong trees -- it can
-  // report files as deleted/added that the worker never touched. Only refuse
-  // on a *confirmed* mismatch (both hashes resolved and differ); an
-  // inconclusive re-check (git failure, non-git target) falls through to
-  // extraction unchanged, matching prior behavior.
-  const currentHead = resolvePreDispatchHead(directory, runCommand);
-  if (currentHead !== null && currentHead !== preDispatchHead) {
-    throw new Error(
-      `error: ${directory}'s HEAD moved from '${preDispatchHead}' to '${currentHead}' since dispatch\n` +
-      `help: something else changed this directory's checkout while the task was in flight (a manual git checkout, a branch switch, or another process) -- diffing against the original HEAD would compare the wrong trees. Investigate what changed ${directory}, then retry against a stable target (a dedicated worktree avoids this)`
-    );
-  }
+  // report files as deleted/added that the worker never touched.
+  assertNoHeadDrift(directory, runCommand, preDispatchHead);
   const bwrapArgs = buildBwrapArgs({ directory, stateDir, runtimeDir, homeDir, denyList, overlay, overlayRwBinds, overlayRwFileBinds });
   // The final `exit $rc` propagates the diff's own status: the previous
   // `; git reset` tail made the whole script exit with reset's status, so a
@@ -112,10 +192,17 @@ export function extractGitDiff({
   // the transient staging -- the upper already captured everything), then
   // the shell exits with the diff's code.
   const script = `git -C ${shQuote(directory)} add -A && { git -C ${shQuote(directory)} diff --cached ${shQuote(preDispatchHead)}; rc=$?; git -C ${shQuote(directory)} reset > /dev/null 2>&1; exit $rc; }`;
-  const result = runCommand("bwrap", [...bwrapArgs, "--", "sh", "-c", script]);
+  const result = runExtractionBwrap(runCommand, [...bwrapArgs, "--", "sh", "-c", script], sleepFn);
   if (result.error || result.status !== 0) {
-    throw new Error(`error: git diff extraction failed for ${directory} (exit ${result.status ?? "null"}): ${(result.error?.message || result.stderr || "unknown error").trim()}`);
+    throw new Error(`error: git diff extraction failed for ${directory} (exit ${result.status ?? "null"}): ${(result.stderr || result.error?.message || "unknown error").trim()}`);
   }
+  // Re-check HEAD once more (taskferry#329): runExtractionBwrap's retry loop
+  // above can have absorbed up to 1.3s of backoff on the overlay-mount-busy
+  // race, which is enough time for a concurrent checkout/branch-switch/
+  // dispatch to move HEAD after the pre-retry guard above already passed.
+  // Catching it here, immediately before the diff is persisted, closes that
+  // window instead of silently writing a patch anchored on a stale HEAD.
+  assertNoHeadDrift(directory, runCommand, preDispatchHead);
   mkdirFn(pathDirname(diffPath));
   writeFileFn(diffPath, result.stdout);
   return { diffPath, hasChanges: result.stdout.trim().length > 0 };
@@ -211,6 +298,7 @@ export function buildMergedViewBwrapArgs({ directory, overlay, runtimeDir, denyL
  * @param {typeof defaultRunCommand} [params.runCommand]
  * @param {(filePath: string, content: string) => void} [params.writeFileFn]
  * @param {(dirPath: string) => void} [params.mkdirFn]
+ * @param {(ms: number) => void} [params.sleepFn] - injectable for tests; real callers get a blocking sleep between retries
  * @returns {{diffPath: string, hasChanges: boolean}}
  * @throws {Error} when the bwrap extraction fails to start or exits non-zero
  */
@@ -225,6 +313,7 @@ export function extractNonGitDiff({
   runCommand = defaultRunCommand,
   writeFileFn = (filePath, content) => fs.writeFileSync(filePath, content, { mode: 0o600 }),
   mkdirFn = (dirPath) => fs.mkdirSync(dirPath, { recursive: true, mode: 0o700 }),
+  sleepFn = sleepSync,
 }) {
   const mergedMountPoint = path.join(overlay.root, "merged");
   const bwrapArgs = buildMergedViewBwrapArgs({ directory, overlay, stateDir, runtimeDir, homeDir, denyList, mergedMountPoint, writable: false });
@@ -232,13 +321,18 @@ export function extractNonGitDiff({
   // created inside the overlay shows its full content (a plain -ru would
   // collapse it to a bare "Only in ... merged" line with no content, and
   // the apply step would then lose the new file entirely).
-  const result = runCommand("bwrap", [...bwrapArgs, "--", "diff", "-ruN", directory, mergedMountPoint]);
+  const result = runExtractionBwrap(runCommand, [...bwrapArgs, "--", "diff", "-ruN", directory, mergedMountPoint], sleepFn);
   // diff exits 0 = identical, 1 = differences found (success for us), >=2 =
   // real trouble. A bwrap failure (bad mount, timeout, killed) must not be
   // indistinguishable from "no changes" -- throw on anything but 0/1 so the
-  // caller can record the failure and keep the overlay for recovery.
-  if (result.error || (result.status !== 0 && result.status !== 1)) {
-    throw new Error(`error: non-git diff extraction failed for ${directory} (exit ${result.status ?? "null"}): ${(result.error?.message || result.stderr || "unknown error").trim()}`);
+  // caller can record the failure and keep the overlay for recovery. bwrap
+  // itself also exits 1 on a setup failure (its own die() convention), which
+  // collides with diff's own exit-1-for-differences-found on this exact
+  // status code -- an overlay-mount-busy failure that survives every retry
+  // must still throw even though its exit code alone looks like success, or
+  // the worker's real edits get silently discarded as "no changes".
+  if (result.error || isOverlayMountBusy(result) || (result.status !== 0 && result.status !== 1)) {
+    throw new Error(`error: non-git diff extraction failed for ${directory} (exit ${result.status ?? "null"}): ${(result.stderr || result.error?.message || "unknown error").trim()}`);
   }
   mkdirFn(pathDirname(diffPath));
   writeFileFn(diffPath, result.stdout);
@@ -280,13 +374,14 @@ export function subFilePaths(root, targetPath) {
  * @param {string} [params.homeDir]
  * @param {string[]} [params.denyList]
  * @param {typeof defaultRunCommand} [params.runCommand]
+ * @param {(ms: number) => void} [params.sleepFn] - injectable for tests; real callers get a blocking sleep between retries (non-git apply only -- applyGitChangeset uses `git apply`, not bwrap, so it never hits the overlay-mount race)
  * @returns {{applied: boolean, reason: string|null}}
  */
-export function applyChangeset({ directory, diffPath, isGitTarget, overlay, stateDir, runtimeDir, homeDir, denyList, runCommand = defaultRunCommand }) {
+export function applyChangeset({ directory, diffPath, isGitTarget, overlay, stateDir, runtimeDir, homeDir, denyList, runCommand = defaultRunCommand, sleepFn = sleepSync }) {
   if (isGitTarget) {
     return applyGitChangeset({ directory, diffPath, runCommand });
   }
-  return applyNonGitChangeset({ directory, overlay, stateDir, runtimeDir, homeDir, denyList, runCommand });
+  return applyNonGitChangeset({ directory, overlay, stateDir, runtimeDir, homeDir, denyList, runCommand, sleepFn });
 }
 
 // Shared by the two live-overlay-input guard clauses below (thrown from two
@@ -332,9 +427,10 @@ function gitApplyFailureReason(result) {
  * @param {string} [params.homeDir]
  * @param {string[]} [params.denyList]
  * @param {typeof defaultRunCommand} params.runCommand
+ * @param {(ms: number) => void} [params.sleepFn]
  * @returns {{applied: boolean, reason: string|null}}
  */
-function applyNonGitChangeset({ directory, overlay, stateDir, runtimeDir, homeDir, denyList, runCommand }) {
+function applyNonGitChangeset({ directory, overlay, stateDir, runtimeDir, homeDir, denyList, runCommand, sleepFn = sleepSync }) {
   // Guard clauses (split so each stays under the expression-complexity cap)
   // double as the TS narrowing the rsync remount below needs: a missing input
   // means a partial/tampered task record, which must surface as a hard error
@@ -354,7 +450,15 @@ function applyNonGitChangeset({ directory, overlay, stateDir, runtimeDir, homeDi
   // failed apply leaves changesetStatus "pending" and never runs cleanup
   // (spec §5.4), so the overlay survives for a second attempt.
   const script = `rsync -a --delete --delay-updates ${shQuote(mergedMountPoint)}/ ${shQuote(directory)}/`;
-  const result = runCommand("bwrap", [...bwrapArgs, "--", "sh", "-c", script]);
+  // Same overlay-mount-busy race as extraction (taskferry#326): this bwrap
+  // call mounts its own overlay merged view, which can race the async
+  // mount-namespace teardown of whatever bwrap just exited before this
+  // accept() ran. Routed through the same bounded retry-with-backoff rather
+  // than a bespoke copy -- unlike extractNonGitDiff, no fail-open guard is
+  // needed here: rsync doesn't share diff's "non-zero exit can mean success"
+  // convention, so a persistent busy failure (exit 1) already falls through
+  // to the existing `status !== 0` branch as a real failure.
+  const result = runExtractionBwrap(runCommand, [...bwrapArgs, "--", "sh", "-c", script], sleepFn);
   if (result.status !== 0) {
     return { applied: false, reason: copyApplyFailureReason(result) };
   }

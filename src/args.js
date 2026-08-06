@@ -208,6 +208,7 @@ const FLAGS = {
   "--require-final-marker": { allow: ["dispatch"], key: "finalMarker", coerce: coerceFinalMarker },
   "--allowed-dirs": { allow: ["dispatch"], key: "allowedDirs", coerce: coerceAllowedDirs },
   "--executor": { allow: ["dispatch", "advisor"], key: "executor", coerce: coerceExecutor },
+  "--class": { allow: ["dispatch", "advisor"], key: "class" },
   "--grace-ms": { allow: ["cancel"], key: "graceMs", coerce: (v, n) => parseNumber(v, n, { min: 0 }) },
   "--timeout": { allow: ["wait", "advisor"], key: "timeoutMs", coerce: (v, n) => parseDuration(v, n) },
   "--tail-chars": { allow: ["wait"], key: "tailChars", coerce: (v, n) => parseNumber(v, n, { min: 1, max: 65536 }) },
@@ -220,7 +221,7 @@ const FLAGS = {
   "--task-id": { allow: ["watch"], key: "taskId", mention: "--task-id was replaced by the positional task id; use `taskferry status <id>`" },
   "--flush-interval": { allow: ["watch"], key: "flushIntervalMs", coerce: (v, n) => parseDuration(v, n) },
   "--full": { allow: ["wait", "status", "result", "doctor"], bool: true },
-  "--all": { allow: ["list"], bool: true },
+  "--all": { allow: ["list", "watch"], bool: true },
   "--wait": { allow: ["summary"], bool: true },
   "--summaries": { allow: ["watch"], bool: true },
   "--summarize": { allow: ["wait"], bool: true },
@@ -313,9 +314,15 @@ function parseHead(argv) {
   return { done: false, command: first, rest: argv.slice(1) };
 }
 
-function validateList({ command, options, seen }) {
-  if (command !== "list") return;
+// `--all` (list and watch) drops the directory scope entirely -- see every
+// task/event regardless of which workspace dispatched it. Combining it with
+// an explicit `--directory` (or, for watch, `--task-id`) is a contradiction
+// the caller almost certainly didn't intend, so it's rejected rather than
+// silently letting one option win.
+function applyAllFlag({ command, options, seen }) {
+  if (!["list", "watch"].includes(command)) return;
   if (options.all && seen.has("directory")) throw usageError("--all cannot be combined with --directory", command);
+  if (command === "watch" && options.all && seen.has("taskId")) throw usageError("--all cannot be combined with --task-id", command);
   if (options.all) options.directory = void 0;
 }
 
@@ -384,7 +391,7 @@ export function parseArgs(argv, { cwd = process.cwd() } = {}) {
       index = consumeFlag(ctx, rest, index, token);
     }
   }
-  validateList(ctx);
+  applyAllFlag(ctx);
   if (!ctx.help) validateCommand(command, ctx.options);
   return { command, options: ctx.options, help: ctx.help, ...(ctx.help ? { helpText: helpText(command) } : {}) };
 }

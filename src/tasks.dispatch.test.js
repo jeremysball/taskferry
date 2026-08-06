@@ -712,3 +712,19 @@ describe("config file precedence (maxConcurrentTasks)", () => {
     assert.equal(mgr.status(fifth.id).status, "queued");
   });
 });
+
+describe("dispatch() class tag persistence and summary surfacing", () => {
+  test("dispatch persists the class tag and surfaces it in the summary", () => {
+    const mgr = makeManager({ spawnFn: () => fakeChild() });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), class: "implementer" });
+    assert.equal(dispatched.class, "implementer");
+    const status = mgr.status(dispatched.id);
+    assert.equal(status.class, "implementer");
+  });
+
+  test("dispatch without a class tag omits it from the summary", () => {
+    const mgr = makeManager({ spawnFn: () => fakeChild() });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+    assert.equal("class" in dispatched, false);
+  });
+});

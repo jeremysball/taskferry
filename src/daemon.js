@@ -8,7 +8,7 @@ import { createTaskManager } from "./tasks.js";
 import { loadConfig } from "./config.js";
 import { withFileLock, withFileLockAsync } from "./state-lock.js";
 import { isNonNegativeInteger, isPositiveInteger } from "./numbers.js";
-import { normalizeDirectory, resolveRuntimeDir, resolveStateDir } from "./paths.js";
+import { normalizeDirectory, resolveRuntimeDir, resolveStateDir, createWorkspaceRootResolver, sameWorkspace } from "./paths.js";
 import {
   PROTOCOL_VERSION,
   ProtocolError,
@@ -234,7 +234,7 @@ function listRows(manager) {
   return Array.isArray(listed.tasks) ? listed.tasks : [];
 }
 
-function filteredTaskDetails(manager, directory) {
+function filteredTaskDetails(manager, directory, resolveWorkspaceRootFn) {
   const normalized = normalizeDirectory(directory);
   return {
     directory: normalized,
@@ -243,16 +243,18 @@ function filteredTaskDetails(manager, directory) {
     // (statSync/open/read), so calling it for every task ever recorded
     // instead of just the ones in this workspace turns a routine
     // statusline poll into O(all-time task count) synchronous I/O on the
-    // daemon's single thread (taskferry#287).
+    // daemon's single thread (taskferry#287). sameWorkspace() (not a raw
+    // `===`) so a root-scoped filter also matches a task dispatched into a
+    // linked worktree of the same repo (taskferry#315).
     tasks: listRows(manager)
-      .filter((row) => row.directory === normalized)
+      .filter((row) => sameWorkspace(row.directory, normalized, resolveWorkspaceRootFn))
       .map((row) => manager.status(row.id)),
   };
 }
 
-function filteredList(manager, directory) {
+function filteredList(manager, directory, resolveWorkspaceRootFn) {
   if (directory === undefined) return manager.list();
-  const details = filteredTaskDetails(manager, directory);
+  const details = filteredTaskDetails(manager, directory, resolveWorkspaceRootFn);
   const counts = countTasks(details.tasks);
   const rows = details.tasks.map(({ id, status, model, startedAt, failureReason }) => ({ id, status, model, startedAt, failureReason: failureReason ?? null }));
   return { counts, tasks: rows.length ? rows : "none found in this workspace" };
@@ -289,24 +291,24 @@ const invokeHandlers = {
   "task.cancel": (manager, params) => manager.cancel(params.taskId, params.graceMs === undefined ? undefined : { graceMs: params.graceMs }),
   "task.status": (manager, params) => manager.status(params.taskId),
   "task.wait": (manager, params) => manager.poll(params.taskId, params),
-  "task.list": (manager, params) => filteredList(manager, params.directory),
+  "task.list": (manager, params, resolveWorkspaceRootFn) => filteredList(manager, params.directory, resolveWorkspaceRootFn),
   "task.stats": (manager) => manager.stats(),
   "task.result": (manager, params) => manager.result(params.taskId, params),
   "task.tail": (manager, params) => manager.tail(params.taskId, params.chars === undefined ? undefined : { chars: params.chars }),
   "task.summary": (manager, params) => manager.summarize(params.taskId, params),
   "task.advisor": (manager, params) => manager.advisor(params),
-  "task.context": (manager, params) => {
-    const context = filteredTaskDetails(manager, params.directory);
+  "task.context": (manager, params, resolveWorkspaceRootFn) => {
+    const context = filteredTaskDetails(manager, params.directory, resolveWorkspaceRootFn);
     return { ...context, counts: countTasks(context.tasks) };
   },
   "task.accept": (manager, params) => manager.accept(params.taskId),
   "task.reject": (manager, params) => manager.reject(params.taskId),
 };
 
-function invoke(manager, request) {
+function invoke(manager, request, resolveWorkspaceRootFn) {
   const handler = invokeHandlers[request.method];
   if (!handler) throw new Error(`unsupported method after validation: ${request.method}`);
-  return handler(manager, request.params);
+  return handler(manager, request.params, resolveWorkspaceRootFn);
 }
 
 const DAEMON_DEFAULTS = {
@@ -332,11 +334,17 @@ function resolveDaemonOptions(options = {}) {
   const stateDir = merged.stateDir ?? resolveStateDir(env);
   const runtimeDir = merged.runtimeDir ?? resolveRuntimeDir({ env, stateDir });
   const socketPath = merged.socketPath ?? resolveSocketPath({ env, stateDir, runtimeDir });
+  // Created fresh per startDaemon() call (not a DAEMON_DEFAULTS literal,
+  // which would be evaluated once at module load and shared -- with its
+  // per-directory cache -- across every daemon started in one process,
+  // e.g. multiple daemons spun up across a test file).
+  const resolveWorkspaceRoot = merged.resolveWorkspaceRoot ?? createWorkspaceRootResolver();
   return {
     env,
     stateDir,
     runtimeDir,
     socketPath,
+    resolveWorkspaceRoot,
     platform: merged.platform,
     healthCheckTimeoutMs: merged.healthCheckTimeoutMs,
     maxOutboundBytes: merged.maxOutboundBytes,
@@ -400,6 +408,7 @@ export async function startDaemon(options = {}) {
     stateDir,
     runtimeDir,
     socketPath,
+    resolveWorkspaceRoot,
     healthCheckTimeoutMs,
     maxOutboundBytes,
     maxInFlightRequests,
@@ -420,7 +429,7 @@ export async function startDaemon(options = {}) {
   const subscriptions = new Map();
   const inFlightRef = { current: 0 };
   const writeMessage = makeWriteMessage(maxOutboundBytes);
-  const onEvent = (event) => deliverEvent(subscriptions, writeMessage, event);
+  const onEvent = (event) => deliverEvent(subscriptions, writeMessage, event, resolveWorkspaceRoot);
   const manager = taskManagerFactory({ ...taskManagerOptions, onEvent, stateDir, runtimeDir });
   const onRequestTimed = makeRequestTimer({ stateDir, env, config: taskManagerOptions.config });
   const startupSourceSignature = sourceSignature(sourceDir);
@@ -435,9 +444,9 @@ export async function startDaemon(options = {}) {
     syncActivity,
     inFlightRef,
     maxInFlightRequests,
-    invoke,
     responseError,
     onRequestTimed,
+    invoke: (targetManager, request) => invoke(targetManager, request, resolveWorkspaceRoot),
     maybeRestart: () => maybeRestartRef.current?.(),
   });
 

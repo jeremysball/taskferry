@@ -11,7 +11,7 @@ import { formatToolEventForNarration } from "./narration-format.js";
 import { errCode } from "./errors.js";
 import { isNonNegativeInteger, isPositiveInteger } from "./numbers.js";
 import { buildBwrapArgs, checkBwrapAvailable, checkOverlaySupport, defaultDenyList, platformSupportsSandbox, resolveGitCommonDir, resolveGitDir } from "./sandbox.js";
-import { applyChangeset, overlayPaths, resolvePreDispatchHead, subOverlayPaths, subFilePaths, cleanupOverlay, defaultRunCommand as defaultOverlayRunCommand, extractGitDiff, extractNonGitDiff } from "./changeset.js";
+import { applyChangeset, overlayPaths, resolvePreDispatchHead, subOverlayPaths, subFilePaths, cleanupOverlay, defaultRunCommand as defaultOverlayRunCommand, extractGitDiff, extractNonGitDiff, OVERLAY_MOUNT_BUSY_PATTERN } from "./changeset.js";
 import { resolveExecutor, opencodeExecutor } from "./executor.js";
 import { loadEnvFile, watchEnvFile } from "./env-file.js";
 import { computeDoctorStats } from "./doctor-stats.js";
@@ -51,6 +51,8 @@ import { computeDoctorStats } from "./doctor-stats.js";
  * @property {SummaryOf} [summaryOf]
  * @property {boolean} [incomplete]
  * @property {string|null} [finalMarker]
+ * @property {string|null} [finalStatus]
+ * @property {string|null} [class]
  * @property {"opencode"|"pi"} [executorId]
  * @property {"dispatch"|"advisor"} [role]
  * @property {"none"|"pending"|"accepted"|"rejected"} [changesetStatus]
@@ -83,6 +85,8 @@ import { computeDoctorStats } from "./doctor-stats.js";
  * @property {string|null} [spawnError]
  * @property {boolean} [incomplete]
  * @property {string|null} [finalMarker]
+ * @property {string|null} [finalStatus]
+ * @property {string|null} [class]
  * @property {"opencode"|"pi"} [executorId]
  * @property {"dispatch"|"advisor"} [role]
  * @property {"none"|"pending"|"accepted"|"rejected"} [changesetStatus]
@@ -153,6 +157,8 @@ import { computeDoctorStats } from "./doctor-stats.js";
  * @property {string} [next]
  * @property {boolean} [incomplete]
  * @property {string|null} [finalMarker]
+ * @property {string|null} [finalStatus]
+ * @property {string|null} [class]
  * @property {string|null} [diff]
  * @property {{files: number, additions: number, deletions: number}|null} [diffStat]
  * @property {string|null} [changesetError]
@@ -232,12 +238,6 @@ const FAILURE_DETAIL_MAX_CHARS = 500;
 function capDetail(text) {
   return text.length > FAILURE_DETAIL_MAX_CHARS ? text.slice(0, FAILURE_DETAIL_MAX_CHARS - 1) + "…" : text;
 }
-
-// bwrap's exact wording for the taskferry#318 overlay-mount race (see
-// .superpowers/specs/2026-08-03-lowerdir-launch-stagger-design.md). Matched
-// against changesetError text, which can span the bwrap error's own
-// multi-line wrapping -- "s" flag so "." also matches newlines.
-const OVERLAY_MOUNT_BUSY_PATTERN = /overlay mount on .*Device or resource busy/s;
 
 /** @param {string} text @returns {boolean} */
 function isParseableJson(text) {
@@ -574,7 +574,8 @@ export function isOutsideDirectory(directory, candidate) {
  * @property {(task: Task, executor: import("./executor.js").WorkerExecutor) => void} startRunningWatcher
  * @property {(taskId: string) => void} stopRunningWatcher
  * @property {(taskId: string) => string|null} readSessionIdFromLog
- * @property {(task: Task) => void} evaluateOutputCompleteness
+ * @property {(task: Task, precomputed?: {message: string, hadExplicitStop: boolean}) => void} evaluateOutputCompleteness
+ * @property {(task: Task) => {message: string, hadExplicitStop: boolean}|null} attemptCrashRecovery
  * @property {(task: Task) => void} extractChangesetForTask
  * @property {(pid: number, signal: NodeJS.Signals) => void} sendSignal
  * @property {{evictTask: (id: string) => void, setSummarySessionId: (srcTaskId: string, sessionId: string) => void, setLastSummarizedWatermark: (srcTaskId: string, bytes: number) => void}} activityCache
@@ -1095,9 +1096,10 @@ function onChildExit(ctx, shared, code, signal) {
   task.exitCode = code;
   task.signal = signal;
   task.endedAt = new Date().toISOString();
+  const recoveredState = ctx.attemptCrashRecovery(task);
   const parsedSessionId = ctx.readSessionIdFromLog(task.logPath);
   if (parsedSessionId) task.sessionId = parsedSessionId;
-  if (task.status === "done") ctx.evaluateOutputCompleteness(task);
+  if (task.status === "done") ctx.evaluateOutputCompleteness(task, recoveredState ?? undefined);
   if (task.status === "done" || task.status === "crashed" || task.status === "cancelled") ctx.extractChangesetForTask(task);
   carrySummarySession(ctx, task, parsedSessionId);
   finishChildSettlement(ctx, shared);
@@ -1515,6 +1517,8 @@ function computeResultDetail(task, { taskId, full, fields }, ctx) {
     ...(task.summaryOf ? { summaryOf: task.summaryOf } : {}),
     ...(task.incomplete === true ? { incomplete: true } : {}),
     ...(task.finalMarker != null ? { finalMarker: task.finalMarker } : {}),
+    ...(task.finalStatus != null ? { finalStatus: task.finalStatus } : {}),
+    ...(task.class != null ? { class: task.class } : {}),
     ...(next ? { next } : {}),
     logPath: task.logPath,
   };
@@ -1663,10 +1667,11 @@ function resolveDispatchDirectory(directory) {
  * `oc_` prefix for compatibility. A resume with no `--model` inherits the
  * model the session was created under (a different model can mean a different
  * provider, breaking the whole point of resuming that exact session).
- * @param {{id: string, directory: string, prompt: string, model: string|undefined, executor: import("./executor.js").WorkerExecutor, priorSessionTask: Task|null, variant: string|undefined, sessionId: string|undefined, originSessionId: string|undefined, internal: boolean, finalMarker: string|null, role: "dispatch"|"advisor", logPath: string}} params
+ * @param {{id: string, directory: string, prompt: string, model: string|undefined, executor: import("./executor.js").WorkerExecutor, priorSessionTask: Task|null, variant: string|undefined, sessionId: string|undefined, originSessionId: string|undefined, internal: boolean, finalMarker: string|null, role: "dispatch"|"advisor", logPath: string, class?: string|null}} params
  * @returns {Task}
  */
-function buildDispatchTask({ id, directory, prompt, model, executor, priorSessionTask, variant, sessionId, originSessionId, internal, finalMarker, role, logPath }) {
+// eslint-disable-next-line sonarjs/cyclomatic-complexity -- adding `class` field per brief; function was already at the 10-point ceiling
+function buildDispatchTask({ id, directory, prompt, model, executor, priorSessionTask, variant, sessionId, originSessionId, internal, finalMarker, role, logPath, class: taskClass }) {
   const usingDefaultModel = !model;
   const resolvedModel = model || priorSessionTask?.model || executor.defaultModel;
   return {
@@ -1694,6 +1699,8 @@ function buildDispatchTask({ id, directory, prompt, model, executor, priorSessio
     failureDetail: null,
     incomplete: false,
     finalMarker: finalMarker == null ? null : finalMarker,
+    finalStatus: null,
+    class: taskClass == null ? null : taskClass,
     changesetStatus: "none",
     diffPath: null,
     overlayDirs: null,
@@ -2105,7 +2112,7 @@ async function runSummarizeActivity(ctx, taskId, maxWords, previousActivity) {
  * @typedef {object} AdvisorContext
  * @property {() => void} ensureStateLoaded
  * @property {(sessionId: string|undefined) => {sessionId: string|undefined, reset: boolean, previousSessionId: string|undefined}} resolveAdvisorSession
- * @property {(params: {prompt: string, directory: string, model?: string, variant?: string, sessionId?: string|undefined, executor?: string, env?: NodeJS.ProcessEnv, role: "advisor"}) => TaskSummary & {next: string}} dispatch
+ * @property {(params: {prompt: string, directory: string, model?: string, variant?: string, sessionId?: string|undefined, executor?: string, env?: NodeJS.ProcessEnv, role: "advisor", class?: string|null}) => TaskSummary & {next: string}} dispatch
  * @property {(err: unknown) => string} errMessage
  * @property {(taskId: string, options: object) => Promise<{status: string, sessionId?: string|null}>} poll
  * @property {number} maxWait
@@ -2120,13 +2127,13 @@ async function runSummarizeActivity(ctx, taskId, maxWords, previousActivity) {
  * dispatch`. Overlay is mandatory for the advisor role, so it is not a
  * parameter here -- the role itself carries that guarantee.
  * @param {AdvisorContext} ctx
- * @param {{prompt?: string, directory?: string, model?: string, variant?: string, sessionId?: string|undefined, executor?: string, env?: NodeJS.ProcessEnv}} params
+ * @param {{prompt?: string, directory?: string, model?: string, variant?: string, sessionId?: string|undefined, executor?: string, env?: NodeJS.ProcessEnv, class?: string|null}} params
  * @returns {TaskSummary & {next: string}}
  */
 function dispatchAdvisorTask(ctx, params) {
-  const { prompt, directory, model, variant, sessionId, executor, env } = params;
+  const { prompt, directory, model, variant, sessionId, executor, env, class: taskClass } = params;
   try {
-    return ctx.dispatch({ model, variant, sessionId, executor, env, prompt: /** @type {string} */ (prompt), directory: /** @type {string} */ (directory), role: "advisor" });
+    return ctx.dispatch({ model, variant, sessionId, executor, env, prompt: /** @type {string} */ (prompt), directory: /** @type {string} */ (directory), role: "advisor", class: taskClass });
   } catch (err) {
     throw new Error(ctx.errMessage(err).replaceAll("taskferry dispatch", "taskferry advisor"), { cause: err });
   }
@@ -2245,16 +2252,16 @@ function buildAdvisorSettledResponse(ctx, { dispatched, resolved }) {
  * the advisor-role task, poll it to settlement, and shape either the
  * still-active or settled response.
  * @param {AdvisorContext} ctx
- * @param {{prompt?: string, directory?: string, model?: string, variant?: string, sessionId?: string, timeoutMs?: number, executor?: string, env?: NodeJS.ProcessEnv}} params
+ * @param {{prompt?: string, directory?: string, model?: string, variant?: string, sessionId?: string, timeoutMs?: number, executor?: string, env?: NodeJS.ProcessEnv, class?: string|null}} params
  * @returns {Promise<object>}
  */
-async function runAdvisor(ctx, { prompt, directory, model, variant, sessionId, timeoutMs, executor, env } = {}) {
+async function runAdvisor(ctx, { prompt, directory, model, variant, sessionId, timeoutMs, executor, env, class: taskClass } = {}) {
   ctx.ensureStateLoaded();
   if (!model || typeof model !== "string") {
     throw new Error("error: model is required\nhelp: taskferry advisor requires a provider/model string, e.g. \"openai/gpt-5.6-sol\"");
   }
   const resolved = ctx.resolveAdvisorSession(sessionId);
-  const dispatched = dispatchAdvisorTask(ctx, { prompt, directory, model, variant, executor, env, sessionId: resolved.sessionId });
+  const dispatched = dispatchAdvisorTask(ctx, { prompt, directory, model, variant, executor, env, sessionId: resolved.sessionId, class: taskClass });
   const settled = await ctx.poll(dispatched.id, { timeoutMs: timeoutMs ?? ctx.maxWait });
   if (settled.status === "running" || settled.status === "queued") {
     return buildAdvisorActiveResponse(ctx, { settled, dispatched, resolved });
@@ -2295,30 +2302,6 @@ function parseNumstatLine(line) {
   const dels = Number(line.slice(firstTab + 1, secondTab));
   if (Number.isNaN(adds) || Number.isNaN(dels)) return null;
   return { additions: adds, deletions: dels };
-}
-
-/**
- * Accumulates one parseable log line's contribution to final-message
- * extraction: text parts by message id, and (when a `step_finish` stop event
- * lands) returns that message id as the final turn.
- * @param {any} evt
- * @param {Map<string, string[]>} textByMessageId
- * @param {string[]} textOrder
- * @returns {string|null}
- */
-function collectFinalMessageLine(evt, textByMessageId, textOrder) {
-  if (evt.type === "text" && evt.part && typeof evt.part.text === "string") {
-    const mid = evt.part.messageID;
-    if (!textByMessageId.has(mid)) {
-      textByMessageId.set(mid, []);
-      textOrder.push(mid);
-    }
-    /** @type {string[]} */ (textByMessageId.get(mid)).push(evt.part.text);
-  }
-  if (evt.type === "step_finish" && evt.part && evt.part.reason === "stop") {
-    return evt.part.messageID;
-  }
-  return null;
 }
 
 // sharing process-wide state with every other test or the real server.
@@ -2438,12 +2421,14 @@ function sweepOverlayEntry(ctx, entry, tmpRoot) {
  * @param {Task} task
  */
 function summarizeOptionalFields(task) {
-  const { promptTotalChars, incomplete, finalMarker, executorId } = task;
+  const { promptTotalChars, incomplete, finalMarker, finalStatus, executorId, class: taskClass } = task;
   return {
     ...(promptTotalChars != null ? { promptTotalChars } : {}),
     ...(task.summaryOf ? { summaryOf: task.summaryOf } : {}),
     ...(incomplete === true ? { incomplete: true } : {}),
     ...(finalMarker != null ? { finalMarker } : {}),
+    ...(finalStatus != null ? { finalStatus } : {}),
+    ...(taskClass != null ? { class: taskClass } : {}),
     ...(executorId != null ? { executorId } : {}),
     ...(task.overlayDirs != null ? { overlayDirs: task.overlayDirs } : {}),
     ...(task.changesetError != null ? { changesetError: task.changesetError } : {}),
@@ -2689,7 +2674,19 @@ function watchdogTick(state, ctx) {
     // A rotated or removed log is retried on the next watcher tick.
   }
   if (Date.now() - state.lastActivityMs >= state.currentNoOutputTimeout) {
-    ctx.failRunningTask(current, "no_output_timeout", `no output for ${state.currentNoOutputTimeout}ms (${state.outputSeen ? "post-output" : "pre-output"} timeout)`);
+    // Split by state.outputSeen (the same pre/post-output latch the
+    // escalated budget already tracks) rather than reporting one generic
+    // bucket: a spawn that never wrote a byte is a dead worker/provider
+    // stall, while one that produced output and then went silent stalled
+    // mid-work. Conflating the two into "no_output_timeout" made both look
+    // like the same failure mode when a fleet-wide read of the logs showed
+    // most of the eventless bucket really is a dead spawn. One lookup, not
+    // two independent ternaries, so the reason and the phase label in
+    // failureDetail can't drift apart.
+    const [reason, phase] = state.outputSeen
+      ? ["no_output_timeout_stalled", "post-output"]
+      : ["no_output_timeout_dead_spawn", "pre-output"];
+    ctx.failRunningTask(current, reason, `no output for ${state.currentNoOutputTimeout}ms (${phase} timeout)`);
   }
 }
 
@@ -2901,6 +2898,19 @@ function resolveFilesystemSimpleOptions(rawOptions) {
     checkOverlaySupportFn: rawOptions.checkOverlaySupportFn ?? checkOverlaySupport,
     runOverlayCommandFn: rawOptions.runOverlayCommandFn ?? defaultOverlayRunCommand,
     rmOverlayTreeFn: rawOptions.rmOverlayTreeFn,
+    // No default: undefined here means changeset.js's own extractGitDiff/
+    // extractNonGitDiff/applyChangeset default (the real blocking sleepSync)
+    // applies, same as before this option existed. Only a caller that sets
+    // this explicitly (tests injecting a fast/no-op sleep to avoid eating
+    // the real ~1.3s overlay-mount-busy backoff, taskferry#328) overrides it.
+    // `?? undefined` folds an explicit `null` into `undefined` too -- JS
+    // default parameters (changeset.js's `sleepFn = sleepSync`) only trigger
+    // on `undefined`, not `null`, so a caller passing `overlaySleepFn: null`
+    // would otherwise reach `runExtractionBwrap`'s `sleepFn(100)` call with a
+    // literal `null` and throw a TypeError instead of falling back to the
+    // real sleep (code review finding on PR #333; no current caller passes
+    // `null`, but the guard is free).
+    overlaySleepFn: rawOptions.overlaySleepFn ?? undefined,
     resolveGitCommonDirFn: rawOptions.resolveGitCommonDirFn ?? resolveGitCommonDir,
     resolveGitDirFn: rawOptions.resolveGitDirFn ?? resolveGitDir,
     checkBwrapAvailableFn: rawOptions.checkBwrapAvailableFn ?? checkBwrapAvailable,
@@ -3262,7 +3272,7 @@ function buildManagerEnvHelpers(ctx) {
     requireBwrap: () => requireBwrapCapability(bwrapState, { checkBwrapAvailableFn: ctx.opts.checkBwrapAvailableFn }),
     requireOverlaySupport: () => requireOverlayCapability(overlayState, { checkOverlaySupportFn: ctx.opts.checkOverlaySupportFn, OVERLAY_SUPPORT_TTL_MS }),
     /** @param {Task} finishedTask */
-    extractChangesetForTask: (finishedTask) => extractChangesetForTaskRecord(finishedTask, { stateDir: ctx.opts.stateDir, runtimeDir: ctx.opts.runtimeDir, existsFn: ctx.opts.existsFn, sandboxDenylist: ctx.opts.sandboxDenylist, runOverlayCommandFn: ctx.opts.runOverlayCommandFn, persistTask: (taskId) => ctx.helpers.persistTask(taskId), releaseOverlay }),
+    extractChangesetForTask: (finishedTask) => extractChangesetForTaskRecord(finishedTask, { stateDir: ctx.opts.stateDir, runtimeDir: ctx.opts.runtimeDir, existsFn: ctx.opts.existsFn, sandboxDenylist: ctx.opts.sandboxDenylist, runOverlayCommandFn: ctx.opts.runOverlayCommandFn, overlaySleepFn: ctx.opts.overlaySleepFn, persistTask: (taskId) => ctx.helpers.persistTask(taskId), releaseOverlay }),
     /** @param {NodeJS.ProcessEnv} [env] @param {string} [taskId] */
     dispatchEnvironment: (env, taskId) => buildDispatchEnvironment({ sanitizedEnvironment }, env, taskId),
     /** @param {NodeJS.ProcessEnv} [env] */
@@ -3372,12 +3382,12 @@ function buildManagerInternalHelpers(ctx) {
      * delegated to {@link startTaskFor}, which takes every factory closure
      * dependency explicitly via `ctx`.
      * @param {Task} task */
-    startTask: (task) => startTaskFor(task, { pendingLaunches: ctx.maps.pendingLaunches, SUMMARY_DIR: ctx.paths.SUMMARY_DIR, PROMPT_DIR: ctx.paths.PROMPT_DIR, spawnFn: ctx.opts.spawnFn, runOverlayCommandFn: ctx.opts.runOverlayCommandFn, sandboxEnabled: ctx.opts.sandboxEnabled, platform: ctx.opts.platform, overlayEnabled: ctx.opts.overlayEnabled, overlayTmpRoot: ctx.opts.overlayTmpRoot, allowedDirs: ctx.opts.allowedDirs, stateDir: ctx.opts.stateDir, cacheDir: ctx.opts.cacheDir, runtimeDir: ctx.opts.runtimeDir, existsFn: ctx.opts.existsFn, statFn: ctx.opts.statFn, readdirFn: ctx.opts.readdirFn, sandboxDenylist: ctx.opts.sandboxDenylist, resolveGitCommonDirFn: ctx.opts.resolveGitCommonDirFn, resolveGitDirFn: ctx.opts.resolveGitDirFn, requireBwrap: () => ctx.env.requireBwrap(), requireOverlaySupport: () => ctx.env.requireOverlaySupport(), dispatchEnvironment: (env, taskId) => ctx.env.dispatchEnvironment(env, taskId), summaryEnvironment: (env) => ctx.env.summaryEnvironment(env), settleWaiters: (taskId) => ctx.helpers.settleWaiters(taskId), launchQueuedTasks: () => ctx.helpers.launchQueuedTasks(), persistTask: (taskId) => ctx.helpers.persistTask(taskId), scheduleActivity: (task, options) => ctx.helpers.scheduleActivity(task, options), classifyTrailingLogFailure: (task, executor) => ctx.helpers.classifyTrailingLogFailure(task, executor), startRunningWatcher: (task, executor) => ctx.helpers.startRunningWatcher(task, executor), stopRunningWatcher: (taskId) => ctx.helpers.stopRunningWatcher(taskId), extractChangesetForTask: (task) => ctx.env.extractChangesetForTask(task), sendSignal: (pid, signal) => ctx.helpers.sendSignal(pid, signal), activityCache: ctx.activity.cache, logHasEventCache: ctx.maps.logHasEventCache, escalationTimers: ctx.maps.escalationTimers, tasks: ctx.maps.tasks, decRunning: () => { ctx.state.runningCount--; }, incRunning: () => { ctx.state.runningCount++; }, readSessionIdFromLog, evaluateOutputCompleteness }),
+    startTask: (task) => startTaskFor(task, { pendingLaunches: ctx.maps.pendingLaunches, SUMMARY_DIR: ctx.paths.SUMMARY_DIR, PROMPT_DIR: ctx.paths.PROMPT_DIR, spawnFn: ctx.opts.spawnFn, runOverlayCommandFn: ctx.opts.runOverlayCommandFn, sandboxEnabled: ctx.opts.sandboxEnabled, platform: ctx.opts.platform, overlayEnabled: ctx.opts.overlayEnabled, overlayTmpRoot: ctx.opts.overlayTmpRoot, allowedDirs: ctx.opts.allowedDirs, stateDir: ctx.opts.stateDir, cacheDir: ctx.opts.cacheDir, runtimeDir: ctx.opts.runtimeDir, existsFn: ctx.opts.existsFn, statFn: ctx.opts.statFn, readdirFn: ctx.opts.readdirFn, sandboxDenylist: ctx.opts.sandboxDenylist, resolveGitCommonDirFn: ctx.opts.resolveGitCommonDirFn, resolveGitDirFn: ctx.opts.resolveGitDirFn, requireBwrap: () => ctx.env.requireBwrap(), requireOverlaySupport: () => ctx.env.requireOverlaySupport(), dispatchEnvironment: (env, taskId) => ctx.env.dispatchEnvironment(env, taskId), summaryEnvironment: (env) => ctx.env.summaryEnvironment(env), settleWaiters: (taskId) => ctx.helpers.settleWaiters(taskId), launchQueuedTasks: () => ctx.helpers.launchQueuedTasks(), persistTask: (taskId) => ctx.helpers.persistTask(taskId), scheduleActivity: (task, options) => ctx.helpers.scheduleActivity(task, options), classifyTrailingLogFailure: (task, executor) => ctx.helpers.classifyTrailingLogFailure(task, executor), startRunningWatcher: (task, executor) => ctx.helpers.startRunningWatcher(task, executor), stopRunningWatcher: (taskId) => ctx.helpers.stopRunningWatcher(taskId), extractChangesetForTask: (task) => ctx.env.extractChangesetForTask(task), sendSignal: (pid, signal) => ctx.helpers.sendSignal(pid, signal), activityCache: ctx.activity.cache, logHasEventCache: ctx.maps.logHasEventCache, escalationTimers: ctx.maps.escalationTimers, tasks: ctx.maps.tasks, decRunning: () => { ctx.state.runningCount--; }, incRunning: () => { ctx.state.runningCount++; }, readSessionIdFromLog, evaluateOutputCompleteness, attemptCrashRecovery }),
     /**
      * @param {string} taskId
      * @returns {{taskId: string, changesetStatus: string, applied: boolean, reason?: string|null, cleanupFailed?: boolean}}
      */
-    accept: (taskId) => acceptTaskChangeset(taskId, { ensureStateLoaded: () => ctx.helpers.ensureStateLoaded(), tasks: ctx.maps.tasks, existsFn: ctx.opts.existsFn, hasLiveOverlay: (task) => ctx.helpers.hasLiveOverlay(task), stateDir: ctx.opts.stateDir, runtimeDir: ctx.opts.runtimeDir, sandboxDenylist: ctx.opts.sandboxDenylist, runOverlayCommandFn: ctx.opts.runOverlayCommandFn, persistTask: (taskId) => ctx.helpers.persistTask(taskId), releaseOverlay: (task) => ctx.env.releaseOverlay(task), noSuchTask }),
+    accept: (taskId) => acceptTaskChangeset(taskId, { ensureStateLoaded: () => ctx.helpers.ensureStateLoaded(), tasks: ctx.maps.tasks, existsFn: ctx.opts.existsFn, hasLiveOverlay: (task) => ctx.helpers.hasLiveOverlay(task), stateDir: ctx.opts.stateDir, runtimeDir: ctx.opts.runtimeDir, sandboxDenylist: ctx.opts.sandboxDenylist, runOverlayCommandFn: ctx.opts.runOverlayCommandFn, overlaySleepFn: ctx.opts.overlaySleepFn, persistTask: (taskId) => ctx.helpers.persistTask(taskId), releaseOverlay: (task) => ctx.env.releaseOverlay(task), noSuchTask }),
     /**
      * @param {string} taskId
      * @returns {{taskId: string, changesetStatus: string, cleanupFailed?: boolean}}
@@ -3822,53 +3832,64 @@ function failureFields(task) {
 
 
 /**
+ * Reads and parses a task's log for its final message, reusing `result()`'s
+ * own `parseTaskLog`/`shapeNarration` pair instead of a second NDJSON
+ * parser -- `parsed.finalMessageId` is already exactly the "did a genuine
+ * step_finish reason 'stop' land" signal `attemptCrashRecovery` needs.
  * @param {string} logPath
- * @returns {string}
+ * @returns {{message: string, hadExplicitStop: boolean}}
  */
-function extractFinalMessage(logPath) {
+function readFinalMessageState(logPath) {
   let raw;
   try {
     raw = fs.readFileSync(logPath, "utf8");
   } catch {
-    return "";
+    return { message: "", hadExplicitStop: false };
   }
-  /** @type {Map<string, string[]>} */
-  const textByMessageId = new Map();
-  /** @type {string[]} */
-  const textOrder = [];
-  /** @type {string|null} */
-  let finalMessageId = null;
-  for (const line of raw.split("\n")) {
-    if (!line.trim()) continue;
-    /** @type {any} */
-    let evt;
-    let parsed = false;
-    try {
-      evt = JSON.parse(line);
-      parsed = true;
-    } catch {
-      // Not a parseable event line -- not final-message evidence.
-    }
-    if (parsed) {
-      const stepId = collectFinalMessageLine(evt, textByMessageId, textOrder);
-      if (stepId) finalMessageId = stepId;
-    }
-  }
-  // Same fallback rule as result(): the last messageID seen wins if no
-  // explicit step_finish reason "stop" landed (e.g. a crashed run that never
-  // reached one). The settlement-time check uses this same fallback so a
-  // clean exit with no step_finish still gets its final turn inspected.
-  const targetId = finalMessageId ?? textOrder[textOrder.length - 1];
-  return targetId && textByMessageId.has(targetId)
-    ? /** @type {string[]} */ (textByMessageId.get(targetId)).join("")
-    : "";
+  const parsed = parseTaskLog(raw, null);
+  const { message } = shapeNarration(parsed, true);
+  return { message, hadExplicitStop: parsed.finalMessageId != null };
 }
 
 /**
+ * A crashed task whose transcript actually reached a genuine `step_finish`
+ * "stop" event with real text is not the failure its status claims -- e.g. a
+ * transient mid-run provider error (ContextOverflowError) that the model
+ * recovered from, after which the process still exited non-zero. Flips
+ * status to "done" so it isn't undercounted as a failure; failureReason /
+ * failureDetail are deliberately left in place as a record of what actually
+ * happened partway through, rather than cleared to make the task look clean.
+ * Only applies to a genuine `status: "crashed"` settlement -- a cancelled
+ * task is never reinterpreted as done just because it happened to have
+ * produced a final answer before the cancel landed. This also covers a
+ * `no_output_timeout_stalled` crash where the transcript reached "stop" but
+ * the process then hung past the post-output deadline instead of exiting --
+ * the generation genuinely finished, so recovering it to "done" is correct
+ * even though the watchdog is what ended the process.
  * @param {Task} task
+ * @returns {{message: string, hadExplicitStop: boolean}|null} the parsed log
+ *   state when recovery applied, so the caller can hand it to
+ *   `evaluateOutputCompleteness` instead of re-reading the same log again.
  */
-function evaluateOutputCompleteness(task) {
-  const message = extractFinalMessage(task.logPath);
+function attemptCrashRecovery(task) {
+  if (task.status !== "crashed") return null;
+  const state = readFinalMessageState(task.logPath);
+  if (!state.hadExplicitStop || !state.message.trim()) return null;
+  task.status = "done";
+  return state;
+}
+
+const STATUS_MARKER_RE = /^Status:\s*(DONE_WITH_CONCERNS|DONE|BLOCKED|NEEDS_CONTEXT)\s*$/m;
+
+/**
+ * @param {Task} task
+ * @param {{message: string, hadExplicitStop: boolean}} [precomputed] - reuse
+ *   `attemptCrashRecovery`'s already-parsed state on a recovered task
+ *   instead of re-reading and re-parsing the same log a second time on the
+ *   daemon's synchronous exit path.
+ */
+function evaluateOutputCompleteness(task, precomputed) {
+  const message = (precomputed ?? readFinalMessageState(task.logPath)).message;
   if (!message.trim()) {
     task.incomplete = true;
     return;
@@ -3884,6 +3905,8 @@ function evaluateOutputCompleteness(task) {
       task.incomplete = true;
     }
   }
+  const statusMatch = message.match(STATUS_MARKER_RE);
+  if (statusMatch) task.finalStatus = statusMatch[1];
 }
 
 /**
@@ -4274,7 +4297,7 @@ function persistTaskRecord(taskId, ctx) {
  * Mirrors the original `extractChangesetForTask` closure exactly; every
  * factory binding is threaded in via `ctx`.
  * @param {Task} finishedTask
- * @param {{stateDir: string, runtimeDir: string, existsFn: (path: string) => boolean, sandboxDenylist: string[], runOverlayCommandFn: (command: string, args: string[]) => {status: number|null, stdout: string, stderr: string, error?: Error}, persistTask: (taskId: string) => void, releaseOverlay: (task: {overlayDirs?: {root:string,tmpRoot:string}|null}) => boolean}} ctx
+ * @param {{stateDir: string, runtimeDir: string, existsFn: (path: string) => boolean, sandboxDenylist: string[], runOverlayCommandFn: (command: string, args: string[]) => {status: number|null, stdout: string, stderr: string, error?: Error}, overlaySleepFn?: (ms: number) => void, persistTask: (taskId: string) => void, releaseOverlay: (task: {overlayDirs?: {root:string,tmpRoot:string}|null}) => boolean}} ctx
  */
 function extractChangesetForTaskRecord(finishedTask, ctx) {
   if (!finishedTask.overlayDirs) return;
@@ -4296,6 +4319,7 @@ function extractChangesetForTaskRecord(finishedTask, ctx) {
           preDispatchHead: /** @type {string} */ (finishedTask.preDispatchHead),
           homeDir: os.homedir(),
           runCommand: ctx.runOverlayCommandFn,
+          sleepFn: ctx.overlaySleepFn,
         })
       : extractNonGitDiff({
           denyList,
@@ -4306,14 +4330,16 @@ function extractChangesetForTaskRecord(finishedTask, ctx) {
           overlay: finishedTask.overlayDirs,
           homeDir: os.homedir(),
           runCommand: ctx.runOverlayCommandFn,
+          sleepFn: ctx.overlaySleepFn,
         });
   } catch (err) {
     finishedTask.changesetError = err instanceof Error ? err.message : String(err);
     if (OVERLAY_MOUNT_BUSY_PATTERN.test(finishedTask.changesetError)) {
       // The real cause is now known and specific -- always wins over
-      // whatever the exit-path classifier guessed (no_output_timeout,
-      // boot_failure, or nothing), since a generic timeout bucket is
-      // strictly less useful than "the overlay mount itself failed."
+      // whatever the exit-path classifier guessed (no_output_timeout_dead_spawn,
+      // no_output_timeout_stalled, boot_failure, or nothing), since a
+      // generic timeout bucket is strictly less useful than "the overlay
+      // mount itself failed."
       finishedTask.failureReason = "overlay_mount_busy";
       finishedTask.failureDetail = capDetail(finishedTask.changesetError);
     }
@@ -4506,7 +4532,7 @@ function requireOverlayCapability(state, ctx) {
  * record reflects the cleared overlay. Extracted out of `createTaskManager`'s
  * `accept` closure; every factory binding is threaded in via `ctx`.
  * @param {string} taskId
- * @param {{ensureStateLoaded: () => void, tasks: Map<string, Task>, noSuchTask: (taskId: string) => Error, existsFn: (path: string) => boolean, hasLiveOverlay: (task: Task) => boolean, stateDir: string, runtimeDir: string, sandboxDenylist: string[], runOverlayCommandFn: (command: string, args: string[]) => {status: number|null, stdout: string, stderr: string, error?: Error}, persistTask: (taskId: string) => void, releaseOverlay: (task: {overlayDirs?: {root:string,tmpRoot:string}|null}) => boolean}} ctx
+ * @param {{ensureStateLoaded: () => void, tasks: Map<string, Task>, noSuchTask: (taskId: string) => Error, existsFn: (path: string) => boolean, hasLiveOverlay: (task: Task) => boolean, stateDir: string, runtimeDir: string, sandboxDenylist: string[], runOverlayCommandFn: (command: string, args: string[]) => {status: number|null, stdout: string, stderr: string, error?: Error}, overlaySleepFn?: (ms: number) => void, persistTask: (taskId: string) => void, releaseOverlay: (task: {overlayDirs?: {root:string,tmpRoot:string}|null}) => boolean}} ctx
  * @returns {{taskId: string, changesetStatus: string, applied: boolean, reason?: string|null, cleanupFailed?: boolean}}
  */
 function acceptTaskChangeset(taskId, ctx) {
@@ -4527,6 +4553,7 @@ function acceptTaskChangeset(taskId, ctx) {
     overlay: task.overlayDirs ?? undefined,
     homeDir: os.homedir(),
     runCommand: ctx.runOverlayCommandFn,
+    sleepFn: ctx.overlaySleepFn,
   });
   if (!applied.applied) {
     // validateAcceptable() threw above if changesetStatus weren't pending,
@@ -4901,12 +4928,12 @@ function startRunningWatcherFor(task, ctx) {
  * `createTaskManager`'s `dispatch` closure; all the validation/build/queue
  * helpers are plain module-level functions called directly. The factory
  * bindings are threaded in via `ctx`.
- * @param {{prompt: string, directory: string, model?: string, variant?: string, sessionId?: string, internal?: boolean, finalMarker?: string|null, originSessionId?: string, noSandbox?: boolean, noOverlay?: boolean, allowedDirs?: string[], executor?: string, env?: NodeJS.ProcessEnv, role?: "dispatch"|"advisor"}} params
+ * @param {{prompt: string, directory: string, model?: string, variant?: string, sessionId?: string, internal?: boolean, finalMarker?: string|null, originSessionId?: string, noSandbox?: boolean, noOverlay?: boolean, allowedDirs?: string[], executor?: string, env?: NodeJS.ProcessEnv, role?: "dispatch"|"advisor", class?: string|null}} params
  * @param {{ensureStateLoaded: () => void, tasks: Map<string, Task>, defaultExecutor: import("./executor.js").WorkerExecutor, LOG_DIR: string, persistTask: (taskId: string) => void, pendingLaunches: Map<string, LaunchSpec>, launchQueue: string[], launchQueuedTasks: () => void}} ctx
  * @returns {TaskSummary & {next: string}}
  */
 function dispatchTask(params, ctx) {
-  const { prompt, directory, model, variant, sessionId, internal = false, finalMarker = null, originSessionId, noSandbox = false, noOverlay = false, allowedDirs: dispatchAllowedDirs, executor: executorName, env, role = "dispatch" } = params;
+  const { prompt, directory, model, variant, sessionId, internal = false, finalMarker = null, originSessionId, noSandbox = false, noOverlay = false, allowedDirs: dispatchAllowedDirs, executor: executorName, env, role = "dispatch", class: taskClass = null } = params;
   ctx.ensureStateLoaded();
   const priorSessionTask = resolvePriorSessionTask(ctx.tasks, sessionId, executorName);
   const executor = resolveDispatchExecutor(priorSessionTask, executorName, ctx.defaultExecutor);
@@ -4916,7 +4943,7 @@ function dispatchTask(params, ctx) {
   // Task IDs retain the literal "oc_" prefix for compatibility; WorkerExecutor.taskIdPrefix is not wired in this issue.
   const id = `oc_${Date.now().toString(36)}_${randomUUID().slice(0, 8)}`;
   const logPath = path.join(ctx.LOG_DIR, `${id}.ndjson`);
-  const task = buildDispatchTask({ id, prompt, model, executor, priorSessionTask, variant, sessionId, originSessionId, internal, finalMarker, role, logPath, directory: normalizedDirectory });
+  const task = buildDispatchTask({ id, prompt, model, executor, priorSessionTask, variant, sessionId, originSessionId, internal, finalMarker, role, logPath, directory: normalizedDirectory, class: taskClass });
   queueDispatchLaunch({ tasks: ctx.tasks, persistTask: ctx.persistTask, pendingLaunches: ctx.pendingLaunches, launchQueue: ctx.launchQueue, launchQueuedTasks: ctx.launchQueuedTasks }, { id, task, prompt, sessionId, env, noSandbox, noOverlay, executor, role, allowedDirs: dispatchAllowedDirs });
   const summary = summarize(task);
   return {
@@ -4934,7 +4961,7 @@ function dispatchTask(params, ctx) {
  * (event sequence, subscription count) are read/written through `ctx.state`.
  * @param {Task} task
  * @param {{force?: boolean}} options
- * @param {{onEvent?: (event: object) => void, state: {eventSequence: number, activitySummarySubscriptions: number}, activitySubscriptions: Map<string, Set<boolean>>, activitySummariesEnabled: boolean, activityCache: {refresh: (task: Task, options: {force?: boolean, includeSummary?: boolean}) => Promise<{activity: string, outputWatermark: number}|null>}}} ctx
+ * @param {{onEvent?: (event: object) => void, state: {eventSequence: number, activitySummarySubscriptions: number}, activitySubscriptions: Map<string|null, Set<boolean>>, activitySummariesEnabled: boolean, activityCache: {refresh: (task: Task, options: {force?: boolean, includeSummary?: boolean}) => Promise<{activity: string, outputWatermark: number}|null>}}} ctx
  * @returns {Promise<unknown>}
  */
 function scheduleActivityFor(task, { force }, ctx) {
@@ -4963,9 +4990,15 @@ function scheduleActivityFor(task, { force }, ctx) {
       // Activity is advisory and cannot interrupt task lifecycle.
     }
   };
+  // A `watch --all` subscription groups under the null key (daemon-server.js's
+  // ALL_DIRECTORIES sentinel, taskferry#315) regardless of any task's own
+  // directory, so its variants apply to every task alongside whatever this
+  // task's own directory has subscribed to.
   const dirVariants = ctx.activitySubscriptions.get(scheduledDirectory);
-  const variants = dirVariants && dirVariants.size > 0
-    ? [...dirVariants]
+  const allVariants = ctx.activitySubscriptions.get(null);
+  const mergedVariants = new Set([...(dirVariants ?? []), ...(allVariants ?? [])]);
+  const variants = mergedVariants.size > 0
+    ? [...mergedVariants]
     : [ctx.activitySummariesEnabled && ctx.state.activitySummarySubscriptions > 0];
   const refreshes = variants.map((includeSummary) =>
     ctx.activityCache.refresh(task, { force, includeSummary })

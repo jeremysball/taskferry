@@ -147,7 +147,7 @@ async function ensureSkillSync(checkSkills) {
 // when the caller set them. The daemon's allowed-params spec rejects unknown
 // keys, so an explicitly-undefined value (the args.js default for an omitted
 // flag) must be omitted entirely -- see isSet() above.
-const DISPATCH_PASSTHROUGH_KEYS = ["model", "variant", "sessionId", "finalMarker", "noSandbox", "noOverlay", "allowedDirs", "executor"];
+const DISPATCH_PASSTHROUGH_KEYS = ["model", "variant", "sessionId", "finalMarker", "noSandbox", "noOverlay", "allowedDirs", "executor", "class"];
 
 function pickDispatchOptions(options) {
   const picked = {};
@@ -288,6 +288,7 @@ async function runAdvisor(options, { client, env, cwd, homeDirectory }) {
     ...(isSet(options.sessionId) && { sessionId: options.sessionId }),
     ...(isSet(options.timeoutMs) && { timeoutMs: options.timeoutMs }),
     ...(isSet(options.executor) && { executor: options.executor }),
+    ...(isSet(options.class) && { class: options.class }),
   });
 }
 

@@ -304,7 +304,7 @@ describe("provider-failure classification: authentication and timeout detail", (
 
     child.emit("exit", null, "SIGTERM");
     const s = mgr.status(dispatched.id, { full: true });
-    assert.equal(s.failureReason, "no_output_timeout");
+    assert.equal(s.failureReason, "no_output_timeout_dead_spawn");
     assert.equal(s.failureDetail, "no output for 20ms (pre-output timeout)");
   });
 
@@ -910,6 +910,109 @@ describe("boot-failure surfacing (exit non-zero with zero parseable events)", ()
     // Graceful-trap exit: non-zero code after the watchdog already named
     // the failure. The boot gate must leave the existing reason alone.
     child.emit("exit", 1, null);
-    assert.equal(mgr.result(dispatched.id, { fields: ["failureReason"] }).failureReason, "no_output_timeout");
+    assert.equal(mgr.result(dispatched.id, { fields: ["failureReason"] }).failureReason, "no_output_timeout_dead_spawn");
+  });
+});
+
+describe("crash recovery: a genuine step_finish stop overrides a crashed status", () => {
+  test("a transient mid-run provider error followed by a real final answer is recovered to done, keeping failureReason as a record", async () => {
+    const child = fakeChild(7401);
+    const mgr = makeManager({
+      spawnFn: () => child,
+      killFn: () => {},
+      watchdogPollMs: 5,
+    });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), executor: "opencode" });
+    // A transient provider error mid-run (classified by the watcher as a
+    // crash bucket, same as any other error line) followed by the model
+    // recovering and reaching a genuine step_finish "stop" with real text --
+    // the concrete pattern found live in the fleet: a ContextOverflowError
+    // partway through, 24s later a normal completion.
+    fs.writeFileSync(
+      mgr.status(dispatched.id).logPath,
+      JSON.stringify({ type: "error", message: RATE_LIMIT_ERROR }) + "\n"
+      + JSON.stringify({ type: "text", part: { messageID: "m1", text: "Verification completed successfully." } }) + "\n"
+      + JSON.stringify({ type: "step_finish", part: { messageID: "m1", reason: "stop" } }) + "\n"
+    );
+    await new Promise((r) => setTimeout(r, 30));
+    child.emit("exit", 1, null);
+
+    const s = mgr.status(dispatched.id, { full: true });
+    assert.equal(s.status, "done", "a genuine final answer must not be undercounted as a failure");
+    assert.equal(s.failureReason, "rate_limited", "the transient cause stays on record even though status recovered");
+  });
+
+  test("a crash with no explicit step_finish stop is left crashed (the fallback last-message rule does not count)", async () => {
+    const child = fakeChild(7402);
+    const mgr = makeManager({
+      spawnFn: () => child,
+      killFn: () => {},
+      watchdogPollMs: 5,
+    });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), executor: "opencode" });
+    // Text landed but the run never reached a step_finish "stop" -- this is
+    // the ordinary crashed-mid-write case the fallback rule in
+    // extractFinalMessageDetail exists for at read time, but recovery must
+    // not treat a fallback-only message the same as a genuine completion.
+    fs.writeFileSync(
+      mgr.status(dispatched.id).logPath,
+      JSON.stringify({ type: "text", part: { messageID: "m1", text: "still working" } }) + "\n"
+    );
+    await new Promise((r) => setTimeout(r, 30));
+    child.emit("exit", 1, null);
+
+    const s = mgr.status(dispatched.id);
+    assert.equal(s.status, "crashed");
+  });
+
+  test("a cancelled task is never reinterpreted as done even with a genuine step_finish stop", async () => {
+    const child = fakeChild(7403);
+    const mgr = makeManager({
+      spawnFn: () => child,
+      killFn: () => {},
+      watchdogPollMs: 5,
+    });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), executor: "opencode" });
+    fs.writeFileSync(
+      mgr.status(dispatched.id).logPath,
+      JSON.stringify({ type: "text", part: { messageID: "m1", text: "done before the cancel landed" } }) + "\n"
+      + JSON.stringify({ type: "step_finish", part: { messageID: "m1", reason: "stop" } }) + "\n"
+    );
+    mgr.cancel(dispatched.id);
+    child.emit("exit", null, "SIGTERM");
+
+    const s = mgr.status(dispatched.id);
+    assert.equal(s.status, "cancelled");
+  });
+
+  test("a real step_finish stop reaches recovery even when the watchdog is what actually killed the process (no_output_timeout_stalled)", async () => {
+    // The transcript reached a genuine "stop" before the process hung --
+    // e.g. a stuck provider keep-alive or a cleanup step that never
+    // returns. The generation itself finished; the watchdog only ended a
+    // process that failed to exit afterward, so this still recovers.
+    const child = fakeChild(7404);
+    const killed = [];
+    const mgr = makeManager({
+      spawnFn: () => child,
+      killFn: (pid, signal) => killed.push({ pid, signal }),
+      noOutputTimeoutMs: 20,
+      postOutputNoOutputTimeoutMs: 20,
+      watchdogPollMs: 5,
+    });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), executor: "opencode" });
+    fs.writeFileSync(
+      mgr.status(dispatched.id).logPath,
+      JSON.stringify({ type: "text", part: { messageID: "m1", text: "real final answer" } }) + "\n"
+      + JSON.stringify({ type: "step_finish", part: { messageID: "m1", reason: "stop" } }) + "\n"
+    );
+
+    await new Promise((r) => setTimeout(r, 60));
+    assert.ok(killed.some((k) => k.signal === "SIGTERM"), "the watchdog must have fired on the post-stop hang");
+
+    child.emit("exit", null, "SIGTERM");
+
+    const s = mgr.status(dispatched.id, { full: true });
+    assert.equal(s.status, "done");
+    assert.equal(s.failureReason, "no_output_timeout_stalled");
   });
 });

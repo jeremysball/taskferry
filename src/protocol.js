@@ -39,6 +39,8 @@ export const RESULT_FIELDS = new Set([
   "logPath",
   "incomplete",
   "finalMarker",
+  "finalStatus",
+  "class",
   "diff",
   "diffStat",
   "changesetError",
@@ -176,6 +178,7 @@ const METHOD_PARAMS = {
       ["noOverlay", isBoolean],
       ["allowedDirs", isNonEmptyStringArray],
       ["executor", isKnownExecutor],
+      ["class", isNonEmptyString],
     ],
   },
   "task.cancel": {
@@ -240,6 +243,7 @@ const METHOD_PARAMS = {
       ["timeoutMs", nonNegativeInteger],
       ["env", isEnvironment],
       ["executor", isKnownExecutor],
+      ["class", isNonEmptyString],
     ],
   },
   "task.context": {
@@ -255,19 +259,22 @@ const METHOD_PARAMS = {
     optional: [],
   },
   [METHOD_SUBSCRIBE]: {
-    // Either an explicit directory, or a taskId the daemon resolves the
-    // directory from server-side -- lets a taskId-scoped subscribe (watch
-    // --task-id) skip a client-side task.status round-trip solely to learn
-    // which directory to subscribe to.
+    // Either an explicit directory, a taskId the daemon resolves the
+    // directory from server-side (lets a taskId-scoped subscribe -- watch
+    // --task-id -- skip a client-side task.status round-trip solely to learn
+    // which directory to subscribe to), or `all: true` (watch --all,
+    // taskferry#315) to skip directory filtering entirely.
     required: [],
     optional: [
       ["directory", isAbsolutePath],
       ["taskId", isNonEmptyString],
+      ["all", isBoolean],
       ["summaries", isBoolean],
       ["originSessionId", isNonEmptyString],
     ],
     extra: (params) =>
-      params.directory !== undefined ? isAbsolutePath(params.directory) : isNonEmptyString(params.taskId),
+      params.all === true
+      || (params.directory !== undefined ? isAbsolutePath(params.directory) : isNonEmptyString(params.taskId)),
   },
 };
 

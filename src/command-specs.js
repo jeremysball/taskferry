@@ -2,8 +2,8 @@ export const commandSpecs = {
   dispatch: {
     usage: "taskferry dispatch --prompt <text> [options]",
     description: "Queue a background OpenCode run.",
-    options: { "--prompt <text>": "required", "--directory <path>": "defaults to the current workspace", "--model <id>": "use the default model when omitted", "--variant <name>": "optional model reasoning variant", "--session-id <id>": "resume an existing OpenCode session", "--require-final-marker <regex>": "flag the task as incomplete if the final message doesn't match this pattern (case-sensitive, standard JS RegExp semantics)", "--no-sandbox": "run this dispatch without the bwrap filesystem sandbox (default: sandboxed on Linux)", "--no-overlay": "run this dispatch without the copy-on-write overlay (writes land directly, not gated by accept/reject)", "--allowed-dirs <path,path,...>": "extra directories bound read-write inside the sandbox, in addition to the auto-detected git-common-dir for a worktree; required for anything under /tmp — the sandbox mounts it empty by default, hiding paths that exist on the host", "--executor <opencode|pi>": "worker backend to dispatch through, default pi" },
-    examples: ['taskferry dispatch --prompt "Fix the failing tests"', 'taskferry dispatch --prompt "Review this change" --model openai/gpt-5.6-sol', 'taskferry dispatch --prompt "Investigate" --require-final-marker "^Status: (DONE|DONE_WITH_CONCERNS)$"', 'taskferry dispatch --prompt "Run one-off shell tooling" --no-sandbox', 'taskferry dispatch --prompt "Update the shared cache dir" --allowed-dirs /home/user/.cache/myapp'],
+    options: { "--prompt <text>": "required", "--directory <path>": "defaults to the current workspace", "--model <id>": "use the default model when omitted", "--variant <name>": "optional model reasoning variant", "--session-id <id>": "resume an existing OpenCode session", "--require-final-marker <regex>": "flag the task as incomplete if the final message doesn't match this pattern (case-sensitive, standard JS RegExp semantics)", "--no-sandbox": "run this dispatch without the bwrap filesystem sandbox (default: sandboxed on Linux)", "--no-overlay": "run this dispatch without the copy-on-write overlay (writes land directly, not gated by accept/reject)", "--allowed-dirs <path,path,...>": "extra directories bound read-write inside the sandbox, in addition to the auto-detected git-common-dir for a worktree; required for anything under /tmp — the sandbox mounts it empty by default, hiding paths that exist on the host", "--executor <opencode|pi>": "worker backend to dispatch through, default pi", "--class <name>": "optional free-text task-class tag for external telemetry consumers; taskferry does not validate against a fixed list" },
+    examples: ['taskferry dispatch --prompt "Fix the failing tests"', 'taskferry dispatch --prompt "Review this change" --model openai/gpt-5.6-sol', 'taskferry dispatch --prompt "Investigate" --require-final-marker "^Status: (DONE|DONE_WITH_CONCERNS)$"', 'taskferry dispatch --prompt "Run one-off shell tooling" --no-sandbox', 'taskferry dispatch --prompt "Update the shared cache dir" --allowed-dirs /home/user/.cache/myapp', 'taskferry dispatch --prompt "Fix the failing tests" --class implementer'],
   },
   cancel: {
     usage: "taskferry cancel <id> [--grace-ms <number>]",
@@ -40,6 +40,7 @@ export const commandSpecs = {
       "--session-id <id>": "continue a recent advisor session",
       "--timeout <duration>": "maximum wait, e.g. 10000 (ms), 30s, 5m, 1h",
       "--executor <opencode|pi>": "worker backend to dispatch through, default pi",
+      "--class <name>": "optional free-text task-class tag for external telemetry consumers; taskferry does not validate against a fixed list",
       "--summarize-context": "condense the auto-attached context through a throwaway model call before sending it (off by default)",
     },
     examples: [
@@ -75,19 +76,19 @@ export const commandSpecs = {
   list: {
     usage: "taskferry list [options]",
     description: "List tasks scoped to a workspace, newest first.",
-    options: { "--directory <path>": "workspace to inspect, defaults to the current workspace", "--all": "include tasks from every workspace", "--limit <number>": "limit displayed rows while preserving counts" },
+    options: { "--directory <path>": "workspace to inspect, defaults to the current workspace; also matches tasks dispatched into any git worktree of the same repo", "--all": "include tasks from every workspace", "--limit <number>": "limit displayed rows while preserving counts" },
     examples: ['taskferry list', 'taskferry list --limit 20', 'taskferry list --all'],
   },
   watch: {
     usage: "taskferry watch [options]",
     description: "Stream task state events for a workspace.",
-    options: { "--directory <path>": "workspace to watch, defaults to the current workspace", "--task-id <id>": "scope the stream to one task; exits automatically once it settles", "--format toon|ndjson": "stream format, default toon", "--summaries": "request activity summaries when available", "--flush-interval <duration>": "batch events and print them together on this interval, e.g. 30s, 5m, 1h; requires --summaries" },
-    examples: ['taskferry watch', 'taskferry watch --task-id <id> --summaries', 'taskferry watch --format ndjson', 'taskferry watch --summaries --flush-interval 5m'],
+    options: { "--directory <path>": "workspace to watch, defaults to the current workspace; also matches tasks dispatched into any git worktree of the same repo", "--all": "stream events from every workspace, not just one", "--task-id <id>": "scope the stream to one task; exits automatically once it settles", "--format toon|ndjson": "stream format, default toon", "--summaries": "request activity summaries when available", "--flush-interval <duration>": "batch events and print them together on this interval, e.g. 30s, 5m, 1h; requires --summaries" },
+    examples: ['taskferry watch', 'taskferry watch --all', 'taskferry watch --task-id <id> --summaries', 'taskferry watch --format ndjson', 'taskferry watch --summaries --flush-interval 5m'],
   },
   context: {
     usage: "taskferry context [options]",
     description: "Print compact current-workspace context for an agent hook.",
-    options: { "--directory <path>": "workspace to inspect, defaults to the current workspace", "--format toon|claude-hook|codex-hook": "context format, default toon" },
+    options: { "--directory <path>": "workspace to inspect, defaults to the current workspace; also matches tasks dispatched into any git worktree of the same repo", "--format toon|claude-hook|codex-hook": "context format, default toon" },
     examples: ['taskferry context', 'taskferry context --format claude-hook', 'taskferry context --format codex-hook'],
   },
   doctor: {

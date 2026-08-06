@@ -359,6 +359,56 @@ describe("accept()/reject()", () => {
   });
 });
 
+// taskferry#328: overlaySleepFn threads through TWO independent call paths
+// -- extraction at settlement (covered by tasks.changeset.test.js's
+// overlay-mount-busy reclassification tests) and accept/apply
+// (acceptTaskChangeset -> applyChangeset -> applyNonGitChangeset ->
+// runExtractionBwrap). Before this test, only the extraction path had
+// coverage proving the injected sleep actually fires through the manager
+// API -- a regression that broke overlaySleepFn forwarding specifically in
+// the accept closure would have gone undetected (code review finding on PR
+// #333). A standalone describe block (own fixture, not the "accept()/
+// reject()" block's shared pendingTaskFixture()) so this one addition
+// doesn't push that block's line count over the sonarjs function-length cap.
+describe("accept(): overlaySleepFn threading (taskferry#328)", () => {
+  test("accept() on a non-git target threads overlaySleepFn through applyChangeset's overlay-mount-busy retry", () => {
+    const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "axi-accept-sleepfn-"));
+    const overlayRoot = path.join(tmpRoot, "overlay");
+    fs.mkdirSync(path.join(overlayRoot, "upper", "main"), { recursive: true });
+    fs.mkdirSync(path.join(overlayRoot, "work", "main"), { recursive: true });
+    const diffPath = path.join(tmpRoot, "t_pending.patch");
+    fs.writeFileSync(diffPath, DIFF_LINE);
+    const bwrapMessage =
+      "bwrap: Can't make overlay mount on /newroot/workspace with options " +
+      "upperdir=/tmp/upper,workdir=/tmp/work,lowerdir=/oldroot/workspace,userxattr: Device or resource busy";
+    let bwrapAttempts = 0;
+    const sleeps = [];
+    const mgr = makeManager({
+      tasksFixture: [{
+        ...baseTask({ id: "t_pending", status: "done" }),
+        role: "dispatch",
+        changesetStatus: "pending",
+        diffPath,
+        preDispatchHead: null, // non-git target -> applyNonGitChangeset
+        overlayDirs: { tmpRoot, root: overlayRoot, upperDir: path.join(overlayRoot, "upper", "main"), workDir: path.join(overlayRoot, "work", "main"), rwBinds: [] },
+      }],
+      runOverlayCommandFn: () => {
+        bwrapAttempts += 1;
+        if (bwrapAttempts < 3) return { status: 1, stdout: "", stderr: bwrapMessage };
+        return { status: 0, stdout: "", stderr: "" };
+      },
+      rmOverlayTreeFn: () => {},
+      overlaySleepFn: (ms) => sleeps.push(ms),
+    });
+
+    const result = mgr.accept("t_pending");
+
+    assert.equal(result.applied, true, "the apply must succeed once the retry clears the busy mount");
+    assert.equal(bwrapAttempts, 3, "must retry the apply bwrap through the same busy-race backoff extraction uses");
+    assert.deepEqual(sleeps, [100, 300], "overlaySleepFn must be invoked for each retry, proving it reaches applyNonGitChangeset via acceptTaskChangeset, not just extraction");
+  });
+});
+
 describe("summarize() changeset exposure", () => {
   test("exposes changeset fields only when they are meaningful", () => {
     const overlayDirs = {
@@ -863,7 +913,7 @@ describe("tail()", () => {
   test("a watchdog-killed eventless task shows its raw capture (failureReason does not gate tail)", () => {
     const raw = 'Error: Extension "/x/y.js" blew up at load';
     const mgr = makeManager({
-      tasksFixture: (logDir) => [baseTask({ id: "t1", status: "crashed", failureReason: "no_output_timeout", logPath: path.join(logDir, "t1.ndjson") })],
+      tasksFixture: (logDir) => [baseTask({ id: "t1", status: "crashed", failureReason: "no_output_timeout_dead_spawn", logPath: path.join(logDir, "t1.ndjson") })],
       logs: { "t1.ndjson": raw + "\n" },
     });
     assert.equal(mgr.tail("t1").text, raw);

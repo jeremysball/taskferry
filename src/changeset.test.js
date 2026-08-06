@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { overlayPaths, subOverlayPaths, subOverlaySlug, extractGitDiff, resolvePreDispatchHead, buildMergedViewBwrapArgs, extractNonGitDiff, applyChangeset, cleanupOverlay } from "./changeset.js";
+import { overlayPaths, subOverlayPaths, subOverlaySlug, extractGitDiff, resolvePreDispatchHead, buildMergedViewBwrapArgs, extractNonGitDiff, applyChangeset, cleanupOverlay, defaultRunCommand } from "./changeset.js";
 
 // Shared fixture literals lifted to module scope so the sonarjs
 // no-duplicate-string rule stays quiet (each literal now appears once, in
@@ -41,6 +41,22 @@ const OVERLAY_BUSY_STDERR =
   "bwrap: Can't make overlay mount on /newroot/repo with options " +
   "upperdir=/tmp/u,workdir=/tmp/w,lowerdir=/oldroot/repo,userxattr: Device or resource busy\n";
 const RETRIES_EXHAUSTED_MSG = "one initial attempt plus three retries, then give up";
+
+describe("defaultRunCommand()", () => {
+  test("does not throw ENOBUFS on stdout over spawnSync's 1 MiB default maxBuffer (taskferry#358)", () => {
+    // A real merge diff routinely exceeds Node's spawnSync default
+    // maxBuffer (1 MiB); the fix must raise it well past that so a large
+    // git diff still comes back instead of throwing.
+    const overOneMebibyte = 1024 * 1024 + 1;
+    const result = defaultRunCommand(process.execPath, [
+      "-e",
+      `process.stdout.write("x".repeat(${overOneMebibyte}))`,
+    ]);
+    assert.equal(result.error, undefined);
+    assert.equal(result.status, 0);
+    assert.equal(result.stdout.length, overOneMebibyte);
+  });
+});
 
 describe("overlayPaths()", () => {
   test("builds a per-task root plus a main upper/work pair under it", () => {

@@ -496,7 +496,11 @@ describe("no-output watchdog", () => {
     assert.equal(mgr.status(dispatched.id).failureReason, null);
   });
 
-  test("repeated non-JSON output does not reset the no-output watchdog", async () => {
+  test("repeated non-JSON output resets the no-output watchdog (any log growth counts as activity)", async () => {
+    // A parseable line can't appear without the log growing first, so
+    // log-size growth is a strict superset of "parseable line landed" as an
+    // activity signal: raw bytes (in-progress lines, non-JSON stderr noise)
+    // are just as much proof the process is alive as a complete JSON line.
     const child = fakeChild(7004);
     const killed = [];
     const mgr = makeManager({
@@ -511,9 +515,34 @@ describe("no-output watchdog", () => {
 
     await new Promise((r) => setTimeout(r, 70));
     clearInterval(interval);
-    assert.ok(killed.some((k) => k.signal === "SIGTERM"));
+    assert.deepEqual(killed, []);
+    assert.equal(mgr.status(dispatched.id).status, "running");
+
+    child.emit("exit", 0, null);
+    assert.equal(mgr.status(dispatched.id).failureReason, null);
+  });
+
+  test("silence with zero log growth still fires the watchdog even after earlier non-JSON noise", async () => {
+    // Companion to the above: non-JSON growth resets the clock while it's
+    // happening, but once the log stops growing entirely (not just stops
+    // producing parseable lines), the watchdog must still fire.
+    const child = fakeChild(7008);
+    const killed = [];
+    const mgr = makeManager({
+      spawnFn: () => child,
+      killFn: (pid, signal) => killed.push({ pid, signal }),
+      noOutputTimeoutMs: 20,
+      watchdogPollMs: 5,
+    });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+    const logPath = mgr.status(dispatched.id).logPath;
+    fs.appendFileSync(logPath, "stderr noise\n");
+
+    await new Promise((r) => setTimeout(r, 60));
+    assert.ok(killed.some((k) => k.signal === "SIGTERM"), "watchdog must still fire once the log truly stops growing");
 
     child.emit("exit", null, "SIGTERM");
+    assert.equal(mgr.status(dispatched.id).failureReason, "no_output_timeout_dead_spawn");
   });
 
   test("a running child that goes silent again after early output is eventually stopped (GLM-5.2 review finding)", async () => {

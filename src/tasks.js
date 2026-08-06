@@ -2654,12 +2654,17 @@ function consumeWatchdogLogChunk(state, current, ctx) {
     ctx.failRunningTask(current, failure.bucket, failure.detail);
     return true;
   }
-  if (hasParseableLine) {
-    state.lastActivityMs = Date.now();
-    if (!state.outputSeen) {
-      state.outputSeen = true;
-      state.currentNoOutputTimeout = ctx.postOutputNoOutputTimeout;
-    }
+  // Any new bytes are proof of life, whether or not they form a complete
+  // parseable line yet -- an in-progress line, non-JSON stderr chatter, or a
+  // write straddling two ticks all mean the process is still running. A
+  // parseable line can't appear without the log growing first, so this is a
+  // strict superset of the old hasParseableLine-only reset and needs no
+  // separate check: we only reach here when size > state.bytesRead already
+  // held above.
+  state.lastActivityMs = Date.now();
+  if (hasParseableLine && !state.outputSeen) {
+    state.outputSeen = true;
+    state.currentNoOutputTimeout = ctx.postOutputNoOutputTimeout;
   }
   void ctx.scheduleActivity(current);
   return false;

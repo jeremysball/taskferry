@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
-import { makeManager, fakeChild, baseTask, AXI_GIT_COMMON_DIR, AXI_ALLOWED_DIR, AXI_TASKS_CACHE_DIR, OPENCODE_DATA, INVESTIGATED_TEXT, SOURCE_LOG, OVERLAY_SRC, SOL_MODEL } from "./tasks.test-helpers.js";
+import { makeManager, fakeChild, baseTask, AXI_GIT_COMMON_DIR, AXI_ALLOWED_DIR, AXI_TASKS_CACHE_DIR, OPENCODE_DATA, INVESTIGATED_TEXT, SOURCE_LOG, OVERLAY_SRC, SOL_MODEL, MIMIMAX_MODEL } from "./tasks.test-helpers.js";
 
 describe("bwrap sandboxing: dispatch argv shape and gitdir scoping", () => {
   test("wraps the spawn command in bwrap when sandboxing is enabled and available", () => {
@@ -930,5 +930,110 @@ describe("bwrap sandboxing: advisor guardrails", () => {
     assert.equal(status.status, "crashed");
     assert.match(status.spawnError, /advisor dispatch requires overlay-gated writes/);
     assert.equal(spawned, false, "advisor must not spawn an unsandboxed child");
+  });
+});
+
+describe("bwrap sandboxing: project-config read_only_paths", () => {
+  // Local constant -- the brief's `read_only_paths` handling reads this
+  // exact filename, so the test setup needs to write it three times.
+  const TOML_FILENAME = ".taskferry.toml";
+
+  test("read_only_paths from .taskferry.toml become extra --ro-bind pairs", () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "axi-readonly-dir-"));
+    const roTarget = fs.mkdtempSync(path.join(os.tmpdir(), "axi-readonly-target-"));
+    fs.writeFileSync(path.join(directory, TOML_FILENAME), `read_only_paths = [${JSON.stringify(roTarget)}]\n`);
+    let captured = null;
+    const mgr = makeManager({
+      spawnFn: (cmd, args, opts) => { captured = { cmd, args, opts }; return fakeChild(); },
+      sandboxEnabled: true,
+      checkBwrapAvailableFn: () => ({ checked: true, available: true }),
+      platform: "linux",
+    });
+    mgr.dispatch({ directory, prompt: "hello", model: MIMIMAX_MODEL, executor: "opencode" });
+    const roBindIndex = captured.args.indexOf("--ro-bind");
+    const roPairs = [];
+    for (let i = 0; i < captured.args.length - 2; i++) {
+      if (captured.args[i] === "--ro-bind") roPairs.push([captured.args[i + 1], captured.args[i + 2]]);
+    }
+    assert.ok(roPairs.some(([src, dest]) => src === roTarget && dest === roTarget), `expected a --ro-bind pair for ${roTarget}, got ${JSON.stringify(roPairs)}`);
+    assert.ok(roBindIndex !== -1);
+  });
+
+  test("a read_only_paths entry that doesn't exist on this host is skipped and warned, not fatal", () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "axi-readonly-missing-"));
+    const missing = path.join(os.tmpdir(), "axi-readonly-does-not-exist");
+    fs.writeFileSync(path.join(directory, TOML_FILENAME), `read_only_paths = [${JSON.stringify(missing)}]\n`);
+    const mgr = makeManager({
+      spawnFn: () => fakeChild(),
+      sandboxEnabled: true,
+      checkBwrapAvailableFn: () => ({ checked: true, available: true }),
+      platform: "linux",
+    });
+    const dispatched = mgr.dispatch({ directory, prompt: "hello", model: MIMIMAX_MODEL, executor: "opencode" });
+    const status = mgr.status(dispatched.id);
+    assert.match(status.projectConfigWarning, /read_only_paths/);
+    assert.match(status.projectConfigWarning, new RegExp(missing.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  });
+
+  test("a read_only_paths entry that overlaps a protected sandbox mount is rejected and reported, never bound", () => {
+    // Mount-order safety: bwrap applies --ro-bind last, so a
+    // read_only_paths entry that is an ancestor of any protected mount
+    // (e.g. the deny-list `~/.ssh` paths inside $HOME) would re-expose
+    // the deny-list tmpfs mounts -- reject before it ever reaches
+    // extraRoBinds. Uses homeDir here -- any non-root ancestor of a
+    // protected path exercises the same code path.
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "axi-readonly-unsafe-"));
+    const homeDir = os.homedir();
+    fs.writeFileSync(path.join(directory, TOML_FILENAME), `read_only_paths = [${JSON.stringify(homeDir)}]\n`);
+    let captured = null;
+    const mgr = makeManager({
+      spawnFn: (cmd, args, opts) => { captured = { cmd, args, opts }; return fakeChild(); },
+      sandboxEnabled: true,
+      checkBwrapAvailableFn: () => ({ checked: true, available: true }),
+      platform: "linux",
+    });
+    const dispatched = mgr.dispatch({ directory, prompt: "hello", model: MIMIMAX_MODEL, executor: "opencode" });
+    const status = mgr.status(dispatched.id);
+    // No `--ro-bind <homeDir> <homeDir>` was added -- the unsafe check
+    // rejected it (homeDir is an ancestor of /home/.../.<dotfile> deny-list
+    // entries).
+    const roPairs = [];
+    for (let i = 0; i < captured.args.length - 2; i++) {
+      if (captured.args[i] === "--ro-bind") roPairs.push([captured.args[i + 1], captured.args[i + 2]]);
+    }
+    assert.ok(!roPairs.some(([src]) => src === homeDir), `unexpected ro-bind for ${homeDir}, got ${JSON.stringify(roPairs)}`);
+    // projectConfigWarning records the rejected entry.
+    assert.match(status.projectConfigWarning, /read_only_paths/);
+    assert.match(status.projectConfigWarning, /overlaps a protected sandbox mount/);
+  });
+
+  test("read_only_paths = ['/'] is rejected as overlapping every protected mount (root is an ancestor of all paths)", () => {
+    // Regression for the brief's exact canonical exploit: the resolver
+    // must treat `/` as an ancestor of every protected path so an
+    // untrusted `.taskferry.toml` declaring `read_only_paths = ["/"]`
+    // never reaches the bwrap argv as `--ro-bind / /` -- that second
+    // `--ro-bind / /` would shadow the deny-list tmpfs mounts (un-hiding
+    // `~/.ssh`/etc.) and the overlay mount itself (defeating CoW).
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "axi-readonly-root-"));
+    fs.writeFileSync(path.join(directory, TOML_FILENAME), `read_only_paths = ["/"]\n`);
+    let captured = null;
+    const mgr = makeManager({
+      spawnFn: (cmd, args, opts) => { captured = { cmd, args, opts }; return fakeChild(); },
+      sandboxEnabled: true,
+      checkBwrapAvailableFn: () => ({ checked: true, available: true }),
+      platform: "linux",
+    });
+    const dispatched = mgr.dispatch({ directory, prompt: "hello", model: MIMIMAX_MODEL, executor: "opencode" });
+    const status = mgr.status(dispatched.id);
+    // The base bwrap args always include exactly one `--ro-bind / /`
+    // (buildBwrapBaseArgs's read-only-root bind). The unsafe check must
+    // prevent a second `--ro-bind / /` from being added for the
+    // read_only_paths entry -- that second one would shadow the deny-list
+    // tmpfs mounts AND the overlay mount.
+    const roRootCount = captured.args.filter((arg) => arg === "/").length;
+    assert.equal(roRootCount, 2, `expected exactly 2 '/' occurrences (one base read-only-root bind only, no second from read_only_paths); got ${roRootCount} in ${JSON.stringify(captured.args)}`);
+    // projectConfigWarning records the rejected entry.
+    assert.match(status.projectConfigWarning, /read_only_paths/);
+    assert.match(status.projectConfigWarning, /overlaps a protected sandbox mount/);
   });
 });

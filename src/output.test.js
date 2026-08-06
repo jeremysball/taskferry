@@ -10,6 +10,7 @@ const OCCURRED_AT_LATE = "2026-07-18T00:24:11.282Z";
 const WORKSPACE_EXAMPLE = "/workspace/example";
 const TASKFERRY_BIN = "/bin/taskferry";
 const TASK_MODEL_SOL = "openai/gpt-5.6-sol";
+const TASK_STARTED_AT = "2026-07-29T00:00:00.000Z";
 const TASK_STARTED_AT_EXAMPLE = "2026-08-01T00:00:00.000Z";
 const REVEAL_HINT_805 = "Run taskferry list --limit 805 for all 805 tasks";
 
@@ -278,15 +279,87 @@ describe("formatWatchEvent color (TTY-gated)", () => {
 });
 
 test("leanStatus surfaces a pending changesetStatus without --full", () => {
-  const detail = { id: "t1", status: "done", startedAt: "2026-07-29T00:00:00.000Z", exitCode: 0, signal: null, role: "dispatch", changesetStatus: "pending" };
+  const detail = { id: "t1", status: "done", startedAt: TASK_STARTED_AT, exitCode: 0, signal: null, role: "dispatch", changesetStatus: "pending" };
   const lean = leanStatus(detail);
   assert.equal(lean.changesetStatus, "pending");
 });
 
 test("leanStatus omits changesetStatus when it's already resolved", () => {
-  const detail = { id: "t1", status: "done", startedAt: "2026-07-29T00:00:00.000Z", exitCode: 0, signal: null, role: "dispatch", changesetStatus: "accepted" };
+  const detail = { id: "t1", status: "done", startedAt: TASK_STARTED_AT, exitCode: 0, signal: null, role: "dispatch", changesetStatus: "accepted" };
   const lean = leanStatus(detail);
   assert.equal(lean.changesetStatus, undefined);
+});
+
+test("leanStatus surfaces a non-default checkStatus without --full", () => {
+  const detail = {
+    id: "t1",
+    status: "done",
+    startedAt: TASK_STARTED_AT,
+    exitCode: 0,
+    signal: null,
+    checkStatus: "running",
+    checkCommand: "npm test",
+    checkExitCode: null,
+    checkStartedAt: "2026-07-29T00:01:00.000Z",
+    checkEndedAt: null,
+    checkOverride: false,
+  };
+  const lean = leanStatus(detail);
+  assert.equal(lean.checkStatus, "running");
+  assert.equal(lean.checkCommand, "npm test");
+  assert.equal(lean.checkExitCode, null);
+  assert.equal(lean.checkStartedAt, "2026-07-29T00:01:00.000Z");
+  assert.equal(lean.checkEndedAt, null);
+  assert.equal("checkOverride" in lean, false);
+  assert.equal("checkOutputTail" in lean, false);
+});
+
+test("leanStatus surfaces checkOverride only when set", () => {
+  const detail = {
+    id: "t1",
+    status: "done",
+    startedAt: TASK_STARTED_AT,
+    exitCode: 0,
+    signal: null,
+    checkStatus: "failed",
+    checkCommand: "npm test",
+    checkOverride: true,
+  };
+  const lean = leanStatus(detail);
+  assert.equal(lean.checkOverride, true);
+});
+
+test("leanStatus omits checkStatus fields when checkStatus is the default 'none'", () => {
+  const detail = {
+    id: "t1",
+    status: "done",
+    startedAt: TASK_STARTED_AT,
+    exitCode: 0,
+    signal: null,
+    checkStatus: "none",
+  };
+  const lean = leanStatus(detail);
+  assert.equal("checkStatus" in lean, false);
+  assert.equal("checkCommand" in lean, false);
+});
+
+test("leanStatus surfaces a projectConfigWarning when set", () => {
+  const detail = {
+    id: "t1",
+    status: "done",
+    startedAt: TASK_STARTED_AT,
+    exitCode: 0,
+    signal: null,
+    projectConfigWarning: ".taskferry.toml: missing check key, gate skipped",
+  };
+  const lean = leanStatus(detail);
+  assert.equal(lean.projectConfigWarning, ".taskferry.toml: missing check key, gate skipped");
+});
+
+test("leanStatus omits projectConfigWarning when unset", () => {
+  const detail = { id: "t1", status: "done", startedAt: TASK_STARTED_AT, exitCode: 0, signal: null };
+  const lean = leanStatus(detail);
+  assert.equal("projectConfigWarning" in lean, false);
 });
 
 describe("leanStatus --full overlayDirs trimming", () => {

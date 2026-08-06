@@ -107,4 +107,10 @@ export const commandSpecs = {
     options: {},
     examples: ['taskferry setup', 'node src/cli.js setup'],
   },
+  init: {
+    usage: "taskferry init",
+    description: "Scaffold .taskferry.toml for this repo, detecting a check command from the project's ecosystem.",
+    options: {},
+    examples: ['taskferry init'],
+  },
 };

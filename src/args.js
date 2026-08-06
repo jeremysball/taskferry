@@ -158,6 +158,7 @@ const DEFAULT_OPTIONS = {
   context: () => ({ ...flagDefaultsFor("context"), format: "toon" }),
   doctor: () => flagDefaultsFor("doctor"),
   setup: () => ({}),
+  init: () => ({}),
 };
 
 function defaultOptions(command, cwd) {

@@ -5,6 +5,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs, UsageError } from "./args.js";
 import { runSetup } from "./setup.js";
+import { runInit } from "./init.js";
 import { resolveInvokedPath } from "./paths.js";
 
 export async function runCli(argv = process.argv.slice(2), {
@@ -14,6 +15,7 @@ export async function runCli(argv = process.argv.slice(2), {
   executablePath = process.argv[1],
   connectClient: connectClientFn,
   setup: setupFn = runSetup,
+  init: initFn = runInit,
   signal,
   runShellCommand,
   homeDirectory = os.homedir(),
@@ -34,6 +36,10 @@ export async function runCli(argv = process.argv.slice(2), {
 
   if (parsed.command === "setup") {
     return runSetupCommand(setupFn, env, io);
+  }
+
+  if (parsed.command === "init") {
+    return runInitCommand(initFn, io, cwd);
   }
 
   return runDaemonCommand(parsed, { io, cwd, env, executablePath, connectClientFn, signal, runShellCommand, homeDirectory, resolveWorkspaceRootFn });
@@ -63,6 +69,19 @@ async function runSetupCommand(setupFn, env, io) {
     const tty = io.stderr.isTTY;
     io.stderr.write(`${colorize(errorLabel, "\x1b[31m", tty)}\n`);
     io.stderr.write(`${colorize("help: fix the reported dependency or filesystem problem, then rerun node src/cli.js setup", "\x1b[2m", tty)}\n`);
+    return { exitCode: 1 };
+  }
+}
+
+async function runInitCommand(initFn, io, cwd) {
+  try {
+    const value = await initFn(cwd, { io });
+    const { writeToon } = await import("./output.js");
+    writeToon(value, io);
+    return { exitCode: 0, value };
+  } catch (error) {
+    const { writeError } = await import("./output.js");
+    writeError(error, io);
     return { exitCode: 1 };
   }
 }

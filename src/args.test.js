@@ -153,6 +153,23 @@ test("parses the setup command with no arguments and rejects extras and flags", 
   assert.throws(() => parseArgs(["setup", "--bogus"]), /unknown flag --bogus/);
 });
 
+test("parses the init command with no arguments and rejects extras and flags", () => {
+  assert.deepEqual(parseArgs(["init"]), {
+    command: "init",
+    options: {},
+    help: false,
+  });
+
+  const helpParsed = parseArgs(["init", "--help"]);
+  assert.equal(helpParsed.command, "init");
+  assert.deepEqual(helpParsed.options, {});
+  assert.equal(helpParsed.help, true);
+  assert.match(helpParsed.helpText.usage, /taskferry init/);
+
+  assert.throws(() => parseArgs(["init", "extra"]), /unexpected argument/);
+  assert.throws(() => parseArgs(["init", "--bogus"]), /unknown flag --bogus/);
+});
+
 test("rejects retired MCP names with one-step migration hints", () => {
   assert.throws(() => parseArgs(["taskferry_poll", "oc_1"]), (error) => {
     assert.match(error.message, /taskferry_poll/);

@@ -11,13 +11,21 @@ import { buildBwrapArgs, buildBwrapBaseArgs } from "./sandbox.js";
 // Diff/apply calls are heavier than sandbox.js's bwrap --version probe (a
 // real git diff over a worker's changes), so this uses a longer timeout
 // than sandbox.js's defaultRunCommand.
+//
+// Also needs a much larger maxBuffer than spawnSync's 1 MiB default:
+// a real merge diff over a large task changeset routinely exceeds that,
+// and spawnSync throws ENOBUFS rather than truncating, which surfaced as
+// `taskferry result --diff` silently returning `diff: null` for an
+// otherwise-successful task (taskferry#358).
+const DIFF_MAX_BUFFER_BYTES = 200 * 1024 * 1024;
+
 /**
  * @param {string} command
  * @param {string[]} args
  * @returns {CommandResult}
  */
 export function defaultRunCommand(command, args) {
-  const result = spawnSync(command, args, { encoding: "utf8", timeout: 30000 });
+  const result = spawnSync(command, args, { encoding: "utf8", timeout: 30000, maxBuffer: DIFF_MAX_BUFFER_BYTES });
   if (result.error) return { status: null, stdout: result.stdout || "", stderr: result.stderr || "", error: result.error };
   return { status: result.status, stdout: result.stdout || "", stderr: result.stderr || "", error: result.error };
 }

@@ -16,6 +16,8 @@
 // does the chmod-then-recurse dance for exactly this case, so `rmRoot()`
 // shells out to it instead of reimplementing that logic in JS.
 import { execFileSync } from "node:child_process";
+import fs from "node:fs";
+import path from "node:path";
 
 function pidIsAlive(pid) {
   try {
@@ -55,4 +57,29 @@ export function stopDaemonAndWait(pid, { timeoutMs = 5000, pollMs = 50 } = {}) {
  */
 export function rmRoot(root) {
   execFileSync("rm", ["-rf", root]);
+}
+
+/**
+ * Creates a throwaway git repo (one commit, no `.taskferry.toml`) under
+ * `root` for the smoke tests to dispatch into, instead of defaulting to the
+ * real taskferry checkout. Dispatching into the live repo picks up its own
+ * `.taskferry.toml` `check` command (`npm run check`) via `dispatchTask()`'s
+ * prompt augmentation, which turns a trivial "reply PONG" smoke-test prompt
+ * into "run the full lint/typecheck/test suite first" -- taking far longer
+ * than the smoke tests' wait timeouts and failing the settlement checks for
+ * reasons that have nothing to do with what's actually being tested.
+ * @param {string} root
+ * @returns {string} the scratch repo's directory
+ */
+export function scratchGitRepo(root) {
+  const dir = path.join(root, "scratch-repo");
+  fs.mkdirSync(dir, { recursive: true });
+  const git = (...args) => execFileSync("git", ["-C", dir, ...args], { encoding: "utf8" });
+  git("init", "-q");
+  git("config", "user.email", "smoke-test@localhost");
+  git("config", "user.name", "smoke test");
+  fs.writeFileSync(path.join(dir, "README.md"), "taskferry smoke-test scratch repo\n");
+  git("add", "-A");
+  git("commit", "-q", "-m", "init");
+  return dir;
 }

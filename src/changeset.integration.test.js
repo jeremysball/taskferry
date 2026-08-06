@@ -17,7 +17,7 @@ const TRACKED_FILE = "tracked.txt";
 const GIT_EMAIL = "user.email=t@t";
 const GIT_NAME = "user.name=t";
 const DRIFT_TEST_FILE = "line2.txt";
-const DRIFT_WORKER_BRANCH = DRIFT_WORKER_BRANCH;
+const DRIFT_WORKER_BRANCH = "worker-sim";
 
 // Skip the whole suite unless this host can actually run overlays: Linux,
 // bwrap >= 0.8, and (for the non-git round trip) a real rsync. A missing

@@ -6,3 +6,7 @@ Task 2: complete (commits 906c444..d4c3e38, review clean)
 Task 3: complete (commits 3d88076..a3d1899, review approved; 2 minor coverage notes, not blockers)
 Task 4: complete (commits 42211ed..67ecf1a, review clean)
 Task 5: implementer done, review pending (commits 67ecf1a..HEAD)
+Task 5: complete (commits 555a33c, implementer done, review pending)
+Task 6: complete (commits 6b3c737, real-git integration coverage for stale-base 3-way resolution)
+Task 7: complete (commits f598baa, sourcemap refresh and spec archival)
+All tasks complete — awaiting Task 5 review before PR merge.

@@ -152,12 +152,18 @@ CLI usage approaches.
 - `TASKFERRY_NO_OUTPUT_TIMEOUT_MS` (default `256000`): a running task that
   writes no parseable log event before this deadline is stopped (`SIGTERM`,
   escalating to `SIGKILL`) and marked `crashed` with `failureReason:
-  "no_output_timeout"`.
+  "no_output_timeout_dead_spawn"`.
 - `TASKFERRY_POST_OUTPUT_NO_OUTPUT_TIMEOUT_MS` (default `400000`): once a
   task has produced at least one parseable log event, the deadline for
   further silence switches to this longer value for the rest of the task's
   life — a model that's gone quiet mid-turn (long reasoning, a slow test
-  run) gets more room than a task that never started at all.
+  run) gets more room than a task that never started at all. A task killed
+  after this deadline settles with `failureReason:
+  "no_output_timeout_stalled"` — distinct from
+  `"no_output_timeout_dead_spawn"` above so a caller can tell "the worker
+  never produced anything" (dead spawn / provider stall) from "it did real
+  work, then went silent" (stalled mid-task) without parsing
+  `failureDetail`.
 - `TASKFERRY_WATCHDOG_POLL_MS` (default `2000`): how often the no-output and
   provider-failure checks run against a running task's log.
 - A task stopped because its log matched a known provider-failure
@@ -182,9 +188,20 @@ CLI usage approaches.
   class name, lowercased and prefixed (e.g. `opencode_unknownerror`,
   `pi_error`).
   Each crash also carries `failureDetail`: the matched log line or
-  provider error text (capped at 500 characters), or for
-  `no_output_timeout`, which timeout value fired and whether it was before
-  or after the task's first output.
+  provider error text (capped at 500 characters), or for the
+  `no_output_timeout_*` buckets, which timeout value fired and whether it
+  was before or after the task's first output.
+- A `crashed` task whose log actually reached a genuine `step_finish`
+  `"stop"` event with real text is reclassified to `"done"` at
+  settlement — this covers a transient mid-run provider error (e.g. a
+  context-overflow) that the model recovered from before the process still
+  exited non-zero. `failureReason`/`failureDetail` are left in place as a
+  record of what happened partway through, so `status: "done"` with a
+  non-null `failureReason` means "finished despite a mid-run hiccup," not
+  "nothing went wrong." A watchdog-killed task never reaches this path: by
+  definition it went silent before any stop event, so recovery cannot
+  apply to `no_output_timeout_*` crashes. A cancelled task is never
+  reinterpreted as done this way either.
 - A child that exits non-zero without ever emitting a parseable event (a
   crash during CLI startup, e.g. a malformed provider extension) settles
   with `"boot_failure"` (`"pi_boot_failure"` for `pi`) and a

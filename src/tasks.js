@@ -574,6 +574,7 @@ export function isOutsideDirectory(directory, candidate) {
  * @property {(taskId: string) => void} stopRunningWatcher
  * @property {(taskId: string) => string|null} readSessionIdFromLog
  * @property {(task: Task) => void} evaluateOutputCompleteness
+ * @property {(task: Task) => void} attemptCrashRecovery
  * @property {(task: Task) => void} extractChangesetForTask
  * @property {(pid: number, signal: NodeJS.Signals) => void} sendSignal
  * @property {{evictTask: (id: string) => void, setSummarySessionId: (srcTaskId: string, sessionId: string) => void, setLastSummarizedWatermark: (srcTaskId: string, bytes: number) => void}} activityCache
@@ -1094,6 +1095,7 @@ function onChildExit(ctx, shared, code, signal) {
   task.exitCode = code;
   task.signal = signal;
   task.endedAt = new Date().toISOString();
+  ctx.attemptCrashRecovery(task);
   const parsedSessionId = ctx.readSessionIdFromLog(task.logPath);
   if (parsedSessionId) task.sessionId = parsedSessionId;
   if (task.status === "done") ctx.evaluateOutputCompleteness(task);
@@ -2695,7 +2697,15 @@ function watchdogTick(state, ctx) {
     // A rotated or removed log is retried on the next watcher tick.
   }
   if (Date.now() - state.lastActivityMs >= state.currentNoOutputTimeout) {
-    ctx.failRunningTask(current, "no_output_timeout", `no output for ${state.currentNoOutputTimeout}ms (${state.outputSeen ? "post-output" : "pre-output"} timeout)`);
+    // Split by state.outputSeen (the same pre/post-output latch the
+    // escalated budget already tracks) rather than reporting one generic
+    // bucket: a spawn that never wrote a byte is a dead worker/provider
+    // stall, while one that produced output and then went silent stalled
+    // mid-work. Conflating the two into "no_output_timeout" made both look
+    // like the same failure mode when a fleet-wide read of the logs showed
+    // most of the eventless bucket really is a dead spawn.
+    const reason = state.outputSeen ? "no_output_timeout_stalled" : "no_output_timeout_dead_spawn";
+    ctx.failRunningTask(current, reason, `no output for ${state.currentNoOutputTimeout}ms (${state.outputSeen ? "post-output" : "pre-output"} timeout)`);
   }
 }
 
@@ -3391,7 +3401,7 @@ function buildManagerInternalHelpers(ctx) {
      * delegated to {@link startTaskFor}, which takes every factory closure
      * dependency explicitly via `ctx`.
      * @param {Task} task */
-    startTask: (task) => startTaskFor(task, { pendingLaunches: ctx.maps.pendingLaunches, SUMMARY_DIR: ctx.paths.SUMMARY_DIR, PROMPT_DIR: ctx.paths.PROMPT_DIR, spawnFn: ctx.opts.spawnFn, runOverlayCommandFn: ctx.opts.runOverlayCommandFn, sandboxEnabled: ctx.opts.sandboxEnabled, platform: ctx.opts.platform, overlayEnabled: ctx.opts.overlayEnabled, overlayTmpRoot: ctx.opts.overlayTmpRoot, allowedDirs: ctx.opts.allowedDirs, stateDir: ctx.opts.stateDir, cacheDir: ctx.opts.cacheDir, runtimeDir: ctx.opts.runtimeDir, existsFn: ctx.opts.existsFn, statFn: ctx.opts.statFn, readdirFn: ctx.opts.readdirFn, sandboxDenylist: ctx.opts.sandboxDenylist, resolveGitCommonDirFn: ctx.opts.resolveGitCommonDirFn, resolveGitDirFn: ctx.opts.resolveGitDirFn, requireBwrap: () => ctx.env.requireBwrap(), requireOverlaySupport: () => ctx.env.requireOverlaySupport(), dispatchEnvironment: (env, taskId) => ctx.env.dispatchEnvironment(env, taskId), summaryEnvironment: (env) => ctx.env.summaryEnvironment(env), settleWaiters: (taskId) => ctx.helpers.settleWaiters(taskId), launchQueuedTasks: () => ctx.helpers.launchQueuedTasks(), persistTask: (taskId) => ctx.helpers.persistTask(taskId), scheduleActivity: (task, options) => ctx.helpers.scheduleActivity(task, options), classifyTrailingLogFailure: (task, executor) => ctx.helpers.classifyTrailingLogFailure(task, executor), startRunningWatcher: (task, executor) => ctx.helpers.startRunningWatcher(task, executor), stopRunningWatcher: (taskId) => ctx.helpers.stopRunningWatcher(taskId), extractChangesetForTask: (task) => ctx.env.extractChangesetForTask(task), sendSignal: (pid, signal) => ctx.helpers.sendSignal(pid, signal), activityCache: ctx.activity.cache, logHasEventCache: ctx.maps.logHasEventCache, escalationTimers: ctx.maps.escalationTimers, tasks: ctx.maps.tasks, decRunning: () => { ctx.state.runningCount--; }, incRunning: () => { ctx.state.runningCount++; }, readSessionIdFromLog, evaluateOutputCompleteness }),
+    startTask: (task) => startTaskFor(task, { pendingLaunches: ctx.maps.pendingLaunches, SUMMARY_DIR: ctx.paths.SUMMARY_DIR, PROMPT_DIR: ctx.paths.PROMPT_DIR, spawnFn: ctx.opts.spawnFn, runOverlayCommandFn: ctx.opts.runOverlayCommandFn, sandboxEnabled: ctx.opts.sandboxEnabled, platform: ctx.opts.platform, overlayEnabled: ctx.opts.overlayEnabled, overlayTmpRoot: ctx.opts.overlayTmpRoot, allowedDirs: ctx.opts.allowedDirs, stateDir: ctx.opts.stateDir, cacheDir: ctx.opts.cacheDir, runtimeDir: ctx.opts.runtimeDir, existsFn: ctx.opts.existsFn, statFn: ctx.opts.statFn, readdirFn: ctx.opts.readdirFn, sandboxDenylist: ctx.opts.sandboxDenylist, resolveGitCommonDirFn: ctx.opts.resolveGitCommonDirFn, resolveGitDirFn: ctx.opts.resolveGitDirFn, requireBwrap: () => ctx.env.requireBwrap(), requireOverlaySupport: () => ctx.env.requireOverlaySupport(), dispatchEnvironment: (env, taskId) => ctx.env.dispatchEnvironment(env, taskId), summaryEnvironment: (env) => ctx.env.summaryEnvironment(env), settleWaiters: (taskId) => ctx.helpers.settleWaiters(taskId), launchQueuedTasks: () => ctx.helpers.launchQueuedTasks(), persistTask: (taskId) => ctx.helpers.persistTask(taskId), scheduleActivity: (task, options) => ctx.helpers.scheduleActivity(task, options), classifyTrailingLogFailure: (task, executor) => ctx.helpers.classifyTrailingLogFailure(task, executor), startRunningWatcher: (task, executor) => ctx.helpers.startRunningWatcher(task, executor), stopRunningWatcher: (taskId) => ctx.helpers.stopRunningWatcher(taskId), extractChangesetForTask: (task) => ctx.env.extractChangesetForTask(task), sendSignal: (pid, signal) => ctx.helpers.sendSignal(pid, signal), activityCache: ctx.activity.cache, logHasEventCache: ctx.maps.logHasEventCache, escalationTimers: ctx.maps.escalationTimers, tasks: ctx.maps.tasks, decRunning: () => { ctx.state.runningCount--; }, incRunning: () => { ctx.state.runningCount++; }, readSessionIdFromLog, evaluateOutputCompleteness, attemptCrashRecovery }),
     /**
      * @param {string} taskId
      * @returns {{taskId: string, changesetStatus: string, applied: boolean, reason?: string|null, cleanupFailed?: boolean}}
@@ -3841,14 +3851,14 @@ function failureFields(task) {
 
 /**
  * @param {string} logPath
- * @returns {string}
+ * @returns {{message: string, hadExplicitStop: boolean}}
  */
-function extractFinalMessage(logPath) {
+function extractFinalMessageDetail(logPath) {
   let raw;
   try {
     raw = fs.readFileSync(logPath, "utf8");
   } catch {
-    return "";
+    return { message: "", hadExplicitStop: false };
   }
   /** @type {Map<string, string[]>} */
   const textByMessageId = new Map();
@@ -3877,9 +3887,38 @@ function extractFinalMessage(logPath) {
   // reached one). The settlement-time check uses this same fallback so a
   // clean exit with no step_finish still gets its final turn inspected.
   const targetId = finalMessageId ?? textOrder[textOrder.length - 1];
-  return targetId && textByMessageId.has(targetId)
+  const message = targetId && textByMessageId.has(targetId)
     ? /** @type {string[]} */ (textByMessageId.get(targetId)).join("")
     : "";
+  return { message, hadExplicitStop: finalMessageId != null };
+}
+
+/**
+ * @param {string} logPath
+ * @returns {string}
+ */
+function extractFinalMessage(logPath) {
+  return extractFinalMessageDetail(logPath).message;
+}
+
+/**
+ * A crashed task whose transcript actually reached a genuine `step_finish`
+ * "stop" event with real text is not the failure its status claims -- e.g. a
+ * transient mid-run provider error (ContextOverflowError) that the model
+ * recovered from, after which the process still exited non-zero. Flips
+ * status to "done" so it isn't undercounted as a failure; failureReason /
+ * failureDetail are deliberately left in place as a record of what actually
+ * happened partway through, rather than cleared to make the task look clean.
+ * Only applies to a genuine `status: "crashed"` settlement -- a cancelled
+ * task is never reinterpreted as done just because it happened to have
+ * produced a final answer before the cancel landed.
+ * @param {Task} task
+ */
+function attemptCrashRecovery(task) {
+  if (task.status !== "crashed") return;
+  const { message, hadExplicitStop } = extractFinalMessageDetail(task.logPath);
+  if (!hadExplicitStop || !message.trim()) return;
+  task.status = "done";
 }
 
 const STATUS_MARKER_RE = /^Status:\s*(DONE_WITH_CONCERNS|DONE|BLOCKED|NEEDS_CONTEXT)\s*$/m;

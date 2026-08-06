@@ -215,12 +215,12 @@ describe("changeset extraction at settlement: overlay-mount-busy reclassificatio
     // SIGTERMs it and stamps failureReason: "no_output_timeout" BEFORE the
     // exit handler ever runs extractChangesetForTask().
     await new Promise((r) => setTimeout(r, 40));
-    assert.equal(mgr.status(result.id).failureReason, "no_output_timeout", "sanity: the watchdog must have fired first");
+    assert.equal(mgr.status(result.id).failureReason, "no_output_timeout_dead_spawn", "sanity: the watchdog must have fired first");
 
     child.emit("exit", null, "SIGTERM");
 
     const status = mgr.status(result.id);
-    assert.equal(status.failureReason, "overlay_mount_busy", "the confirmed bwrap cause must overwrite the generic no_output_timeout guess");
+    assert.equal(status.failureReason, "overlay_mount_busy", "the confirmed bwrap cause must overwrite the generic no_output_timeout_dead_spawn guess");
     assert.match(status.failureDetail, /Device or resource busy/);
     assert.match(status.changesetError, /Device or resource busy/);
     assert.deepEqual(sleeps, [100, 300, 900], "must exhaust the full retry backoff, injected through the manager API, before giving up");

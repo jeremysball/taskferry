@@ -1,10 +1,16 @@
 // src/changeset.test.js
-import { describe, test } from "node:test";
+import { describe, test, after } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { overlayPaths, subOverlayPaths, subOverlaySlug, extractGitDiff, resolvePreDispatchHead, buildMergedViewBwrapArgs, extractNonGitDiff, applyChangeset, cleanupOverlay, detectHeadDrift, resolveHeadDrift, defaultRunCommand } from "./changeset.js";
+
+const trackedTmpDirs = [];
+after(() => {
+  for (const d of trackedTmpDirs) fs.rmSync(d, { recursive: true, force: true });
+});
+
 
 // Shared fixture literals lifted to module scope so the sonarjs
 // no-duplicate-string rule stays quiet (each literal now appears once, in
@@ -902,6 +908,7 @@ describe("cleanupOverlay()", () => {
   // exact shape.
   test("default rmFn removes a tree containing a non-empty mode-000 kernel-owned work scratch dir", () => {
     const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "cleanup-overlay-test-"));
+    trackedTmpDirs.push(tmpRoot);
     const root = path.join(tmpRoot, "taskferry-cow-modetest");
     const upperDir = path.join(root, "upper", "main");
     const workScratch = path.join(root, "work", "main", "work");

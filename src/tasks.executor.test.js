@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { makeManager, fakeChild, LUNA_MODEL, MIMO_MODEL, MINIMAX_MODEL, UNUSED_TMP, OPENCODE_DATA, AXI_TASKS_CACHE_PI, NO_API_KEY_FOUND } from "./tasks.test-helpers.js";
+import { makeManager, fakeChild, LUNA_MODEL, MIMO_MODEL, MINIMAX_MODEL, UNUSED_TMP, OPENCODE_DATA, AXI_TASKS_CACHE_PI, NO_API_KEY_FOUND, mkdtempTracked } from "./tasks.test-helpers.js";
 
 describe("startTask() writes stdout through executor.normalizeLogEvent (Task 7: write-time normalization)", () => {
   test("JSON events flagged null by normalizeLogEvent are dropped; kept events are written canonicalized", () => {
@@ -127,7 +127,7 @@ describe("startTask() spawns the executor's CLI binary, not a hardcoded command 
 describe("startTask() merges executor.sandboxAuthFile().sandboxEnv into spawnEnv (Task 7: per-executor env overrides)", () => {
   test("opencode's sandboxEnv rewrites XDG_DATA_HOME to the sandboxed cache data home", () => {
     let captured = null;
-    const cacheDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-cache-oc-"));
+    const cacheDir = mkdtempTracked("axi-tasks-cache-oc-");
     const mgr = makeManager({
       spawnFn: (cmd, args, opts) => { captured = { cmd, args, opts }; return fakeChild(); },
       sandboxEnabled: true,
@@ -141,7 +141,7 @@ describe("startTask() merges executor.sandboxAuthFile().sandboxEnv into spawnEnv
 
   test("pi's sandboxEnv rewrites PI_CODING_AGENT_DIR, not XDG_DATA_HOME, and the auth bind destination matches", () => {
     let captured = null;
-    const cacheDir = fs.mkdtempSync(path.join(os.tmpdir(), AXI_TASKS_CACHE_PI));
+    const cacheDir = mkdtempTracked(AXI_TASKS_CACHE_PI);
     const realAuthFile = path.join(os.tmpdir(), "fake-pi-home", "auth.json");
     const fakePi = {
       id: "pi",
@@ -198,7 +198,7 @@ describe("startTask() merges executor.sandboxAuthFile().sandboxEnv into spawnEnv
 
   test("a pi dispatch's sandboxAuthFile call is invoked with the dispatch's sessionId + launchDirectory, so the bind can scope to a single session file", () => {
     let capturedArgs = null;
-    const cacheDir = fs.mkdtempSync(path.join(os.tmpdir(), AXI_TASKS_CACHE_PI));
+    const cacheDir = mkdtempTracked(AXI_TASKS_CACHE_PI);
     const realAuthFile = path.join(os.tmpdir(), "fake-pi-home", "auth.json");
     const fakePi = {
       id: "pi",
@@ -243,7 +243,7 @@ describe("startTask() merges executor.sandboxAuthFile().sandboxEnv into spawnEnv
 
   test("a fresh (non-resume) pi dispatch does not pass a sessionId to sandboxAuthFile, so no sessions bind is added", () => {
     let capturedArgs = null;
-    const cacheDir = fs.mkdtempSync(path.join(os.tmpdir(), AXI_TASKS_CACHE_PI));
+    const cacheDir = mkdtempTracked(AXI_TASKS_CACHE_PI);
     const fakePi = {
       id: "pi",
       taskIdPrefix: "pi",
@@ -296,7 +296,7 @@ describe("startTask() resolves the resumed session file via Array.find (no break
     // realSessionsDir, even when pi's own sandboxAuthFile decides to
     // bind a single file.
     let captured = null;
-    const cacheDir = fs.mkdtempSync(path.join(os.tmpdir(), AXI_TASKS_CACHE_PI));
+    const cacheDir = mkdtempTracked(AXI_TASKS_CACHE_PI);
     const realSessionsDir = path.join(os.homedir(), ".pi", "agent", "sessions");
     const realSessionFile = path.join(realSessionsDir, "--tmp--", "2026-07-23T21-42-41-761Z_019f90ea-1234-70e0-98dc-6847db316eb4.jsonl");
     const realAuthFile = path.join(os.homedir(), ".pi", "agent", "auth.json");

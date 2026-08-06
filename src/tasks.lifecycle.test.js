@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { makeManager, fakeChild, baseTask, DIFF_LINE, OVERLAY_DIR_PENDING, EBUSY_ERROR, SPAWN_BWRAP_TIMEOUT, TOOL_CALLS, NONE_OBSERVED, FINAL_ANSWER } from "./tasks.test-helpers.js";
+import { makeManager, fakeChild, baseTask, DIFF_LINE, OVERLAY_DIR_PENDING, EBUSY_ERROR, SPAWN_BWRAP_TIMEOUT, TOOL_CALLS, NONE_OBSERVED, FINAL_ANSWER, mkdtempTracked } from "./tasks.test-helpers.js";
 import { defaultRunCommand as changesetDefaultRunCommand } from "./changeset.js";
 
 const USER_MODEL = "user-model";
@@ -121,7 +121,7 @@ describe("accept()/reject()", () => {
   // every task's overlayDirs.tmpRoot, and a fixture pointing straight at real
   // os.tmpdir() made every test in this block scan (and act on) whatever a
   // real, concurrently-running daemon actually has in /tmp (issue #253).
-  const fixtureTmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "axi-accept-reject-tmp-"));
+  const fixtureTmpRoot = mkdtempTracked("axi-accept-reject-tmp-");
   const fixtureRoot = path.join(fixtureTmpRoot, OVERLAY_DIR_PENDING);
   // Each pendingTaskFixture() call writes a real .patch file to the host
   // tmpdir; track them here and remove them once the whole suite finishes
@@ -211,8 +211,8 @@ describe("accept()/reject()", () => {
   });
 
   test("reject() cleans an overlay using its recorded tmpRoot after the live tmpRoot changes", () => {
-    const recordedTmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "axi-recorded-overlay-"));
-    const liveTmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "axi-live-overlay-"));
+    const recordedTmpRoot = mkdtempTracked("axi-recorded-overlay-");
+    const liveTmpRoot = mkdtempTracked("axi-live-overlay-");
     const root = path.join(recordedTmpRoot, OVERLAY_DIR_PENDING);
     fs.mkdirSync(path.join(root, "upper", "main"), { recursive: true });
     fs.mkdirSync(path.join(root, "work", "main"), { recursive: true });
@@ -375,7 +375,7 @@ describe("accept()/reject()", () => {
 // doesn't push that block's line count over the sonarjs function-length cap.
 describe("accept(): overlaySleepFn threading (taskferry#328)", () => {
   test("accept() on a non-git target threads overlaySleepFn through applyChangeset's overlay-mount-busy retry", () => {
-    const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "axi-accept-sleepfn-"));
+    const tmpRoot = mkdtempTracked("axi-accept-sleepfn-");
     const overlayRoot = path.join(tmpRoot, "overlay");
     fs.mkdirSync(path.join(overlayRoot, "upper", "main"), { recursive: true });
     fs.mkdirSync(path.join(overlayRoot, "work", "main"), { recursive: true });

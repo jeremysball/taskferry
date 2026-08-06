@@ -16,7 +16,44 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { EventEmitter } from "node:events";
+import { after } from "node:test";
 import { createTaskManager, DEFAULT_SUMMARY_MODEL, parseEnvDenylist } from "./tasks.js";
+
+const trackedTempDirs = [];
+const trackedManagers = [];
+
+export function mkdtempTracked(prefix) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+  trackedTempDirs.push(dir);
+  return dir;
+}
+
+// createTaskManager() debounces its tasks.json write ~250ms after the last
+// change (PERSIST_DEBOUNCE_MS in tasks.js). Without this, a manager whose
+// last dispatch/event happened just before this file's tests finish can
+// still have that write pending when the trackedTempDirs cleanup below
+// deletes its stateDir out from under it, logging a spurious
+// "failed to persist task state: ENOENT" to stderr. Flushing every tracked
+// manager synchronously first (before removing any directory) closes that
+// race regardless of how fast or slow the rest of the file ran.
+export function trackManager(manager) {
+  trackedManagers.push(manager);
+  return manager;
+}
+
+after(() => {
+  for (const manager of trackedManagers) {
+    try {
+      manager.flushPersist();
+    } catch {
+      // Best-effort: a manager that never wrote anything, or whose stateDir
+      // is already gone for an unrelated reason, has nothing to flush.
+    }
+  }
+  for (const dir of trackedTempDirs) {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
 
 export { DEFAULT_SUMMARY_MODEL };
 export const EXTENSION_CONFIG_ERROR = 'Error: Extension "/x/y.js" error: Provider y: "baseUrl" is required when defining models.';
@@ -132,9 +169,9 @@ function makeTempDirs() {
   // scanning (and acting on) whatever a real, concurrently-running daemon
   // has actually left in /tmp on this host.
   return {
-    stateDir: fs.mkdtempSync(path.join(os.tmpdir(), AXI_TASKS_TEST_DIR)),
-    defaultCacheDir: fs.mkdtempSync(path.join(os.tmpdir(), AXI_TASKS_CACHE_DIR)),
-    defaultOverlayTmpRoot: fs.mkdtempSync(path.join(os.tmpdir(), AXI_TASKS_OVERLAY_DIR)),
+    stateDir: mkdtempTracked(AXI_TASKS_TEST_DIR),
+    defaultCacheDir: mkdtempTracked(AXI_TASKS_CACHE_DIR),
+    defaultOverlayTmpRoot: mkdtempTracked(AXI_TASKS_OVERLAY_DIR),
   };
 }
 
@@ -234,5 +271,5 @@ function buildManagerOptions(options, stateDir, defaultCacheDir, defaultOverlayT
 export function makeManager(options = {}) {
   const { stateDir, defaultCacheDir, defaultOverlayTmpRoot } = makeTempDirs();
   seedTestFixtures(stateDir, options.tasksFixture ?? [], options.logs ?? {});
-  return createTaskManager(buildManagerOptions(options, stateDir, defaultCacheDir, defaultOverlayTmpRoot));
+  return trackManager(createTaskManager(buildManagerOptions(options, stateDir, defaultCacheDir, defaultOverlayTmpRoot)));
 }

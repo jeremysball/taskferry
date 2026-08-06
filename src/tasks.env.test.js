@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { createTaskManager } from "./tasks.js";
-import { makeManager, fakeChild, baseTask, AMBIENT_VALUE, FAKE_SECRETS_ENV_PATH, AXI_TASKS_TEST_DIR, AXI_TASKS_CACHE_DIR, AXI_TASKS_OVERLAY_DIR, TASKS_STATE_FILE, FROM_CALLER, OCCUPYING_TASK, CAPTURED_DISPATCH, SRC1_LOG, DID_THING, SOL_MODEL } from "./tasks.test-helpers.js";
+import { trackManager, makeManager, fakeChild, baseTask, AMBIENT_VALUE, FAKE_SECRETS_ENV_PATH, AXI_TASKS_TEST_DIR, AXI_TASKS_CACHE_DIR, AXI_TASKS_OVERLAY_DIR, TASKS_STATE_FILE, FROM_CALLER, OCCUPYING_TASK, CAPTURED_DISPATCH, SRC1_LOG, DID_THING, SOL_MODEL, mkdtempTracked } from "./tasks.test-helpers.js";
 import { DEFAULT_SUMMARY_MODEL } from "./tasks.js";
 
 describe("caller-env union: basic dispatch and TASKFERRY_TASK_ID", () => {
@@ -207,14 +207,14 @@ describe("caller-env union: envFileVars merge with caller/ambient", () => {
 
 describe("caller-env union: envFile load at construction", () => {
   test("createTaskManager() with envFilePath but no envFileVars override loads via loadEnvFileFn once at construction", () => {
-    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), AXI_TASKS_TEST_DIR));
+    const stateDir = mkdtempTracked(AXI_TASKS_TEST_DIR);
     fs.writeFileSync(path.join(stateDir, TASKS_STATE_FILE), "[]");
-    const cacheDir = fs.mkdtempSync(path.join(os.tmpdir(), AXI_TASKS_CACHE_DIR));
-    const overlayTmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), AXI_TASKS_OVERLAY_DIR));
+    const cacheDir = mkdtempTracked(AXI_TASKS_CACHE_DIR);
+    const overlayTmpRoot = mkdtempTracked(AXI_TASKS_OVERLAY_DIR);
     let loadCalls = 0;
     let capturedOpts = null;
 
-    const mgr = createTaskManager({
+    const mgr = trackManager(createTaskManager({
       stateDir,
       cacheDir,
       overlayTmpRoot,
@@ -225,7 +225,7 @@ describe("caller-env union: envFile load at construction", () => {
       envFilePath: FAKE_SECRETS_ENV_PATH,
       loadEnvFileFn: (p) => { loadCalls++; assert.equal(p, FAKE_SECRETS_ENV_PATH); return { AXI_TEST_FROM_LOADER: "loaded-once" }; },
       watchEnvFileFn: () => ({ close: () => {} }),
-    });
+    }));
 
     assert.equal(loadCalls, 1, "loadEnvFileFn must run exactly once, at construction, not per-dispatch");
     mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
@@ -235,13 +235,13 @@ describe("caller-env union: envFile load at construction", () => {
   });
 
   test("createTaskManager() propagates a loadEnvFileFn throw synchronously, before any dispatch is possible", () => {
-    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), AXI_TASKS_TEST_DIR));
+    const stateDir = mkdtempTracked(AXI_TASKS_TEST_DIR);
     fs.writeFileSync(path.join(stateDir, TASKS_STATE_FILE), "[]");
-    const cacheDir = fs.mkdtempSync(path.join(os.tmpdir(), AXI_TASKS_CACHE_DIR));
-    const overlayTmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), AXI_TASKS_OVERLAY_DIR));
+    const cacheDir = mkdtempTracked(AXI_TASKS_CACHE_DIR);
+    const overlayTmpRoot = mkdtempTracked(AXI_TASKS_OVERLAY_DIR);
 
     assert.throws(
-      () => createTaskManager({
+      () => trackManager(createTaskManager({
         stateDir,
         cacheDir,
         overlayTmpRoot,
@@ -251,19 +251,19 @@ describe("caller-env union: envFile load at construction", () => {
         killFn: () => {},
         envFilePath: "/fake/missing.env",
         loadEnvFileFn: () => { throw new Error("error: env file not found: /fake/missing.env"); },
-      }),
+      })),
       /env file not found/
     );
   });
 
   test("omitting envFilePath never calls loadEnvFileFn and defaults envFileVars to {}", () => {
-    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), AXI_TASKS_TEST_DIR));
+    const stateDir = mkdtempTracked(AXI_TASKS_TEST_DIR);
     fs.writeFileSync(path.join(stateDir, TASKS_STATE_FILE), "[]");
-    const cacheDir = fs.mkdtempSync(path.join(os.tmpdir(), AXI_TASKS_CACHE_DIR));
-    const overlayTmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), AXI_TASKS_OVERLAY_DIR));
+    const cacheDir = mkdtempTracked(AXI_TASKS_CACHE_DIR);
+    const overlayTmpRoot = mkdtempTracked(AXI_TASKS_OVERLAY_DIR);
     let loadCalls = 0;
 
-    createTaskManager({
+    trackManager(createTaskManager({
       stateDir,
       cacheDir,
       overlayTmpRoot,
@@ -272,7 +272,7 @@ describe("caller-env union: envFile load at construction", () => {
       spawnFn: () => fakeChild(),
       killFn: () => {},
       loadEnvFileFn: () => { loadCalls++; return {}; },
-    });
+    }));
 
     assert.equal(loadCalls, 0);
   });
@@ -280,13 +280,13 @@ describe("caller-env union: envFile load at construction", () => {
   test("an explicit empty-string TASKFERRY_ENV_FILE disables loading rather than falling through to config.envFile (review finding: the old `||` check treated \"\" as unset)", (t) => {
     process.env.TASKFERRY_ENV_FILE = "";
     t.after(() => delete process.env.TASKFERRY_ENV_FILE);
-    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), AXI_TASKS_TEST_DIR));
+    const stateDir = mkdtempTracked(AXI_TASKS_TEST_DIR);
     fs.writeFileSync(path.join(stateDir, TASKS_STATE_FILE), "[]");
-    const cacheDir = fs.mkdtempSync(path.join(os.tmpdir(), AXI_TASKS_CACHE_DIR));
-    const overlayTmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), AXI_TASKS_OVERLAY_DIR));
+    const cacheDir = mkdtempTracked(AXI_TASKS_CACHE_DIR);
+    const overlayTmpRoot = mkdtempTracked(AXI_TASKS_OVERLAY_DIR);
     let loadCalls = 0;
 
-    createTaskManager({
+    trackManager(createTaskManager({
       stateDir,
       cacheDir,
       overlayTmpRoot,
@@ -296,19 +296,19 @@ describe("caller-env union: envFile load at construction", () => {
       killFn: () => {},
       config: { envFile: "/would/have/loaded/this.env" },
       loadEnvFileFn: () => { loadCalls++; return { SHOULD_NOT_APPEAR: "leaked" }; },
-    });
+    }));
 
     assert.equal(loadCalls, 0, "an explicit empty TASKFERRY_ENV_FILE must disable loading, not fall through to config.envFile");
   });
 
   test("createTaskManager() starts a live watch via watchEnvFileFn, passed the resolved envFilePath", () => {
-    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), AXI_TASKS_TEST_DIR));
+    const stateDir = mkdtempTracked(AXI_TASKS_TEST_DIR);
     fs.writeFileSync(path.join(stateDir, TASKS_STATE_FILE), "[]");
-    const cacheDir = fs.mkdtempSync(path.join(os.tmpdir(), AXI_TASKS_CACHE_DIR));
-    const overlayTmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), AXI_TASKS_OVERLAY_DIR));
+    const cacheDir = mkdtempTracked(AXI_TASKS_CACHE_DIR);
+    const overlayTmpRoot = mkdtempTracked(AXI_TASKS_OVERLAY_DIR);
     const watchCalls = [];
 
-    createTaskManager({
+    trackManager(createTaskManager({
       stateDir,
       cacheDir,
       overlayTmpRoot,
@@ -319,7 +319,7 @@ describe("caller-env union: envFile load at construction", () => {
       envFilePath: FAKE_SECRETS_ENV_PATH,
       loadEnvFileFn: () => ({ AXI_TEST_INITIAL: "initial" }),
       watchEnvFileFn: (p, options) => { watchCalls.push([p, options]); return { close: () => {} }; },
-    });
+    }));
 
     assert.equal(watchCalls.length, 1, "watchEnvFileFn must run exactly once, at construction");
     assert.equal(watchCalls[0][0], FAKE_SECRETS_ENV_PATH);
@@ -330,13 +330,13 @@ describe("caller-env union: envFile load at construction", () => {
 
 describe("caller-env union: envFile watch reload/error/setup/close", () => {
   test("omitting envFilePath never calls watchEnvFileFn", () => {
-    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), AXI_TASKS_TEST_DIR));
+    const stateDir = mkdtempTracked(AXI_TASKS_TEST_DIR);
     fs.writeFileSync(path.join(stateDir, TASKS_STATE_FILE), "[]");
-    const cacheDir = fs.mkdtempSync(path.join(os.tmpdir(), AXI_TASKS_CACHE_DIR));
-    const overlayTmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), AXI_TASKS_OVERLAY_DIR));
+    const cacheDir = mkdtempTracked(AXI_TASKS_CACHE_DIR);
+    const overlayTmpRoot = mkdtempTracked(AXI_TASKS_OVERLAY_DIR);
     let watchCalls = 0;
 
-    createTaskManager({
+    trackManager(createTaskManager({
       stateDir,
       cacheDir,
       overlayTmpRoot,
@@ -345,20 +345,20 @@ describe("caller-env union: envFile watch reload/error/setup/close", () => {
       spawnFn: () => fakeChild(),
       killFn: () => {},
       watchEnvFileFn: () => { watchCalls++; return { close: () => {} }; },
-    });
+    }));
 
     assert.equal(watchCalls, 0);
   });
 
   test("a watchEnvFileFn onReload call updates envFileVars for every dispatch after it fires, not ones already in flight", () => {
-    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), AXI_TASKS_TEST_DIR));
+    const stateDir = mkdtempTracked(AXI_TASKS_TEST_DIR);
     fs.writeFileSync(path.join(stateDir, TASKS_STATE_FILE), "[]");
-    const cacheDir = fs.mkdtempSync(path.join(os.tmpdir(), AXI_TASKS_CACHE_DIR));
-    const overlayTmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), AXI_TASKS_OVERLAY_DIR));
+    const cacheDir = mkdtempTracked(AXI_TASKS_CACHE_DIR);
+    const overlayTmpRoot = mkdtempTracked(AXI_TASKS_OVERLAY_DIR);
     let capturedOpts = null;
     let onReload;
 
-    const mgr = createTaskManager({
+    const mgr = trackManager(createTaskManager({
       stateDir,
       cacheDir,
       overlayTmpRoot,
@@ -373,7 +373,7 @@ describe("caller-env union: envFile watch reload/error/setup/close", () => {
       // otherwise queue the second dispatch instead of launching it
       // immediately.
       lowerdirStaggerMs: 0,
-    });
+    }));
 
     mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
     assert.equal(capturedOpts.env.AXI_TEST_ROTATE, "before-rotation");
@@ -385,10 +385,10 @@ describe("caller-env union: envFile watch reload/error/setup/close", () => {
   });
 
   test("a watchEnvFileFn onError call (a failed reload) leaves envFileVars at its last-known-good value", () => {
-    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), AXI_TASKS_TEST_DIR));
+    const stateDir = mkdtempTracked(AXI_TASKS_TEST_DIR);
     fs.writeFileSync(path.join(stateDir, TASKS_STATE_FILE), "[]");
-    const cacheDir = fs.mkdtempSync(path.join(os.tmpdir(), AXI_TASKS_CACHE_DIR));
-    const overlayTmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), AXI_TASKS_OVERLAY_DIR));
+    const cacheDir = mkdtempTracked(AXI_TASKS_CACHE_DIR);
+    const overlayTmpRoot = mkdtempTracked(AXI_TASKS_OVERLAY_DIR);
     let capturedOpts = null;
     let onError;
     const warnings = [];
@@ -397,7 +397,7 @@ describe("caller-env union: envFile watch reload/error/setup/close", () => {
 
     let mgr;
     try {
-      mgr = createTaskManager({
+      mgr = trackManager(createTaskManager({
         stateDir,
         cacheDir,
         overlayTmpRoot,
@@ -408,7 +408,7 @@ describe("caller-env union: envFile watch reload/error/setup/close", () => {
         envFilePath: FAKE_SECRETS_ENV_PATH,
         loadEnvFileFn: () => ({ AXI_TEST_STABLE: "good-value" }),
         watchEnvFileFn: (_p, options) => { onError = options.onError; return { close: () => {} }; },
-      });
+      }));
 
       onError(new Error("transient mid-rename read failure"));
 
@@ -421,10 +421,10 @@ describe("caller-env union: envFile watch reload/error/setup/close", () => {
   });
 
   test("a watchEnvFileFn setup failure is caught and logged rather than blocking daemon startup", () => {
-    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), AXI_TASKS_TEST_DIR));
+    const stateDir = mkdtempTracked(AXI_TASKS_TEST_DIR);
     fs.writeFileSync(path.join(stateDir, TASKS_STATE_FILE), "[]");
-    const cacheDir = fs.mkdtempSync(path.join(os.tmpdir(), AXI_TASKS_CACHE_DIR));
-    const overlayTmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), AXI_TASKS_OVERLAY_DIR));
+    const cacheDir = mkdtempTracked(AXI_TASKS_CACHE_DIR);
+    const overlayTmpRoot = mkdtempTracked(AXI_TASKS_OVERLAY_DIR);
     const warnings = [];
     const originalWrite = process.stderr.write;
     process.stderr.write = (chunk) => { warnings.push(chunk); return true; };
@@ -432,7 +432,7 @@ describe("caller-env union: envFile watch reload/error/setup/close", () => {
     let mgr;
     try {
       assert.doesNotThrow(() => {
-        mgr = createTaskManager({
+        mgr = trackManager(createTaskManager({
           stateDir,
           cacheDir,
           overlayTmpRoot,
@@ -443,7 +443,7 @@ describe("caller-env union: envFile watch reload/error/setup/close", () => {
           envFilePath: FAKE_SECRETS_ENV_PATH,
           loadEnvFileFn: () => ({ AXI_TEST_STILL_WORKS: "yes" }),
           watchEnvFileFn: () => { throw new Error("ENOENT: fake watch setup failure"); },
-        });
+        }));
       });
       assert.ok(warnings.some((w) => w.includes("could not watch env file") && w.includes("fake watch setup failure")));
     } finally {
@@ -453,13 +453,13 @@ describe("caller-env union: envFile watch reload/error/setup/close", () => {
   });
 
   test("manager.close() closes the env-file watcher returned by watchEnvFileFn", () => {
-    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), AXI_TASKS_TEST_DIR));
+    const stateDir = mkdtempTracked(AXI_TASKS_TEST_DIR);
     fs.writeFileSync(path.join(stateDir, TASKS_STATE_FILE), "[]");
-    const cacheDir = fs.mkdtempSync(path.join(os.tmpdir(), AXI_TASKS_CACHE_DIR));
-    const overlayTmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), AXI_TASKS_OVERLAY_DIR));
+    const cacheDir = mkdtempTracked(AXI_TASKS_CACHE_DIR);
+    const overlayTmpRoot = mkdtempTracked(AXI_TASKS_OVERLAY_DIR);
     let closeCalls = 0;
 
-    const mgr = createTaskManager({
+    const mgr = trackManager(createTaskManager({
       stateDir,
       cacheDir,
       overlayTmpRoot,
@@ -470,7 +470,7 @@ describe("caller-env union: envFile watch reload/error/setup/close", () => {
       envFilePath: FAKE_SECRETS_ENV_PATH,
       loadEnvFileFn: () => ({}),
       watchEnvFileFn: () => ({ close: () => { closeCalls++; } }),
-    });
+    }));
 
     mgr.close();
     assert.equal(closeCalls, 1);

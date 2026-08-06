@@ -1,4 +1,4 @@
-import { test, describe } from "node:test";
+import { test, describe, after } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -6,12 +6,18 @@ import path from "node:path";
 import { resolveAdvisorContextChars, claudeTranscriptPath, extractTranscriptText } from "./advisor-context.js";
 import { UsageError } from "./args.js";
 
+const trackedTmpDirs = [];
+after(() => {
+  for (const d of trackedTmpDirs) fs.rmSync(d, { recursive: true, force: true });
+});
+
+
 const TASKFERRY_ADVISOR_CONFIG_PREFIX = "taskferry-advisor-config-";
 const TASKFERRY_EXTRACT_TRANSCRIPT_PREFIX = "taskferry-extract-transcript-";
 const TRANSCRIPT_JSONL_FILENAME = "transcript.jsonl";
 
 function mkTmpDir(prefix) {
-  return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix)); trackedTmpDirs.push(dir); return dir;
 }
 
 describe("advisor context helpers", () => {
@@ -39,6 +45,7 @@ describe("advisor context helpers", () => {
 
   test("extractTranscriptText() keeps only user/assistant text turns, dropping thinking, tool_use, and tool_result noise", () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), TASKFERRY_EXTRACT_TRANSCRIPT_PREFIX));
+    trackedTmpDirs.push(dir);
     const filePath = path.join(dir, TRANSCRIPT_JSONL_FILENAME);
     const lines = [
       { type: "user", message: { role: "user", content: "please fix the bug" } },
@@ -61,6 +68,7 @@ describe("advisor context helpers", () => {
 
   test("extractTranscriptText() returns the last N characters of the extracted text when it exceeds the budget", () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), TASKFERRY_EXTRACT_TRANSCRIPT_PREFIX));
+    trackedTmpDirs.push(dir);
     const filePath = path.join(dir, TRANSCRIPT_JSONL_FILENAME);
     const lines = [
       { type: "user", message: { role: "user", content: "first message" } },
@@ -80,6 +88,7 @@ describe("advisor context helpers", () => {
 
   test("extractTranscriptText() skips malformed lines instead of throwing", () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), TASKFERRY_EXTRACT_TRANSCRIPT_PREFIX));
+    trackedTmpDirs.push(dir);
     const filePath = path.join(dir, TRANSCRIPT_JSONL_FILENAME);
     fs.writeFileSync(filePath, 'not valid json\n{"type":"user","message":{"role":"user","content":"still readable"}}\n');
 
@@ -90,6 +99,7 @@ describe("advisor context helpers", () => {
 
   test("extractTranscriptText() skips a line that parses to the JSON literal null instead of crashing on entry.type", () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), TASKFERRY_EXTRACT_TRANSCRIPT_PREFIX));
+    trackedTmpDirs.push(dir);
     const filePath = path.join(dir, TRANSCRIPT_JSONL_FILENAME);
     fs.writeFileSync(filePath, 'null\n{"type":"user","message":{"role":"user","content":"still readable"}}\n');
 
@@ -100,6 +110,7 @@ describe("advisor context helpers", () => {
 
   test("extractTranscriptText() strips a leading UTF-8 BOM instead of silently dropping the first line", () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), TASKFERRY_EXTRACT_TRANSCRIPT_PREFIX));
+    trackedTmpDirs.push(dir);
     const filePath = path.join(dir, TRANSCRIPT_JSONL_FILENAME);
     fs.writeFileSync(filePath, '﻿{"type":"user","message":{"role":"user","content":"first turn"}}\n');
 
@@ -110,6 +121,7 @@ describe("advisor context helpers", () => {
 
   test("extractTranscriptText() drops a text block with no text field instead of rendering the literal string 'undefined'", () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), TASKFERRY_EXTRACT_TRANSCRIPT_PREFIX));
+    trackedTmpDirs.push(dir);
     const filePath = path.join(dir, TRANSCRIPT_JSONL_FILENAME);
     const lines = [
       { type: "assistant", message: { role: "assistant", content: [{ type: "text" }] } },
@@ -125,6 +137,7 @@ describe("advisor context helpers", () => {
 
   test("extractTranscriptText() bounds its read to a tail of the file instead of loading the whole thing", () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), TASKFERRY_EXTRACT_TRANSCRIPT_PREFIX));
+    trackedTmpDirs.push(dir);
     const filePath = path.join(dir, TRANSCRIPT_JSONL_FILENAME);
     // Pad with a huge noise line so the file is far bigger than the small
     // budget below would need if the read were properly bounded.

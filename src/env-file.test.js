@@ -1,10 +1,16 @@
-import { test, describe } from "node:test";
+import { test, describe, after } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { parseEnvFile, loadEnvFile, watchEnvFile } from "./env-file.js";
+
+const trackedTmpDirs = [];
+after(() => {
+  for (const d of trackedTmpDirs) fs.rmSync(d, { recursive: true, force: true });
+});
+
 
 const X_ENV_PATH = "/tmp/x.env";
 const ENV_WATCH_TEST_PREFIX = "env-file-watch-test-";
@@ -170,6 +176,7 @@ describe("loadEnvFile()", () => {
 describe("watchEnvFile()", () => {
   function tmpEnvFile(initialContents) {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), ENV_WATCH_TEST_PREFIX));
+    trackedTmpDirs.push(dir);
     const filePath = path.join(dir, SECRETS_ENV_NAME);
     fs.writeFileSync(filePath, initialContents, { mode: 0o600 });
     return { dir, filePath };
@@ -245,6 +252,7 @@ describe("watchEnvFile()", () => {
   // routing logic.
   test("routes a reload failure to onError and keeps the watch alive for the next change", async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), ENV_WATCH_TEST_PREFIX));
+    trackedTmpDirs.push(dir);
     const filePath = path.join(dir, SECRETS_ENV_NAME);
     let call = 0;
     const errors = [];
@@ -278,6 +286,7 @@ describe("watchEnvFile()", () => {
 
   test("coalesces a burst of rapid changes into a single reload via the debounce window", async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), ENV_WATCH_TEST_PREFIX));
+    trackedTmpDirs.push(dir);
     const filePath = path.join(dir, SECRETS_ENV_NAME);
     fs.writeFileSync(filePath, "FOO=0\n");
     let loadCalls = 0;

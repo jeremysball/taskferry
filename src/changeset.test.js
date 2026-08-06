@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { overlayPaths, subOverlayPaths, subOverlaySlug, extractGitDiff, resolvePreDispatchHead, buildMergedViewBwrapArgs, extractNonGitDiff, applyChangeset, cleanupOverlay, detectHeadDrift } from "./changeset.js";
+import { overlayPaths, subOverlayPaths, subOverlaySlug, extractGitDiff, resolvePreDispatchHead, buildMergedViewBwrapArgs, extractNonGitDiff, applyChangeset, cleanupOverlay, detectHeadDrift, resolveHeadDrift } from "./changeset.js";
 
 // Shared fixture literals lifted to module scope so the sonarjs
 // no-duplicate-string rule stays quiet (each literal now appears once, in
@@ -256,6 +256,94 @@ describe("detectHeadDrift()", () => {
   test("returns null (fail-open) when the HEAD check itself is inconclusive", () => {
     const runCommand = () => ({ status: 128, stdout: "", stderr: GIT_NOT_A_REPO_STDERR_NL, error: null });
     assert.equal(detectHeadDrift(REPO_DIR, runCommand, PRE_DISPATCH_HEAD), null);
+  });
+});
+
+describe("resolveHeadDrift()", () => {
+  const CURRENT_HEAD = "def456";
+  const SCRATCH_DIR = "/tmp/taskferry-stale-base-scratch";
+
+  test("recovered: true on a clean 3-way merge (add, apply, status, remove all succeed with no conflict markers)", () => {
+    const calls = [];
+    const runCommand = (_command, args) => {
+      calls.push(args.join(" "));
+      if (args.includes("add")) return { status: 0, stdout: "", stderr: "", error: null };
+      if (args.includes("apply")) return { status: 0, stdout: "", stderr: "", error: null };
+      if (args.includes("status")) return { status: 0, stdout: "", stderr: "", error: null };
+      if (args.includes("remove")) return { status: 0, stdout: "", stderr: "", error: null };
+      throw new Error(`unexpected git invocation: ${args.join(" ")}`);
+    };
+    const result = resolveHeadDrift({ directory: REPO_DIR, diffPath: DIFF_PATCH, currentHead: CURRENT_HEAD, scratchDir: SCRATCH_DIR, runCommand });
+    assert.deepEqual(result, { recovered: true, conflictDetail: null });
+    assert.ok(calls.some((c) => c.includes(`worktree add --detach ${SCRATCH_DIR} ${CURRENT_HEAD}`)));
+    assert.ok(calls.some((c) => c.includes(`apply --3way ${DIFF_PATCH}`)));
+    assert.ok(calls.some((c) => c.includes("status --porcelain")));
+    assert.ok(calls.some((c) => c.includes(`worktree remove --force ${SCRATCH_DIR}`)));
+  });
+
+  test("recovered: false on a genuine conflict (apply exits non-zero and status reports UU)", () => {
+    const runCommand = (_command, args) => {
+      if (args.includes("add")) return { status: 0, stdout: "", stderr: "", error: null };
+      if (args.includes("apply")) return { status: 1, stdout: "", stderr: "Applied patch to 'f.txt' with conflicts.\n", error: null };
+      if (args.includes("status")) return { status: 0, stdout: "UU f.txt\n", stderr: "", error: null };
+      if (args.includes("remove")) return { status: 0, stdout: "", stderr: "", error: null };
+      throw new Error(`unexpected git invocation: ${args.join(" ")}`);
+    };
+    const result = resolveHeadDrift({ directory: REPO_DIR, diffPath: DIFF_PATCH, currentHead: CURRENT_HEAD, scratchDir: SCRATCH_DIR, runCommand });
+    assert.equal(result.recovered, false);
+    assert.match(result.conflictDetail, /conflicts/);
+  });
+
+  test("recovered: false when status reports conflict markers even though apply's own exit code was 0", () => {
+    // Defensive: pin the check on git status --porcelain, not solely on
+    // apply's exit code, since --3way's exit-code semantics are exactly
+    // what the spec's --check correction warns not to trust blindly.
+    const runCommand = (_command, args) => {
+      if (args.includes("add")) return { status: 0, stdout: "", stderr: "", error: null };
+      if (args.includes("apply")) return { status: 0, stdout: "", stderr: "", error: null };
+      if (args.includes("status")) return { status: 0, stdout: "AA g.txt\n", stderr: "", error: null };
+      if (args.includes("remove")) return { status: 0, stdout: "", stderr: "", error: null };
+      throw new Error(`unexpected git invocation: ${args.join(" ")}`);
+    };
+    const result = resolveHeadDrift({ directory: REPO_DIR, diffPath: DIFF_PATCH, currentHead: CURRENT_HEAD, scratchDir: SCRATCH_DIR, runCommand });
+    assert.equal(result.recovered, false);
+  });
+
+  test("recovered: null when git worktree add itself fails (no apply attempted, could not evaluate)", () => {
+    let applyAttempted = false;
+    const runCommand = (_command, args) => {
+      if (args.includes("add")) return { status: 128, stdout: "", stderr: "fatal: could not create work tree dir\n", error: null };
+      if (args.includes("apply")) applyAttempted = true;
+      return { status: 0, stdout: "", stderr: "", error: null };
+    };
+    const result = resolveHeadDrift({ directory: REPO_DIR, diffPath: DIFF_PATCH, currentHead: CURRENT_HEAD, scratchDir: SCRATCH_DIR, runCommand });
+    assert.equal(result.recovered, null);
+    assert.match(result.conflictDetail, /could not create work tree dir/);
+    assert.equal(applyAttempted, false, "must never attempt the apply once worktree add has failed");
+  });
+
+  test("always runs worktree remove, even after a genuine conflict", () => {
+    let removeRan = false;
+    const runCommand = (_command, args) => {
+      if (args.includes("add")) return { status: 0, stdout: "", stderr: "", error: null };
+      if (args.includes("apply")) return { status: 1, stdout: "", stderr: "conflict\n", error: null };
+      if (args.includes("status")) return { status: 0, stdout: "UU f.txt\n", stderr: "", error: null };
+      if (args.includes("remove")) { removeRan = true; return { status: 0, stdout: "", stderr: "", error: null }; }
+      throw new Error(`unexpected git invocation: ${args.join(" ")}`);
+    };
+    resolveHeadDrift({ directory: REPO_DIR, diffPath: DIFF_PATCH, currentHead: CURRENT_HEAD, scratchDir: SCRATCH_DIR, runCommand });
+    assert.equal(removeRan, true);
+  });
+
+  test("the live directory is only ever read (worktree add's source), never written -- apply/status/remove all target scratchDir, not directory", () => {
+    const targets = [];
+    const runCommand = (_command, args) => {
+      if (args.includes("apply") || args.includes("status")) targets.push(args[1]);
+      if (args.includes("add")) return { status: 0, stdout: "", stderr: "", error: null };
+      return { status: 0, stdout: "", stderr: "", error: null };
+    };
+    resolveHeadDrift({ directory: REPO_DIR, diffPath: DIFF_PATCH, currentHead: CURRENT_HEAD, scratchDir: SCRATCH_DIR, runCommand });
+    assert.deepEqual(targets, [SCRATCH_DIR, SCRATCH_DIR]);
   });
 });
 

@@ -111,6 +111,48 @@ export function detectHeadDrift(directory, runCommand, preDispatchHead) {
   return null;
 }
 
+// Matches a `git status --porcelain` line for any unmerged path (both
+// added, both deleted, or one/both sides modified) -- the exact signature
+// the spec's --check correction says is the only trustworthy way to detect
+// a real conflict, since --3way --check's own exit code can't be trusted
+// (see the spec's "A --check correction" section).
+const CONFLICT_STATUS_PATTERN = /^(?:UU|AA|DD|AU|UD|UA|DU) /m;
+
+/**
+ * Probes whether `diffPath` (already extracted, anchored on the original
+ * preDispatchHead) would forward-apply cleanly onto `currentHead` via a real
+ * `git apply --3way` -- never `--check`, which cannot distinguish a clean
+ * merge from a real conflict (spec "A `--check` correction"). Runs entirely
+ * inside a disposable detached worktree created off the live `directory`;
+ * `directory` itself is only ever read (as `worktree add`'s source) and is
+ * removed unconditionally afterward, whether the merge succeeded or not.
+ * @param {object} params
+ * @param {string} params.directory - live directory; read-only source for the scratch worktree
+ * @param {string} params.diffPath
+ * @param {string} params.currentHead
+ * @param {string} params.scratchDir
+ * @param {typeof defaultRunCommand} [params.runCommand]
+ * @returns {{recovered: boolean|null, conflictDetail: string|null}}
+ */
+export function resolveHeadDrift({ directory, diffPath, currentHead, scratchDir, runCommand = defaultRunCommand }) {
+  const add = runCommand("git", ["-C", directory, "worktree", "add", "--detach", scratchDir, currentHead]);
+  if (add.error || add.status !== 0) {
+    return { recovered: null, conflictDetail: `could not evaluate: ${gitApplyFailureReason(add)}` };
+  }
+  const apply = runCommand("git", ["-C", scratchDir, "apply", "--3way", diffPath]);
+  const statusResult = runCommand("git", ["-C", scratchDir, "status", "--porcelain"]);
+  // Unconditional cleanup regardless of outcome; a failed removal doesn't
+  // change the merge outcome already computed above (it's a best-effort
+  // tidy-up of a throwaway worktree, same class as cleanupOverlay's own
+  // best-effort semantics elsewhere in this file).
+  runCommand("git", ["-C", directory, "worktree", "remove", "--force", scratchDir]);
+  const hasConflictMarkers = CONFLICT_STATUS_PATTERN.test(statusResult.stdout || "");
+  if (!apply.error && apply.status === 0 && !hasConflictMarkers) {
+    return { recovered: true, conflictDetail: null };
+  }
+  return { recovered: false, conflictDetail: gitApplyFailureReason(apply) || statusResult.stdout.trim() || null };
+}
+
 /**
  * @param {string} directory
  * @param {typeof defaultRunCommand} [runCommand]

@@ -86,6 +86,9 @@ jobs:
           sudo ninja -C build install
           bwrap --help | grep -q -- --overlay-src
 
+      - name: Install opencode CLI
+        run: npm install -g opencode-ai
+
       - name: Run integration (real CLI + daemon + live dispatch, no mocks)
         env:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}

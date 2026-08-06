@@ -98,6 +98,18 @@ describe("loadConfig()", () => {
     assert.throws(() => loadConfig({ configPath }), /error: config key "overlayEnabled".*must be a boolean.*\nhelp:/s);
   });
 
+  test("accepts a valid preOutputMaxMs value", () => {
+    const dir = tmpConfigDir();
+    const configPath = writeConfig(dir, JSON.stringify({ preOutputMaxMs: 600000 }));
+    assert.deepEqual(loadConfig({ configPath }), { preOutputMaxMs: 600000 });
+  });
+
+  test("rejects a wrong-typed preOutputMaxMs value", () => {
+    const dir = tmpConfigDir();
+    const configPath = writeConfig(dir, JSON.stringify({ preOutputMaxMs: "600000" }));
+    assert.throws(() => loadConfig({ configPath }), /error: config key "preOutputMaxMs".*must be a number.*\nhelp:/s);
+  });
+
   test("accepts a valid lowerdirStaggerMs value", () => {
     const dir = tmpConfigDir();
     const configPath = writeConfig(dir, JSON.stringify({ lowerdirStaggerMs: 5000 }));

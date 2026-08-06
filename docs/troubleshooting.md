@@ -81,18 +81,29 @@ first triggered its auto-start, not necessarily your current shell — see
 binary, stop the existing daemon (it started before that binary was on
 `PATH`) and let the next command spawn a fresh one.
 
-## A task is stuck `crashed` with `failureReason: "no_output_timeout"`
+## A task is stuck `crashed` with `failureReason: "no_output_timeout_dead_spawn"` or `"no_output_timeout_stalled"`
 
-The task produced no parseable log event within
-`TASKFERRY_NO_OUTPUT_TIMEOUT_MS` (default 256000ms) and the watchdog killed
-it. This applies equally to either executor. Read the log directly
-(`taskferry status <id> --full` for the `logPath`) to see what, if
-anything, the selected worker wrote before being killed — a common cause
-is a prompt or model that needs an interactive step taskferry's
-non-interactive invocation can't satisfy (`opencode run --auto` for the
-`opencode` executor; `pi`'s own non-interactive mode for `pi`). Raise
-`TASKFERRY_NO_OUTPUT_TIMEOUT_MS` only if the task is legitimately slow to
-produce its first log line, not to paper over a hung worker.
+The task went silent past the applicable no-output deadline and the
+watchdog killed it. `"no_output_timeout_dead_spawn"` means it never wrote a
+single parseable log event within `TASKFERRY_NO_OUTPUT_TIMEOUT_MS` (default
+256000ms) — the worker or provider never started producing anything.
+`"no_output_timeout_stalled"` means it did produce at least one event and
+then went silent past `TASKFERRY_POST_OUTPUT_NO_OUTPUT_TIMEOUT_MS` (default
+400000ms) — it did real work, then hung mid-task. Both apply equally to
+either executor. Read the log directly (`taskferry status <id> --full` for
+the `logPath`) to see what, if anything, the selected worker wrote before
+being killed — a common cause of the dead-spawn variant is a prompt or
+model that needs an interactive step taskferry's non-interactive invocation
+can't satisfy (`opencode run --auto` for the `opencode` executor; `pi`'s
+own non-interactive mode for `pi`). Raise the relevant timeout only if the
+task is legitimately slow, not to paper over a hung worker.
+
+If the log shows the worker recovered on its own after a transient error
+mid-run and reached a genuine final answer, check `status` again: taskferry
+reclassifies that specific pattern (a `crashed` exit whose log still ends
+in a real `step_finish "stop"`) to `"done"` at settlement, keeping
+`failureReason` set as a record. A task stuck `crashed` here never reached
+that point.
 
 ## A task is stuck `crashed` with a provider-failure `failureReason`
 

@@ -853,7 +853,7 @@ test("doctor --stats calls task.list and returns computeDoctorStats() output, sk
         counts: { queued: 0, running: 0, done: 1, crashed: 1, cancelled: 0, unknown: 0 },
         tasks: [
           { id: "a", status: "done", model: "m1", startedAt: "2026-08-01T10:00:00.000Z", failureReason: null },
-          { id: "b", status: "crashed", model: "m1", startedAt: "2026-08-01T11:00:00.000Z", failureReason: "no_output_timeout" },
+          { id: "b", status: "crashed", model: "m1", startedAt: "2026-08-01T11:00:00.000Z", failureReason: "no_output_timeout_dead_spawn" },
         ],
       };
     },

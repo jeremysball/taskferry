@@ -76,6 +76,33 @@ narration will still report success. If multiple worktrees need to share
 scratch files (an SDD plan's ledger, briefs, reports), copy them into each
 worktree instead of symlinking across the sandbox boundary.
 
+## Enabling The Verification Gate
+
+A repo with a `.taskferry.toml` at its root gets an automatic
+settle-time gate — every dispatched worker is told about the check
+command in its prompt, then that same command runs inside the worker's
+copy-on-write overlay at settle, and `accept` refuses any task whose
+gate has not settled in your favor. Scaffold one with `taskferry init`:
+
+```sh
+taskferry init
+```
+
+`init` runs in literal cwd (no `--directory` flag, no workspace-root
+redirect) and detects the project's ecosystem — package.json's
+`check`/`lint`/`typecheck`/`test` scripts, or a marker file
+(`pyproject.toml`, `go.mod`, `Cargo.toml`, `deno.json[c]`, `bunfig.toml`)
+— proposing a `check` command. On a TTY it asks before writing the
+detected value in directly; without a TTY it always writes a commented
+fill-in template, so the file is never silently encoded with a guess
+nobody approved. Run it once per repo (or per worktree if each
+worktree wants its own gate), commit the result, and the next dispatch
+picks it up automatically — no daemon restart required. The schema is
+documented in [config.md](config.md#taskferrytoml); the gate's accept
+refusal / `--force` override behavior is in "Verification gate (`accept`
+refusal and `--force`)" under "Verifying A Worker's Claimed Changeset"
+below. `init` never overwrites an existing `.taskferry.toml`.
+
 ## Worker Contract
 
 - Select the worker model and variant explicitly when the task needs them:
@@ -96,7 +123,13 @@ worktree instead of symlinking across the sandbox boundary.
   opencode` explicitly whenever the task needs a specific CLI regardless of
   that default. Both also accept `--class <name>` to tag the task with a
   free-text classification for telemetry aggregation (any non-empty string;
-  taskferry does not validate against a fixed list).
+  taskferry does not validate against a fixed list). Both also accept
+  `--parent-task <id>` to tag the dispatch as fixing/retrying an earlier
+  task (persisted as `parentTaskId`, surfaced by `taskferry status <id>` /
+  `taskferry result <id> --fields parentTaskId`); pass it whenever a
+  fix-forward round is resuming from a known failing task — the parent
+  task's check-gate failure message echoes the link, so the chain stays
+  traceable across rounds instead of looking like an unrelated re-dispatch.
 - Start fresh sessions for each separate implementation task and each reviewer.
 - Resume only the implementer session for a fix to that same task.
 - Keep the task brief and directory explicit so the worker operates in the intended
@@ -143,11 +176,56 @@ taskferry accept <id>
 `git -C "<worktree>" status --short` checks become meaningful again, since
 the diff has now actually landed.
 
-If `accept` itself fails (a conflicting `git apply` -- the lower moved
-under a long-running ferry, see "Always Use A Worktree" above), don't
-re-dispatch reflexively: `taskferry result <id> --diff` still has the
-worker's changes, so resolve the conflict by hand or reject and retry with
-a fresh dispatch against the now-current directory.
+### Verification gate (`accept` refusal and `--force`)
+
+A repo with a `.taskferry.toml` at its root that declares a `check`
+command (scaffold one with `taskferry init`; see
+[config.md](config.md#taskferrytoml) for the schema) runs that command
+automatically inside the worker's copy-on-write overlay at settle. The
+gate's verdict is recorded on the task as `checkStatus` (`none`/`running`/
+`passed`/`failed`/`timeout`/`interrupted`) and surfaces on
+`taskferry status <id> --full` and `taskferry result <id> --fields ...`
+even before `accept` runs. `accept` then refuses any task whose gate
+has not settled in your favor:
+
+- `checkStatus: "failed"` or `"timeout"` — refuse with a multi-line
+  fix-forward message (command, exit/timeout, last 40 lines of the
+  gate's combined output, and a ready-to-paste `--parent-task`-tagged
+  resume command).
+- `checkStatus: "interrupted"` — same fix-forward message (rendered as
+  a re-run notice). The gate was killed by a daemon restart; on the
+  next daemon boot the gate auto-re-runs whenever the task's overlay
+  survived.
+- `checkStatus: "running"` — refuse with `error: check gate still
+  running for <id>` and a pointer at `taskferry status <id>` for
+  progress.
+
+If you have manually verified the changeset (read the diff, run the
+check yourself, decided the gate's verdict is the wrong one), override
+the gate's outcome with `--force`:
+
+```sh
+taskferry accept <id> --force
+```
+
+`--force` stamps `checkOverride: true` on the task and applies normally,
+including over a still-running gate (it group-kills the bwrap child and
+waits for it to actually exit before applying). `--force` never
+overrides anything except the gate's outcome — every other accept
+validation (pending changeset, diff present, overlay live) still applies.
+Do not reach for `--force` reflexively: if the gate refused, the
+fix-forward message is the cheaper path back to a clean accept.
+
+If the repo has no `.taskferry.toml` (or no `check` line in it), `accept`
+prints a one-line stderr warning that the changeset landed unverified —
+an accidental missing `.taskferry.toml` is loud rather than silent.
+
+If `accept` itself fails for an unrelated reason (a conflicting `git
+apply` -- the lower moved under a long-running ferry, see "Always Use A
+Worktree" above), don't re-dispatch reflexively: `taskferry result <id>
+--diff` still has the worker's changes, so resolve the conflict by hand
+or reject and retry with a fresh dispatch against the now-current
+directory.
 
 If the diff itself is missing, wrong, or incomplete relative to the
 worker's claim, reject it and re-dispatch:
@@ -155,6 +233,10 @@ worker's claim, reject it and re-dispatch:
 ```sh
 taskferry reject <id>
 ```
+
+`reject` is always allowed regardless of `checkStatus` (per the design's
+"reject is always allowed" rule) and tears down any in-flight gate
+before releasing the overlay.
 
 A worker's `git commit` made *inside* the sandbox is never preserved as a
 commit -- it's flattened into the same diff an uncommitted edit would

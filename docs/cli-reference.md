@@ -61,6 +61,7 @@ summary immediately.
 | `--allowed-dirs <path,path,...>` | Extra directories bound read-write inside the sandbox for this dispatch, on top of the auto-detected git-common-dir for a worktree and any config-level `allowedDirs`; see [security.md](security.md). **`/tmp` needs this too** — the sandbox mounts a fresh, empty `--tmpfs /tmp`, so any path under `/tmp` that isn't `--directory`, `runtimeDir`, or an `--allowed-dirs` entry is invisible inside the sandbox even though it exists on the host |
 | `--require-final-marker <regex>` | Fail the task if the final message doesn't match this pattern (case-sensitive, standard JS RegExp semantics). Sets `incomplete: true` on the settled task when the final message is empty (after trimming) or doesn't match. Patterns that don't compile as a standard JS RegExp reject the dispatch up front with a usage error. Useful for enforcing a report-format contract like `^Status: (DONE\|DONE_WITH_CONCERNS\|BLOCKED\|NEEDS_CONTEXT)$` on the last line of model output. |
 | `--class <name>` | Optional free-text task-class tag for telemetry aggregation; any non-empty string, no fixed-list validation — taskferry stores whatever is given |
+| `--parent-task <id>` | Tag this dispatch as fixing/retrying an earlier task. Persisted as `parentTaskId` and surfaced on `taskferry status <id>` / `taskferry result <id> --fields parentTaskId`. The earlier task's check-gate failure message echoes the link when this dispatch is the suggested fix-forward resume (see `## taskferry accept <id>` below) |
 | `--no-sandbox` | Run this dispatch without the bwrap filesystem sandbox (default: sandboxed on Linux, no-op on macOS); see [security.md](security.md) |
 
 ```
@@ -132,6 +133,7 @@ planning or hard-debugging help mid-task, not for open-ended background work
 | `--executor <opencode\|pi>` | Which worker CLI to spawn. Built-in default `pi`, but an omitted flag actually falls back to the daemon's configured default executor (`TASKFERRY_DEFAULT_EXECUTOR` or `config.json`'s `defaultExecutor`) |
 | `--session-id <id>` | Resume a prior advisor exchange |
 | `--class <name>` | Optional free-text task-class tag for telemetry aggregation; any non-empty string, no fixed-list validation |
+| `--parent-task <id>` | Same `--parent-task` semantics as `dispatch`: tag the advisor task as fixing/retrying an earlier task, persisted as `parentTaskId`, surfaced by `taskferry status <id>` / `taskferry result <id> --fields parentTaskId`. A review-fix round that uses `advisor` to read the failing task's output and re-prompt a new `dispatch` can thread the lineage through both legs of the chain. |
 | `--timeout <duration>` | Early-return cap — milliseconds or a duration string (30s, 5m, 1h), same semantics as `wait`; omitting it does not block indefinitely — it falls back to a 45-second internal cap, after which the "still running" response below is returned |
 
 If it times out before the advisor answers, the response is `status:
@@ -266,6 +268,49 @@ follow. Calling it on a task that already settled (no pending changeset)
 is a no-op that returns a `note` instead of an error, exit code `0`. The
 advisor role (`taskferry advisor`) has no accept path — its changeset is
 auto-rejected right after extraction.
+
+### Check-gate refusal and `--force`
+
+When the project's `.taskferry.toml` declares a `check` command (see
+[config.md](config.md#taskferrytoml) for the format and [security.md](security.md)),
+taskferry runs that command automatically inside the worker's copy-on-write
+overlay as a settle-time verification gate. `accept` refuses a task whose
+gate has not yet settled in your favor, with a multi-line error that
+echoes the command, the exit status or timeout, the last 40 lines of the
+gate's combined stdout+stderr, and a ready-to-paste `--parent-task`-tagged
+fix-forward dispatch command (resuming the worker session when one
+survived, or starting fresh against the same `--directory` otherwise):
+
+- `checkStatus: "failed"` or `checkStatus: "timeout"` — refuse with the
+  fix-forward message. Override only after manual verification:
+  `taskferry accept <id> --force`. The override stamps `checkOverride:
+  true` on the task.
+- `checkStatus: "interrupted"` — refuse with the fix-forward message
+  (rendered as a re-run notice rather than a dead-looking `exit: null`).
+  The gate was killed by a daemon restart; on the next daemon boot the
+  gate auto-re-runs whenever the task's overlay survived. Override with
+  `--force` only if you do not want the auto re-run to gate this
+  changeset.
+- `checkStatus: "running"` — refuse with `error: check gate still
+  running for <id>` and a pointer at `taskferry status <id>` for
+  progress. Override with `--force` only if you are confident the gate
+  will not finish cleanly; `--force` group-kills the running bwrap child
+  and waits for it to actually exit before applying the changeset.
+- `checkStatus: "passed"`, `checkStatus: "none"` (no `check` declared in
+  `.taskferry.toml`), or non-git/overlay-only targets (the gate is
+  deliberately skipped for those — see the design spec's "Gating
+  `--no-overlay` dispatches" non-goal) — `accept` proceeds normally. A
+  one-line `warning: changeset applied, but this repo declares no check
+  command in .taskferry.toml -- nothing was verified before landing`
+  prints to stderr when `checkStatus` is `"none"`, so an accidental
+  missing `.taskferry.toml` is loud rather than silent.
+
+`reject` is always allowed regardless of `checkStatus`; it also tears
+down an in-flight gate before releasing the overlay.
+
+| Flag | Notes |
+|---|---|
+| `--force` | Apply the changeset even though its check gate `failed`, `timed out`, is `interrupted`, or is still `running`. Stamps `checkOverride: true` on the task so a later `taskferry status <id>` / `taskferry result <id>` can show the override happened. Never overrides anything except the gate's outcome — every other accept validation (pending changeset, diff present, overlay live, etc.) still applies. |
 
 ## `taskferry reject <id>`
 
@@ -441,6 +486,90 @@ manual Codex desktop flow.
 |---|---|
 | `0` | Symlinks and any auto-installable integration succeeded; on Windows `setup` is rejected with `error: taskferry setup requires Unix domain sockets and is unavailable on Windows` (exit `1`) |
 | `1` | `npm install` failed, a managed symlink could not be created, an integration command failed, or the platform is Windows |
+
+## `taskferry init`
+
+The one-shot scaffolder for a repo's `.taskferry.toml`. Runs in literal
+cwd (no `--directory` flag, no workspace-root redirect — a `taskferry
+init` invoked from inside a worktree scaffolds that worktree's
+`.taskferry.toml`, never the main checkout's), detects the project's
+ecosystem, and proposes a `check` command. The CLI does not connect to
+the daemon for this command, so it is usable to bootstrap a fresh repo
+even before any taskferry daemon has run.
+
+`init` is the only place in taskferry that parses a manifest at all —
+and it stays deliberately shallow (just the top-level `scripts` object
+of `package.json`, plus the existence of a handful of ecosystem marker
+files). After the file exists, every later dispatch's gate reads it via
+[project-config.js](config.md#taskferrytoml)'s mtime-cached loader.
+
+### Ecosystem detection
+
+| Found in `cwd` | Proposed `check` |
+|---|---|
+| `package.json` with a `scripts.check` string | `npm run check` |
+| `package.json` with any of `lint`/`typecheck`/`test` scripts | `npm run <first available>` joined with `&&`, in that order |
+| `pyproject.toml` | `uv run pytest && uv run ruff check .` |
+| `go.mod` | `go vet ./... && go test ./...` |
+| `Cargo.toml` | `cargo clippy -- -D warnings && cargo test` |
+| `deno.json` or `deno.jsonc` | `deno check . && deno test` |
+| `bunfig.toml` | `bun test` |
+| (nothing recognized) | no proposal — the file is written with the check line commented out |
+
+A malformed `package.json` falls through to the ecosystem checks below
+it (a missing/garbled file is not an `init` failure); an unreadable
+manifest propagates the read error. Edit the proposed command in place
+after the scaffolder runs — `init` writes what it detected, it does not
+guess on the user's behalf.
+
+### TTY confirmation
+
+On an interactive TTY, `init` shows the proposed command and asks
+`Write .taskferry.toml with this command? [Y/n]`. Yes writes the
+detected `check` in directly; No (or anything starting with `n`)
+writes the commented fill-in template instead — the file is created in
+either case, so the user always gets the scaffolded header and the
+optional-field comments even on rejection.
+
+Without a TTY (a piped invocation, CI, or an unattended run), `init`
+never writes a detected command unconfirmed — it writes the fill-in
+template, regardless of whether detection succeeded, and prints a one-
+line notice pointing at the new file's `check` line. The file is never
+overwritten on a re-run: an existing `.taskferry.toml` is left alone,
+and `init` returns `{ written: false, reason: "<path> already exists --
+taskferry init never overwrites it" }` instead.
+
+### Output shape
+
+On success, `init` prints a single TOON document:
+
+```
+path: /workspace/my-repo/.taskferry.toml
+written: true
+checkCommand: npm run lint && npm run test
+```
+
+Field-by-field:
+
+| Field | Outcome |
+|---|---|
+| `path` | Absolute path to the file `init` would create (or did create, or that already existed and was left alone) |
+| `written` | `true` when `init` created the file; `false` when it skipped because the file already existed |
+| `checkCommand` | The `check` line written into the file — the detected proposal that the user confirmed (or the fill-in template's null), or `null` when the file already existed |
+| `reason` | Present only when `written: false`; names the path that already existed and the no-overwrite rule |
+
+After `init` lands, the new dispatch's verification block is appended
+to every worker's prompt automatically, and the gate runs at settle as
+described in [config.md](config.md#taskferrytoml). No daemon restart is
+required — `project-config.js` reads `.taskferry.toml` fresh (mtime-
+cached) on the next dispatch.
+
+### Exit codes
+
+| Code | Meaning |
+|---|---|
+| `0` | File created, or an existing file was left alone (`written: false` with a `reason`) |
+| `1` | The proposed file path's parent directory is not writable, or the filesystem rejected the `writeFileSync` |
 
 ## Retired names
 

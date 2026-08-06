@@ -472,7 +472,7 @@ const NON_GIT_APPLY_ERROR =
  * @returns {{applied: boolean, reason: string|null}}
  */
 function applyGitChangeset({ directory, diffPath, runCommand }) {
-  const result = runCommand("git", ["-C", directory, "apply", diffPath]);
+  const result = runCommand("git", ["-C", directory, "apply", "--3way", diffPath]);
   if (result.status !== 0) {
     return { applied: false, reason: gitApplyFailureReason(result) };
   }

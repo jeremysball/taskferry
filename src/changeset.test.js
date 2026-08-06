@@ -713,7 +713,7 @@ describe("extractGitDiff() head-drift resolution", () => {
 });
 
 describe("applyChangeset()", () => {
-  test("git target: runs git apply <diffPath> against directory", () => {
+  test("git target: runs git apply --3way <diffPath> against directory", () => {
     let capturedCommand = null;
     let capturedArgs = null;
     const runCommand = (command, args) => {
@@ -728,7 +728,7 @@ describe("applyChangeset()", () => {
       runCommand,
     });
     assert.equal(capturedCommand, GIT_CMD);
-    assert.deepEqual(capturedArgs, ["-C", REPO_DIR, "apply", DIFF_PATCH]);
+    assert.deepEqual(capturedArgs, ["-C", REPO_DIR, "apply", "--3way", DIFF_PATCH]);
     assert.deepEqual(result, { applied: true, reason: null });
   });
 

@@ -4556,13 +4556,18 @@ function extractChangesetForTaskRecord(finishedTask, ctx) {
 
 /**
  * Tail-trims combined stdout+stderr to the last `n` lines, per the design's
- * "last ~40 lines of combined output" contract for checkOutputTail.
+ * "last ~40 lines of combined output" contract for checkOutputTail. Strips a
+ * single trailing `\n` before splitting so a child process's standard
+ * "every line ends with newline" output doesn't count the final empty
+ * string as a line (shifting the window by one and dropping the last real
+ * line off the tail).
  * @param {string} text
  * @param {number} [n]
  * @returns {string}
  */
 function lastLines(text, n = 40) {
-  const lines = text.split("\n");
+  const trimmed = text.endsWith("\n") ? text.slice(0, -1) : text;
+  const lines = trimmed.split("\n");
   return lines.length <= n ? text : lines.slice(-n).join("\n");
 }
 
@@ -4571,17 +4576,22 @@ function lastLines(text, n = 40) {
  * the front when the buffer would otherwise exceed CHECK_GATE_OUTPUT_CAP_BYTES.
  * A chatty test suite (e.g. tsc emitting a type error per line, vitest
  * repeating the verbose reporter per file) would otherwise grow the daemon's
- * heap unbounded for up to checkTimeoutSeconds. `tail` is severed
- * byte-exact so a UTF-8 multi-byte sequence straddling the cut point is
- * discarded rather than reported as a malformed tail -- the resulting
- * `checkOutputTail` is a debug aid, not a contractual view.
+ * heap unbounded for up to checkTimeoutSeconds. The cap is measured in real
+ * UTF-8 bytes (not `String.length`, which counts UTF-16 code units and would
+ * let a chatty 4-byte-UTF-8 character like 🎉 grow to ~2x the intended byte
+ * budget before the cap engaged). The byte-level cut point can land mid-
+ * multi-byte-sequence, so the byte slice is decoded back through `Buffer`
+ * with the default tolerant UTF-8 decoder rather than asserting a valid
+ * codepoint boundary; the resulting `checkOutputTail` is a debug aid, not a
+ * contractual view.
  * @param {string} tail
  * @param {Buffer|string} chunk
  */
 function appendBoundedOutput(tail, chunk) {
   const next = tail + (typeof chunk === "string" ? chunk : chunk.toString("utf8"));
-  if (next.length <= CHECK_GATE_OUTPUT_CAP_BYTES) return next;
-  return next.slice(next.length - CHECK_GATE_OUTPUT_CAP_BYTES);
+  const bytes = Buffer.byteLength(next, "utf8");
+  if (bytes <= CHECK_GATE_OUTPUT_CAP_BYTES) return next;
+  return Buffer.from(next, "utf8").subarray(-CHECK_GATE_OUTPUT_CAP_BYTES).toString("utf8");
 }
 
 /**

@@ -145,4 +145,60 @@ const dispatched = mgr.dispatch({ model: FAKE_GATE_MODEL, executor: "opencode", 
     spawns[1].child.emit("exit", null, "SIGTERM");
     assert.equal(mgr.status(dispatched.id).checkStatus, "timeout");
   });
+
+  test("a failed gate with a trailing newline captures the last 40 real lines, not 39 lines plus a trailing blank", () => {
+    // Regression: lastLines(text) used to `text.split("\n").slice(-n)`, which
+    // counts the final empty string after a trailing "\n" as a line -- so 45
+    // real lines + "\n" returned 39 lines + a trailing "" instead of all 40
+    // of lines 5..44. Real child-process output always ends with "\n", so
+    // the bug dropped one real line off every failing gate's tail.
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "axi-gate-trailing-newline-"));
+    fs.writeFileSync(path.join(directory, TASKFERRY_CONFIG_FILENAME), FAKE_GATE_CONFIG);
+    const spawns = [];
+    const { mgr, dispatched } = dispatchAndSettleWithChanges({ spawns, directory });
+    const lines = Array.from({ length: 45 }, (_, i) => `line ${i}`).join("\n") + "\n";
+    spawns[1].child.stdout.emit("data", Buffer.from(lines));
+    spawns[1].child.emit("exit", 1, null);
+    const detail = mgr.result(dispatched.id, { fields: ["checkOutputTail"] });
+    assert.equal(detail.checkOutputTail.split("\n").length, 40);
+    assert.ok(detail.checkOutputTail.startsWith("line 5"), `expected the 40-line tail to start at "line 5", got: ${JSON.stringify(detail.checkOutputTail.slice(0, 40))}`);
+    assert.ok(detail.checkOutputTail.endsWith("line 44"), `expected the tail to include the last real line "line 44", got: ${JSON.stringify(detail.checkOutputTail.slice(-40))}`);
+    assert.ok(!detail.checkOutputTail.endsWith("\n"), `expected no trailing blank line, got a tail ending with newline`);
+  });
+
+  test("a chatty gate emitting 4-byte UTF-8 output is capped by real byte count, not UTF-16 code units", () => {
+    // Regression: appendBoundedOutput measured by String.length (UTF-16 code
+    // units). A 4-byte UTF-8 char like 🎉 is 2 UTF-16 units, so a check
+    // command spamming emoji could grow to ~2x the intended 256 KiB byte
+    // budget before the cap engaged. Verify the byte count of the resulting
+    // checkOutputTail stays under CHECK_GATE_OUTPUT_CAP_BYTES, and that the
+    // string is still valid (the byte-level cut may land mid-codepoint; the
+    // tolerant UTF-8 decoder must not throw).
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "axi-gate-utf8-cap-"));
+    fs.writeFileSync(path.join(directory, TASKFERRY_CONFIG_FILENAME), FAKE_GATE_CONFIG);
+    const spawns = [];
+    const { mgr, dispatched } = dispatchAndSettleWithChanges({ spawns, directory });
+    // Each 🎉 is 4 UTF-8 bytes / 2 UTF-16 code units. 70000 * 4 = 280000
+    // bytes, comfortably over the 256 KiB cap. Emit in chunks to exercise
+    // the append path too, not just the trim path.
+    const emoji = "🎉";
+    const chunk = emoji.repeat(1000);
+    for (let i = 0; i < 70; i++) spawns[1].child.stdout.emit("data", Buffer.from(chunk, "utf8"));
+    spawns[1].child.emit("exit", 1, null);
+    const detail = mgr.result(dispatched.id, { fields: ["checkOutputTail"] });
+    const bytes = Buffer.byteLength(detail.checkOutputTail, "utf8");
+    // Cap is enforced on real UTF-8 bytes, not on String.length (which
+    // would let the tail grow to ~512 KiB before tripping).
+    assert.ok(bytes <= 256 * 1024, `expected at most 256 KiB of UTF-8 bytes, got ${bytes}`);
+    // The byte-level cut can land mid-codepoint; Buffer.toString("utf8") on
+    // a Buffer.from(..., "utf8") with a multi-byte cut uses the tolerant
+    // replacement decoder by default -- a non-throwing result here proves
+    // the round-trip is well-formed as a JS string.
+    assert.equal(typeof detail.checkOutputTail, "string");
+    // The cap trimmed the front, so the tail must still be entirely emoji
+    // (or the Unicode replacement char at a mid-codepoint byte-cut). Use
+    // the `u` flag so `🎉` (a 2-code-unit surrogate pair) is matched as one
+    // codepoint and `$` anchors correctly at the string's last codepoint.
+    assert.match(detail.checkOutputTail, /^[🎉\uFFFD]*$/u);
+  });
 });

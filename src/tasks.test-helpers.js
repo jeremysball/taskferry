@@ -51,7 +51,13 @@ after(() => {
     }
   }
   for (const dir of trackedTempDirs) {
-    fs.rmSync(dir, { recursive: true, force: true });
+    try {
+      fs.rmSync(dir, { recursive: true, force: true });
+    } catch {
+      // Best-effort: force:true only suppresses ENOENT, not EACCES/EPERM
+      // (e.g. a test left a mode-000 or overlayfs-kernel-owned work dir
+      // behind). Don't let one unremovable dir abort cleanup for the rest.
+    }
   }
 });
 

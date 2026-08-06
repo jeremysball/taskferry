@@ -8,7 +8,13 @@ import { overlayPaths, subOverlayPaths, subOverlaySlug, extractGitDiff, resolveP
 
 const trackedTmpDirs = [];
 after(() => {
-  for (const d of trackedTmpDirs) fs.rmSync(d, { recursive: true, force: true });
+  for (const d of trackedTmpDirs) {
+    try {
+      fs.rmSync(d, { recursive: true, force: true });
+    } catch {
+      // Best-effort: force:true only suppresses ENOENT, not EACCES/EPERM.
+    }
+  }
 });
 
 

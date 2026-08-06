@@ -98,7 +98,7 @@ describe("task activity events", () => {
       summarizerTimeoutMs: 0,
       onEvent: (event) => events.push(event),
     }));
-    t.after(() => { manager.close(); fs.rmSync(stateDir, { recursive: true, force: true }); });
+    t.after(() => manager.close());
 
     const task = manager.dispatch({ prompt: "Check the server", directory: os.tmpdir() });
     await new Promise((resolve) => setImmediate(resolve));
@@ -131,7 +131,7 @@ describe("task activity events", () => {
       summarizerTimeoutMs: 0,
       onEvent: (event) => events.push(event),
     }));
-    t.after(() => { manager.close(); fs.rmSync(stateDir, { recursive: true, force: true }); });
+    t.after(() => manager.close());
 
     const directory = os.tmpdir();
     // daemon-server.js's syncActivitySubscriptions() groups a `watch --all`
@@ -166,7 +166,7 @@ describe("task activity events", () => {
       watchdogPollMs: 5,
       onEvent: (event) => events.push(event),
     }));
-    t.after(() => { manager.close(); fs.rmSync(stateDir, { recursive: true, force: true }); });
+    t.after(() => manager.close());
 
     const task = manager.dispatch({ prompt: "Watch output", directory: os.tmpdir() });
     await new Promise((resolve) => setImmediate(resolve));
@@ -203,7 +203,7 @@ describe("task activity events", () => {
       onEvent: (event) => events.push(event),
       listModelsFn: () => `${DEFAULT_SUMMARY_MODEL}\n`,
     }));
-    t.after(() => { manager.close(); fs.rmSync(stateDir, { recursive: true, force: true }); });
+    t.after(() => manager.close());
     manager.setActivitySummarySubscriptions(1);
 
     const source = manager.dispatch({ prompt: "Inspect the daemon", directory: os.tmpdir() });

@@ -2540,6 +2540,62 @@ function sweepOverlayEntry(ctx, entry, tmpRoot) {
 }
 
 /**
+ * A daemon that crashed or was force-restarted mid-gate leaves a task
+ * recorded with checkStatus: "running" forever -- nothing will ever settle
+ * it, since the child that would have called startCheckGate()'s exit/error
+ * handlers died with the daemon. Reclassify every such task as "interrupted"
+ * on load, then per the design's "the gate is re-runnable" promise, if the
+ * task's overlay is still live, automatically re-invoke startCheckGate on
+ * it (which flips checkStatus back to "running" and starts a fresh check
+ * run -- the user sees the same "running" status they would have seen
+ * pre-crash, just on a new daemon). Tasks whose overlay was swept away
+ * between the daemon's death and its restart are left at "interrupted"
+ * only; Task 6's validateAcceptable keeps refusing them without --force,
+ * and the failure message renders the re-run path explicitly (see
+ * "interrupted" handling note in Task 6 below).
+ *
+ * Two review fixes folded in here:
+ * (1) `changesetStatus !== "pending"` guard -- without it, a task that was
+ *     already force-accepted or rejected WHILE its gate was "running" (the
+ *     kill handshake fired, but the exit event that would flip checkStatus
+ *     away from "running" hadn't landed yet when the daemon died) gets
+ *     flipped to "interrupted" forever on every future restart, and if its
+ *     overlay happens to still be live, re-gated against an already-decided
+ *     changeset -- whose own settle() then no-ops via its own
+ *     `changesetStatus !== "pending"` guard, leaving checkStatus stuck on
+ *     "running" again, repeating the whole cycle on the next boot. A task
+ *     that's already been decided is not this sweep's concern at all.
+ * (2) Best-effort orphan kill before re-invoking startCheckGate -- an
+ *     UNCLEAN daemon death (crash, OOM-kill, force-restart) is the one path
+ *     where nothing ever sent the gate a kill signal at all (a graceful
+ *     accept/reject/shutdown always does, via killGateAndWait). Because the
+ *     gate is spawned `detached: true` (Task 5), the persisted
+ *     `task.checkGatePid` IS that process group's leader pid, so a
+ *     best-effort group-kill against it on restart reaps any surviving
+ *     orphan from the previous daemon incarnation before a second gate
+ *     mounts the same overlay -- without this, two writers (the orphan and
+ *     the fresh re-run) can be live against the same upper/work dir at
+ *     once. `sendSignal` already swallows ESRCH (nothing there), so this is
+ *     safe to call unconditionally.
+ * @param {{tasks: Map<string, Task>, hasLiveOverlay: (task: Task) => boolean, startCheckGate: (task: Task) => void, sendSignal: (pid: number, signal: NodeJS.Signals) => void, persistTask: (taskId: string) => void}} ctx
+ */
+function markInterruptedGatesFor(ctx) {
+  for (const task of ctx.tasks.values()) {
+    if (task.checkStatus !== "running" || task.changesetStatus !== "pending") continue;
+    task.checkStatus = "interrupted";
+    ctx.persistTask(task.id);
+    if (ctx.hasLiveOverlay(task)) {
+      if (task.checkGatePid != null) ctx.sendSignal(task.checkGatePid, "SIGTERM");
+      // Auto re-run: the overlay survived the daemon crash, so the gate
+      // can be re-run over the same copy-on-write mount. startCheckGate
+      // flips checkStatus back to "running" and persists before spawning,
+      // so the brief "interrupted" write above is not user-visible.
+      ctx.startCheckGate(task);
+    }
+  }
+}
+
+/**
  * Builds the conditional extra fields for a summarized task (the optional
  * fields the direct summarize path only includes when present). Extracted
  * from `summarize`'s single return statement, which had accumulated eight
@@ -3632,6 +3688,7 @@ function buildManagerInternalHelpers(ctx) {
     hasLiveOverlay: (task) => hasLiveOverlayForTask(task, { existsFn: ctx.opts.existsFn }),
     sweepOrphanedPromptFiles: () => sweepOrphanedPromptFilesFor({ PROMPT_DIR: ctx.paths.PROMPT_DIR, tasks: ctx.maps.tasks }),
     sweepOrphanedOverlays: () => sweepOrphanedOverlaysFor({ tasks: ctx.maps.tasks, overlayTmpRoot: ctx.opts.overlayTmpRoot, releaseOverlay: (task) => ctx.env.releaseOverlay(task), persistTask: (taskId) => ctx.helpers.persistTask(taskId), readdirFn: ctx.opts.readdirFn }),
+    markInterruptedGates: () => markInterruptedGatesFor({ tasks: ctx.maps.tasks, hasLiveOverlay: (task) => ctx.helpers.hasLiveOverlay(task), startCheckGate: (task) => ctx.env.startCheckGate(task), sendSignal: (pid, signal) => ctx.helpers.sendSignal(pid, signal), persistTask: (taskId) => ctx.helpers.persistTask(taskId) }),
     /**
      * Validate `model` against opencode's installed-models list, NOT against
      * the dispatch-default executor's list. `summarizeTask()` deliberately
@@ -3895,6 +3952,13 @@ function bootstrapManagerContext(ctx) {
   // these on a real reboot for free; this only matters for a same-boot
   // daemon restart.
   ctx.helpers.sweepOrphanedOverlays();
+  // A daemon that died with a check gate mid-flight (checkStatus: "running")
+  // leaves that status stuck forever -- nothing will ever call
+  // startCheckGate()'s settle handlers again for that task. Reclassify as
+  // "interrupted" so accept() (Task 6) keeps refusing it without --force,
+  // then auto-re-run any gate whose overlay survived the crash (per the
+  // design's "the gate is re-runnable" promise).
+  ctx.helpers.markInterruptedGates();
 }
 
 /**

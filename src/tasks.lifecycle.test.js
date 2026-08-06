@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { EventEmitter } from "node:events";
 import { makeManager, fakeChild, baseTask, DIFF_LINE, OVERLAY_DIR_PENDING, EBUSY_ERROR, SPAWN_BWRAP_TIMEOUT, TOOL_CALLS, NONE_OBSERVED, FINAL_ANSWER } from "./tasks.test-helpers.js";
 import { defaultRunCommand as changesetDefaultRunCommand } from "./changeset.js";
 
@@ -1032,5 +1033,152 @@ describe("poll()", () => {
     } finally {
       mock.timers.reset();
     }
+  });
+});
+
+describe("daemon-restart handling for a check gate that was mid-flight", () => {
+  // A daemon that crashed/was force-restarted while a check gate was running
+  // (checkStatus: "running") leaves that status stuck forever -- nothing will
+  // ever call startCheckGate()'s exit/error handlers for that task again,
+  // because the child that would have called them died with the daemon. These
+  // tests pin the boot-time reclassification ("running" -> "interrupted") and
+  // the auto re-run for tasks whose overlay survived the crash.
+
+  test("a task whose check gate was 'running' when the daemon last exited loads as 'interrupted', not silently 'passed'", () => {
+    const mgr = makeManager({
+      tasksFixture: [
+        { id: "oc_interrupted1", status: "done", directory: os.tmpdir(), checkStatus: "running", checkCommand: "npm test", changesetStatus: "pending" },
+      ],
+    });
+    const status = mgr.status("oc_interrupted1");
+    assert.equal(status.checkStatus, "interrupted");
+  });
+
+  test("a task whose check gate had already settled ('passed') is left untouched on daemon restart", () => {
+    const mgr = makeManager({
+      tasksFixture: [
+        { id: "oc_settled1", status: "done", directory: os.tmpdir(), checkStatus: "passed", checkCommand: "npm test", changesetStatus: "pending" },
+      ],
+    });
+    assert.equal(mgr.status("oc_settled1").checkStatus, "passed");
+  });
+
+  test("a task already force-accepted/rejected while its gate was 'running' is left alone, not flipped to 'interrupted'", () => {
+    // Review fix: changesetStatus left "accepted"/"rejected" but checkStatus
+    // still "running" (the kill signal fired, but no exit event landed before
+    // the daemon died) must NOT be reclassified -- the decision is already
+    // made. A task that's already been decided is not this sweep's concern.
+    const mgr = makeManager({
+      tasksFixture: [
+        { id: "oc_decided1", status: "done", directory: os.tmpdir(), checkStatus: "running", checkCommand: "npm test", changesetStatus: "accepted" },
+        { id: "oc_decided2", status: "done", directory: os.tmpdir(), checkStatus: "running", checkCommand: "npm test", changesetStatus: "rejected" },
+      ],
+    });
+    assert.equal(mgr.status("oc_decided1").checkStatus, "running");
+    assert.equal(mgr.status("oc_decided2").checkStatus, "running");
+  });
+
+  test("a task whose gate was 'running' AND whose overlay is still live is automatically re-run on next daemon restart", () => {
+    // The design's "the gate is re-runnable" promise: a daemon crash mid-gate
+    // does not silently pass; the next daemon boot re-runs the gate, and the
+    // user sees "running" again on `taskferry status <id>` instead of a
+    // dead-looking "interrupted" with no further action. startCheckGate
+    // flips checkStatus back to "running" before spawning, so the brief
+    // "interrupted" write is not user-observable -- only the post-boot
+    // "running" state is.
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "axi-rerun-"));
+    fs.writeFileSync(path.join(directory, ".taskferry.toml"), `check = "true"\n`);
+    const overlayTmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "axi-rerun-overlay-"));
+    const overlayRoot = path.join(overlayTmpRoot, `taskferry-cow-oc_rerun1`);
+    fs.mkdirSync(path.join(overlayRoot, "upper", "main"), { recursive: true });
+    const spawns = [];
+    const mgr = makeManager({
+      tasksFixture: [{
+        ...baseTask({ id: "oc_rerun1", directory }),
+        role: "dispatch",
+        changesetStatus: "pending",
+        preDispatchHead: "abc123",
+        checkStatus: "running",
+        checkCommand: "true",
+        checkExitCode: null,
+        checkOutputTail: null,
+        overlayDirs: { root: overlayRoot, tmpRoot: overlayTmpRoot, upperDir: path.join(overlayRoot, "upper", "main"), workDir: path.join(overlayRoot, "work", "main"), rwBinds: [] },
+      }],
+      spawnFn: (cmd, args, opts) => {
+        const child = new EventEmitter();
+        child.pid = 9001;
+        child.unref = () => {};
+        child.stdout = new EventEmitter();
+        child.stderr = new EventEmitter();
+        spawns.push({ cmd, args, opts, child });
+        return child;
+      },
+      sandboxEnabled: true,
+      overlayEnabled: true,
+      checkBwrapAvailableFn: () => ({ checked: true, available: true }),
+      checkOverlaySupportFn: () => ({ supported: true }),
+      platform: "linux",
+      runOverlayCommandFn: () => ({ status: 0, stdout: "", stderr: "" }),
+    });
+    // Auto re-run: the bwrap spawn is the one observable side effect of
+    // startCheckGate() being called (no other boot path spawns a child).
+    const bwrapSpawns = spawns.filter((s) => s.cmd === "bwrap");
+    assert.equal(bwrapSpawns.length, 1, "startCheckGate must be invoked exactly once for the auto re-run");
+    assert.ok(bwrapSpawns[0].args.includes("true"), "the re-run must execute the .taskferry.toml check command");
+    assert.equal(mgr.status("oc_rerun1").checkStatus, "running", "the auto re-run flips checkStatus back to 'running' before the test can observe 'interrupted'");
+  });
+
+  test("restart with a live overlay best-effort kills any orphaned gate process before re-running", () => {
+    // Review fix: an UNCLEAN daemon death (crash, OOM-kill, force-restart)
+    // is the one path where nothing ever sent the gate a kill signal at all
+    // (a graceful accept/reject/shutdown always does, via killGateAndWait).
+    // Because the gate is spawned `detached: true` (Task 5), the persisted
+    // `task.checkGatePid` IS that process group's leader pid, so a
+    // best-effort group-kill against it on restart reaps any surviving
+    // orphan from the previous daemon incarnation BEFORE a second gate
+    // mounts the same overlay -- without this, two writers (the orphan and
+    // the fresh re-run) can be live against the same upper/work dir at
+    // once. `sendSignal` already swallows ESRCH (nothing there), so this is
+    // safe to call unconditionally.
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "axi-orphan-kill-"));
+    fs.writeFileSync(path.join(directory, ".taskferry.toml"), `check = "true"\n`);
+    const overlayTmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "axi-orphan-kill-overlay-"));
+    const overlayRoot = path.join(overlayTmpRoot, `taskferry-cow-oc_orphankill1`);
+    fs.mkdirSync(path.join(overlayRoot, "upper", "main"), { recursive: true });
+    const killCalls = [];
+    const spawns = [];
+    const mgr = makeManager({
+      tasksFixture: [{
+        ...baseTask({ id: "oc_orphankill1", directory }),
+        role: "dispatch",
+        changesetStatus: "pending",
+        preDispatchHead: "abc123",
+        checkStatus: "running",
+        checkCommand: "true",
+        checkGatePid: 12345,
+        overlayDirs: { root: overlayRoot, tmpRoot: overlayTmpRoot, upperDir: path.join(overlayRoot, "upper", "main"), workDir: path.join(overlayRoot, "work", "main"), rwBinds: [] },
+      }],
+      spawnFn: (cmd, args, opts) => {
+        const child = new EventEmitter();
+        child.pid = 9002;
+        child.unref = () => {};
+        child.stdout = new EventEmitter();
+        child.stderr = new EventEmitter();
+        spawns.push({ cmd, args, opts, child });
+        return child;
+      },
+      killFn: (pid, signal) => killCalls.push({ pid, signal }),
+      sandboxEnabled: true,
+      overlayEnabled: true,
+      checkBwrapAvailableFn: () => ({ checked: true, available: true }),
+      checkOverlaySupportFn: () => ({ supported: true }),
+      platform: "linux",
+      runOverlayCommandFn: () => ({ status: 0, stdout: "", stderr: "" }),
+    });
+    const orphanKill = killCalls.find((k) => k.pid === -12345 && k.signal === "SIGTERM");
+    assert.ok(orphanKill, `expected a process-group SIGTERM to -12345 to reap the orphan, got ${JSON.stringify(killCalls)}`);
+    const bwrapSpawns = spawns.filter((s) => s.cmd === "bwrap");
+    assert.equal(bwrapSpawns.length, 1, "the re-run still mounts exactly one fresh bwrap gate over the overlay");
+    assert.equal(mgr.status("oc_orphankill1").checkStatus, "running", "the re-run flips checkStatus back to 'running'");
   });
 });

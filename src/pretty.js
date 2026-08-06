@@ -39,6 +39,7 @@ function renderArrayField(label, value, indent) {
 }
 
 function renderFallback(value, indent = "") {
+  if (value === null || typeof value !== "object") return `${indent}${c.dim(String(value))}`;
   return Object.entries(value)
     .map(([key, val]) => renderScalarField(key, val, indent))
     .filter((line) => line !== null)

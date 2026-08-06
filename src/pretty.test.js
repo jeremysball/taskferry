@@ -41,6 +41,16 @@ describe("renderPretty fallback (light-touch) renderer", () => {
     assert.equal(plain(out), "warnings  (none)");
   });
 
+  test("renders a null entry in an object-shaped array without crashing", () => {
+    const out = renderPretty({ items: [null] });
+    assert.equal(plain(out), "items\n  null");
+  });
+
+  test("renders an undefined entry in an object-shaped array without crashing", () => {
+    const out = renderPretty({ items: [undefined, { id: "oc_1" }] });
+    assert.equal(plain(out), "items\n  undefined\n  id  oc_1");
+  });
+
   test("flattens a nested object under an indented bold label", () => {
     const out = renderPretty({ metadata: { claude: { installed: true } } });
     assert.equal(plain(out), "metadata\n  claude\n    installed  true");

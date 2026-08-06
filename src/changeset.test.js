@@ -345,6 +345,25 @@ describe("resolveHeadDrift()", () => {
     resolveHeadDrift({ directory: REPO_DIR, diffPath: DIFF_PATCH, currentHead: CURRENT_HEAD, scratchDir: SCRATCH_DIR, runCommand });
     assert.deepEqual(targets, [SCRATCH_DIR, SCRATCH_DIR]);
   });
+
+  test("recovered: null when git status --porcelain itself fails (conflict-marker inspection inconclusive)", () => {
+    // Apply exits 0 and stdout is empty -- without the explicit status
+    // check, the empty stdout would be read as "no conflict markers
+    // found" and yield recovered: true, even though the status
+    // inspection never actually ran. The fix turns an empty/absent
+    // conflict-marker match into a could-not-evaluate when the status
+    // call itself failed.
+    const runCommand = (_command, args) => {
+      if (args.includes("add")) return { status: 0, stdout: "", stderr: "", error: null };
+      if (args.includes("apply")) return { status: 0, stdout: "", stderr: "", error: null };
+      if (args.includes("status")) return { status: 128, stdout: "", stderr: GIT_NOT_A_REPO_STDERR_NL, error: null };
+      if (args.includes("remove")) return { status: 0, stdout: "", stderr: "", error: null };
+      throw new Error(`unexpected git invocation: ${args.join(" ")}`);
+    };
+    const result = resolveHeadDrift({ directory: REPO_DIR, diffPath: DIFF_PATCH, currentHead: CURRENT_HEAD, scratchDir: SCRATCH_DIR, runCommand });
+    assert.equal(result.recovered, null);
+    assert.match(result.conflictDetail, /not a git repository/);
+  });
 });
 
 describe("extractGitDiff()", () => {

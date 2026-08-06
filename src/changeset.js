@@ -137,15 +137,46 @@ const CONFLICT_STATUS_PATTERN = /^(?:UU|AA|DD|AU|UD|UA|DU) /m;
 export function resolveHeadDrift({ directory, diffPath, currentHead, scratchDir, runCommand = defaultRunCommand }) {
   const add = runCommand("git", ["-C", directory, "worktree", "add", "--detach", scratchDir, currentHead]);
   if (add.error || add.status !== 0) {
+    // worktree add itself failed -- nothing was created, so no cleanup
+    // work to do (and no scratch tree to leak).
     return { recovered: null, conflictDetail: `could not evaluate: ${gitApplyFailureReason(add)}` };
   }
+  try {
+    return evaluateApplyAndStatus(scratchDir, diffPath, runCommand);
+  } finally {
+    // Unconditional cleanup of the disposable scratch worktree once it has
+    // been created, regardless of how the try exited: a normal end, a
+    // returned result, OR a thrown runCommand (the documented contract
+    // says "runCommand" returns a result object, but defense-in-depth
+    // matters here -- a throwing wrapper would otherwise leak the worktree
+    // tree on every probe). The worktree-add failure path above doesn't
+    // need this branch because nothing was created.
+    runCommand("git", ["-C", directory, "worktree", "remove", "--force", scratchDir]);
+  }
+}
+
+/**
+ * Runs `git apply --3way` + `git status --porcelain` inside the scratch
+ * worktree and classifies the outcome. Split out of `resolveHeadDrift` to
+ * keep that function's cyclomatic complexity under the file cap; the
+ * classification logic (status failure / clean merge / conflict) is the
+ * only thing that grows with each new branch, so it lives here.
+ * @param {string} scratchDir
+ * @param {string} diffPath
+ * @param {typeof defaultRunCommand} runCommand
+ * @returns {{recovered: boolean|null, conflictDetail: string|null}}
+ */
+function evaluateApplyAndStatus(scratchDir, diffPath, runCommand) {
   const apply = runCommand("git", ["-C", scratchDir, "apply", "--3way", diffPath]);
   const statusResult = runCommand("git", ["-C", scratchDir, "status", "--porcelain"]);
-  // Unconditional cleanup regardless of outcome; a failed removal doesn't
-  // change the merge outcome already computed above (it's a best-effort
-  // tidy-up of a throwaway worktree, same class as cleanupOverlay's own
-  // best-effort semantics elsewhere in this file).
-  runCommand("git", ["-C", directory, "worktree", "remove", "--force", scratchDir]);
+  // A failed status inspection (spawn error or non-zero exit) means we
+  // can't tell whether the merge produced conflict markers -- the empty
+  // stdout isn't a clean merge, it's "didn't get to read porcelain" -- so
+  // treat as could-not-evaluate rather than trusting an empty/absent
+  // match against CONFLICT_STATUS_PATTERN.
+  if (statusResult.error || statusResult.status !== 0) {
+    return { recovered: null, conflictDetail: `could not evaluate status inspection: ${gitApplyFailureReason(statusResult)}` };
+  }
   const hasConflictMarkers = CONFLICT_STATUS_PATTERN.test(statusResult.stdout || "");
   if (!apply.error && apply.status === 0 && !hasConflictMarkers) {
     return { recovered: true, conflictDetail: null };

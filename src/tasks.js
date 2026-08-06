@@ -1313,6 +1313,21 @@ const DEFAULT_MAX_CONCURRENT_TASKS = 4;
 const DEFAULT_ADVISOR_SESSION_TTL_MS = 30 * 60 * 1000;
 const DEFAULT_NO_OUTPUT_TIMEOUT_MS = 256000;
 const DEFAULT_POST_OUTPUT_NO_OUTPUT_TIMEOUT_MS = 400000;
+// Absolute ceiling on the pre-output phase: raw (non-parseable) log growth
+// keeps resetting the no-output clock (see consumeWatchdogLogChunk), which
+// is the whole point of that fix, but a task that NEVER produces a single
+// parseable line can otherwise ride that reset forever -- continuous
+// non-JSON stderr chatter with no real completion signal holds a
+// concurrency slot and grows its log indefinitely. This deadline is
+// measured from when the watcher armed, not from the last activity, and
+// fires regardless of continued raw growth once the task has spent this
+// long without ever flipping outputSeen. 4x the base pre-output timeout:
+// generous enough that a legitimately slow-to-start worker (a big sandbox
+// mount, a cold provider connection) isn't cut short, but still a real
+// upper bound. Once outputSeen flips true, this ceiling no longer applies
+// -- postOutputNoOutputTimeout's escalated, per-tick-reset budget is the
+// intended mechanism for a task doing real, silent-but-legitimate work.
+const DEFAULT_PRE_OUTPUT_MAX_MS = DEFAULT_NO_OUTPUT_TIMEOUT_MS * 4;
 // TASKFERRY_WATCHDOG_POLL_MS is internal plumbing with no config-file
 // equivalent (see .superpowers/.completed/specs/2026-07-18-config-file-design.md),
 // so this one constant keeps reading process.env directly.
@@ -2575,18 +2590,6 @@ function validateAcceptable(task, ctx) {
 }
 
 /**
- * Reads the bytes appended to a running task's log since the last watcher
- * tick, updating the shared watch state (bytesRead/carry) and classifying any
- * provider failure in the new chunk. Returns true when a provider failure was
- * found and the task has already been failed (so the tick can bail before the
- * no-output check). Extracted from the watchdog interval's body to keep the
- * interval callback's complexity under the family's ceilings.
- * @param {{bytesRead: number, carry: string, outputSeen: boolean, currentNoOutputTimeout: number, lastActivityMs: number}} state
- * @param {Task} current
- * @param {{failRunningTask: (task: Task, reason: string, detail?: string) => void, scheduleActivity: (task: Task) => Promise<unknown>, postOutputNoOutputTimeout: number}} ctx
- * @returns {boolean}
- */
-/**
  * Classifies a freshly-read log chunk (plus the trailing carry line) into a
  * provider failure and whether the chunk contained any parseable JSON line.
  * The carry line is only classified on its own when the main lines yielded no
@@ -2608,6 +2611,18 @@ function resolveChunkProviderFailure(lines, carry, errorBucketPrefix) {
   };
 }
 
+// Every other bounded log-read in this file caps its allocation
+// (BOOT_FAILURE_SCAN_BYTES, LOG_ACTIVITY_SCAN_BYTES, TAIL_READ_BYTES) --
+// this one didn't: consumeWatchdogLogChunk used to Buffer.alloc the entire
+// growth since the last tick in one shot, unbounded. A child that dumps a
+// large burst (a verbose error, a big stdout flush) between polls could
+// spike a large single allocation on the daemon's one thread. Cap each
+// tick's read to this many bytes -- state.bytesRead only advances by what
+// was actually read, so a chunk larger than the cap is picked up over
+// however many subsequent ticks it takes, same as TAIL_READ_BYTES' cap on
+// `tail`.
+const WATCHDOG_CHUNK_READ_BYTES = TAIL_READ_BYTES;
+
 /**
  * Reads the bytes appended to a running task's log since the last watcher
  * tick, updating the shared watch state (bytesRead/carry) and classifying any
@@ -2615,7 +2630,7 @@ function resolveChunkProviderFailure(lines, carry, errorBucketPrefix) {
  * found and the task has already been failed (so the tick can bail before the
  * no-output check). Extracted from the watchdog interval's body to keep the
  * interval callback's complexity under the family's ceilings.
- * @param {{bytesRead: number, carry: string, outputSeen: boolean, currentNoOutputTimeout: number, lastActivityMs: number}} state
+ * @param {{bytesRead: number, carry: string, outputSeen: boolean, currentNoOutputTimeout: number, lastActivityMs: number, armedAtMs: number}} state
  * @param {Task} current
  * @param {{failRunningTask: (task: Task, reason: string, detail?: string) => void, scheduleActivity: (task: Task) => Promise<unknown>, postOutputNoOutputTimeout: number, errorBucketPrefix: string}} ctx
  * @returns {boolean}
@@ -2633,7 +2648,7 @@ function consumeWatchdogLogChunk(state, current, ctx) {
     state.carry = "";
   }
   if (size <= state.bytesRead) return false;
-  const chunkSize = size - state.bytesRead;
+  const chunkSize = Math.min(size - state.bytesRead, WATCHDOG_CHUNK_READ_BYTES);
   const buf = Buffer.alloc(chunkSize);
   const fd = fs.openSync(current.logPath, "r");
   try {
@@ -2641,7 +2656,7 @@ function consumeWatchdogLogChunk(state, current, ctx) {
   } finally {
     fs.closeSync(fd);
   }
-  state.bytesRead = size;
+  state.bytesRead += chunkSize;
   const text = state.carry + buf.toString("utf8");
   const lines = text.split("\n");
   state.carry = lines.pop() ?? "";
@@ -2658,9 +2673,10 @@ function consumeWatchdogLogChunk(state, current, ctx) {
   // parseable line yet -- an in-progress line, non-JSON stderr chatter, or a
   // write straddling two ticks all mean the process is still running. A
   // parseable line can't appear without the log growing first, so this is a
-  // strict superset of the old hasParseableLine-only reset and needs no
-  // separate check: we only reach here when size > state.bytesRead already
-  // held above.
+  // strict superset of the old hasParseableLine-only reset. This clock
+  // reset alone has no ceiling -- watchdogTick's separate preOutputMax
+  // check below is what stops a task that rides this reset forever without
+  // ever producing a real event.
   state.lastActivityMs = Date.now();
   if (hasParseableLine && !state.outputSeen) {
     state.outputSeen = true;
@@ -2673,10 +2689,14 @@ function consumeWatchdogLogChunk(state, current, ctx) {
 /**
  * One watchdog tick: re-read the current task, and if it's no longer running
  * tear the watcher down; otherwise consume any new log bytes (failing the
- * task on a provider failure) and enforce the no-output timeout. Errors from
- * log reads (rotated/removed log) are swallowed and retried next tick.
- * @param {{bytesRead: number, carry: string, outputSeen: boolean, currentNoOutputTimeout: number, lastActivityMs: number}} state
- * @param {{taskId: string, tasks: Map<string, Task>, stopRunningWatcher: (taskId: string) => void, failRunningTask: (task: Task, reason: string, detail?: string) => void, scheduleActivity: (task: Task) => Promise<unknown>, postOutputNoOutputTimeout: number, errorBucketPrefix: string}} ctx
+ * task on a provider failure), enforce the absolute pre-output ceiling, and
+ * enforce the no-output timeout. Only an ENOENT from the log read (rotated
+ * or not-yet-created) is swallowed and retried next tick -- any other read
+ * error (EACCES, EMFILE, ...) fails the task explicitly instead of silently
+ * freezing the activity clock and letting a healthy task get misclassified
+ * as a stale no-output timeout later.
+ * @param {{bytesRead: number, carry: string, outputSeen: boolean, currentNoOutputTimeout: number, lastActivityMs: number, armedAtMs: number}} state
+ * @param {{taskId: string, tasks: Map<string, Task>, stopRunningWatcher: (taskId: string) => void, failRunningTask: (task: Task, reason: string, detail?: string) => void, scheduleActivity: (task: Task) => Promise<unknown>, postOutputNoOutputTimeout: number, preOutputMax: number, errorBucketPrefix: string}} ctx
  */
 function watchdogTick(state, ctx) {
   const current = ctx.tasks.get(ctx.taskId);
@@ -2686,8 +2706,24 @@ function watchdogTick(state, ctx) {
   }
   try {
     if (consumeWatchdogLogChunk(state, current, ctx)) return;
-  } catch {
-    // A rotated or removed log is retried on the next watcher tick.
+  } catch (err) {
+    if (/** @type {NodeJS.ErrnoException} */ (err)?.code !== "ENOENT") {
+      ctx.failRunningTask(current, "watchdog_log_read_error", errMessage(err));
+      return;
+    }
+    // A rotated or not-yet-created log (ENOENT) is retried on the next tick.
+  }
+  // Absolute ceiling: a task that has never produced a single parseable
+  // line can otherwise ride consumeWatchdogLogChunk's any-growth reset
+  // forever (continuous non-JSON noise keeps pushing lastActivityMs
+  // forward). This check is independent of lastActivityMs -- it's measured
+  // from when the watcher armed -- so continued raw growth cannot extend
+  // it. Once outputSeen flips true, this no longer applies; the escalated
+  // postOutputNoOutputTimeout budget below is the intended mechanism for a
+  // task doing real, silent-but-legitimate work.
+  if (!state.outputSeen && Date.now() - state.armedAtMs >= ctx.preOutputMax) {
+    ctx.failRunningTask(current, "no_output_timeout_dead_spawn", `no parseable event within ${ctx.preOutputMax}ms despite continued raw log growth (pre-output ceiling)`);
+    return;
   }
   if (Date.now() - state.lastActivityMs >= state.currentNoOutputTimeout) {
     // Split by state.outputSeen (the same pre/post-output latch the
@@ -2730,6 +2766,7 @@ function watchdogTick(state, ctx) {
  * @param {number} [options.advisorSessionTtlMs]
  * @param {number} [options.noOutputTimeoutMs]
  * @param {number} [options.postOutputNoOutputTimeoutMs]
+ * @param {number} [options.preOutputMaxMs]
  * @param {number} [options.watchdogPollMs]
  * @param {number} [options.watchdogGraceMs]
  * @param {number} [options.cancelGraceMs]
@@ -2861,6 +2898,7 @@ function resolveTimeoutOptions(rawOptions) {
     advisorSessionTtlMs: resolvePositiveIntOption(rawOptions.advisorSessionTtlMs, process.env.TASKFERRY_ADVISOR_SESSION_TTL_MS, config.advisorSessionTtlMs, DEFAULT_ADVISOR_SESSION_TTL_MS),
     noOutputTimeoutMs: resolvePositiveIntOption(rawOptions.noOutputTimeoutMs, process.env.TASKFERRY_NO_OUTPUT_TIMEOUT_MS, config.noOutputTimeoutMs, DEFAULT_NO_OUTPUT_TIMEOUT_MS),
     postOutputNoOutputTimeoutMs: resolvePositiveIntOption(rawOptions.postOutputNoOutputTimeoutMs, process.env.TASKFERRY_POST_OUTPUT_NO_OUTPUT_TIMEOUT_MS, config.postOutputNoOutputTimeoutMs, DEFAULT_POST_OUTPUT_NO_OUTPUT_TIMEOUT_MS),
+    preOutputMaxMs: resolvePositiveIntOption(rawOptions.preOutputMaxMs, process.env.TASKFERRY_PRE_OUTPUT_MAX_MS, config.preOutputMaxMs, DEFAULT_PRE_OUTPUT_MAX_MS),
     watchdogPollMs: rawOptions.watchdogPollMs ?? DEFAULT_WATCHDOG_POLL_MS,
     watchdogGraceMs: resolvePositiveIntOption(rawOptions.watchdogGraceMs, process.env.TASKFERRY_WATCHDOG_GRACE_MS, config.watchdogGraceMs, DEFAULT_WATCHDOG_GRACE_MS),
     cancelGraceMs: resolvePositiveIntOption(rawOptions.cancelGraceMs, process.env.TASKFERRY_CANCEL_GRACE_MS, config.cancelGraceMs, DEFAULT_CANCEL_GRACE_MS),
@@ -3104,6 +3142,7 @@ function initManagerLimits(opts) {
     advisorTtl: positiveInteger(opts.advisorSessionTtlMs, DEFAULT_ADVISOR_SESSION_TTL_MS),
     noOutputTimeout: positiveInteger(opts.noOutputTimeoutMs, DEFAULT_NO_OUTPUT_TIMEOUT_MS),
     postOutputNoOutputTimeout: positiveInteger(opts.postOutputNoOutputTimeoutMs, DEFAULT_POST_OUTPUT_NO_OUTPUT_TIMEOUT_MS),
+    preOutputMax: positiveInteger(opts.preOutputMaxMs, DEFAULT_PRE_OUTPUT_MAX_MS),
     watchdogPoll: positiveInteger(opts.watchdogPollMs, DEFAULT_WATCHDOG_POLL_MS),
     watchdogGrace: positiveInteger(opts.watchdogGraceMs, DEFAULT_WATCHDOG_GRACE_MS),
     cancelGrace: positiveInteger(opts.cancelGraceMs, DEFAULT_CANCEL_GRACE_MS),
@@ -3435,7 +3474,7 @@ function buildManagerInternalHelpers(ctx) {
     /**
      * @param {Task} task
      * @param {import("./executor.js").WorkerExecutor} executor */
-    startRunningWatcher: (task, executor) => startRunningWatcherFor(task, { noOutputTimeout: ctx.limits.noOutputTimeout, runningWatcherState: ctx.maps.runningWatcherState, tasks: ctx.maps.tasks, stopRunningWatcher: (taskId) => ctx.helpers.stopRunningWatcher(taskId), failRunningTask: (task, reason, detail) => ctx.helpers.failRunningTask(task, reason, detail), scheduleActivity: (task, options) => ctx.helpers.scheduleActivity(task, options), postOutputNoOutputTimeout: ctx.limits.postOutputNoOutputTimeout, watchdogPoll: ctx.limits.watchdogPoll, runningWatchers: ctx.maps.runningWatchers, errorBucketPrefix: executor.errorBucketPrefix }),
+    startRunningWatcher: (task, executor) => startRunningWatcherFor(task, { noOutputTimeout: ctx.limits.noOutputTimeout, runningWatcherState: ctx.maps.runningWatcherState, tasks: ctx.maps.tasks, stopRunningWatcher: (taskId) => ctx.helpers.stopRunningWatcher(taskId), failRunningTask: (task, reason, detail) => ctx.helpers.failRunningTask(task, reason, detail), scheduleActivity: (task, options) => ctx.helpers.scheduleActivity(task, options), postOutputNoOutputTimeout: ctx.limits.postOutputNoOutputTimeout, preOutputMax: ctx.limits.preOutputMax, watchdogPoll: ctx.limits.watchdogPoll, runningWatchers: ctx.maps.runningWatchers, errorBucketPrefix: executor.errorBucketPrefix }),
     /** Targets the process group (negative pid), which reaches opencode and any
      * subprocess it spawned (e.g. a bash command it's mid-way through running),
      * since `dispatch()` makes the child a process group leader for exactly
@@ -4936,7 +4975,7 @@ function failRunningTaskFor(task, failureReason, ctx, failureDetail) {
  * `startRunningWatcher` closure; every factory binding is threaded in via
  * `ctx` and the mutable per-task watch state lives on `ctx.runningWatcherState`.
  * @param {Task} task
- * @param {{noOutputTimeout: number, runningWatcherState: Map<string, {bytesRead: number, carry: string}>, tasks: Map<string, Task>, stopRunningWatcher: (taskId: string) => void, failRunningTask: (task: Task, failureReason: string, failureDetail?: string) => void, scheduleActivity: (task: Task, options?: {force?: boolean}) => Promise<unknown>, postOutputNoOutputTimeout: number, watchdogPoll: number, runningWatchers: Map<string, NodeJS.Timeout>, errorBucketPrefix: string}} ctx
+ * @param {{noOutputTimeout: number, runningWatcherState: Map<string, {bytesRead: number, carry: string}>, tasks: Map<string, Task>, stopRunningWatcher: (taskId: string) => void, failRunningTask: (task: Task, failureReason: string, failureDetail?: string) => void, scheduleActivity: (task: Task, options?: {force?: boolean}) => Promise<unknown>, postOutputNoOutputTimeout: number, preOutputMax: number, watchdogPoll: number, runningWatchers: Map<string, NodeJS.Timeout>, errorBucketPrefix: string}} ctx
  */
 function startRunningWatcherFor(task, ctx) {
   // Mutable per-task watch state threaded into the module-level watchdog
@@ -4944,13 +4983,17 @@ function startRunningWatcherFor(task, ctx) {
   // the last one instead of the whole file (O(1) amortized per tick, not
   // O(n) per tick / O(n²) over a long-running task). `carry` holds a
   // trailing partial line from the previous read until it's completed by
-  // the next chunk.
+  // the next chunk. `armedAtMs` anchors the absolute pre-output ceiling
+  // (preOutputMax) below -- unlike lastActivityMs it is never reset by
+  // continued raw growth, so it's what actually bounds a task that keeps
+  // resetting its own activity clock without ever producing a real event.
   const watchState = {
     bytesRead: 0,
     carry: "",
     outputSeen: false,
     currentNoOutputTimeout: ctx.noOutputTimeout,
     lastActivityMs: Date.now(),
+    armedAtMs: Date.now(),
   };
   ctx.runningWatcherState.set(task.id, {
     get bytesRead() { return watchState.bytesRead; },
@@ -4975,6 +5018,7 @@ function startRunningWatcherFor(task, ctx) {
       failRunningTask: ctx.failRunningTask,
       scheduleActivity: ctx.scheduleActivity,
       postOutputNoOutputTimeout: ctx.postOutputNoOutputTimeout,
+      preOutputMax: ctx.preOutputMax,
       errorBucketPrefix: ctx.errorBucketPrefix,
     });
   }, ctx.watchdogPoll);

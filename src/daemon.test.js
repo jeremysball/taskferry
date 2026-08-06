@@ -88,6 +88,10 @@ function fakeManagerFactory(tasks = [], { checkSummaryModelReady, throwOnClose =
           : "none found (this server process's lifetime)",
       };
     },
+    stats() {
+      calls.push(["stats"]);
+      return { byModel: [], failureReasons: [], unknownBacklog: { total: 0, tasks: [] }, computedAt: TEST_STARTED_AT, statusMix: { overall: { total: tasks.length } }, trend: { direction: "unknown" } };
+    },
     result(taskId, options) {
       calls.push(["result", taskId, options]);
       return { taskId, status: "done", message: "result" };
@@ -260,6 +264,26 @@ describe("Unix socket daemon", () => {
       assert.deepEqual(fake.calls.at(-1), ["reject", "t1"]);
       assert.equal(response.result.changesetStatus, "rejected");
     });
+  });
+
+  test("task.stats invokes manager.stats() (no directory/other params forwarded), not manager.list()", async (t) => {
+    // doctor --stats's fix: aggregation happens in the manager, over its own
+    // in-memory task map -- the daemon must never fall back to manager.list()
+    // for this method, since that's exactly the unfiltered-full-row-list path
+    // whose serialized size can exceed the outbound cap.
+    const paths = temporaryPaths(t);
+    const fake = fakeManagerFactory();
+    const daemon = await startDaemon({ ...paths, taskManagerFactory: fake.factory });
+    t.after(() => daemon.close());
+    const peer = await openPeer(paths.socketPath);
+    t.after(() => peer.close());
+
+    const response = await peer.request("stats", "task.stats", {});
+
+    assert.equal(response.ok, true, response.error?.message);
+    assert.deepEqual(fake.calls.at(-1), ["stats"]);
+    assert.ok(!fake.calls.some((call) => call[0] === "list"), "task.stats must not call manager.list()");
+    assert.ok(Array.isArray(response.result.byModel));
   });
 
   test("forwards an executor param on task.dispatch to manager.dispatch(params)", async (t) => {
@@ -697,6 +721,100 @@ describe("Unix socket daemon: profiling (request-timing edge cases)", () => {
     const perfLogPath = path.join(paths.stateDir, "perf.log");
     const lines = fs.readFileSync(perfLogPath, "utf8").trim().split("\n").map((line) => JSON.parse(line));
     assert.ok(lines.some((line) => line.method === "request_too_large" && line.ok === false), "expected the oversized buffer to be logged");
+  });
+});
+
+describe("Unix socket daemon: oversized response downgrade", () => {
+  test("an oversized success result degrades to a RESPONSE_TOO_LARGE error frame instead of silently destroying the socket", async (t) => {
+    const paths = temporaryPaths(t);
+    // 200 tasks worth of list() output blows well past this cap, but the
+    // small RESPONSE_TOO_LARGE error frame itself comfortably fits.
+    const tasks = Array.from({ length: 200 }, (_, i) => ({ id: `t${i}`, status: "done", directory: paths.root }));
+    const fake = fakeManagerFactory(tasks);
+    const daemon = await startDaemon({ ...paths, taskManagerFactory: fake.factory, maxOutboundBytes: 512 });
+    t.after(() => daemon.close());
+    const peer = await openPeer(paths.socketPath);
+    t.after(() => peer.close());
+
+    const response = await peer.request("list-1", "task.list", {});
+
+    assert.equal(response.ok, false);
+    assert.equal(response.error.code, "RESPONSE_TOO_LARGE");
+    assert.equal(response.id, "list-1");
+
+    // The socket itself survives the downgrade -- unlike the silent-destroy
+    // path, a later request on the same connection still gets answered.
+    const health = await peer.request("health-2", SYSTEM_HEALTH);
+    assert.equal(health.ok, true, health.error?.message);
+  });
+
+  test("a small RESPONSE_TOO_LARGE envelope still gets through when the normal-sized one doesn't fit (a socket already close to its cap)", async (t) => {
+    // Regression for fix-doctor-stats-formatting's silent-destroy edge case:
+    // the original downgrade was a single full-sized error frame (~250
+    // bytes), so any socket whose existing writableLength was already
+    // (cap - 200) bytes or more fell through to a zero-diagnostic destroy.
+    // The two-level fallback (normal -> small) catches that case: even
+    // with a 200-byte cap, the small envelope (~110 bytes) still fits, so
+    // the client at least gets a code-level diagnostic before the wire
+    // truly goes silent.
+    const paths = temporaryPaths(t);
+    const tasks = Array.from({ length: 200 }, (_, i) => ({ id: `t${i}`, status: "done", directory: paths.root }));
+    const fake = fakeManagerFactory(tasks);
+    const daemon = await startDaemon({ ...paths, taskManagerFactory: fake.factory, maxOutboundBytes: 200 });
+    t.after(() => daemon.close());
+    const peer = await openPeer(paths.socketPath);
+    t.after(() => peer.close());
+
+    const response = await peer.request("list-1", "task.list", {});
+
+    assert.equal(response.ok, false);
+    assert.equal(response.error.code, "RESPONSE_TOO_LARGE");
+    assert.equal(response.id, "list-1");
+  });
+
+  test("an oversized error response also degrades to a RESPONSE_TOO_LARGE frame (not just success responses)", async (t) => {
+    // The original PR's downgrade was gated on message.ok === true, which
+    // left error responses and event pushes silently destroying the
+    // socket on overflow. Both are eligible for the same downgrade now --
+    // a 200-byte cap is small enough that the full success payload won't
+    // fit, and so the error response takes the downgrade path. We assert
+    // the client still gets a structured error rather than a closed
+    // connection.
+    const paths = temporaryPaths(t);
+    const tasks = Array.from({ length: 200 }, (_, i) => ({ id: `t${i}`, status: "done", directory: paths.root }));
+    const fake = fakeManagerFactory(tasks);
+    const daemon = await startDaemon({ ...paths, taskManagerFactory: fake.factory, maxOutboundBytes: 200 });
+    t.after(() => daemon.close());
+    const peer = await openPeer(paths.socketPath);
+    t.after(() => peer.close());
+
+    // Send a bad request whose server-side error response is the kind that
+    // would also blow past the cap if the underlying result were huge.
+    // The 200-task fake already produces a list() result larger than 200
+    // bytes, so this exercises the same downgrade.
+    const response = await peer.request("err-1", "task.list", {});
+
+    assert.equal(response.ok, false);
+    assert.equal(response.error.code, "RESPONSE_TOO_LARGE");
+  });
+
+  test("a downgrade that even the small fallback can't fit still destroys the socket (no infinite fallback loop)", async (t) => {
+    const paths = temporaryPaths(t);
+    const tasks = Array.from({ length: 200 }, (_, i) => ({ id: `t${i}`, status: "done", directory: paths.root }));
+    const fake = fakeManagerFactory(tasks);
+    // A 1-byte cap is the only realistic way to land here: any reasonable
+    // cap leaves at least 110 bytes of headroom for the small envelope.
+    // The bounded fallback chain (normal -> small -> destroy) is the
+    // guarantee that this never loops.
+    const daemon = await startDaemon({ ...paths, taskManagerFactory: fake.factory, maxOutboundBytes: 1 });
+    t.after(() => daemon.close());
+    const peer = await openPeer(paths.socketPath);
+    t.after(() => peer.close());
+
+    void peer.request("list-1", "task.list", {});
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    assert.equal(peer.socket.destroyed, true);
   });
 });
 

@@ -1,0 +1,310 @@
+# Review package: 12979e3..88e1f31
+
+## Commits
+88e1f31 feat(tasks): add executorId to Task, defaultExecutor option to createTaskManager
+
+## Files changed
+ src/tasks.js      | 17 +++++++++++++++--
+ src/tasks.test.js | 21 +++++++++++++++++++++
+ 2 files changed, 36 insertions(+), 2 deletions(-)
+
+## Diff
+diff --git a/src/tasks.js b/src/tasks.js
+index 5a67dcf..52d7199 100644
+--- a/src/tasks.js
++++ b/src/tasks.js
+@@ -6,20 +6,21 @@ import path from "node:path";
+ import { promisify } from "node:util";
+ import { createTaskEvents } from "./events.js";
+ import { createActivityCache, readActivitySnapshot, readDeltaNarration, DEFAULT_SUMMARIZER_TIMEOUT_MS } from "./activity.js";
+ import { withFileLock } from "./state-lock.js";
+ import { resolveStateDir } from "./paths.js";
+ import { RESULT_FIELDS } from "./protocol.js";
+ import { formatToolEventForNarration } from "./narration-format.js";
+ import { errCode } from "./errors.js";
+ import { isNonNegativeInteger, isPositiveInteger } from "./numbers.js";
+ import { buildBwrapArgs, checkBwrapAvailable, defaultDenyList, platformSupportsSandbox, resolveGitCommonDir } from "./sandbox.js";
++import { resolveExecutor, opencodeExecutor } from "./executor.js";
+ 
+ /**
+  * @typedef {object} SummaryOf
+  * @property {string} sourceTaskId
+  * @property {string} sourceStatus
+  * @property {string} capturedAt
+  * @property {number} sourceLogBytes
+  * @property {number} summaryInputBytes
+  * @property {number} maxWords
+  */
+@@ -43,20 +44,21 @@ import { buildBwrapArgs, checkBwrapAvailable, defaultDenyList, platformSupportsS
+  * @property {number|null} promptTotalChars
+  * @property {string|null} spawnError
+  * @property {boolean} cancelRequested
+  * @property {boolean} internal
+  * @property {string|null} [failureReason]
+  * @property {string|null} [failureDetail]
+  * @property {string|null} [keySlot]
+  * @property {SummaryOf} [summaryOf]
+  * @property {boolean} [incomplete]
+  * @property {string|null} [finalMarker]
++ * @property {"opencode"|"pi"} [executorId]
+  */
+ 
+ /**
+  * @typedef {object} TaskSummary
+  * @property {string} id
+  * @property {string} status
+  * @property {string} directory
+  * @property {string} model
+  * @property {string|null} sessionId
+  * @property {string|null} originSessionId
+@@ -69,20 +71,21 @@ import { buildBwrapArgs, checkBwrapAvailable, defaultDenyList, platformSupportsS
+  * @property {string} promptPreview
+  * @property {number} [promptTotalChars]
+  * @property {SummaryOf} [summaryOf]
+  * @property {boolean} cancelRequested
+  * @property {string|null} [failureReason]
+  * @property {string|null} [failureDetail]
+  * @property {string|null} [keySlot]
+  * @property {string|null} [spawnError]
+  * @property {boolean} [incomplete]
+  * @property {string|null} [finalMarker]
++ * @property {"opencode"|"pi"} [executorId]
+  */
+ 
+ /**
+  * @typedef {object} LogActivity
+  * @property {number} logBytesWritten
+  * @property {string|null} logLastWriteAt
+  * @property {boolean} logHasEvent
+  */
+ 
+ /**
+@@ -92,32 +95,34 @@ import { buildBwrapArgs, checkBwrapAvailable, defaultDenyList, platformSupportsS
+ /**
+  * @typedef {object} DispatchLaunch
+  * @property {string} prompt
+  * @property {string} directory
+  * @property {string} model
+  * @property {string|null} variant
+  * @property {string|null|undefined} [sessionId]
+  * @property {string|null} [keyEnvValue]
+  * @property {boolean} [noSandbox]
+  * @property {string[]} [allowedDirs]
++ * @property {import("./executor.js").WorkerExecutor} executor
+  * @property {undefined} [kind]
+  * @property {undefined} [snapshotPath]
+  */
+ 
+ /**
+  * @typedef {object} SummaryLaunch
+  * @property {"summary"} kind
+  * @property {string} model
+  * @property {string} snapshotPath
+  * @property {NodeJS.ProcessEnv} env
+  * @property {string|null} [keyEnvValue]
+  * @property {string} [summarySessionId]  opencode session id to continue on this turn, if any
++ * @property {import("./executor.js").WorkerExecutor} executor
+  */
+ 
+ /** @typedef {DispatchLaunch|SummaryLaunch} LaunchSpec */
+ 
+ /**
+  * @typedef {object} ResultDetail
+  * @property {string} taskId
+  * @property {string} status
+  * @property {string} [message]
+  * @property {string} [narration]
+@@ -367,20 +372,24 @@ const DEFAULT_WATCHDOG_POLL_MS = positiveInteger(
+   2000
+ );
+ const DEFAULT_WATCHDOG_GRACE_MS = 5000;
+ 
+ /**
+  * @param {object} [options]
+  * @param {typeof spawn} [options.spawnFn]
+  * @param {(pid: number, signal: NodeJS.Signals) => void} [options.killFn]
+  * @param {(env?: NodeJS.ProcessEnv) => Promise<string>} [options.listModelsFn]
+  * @param {(env: NodeJS.ProcessEnv) => Promise<void>} [options.verifySummaryAgentFn]
++ * @param {import("./executor.js").WorkerExecutor} [options.defaultExecutor] - fallback WorkerExecutor used when
++ *   a dispatch doesn't request one explicitly. Per-dispatch selection (Task 6) calls `resolveExecutor(params.executor)`
++ *   and overrides this; this option exists so tests and embedders can swap in a different default without the
++ *   `dispatch({...})` params surface. Defaults to `resolveExecutor(undefined)` → `opencodeExecutor()`.
+  * @param {string} [options.stateDir]
+  * @param {Record<string, unknown>} [options.config]
+  * @param {number} [options.maxDispatchesPerWindow]
+  * @param {number} [options.dispatchWindowMs]
+  * @param {number} [options.maxConcurrentTasks]
+  * @param {number} [options.advisorSessionTtlMs]
+  * @param {number} [options.noOutputTimeoutMs]
+  * @param {number} [options.postOutputNoOutputTimeoutMs]
+  * @param {number} [options.watchdogPollMs]
+  * @param {number} [options.watchdogGraceMs]
+@@ -425,20 +434,21 @@ export function createTaskManager({
+         { encoding: "utf8", timeout: SUMMARY_PREFLIGHT_TIMEOUT_MS, env }
+       ));
+     } catch (err) {
+       stdout = /** @type {{stdout?: string}} */ (err).stdout || "";
+       stderr = /** @type {{stderr?: string}} */ (err).stderr || "";
+     }
+     if (!summaryAgentDeniedBash(stdout, stderr)) {
+       throw new Error("summary agent allowed bash");
+     }
+   },
++  defaultExecutor = /** @type {import("./executor.js").WorkerExecutor} */ (resolveExecutor(undefined)),
+   stateDir = DEFAULT_STATE_DIR,
+   config = {},
+   maxDispatchesPerWindow = positiveInteger(
+     Number(process.env.TASKFERRY_MAX_DISPATCHES_PER_WINDOW),
+     positiveInteger(/** @type {number} */ (config.maxDispatchesPerWindow), DEFAULT_MAX_DISPATCHES_PER_WINDOW)
+   ),
+   dispatchWindowMs = positiveInteger(
+     Number(process.env.TASKFERRY_DISPATCH_WINDOW_MS),
+     positiveInteger(/** @type {number} */ (config.dispatchWindowMs), DEFAULT_DISPATCH_WINDOW_MS)
+   ),
+@@ -714,20 +724,21 @@ export function createTaskManager({
+       const persisted = JSON.parse(raw);
+       for (const t of persisted) {
+         const previousStatus = t.status;
+         if (t.summaryOf) t.internal = true;
+         try {
+           t.directory = fs.realpathSync(t.directory);
+         } catch {
+           // A persisted task may outlive a workspace that has since been removed.
+         }
+         if (t.status === "running" || t.status === "queued") t.status = "unknown";
++        if (t.executorId === undefined) t.executorId = "opencode";
+         tasks.set(t.id, t);
+         if (t.status !== previousStatus) taskEvents.emitState(t, previousStatus);
+       }
+       fs.chmodSync(TASKS_FILE, 0o600);
+     } catch (err) {
+       if (errCode(err) !== "ENOENT") stateLoadError = /** @type {Error} */ (err);
+     }
+   }
+   loadPersisted();
+ 
+@@ -809,31 +820,32 @@ export function createTaskManager({
+   /** @param {Task} task */
+   function failureFields(task) {
+     return { failureReason: task.failureReason ?? null, failureDetail: task.failureDetail ?? null };
+   }
+ 
+   /**
+    * @param {Task} task
+    * @returns {TaskSummary}
+    */
+   function summarize(task) {
+-    const { promptPreview, promptTotalChars, id, status, directory, model, sessionId, originSessionId, pid, startedAt, endedAt, exitCode, signal, logPath, cancelRequested, keySlot, incomplete, finalMarker, spawnError } = task;
++    const { promptPreview, promptTotalChars, id, status, directory, model, sessionId, originSessionId, pid, startedAt, endedAt, exitCode, signal, logPath, cancelRequested, keySlot, incomplete, finalMarker, spawnError, executorId } = task;
+     return {
+       id, status, directory, model, sessionId, originSessionId, pid, startedAt, endedAt, exitCode, signal, logPath,
+       ...failureFields(task),
+       keySlot: keySlot ?? null,
+       spawnError: spawnError ?? null,
+       promptPreview,
+       ...(promptTotalChars != null ? { promptTotalChars } : {}),
+       ...(task.summaryOf ? { summaryOf: task.summaryOf } : {}),
+       ...(incomplete === true ? { incomplete: true } : {}),
+       ...(finalMarker != null ? { finalMarker } : {}),
++      ...(executorId != null ? { executorId } : {}),
+       cancelRequested: !!cancelRequested,
+     };
+   }
+ 
+   // Minimal per-row schema for taskferry list: an agent scanning a task list
+   // needs id/status/model/startedAt to decide what to poll next, not the full
+   // detail (directory, pid, logPath, ...) that summarize() carries for a
+   // single-task lookup. failureReason is included despite that otherwise-thin
+   // schema because a "crashed" status alone doesn't tell a scanning agent
+   // whether the task is worth retrying immediately (a provider failure bucket
+@@ -1008,21 +1020,21 @@ export function createTaskManager({
+       cancelRequested: false,
+       internal: internal === true,
+       failureReason: null,
+       failureDetail: null,
+       keySlot: resolvedKeySlot.keySlot,
+       incomplete: false,
+       finalMarker: finalMarker == null ? null : finalMarker,
+     };
+     tasks.set(id, task);
+     persistTask(task.id);
+-    pendingLaunches.set(id, { prompt, directory: normalizedDirectory, model: resolvedModel, variant: task.variant, sessionId, keyEnvValue: resolvedKeySlot.keyEnvValue, noSandbox: noSandbox === true, allowedDirs: dispatchAllowedDirs });
++    pendingLaunches.set(id, { prompt, directory: normalizedDirectory, model: resolvedModel, variant: task.variant, sessionId, keyEnvValue: resolvedKeySlot.keyEnvValue, noSandbox: noSandbox === true, allowedDirs: dispatchAllowedDirs, executor: defaultExecutor });
+     launchQueue.push(id);
+     launchQueuedTasks();
+ 
+     const summary = summarize(task);
+     return {
+       ...summary,
+       next: task.status === "queued"
+         ? `Task is queued; run taskferry wait or taskferry status with task id "${id}" to check when it starts`
+         : `Run taskferry wait or taskferry status with task id "${id}" to check progress`,
+     };
+@@ -1367,20 +1379,21 @@ export function createTaskManager({
+       failureDetail: null,
+       summaryOf,
+     };
+     tasks.set(id, task);
+     persistTask(task.id);
+     pendingLaunches.set(id, {
+       kind: "summary",
+       model: activitySummaryModel,
+       snapshotPath,
+       env,
++      executor: opencodeExecutor(),
+       ...(resolvedSummarySessionId ? { summarySessionId: resolvedSummarySessionId } : {}),
+     });
+     launchQueue.push(id);
+     launchQueuedTasks();
+     return {
+       sourceTaskId: taskId,
+       sourceStatus,
+       capturedAt,
+       sourceLogBytes: snapshot.sourceLogBytes,
+       summaryInputBytes: snapshot.inputBytes,
+diff --git a/src/tasks.test.js b/src/tasks.test.js
+index 676de03..b937b87 100644
+--- a/src/tasks.test.js
++++ b/src/tasks.test.js
+@@ -2289,20 +2289,41 @@ describe("cancel()", () => {
+     const result = mgr.cancel("t1");
+     assert.match(result.note, /task is already unknown; nothing to cancel/);
+   });
+ 
+   test("a persisted queued task reloads as 'unknown' and is never launched", () => {
+     const mgr = makeManager({ tasksFixture: [baseTask({ id: "t1", status: "queued", pid: null })] });
+     assert.equal(mgr.status("t1").status, "unknown");
+   });
+ });
+ 
++describe("executorId on persisted tasks (Task 5: legacy records default to opencode at load)", () => {
++  test("a persisted task with no executorId defaults to \"opencode\" on load", () => {
++    const mgr = makeManager({
++      tasksFixture: (logDir) => [{
++        id: "oc_legacy", status: "done", directory: "/tmp", model: "openai/gpt-5.6-luna", variant: "high",
++        sessionId: null, originSessionId: null, pid: null, startedAt: "2026-07-13T10:00:00.000Z",
++        endedAt: "2026-07-13T10:01:00.000Z", exitCode: 0, signal: null, logPath: path.join(logDir, "oc_legacy.ndjson"),
++        promptPreview: "legacy task", promptTotalChars: null, spawnError: null, cancelRequested: false, internal: false,
++      }],
++    });
++    assert.equal(mgr.status("oc_legacy").executorId, "opencode");
++  });
++
++  test("a persisted task that already has executorId \"pi\" is preserved on load", () => {
++    const mgr = makeManager({
++      tasksFixture: (logDir) => [baseTask({ id: "pi_persisted", logPath: path.join(logDir, "pi_persisted.ndjson"), executorId: "pi" })],
++    });
++    assert.equal(mgr.status("pi_persisted").executorId, "pi");
++  });
++});
++
+ describe("unknown task id (status/cancel/wait/result share one error path)", () => {
+   test("status() throws with an actionable help line", () => {
+     const mgr = makeManager();
+     assert.throws(
+       () => mgr.status("nope"),
+       /error: unknown task id: nope\nhelp: run taskferry list to see valid task ids/
+     );
+   });
+ 
+   test("cancel() throws the same formatted error", () => {

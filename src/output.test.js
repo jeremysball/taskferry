@@ -1,6 +1,6 @@
 import { describe, test } from "node:test";
 import assert from "node:assert/strict";
-import { colorize, errorValue, formatWatchEvent, homeView, leanStatus, projectContext, projectList, writeToon } from "./output.js";
+import { colorize, errorValue, formatWatchEvent, homeView, leanStatus, projectContext, projectDoctorStats, projectList, writeToon } from "./output.js";
 
 const TASK_ACTIVITY = "task.activity";
 const TASK_STATE = "task.state";
@@ -430,6 +430,122 @@ describe("writeToon status coloring", () => {
 
     assert.ok(!output().includes("\x1b["));
     assert.ok(output().includes("status: unknown"));
+  });
+});
+
+describe("writeToon doctor coloring", () => {
+  test("colors healthy/installed/isolated true green and false red", () => {
+    const { io, output } = fakeStdoutIo(true);
+    writeToon({ healthy: true, integrations: { claude: { installed: false }, playwrightMcpIsolation: { opencode: { isolated: true } } } }, io);
+
+    assert.ok(output().includes("healthy: \x1b[32mtrue\x1b[0m"));
+    assert.ok(output().includes("installed: \x1b[31mfalse\x1b[0m"));
+    assert.ok(output().includes("isolated: \x1b[32mtrue\x1b[0m"));
+  });
+
+  test("leaves `checked` uncolored -- false there means unverified, not failed", () => {
+    const { io, output } = fakeStdoutIo(true);
+    writeToon({ checked: false }, io);
+
+    assert.ok(!output().includes("\x1b["));
+    assert.ok(output().includes("checked: false"));
+  });
+
+  test("colors trend.direction improving green and worsening red, leaves unknown uncolored", () => {
+    const { io: ioImproving, output: outputImproving } = fakeStdoutIo(true);
+    writeToon({ direction: "improving" }, ioImproving);
+    assert.ok(outputImproving().includes("direction: \x1b[32mimproving\x1b[0m"));
+
+    const { io: ioWorsening, output: outputWorsening } = fakeStdoutIo(true);
+    writeToon({ direction: "worsening" }, ioWorsening);
+    assert.ok(outputWorsening().includes("direction: \x1b[31mworsening\x1b[0m"));
+
+    const { io: ioUnknown, output: outputUnknown } = fakeStdoutIo(true);
+    writeToon({ direction: "unknown" }, ioUnknown);
+    assert.ok(!outputUnknown().includes("\x1b["));
+  });
+
+  test("colors warnings yellow and info dim, without swallowing the text itself", () => {
+    const { io, output } = fakeStdoutIo(true);
+    writeToon({ warnings: ["bwrap is not installed"], info: ["sandboxing unavailable on this platform"] }, io);
+
+    assert.ok(output().includes("\x1b[33mbwrap is not installed\x1b[0m"));
+    assert.ok(output().includes("\x1b[2msandboxing unavailable on this platform\x1b[0m"));
+  });
+
+  test("no ANSI escapes anywhere when stdout is not a TTY, even with warnings/booleans/direction present", () => {
+    const { io, output } = fakeStdoutIo(false);
+    writeToon({ healthy: true, direction: "worsening", warnings: ["bwrap missing"] }, io);
+
+    assert.ok(!output().includes("\x1b["));
+    assert.ok(output().includes("healthy: true"));
+    assert.ok(output().includes("direction: worsening"));
+    assert.ok(output().includes("bwrap missing"));
+  });
+});
+
+describe("projectDoctorStats", () => {
+  function stats(overrides = {}) {
+    return {
+      byModel: [{ model: "m1", dispatches: 2, done: 1, crashed: 1, doneRate: 0.5, crashRate: 0.5 }],
+      failureReasons: [],
+      unknownBacklog: { total: 0, tasks: [] },
+      computedAt: TASK_STARTED_AT_EXAMPLE,
+      statusMix: { overall: {}, last24h: {}, last7d: {} },
+      trend: { window: "24h", current: { crashRate: 0.25 }, previous: { crashRate: null }, direction: "flat" },
+      ...overrides,
+    };
+  }
+
+  test("formats byModel and trend rates as one-decimal percentages", () => {
+    const result = projectDoctorStats(stats());
+    assert.equal(result.byModel[0].doneRate, "50.0%");
+    assert.equal(result.byModel[0].crashRate, "50.0%");
+    assert.equal(result.trend.current.crashRate, "25.0%");
+  });
+
+  test("leaves a null rate (no settled tasks) as null instead of formatting it", () => {
+    const result = projectDoctorStats(stats());
+    assert.equal(result.trend.previous.crashRate, null);
+  });
+
+  test("tolerates a missing/non-array byModel without throwing", () => {
+    // A partial / stubbed / version-skewed response (e.g. an old daemon
+    // that returned a different shape, or a stub injected by a test)
+    // shouldn't throw a raw TypeError out of `stats.byModel.map`. The
+    // defensive guard coerces the missing array to [], so the rest of
+    // the response is still surfaced.
+    const result = projectDoctorStats(stats({ byModel: null }));
+    assert.deepEqual(result.byModel, []);
+    assert.equal(result.trend.current.crashRate, "25.0%");
+  });
+
+  test("tolerates a missing/null trend (and missing trend.current/previous) without throwing", () => {
+    // The old code dereferenced stats.trend.current unconditionally; a
+    // partial response would throw TypeError. With the guard, a null
+    // trend degrades to an empty trend object, and crashRate stays
+    // (with `undefined` value, matching formatRate's null/undefined
+    // pass-through) instead of crashing.
+    const result = projectDoctorStats(stats({ trend: null }));
+    assert.ok(result.trend.current);
+    assert.ok(result.trend.previous);
+    assert.equal("crashRate" in result.trend.current, true);
+    assert.equal("crashRate" in result.trend.previous, true);
+  });
+
+  test("tolerates a totally missing/undefined stats payload", () => {
+    // Last-line defensive guard: a caller that wires up a no-op stats
+    // source (or a stub that returned `undefined` for any reason) must
+    // not throw. The function returns an empty-but-shaped object; the
+    // crashRate keys stay present (with `undefined` value, matching
+    // formatRate's null/undefined pass-through) so downstream code that
+    // reads them gets a consistent shape.
+    const result = projectDoctorStats(null);
+    assert.deepEqual(result.byModel, []);
+    assert.ok(result.trend.current);
+    assert.ok(result.trend.previous);
+    assert.equal("crashRate" in result.trend.current, true);
+    assert.equal("crashRate" in result.trend.previous, true);
   });
 });
 

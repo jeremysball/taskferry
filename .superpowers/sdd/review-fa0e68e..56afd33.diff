@@ -1,0 +1,77 @@
+# Review package: fa0e68e..56afd33
+
+## Commits
+56afd33 test(tasks): add fakeChild().stdout and makeManager({defaultExecutor}) for executor testing
+
+## Files changed
+ src/tasks.test.js | 4 +++-
+ 1 file changed, 3 insertions(+), 1 deletion(-)
+
+## Diff
+diff --git a/src/tasks.test.js b/src/tasks.test.js
+index 95b39fb..e201bd1 100644
+--- a/src/tasks.test.js
++++ b/src/tasks.test.js
+@@ -6,38 +6,39 @@ import os from "node:os";
+ import path from "node:path";
+ import { createTaskManager, summaryAgentDeniedBash, isOutsideDirectory } from "./tasks.js";
+ 
+ // Builds an isolated task manager backed by a temp state dir and, unless
+ // overridden, fake spawnFn/killFn so no test ever touches a real `opencode`
+ // process or a real OS signal. `tasksFixture`/`logs` seed tasks.json and
+ // logs/ *before* the manager loads them (createTaskManager's loadPersisted()
+ // runs synchronously in the constructor, same as the old module-level code
+ // did at import time). `tasksFixture` may be an array or `(logDir) => array`
+ // for fixtures whose logPath needs to point inside the real log dir.
+-function makeManager({ tasksFixture = [], logs = {}, spawnFn, killFn, listModelsFn, verifySummaryAgentFn, maxDispatchesPerWindow, dispatchWindowMs, advisorSessionTtlMs, maxConcurrentTasks, noOutputTimeoutMs, postOutputNoOutputTimeoutMs, watchdogPollMs, maxWaitMs, keySlotsSpec, providerKeyEnvName, summaryKeySlot, summaryProviderKeyEnvName, sandboxEnabled = false, checkBwrapAvailableFn, existsFn, runtimeDir, platform, onEvent, allowedDirs, resolveGitCommonDirFn } = {}) {
++function makeManager({ tasksFixture = [], logs = {}, spawnFn, killFn, listModelsFn, verifySummaryAgentFn, defaultExecutor, maxDispatchesPerWindow, dispatchWindowMs, advisorSessionTtlMs, maxConcurrentTasks, noOutputTimeoutMs, postOutputNoOutputTimeoutMs, watchdogPollMs, maxWaitMs, keySlotsSpec, providerKeyEnvName, summaryKeySlot, summaryProviderKeyEnvName, sandboxEnabled = false, checkBwrapAvailableFn, existsFn, runtimeDir, platform, onEvent, allowedDirs, resolveGitCommonDirFn } = {}) {
+   const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-test-"));
+   const logDir = path.join(stateDir, "logs");
+   fs.mkdirSync(logDir, { recursive: true });
+ 
+   const fixtureTasks = typeof tasksFixture === "function" ? tasksFixture(logDir) : tasksFixture;
+   fs.writeFileSync(path.join(stateDir, "tasks.json"), JSON.stringify(fixtureTasks, null, 2));
+   for (const [name, content] of Object.entries(logs)) {
+     fs.writeFileSync(path.join(logDir, name), content);
+   }
+ 
+   return createTaskManager({
+     stateDir,
+     spawnFn: spawnFn ?? (() => { throw new Error("spawnFn was not injected for this test"); }),
+     killFn: killFn ?? (() => { throw new Error("killFn was not injected for this test"); }),
+     listModelsFn: listModelsFn ?? (() => "opencode/hy3-free\n"),
+     verifySummaryAgentFn: verifySummaryAgentFn ?? (async () => {}),
+     sandboxEnabled,
++    ...(defaultExecutor != null ? { defaultExecutor } : {}),
+     ...(checkBwrapAvailableFn != null ? { checkBwrapAvailableFn } : {}),
+     ...(existsFn != null ? { existsFn } : {}),
+     ...(runtimeDir != null ? { runtimeDir } : {}),
+     ...(platform != null ? { platform } : {}),
+     ...(onEvent != null ? { onEvent } : {}),
+     ...(maxDispatchesPerWindow != null ? { maxDispatchesPerWindow } : {}),
+     ...(dispatchWindowMs != null ? { dispatchWindowMs } : {}),
+     ...(advisorSessionTtlMs != null ? { advisorSessionTtlMs } : {}),
+     ...(maxConcurrentTasks != null ? { maxConcurrentTasks } : {}),
+     ...(noOutputTimeoutMs != null ? { noOutputTimeoutMs } : {}),
+@@ -54,20 +55,21 @@ function makeManager({ tasksFixture = [], logs = {}, spawnFn, killFn, listModels
+ }
+ 
+ // A fake ChildProcess: an EventEmitter with the pid/unref surface dispatch()
+ // touches. Tests drive completion by calling fakeChild.emit("exit", ...) or
+ // .emit("error", ...) themselves -- nothing here runs asynchronously on its
+ // own, so tests don't need to wait on a real subprocess.
+ function fakeChild(pid = 4242) {
+   const child = new EventEmitter();
+   child.pid = pid;
+   child.unref = () => {};
++  child.stdout = new EventEmitter();
+   return child;
+ }
+ 
+ function baseTask(overrides = {}) {
+   return {
+     id: "t_base",
+     status: "done",
+     directory: "/tmp/somewhere",
+     model: "openai/gpt-5.6-luna",
+     variant: "high",

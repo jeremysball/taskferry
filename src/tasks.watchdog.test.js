@@ -126,6 +126,29 @@ describe("output-completeness check at settlement time: --require-final-marker g
     assert.equal(r.message, STATUS_DONE_TEXT);
   });
 
+  test("--require-final-marker matches a standalone marker line inside a multi-paragraph summary", () => {
+    // Regression: a real agent's final message is almost never just the bare
+    // marker -- it's a multi-paragraph summary that *ends* with the marker
+    // on its own line. `^...$` without the `m` flag anchors to the start/end
+    // of the whole string, so this always failed to match and every genuine
+    // "Status: DONE" got flagged incomplete and its changeset rejected.
+    const child = fakeChild();
+    const mgr = makeManager({ spawnFn: () => child });
+    const dispatched = mgr.dispatch({
+      prompt: "hi",
+      directory: os.tmpdir(),
+      finalMarker: STATUS_DONE_RE,
+    });
+    writeLog(dispatched.logPath, [
+      { type: "text", part: { messageID: "m1", text: "## Summary\n\nDid the thing.\n\nStatus: DONE" } },
+      { type: "step_finish", part: { messageID: "m1", reason: "stop" } },
+    ]);
+    child.emit("exit", 0, null);
+    const settled = mgr.status(dispatched.id);
+    assert.equal(settled.status, "done");
+    assert.equal("incomplete" in settled, false);
+  });
+
   test("--require-final-marker with a non-matching message flags the task incomplete", () => {
     const child = fakeChild();
     const mgr = makeManager({ spawnFn: () => child });
@@ -398,16 +421,16 @@ describe("no-output watchdog", () => {
     await new Promise((r) => setTimeout(r, 60));
     assert.ok(killed.some((k) => k.signal === "SIGTERM"), "watchdog must SIGTERM the stuck child's process group");
     mgr.flushPersist();
-    assert.equal(JSON.parse(fs.readFileSync(mgr.paths.TASKS_FILE, "utf8"))[0].failureReason, "no_output_timeout");
+    assert.equal(JSON.parse(fs.readFileSync(mgr.paths.TASKS_FILE, "utf8"))[0].failureReason, "no_output_timeout_dead_spawn");
 
     child.emit("exit", null, "SIGTERM");
     const s = mgr.status(dispatched.id);
     assert.equal(s.status, "crashed");
-    assert.equal(s.failureReason, "no_output_timeout");
+    assert.equal(s.failureReason, "no_output_timeout_dead_spawn");
     assert.deepEqual(mgr.result(dispatched.id, { fields: ["failureReason"] }), {
       taskId: dispatched.id,
       status: "crashed",
-      failureReason: "no_output_timeout",
+      failureReason: "no_output_timeout_dead_spawn",
     });
   });
 
@@ -510,7 +533,7 @@ describe("no-output watchdog", () => {
     assert.ok(killed.some((k) => k.signal === "SIGTERM"), "watchdog must eventually fire after the last activity, not just the start");
 
     child.emit("exit", null, "SIGTERM");
-    assert.equal(mgr.status(dispatched.id).failureReason, "no_output_timeout");
+    assert.equal(mgr.status(dispatched.id).failureReason, "no_output_timeout_stalled");
   });
 
   test("one log event then silence: the task survives well past noOutputTimeoutMs because the budget escalated", async () => {
@@ -577,7 +600,7 @@ describe("no-output watchdog", () => {
     );
 
     child.emit("exit", null, "SIGTERM");
-    assert.equal(mgr.status(dispatched.id).failureReason, "no_output_timeout");
+    assert.equal(mgr.status(dispatched.id).failureReason, "no_output_timeout_stalled");
   });
 
   test("the watcher's first tick sees pre-existing JSON in the log: latch flips and post-output budget applies from the start", async () => {
@@ -636,6 +659,6 @@ describe("no-output watchdog", () => {
     assert.ok(sigterm, "after the latch from pre-existing JSON, the post-output watchdog must still fire on continued silence");
 
     child.emit("exit", null, "SIGTERM");
-    assert.equal(mgr.status(dispatched.id).failureReason, "no_output_timeout");
+    assert.equal(mgr.status(dispatched.id).failureReason, "no_output_timeout_stalled");
   });
 });

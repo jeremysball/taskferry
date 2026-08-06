@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { overlayPaths, subOverlayPaths, subOverlaySlug, extractGitDiff, resolvePreDispatchHead, buildMergedViewBwrapArgs, extractNonGitDiff, applyChangeset, cleanupOverlay } from "./changeset.js";
+import { overlayPaths, subOverlayPaths, subOverlaySlug, extractGitDiff, resolvePreDispatchHead, buildMergedViewBwrapArgs, extractNonGitDiff, applyChangeset, cleanupOverlay, detectHeadDrift, resolveHeadDrift, defaultRunCommand } from "./changeset.js";
 
 // Shared fixture literals lifted to module scope so the sonarjs
 // no-duplicate-string rule stays quiet (each literal now appears once, in
@@ -23,6 +23,8 @@ const TMP_DIR = "/tmp";
 const UPPER_DIR = "/tmp/u";
 const WORK_DIR = "/tmp/w";
 const PRE_DISPATCH_HEAD = "abc123";
+const GIT_NOT_A_REPO_STDERR = "fatal: not a git repository";
+const GIT_NOT_A_REPO_STDERR_NL = "fatal: not a git repository\n";
 const MY_REPO_WT = "/workspace/main-repo/.git/worktrees/my-repo";
 const GIT_CMD = "git";
 const BWRAP_CMD = "bwrap";
@@ -41,6 +43,22 @@ const OVERLAY_BUSY_STDERR =
   "bwrap: Can't make overlay mount on /newroot/repo with options " +
   "upperdir=/tmp/u,workdir=/tmp/w,lowerdir=/oldroot/repo,userxattr: Device or resource busy\n";
 const RETRIES_EXHAUSTED_MSG = "one initial attempt plus three retries, then give up";
+
+describe("defaultRunCommand()", () => {
+  test("does not throw ENOBUFS on stdout over spawnSync's 1 MiB default maxBuffer (taskferry#358)", () => {
+    // A real merge diff routinely exceeds Node's spawnSync default
+    // maxBuffer (1 MiB); the fix must raise it well past that so a large
+    // git diff still comes back instead of throwing.
+    const overOneMebibyte = 1024 * 1024 + 1;
+    const result = defaultRunCommand(process.execPath, [
+      "-e",
+      `process.stdout.write("x".repeat(${overOneMebibyte}))`,
+    ]);
+    assert.equal(result.error, undefined);
+    assert.equal(result.status, 0);
+    assert.equal(result.stdout.length, overOneMebibyte);
+  });
+});
 
 describe("overlayPaths()", () => {
   test("builds a per-task root plus a main upper/work pair under it", () => {
@@ -226,7 +244,7 @@ describe("resolvePreDispatchHead()", () => {
   });
 
   test("returns null for a non-git directory", () => {
-    const runCommand = () => ({ status: 128, stdout: "", stderr: "fatal: not a git repository", error: null });
+    const runCommand = () => ({ status: 128, stdout: "", stderr: GIT_NOT_A_REPO_STDERR, error: null });
     assert.equal(resolvePreDispatchHead("/tmp/scratch", runCommand), null);
   });
 
@@ -237,6 +255,130 @@ describe("resolvePreDispatchHead()", () => {
       throw new Error(`unexpected git invocation: ${args.join(" ")}`);
     };
     assert.equal(resolvePreDispatchHead("/repo", runCommand), "4b825dc642cb6eb9a060e54bf8d69288fbee4904");
+  });
+});
+
+describe("detectHeadDrift()", () => {
+  test("returns null when current HEAD matches preDispatchHead", () => {
+    const runCommand = () => ({ status: 0, stdout: "abc123\n", stderr: "", error: null });
+    assert.equal(detectHeadDrift(REPO_DIR, runCommand, PRE_DISPATCH_HEAD), null);
+  });
+
+  test("returns {from, to} when current HEAD has moved", () => {
+    const runCommand = () => ({ status: 0, stdout: "def456\n", stderr: "", error: null });
+    assert.deepEqual(detectHeadDrift(REPO_DIR, runCommand, PRE_DISPATCH_HEAD), { from: PRE_DISPATCH_HEAD, to: "def456" });
+  });
+
+  test("returns null (fail-open) when the HEAD check itself is inconclusive", () => {
+    const runCommand = () => ({ status: 128, stdout: "", stderr: GIT_NOT_A_REPO_STDERR_NL, error: null });
+    assert.equal(detectHeadDrift(REPO_DIR, runCommand, PRE_DISPATCH_HEAD), null);
+  });
+});
+
+describe("resolveHeadDrift()", () => {
+  const CURRENT_HEAD = "def456";
+  const SCRATCH_DIR = "/tmp/taskferry-stale-base-scratch";
+
+  test("recovered: true on a clean 3-way merge (add, apply, status, remove all succeed with no conflict markers)", () => {
+    const calls = [];
+    const runCommand = (_command, args) => {
+      calls.push(args.join(" "));
+      if (args.includes("add")) return { status: 0, stdout: "", stderr: "", error: null };
+      if (args.includes("apply")) return { status: 0, stdout: "", stderr: "", error: null };
+      if (args.includes("status")) return { status: 0, stdout: "", stderr: "", error: null };
+      if (args.includes("remove")) return { status: 0, stdout: "", stderr: "", error: null };
+      throw new Error(`unexpected git invocation: ${args.join(" ")}`);
+    };
+    const result = resolveHeadDrift({ directory: REPO_DIR, diffPath: DIFF_PATCH, currentHead: CURRENT_HEAD, scratchDir: SCRATCH_DIR, runCommand });
+    assert.deepEqual(result, { recovered: true, conflictDetail: null });
+    assert.ok(calls.some((c) => c.includes(`worktree add --detach ${SCRATCH_DIR} ${CURRENT_HEAD}`)));
+    assert.ok(calls.some((c) => c.includes(`apply --3way ${DIFF_PATCH}`)));
+    assert.ok(calls.some((c) => c.includes("status --porcelain")));
+    assert.ok(calls.some((c) => c.includes(`worktree remove --force ${SCRATCH_DIR}`)));
+  });
+
+  test("recovered: false on a genuine conflict (apply exits non-zero and status reports UU)", () => {
+    const runCommand = (_command, args) => {
+      if (args.includes("add")) return { status: 0, stdout: "", stderr: "", error: null };
+      if (args.includes("apply")) return { status: 1, stdout: "", stderr: "Applied patch to 'f.txt' with conflicts.\n", error: null };
+      if (args.includes("status")) return { status: 0, stdout: "UU f.txt\n", stderr: "", error: null };
+      if (args.includes("remove")) return { status: 0, stdout: "", stderr: "", error: null };
+      throw new Error(`unexpected git invocation: ${args.join(" ")}`);
+    };
+    const result = resolveHeadDrift({ directory: REPO_DIR, diffPath: DIFF_PATCH, currentHead: CURRENT_HEAD, scratchDir: SCRATCH_DIR, runCommand });
+    assert.equal(result.recovered, false);
+    assert.match(result.conflictDetail, /conflicts/);
+  });
+
+  test("recovered: false when status reports conflict markers even though apply's own exit code was 0", () => {
+    // Defensive: pin the check on git status --porcelain, not solely on
+    // apply's exit code, since --3way's exit-code semantics are exactly
+    // what the spec's --check correction warns not to trust blindly.
+    const runCommand = (_command, args) => {
+      if (args.includes("add")) return { status: 0, stdout: "", stderr: "", error: null };
+      if (args.includes("apply")) return { status: 0, stdout: "", stderr: "", error: null };
+      if (args.includes("status")) return { status: 0, stdout: "AA g.txt\n", stderr: "", error: null };
+      if (args.includes("remove")) return { status: 0, stdout: "", stderr: "", error: null };
+      throw new Error(`unexpected git invocation: ${args.join(" ")}`);
+    };
+    const result = resolveHeadDrift({ directory: REPO_DIR, diffPath: DIFF_PATCH, currentHead: CURRENT_HEAD, scratchDir: SCRATCH_DIR, runCommand });
+    assert.equal(result.recovered, false);
+  });
+
+  test("recovered: null when git worktree add itself fails (no apply attempted, could not evaluate)", () => {
+    let applyAttempted = false;
+    const runCommand = (_command, args) => {
+      if (args.includes("add")) return { status: 128, stdout: "", stderr: "fatal: could not create work tree dir\n", error: null };
+      if (args.includes("apply")) applyAttempted = true;
+      return { status: 0, stdout: "", stderr: "", error: null };
+    };
+    const result = resolveHeadDrift({ directory: REPO_DIR, diffPath: DIFF_PATCH, currentHead: CURRENT_HEAD, scratchDir: SCRATCH_DIR, runCommand });
+    assert.equal(result.recovered, null);
+    assert.match(result.conflictDetail, /could not create work tree dir/);
+    assert.equal(applyAttempted, false, "must never attempt the apply once worktree add has failed");
+  });
+
+  test("always runs worktree remove, even after a genuine conflict", () => {
+    let removeRan = false;
+    const runCommand = (_command, args) => {
+      if (args.includes("add")) return { status: 0, stdout: "", stderr: "", error: null };
+      if (args.includes("apply")) return { status: 1, stdout: "", stderr: "conflict\n", error: null };
+      if (args.includes("status")) return { status: 0, stdout: "UU f.txt\n", stderr: "", error: null };
+      if (args.includes("remove")) { removeRan = true; return { status: 0, stdout: "", stderr: "", error: null }; }
+      throw new Error(`unexpected git invocation: ${args.join(" ")}`);
+    };
+    resolveHeadDrift({ directory: REPO_DIR, diffPath: DIFF_PATCH, currentHead: CURRENT_HEAD, scratchDir: SCRATCH_DIR, runCommand });
+    assert.equal(removeRan, true);
+  });
+
+  test("the live directory is only ever read (worktree add's source), never written -- apply/status/remove all target scratchDir, not directory", () => {
+    const targets = [];
+    const runCommand = (_command, args) => {
+      if (args.includes("apply") || args.includes("status")) targets.push(args[1]);
+      if (args.includes("add")) return { status: 0, stdout: "", stderr: "", error: null };
+      return { status: 0, stdout: "", stderr: "", error: null };
+    };
+    resolveHeadDrift({ directory: REPO_DIR, diffPath: DIFF_PATCH, currentHead: CURRENT_HEAD, scratchDir: SCRATCH_DIR, runCommand });
+    assert.deepEqual(targets, [SCRATCH_DIR, SCRATCH_DIR]);
+  });
+
+  test("recovered: null when git status --porcelain itself fails (conflict-marker inspection inconclusive)", () => {
+    // Apply exits 0 and stdout is empty -- without the explicit status
+    // check, the empty stdout would be read as "no conflict markers
+    // found" and yield recovered: true, even though the status
+    // inspection never actually ran. The fix turns an empty/absent
+    // conflict-marker match into a could-not-evaluate when the status
+    // call itself failed.
+    const runCommand = (_command, args) => {
+      if (args.includes("add")) return { status: 0, stdout: "", stderr: "", error: null };
+      if (args.includes("apply")) return { status: 0, stdout: "", stderr: "", error: null };
+      if (args.includes("status")) return { status: 128, stdout: "", stderr: GIT_NOT_A_REPO_STDERR_NL, error: null };
+      if (args.includes("remove")) return { status: 0, stdout: "", stderr: "", error: null };
+      throw new Error(`unexpected git invocation: ${args.join(" ")}`);
+    };
+    const result = resolveHeadDrift({ directory: REPO_DIR, diffPath: DIFF_PATCH, currentHead: CURRENT_HEAD, scratchDir: SCRATCH_DIR, runCommand });
+    assert.equal(result.recovered, null);
+    assert.match(result.conflictDetail, /not a git repository/);
   });
 });
 
@@ -380,32 +522,6 @@ describe("extraction fail-closed behavior", () => {
     assert.match(script, /exit \$rc/, "the script must exit with the diff's code, not reset's");
   });
 
-  test("extractGitDiff refuses to extract when the directory's HEAD moved since preDispatchHead, without invoking bwrap", () => {
-    let bwrapCalled = false;
-    const runCommand = (command) => {
-      if (command === "git") return { status: 0, stdout: "def456\n", stderr: "", error: null };
-      bwrapCalled = true;
-      return { status: 0, stdout: SAMPLE_DIFF_X, stderr: "", error: null };
-    };
-    assert.throws(
-      () => extractGitDiff({ ...baseGitParams, runCommand, writeFileFn: () => {}, mkdirFn: () => {} }),
-      /HEAD moved from 'abc123' to 'def456' since dispatch/
-    );
-    assert.equal(bwrapCalled, false, "extraction must never run against a directory whose HEAD has drifted");
-  });
-
-  test("extractGitDiff proceeds normally when the HEAD re-check itself can't resolve (git failure)", () => {
-    let capturedArgs = null;
-    const runCommand = (command, args) => {
-      if (command === "git") return { status: 128, stdout: "", stderr: "fatal: not a git repository\n", error: null };
-      capturedArgs = args;
-      return { status: 0, stdout: SAMPLE_DIFF_X, stderr: "", error: null };
-    };
-    const result = extractGitDiff({ ...baseGitParams, runCommand, writeFileFn: () => {}, mkdirFn: () => {} });
-    assert.ok(capturedArgs, "bwrap must still run when the HEAD re-check is inconclusive rather than a confirmed drift");
-    assert.equal(result.hasChanges, true);
-  });
-
   // taskferry#326: the extraction bwrap can race the just-exited dispatch
   // bwrap's own mount-namespace teardown and lose with the same
   // "Device or resource busy" overlay-mount error #318 already surfaces.
@@ -448,35 +564,6 @@ describe("extraction fail-closed behavior", () => {
     );
     assert.equal(bwrapAttempts, 4, RETRIES_EXHAUSTED_MSG);
     assert.deepEqual(sleeps, [100, 300, 900]);
-  });
-
-  // taskferry#329: the pre-retry HEAD guard above only catches drift that
-  // happened before the first bwrap attempt. A HEAD change landing during
-  // the up-to-1.3s retry backoff needs its own re-check right before the
-  // diff is persisted, or the eventually-successful retry silently writes a
-  // diff anchored on the now-stale preDispatchHead.
-  test("extractGitDiff re-checks HEAD after the retry loop and refuses to write a diff that drifted mid-backoff", () => {
-    let gitCalls = 0;
-    let bwrapAttempts = 0;
-    let written = null;
-    const runCommand = (command) => {
-      if (command === "git") {
-        gitCalls += 1;
-        // First check (pre-retry) sees the recorded head; second check
-        // (post-retry, immediately before the diff is written) sees a HEAD
-        // that moved during the retry backoff.
-        return { status: 0, stdout: gitCalls === 1 ? "abc123\n" : "def456\n", stderr: "", error: null };
-      }
-      bwrapAttempts += 1;
-      if (bwrapAttempts < 3) return { status: 1, stdout: "", stderr: OVERLAY_BUSY_STDERR, error: null };
-      return { status: 0, stdout: SAMPLE_DIFF_X, stderr: "", error: null };
-    };
-    assert.throws(
-      () => extractGitDiff({ ...baseGitParams, runCommand, writeFileFn: (p) => { written = p; }, mkdirFn: () => {}, sleepFn: () => {} }),
-      /HEAD moved from 'abc123' to 'def456' since dispatch/
-    );
-    assert.equal(bwrapAttempts, 3, "must have gone through the full retry loop before the post-retry HEAD re-check fires");
-    assert.equal(written, null, "no patch may be written when HEAD drifted during the retry backoff");
   });
 
   test("extractGitDiff does not retry (or sleep) on a bwrap failure unrelated to the overlay-mount-busy race", () => {
@@ -564,8 +651,85 @@ describe("extraction fail-closed behavior", () => {
   });
 });
 
+describe("extractGitDiff() head-drift resolution", () => {
+  // Task 3: extractGitDiff no longer aborts on a drifted HEAD -- it writes
+  // the diff as-is and returns headDrift so the caller can decide whether to
+  // apply it via --3way (recovered: true), surface a conflict
+  // (recovered: false), or treat an inconclusive check as null.
+  const baseGitParams = {
+    directory: REPO_DIR,
+    overlay: { upperDir: T1_UPPER, workDir: T1_WORK },
+    overlayRwBinds: [],
+    preDispatchHead: PRE_DISPATCH_HEAD,
+    stateDir: STATE_DIR,
+    runtimeDir: RUNTIME_DIR,
+    homeDir: HOME_DIR,
+    denyList: [],
+    diffPath: DIFF_PATCH,
+  };
+
+  test("extractGitDiff proceeds through bwrap and writes the diff even when HEAD has drifted, reporting headDrift instead of throwing", () => {
+    let bwrapCalled = false;
+    let written = null;
+    const runCommand = (command, args) => {
+      if (command === "git") {
+        if (args.includes("rev-parse")) return { status: 0, stdout: "def456\n", stderr: "", error: null };
+        if (args.includes("worktree") && args.includes("add")) return { status: 0, stdout: "", stderr: "", error: null };
+        if (args.includes("apply")) return { status: 0, stdout: "", stderr: "", error: null };
+        if (args.includes("status")) return { status: 0, stdout: "", stderr: "", error: null };
+        if (args.includes("remove")) return { status: 0, stdout: "", stderr: "", error: null };
+        throw new Error(`unexpected git invocation: ${args.join(" ")}`);
+      }
+      bwrapCalled = true;
+      return { status: 0, stdout: SAMPLE_DIFF_X, stderr: "", error: null };
+    };
+    const result = extractGitDiff({ ...baseGitParams, runCommand, writeFileFn: (p, c) => { written = { p, c }; }, mkdirFn: () => {} });
+    assert.equal(bwrapCalled, true, "extraction must still run against a drifted directory, not abort");
+    assert.deepEqual(written, { p: DIFF_PATCH, c: SAMPLE_DIFF_X });
+    assert.deepEqual(result.headDrift, { from: PRE_DISPATCH_HEAD, to: "def456", recovered: true, conflictDetail: null });
+  });
+
+  test("extractGitDiff reports headDrift.recovered: false for a genuine conflicting drift", () => {
+    const runCommand = (command, args) => {
+      if (command === "git") {
+        if (args.includes("rev-parse")) return { status: 0, stdout: "def456\n", stderr: "", error: null };
+        if (args.includes("worktree") && args.includes("add")) return { status: 0, stdout: "", stderr: "", error: null };
+        if (args.includes("apply")) return { status: 1, stdout: "", stderr: "conflict\n", error: null };
+        if (args.includes("status")) return { status: 0, stdout: "UU f.txt\n", stderr: "", error: null };
+        if (args.includes("remove")) return { status: 0, stdout: "", stderr: "", error: null };
+        throw new Error(`unexpected git invocation: ${args.join(" ")}`);
+      }
+      return { status: 0, stdout: SAMPLE_DIFF_X, stderr: "", error: null };
+    };
+    const result = extractGitDiff({ ...baseGitParams, runCommand, writeFileFn: () => {}, mkdirFn: () => {} });
+    assert.equal(result.headDrift.recovered, false);
+    assert.match(result.headDrift.conflictDetail, /conflict/);
+  });
+
+  test("extractGitDiff reports headDrift: null when the HEAD re-check itself can't resolve (git failure)", () => {
+    let capturedArgs = null;
+    const runCommand = (command, args) => {
+      if (command === "git") return { status: 128, stdout: "", stderr: GIT_NOT_A_REPO_STDERR_NL, error: null };
+      capturedArgs = args;
+      return { status: 0, stdout: SAMPLE_DIFF_X, stderr: "", error: null };
+    };
+    const result = extractGitDiff({ ...baseGitParams, runCommand, writeFileFn: () => {}, mkdirFn: () => {} });
+    assert.ok(capturedArgs, "bwrap must still run when the HEAD re-check is inconclusive");
+    assert.equal(result.headDrift, null);
+  });
+
+  test("extractGitDiff reports headDrift: null when HEAD has not moved (today's normal path)", () => {
+    const runCommand = (command, _args) => {
+      if (command === "git") return { status: 0, stdout: "abc123\n", stderr: "", error: null };
+      return { status: 0, stdout: SAMPLE_DIFF_X, stderr: "", error: null };
+    };
+    const result = extractGitDiff({ ...baseGitParams, runCommand, writeFileFn: () => {}, mkdirFn: () => {} });
+    assert.equal(result.headDrift, null);
+  });
+});
+
 describe("applyChangeset()", () => {
-  test("git target: runs git apply <diffPath> against directory", () => {
+  test("git target: runs git apply --3way <diffPath> against directory", () => {
     let capturedCommand = null;
     let capturedArgs = null;
     const runCommand = (command, args) => {
@@ -580,7 +744,7 @@ describe("applyChangeset()", () => {
       runCommand,
     });
     assert.equal(capturedCommand, GIT_CMD);
-    assert.deepEqual(capturedArgs, ["-C", REPO_DIR, "apply", DIFF_PATCH]);
+    assert.deepEqual(capturedArgs, ["-C", REPO_DIR, "apply", "--3way", DIFF_PATCH]);
     assert.deepEqual(result, { applied: true, reason: null });
   });
 

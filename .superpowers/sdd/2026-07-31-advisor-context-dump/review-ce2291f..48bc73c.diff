@@ -1,0 +1,129 @@
+# Review package: ce2291f..48bc73c
+
+## Commits
+48bc73c feat(tasks): stamp TASKFERRY_TASK_ID on spawned dispatch/advisor children
+
+## Files changed
+ src/tasks.js      |  7 ++++---
+ src/tasks.test.js | 38 ++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 42 insertions(+), 3 deletions(-)
+
+## Diff
+diff --git a/src/tasks.js b/src/tasks.js
+index 3a850d7..456f1db 100644
+--- a/src/tasks.js
++++ b/src/tasks.js
+@@ -807,24 +807,25 @@ export function createTaskManager({
+       if (typeof callerEnv[name] !== "string") {
+         throw new Error(`error: env value for ${JSON.stringify(name)} must be a string, got ${typeof callerEnv[name]}\nhelp: cast values to strings before dispatching`);
+       }
+       if (CALLER_ENV_EXCLUDED.has(name)) continue;
+       merged[name] = callerEnv[name];
+     }
+     for (const name of envDenylist) delete merged[name];
+     return merged;
+   }
+ 
+-  /** @param {NodeJS.ProcessEnv} [env] */
+-  function dispatchEnvironment(env) {
++  /** @param {NodeJS.ProcessEnv} [env] @param {string} [taskId] */
++  function dispatchEnvironment(env, taskId) {
+     const result = sanitizedEnvironment(env);
+     result.TASKFERRY_CHILD = "1";
++    result.TASKFERRY_TASK_ID = taskId;
+     return result;
+   }
+ 
+   /** @param {NodeJS.ProcessEnv} [env] */
+   function summaryEnvironment(env) {
+     const result = sanitizedEnvironment(env);
+     delete result.OPENCODE_CONFIG;
+     delete result.OPENCODE_CONFIG_DIR;
+     delete result.OPENCODE_CONFIG_CONTENT;
+     result.TASKFERRY_CHILD = "1";
+@@ -1877,21 +1878,21 @@ export function createTaskManager({
+         }
+       }
+     };
+ 
+     let logFd;
+     let child;
+     try {
+       if (promptFilePath) fs.writeFileSync(promptFilePath, dispatchLaunch.prompt, { mode: 0o600, flag: "wx" });
+       logFd = fs.openSync(task.logPath, "a", 0o600);
+       fs.chmodSync(task.logPath, 0o600);
+-      let spawnEnv = isSummary ? summaryEnvironment(summaryLaunch.env) : dispatchEnvironment(dispatchLaunch.env);
++      let spawnEnv = isSummary ? summaryEnvironment(summaryLaunch.env) : dispatchEnvironment(dispatchLaunch.env, task.id);
+       const noSandbox = !isSummary && dispatchLaunch.noSandbox === true;
+       let spawnCommand = executor.binaryName;
+       let spawnArgs = args;
+       // Summary/report children never get an overlay -- they don't write
+       // to the target directory in any sense the changeset model cares
+       // about, so the plain v1 bind is correct and unchanged for them.
+       const role = isSummary ? null : (dispatchLaunch.role ?? "dispatch");
+       // Review finding #5 (dispatch-launch side): overlay-gating lives inside
+       // the bwrap block below, so when sandboxing is force-disabled
+       // (--no-sandbox / TASKFERRY_DISABLE_SANDBOX=1) or unsupported on this
+diff --git a/src/tasks.test.js b/src/tasks.test.js
+index 8e3e516..62d12fb 100644
+--- a/src/tasks.test.js
++++ b/src/tasks.test.js
+@@ -5488,20 +5488,58 @@ describe("caller-env union (sanitizedEnvironment)", () => {
+     const mgr = makeManager({
+       spawnFn: (cmd, args, opts) => { capturedOpts = opts; return fakeChild(); },
+       envDenylistSpec: "TASKFERRY_CHILD",
+     });
+ 
+     mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+ 
+     assert.equal(capturedOpts.env.TASKFERRY_CHILD, "1");
+   });
+ 
++  test("TASKFERRY_TASK_ID is stamped with the spawned task's own id, for both dispatch and advisor roles", async () => {
++    let dispatchOpts = null;
++    let advisorOpts = null;
++    const mgr = makeManager({
++      spawnFn: (cmd, args, opts) => {
++        if (!dispatchOpts) dispatchOpts = opts; else advisorOpts = opts;
++        const child = fakeChild();
++        setImmediate(() => child.emit("exit", 0, null));
++        return child;
++      },
++      sandboxEnabled: true,
++      overlayEnabled: true,
++      checkBwrapAvailableFn: () => ({ checked: true, available: true }),
++      checkOverlaySupportFn: () => ({ supported: true }),
++      platform: "linux",
++    });
++
++    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
++    assert.equal(dispatchOpts.env.TASKFERRY_TASK_ID, dispatched.id);
++
++    const advised = await mgr.advisor({ prompt: "hello", directory: os.tmpdir(), model: "openai/gpt-5.6-sol" });
++    assert.equal(advisorOpts.env.TASKFERRY_TASK_ID, advised.task_id);
++  });
++
++  test("TASKFERRY_TASK_ID is absent from summary spawns", async () => {
++    let capturedOpts = null;
++    const log = JSON.stringify({ type: "text", part: { messageID: "m1", text: "Investigated the issue" } });
++    const mgr = makeManager({
++      tasksFixture: (logDir) => [baseTask({ id: "source", logPath: path.join(logDir, "source.ndjson") })],
++      logs: { "source.ndjson": log },
++      spawnFn: (cmd, args, opts) => { capturedOpts = opts; return fakeChild(); },
++    });
++
++    await mgr.summarize("source", { maxWords: 150 });
++
++    assert.equal("TASKFERRY_TASK_ID" in capturedOpts.env, false);
++  });
++
+   test("omitting env behaves as ambient-only, same as before caller-env forwarding existed", (t) => {
+     process.env.AXI_TEST_AMBIENT_ONLY = "ambient-value";
+     t.after(() => delete process.env.AXI_TEST_AMBIENT_ONLY);
+     let capturedOpts = null;
+     const mgr = makeManager({ spawnFn: (cmd, args, opts) => { capturedOpts = opts; return fakeChild(); } });
+ 
+     mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+ 
+     assert.equal(capturedOpts.env.AXI_TEST_AMBIENT_ONLY, "ambient-value");
+   });

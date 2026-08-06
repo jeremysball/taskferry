@@ -7,6 +7,9 @@ import { EventEmitter } from "node:events";
 import { makeManager, fakeChild, baseTask, DIFF_LINE, OVERLAY_DIR_PENDING, EBUSY_ERROR, SPAWN_BWRAP_TIMEOUT, TOOL_CALLS, NONE_OBSERVED, FINAL_ANSWER } from "./tasks.test-helpers.js";
 import { defaultRunCommand as changesetDefaultRunCommand } from "./changeset.js";
 
+const USER_MODEL = "user-model";
+const SUMMARY_MODEL = "summary-model";
+
 describe("cancel()", () => {
   test("sends SIGTERM to the negative pid (process group), then escalates to SIGKILL after graceMs if still running", async () => {
     const child = fakeChild(777);
@@ -482,6 +485,36 @@ describe("list()", () => {
   });
 });
 
+describe("stats() (doctor --stats)", () => {
+  test("filters out internal=true tasks (daemon's own activity-summary children) so they don't pollute dispatch counts", () => {
+    // The activity-summary path in tasks.js's `summarize()` spawns a child
+    // task with `internal: true` for every settled user task (when
+    // activitySummary is enabled, the default). stats() is a "real work
+    // only" view of the task map, same as any user-facing count -- those
+    // bookkeeping rows must be filtered out before aggregation, otherwise
+    // they inflate the dispatch count under the summary model and add a
+    // spurious model row.
+    const mgr = makeManager({
+      tasksFixture: [
+        baseTask({ id: "user-1", status: "done", model: USER_MODEL }),
+        baseTask({ id: "user-2", status: "crashed", model: USER_MODEL, failureReason: "no_output_timeout" }),
+        baseTask({ id: "summary-1", status: "done", model: SUMMARY_MODEL, internal: true }),
+        baseTask({ id: "summary-2", status: "done", model: SUMMARY_MODEL, internal: true }),
+        baseTask({ id: "summary-3", status: "crashed", model: SUMMARY_MODEL, internal: true, failureReason: "no_output_timeout" }),
+      ],
+    });
+    const stats = mgr.stats();
+    const modelNames = stats.byModel.map((entry) => entry.model);
+    assert.deepEqual(modelNames, ["user-model"], "summary-model row must be filtered out of byModel");
+    const userModel = stats.byModel[0];
+    assert.equal(userModel.dispatches, 2, "dispatches must count only the two user rows");
+    assert.equal(userModel.done, 1);
+    assert.equal(userModel.crashed, 1);
+    assert.deepEqual(stats.failureReasons, [{ reason: "no_output_timeout", count: 1 }], "crashes from internal summary tasks must not contribute to the failure-reason histogram");
+    assert.equal(stats.statusMix.overall.total, 2, "overall statusMix total must reflect only user tasks");
+  });
+});
+
 describe("result()", () => {
   test("joins only the final step's text as `message`, keeps everything as `narration`", () => {
     const log = [
@@ -811,28 +844,6 @@ describe("result() diffStat field", () => {
   });
 });
 
-describe("result() diff field", () => {
-  test("returns the cached patch text for fields: ['diff']", () => {
-    const mgr = makeManager({
-      tasksFixture: (logDir) => [{
-        ...baseTask({ id: "t_diff", logPath: path.join(logDir, "t_diff.ndjson") }),
-        diffPath: path.join(logDir, "..", "diffs", "t_diff.patch"),
-      }],
-      logs: { "t_diff.ndjson": "" },
-    });
-    fs.mkdirSync(path.join(mgr.paths.STATE_DIR, "diffs"), { recursive: true });
-    fs.writeFileSync(path.join(mgr.paths.STATE_DIR, "diffs", "t_diff.patch"), DIFF_LINE);
-    const result = mgr.result("t_diff", { fields: ["diff"] });
-    assert.equal(result.diff, DIFF_LINE);
-  });
-
-  test("returns null for a task with no diffPath", () => {
-    const mgr = makeManager({ tasksFixture: [baseTask({ id: "t_no_diff" })] });
-    const result = mgr.result("t_no_diff", { fields: ["diff"] });
-    assert.equal(result.diff, null);
-  });
-});
-
 describe("tail()", () => {
   test("returns a Unicode-safe suffix of the latest text event", () => {
     const log = [
@@ -914,7 +925,7 @@ describe("tail()", () => {
   test("a watchdog-killed eventless task shows its raw capture (failureReason does not gate tail)", () => {
     const raw = 'Error: Extension "/x/y.js" blew up at load';
     const mgr = makeManager({
-      tasksFixture: (logDir) => [baseTask({ id: "t1", status: "crashed", failureReason: "no_output_timeout", logPath: path.join(logDir, "t1.ndjson") })],
+      tasksFixture: (logDir) => [baseTask({ id: "t1", status: "crashed", failureReason: "no_output_timeout_dead_spawn", logPath: path.join(logDir, "t1.ndjson") })],
       logs: { "t1.ndjson": raw + "\n" },
     });
     assert.equal(mgr.tail("t1").text, raw);

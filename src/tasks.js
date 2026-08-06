@@ -15,6 +15,7 @@ import { applyChangeset, overlayPaths, resolvePreDispatchHead, subOverlayPaths, 
 import { resolveExecutor, opencodeExecutor } from "./executor.js";
 import { loadEnvFile, watchEnvFile } from "./env-file.js";
 import { loadProjectConfig, resolveReadOnlyProjectBinds, verificationPromptBlock } from "./project-config.js";
+import { computeDoctorStats } from "./doctor-stats.js";
 
 /**
  * @typedef {object} SummaryOf
@@ -70,6 +71,9 @@ import { loadProjectConfig, resolveReadOnlyProjectBinds, verificationPromptBlock
  * @property {boolean} [checkOverride]
  * @property {string|null} [projectConfigWarning]
  * @property {number|null} [checkGatePid]
+ * @property {string|null} [headDriftFrom]
+ * @property {string|null} [headDriftTo]
+ * @property {boolean|null} [headDriftRecovered]
  */
 
 /**
@@ -113,6 +117,9 @@ import { loadProjectConfig, resolveReadOnlyProjectBinds, verificationPromptBlock
  * @property {string|null} [checkEndedAt]
  * @property {boolean} [checkOverride]
  * @property {string|null} [projectConfigWarning]
+ * @property {string|null} [headDriftFrom]
+ * @property {string|null} [headDriftTo]
+ * @property {boolean|null} [headDriftRecovered]
  */
 
 /**
@@ -190,6 +197,9 @@ import { loadProjectConfig, resolveReadOnlyProjectBinds, verificationPromptBlock
  * @property {string|null} [checkEndedAt]
  * @property {boolean} [checkOverride]
  * @property {string|null} [projectConfigWarning]
+ * @property {string|null} [headDriftFrom]
+ * @property {string|null} [headDriftTo]
+ * @property {boolean|null} [headDriftRecovered]
  */
 
 const DEFAULT_STATE_DIR = resolveStateDir(process.env);
@@ -602,7 +612,8 @@ export function isOutsideDirectory(directory, candidate) {
  * @property {(task: Task, executor: import("./executor.js").WorkerExecutor) => void} startRunningWatcher
  * @property {(taskId: string) => void} stopRunningWatcher
  * @property {(taskId: string) => string|null} readSessionIdFromLog
- * @property {(task: Task) => void} evaluateOutputCompleteness
+ * @property {(task: Task, precomputed?: {message: string, hadExplicitStop: boolean}) => void} evaluateOutputCompleteness
+ * @property {(task: Task) => {message: string, hadExplicitStop: boolean}|null} attemptCrashRecovery
  * @property {(task: Task) => void} extractChangesetForTask
  * @property {(pid: number, signal: NodeJS.Signals) => void} sendSignal
  * @property {{evictTask: (id: string) => void, setSummarySessionId: (srcTaskId: string, sessionId: string) => void, setLastSummarizedWatermark: (srcTaskId: string, bytes: number) => void}} activityCache
@@ -1151,9 +1162,10 @@ function onChildExit(ctx, shared, code, signal) {
   task.exitCode = code;
   task.signal = signal;
   task.endedAt = new Date().toISOString();
+  const recoveredState = ctx.attemptCrashRecovery(task);
   const parsedSessionId = ctx.readSessionIdFromLog(task.logPath);
   if (parsedSessionId) task.sessionId = parsedSessionId;
-  if (task.status === "done") ctx.evaluateOutputCompleteness(task);
+  if (task.status === "done") ctx.evaluateOutputCompleteness(task, recoveredState ?? undefined);
   if (task.status === "done" || task.status === "crashed" || task.status === "cancelled") ctx.extractChangesetForTask(task);
   carrySummarySession(ctx, task, parsedSessionId);
   finishChildSettlement(ctx, shared);
@@ -1596,6 +1608,7 @@ function computeResultDetail(task, { taskId, full, fields }, ctx) {
     diff: diffText,
     diffStat,
     changesetError: task.changesetError ?? null,
+    ...resultTaskOptionalFields(task, fields),
     sessionId: parsed.sessionId,
     tokens: parsed.tokens,
     cost: parsed.cost,
@@ -1603,6 +1616,21 @@ function computeResultDetail(task, { taskId, full, fields }, ctx) {
     narration: narration.narration,
     narrationTotalChars: narration.narrationTotalChars,
     narrationTruncated: narration.narrationTruncated,
+    ...(next ? { next } : {}),
+    logPath: task.logPath,
+  };
+}
+
+/**
+ * Optional fields the result surface only emits when set, in a single place
+ * so `computeResultDetail` doesn't accumulate a complexity-point per spread.
+ * @param {Task} task
+ * @param {string[]|null|undefined} fields
+ * @returns {Object<string, unknown>}
+ */
+function resultTaskOptionalFields(task, fields) {
+  return {
+    ...(task.headDriftFrom != null ? { headDriftFrom: task.headDriftFrom, headDriftTo: task.headDriftTo, headDriftRecovered: task.headDriftRecovered } : {}),
     ...(task.summaryOf ? { summaryOf: task.summaryOf } : {}),
     ...(task.incomplete === true ? { incomplete: true } : {}),
     ...(task.finalMarker != null ? { finalMarker: task.finalMarker } : {}),
@@ -1611,8 +1639,6 @@ function computeResultDetail(task, { taskId, full, fields }, ctx) {
     ...(task.parentTaskId != null ? { parentTaskId: task.parentTaskId } : {}),
     ...(task.projectConfigWarning != null ? { projectConfigWarning: task.projectConfigWarning } : {}),
     ...resultCheckGateFields(task, fields),
-    ...(next ? { next } : {}),
-    logPath: task.logPath,
   };
 }
 
@@ -2406,30 +2432,6 @@ function parseNumstatLine(line) {
   return { additions: adds, deletions: dels };
 }
 
-/**
- * Accumulates one parseable log line's contribution to final-message
- * extraction: text parts by message id, and (when a `step_finish` stop event
- * lands) returns that message id as the final turn.
- * @param {any} evt
- * @param {Map<string, string[]>} textByMessageId
- * @param {string[]} textOrder
- * @returns {string|null}
- */
-function collectFinalMessageLine(evt, textByMessageId, textOrder) {
-  if (evt.type === "text" && evt.part && typeof evt.part.text === "string") {
-    const mid = evt.part.messageID;
-    if (!textByMessageId.has(mid)) {
-      textByMessageId.set(mid, []);
-      textOrder.push(mid);
-    }
-    /** @type {string[]} */ (textByMessageId.get(mid)).push(evt.part.text);
-  }
-  if (evt.type === "step_finish" && evt.part && evt.part.reason === "stop") {
-    return evt.part.messageID;
-  }
-  return null;
-}
-
 // sharing process-wide state with every other test or the real server.
 
 /**
@@ -2686,10 +2688,11 @@ function summarizeOptionalFields(task) {
  * @param {Task} task
  */
 function summarizeChangesetFields(task) {
-  const { changesetStatus, role } = task;
-  return changesetStatus != null && (changesetStatus !== "none" || role === "advisor")
+  const { changesetStatus, role, headDriftFrom, headDriftTo, headDriftRecovered } = task;
+  const base = changesetStatus != null && (changesetStatus !== "none" || role === "advisor")
     ? { role, changesetStatus }
     : {};
+  return headDriftFrom != null ? { ...base, headDriftFrom, headDriftTo, headDriftRecovered } : base;
 }
 
 /**
@@ -3023,7 +3026,19 @@ function watchdogTick(state, ctx) {
     // A rotated or removed log is retried on the next watcher tick.
   }
   if (Date.now() - state.lastActivityMs >= state.currentNoOutputTimeout) {
-    ctx.failRunningTask(current, "no_output_timeout", `no output for ${state.currentNoOutputTimeout}ms (${state.outputSeen ? "post-output" : "pre-output"} timeout)`);
+    // Split by state.outputSeen (the same pre/post-output latch the
+    // escalated budget already tracks) rather than reporting one generic
+    // bucket: a spawn that never wrote a byte is a dead worker/provider
+    // stall, while one that produced output and then went silent stalled
+    // mid-work. Conflating the two into "no_output_timeout" made both look
+    // like the same failure mode when a fleet-wide read of the logs showed
+    // most of the eventless bucket really is a dead spawn. One lookup, not
+    // two independent ternaries, so the reason and the phase label in
+    // failureDetail can't drift apart.
+    const [reason, phase] = state.outputSeen
+      ? ["no_output_timeout_stalled", "post-output"]
+      : ["no_output_timeout_dead_spawn", "pre-output"];
+    ctx.failRunningTask(current, reason, `no output for ${state.currentNoOutputTimeout}ms (${phase} timeout)`);
   }
 }
 
@@ -3736,7 +3751,7 @@ function buildManagerInternalHelpers(ctx) {
      * delegated to {@link startTaskFor}, which takes every factory closure
      * dependency explicitly via `ctx`.
      * @param {Task} task */
-    startTask: (task) => startTaskFor(task, { pendingLaunches: ctx.maps.pendingLaunches, SUMMARY_DIR: ctx.paths.SUMMARY_DIR, PROMPT_DIR: ctx.paths.PROMPT_DIR, spawnFn: ctx.opts.spawnFn, runOverlayCommandFn: ctx.opts.runOverlayCommandFn, sandboxEnabled: ctx.opts.sandboxEnabled, platform: ctx.opts.platform, overlayEnabled: ctx.opts.overlayEnabled, overlayTmpRoot: ctx.opts.overlayTmpRoot, allowedDirs: ctx.opts.allowedDirs, stateDir: ctx.opts.stateDir, cacheDir: ctx.opts.cacheDir, runtimeDir: ctx.opts.runtimeDir, existsFn: ctx.opts.existsFn, statFn: ctx.opts.statFn, readdirFn: ctx.opts.readdirFn, sandboxDenylist: ctx.opts.sandboxDenylist, resolveGitCommonDirFn: ctx.opts.resolveGitCommonDirFn, resolveGitDirFn: ctx.opts.resolveGitDirFn, requireBwrap: () => ctx.env.requireBwrap(), requireOverlaySupport: () => ctx.env.requireOverlaySupport(), dispatchEnvironment: (env, taskId) => ctx.env.dispatchEnvironment(env, taskId), summaryEnvironment: (env) => ctx.env.summaryEnvironment(env), settleWaiters: (taskId) => ctx.helpers.settleWaiters(taskId), launchQueuedTasks: () => ctx.helpers.launchQueuedTasks(), persistTask: (taskId) => ctx.helpers.persistTask(taskId), scheduleActivity: (task, options) => ctx.helpers.scheduleActivity(task, options), classifyTrailingLogFailure: (task, executor) => ctx.helpers.classifyTrailingLogFailure(task, executor), startRunningWatcher: (task, executor) => ctx.helpers.startRunningWatcher(task, executor), stopRunningWatcher: (taskId) => ctx.helpers.stopRunningWatcher(taskId), extractChangesetForTask: (task) => ctx.env.extractChangesetForTask(task), sendSignal: (pid, signal) => ctx.helpers.sendSignal(pid, signal), activityCache: ctx.activity.cache, logHasEventCache: ctx.maps.logHasEventCache, escalationTimers: ctx.maps.escalationTimers, tasks: ctx.maps.tasks, decRunning: () => { ctx.state.runningCount--; }, incRunning: () => { ctx.state.runningCount++; }, readSessionIdFromLog, evaluateOutputCompleteness }),
+    startTask: (task) => startTaskFor(task, { pendingLaunches: ctx.maps.pendingLaunches, SUMMARY_DIR: ctx.paths.SUMMARY_DIR, PROMPT_DIR: ctx.paths.PROMPT_DIR, spawnFn: ctx.opts.spawnFn, runOverlayCommandFn: ctx.opts.runOverlayCommandFn, sandboxEnabled: ctx.opts.sandboxEnabled, platform: ctx.opts.platform, overlayEnabled: ctx.opts.overlayEnabled, overlayTmpRoot: ctx.opts.overlayTmpRoot, allowedDirs: ctx.opts.allowedDirs, stateDir: ctx.opts.stateDir, cacheDir: ctx.opts.cacheDir, runtimeDir: ctx.opts.runtimeDir, existsFn: ctx.opts.existsFn, statFn: ctx.opts.statFn, readdirFn: ctx.opts.readdirFn, sandboxDenylist: ctx.opts.sandboxDenylist, resolveGitCommonDirFn: ctx.opts.resolveGitCommonDirFn, resolveGitDirFn: ctx.opts.resolveGitDirFn, requireBwrap: () => ctx.env.requireBwrap(), requireOverlaySupport: () => ctx.env.requireOverlaySupport(), dispatchEnvironment: (env, taskId) => ctx.env.dispatchEnvironment(env, taskId), summaryEnvironment: (env) => ctx.env.summaryEnvironment(env), settleWaiters: (taskId) => ctx.helpers.settleWaiters(taskId), launchQueuedTasks: () => ctx.helpers.launchQueuedTasks(), persistTask: (taskId) => ctx.helpers.persistTask(taskId), scheduleActivity: (task, options) => ctx.helpers.scheduleActivity(task, options), classifyTrailingLogFailure: (task, executor) => ctx.helpers.classifyTrailingLogFailure(task, executor), startRunningWatcher: (task, executor) => ctx.helpers.startRunningWatcher(task, executor), stopRunningWatcher: (taskId) => ctx.helpers.stopRunningWatcher(taskId), extractChangesetForTask: (task) => ctx.env.extractChangesetForTask(task), sendSignal: (pid, signal) => ctx.helpers.sendSignal(pid, signal), activityCache: ctx.activity.cache, logHasEventCache: ctx.maps.logHasEventCache, escalationTimers: ctx.maps.escalationTimers, tasks: ctx.maps.tasks, decRunning: () => { ctx.state.runningCount--; }, incRunning: () => { ctx.state.runningCount++; }, readSessionIdFromLog, evaluateOutputCompleteness, attemptCrashRecovery }),
     /**
      * @param {string} taskId
      * @param {{force?: boolean}} options
@@ -3859,6 +3874,7 @@ function buildTaskManagerApi(ctx) {
      */
     poll: (taskId, options = {}) => pollTask(taskId, options, { ensureStateLoaded: () => ctx.helpers.ensureStateLoaded(), tasks: ctx.maps.tasks, waiters: ctx.maps.waiters, noSuchTask }),
     list: () => listTasks({ ensureStateLoaded: () => ctx.helpers.ensureStateLoaded(), tasks: ctx.maps.tasks }),
+    stats: () => statsTasks({ ensureStateLoaded: () => ctx.helpers.ensureStateLoaded(), tasks: ctx.maps.tasks }),
     /**
      * @param {string} taskId
      * @param {{full?: boolean, fields?: string[]}} [options]
@@ -4195,62 +4211,76 @@ function failureFields(task) {
 
 
 /**
+ * Reads and parses a task's log for its final message, reusing `result()`'s
+ * own `parseTaskLog`/`shapeNarration` pair instead of a second NDJSON
+ * parser -- `parsed.finalMessageId` is already exactly the "did a genuine
+ * step_finish reason 'stop' land" signal `attemptCrashRecovery` needs.
  * @param {string} logPath
- * @returns {string}
+ * @returns {{message: string, hadExplicitStop: boolean}}
  */
-function extractFinalMessage(logPath) {
+function readFinalMessageState(logPath) {
   let raw;
   try {
     raw = fs.readFileSync(logPath, "utf8");
   } catch {
-    return "";
+    return { message: "", hadExplicitStop: false };
   }
-  /** @type {Map<string, string[]>} */
-  const textByMessageId = new Map();
-  /** @type {string[]} */
-  const textOrder = [];
-  /** @type {string|null} */
-  let finalMessageId = null;
-  for (const line of raw.split("\n")) {
-    if (!line.trim()) continue;
-    /** @type {any} */
-    let evt;
-    let parsed = false;
-    try {
-      evt = JSON.parse(line);
-      parsed = true;
-    } catch {
-      // Not a parseable event line -- not final-message evidence.
-    }
-    if (parsed) {
-      const stepId = collectFinalMessageLine(evt, textByMessageId, textOrder);
-      if (stepId) finalMessageId = stepId;
-    }
-  }
-  // Same fallback rule as result(): the last messageID seen wins if no
-  // explicit step_finish reason "stop" landed (e.g. a crashed run that never
-  // reached one). The settlement-time check uses this same fallback so a
-  // clean exit with no step_finish still gets its final turn inspected.
-  const targetId = finalMessageId ?? textOrder[textOrder.length - 1];
-  return targetId && textByMessageId.has(targetId)
-    ? /** @type {string[]} */ (textByMessageId.get(targetId)).join("")
-    : "";
+  const parsed = parseTaskLog(raw, null);
+  const { message } = shapeNarration(parsed, true);
+  return { message, hadExplicitStop: parsed.finalMessageId != null };
+}
+
+/**
+ * A crashed task whose transcript actually reached a genuine `step_finish`
+ * "stop" event with real text is not the failure its status claims -- e.g. a
+ * transient mid-run provider error (ContextOverflowError) that the model
+ * recovered from, after which the process still exited non-zero. Flips
+ * status to "done" so it isn't undercounted as a failure; failureReason /
+ * failureDetail are deliberately left in place as a record of what actually
+ * happened partway through, rather than cleared to make the task look clean.
+ * Only applies to a genuine `status: "crashed"` settlement -- a cancelled
+ * task is never reinterpreted as done just because it happened to have
+ * produced a final answer before the cancel landed. This also covers a
+ * `no_output_timeout_stalled` crash where the transcript reached "stop" but
+ * the process then hung past the post-output deadline instead of exiting --
+ * the generation genuinely finished, so recovering it to "done" is correct
+ * even though the watchdog is what ended the process.
+ * @param {Task} task
+ * @returns {{message: string, hadExplicitStop: boolean}|null} the parsed log
+ *   state when recovery applied, so the caller can hand it to
+ *   `evaluateOutputCompleteness` instead of re-reading the same log again.
+ */
+function attemptCrashRecovery(task) {
+  if (task.status !== "crashed") return null;
+  const state = readFinalMessageState(task.logPath);
+  if (!state.hadExplicitStop || !state.message.trim()) return null;
+  task.status = "done";
+  return state;
 }
 
 const STATUS_MARKER_RE = /^Status:\s*(DONE_WITH_CONCERNS|DONE|BLOCKED|NEEDS_CONTEXT)\s*$/m;
 
 /**
  * @param {Task} task
+ * @param {{message: string, hadExplicitStop: boolean}} [precomputed] - reuse
+ *   `attemptCrashRecovery`'s already-parsed state on a recovered task
+ *   instead of re-reading and re-parsing the same log a second time on the
+ *   daemon's synchronous exit path.
  */
-function evaluateOutputCompleteness(task) {
-  const message = extractFinalMessage(task.logPath);
+function evaluateOutputCompleteness(task, precomputed) {
+  const message = (precomputed ?? readFinalMessageState(task.logPath)).message;
   if (!message.trim()) {
     task.incomplete = true;
     return;
   }
   if (task.finalMarker) {
     try {
-      if (!new RegExp(task.finalMarker).test(message)) task.incomplete = true;
+      // `m` so a `^...$`-anchored marker (the documented style, e.g.
+      // '^Status: DONE$') matches against any line of a multi-paragraph
+      // final message instead of requiring the marker to be the entire
+      // message. Without it every real agent summary that ends in a
+      // standalone "Status: DONE" line was wrongly flagged incomplete.
+      if (!new RegExp(task.finalMarker, "m").test(message)) task.incomplete = true;
     } catch {
       // A finalMarker that survived dispatch-time validation shouldn't
       // throw here, but if it does (e.g. an impossible pathological input),
@@ -4646,6 +4676,54 @@ function persistTaskRecord(taskId, ctx) {
 }
 
 /**
+ * Applies the post-extraction settlement decision to `finishedTask` based on
+ * the just-extracted `extracted` payload: stamps `headDrift` audit fields
+ * when present, then walks the precedence chain (advisor → recovered:false
+ * conflict → recovered:null inconclusive → normal hasChanges / no-changes).
+ * Split out of `extractChangesetForTaskRecord` to keep that function's
+ * cognitive complexity under the file cap; the per-branch settlement logic
+ * is the only thing that grows with each new headDrift classification.
+ * @param {Task} finishedTask
+ * @param {{diffPath: string, hasChanges: boolean, headDrift: null | {from: string, to: string, recovered: boolean|null, conflictDetail: string|null}}} extracted
+ * @param {{releaseOverlay: (task: {overlayDirs?: {root:string,tmpRoot:string}|null}) => boolean, startCheckGate: (task: Task) => void}} ctx
+ * @param {boolean} isGitTarget
+ */
+function settleChangesetAfterExtraction(finishedTask, extracted, ctx, isGitTarget) {
+  finishedTask.diffPath = extracted.diffPath;
+  finishedTask.changesetError = null;
+  if (extracted.headDrift) {
+    finishedTask.headDriftFrom = extracted.headDrift.from;
+    finishedTask.headDriftTo = extracted.headDrift.to;
+    finishedTask.headDriftRecovered = extracted.headDrift.recovered;
+  }
+  if (finishedTask.role === "advisor") {
+    finishedTask.changesetStatus = "rejected";
+    ctx.releaseOverlay(finishedTask);
+  } else if (extracted.headDrift?.recovered === false) {
+    // A genuine conflict: the 3-way probe already proved this changeset is
+    // DOA against the directory's current HEAD -- reject outright rather
+    // than leave "pending" and force a human to run accept just to
+    // discover the same conflict git apply --3way would report anyway.
+    finishedTask.changesetStatus = "rejected";
+    finishedTask.changesetError = extracted.headDrift.conflictDetail;
+    ctx.releaseOverlay(finishedTask);
+  } else if (extracted.headDrift?.recovered === null) {
+    // Could not evaluate (the scratch-worktree probe's own git plumbing
+    // failed) -- never silently assumed clean. Falls into the same
+    // pending + changesetError shape as a real extraction error, which is
+    // exactly what taskferry accept already knows how to report.
+    finishedTask.changesetStatus = "pending";
+    finishedTask.changesetError = extracted.headDrift.conflictDetail;
+  } else if (extracted.hasChanges) {
+    finishedTask.changesetStatus = "pending";
+    maybeStartCheckGate(ctx, finishedTask, isGitTarget);
+  } else {
+    finishedTask.changesetStatus = "accepted";
+    ctx.releaseOverlay(finishedTask);
+  }
+}
+
+/**
  * Resolves a task's changeset from its overlay at settlement time, persisting
  * the outcome (and releasing the overlay for advisor / no-change cases).
  * Mirrors the original `extractChangesetForTask` closure exactly; every
@@ -4690,9 +4768,10 @@ function extractChangesetForTaskRecord(finishedTask, ctx) {
     finishedTask.changesetError = err instanceof Error ? err.message : String(err);
     if (OVERLAY_MOUNT_BUSY_PATTERN.test(finishedTask.changesetError)) {
       // The real cause is now known and specific -- always wins over
-      // whatever the exit-path classifier guessed (no_output_timeout,
-      // boot_failure, or nothing), since a generic timeout bucket is
-      // strictly less useful than "the overlay mount itself failed."
+      // whatever the exit-path classifier guessed (no_output_timeout_dead_spawn,
+      // no_output_timeout_stalled, boot_failure, or nothing), since a
+      // generic timeout bucket is strictly less useful than "the overlay
+      // mount itself failed."
       finishedTask.failureReason = "overlay_mount_busy";
       finishedTask.failureDetail = capDetail(finishedTask.changesetError);
     }
@@ -4711,18 +4790,7 @@ function extractChangesetForTaskRecord(finishedTask, ctx) {
     ctx.persistTask(finishedTask.id);
     return;
   }
-  finishedTask.diffPath = extracted.diffPath;
-  finishedTask.changesetError = null;
-  if (finishedTask.role === "advisor") {
-    finishedTask.changesetStatus = "rejected";
-    ctx.releaseOverlay(finishedTask);
-  } else if (extracted.hasChanges) {
-    finishedTask.changesetStatus = "pending";
-    maybeStartCheckGate(ctx, finishedTask, isGitTarget);
-  } else {
-    finishedTask.changesetStatus = "accepted";
-    ctx.releaseOverlay(finishedTask);
-  }
+  settleChangesetAfterExtraction(finishedTask, extracted, ctx, isGitTarget);
 }
 
 /**
@@ -5354,6 +5422,32 @@ function listTasks(ctx) {
     counts,
     tasks: all.length ? all.map(summarizeRow) : "none found (this server process's lifetime)",
   };
+}
+
+/**
+ * Aggregate task-history stats (`doctor --stats`), computed in-process over
+ * the daemon's own task map rather than shipping every row to the client for
+ * client-side aggregation -- with enough task history (~800+ rows observed in
+ * practice) the raw row list alone exceeds the daemon's outbound message cap
+ * (see MAX_BUFFER_BYTES in daemon-server.js), which silently destroys the
+ * socket with no error frame. Only the small aggregated result crosses the
+ * wire.
+ *
+ * Filters out `internal: true` rows (the daemon's own activity-summary
+ * children, which `summarize()` spawns with `internal: true` for every
+ * settled user task when `activitySummary` is on) before aggregation -- those
+ * are bookkeeping, not user dispatches, and folding them in would inflate
+ * the dispatch count under the summary model and add a spurious model row.
+ * @param {{ensureStateLoaded: () => void, tasks: Map<string, Task>}} ctx
+ */
+function statsTasks(ctx) {
+  ctx.ensureStateLoaded();
+  const rows = [];
+  for (const task of ctx.tasks.values()) {
+    if (task.internal === true) continue;
+    rows.push(summarizeRow(task));
+  }
+  return computeDoctorStats(rows);
 }
 
 /**

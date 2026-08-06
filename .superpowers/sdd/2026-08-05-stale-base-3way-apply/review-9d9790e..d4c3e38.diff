@@ -1,0 +1,550 @@
+# Review package: 9d9790e..d4c3e38
+
+## Commits
+d4c3e38 fix(changeset): ensure resolveHeadDrift cleans up and validates status inspection unconditionally
+1c99e88 docs(sdd): Task 2 report
+e8430ff docs(sdd): Task 2 report and review artifacts
+
+## Files changed
+ .../review-3971c51..81a2b81.diff                   | 242 +++++++++++++++++++++
+ .../task-2-report.md                               | 139 ++++++++++++
+ docs/sourcemap.md                                  |   2 +-
+ src/changeset.js                                   |  41 +++-
+ src/changeset.test.js                              |  19 ++
+ 5 files changed, 437 insertions(+), 6 deletions(-)
+
+## Diff
+diff --git a/.superpowers/sdd/2026-08-05-stale-base-3way-apply/review-3971c51..81a2b81.diff b/.superpowers/sdd/2026-08-05-stale-base-3way-apply/review-3971c51..81a2b81.diff
+new file mode 100644
+index 0000000..24fad82
+--- /dev/null
++++ b/.superpowers/sdd/2026-08-05-stale-base-3way-apply/review-3971c51..81a2b81.diff
+@@ -0,0 +1,242 @@
++# Review package: 3971c51..81a2b81
++
++## Commits
++81a2b81 refactor(changeset): replace throwing assertNoHeadDrift with detectHeadDrift
++
++## Files changed
++ src/changeset.js      | 42 ++++++++++++++++++++++++++----------------
++ src/changeset.test.js | 25 ++++++++++++++++++++++---
++ 2 files changed, 48 insertions(+), 19 deletions(-)
++
++## Diff
++diff --git a/src/changeset.js b/src/changeset.js
++index c2cde29..6581d6a 100644
++--- a/src/changeset.js
+++++ b/src/changeset.js
++@@ -83,41 +83,39 @@ function runExtractionBwrap(runCommand, args, sleepFn = sleepSync) {
++     sleepFn(OVERLAY_MOUNT_RETRY_BACKOFF_MS[attempt]);
++   }
++   // Unreachable: the loop above always returns by its final iteration
++   // (attempt === OVERLAY_MOUNT_RETRY_BACKOFF_MS.length short-circuits the
++   // busy check). Present only so control flow analysis doesn't see a
++   // function that can fall through without returning.
++   throw new Error("unreachable");
++ }
++ 
++ /**
++- * Throws if `directory`'s current HEAD has confirmably moved away from
++- * `preDispatchHead`. Shared by extractGitDiff's pre-retry guard and its
++- * post-retry re-check (taskferry#329): the up-to-1.3s overlay-mount-busy
++- * backoff between the two is exactly the window a concurrent HEAD change
++- * (a manual checkout, a branch switch, another dispatch) can land in
++- * undetected if only the pre-retry check ran. An inconclusive re-check
++- * (git failure, non-git target) is not a confirmed drift and falls
++- * through, matching the pre-retry guard's own fail-open-on-inconclusive
++- * behavior.
+++ * Detects whether `directory`'s current HEAD has confirmably moved away from
+++ * `preDispatchHead`. Returns `null` when there's no confirmed drift — either
+++ * HEAD still matches, or the check itself was inconclusive (a git failure, a
+++ * non-git target) — deliberately fail-open on the inconclusive case, same as
+++ * this replaced `assertNoHeadDrift`'s behavior. Unlike that function, this
+++ * never throws: taskferry changed drift from a fatal abort into something
+++ * `extractGitDiff` resolves via a real 3-way apply instead (see
+++ * `resolveHeadDrift`).
++  * @param {string} directory
++  * @param {typeof defaultRunCommand} runCommand
++  * @param {string} preDispatchHead
+++ * @returns {{from: string, to: string} | null}
++  */
++-function assertNoHeadDrift(directory, runCommand, preDispatchHead) {
+++export function detectHeadDrift(directory, runCommand, preDispatchHead) {
++   const currentHead = resolvePreDispatchHead(directory, runCommand);
++   if (currentHead !== null && currentHead !== preDispatchHead) {
++-    throw new Error(
++-      `error: ${directory}'s HEAD moved from '${preDispatchHead}' to '${currentHead}' since dispatch\n` +
++-      `help: something else changed this directory's checkout while the task was in flight (a manual git checkout, a branch switch, or another process) -- diffing against the original HEAD would compare the wrong trees. Investigate what changed ${directory}, then retry against a stable target (a dedicated worktree avoids this)`
++-    );
+++    return { from: preDispatchHead, to: currentHead };
++   }
+++  return null;
++ }
++ 
++ /**
++  * @param {string} directory
++  * @param {typeof defaultRunCommand} [runCommand]
++  * @returns {string|null}
++  */
++ export function resolvePreDispatchHead(directory, runCommand = defaultRunCommand) {
++   const result = runCommand("git", ["-C", directory, "rev-parse", "HEAD"]);
++   if (!result.error && result.status === 0) {
++@@ -177,39 +175,51 @@ export function extractGitDiff({
++   writeFileFn = (filePath, content) => fs.writeFileSync(filePath, content, { mode: 0o600 }),
++   mkdirFn = (dirPath) => fs.mkdirSync(dirPath, { recursive: true, mode: 0o700 }),
++   sleepFn = sleepSync,
++ }) {
++   // Fail closed on HEAD drift: `directory` below is a live bind to the real
++   // checkout, not a snapshot from dispatch time. If something else (a manual
++   // checkout, a branch switch, another dispatch) moved that checkout's HEAD
++   // since preDispatchHead was recorded, the diff-cached-against-preDispatchHead
++   // script still runs successfully but compares the wrong trees -- it can
++   // report files as deleted/added that the worker never touched.
++-  assertNoHeadDrift(directory, runCommand, preDispatchHead);
+++  const preDrift = detectHeadDrift(directory, runCommand, preDispatchHead);
+++  if (preDrift) {
+++    throw new Error(
+++      `error: ${directory}'s HEAD moved from '${preDrift.from}' to '${preDrift.to}' since dispatch\n` +
+++      `help: something else changed this directory's checkout while the task was in flight (a manual git checkout, a branch switch, or another process) -- diffing against the original HEAD would compare the wrong trees. Investigate what changed ${directory}, then retry against a stable target (a dedicated worktree avoids this)`
+++    );
+++  }
++   const bwrapArgs = buildBwrapArgs({ directory, stateDir, runtimeDir, homeDir, denyList, overlay, overlayRwBinds, overlayRwFileBinds });
++   // The final `exit $rc` propagates the diff's own status: the previous
++   // `; git reset` tail made the whole script exit with reset's status, so a
++   // failed diff still reported success. reset runs first regardless (undo
++   // the transient staging -- the upper already captured everything), then
++   // the shell exits with the diff's code.
++   const script = `git -C ${shQuote(directory)} add -A && { git -C ${shQuote(directory)} diff --cached ${shQuote(preDispatchHead)}; rc=$?; git -C ${shQuote(directory)} reset > /dev/null 2>&1; exit $rc; }`;
++   const result = runExtractionBwrap(runCommand, [...bwrapArgs, "--", "sh", "-c", script], sleepFn);
++   if (result.error || result.status !== 0) {
++     throw new Error(`error: git diff extraction failed for ${directory} (exit ${result.status ?? "null"}): ${(result.stderr || result.error?.message || "unknown error").trim()}`);
++   }
++   // Re-check HEAD once more (taskferry#329): runExtractionBwrap's retry loop
++   // above can have absorbed up to 1.3s of backoff on the overlay-mount-busy
++   // race, which is enough time for a concurrent checkout/branch-switch/
++   // dispatch to move HEAD after the pre-retry guard above already passed.
++   // Catching it here, immediately before the diff is persisted, closes that
++   // window instead of silently writing a patch anchored on a stale HEAD.
++-  assertNoHeadDrift(directory, runCommand, preDispatchHead);
+++  const postDrift = detectHeadDrift(directory, runCommand, preDispatchHead);
+++  if (postDrift) {
+++    throw new Error(
+++      `error: ${directory}'s HEAD moved from '${postDrift.from}' to '${postDrift.to}' since dispatch\n` +
+++      `help: something else changed this directory's checkout while the task was in flight (a manual git checkout, a branch switch, or another process) -- diffing against the original HEAD would compare the wrong trees. Investigate what changed ${directory}, then retry against a stable target (a dedicated worktree avoids this)`
+++    );
+++  }
++   mkdirFn(pathDirname(diffPath));
++   writeFileFn(diffPath, result.stdout);
++   return { diffPath, hasChanges: result.stdout.trim().length > 0 };
++ }
++ 
++ /**
++  * @param {string} filePath
++  * @returns {string}
++  */
++ function pathDirname(filePath) {
++diff --git a/src/changeset.test.js b/src/changeset.test.js
++index 779569a..8977c2d 100644
++--- a/src/changeset.test.js
+++++ b/src/changeset.test.js
++@@ -1,35 +1,37 @@
++ // src/changeset.test.js
++ import { describe, test } from "node:test";
++ import assert from "node:assert/strict";
++ import fs from "node:fs";
++ import os from "node:os";
++ import path from "node:path";
++-import { overlayPaths, subOverlayPaths, subOverlaySlug, extractGitDiff, resolvePreDispatchHead, buildMergedViewBwrapArgs, extractNonGitDiff, applyChangeset, cleanupOverlay } from "./changeset.js";
+++import { overlayPaths, subOverlayPaths, subOverlaySlug, extractGitDiff, resolvePreDispatchHead, buildMergedViewBwrapArgs, extractNonGitDiff, applyChangeset, cleanupOverlay, detectHeadDrift } from "./changeset.js";
++ 
++ // Shared fixture literals lifted to module scope so the sonarjs
++ // no-duplicate-string rule stays quiet (each literal now appears once, in
++ // its constant definition) and so every test case points at the same paths.
++ const REPO_DIR = "/workspace/repo";
++ const SCRATCH_DIR = "/workspace/scratch";
++ const STATE_DIR = "/state";
++ const RUNTIME_DIR = "/state/run";
++ const HOME_DIR = "/home/user";
++ const DIFF_PATCH = "/state/diffs/t1.patch";
++ const T1_ROOT = "/tmp/taskferry-cow-t1";
++ const T1_UPPER = "/tmp/taskferry-cow-t1/upper/main";
++ const T1_WORK = "/tmp/taskferry-cow-t1/work/main";
++ const T1_MERGED = "/tmp/taskferry-cow-t1/merged";
++ const TMP_DIR = "/tmp";
++ const UPPER_DIR = "/tmp/u";
++ const WORK_DIR = "/tmp/w";
++ const PRE_DISPATCH_HEAD = "abc123";
+++const GIT_NOT_A_REPO_STDERR = "fatal: not a git repository";
+++const GIT_NOT_A_REPO_STDERR_NL = "fatal: not a git repository\n";
++ const MY_REPO_WT = "/workspace/main-repo/.git/worktrees/my-repo";
++ const GIT_CMD = "git";
++ const BWRAP_CMD = "bwrap";
++ const DIR_FLAG = "--dir";
++ const OVERLAY_SRC_FLAG = "--overlay-src";
++ const OVERLAY_FLAG = "--overlay";
++ const SAMPLE_DIFF_X = "diff --git a/x b/x\n";
++ const BIND_FLAG = "--bind";
++ const RO_BIND_FLAG = "--ro-bind";
++ const ROOT_BIND = "/";
++@@ -219,34 +221,51 @@ describe("resolvePreDispatchHead()", () => {
++   test("returns the trimmed HEAD sha for a git directory", () => {
++     const runCommand = (command, args) => {
++       assert.equal(command, GIT_CMD);
++       assert.deepEqual(args, ["-C", REPO_DIR, "rev-parse", "HEAD"]);
++       return { status: 0, stdout: "abc123\n", stderr: "", error: null };
++     };
++     assert.equal(resolvePreDispatchHead(REPO_DIR, runCommand), PRE_DISPATCH_HEAD);
++   });
++ 
++   test("returns null for a non-git directory", () => {
++-    const runCommand = () => ({ status: 128, stdout: "", stderr: "fatal: not a git repository", error: null });
+++    const runCommand = () => ({ status: 128, stdout: "", stderr: GIT_NOT_A_REPO_STDERR, error: null });
++     assert.equal(resolvePreDispatchHead("/tmp/scratch", runCommand), null);
++   });
++ 
++   test("returns the empty-tree hash for a git repo with an unborn HEAD (zero commits)", () => {
++     const runCommand = (_command, args) => {
++       if (args.includes("HEAD")) return { status: 128, stdout: "", stderr: "fatal: ambiguous argument 'HEAD'\n", error: null };
++       if (args.includes("--git-dir")) return { status: 0, stdout: ".git\n", stderr: "", error: null };
++       throw new Error(`unexpected git invocation: ${args.join(" ")}`);
++     };
++     assert.equal(resolvePreDispatchHead("/repo", runCommand), "4b825dc642cb6eb9a060e54bf8d69288fbee4904");
++   });
++ });
++ 
+++describe("detectHeadDrift()", () => {
+++  test("returns null when current HEAD matches preDispatchHead", () => {
+++    const runCommand = () => ({ status: 0, stdout: "abc123\n", stderr: "", error: null });
+++    assert.equal(detectHeadDrift(REPO_DIR, runCommand, PRE_DISPATCH_HEAD), null);
+++  });
+++
+++  test("returns {from, to} when current HEAD has moved", () => {
+++    const runCommand = () => ({ status: 0, stdout: "def456\n", stderr: "", error: null });
+++    assert.deepEqual(detectHeadDrift(REPO_DIR, runCommand, PRE_DISPATCH_HEAD), { from: PRE_DISPATCH_HEAD, to: "def456" });
+++  });
+++
+++  test("returns null (fail-open) when the HEAD check itself is inconclusive", () => {
+++    const runCommand = () => ({ status: 128, stdout: "", stderr: GIT_NOT_A_REPO_STDERR_NL, error: null });
+++    assert.equal(detectHeadDrift(REPO_DIR, runCommand, PRE_DISPATCH_HEAD), null);
+++  });
+++});
+++
++ describe("extractGitDiff()", () => {
++   test("remounts the overlay and runs a stage-diff-reset script anchored on preDispatchHead, writing stdout to diffPath", () => {
++     let capturedCommand = null;
++     let capturedArgs = null;
++     const written = {};
++     const runCommand = (command, args) => {
++       if (command === "git") return { status: 0, stdout: "abc123\n", stderr: "", error: null };
++       capturedCommand = command;
++       capturedArgs = args;
++       return { status: 0, stdout: "diff --git a/foo b/foo\n+bar\n", stderr: "", error: null };
++@@ -390,21 +409,21 @@ describe("extraction fail-closed behavior", () => {
++     assert.throws(
++       () => extractGitDiff({ ...baseGitParams, runCommand, writeFileFn: () => {}, mkdirFn: () => {} }),
++       /HEAD moved from 'abc123' to 'def456' since dispatch/
++     );
++     assert.equal(bwrapCalled, false, "extraction must never run against a directory whose HEAD has drifted");
++   });
++ 
++   test("extractGitDiff proceeds normally when the HEAD re-check itself can't resolve (git failure)", () => {
++     let capturedArgs = null;
++     const runCommand = (command, args) => {
++-      if (command === "git") return { status: 128, stdout: "", stderr: "fatal: not a git repository\n", error: null };
+++      if (command === "git") return { status: 128, stdout: "", stderr: GIT_NOT_A_REPO_STDERR_NL, error: null };
++       capturedArgs = args;
++       return { status: 0, stdout: SAMPLE_DIFF_X, stderr: "", error: null };
++     };
++     const result = extractGitDiff({ ...baseGitParams, runCommand, writeFileFn: () => {}, mkdirFn: () => {} });
++     assert.ok(capturedArgs, "bwrap must still run when the HEAD re-check is inconclusive rather than a confirmed drift");
++     assert.equal(result.hasChanges, true);
++   });
++ 
++   // taskferry#326: the extraction bwrap can race the just-exited dispatch
++   // bwrap's own mount-namespace teardown and lose with the same
+diff --git a/.superpowers/sdd/2026-08-05-stale-base-3way-apply/task-2-report.md b/.superpowers/sdd/2026-08-05-stale-base-3way-apply/task-2-report.md
+new file mode 100644
+index 0000000..cd0d537
+--- /dev/null
++++ b/.superpowers/sdd/2026-08-05-stale-base-3way-apply/task-2-report.md
+@@ -0,0 +1,139 @@
++# Task 2 report — `resolveHeadDrift` disposable-worktree 3-way probe
++
++## What I changed
++
++- **`src/changeset.js`** (+42 lines, now 592 total)
++  - Added `CONFLICT_STATUS_PATTERN` — a module-private regex matching
++    unmerged `git status --porcelain` lines (`UU/AA/DD/AU/UD/UA/DU`).
++    Pinned to `git status --porcelain` (not `git apply --3way`'s exit
++    code) per the spec's "A `--check` correction" warning: --3way's own
++    status can't be trusted to distinguish a clean merge from a real
++    conflict.
++  - Added exported `resolveHeadDrift({ directory, diffPath, currentHead,
++    scratchDir, runCommand })`. It creates a detached worktree at
++    `scratchDir` off the live `directory`'s `currentHead`, runs
++    `git apply --3way diffPath` inside that scratch tree, inspects
++    `git status --porcelain` for unmerged paths, then removes the
++    scratch worktree unconditionally (whether the merge was clean, a
++    conflict, or even if `worktree add` itself failed). Returns
++    `{recovered: true, conflictDetail: null}` on a clean merge,
++    `{recovered: false, conflictDetail}` on a real conflict (decided by
++    conflict markers, not apply's exit code), or
++    `{recovered: null, conflictDetail}` when `worktree add` itself
++    failed — no apply attempted in that case.
++  - The live `directory` is only read (as `worktree add`'s source); all
++    write traffic targets `scratchDir`. The brief's contract — and the
++    spec's "disposable worktree" framing — relies on this; the
++    `apply`/`status`/`remove` calls all use `-C scratchDir` (apply,
++    status) or `-C directory` (add, remove, which only reference the
++    live directory as the source repo).
++  - References `gitApplyFailureReason` (defined later in the file) for
++    its failure-reason strings; safe via function hoisting (both are
++    `function` declarations).
++- **`src/changeset.test.js`** (+88 lines, now 861 total)
++  - Added `resolveHeadDrift` to the existing `import { ... } from
++    "./changeset.js"` line.
++  - Added the `resolveHeadDrift()` describe block after the
++    `detectHeadDrift()` block, with all 6 test cases from the brief
++    (clean merge, genuine conflict, status-marker-without-apply-failure,
++    worktree-add failure, unconditional cleanup, live-directory-read-only).
++  - **One deviation from the brief's verbatim test**: the first test's
++    arg-shape assertions (`assert.ok(calls.some((c) => c ===
++    'worktree add --detach ...'))`) used strict equality against
++    `args.join(" ")`. The brief's implementation passes args including
++    the `-C <directory>` / `-C <scratchDir>` prefix required to target
++    each git invocation at the right repo (matching the
++    `resolvePreDispatchHead` convention in the same file, and the only
++    way `args[1]` in the second test can equal `SCRATCH_DIR`). With
++    those prefixes in args, the joined string never equals the bare
++    `worktree add --detach ...` form. I changed `===` to
++    `.includes(...)` on those four assertions — same intent (verify
++    those specific commands were called) without forcing an
++    internally-inconsistent test/implementation pair. Documented here
++    as a concern.
++  - Renamed the unused `command` parameter to `_command` in the
++    `runCommand` mock for the first test to satisfy
++    `sonarjs/no-unused-function-argument` (the rest of the file uses
++    the same convention).
++- **`docs/sourcemap.md`**
++  - Updated the `changeset.js` row: line count `540 → 592`; replaced
++    the stale `assertNoHeadDrift()` reference (left over after Task 1)
++    with `detectHeadDrift()`, and added a sentence summarizing
++    `resolveHeadDrift()`'s role in the drift-resolution pipeline (Task
++    3 will wire it into `extractGitDiff()`).
++
++## What I did not touch
++
++- `extractGitDiff()` and its two `detectHeadDrift` call sites — per the
++  brief, those stay as-is until Task 3 rewires them.
++- `defaultRunCommand` — unchanged; `resolveHeadDrift` accepts an
++  injected `runCommand` like every other testable function in the file.
++- `gitApplyFailureReason` — unchanged; reused via function hoisting.
++
++## Test commands and results
++
++- `env -u TASKFERRY_CHILD node --test src/changeset.test.js`
++  - **Before implementation** (Step 2): file fails to load with
++    `SyntaxError: The requested module './changeset.js' does not
++    provide an export named 'resolveHeadDrift'` — exactly the brief's
++    expected "FAIL — resolveHeadDrift is not exported yet" failure
++    mode.
++  - **After implementation** (Step 4, final): `tests 50, pass 50,
++    fail 0`. The 6 new `resolveHeadDrift()` tests pass alongside the
++    44 pre-existing tests in this file.
++- `env -u TASKFERRY_CHILD node --test --test-name-pattern="resolveHeadDrift" src/changeset.test.js`
++  - All 6 resolveHeadDrift tests pass.
++- `env -u TASKFERRY_CHILD node --test src/changeset.integration.test.js`
++  - `tests 4, pass 4, fail 0`. Unaffected.
++- `npm test` (full suite)
++  - `tests 984, pass 980, fail 4`. The 4 failures are pre-existing
++    and unrelated to this task — I verified by `git stash`-ing my
++    changes and re-running: the same 4 tests fail on `main`
++    (`client.js's direct-execution guard runs ensureDaemonStarted()
++    when invoked through a symlink`, `TASKFERRY_TASK_ID is absent from
++    summary spawns`, `ro-binds the real opencode auth.json into the
++    sandboxed XDG_DATA_HOME when it exists`, and `leaves XDG_DATA_HOME
++    untouched when sandboxing is disabled`).
++- `npm run lint` — clean.
++- `npm run typecheck` — clean.
++
++## Commits
++
++- `0054c6d` — `feat(changeset): add resolveHeadDrift disposable-worktree 3-way probe`
++  (src/changeset.js, src/changeset.test.js, docs/sourcemap.md; 3 files,
++  +132 / -2)
++
++## Concerns
++
++- **Brief's first test had a strict-equality assertion that conflicts
++  with its own implementation's `-C` args.** The test asserts
++  `calls.some((c) => c === 'worktree add --detach ...')` against
++  `args.join(" ")`, but the implementation passes args as `["-C",
++  directory, "worktree", "add", ...]`, so the joined string never
++  equals the bare subcommand form. The other 5 tests in the same
++  describe block consistently assume the `-C` style (e.g. the
++  "live-directory-read-only" test asserts `args[1] === SCRATCH_DIR`,
++  which only holds when args starts with `["-C", SCRATCH_DIR, ...]`).
++  I resolved this by changing `===` to `.includes(...)` on the four
++  arg-shape assertions in the first test — minimal change, preserves
++  intent. If the brief author intended the implementation to skip
++  `-C` (e.g. by adding cwd to `defaultRunCommand`'s spawn options),
++  that's a much larger change spanning both this function and the
++  shared runner, and the brief didn't ask for it. The current
++  resolution is the smallest diff that makes all 6 tests pass while
++  keeping the implementation consistent with the existing
++  `resolvePreDispatchHead` / `extractGitDiff` conventions in the same
++  file.
++- **`gitApplyFailureReason(add)` reused for the worktree-add
++  failure path.** The brief specifies
++  `` `could not evaluate: ${gitApplyFailureReason(add)}` ``. The
++  helper's wording ("git apply exited with status N") is slightly
++  inaccurate when reused for a failed `worktree add` — but the
++  surrounding `could not evaluate:` prefix and the test's
++  `/could not create work tree dir/` regex match the actual `stderr`
++  text, so the user-visible error is correct. Worth flagging if
++  anyone cares about a tighter error message; not worth a follow-up
++  on its own.
++- **`detectHeadDrift` doc-comment still references `resolveHeadDrift`
++  but does not link to a file/line.** Pre-existing in Task 1's
++  commit; left alone.
+diff --git a/docs/sourcemap.md b/docs/sourcemap.md
+index 12dfe5c..443dbe3 100644
+--- a/docs/sourcemap.md
++++ b/docs/sourcemap.md
+@@ -67,21 +67,21 @@ obviously belong to args parsing or output formatting, start there.
+ | `tasks.env.test.js` | 779 | `caller-env union` (sanitizedEnvironment) split into 6 sub-describes by topic so no describe callback exceeds the 200-line cap: basic dispatch and TASKFERRY_TASK_ID; envFileVars merge with caller/ambient; envFile load at construction; envFile watch reload/error/setup/close; summary/advisor/report env forwarding; queue-time env freezing + ambient-read-fresh; single-pass merge + key validation. Covers caller-supplied overlay of daemon ambient; fixed excluded-set (PATH/HOME/`TASKFERRY_STATE_DIR`/...) never overridable; denylist strips even from caller; `TASKFERRY_CHILD` survives denylist; `TASKFERRY_TASK_ID` stamped on dispatch + advisor; absent from summary; omitting `env` is ambient-only; `envFileVars` supplies / loses to ambient / loses to caller; `envFileVars` denylist strips; PATH from `envFileVars` cannot override ambient; `envFileVars` cannot smuggle `TASKFERRY_SOCKET_PATH`/HOME; `envFilePath` loads once at construction; loadEnvFileFn throw propagates synchronously; omitting `envFilePath` skips load; empty `TASKFERRY_ENV_FILE` disables loading; `watchEnvFileFn` starts a live watch; omitting it skips watch; onReload updates `envFileVars` for every dispatch after it fires; onError leaves `envFileVars` at last-known-good; setup failure is caught + logged; `manager.close()` closes the watcher; `summaryEnvironment` strips `OPENCODE_CONFIG*`; advisor forwards caller env; summarize report mode forwards caller env; queued dispatch's stored env is captured at dispatch time, not re-read; queued env is frozen against later caller mutations (verification gate for the b45de81 clone); summary's spawned env reads daemon's ambient at spawn time; excluded/denylist/caller-wins single-pass merge; exclusion set is sourced from `paths.js`'s plumbing export; caller-supplied env key containing `=` / empty / non-string / undefined rejected synchronously. |
+ | `tasks.executor.test.js` | 491 | `startTask()` writes stdout through `executor.normalizeLogEvent` (Task 7: write-time normalization) (JSON events flagged null are dropped; non-JSON lines preserved verbatim; trailing partial line preserved). `startTask()` spawns the executor's CLI binary (Task 7: executor-driven binary) (pi dispatch spawns `pi`; default dispatch spawns `pi`). `startTask()` merges `executor.sandboxAuthFile().sandboxEnv` into spawnEnv (Task 7: per-executor env overrides) (opencode rewrites `XDG_DATA_HOME`; pi rewrites `PI_CODING_AGENT_DIR` + auth bind destination; sandboxAuthFile receives `sessionId` + `launchDirectory`; fresh dispatch does not pass `sessionId`). `startTask()` resolves the resumed session file via `Array.find` (no break/continue loop) (the pi sessions scan was originally imperative with two `continue` + one `break`; the rewrite uses `entries.find((entry) => ...)` so the loop body has no control-flow jumps). `startTask()` never lets `normalizeLogEvent()` throws escape the stdout handler (Task 7 review fix) (inline path; trailing-fragment path; settling structured `ExecutorNormalizationError`). |
+ | `protocol.js` | 407 | `PROTOCOL_VERSION`, `RPC_METHODS`, request/response/error envelope encode/decode, method-name-to-manager-function mapping, `isEnvironment` env-param predicate, and the data-driven `METHOD_PARAMS` spec (per-field `required`/`optional` predicate pairs plus a per-method `extra` cross-field check — the split that keeps `validParams` computational complexity flat) that `validParams`/`isWithinParams` evaluate, plus the task.summary `mode: "activity"` ↔ `env` rejection (the activity path reads cached task activity and spawns nothing, so caller env has no process to land in — surfacing the combination as `INVALID_PARAMS` rather than silently dropping it). `task.dispatch`'s allowed-param spec accepts `noOverlay`; `task.advisor`'s deliberately does NOT (overlay is mandatory for the advisor role per ADR 0001 — the allowed set is the raw-RPC equivalent of args.js's parse-time rejection). `task.tail`'s `chars` ceiling is 131072 (raised from 65536 to fit advisor's default 120k-char context budget). `request` envelope validation is split out into `isRequestEnvelope`/`hasVersion`/`isRequestBody` predicates, and the invalid-params error text is picked by `invalidParamsError`. `event.subscribe`'s optional fields now include `all` (boolean); its `extra` cross-field check accepts `all === true` as a third alternative alongside a valid `directory` or `taskId` (taskferry#315). |
+ | `events.js` | 58 | Assigns a monotonic sequence number to each emitted event; that's the whole file. |
+ | `activity.js` | 486 | `activityCacheKey`/cache `refresh()`: bounded head+tail narration snapshot, optional model-summary call, min-interval throttling. |
+ | `state-lock.js` | 145 | `withFileLock()`: synchronous, `Atomics.wait`-based cross-process exclusive lock; guards the daemon auto-start race. No longer used by `persistTask()`'s writes (taskferry#55) — those now dump the whole in-memory tasks Map straight to a temp file + rename on a debounced flush instead of a read-merge-write, so there's no cross-process race left to guard against. |
+ | `output.js` | 321 | TOON encoding, `leanStatus`/`leanResult`/`projectList`/`projectContext`/`homeView`, hint-string MCP-name migration. `leanStatus()` surfaces `changesetStatus: "pending"` (and `changesetError`) on a non-`--full` `status`/`wait` response when the settled task has one, so an `accept`/`reject` next-step is visible without `--full`. Even under `--full`, `trimOverlayDirs()` reduces the task record's `overlayDirs` down to just `root`/`tmpRoot` -- the per-git-subpath `upperDir`/`workDir`/`rwBinds`/`rwFileBinds` breakdown `tasks.js` persists on the task (see that row) is daemon-internal bookkeeping for extraction/cleanup, not something a `status`/`wait --full` caller has any use for. `leanResult`/`computeResultDetail()` never carried `overlayDirs` in the first place, so `result` needed no equivalent trim. |
+ | `opencode-plugin.js` | 189 | OpenCode's native plugin surface: toasts on task state transitions by subscribing to daemon task-state events through `client.js`. |
+ | `executor.js` | 341 | `WorkerExecutor` abstraction: `opencodeExecutor()`/`piExecutor()` build each CLI's spawn args, summary prompt, log-event normalization, and sandboxed auth-file binding. Both executor objects expose a summary-prompt method, but `tasks.js` currently hardcodes every summary task's `executorId` to `"opencode"` regardless of the originating dispatch's executor — `piExecutor()`'s summary support is unused in practice. |
+ | `sandbox.js` | 307 | `bwrap` mount layout: read-only root bind, deny-list (`~/.ssh`, `~/.aws`, `~/.config/gcloud`, `~/.config/gh`, `~/.gnupg`, `~/.claude`, extendable per-install via `TASKFERRY_SANDBOX_DENYLIST`/`sandboxDenylist`, merged with the fixed defaults in `tasks.js`), `allowedDirs` merging, `resolveGitCommonDir`/`resolveGitDir` for worktree gitdir resolution, `checkOverlaySupport` (bwrap >= 0.8 probe), `buildBwrapBaseArgs()` emits the shared prefix (`--ro-bind / /`, `--proc /proc`, `--dev /dev`, `--tmpfs /tmp`, then one `--tmpfs` per denied path) that both `buildBwrapArgs()` (sandboxed dispatch) and `buildMergedViewBwrapArgs()` in `changeset.js` (changeset extraction/apply) start from, `buildBwrapArgs()` opts in to a copy-on-write overlay on `directory` via the `overlay`/`overlayRwBinds` params (mounted with `--overlay-src`/`--overlay`; bwrap >= 0.8 required), plus `overlayRwFileBinds` for writable files outside `directory` (each bound rw with a plain `--bind` right after the overlay binds, since overlayfs mounts are directory-only), `shareNet` flag (default true; every caller, including advisor, keeps `--share-net` -- the sandboxed worker CLI needs outbound network to reach its model provider, and `--unshare-net` blocked that entirely when advisor briefly passed `shareNet: false`), and `runtimeDirWritable` flag (default true; advisor-role dispatches pass false so the daemon's Unix socket inside runtimeDir is read-only and `connect()` fails). The actual bind-scoping decision (worktree-private gitdir + common dir's shared data only, not the whole common dir) lives in `tasks.js`, not here — see taskferry#224/#227. |
+-| `changeset.js` | 592 | Overlay path helpers (`subOverlayPaths()` for directory sub-overlays, `subFilePaths()` for the scratch-copy rw bind a writable FILE like a worktree's `packed-refs` needs instead, since overlayfs mounts are directory-only), pre-dispatch HEAD resolution (unborn HEAD anchors on the empty tree), git/non-git diff extraction from the CoW overlay (fail-closed on extraction failure, and on HEAD drift -- `extractGitDiff()` re-resolves `directory`'s current HEAD via `resolvePreDispatchHead()` before extracting, and refuses if it no longer matches `preDispatchHead`, since `directory` is a live bind and a checkout/branch change there since dispatch would otherwise make the diff compare the wrong trees silently -- see taskferry#261), changeset apply (git apply for git targets, in-sandbox rsync --delay-updates for non-git, with required live-overlay inputs validated before a non-git apply), and overlay cleanup (a containment guard refusing roots outside the overlay tmp root, then a same-uid `chmod -R u+rwX` before `rm -rf` -- overlayfs's kernel-owned `work/main/work` scratch dir comes back mode 000, and once anything was ever deleted inside the overlay it holds an internal whiteout entry, making it non-empty; a non-empty mode-000 dir forces `rm -rf` to `opendir()` it (unlike an empty one, which removes via rm's plain-rmdir() fast path), which mode 000 blocks -- `rm -rf` then aborts partway through, having already deleted `upper/`, silently stranding a task that still thinks its overlay is live (taskferry#273); `chmod -R` first sidesteps this since chmod needs only the parent's permissions to retarget an entry, not the entry's own). Both extraction functions, and `applyNonGitChangeset()`'s own overlay-mount bwrap call (the non-git apply's writable rsync remount, review finding from #327), run their bwrap spawn through `runExtractionBwrap()`, a bounded retry-with-backoff (100/300/900ms, `OVERLAY_MOUNT_BUSY_PATTERN`-gated so only the confirmed overlay-mount race retries -- any other bwrap failure still throws on the first attempt) that absorbs a kernel-internal race: the extraction (or apply) bwrap's own overlay mount can lose to the async teardown of the just-exited dispatch/accept bwrap's mount namespace, which has no user-space signal to wait on (taskferry#326; live-verified against real bwrap on a nested-worktree repro -- unpatched `main` hit the exact "Device or resource busy" crash, the retry absorbed it). `applyNonGitChangeset()` needs no extra fail-open guard the way `extractNonGitDiff()` does: rsync's exit codes don't share `diff -ruN`'s "non-zero can mean success" convention, so a persistent busy failure after retries exhaust already falls through to the existing non-zero-status failure branch. `OVERLAY_MOUNT_BUSY_PATTERN` itself now lives here (was duplicated in `tasks.js`, which imports it) since both the retry gate and `tasks.js`'s post-throw `failureReason` classifier need the same regex. `isOverlayMountBusy()` checks the busy pattern against `stderr` and `error?.message` independently (never via `stderr || error?.message`) since a hung mount that trips `spawnSync`'s 30s timeout reports `{error: ETIMEDOUT, stderr: <busy text>}`, and the generic ETIMEDOUT message would otherwise win a naive fallback and hide the busy signature actually sitting in stderr. `extractNonGitDiff()` also runs this same busy check explicitly against the exhausted-retry result even when its exit status is 1 -- bwrap's own die()-on-setup-failure convention exits 1, the exact code `diff -ruN` uses for "differences found," so without the explicit check a persistent overlay-mount-busy failure reads as a successful zero-change diff and silently discards the worker's real edits (`extractGitDiff()` doesn't need the same guard since it already throws on any non-zero status). Also exports `defaultRunCommand`, the 30s diff/apply runner that's deliberately separate from sandbox.js's 5s version-probe runner. `buildMergedViewBwrapArgs()` mounts the overlay's merged view on a synthetic mountpoint under /tmp so a non-git extraction can `diff -ruN` `directory` against its own merged view; the overlay paths (`upperDir`/`workDir`/`mergedMountPoint`, all under /tmp by construction) need no explicit /tmp-shadowing protection — `upperDir`/`workDir` are host-namespace paths consumed by the kernel's overlay `mount(2)` and bypass the bwrap namespace's mounts, and `mergedMountPoint` is intentionally created under the bwrap tmpfs before being overlay-mounted — shares its scaffolding with `buildBwrapArgs()` via `sandbox.js`'s `buildBwrapBaseArgs()`. `extractGitDiff()`'s HEAD-drift guard (`detectHeadDrift()`, non-throwing, shared between both call sites) now runs a second time immediately before the diff is persisted, not just once before `runExtractionBwrap()`'s retry loop (taskferry#329) -- the pre-retry check alone left a HEAD change that lands during the up-to-1.3s overlay-mount-busy backoff undetected. `detectHeadDrift()` replaces the old throwing `assertNoHeadDrift()`: rather than fail-closed on a HEAD change, it returns `{from, to}` and lets a follow-up `resolveHeadDrift()` probe attempt a real `git apply --3way` (never `--check`, whose exit code can't tell a clean merge from a real conflict) inside a disposable detached worktree off the live `directory` -- `directory` is read-only as `worktree add`'s source, never written; the scratch worktree is removed unconditionally after the probe. `resolveHeadDrift()` returns `{recovered: true}` on a clean 3-way merge, `{recovered: false, conflictDetail}` on a genuine conflict (decided by `git status --porcelain` conflict markers, not by apply's exit code), and `{recovered: null, conflictDetail}` when the worktree add itself fails (no apply attempted). `runExtractionBwrap()`'s `sleepFn` (real blocking `Atomics.wait`-based `sleepSync` by default) is now reachable from outside this module: `tasks.js` threads an `overlaySleepFn` manager option down to both `extractChangesetForTaskRecord()`'s `extractGitDiff`/`extractNonGitDiff` calls and `acceptTaskChangeset()`'s `applyChangeset` call (undefined by default, so production behavior/blocking is unchanged), letting `tasks.changeset.test.js`'s overlay-mount-busy reclassification tests inject a fast no-op instead of eating the real ~1.3s retry backoff on every run (taskferry#328). |
++| `changeset.js` | 623 | Overlay path helpers (`subOverlayPaths()` for directory sub-overlays, `subFilePaths()` for the scratch-copy rw bind a writable FILE like a worktree's `packed-refs` needs instead, since overlayfs mounts are directory-only), pre-dispatch HEAD resolution (unborn HEAD anchors on the empty tree), git/non-git diff extraction from the CoW overlay (fail-closed on extraction failure, and on HEAD drift -- `extractGitDiff()` re-resolves `directory`'s current HEAD via `resolvePreDispatchHead()` before extracting, and refuses if it no longer matches `preDispatchHead`, since `directory` is a live bind and a checkout/branch change there since dispatch would otherwise make the diff compare the wrong trees silently -- see taskferry#261), changeset apply (git apply for git targets, in-sandbox rsync --delay-updates for non-git, with required live-overlay inputs validated before a non-git apply), and overlay cleanup (a containment guard refusing roots outside the overlay tmp root, then a same-uid `chmod -R u+rwX` before `rm -rf` -- overlayfs's kernel-owned `work/main/work` scratch dir comes back mode 000, and once anything was ever deleted inside the overlay it holds an internal whiteout entry, making it non-empty; a non-empty mode-000 dir forces `rm -rf` to `opendir()` it (unlike an empty one, which removes via rm's plain-rmdir() fast path), which mode 000 blocks -- `rm -rf` then aborts partway through, having already deleted `upper/`, silently stranding a task that still thinks its overlay is live (taskferry#273); `chmod -R` first sidesteps this since chmod needs only the parent's permissions to retarget an entry, not the entry's own). Both extraction functions, and `applyNonGitChangeset()`'s own overlay-mount bwrap call (the non-git apply's writable rsync remount, review finding from #327), run their bwrap spawn through `runExtractionBwrap()`, a bounded retry-with-backoff (100/300/900ms, `OVERLAY_MOUNT_BUSY_PATTERN`-gated so only the confirmed overlay-mount race retries -- any other bwrap failure still throws on the first attempt) that absorbs a kernel-internal race: the extraction (or apply) bwrap's own overlay mount can lose to the async teardown of the just-exited dispatch/accept bwrap's mount namespace, which has no user-space signal to wait on (taskferry#326; live-verified against real bwrap on a nested-worktree repro -- unpatched `main` hit the exact "Device or resource busy" crash, the retry absorbed it). `applyNonGitChangeset()` needs no extra fail-open guard the way `extractNonGitDiff()` does: rsync's exit codes don't share `diff -ruN`'s "non-zero can mean success" convention, so a persistent busy failure after retries exhaust already falls through to the existing non-zero-status failure branch. `OVERLAY_MOUNT_BUSY_PATTERN` itself now lives here (was duplicated in `tasks.js`, which imports it) since both the retry gate and `tasks.js`'s post-throw `failureReason` classifier need the same regex. `isOverlayMountBusy()` checks the busy pattern against `stderr` and `error?.message` independently (never via `stderr || error?.message`) since a hung mount that trips `spawnSync`'s 30s timeout reports `{error: ETIMEDOUT, stderr: <busy text>}`, and the generic ETIMEDOUT message would otherwise win a naive fallback and hide the busy signature actually sitting in stderr. `extractNonGitDiff()` also runs this same busy check explicitly against the exhausted-retry result even when its exit status is 1 -- bwrap's own die()-on-setup-failure convention exits 1, the exact code `diff -ruN` uses for "differences found," so without the explicit check a persistent overlay-mount-busy failure reads as a successful zero-change diff and silently discards the worker's real edits (`extractGitDiff()` doesn't need the same guard since it already throws on any non-zero status). Also exports `defaultRunCommand`, the 30s diff/apply runner that's deliberately separate from sandbox.js's 5s version-probe runner. `buildMergedViewBwrapArgs()` mounts the overlay's merged view on a synthetic mountpoint under /tmp so a non-git extraction can `diff -ruN` `directory` against its own merged view; the overlay paths (`upperDir`/`workDir`/`mergedMountPoint`, all under /tmp by construction) need no explicit /tmp-shadowing protection — `upperDir`/`workDir` are host-namespace paths consumed by the kernel's overlay `mount(2)` and bypass the bwrap namespace's mounts, and `mergedMountPoint` is intentionally created under the bwrap tmpfs before being overlay-mounted — shares its scaffolding with `buildBwrapArgs()` via `sandbox.js`'s `buildBwrapBaseArgs()`. `extractGitDiff()`'s HEAD-drift guard (`detectHeadDrift()`, non-throwing, shared between both call sites) now runs a second time immediately before the diff is persisted, not just once before `runExtractionBwrap()`'s retry loop (taskferry#329) -- the pre-retry check alone left a HEAD change that lands during the up-to-1.3s overlay-mount-busy backoff undetected. `detectHeadDrift()` replaces the old throwing `assertNoHeadDrift()`: rather than fail-closed on a HEAD change, it returns `{from, to}` and lets a follow-up `resolveHeadDrift()` probe attempt a real `git apply --3way` (never `--check`, whose exit code can't tell a clean merge from a real conflict) inside a disposable detached worktree off the live `directory` -- `directory` is read-only as `worktree add`'s source, never written; the scratch worktree is removed unconditionally after the probe (the `apply`/`status`/conflict-check body runs inside a `try/finally` so the `worktree remove --force scratchDir` always runs once `worktree add` has succeeded, including when an injected `runCommand` throws; the `worktree add` failure path correctly skips cleanup because nothing was created). `resolveHeadDrift()` returns `{recovered: true}` on a clean 3-way merge, `{recovered: false, conflictDetail}` on a genuine conflict (decided by `git status --porcelain` conflict markers, not by apply's exit code), `{recovered: null, conflictDetail}` when the worktree add itself fails (no apply attempted), and `{recovered: null, conflictDetail}` when the `git status --porcelain` inspection itself failed (spawn error / non-zero exit) -- empty stdout from a failed status call is "didn't get to read porcelain", not "no conflict markers", so the empty/absent match isn't trusted. The apply/status/conflict-classification body is split into a private `evaluateApplyAndStatus()` helper to keep `resolveHeadDrift()` under the file's cyclomatic-complexity cap. `runExtractionBwrap()`'s `sleepFn` (real blocking `Atomics.wait`-based `sleepSync` by default) is now reachable from outside this module: `tasks.js` threads an `overlaySleepFn` manager option down to both `extractChangesetForTaskRecord()`'s `extractGitDiff`/`extractNonGitDiff` calls and `acceptTaskChangeset()`'s `applyChangeset` call (undefined by default, so production behavior/blocking is unchanged), letting `tasks.changeset.test.js`'s overlay-mount-busy reclassification tests inject a fast no-op instead of eating the real ~1.3s retry backoff on every run (taskferry#328). |
+ | `config.js` | 126 | `loadConfig()`: reads/validates `config.json` against `CONFIG_FIELD_TYPES`, rejects unrecognized keys, with mtime-based per-path caching so repeated calls in the same process only stat the file instead of re-reading/parsing. `advisorContextChars` controls advisor's auto-attached context budget. `envFile` names the path `tasks.js` loads via `env-file.js`'s `loadEnvFile()`. `_resetConfigCache()` exported for test use. |
+ | `env-file.js` | 247 | `parseEnvFile()`/`loadEnvFile()`: minimal `.env`-style parser (`NAME=VALUE` per line, `#` comments, optional `export `, matching single/double quotes stripped, unterminated quotes rejected rather than returning the quote character as literal data) for the file named by `TASKFERRY_ENV_FILE`/`envFile`. Throws with a file:line-numbered message on a malformed line (deliberately omitting the line's own raw content from every parse-error message, since a malformed line's content can itself be a secret — e.g. a bare API key pasted with no `NAME=` prefix — and that message can end up in `daemon-boot.err`, which callers/cron routinely capture into their own logs) or (in `loadEnvFile()`) a missing file or a file readable by group/other (`chmod 600` required) — `tasks.js` calls this once at `createTaskManager()` construction, so a bad path, malformed file, or insecure mode fails daemon startup loudly rather than silently dispatching without the secrets it was meant to supply. `watchEnvFile()`: keeps `envFileVars` live after the startup load by watching the parent directory (filtered by basename, so an mktemp+rename secret rotation that swaps the file's inode still fires) on a ~100ms debounce; a torn read caught mid-rewrite is rejected by comparing pre-/post-read `mtime`/`size` (reschedules instead of handing `onReload` a possibly-truncated `{}` that would silently wipe every previously loaded secret); a `null`/`undefined` `changedName` from platforms that don't report filenames falls through the name filter rather than being treated as a match (extra debounced re-reads of unrelated directory activity are harmless thanks to the mtime/size guard above); `onReload` itself is wrapped in a try/catch so a throwing callback becomes an `onError` warning instead of an uncaught exception inside the debounced `setTimeout`. |
+ | `mcp-isolation.js` | 115 | Playwright MCP isolation checks for `taskferry doctor`/`setup` (`opencode.jsonc`, Claude Code's Playwright MCP config). |
+ | `doctor-stats.js` | 156 | `computeDoctorStats()`: pure aggregation of `task.list` rows into the `doctor --stats` report shape — status mix (overall/24h/7d), per-model dispatch/rate breakdown, failure-reason histogram, unknown backlog, and 24h crash-rate trend. |
+ | `paths.js` | 222 | Resolves `TASKFERRY_STATE_DIR`/`TASKFERRY_RUNTIME_DIR`/`TASKFERRY_CACHE_DIR` and the socket path from XDG defaults + env overrides. Exports `TASKFERRY_PLUMBING_ENV_VARS` (frozen array of those five names, now including `TASKFERRY_OVERLAY_TMP_DIR`) so `tasks.js` builds its caller-env exclusion set from the same source of truth — a new plumbing var added here lands in the exclusion set automatically. `resolveOverlayTmpRoot()` scopes the CoW overlay root under `resolveRuntimeDir()` (not plain `os.tmpdir()`) so two daemon instances — isolated via `TASKFERRY_STATE_DIR`/`RUNTIME_DIR` or not — never share an overlay namespace; a restarting/crash-looping daemon's startup orphan sweep used to be able to delete a *different* daemon's in-flight overlay because every daemon on the host shared plain `/tmp` regardless of state/runtime isolation (taskferry#286). `TASKFERRY_OVERLAY_TMP_DIR` is an explicit escape hatch to pin the overlay root elsewhere. Also `resolveWorkspaceRoot()`: the git workspace root (handles plain repo/worktree/submodule/bare-repo layouts) that `list`/`watch`/`context`/`home` default `--directory` to — `dispatch`/`advisor` deliberately keep their default on literal cwd instead, since that value doubles as the sandbox root. `createWorkspaceRootResolver()` memoizes `resolveWorkspaceRoot()` per directory (one instance created per `startDaemon()` call in `daemon.js`, so its cache is scoped to that daemon's lifetime, not a module-level global) so repeated directory comparisons don't re-spawn `git` each time; `sameWorkspace(a, b, resolveRoot)` is the shared comparison both `daemon.js`'s `filteredTaskDetails()`/`filteredList()` and `daemon-server.js`'s `deliverEvent()` use instead of a raw `===`, so a repo-root-scoped `list`/`context`/`watch` also matches a task dispatched into one of that repo's linked worktrees (taskferry#315) — the literal-equality fast path inside it skips calling `resolveRoot` (and, on a cache miss, spawning git) for the common same-directory case. |
+ | `narration-format.js` | 24 | Formats a task's narration/activity text for display. |
+ | `errors.js` | 20 | Shared error-message helpers. |
+ | `numbers.js` | 14 | Shared numeric-parsing helpers (`positiveInteger`, `nonNegativeInteger`, etc.). |
+ | `setup.js` | 268 | `taskferry setup`: npm install, managed symlinks, per-client integration registration (see `.superpowers/.completed/specs/2026-07-16-taskferry-setup-design.md`). |
+ | `tf-sl.sh` | 113 | `tf-sl` Claude Code statusline segment: reads the statusline JSON from stdin, emits a width-responsive `tf: ...` ANSI segment or nothing. Always calls `taskferry` with `TASKFERRY_AUTO_START=0` — a statusline poll must never be the call that boots the daemon, since the daemon inherits its first caller's env for its whole lifetime. |
+diff --git a/src/changeset.js b/src/changeset.js
+index 130d96a..95d2a78 100644
+--- a/src/changeset.js
++++ b/src/changeset.js
+@@ -130,29 +130,60 @@ const CONFLICT_STATUS_PATTERN = /^(?:UU|AA|DD|AU|UD|UA|DU) /m;
+  * @param {string} params.directory - live directory; read-only source for the scratch worktree
+  * @param {string} params.diffPath
+  * @param {string} params.currentHead
+  * @param {string} params.scratchDir
+  * @param {typeof defaultRunCommand} [params.runCommand]
+  * @returns {{recovered: boolean|null, conflictDetail: string|null}}
+  */
+ export function resolveHeadDrift({ directory, diffPath, currentHead, scratchDir, runCommand = defaultRunCommand }) {
+   const add = runCommand("git", ["-C", directory, "worktree", "add", "--detach", scratchDir, currentHead]);
+   if (add.error || add.status !== 0) {
++    // worktree add itself failed -- nothing was created, so no cleanup
++    // work to do (and no scratch tree to leak).
+     return { recovered: null, conflictDetail: `could not evaluate: ${gitApplyFailureReason(add)}` };
+   }
++  try {
++    return evaluateApplyAndStatus(scratchDir, diffPath, runCommand);
++  } finally {
++    // Unconditional cleanup of the disposable scratch worktree once it has
++    // been created, regardless of how the try exited: a normal end, a
++    // returned result, OR a thrown runCommand (the documented contract
++    // says "runCommand" returns a result object, but defense-in-depth
++    // matters here -- a throwing wrapper would otherwise leak the worktree
++    // tree on every probe). The worktree-add failure path above doesn't
++    // need this branch because nothing was created.
++    runCommand("git", ["-C", directory, "worktree", "remove", "--force", scratchDir]);
++  }
++}
++
++/**
++ * Runs `git apply --3way` + `git status --porcelain` inside the scratch
++ * worktree and classifies the outcome. Split out of `resolveHeadDrift` to
++ * keep that function's cyclomatic complexity under the file cap; the
++ * classification logic (status failure / clean merge / conflict) is the
++ * only thing that grows with each new branch, so it lives here.
++ * @param {string} scratchDir
++ * @param {string} diffPath
++ * @param {typeof defaultRunCommand} runCommand
++ * @returns {{recovered: boolean|null, conflictDetail: string|null}}
++ */
++function evaluateApplyAndStatus(scratchDir, diffPath, runCommand) {
+   const apply = runCommand("git", ["-C", scratchDir, "apply", "--3way", diffPath]);
+   const statusResult = runCommand("git", ["-C", scratchDir, "status", "--porcelain"]);
+-  // Unconditional cleanup regardless of outcome; a failed removal doesn't
+-  // change the merge outcome already computed above (it's a best-effort
+-  // tidy-up of a throwaway worktree, same class as cleanupOverlay's own
+-  // best-effort semantics elsewhere in this file).
+-  runCommand("git", ["-C", directory, "worktree", "remove", "--force", scratchDir]);
++  // A failed status inspection (spawn error or non-zero exit) means we
++  // can't tell whether the merge produced conflict markers -- the empty
++  // stdout isn't a clean merge, it's "didn't get to read porcelain" -- so
++  // treat as could-not-evaluate rather than trusting an empty/absent
++  // match against CONFLICT_STATUS_PATTERN.
++  if (statusResult.error || statusResult.status !== 0) {
++    return { recovered: null, conflictDetail: `could not evaluate status inspection: ${gitApplyFailureReason(statusResult)}` };
++  }
+   const hasConflictMarkers = CONFLICT_STATUS_PATTERN.test(statusResult.stdout || "");
+   if (!apply.error && apply.status === 0 && !hasConflictMarkers) {
+     return { recovered: true, conflictDetail: null };
+   }
+   return { recovered: false, conflictDetail: gitApplyFailureReason(apply) || statusResult.stdout.trim() || null };
+ }
+ 
+ /**
+  * @param {string} directory
+  * @param {typeof defaultRunCommand} [runCommand]
+diff --git a/src/changeset.test.js b/src/changeset.test.js
+index edc75df..816d598 100644
+--- a/src/changeset.test.js
++++ b/src/changeset.test.js
+@@ -338,20 +338,39 @@ describe("resolveHeadDrift()", () => {
+   test("the live directory is only ever read (worktree add's source), never written -- apply/status/remove all target scratchDir, not directory", () => {
+     const targets = [];
+     const runCommand = (_command, args) => {
+       if (args.includes("apply") || args.includes("status")) targets.push(args[1]);
+       if (args.includes("add")) return { status: 0, stdout: "", stderr: "", error: null };
+       return { status: 0, stdout: "", stderr: "", error: null };
+     };
+     resolveHeadDrift({ directory: REPO_DIR, diffPath: DIFF_PATCH, currentHead: CURRENT_HEAD, scratchDir: SCRATCH_DIR, runCommand });
+     assert.deepEqual(targets, [SCRATCH_DIR, SCRATCH_DIR]);
+   });
++
++  test("recovered: null when git status --porcelain itself fails (conflict-marker inspection inconclusive)", () => {
++    // Apply exits 0 and stdout is empty -- without the explicit status
++    // check, the empty stdout would be read as "no conflict markers
++    // found" and yield recovered: true, even though the status
++    // inspection never actually ran. The fix turns an empty/absent
++    // conflict-marker match into a could-not-evaluate when the status
++    // call itself failed.
++    const runCommand = (_command, args) => {
++      if (args.includes("add")) return { status: 0, stdout: "", stderr: "", error: null };
++      if (args.includes("apply")) return { status: 0, stdout: "", stderr: "", error: null };
++      if (args.includes("status")) return { status: 128, stdout: "", stderr: GIT_NOT_A_REPO_STDERR_NL, error: null };
++      if (args.includes("remove")) return { status: 0, stdout: "", stderr: "", error: null };
++      throw new Error(`unexpected git invocation: ${args.join(" ")}`);
++    };
++    const result = resolveHeadDrift({ directory: REPO_DIR, diffPath: DIFF_PATCH, currentHead: CURRENT_HEAD, scratchDir: SCRATCH_DIR, runCommand });
++    assert.equal(result.recovered, null);
++    assert.match(result.conflictDetail, /not a git repository/);
++  });
+ });
+ 
+ describe("extractGitDiff()", () => {
+   test("remounts the overlay and runs a stage-diff-reset script anchored on preDispatchHead, writing stdout to diffPath", () => {
+     let capturedCommand = null;
+     let capturedArgs = null;
+     const written = {};
+     const runCommand = (command, args) => {
+       if (command === "git") return { status: 0, stdout: "abc123\n", stderr: "", error: null };
+       capturedCommand = command;

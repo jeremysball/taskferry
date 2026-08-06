@@ -384,8 +384,121 @@ describe("reject() check-gate gating", () => {
   });
 });
 
+describe("changeset extraction at settlement: stale-base drift settlement (taskferry#261)", () => {
+  test("a recovered stale-base drift settles pending (git target) as normal and stamps audit fields", () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "axi-drift-recovered-dir-"));
+    const overlayTmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "axi-drift-recovered-tmp-"));
+    let child;
+    // First rev-parse call (during dispatch) records preDispatchHead;
+    // second call (during settlement drift detection) sees a new SHA.
+    let revParseCount = 0;
+    const mgr = makeManager({
+      spawnFn: (_cmd, _args) => { child = fakeChild(); return child; },
+      sandboxEnabled: true,
+      checkBwrapAvailableFn: () => ({ checked: true, available: true }),
+      overlayEnabled: true,
+      checkOverlaySupportFn: () => ({ supported: true }),
+      platform: "linux",
+      runOverlayCommandFn: (command, args) => {
+        if (command === "bwrap") return { status: 0, stdout: DIFF_LINE, stderr: "" };
+        if (args.includes("rev-parse")) {
+          revParseCount += 1;
+          return { status: 0, stdout: revParseCount === 1 ? "abc123\n" : "def456\n", stderr: "" };
+        }
+        if (args.includes("worktree") && args.includes("add")) return { status: 0, stdout: "", stderr: "" };
+        if (args.includes("apply")) return { status: 0, stdout: "", stderr: "" };
+        if (args.includes("status")) return { status: 0, stdout: "", stderr: "" };
+        if (args.includes("worktree") && args.includes("remove")) return { status: 0, stdout: "", stderr: "" };
+        throw new Error(`unexpected git invocation: ${args.join(" ")}`);
+      },
+      overlayTmpRoot,
+    });
+
+    const result = mgr.dispatch({ prompt: "hello", directory });
+    child.emit("exit", 0, null);
+
+    const status = mgr.status(result.id);
+    assert.equal(status.changesetStatus, "pending", "a recovered drift is not a rejection -- it's a normal pending changeset");
+    assert.equal(status.headDriftRecovered, true);
+    assert.ok(status.headDriftFrom);
+    assert.equal(status.headDriftTo, "def456");
+  });
+
+  test("an unrecovered (genuinely conflicting) stale-base drift auto-rejects and releases the overlay", () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "axi-drift-conflict-dir-"));
+    const overlayTmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "axi-drift-conflict-tmp-"));
+    let cleanedRoot = null;
+    let child;
+    let revParseCount = 0;
+    const mgr = makeManager({
+      spawnFn: (_cmd, _args) => { child = fakeChild(); return child; },
+      sandboxEnabled: true,
+      checkBwrapAvailableFn: () => ({ checked: true, available: true }),
+      overlayEnabled: true,
+      checkOverlaySupportFn: () => ({ supported: true }),
+      platform: "linux",
+      runOverlayCommandFn: (command, args) => {
+        if (command === "bwrap") return { status: 0, stdout: DIFF_LINE, stderr: "" };
+        if (args.includes("rev-parse")) {
+          revParseCount += 1;
+          return { status: 0, stdout: revParseCount === 1 ? "abc123\n" : "def456\n", stderr: "" };
+        }
+        if (args.includes("worktree") && args.includes("add")) return { status: 0, stdout: "", stderr: "" };
+        if (args.includes("apply")) return { status: 1, stdout: "", stderr: "Applied patch to 'f.txt' with conflicts.\n" };
+        if (args.includes("status")) return { status: 0, stdout: "UU f.txt\n", stderr: "" };
+        if (args.includes("worktree") && args.includes("remove")) return { status: 0, stdout: "", stderr: "" };
+        throw new Error(`unexpected git invocation: ${args.join(" ")}`);
+      },
+      rmOverlayTreeFn: (p) => { cleanedRoot = p; },
+      overlayTmpRoot,
+    });
+
+    const result = mgr.dispatch({ prompt: "hello", directory });
+    child.emit("exit", 0, null);
+
+    const status = mgr.status(result.id);
+    assert.equal(status.changesetStatus, "rejected");
+    assert.match(status.changesetError, /conflicts/);
+    assert.equal(status.headDriftRecovered, false);
+    assert.ok(cleanedRoot, "the overlay must be released -- nothing left to accept on an unrecovered drift");
+  });
+
+  test("a drift the scratch-worktree probe could not evaluate (git worktree add failure) settles pending with the infra failure recorded", () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "axi-drift-noeval-dir-"));
+    const overlayTmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "axi-drift-noeval-tmp-"));
+    let child;
+    let revParseCount = 0;
+    const mgr = makeManager({
+      spawnFn: (_cmd, _args) => { child = fakeChild(); return child; },
+      sandboxEnabled: true,
+      checkBwrapAvailableFn: () => ({ checked: true, available: true }),
+      overlayEnabled: true,
+      checkOverlaySupportFn: () => ({ supported: true }),
+      platform: "linux",
+      runOverlayCommandFn: (command, args) => {
+        if (command === "bwrap") return { status: 0, stdout: DIFF_LINE, stderr: "" };
+        if (args.includes("rev-parse")) {
+          revParseCount += 1;
+          return { status: 0, stdout: revParseCount === 1 ? "abc123\n" : "def456\n", stderr: "" };
+        }
+        if (args.includes("worktree") && args.includes("add")) return { status: 128, stdout: "", stderr: "fatal: could not create work tree dir\n" };
+        throw new Error(`unexpected git invocation: ${args.join(" ")}`);
+      },
+      overlayTmpRoot,
+    });
+
+    const result = mgr.dispatch({ prompt: "hello", directory });
+    child.emit("exit", 0, null);
+
+    const status = mgr.status(result.id);
+    assert.equal(status.changesetStatus, "pending", "an inconclusive probe must never be silently assumed clean or auto-rejected");
+    assert.match(status.changesetError, /could not evaluate/);
+    assert.equal(status.headDriftRecovered, null);
+  });
+});
+
 describe("changeset extraction at settlement: overlay-mount-busy reclassification", () => {
-  test("reclassifies a real no_output_timeout crash as overlay_mount_busy when the bwrap overlay-busy message is the real cause", async () => {
+  test("reclassifies a real no_output_timeout_dead_spawn crash as overlay_mount_busy when the bwrap overlay-busy message is the real cause", async () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "axi-overlay-busy-dir-"));
     const overlayTmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "axi-overlay-busy-tmp-"));
     const bwrapMessage =
@@ -419,15 +532,15 @@ describe("changeset extraction at settlement: overlay-mount-busy reclassificatio
     const result = mgr.dispatch({ prompt: "hello", directory });
     // Let the watchdog fire first, exactly like the real crash: the child
     // never produces output (bwrap is stuck failing to mount), the watchdog
-    // SIGTERMs it and stamps failureReason: "no_output_timeout" BEFORE the
+    // SIGTERMs it and stamps failureReason: "no_output_timeout_dead_spawn" BEFORE the
     // exit handler ever runs extractChangesetForTask().
     await new Promise((r) => setTimeout(r, 40));
-    assert.equal(mgr.status(result.id).failureReason, "no_output_timeout", "sanity: the watchdog must have fired first");
+    assert.equal(mgr.status(result.id).failureReason, "no_output_timeout_dead_spawn", "sanity: the watchdog must have fired first");
 
     child.emit("exit", null, "SIGTERM");
 
     const status = mgr.status(result.id);
-    assert.equal(status.failureReason, "overlay_mount_busy", "the confirmed bwrap cause must overwrite the generic no_output_timeout guess");
+    assert.equal(status.failureReason, "overlay_mount_busy", "the confirmed bwrap cause must overwrite the generic no_output_timeout_dead_spawn guess");
     assert.match(status.failureDetail, /Device or resource busy/);
     assert.match(status.changesetError, /Device or resource busy/);
     assert.deepEqual(sleeps, [100, 300, 900], "must exhaust the full retry backoff, injected through the manager API, before giving up");

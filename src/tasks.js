@@ -3894,7 +3894,12 @@ function evaluateOutputCompleteness(task, precomputed) {
   }
   if (task.finalMarker) {
     try {
-      if (!new RegExp(task.finalMarker).test(message)) task.incomplete = true;
+      // `m` so a `^...$`-anchored marker (the documented style, e.g.
+      // '^Status: DONE$') matches against any line of a multi-paragraph
+      // final message instead of requiring the marker to be the entire
+      // message. Without it every real agent summary that ends in a
+      // standalone "Status: DONE" line was wrongly flagged incomplete.
+      if (!new RegExp(task.finalMarker, "m").test(message)) task.incomplete = true;
     } catch {
       // A finalMarker that survived dispatch-time validation shouldn't
       // throw here, but if it does (e.g. an impossible pathological input),

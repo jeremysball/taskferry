@@ -1,0 +1,372 @@
+# Review package: 9c839ea..9b5925a
+
+## Commits
+9b5925a build: add picocolors and cli-table3 dependencies
+
+## Files changed
+ .../task-1-report.md                               | 73 +++++++++++++++++++
+ package-lock.json                                  | 85 +++++++++++++++++++++-
+ package.json                                       |  4 +-
+ 3 files changed, 160 insertions(+), 2 deletions(-)
+
+## Diff
+diff --git a/.superpowers/sdd/2026-08-06-prettified-cli-output/task-1-report.md b/.superpowers/sdd/2026-08-06-prettified-cli-output/task-1-report.md
+new file mode 100644
+index 0000000..dbe8d6d
+--- /dev/null
++++ b/.superpowers/sdd/2026-08-06-prettified-cli-output/task-1-report.md
+@@ -0,0 +1,73 @@
++# Task 1 Report: Add `picocolors` and `cli-table3` dependencies
++
++## What I did
++
++1. **Edited `package.json`**: Added two entries to the `"dependencies"` block, keeping them in alphabetical order (matching the existing single-entry style):
++   ```json
++   "cli-table3": "^0.6.5",
++   "picocolors": "^1.1.1"
++   ```
++   Versions match the brief exactly.
++
++2. **Ran `npm install`**: Had to pass `--cache /tmp/npm-cache-tmp` because the default npm cache dir (`~/.npm`) is mounted read-only in this environment. Installed 8 new packages (cli-table3 + picocolors + their transitive deps), `package-lock.json` updated with the new entries, 0 vulnerabilities.
++
++3. **Verified both import cleanly under the repo's ESM setup**:
++   ```
++   $ node -e "import('cli-table3').then(m => console.log(typeof m.default)); import('picocolors').then(m => console.log(typeof m.default.createColors))"
++   function
++   function
++   ```
++   Installed versions resolved to exactly `cli-table3@0.6.5` and `picocolors@1.1.1`.
++
++4. **Sanity-checked nothing else regressed**:
++   - `npm run lint` → clean
++   - `npm run typecheck` → clean
++   - `npm run test:unit` → 1011 pass / 4 fail. The 4 failures are **pre-existing** (confirmed by re-running on the baseline commit via `git stash`):
++     - `bwrap sandboxing: opencode auth and data home`
++     - `leaves XDG_DATA_HOME untouched when sandboxing is disabled`
++     - `ro-binds the real opencode auth.json into the sandboxed XDG_DATA_HOME when it exists`
++     - `multiplexed daemon client: request correlation, subscriptions, and auto-start` (plus related symlink/caller-env tests)
++     
++     All are env-sensitive sandbox/daemon tests reading `XDG_DATA_HOME=/home/jeremy/.cache/taskferry/opencode-data` from the session env; unrelated to dependency additions.
++
++5. **Committed** on `cli-pretty-output` branch:
++   ```
++   build: add picocolors and cli-table3 dependencies
++   ```
++
++## Decisions
++
++- Used `--cache /tmp/npm-cache-tmp` to work around the read-only default npm cache. The installed packages in `node_modules/` and the updated `package-lock.json` are identical to what a plain `npm install` would produce.
++- Did not touch `devDependencies`, `overrides`, or any other package.json field — the brief is strictly additive.
++- Preserved the existing single-entry formatting of the dependencies block; the two new entries slot in alphabetically.
++
++## Files changed
++
++- `package.json` — 2 new dependency entries
++- `package-lock.json` — 8 new package entries, 2 new top-level deps registered
++
++## Verification output
++
++```
++$ node -e "import('cli-table3').then(m => console.log(typeof m.default)); import('picocolors').then(m => console.log(typeof m.default.createColors))"
++function
++function
++
++$ npm run lint
++> eslint .
++(clean)
++
++$ npm run typecheck
++> tsc --noEmit
++(clean)
++
++$ npm run test:unit
++ℹ tests 1015
++ℹ pass 1011
++ℹ fail 4
++(4 failures are pre-existing sandbox/daemon env-sensitive tests, confirmed against the baseline commit)
++```
++
++## Concerns
++
++None. The 4 test failures observed are pre-existing and environment-specific, unrelated to the dependency addition. No concerns about the dependency versions or integration — both packages import cleanly, resolve to the pinned versions, and pass lint/typecheck.
+diff --git a/package-lock.json b/package-lock.json
+index 8982129..569f737 100644
+--- a/package-lock.json
++++ b/package-lock.json
+@@ -1,37 +1,49 @@
+ {
+   "name": "taskferry",
+   "version": "3.0.0",
+   "lockfileVersion": 3,
+   "requires": true,
+   "packages": {
+     "": {
+       "name": "taskferry",
+       "version": "3.0.0",
+       "dependencies": {
+-        "@toon-format/toon": "^2.3.0"
++        "@toon-format/toon": "^2.3.0",
++        "cli-table3": "^0.6.5",
++        "picocolors": "^1.1.1"
+       },
+       "bin": {
+         "taskferry": "src/cli.js"
+       },
+       "devDependencies": {
+         "@eslint/js": "^10.0.1",
+         "@types/node": "^26.1.1",
+         "eslint": "^10.7.0",
+         "eslint-plugin-sonarjs": "^4.2.0",
+         "globals": "^17.7.0",
+         "typescript": "^7.0.2"
+       },
+       "engines": {
+         "node": ">=16.9"
+       }
+     },
++    "node_modules/@colors/colors": {
++      "version": "1.5.0",
++      "resolved": "https://registry.npmjs.org/@colors/colors/-/colors-1.5.0.tgz",
++      "integrity": "sha512-ooWCrlZP11i8GImSjTHYHLkvFDP48nS4+204nGb1RiX/WXYHmJA2III9/e2DWVabCESdW7hBAEzHRqUn9OUVvQ==",
++      "license": "MIT",
++      "optional": true,
++      "engines": {
++        "node": ">=0.1.90"
++      }
++    },
+     "node_modules/@eslint-community/eslint-utils": {
+       "version": "4.10.1",
+       "resolved": "https://registry.npmjs.org/@eslint-community/eslint-utils/-/eslint-utils-4.10.1.tgz",
+       "integrity": "sha512-cuadcxVFE8sDK6iWJbs8Sn0av2Nrh2QSGQhVlBW9AaAHqHwjWsZHT8LJ4hFGPh7ASBV2deFdM7H/DPjulmh8rg==",
+       "dev": true,
+       "license": "MIT",
+       "dependencies": {
+         "eslint-visitor-keys": "^3.4.3"
+       },
+       "engines": {
+@@ -629,20 +641,29 @@
+         "fast-deep-equal": "^3.1.1",
+         "fast-json-stable-stringify": "^2.0.0",
+         "json-schema-traverse": "^0.4.1",
+         "uri-js": "^4.2.2"
+       },
+       "funding": {
+         "type": "github",
+         "url": "https://github.com/sponsors/epoberezkin"
+       }
+     },
++    "node_modules/ansi-regex": {
++      "version": "5.0.1",
++      "resolved": "https://registry.npmjs.org/ansi-regex/-/ansi-regex-5.0.1.tgz",
++      "integrity": "sha512-quJQXlTSUGL2LH9SUXo8VwsY4soanhgo6LNSm84E1LBcE8s3O0wpdiRzyR9z/ZZJMlMWv37qOOb9pdJlMUEKFQ==",
++      "license": "MIT",
++      "engines": {
++        "node": ">=8"
++      }
++    },
+     "node_modules/balanced-match": {
+       "version": "4.0.4",
+       "resolved": "https://registry.npmjs.org/balanced-match/-/balanced-match-4.0.4.tgz",
+       "integrity": "sha512-BLrgEcRTwX2o6gGxGOCNyMvGSp35YofuYzw9h1IMTRmKqttAZZVU67bdb9Pr2vUHA8+j3i2tJfjO6C6+4myGTA==",
+       "dev": true,
+       "license": "MIT",
+       "engines": {
+         "node": "18 || 20 || >=22"
+       }
+     },
+@@ -675,20 +696,35 @@
+     "node_modules/bytes": {
+       "version": "3.1.2",
+       "resolved": "https://registry.npmjs.org/bytes/-/bytes-3.1.2.tgz",
+       "integrity": "sha512-/Nf7TyzTx6S3yRJObOAV7956r8cr2+Oj8AC5dt8wSP3BQAoeX58NoHyCU8P8zGkNXStjTSi6fzO6F0pBdcYbEg==",
+       "dev": true,
+       "license": "MIT",
+       "engines": {
+         "node": ">= 0.8"
+       }
+     },
++    "node_modules/cli-table3": {
++      "version": "0.6.5",
++      "resolved": "https://registry.npmjs.org/cli-table3/-/cli-table3-0.6.5.tgz",
++      "integrity": "sha512-+W/5efTR7y5HRD7gACw9yQjqMVvEMLBHmboM/kPWam+H+Hmyrgjh6YncVKK122YZkXrLudzTuAukUw9FnMf7IQ==",
++      "license": "MIT",
++      "dependencies": {
++        "string-width": "^4.2.0"
++      },
++      "engines": {
++        "node": "10.* || >= 12.*"
++      },
++      "optionalDependencies": {
++        "@colors/colors": "1.5.0"
++      }
++    },
+     "node_modules/cross-spawn": {
+       "version": "7.0.6",
+       "resolved": "https://registry.npmjs.org/cross-spawn/-/cross-spawn-7.0.6.tgz",
+       "integrity": "sha512-uV2QOWP2nWzsy2aMp8aRibhi9dlzF5Hgh5SHaB9OiTGEyDTiJJyx0uy51QXdyWbtAHNua4XJzUKca3OzKUd3vA==",
+       "dev": true,
+       "license": "MIT",
+       "dependencies": {
+         "path-key": "^3.1.0",
+         "shebang-command": "^2.0.0",
+         "which": "^2.0.1"
+@@ -715,20 +751,26 @@
+         }
+       }
+     },
+     "node_modules/deep-is": {
+       "version": "0.1.4",
+       "resolved": "https://registry.npmjs.org/deep-is/-/deep-is-0.1.4.tgz",
+       "integrity": "sha512-oIPzksmTg4/MriiaYGO+okXDT7ztn/w3Eptv/+gSIdMdKsJo0u4CfYNFJPy+4SKMuCqGw2wxnA+URMg3t8a/bQ==",
+       "dev": true,
+       "license": "MIT"
+     },
++    "node_modules/emoji-regex": {
++      "version": "8.0.0",
++      "resolved": "https://registry.npmjs.org/emoji-regex/-/emoji-regex-8.0.0.tgz",
++      "integrity": "sha512-MSjYzcWNOA0ewAHpz0MxpYFvwg6yjy1NG3xteoqz644VCo/RPgnr1/GGt+ic3iJTzQ8Eu3TdM14SawnVUmGE6A==",
++      "license": "MIT"
++    },
+     "node_modules/escape-string-regexp": {
+       "version": "4.0.0",
+       "resolved": "https://registry.npmjs.org/escape-string-regexp/-/escape-string-regexp-4.0.0.tgz",
+       "integrity": "sha512-TtpcNJ3XAzx3Gq8sWRzJaVajRs0uVxA2YAkdb1jm2YkPz4G6egUFAyA3n5vtEIZefPk5Wa4UXbKuS5fKkJWdgA==",
+       "dev": true,
+       "license": "MIT",
+       "engines": {
+         "node": ">=10"
+       },
+       "funding": {
+@@ -1070,20 +1112,29 @@
+     "node_modules/is-extglob": {
+       "version": "2.1.1",
+       "resolved": "https://registry.npmjs.org/is-extglob/-/is-extglob-2.1.1.tgz",
+       "integrity": "sha512-SbKbANkN603Vi4jEZv49LeVJMn4yGwsbzZworEoyEiutsN3nJYdbO36zfhGJ6QEDpOZIFkDtnq5JRxmvl3jsoQ==",
+       "dev": true,
+       "license": "MIT",
+       "engines": {
+         "node": ">=0.10.0"
+       }
+     },
++    "node_modules/is-fullwidth-code-point": {
++      "version": "3.0.0",
++      "resolved": "https://registry.npmjs.org/is-fullwidth-code-point/-/is-fullwidth-code-point-3.0.0.tgz",
++      "integrity": "sha512-zymm5+u+sCsSWyD9qNaejV3DFvhCKclKdizYaJUuHA83RLjb7nSuGnddCHGv0hk+KY7BMAlsWeK4Ueg6EV6XQg==",
++      "license": "MIT",
++      "engines": {
++        "node": ">=8"
++      }
++    },
+     "node_modules/is-glob": {
+       "version": "4.0.3",
+       "resolved": "https://registry.npmjs.org/is-glob/-/is-glob-4.0.3.tgz",
+       "integrity": "sha512-xelSayHH36ZgE7ZWhli7pW34hNbNl8Ojv5KVmkJD4hBdD3th8Tfk9vYasLM+mXWOZhFkgZfxhLSnrwRr4elSSg==",
+       "dev": true,
+       "license": "MIT",
+       "dependencies": {
+         "is-extglob": "^2.1.1"
+       },
+       "engines": {
+@@ -1268,20 +1319,26 @@
+     "node_modules/path-key": {
+       "version": "3.1.1",
+       "resolved": "https://registry.npmjs.org/path-key/-/path-key-3.1.1.tgz",
+       "integrity": "sha512-ojmeN0qd+y0jszEtoY48r0Peq5dwMEkIlCOu6Q5f41lfkswXuKtYrhgoTpLnyIcHm24Uhqx+5Tqm2InSwLhE6Q==",
+       "dev": true,
+       "license": "MIT",
+       "engines": {
+         "node": ">=8"
+       }
+     },
++    "node_modules/picocolors": {
++      "version": "1.1.1",
++      "resolved": "https://registry.npmjs.org/picocolors/-/picocolors-1.1.1.tgz",
++      "integrity": "sha512-xceH2snhtb5M9liqDsmEw56le376mTZkEX/jEb/RxNFyegNul7eNslCXP9FDj/Lcu0X8KEyMceP2ntpaHrDEVA==",
++      "license": "ISC"
++    },
+     "node_modules/prelude-ls": {
+       "version": "1.2.1",
+       "resolved": "https://registry.npmjs.org/prelude-ls/-/prelude-ls-1.2.1.tgz",
+       "integrity": "sha512-vkcDPrRZo1QZLbn5RLGPpg/WmIQ65qoWWhcGKf/b5eplkkarX0m9z8ppCat4mlOqUsWpyNuYgO3VRyrYHSzX5g==",
+       "dev": true,
+       "license": "MIT",
+       "engines": {
+         "node": ">= 0.8.0"
+       }
+     },
+@@ -1366,20 +1423,46 @@
+     "node_modules/shebang-regex": {
+       "version": "3.0.0",
+       "resolved": "https://registry.npmjs.org/shebang-regex/-/shebang-regex-3.0.0.tgz",
+       "integrity": "sha512-7++dFhtcx3353uBaq8DDR4NuxBetBzC7ZQOhmTQInHEd6bSrXdiEyzCvG07Z44UYdLShWUyXt5M/yhz8ekcb1A==",
+       "dev": true,
+       "license": "MIT",
+       "engines": {
+         "node": ">=8"
+       }
+     },
++    "node_modules/string-width": {
++      "version": "4.2.3",
++      "resolved": "https://registry.npmjs.org/string-width/-/string-width-4.2.3.tgz",
++      "integrity": "sha512-wKyQRQpjJ0sIp62ErSZdGsjMJWsap5oRNihHhu6G7JVO/9jIB6UyevL+tXuOqrng8j/cxKTWyWUwvSTriiZz/g==",
++      "license": "MIT",
++      "dependencies": {
++        "emoji-regex": "^8.0.0",
++        "is-fullwidth-code-point": "^3.0.0",
++        "strip-ansi": "^6.0.1"
++      },
++      "engines": {
++        "node": ">=8"
++      }
++    },
++    "node_modules/strip-ansi": {
++      "version": "6.0.1",
++      "resolved": "https://registry.npmjs.org/strip-ansi/-/strip-ansi-6.0.1.tgz",
++      "integrity": "sha512-Y38VPSHcqkFrCpFnQ9vuSXmquuv5oXOKpGeT6aGrr3o3Gc9AlVa6JBfUSOCnbxGGZF+/0ooI7KrPuUSztUdU5A==",
++      "license": "MIT",
++      "dependencies": {
++        "ansi-regex": "^5.0.1"
++      },
++      "engines": {
++        "node": ">=8"
++      }
++    },
+     "node_modules/type-check": {
+       "version": "0.4.0",
+       "resolved": "https://registry.npmjs.org/type-check/-/type-check-0.4.0.tgz",
+       "integrity": "sha512-XleUoc9uwGXqjWwXaUTZAmzMcFZ5858QA2vvx1Ur5xIcixXIP+8LnFDgRplU30us6teqdlskFfu+ae4K79Ooew==",
+       "dev": true,
+       "license": "MIT",
+       "dependencies": {
+         "prelude-ls": "^1.2.1"
+       },
+       "engines": {
+diff --git a/package.json b/package.json
+index 81e2640..27c4a81 100644
+--- a/package.json
++++ b/package.json
+@@ -18,21 +18,23 @@
+     "typecheck": "tsc --noEmit",
+     "check": "git ls-files '*.js' | xargs -P4 -I{} node --check {} && npm run lint && npm run typecheck",
+     "prepare": "git config core.hooksPath .githooks || true"
+   },
+   "keywords": [],
+   "type": "module",
+   "engines": {
+     "node": ">=16.9"
+   },
+   "dependencies": {
+-    "@toon-format/toon": "^2.3.0"
++    "@toon-format/toon": "^2.3.0",
++    "cli-table3": "^0.6.5",
++    "picocolors": "^1.1.1"
+   },
+   "devDependencies": {
+     "@eslint/js": "^10.0.1",
+     "@types/node": "^26.1.1",
+     "eslint": "^10.7.0",
+     "eslint-plugin-sonarjs": "^4.2.0",
+     "globals": "^17.7.0",
+     "typescript": "^7.0.2"
+   },
+   "overrides": {

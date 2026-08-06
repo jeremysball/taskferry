@@ -4,17 +4,17 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { createTaskManager, isOutsideDirectory } from "./tasks.js";
-import { makeManager, fakeChild, baseTask, AXI_TASKS_TEST_DIR, TASKS_STATE_FILE, LUNA_MODEL, NOT_REACHED, WS_REPO } from "./tasks.test-helpers.js";
+import { trackManager, makeManager, fakeChild, baseTask, AXI_TASKS_TEST_DIR, TASKS_STATE_FILE, LUNA_MODEL, NOT_REACHED, WS_REPO, mkdtempTracked } from "./tasks.test-helpers.js";
 
 describe("persistTask() durability across concurrent manager instances", () => {
   test("two manager instances sharing a state dir each persist their own tasks via debounced flush", () => {
-    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), AXI_TASKS_TEST_DIR));
-    const mgrA = createTaskManager({
+    const stateDir = mkdtempTracked(AXI_TASKS_TEST_DIR);
+    const mgrA = trackManager(createTaskManager({
       stateDir,
       sandboxEnabled: false,
       spawnFn: () => fakeChild(1001),
       killFn: () => { throw new Error("not used"); },
-    });
+    }));
     const a = mgrA.dispatch({ prompt: "from A", directory: os.tmpdir() });
     // Flush A's debounced write immediately via close()
     mgrA.close();
@@ -22,12 +22,12 @@ describe("persistTask() durability across concurrent manager instances", () => {
     const onDiskA = JSON.parse(fs.readFileSync(path.join(stateDir, TASKS_STATE_FILE), "utf8"));
     assert.ok(onDiskA.some((t) => t.id === a.id), "manager A's task must be on disk after close()");
 
-    const mgrB = createTaskManager({
+    const mgrB = trackManager(createTaskManager({
       stateDir,
       sandboxEnabled: false,
       spawnFn: () => fakeChild(1002),
       killFn: () => { throw new Error("not used"); },
-    });
+    }));
     const b = mgrB.dispatch({ prompt: "from B", directory: os.tmpdir() });
     mgrB.close();
 
@@ -38,9 +38,9 @@ describe("persistTask() durability across concurrent manager instances", () => {
   });
 
   test("malformed tasks.json surfaces as a structured error instead of throwing at construction", () => {
-    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), AXI_TASKS_TEST_DIR));
+    const stateDir = mkdtempTracked(AXI_TASKS_TEST_DIR);
     fs.writeFileSync(path.join(stateDir, TASKS_STATE_FILE), "{ not valid json");
-    const mgr = createTaskManager({ stateDir, sandboxEnabled: false, spawnFn: () => fakeChild(), killFn: () => {} });
+    const mgr = trackManager(createTaskManager({ stateDir, sandboxEnabled: false, spawnFn: () => fakeChild(), killFn: () => {} }));
     assert.throws(
       () => mgr.dispatch({ prompt: "hi", directory: os.tmpdir() }),
       /error: could not read persisted task state/

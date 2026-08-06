@@ -1,0 +1,2 @@
+# taskferry project config -- see docs/config.md#taskferrytoml
+check = "npm run check"

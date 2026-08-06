@@ -40,6 +40,7 @@ test("parses dispatch and applies its argument defaults", () => {
       allowedDirs: void 0,
       executor: void 0,
       class: void 0,
+      parentTaskId: void 0,
     },
     help: false,
   });
@@ -150,6 +151,23 @@ test("parses the setup command with no arguments and rejects extras and flags", 
 
   assert.throws(() => parseArgs(["setup", "extra"]), /unexpected argument/);
   assert.throws(() => parseArgs(["setup", "--bogus"]), /unknown flag --bogus/);
+});
+
+test("parses the init command with no arguments and rejects extras and flags", () => {
+  assert.deepEqual(parseArgs(["init"]), {
+    command: "init",
+    options: {},
+    help: false,
+  });
+
+  const helpParsed = parseArgs(["init", "--help"]);
+  assert.equal(helpParsed.command, "init");
+  assert.deepEqual(helpParsed.options, {});
+  assert.equal(helpParsed.help, true);
+  assert.match(helpParsed.helpText.usage, /taskferry init/);
+
+  assert.throws(() => parseArgs(["init", "extra"]), /unexpected argument/);
+  assert.throws(() => parseArgs(["init", "--bogus"]), /unknown flag --bogus/);
 });
 
 test("rejects retired MCP names with one-step migration hints", () => {
@@ -519,4 +537,46 @@ test("dispatch accepts an arbitrary --class value", () => {
 test("advisor accepts an arbitrary --class value", () => {
   const { options } = parseArgs(["advisor", "--model", "m", "--class", "advisor-design"]);
   assert.equal(options.class, "advisor-design");
+});
+
+const PARENT_TASK_ID = "oc_msgabc12";
+const PARENT_TASK_FLAG = "--parent-task";
+
+test("dispatch accepts --parent-task and stores it under parentTaskId", () => {
+  const { options } = parseArgs(["dispatch", "--prompt", "prompt-x", PARENT_TASK_FLAG, PARENT_TASK_ID], { cwd: CWD });
+  assert.equal(options.parentTaskId, PARENT_TASK_ID);
+});
+
+test("advisor accepts --parent-task and stores it under parentTaskId", () => {
+  const { options } = parseArgs(["advisor", "--model", "m", PARENT_TASK_FLAG, PARENT_TASK_ID]);
+  assert.equal(options.parentTaskId, PARENT_TASK_ID);
+});
+
+test("accept defaults to force: false and accepts --force", () => {
+  const parsed = parseArgs(["accept", "t1"], { cwd: CWD });
+  assert.equal(parsed.options.force, false);
+  assert.equal(parsed.options.taskId, "t1");
+  const forced = parseArgs(["accept", "t1", "--force"], { cwd: CWD });
+  assert.equal(forced.options.force, true);
+});
+
+test("dispatch rejects --parent-task on accept", () => {
+  assert.throws(
+    () => parseArgs(["accept", "t1", PARENT_TASK_FLAG, PARENT_TASK_ID], { cwd: CWD }),
+    /unknown flag --parent-task/
+  );
+});
+
+test("accept rejects --parent-task", () => {
+  assert.throws(
+    () => parseArgs(["accept", "t1", PARENT_TASK_FLAG, PARENT_TASK_ID], { cwd: CWD }),
+    /unknown flag --parent-task/
+  );
+});
+
+test("dispatch rejects --force", () => {
+  assert.throws(
+    () => parseArgs(["dispatch", "--prompt", "x", "--force"], { cwd: CWD }),
+    /unknown flag --force/
+  );
 });

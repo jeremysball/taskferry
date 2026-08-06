@@ -1,6 +1,6 @@
 import { describe, test } from "node:test";
 import assert from "node:assert/strict";
-import { colorize, errorValue, formatWatchEvent, homeView, leanStatus, projectContext, projectDoctorStats, projectList, writeToon } from "./output.js";
+import { colorize, errorValue, formatWatchEvent, homeView, leanStatus, projectContext, projectDoctorStats, projectList, writeError, writeToon } from "./output.js";
 
 const TASK_ACTIVITY = "task.activity";
 const TASK_STATE = "task.state";
@@ -10,6 +10,7 @@ const OCCURRED_AT_LATE = "2026-07-18T00:24:11.282Z";
 const WORKSPACE_EXAMPLE = "/workspace/example";
 const TASKFERRY_BIN = "/bin/taskferry";
 const TASK_MODEL_SOL = "openai/gpt-5.6-sol";
+const TASK_STARTED_AT = "2026-07-29T00:00:00.000Z";
 const TASK_STARTED_AT_EXAMPLE = "2026-08-01T00:00:00.000Z";
 const REVEAL_HINT_805 = "Run taskferry list --limit 805 for all 805 tasks";
 
@@ -278,15 +279,87 @@ describe("formatWatchEvent color (TTY-gated)", () => {
 });
 
 test("leanStatus surfaces a pending changesetStatus without --full", () => {
-  const detail = { id: "t1", status: "done", startedAt: "2026-07-29T00:00:00.000Z", exitCode: 0, signal: null, role: "dispatch", changesetStatus: "pending" };
+  const detail = { id: "t1", status: "done", startedAt: TASK_STARTED_AT, exitCode: 0, signal: null, role: "dispatch", changesetStatus: "pending" };
   const lean = leanStatus(detail);
   assert.equal(lean.changesetStatus, "pending");
 });
 
 test("leanStatus omits changesetStatus when it's already resolved", () => {
-  const detail = { id: "t1", status: "done", startedAt: "2026-07-29T00:00:00.000Z", exitCode: 0, signal: null, role: "dispatch", changesetStatus: "accepted" };
+  const detail = { id: "t1", status: "done", startedAt: TASK_STARTED_AT, exitCode: 0, signal: null, role: "dispatch", changesetStatus: "accepted" };
   const lean = leanStatus(detail);
   assert.equal(lean.changesetStatus, undefined);
+});
+
+test("leanStatus surfaces a non-default checkStatus without --full", () => {
+  const detail = {
+    id: "t1",
+    status: "done",
+    startedAt: TASK_STARTED_AT,
+    exitCode: 0,
+    signal: null,
+    checkStatus: "running",
+    checkCommand: "npm test",
+    checkExitCode: null,
+    checkStartedAt: "2026-07-29T00:01:00.000Z",
+    checkEndedAt: null,
+    checkOverride: false,
+  };
+  const lean = leanStatus(detail);
+  assert.equal(lean.checkStatus, "running");
+  assert.equal(lean.checkCommand, "npm test");
+  assert.equal(lean.checkExitCode, null);
+  assert.equal(lean.checkStartedAt, "2026-07-29T00:01:00.000Z");
+  assert.equal(lean.checkEndedAt, null);
+  assert.equal("checkOverride" in lean, false);
+  assert.equal("checkOutputTail" in lean, false);
+});
+
+test("leanStatus surfaces checkOverride only when set", () => {
+  const detail = {
+    id: "t1",
+    status: "done",
+    startedAt: TASK_STARTED_AT,
+    exitCode: 0,
+    signal: null,
+    checkStatus: "failed",
+    checkCommand: "npm test",
+    checkOverride: true,
+  };
+  const lean = leanStatus(detail);
+  assert.equal(lean.checkOverride, true);
+});
+
+test("leanStatus omits checkStatus fields when checkStatus is the default 'none'", () => {
+  const detail = {
+    id: "t1",
+    status: "done",
+    startedAt: TASK_STARTED_AT,
+    exitCode: 0,
+    signal: null,
+    checkStatus: "none",
+  };
+  const lean = leanStatus(detail);
+  assert.equal("checkStatus" in lean, false);
+  assert.equal("checkCommand" in lean, false);
+});
+
+test("leanStatus surfaces a projectConfigWarning when set", () => {
+  const detail = {
+    id: "t1",
+    status: "done",
+    startedAt: TASK_STARTED_AT,
+    exitCode: 0,
+    signal: null,
+    projectConfigWarning: ".taskferry.toml: missing check key, gate skipped",
+  };
+  const lean = leanStatus(detail);
+  assert.equal(lean.projectConfigWarning, ".taskferry.toml: missing check key, gate skipped");
+});
+
+test("leanStatus omits projectConfigWarning when unset", () => {
+  const detail = { id: "t1", status: "done", startedAt: TASK_STARTED_AT, exitCode: 0, signal: null };
+  const lean = leanStatus(detail);
+  assert.equal("projectConfigWarning" in lean, false);
 });
 
 describe("leanStatus --full overlayDirs trimming", () => {
@@ -323,81 +396,45 @@ describe("leanStatus --full overlayDirs trimming", () => {
   });
 });
 
-describe("writeToon status coloring", () => {
-  test("colors a status field in the nested (non-uniform) task layout when stdout is a TTY", () => {
+describe("writeToon TTY output", () => {
+  test("routes to the pretty renderer when stdout is a TTY", () => {
     const { io, output } = fakeStdoutIo(true);
-    // Mixed key sets across rows (one has failureReason, one doesn't) forces
-    // toon's expanded `status: x` line layout instead of the tabular one.
-    writeToon({ tasks: [{ id: "a", status: "crashed", failureReason: "boom" }, { id: "b", status: "done" }] }, io);
+    writeToon({ id: "a", status: "done" }, io);
 
-    assert.ok(output().includes("status: \x1b[31mcrashed\x1b[0m"));
-    assert.ok(output().includes("status: \x1b[32mdone\x1b[0m"));
+    assert.ok(output().includes("\x1b[32mdone\x1b[39m"), output());
+    assert.ok(!output().includes("status: "), output());
   });
 
-  test("colors a status field in the tabular (uniform) task layout when stdout is a TTY", () => {
-    const { io, output } = fakeStdoutIo(true);
-    writeToon({ tasks: [{ id: "a", status: "done" }, { id: "b", status: "running" }] }, io);
+  test("still writes plain TOON with no ANSI codes when stdout is not a TTY", () => {
+    const { io, output } = fakeStdoutIo(false);
+    writeToon({ id: "a", status: "done" }, io);
 
-    assert.ok(output().includes("a,\x1b[32mdone\x1b[0m"));
-    assert.ok(output().includes("b,\x1b[33mrunning\x1b[0m"));
+    assert.ok(!output().includes("\x1b["), output());
+    assert.ok(output().includes("status: done"), output());
   });
 
-  test("leaves plain, unmarked status text when stdout is not a TTY (piped/redirected)", () => {
+  test("non-TTY output for a task list is byte-identical to the pre-existing TOON shape", () => {
     const { io, output } = fakeStdoutIo(false);
     writeToon({ tasks: [{ id: "a", status: "done" }, { id: "b", status: "crashed" }] }, io);
 
-    assert.ok(!output().includes("\x1b["));
-    assert.ok(output().includes("a,done"));
-    assert.ok(output().includes("b,crashed"));
+    assert.equal(output(), "tasks[2]{id,status}:\n  a,done\n  b,crashed\n");
   });
 
-  test("does not color a status value with no known color mapping (e.g. unknown)", () => {
+  test("writeError on a TTY falls through to the fallback renderer's bold labels", () => {
     const { io, output } = fakeStdoutIo(true);
-    writeToon({ id: "a", status: "unknown" }, io);
+    writeError(new Error("error: boom\nhelp: try again"), io);
 
-    assert.ok(!output().includes("\x1b["));
-    assert.ok(output().includes("status: unknown"));
-  });
-});
-
-describe("writeToon doctor coloring", () => {
-  test("colors healthy/installed/isolated true green and false red", () => {
-    const { io, output } = fakeStdoutIo(true);
-    writeToon({ healthy: true, integrations: { claude: { installed: false }, playwrightMcpIsolation: { opencode: { isolated: true } } } }, io);
-
-    assert.ok(output().includes("healthy: \x1b[32mtrue\x1b[0m"));
-    assert.ok(output().includes("installed: \x1b[31mfalse\x1b[0m"));
-    assert.ok(output().includes("isolated: \x1b[32mtrue\x1b[0m"));
+    assert.ok(output().includes("boom"), output());
+    assert.ok(output().includes("try again"), output());
+    assert.ok(!output().includes("error: boom"), output());
   });
 
-  test("leaves `checked` uncolored -- false there means unverified, not failed", () => {
-    const { io, output } = fakeStdoutIo(true);
-    writeToon({ checked: false }, io);
+  test("writeError on non-TTY is unchanged: plain TOON error:/help: lines", () => {
+    const { io, output } = fakeStdoutIo(false);
+    writeError(new Error("error: boom\nhelp: try again"), io);
 
-    assert.ok(!output().includes("\x1b["));
-    assert.ok(output().includes("checked: false"));
-  });
-
-  test("colors trend.direction improving green and worsening red, leaves unknown uncolored", () => {
-    const { io: ioImproving, output: outputImproving } = fakeStdoutIo(true);
-    writeToon({ direction: "improving" }, ioImproving);
-    assert.ok(outputImproving().includes("direction: \x1b[32mimproving\x1b[0m"));
-
-    const { io: ioWorsening, output: outputWorsening } = fakeStdoutIo(true);
-    writeToon({ direction: "worsening" }, ioWorsening);
-    assert.ok(outputWorsening().includes("direction: \x1b[31mworsening\x1b[0m"));
-
-    const { io: ioUnknown, output: outputUnknown } = fakeStdoutIo(true);
-    writeToon({ direction: "unknown" }, ioUnknown);
-    assert.ok(!outputUnknown().includes("\x1b["));
-  });
-
-  test("colors warnings yellow and info dim, without swallowing the text itself", () => {
-    const { io, output } = fakeStdoutIo(true);
-    writeToon({ warnings: ["bwrap is not installed"], info: ["sandboxing unavailable on this platform"] }, io);
-
-    assert.ok(output().includes("\x1b[33mbwrap is not installed\x1b[0m"));
-    assert.ok(output().includes("\x1b[2msandboxing unavailable on this platform\x1b[0m"));
+    assert.ok(!output().includes("\x1b["), output());
+    assert.ok(output().includes("error: boom") && output().includes("help: try again"), output());
   });
 
   test("no ANSI escapes anywhere when stdout is not a TTY, even with warnings/booleans/direction present", () => {

@@ -1,0 +1,332 @@
+# Review package: 0298805..1fde9cc
+
+## Commits
+1fde9cc refactor(cli): route TTY output through the pretty renderer, drop dead marker-based coloring
+
+## Files changed
+ docs/sourcemap.md  |  4 ++-
+ src/output.js      | 99 ++++--------------------------------------------------
+ src/output.test.js | 90 ++++++++++++-------------------------------------
+ 3 files changed, 31 insertions(+), 162 deletions(-)
+
+## Diff
+diff --git a/docs/sourcemap.md b/docs/sourcemap.md
+index 25486c2..4d89782 100644
+--- a/docs/sourcemap.md
++++ b/docs/sourcemap.md
+@@ -63,21 +63,23 @@ obviously belong to args parsing or output formatting, start there.
+ | `tasks.failure.test.js` | 1018 | `provider-failure classification` (rate_limit / payment / authentication buckets; 500-char truncation; SIGTERM'd child exiting 0 still lands on crashed; ordinary crash text is `pi_boot_failure` not a provider bucket; type:"text" mentioning rate limits isn't misclassified; insufficient_quota vs rate-limit language; bare quota's fallback bucket; 401 in plain English; `status_code: 401` without the word "unauthorized"; `no_output_timeout_dead_spawn` failureDetail; first-classification wins across watchdog ticks), `trailing provider-error events that land after the last watcher poll` (issue #81: classified even with no watcher tick; classified even when child traps exit 0; watcher-classified reason wins; clean exit reuses watcher's offset; settlement reads only the trailing delta via the injected delegate; clean exit with a watched-but-not-yet-classified error doesn't invent a reason; provider error split across carry and new bytes is still classified; classified when log no longer exists; classified when log shrank past watcher's offset), `bucketFor()` (Task 7 review fix: opencode buckets stay unprefixed; every other prefix gets underscore-joined), `classifyProviderFailure() honors the binding compatibility contract` (opencode named buckets unprefixed; pi named buckets prefixed; unknown structured events keep the executor prefix for both), `provider-failure classification is task-aware via task.executorId` (pi executor task with plain `NO_API_KEY_FOUND` settles with `pi_authentication_failed`), `boot-failure surfacing` (raw capture becomes `boot_failure` with the fatal `Error:` line; pi executor uses `pi_boot_failure`; non-Error last line; crash-after-real-events leaves `failureReason` null; exit 0 with raw text not classified; oversized event line blocks boot classification; oversized raw line yields no garbage detail; oversized noise before a real Error still surfaces the real one; unparseable brace-starting stderr is evidence; signal-killed eventless not classified; watcher-set failureReason survives eventless non-zero exit), `crash recovery: a genuine step_finish stop overrides a crashed status` (a transient mid-run error followed by a real final answer recovers `crashed` to `done`, keeping `failureReason` as a record; the fallback last-message rule alone doesn't count as recovery; a cancelled task is never reinterpreted; a `no_output_timeout_stalled` kill after a genuine stop still recovers). |
+ | `tasks.lifecycle.test.js` | 1036 | `cancel()` (SIGTERM to negative pid + SIGKILL escalation after `graceMs`; no SIGKILL if task already exited; stops the watchdog so cancellation can't add a failureReason; replaces existing escalation timer; signals + disables watchdog even when persistence fails; falls back to plain pid if `-pid` raises ESRCH; no-op note for non-running; persisted `running` task reloads as `unknown`; persisted queued task reloads as `unknown`). `accept()/reject()` (apply + accepted + cleanup; apply failure leaves pending + no cleanup; reject discards + cleans; reject cleans via recorded tmpRoot after live tmpRoot changes; advisor task throws on accept; no pending changeset throws; extraction-failed accepts preserve the overlay; missing diff file errors usefully; non-git target whose overlay vanished errors; failed cleanup surfaces `cleanupFailed`; persist-then-cleanup-then-persist order: status and `overlayDirs` are both durable). `accept(): overlaySleepFn threading (taskferry#328)` (its own standalone `describe` block, split out to keep `accept()/reject()`'s own body under the sonarjs function-length cap -- a non-git accept whose apply hits the overlay-mount-busy retry proves `overlaySleepFn` reaches `applyNonGitChangeset` via `acceptTaskChangeset`, not just the extraction path `tasks.changeset.test.js` already covered). `summarize() changeset exposure` (changeset fields only when meaningful). `list()` (empty-state shape; mixed-status counts; minimal-row schema; newest-first sort). `result()` (final-step `message` only, full `narration`; sums tokens + cost across every step_finish -- issue #201; last-message fallback when no `step_finish reason "stop"`; 2000-char narration truncation with `next` hint; `full: true` returns untruncated; missing log file returns cleanly; running task shows 'still running'; projects only requested fields; rejects `full: true` without `narration` in fields; running task's selected fields return null; unknown summary task doesn't expose partial output). `result() diffStat field` (routes through `git apply --numstat` via `runOverlayCommandFn`; non-git diffs report non-zero file count; parses a real `diff -ruN` patch via the real `git apply --numstat` parser; zero-stat fallback on non-zero exit; non-zero status zeroes the stat even with non-empty stdout). `result() diff field` (cached patch text for `fields: ["diff"]`; null for task with no diffPath). `tail()` (Unicode-safe suffix of latest text event; no-text response; `chars` validation; 131072 ceiling + rejection above; raw capture fallback for eventless crashed task; `none-observed` once any parseable event exists; raw-capture respects `chars` + reports truncation; eventless empty log keeps `none-observed`; watchdog-killed eventless task shows raw capture). `poll()` (immediate for non-running; resolves on real exit; no timeoutMs blocks; `running` after timeout; narration tail on timeout; `mock.timers` no-options never resolves; `mock.timers` timeoutMs above the old 45000 cap still returns `running`). |
+ | `tasks.advisor.test.js` | 370 | `advisor(): validation, completion, and timeouts` (requires a model; dispatches with the given model/variant + resolves inline once the task finishes; `--executor pi` reaches an actual pi-spawned child end-to-end; returns `status: "running"` with a `task_id` and `session_id` when the timeout elapses first; reports `status: "queued"` not running when the timeout elapses while the task is still waiting for a concurrency slot; timeout before session id is written points at `taskferry wait with task id`; a dispatch validation error is reported under `taskferry advisor`; no `timeout_ms` against an injected small `maxWaitMs` still returns the bounded 'still running' + resumable `session_id` shape). `advisor(): timeout, queueing, and no-timeout shape` (with no `timeout_ms` ... still returns the bounded 'still running' + resumable `session_id` shape). `advisor(): session resume, expiry, and crash surfacing` (fresh `session_id` within TTL is passed through to dispatch via `--continue --session`; expired `session_id` starts fresh + reports `session_reset`; crashed advisor task surfaces `exitCode`/`spawnError`, not a thrown error). |
+ | `tasks.summarize.test.js` | 798 | `summarize()`: spawn shape, attachment, and snapshot content (uses `--pure` + private attachment; `previous_summary` field; omits when no prior activity; truncated tool call input/output alongside text; no model call when no text observed; rejects unavailable summary model before creating a task; `checkSummaryModelReady` rejects when summary model unavailable; `createTaskManager()`'s real default listModelsFn validates against opencode's list, not the dispatch-default executor's; injected listModelsFn takes precedence; `--mode activity` rejects when summary model unavailable; head+tail narration around an oversized log omission marker). `summarize()`: listModelsFn source-of-truth and oversized-log snapshot (the same opencode-default test, plus a createTaskManager+pi variant; oversized log preservation). `summarize()`: multi-call session continuity (first call spawns with no `--continue`/`--session`; second call continues the prior session + sends only the narration delta). `summarize()`: continue-fail-so-fresh retry (session-id mismatch detected, fresh retry, cache cleared of stale id). `summarize()`: exit handler persistence and concurrency reserve (exit handler persists opencode session id + source-log watermark; activity-refresh summary reserve retries briefly instead of dropping). `summarize()`: per-caller-env listModels cache (Fix 1) (separate entries for callers with different provider keys; identical envs share; cosmetic differences ignored; separates across opencode catalog/auth overrides + provider base-URL overrides; TTL expires per-key; concurrent populates coalesce). |
+ | `tasks.env.test.js` | 779 | `caller-env union` (sanitizedEnvironment) split into 6 sub-describes by topic so no describe callback exceeds the 200-line cap: basic dispatch and TASKFERRY_TASK_ID; envFileVars merge with caller/ambient; envFile load at construction; envFile watch reload/error/setup/close; summary/advisor/report env forwarding; queue-time env freezing + ambient-read-fresh; single-pass merge + key validation. Covers caller-supplied overlay of daemon ambient; fixed excluded-set (PATH/HOME/`TASKFERRY_STATE_DIR`/...) never overridable; denylist strips even from caller; `TASKFERRY_CHILD` survives denylist; `TASKFERRY_TASK_ID` stamped on dispatch + advisor; absent from summary; omitting `env` is ambient-only; `envFileVars` supplies / loses to ambient / loses to caller; `envFileVars` denylist strips; PATH from `envFileVars` cannot override ambient; `envFileVars` cannot smuggle `TASKFERRY_SOCKET_PATH`/HOME; `envFilePath` loads once at construction; loadEnvFileFn throw propagates synchronously; omitting `envFilePath` skips load; empty `TASKFERRY_ENV_FILE` disables loading; `watchEnvFileFn` starts a live watch; omitting it skips watch; onReload updates `envFileVars` for every dispatch after it fires; onError leaves `envFileVars` at last-known-good; setup failure is caught + logged; `manager.close()` closes the watcher; `summaryEnvironment` strips `OPENCODE_CONFIG*`; advisor forwards caller env; summarize report mode forwards caller env; queued dispatch's stored env is captured at dispatch time, not re-read; queued env is frozen against later caller mutations (verification gate for the b45de81 clone); summary's spawned env reads daemon's ambient at spawn time; excluded/denylist/caller-wins single-pass merge; exclusion set is sourced from `paths.js`'s plumbing export; caller-supplied env key containing `=` / empty / non-string / undefined rejected synchronously. |
+ | `tasks.executor.test.js` | 491 | `startTask()` writes stdout through `executor.normalizeLogEvent` (Task 7: write-time normalization) (JSON events flagged null are dropped; non-JSON lines preserved verbatim; trailing partial line preserved). `startTask()` spawns the executor's CLI binary (Task 7: executor-driven binary) (pi dispatch spawns `pi`; default dispatch spawns `pi`). `startTask()` merges `executor.sandboxAuthFile().sandboxEnv` into spawnEnv (Task 7: per-executor env overrides) (opencode rewrites `XDG_DATA_HOME`; pi rewrites `PI_CODING_AGENT_DIR` + auth bind destination; sandboxAuthFile receives `sessionId` + `launchDirectory`; fresh dispatch does not pass `sessionId`). `startTask()` resolves the resumed session file via `Array.find` (no break/continue loop) (the pi sessions scan was originally imperative with two `continue` + one `break`; the rewrite uses `entries.find((entry) => ...)` so the loop body has no control-flow jumps). `startTask()` never lets `normalizeLogEvent()` throws escape the stdout handler (Task 7 review fix) (inline path; trailing-fragment path; settling structured `ExecutorNormalizationError`). |
+ | `protocol.js` | 407 | `PROTOCOL_VERSION`, `RPC_METHODS`, request/response/error envelope encode/decode, method-name-to-manager-function mapping, `isEnvironment` env-param predicate, and the data-driven `METHOD_PARAMS` spec (per-field `required`/`optional` predicate pairs plus a per-method `extra` cross-field check — the split that keeps `validParams` computational complexity flat) that `validParams`/`isWithinParams` evaluate, plus the task.summary `mode: "activity"` ↔ `env` rejection (the activity path reads cached task activity and spawns nothing, so caller env has no process to land in — surfacing the combination as `INVALID_PARAMS` rather than silently dropping it). `task.dispatch`'s allowed-param spec accepts `noOverlay`; `task.advisor`'s deliberately does NOT (overlay is mandatory for the advisor role per ADR 0001 — the allowed set is the raw-RPC equivalent of args.js's parse-time rejection). `task.tail`'s `chars` ceiling is 131072 (raised from 65536 to fit advisor's default 120k-char context budget). `request` envelope validation is split out into `isRequestEnvelope`/`hasVersion`/`isRequestBody` predicates, and the invalid-params error text is picked by `invalidParamsError`. `event.subscribe`'s optional fields now include `all` (boolean); its `extra` cross-field check accepts `all === true` as a third alternative alongside a valid `directory` or `taskId` (taskferry#315). |
+ | `events.js` | 58 | Assigns a monotonic sequence number to each emitted event; that's the whole file. |
+ | `activity.js` | 486 | `activityCacheKey`/cache `refresh()`: bounded head+tail narration snapshot, optional model-summary call, min-interval throttling. |
+ | `state-lock.js` | 145 | `withFileLock()`: synchronous, `Atomics.wait`-based cross-process exclusive lock; guards the daemon auto-start race. No longer used by `persistTask()`'s writes (taskferry#55) — those now dump the whole in-memory tasks Map straight to a temp file + rename on a debounced flush instead of a read-merge-write, so there's no cross-process race left to guard against. |
+-| `output.js` | 321 | TOON encoding, `leanStatus`/`leanResult`/`projectList`/`projectContext`/`homeView`, hint-string MCP-name migration. `leanStatus()` surfaces `changesetStatus: "pending"` (and `changesetError`) on a non-`--full` `status`/`wait` response when the settled task has one, so an `accept`/`reject` next-step is visible without `--full`. Even under `--full`, `trimOverlayDirs()` reduces the task record's `overlayDirs` down to just `root`/`tmpRoot` -- the per-git-subpath `upperDir`/`workDir`/`rwBinds`/`rwFileBinds` breakdown `tasks.js` persists on the task (see that row) is daemon-internal bookkeeping for extraction/cleanup, not something a `status`/`wait --full` caller has any use for. `leanResult`/`computeResultDetail()` never carried `overlayDirs` in the first place, so `result` needed no equivalent trim. |
++| `output.js` | 332 | TOON encoding (non-TTY) and pretty-renderer dispatch (TTY, via `renderPretty()` from `pretty.js`), `leanStatus`/`leanResult`/`projectList`/`projectContext`/`homeView`, hint-string MCP-name migration. `writeToon()` gates on `io.stdout.isTTY`: TTY routes through `renderPretty()`, non-TTY writes plain `encode()` (byte-identical to the pre-pretty TOON shape). `leanStatus()` surfaces `changesetStatus: "pending"` (and `changesetError`) on a non-`--full` `status`/`wait` response when the settled task has one, so an `accept`/`reject` next-step is visible without `--full`. Even under `--full`, `trimOverlayDirs()` reduces the task record's `overlayDirs` down to just `root`/`tmpRoot` -- the per-git-subpath `upperDir`/`workDir`/`rwBinds`/`rwFileBinds` breakdown `tasks.js` persists on the task (see that row) is daemon-internal bookkeeping for extraction/cleanup, not something a `status`/`wait --full` caller has any use for. `leanResult`/`computeResultDetail()` never carried `overlayDirs` in the first place, so `result` needed no equivalent trim. |
++| `pretty.js` | 230 | Shape-based TTY renderer: `renderPretty(value)` detects one of four shapes (list, doctor, stats, fallback) via `detectShape()` and dispatches to the matching renderer. Uses picocolors (force-enabled, since it's only called on the TTY path) for bold labels, status-colored headings, dim hints, and gray trend tones. Renders task lists grouped by status (running/queued/done/crashed/cancelled order) with borderless `cli-table3` tables, doctor reports with pass/fail glyphs for healthy/installed/isolated checks plus warning/info bullet blocks, and `doctor --stats` with aligned model tables and trend summaries. The fallback renderer covers any other object shape (error values, single-task responses) with bold-labeled scalar fields. Consumed by `writeToon()` in `output.js` on the TTY branch only. |
++| `pretty.test.js` | 229 | Tests for `renderPretty()`: four shape dispatches (list/doctor/stats/fallback), list grouping by status with correct ordering, doctor pass/fail glyphs for healthy/installed/isolated/checked, warning/info bullet blocks, stats table alignment, trend direction coloring, and the graceful-degradation paths (missing/empty arrays, missing trend). |
+ | `opencode-plugin.js` | 189 | OpenCode's native plugin surface: toasts on task state transitions by subscribing to daemon task-state events through `client.js`. |
+ | `executor.js` | 341 | `WorkerExecutor` abstraction: `opencodeExecutor()`/`piExecutor()` build each CLI's spawn args, summary prompt, log-event normalization, and sandboxed auth-file binding. Both executor objects expose a summary-prompt method, but `tasks.js` currently hardcodes every summary task's `executorId` to `"opencode"` regardless of the originating dispatch's executor — `piExecutor()`'s summary support is unused in practice. |
+ | `sandbox.js` | 307 | `bwrap` mount layout: read-only root bind, deny-list (`~/.ssh`, `~/.aws`, `~/.config/gcloud`, `~/.config/gh`, `~/.gnupg`, `~/.claude`, extendable per-install via `TASKFERRY_SANDBOX_DENYLIST`/`sandboxDenylist`, merged with the fixed defaults in `tasks.js`), `allowedDirs` merging, `resolveGitCommonDir`/`resolveGitDir` for worktree gitdir resolution, `checkOverlaySupport` (bwrap >= 0.8 probe), `buildBwrapBaseArgs()` emits the shared prefix (`--ro-bind / /`, `--proc /proc`, `--dev /dev`, `--tmpfs /tmp`, then one `--tmpfs` per denied path) that both `buildBwrapArgs()` (sandboxed dispatch) and `buildMergedViewBwrapArgs()` in `changeset.js` (changeset extraction/apply) start from, `buildBwrapArgs()` opts in to a copy-on-write overlay on `directory` via the `overlay`/`overlayRwBinds` params (mounted with `--overlay-src`/`--overlay`; bwrap >= 0.8 required), plus `overlayRwFileBinds` for writable files outside `directory` (each bound rw with a plain `--bind` right after the overlay binds, since overlayfs mounts are directory-only), `shareNet` flag (default true; every caller, including advisor, keeps `--share-net` -- the sandboxed worker CLI needs outbound network to reach its model provider, and `--unshare-net` blocked that entirely when advisor briefly passed `shareNet: false`), and `runtimeDirWritable` flag (default true; advisor-role dispatches pass false so the daemon's Unix socket inside runtimeDir is read-only and `connect()` fails). The actual bind-scoping decision (worktree-private gitdir + common dir's shared data only, not the whole common dir) lives in `tasks.js`, not here — see taskferry#224/#227. |
+ | `changeset.js` | 619 | Overlay path helpers (`subOverlayPaths()` for directory sub-overlays, `subFilePaths()` for the scratch-copy rw bind a writable FILE like a worktree's `packed-refs` needs instead, since overlayfs mounts are directory-only), pre-dispatch HEAD resolution (unborn HEAD anchors on the empty tree), git/non-git diff extraction from the CoW overlay (fail-closed on extraction failure only; HEAD drift is no longer fatal -- `extractGitDiff()` writes the diff unconditionally and returns `headDrift: null | {from, to, recovered: true|false|null, conflictDetail}` via `detectHeadDrift()` + `resolveHeadDrift()`, since a stale-base diff is still valid content that `git apply --3way` can forward-apply onto the new HEAD -- see taskferry#261), changeset apply (`git apply --3way` unconditionally for git targets, so a stale-base diff forward-applies onto new HEAD instead of erroring; in-sandbox rsync --delay-updates for non-git, with required live-overlay inputs validated before a non-git apply), and overlay cleanup (a containment guard refusing roots outside the overlay tmp root, then a same-uid `chmod -R u+rwX` before `rm -rf` -- overlayfs's kernel-owned `work/main/work` scratch dir comes back mode 000, and once anything was ever deleted inside the overlay it holds an internal whiteout entry, making it non-empty; a non-empty mode-000 dir forces `rm -rf` to `opendir()` it (unlike an empty one, which removes via rm's plain-rmdir() fast path), which mode 000 blocks -- `rm -rf` then aborts partway through, having already deleted `upper/`, silently stranding a task that still thinks its overlay is live (taskferry#273); `chmod -R` first sidesteps this since chmod needs only the parent's permissions to retarget an entry, not the entry's own). Both extraction functions, and `applyNonGitChangeset()`'s own overlay-mount bwrap call (the non-git apply's writable rsync remount, review finding from #327), run their bwrap spawn through `runExtractionBwrap()`, a bounded retry-with-backoff (100/300/900ms, `OVERLAY_MOUNT_BUSY_PATTERN`-gated so only the confirmed overlay-mount race retries -- any other bwrap failure still throws on the first attempt) that absorbs a kernel-internal race: the extraction (or apply) bwrap's own overlay mount can lose to the async teardown of the just-exited dispatch/accept bwrap's mount namespace, which has no user-space signal to wait on (taskferry#326; live-verified against real bwrap on a nested-worktree repro -- unpatched `main` hit the exact "Device or resource busy" crash, the retry absorbed it). `applyNonGitChangeset()` needs no extra fail-open guard the way `extractNonGitDiff()` does: rsync's exit codes don't share `diff -ruN`'s "non-zero can mean success" convention, so a persistent busy failure after retries exhaust already falls through to the existing non-zero-status failure branch. `OVERLAY_MOUNT_BUSY_PATTERN` itself now lives here (was duplicated in `tasks.js`, which imports it) since both the retry gate and `tasks.js`'s post-throw `failureReason` classifier need the same regex. `isOverlayMountBusy()` checks the busy pattern against `stderr` and `error?.message` independently (never via `stderr || error?.message`) since a hung mount that trips `spawnSync`'s 30s timeout reports `{error: ETIMEDOUT, stderr: <busy text>}`, and the generic ETIMEDOUT message would otherwise win a naive fallback and hide the busy signature actually sitting in stderr. `extractNonGitDiff()` also runs this same busy check explicitly against the exhausted-retry result even when its exit status is 1 -- bwrap's own die()-on-setup-failure convention exits 1, the exact code `diff -ruN` uses for "differences found," so without the explicit check a persistent overlay-mount-busy failure reads as a successful zero-change diff and silently discards the worker's real edits (`extractGitDiff()` doesn't need the same guard since it already throws on any non-zero status). Also exports `defaultRunCommand`, the 30s diff/apply runner that's deliberately separate from sandbox.js's 5s version-probe runner, and sets an explicit 200 MiB `maxBuffer` on its `spawnSync` call rather than relying on Node's 1 MiB default, since a real merge diff routinely exceeds that and used to throw `ENOBUFS` (surfacing as `taskferry result --diff` silently returning `diff: null`, taskferry#358). `buildMergedViewBwrapArgs()` mounts the overlay's merged view on a synthetic mountpoint under /tmp so a non-git extraction can `diff -ruN` `directory` against its own merged view; the overlay paths (`upperDir`/`workDir`/`mergedMountPoint`, all under /tmp by construction) need no explicit /tmp-shadowing protection — `upperDir`/`workDir` are host-namespace paths consumed by the kernel's overlay `mount(2)` and bypass the bwrap namespace's mounts, and `mergedMountPoint` is intentionally created under the bwrap tmpfs before being overlay-mounted — shares its scaffolding with `buildBwrapArgs()` via `sandbox.js`'s `buildBwrapBaseArgs()`. `extractGitDiff()` no longer throws on HEAD drift (the pre-retry check and the post-retry re-check from taskferry#329 were both removed): the diff is always written, and `detectHeadDrift()` runs exactly once after the diff is persisted; on drift, `resolveHeadDrift()` runs a real `git apply --3way` (never `--check`, whose exit code can't tell a clean merge from a real conflict) inside a disposable detached worktree off the live `directory` -- `directory` is read-only as `worktree add`'s source, never written; the scratch worktree is removed unconditionally after the probe (the `apply`/`status`/conflict-check body runs inside a `try/finally` so the `worktree remove --force scratchDir` always runs once `worktree add` has succeeded, including when an injected `runCommand` throws; the `worktree add` failure path correctly skips cleanup because nothing was created). `resolveHeadDrift()` returns `{recovered: true}` on a clean 3-way merge, `{recovered: false, conflictDetail}` on a genuine conflict (decided by `git status --porcelain` conflict markers, not by apply's exit code), `{recovered: null, conflictDetail}` when the worktree add itself fails (no apply attempted), and `{recovered: null, conflictDetail}` when the `git status --porcelain` inspection itself failed (spawn error / non-zero exit) -- empty stdout from a failed status call is "didn't get to read porcelain", not "no conflict markers", so the empty/absent match isn't trusted. `extractGitDiff()` exposes an injectable `scratchDirFn` (default `os.tmpdir()/taskferry-stale-base-<uuid>`) so callers/tests can pin or mock the disposable worktree root. The apply/status/conflict-classification body is split into a private `evaluateApplyAndStatus()` helper to keep `resolveHeadDrift()` under the file's cyclomatic-complexity cap. `runExtractionBwrap()`'s `sleepFn` (real blocking `Atomics.wait`-based `sleepSync` by default) is now reachable from outside this module: `tasks.js` threads an `overlaySleepFn` manager option down to both `extractChangesetForTaskRecord()`'s `extractGitDiff`/`extractNonGitDiff` calls and `acceptTaskChangeset()`'s `applyChangeset` call (undefined by default, so production behavior/blocking is unchanged), letting `tasks.changeset.test.js`'s overlay-mount-busy reclassification tests inject a fast no-op instead of eating the real ~1.3s retry backoff on every run (taskferry#328). |
+ | `config.js` | 126 | `loadConfig()`: reads/validates `config.json` against `CONFIG_FIELD_TYPES`, rejects unrecognized keys, with mtime-based per-path caching so repeated calls in the same process only stat the file instead of re-reading/parsing. `advisorContextChars` controls advisor's auto-attached context budget. `envFile` names the path `tasks.js` loads via `env-file.js`'s `loadEnvFile()`. `_resetConfigCache()` exported for test use. |
+ | `env-file.js` | 247 | `parseEnvFile()`/`loadEnvFile()`: minimal `.env`-style parser (`NAME=VALUE` per line, `#` comments, optional `export `, matching single/double quotes stripped, unterminated quotes rejected rather than returning the quote character as literal data) for the file named by `TASKFERRY_ENV_FILE`/`envFile`. Throws with a file:line-numbered message on a malformed line (deliberately omitting the line's own raw content from every parse-error message, since a malformed line's content can itself be a secret — e.g. a bare API key pasted with no `NAME=` prefix — and that message can end up in `daemon-boot.err`, which callers/cron routinely capture into their own logs) or (in `loadEnvFile()`) a missing file or a file readable by group/other (`chmod 600` required) — `tasks.js` calls this once at `createTaskManager()` construction, so a bad path, malformed file, or insecure mode fails daemon startup loudly rather than silently dispatching without the secrets it was meant to supply. `watchEnvFile()`: keeps `envFileVars` live after the startup load by watching the parent directory (filtered by basename, so an mktemp+rename secret rotation that swaps the file's inode still fires) on a ~100ms debounce; a torn read caught mid-rewrite is rejected by comparing pre-/post-read `mtime`/`size` (reschedules instead of handing `onReload` a possibly-truncated `{}` that would silently wipe every previously loaded secret); a `null`/`undefined` `changedName` from platforms that don't report filenames falls through the name filter rather than being treated as a match (extra debounced re-reads of unrelated directory activity are harmless thanks to the mtime/size guard above); `onReload` itself is wrapped in a try/catch so a throwing callback becomes an `onError` warning instead of an uncaught exception inside the debounced `setTimeout`. |
+ | `mcp-isolation.js` | 115 | Playwright MCP isolation checks for `taskferry doctor`/`setup` (`opencode.jsonc`, Claude Code's Playwright MCP config). |
+ | `doctor-stats.js` | 156 | `computeDoctorStats()`: pure aggregation of `task.list` rows into the `doctor --stats` report shape — status mix (overall/24h/7d), per-model dispatch/rate breakdown, failure-reason histogram, unknown backlog, and 24h crash-rate trend. |
+ | `paths.js` | 222 | Resolves `TASKFERRY_STATE_DIR`/`TASKFERRY_RUNTIME_DIR`/`TASKFERRY_CACHE_DIR` and the socket path from XDG defaults + env overrides. Exports `TASKFERRY_PLUMBING_ENV_VARS` (frozen array of those five names, now including `TASKFERRY_OVERLAY_TMP_DIR`) so `tasks.js` builds its caller-env exclusion set from the same source of truth — a new plumbing var added here lands in the exclusion set automatically. `resolveOverlayTmpRoot()` scopes the CoW overlay root under `resolveRuntimeDir()` (not plain `os.tmpdir()`) so two daemon instances — isolated via `TASKFERRY_STATE_DIR`/`RUNTIME_DIR` or not — never share an overlay namespace; a restarting/crash-looping daemon's startup orphan sweep used to be able to delete a *different* daemon's in-flight overlay because every daemon on the host shared plain `/tmp` regardless of state/runtime isolation (taskferry#286). `TASKFERRY_OVERLAY_TMP_DIR` is an explicit escape hatch to pin the overlay root elsewhere. Also `resolveWorkspaceRoot()`: the git workspace root (handles plain repo/worktree/submodule/bare-repo layouts) that `list`/`watch`/`context`/`home` default `--directory` to — `dispatch`/`advisor` deliberately keep their default on literal cwd instead, since that value doubles as the sandbox root. `createWorkspaceRootResolver()` memoizes `resolveWorkspaceRoot()` per directory (one instance created per `startDaemon()` call in `daemon.js`, so its cache is scoped to that daemon's lifetime, not a module-level global) so repeated directory comparisons don't re-spawn `git` each time; `sameWorkspace(a, b, resolveRoot)` is the shared comparison both `daemon.js`'s `filteredTaskDetails()`/`filteredList()` and `daemon-server.js`'s `deliverEvent()` use instead of a raw `===`, so a repo-root-scoped `list`/`context`/`watch` also matches a task dispatched into one of that repo's linked worktrees (taskferry#315) — the literal-equality fast path inside it skips calling `resolveRoot` (and, on a cache miss, spawning git) for the common same-directory case. |
+ | `narration-format.js` | 24 | Formats a task's narration/activity text for display. |
+diff --git a/src/output.js b/src/output.js
+index 8e444ea..3bdbf41 100644
+--- a/src/output.js
++++ b/src/output.js
+@@ -1,134 +1,47 @@
+ import os from "node:os";
+ import path from "node:path";
+ import { encode } from "@toon-format/toon";
++import { renderPretty } from "./pretty.js";
+ 
+ const ANSI_RESET = "\x1b[0m";
+ const ANSI_GREEN = "\x1b[32m";
+ const ANSI_RED = "\x1b[31m";
+ const ANSI_YELLOW = "\x1b[33m";
+-const ANSI_GRAY = "\x1b[90m";
+-const ANSI_DIM = "\x1b[2m";
+-
+ const ANSI_BY_STATUS = {
+   done: ANSI_GREEN,
+   crashed: ANSI_RED,
+   cancelled: ANSI_RED,
+   running: ANSI_YELLOW,
+   queued: ANSI_YELLOW,
+ };
+ 
+ /** Wrap text in an ANSI color code, but only when `enabled` (i.e. the target stream is a TTY). */
+ export function colorize(text, code, enabled) {
+   return enabled && code ? `${code}${text}${ANSI_RESET}` : text;
+ }
+ 
+ /** @param {string} status */
+ export function colorForStatus(status) {
+   return ANSI_BY_STATUS[status] || null;
+ }
+ 
+-// doctor --stats' trend.direction. "unknown" is deliberately left uncolored
+-// (falls through to null), same as an unrecognized task status below --
+-// there's no evidence either way yet, so no color reads more honestly than a
+-// guessed one.
+-const ANSI_BY_TREND_DIRECTION = { improving: ANSI_GREEN, worsening: ANSI_RED, flat: ANSI_GRAY };
+-function colorForTrendDirection(direction) {
+-  return ANSI_BY_TREND_DIRECTION[direction] || null;
+-}
+-
+-// doctor's own pass/fail booleans (healthy, and the MCP-isolation checks'
+-// installed/isolated) -- true is good, false is bad, for exactly these field
+-// names. `checked` is deliberately excluded from coloring entirely: false
+-// there means "this check couldn't run," not "it failed," so red/green would
+-// assert something the check itself doesn't know.
+-function colorForPassFailToken(token) {
+-  if (token === "true") return ANSI_GREEN;
+-  if (token === "false") return ANSI_RED;
+-  return null;
+-}
+-
+-// Coloring these fields has to happen post-encode: encode() escapes raw ANSI
+-// bytes embedded in a string value into \u escapes. encode() also reshapes a
+-// status field's surroundings unpredictably -- a uniform tasks[] array
+-// collapses to a comma-separated tabular block instead of one "status: x"
+-// line per item -- so a fixed line pattern can't find every occurrence.
+-// Instead, bracket recognized values in an invisible marker before encoding
+-// (encode() passes it through unescaped -- and, being zero-width, without
+-// ever triggering encode()'s own quoting -- in every layout) and swap the
+-// marked span for an ANSI-colored one afterward.
+-//
+-// Three separate marker characters, not one: once a value round-trips through
+-// encode(), the marked text has no positional/key context left, only the
+-// marker and the original text. `status`/`direction`/the pass-fail booleans
+-// resolve a color from that text via a fixed enum (ENUM_MARK); `warnings`/
+-// `info` are arbitrary free-text sentences that must always render yellow/dim
+-// regardless of their contents, so they get their own marks instead of being
+-// run through the enum lookup.
+-const ENUM_MARK = "\u2063";
+-const WARN_MARK = "\u2064";
+-const INFO_MARK = "\u2065";
+-const MARK_RE = new RegExp(`[${ENUM_MARK}${WARN_MARK}${INFO_MARK}]([^${ENUM_MARK}${WARN_MARK}${INFO_MARK}]*)[${ENUM_MARK}${WARN_MARK}${INFO_MARK}]`, "g");
+-
+-// Every key here is scoped to the daemon method(s) that actually produce it
+-// (task rows for `status`; doctor's own health/MCP checks for
+-// `healthy`/`installed`/`isolated`; doctor --stats' trend for `direction`;
+-// doctor's diagnostics for `warnings`/`info` -- see commands.js,
+-// mcp-isolation.js, doctor-stats.js), so marking never reaches into an
+-// unrelated command's same-named field.
+-const ENUM_KEYS = new Set(["status", "direction", "healthy", "installed", "isolated"]);
+-const WARN_KEYS = new Set(["warnings"]);
+-const INFO_KEYS = new Set(["info"]);
+-
+-function isMarkableScalar(item) {
+-  return typeof item === "string" || typeof item === "boolean";
+-}
+-
+-function markStringArray(items, mark) {
+-  return items.map((entry) => (typeof entry === "string" ? `${mark}${entry}${mark}` : entry));
+-}
+-
+-export function markColorableFields(value) {
+-  if (Array.isArray(value)) return value.map(markColorableFields);
+-  if (value && typeof value === "object") {
+-    return Object.fromEntries(Object.entries(value).map(([key, item]) => {
+-      if (ENUM_KEYS.has(key) && isMarkableScalar(item)) return [key, `${ENUM_MARK}${item}${ENUM_MARK}`];
+-      if (WARN_KEYS.has(key) && Array.isArray(item)) return [key, markStringArray(item, WARN_MARK)];
+-      if (INFO_KEYS.has(key) && Array.isArray(item)) return [key, markStringArray(item, INFO_MARK)];
+-      return [key, markColorableFields(item)];
+-    }));
+-  }
+-  return value;
+-}
+-
+-function colorForMarkedToken(markChar, token) {
+-  if (markChar === WARN_MARK) return ANSI_YELLOW;
+-  if (markChar === INFO_MARK) return ANSI_DIM;
+-  return colorForStatus(token) || colorForTrendDirection(token) || colorForPassFailToken(token);
+-}
+-
+-export function colorizeText(text, useColor) {
+-  return text.replace(MARK_RE, (whole, token) => {
+-    if (!useColor) return token;
+-    const code = colorForMarkedToken(whole[0], token);
+-    return code ? colorize(token, code, true) : token;
+-  });
+-}
+-
+ function shellQuote(value) {
+   return `'${String(value).replaceAll("'", "'\\''")}'`;
+ }
+ 
+ export function writeToon(value, io = process) {
+-  const useColor = Boolean(io.stdout.isTTY);
+-  const text = encode(useColor ? markColorableFields(value) : value);
+-  io.stdout.write(`${colorizeText(text, useColor)}\n`);
++  if (io.stdout.isTTY) {
++    io.stdout.write(`${renderPretty(value)}\n`);
++    return;
++  }
++  io.stdout.write(`${encode(value)}\n`);
+ }
+ 
+ function stripPrefix(line, prefix) {
+   return line.startsWith(prefix) ? line.slice(prefix.length).trim() : null;
+ }
+ 
+ /** @param {unknown} error @param {string|undefined} helpLine */
+ function errorHelp(error, helpLine) {
+   if (error && typeof error === "object" && typeof error.help === "string") return error.help;
+   return helpLine || "Retry the command or run `taskferry --help`";
+diff --git a/src/output.test.js b/src/output.test.js
+index 7136348..707b25c 100644
+--- a/src/output.test.js
++++ b/src/output.test.js
+@@ -1,13 +1,13 @@
+ import { describe, test } from "node:test";
+ import assert from "node:assert/strict";
+-import { colorize, errorValue, formatWatchEvent, homeView, leanStatus, projectContext, projectDoctorStats, projectList, writeToon } from "./output.js";
++import { colorize, errorValue, formatWatchEvent, homeView, leanStatus, projectContext, projectDoctorStats, projectList, writeError, writeToon } from "./output.js";
+ 
+ const TASK_ACTIVITY = "task.activity";
+ const TASK_STATE = "task.state";
+ const WORKSPACE_PROJ = "/workspace/proj";
+ const OCCURRED_AT_MID = "2026-07-18T00:06:12.414Z";
+ const OCCURRED_AT_LATE = "2026-07-18T00:24:11.282Z";
+ const WORKSPACE_EXAMPLE = "/workspace/example";
+ const TASKFERRY_BIN = "/bin/taskferry";
+ const TASK_MODEL_SOL = "openai/gpt-5.6-sol";
+ const TASK_STARTED_AT_EXAMPLE = "2026-08-01T00:00:00.000Z";
+@@ -316,105 +316,59 @@ describe("leanStatus --full overlayDirs trimming", () => {
+     assert.equal(lean.overlayDirs, null);
+   });
+ 
+   test("non-full status never surfaces overlayDirs at all", () => {
+     const detail = { id: "t1", status: "running", overlayDirs: { root: OVERLAY_ROOT, tmpRoot: OVERLAY_TMP_ROOT, upperDir: "x", workDir: "y", rwBinds: [], rwFileBinds: [] } };
+     const lean = leanStatus(detail);
+     assert.equal("overlayDirs" in lean, false);
+   });
+ });
+ 
+-describe("writeToon status coloring", () => {
+-  test("colors a status field in the nested (non-uniform) task layout when stdout is a TTY", () => {
++describe("writeToon TTY output", () => {
++  test("routes to the pretty renderer when stdout is a TTY", () => {
+     const { io, output } = fakeStdoutIo(true);
+-    // Mixed key sets across rows (one has failureReason, one doesn't) forces
+-    // toon's expanded `status: x` line layout instead of the tabular one.
+-    writeToon({ tasks: [{ id: "a", status: "crashed", failureReason: "boom" }, { id: "b", status: "done" }] }, io);
++    writeToon({ id: "a", status: "done" }, io);
+ 
+-    assert.ok(output().includes("status: \x1b[31mcrashed\x1b[0m"));
+-    assert.ok(output().includes("status: \x1b[32mdone\x1b[0m"));
++    assert.ok(output().includes("\x1b[32mdone\x1b[39m"), output());
++    assert.ok(!output().includes("status: "), output());
+   });
+ 
+-  test("colors a status field in the tabular (uniform) task layout when stdout is a TTY", () => {
+-    const { io, output } = fakeStdoutIo(true);
+-    writeToon({ tasks: [{ id: "a", status: "done" }, { id: "b", status: "running" }] }, io);
++  test("still writes plain TOON with no ANSI codes when stdout is not a TTY", () => {
++    const { io, output } = fakeStdoutIo(false);
++    writeToon({ id: "a", status: "done" }, io);
+ 
+-    assert.ok(output().includes("a,\x1b[32mdone\x1b[0m"));
+-    assert.ok(output().includes("b,\x1b[33mrunning\x1b[0m"));
++    assert.ok(!output().includes("\x1b["), output());
++    assert.ok(output().includes("status: done"), output());
+   });
+ 
+-  test("leaves plain, unmarked status text when stdout is not a TTY (piped/redirected)", () => {
++  test("non-TTY output for a task list is byte-identical to the pre-existing TOON shape", () => {
+     const { io, output } = fakeStdoutIo(false);
+     writeToon({ tasks: [{ id: "a", status: "done" }, { id: "b", status: "crashed" }] }, io);
+ 
+-    assert.ok(!output().includes("\x1b["));
+-    assert.ok(output().includes("a,done"));
+-    assert.ok(output().includes("b,crashed"));
+-  });
+-
+-  test("does not color a status value with no known color mapping (e.g. unknown)", () => {
+-    const { io, output } = fakeStdoutIo(true);
+-    writeToon({ id: "a", status: "unknown" }, io);
+-
+-    assert.ok(!output().includes("\x1b["));
+-    assert.ok(output().includes("status: unknown"));
+-  });
+-});
+-
+-describe("writeToon doctor coloring", () => {
+-  test("colors healthy/installed/isolated true green and false red", () => {
+-    const { io, output } = fakeStdoutIo(true);
+-    writeToon({ healthy: true, integrations: { claude: { installed: false }, playwrightMcpIsolation: { opencode: { isolated: true } } } }, io);
+-
+-    assert.ok(output().includes("healthy: \x1b[32mtrue\x1b[0m"));
+-    assert.ok(output().includes("installed: \x1b[31mfalse\x1b[0m"));
+-    assert.ok(output().includes("isolated: \x1b[32mtrue\x1b[0m"));
+-  });
+-
+-  test("leaves `checked` uncolored -- false there means unverified, not failed", () => {
+-    const { io, output } = fakeStdoutIo(true);
+-    writeToon({ checked: false }, io);
+-
+-    assert.ok(!output().includes("\x1b["));
+-    assert.ok(output().includes("checked: false"));
+-  });
+-
+-  test("colors trend.direction improving green and worsening red, leaves unknown uncolored", () => {
+-    const { io: ioImproving, output: outputImproving } = fakeStdoutIo(true);
+-    writeToon({ direction: "improving" }, ioImproving);
+-    assert.ok(outputImproving().includes("direction: \x1b[32mimproving\x1b[0m"));
+-
+-    const { io: ioWorsening, output: outputWorsening } = fakeStdoutIo(true);
+-    writeToon({ direction: "worsening" }, ioWorsening);
+-    assert.ok(outputWorsening().includes("direction: \x1b[31mworsening\x1b[0m"));
+-
+-    const { io: ioUnknown, output: outputUnknown } = fakeStdoutIo(true);
+-    writeToon({ direction: "unknown" }, ioUnknown);
+-    assert.ok(!outputUnknown().includes("\x1b["));
++    assert.equal(output(), "tasks[2]{id,status}:\n  a,done\n  b,crashed\n");
+   });
+ 
+-  test("colors warnings yellow and info dim, without swallowing the text itself", () => {
++  test("writeError on a TTY falls through to the fallback renderer's bold labels", () => {
+     const { io, output } = fakeStdoutIo(true);
+-    writeToon({ warnings: ["bwrap is not installed"], info: ["sandboxing unavailable on this platform"] }, io);
++    writeError(new Error("error: boom\nhelp: try again"), io);
+ 
+-    assert.ok(output().includes("\x1b[33mbwrap is not installed\x1b[0m"));
+-    assert.ok(output().includes("\x1b[2msandboxing unavailable on this platform\x1b[0m"));
++    assert.ok(output().includes("boom"), output());
++    assert.ok(output().includes("try again"), output());
++    assert.ok(!output().includes("error: boom"), output());
+   });
+ 
+-  test("no ANSI escapes anywhere when stdout is not a TTY, even with warnings/booleans/direction present", () => {
++  test("writeError on non-TTY is unchanged: plain TOON error:/help: lines", () => {
+     const { io, output } = fakeStdoutIo(false);
+-    writeToon({ healthy: true, direction: "worsening", warnings: ["bwrap missing"] }, io);
++    writeError(new Error("error: boom\nhelp: try again"), io);
+ 
+-    assert.ok(!output().includes("\x1b["));
+-    assert.ok(output().includes("healthy: true"));
+-    assert.ok(output().includes("direction: worsening"));
+-    assert.ok(output().includes("bwrap missing"));
++    assert.ok(!output().includes("\x1b["), output());
++    assert.ok(output().includes("error: boom") && output().includes("help: try again"), output());
+   });
+ });
+ 
+ describe("projectDoctorStats", () => {
+   function stats(overrides = {}) {
+     return {
+       byModel: [{ model: "m1", dispatches: 2, done: 1, crashed: 1, doneRate: 0.5, crashRate: 0.5 }],
+       failureReasons: [],
+       unknownBacklog: { total: 0, tasks: [] },
+       computedAt: TASK_STARTED_AT_EXAMPLE,

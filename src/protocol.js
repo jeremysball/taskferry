@@ -44,6 +44,15 @@ export const RESULT_FIELDS = new Set([
   "diff",
   "diffStat",
   "changesetError",
+  "checkStatus",
+  "checkCommand",
+  "checkExitCode",
+  "checkOutputTail",
+  "checkStartedAt",
+  "checkEndedAt",
+  "checkOverride",
+  "parentTaskId",
+  "projectConfigWarning",
 ]);
 export class ProtocolError extends Error {
   /**
@@ -179,6 +188,7 @@ const METHOD_PARAMS = {
       ["allowedDirs", isNonEmptyStringArray],
       ["executor", isKnownExecutor],
       ["class", isNonEmptyString],
+      ["parentTaskId", isNonEmptyString],
     ],
   },
   "task.cancel": {
@@ -244,6 +254,7 @@ const METHOD_PARAMS = {
       ["env", isEnvironment],
       ["executor", isKnownExecutor],
       ["class", isNonEmptyString],
+      ["parentTaskId", isNonEmptyString],
     ],
   },
   "task.context": {
@@ -252,7 +263,7 @@ const METHOD_PARAMS = {
   },
   "task.accept": {
     required: [["taskId", isNonEmptyString]],
-    optional: [],
+    optional: [["force", isBoolean]],
   },
   "task.reject": {
     required: [["taskId", isNonEmptyString]],
@@ -401,9 +412,9 @@ export function successResponse(id, result) {
   return { version: PROTOCOL_VERSION, ok: true, id, result };
 }
 
-/** @param {string | null} id @param {string} code @param {string} message @param {string} help */
-export function errorResponse(id, code, message, help) {
-  return { version: PROTOCOL_VERSION, ok: false, error: { code, message, help }, id };
+/** @param {string | null} id @param {string} code @param {string} message @param {string} help @param {string} [detail] */
+export function errorResponse(id, code, message, help, detail) {
+  return { version: PROTOCOL_VERSION, ok: false, error: { code, message, help, detail: detail ?? message }, id };
 }
 
 /** @param {string} subscriptionId @param {unknown} event */

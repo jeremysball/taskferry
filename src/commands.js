@@ -15,7 +15,6 @@ import {
 import { defaultRunCommandAsync as defaultShellRunner, pluginInstalled } from "./setup.js";
 import { checkClaudeCodePlaywrightIsolation, checkOpencodePlaywrightIsolation } from "./mcp-isolation.js";
 import { checkBwrapAvailableAsync } from "./sandbox.js";
-import { checkSkills as defaultCheckSkills } from "../scripts/generate-skill.js";
 import { normalizeDirectory, resolveWorkspaceRoot } from "./paths.js";
 import { loadConfig } from "./config.js";
 import { computeDoctorStats } from "./doctor-stats.js";
@@ -132,18 +131,6 @@ function runVersion() {
   return { name: "taskferry", version: readPackageVersion(), protocolVersion: PROTOCOL_VERSION };
 }
 
-async function ensureSkillSync(checkSkills) {
-  try {
-    checkSkills();
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    throw new UsageError(
-      `taskferry's own skill files are out of sync: ${message}`,
-      "Run `npm run skill:generate` in the taskferry repo, then retry dispatch"
-    );
-  }
-}
-
 // Dispatch forwards these option keys through to task.dispatch verbatim, only
 // when the caller set them. The daemon's allowed-params spec rejects unknown
 // keys, so an explicitly-undefined value (the args.js default for an omitted
@@ -158,8 +145,7 @@ function pickDispatchOptions(options) {
   return picked;
 }
 
-async function runDispatch(options, { client, cwd, env, checkSkills }) {
-  await ensureSkillSync(checkSkills);
+async function runDispatch(options, { client, cwd, env }) {
   const directory = normalizeDirectory(options.directory || cwd);
   return client.request("task.dispatch", {
     env,
@@ -494,7 +480,6 @@ function resolveRunCommandDeps(deps) {
     env: deps.env ?? process.env,
     runShellCommand: deps.runShellCommand ?? defaultShellRunner,
     platform: deps.platform ?? process.platform,
-    checkSkills: deps.checkSkills ?? defaultCheckSkills,
     resolveWorkspaceRoot: deps.resolveWorkspaceRoot ?? resolveWorkspaceRoot,
   };
 }

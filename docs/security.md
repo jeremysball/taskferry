@@ -107,7 +107,8 @@ the old restart-required behavior for that one field.
 - A fixed set of daemon-controlled plumbing variables can never be
   overridden by a caller's env, regardless of what it sets: `PATH`,
   `HOME`, `TASKFERRY_STATE_DIR`, `TASKFERRY_RUNTIME_DIR`,
-  `TASKFERRY_CACHE_DIR`, `TASKFERRY_SOCKET_PATH`. These are resolved once
+  `TASKFERRY_CACHE_DIR`, `TASKFERRY_SOCKET_PATH`, `TASKFERRY_OVERLAY_TMP_DIR`.
+  These are resolved once
   at the daemon's own startup; letting a caller override any of them (most
   notably `TASKFERRY_SOCKET_PATH`) could misroute a nested `taskferry`
   call made from inside a dispatched worker.
@@ -222,7 +223,9 @@ secrets you don't want sent there. Specifics:
   supply, when a source is available.
 - **Bounded.** At most 120,000 chars (`TASKFERRY_ADVISOR_CONTEXT_CHARS`
   default, in chars / code points) of the chosen tail are attached, read
-  via `commands.js`'s `readTailChars()`; an unreadable transcript
+  via `extractTranscriptText()` in `src/advisor-context.js` (for the Claude
+  Code session path) or the `task.tail` RPC (for the calling ferry's own
+  task log); an unreadable transcript
   surfaces as a `UsageError` at parse time rather than a silently empty
   context, so a misconfigured caller fails loudly instead of sending a
   prompt with no context the caller expected to be there. The budget is
@@ -231,7 +234,7 @@ secrets you don't want sent there. Specifics:
   over the config file.
 
 The Claude Code session path is resolved by
-`commands.js`'s `claudeTranscriptPath()`, so a future change to how
+`src/advisor-context.js`'s `claudeTranscriptPath()`, so a future change to how
 Claude Code organizes its transcripts will be picked up there; the budget
 and the priority order live next to it. `--summarize-context` on
 `taskferry advisor` (off by default) is a separate, additional
@@ -384,8 +387,12 @@ runs wrapped in
   (and, for a git worktree, the scoped git-common-dir slice described
   above) is mounted as a copy-on-write overlay instead of a plain
   read-write bind: all writes and deletes land in a per-task upper layer
-  under `/tmp/taskferry-cow-<task-id>/`, never on the real directory. This
-  requires bwrap >= 0.8 (`--overlay-src`/`--overlay`); a host below that
+  under `<overlayTmpRoot>/taskferry-cow-<task-id>/`, never on the real
+  directory. `overlayTmpRoot` defaults to `<runtimeDir>/overlay` (e.g.
+  `/run/user/<uid>/taskferry/overlay`), not `/tmp` — it was moved off
+  `os.tmpdir()` so two daemons on the same host don't share an overlay
+  namespace (taskferry#286); override it with `TASKFERRY_OVERLAY_TMP_DIR`.
+  This requires bwrap >= 0.8 (`--overlay-src`/`--overlay`); a host below that
   floor fails the dispatch with a `crashed` task and a `spawnError`
   explaining why, the same fail-closed shape as a missing `bwrap` binary --
   unless overlay is explicitly disabled **for a dispatch role**
@@ -396,10 +403,13 @@ runs wrapped in
   "an advisor has no path to persist a write"), so a globally disabled
   overlay crashes an advisor dispatch with a `spawnError` instead of
   falling back, and `--no-overlay` is not accepted on `taskferry advisor`
-  at all. An advisor's sandbox additionally runs with `--unshare-net`
-  instead of `--share-net`, and its `runtimeDir` is bound read-only so the
-  daemon's Unix socket (which lives there) is unreachable -- `--unshare-net`
-  alone does not block Unix-domain-socket connects through a writable bind.
+  at all. An advisor's sandbox keeps `--share-net` like every other
+  role — the worker CLI still needs outbound network to reach its model
+  provider, so `--unshare-net` was tried for advisor and reverted when it
+  blocked that. The advisor-specific guardrail is narrower: its `runtimeDir`
+  is bound read-only instead of read-write, so the daemon's Unix socket
+  (which lives there) is unreachable from inside the sandbox, without
+  touching the network namespace at all.
   A worker's `git commit` inside the sandbox is never
   replayed as a commit -- only a working-tree-style diff, computed against
   the real pre-dispatch `HEAD`, survives into `accept`.

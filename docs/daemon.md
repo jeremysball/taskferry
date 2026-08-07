@@ -123,8 +123,8 @@ different version treats the connection as broken and fails closed rather
 than guessing at a schema it doesn't recognize.
 
 Requests: `{ version, id, method, params }`. Responses: `{ version, id, ok:
-true, result }` or `{ version, id, ok: false, error: { code, message, help }
-}`. A single connection can have many requests in flight at once, matched
+true, result }` or `{ version, id, ok: false, error: { code, message, help,
+detail } }`. A single connection can have many requests in flight at once, matched
 back to callers by `id` (a random UUID per request).
 
 Events use a separate envelope, `{ version, type: "event", subscriptionId,

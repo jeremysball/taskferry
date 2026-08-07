@@ -37,13 +37,20 @@ you've already passed it.
 Every sandboxed ferry writes to a copy-on-write overlay, never the real
 directory directly -- a rogue or mistaken dispatch cannot corrupt whatever
 directory you point it at, worktree or not. `taskferry result --diff` also
-fails closed rather than silently corrupting: if the directory's real git
-HEAD has moved since dispatch (someone or something checked out a different
-branch there while the task was in flight), extraction refuses with an
-explicit "HEAD moved" error instead of returning a diff computed against the
-wrong tree.
+handles HEAD drift safely rather than silently corrupting: if the
+directory's real git HEAD has moved since dispatch (someone or something
+checked out a different branch there while the task was in flight),
+extraction reports a `headDrift` field and tries to recover via `git apply
+--3way` against the new HEAD. If recovery succeeds, the diff is applied and
+the task settles `pending` for normal `accept`/`reject`; if the 3-way merge
+fails, the task is auto-rejected with a `changesetError`; if recovery
+couldn't be determined, the task settles `pending` with `changesetError`
+for you to look at by hand. The diff is never silently computed against the
+wrong tree, but extraction no longer refuses outright — it always records
+something (taskferry#261 replaced the old fail-closed "HEAD moved" refusal
+with this recover-or-flag behavior).
 
-That guard only fires on a *confirmed* HEAD mismatch, though -- it won't
+That handling only fires on a *confirmed* HEAD mismatch, though -- it won't
 catch every way a shared directory can bite you (a concurrent file edit that
 doesn't touch HEAD, for instance), and hitting it mid-session is still lost
 wall time you'd rather not spend. **Always dispatch at a worktree, never the
@@ -52,9 +59,9 @@ doing one task at a time on the reasoning that nothing else would touch the
 directory -- that reasoning failed in practice (taskferry#261): a real
 solo session hit an unexplained branch flip on the main checkout mid-dispatch,
 and `taskferry result --diff` silently produced a diff comparing the wrong
-trees before the HEAD-drift guard above existed. "Nothing else touches this
+trees before this HEAD-drift handling existed. "Nothing else touches this
 directory" is an assumption, not a guarantee the sandbox can enforce, and the
-cost of being wrong (a corrupted diff, or now a stalled "HEAD moved" refusal
+cost of being wrong (a corrupted diff, or now a stalled `changesetError`
 mid-session) is never worth the one worktree-creation step it saves. Create
 a worktree even for a single quick dispatch. The two reasons worktrees help
 beyond this -- branch isolation (parallel sessions on different branches
@@ -64,17 +71,21 @@ in flight, which can make `accept` conflict later) -- still apply on top of
 this; they're not the only justification anymore.
 
 **A worker's writes only land somewhere durable inside `--directory`.** The
-sandbox bind-mounts the dispatched directory's own tree plus its git
-internals -- it does not follow a symlink out to some other path on the
-host, even one that looks like it should resolve fine (e.g. a worktree's
-scratch directory symlinked out to a shared location in the main checkout).
-A write through a path that resolves outside `--directory` lands in a
-throwaway overlay copy that vanishes at settlement, never appears in
-`taskferry result --diff` (doubly true for a gitignored path, which a
-git-diff-based extraction can't see regardless), and the worker's own
-narration will still report success. If multiple worktrees need to share
-scratch files (an SDD plan's ledger, briefs, reports), copy them into each
-worktree instead of symlinking across the sandbox boundary.
+sandbox mounts `--directory` as the one copy-on-write overlay and binds the
+rest of the root read-only, plus a small set of explicitly read-write paths
+(the git common dir, `runtimeDir`, any `--allowed-dirs` entries) -- there is
+no second, throwaway overlay for anything else. A symlink out to some other
+path on the host (e.g. a worktree's scratch directory symlinked to a shared
+location in the main checkout) resolves into the read-only root, so a write
+through it fails with EROFS rather than silently landing anywhere. A write
+that resolves to one of the other read-write paths *does* land durably on
+the host, but still doesn't appear in `taskferry result --diff`, because
+diff extraction is rooted at `--directory` only (doubly true for a
+gitignored path, which a git-diff-based extraction can't see regardless) --
+and the worker's own narration will still report success either way. If
+multiple worktrees need to share scratch files (an SDD plan's ledger,
+briefs, reports), put them inside the dispatched `--directory` (or one of
+its allowed dirs) instead of symlinking across the sandbox boundary.
 
 ## Enabling The Verification Gate
 
@@ -183,10 +194,11 @@ command (scaffold one with `taskferry init`; see
 `docs/config.md#taskferrytoml` for the schema) runs that command
 automatically inside the worker's copy-on-write overlay at settle. The
 gate's verdict is recorded on the task as `checkStatus` (`none`/`running`/
-`passed`/`failed`/`timeout`/`interrupted`) and surfaces on
-`taskferry status <id> --full` and `taskferry result <id> --fields ...`
-even before `accept` runs. `accept` then refuses any task whose gate
-has not settled in your favor:
+`passed`/`failed`/`timeout`/`interrupted`) and surfaces on plain
+`taskferry status <id>` (it's not `--full`-only) and `taskferry result <id>
+--fields ...` even before `accept` runs; `--full` adds the changeset side
+(`diff`, `diffStat`, `headDrift`, `changesetError`, ...) on top. `accept`
+then refuses any task whose gate has not settled in your favor:
 
 - `checkStatus: "failed"` or `"timeout"` — refuse with a multi-line
   fix-forward message (command, exit/timeout, last 40 lines of the
@@ -612,16 +624,18 @@ Taskferry, not a Taskferry feature.
 
 ## `no_output_timeout` Crashes
 
-A worker can crash with `status: crashed, failureReason: no_output_timeout` while
-genuinely still working, not actually stuck: high-reasoning-effort models can go
-silent for minutes mid-turn (long internal reasoning, or a slow tool call such as
-a full test suite), and some models (e.g. `glm-5.2`) stream long stretches of
-empty `</think>` thinking-tail events that don't reset the watchdog. Taskferry's
-own watchdog kills the process regardless of whether real work is happening
-underneath.
+A worker can crash with `status: crashed, failureReason:
+no_output_timeout_dead_spawn` (no parseable log event ever emitted) or
+`no_output_timeout_stalled` (some parseable event emitted, then no progress
+past the post-output budget) while genuinely still working, not actually
+stuck: high-reasoning-effort models can go silent for minutes mid-turn (long
+internal reasoning, or a slow tool call such as a full test suite), and some
+models (e.g. `glm-5.2`) stream long stretches of empty `</think>`
+thinking-tail events that don't reset the watchdog. Taskferry's own watchdog
+kills the process regardless of whether real work is happening underneath.
 
-Treat every `no_output_timeout` crash as a possible false-positive kill, not proof
-the task failed:
+Treat every `no_output_timeout_*` crash as a possible false-positive kill,
+not proof the task failed:
 
 - Check `taskferry status <id> --full` for `sessionId`. If it is non-null, real
   work happened before the kill — resume that exact session rather than
@@ -635,7 +649,7 @@ the task failed:
   new/changed files) before deciding whether to resume or restart. A crash can
   land mid-write; verify what actually landed on disk rather than assuming
   either "nothing happened" or "it finished."
-- Two or more consecutive `no_output_timeout` crashes on the same
+- Two or more consecutive `no_output_timeout_*` crashes on the same
   prompt+model+variant combination, especially with `sessionId: null` every
   time, is a signal to change something rather than retry unchanged: drop to a
   less exhaustive `--variant`, switch model/provider, or shorten the prompt so

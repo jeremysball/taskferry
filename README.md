@@ -124,9 +124,10 @@ counts by status, the task list, and the suggested next action.
 - **TOON output by default.** Token-Oriented Object Notation, roughly
   40% fewer tokens than JSON for the same data, list-shaped results
   rendered as compact tables. Built for agents to consume.
-- **Strict workspace scoping by directory realpath.** Two worktrees of
-  the same repo are two distinct workspaces; a task dispatched from one
-  is invisible from the other.
+- **Workspace scoping by git root.** Two unrelated repos are two distinct
+  workspaces; a worktree of a repo shares the parent repo's workspace, so
+  a `--directory` pointed at the main checkout also sees tasks dispatched
+  into any linked worktree of that repo.
 - **`advisor` for consultations, `summary` for reports.** `advisor` is a
   blocking ask-a-bigger-model call; `summary` produces a bounded report
   or activity snapshot for a finished task.

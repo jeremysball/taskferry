@@ -35,7 +35,7 @@
     "skill:check": "node scripts/generate-skill.js --check",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
-    "check": "git ls-files '*.js' | xargs -P4 -I{} node --check {} && npm run lint && npm run typecheck && npm test",
+    "check": "git ls-files '*.js' | xargs -P4 -I{} node --check {} && npm run lint && npm run typecheck && npm run skill:check && npm test",
     "prepare": "git config core.hooksPath .githooks || true"
   },
   "keywords": [],

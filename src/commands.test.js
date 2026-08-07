@@ -385,9 +385,8 @@ test("dispatch does NOT resolve via resolveWorkspaceRoot (regression test pinnin
     seenDirectory = params.directory;
     return { id: "oc_1", status: "queued" };
   } };
-  const checkSkills = () => {};
 
-  await runCommand("dispatch", { directory: void 0, prompt: "p" }, { resolveWorkspaceRoot: resolveWorkspaceRootFn,  checkSkills,  client,  cwd });
+  await runCommand("dispatch", { directory: void 0, prompt: "p" }, { resolveWorkspaceRoot: resolveWorkspaceRootFn,  client,  cwd });
 
   assert.equal(called, false, "dispatch must never consult resolveWorkspaceRoot");
   assert.equal(seenDirectory, cwd);
@@ -456,7 +455,7 @@ test("dispatch forwards executor to the RPC payload when set", async () => {
     },
   };
 
-  await runCommand("dispatch", { prompt: "hi", directory: root, executor: "pi" }, { client, cwd: root, checkSkills: () => {} });
+  await runCommand("dispatch", { prompt: "hi", directory: root, executor: "pi" }, { client, cwd: root });
 
   assert.equal(captured.method, TASK_DISPATCH_METHOD);
   assert.equal(captured.params.executor, "pi");
@@ -487,7 +486,7 @@ test("dispatch forwards noSandbox to the RPC payload when set", async () => {
       return { id: "oc_1" };
     },
   };
-  await runCommand("dispatch", { prompt: "hi", directory: root, noSandbox: true }, { client, cwd: root, checkSkills: () => {} });
+  await runCommand("dispatch", { prompt: "hi", directory: root, noSandbox: true }, { client, cwd: root });
   assert.equal(capturedParams.noSandbox, true);
 });
 
@@ -500,7 +499,7 @@ test("dispatch omits noSandbox from the RPC payload when not set", async () => {
       return { id: "oc_1" };
     },
   };
-  await runCommand("dispatch", { prompt: "hi", directory: root }, { client, cwd: root, checkSkills: () => {} });
+  await runCommand("dispatch", { prompt: "hi", directory: root }, { client, cwd: root });
   assert.equal("noSandbox" in capturedParams, false);
 });
 
@@ -514,7 +513,7 @@ test("dispatch forwards the caller's env to the RPC payload", async () => {
     },
   };
   const injectedEnv = { FOO: "bar" };
-  await runCommand("dispatch", { prompt: "hi", directory: root }, { client, cwd: root, env: injectedEnv, checkSkills: () => {} });
+  await runCommand("dispatch", { prompt: "hi", directory: root }, { client, cwd: root, env: injectedEnv });
   assert.deepEqual(capturedParams.env, injectedEnv);
 });
 
@@ -527,7 +526,7 @@ test("dispatch no longer forwards keySlot", async () => {
       return { id: "oc_1" };
     },
   };
-  await runCommand("dispatch", { prompt: "hi", directory: root, keySlot: "primary" }, { client, cwd: root, checkSkills: () => {} });
+  await runCommand("dispatch", { prompt: "hi", directory: root, keySlot: "primary" }, { client, cwd: root });
   assert.equal("keySlot" in capturedParams, false);
 });
 
@@ -737,35 +736,6 @@ test("summary --mode report still forwards the caller's env to the RPC payload",
   assert.equal("mode" in capturedParams, false);
 });
 
-test("dispatch refuses to run when the generated skill copies are stale", async () => {
-  const root = mkTmpRoot(TASKFERRY_TEST_TMP_PREFIX);
-  const client = {
-    request: async () => {
-      throw new Error("task.dispatch should not be called when skill:check fails");
-    },
-  };
-  const checkSkills = () => {
-    throw new Error("stale generated skill copies: integrations/claude/skills/using-taskferry/SKILL.md");
-  };
-  await assert.rejects(
-    () => runCommand("dispatch", { prompt: "hi", directory: root }, { cwd: root,  client,  checkSkills }),
-    /taskferry's own skill files are out of sync/
-  );
-});
-
-test("dispatch proceeds normally when the generated skill copies are in sync", async () => {
-  const root = mkTmpRoot(TASKFERRY_TEST_TMP_PREFIX);
-  let checkSkillsCalled = false;
-  const checkSkills = () => {
-    checkSkillsCalled = true;
-  };
-  const client = {
-    request: async () => ({ id: "oc_1" }),
-  };
-  const result = await runCommand("dispatch", { prompt: "hi", directory: root }, { cwd: root,  client,  checkSkills });
-  assert.equal(checkSkillsCalled, true);
-  assert.equal(result.id, "oc_1");
-});
 
 test("doctor warns when opencode playwright MCP is checked and not isolated", async () => {
   const home = mkTmpDir(TASKFERRY_DOCTOR_HOME_PREFIX);
@@ -1065,7 +1035,7 @@ test("result --diff requests fields: ['diff']", async () => {
 test("dispatch forwards noOverlay to task.dispatch", async () => {
   let capturedParams = null;
   const client = { request: async (_method, params) => { capturedParams = params; return {}; } };
-  await runCommand("dispatch", { prompt: "hi", directory: "/tmp", noOverlay: true }, { client, cwd: "/tmp", checkSkills: () => {} });
+  await runCommand("dispatch", { prompt: "hi", directory: "/tmp", noOverlay: true }, { client, cwd: "/tmp" });
   assert.equal(capturedParams.noOverlay, true);
 });
 
@@ -1078,7 +1048,7 @@ test("dispatch forwards class to the RPC payload when set", async () => {
       return { id: "oc_1" };
     },
   };
-  await runCommand("dispatch", { prompt: "hi", directory: root, class: "implementer" }, { client, cwd: root, checkSkills: () => {} });
+  await runCommand("dispatch", { prompt: "hi", directory: root, class: "implementer" }, { client, cwd: root });
   assert.equal(capturedParams.class, "implementer");
 });
 
@@ -1091,7 +1061,7 @@ test("dispatch omits class from the RPC payload when not set", async () => {
       return { id: "oc_1" };
     },
   };
-  await runCommand("dispatch", { prompt: "hi", directory: root }, { client, cwd: root, checkSkills: () => {} });
+  await runCommand("dispatch", { prompt: "hi", directory: root }, { client, cwd: root });
   assert.equal("class" in capturedParams, false);
 });
 

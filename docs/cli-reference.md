@@ -23,9 +23,9 @@ list, and contextual next-step suggestions.
 
 ```
 $ taskferry
+workspace: /workspace/my-repo
 bin: ~/.local/bin/taskferry
 description: Manage background OpenCode tasks in the current workspace.
-workspace: /workspace/my-repo
 counts:
   queued: 0
   running: 1
@@ -61,11 +61,11 @@ summary immediately.
 | `--allowed-dirs <path,path,...>` | Extra directories bound read-write inside the sandbox for this dispatch, on top of the auto-detected git-common-dir for a worktree and any config-level `allowedDirs`; see [security.md](security.md). **`/tmp` needs this too** — the sandbox mounts a fresh, empty `--tmpfs /tmp`, so any path under `/tmp` that isn't `--directory`, `runtimeDir`, or an `--allowed-dirs` entry is invisible inside the sandbox even though it exists on the host |
 | `--require-final-marker <regex>` | Fail the task if the final message doesn't match this pattern (case-sensitive, standard JS RegExp semantics). Sets `incomplete: true` on the settled task when the final message is empty (after trimming) or doesn't match. Patterns that don't compile as a standard JS RegExp reject the dispatch up front with a usage error. Useful for enforcing a report-format contract like `^Status: (DONE\|DONE_WITH_CONCERNS\|BLOCKED\|NEEDS_CONTEXT)$` on the last line of model output. |
 | `--class <name>` | Optional free-text task-class tag for telemetry aggregation; any non-empty string, no fixed-list validation — taskferry stores whatever is given |
-| `--parent-task <id>` | Tag this dispatch as fixing/retrying an earlier task. Persisted as `parentTaskId` and surfaced on `taskferry status <id>` / `taskferry result <id> --fields parentTaskId`. The earlier task's check-gate failure message echoes the link when this dispatch is the suggested fix-forward resume (see `## taskferry accept <id>` below) |
+| `--parent-task <id>` | Tag this dispatch as fixing/retrying an earlier task. Persisted as `parentTaskId` and surfaced on `taskferry status <id> --full` / `taskferry result <id> --fields parentTaskId` (not on plain `taskferry status <id>`). The earlier task's check-gate failure message echoes the link when this dispatch is the suggested fix-forward resume (see `## taskferry accept <id>` below) |
 | `--no-sandbox` | Run this dispatch without the bwrap filesystem sandbox (default: sandboxed on Linux, no-op on macOS); see [security.md](security.md) |
 
 ```
-$ taskferry dispatch --prompt "Fix the failing tests" --directory /workspace/my-repo
+$ taskferry dispatch --prompt "Fix the failing tests" --directory /workspace/my-repo --executor opencode
 id: oc_mrn4ipkp_19450105
 status: running
 directory: /workspace/my-repo
@@ -126,7 +126,7 @@ planning or hard-debugging help mid-task, not for open-ended background work
 
 | Flag | Notes |
 |---|---|
-| `--prompt <text>` | Required. Pass `-` to read the prompt from piped stdin instead, same as `dispatch` |
+| `--prompt <text>` | Optional; auto-attaches caller context (Claude Code session transcript or the calling ferry's own task log) when omitted, and prepends that context ahead of `--prompt` when both are present. Pass `-` to read the prompt from piped stdin instead, same as `dispatch` |
 | `--model <id>` | Required, no default; the caller picks the advisor |
 | `--directory <path>` | Defaults to the current git workspace root (falls back to the literal current directory outside a git repo) |
 | `--variant <name>` | Optional reasoning-effort override |
@@ -181,14 +181,17 @@ failureDetail`) carries the matched log line or timeout detail behind
 whichever `failureReason` fired. `incomplete` is `true` when a `done`
 task has an empty final message or one that doesn't match
 `--require-final-marker`; `finalMarker` echoes the regex pattern when one
-was supplied. Both fields only appear when set, unlike `failureReason`/
-`failureDetail`, which are always present (as `null` when unset).
+was supplied. All four fields — `failureReason`, `failureDetail`,
+`incomplete`, `finalMarker` — are omitted entirely from plain `taskferry
+status <id>` output and only appear with `--full`. `taskferry result
+<id> --fields ...` is the one place `failureReason`/`failureDetail` are
+always present as `null` when unset, rather than omitted.
 
 ## `taskferry tail <id> [--chars <number>]`
 
 Returns the final `--chars` Unicode code points of the newest parsed `text`
 event for a task, reading the local task log only (never sends content to a
-model). Defaults to 1000, maximum 65536. The response includes the complete
+model). Defaults to 1000, maximum 131072. The response includes the complete
 event length and `truncated` so callers know whether the suffix omitted
 earlier content. A crashed task whose log has no parseable events at all
 (a boot failure, or a watchdog kill before first output) never grows a
@@ -233,7 +236,7 @@ tripped.
 | Flag | Notes |
 |---|---|
 | `--full` | Include untruncated narration; only rejected as a usage error when combined with `--fields` that omits `narration` — `--full` alone (no `--fields`) works fine |
-| `--fields <comma-list>` | Project only the fields you need: `message`, `narration`, `tokens`, `cost`, `sessionId`, `exitCode`, `signal`, `spawnError`, `failureReason`, `failureDetail`, `logPath`, `incomplete`, `finalMarker`, `diff`, `diffStat`, `changesetError` |
+| `--fields <comma-list>` | Project only the fields you need: `message`, `narration`, `tokens`, `cost`, `sessionId`, `exitCode`, `signal`, `spawnError`, `failureReason`, `failureDetail`, `logPath`, `incomplete`, `finalMarker`, `diff`, `diffStat`, `changesetError`, `finalStatus`, `class`, `checkStatus`, `checkCommand`, `checkExitCode`, `checkOutputTail`, `checkStartedAt`, `checkEndedAt`, `checkOverride`, `parentTaskId`, `projectConfigWarning` |
 | `--diff` | Print the task's pending changeset (read-only; cannot combine with `--fields` or `--full`) |
 
 ```

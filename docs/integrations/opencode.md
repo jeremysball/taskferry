@@ -17,8 +17,11 @@ taskferry setup
 `$XDG_CONFIG_HOME/opencode/plugins/taskferry.js` (default
 `~/.config/opencode/plugins/taskferry.js`) that resolves to the
 checkout's `src/opencode-plugin.js`. OpenCode auto-loads any module at
-that path on startup, so no edits to `opencode.json` or any other config
-are required.
+that path on startup, so the plugin symlink itself needs no `opencode.json`
+edit. `setup` also patches `opencode.json` in a separate step: if a
+non-isolated `mcp.playwright.command` entry is already present, it appends
+`--isolated` to that command array. A `.jsonc`-only config is left
+untouched, since that step only reads/writes `opencode.json`.
 
 The symlink is self-managed: `taskferry setup` only replaces the file
 at that path when the existing symlink's target is one it created (a
@@ -28,21 +31,24 @@ that path is left alone and `setup` exits with `refusing to replace
 unmanaged path: <path>`. The same command also creates the CLI
 symlink at `~/.local/bin/taskferry` and registers the Claude Code and
 Codex integrations when their CLIs are on `PATH` — see the
-[Install section in the README](../../README.md#install) for the full
+[Quickstart section in the README](../../README.md#quickstart) for the full
 bootstrap.
 
 ## Update
 
 After `git pull` (or any other change to the checkout), re-run
 `taskferry setup` from inside it. The OpenCode leg of `setup` is
-idempotent: when no symlink exists yet, or the existing one resolves to
-a file inside *any* taskferry checkout (its own or a different one, e.g.
-after the checkout moved), it's unlinked and recreated pointing at this
-checkout's `src/opencode-plugin.js`. A dangling symlink (target no longer
-exists) or one pointing at an unrelated file is treated as unmanaged and
+idempotent: when no symlink exists yet, or the existing one resolves to a
+file inside *this same* checkout, it's unlinked and recreated pointing at
+this checkout's `src/opencode-plugin.js`. A symlink that resolves into a
+*different* taskferry checkout is deliberately left alone and rejected as
+unmanaged — a scratch or throwaway clone must not be able to steal a
+symlink the live checkout owns. A dangling symlink (target no longer
+exists) or one pointing at an unrelated file is treated the same way and
 rejected with `refusing to replace unmanaged path: <path>` — remove it by
-hand and re-run `setup`. Restart OpenCode so it reloads the freshly
-linked module.
+hand and re-run `setup`. If a checkout genuinely moved, remove the stale
+symlink by hand before re-running `setup` from the new location. Restart
+OpenCode so it reloads the freshly linked module.
 
 ## Remove
 

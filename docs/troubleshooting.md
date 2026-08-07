@@ -21,8 +21,9 @@ giving up with `error: taskferry daemon did not become ready within
 5000ms`. Causes, roughly in likelihood order:
 
 1. **Permission problem on the runtime directory.** The daemon needs to
-   `mkdir`/`chmod` `TASKFERRY_RUNTIME_DIR` (default
-   `<state-dir>/run`, or `$XDG_RUNTIME_DIR/taskferry`) to mode `0700` before
+   `mkdir`/`chmod` `TASKFERRY_RUNTIME_DIR` (falls back, in priority order,
+   to `$XDG_RUNTIME_DIR/taskferry`, then `/run/user/<uid>/taskferry` if it
+   exists, then `<state-dir>/run` as the last resort) to mode `0700` before
    it can bind a socket there. Check the directory is writable by the
    current user; a stale directory owned by a different user (e.g. left
    over from running taskferry as root once) blocks every subsequent start.
@@ -215,10 +216,11 @@ the agent's launcher, not just the shell you ran it from. See
 
 ## Watch stream never shows an event
 
-Confirm `--directory` matches the exact workspace a task was dispatched
-against (workspace scoping is strict `fs.realpathSync` equality, not
-git-repository identity — two worktrees of the same repo are different
-workspaces, even though they share history). Confirm the task hasn't
+Confirm `--directory` matches the workspace a task was dispatched against
+(workspace scoping matches by `fs.realpathSync` equality OR shared git
+workspace root — a `watch --directory <repo-root>` subscription also
+receives events from a task dispatched into any linked worktree of that
+repo; two unrelated repos never cross-match). Confirm the task hasn't
 already settled before the watch subscription opened: `watch` only streams
 events going forward, it does not replay history — use `taskferry list`/
 `taskferry status` for anything that already happened.

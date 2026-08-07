@@ -55,6 +55,7 @@ message — there is no silent typo tolerance.
 | `defaultExecutor` | `TASKFERRY_DEFAULT_EXECUTOR` | string (`opencode` or `pi`) | `pi` |
 | `envFile` | `TASKFERRY_ENV_FILE` | string (path to a `.env`-style file) | (none) |
 | `profilingEnabled` | `TASKFERRY_PROFILING_ENABLED` | boolean | `false`; see `docs/daemon.md#request-latency-profiling` |
+| `lowerdirStaggerMs` | `TASKFERRY_LOWERDIR_STAGGER_MS` | number | `3000`; `0` disables |
 
 `envDenylist` uses the same comma-separated grammar as `allowedDirs` — a
 flat list of env var names, always stripped from every spawned child

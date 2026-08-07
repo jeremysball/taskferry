@@ -5,6 +5,9 @@ import os from "node:os";
 import path from "node:path";
 import { makeManager, fakeChild, LUNA_MODEL, MIMO_MODEL, MINIMAX_MODEL, UNUSED_TMP, OPENCODE_DATA, AXI_TASKS_CACHE_PI, NO_API_KEY_FOUND, mkdtempTracked } from "./tasks.test-helpers.js";
 
+const OPENCODE_JSONC = "opencode.jsonc";
+const GITIGNORE = ".gitignore";
+
 describe("startTask() writes stdout through executor.normalizeLogEvent (Task 7: write-time normalization)", () => {
   test("JSON events flagged null by normalizeLogEvent are dropped; kept events are written canonicalized", () => {
     const child = fakeChild();
@@ -137,6 +140,60 @@ describe("startTask() merges executor.sandboxAuthFile().sandboxEnv into spawnEnv
     });
     mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), executor: "opencode" });
     assert.equal(captured.opts.env.XDG_DATA_HOME, path.join(cacheDir, OPENCODE_DATA));
+  });
+
+  // opencode creates its config dir on boot (writing .gitignore and a default
+  // opencode.jsonc into it). The sandbox binds the whole root read-only, so
+  // leaving XDG_CONFIG_HOME pointed at the real ~/.config made that boot write
+  // fail EROFS on any machine where opencode had never run before -- a fresh
+  // CI runner, or a new user's first dispatch. Redirect it into the sandboxed
+  // data home (already bound read-write) so the boot write has somewhere to go.
+  test("opencode's sandboxEnv redirects XDG_CONFIG_HOME under the read-write sandboxed data home", () => {
+    let captured = null;
+    const cacheDir = mkdtempTracked("axi-tasks-cache-oc-cfg-");
+    const mgr = makeManager({
+      spawnFn: (cmd, args, opts) => { captured = { cmd, args, opts }; return fakeChild(); },
+      sandboxEnabled: true,
+      checkBwrapAvailableFn: () => ({ checked: true, available: true }),
+      platform: "linux",
+      cacheDir,
+    });
+    mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), executor: "opencode" });
+    const sandboxedDataHome = path.join(cacheDir, OPENCODE_DATA);
+    const configHome = captured.opts.env.XDG_CONFIG_HOME;
+    assert.equal(configHome, path.join(sandboxedDataHome, "config"));
+    // It must sit *under* the data home, because that is the only path
+    // startTask() mkdirs and pushes onto extraRwBinds. A sibling path would
+    // land back on the read-only root bind and reintroduce the EROFS.
+    assert.ok(configHome.startsWith(sandboxedDataHome + path.sep));
+  });
+
+  test("opencode's real config entries are ro-bound into the sandboxed config home, except .gitignore", () => {
+    let captured = null;
+    const cacheDir = mkdtempTracked("axi-tasks-cache-oc-bind-");
+    const homeDir = os.homedir();
+    const realConfigDir = path.join(homeDir, ".config", "opencode");
+    const realJsonc = path.join(realConfigDir, OPENCODE_JSONC);
+    const realGitignore = path.join(realConfigDir, GITIGNORE);
+    const mgr = makeManager({
+      spawnFn: (cmd, args, opts) => { captured = { cmd, args, opts }; return fakeChild(); },
+      sandboxEnabled: true,
+      checkBwrapAvailableFn: () => ({ checked: true, available: true }),
+      platform: "linux",
+      existsFn: (p) => p === realConfigDir || p === realJsonc || p === realGitignore,
+      readdirFn: (p) => (p === realConfigDir ? [OPENCODE_JSONC, GITIGNORE] : []),
+      cacheDir,
+    });
+    mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), executor: "opencode" });
+    const sandboxedConfigDir = path.join(cacheDir, OPENCODE_DATA, "config", "opencode");
+    // The user's real config (custom providers live here) is still visible.
+    const destIdx = captured.args.indexOf(path.join(sandboxedConfigDir, OPENCODE_JSONC));
+    assert.notEqual(destIdx, -1, "expected the real opencode.jsonc to be ro-bound into the sandboxed config dir");
+    assert.equal(captured.args[destIdx - 2], "--ro-bind");
+    assert.equal(captured.args[destIdx - 1], realJsonc);
+    // .gitignore is deliberately NOT bound: opencode rewrites it on boot, and
+    // a read-only bind there would fail exactly the way the real path did.
+    assert.equal(captured.args.indexOf(path.join(sandboxedConfigDir, GITIGNORE)), -1);
   });
 
   test("pi's sandboxEnv rewrites PI_CODING_AGENT_DIR, not XDG_DATA_HOME, and the auth bind destination matches", () => {

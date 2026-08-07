@@ -84,7 +84,7 @@ function resolvePiSessionFile(realSessionsDir, sessionId, { readdirFn = (/** @ty
  * @property {(ctx: SpawnLaunchContext) => string[]} buildSpawnArgs
  * @property {() => string} buildSummaryPrompt
  * @property {(parsed: unknown) => unknown} normalizeLogEvent
- * @property {(args: {homeDir: string, dataDir: string, spawnEnv: NodeJS.ProcessEnv, existsFn: (file: string) => boolean, statFn?: (file: string) => {isDirectory: () => boolean}|null, readdirFn?: (dir: string) => string[], sessionId?: string|null, launchDirectory?: string|null}) => {extraRoBinds: [string, string][], extraRwPairBinds?: [string, string][], sandboxedDataHome: string, sandboxEnv: Record<string, string>}} sandboxAuthFile
+ * @property {(args: {homeDir: string, dataDir: string, spawnEnv: NodeJS.ProcessEnv, existsFn: (file: string) => boolean, statFn?: (file: string) => {isDirectory: () => boolean}|null, readdirFn: (dir: string) => string[], sessionId?: string|null, launchDirectory?: string|null}) => {extraRoBinds: [string, string][], extraRwPairBinds?: [string, string][], sandboxedDataHome: string, sandboxEnv: Record<string, string>}} sandboxAuthFile
  */
 
 /**
@@ -338,15 +338,39 @@ export function opencodeExecutor() {
     // small tmpfs: opencode's snapshot store under here grows unbounded
     // across dispatches (no gc) and previously filled the whole
     // XDG_RUNTIME_DIR tmpfs, starving it of space for sockets/locks too.
-    /** @param {{homeDir: string, dataDir: string, spawnEnv: NodeJS.ProcessEnv, existsFn: (file: string) => boolean, statFn?: (file: string) => {isDirectory: () => boolean}|null, readdirFn?: (dir: string) => string[], sessionId?: string|null, launchDirectory?: string|null}} args @returns {{extraRoBinds: [string, string][], extraRwPairBinds?: [string, string][], sandboxedDataHome: string, sandboxEnv: Record<string, string>}} */
-    sandboxAuthFile({ homeDir, dataDir, spawnEnv, existsFn }) {
+    /** @param {{homeDir: string, dataDir: string, spawnEnv: NodeJS.ProcessEnv, existsFn: (file: string) => boolean, statFn?: (file: string) => {isDirectory: () => boolean}|null, readdirFn: (dir: string) => string[], sessionId?: string|null, launchDirectory?: string|null}} args @returns {{extraRoBinds: [string, string][], extraRwPairBinds?: [string, string][], sandboxedDataHome: string, sandboxEnv: Record<string, string>}} */
+    sandboxAuthFile({ homeDir, dataDir, spawnEnv, existsFn, readdirFn }) {
       const realDataHome = spawnEnv.XDG_DATA_HOME || path.join(homeDir, ".local", "share");
       const realAuthFile = path.join(realDataHome, "opencode", "auth.json");
       const sandboxedDataHome = path.join(dataDir, "opencode-data");
+      // opencode writes into its config dir on boot (a .gitignore, and a
+      // default opencode.jsonc when none exists). The sandbox binds the root
+      // read-only, so pointing XDG_CONFIG_HOME at the real ~/.config made that
+      // boot write fail EROFS on any machine where opencode had not already
+      // run -- a fresh CI runner, or a new user's very first dispatch. Nest
+      // the sandboxed config home under sandboxedDataHome, which startTask()
+      // already mkdirs and binds read-write, so the boot write has somewhere
+      // to land without widening the sandbox.
+      const sandboxedConfigHome = path.join(sandboxedDataHome, "config");
+      const sandboxedConfigDir = path.join(sandboxedConfigHome, "opencode");
+      /** @type {[string, string][]} */
+      const extraRoBinds = existsFn(realAuthFile) ? [[realAuthFile, path.join(sandboxedDataHome, "opencode", "auth.json")]] : [];
+      // Bind the user's real config entries (custom provider definitions,
+      // plugins, agents) in read-only so a sandboxed dispatch still resolves
+      // the same models it would unsandboxed. .gitignore is skipped on
+      // purpose: opencode rewrites it on boot, so a read-only bind there
+      // would fail the same way the unredirected path did.
+      const realConfigDir = path.join(spawnEnv.XDG_CONFIG_HOME || path.join(homeDir, ".config"), "opencode");
+      if (existsFn(realConfigDir)) {
+        for (const entry of readdirFn(realConfigDir)) {
+          if (entry === ".gitignore") continue;
+          extraRoBinds.push([path.join(realConfigDir, entry), path.join(sandboxedConfigDir, entry)]);
+        }
+      }
       return {
         sandboxedDataHome,
-        extraRoBinds: existsFn(realAuthFile) ? [/** @type {[string, string]} */ ([realAuthFile, path.join(sandboxedDataHome, "opencode", "auth.json")])] : [],
-        sandboxEnv: { XDG_DATA_HOME: sandboxedDataHome },
+        extraRoBinds,
+        sandboxEnv: { XDG_DATA_HOME: sandboxedDataHome, XDG_CONFIG_HOME: sandboxedConfigHome },
       };
     },
   };

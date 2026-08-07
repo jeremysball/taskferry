@@ -487,8 +487,26 @@ describe("opencodeExecutor()", () => {
     assert.deepEqual(result, {
       extraRoBinds: [["/home/user/.local/share/opencode/auth.json", "/state/run/opencode-data/opencode/auth.json"]],
       sandboxedDataHome: "/state/run/opencode-data",
-      sandboxEnv: { XDG_DATA_HOME: "/state/run/opencode-data" },
+      // XDG_CONFIG_HOME is redirected unconditionally, whether or not the user
+      // has a real opencode config to bind in: opencode writes its own
+      // .gitignore there on boot and the real ~/.config is read-only in the
+      // sandbox.
+      sandboxEnv: { XDG_DATA_HOME: "/state/run/opencode-data", XDG_CONFIG_HOME: "/state/run/opencode-data/config" },
     });
+  });
+
+  test("sandboxAuthFile: ro-binds the real config dir's entries, skipping the .gitignore opencode rewrites on boot", () => {
+    const ex = opencodeExecutor();
+    const realConfigDir = "/home/user/.config/opencode";
+    const result = ex.sandboxAuthFile({
+      homeDir: HOME_DIR, dataDir: DATA_DIR, spawnEnv: {},
+      existsFn: (p) => p === realConfigDir,
+      readdirFn: (p) => (p === realConfigDir ? ["opencode.jsonc", "plugins", ".gitignore"] : []),
+    });
+    assert.deepEqual(result.extraRoBinds, [
+      [`${realConfigDir}/opencode.jsonc`, "/state/run/opencode-data/config/opencode/opencode.jsonc"],
+      [`${realConfigDir}/plugins`, "/state/run/opencode-data/config/opencode/plugins"],
+    ]);
   });
 
   test("sandboxAuthFile: no bind when auth.json is missing", () => {

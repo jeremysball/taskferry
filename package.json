@@ -1,6 +1,6 @@
 {
   "name": "taskferry",
-  "version": "3.0.0",
+  "version": "3.0.1",
   "description": "AXI CLI and local daemon for dispatching background pi/OpenCode tasks from any frontend harness",
   "license": "MIT",
   "author": "Jeremy Ball",
@@ -23,6 +23,7 @@
     "!src/*-test.js",
     "!src/*test-helpers.js",
     "!src/*test-support.js",
+    "scripts/generate-skill.js",
     "CHANGELOG.md"
   ],
   "scripts": {

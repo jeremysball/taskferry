@@ -2,11 +2,29 @@
   "name": "taskferry",
   "version": "3.0.0",
   "description": "AXI CLI and local daemon for dispatching background pi/OpenCode tasks from any frontend harness",
+  "license": "MIT",
+  "author": "Jeremy Ball",
+  "homepage": "https://github.com/jeremysball/taskferry#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jeremysball/taskferry.git"
+  },
+  "bugs": {
+    "url": "https://github.com/jeremysball/taskferry/issues"
+  },
   "main": "src/cli.js",
   "exports": "./src/opencode-plugin.js",
   "bin": {
     "taskferry": "src/cli.js"
   },
+  "files": [
+    "src/*.js",
+    "!src/*.test.js",
+    "!src/*-test.js",
+    "!src/*test-helpers.js",
+    "!src/*test-support.js",
+    "CHANGELOG.md"
+  ],
   "scripts": {
     "start": "node src/cli.js",
     "test": "npm run test:unit",

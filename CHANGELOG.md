@@ -1,5 +1,33 @@
 # Changelog
 
+## [3.1.0](https://github.com/jeremysball/taskferry/compare/taskferry-v3.0.0...taskferry-v3.1.0) (2026-08-07)
+
+
+### Features
+
+* .taskferry.toml project config with settle-time verification gate ([#352](https://github.com/jeremysball/taskferry/issues/352)) ([f0b09ba](https://github.com/jeremysball/taskferry/commit/f0b09baafeb3380ffa590bbdb763d1afe0d90c5d))
+* **cli:** prettified TTY output via a shape-based renderer ([#367](https://github.com/jeremysball/taskferry/issues/367)) ([566a331](https://github.com/jeremysball/taskferry/commit/566a331e69f5748085bf7ffaa02d5574f2fc3ebc))
+* **dispatch:** tranche 2 telemetry instrumentation (--class tag + finalStatus parsing) ([#340](https://github.com/jeremysball/taskferry/issues/340)) ([5b3f837](https://github.com/jeremysball/taskferry/commit/5b3f837b48e98fde521a2a4623bb4374ad811254))
+* stale-base 3-way apply and honest terminal status ([#353](https://github.com/jeremysball/taskferry/issues/353)) ([ee6ce40](https://github.com/jeremysball/taskferry/commit/ee6ce40f2702a433201e1854a3ece7a43f39960e))
+
+
+### Bug Fixes
+
+* **changeset:** re-check HEAD after retry and inject a fast test sleepFn ([#333](https://github.com/jeremysball/taskferry/issues/333)) ([af62f76](https://github.com/jeremysball/taskferry/commit/af62f760bfa2422e2eba191cf2fcb73df7c010ce))
+* **changeset:** retry extraction bwrap on the overlay-mount-busy race ([#326](https://github.com/jeremysball/taskferry/issues/326)) ([#327](https://github.com/jeremysball/taskferry/issues/327)) ([9c94513](https://github.com/jeremysball/taskferry/commit/9c945131fc70e77af70ae8bdf645ecab79ff0907))
+* **changeset:** set an explicit maxBuffer on defaultRunCommand's spawnSync ([#361](https://github.com/jeremysball/taskferry/issues/361)) ([44e657e](https://github.com/jeremysball/taskferry/commit/44e657ef7c7cd65d272ca4ded0b0077c594570db))
+* **ci:** collapse check workflow into a single job to fix runner contention ([0080dea](https://github.com/jeremysball/taskferry/commit/0080deae0889e96572b299c864c0f47356caf428))
+* **daemon:** doctor --stats connection-closed bug + doctor output formatting ([#332](https://github.com/jeremysball/taskferry/issues/332)) ([89988a3](https://github.com/jeremysball/taskferry/commit/89988a342643b13248d210170e8bdb48c6c7318c))
+* **daemon:** make watch/list/context directory filtering worktree-aware, add watch --all ([#334](https://github.com/jeremysball/taskferry/issues/334)) ([2d5c286](https://github.com/jeremysball/taskferry/commit/2d5c28609927ce83c85d2ea9f088bb69a8eb2d71)), closes [#315](https://github.com/jeremysball/taskferry/issues/315)
+* **npm:** ship scripts/generate-skill.js in the published package ([#393](https://github.com/jeremysball/taskferry/issues/393)) ([30eefc8](https://github.com/jeremysball/taskferry/commit/30eefc88e7203750560293740475065dab92a075))
+* **output:** trim overlayDirs internals out of `status --full` ([#330](https://github.com/jeremysball/taskferry/issues/330)) ([b806ae4](https://github.com/jeremysball/taskferry/commit/b806ae4f8354cd08d857ed9fb3d2b95568002a98))
+* **sandbox:** give opencode a writable config home inside the sandbox ([#390](https://github.com/jeremysball/taskferry/issues/390)) ([f49d787](https://github.com/jeremysball/taskferry/commit/f49d787bf6efa6cf6a32401c6984d0b5685b8d72))
+* **tasks:** close remaining gaps in the any-growth watchdog activity signal ([#360](https://github.com/jeremysball/taskferry/issues/360)) ([062563c](https://github.com/jeremysball/taskferry/commit/062563ce2501b5c3428d768691e0d6d9feced841))
+* **tasks:** match --require-final-marker across a multi-paragraph message ([#339](https://github.com/jeremysball/taskferry/issues/339)) ([49d896a](https://github.com/jeremysball/taskferry/commit/49d896ad1e0253ac5648aab2b23b0664f19d7ca1))
+* **tasks:** split no_output_timeout by output-seen, recover crashed-but-completed tasks ([#345](https://github.com/jeremysball/taskferry/issues/345)) ([2860818](https://github.com/jeremysball/taskferry/commit/2860818f95f1ed6fc9a1210bec5a5cdba29ebd63))
+* **test:** route integration smoke tests through OpenRouter, not direct minimax ([#364](https://github.com/jeremysball/taskferry/issues/364)) ([e0056ed](https://github.com/jeremysball/taskferry/commit/e0056ed2b348bc180c710b0a2e7f0e52878ac108))
+* **tests:** close the test-suite's own /tmp temp-dir leak ([#368](https://github.com/jeremysball/taskferry/issues/368)) ([cc5cecc](https://github.com/jeremysball/taskferry/commit/cc5cecc031130acf4dbb97fdd93c819ed4587da9))
+
 ## [3.0.0](https://github.com/jeremysball/taskferry/compare/taskferry-v2.1.0...taskferry-v3.0.0) (2026-08-04)
 
 

@@ -46,7 +46,52 @@ const CONFIG_FIELD_TYPES = {
   advisorContextChars: "number",
   envFile: "string",
   profilingEnabled: "boolean",
+  providerLimits: "object",
 };
+
+const PROVIDER_LIMIT_FIELD_TYPES = {
+  maxConcurrentTasks: "number",
+  maxDispatchesPerWindow: "number",
+};
+
+/**
+ * Validates `config.json`'s `providerLimits` field: a flat map of provider
+ * name -> {maxConcurrentTasks?, maxDispatchesPerWindow?}, both optional
+ * positive integers. Mirrors the top-level object/key/type checks in
+ * {@link parseAndValidateConfig} one level deeper, since `providerLimits`
+ * is the one config field shaped as a nested object rather than a scalar.
+ * @param {unknown} providerLimits
+ * @param {string} configPath
+ */
+/**
+ * Validates a single provider's limits object inside `providerLimits`.
+ * @param {string} provider
+ * @param {unknown} limits
+ * @param {string} configPath
+ */
+function validateProviderLimitEntry(provider, limits, configPath) {
+  if (limits === null || typeof limits !== "object" || Array.isArray(limits)) {
+    throw new Error(`error: config key "providerLimits.${provider}" in ${configPath} must be a JSON object\nhelp: use {"maxConcurrentTasks": N, "maxDispatchesPerWindow": N}`);
+  }
+  for (const key of Object.keys(limits)) {
+    if (!Object.hasOwn(PROVIDER_LIMIT_FIELD_TYPES, key)) {
+      throw new Error(`error: unrecognized key "providerLimits.${provider}.${key}" in ${configPath}\nhelp: recognized keys are: ${Object.keys(PROVIDER_LIMIT_FIELD_TYPES).join(", ")}`);
+    }
+    const value = /** @type {Record<string, unknown>} */ (limits)[key];
+    if (typeof value !== PROVIDER_LIMIT_FIELD_TYPES[key] || !Number.isInteger(value) || /** @type {number} */ (value) <= 0) {
+      throw new Error(`error: config key "providerLimits.${provider}.${key}" in ${configPath} must be a positive integer (got ${JSON.stringify(value)})\nhelp: fix the value's type in ${configPath}`);
+    }
+  }
+}
+
+function validateProviderLimits(providerLimits, configPath) {
+  if (providerLimits === null || typeof providerLimits !== "object" || Array.isArray(providerLimits)) {
+    throw new Error(`error: config key "providerLimits" in ${configPath} must be a JSON object\nhelp: use {"provider": {"maxConcurrentTasks": N, "maxDispatchesPerWindow": N}, ...}`);
+  }
+  for (const [provider, limits] of Object.entries(providerLimits)) {
+    validateProviderLimitEntry(provider, limits, configPath);
+  }
+}
 
 /**
  * @param {NodeJS.ProcessEnv} [env]
@@ -92,6 +137,8 @@ function parseAndValidateConfig(configPath) {
   if (parsed.defaultExecutor !== undefined && !KNOWN_EXECUTORS.includes(parsed.defaultExecutor)) {
     throw new Error(`error: config key "defaultExecutor" in ${configPath} must be one of ${KNOWN_EXECUTORS.join(", ")} (got ${JSON.stringify(parsed.defaultExecutor)})\nhelp: fix the value in ${configPath}`);
   }
+
+  if (parsed.providerLimits !== undefined) validateProviderLimits(parsed.providerLimits, configPath);
 
   return parsed;
 }

@@ -73,7 +73,7 @@ this; they're not the only justification anymore.
 **A worker's writes only land somewhere durable inside `--directory`.** The
 sandbox mounts `--directory` as the one copy-on-write overlay and binds the
 rest of the root read-only, plus a small set of explicitly read-write paths
-(the git common dir, `runtimeDir`, any `--allowed-dirs` entries) -- there is
+(the git common dir, `runtimeDir`, any `--rw-dirs`/`--allowed-dirs` entries) -- there is
 no second, throwaway overlay for anything else. A symlink out to some other
 path on the host (e.g. a worktree's scratch directory symlinked to a shared
 location in the main checkout) resolves into the read-only root, so a write
@@ -718,11 +718,13 @@ unrelated pre-existing dirty state in that checkout.
 
 Every sandboxed dispatch mounts a fresh, empty `--tmpfs /tmp`. If you point a
 dispatch at a scratch file you saved under `/tmp` (a diff, a prompt, any
-input the worker's supposed to read) without also passing `--allowed-dirs`
+input the worker's supposed to read) without also passing `--rw-dirs`
 for that path, the file doesn't exist from the worker's point of view —
 even though it's right there on the host. Pass the containing directory via
-`--allowed-dirs /tmp/your-scratch-dir` any time a dispatch needs to read
+`--rw-dirs /tmp/your-scratch-dir` any time a dispatch needs to read
 something under `/tmp` that isn't already the dispatch's `--directory`.
+(`--allowed-dirs` is the deprecated alias for `--rw-dirs`; it still works
+but warns.)
 
 This bit once with a batch of code-review dispatches pointed at diff files
 saved under `/tmp/pr-reviews/pr-<N>.diff`: none of the finders could read

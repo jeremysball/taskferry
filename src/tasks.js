@@ -145,6 +145,7 @@ import { computeDoctorStats } from "./doctor-stats.js";
  * @property {boolean} [noOverlay]
  * @property {"dispatch"|"advisor"} [role]
  * @property {string[]} [allowedDirs]
+ * @property {string[]} [roDirs]
  * @property {import("./executor.js").WorkerExecutor} executor
  * @property {undefined} [kind]
  * @property {undefined} [snapshotPath]
@@ -591,6 +592,7 @@ export function isOutsideDirectory(directory, candidate) {
  * @property {boolean} overlayEnabled
  * @property {string} overlayTmpRoot
  * @property {string[]} allowedDirs
+ * @property {string[]} roDirs
  * @property {string} stateDir
  * @property {string} cacheDir
  * @property {string} runtimeDir
@@ -837,6 +839,137 @@ function applyProjectConfigReadOnlyBinds({ launchDirectory, denyList, stateDir, 
 }
 
 /**
+ * Resolves the user-supplied `--ro-dirs` set (a union of the manager-level
+ * default and per-dispatch entries) against the same protected sandbox mount
+ * set the `.taskferry.toml` read_only_paths resolver uses: a path that does
+ * not exist on the host, or that overlaps a protected mount (deny-list,
+ * stateDir, runtimeDir, launchDirectory), is skipped with a warning rather
+ * than failing silently. Returns the resolved absolute paths to bind
+ * read-only (as same-path pairs by the caller).
+ * @param {{launchDirectory: string, roDirs: string[], denyList: string[], stateDir: string, runtimeDir: string, existsFn: (p: string) => boolean}} ctx
+ * @returns {string[]}
+ */
+function resolveUserRoDirs({ launchDirectory, roDirs, denyList, stateDir, runtimeDir, existsFn }) {
+  if (!roDirs.length) return [];
+  const { roBinds, missing, unsafe } = resolveReadOnlyProjectBinds(roDirs, {
+    protectedPaths: [...denyList, stateDir, runtimeDir, launchDirectory],
+    existsFn,
+  });
+  const warnings = [];
+  if (missing.length) warnings.push(`not found on this host, skipped: ${missing.join(", ")}`);
+  if (unsafe.length) warnings.push(`overlaps a protected sandbox mount, skipped: ${unsafe.join(", ")}`);
+  if (warnings.length) process.stderr.write(`warning: --ro-dirs ${warnings.join("; ")}\n`);
+  return roBinds.map(([src]) => src);
+}
+
+/**
+ * Resolves the user-supplied read-write and read-only dir sets for one
+ * dispatch and applies the read-write-wins conflict rule. Both sets are a
+ * union of the manager-level default (flag/env/config, already folded into
+ * `ctx.allowedDirs`/`ctx.roDirs`) and the per-dispatch entries carried on
+ * `dispatchLaunch`. Read-write dirs that don't exist on the host are dropped
+ * silently (same as the pre-existing allowedDirs behavior); read-only dirs go
+ * through `resolveUserRoDirs`' protected-mount validation instead. A path in
+ * both sets binds read-write with a warning naming the path -- never an
+ * error, never read-only wins. A read-write dir that overlaps the sandbox's
+ * own deny-list (`ctx.denyList`) is still bound read-write -- overriding the
+ * deny-list is the user's call to make, not something this function blocks
+ * -- but it warns loudly at dispatch time, since re-exposing a deny-listed
+ * path like ~/.ssh as writable deserves more visibility than a docs
+ * footnote. Returns the resolved absolute path lists ready for
+ * `extraRwBinds`/`extraRoBinds`.
+ * @param {{launchDirectory: string, dispatchLaunch: {allowedDirs?: string[], roDirs?: string[]}|null, isSummary: boolean, rwDirs: string[], roDirs: string[], denyList: string[], stateDir: string, runtimeDir: string, existsFn: (p: string) => boolean}} ctx
+ * @returns {{rwResolved: string[], roResolved: string[]}}
+ */
+function resolveUserRwRoDirs(ctx) {
+  const perDispatch = ctx.isSummary ? { allowedDirs: [], roDirs: [] } : ctx.dispatchLaunch || { allowedDirs: [], roDirs: [] };
+  const rwDirs = [...ctx.rwDirs, ...(perDispatch.allowedDirs || [])];
+  const rwResolved = [];
+  const denyOverridden = [];
+  /** @param {string} base */
+  const childPrefix = (base) => (base === path.sep ? base : base + path.sep);
+  /** @param {string} p */
+  const overlapsDenyList = (p) => ctx.denyList.some((deny) => p === deny || p.startsWith(childPrefix(deny)) || deny.startsWith(childPrefix(p)));
+  for (const dir of rwDirs) {
+    const resolved = path.isAbsolute(dir) ? dir : path.resolve(ctx.launchDirectory, dir);
+    if (!ctx.existsFn(resolved)) continue;
+    rwResolved.push(resolved);
+    // --rw-dirs is allowed to re-expose a deny-listed path (e.g. ~/.ssh) as
+    // read-write -- that's the user's call to make, per policy -- but a
+    // silent override of the sandbox's own deny-list deserves a loud warning
+    // at the moment it happens, not just a docs footnote.
+    if (overlapsDenyList(resolved)) denyOverridden.push(resolved);
+  }
+  if (denyOverridden.length) {
+    process.stderr.write(`warning: --rw-dirs overrides the sandbox deny-list for: ${denyOverridden.join(", ")} (bound read-write anyway; this was your explicit choice)\n`);
+  }
+  const roDirs = [...ctx.roDirs, ...(perDispatch.roDirs || [])];
+  const roResolved = resolveUserRoDirs({
+    roDirs,
+    launchDirectory: ctx.launchDirectory,
+    denyList: ctx.denyList,
+    stateDir: ctx.stateDir,
+    runtimeDir: ctx.runtimeDir,
+    existsFn: ctx.existsFn,
+  });
+  // Any rw/ro conflict -- including one where the same path also shows up in
+  // `.taskferry.toml`'s read_only_paths/roDirs -- is resolved and warned
+  // about exactly once, centrally, by dropReadWriteConflicts once every ro
+  // source (user --ro-dirs, project config, executor credentials) has been
+  // accumulated. Warning here too would double-print for a path that's
+  // listed read-only from more than one source.
+  return { rwResolved, roResolved };
+}
+
+/**
+ * Promotes any read-only bind pair whose source is also bound read-write,
+ * re-emitting it as a read-write `--bind` pair (same source/dest) instead of
+ * dropping it, with a warning naming the path (rw wins, never an error, and
+ * the destination still gets *something*). This is the escape hatch that
+ * lets a `.taskferry.toml` read_only_paths entry -- or an executor's own
+ * credential ro-bind pair (e.g. an auth.json bind whose source happens to sit
+ * under a user's --rw-dirs path) -- be promoted to read-write from the
+ * command line rather than silently vanishing from the sandbox. Making a
+ * credential read-write is the user's call to make (they passed --rw-dirs at
+ * that path on purpose); losing the credential entirely because of an
+ * incidental path collision is not a choice they made.
+ *
+ * The same source path can legitimately show up more than once in
+ * `extraRoBinds` (e.g. listed in both `--ro-dirs` and a project's
+ * `.taskferry.toml` read_only_paths) -- this is the single, centralized
+ * place the rw-wins conflict is resolved for every ro source, specifically
+ * so a path duplicated across sources warns and promotes exactly once
+ * instead of once per source.
+ * @param {[string, string][]} extraRoBinds
+ * @param {string[]} rwResolved
+ * @returns {{roBinds: [string, string][], promotedPairBinds: [string, string][]}}
+ */
+function dropReadWriteConflicts(extraRoBinds, rwResolved) {
+  const rwSet = new Set(rwResolved);
+  const promoted = extraRoBinds.filter(([src]) => rwSet.has(src));
+  const warnedSrcs = new Set();
+  for (const [src] of promoted) {
+    if (warnedSrcs.has(src)) continue;
+    warnedSrcs.add(src);
+    process.stderr.write(`warning: ${src} is bound read-write (also listed read-only); read-write wins\n`);
+  }
+  if (!promoted.length) return { roBinds: extraRoBinds, promotedPairBinds: [] };
+  // Dedupe the promoted pairs themselves (by src+dest) so a path duplicated
+  // across ro sources emits one --bind pair, not one per source.
+  const seenPairs = new Set();
+  const promotedPairBinds = promoted.filter(([src, dest]) => {
+    const key = `${src}\0${dest}`;
+    if (seenPairs.has(key)) return false;
+    seenPairs.add(key);
+    return true;
+  });
+  return {
+    roBinds: extraRoBinds.filter(([src]) => !rwSet.has(src)),
+    promotedPairBinds,
+  };
+}
+
+/**
  * Computes the bwrap bind set for a sandboxed dispatch: the deny-list (with
  * entries the user simply doesn't have dropped, since bwrap --tmpfs fails if
  * the mount point doesn't exist), the executor's ro-bind auth file, the
@@ -886,7 +1019,7 @@ function buildBwrapBinds(ctx, launchInfo, task, spawnEnv, role) {
     ...(isSummary ? {} : { sessionId: dispatchLaunch.sessionId ?? null, launchDirectory: launchDirectory || null }),
   });
   /** @type {[string, string][]} */
-  const extraRoBinds = [...executorRoBinds];
+  let extraRoBinds = [...executorRoBinds];
   if (promptFilePath) extraRoBinds.push([ctx.PROMPT_DIR, ctx.PROMPT_DIR]);
   extraRoBinds.push(...applyProjectConfigReadOnlyBinds({ launchDirectory, task, denyList: fullDenyList, existsFn: ctx.existsFn, stateDir: ctx.stateDir, runtimeDir: ctx.runtimeDir }));
   /** @type {string[]} */
@@ -899,12 +1032,37 @@ function buildBwrapBinds(ctx, launchInfo, task, spawnEnv, role) {
   extraRwBinds.push(sandboxedDataHome);
   const overlayInfo = createOverlayIfNeeded(ctx, launchInfo, task, role);
   const gitBinds = buildGitBinds(ctx, launchDirectory, overlayInfo, extraRwBinds);
-  for (const dir of [...ctx.allowedDirs, ...(isSummary ? [] : dispatchLaunch.allowedDirs || [])]) {
-    const resolved = path.isAbsolute(dir) ? dir : path.resolve(launchDirectory, dir);
-    if (ctx.existsFn(resolved)) extraRwBinds.push(resolved);
-  }
+  // Read-write/read-only dirs: each resolves as a union of the manager-level
+  // default (flag/env/config, already folded into ctx.allowedDirs/ctx.roDirs)
+  // and the per-dispatch `--rw-dirs`/`--ro-dirs` entries. The rw set drops
+  // nonexistent paths silently; the ro set goes through the same protected
+  // mount validation `.taskferry.toml` read_only_paths uses. A path in both
+  // sets binds read-write with a warning (rw wins, never an error).
+  const { rwResolved, roResolved } = resolveUserRwRoDirs({
+    launchDirectory,
+    dispatchLaunch,
+    isSummary,
+    rwDirs: ctx.allowedDirs,
+    roDirs: ctx.roDirs,
+    denyList: fullDenyList,
+    stateDir: ctx.stateDir,
+    runtimeDir: ctx.runtimeDir,
+    existsFn: ctx.existsFn,
+  });
+  extraRwBinds.push(...rwResolved);
+  for (const dir of roResolved) extraRoBinds.push([dir, dir]);
+  // Conflict rule, again over the accumulated ro list (which now includes the
+  // `.taskferry.toml` read_only_paths pairs and the executor's own credential
+  // ro-bind pairs): any ro source that is also resolved read-write is
+  // promoted to a read-write `--bind` pair rather than dropped, so a
+  // collision with e.g. the executor's auth.json bind still reaches the
+  // sandbox (just writable) instead of vanishing.
+  const conflictResult = dropReadWriteConflicts(extraRoBinds, rwResolved);
+  extraRoBinds = conflictResult.roBinds;
+  const allExecutorRwPairBinds = [...executorRwPairBinds, ...conflictResult.promotedPairBinds];
   return {
-    homeDir, denyList, extraRoBinds, extraRwBinds, overlayInfo, executorRwPairBinds, sandboxEnv, spawnEnv, role,
+    homeDir, denyList, extraRoBinds, extraRwBinds, overlayInfo, sandboxEnv, spawnEnv, role,
+    executorRwPairBinds: allExecutorRwPairBinds,
     overlayRwBinds: gitBinds.overlayRwBinds,
     overlayRwFileBinds: gitBinds.overlayRwFileBinds,
   };
@@ -1874,9 +2032,9 @@ function buildDispatchTask({ id, directory, prompt, model, executor, priorSessio
  * reaches the child. Pinned by tasks.test.js's "dispatch()'s queued env is
  * frozen against later caller mutations" gate.
  * @param {DispatchContext} ctx
- * @param {{id: string, task: Task, prompt: string, sessionId: string|undefined, env: NodeJS.ProcessEnv|undefined, noSandbox: boolean, noOverlay: boolean, allowedDirs: string[]|undefined, executor: import("./executor.js").WorkerExecutor, role: "dispatch"|"advisor"}} params
+ * @param {{id: string, task: Task, prompt: string, sessionId: string|undefined, env: NodeJS.ProcessEnv|undefined, noSandbox: boolean, noOverlay: boolean, allowedDirs: string[]|undefined, roDirs: string[]|undefined, executor: import("./executor.js").WorkerExecutor, role: "dispatch"|"advisor"}} params
  */
-function queueDispatchLaunch(ctx, { id, task, prompt, sessionId, env, noSandbox, noOverlay, allowedDirs, executor, role }) {
+function queueDispatchLaunch(ctx, { id, task, prompt, sessionId, env, noSandbox, noOverlay, allowedDirs, roDirs, executor, role }) {
   ctx.tasks.set(id, task);
   ctx.persistTask(task.id);
   const capturedEnv = env === undefined ? undefined : { ...env };
@@ -1884,6 +2042,7 @@ function queueDispatchLaunch(ctx, { id, task, prompt, sessionId, env, noSandbox,
     prompt,
     sessionId,
     allowedDirs,
+    roDirs,
     executor,
     role,
     directory: task.directory,
@@ -3132,8 +3291,14 @@ function watchdogTick(state, ctx) {
  * @param {string[]} [options.envDenylist] - env var names stripped from every spawned child's
  *   environment, applied last (after the caller-env union), regardless of whether the value
  *   came from the daemon's own ambient environment or the caller.
- * @param {string[]} [options.allowedDirs] - extra directories always bound read-write inside the sandbox,
+ * @param {string[]} [options.allowedDirs] - deprecated alias for `rwDirs`; extra directories always bound read-write inside the sandbox,
  *   in addition to the auto-detected git-common-dir for a worktree dispatch directory.
+ * @param {string[]} [options.rwDirs] - extra directories always bound read-write inside the sandbox,
+ *   in addition to the auto-detected git-common-dir for a worktree dispatch directory. Resolved as a
+ *   union of this, `TASKFERRY_RW_DIRS`, and config `rwDirs`.
+ * @param {string[]} [options.roDirs] - extra directories always bound read-only inside the sandbox.
+ *   Resolved as a union of this, `TASKFERRY_RO_DIRS`, and config `roDirs`; a path that is also bound
+ *   read-write wins read-write (with a warning).
  * @param {(directory: string) => string|null} [options.resolveGitCommonDirFn]
  * @param {(directory: string) => string|null} [options.resolveGitDirFn]
  * @param {boolean} [options.overlayEnabled]
@@ -3331,10 +3496,80 @@ function resolveFilesystemSimpleOptions(rawOptions) {
  */
 function resolveFilesystemDenylists(rawOptions, config) {
   return {
-    allowedDirs: rawOptions.allowedDirs ?? parseAllowedDirs(process.env.TASKFERRY_ALLOWED_DIRS ?? config.allowedDirs),
+    allowedDirs: resolveRwDirs(rawOptions, config),
+    roDirs: resolveRoDirs(rawOptions, config),
     envDenylist: rawOptions.envDenylist ?? parseEnvDenylist(process.env.TASKFERRY_ENV_DENYLIST ?? config.envDenylist),
     sandboxDenylist: rawOptions.sandboxDenylist ?? parseSandboxDenylist(process.env.TASKFERRY_SANDBOX_DENYLIST ?? config.sandboxDenylist),
   };
+}
+
+// `allowedDirs` is kept as the resolved (post-union) value so existing
+// `ctx.allowedDirs` call sites keep working; the deprecated name itself just
+// feeds the union below. It is renamed conceptually to `rwDirs` for the
+// user-facing flags/env/config keys.
+const RW_DIRS_DEPRECATION_HINT = "TASKFERRY_ALLOWED_DIRS / allowedDirs / --allowed-dirs is deprecated; use rwDirs / TASKFERRY_RW_DIRS / --rw-dirs instead. It will be removed in the next major release.";
+
+/**
+ * Unions one directory-list layer into the accumulator. Each layer is either
+ * an array (a createTaskManager option / test injection) or a comma-separated
+ * string (env var or config key). Returns the merged, deduplicated list.
+ * @param {string[]} acc
+ * @param {string[]|string|undefined} layer
+ * @returns {string[]}
+ */
+function unionDirLayer(acc, layer) {
+  if (layer === undefined || layer === null) return acc;
+  const entries = Array.isArray(layer) ? layer : parseAllowedDirs(layer);
+  return [...new Set([...acc, ...entries])];
+}
+
+/**
+ * Resolves the read-write bind set as a UNION across every layer (flag, env
+ * var, config) -- deliberately unlike the replace-semantics `??` chain the
+ * numeric options use. `--rw-dirs` does not replace `TASKFERRY_RW_DIRS` or
+ * config `rwDirs`; they all contribute. The deprecated `allowedDirs` name
+ * feeds the same union, and emits a deprecation warning whenever it
+ * contributes (even when the new name is also set).
+ * @param {Record<string, any>} rawOptions
+ * @param {Record<string, any>} config
+ * @returns {string[]}
+ */
+function resolveRwDirs(rawOptions, config) {
+  /** @type {string[]} */
+  let resolved = [];
+  const newNameSet = rawOptions.rwDirs !== undefined || process.env.TASKFERRY_RW_DIRS !== undefined || config.rwDirs !== undefined;
+  const oldNameSet = rawOptions.allowedDirs !== undefined || process.env.TASKFERRY_ALLOWED_DIRS !== undefined || config.allowedDirs !== undefined;
+  if (oldNameSet) process.stderr.write(`warning: ${RW_DIRS_DEPRECATION_HINT}\n`);
+  if (newNameSet) {
+    resolved = unionDirLayer(resolved, rawOptions.rwDirs);
+    resolved = unionDirLayer(resolved, process.env.TASKFERRY_RW_DIRS);
+    resolved = unionDirLayer(resolved, config.rwDirs);
+  }
+  if (oldNameSet) {
+    resolved = unionDirLayer(resolved, rawOptions.allowedDirs);
+    resolved = unionDirLayer(resolved, process.env.TASKFERRY_ALLOWED_DIRS);
+    resolved = unionDirLayer(resolved, config.allowedDirs);
+  }
+  return resolved;
+}
+
+/**
+ * Resolves the read-only bind set as a UNION across the manager-level layers
+ * (createTaskManager option, env, config `roDirs`); per-dispatch `--ro-dirs`
+ * is unioned in at spawn time in buildBwrapBinds. Same union-not-replace
+ * semantics as {@link resolveRwDirs}. (The `read_only_paths` project-config
+ * alias is resolved separately at spawn time.)
+ * @param {Record<string, any>} rawOptions
+ * @param {Record<string, any>} config
+ * @returns {string[]}
+ */
+function resolveRoDirs(rawOptions, config) {
+  /** @type {string[]} */
+  let resolved = [];
+  resolved = unionDirLayer(resolved, rawOptions.roDirs);
+  resolved = unionDirLayer(resolved, process.env.TASKFERRY_RO_DIRS);
+  resolved = unionDirLayer(resolved, config.roDirs);
+  return resolved;
 }
 
 /**
@@ -3805,7 +4040,7 @@ function buildManagerInternalHelpers(ctx) {
      * delegated to {@link startTaskFor}, which takes every factory closure
      * dependency explicitly via `ctx`.
      * @param {Task} task */
-    startTask: (task) => startTaskFor(task, { pendingLaunches: ctx.maps.pendingLaunches, SUMMARY_DIR: ctx.paths.SUMMARY_DIR, PROMPT_DIR: ctx.paths.PROMPT_DIR, spawnFn: ctx.opts.spawnFn, runOverlayCommandFn: ctx.opts.runOverlayCommandFn, sandboxEnabled: ctx.opts.sandboxEnabled, platform: ctx.opts.platform, overlayEnabled: ctx.opts.overlayEnabled, overlayTmpRoot: ctx.opts.overlayTmpRoot, allowedDirs: ctx.opts.allowedDirs, stateDir: ctx.opts.stateDir, cacheDir: ctx.opts.cacheDir, runtimeDir: ctx.opts.runtimeDir, existsFn: ctx.opts.existsFn, statFn: ctx.opts.statFn, readdirFn: ctx.opts.readdirFn, sandboxDenylist: ctx.opts.sandboxDenylist, resolveGitCommonDirFn: ctx.opts.resolveGitCommonDirFn, resolveGitDirFn: ctx.opts.resolveGitDirFn, requireBwrap: () => ctx.env.requireBwrap(), requireOverlaySupport: () => ctx.env.requireOverlaySupport(), dispatchEnvironment: (env, taskId) => ctx.env.dispatchEnvironment(env, taskId), summaryEnvironment: (env) => ctx.env.summaryEnvironment(env), settleWaiters: (taskId) => ctx.helpers.settleWaiters(taskId), launchQueuedTasks: () => ctx.helpers.launchQueuedTasks(), persistTask: (taskId) => ctx.helpers.persistTask(taskId), scheduleActivity: (task, options) => ctx.helpers.scheduleActivity(task, options), classifyTrailingLogFailure: (task, executor) => ctx.helpers.classifyTrailingLogFailure(task, executor), startRunningWatcher: (task, executor) => ctx.helpers.startRunningWatcher(task, executor), stopRunningWatcher: (taskId) => ctx.helpers.stopRunningWatcher(taskId), extractChangesetForTask: (task) => ctx.env.extractChangesetForTask(task), sendSignal: (pid, signal) => ctx.helpers.sendSignal(pid, signal), activityCache: ctx.activity.cache, logHasEventCache: ctx.maps.logHasEventCache, escalationTimers: ctx.maps.escalationTimers, tasks: ctx.maps.tasks, decRunning: () => { ctx.state.runningCount--; }, incRunning: () => { ctx.state.runningCount++; }, readSessionIdFromLog, evaluateOutputCompleteness, attemptCrashRecovery }),
+    startTask: (task) => startTaskFor(task, { pendingLaunches: ctx.maps.pendingLaunches, SUMMARY_DIR: ctx.paths.SUMMARY_DIR, PROMPT_DIR: ctx.paths.PROMPT_DIR, spawnFn: ctx.opts.spawnFn, runOverlayCommandFn: ctx.opts.runOverlayCommandFn, sandboxEnabled: ctx.opts.sandboxEnabled, platform: ctx.opts.platform, overlayEnabled: ctx.opts.overlayEnabled, overlayTmpRoot: ctx.opts.overlayTmpRoot, allowedDirs: ctx.opts.allowedDirs, roDirs: ctx.opts.roDirs, stateDir: ctx.opts.stateDir, cacheDir: ctx.opts.cacheDir, runtimeDir: ctx.opts.runtimeDir, existsFn: ctx.opts.existsFn, statFn: ctx.opts.statFn, readdirFn: ctx.opts.readdirFn, sandboxDenylist: ctx.opts.sandboxDenylist, resolveGitCommonDirFn: ctx.opts.resolveGitCommonDirFn, resolveGitDirFn: ctx.opts.resolveGitDirFn, requireBwrap: () => ctx.env.requireBwrap(), requireOverlaySupport: () => ctx.env.requireOverlaySupport(), dispatchEnvironment: (env, taskId) => ctx.env.dispatchEnvironment(env, taskId), summaryEnvironment: (env) => ctx.env.summaryEnvironment(env), settleWaiters: (taskId) => ctx.helpers.settleWaiters(taskId), launchQueuedTasks: () => ctx.helpers.launchQueuedTasks(), persistTask: (taskId) => ctx.helpers.persistTask(taskId), scheduleActivity: (task, options) => ctx.helpers.scheduleActivity(task, options), classifyTrailingLogFailure: (task, executor) => ctx.helpers.classifyTrailingLogFailure(task, executor), startRunningWatcher: (task, executor) => ctx.helpers.startRunningWatcher(task, executor), stopRunningWatcher: (taskId) => ctx.helpers.stopRunningWatcher(taskId), extractChangesetForTask: (task) => ctx.env.extractChangesetForTask(task), sendSignal: (pid, signal) => ctx.helpers.sendSignal(pid, signal), activityCache: ctx.activity.cache, logHasEventCache: ctx.maps.logHasEventCache, escalationTimers: ctx.maps.escalationTimers, tasks: ctx.maps.tasks, decRunning: () => { ctx.state.runningCount--; }, incRunning: () => { ctx.state.runningCount++; }, readSessionIdFromLog, evaluateOutputCompleteness, attemptCrashRecovery }),
     /**
      * @param {string} taskId
      * @param {{force?: boolean}} options
@@ -3883,8 +4118,12 @@ function buildTaskManagerApi(ctx) {
      * @param {boolean} [params.noSandbox]
      * @param {boolean} [params.noOverlay]
      * @param {"dispatch"|"advisor"} [params.role]
-     * @param {string[]} [params.allowedDirs] - extra directories bound read-write for this dispatch only, on
+     * @param {string[]} [params.allowedDirs] - deprecated alias for `rwDirs`; extra directories bound read-write for this dispatch only, on
      *   top of the manager-level default (see createTaskManager's `allowedDirs` option)
+     * @param {string[]} [params.rwDirs] - extra directories bound read-write for this dispatch only, on
+     *   top of the manager-level default (see createTaskManager's `allowedDirs` option)
+     * @param {string[]} [params.roDirs] - extra directories bound read-only for this dispatch only, on
+     *   top of the manager-level default (see createTaskManager's `roDirs` option)
      * @param {string} [params.executor] - "opencode" | "pi". When omitted on a `sessionId` resume, inherits
      *   the executor that originally created the session (a different executor can't continue another CLI's
      *   session file); otherwise defaults to the manager's defaultExecutor (itself the result of
@@ -5704,12 +5943,15 @@ function startRunningWatcherFor(task, ctx) {
  * `createTaskManager`'s `dispatch` closure; all the validation/build/queue
  * helpers are plain module-level functions called directly. The factory
  * bindings are threaded in via `ctx`.
- * @param {{prompt: string, directory: string, model?: string, variant?: string, sessionId?: string, internal?: boolean, finalMarker?: string|null, originSessionId?: string, noSandbox?: boolean, noOverlay?: boolean, allowedDirs?: string[], executor?: string, env?: NodeJS.ProcessEnv, role?: "dispatch"|"advisor", class?: string|null, parentTaskId?: string|null}} params
+ * @param {{prompt: string, directory: string, model?: string, variant?: string, sessionId?: string, internal?: boolean, finalMarker?: string|null, originSessionId?: string, noSandbox?: boolean, noOverlay?: boolean, allowedDirs?: string[], rwDirs?: string[], roDirs?: string[], executor?: string, env?: NodeJS.ProcessEnv, role?: "dispatch"|"advisor", class?: string|null, parentTaskId?: string|null}} params
  * @param {{ensureStateLoaded: () => void, tasks: Map<string, Task>, defaultExecutor: import("./executor.js").WorkerExecutor, LOG_DIR: string, persistTask: (taskId: string) => void, pendingLaunches: Map<string, LaunchSpec>, launchQueue: string[], launchQueuedTasks: () => void}} ctx
  * @returns {TaskSummary & {next: string}}
  */
 function dispatchTask(params, ctx) {
-  const { prompt, directory, model, variant, sessionId, internal = false, finalMarker = null, originSessionId, noSandbox = false, noOverlay = false, allowedDirs: dispatchAllowedDirs, executor: executorName, env, role = "dispatch", class: taskClass = null, parentTaskId = null } = params;
+  const { prompt, directory, model, variant, sessionId, internal = false, finalMarker = null, originSessionId, noSandbox = false, noOverlay = false, allowedDirs: dispatchAllowedDirs, rwDirs: dispatchRwDirs, roDirs: dispatchRoDirs, executor: executorName, env, role = "dispatch", class: taskClass = null, parentTaskId = null } = params;
+  // `allowedDirs` is the deprecated per-dispatch alias for `rwDirs`; fold it
+  // into the modern name so the launch carries one concept.
+  const effectiveRwDirs = [...new Set([...(dispatchRwDirs ?? []), ...(dispatchAllowedDirs ?? [])])];
   ctx.ensureStateLoaded();
   const priorSessionTask = resolvePriorSessionTask(ctx.tasks, sessionId, executorName);
   const executor = resolveDispatchExecutor(priorSessionTask, executorName, ctx.defaultExecutor);
@@ -5724,7 +5966,7 @@ function dispatchTask(params, ctx) {
   const id = `oc_${Date.now().toString(36)}_${randomUUID().slice(0, 8)}`;
   const logPath = path.join(ctx.LOG_DIR, `${id}.ndjson`);
   const task = buildDispatchTask({ id, model, executor, priorSessionTask, variant, sessionId, originSessionId, internal, finalMarker, role, logPath, parentTaskId, class: taskClass, prompt: dispatchPrompt, directory: normalizedDirectory });
-  queueDispatchLaunch({ tasks: ctx.tasks, persistTask: ctx.persistTask, pendingLaunches: ctx.pendingLaunches, launchQueue: ctx.launchQueue, launchQueuedTasks: ctx.launchQueuedTasks }, { id, task, sessionId, env, noSandbox, noOverlay, executor, role, prompt: dispatchPrompt, allowedDirs: dispatchAllowedDirs });
+  queueDispatchLaunch({ tasks: ctx.tasks, persistTask: ctx.persistTask, pendingLaunches: ctx.pendingLaunches, launchQueue: ctx.launchQueue, launchQueuedTasks: ctx.launchQueuedTasks }, { id, task, sessionId, env, noSandbox, noOverlay, executor, role, prompt: dispatchPrompt, allowedDirs: effectiveRwDirs, roDirs: dispatchRoDirs });
   const summary = summarize(task);
   return {
     ...summary,

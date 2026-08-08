@@ -186,6 +186,8 @@ const METHOD_PARAMS = {
       ["noSandbox", isBoolean],
       ["noOverlay", isBoolean],
       ["allowedDirs", isNonEmptyStringArray],
+      ["rwDirs", isNonEmptyStringArray],
+      ["roDirs", isNonEmptyStringArray],
       ["executor", isKnownExecutor],
       ["class", isNonEmptyString],
       ["parentTaskId", isNonEmptyString],

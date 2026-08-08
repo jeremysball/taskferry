@@ -140,6 +140,24 @@ describe("loadConfig()", () => {
     assert.throws(() => loadConfig({ configPath }), /error: config key "allowedDirs".*must be a string.*\nhelp:/s);
   });
 
+  test("accepts valid rwDirs and roDirs values", () => {
+    const dir = tmpConfigDir();
+    const configPath = writeConfig(dir, JSON.stringify({ rwDirs: "/opt/a,/opt/b", roDirs: "/opt/ro" }));
+    assert.deepEqual(loadConfig({ configPath }), { rwDirs: "/opt/a,/opt/b", roDirs: "/opt/ro" });
+  });
+
+  test("rejects a wrong-typed rwDirs value", () => {
+    const dir = tmpConfigDir();
+    const configPath = writeConfig(dir, JSON.stringify({ rwDirs: ["/opt/a"] }));
+    assert.throws(() => loadConfig({ configPath }), /error: config key "rwDirs".*must be a string.*\nhelp:/s);
+  });
+
+  test("rejects a wrong-typed roDirs value", () => {
+    const dir = tmpConfigDir();
+    const configPath = writeConfig(dir, JSON.stringify({ roDirs: ["/opt/ro"] }));
+    assert.throws(() => loadConfig({ configPath }), /error: config key "roDirs".*must be a string.*\nhelp:/s);
+  });
+
   test("accepts a valid envDenylist value", () => {
     const dir = tmpConfigDir();
     const configPath = writeConfig(dir, JSON.stringify({ envDenylist: "PI_CODING_AGENT_DIR,SOME_OTHER_VAR" }));

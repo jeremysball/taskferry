@@ -376,6 +376,23 @@ included, as periodic batched notifications. `run_in_background` notifies
 once, on the whole command's exit; that notification is the settlement
 signal for this specific task.
 
+**Never reach for `ScheduleWakeup` to wait on a settling ferry.**
+`ScheduleWakeup` exists to self-pace a `/loop` session between iterations —
+it takes a `/loop`-shaped `prompt`, not a task id, and errors outside that
+context. It is not a general-purpose "check back later" primitive, and
+nothing about waiting on `taskferry wait`/`taskferry result` should reach
+for it, `/loop`-mode session or not: a `taskferry wait` already backgrounded
+with `Bash` `run_in_background: true` delivers its own settlement
+notification the moment the task finishes — there is nothing left to
+schedule a wakeup for. Confirmed by a direct failed call: invoking
+`ScheduleWakeup` immediately after backgrounding a `wait` errored
+(`prompt is required when stop is not true`), because the tool has no
+notion of "wake me when task X settles" at all. A genuine `/loop` session
+separately polling ferry status as its actual loop body is a different,
+legitimate use of the tool — that loop's own `prompt`/`delaySeconds`
+governs its iteration, which is not the same thing as substituting
+`ScheduleWakeup` for `run_in_background`'s notification.
+
 **Never background `taskferry wait` with a shell `&`, `nohup … &`, `disown`,
 or any equivalent manual detacher — this is NOT ALLOWED, in Claude Code or
 any other host.** That idiom was a fallback for opencode's old

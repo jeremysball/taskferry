@@ -341,6 +341,17 @@ Do not pass `--timeout` to `taskferry wait`. The process exits on its own the
 moment the task settles; a timeout only makes the caller re-issue `wait` in a
 polling loop for no benefit.
 
+**!temp: a bare `--timeout` number is milliseconds, not seconds.** `--timeout
+1800` is 1.8 seconds, not 30 minutes. Bare digits pass straight through as
+milliseconds (`src/args.js:78`), so the value that reads like a generous
+half-hour budget actually times the wait out almost immediately. Always write
+the unit: `--timeout 30m`, `--timeout 90s`, `--timeout 1h`. The same applies to
+every duration flag that goes through `parseDuration`, including
+`--flush-interval`.
+
+A `!temp:` directive papers over a rough edge in the current CLI rather than
+describing intended behavior. Delete it once the underlying surface changes.
+
 **`taskferry wait` is the only settlement signal — never a bare search for
 `Status:` in the output.** Grepping for the marker alone, before the task has
 settled, false-positives whenever the worker's own output quotes earlier text

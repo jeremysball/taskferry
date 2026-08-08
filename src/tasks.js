@@ -2446,15 +2446,15 @@ function extractSessionId(carry) {
  * @returns {{additions: number, deletions: number} | null}
  */
 function parseNumstatLine(line) {
-  if (!line) return null;
-  const firstTab = line.indexOf("\t");
-  if (firstTab === -1) return null;
-  const secondTab = line.indexOf("\t", firstTab + 1);
-  if (secondTab === -1) return null;
-  const adds = Number(line.slice(0, firstTab));
-  const dels = Number(line.slice(firstTab + 1, secondTab));
-  if (Number.isNaN(adds) || Number.isNaN(dels)) return null;
-  return { additions: adds, deletions: dels };
+  // Numstat counts are canonical unsigned decimal integers. Validate their
+  // spelling before conversion so JavaScript-only forms such as `1e3`, hex,
+  // signs, fractions, and Infinity cannot leak into result serialization.
+  const match = /^(\d+)\t(\d+)\t/.exec(line);
+  if (!match) return null;
+  const additions = Number(match[1]);
+  const deletions = Number(match[2]);
+  if (!Number.isSafeInteger(additions) || !Number.isSafeInteger(deletions)) return null;
+  return { additions, deletions };
 }
 
 // sharing process-wide state with every other test or the real server.

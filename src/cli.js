@@ -27,11 +27,11 @@ import { resolveInvokedPath } from "./paths.js";
  *   cwd?: string,
  *   env?: NodeJS.ProcessEnv,
  *   executablePath?: string,
- *   connectClient?: (opts: {env: NodeJS.ProcessEnv}) => Promise<{request: (method: string, params: object) => Promise<unknown>, close?: () => Promise<void> | void}>,
+ *   connectClient?: (opts: {env: NodeJS.ProcessEnv}) => Promise<import("./commands.js").Client>,
  *   setup?: (opts: {checkoutDirectory: string, cliPath: string, homeDirectory: string, env: NodeJS.ProcessEnv}) => unknown,
  *   init?: (directory: string, deps?: {io?: Io}) => Promise<unknown>,
  *   signal?: AbortSignal,
- *   runShellCommand?: (command: string, args: string[]) => Promise<{status: number|null, stdout: string, stderr: string, error?: NodeJS.ErrnoException}>,
+ *   runShellCommand?: (command: string, args: readonly string[]) => Promise<{status: number|null, stdout: string, stderr: string, error?: NodeJS.ErrnoException}>,
  *   homeDirectory?: string,
  *   resolveWorkspaceRoot?: (startDir: string) => string,
  * }} RunCliOptions

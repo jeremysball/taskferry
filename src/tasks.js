@@ -551,6 +551,55 @@ export function parseEnvDenylist(spec) {
   return parseAllowedDirs(spec);
 }
 
+const PROVIDER_LIMITS_HELP =
+  "help: use provider:maxConcurrentTasks[:maxDispatchesPerWindow], comma-separated";
+
+/**
+ * Parses one `provider:maxConcurrentTasks[:maxDispatchesPerWindow]` entry.
+ * @param {string} entry
+ * @returns {[string, {concurrencyLimit: number, dispatchLimit: number}]}
+ */
+function parseProviderLimitEntry(entry) {
+  const parts = entry.split(":");
+  if (parts.length < 2 || parts.length > 3) {
+    throw new Error(`error: malformed TASKFERRY_PROVIDER_LIMITS entry "${entry}"\n${PROVIDER_LIMITS_HELP}`);
+  }
+  const [provider, concurrencyStr, dispatchStr] = parts;
+  if (!provider) {
+    throw new Error(`error: malformed TASKFERRY_PROVIDER_LIMITS entry "${entry}": empty provider name\n${PROVIDER_LIMITS_HELP}`);
+  }
+  const concurrencyLimit = Number(concurrencyStr);
+  if (!Number.isInteger(concurrencyLimit) || concurrencyLimit <= 0) {
+    throw new Error(`error: malformed TASKFERRY_PROVIDER_LIMITS entry "${entry}": maxConcurrentTasks must be a positive integer\n${PROVIDER_LIMITS_HELP}`);
+  }
+  if (dispatchStr === undefined) return [provider, { concurrencyLimit, dispatchLimit: Infinity }];
+  const dispatchLimit = Number(dispatchStr);
+  if (!Number.isInteger(dispatchLimit) || dispatchLimit <= 0) {
+    throw new Error(`error: malformed TASKFERRY_PROVIDER_LIMITS entry "${entry}": maxDispatchesPerWindow must be a positive integer\n${PROVIDER_LIMITS_HELP}`);
+  }
+  return [provider, { concurrencyLimit, dispatchLimit }];
+}
+
+/**
+ * Parses `TASKFERRY_PROVIDER_LIMITS`'s comma-separated grammar:
+ * `provider:maxConcurrentTasks[:maxDispatchesPerWindow]` per entry. A
+ * provider's `dispatchLimit` is `Infinity` (unbounded) when the third field
+ * is omitted. Throws a two-line `error:`/`help:` message on any malformed
+ * entry, matching config.js's no-silent-typo-tolerance posture, since a
+ * malformed provider limit is a daemon-startup-time config error.
+ * @param {string|undefined} spec
+ * @returns {Map<string, {concurrencyLimit: number, dispatchLimit: number}>}
+ */
+export function parseProviderLimitsEnv(spec) {
+  const map = new Map();
+  if (!spec) return map;
+  for (const entry of spec.split(",").map((e) => e.trim()).filter(Boolean)) {
+    const [provider, limits] = parseProviderLimitEntry(entry);
+    map.set(provider, limits);
+  }
+  return map;
+}
+
 /**
  * Parses a comma-separated list of extra sandbox deny-list paths, merged
  * with {@link defaultDenyList} at every bwrap call site (see denyList

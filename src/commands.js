@@ -2,6 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import { fileURLToPath } from "node:url";
 import { UsageError } from "./args.js";
+import { errCode } from "./errors.js";
 import { PROTOCOL_VERSION } from "./protocol.js";
 import {
   contextForHook,
@@ -42,12 +43,55 @@ const ADVISOR_SUMMARIZE_MODEL = "opencode/mimo-v2.5-free";
 const ADVISOR_SUMMARIZE_TIMEOUT_MS = 120000;
 
 /**
+ * @typedef {object} Client
+ * @property {(method: string, params?: Record<string, unknown>) => Promise<any>} request
+ * @property {(params: Record<string, unknown>, onEvent: (event: Record<string, unknown>) => void) => Promise<string>} subscribe
+ * @property {() => void | Promise<void>} [close]
+ */
+
+/**
+ * @typedef {object} Io
+ * @property {{write: (chunk: string) => unknown, isTTY?: boolean}} stdout
+ */
+
+/**
+ * @typedef {object} Deps
+ * @property {Client} [client] -- absent for `version`, which answers without the daemon
+ * @property {Io} [io]
+ * @property {AbortSignal} [signal]
+ * @property {string} [executablePath]
+ * @property {string} [cwd]
+ * @property {string} [homeDirectory]
+ * @property {NodeJS.ProcessEnv} [env]
+ * @property {(command: string, args: readonly string[]) => Promise<import("./setup.js").CommandResult>} [runShellCommand]
+ * @property {NodeJS.Platform} [platform]
+ * @property {(startDir: string) => string} [resolveWorkspaceRoot]
+ */
+
+/**
+ * The fully-resolved deps object every handler receives (see
+ * resolveRunCommandDeps): every optional input has been defaulted, so the
+ * fields handlers destructure are all present.
+ * @typedef {object} ResolvedDeps
+ * @property {Client} client
+ * @property {Io} io
+ * @property {AbortSignal} [signal]
+ * @property {string} [executablePath]
+ * @property {string} cwd
+ * @property {string} homeDirectory
+ * @property {NodeJS.ProcessEnv} env
+ * @property {(command: string, args: readonly string[]) => Promise<import("./setup.js").CommandResult>} runShellCommand
+ * @property {NodeJS.Platform} platform
+ * @property {(startDir: string) => string} resolveWorkspaceRoot
+ */
+
+/**
  * Best-effort condensation of an arbitrary text blob via a throwaway
  * dispatch+wait+result round trip. Never throws: on any failure (dispatch
  * error, timeout, empty result) it returns `text` unchanged, since
  * condensation is a convenience, not a hard dependency of a working
  * advisor call.
- * @param {{request: (method: string, params: object) => Promise<any>}} client
+ * @param {{request: (method: string, params?: Record<string, unknown>) => Promise<any>}} client
  * @param {string} text
  * @param {{env: NodeJS.ProcessEnv, directory: string}} options
  * @returns {Promise<string>}
@@ -96,6 +140,10 @@ function resolveWaitDefaultTimeoutMs(env) {
 // Checked from `doctor` so a missing Claude plugin install surfaces in the
 // integrations output. `runShellCommand` is injected (default: a real `claude`
 // invocation) so tests can stub it without spawning a subprocess.
+/**
+ * @param {(command: string, args: readonly string[]) => Promise<import("./setup.js").CommandResult>} runShellCommand
+ * @returns {Promise<{installed: boolean, reason?: string}>}
+ */
 async function checkClaudeIntegration(runShellCommand) {
   const probe = await runShellCommand("claude", ["plugin", "list", "--json"]);
   if (probe.error) {
@@ -117,10 +165,16 @@ const TASK_STATS_METHOD = "task.stats";
 // the daemon's per-method spec rejects unknown keys, so an explicitly-set
 // `undefined` (e.g. `model: undefined` after the caller omitted --model) is
 // indistinguishable from a missing key and must be omitted.
+/** @param {unknown} value @returns {boolean} */
 function isSet(value) {
   return value !== undefined;
 }
 
+/**
+ * @param {object} options
+ * @param {string} [options.directory]
+ * @param {ResolvedDeps} deps
+ */
 async function runHome(options, { client, executablePath, cwd, resolveWorkspaceRoot: resolveWorkspaceRootFn }) {
   const directory = normalizeDirectory(options.directory || resolveWorkspaceRootFn(cwd));
   const listed = await client.request(TASK_LIST_METHOD, { directory });
@@ -137,7 +191,12 @@ function runVersion() {
 // flag) must be omitted entirely -- see isSet() above.
 const DISPATCH_PASSTHROUGH_KEYS = ["model", "variant", "sessionId", "finalMarker", "noSandbox", "noOverlay", "allowedDirs", "executor", "class", "parentTaskId"];
 
+/**
+ * @param {Record<string, unknown>} options
+ * @returns {Record<string, unknown>}
+ */
 function pickDispatchOptions(options) {
+  /** @type {Record<string, unknown>} */
   const picked = {};
   for (const key of DISPATCH_PASSTHROUGH_KEYS) {
     if (isSet(options[key])) picked[key] = options[key];
@@ -145,6 +204,12 @@ function pickDispatchOptions(options) {
   return picked;
 }
 
+/**
+ * @param {object} options
+ * @param {string} [options.directory]
+ * @param {string} options.prompt
+ * @param {ResolvedDeps} deps
+ */
 async function runDispatch(options, { client, cwd, env }) {
   const directory = normalizeDirectory(options.directory || cwd);
   return client.request("task.dispatch", {
@@ -156,6 +221,12 @@ async function runDispatch(options, { client, cwd, env }) {
   });
 }
 
+/**
+ * @param {object} options
+ * @param {string} options.taskId
+ * @param {number} [options.graceMs]
+ * @param {ResolvedDeps} deps
+ */
 async function runCancel(options, { client }) {
   return client.request("task.cancel", {
     taskId: options.taskId,
@@ -163,10 +234,20 @@ async function runCancel(options, { client }) {
   });
 }
 
+/**
+ * @param {string} label
+ * @param {{cleanupFailed?: boolean, taskId: string}} result
+ */
 function warnIfCleanupFailed(label, result) {
   if (result.cleanupFailed) process.stderr.write(`warning: ${label}, but overlay cleanup failed -- ${result.taskId}'s overlay dir remains on disk (a daemon restart will sweep it)\n`);
 }
 
+/**
+ * @param {object} options
+ * @param {string} options.taskId
+ * @param {boolean} [options.force]
+ * @param {ResolvedDeps} deps
+ */
 async function runAccept(options, { client }) {
   const accepted = await client.request("task.accept", { taskId: options.taskId, ...(options.force === true && { force: true }) });
   // Review finding #11: a failed cleanup must not be swallowed -- without
@@ -178,6 +259,11 @@ async function runAccept(options, { client }) {
   return accepted;
 }
 
+/**
+ * @param {object} options
+ * @param {string} options.taskId
+ * @param {ResolvedDeps} deps
+ */
 async function runReject(options, { client }) {
   const rejected = await client.request("task.reject", { taskId: options.taskId });
   warnIfCleanupFailed("changeset rejected", rejected);
@@ -187,6 +273,12 @@ async function runReject(options, { client }) {
 // `wait --summarize` keeps the client open (cli.js's top-level finally owns the
 // lifecycle) and re-uses streamTaskEvents to print periodic summaries, then a
 // trailing task.status RPC to project the final lean shape.
+/**
+ * @param {object} options
+ * @param {string} options.taskId
+ * @param {boolean} [options.full]
+ * @param {ResolvedDeps} deps
+ */
 async function runWaitWithSummarize(options, { client, io, signal }) {
   const initial = await client.request(TASK_STATUS_METHOD, { taskId: options.taskId });
   const streamed = await streamTaskEvents({
@@ -208,6 +300,14 @@ async function runWaitWithSummarize(options, { client, io, signal }) {
   return leanStatus(detail, { full: options.full });
 }
 
+/**
+ * @param {object} options
+ * @param {string} options.taskId
+ * @param {number} [options.timeoutMs]
+ * @param {number} [options.tailChars]
+ * @param {boolean} [options.full]
+ * @param {ResolvedDeps} deps
+ */
 async function runWaitWithoutSummarize(options, { client, env }) {
   const waitTimeoutMs = options.timeoutMs ?? resolveWaitDefaultTimeoutMs(env);
   const detail = await client.request("task.wait", {
@@ -218,6 +318,12 @@ async function runWaitWithoutSummarize(options, { client, env }) {
   return leanStatus(detail, { full: options.full });
 }
 
+/**
+ * @param {object} options
+ * @param {string} options.taskId
+ * @param {boolean} [options.summarize]
+ * @param {ResolvedDeps} deps
+ */
 async function runWait(options, deps) {
   if (options.summarize) return runWaitWithSummarize(options, deps);
   return runWaitWithoutSummarize(options, deps);
@@ -231,6 +337,12 @@ async function runWait(options, deps) {
 // live: two separate models both did this on 2026-07-31, e.g.
 // openai/gpt-5.6-sol was fine standalone but cheapestinference/glm-5.2 and
 // cheapestinference/kimi-k2.7 answered the canned framing when it came first).
+/**
+ * @param {object} options
+ * @param {string} [options.prompt]
+ * @param {{source: string, text: string}|null} [finalContext]
+ * @returns {string}
+ */
 function assembleAdvisorPrompt(options, finalContext) {
   const contextBlock = finalContext
     ? [`\n--- attached context (${finalContext.source}, ${finalContext.text.length} chars) ---\n${finalContext.text}\n---`]
@@ -242,6 +354,16 @@ function assembleAdvisorPrompt(options, finalContext) {
   ].join("\n");
 }
 
+/**
+ * @param {Client} client
+ * @param {{source: string, text: string}|null} gathered
+ * @param {object} options
+ * @param {boolean} [options.summarizeContext]
+ * @param {object} deps
+ * @param {NodeJS.ProcessEnv} deps.env
+ * @param {string} deps.directory
+ * @returns {Promise<{source: string, text: string}|null>}
+ */
 async function maybeCondenseContext(client, gathered, options, { env, directory }) {
   if (!gathered || !options.summarizeContext) return gathered;
   // Only relabel the source when condensation actually changed the text --
@@ -252,6 +374,20 @@ async function maybeCondenseContext(client, gathered, options, { env, directory 
   return condensed === gathered.text ? gathered : { source: `summarized ${gathered.source}`, text: condensed };
 }
 
+/**
+ * @param {object} options
+ * @param {string} [options.directory]
+ * @param {string} [options.prompt]
+ * @param {string} [options.model]
+ * @param {string} [options.variant]
+ * @param {string} [options.sessionId]
+ * @param {number} [options.timeoutMs]
+ * @param {string} [options.executor]
+ * @param {string} [options.class]
+ * @param {string} [options.parentTaskId]
+ * @param {boolean} [options.summarizeContext]
+ * @param {ResolvedDeps} deps
+ */
 async function runAdvisor(options, { client, env, cwd, homeDirectory }) {
   // advisor is grouped with dispatch (literal cwd), not with the
   // observation commands: tasks.js's advisor() forwards its directory
@@ -283,11 +419,23 @@ async function runAdvisor(options, { client, env, cwd, homeDirectory }) {
   });
 }
 
+/**
+ * @param {object} options
+ * @param {string} options.taskId
+ * @param {boolean} [options.full]
+ * @param {ResolvedDeps} deps
+ */
 async function runStatus(options, { client }) {
   const detail = await client.request(TASK_STATUS_METHOD, { taskId: options.taskId });
   return leanStatus(detail, { full: options.full });
 }
 
+/**
+ * @param {object} options
+ * @param {string} options.taskId
+ * @param {number} [options.chars]
+ * @param {ResolvedDeps} deps
+ */
 async function runTail(options, { client }) {
   return client.request("task.tail", {
     taskId: options.taskId,
@@ -295,6 +443,12 @@ async function runTail(options, { client }) {
   });
 }
 
+/**
+ * @param {object} options
+ * @param {string} options.taskId
+ * @param {boolean} [options.full]
+ * @param {{client: Client, env: NodeJS.ProcessEnv}} deps
+ */
 async function runSummaryWait(options, { client, env }) {
   const waitTimeoutMs = resolveWaitDefaultTimeoutMs(env);
   const waited = await client.request("task.wait", {
@@ -310,6 +464,15 @@ async function runSummaryWait(options, { client, env }) {
   return null;
 }
 
+/**
+ * @param {object} options
+ * @param {string} options.taskId
+ * @param {boolean} [options.wait]
+ * @param {number} [options.maxWords]
+ * @param {"report"|"activity"} [options.mode]
+ * @param {boolean} [options.full]
+ * @param {ResolvedDeps} deps
+ */
 async function runSummary(options, { client, env }) {
   if (options.wait) {
     const stillRunning = await runSummaryWait(options, { client, env });
@@ -330,6 +493,14 @@ async function runSummary(options, { client, env }) {
   return isActivity ? { mode: options.mode, ...summary } : summary;
 }
 
+/**
+ * @param {object} options
+ * @param {string} options.taskId
+ * @param {boolean} [options.diff]
+ * @param {string[]} [options.fields]
+ * @param {boolean} [options.full]
+ * @param {ResolvedDeps} deps
+ */
 async function runResult(options, { client }) {
   // `options.diff` and `options.full` are mutually exclusive (args.js rejects
   // the combination at parse time), so the if/else-if below is deterministic:
@@ -343,19 +514,42 @@ async function runResult(options, { client }) {
     ...(fields && { fields }),
     ...(options.full && !options.diff && { full: true }),
   });
-  return leanResult(detail, { full: options.full, fields });
+  return leanResult(detail, /** @type {{full?: boolean, fields?: string[]}} */ ({ full: options.full, fields }));
 }
 
+/**
+ * @param {object} options
+ * @param {boolean} [options.all]
+ * @param {string} [options.directory]
+ * @param {number} [options.limit]
+ * @param {ResolvedDeps} deps
+ */
 async function runList(options, { client, cwd, resolveWorkspaceRoot: resolveWorkspaceRootFn }) {
   const params = options.all ? {} : { directory: normalizeDirectory(options.directory || resolveWorkspaceRootFn(cwd)) };
   const listed = await client.request(TASK_LIST_METHOD, params);
   return projectList(listed, { limit: options.limit });
 }
 
+/**
+ * @param {object} options
+ * @param {boolean} [options.all]
+ * @param {string} [options.directory]
+ * @param {string} [options.taskId]
+ * @param {boolean} [options.summaries]
+ * @param {"toon"|"ndjson"} [options.format]
+ * @param {number} [options.flushIntervalMs]
+ * @param {ResolvedDeps} deps
+ */
 async function runWatch(options, { client, io, signal, cwd, resolveWorkspaceRoot: resolveWorkspaceRootFn }) {
   return watchCommand(options, { client, io, signal, cwd, resolveWorkspaceRoot: resolveWorkspaceRootFn });
 }
 
+/**
+ * @param {object} options
+ * @param {string} [options.directory]
+ * @param {"toon"|"claude-hook"|"codex-hook"} [options.format]
+ * @param {ResolvedDeps} deps
+ */
 async function runContext(options, { client, cwd, resolveWorkspaceRoot: resolveWorkspaceRootFn }) {
   const directory = normalizeDirectory(options.directory || resolveWorkspaceRootFn(cwd));
   const context = await client.request("task.context", { directory });
@@ -366,6 +560,10 @@ function failedCheck(reason = CHECK_FAILED) {
   return { checked: false, reason };
 }
 
+/**
+ * @param {ResolvedDeps} deps
+ * @returns {Promise<DoctorChecks>}
+ */
 async function runDoctorChecks({ client, homeDirectory, env, runShellCommand, platform }) {
   const checks = await Promise.allSettled([
     client.request(SYSTEM_HEALTH_METHOD, {}),
@@ -383,6 +581,10 @@ async function runDoctorChecks({ client, homeDirectory, env, runShellCommand, pl
   };
 }
 
+/**
+ * @param {NodeJS.Platform} platform
+ * @returns {{checked: boolean, reason: string}|null}
+ */
 function bwrapFailureForPlatform(platform) {
   return platform === "linux" ? failedCheck() : null;
 }
@@ -393,11 +595,19 @@ function bwrapFailureForPlatform(platform) {
 // to slot in another helper here.
 const SHARED_BROWSER_CRASH_PHRASE = "concurrent dispatches sharing one browser profile crash with SIGKILL";
 
+/**
+ * @param {{checked: boolean, isolated?: boolean, path?: string}} opencodeMCP
+ * @returns {string|null}
+ */
 function opencodeMcpWarning(opencodeMCP) {
   if (!opencodeMCP.checked || opencodeMCP.isolated) return null;
   return `Playwright MCP for opencode is not isolated (${opencodeMCP.path}): ${SHARED_BROWSER_CRASH_PHRASE}. Run taskferry setup to fix, or add --isolated to its command manually.`;
 }
 
+/**
+ * @param {{checked: boolean, isolated?: boolean, path?: string, reason?: string}} claudeCodeMCP
+ * @returns {string|null}
+ */
 function claudeCodeMcpWarning(claudeCodeMCP) {
   if (!claudeCodeMCP.checked || claudeCodeMCP.isolated) return null;
   const pathFragment = claudeCodeMCP.path ? ` (${claudeCodeMCP.path})` : "";
@@ -405,11 +615,23 @@ function claudeCodeMcpWarning(claudeCodeMCP) {
   return `Playwright MCP for Claude Code is not isolated${pathFragment}: ${SHARED_BROWSER_CRASH_PHRASE}. Run taskferry setup to fix${reasonFragment}.`;
 }
 
+/**
+ * @param {{available?: boolean, reason?: string}|null} bwrap
+ * @returns {string|null}
+ */
 function bwrapWarning(bwrap) {
   if (!bwrap || bwrap.available) return null;
   return `Filesystem sandboxing is unavailable: bwrap is not installed (${bwrap.reason}). Dispatches will fail with a spawnError instead of running unconfined. Install bubblewrap (e.g. apt install bubblewrap), or opt out explicitly with TASKFERRY_DISABLE_SANDBOX=1.`;
 }
 
+/**
+ * @param {object} checked
+ * @param {{checked: boolean, isolated?: boolean, path?: string}} checked.opencodeMCP
+ * @param {{checked: boolean, isolated?: boolean, path?: string, reason?: string}} checked.claudeCodeMCP
+ * @param {{available?: boolean, reason?: string}|null} checked.bwrap
+ * @param {NodeJS.Platform} platform
+ * @returns {{warnings: string[], info: string[]}}
+ */
 function collectDoctorDiagnostics(checked, platform) {
   const warnings = [
     opencodeMcpWarning(checked.opencodeMCP),
@@ -422,6 +644,23 @@ function collectDoctorDiagnostics(checked, platform) {
   return { warnings, info };
 }
 
+/**
+ * @typedef {object} DoctorChecks
+ * @property {object} health
+ * @property {{installed: boolean, reason?: string}} claude
+ * @property {{checked: boolean, isolated?: boolean, path?: string, reason?: string}} opencodeMCP
+ * @property {{checked: boolean, isolated?: boolean, path?: string, reason?: string}} claudeCodeMCP
+ * @property {{checked: boolean, available?: boolean, reason?: string}|null} bwrap
+ */
+
+/**
+ * @param {object} options
+ * @param {boolean} [options.full]
+ * @param {DoctorChecks} checked
+ * @param {object} diagnostics
+ * @param {string[]} diagnostics.warnings
+ * @param {string[]} diagnostics.info
+ */
 function shapeDoctorResult(options, checked, diagnostics) {
   const { health, claude, opencodeMCP, claudeCodeMCP } = checked;
   return {
@@ -433,6 +672,9 @@ function shapeDoctorResult(options, checked, diagnostics) {
   };
 }
 
+/**
+ * @param {Client} client
+ */
 async function runDoctorStats(client) {
   // Aggregated server-side (task.stats), not shipped as raw rows to aggregate
   // here: with enough task history the full unfiltered row list alone blows
@@ -449,12 +691,18 @@ async function runDoctorStats(client) {
     // the upgrade window -- reconstruct the same aggregated result from
     // task.list on the client side, the way the pre-PR code path did. Once
     // the upgrade completes and the daemon restarts, the new path takes over.
-    if (error?.code !== "UNKNOWN_METHOD") throw error;
+    if (errCode(error) !== "UNKNOWN_METHOD") throw error;
     const listed = await client.request(TASK_LIST_METHOD, {});
     return projectDoctorStats(computeDoctorStats(Array.isArray(listed?.tasks) ? listed.tasks : []));
   }
 }
 
+/**
+ * @param {object} options
+ * @param {boolean} [options.stats]
+ * @param {boolean} [options.full]
+ * @param {ResolvedDeps} deps
+ */
 async function runDoctor(options, deps) {
   if (options.stats) return runDoctorStats(deps.client);
   const checked = await runDoctorChecks(deps);
@@ -463,12 +711,35 @@ async function runDoctor(options, deps) {
 }
 
 // Per-command dispatch table. Adding a new command means writing one handler
-// here and registering it below -- the top-level switch is gone.
-const HANDLERS = { home: runHome, version: runVersion, dispatch: runDispatch, cancel: runCancel, accept: runAccept, reject: runReject, wait: runWait, advisor: runAdvisor, status: runStatus, tail: runTail, summary: runSummary, result: runResult, list: runList, watch: runWatch, context: runContext, doctor: runDoctor };
+// here and registering it below -- the top-level switch is gone. Each handler
+// has its own per-command options shape, so the table is typed loosely and
+// the per-handler JSDoc carries the real signature.
+/** @type {Record<string, (options: object, deps: Deps) => unknown>} */
+const HANDLERS = {
+  home: /** @type {(options: object, deps: Deps) => unknown} */ (runHome),
+  version: /** @type {(options: object, deps: Deps) => unknown} */ (runVersion),
+  dispatch: /** @type {(options: object, deps: Deps) => unknown} */ (runDispatch),
+  cancel: /** @type {(options: object, deps: Deps) => unknown} */ (runCancel),
+  accept: /** @type {(options: object, deps: Deps) => unknown} */ (runAccept),
+  reject: /** @type {(options: object, deps: Deps) => unknown} */ (runReject),
+  wait: /** @type {(options: object, deps: Deps) => unknown} */ (runWait),
+  advisor: /** @type {(options: object, deps: Deps) => unknown} */ (runAdvisor),
+  status: /** @type {(options: object, deps: Deps) => unknown} */ (runStatus),
+  tail: /** @type {(options: object, deps: Deps) => unknown} */ (runTail),
+  summary: /** @type {(options: object, deps: Deps) => unknown} */ (runSummary),
+  result: /** @type {(options: object, deps: Deps) => unknown} */ (runResult),
+  list: /** @type {(options: object, deps: Deps) => unknown} */ (runList),
+  watch: /** @type {(options: object, deps: Deps) => unknown} */ (runWatch),
+  context: /** @type {(options: object, deps: Deps) => unknown} */ (runContext),
+  doctor: /** @type {(options: object, deps: Deps) => unknown} */ (runDoctor),
+};
 
 // Resolve the default values for the per-command deps once so every handler
 // sees a fully-populated deps object instead of threading `?? process.cwd()`
 // (etc.) through every call.
+/**
+ * @param {Deps} deps
+ */
 function resolveRunCommandDeps(deps) {
   return {
     client: deps.client,
@@ -484,7 +755,12 @@ function resolveRunCommandDeps(deps) {
   };
 }
 
-export async function runCommand(command, options, deps = {}) {
+/**
+ * @param {string} command
+ * @param {object} options
+ * @param {Deps} [deps]
+ */
+export async function runCommand(command, options, deps = /** @type {Deps} */ ({})) {
   if (!Object.hasOwn(HANDLERS, command)) throw new Error(`unknown command: ${command}`);
   const handler = HANDLERS[command];
   return handler(options, resolveRunCommandDeps(deps));

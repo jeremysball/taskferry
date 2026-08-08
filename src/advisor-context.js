@@ -172,7 +172,7 @@ Format: bulleted, terse, no preamble, no closing summary. Short sentences. Refer
  * TASKFERRY_TASK_ID is set (this call came from inside a taskferry-spawned
  * worker), else null (no source available).
  * @param {object} params
- * @param {{request: (method: string, params: object) => Promise<any>}} params.client
+ * @param {{request: (method: string, params?: Record<string, unknown>) => Promise<any>}} params.client
  * @param {NodeJS.ProcessEnv} params.env
  * @param {string} params.cwd
  * @param {string} params.homeDirectory

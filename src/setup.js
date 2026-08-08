@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { ensureClaudeCodePlaywrightIsolation, ensureOpencodePlaywrightIsolation } from "./mcp-isolation.js";
 import { defaultRunCommand } from "./sandbox.js";
+import { errCode } from "./errors.js";
 
 const PLUGIN_ID = "taskferry@taskferry";
 
@@ -13,6 +14,29 @@ const MANAGED_TARGETS = new Set([
   path.join("src", "tf-sl.sh"),
 ]);
 
+/**
+ * @typedef {{status: number|null, stdout: string, stderr: string, error?: import("node:child_process").ExecException | NodeJS.ErrnoException}} CommandResult
+ */
+
+/**
+ * @typedef {(command: string, args: readonly string[]) => CommandResult} RunCommandFn
+ */
+
+/**
+ * @typedef {object} RunSetupOptions
+ * @property {string} checkoutDirectory
+ * @property {string} cliPath
+ * @property {string} [homeDirectory]
+ * @property {NodeJS.ProcessEnv} [env]
+ * @property {NodeJS.Platform} [platform]
+ * @property {(checkoutDirectory: string) => unknown} [runNpmInstall]
+ * @property {RunCommandFn} [runCommand]
+ */
+
+/**
+ * @param {string} resolvedSource
+ * @returns {boolean}
+ */
 function isTaskferryCheckout(resolvedSource) {
   const checkout = path.dirname(path.dirname(resolvedSource));
   try {
@@ -28,6 +52,11 @@ function isTaskferryCheckout(resolvedSource) {
 // checkout whose package.json happens to be named taskferry". Without the
 // checkout-identity check, running setup from any throwaway/scratch clone
 // silently re-points an unrelated, currently-in-use global taskferry symlink.
+/**
+ * @param {string} resolvedExisting
+ * @param {string} resolvedNewSource
+ * @returns {boolean}
+ */
 function isManagedSymlinkTarget(resolvedExisting, resolvedNewSource) {
   const existingCheckout = path.dirname(path.dirname(resolvedExisting));
   const newCheckout = path.dirname(path.dirname(resolvedNewSource));
@@ -42,13 +71,18 @@ function isManagedSymlinkTarget(resolvedExisting, resolvedNewSource) {
   return isTaskferryCheckout(resolvedExisting);
 }
 
+/**
+ * @param {string} destination
+ * @param {string} source
+ * @returns {void}
+ */
 export function replaceManagedSymlink(destination, source) {
   fs.mkdirSync(path.dirname(destination), { recursive: true });
   let existing = null;
   try {
     existing = fs.lstatSync(destination);
   } catch (error) {
-    if (error.code !== "ENOENT") throw error;
+    if (errCode(error) !== "ENOENT") throw error;
   }
   if (existing) {
     if (!existing.isSymbolicLink()) {
@@ -68,6 +102,10 @@ export function replaceManagedSymlink(destination, source) {
   fs.symlinkSync(source, destination, "file");
 }
 
+/**
+ * @param {string} checkoutDirectory
+ * @returns {ReturnType<typeof import("node:child_process").spawnSync>}
+ */
 export function defaultNpmInstall(checkoutDirectory) {
   const result = spawnSync("npm", ["install"], { cwd: checkoutDirectory, encoding: "utf8" });
   if (result.error || result.status !== 0) {
@@ -88,6 +126,11 @@ export function defaultNpmInstall(checkoutDirectory) {
 // `status !== 0` and `error` as distinct failure modes (e.g.
 // getBwrapAvailabilityResult) behave the same regardless of which runner
 // they were given.
+/**
+ * @param {string} command
+ * @param {readonly string[]} args
+ * @returns {Promise<CommandResult>}
+ */
 export function defaultRunCommandAsync(command, args) {
   return new Promise((resolve) => {
     execFile(command, args, { encoding: "utf8", timeout: 5000 }, (error, stdout, stderr) => {
@@ -104,6 +147,12 @@ export function defaultRunCommandAsync(command, args) {
   });
 }
 
+/**
+ * @param {CommandResult} result
+ * @param {string} command
+ * @param {readonly string[]} args
+ * @returns {CommandResult}
+ */
 function ensureSuccess(result, command, args) {
   if (result.error) {
     throw new Error(`${command} ${args.join(" ")} failed: ${result.error.message}`);
@@ -116,14 +165,27 @@ function ensureSuccess(result, command, args) {
   return result;
 }
 
+/**
+ * @param {CommandResult} result
+ * @returns {boolean}
+ */
 function detectExecutable(result) {
   return !result.error || result.error.code !== "ENOENT";
 }
 
+/**
+ * @param {string} checkoutDirectory
+ * @param {string} listOutput
+ * @returns {boolean}
+ */
 function marketplaceHas(checkoutDirectory, listOutput) {
   return listOutput.includes(checkoutDirectory) || listOutput.includes("taskferry");
 }
 
+/**
+ * @param {string} installedJson
+ * @returns {boolean}
+ */
 export function pluginInstalled(installedJson) {
   let parsed;
   try {
@@ -135,6 +197,10 @@ export function pluginInstalled(installedJson) {
   return parsed.some((entry) => entry && entry.id === PLUGIN_ID);
 }
 
+/**
+ * @param {RunCommandFn} runCommand
+ * @returns {string|null}
+ */
 function resolveGitHash(runCommand) {
   const hashResult = runCommand("git", ["rev-parse", "HEAD"]);
   if (!hashResult.error && hashResult.status === 0) {
@@ -143,15 +209,23 @@ function resolveGitHash(runCommand) {
   return null;
 }
 
+/**
+ * @param {string} hashFile
+ * @returns {string|null}
+ */
 function readStoredHash(hashFile) {
   try {
     return fs.readFileSync(hashFile, "utf8").trim();
   } catch (error) {
-    if (error.code !== "ENOENT") throw error;
+    if (errCode(error) !== "ENOENT") throw error;
     return null;
   }
 }
 
+/**
+ * @param {RunCommandFn} runCommand
+ * @returns {void}
+ */
 function installPlugin(runCommand) {
   ensureSuccess(
     runCommand("claude", ["plugin", "install", PLUGIN_ID, "--scope", "user"]),
@@ -160,6 +234,10 @@ function installPlugin(runCommand) {
   );
 }
 
+/**
+ * @param {RunCommandFn} runCommand
+ * @returns {void}
+ */
 function forceResyncPlugin(runCommand) {
   ensureSuccess(
     runCommand("claude", ["plugin", "uninstall", PLUGIN_ID, "--keep-data", "-y"]),
@@ -169,11 +247,23 @@ function forceResyncPlugin(runCommand) {
   installPlugin(runCommand);
 }
 
+/**
+ * @param {string} hashFile
+ * @param {string} hash
+ * @returns {void}
+ */
 function writeHashFile(hashFile, hash) {
   fs.mkdirSync(path.dirname(hashFile), { recursive: true });
   fs.writeFileSync(hashFile, hash);
 }
 
+/**
+ * @param {string} checkoutDirectory
+ * @param {RunCommandFn} runCommand
+ * @param {string} homeDirectory
+ * @param {NodeJS.ProcessEnv} env
+ * @returns {{status: "installed"}|{status: "unavailable"}}
+ */
 export function installClaude(checkoutDirectory, runCommand, homeDirectory, env) {
   const probe = runCommand("claude", ["plugin", "marketplace", "list"]);
   if (!detectExecutable(probe)) return { status: "unavailable" };
@@ -228,6 +318,11 @@ export function installClaude(checkoutDirectory, runCommand, homeDirectory, env)
   return { status: "installed" };
 }
 
+/**
+ * @param {string} checkoutDirectory
+ * @param {RunCommandFn} runCommand
+ * @returns {{status: "desktop-install-required", next: string}|{status: "unavailable"}}
+ */
 export function registerCodex(checkoutDirectory, runCommand) {
   const probe = runCommand("codex", ["plugin", "marketplace", "list"]);
   if (!detectExecutable(probe)) return { status: "unavailable" };
@@ -253,6 +348,25 @@ export function registerCodex(checkoutDirectory, runCommand) {
   };
 }
 
+/**
+ * @param {RunSetupOptions} options
+ * @returns {{
+ *   cli: {path: string, source: string},
+ *   opencode: {path: string, source: string},
+ *   statusline: {path: string, source: string},
+ *   dependencies: string,
+ *   path: "available"|"missing",
+ *   pathInstruction?: string,
+ *   integrations: {
+ *     claude: ReturnType<typeof installClaude>,
+ *     codex: ReturnType<typeof registerCodex>,
+ *   },
+ *   playwrightMcpIsolation: {
+ *     opencode: ReturnType<typeof ensureOpencodePlaywrightIsolation>,
+ *     claudeCode: ReturnType<typeof ensureClaudeCodePlaywrightIsolation>,
+ *   },
+ * }}
+ */
 export function runSetup({
   checkoutDirectory,
   cliPath,

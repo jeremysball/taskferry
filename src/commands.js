@@ -63,7 +63,7 @@ const ADVISOR_SUMMARIZE_TIMEOUT_MS = 120000;
  * @property {string} [cwd]
  * @property {string} [homeDirectory]
  * @property {NodeJS.ProcessEnv} [env]
- * @property {(command: string, args: readonly string[]) => Promise<{status: number|null, stdout: string, stderr: string, error?: NodeJS.ErrnoException}>} [runShellCommand]
+ * @property {(command: string, args: readonly string[]) => Promise<import("./setup.js").CommandResult>} [runShellCommand]
  * @property {NodeJS.Platform} [platform]
  * @property {(startDir: string) => string} [resolveWorkspaceRoot]
  */
@@ -80,7 +80,7 @@ const ADVISOR_SUMMARIZE_TIMEOUT_MS = 120000;
  * @property {string} cwd
  * @property {string} homeDirectory
  * @property {NodeJS.ProcessEnv} env
- * @property {(command: string, args: readonly string[]) => Promise<{status: number|null, stdout: string, stderr: string, error?: NodeJS.ErrnoException}>} runShellCommand
+ * @property {(command: string, args: readonly string[]) => Promise<import("./setup.js").CommandResult>} runShellCommand
  * @property {NodeJS.Platform} platform
  * @property {(startDir: string) => string} resolveWorkspaceRoot
  */
@@ -141,7 +141,7 @@ function resolveWaitDefaultTimeoutMs(env) {
 // integrations output. `runShellCommand` is injected (default: a real `claude`
 // invocation) so tests can stub it without spawning a subprocess.
 /**
- * @param {(command: string, args: readonly string[]) => Promise<{status: number|null, stdout: string, stderr: string, error?: NodeJS.ErrnoException}>} runShellCommand
+ * @param {(command: string, args: readonly string[]) => Promise<import("./setup.js").CommandResult>} runShellCommand
  * @returns {Promise<{installed: boolean, reason?: string}>}
  */
 async function checkClaudeIntegration(runShellCommand) {

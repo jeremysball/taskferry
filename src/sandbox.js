@@ -26,7 +26,7 @@ export function defaultRunCommand(command, args) {
  * `raw` carries bwrap's own `--version` stdout so callers that need the version
  * (checkOverlaySupport() via parseBwrapVersion()) don't have to re-probe. It is
  * only set when bwrap is actually available.
- * @param {{status: number|null, stdout: string, stderr: string, error?: NodeJS.ErrnoException}} result
+ * @param {import("./setup.js").CommandResult} result
  * @returns {{checked: boolean, available: boolean, reason?: string, raw?: string}}
  */
 function getBwrapAvailabilityResult(result) {
@@ -98,7 +98,7 @@ export function checkOverlaySupport(runCommand = defaultRunCommand) {
 
 /**
  * Async variant of checkBwrapAvailable for use with async runCommand implementations.
- * @param {(command: string, args: readonly string[]) => Promise<{status: number|null, stdout: string, stderr: string, error?: NodeJS.ErrnoException}>} runCommand
+ * @param {(command: string, args: readonly string[]) => Promise<import("./setup.js").CommandResult>} runCommand
  * @returns {Promise<{checked: boolean, available: boolean, reason?: string}>}
  */
 export async function checkBwrapAvailableAsync(runCommand) {

@@ -31,7 +31,7 @@ import { resolveInvokedPath } from "./paths.js";
  *   setup?: (opts: {checkoutDirectory: string, cliPath: string, homeDirectory: string, env: NodeJS.ProcessEnv}) => unknown,
  *   init?: (directory: string, deps?: {io?: Io}) => Promise<unknown>,
  *   signal?: AbortSignal,
- *   runShellCommand?: (command: string, args: readonly string[]) => Promise<{status: number|null, stdout: string, stderr: string, error?: NodeJS.ErrnoException}>,
+ *   runShellCommand?: (command: string, args: readonly string[]) => Promise<import("./setup.js").CommandResult>,
  *   homeDirectory?: string,
  *   resolveWorkspaceRoot?: (startDir: string) => string,
  * }} RunCliOptions

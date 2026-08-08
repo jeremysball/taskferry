@@ -55,15 +55,6 @@ const PROVIDER_LIMIT_FIELD_TYPES = {
 };
 
 /**
- * Validates `config.json`'s `providerLimits` field: a flat map of provider
- * name -> {maxConcurrentTasks?, maxDispatchesPerWindow?}, both optional
- * positive integers. Mirrors the top-level object/key/type checks in
- * {@link parseAndValidateConfig} one level deeper, since `providerLimits`
- * is the one config field shaped as a nested object rather than a scalar.
- * @param {unknown} providerLimits
- * @param {string} configPath
- */
-/**
  * Validates a single provider's limits object inside `providerLimits`.
  * @param {string} provider
  * @param {unknown} limits
@@ -84,6 +75,15 @@ function validateProviderLimitEntry(provider, limits, configPath) {
   }
 }
 
+/**
+ * Validates `config.json`'s `providerLimits` field: a flat map of provider
+ * name -> {maxConcurrentTasks?, maxDispatchesPerWindow?}, both optional
+ * positive integers. Mirrors the top-level object/key/type checks in
+ * {@link parseAndValidateConfig} one level deeper, since `providerLimits`
+ * is the one config field shaped as a nested object rather than a scalar.
+ * @param {unknown} providerLimits
+ * @param {string} configPath
+ */
 function validateProviderLimits(providerLimits, configPath) {
   if (providerLimits === null || typeof providerLimits !== "object" || Array.isArray(providerLimits)) {
     throw new Error(`error: config key "providerLimits" in ${configPath} must be a JSON object\nhelp: use {"provider": {"maxConcurrentTasks": N, "maxDispatchesPerWindow": N}, ...}`);

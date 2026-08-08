@@ -73,3 +73,32 @@ diff, and is resolved now that the controller's doc commits (which caused it)
 are committed in the real worktree.
 
 Status: DONE
+
+## Fix round 1
+
+Two issues found by an independent task reviewer (`oc_msks3u9u_f16c9375`,
+`openai/gpt-5.6-luna`) in the landed Task 1 diff, fixed by the controller
+directly in the real worktree (ferry `oc_msks9nid_d3310f5e`'s changeset
+verified against source and applied by scoped edit rather than a bare
+`taskferry accept`, per the same landing discipline as the initial commit).
+
+### Issue 1: unrelated dependency-lockfile change
+`package-lock.json` had a `license: "MIT"` field added to the root package
+entry (`""`) in `bcab372`. Out of Task 1's file scope. Removed the line,
+restoring the file to its pre-Task-1 state.
+
+### Issue 2: stale duplicate JSDoc comment
+In `src/config.js`, two JSDoc blocks were stacked back to back above
+`validateProviderLimitEntry` — the original single-function
+`validateProviderLimits` doc followed by the two-function-split doc. Moved
+the `validateProviderLimits` doc to sit directly above its own function and
+left `validateProviderLimitEntry` with its own single correct doc block.
+
+### Verification
+- `npm run check` (full, in the real worktree): 1125/1125 tests pass,
+  lint/typecheck/skill:check all clean.
+
+### Commit
+`fix(config): drop unrelated lockfile edit and stale JSDoc from Task 1`
+
+Status: DONE

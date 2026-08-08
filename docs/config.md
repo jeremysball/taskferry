@@ -56,6 +56,7 @@ message — there is no silent typo tolerance.
 | `envFile` | `TASKFERRY_ENV_FILE` | string (path to a `.env`-style file) | (none) |
 | `profilingEnabled` | `TASKFERRY_PROFILING_ENABLED` | boolean | `false`; see `docs/daemon.md#request-latency-profiling` |
 | `lowerdirStaggerMs` | `TASKFERRY_LOWERDIR_STAGGER_MS` | number | `3000`; `0` disables |
+| `providerLimits` | `TASKFERRY_PROVIDER_LIMITS` | object (provider -> `{maxConcurrentTasks?, maxDispatchesPerWindow?}`) | `{}` (no per-provider limit; only the global ceiling applies) |
 
 `envDenylist` uses the same comma-separated grammar as `allowedDirs` — a
 flat list of env var names, always stripped from every spawned child
@@ -91,6 +92,31 @@ exists specifically to hold secrets rather than ordinary settings.
 loading; it does not fall through to a `envFile` config-file value, same
 "explicit empty overrides, doesn't fall through" semantics as an explicit
 `false`/`0` would for a boolean field.
+
+`providerLimits` scopes `maxConcurrentTasks`/`maxDispatchesPerWindow` to a
+single provider — the substring of a task's `model` before its first `/`
+(e.g. `"minimax/MiniMax-M3"` is provider `"minimax"`). A task must clear
+both its provider's own limit (if configured) and the global
+`maxConcurrentTasks`/`maxDispatchesPerWindow` ceiling to launch; a provider
+absent from `providerLimits` has no limit of its own and is bound only by
+the global ceiling. There is no per-provider window duration — every
+provider's rate window reuses the single configured `dispatchWindowMs`.
+
+```json
+{
+  "providerLimits": {
+    "minimax": { "maxConcurrentTasks": 4, "maxDispatchesPerWindow": 10 },
+    "ollama": { "maxConcurrentTasks": 3 }
+  }
+}
+```
+
+`TASKFERRY_PROVIDER_LIMITS` uses a compact grammar instead of JSON:
+`provider:maxConcurrentTasks[:maxDispatchesPerWindow]`, comma-separated
+(e.g. `TASKFERRY_PROVIDER_LIMITS="minimax:4:10,ollama:3"`). Setting the env
+var replaces the config file's entire `providerLimits` map wholesale, the
+same all-or-nothing precedence every other field uses — it is not merged
+key-by-key with a config-file `providerLimits` value.
 
 ## Precedence
 

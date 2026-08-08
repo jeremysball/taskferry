@@ -52,23 +52,32 @@ with this recover-or-flag behavior).
 
 That handling only fires on a *confirmed* HEAD mismatch, though -- it won't
 catch every way a shared directory can bite you (a concurrent file edit that
-doesn't touch HEAD, for instance), and hitting it mid-session is still lost
-wall time you'd rather not spend. **Always dispatch at a worktree, never the
-main checkout.** This used to carve out an exception for a solo session
-doing one task at a time on the reasoning that nothing else would touch the
+doesn't touch HEAD -- an uncommitted working-tree change, for instance --
+leaves no ref movement for the recovery to detect), and hitting either case
+mid-session is still lost wall time you'd rather not spend even when
+recovery succeeds. **Always dispatch at a worktree, never the main
+checkout.** This used to carve out an exception for a solo session doing
+one task at a time on the reasoning that nothing else would touch the
 directory -- that reasoning failed in practice (taskferry#261): a real
 solo session hit an unexplained branch flip on the main checkout mid-dispatch,
 and `taskferry result --diff` silently produced a diff comparing the wrong
 trees before this HEAD-drift handling existed. "Nothing else touches this
 directory" is an assumption, not a guarantee the sandbox can enforce, and the
-cost of being wrong (a corrupted diff, or now a stalled `changesetError`
-mid-session) is never worth the one worktree-creation step it saves. Create
-a worktree even for a single quick dispatch. The two reasons worktrees help
-beyond this -- branch isolation (parallel sessions on different branches
-without a switch race) and lower-layer stability (a concurrent edit to a
-live main checkout mutates the overlay's *lower* in place while a ferry is
-in flight, which can make `accept` conflict later) -- still apply on top of
-this; they're not the only justification anymore.
+cost of being wrong (lost wall time re-diagnosing a `changesetError`, or an
+uncommitted concurrent edit the drift check can't even see) is never worth
+the one worktree-creation step it saves. Create a worktree even for a single
+quick dispatch. Branch isolation (parallel sessions on different branches
+without a switch race) is the other standing reason worktrees help beyond
+this. (An earlier version of this section additionally warned that any
+concurrent edit to a live main checkout, HEAD-moving or not, "mutates the
+overlay's lower in place... which can make `accept` conflict later" --
+that framing predates the recover-or-flag behavior above and is superseded
+by it for the HEAD-moving case, which is exactly what a commit like the one
+that prompted this note does: a `git commit` in the shared worktree while a
+ferry was in flight moved HEAD, and the recovery mechanism -- not a
+corrupted diff -- was the actual outcome. The genuinely open risk is
+narrower than that old framing suggested: uncommitted, non-HEAD-moving
+edits only.)
 
 **A worker's writes only land somewhere durable inside `--directory`.** The
 sandbox mounts `--directory` as the one copy-on-write overlay and binds the

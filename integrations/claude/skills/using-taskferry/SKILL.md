@@ -68,16 +68,7 @@ uncommitted concurrent edit the drift check can't even see) is never worth
 the one worktree-creation step it saves. Create a worktree even for a single
 quick dispatch. Branch isolation (parallel sessions on different branches
 without a switch race) is the other standing reason worktrees help beyond
-this. (An earlier version of this section additionally warned that any
-concurrent edit to a live main checkout, HEAD-moving or not, "mutates the
-overlay's lower in place... which can make `accept` conflict later" --
-that framing predates the recover-or-flag behavior above and is superseded
-by it for the HEAD-moving case, which is exactly what a commit like the one
-that prompted this note does: a `git commit` in the shared worktree while a
-ferry was in flight moved HEAD, and the recovery mechanism -- not a
-corrupted diff -- was the actual outcome. The genuinely open risk is
-narrower than that old framing suggested: uncommitted, non-HEAD-moving
-edits only.)
+this.
 
 **A worker's writes only land somewhere durable inside `--directory`.** The
 sandbox mounts `--directory` as the one copy-on-write overlay and binds the

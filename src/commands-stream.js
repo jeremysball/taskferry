@@ -30,8 +30,8 @@ const TASK_STATE_EVENT_TYPE = "task.state";
 
 /**
  * @typedef {object} Client
- * @property {(method: string, params: object) => Promise<any>} request
- * @property {(params: object, onEvent: (event: WatchEvent) => void) => Promise<string>} subscribe
+ * @property {(method: string, params?: Record<string, unknown>) => Promise<any>} request
+ * @property {(params: Record<string, unknown>, onEvent: (event: Record<string, unknown>) => void) => Promise<string>} subscribe
  * @property {() => void} [close]
  */
 
@@ -168,7 +168,12 @@ function streamTaskEvents({ client, io, signal, directory, taskId, all, summarie
       return;
     }
     signal?.addEventListener("abort", /** @type {() => void} */ (abortHandler), { once: true });
-    Promise.resolve(client.subscribe({ ...subscribeSelector({ all, directory, taskId }), ...(summaries ? { summaries: true } : {}) }, (event) => {
+    Promise.resolve(client.subscribe({ ...subscribeSelector({ all, directory, taskId }), ...(summaries ? { summaries: true } : {}) }, (rawEvent) => {
+      // The client is a transport: it hands back whatever JSON the daemon sent,
+      // typed only as a bag of keys. The daemon's own event contract (protocol.js)
+      // is what guarantees the WatchEvent shape, so this is the one place that
+      // narrowing belongs -- everything downstream can then rely on it.
+      const event = /** @type {WatchEvent} */ (rawEvent);
       if (taskId && event.taskId !== taskId) return;
       resolvedDirectory = event.directory;
       if (taskId && TERMINAL_STATUSES.has(event.status)) {

@@ -44,8 +44,8 @@ const ADVISOR_SUMMARIZE_TIMEOUT_MS = 120000;
 
 /**
  * @typedef {object} Client
- * @property {(method: string, params: object) => Promise<any>} request
- * @property {(params: object, onEvent: (event: import("./commands-stream.js").WatchEvent) => void) => Promise<string>} subscribe
+ * @property {(method: string, params?: Record<string, unknown>) => Promise<any>} request
+ * @property {(params: Record<string, unknown>, onEvent: (event: Record<string, unknown>) => void) => Promise<string>} subscribe
  * @property {() => void | Promise<void>} [close]
  */
 
@@ -91,7 +91,7 @@ const ADVISOR_SUMMARIZE_TIMEOUT_MS = 120000;
  * error, timeout, empty result) it returns `text` unchanged, since
  * condensation is a convenience, not a hard dependency of a working
  * advisor call.
- * @param {{request: (method: string, params: object) => Promise<any>}} client
+ * @param {{request: (method: string, params?: Record<string, unknown>) => Promise<any>}} client
  * @param {string} text
  * @param {{env: NodeJS.ProcessEnv, directory: string}} options
  * @returns {Promise<string>}

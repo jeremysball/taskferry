@@ -49,6 +49,8 @@ message — there is no silent typo tolerance.
 | `sandboxEnabled` | `TASKFERRY_DISABLE_SANDBOX` (inverted: `1`/`true` disables) | boolean | `true` |
 | `overlayEnabled` | `TASKFERRY_DISABLE_OVERLAY` (inverted: `1`/`true` disables) | boolean | `true` |
 | `allowedDirs` | `TASKFERRY_ALLOWED_DIRS` | string (comma-separated paths) | (none) |
+| `rwDirs` | `TASKFERRY_RW_DIRS` | string (comma-separated paths) | (none) |
+| `roDirs` | `TASKFERRY_RO_DIRS` | string (comma-separated paths) | (none) |
 | `sandboxDenylist` | `TASKFERRY_SANDBOX_DENYLIST` | string (comma-separated paths) | (none) |
 | `waitDefaultTimeoutMs` | `TASKFERRY_WAIT_DEFAULT_TIMEOUT_MS` | number | `900000` (15 min); `0` disables via the env var only — a config-file value of `0` is ignored and falls back to the 15-minute default |
 | `cancelGraceMs` | `TASKFERRY_CANCEL_GRACE_MS` | number | `5000`; overridden per-call by `cancel --grace-ms` |
@@ -61,6 +63,23 @@ message — there is no silent typo tolerance.
 flat list of env var names, always stripped from every spawned child
 regardless of whether the value came from the daemon's own ambient
 environment or a caller's forwarded env; see `docs/security.md`.
+
+`allowedDirs` is a deprecated alias for `rwDirs` — both bind directories
+read-write inside the sandbox for every dispatch. The two are **unioned**,
+not mutually exclusive: if both the new name and its deprecated alias are
+set, all paths from both contribute. `rwDirs` (and `allowedDirs`) also union
+with the per-dispatch `--rw-dirs`/`--allowed-dirs` flags and the
+`TASKFERRY_RW_DIRS`/`TASKFERRY_ALLOWED_DIRS` env vars rather than any one
+layer replacing another. `allowedDirs` emits a deprecation warning whenever
+it is used and will be removed in the next major release.
+
+`roDirs` is the read-only counterpart: host paths bound **read-only**
+(`--ro-bind`) into the sandbox for every dispatch, resolved through the same
+protected-mount safety check as `.taskferry.toml`'s `read_only_paths`
+(a nonexistent or protected-overlapping entry is skipped and reported, never
+bound). It unions across the config file, `TASKFERRY_RO_DIRS`, the manager
+option, and the per-dispatch `--ro-dirs` flag. If a path appears in both
+`rwDirs` and `roDirs`, read-write wins and a warning is emitted.
 
 `sandboxDenylist` uses the same comma-separated grammar as `allowedDirs` —
 extra directories tmpfs-masked inside the bwrap sandbox, merged with the
@@ -169,7 +188,7 @@ proceeds, but no gate runs and no extra read-only binds are added.
 ```toml
 check = "npm run check"
 check_timeout_seconds = 900
-read_only_paths = ["/srv/reference-docs"]
+roDirs = ["/srv/reference-docs"]
 ```
 
 ### Fields
@@ -178,7 +197,8 @@ read_only_paths = ["/srv/reference-docs"]
 |---|---|---|---|
 | `check` | string | absent → no gate | Shell command taskferry runs as the settle-time verification gate, and that workers are told (via a `## Verification (required)` block appended to their prompt) to run before declaring the task done. Empty / null / missing → no gate, no prompt injection. |
 | `check_timeout_seconds` | positive integer | `900` | Hard cap on a single gate run. On timeout the gate is SIGTERM'd, escalated to SIGKILL after a short grace, and recorded as `checkStatus: "timeout"`, which `accept` treats as a failure unless `--force` overrides. |
-| `read_only_paths` | array of strings | `[]` | Host paths to bind read-only into the bwrap sandbox for every dispatch from this project (and for the gate, with the same mount semantics — the worker and the gate see an identical read-only mount surface). An entry is dropped (and reported via `projectConfigWarning`) if it does not exist on the host, or if it overlaps a protected mount (`equals`, `is an ancestor of`, or `is a descendant of` any of the deny-list, `stateDir`, `runtimeDir`, or `launchDirectory`). `read_only_paths = ["/"]` is rejected by the ancestor check, not slipped through as `--ro-bind / /`. Ignored when sandboxing is off (`TASKFERRY_DISABLE_SANDBOX=1` or `--no-sandbox`). |
+| `read_only_paths` | array of strings | `[]` | Deprecated alias for `roDirs`. Host paths to bind read-only into the bwrap sandbox for every dispatch from this project (and for the gate, with the same mount semantics — the worker and the gate see an identical read-only mount surface). An entry is dropped (and reported via `projectConfigWarning`) if it does not exist on the host, or if it overlaps a protected mount (`equals`, `is an ancestor of`, or `is a descendant of` any of the deny-list, `stateDir`, `runtimeDir`, or `launchDirectory`). `read_only_paths = ["/"]` is rejected by the ancestor check, not slipped through as `--ro-bind / /`. Ignored when sandboxing is off (`TASKFERRY_DISABLE_SANDBOX=1` or `--no-sandbox`). If both `roDirs` and `read_only_paths` are set, `roDirs` wins and the alias is not flagged; using only `read_only_paths` still works but emits a deprecation warning. Will be removed in the next major release. |
+| `roDirs` | array of strings | `[]` | The modern name for `read_only_paths` (one name per concept). Host paths to bind read-only into the bwrap sandbox for every dispatch from this project. Same mount semantics as `read_only_paths`, including the protected-mount drop + `projectConfigWarning`. |
 
 ### Precedence
 
@@ -277,7 +297,7 @@ are: `checkStatus`, `checkCommand` (verbatim from the TOML), `checkExitCode`
 combined stdout+stderr, capped at 256 KiB to bound the daemon's heap on
 a chatty test suite), `checkOverride` (`true` when `accept --force`
 overrode a blocking gate, including a running override), and
-`projectConfigWarning` (parse error or `read_only_paths` warning,
+`projectConfigWarning` (parse error or `read_only_paths`/`roDirs` warning,
 `null` when both clear). All of these are omitted from a lean
 `taskferry status <id>` (without `--full`) when their value is at the
 neutral default — see [output.js](sourcemap.md) for the exact
@@ -294,7 +314,7 @@ verbatim so the docs and the implementation cannot drift:
 | check run exceeds timeout | killed, `checkStatus: timeout`, treated as failure |
 | daemon crashes mid-gate | task settles with `checkStatus: interrupted`; gate re-runnable; never silently passed |
 | `.taskferry.toml` unparseable | dispatch proceeds, gate skipped (`checkStatus: none`), parse error surfaced as a task warning and in doctor (fail loudly, do not guess) |
-| `read_only_paths` entry doesn't exist on host | dispatch proceeds without that binding, warning surfaced in `status --full` (paths may legitimately differ between machines) |
+| `read_only_paths`/`roDirs` entry doesn't exist on host | dispatch proceeds without that binding, warning surfaced in `status --full` (paths may legitimately differ between machines) |
 | check command itself not found at runtime | `checkStatus: failed` with the spawn error in `checkOutputTail` |
 
 The "doctor context" column in this table is the design's stated

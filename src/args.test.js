@@ -37,6 +37,8 @@ test("parses dispatch and applies its argument defaults", () => {
       finalMarker: void 0,
       noSandbox: false,
       noOverlay: false,
+      rwDirs: void 0,
+      roDirs: void 0,
       allowedDirs: void 0,
       executor: void 0,
       class: void 0,
@@ -580,3 +582,41 @@ test("dispatch rejects --force", () => {
     /unknown flag --force/
   );
 });
+
+test("--rw-dirs parses a comma-separated path list into rwDirs", () => {
+  const parsed = parseArgs(["dispatch", "--prompt", "x", "--rw-dirs", "/a, /b"], { cwd: CWD });
+  assert.deepEqual(parsed.options.rwDirs, ["/a", "/b"]);
+  assert.equal(parsed.options.allowedDirs, undefined);
+});
+
+test("--ro-dirs parses a comma-separated path list into roDirs", () => {
+  const parsed = parseArgs(["dispatch", "--prompt", "x", "--ro-dirs", "/a, /b"], { cwd: CWD });
+  assert.deepEqual(parsed.options.roDirs, ["/a", "/b"]);
+});
+
+test("--rw-dirs / --ro-dirs require at least one path", () => {
+  assert.throws(() => parseArgs(["dispatch", "--prompt", "x", "--rw-dirs", ","], { cwd: CWD }), /--rw-dirs must contain at least one path/);
+  assert.throws(() => parseArgs(["dispatch", "--prompt", "x", "--ro-dirs", ","], { cwd: CWD }), /--ro-dirs must contain at least one path/);
+});
+
+test("--rw-dirs and --ro-dirs are rejected on non-dispatch commands", () => {
+  assert.throws(() => parseArgs(["advisor", "--prompt", "x", "--model", "m", "--rw-dirs", "/a"], { cwd: CWD }), /unknown flag --rw-dirs/);
+  assert.throws(() => parseArgs(["advisor", "--prompt", "x", "--model", "m", "--ro-dirs", "/a"], { cwd: CWD }), /unknown flag --ro-dirs/);
+  assert.throws(() => parseArgs(["list", "--rw-dirs", "/a"], { cwd: CWD }), /unknown flag --rw-dirs/);
+});
+
+test("--allowed-dirs still works as a deprecated alias for --rw-dirs and warns", () => {
+  const originalWrite = process.stderr.write;
+  let warned = "";
+  process.stderr.write = (chunk) => { warned += chunk; return true; };
+  try {
+    const parsed = parseArgs(["dispatch", "--prompt", "x", "--allowed-dirs", "/a"], { cwd: CWD });
+    assert.deepEqual(parsed.options.allowedDirs, ["/a"]);
+    assert.match(warned, /--allowed-dirs is deprecated/);
+    assert.match(warned, /--rw-dirs/);
+    assert.match(warned, /next major release/);
+  } finally {
+    process.stderr.write = originalWrite;
+  }
+});
+

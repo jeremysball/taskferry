@@ -337,6 +337,34 @@ describe("bwrap sandboxing: opencode auth and data home", () => {
     assert.equal(captured.args[srcIndex + 1], path.join(cacheDir, OPENCODE_DATA, "opencode", "auth.json"));
   });
 
+  test("--rw-dirs at the real auth.json path promotes the credential bind to read-write instead of dropping it", () => {
+    let captured = null;
+    const cacheDir = mkdtempTracked(AXI_TASKS_CACHE_DIR);
+    const realAuthFile = path.join(os.homedir(), ".local", "share", "opencode", "auth.json");
+    const mgr = makeManager({
+      spawnFn: (cmd, args, opts) => { captured = { cmd, args, opts }; return fakeChild(); },
+      sandboxEnabled: true,
+      checkBwrapAvailableFn: () => ({ checked: true, available: true }),
+      existsFn: (p) => p === realAuthFile,
+      platform: "linux",
+      cacheDir,
+    });
+
+    mgr.dispatch({ prompt: "hello", directory: os.tmpdir(), executor: "opencode", allowedDirs: [realAuthFile] });
+
+    // The pair must still reach the sandbox -- as a --bind (rw) pair with the
+    // same source/dest the ro-bind would have used -- not vanish because the
+    // user's --rw-dirs collided with the executor's own credential path.
+    // (A separate, redundant same-path --bind for realAuthFile also appears,
+    // from the plain --rw-dirs same-path rw bind -- that's expected and
+    // harmless; find the specific promoted pair by its distinct dest.)
+    const expectedDest = path.join(cacheDir, OPENCODE_DATA, "opencode", "auth.json");
+    const pairIndex = captured.args.findIndex(
+      (arg, i) => arg === "--bind" && captured.args[i + 1] === realAuthFile && captured.args[i + 2] === expectedDest,
+    );
+    assert.notEqual(pairIndex, -1, `auth.json bind pair missing entirely after --rw-dirs collision: ${JSON.stringify(captured.args)}`);
+  });
+
   test("omits the auth.json ro-bind when the real file doesn't exist on disk", () => {
     let captured = null;
     const mgr = makeManager({

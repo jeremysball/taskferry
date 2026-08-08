@@ -166,9 +166,9 @@ function defaultOptions(command, cwd) {
   return factory ? factory(cwd) : {};
 }
 
-function coerceAllowedDirs(value, _name) {
+function coerceDirList(value, name) {
   const dirs = value.split(",").map((entry) => entry.trim()).filter(Boolean);
-  if (!dirs.length) throw new UsageError("--allowed-dirs must contain at least one path", "Use --allowed-dirs with one or more comma-separated paths");
+  if (!dirs.length) throw new UsageError(`${name} must contain at least one path`, `Use ${name} with one or more comma-separated paths`);
   return dirs;
 }
 
@@ -207,7 +207,9 @@ const FLAGS = {
   "--variant": { allow: ["dispatch", "advisor"], key: "variant" },
   "--session-id": { allow: ["dispatch", "advisor"], key: "sessionId" },
   "--require-final-marker": { allow: ["dispatch"], key: "finalMarker", coerce: coerceFinalMarker },
-  "--allowed-dirs": { allow: ["dispatch"], key: "allowedDirs", coerce: coerceAllowedDirs },
+  "--rw-dirs": { allow: ["dispatch"], key: "rwDirs", coerce: coerceDirList },
+  "--ro-dirs": { allow: ["dispatch"], key: "roDirs", coerce: coerceDirList },
+  "--allowed-dirs": { allow: ["dispatch"], key: "allowedDirs", coerce: coerceDirList, deprecate: "--allowed-dirs is deprecated; use --rw-dirs (same behavior). It will be removed in the next major release." },
   "--executor": { allow: ["dispatch", "advisor"], key: "executor", coerce: coerceExecutor },
   "--class": { allow: ["dispatch", "advisor"], key: "class" },
   "--parent-task": { allow: ["dispatch", "advisor"], key: "parentTaskId" },
@@ -270,6 +272,7 @@ function handleBooleanFlag(ctx, name, def, inlineValue, index) {
 
 function handleValueFlag(ctx, name, def, required) {
   const value = def.coerce ? def.coerce(required.value, name, ctx.command) : required.value;
+  if (def.deprecate) process.stderr.write(`warning: ${def.deprecate}\n`);
   setOption(ctx.options, def.key, value, ctx.command, ctx.seen);
   return required.nextIndex + 1;
 }

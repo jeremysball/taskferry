@@ -286,7 +286,8 @@ runs wrapped in
   /tmp`, `src/sandbox.js`), applied before any read-write binds — a path a
   caller saved under `/tmp` for a dispatch to read (a diff file, a scratch
   input) is invisible inside the sandbox unless it's also the dispatch's
-  own `directory`, `runtimeDir`, or an explicit `--allowed-dirs` entry, even
+  own `directory`, `runtimeDir`, or an explicit `--rw-dirs`/`--allowed-dirs`
+  entry, even
   though the file exists on the host. Hitting this looks like a plain
   missing-file error from inside the sandbox, not a sandbox-specific one,
   and a worker prompted to read a path it can't see may silently
@@ -340,16 +341,35 @@ runs wrapped in
   a submodule, whose "common dir" already *is* its own private gitdir with
   no sibling checkout to protect) or its resolution fails outright does the
   whole common dir still get bound, matching the original behavior.
-- **`allowedDirs`** extends this same read-write allowance to arbitrary
-  extra directories, for anything else a dispatch legitimately needs to
-  write outside its own working directory. Set it as a comma-separated
-  list of paths — as the `allowedDirs` config field (applies to every
-  dispatch the daemon serves, including internal report-summary children)
-  or via `--allowed-dirs <path,path,...>` on a single `taskferry dispatch`
-  call (adds to, not replaces, the config default; unlike the config-level
-  setting, per-dispatch `--allowed-dirs` does not carry over to that
-  dispatch's own summary children). Entries that don't exist on disk are
-  silently skipped, the same as the deny-list.
+- **`allowedDirs`** (deprecated alias for `rwDirs`) extends this same
+  read-write allowance to arbitrary extra directories, for anything else a
+  dispatch legitimately needs to write outside its own working directory.
+  Set it as a comma-separated list of paths — as the `rwDirs`/`allowedDirs`
+  config field (applies to every dispatch the daemon serves, including
+  internal report-summary children) or via `--rw-dirs`/`--allowed-dirs
+  <path,path,...>` on a single `taskferry dispatch` call (adds to, not
+  replaces, the config default; unlike the config-level setting,
+  per-dispatch `--rw-dirs`/`--allowed-dirs` does not carry over to that
+  dispatch's own summary children). All three layers (flag, env var, config)
+  **union** rather than replace, so a `--rw-dirs` flag adds to — never
+  overrides — `TASKFERRY_RW_DIRS` and config `rwDirs`. `allowedDirs`
+  (flag/env/config key) still works as a deprecated alias, emits a
+  deprecation warning when used, and will be removed in the next major
+  release. Entries that don't exist on disk are silently skipped, the same
+  as the deny-list.
+- **`roDirs`** is the read-only counterpart to `rwDirs`: extra directories
+  bound **read-only** into the sandbox for a review-only worker that should
+  be able to read several repos but edit none of them. Resolved through the
+  same protected-mount safety check as `.taskferry.toml`'s `read_only_paths`
+  — an entry that doesn't exist on the host, or that overlaps a protected
+  mount (deny-list, `stateDir`, `runtimeDir`, or the launch directory), is
+  skipped and reported rather than bound. `roDirs` unions across the
+  per-dispatch `--ro-dirs` flag, `TASKFERRY_RO_DIRS`, config `roDirs`, and
+  the manager option. If the same resolved path appears in both the
+  read-write set and the read-only set, it is bound **read-write** and a
+  warning is emitted naming the path (read-write wins, never an error) — so
+  a `roDirs`/`read_only_paths` entry can be promoted to read-write from the
+  command line.
 - **`XDG_DATA_HOME` is redirected.** OpenCode writes its own logs, session
   database, and snapshots under `XDG_DATA_HOME` (`~/.local/share` by
   default), which is read-only inside the sandbox. Sandboxed dispatches get

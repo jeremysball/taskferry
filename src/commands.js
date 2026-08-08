@@ -135,12 +135,16 @@ function runVersion() {
 // when the caller set them. The daemon's allowed-params spec rejects unknown
 // keys, so an explicitly-undefined value (the args.js default for an omitted
 // flag) must be omitted entirely -- see isSet() above.
-const DISPATCH_PASSTHROUGH_KEYS = ["model", "variant", "sessionId", "finalMarker", "noSandbox", "noOverlay", "allowedDirs", "executor", "class", "parentTaskId"];
+const DISPATCH_PASSTHROUGH_KEYS = ["model", "variant", "sessionId", "finalMarker", "noSandbox", "noOverlay", "allowedDirs", "rwDirs", "roDirs", "executor", "class", "parentTaskId"];
 
 function pickDispatchOptions(options) {
   const picked = {};
   for (const key of DISPATCH_PASSTHROUGH_KEYS) {
-    if (isSet(options[key])) picked[key] = options[key];
+    if (isSet(options[key])) {
+      // `--allowed-dirs` is a deprecated alias for `--rw-dirs`; both write the
+      // same concept, so fold the old key's value into the new wire field.
+      picked[key === "allowedDirs" ? "rwDirs" : key] = options[key];
+    }
   }
   return picked;
 }

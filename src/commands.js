@@ -140,11 +140,15 @@ const DISPATCH_PASSTHROUGH_KEYS = ["model", "variant", "sessionId", "finalMarker
 function pickDispatchOptions(options) {
   const picked = {};
   for (const key of DISPATCH_PASSTHROUGH_KEYS) {
-    if (isSet(options[key])) {
-      // `--allowed-dirs` is a deprecated alias for `--rw-dirs`; both write the
-      // same concept, so fold the old key's value into the new wire field.
-      picked[key === "allowedDirs" ? "rwDirs" : key] = options[key];
-    }
+    // `--allowed-dirs` is a deprecated alias for `--rw-dirs`; pass both keys
+    // through verbatim (as distinct wire params) rather than folding one into
+    // the other here -- the daemon's own dispatchTask already unions
+    // `allowedDirs` and `rwDirs` server-side (see tasks.js's `effectiveRwDirs`
+    // union in dispatchTask). Collapsing them into a single wire key at this
+    // layer, as an earlier version of this function did, meant passing both
+    // flags on one dispatch silently dropped whichever key iterated first --
+    // the daemon's union could never see two distinct values to union.
+    if (isSet(options[key])) picked[key] = options[key];
   }
   return picked;
 }

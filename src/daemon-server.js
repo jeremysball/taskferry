@@ -38,14 +38,14 @@ export const MAX_BUFFER_BYTES = 1024 * 1024;
  * @typedef {object} DispatchDeps
  * @property {Map<string, Subscription>} subscriptions
  * @property {TaskManager} manager
- * @property {(socket: import("node:net").Socket, message: unknown) => boolean} writeMessage
+ * @property {(socket: import("node:net").Socket, message: Record<string, unknown>) => boolean} writeMessage
  * @property {() => void} syncActivity
  * @property {{current: number}} inFlightRef
  * @property {number} maxInFlightRequests
  * @property {() => void} maybeRestart
  * @property {(manager: TaskManager, request: Request) => unknown} invoke
- * @property {(error: unknown, requestId: string | null) => unknown} responseError
- * @property {((timing: {method: string, durationMs: number, ok: boolean}) => void) | undefined} onRequestTimed
+ * @property {(error: unknown, requestId: string | null) => Record<string, unknown>} responseError
+ * @property {((timing: {method: string, durationMs: number, ok: boolean}) => void) | null | undefined} onRequestTimed
  */
 
 // An oversized response (success, error, or event push) degrades to a small
@@ -155,7 +155,7 @@ function eventPayload(event, summaries) {
 
 /**
  * @param {Map<string, Subscription>} subscriptions
- * @param {(socket: import("node:net").Socket, message: unknown) => boolean} writeMessage
+ * @param {(socket: import("node:net").Socket, message: Record<string, unknown>) => boolean} writeMessage
  * @param {Event} event
  * @param {(directory: string) => string} [resolveWorkspaceRootFn]
  */
@@ -213,7 +213,12 @@ function subscriptionDirectory(params, manager) {
 }
 
 /**
+ * A request as parseRequestLine() in protocol.js hands it back, after that
+ * function has already validated the envelope. daemon.js aliases this rather
+ * than restating it, so the invoke() delegate it supplies and the dispatch
+ * loop that calls it cannot drift apart.
  * @typedef {object} Request
+ * @property {unknown} version
  * @property {string} id
  * @property {string} method
  * @property {Record<string, unknown>} params
@@ -224,7 +229,7 @@ function subscriptionDirectory(params, manager) {
  * @param {TaskManager} deps.manager
  * @param {Map<string, Subscription>} deps.subscriptions
  * @param {import("node:net").Socket} deps.socket
- * @param {(socket: import("node:net").Socket, message: unknown) => boolean} deps.writeMessage
+ * @param {(socket: import("node:net").Socket, message: Record<string, unknown>) => boolean} deps.writeMessage
  * @param {() => void} deps.syncActivity
  * @param {Request} request
  */
@@ -297,14 +302,14 @@ export async function dispatchRequest({ subscriptions, manager, writeMessage, sy
  * @param {Set<import("node:net").Socket>} opts.clients
  * @param {Map<string, Subscription>} opts.subscriptions
  * @param {TaskManager} opts.manager
- * @param {(socket: import("node:net").Socket, message: unknown) => boolean} opts.writeMessage
+ * @param {(socket: import("node:net").Socket, message: Record<string, unknown>) => boolean} opts.writeMessage
  * @param {() => void} opts.syncActivity
  * @param {{current: number}} opts.inFlightRef
  * @param {number} opts.maxInFlightRequests
  * @param {() => void} opts.maybeRestart
  * @param {(manager: TaskManager, request: Request) => unknown} opts.invoke
- * @param {(error: unknown, requestId: string | null) => unknown} opts.responseError
- * @param {((timing: {method: string, durationMs: number, ok: boolean}) => void) | undefined} opts.onRequestTimed
+ * @param {(error: unknown, requestId: string | null) => Record<string, unknown>} opts.responseError
+ * @param {((timing: {method: string, durationMs: number, ok: boolean}) => void) | null | undefined} opts.onRequestTimed
  * @returns {import("node:net").Server}
  */
 export function createDaemonServer({ clients, subscriptions, manager, writeMessage, syncActivity, inFlightRef, maxInFlightRequests, maybeRestart, invoke, responseError, onRequestTimed }) {
@@ -404,8 +409,8 @@ export function makeClose({ manager, clients, server, socketPath, restart }) {
  * @param {object} opts
  * @param {TaskManager} opts.manager
  * @param {string} opts.sourceDir
- * @param {(dir: string) => string} opts.sourceSignature
- * @param {string} opts.startupSourceSignature
+ * @param {(dir?: string) => number} opts.sourceSignature
+ * @param {number} opts.startupSourceSignature
  * @param {() => Promise<void>} opts.close
  * @param {(opts: {daemonEntry: string, env: NodeJS.ProcessEnv}) => void} opts.spawnReplacement
  * @param {string} opts.daemonEntry

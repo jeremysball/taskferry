@@ -2,6 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { KNOWN_EXECUTORS } from "./executor.js";
+import { errCode } from "./errors.js";
 
 // Per-path cache so repeated loadConfig() calls in the same process only
 // stat the file (cheap) instead of re-reading, re-parsing, and re-validating
@@ -21,6 +22,7 @@ export function _resetConfigCache() {
   _configCache.clear();
 }
 
+/** @type {Record<string, string>} */
 const CONFIG_FIELD_TYPES = {
   maxConcurrentTasks: "number",
   maxDispatchesPerWindow: "number",
@@ -71,7 +73,8 @@ function parseAndValidateConfig(configPath) {
   try {
     parsed = JSON.parse(raw);
   } catch (err) {
-    throw new Error(`error: could not parse ${configPath}: ${err.message}\nhelp: fix the JSON syntax, or delete the file to use built-in defaults`, { cause: err });
+    const detail = err instanceof Error ? err.message : String(err);
+    throw new Error(`error: could not parse ${configPath}: ${detail}\nhelp: fix the JSON syntax, or delete the file to use built-in defaults`, { cause: err });
   }
 
   if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
@@ -108,7 +111,7 @@ export function loadConfig({ env = process.env, configPath = resolveConfigPath(e
   try {
     currentMtimeMs = fs.statSync(configPath).mtimeMs;
   } catch (err) {
-    if (err.code === "ENOENT") {
+    if (errCode(err) === "ENOENT") {
       const cached = _configCache.get(configPath);
       if (cached && cached.mtimeMs === null) return cached.result;
       const result = {};

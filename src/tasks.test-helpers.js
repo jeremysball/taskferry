@@ -263,6 +263,7 @@ function buildManagerOptions(options, stateDir, defaultCacheDir, defaultOverlayT
     ...passthroughIfSet({ envFileVars: options.envFileVars }, "envFileVars", "envFileVars"),
     ...passthroughIfSet({ sandboxDenylist: options.sandboxDenylist }, "sandboxDenylist", "sandboxDenylist"),
     ...passthroughIfSet({ allowedDirs: options.allowedDirs }, "allowedDirs", "allowedDirs"),
+    ...passthroughIfSet({ providerLimits: options.providerLimits }, "providerLimits", "providerLimits"),
     ...passthroughIfSet({ resolveGitCommonDirFn: options.resolveGitCommonDirFn }, "resolveGitCommonDirFn", "resolveGitCommonDirFn"),
     ...passthroughIfSet({ resolveGitDirFn: options.resolveGitDirFn }, "resolveGitDirFn", "resolveGitDirFn"),
     ...passthroughIfSet({ checkOverlaySupportFn: options.checkOverlaySupportFn }, "checkOverlaySupportFn", "checkOverlaySupportFn"),

@@ -509,6 +509,105 @@ describe("dispatch queue", () => {
   });
 });
 
+describe("per-provider concurrency and dispatch-rate limits", () => {
+  test("a provider at its own dispatch-rate cap is skipped so another provider's queued task still launches (round-robin, taskferry#235)", () => {
+    const children = [];
+    const mgr = makeManager({
+      maxConcurrentTasks: 10,
+      maxDispatchesPerWindow: 10,
+      dispatchWindowMs: 60000,
+      providerLimits: { "opencode-go": { maxConcurrentTasks: 1 } },
+      spawnFn: () => {
+        const c = fakeChild(9200 + children.length);
+        children.push(c);
+        return c;
+      },
+    });
+
+    const first = mgr.dispatch({ prompt: "p0", directory: os.tmpdir(), model: MIMIMAX_MODEL });
+    const second = mgr.dispatch({ prompt: "p1", directory: os.tmpdir(), model: MIMIMAX_MODEL });
+    const third = mgr.dispatch({ prompt: "p2", directory: os.tmpdir(), model: LUNA_MODEL });
+
+    assert.equal(mgr.status(first.id).status, "running", "opencode-go's first task launches");
+    assert.equal(mgr.status(second.id).status, "queued", "opencode-go's second task is capped at maxConcurrentTasks: 1");
+    assert.equal(mgr.status(third.id).status, "running", "openai's task launches despite opencode-go's queue being blocked");
+
+    children[0].emit("exit", 0, null);
+    assert.equal(mgr.status(second.id).status, "running", "freeing opencode-go's own slot lets its queued task launch");
+  });
+
+  test("global maxConcurrentTasks still caps total launches even when every provider has headroom under its own limit", () => {
+    const children = [];
+    const mgr = makeManager({
+      maxConcurrentTasks: 1,
+      maxDispatchesPerWindow: 10,
+      dispatchWindowMs: 60000,
+      providerLimits: { "opencode-go": { maxConcurrentTasks: 5 }, openai: { maxConcurrentTasks: 5 } },
+      spawnFn: () => {
+        const c = fakeChild(9300 + children.length);
+        children.push(c);
+        return c;
+      },
+    });
+
+    const first = mgr.dispatch({ prompt: "p0", directory: os.tmpdir(), model: MIMIMAX_MODEL });
+    const second = mgr.dispatch({ prompt: "p1", directory: os.tmpdir(), model: LUNA_MODEL });
+
+    assert.equal(mgr.status(first.id).status, "running");
+    assert.equal(mgr.status(second.id).status, "queued", "global maxConcurrentTasks: 1 still binds across providers");
+
+    children[0].emit("exit", 0, null);
+    assert.equal(mgr.status(second.id).status, "running", "freeing the global slot lets the other provider's task launch");
+  });
+
+  test("an unconfigured provider is unlimited on its own axis (only the global ceiling applies)", () => {
+    const children = [];
+    const mgr = makeManager({
+      maxConcurrentTasks: 4,
+      maxDispatchesPerWindow: 10,
+      dispatchWindowMs: 60000,
+      providerLimits: { "opencode-go": { maxConcurrentTasks: 1 } },
+      spawnFn: () => {
+        const c = fakeChild(9400 + children.length);
+        children.push(c);
+        return c;
+      },
+    });
+
+    const dispatched = [
+      mgr.dispatch({ prompt: "p0", directory: os.tmpdir(), model: LUNA_MODEL }),
+      mgr.dispatch({ prompt: "p1", directory: os.tmpdir(), model: LUNA_MODEL }),
+      mgr.dispatch({ prompt: "p2", directory: os.tmpdir(), model: LUNA_MODEL }),
+    ];
+    for (const d of dispatched) assert.equal(mgr.status(d.id).status, "running", "openai has no providerLimits entry, so only the global cap (4) applies");
+  });
+
+  test("cancelling a queued task removes it from its own provider's queue, not another provider's", () => {
+    const children = [];
+    const mgr = makeManager({
+      maxConcurrentTasks: 1,
+      maxDispatchesPerWindow: 10,
+      dispatchWindowMs: 60000,
+      spawnFn: () => {
+        const c = fakeChild(9500 + children.length);
+        children.push(c);
+        return c;
+      },
+    });
+
+    mgr.dispatch({ prompt: "p0", directory: os.tmpdir(), model: MIMIMAX_MODEL });
+    const queuedA = mgr.dispatch({ prompt: "p1", directory: os.tmpdir(), model: MIMIMAX_MODEL });
+    const queuedB = mgr.dispatch({ prompt: "p2", directory: os.tmpdir(), model: LUNA_MODEL });
+
+    const cancelled = mgr.cancel(queuedA.id);
+    assert.equal(cancelled.status, "cancelled");
+    assert.equal(mgr.status(queuedB.id).status, "queued", "cancelling opencode-go's queued task must not touch openai's queued task");
+
+    children[0].emit("exit", 0, null);
+    assert.equal(mgr.status(queuedB.id).status, "running", "openai's queued task still launches once the global slot frees");
+  });
+});
+
 describe("lowerdir launch stagger (taskferry#318: bwrap overlay-mount EBUSY under concurrent launches)", () => {
   // Allow a few ms of scheduling jitter below the nominal stagger: the
   // assertion cares about "roughly staggered, not simultaneous", not

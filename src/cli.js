@@ -8,6 +8,40 @@ import { runSetup } from "./setup.js";
 import { runInit } from "./init.js";
 import { resolveInvokedPath } from "./paths.js";
 
+/**
+ * @typedef {NodeJS.Process} Io
+ */
+
+/**
+ * @typedef {{
+ *   command: string,
+ *   options: Record<string, unknown>,
+ *   help: boolean,
+ *   helpText?: {command: string, usage: string, description: string, commands?: string[], options: string[] | Record<string, string>, examples: string[]},
+ * }} ParsedArgs
+ */
+
+/**
+ * @typedef {{
+ *   io?: Io,
+ *   cwd?: string,
+ *   env?: NodeJS.ProcessEnv,
+ *   executablePath?: string,
+ *   connectClient?: (opts: {env: NodeJS.ProcessEnv}) => Promise<{request: (method: string, params: object) => Promise<unknown>, close?: () => Promise<void> | void}>,
+ *   setup?: (opts: {checkoutDirectory: string, cliPath: string, homeDirectory: string, env: NodeJS.ProcessEnv}) => unknown,
+ *   init?: (directory: string, deps?: {io?: Io}) => Promise<unknown>,
+ *   signal?: AbortSignal,
+ *   runShellCommand?: (command: string, args: string[]) => Promise<{status: number|null, stdout: string, stderr: string, error?: NodeJS.ErrnoException}>,
+ *   homeDirectory?: string,
+ *   resolveWorkspaceRoot?: (startDir: string) => string,
+ * }} RunCliOptions
+ */
+
+/**
+ * @param {string[]} [argv]
+ * @param {RunCliOptions} [opts]
+ * @returns {Promise<{exitCode: number, value?: unknown}>}
+ */
 export async function runCli(argv = process.argv.slice(2), {
   io = process,
   cwd = process.cwd(),
@@ -45,12 +79,23 @@ export async function runCli(argv = process.argv.slice(2), {
   return runDaemonCommand(parsed, { io, cwd, env, executablePath, connectClientFn, signal, runShellCommand, homeDirectory, resolveWorkspaceRootFn });
 }
 
+/**
+ * @param {ParsedArgs["helpText"]} helpText
+ * @param {Io} io
+ * @returns {Promise<{exitCode: number}>}
+ */
 async function writeHelp(helpText, io) {
   const { writeToon } = await import("./output.js");
   writeToon(helpText, io);
   return { exitCode: 0 };
 }
 
+/**
+ * @param {(opts: {checkoutDirectory: string, cliPath: string, homeDirectory: string, env: NodeJS.ProcessEnv}) => unknown} setupFn
+ * @param {NodeJS.ProcessEnv} env
+ * @param {Io} io
+ * @returns {Promise<{exitCode: number, value?: unknown}>}
+ */
 async function runSetupCommand(setupFn, env, io) {
   try {
     const value = setupFn({
@@ -73,6 +118,12 @@ async function runSetupCommand(setupFn, env, io) {
   }
 }
 
+/**
+ * @param {(directory: string, deps?: {io?: Io}) => Promise<unknown>} initFn
+ * @param {Io} io
+ * @param {string} cwd
+ * @returns {Promise<{exitCode: number, value?: unknown}>}
+ */
 async function runInitCommand(initFn, io, cwd) {
   try {
     const value = await initFn(cwd, { io });
@@ -86,6 +137,21 @@ async function runInitCommand(initFn, io, cwd) {
   }
 }
 
+/**
+ * @param {ParsedArgs} parsed
+ * @param {{
+ *   io: Io,
+ *   cwd: string,
+ *   env: NodeJS.ProcessEnv,
+ *   executablePath: string,
+ *   connectClientFn: RunCliOptions["connectClient"],
+ *   signal: AbortSignal | undefined,
+ *   runShellCommand: RunCliOptions["runShellCommand"],
+ *   homeDirectory: string,
+ *   resolveWorkspaceRootFn: RunCliOptions["resolveWorkspaceRoot"],
+ * }} deps
+ * @returns {Promise<{exitCode: number, value?: unknown}>}
+ */
 async function runDaemonCommand(parsed, { io, cwd, env, executablePath, connectClientFn, signal, runShellCommand, homeDirectory, resolveWorkspaceRootFn }) {
   const [{ runCommand }, { normalizeDirectory, resolveWorkspaceRoot }, { connectClient: defaultConnectClient }, { writeError, writeToon }] = await Promise.all([
     import("./commands.js"),
@@ -134,17 +200,27 @@ async function runDaemonCommand(parsed, { io, cwd, env, executablePath, connectC
   }
 }
 
+/**
+ * @param {ParsedArgs} parsed
+ * @param {(directory: string) => string} normalizeDirectory
+ * @param {string} cwd
+ * @param {(startDir: string) => string} resolveRoot
+ */
 function normalizeCommandDirectory(parsed, normalizeDirectory, cwd, resolveRoot) {
   // advisor shares dispatch's literal cwd because it becomes the sandbox root.
   if (["dispatch", "advisor"].includes(parsed.command)) {
-    parsed.options.directory = normalizeDirectory(parsed.options.directory || cwd);
+    parsed.options.directory = normalizeDirectory(/** @type {string|undefined} */ (parsed.options.directory) || cwd);
     return;
   }
   if (usesWorkspaceRoot(parsed)) {
-    parsed.options.directory = normalizeDirectory(parsed.options.directory || resolveRoot(cwd));
+    parsed.options.directory = normalizeDirectory(/** @type {string|undefined} */ (parsed.options.directory) || resolveRoot(cwd));
   }
 }
 
+/**
+ * @param {{command: string, options: Record<string, unknown>}} parsed
+ * @returns {boolean}
+ */
 function usesWorkspaceRoot({ command, options }) {
   if (["home", "context"].includes(command)) return true;
   // --all (list and watch) means "every workspace" -- resolving cwd's root
@@ -155,6 +231,10 @@ function usesWorkspaceRoot({ command, options }) {
   return command === "list";
 }
 
+/**
+ * @param {{command: string, options: Record<string, unknown>}} parsed
+ * @returns {boolean}
+ */
 function readsPromptFromStdin({ command, options }) {
   return ["dispatch", "advisor"].includes(command) && options.prompt === "-";
 }
@@ -179,6 +259,12 @@ if (process.argv[1] && resolveInvokedPath(process.argv[1]) === fileURLToPath(imp
 // `--prompt -` lets a large prompt bypass the argv-length limit entirely by
 // piping it into taskferry's own stdin (issue #78) instead of requiring the
 // caller to write a temp file and pass a path themselves.
+/**
+ * @param {NodeJS.ReadableStream & {isTTY?: boolean}} stdin
+ * @param {string} command
+ * @param {AbortSignal | undefined} signal
+ * @returns {Promise<string>}
+ */
 async function readPromptFromStdin(stdin, command, signal) {
   const stdinHelp = `Pipe a prompt into the command (e.g. \`cat prompt.txt | taskferry ${command} --prompt -\`), or pass --prompt "<text>" directly`;
   if (stdin.isTTY) {

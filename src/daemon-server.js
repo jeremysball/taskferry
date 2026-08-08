@@ -13,6 +13,41 @@ import {
 
 export const MAX_BUFFER_BYTES = 1024 * 1024;
 
+/**
+ * The subset of the task manager's surface that the daemon connection layer
+ * touches. The full manager is built by `createTaskManager` in tasks.js; this
+ * narrows it to the members used here so the connection layer doesn't need to
+ * import the whole manager type.
+ * @typedef {object} TaskManager
+ * @property {(subs: Map<string|null, Set<boolean>>) => void} setActivitySubscriptions
+ * @property {() => Promise<void>} checkSummaryModelReady
+ * @property {(taskId: string) => string} taskDirectory
+ * @property {() => {counts: {running: number, queued: number, done: number, crashed: number, cancelled: number, unknown: number}}} list
+ * @property {() => void} [close]
+ */
+
+/**
+ * @typedef {object} Subscription
+ * @property {import("node:net").Socket} socket
+ * @property {string | null} directory
+ * @property {boolean} summaries
+ * @property {string | null} originSessionId
+ */
+
+/**
+ * @typedef {object} DispatchDeps
+ * @property {Map<string, Subscription>} subscriptions
+ * @property {TaskManager} manager
+ * @property {(socket: import("node:net").Socket, message: unknown) => boolean} writeMessage
+ * @property {() => void} syncActivity
+ * @property {{current: number}} inFlightRef
+ * @property {number} maxInFlightRequests
+ * @property {() => void} maybeRestart
+ * @property {(manager: TaskManager, request: Request) => unknown} invoke
+ * @property {(error: unknown, requestId: string | null) => unknown} responseError
+ * @property {((timing: {method: string, durationMs: number, ok: boolean}) => void) | undefined} onRequestTimed
+ */
+
 // An oversized response (success, error, or event push) degrades to a small
 // RESPONSE_TOO_LARGE error frame instead of a silent socket.destroy() --
 // without this, the client only ever sees "daemon connection closed",
@@ -23,7 +58,15 @@ export const MAX_BUFFER_BYTES = 1024 * 1024;
 // fallback frame's width of the cap still gets a diagnosable frame instead
 // of a zero-diagnostic destroy. If even the small fallback doesn't fit, the
 // wire is too far gone for any useful frame to land -- destroy.
+/**
+ * @param {number} maxOutboundBytes
+ * @returns {(socket: import("node:net").Socket, message: Record<string, unknown>) => boolean}
+ */
 export function makeWriteMessage(maxOutboundBytes) {
+  /**
+   * @param {import("node:net").Socket} socket
+   * @param {unknown} message
+   */
   function tryWrite(socket, message) {
     const encoded = encodeMessage(message);
     if (socket.writableLength + Buffer.byteLength(encoded) <= maxOutboundBytes) {
@@ -32,6 +75,10 @@ export function makeWriteMessage(maxOutboundBytes) {
     }
     return false;
   }
+  /**
+   * @param {import("node:net").Socket} socket
+   * @param {Record<string, unknown>} message
+   */
   return function writeMessage(socket, message) {
     if (socket.destroyed) return false;
     if (tryWrite(socket, message)) return true;
@@ -49,7 +96,7 @@ export function makeWriteMessage(maxOutboundBytes) {
       socket.destroy();
       return false;
     }
-    const id = message.id ?? null;
+    const id = typeof message.id === "string" ? message.id : null;
     if (tryWrite(socket, errorResponse(
       id,
       "RESPONSE_TOO_LARGE",
@@ -69,6 +116,7 @@ export function makeWriteMessage(maxOutboundBytes) {
 // Defensive fallback for a caller that omits resolveWorkspaceRootFn: falls
 // back to sameWorkspace()'s literal-equality fast path (today's pre-#315
 // behavior) rather than throwing on a directory-comparison call.
+/** @param {string} directory @returns {string} */
 const identityWorkspaceRoot = (directory) => directory;
 
 // Sentinel subscription.directory for `event.subscribe({ all: true })`
@@ -84,6 +132,18 @@ const ALL_DIRECTORIES = null;
 // Picks the per-subscription payload for a single event: a summary-variant
 // merge when the event carries activityVariants, the event itself otherwise,
 // or null when the requested variant is absent.
+/**
+ * @typedef {object} Event
+ * @property {string} directory
+ * @property {string | null} [originSessionId]
+ * @property {Record<string, unknown>} [activityVariants]
+ */
+
+/**
+ * @param {Event} event
+ * @param {boolean} summaries
+ * @returns {object | null}
+ */
 function eventPayload(event, summaries) {
   if (!event.activityVariants) return event;
   const variant = event.activityVariants[String(summaries)];
@@ -93,6 +153,12 @@ function eventPayload(event, summaries) {
   return { ...rest, ...variant };
 }
 
+/**
+ * @param {Map<string, Subscription>} subscriptions
+ * @param {(socket: import("node:net").Socket, message: unknown) => boolean} writeMessage
+ * @param {Event} event
+ * @param {(directory: string) => string} [resolveWorkspaceRootFn]
+ */
 export function deliverEvent(subscriptions, writeMessage, event, resolveWorkspaceRootFn = identityWorkspaceRoot) {
   for (const [subscriptionId, subscription] of subscriptions) {
     // ALL_DIRECTORIES bypasses the directory check entirely (watch --all).
@@ -110,6 +176,10 @@ export function deliverEvent(subscriptions, writeMessage, event, resolveWorkspac
   }
 }
 
+/**
+ * @param {TaskManager} manager
+ * @param {Map<string, Subscription>} subscriptions
+ */
 export function syncActivitySubscriptions(manager, subscriptions) {
   if (typeof manager.setActivitySubscriptions !== "function") return;
   // A `watch --all` subscription groups under the ALL_DIRECTORIES (null)
@@ -131,12 +201,33 @@ export function syncActivitySubscriptions(manager, subscriptions) {
 // `all: true` (watch --all) short-circuits to ALL_DIRECTORIES; otherwise an
 // explicit directory wins, falling back to the daemon resolving it from
 // taskId server-side (watch --task-id, issue #59).
+/**
+ * @param {Record<string, unknown>} params
+ * @param {TaskManager} manager
+ * @returns {string | null}
+ */
 function subscriptionDirectory(params, manager) {
   if (params.all === true) return ALL_DIRECTORIES;
-  if (params.directory !== undefined) return normalizeDirectory(params.directory);
-  return normalizeDirectory(manager.taskDirectory(params.taskId));
+  if (params.directory !== undefined) return normalizeDirectory(/** @type {string} */ (params.directory));
+  return normalizeDirectory(manager.taskDirectory(/** @type {string} */ (params.taskId)));
 }
 
+/**
+ * @typedef {object} Request
+ * @property {string} id
+ * @property {string} method
+ * @property {Record<string, unknown>} params
+ */
+
+/**
+ * @param {object} deps
+ * @param {TaskManager} deps.manager
+ * @param {Map<string, Subscription>} deps.subscriptions
+ * @param {import("node:net").Socket} deps.socket
+ * @param {(socket: import("node:net").Socket, message: unknown) => boolean} deps.writeMessage
+ * @param {() => void} deps.syncActivity
+ * @param {Request} request
+ */
 async function subscribeRequest({ manager, subscriptions, socket, writeMessage, syncActivity }, request) {
   if (request.params.summaries === true && typeof manager.checkSummaryModelReady === "function") {
     await manager.checkSummaryModelReady();
@@ -147,7 +238,7 @@ async function subscribeRequest({ manager, subscriptions, socket, writeMessage, 
     socket,
     directory,
     summaries: request.params.summaries === true,
-    originSessionId: request.params.originSessionId || null,
+    originSessionId: typeof request.params.originSessionId === "string" ? request.params.originSessionId : null,
   });
   syncActivity();
   return writeMessage(socket, successResponse(request.id, { subscriptionId }));
@@ -159,8 +250,14 @@ async function subscribeRequest({ manager, subscriptions, socket, writeMessage, 
 // SERVER_BUSY, and the normal try/finally) reports through onRequestTimed so
 // "every RPC request" in the profiling docs is literally true, not just the
 // ones that reach invoke().
+/**
+ * @param {DispatchDeps} deps
+ * @param {import("node:net").Socket} socket
+ * @param {string} line
+ */
 export async function dispatchRequest({ subscriptions, manager, writeMessage, syncActivity, inFlightRef, maxInFlightRequests, maybeRestart, invoke, responseError, onRequestTimed }, socket, line) {
   const startedAt = onRequestTimed ? performance.now() : 0;
+  /** @type {Request | undefined} */
   let request;
   try {
     request = parseRequestLine(line);
@@ -195,7 +292,23 @@ export async function dispatchRequest({ subscriptions, manager, writeMessage, sy
   }
 }
 
+/**
+ * @param {object} opts
+ * @param {Set<import("node:net").Socket>} opts.clients
+ * @param {Map<string, Subscription>} opts.subscriptions
+ * @param {TaskManager} opts.manager
+ * @param {(socket: import("node:net").Socket, message: unknown) => boolean} opts.writeMessage
+ * @param {() => void} opts.syncActivity
+ * @param {{current: number}} opts.inFlightRef
+ * @param {number} opts.maxInFlightRequests
+ * @param {() => void} opts.maybeRestart
+ * @param {(manager: TaskManager, request: Request) => unknown} opts.invoke
+ * @param {(error: unknown, requestId: string | null) => unknown} opts.responseError
+ * @param {((timing: {method: string, durationMs: number, ok: boolean}) => void) | undefined} opts.onRequestTimed
+ * @returns {import("node:net").Server}
+ */
 export function createDaemonServer({ clients, subscriptions, manager, writeMessage, syncActivity, inFlightRef, maxInFlightRequests, maybeRestart, invoke, responseError, onRequestTimed }) {
+  /** @type {DispatchDeps} */
   const dispatchDeps = { subscriptions, manager, writeMessage, syncActivity, inFlightRef, maxInFlightRequests, maybeRestart, invoke, responseError, onRequestTimed };
   return net.createServer((socket) => {
     clients.add(socket);
@@ -234,7 +347,17 @@ export function createDaemonServer({ clients, subscriptions, manager, writeMessa
   });
 }
 
+/**
+ * @param {object} opts
+ * @param {TaskManager} opts.manager
+ * @param {Set<import("node:net").Socket>} opts.clients
+ * @param {import("node:net").Server} opts.server
+ * @param {string} opts.socketPath
+ * @param {{restarting: boolean}} opts.restart
+ * @returns {() => Promise<void>}
+ */
 export function makeClose({ manager, clients, server, socketPath, restart }) {
+  /** @type {Promise<void> | undefined} */
   let closing;
   return function close() {
     if (closing) return closing;
@@ -261,7 +384,7 @@ export function makeClose({ manager, clients, server, socketPath, restart }) {
         try {
           fs.unlinkSync(socketPath);
         } catch (unlinkError) {
-          if (unlinkError.code !== "ENOENT") {
+          if (/** @type {{code?: string}} */ (unlinkError).code !== "ENOENT") {
             reject(unlinkError);
             return;
           }
@@ -277,6 +400,20 @@ export function makeClose({ manager, clients, server, socketPath, restart }) {
 // startup, but the actual restart waits for zero running/queued tasks so an
 // in-flight opencode child is never orphaned mid-task by the daemon
 // swapping itself out from under it.
+/**
+ * @param {object} opts
+ * @param {TaskManager} opts.manager
+ * @param {string} opts.sourceDir
+ * @param {(dir: string) => string} opts.sourceSignature
+ * @param {string} opts.startupSourceSignature
+ * @param {() => Promise<void>} opts.close
+ * @param {(opts: {daemonEntry: string, env: NodeJS.ProcessEnv}) => void} opts.spawnReplacement
+ * @param {string} opts.daemonEntry
+ * @param {NodeJS.ProcessEnv} opts.env
+ * @param {() => void} opts.exitProcess
+ * @param {{pending: boolean, restarting: boolean}} opts.restart
+ * @returns {() => void}
+ */
 export function makeMaybeRestart({ manager, sourceDir, sourceSignature, startupSourceSignature, close, spawnReplacement, daemonEntry, env, exitProcess, restart }) {
   return function maybeRestart() {
     if (restart.restarting) return;

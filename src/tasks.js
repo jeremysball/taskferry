@@ -601,6 +601,77 @@ export function parseProviderLimitsEnv(spec) {
 }
 
 /**
+ * @typedef {{launchQueue: string[], launchTimes: number[], runningCount: number}} ProviderQueue
+ */
+
+/**
+ * Derives a task's provider key from its `model` string
+ * ("provider/model"), used to route scheduler state per-provider (design
+ * spec §1). Falls back to the whole string when there's no "/" -- every
+ * real dispatch always sets a "provider/model"-shaped model, so this is
+ * defensive only.
+ * @param {string} model
+ * @returns {string}
+ */
+function providerOf(model) {
+  const slash = model.indexOf("/");
+  return slash === -1 ? model : model.slice(0, slash);
+}
+
+/**
+ * The zero-limit sentinel used when a provider has no `providerLimits`
+ * entry: both axes unbounded, so only the global ceiling applies to it.
+ * @type {{concurrencyLimit: number, dispatchLimit: number}}
+ */
+const UNLIMITED_PROVIDER = { concurrencyLimit: Infinity, dispatchLimit: Infinity };
+
+/**
+ * Re-poll cadence for a concurrency cap, global or per-provider. A rate
+ * window has a timestamp to wait for; a concurrency cap only clears when a
+ * running task exits, which fires no scheduler event, so it's polled.
+ */
+const CONCURRENCY_POLL_MS = 250;
+
+/**
+ * Converts `config.json`'s validated `providerLimits` object (per Task 1's
+ * `validateProviderLimits`) into the `Map<string, {concurrencyLimit,
+ * dispatchLimit}>` shape the scheduler reads. An omitted per-provider key
+ * means unlimited for that axis (`Infinity`), not zero.
+ * @param {Record<string, {maxConcurrentTasks?: number, maxDispatchesPerWindow?: number}>|undefined} configValue
+ * @returns {Map<string, {concurrencyLimit: number, dispatchLimit: number}>}
+ */
+function providerLimitsFromConfig(configValue) {
+  const map = new Map();
+  if (!configValue) return map;
+  for (const [provider, limits] of Object.entries(configValue)) {
+    map.set(provider, {
+      concurrencyLimit: limits.maxConcurrentTasks ?? Infinity,
+      dispatchLimit: limits.maxDispatchesPerWindow ?? Infinity,
+    });
+  }
+  return map;
+}
+
+/**
+ * Resolves `providerLimits` via the same caller -> env -> config -> default
+ * chain every other option uses, with one difference: setting the env var
+ * replaces the config file's entire map wholesale (same semantics
+ * `TASKFERRY_ENV_FILE=""` already uses for `envFile` -- "explicit empty
+ * overrides, doesn't fall through"), never merged key-by-key.
+ * @param {Record<string, any>} rawOptions
+ */
+function resolveProviderLimitsOption(rawOptions) {
+  if (rawOptions.providerLimits !== undefined) {
+    return { providerLimits: providerLimitsFromConfig(/** @type {any} */ (rawOptions.providerLimits)) };
+  }
+  if (process.env.TASKFERRY_PROVIDER_LIMITS !== undefined) {
+    return { providerLimits: parseProviderLimitsEnv(process.env.TASKFERRY_PROVIDER_LIMITS) };
+  }
+  const config = rawOptions.config || {};
+  return { providerLimits: providerLimitsFromConfig(/** @type {any} */ (config.providerLimits)) };
+}
+
+/**
  * Parses a comma-separated list of extra sandbox deny-list paths, merged
  * with {@link defaultDenyList} at every bwrap call site (see denyList
  * assembly in dispatch launch, extractChangesetForTask, and
@@ -669,8 +740,8 @@ export function isOutsideDirectory(directory, candidate) {
  * @property {Set<string>} logHasEventCache
  * @property {Map<string, NodeJS.Timeout>} escalationTimers
  * @property {Map<string, Task>} tasks
- * @property {() => void} decRunning
- * @property {() => void} incRunning
+ * @property {(task: Task) => void} decRunning
+ * @property {(task: Task) => void} incRunning
  */
 
 /**
@@ -1180,7 +1251,7 @@ function finishChildSettlement(ctx, shared) {
     // unhandled throw crashes the daemon and orphans every other in-flight task.
     console.error(`taskferry: failed to clean up scratch files for task ${task.id}: ${errMessage(err)}`);
   } finally {
-    ctx.decRunning();
+    ctx.decRunning(task);
     ctx.settleWaiters(task.id);
     ctx.launchQueuedTasks();
   }
@@ -1387,7 +1458,7 @@ function spawnTaskChild(ctx, launchInfo, task) {
     child.on("error", (err) => onChildError(ctx, shared, err));
     task.status = "running";
     task.pid = child.pid ?? null;
-    ctx.incRunning();
+    ctx.incRunning(task);
     ctx.persistTask(task.id);
     ctx.scheduleActivity(task, { force: true });
     ctx.startRunningWatcher(task, executor);
@@ -1750,7 +1821,7 @@ function resultNextAction(task, taskId, narrationTruncated) {
  * @property {Map<string, Task>} tasks
  * @property {(taskId: string) => void} persistTask
  * @property {Map<string, LaunchSpec>} pendingLaunches
- * @property {string[]} launchQueue
+ * @property {Map<string, ProviderQueue>} providerQueues
  * @property {() => void} launchQueuedTasks
  */
 
@@ -1922,7 +1993,7 @@ function buildDispatchTask({ id, directory, prompt, model, executor, priorSessio
  * between queue time and the queued launch's actual spawn would change what
  * reaches the child. Pinned by tasks.test.js's "dispatch()'s queued env is
  * frozen against later caller mutations" gate.
- * @param {DispatchContext} ctx
+ * @param {{tasks: Map<string, Task>, persistTask: (taskId: string) => void, pendingLaunches: Map<string, LaunchSpec>, providerQueues: Map<string, ProviderQueue>, launchQueuedTasks: () => void}} ctx
  * @param {{id: string, task: Task, prompt: string, sessionId: string|undefined, env: NodeJS.ProcessEnv|undefined, noSandbox: boolean, noOverlay: boolean, allowedDirs: string[]|undefined, executor: import("./executor.js").WorkerExecutor, role: "dispatch"|"advisor"}} params
  */
 function queueDispatchLaunch(ctx, { id, task, prompt, sessionId, env, noSandbox, noOverlay, allowedDirs, executor, role }) {
@@ -1942,7 +2013,13 @@ function queueDispatchLaunch(ctx, { id, task, prompt, sessionId, env, noSandbox,
     noSandbox: noSandbox === true,
     noOverlay: noOverlay === true,
   });
-  ctx.launchQueue.push(id);
+  const provider = providerOf(task.model);
+  let providerQueue = ctx.providerQueues.get(provider);
+  if (!providerQueue) {
+    providerQueue = { launchQueue: [], launchTimes: [], runningCount: 0 };
+    ctx.providerQueues.set(provider, providerQueue);
+  }
+  providerQueue.launchQueue.push(id);
   ctx.launchQueuedTasks();
 }
 
@@ -1969,7 +2046,7 @@ function queueDispatchLaunch(ctx, { id, task, prompt, sessionId, env, noSandbox,
  * @property {(taskId: string) => void} persistTask
  * @property {Map<string, LaunchSpec>} pendingLaunches
  * @property {() => import("./executor.js").WorkerExecutor} opencodeExecutor
- * @property {string[]} launchQueue
+ * @property {Map<string, ProviderQueue>} providerQueues
  * @property {() => void} launchQueuedTasks
  */
 
@@ -2162,7 +2239,13 @@ function launchSummaryTask(ctx, p) {
     executor: ctx.opencodeExecutor(),
     ...(resolvedSummarySessionId ? { summarySessionId: resolvedSummarySessionId } : {}),
   });
-  ctx.launchQueue.push(id);
+  const provider = providerOf(task.model);
+  let providerQueue = ctx.providerQueues.get(provider);
+  if (!providerQueue) {
+    providerQueue = { launchQueue: [], launchTimes: [], runningCount: 0 };
+    ctx.providerQueues.set(provider, providerQueue);
+  }
+  providerQueue.launchQueue.push(id);
   ctx.launchQueuedTasks();
   return {
     sourceStatus,
@@ -2782,57 +2865,164 @@ function pruneStaleLaunchTimes(launchTimes, dispatchWindow) {
 }
 
 /**
- * Launches queued tasks while both the per-window dispatch limit and the
- * concurrency limit have headroom, and the global lowerdir stagger has
- * elapsed since the last launch (any directory -- see
- * DEFAULT_LOWERDIR_STAGGER_MS's doc comment for why this is deliberately
- * not scoped per-directory). A task that vanished from `tasks` (or is no
- * longer queued) is skipped but still consumed from the queue, matching
- * the original loop.
- * @param {{launchTimes: number[], launchQueue: string[], runningCount: number, lastLaunchAt: number}} sched
- * @param {{dispatchLimit: number, concurrencyLimit: number, lowerdirStagger: number, tasks: Map<string, Task>, startTask: (task: Task) => void}} ctx
+ * One round-robin pass over every provider queue, starting from the
+ * scheduler's rotating cursor: attempts to launch at most one task per
+ * provider per pass, skipping (not blocking on) a provider that has no
+ * queued work or is at its own concurrency/rate cap, then repeats passes
+ * until nothing more can launch this tick (global cap/rate window
+ * exhausted, the lowerdir stagger hasn't elapsed -- see
+ * DEFAULT_LOWERDIR_STAGGER_MS's doc comment for why that one is
+ * deliberately not scoped per-directory -- or every remaining provider is
+ * empty or capped). A stale queue entry (task vanished from `tasks`, or is
+ * no longer `queued`) is dropped and doesn't count as a pass's launch. See
+ * the design spec's sections 2-3 for the rationale.
+ * @param {{launchTimes: number[], providerQueues: Map<string, ProviderQueue>, runningCount: number, lastLaunchAt: number, cursor: number}} sched
+ * @param {{dispatchLimit: number, concurrencyLimit: number, lowerdirStagger: number, providerLimits: Map<string, {concurrencyLimit: number, dispatchLimit: number}>, tasks: Map<string, Task>, startTask: (task: Task) => void}} ctx
  */
 function drainLaunchQueue(sched, ctx) {
-  while (
-    sched.launchQueue.length &&
-    sched.launchTimes.length < ctx.dispatchLimit &&
-    sched.runningCount < ctx.concurrencyLimit &&
-    Date.now() - sched.lastLaunchAt >= ctx.lowerdirStagger
-  ) {
-    const id = /** @type {string} */ (sched.launchQueue.shift());
-    const task = ctx.tasks.get(id);
-    if (!task || task.status !== "queued") continue;
-    const launchedAt = Date.now();
-    sched.launchTimes.push(launchedAt);
-    sched.lastLaunchAt = launchedAt;
-    ctx.startTask(task);
+  for (;;) {
+    if (globalLaunchBlocked(sched, ctx)) return;
+    const providers = Array.from(sched.providerQueues.keys());
+    if (!providers.length) return;
+    if (!launchOneRoundRobin(sched, ctx, providers)) return;
   }
 }
 
 /**
- * Arms the next launch tick when the queue is non-empty and no timer is
- * already pending, backing off for the remaining dispatch-window rate delay,
- * a fixed 250ms concurrency delay, or the remaining lowerdir stagger delay,
- * whichever is longest.
- * @param {{launchTimer: NodeJS.Timeout|null, launchTimes: number[], launchQueue: string[], runningCount: number, lastLaunchAt: number}} sched
- * @param {{dispatchLimit: number, dispatchWindow: number, concurrencyLimit: number, lowerdirStagger: number, reschedule: () => void}} ctx
+ * Whether the global (all-provider) gates rule out launching anything right
+ * now: the rate window is full, the concurrency ceiling is reached, or the
+ * lowerdir stagger hasn't elapsed since the last launch.
+ * @param {{launchTimes: number[], runningCount: number, lastLaunchAt: number}} sched
+ * @param {{dispatchLimit: number, concurrencyLimit: number, lowerdirStagger: number}} ctx
+ * @returns {boolean}
+ */
+function globalLaunchBlocked(sched, ctx) {
+  if (sched.launchTimes.length >= ctx.dispatchLimit) return true;
+  if (sched.runningCount >= ctx.concurrencyLimit) return true;
+  return Date.now() - sched.lastLaunchAt < ctx.lowerdirStagger;
+}
+
+/**
+ * Discards queue-head entries whose task vanished from `tasks` or is no
+ * longer `queued`, so the head is either launchable or the queue is empty.
+ * @param {ProviderQueue} providerQueue
+ * @param {Map<string, Task>} tasks
+ */
+function dropStaleQueueHead(providerQueue, tasks) {
+  while (providerQueue.launchQueue.length) {
+    const task = tasks.get(providerQueue.launchQueue[0]);
+    if (task && task.status === "queued") return;
+    providerQueue.launchQueue.shift();
+  }
+}
+
+/**
+ * Whether this provider has queued work its own caps allow launching now.
+ * @param {string} provider
+ * @param {ProviderQueue} providerQueue
+ * @param {Map<string, {concurrencyLimit: number, dispatchLimit: number}>} providerLimits
+ * @returns {boolean}
+ */
+function providerCanLaunch(provider, providerQueue, providerLimits) {
+  if (!providerQueue.launchQueue.length) return false;
+  const limit = providerLimits.get(provider) ?? UNLIMITED_PROVIDER;
+  return providerQueue.launchTimes.length < limit.dispatchLimit && providerQueue.runningCount < limit.concurrencyLimit;
+}
+
+/**
+ * One round-robin pass from the scheduler's cursor: launches at most one
+ * task, from the first provider that has launchable work, and advances the
+ * cursor past it so the next pass starts at the following provider.
+ * @param {{launchTimes: number[], providerQueues: Map<string, ProviderQueue>, lastLaunchAt: number, cursor: number}} sched
+ * @param {{providerLimits: Map<string, {concurrencyLimit: number, dispatchLimit: number}>, tasks: Map<string, Task>, startTask: (task: Task) => void}} ctx
+ * @param {string[]} providers
+ * @returns {boolean} whether a task was launched
+ */
+function launchOneRoundRobin(sched, ctx, providers) {
+  for (let i = 0; i < providers.length; i++) {
+    const provider = providers[(sched.cursor + i) % providers.length];
+    const providerQueue = /** @type {ProviderQueue} */ (sched.providerQueues.get(provider));
+    dropStaleQueueHead(providerQueue, ctx.tasks);
+    if (!providerCanLaunch(provider, providerQueue, ctx.providerLimits)) continue;
+    const id = /** @type {string} */ (providerQueue.launchQueue.shift());
+    const task = /** @type {Task} */ (ctx.tasks.get(id));
+    const launchedAt = Date.now();
+    sched.launchTimes.push(launchedAt);
+    providerQueue.launchTimes.push(launchedAt);
+    sched.lastLaunchAt = launchedAt;
+    // Advanced before startTask because startTask re-enters the scheduler
+    // synchronously; a stale cursor there would replay this same provider.
+    sched.cursor = (sched.cursor + i + 1) % providers.length;
+    ctx.startTask(task);
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Arms the next launch tick when any provider queue is non-empty and no
+ * timer is already pending, backing off for the longest of: the global
+ * rate-window delay, the soonest provider-specific rate-window delay
+ * among providers still queued, a fixed 250ms concurrency-poll delay, or
+ * the remaining lowerdir stagger delay (design spec section 3).
+ * @param {{launchTimer: NodeJS.Timeout|null, launchTimes: number[], providerQueues: Map<string, ProviderQueue>, runningCount: number, lastLaunchAt: number}} sched
+ * @param {{dispatchLimit: number, dispatchWindow: number, concurrencyLimit: number, lowerdirStagger: number, providerLimits: Map<string, {concurrencyLimit: number, dispatchLimit: number}>, reschedule: () => void}} ctx
  */
 function scheduleNextLaunch(sched, ctx) {
-  if (!sched.launchQueue.length || sched.launchTimer) return;
+  const hasQueued = [...sched.providerQueues.values()].some((q) => q.launchQueue.length);
+  if (!hasQueued || sched.launchTimer) return;
   const rateDelay = sched.launchTimes.length >= ctx.dispatchLimit ? sched.launchTimes[0] + ctx.dispatchWindow - Date.now() : 0;
-  const concurrencyDelay = sched.runningCount >= ctx.concurrencyLimit ? 250 : 0;
+  const concurrencyDelay = sched.runningCount >= ctx.concurrencyLimit ? CONCURRENCY_POLL_MS : 0;
   const staggerDelay = Math.max(0, sched.lastLaunchAt + ctx.lowerdirStagger - Date.now());
-  sched.launchTimer = setTimeout(ctx.reschedule, Math.max(1, rateDelay, concurrencyDelay, staggerDelay));
+  const providerDelay = soonestProviderDelay(sched.providerQueues, ctx.providerLimits, ctx.dispatchWindow);
+  sched.launchTimer = setTimeout(ctx.reschedule, Math.max(1, rateDelay, concurrencyDelay, staggerDelay, providerDelay));
+}
+
+/**
+ * How long the soonest-unblockable provider with queued work has to wait,
+ * so a tick isn't armed earlier than anything can actually launch.
+ * @param {Map<string, ProviderQueue>} providerQueues
+ * @param {Map<string, {concurrencyLimit: number, dispatchLimit: number}>} providerLimits
+ * @param {number} dispatchWindow
+ * @returns {number}
+ */
+function soonestProviderDelay(providerQueues, providerLimits, dispatchWindow) {
+  let soonest = Infinity;
+  for (const [provider, queue] of providerQueues) {
+    if (!queue.launchQueue.length) continue;
+    soonest = Math.min(soonest, providerQueueDelay(provider, queue, providerLimits, dispatchWindow));
+  }
+  return soonest === Infinity ? 0 : soonest;
+}
+
+/**
+ * The backoff one queued provider needs before it could launch again. A
+ * provider capped on its own concurrency has no deadline to wait for --
+ * only a running task exiting frees it -- so it polls on the same fixed
+ * cadence the global concurrency cap uses. Without that term a
+ * provider-capped queue backs off by 0ms and re-arms in a 1ms spin.
+ * @param {string} provider
+ * @param {ProviderQueue} queue
+ * @param {Map<string, {concurrencyLimit: number, dispatchLimit: number}>} providerLimits
+ * @param {number} dispatchWindow
+ * @returns {number}
+ */
+function providerQueueDelay(provider, queue, providerLimits, dispatchWindow) {
+  const limit = providerLimits.get(provider) ?? UNLIMITED_PROVIDER;
+  if (queue.runningCount >= limit.concurrencyLimit) return CONCURRENCY_POLL_MS;
+  if (queue.launchTimes.length >= limit.dispatchLimit) return queue.launchTimes[0] + dispatchWindow - Date.now();
+  return 0;
 }
 
 /**
  * Runs one launch-queue tick: cancel any pending timer, prune stale window
- * timestamps, drain as many queued tasks as the limits allow, then re-arm a
- * timer if the queue still has work. Threads the factory's mutable scheduler
- * state via `sched` so the module-level helpers can read/write `launchTimer`
- * and `runningCount` without closing over the factory.
- * @param {{launchTimer: NodeJS.Timeout|null, launchTimes: number[], launchQueue: string[], runningCount: number, lastLaunchAt: number}} sched
- * @param {{dispatchLimit: number, dispatchWindow: number, concurrencyLimit: number, lowerdirStagger: number, tasks: Map<string, Task>, startTask: (task: Task) => void, reschedule: () => void}} ctx
+ * timestamps (global and every provider bucket's own), drain as many queued
+ * tasks as the limits allow, then re-arm a timer if any provider queue still
+ * has work. Threads the factory's mutable scheduler state via `sched` so the
+ * module-level helpers can read/write `launchTimer` and `runningCount`
+ * without closing over the factory.
+ * @param {{launchTimer: NodeJS.Timeout|null, launchTimes: number[], providerQueues: Map<string, ProviderQueue>, runningCount: number, lastLaunchAt: number, cursor: number}} sched
+ * @param {{dispatchLimit: number, dispatchWindow: number, concurrencyLimit: number, lowerdirStagger: number, providerLimits: Map<string, {concurrencyLimit: number, dispatchLimit: number}>, tasks: Map<string, Task>, startTask: (task: Task) => void, reschedule: () => void}} ctx
  */
 function runLaunchQueuedTasks(sched, ctx) {
   if (sched.launchTimer) {
@@ -2840,6 +3030,7 @@ function runLaunchQueuedTasks(sched, ctx) {
     sched.launchTimer = null;
   }
   pruneStaleLaunchTimes(sched.launchTimes, ctx.dispatchWindow);
+  for (const queue of sched.providerQueues.values()) pruneStaleLaunchTimes(queue.launchTimes, ctx.dispatchWindow);
   drainLaunchQueue(sched, ctx);
   scheduleNextLaunch(sched, ctx);
 }
@@ -3465,6 +3656,7 @@ function resolveTaskManagerOptions(rawOptions = {}) {
     ...resolveStringOptions(rawOptions),
     ...resolveEnvFileOptions(rawOptions),
     ...resolveFilesystemOptions(rawOptions),
+    ...resolveProviderLimitsOption(rawOptions),
   };
 }
 
@@ -3538,6 +3730,7 @@ function initManagerLimits(opts) {
     dispatchLimit: positiveInteger(opts.maxDispatchesPerWindow, DEFAULT_MAX_DISPATCHES_PER_WINDOW),
     dispatchWindow: positiveInteger(opts.dispatchWindowMs, DEFAULT_DISPATCH_WINDOW_MS),
     concurrencyLimit: positiveInteger(opts.maxConcurrentTasks, DEFAULT_MAX_CONCURRENT_TASKS),
+    providerLimits: opts.providerLimits,
     summaryConcurrencyLimit: Math.max(1, Math.floor(positiveInteger(opts.maxConcurrentTasks, DEFAULT_MAX_CONCURRENT_TASKS) / 2)),
     advisorTtl: positiveInteger(opts.advisorSessionTtlMs, DEFAULT_ADVISOR_SESSION_TTL_MS),
     noOutputTimeout: positiveInteger(opts.noOutputTimeoutMs, DEFAULT_NO_OUTPUT_TIMEOUT_MS),
@@ -3642,7 +3835,7 @@ function initManagerMaps() {
     waiters: new Map(),
     advisorSessions: new Map(),
     pendingLaunches: new Map(),
-    launchQueue: [],
+    providerQueues: new Map(),
     launchTimes: [],
     modelsCache: new Map(),
     modelsCacheInFlight: new Map(),
@@ -3654,22 +3847,29 @@ function initManagerMaps() {
 
 /**
  * @param {{launchTimer: NodeJS.Timeout|null, runningCount: number, eventSequence: number, activitySummarySubscriptions: number, lastLaunchAt: number}} state
- * @param {{launchTimes: number[], launchQueue: string[]}} maps
+ * @param {{launchTimes: number[], providerQueues: Map<string, ProviderQueue>}} maps
  */
 function initManagerSchedulers(state, maps) {
   return {
     // Getter/setter pair lets the module-level launch helpers
     // read/write `launchTimer` and `runningCount` (the factory's own
     // `let` bindings) without closing over the factory, while
-    // `launchTimes`/`launchQueue` are shared by reference.
+    // `launchTimes`/`providerQueues` are shared by reference.
     launchScheduler: {
       launchTimes: maps.launchTimes,
-      launchQueue: maps.launchQueue,
+      providerQueues: maps.providerQueues,
       get runningCount() { return state.runningCount; },
       get launchTimer() { return state.launchTimer; },
       set launchTimer(v) { state.launchTimer = v; },
       get lastLaunchAt() { return state.lastLaunchAt; },
       set lastLaunchAt(v) { state.lastLaunchAt = v; },
+      // Round-robin cursor into providerQueues' iteration order, advanced
+      // by the drain algorithm so a heavy provider's backlog doesn't
+      // starve a lighter one's when the global ceiling binds (design
+      // spec §3). Plain mutable property: this object is created once
+      // per manager and lives for the daemon's lifetime, so it needs no
+      // getter/setter indirection the way `state`'s `let` bindings do.
+      cursor: 0,
     },
     // Mutable bindings the extracted activity-schedule helper needs
     // read/write access to (the monotonic event sequence and the
@@ -3845,16 +4045,16 @@ function buildManagerInternalHelpers(ctx) {
      * @param {{maxWords?: number, allowPromptFallback?: boolean, previousActivity?: string|null, summarySessionId?: string|null, lastSummarizedWatermark?: number|null, respectConcurrencyReserve?: boolean, env?: NodeJS.ProcessEnv}} [options]
      * @returns {Promise<{sourceTaskId: string, sourceStatus: string, summary?: string, help?: string, capturedAt?: string, sourceLogBytes?: number, summaryInputBytes?: number, next?: string, summaryTask?: {id: string, status: string, model: string}}>}
      */
-    summarizeTask: (taskId, options = {}) => summarizeTaskFor(taskId, options, { ensureStateLoaded: () => ctx.helpers.ensureStateLoaded(), tasks: ctx.maps.tasks, summaryConcurrencyLimit: ctx.limits.summaryConcurrencyLimit, activityCache: ctx.activity.cache, activitySummaryModel: ctx.opts.activitySummaryModel, summaryModelAvailable: (model, env) => ctx.helpers.summaryModelAvailable(model, env), LOG_DIR: ctx.paths.LOG_DIR, SUMMARY_DIR: ctx.paths.SUMMARY_DIR, persistTask: (taskId) => ctx.helpers.persistTask(taskId), pendingLaunches: ctx.maps.pendingLaunches, launchQueue: ctx.maps.launchQueue, launchQueuedTasks: () => ctx.helpers.launchQueuedTasks(), noSuchTask, readNarrationExcerpt, opencodeExecutor }),
+    summarizeTask: (taskId, options = {}) => summarizeTaskFor(taskId, options, { ensureStateLoaded: () => ctx.helpers.ensureStateLoaded(), tasks: ctx.maps.tasks, summaryConcurrencyLimit: ctx.limits.summaryConcurrencyLimit, activityCache: ctx.activity.cache, activitySummaryModel: ctx.opts.activitySummaryModel, summaryModelAvailable: (model, env) => ctx.helpers.summaryModelAvailable(model, env), LOG_DIR: ctx.paths.LOG_DIR, SUMMARY_DIR: ctx.paths.SUMMARY_DIR, persistTask: (taskId) => ctx.helpers.persistTask(taskId), pendingLaunches: ctx.maps.pendingLaunches, providerQueues: ctx.maps.providerQueues, launchQueuedTasks: () => ctx.helpers.launchQueuedTasks(), noSuchTask, readNarrationExcerpt, opencodeExecutor }),
     /** @returns {void} */
-    launchQueuedTasks: () => { runLaunchQueuedTasks(ctx.schedulers.launchScheduler, { dispatchLimit: ctx.limits.dispatchLimit, dispatchWindow: ctx.limits.dispatchWindow, concurrencyLimit: ctx.limits.concurrencyLimit, lowerdirStagger: ctx.limits.lowerdirStagger, tasks: ctx.maps.tasks, startTask: (task) => ctx.helpers.startTask(task), reschedule: () => ctx.helpers.launchQueuedTasks() }); },
+    launchQueuedTasks: () => { runLaunchQueuedTasks(ctx.schedulers.launchScheduler, { dispatchLimit: ctx.limits.dispatchLimit, dispatchWindow: ctx.limits.dispatchWindow, concurrencyLimit: ctx.limits.concurrencyLimit, lowerdirStagger: ctx.limits.lowerdirStagger, providerLimits: ctx.limits.providerLimits, tasks: ctx.maps.tasks, startTask: (task) => ctx.helpers.startTask(task), reschedule: () => ctx.helpers.launchQueuedTasks() }); },
     /** Spawns a queued launch's worker process. The launch's pre-parsed
      * metadata (target dir, prompt-file routing, buildSpawnArgs output) comes
      * from resolveStartTaskLaunch; the actual spawn + child lifecycle is
      * delegated to {@link startTaskFor}, which takes every factory closure
      * dependency explicitly via `ctx`.
      * @param {Task} task */
-    startTask: (task) => startTaskFor(task, { pendingLaunches: ctx.maps.pendingLaunches, SUMMARY_DIR: ctx.paths.SUMMARY_DIR, PROMPT_DIR: ctx.paths.PROMPT_DIR, spawnFn: ctx.opts.spawnFn, runOverlayCommandFn: ctx.opts.runOverlayCommandFn, sandboxEnabled: ctx.opts.sandboxEnabled, platform: ctx.opts.platform, overlayEnabled: ctx.opts.overlayEnabled, overlayTmpRoot: ctx.opts.overlayTmpRoot, allowedDirs: ctx.opts.allowedDirs, stateDir: ctx.opts.stateDir, cacheDir: ctx.opts.cacheDir, runtimeDir: ctx.opts.runtimeDir, existsFn: ctx.opts.existsFn, statFn: ctx.opts.statFn, readdirFn: ctx.opts.readdirFn, sandboxDenylist: ctx.opts.sandboxDenylist, resolveGitCommonDirFn: ctx.opts.resolveGitCommonDirFn, resolveGitDirFn: ctx.opts.resolveGitDirFn, requireBwrap: () => ctx.env.requireBwrap(), requireOverlaySupport: () => ctx.env.requireOverlaySupport(), dispatchEnvironment: (env, taskId) => ctx.env.dispatchEnvironment(env, taskId), summaryEnvironment: (env) => ctx.env.summaryEnvironment(env), settleWaiters: (taskId) => ctx.helpers.settleWaiters(taskId), launchQueuedTasks: () => ctx.helpers.launchQueuedTasks(), persistTask: (taskId) => ctx.helpers.persistTask(taskId), scheduleActivity: (task, options) => ctx.helpers.scheduleActivity(task, options), classifyTrailingLogFailure: (task, executor) => ctx.helpers.classifyTrailingLogFailure(task, executor), startRunningWatcher: (task, executor) => ctx.helpers.startRunningWatcher(task, executor), stopRunningWatcher: (taskId) => ctx.helpers.stopRunningWatcher(taskId), extractChangesetForTask: (task) => ctx.env.extractChangesetForTask(task), sendSignal: (pid, signal) => ctx.helpers.sendSignal(pid, signal), activityCache: ctx.activity.cache, logHasEventCache: ctx.maps.logHasEventCache, escalationTimers: ctx.maps.escalationTimers, tasks: ctx.maps.tasks, decRunning: () => { ctx.state.runningCount--; }, incRunning: () => { ctx.state.runningCount++; }, readSessionIdFromLog, evaluateOutputCompleteness, attemptCrashRecovery }),
+    startTask: (task) => startTaskFor(task, { pendingLaunches: ctx.maps.pendingLaunches, SUMMARY_DIR: ctx.paths.SUMMARY_DIR, PROMPT_DIR: ctx.paths.PROMPT_DIR, spawnFn: ctx.opts.spawnFn, runOverlayCommandFn: ctx.opts.runOverlayCommandFn, sandboxEnabled: ctx.opts.sandboxEnabled, platform: ctx.opts.platform, overlayEnabled: ctx.opts.overlayEnabled, overlayTmpRoot: ctx.opts.overlayTmpRoot, allowedDirs: ctx.opts.allowedDirs, stateDir: ctx.opts.stateDir, cacheDir: ctx.opts.cacheDir, runtimeDir: ctx.opts.runtimeDir, existsFn: ctx.opts.existsFn, statFn: ctx.opts.statFn, readdirFn: ctx.opts.readdirFn, sandboxDenylist: ctx.opts.sandboxDenylist, resolveGitCommonDirFn: ctx.opts.resolveGitCommonDirFn, resolveGitDirFn: ctx.opts.resolveGitDirFn, requireBwrap: () => ctx.env.requireBwrap(), requireOverlaySupport: () => ctx.env.requireOverlaySupport(), dispatchEnvironment: (env, taskId) => ctx.env.dispatchEnvironment(env, taskId), summaryEnvironment: (env) => ctx.env.summaryEnvironment(env), settleWaiters: (taskId) => ctx.helpers.settleWaiters(taskId), launchQueuedTasks: () => ctx.helpers.launchQueuedTasks(), persistTask: (taskId) => ctx.helpers.persistTask(taskId), scheduleActivity: (task, options) => ctx.helpers.scheduleActivity(task, options), classifyTrailingLogFailure: (task, executor) => ctx.helpers.classifyTrailingLogFailure(task, executor), startRunningWatcher: (task, executor) => ctx.helpers.startRunningWatcher(task, executor), stopRunningWatcher: (taskId) => ctx.helpers.stopRunningWatcher(taskId), extractChangesetForTask: (task) => ctx.env.extractChangesetForTask(task), sendSignal: (pid, signal) => ctx.helpers.sendSignal(pid, signal), activityCache: ctx.activity.cache, logHasEventCache: ctx.maps.logHasEventCache, escalationTimers: ctx.maps.escalationTimers, tasks: ctx.maps.tasks, decRunning: (task) => { ctx.state.runningCount--; const q = ctx.maps.providerQueues.get(providerOf(task.model)); if (q) q.runningCount--; }, incRunning: (task) => { ctx.state.runningCount++; const q = ctx.maps.providerQueues.get(providerOf(task.model)); if (q) q.runningCount++; }, readSessionIdFromLog, evaluateOutputCompleteness, attemptCrashRecovery }),
     /**
      * @param {string} taskId
      * @param {{force?: boolean}} options
@@ -3902,7 +4102,7 @@ function buildManagerInternalHelpers(ctx) {
     sendSignal: (pid, signal) => sendSignalToProcess(pid, signal, { killFn: ctx.opts.killFn }),
     /** @param {string} taskId
      * @param {{graceMs?: number}} [options] */
-    cancel: (taskId, { graceMs = ctx.limits.cancelGrace } = {}) => cancelTask(taskId, { graceMs }, { noSuchTask, ensureStateLoaded: () => ctx.helpers.ensureStateLoaded(), tasks: ctx.maps.tasks, launchScheduler: { get launchQueue() { return ctx.maps.launchQueue; }, get launchTimer() { return ctx.state.launchTimer; }, set launchTimer(value) { ctx.state.launchTimer = value; } }, pendingLaunches: ctx.maps.pendingLaunches, persistTask: (id) => ctx.helpers.persistTask(id), scheduleActivity: (task, options2) => ctx.helpers.scheduleActivity(task, options2), activityCache: ctx.activity.cache, logHasEventCache: ctx.maps.logHasEventCache, settleWaiters: (id) => ctx.helpers.settleWaiters(id), stopRunningWatcher: (id) => ctx.helpers.stopRunningWatcher(id), escalationTimers: ctx.maps.escalationTimers, sendSignal: (pid, signal) => ctx.helpers.sendSignal(pid, signal) }),
+    cancel: (taskId, { graceMs = ctx.limits.cancelGrace } = {}) => cancelTask(taskId, { graceMs }, { noSuchTask, ensureStateLoaded: () => ctx.helpers.ensureStateLoaded(), tasks: ctx.maps.tasks, launchScheduler: { get providerQueues() { return ctx.maps.providerQueues; }, get launchTimer() { return ctx.state.launchTimer; }, set launchTimer(value) { ctx.state.launchTimer = value; } }, pendingLaunches: ctx.maps.pendingLaunches, persistTask: (id) => ctx.helpers.persistTask(id), scheduleActivity: (task, options2) => ctx.helpers.scheduleActivity(task, options2), activityCache: ctx.activity.cache, logHasEventCache: ctx.maps.logHasEventCache, settleWaiters: (id) => ctx.helpers.settleWaiters(id), stopRunningWatcher: (id) => ctx.helpers.stopRunningWatcher(id), escalationTimers: ctx.maps.escalationTimers, sendSignal: (pid, signal) => ctx.helpers.sendSignal(pid, signal) }),
   };
 }
 
@@ -3941,7 +4141,7 @@ function buildTaskManagerApi(ctx) {
      *   misrouted CLI/RPC call fails fast rather than silently picking the default.
      * @returns {TaskSummary & {next: string}}
      */
-    dispatch: (params) => dispatchTask(params, { ensureStateLoaded: () => ctx.helpers.ensureStateLoaded(), tasks: ctx.maps.tasks, defaultExecutor: ctx.opts.defaultExecutor, LOG_DIR: ctx.paths.LOG_DIR, persistTask: (taskId) => ctx.helpers.persistTask(taskId), pendingLaunches: ctx.maps.pendingLaunches, launchQueue: ctx.maps.launchQueue, launchQueuedTasks: () => ctx.helpers.launchQueuedTasks() }),
+    dispatch: (params) => dispatchTask(params, { ensureStateLoaded: () => ctx.helpers.ensureStateLoaded(), tasks: ctx.maps.tasks, defaultExecutor: ctx.opts.defaultExecutor, LOG_DIR: ctx.paths.LOG_DIR, persistTask: (taskId) => ctx.helpers.persistTask(taskId), pendingLaunches: ctx.maps.pendingLaunches, providerQueues: ctx.maps.providerQueues, launchQueuedTasks: () => ctx.helpers.launchQueuedTasks() }),
     /**
      * @param {string} taskId
      * @param {{graceMs?: number}} [options]
@@ -5754,7 +5954,7 @@ function startRunningWatcherFor(task, ctx) {
  * helpers are plain module-level functions called directly. The factory
  * bindings are threaded in via `ctx`.
  * @param {{prompt: string, directory: string, model?: string, variant?: string, sessionId?: string, internal?: boolean, finalMarker?: string|null, originSessionId?: string, noSandbox?: boolean, noOverlay?: boolean, allowedDirs?: string[], executor?: string, env?: NodeJS.ProcessEnv, role?: "dispatch"|"advisor", class?: string|null, parentTaskId?: string|null}} params
- * @param {{ensureStateLoaded: () => void, tasks: Map<string, Task>, defaultExecutor: import("./executor.js").WorkerExecutor, LOG_DIR: string, persistTask: (taskId: string) => void, pendingLaunches: Map<string, LaunchSpec>, launchQueue: string[], launchQueuedTasks: () => void}} ctx
+ * @param {{ensureStateLoaded: () => void, tasks: Map<string, Task>, defaultExecutor: import("./executor.js").WorkerExecutor, LOG_DIR: string, persistTask: (taskId: string) => void, pendingLaunches: Map<string, LaunchSpec>, providerQueues: Map<string, ProviderQueue>, launchQueuedTasks: () => void}} ctx
  * @returns {TaskSummary & {next: string}}
  */
 function dispatchTask(params, ctx) {
@@ -5773,7 +5973,7 @@ function dispatchTask(params, ctx) {
   const id = `oc_${Date.now().toString(36)}_${randomUUID().slice(0, 8)}`;
   const logPath = path.join(ctx.LOG_DIR, `${id}.ndjson`);
   const task = buildDispatchTask({ id, model, executor, priorSessionTask, variant, sessionId, originSessionId, internal, finalMarker, role, logPath, parentTaskId, class: taskClass, prompt: dispatchPrompt, directory: normalizedDirectory });
-  queueDispatchLaunch({ tasks: ctx.tasks, persistTask: ctx.persistTask, pendingLaunches: ctx.pendingLaunches, launchQueue: ctx.launchQueue, launchQueuedTasks: ctx.launchQueuedTasks }, { id, task, sessionId, env, noSandbox, noOverlay, executor, role, prompt: dispatchPrompt, allowedDirs: dispatchAllowedDirs });
+  queueDispatchLaunch({ tasks: ctx.tasks, persistTask: ctx.persistTask, pendingLaunches: ctx.pendingLaunches, providerQueues: ctx.providerQueues, launchQueuedTasks: ctx.launchQueuedTasks }, { id, task, sessionId, env, noSandbox, noOverlay, executor, role, prompt: dispatchPrompt, allowedDirs: dispatchAllowedDirs });
   const summary = summarize(task);
   return {
     ...summary,
@@ -5847,6 +6047,39 @@ function scheduleActivityFor(task, { force }, ctx) {
 }
 
 /**
+ * Cancels a queued task: removes it from its provider's launch queue,
+ * clears its pending launch scratch files, marks it cancelled, and clears
+ * the launch timer if no provider still has queued work. Extracted out of
+ * `cancelTask` so that function stays under the sonarjs complexity ceiling.
+ * @param {string} taskId
+ * @param {Task} task
+ * @param {{launchScheduler: {providerQueues: Map<string, ProviderQueue>, launchTimer: NodeJS.Timeout|null}, pendingLaunches: Map<string, LaunchSpec>, persistTask: (taskId: string) => void, scheduleActivity: (task: Task, options?: {force?: boolean}) => Promise<unknown>, activityCache: {evictTask: (taskId: string) => void}, logHasEventCache: Set<string>, settleWaiters: (taskId: string) => void}} ctx
+ * @returns {TaskSummary & {note: string}}
+ */
+function cancelQueuedTask(taskId, task, ctx) {
+  const providerQueue = ctx.launchScheduler.providerQueues.get(providerOf(task.model));
+  if (providerQueue) {
+    const index = providerQueue.launchQueue.indexOf(taskId);
+    if (index !== -1) providerQueue.launchQueue.splice(index, 1);
+  }
+  const launch = ctx.pendingLaunches.get(taskId);
+  ctx.pendingLaunches.delete(taskId);
+  if (launch?.snapshotPath) removeFileIfPresent(launch.snapshotPath);
+  task.status = "cancelled";
+  task.endedAt = new Date().toISOString();
+  ctx.persistTask(task.id);
+  void ctx.scheduleActivity(task, { force: true }).then(() => ctx.activityCache.evictTask(task.id));
+  ctx.logHasEventCache.delete(task.logPath);
+  ctx.settleWaiters(taskId);
+  const anyQueued = [...ctx.launchScheduler.providerQueues.values()].some((q) => q.launchQueue.length);
+  if (!anyQueued && ctx.launchScheduler.launchTimer) {
+    clearTimeout(ctx.launchScheduler.launchTimer);
+    ctx.launchScheduler.launchTimer = null;
+  }
+  return { ...summarize(task), note: "queued task cancelled before launch" };
+}
+
+/**
  * Cancels a task: removes a queued task from the queue (and clears its
  * pending launch scratch files), or SIGTERM-escalates a running task to
  * SIGKILL after the grace period. Extracted out of `createTaskManager`'s
@@ -5855,7 +6088,7 @@ function scheduleActivityFor(task, { force }, ctx) {
  * `ctx`. `summarize`/`removeFileIfPresent` are module-level helpers.
  * @param {string} taskId
  * @param {{graceMs: number}} options
- * @param {{ensureStateLoaded: () => void, tasks: Map<string, Task>, noSuchTask: (taskId: string) => Error, launchScheduler: {launchQueue: string[], launchTimer: NodeJS.Timeout|null}, pendingLaunches: Map<string, LaunchSpec>, persistTask: (taskId: string) => void, scheduleActivity: (task: Task, options?: {force?: boolean}) => Promise<unknown>, activityCache: {evictTask: (taskId: string) => void}, logHasEventCache: Set<string>, settleWaiters: (taskId: string) => void, stopRunningWatcher: (taskId: string) => void, escalationTimers: Map<string, NodeJS.Timeout>, sendSignal: (pid: number, signal: NodeJS.Signals) => void}} ctx
+ * @param {{ensureStateLoaded: () => void, tasks: Map<string, Task>, noSuchTask: (taskId: string) => Error, launchScheduler: {providerQueues: Map<string, ProviderQueue>, launchTimer: NodeJS.Timeout|null}, pendingLaunches: Map<string, LaunchSpec>, persistTask: (taskId: string) => void, scheduleActivity: (task: Task, options?: {force?: boolean}) => Promise<unknown>, activityCache: {evictTask: (taskId: string) => void}, logHasEventCache: Set<string>, settleWaiters: (taskId: string) => void, stopRunningWatcher: (taskId: string) => void, escalationTimers: Map<string, NodeJS.Timeout>, sendSignal: (pid: number, signal: NodeJS.Signals) => void}} ctx
  * @returns {TaskSummary & {note: string}}
  */
 function cancelTask(taskId, { graceMs }, ctx) {
@@ -5863,22 +6096,7 @@ function cancelTask(taskId, { graceMs }, ctx) {
   const task = ctx.tasks.get(taskId);
   if (!task) throw ctx.noSuchTask(taskId);
   if (task.status === "queued") {
-    const index = ctx.launchScheduler.launchQueue.indexOf(taskId);
-    if (index !== -1) ctx.launchScheduler.launchQueue.splice(index, 1);
-    const launch = ctx.pendingLaunches.get(taskId);
-    ctx.pendingLaunches.delete(taskId);
-    if (launch?.snapshotPath) removeFileIfPresent(launch.snapshotPath);
-    task.status = "cancelled";
-    task.endedAt = new Date().toISOString();
-    ctx.persistTask(task.id);
-    void ctx.scheduleActivity(task, { force: true }).then(() => ctx.activityCache.evictTask(task.id));
-    ctx.logHasEventCache.delete(task.logPath);
-    ctx.settleWaiters(taskId);
-    if (!ctx.launchScheduler.launchQueue.length && ctx.launchScheduler.launchTimer) {
-      clearTimeout(ctx.launchScheduler.launchTimer);
-      ctx.launchScheduler.launchTimer = null;
-    }
-    return { ...summarize(task), note: "queued task cancelled before launch" };
+    return cancelQueuedTask(taskId, task, ctx);
   }
   if (task.status !== "running") {
     return { ...summarize(task), note: `task is already ${task.status}; nothing to cancel` };

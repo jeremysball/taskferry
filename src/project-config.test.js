@@ -31,17 +31,17 @@ describe("loadProjectConfig", () => {
     assert.deepEqual(config, { check: "bun x check", checkTimeoutSeconds: 120, readOnlyPaths: ["/a", "/b"], deprecatedReadOnlyPaths: true, parseError: null });
   });
 
-  test("roDirs unions with the deprecated read_only_paths when both are set, and still flags the deprecated alias", () => {
+  test("roBind unions with the deprecated read_only_paths when both are set, and still flags the deprecated alias", () => {
     const dir = tmpProjectDir();
-    writeConfig(dir, `roDirs = ["/a", "/b"]\nread_only_paths = ["/old"]\n`);
+    writeConfig(dir, `roBind = ["/a", "/b"]\nread_only_paths = ["/old"]\n`);
     const config = loadProjectConfig(dir);
     assert.deepEqual(config.readOnlyPaths, ["/old", "/a", "/b"]);
     assert.equal(config.deprecatedReadOnlyPaths, true);
   });
 
-  test("roDirs alone sets readOnlyPaths without flagging the deprecated alias", () => {
+  test("roBind alone sets readOnlyPaths without flagging the deprecated alias", () => {
     const dir = tmpProjectDir();
-    writeConfig(dir, `roDirs = ["/a"]\n`);
+    writeConfig(dir, `roBind = ["/a"]\n`);
     const config = loadProjectConfig(dir);
     assert.deepEqual(config.readOnlyPaths, ["/a"]);
     assert.equal(config.deprecatedReadOnlyPaths, false);

@@ -37,8 +37,8 @@ test("parses dispatch and applies its argument defaults", () => {
       finalMarker: void 0,
       noSandbox: false,
       noOverlay: false,
-      rwDirs: void 0,
-      roDirs: void 0,
+      rwBind: void 0,
+      roBind: void 0,
       allowedDirs: void 0,
       executor: void 0,
       class: void 0,
@@ -583,29 +583,29 @@ test("dispatch rejects --force", () => {
   );
 });
 
-test("--rw-dirs parses a comma-separated path list into rwDirs", () => {
-  const parsed = parseArgs(["dispatch", "--prompt", "x", "--rw-dirs", "/a, /b"], { cwd: CWD });
-  assert.deepEqual(parsed.options.rwDirs, ["/a", "/b"]);
+test("--rw-bind parses a comma-separated path list into rwBind", () => {
+  const parsed = parseArgs(["dispatch", "--prompt", "x", "--rw-bind", "/a, /b"], { cwd: CWD });
+  assert.deepEqual(parsed.options.rwBind, ["/a", "/b"]);
   assert.equal(parsed.options.allowedDirs, undefined);
 });
 
-test("--ro-dirs parses a comma-separated path list into roDirs", () => {
-  const parsed = parseArgs(["dispatch", "--prompt", "x", "--ro-dirs", "/a, /b"], { cwd: CWD });
-  assert.deepEqual(parsed.options.roDirs, ["/a", "/b"]);
+test("--ro-bind parses a comma-separated path list into roBind", () => {
+  const parsed = parseArgs(["dispatch", "--prompt", "x", "--ro-bind", "/a, /b"], { cwd: CWD });
+  assert.deepEqual(parsed.options.roBind, ["/a", "/b"]);
 });
 
-test("--rw-dirs / --ro-dirs require at least one path", () => {
-  assert.throws(() => parseArgs(["dispatch", "--prompt", "x", "--rw-dirs", ","], { cwd: CWD }), /--rw-dirs must contain at least one path/);
-  assert.throws(() => parseArgs(["dispatch", "--prompt", "x", "--ro-dirs", ","], { cwd: CWD }), /--ro-dirs must contain at least one path/);
+test("--rw-bind / --ro-bind require at least one path", () => {
+  assert.throws(() => parseArgs(["dispatch", "--prompt", "x", "--rw-bind", ","], { cwd: CWD }), /--rw-bind must contain at least one path/);
+  assert.throws(() => parseArgs(["dispatch", "--prompt", "x", "--ro-bind", ","], { cwd: CWD }), /--ro-bind must contain at least one path/);
 });
 
-test("--rw-dirs and --ro-dirs are rejected on non-dispatch commands", () => {
-  assert.throws(() => parseArgs(["advisor", "--prompt", "x", "--model", "m", "--rw-dirs", "/a"], { cwd: CWD }), /unknown flag --rw-dirs/);
-  assert.throws(() => parseArgs(["advisor", "--prompt", "x", "--model", "m", "--ro-dirs", "/a"], { cwd: CWD }), /unknown flag --ro-dirs/);
-  assert.throws(() => parseArgs(["list", "--rw-dirs", "/a"], { cwd: CWD }), /unknown flag --rw-dirs/);
+test("--rw-bind and --ro-bind are rejected on non-dispatch commands", () => {
+  assert.throws(() => parseArgs(["advisor", "--prompt", "x", "--model", "m", "--rw-bind", "/a"], { cwd: CWD }), /unknown flag --rw-bind/);
+  assert.throws(() => parseArgs(["advisor", "--prompt", "x", "--model", "m", "--ro-bind", "/a"], { cwd: CWD }), /unknown flag --ro-bind/);
+  assert.throws(() => parseArgs(["list", "--rw-bind", "/a"], { cwd: CWD }), /unknown flag --rw-bind/);
 });
 
-test("--allowed-dirs still works as a deprecated alias for --rw-dirs and warns", () => {
+test("--allowed-dirs still works as a deprecated alias for --rw-bind and warns", () => {
   const originalWrite = process.stderr.write;
   let warned = "";
   process.stderr.write = (chunk) => { warned += chunk; return true; };
@@ -613,7 +613,7 @@ test("--allowed-dirs still works as a deprecated alias for --rw-dirs and warns",
     const parsed = parseArgs(["dispatch", "--prompt", "x", "--allowed-dirs", "/a"], { cwd: CWD });
     assert.deepEqual(parsed.options.allowedDirs, ["/a"]);
     assert.match(warned, /--allowed-dirs is deprecated/);
-    assert.match(warned, /--rw-dirs/);
+    assert.match(warned, /--rw-bind/);
     assert.match(warned, /next major release/);
   } finally {
     process.stderr.write = originalWrite;

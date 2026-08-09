@@ -4,7 +4,7 @@ import { parse, TomlError } from "smol-toml";
 
 const CONFIG_FILENAME = ".taskferry.toml";
 const DEFAULT_CHECK_TIMEOUT_SECONDS = 900;
-const KNOWN_KEYS = new Set(["check", "check_timeout_seconds", "read_only_paths", "roDirs"]);
+const KNOWN_KEYS = new Set(["check", "check_timeout_seconds", "read_only_paths", "roBind"]);
 
 /** @typedef {{check: string|null, checkTimeoutSeconds: number, readOnlyPaths: string[], deprecatedReadOnlyPaths: boolean, parseError: string|null}} ProjectConfig */
 
@@ -47,7 +47,7 @@ function validateAndNormalize(raw, configPath) {
     errors.push(`"check_timeout_seconds" must be a positive integer (got ${JSON.stringify(checkTimeoutSeconds)})`);
   }
   const readOnlyPaths = validateStringArray(record.read_only_paths, "read_only_paths", errors);
-  const roDirs = validateStringArray(record.roDirs, "roDirs", errors);
+  const roBind = validateStringArray(record.roBind, "roBind", errors);
   for (const key of Object.keys(record)) {
     if (!KNOWN_KEYS.has(key)) errors.push(`unrecognized key "${key}"`);
   }
@@ -55,19 +55,19 @@ function validateAndNormalize(raw, configPath) {
     return { ...EMPTY_CONFIG, parseError: `${configPath}: ${errors.join("; ")}` };
   }
   const deprecatedReadOnlyPathsUsed = readOnlyPaths !== undefined;
-  // The deprecated `read_only_paths` key UNIONS into the new `roDirs` key
+  // The deprecated `read_only_paths` key UNIONS into the new `roBind` key
   // rather than being replaced by it, matching the union-not-replace pattern
-  // the deprecated `allowedDirs`/`rwDirs` CLI-flag alias already uses (see
-  // resolveRwDirs in tasks.js) -- a renamed key aliasing a still-live one is
+  // the deprecated `allowedDirs`/`rwBind` CLI-flag alias already uses (see
+  // resolveRwBind in tasks.js) -- a renamed key aliasing a still-live one is
   // the same shape of problem whether the rename lives in one config file or
   // across flag/env/config layers, so it gets the same answer.
   // `deprecatedReadOnlyPaths` records whether the old key contributed at all
   // (even when the new key also did) so callers can warn either way.
-  const effectiveRoDirs = [...new Set([...(readOnlyPaths ?? []), ...(roDirs ?? [])])];
+  const effectiveRoBind = [...new Set([...(readOnlyPaths ?? []), ...(roBind ?? [])])];
   return {
     check: /** @type {string|undefined} */ (record.check) ?? null,
     checkTimeoutSeconds: /** @type {number|undefined} */ (record.check_timeout_seconds) ?? DEFAULT_CHECK_TIMEOUT_SECONDS,
-    readOnlyPaths: effectiveRoDirs,
+    readOnlyPaths: effectiveRoBind,
     deprecatedReadOnlyPaths: deprecatedReadOnlyPathsUsed,
     parseError: null,
   };

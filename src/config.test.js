@@ -140,22 +140,22 @@ describe("loadConfig()", () => {
     assert.throws(() => loadConfig({ configPath }), /error: config key "allowedDirs".*must be a string.*\nhelp:/s);
   });
 
-  test("accepts valid rwDirs and roDirs values", () => {
+  test("accepts valid rwBind and roBind values", () => {
     const dir = tmpConfigDir();
-    const configPath = writeConfig(dir, JSON.stringify({ rwDirs: "/opt/a,/opt/b", roDirs: "/opt/ro" }));
-    assert.deepEqual(loadConfig({ configPath }), { rwDirs: "/opt/a,/opt/b", roDirs: "/opt/ro" });
+    const configPath = writeConfig(dir, JSON.stringify({ rwBind: "/opt/a,/opt/b", roBind: "/opt/ro" }));
+    assert.deepEqual(loadConfig({ configPath }), { rwBind: "/opt/a,/opt/b", roBind: "/opt/ro" });
   });
 
-  test("rejects a wrong-typed rwDirs value", () => {
+  test("rejects a wrong-typed rwBind value", () => {
     const dir = tmpConfigDir();
-    const configPath = writeConfig(dir, JSON.stringify({ rwDirs: ["/opt/a"] }));
-    assert.throws(() => loadConfig({ configPath }), /error: config key "rwDirs".*must be a string.*\nhelp:/s);
+    const configPath = writeConfig(dir, JSON.stringify({ rwBind: ["/opt/a"] }));
+    assert.throws(() => loadConfig({ configPath }), /error: config key "rwBind".*must be a string.*\nhelp:/s);
   });
 
-  test("rejects a wrong-typed roDirs value", () => {
+  test("rejects a wrong-typed roBind value", () => {
     const dir = tmpConfigDir();
-    const configPath = writeConfig(dir, JSON.stringify({ roDirs: ["/opt/ro"] }));
-    assert.throws(() => loadConfig({ configPath }), /error: config key "roDirs".*must be a string.*\nhelp:/s);
+    const configPath = writeConfig(dir, JSON.stringify({ roBind: ["/opt/ro"] }));
+    assert.throws(() => loadConfig({ configPath }), /error: config key "roBind".*must be a string.*\nhelp:/s);
   });
 
   test("accepts a valid envDenylist value", () => {

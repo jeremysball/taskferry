@@ -76,7 +76,10 @@ next: Run taskferry wait or taskferry status with task id "oc_mrn4ipkp_19450105"
 
 At most `TASKFERRY_MAX_CONCURRENT_TASKS` tasks (default 4) run at once;
 extra dispatches return `status: "queued"` and start FIFO as running tasks
-finish, are cancelled, fail to spawn, or hit the no-output watchdog. See
+finish, are cancelled, fail to spawn, or hit the no-output watchdog. A
+provider hitting its own `TASKFERRY_PROVIDER_LIMITS` entry (per-provider
+concurrency or dispatch-rate cap) also returns `status: "queued"` for that
+provider's tasks, even when the global ceiling has headroom. See
 [daemon.md](daemon.md) for queueing, the watchdog, and rate limiting.
 
 ## `taskferry wait <id> [options]`

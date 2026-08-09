@@ -3041,7 +3041,10 @@ function runLaunchQueuedTasks(sched, ctx) {
     sched.launchTimer = null;
   }
   pruneStaleLaunchTimes(sched.launchTimes, ctx.dispatchWindow);
-  for (const queue of sched.providerQueues.values()) pruneStaleLaunchTimes(queue.launchTimes, ctx.dispatchWindow);
+  for (const queue of sched.providerQueues.values()) {
+    if (queue.launchTimes.length === 0) continue;
+    pruneStaleLaunchTimes(queue.launchTimes, ctx.dispatchWindow);
+  }
   drainLaunchQueue(sched, ctx);
   scheduleNextLaunch(sched, ctx);
 }

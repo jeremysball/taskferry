@@ -536,6 +536,40 @@ describe("per-provider concurrency and dispatch-rate limits", () => {
     assert.equal(mgr.status(second.id).status, "running", "freeing opencode-go's own slot lets its queued task launch");
   });
 
+  test("a provider's maxDispatchesPerWindow queues its next task until the dispatch window passes (taskferry#235)", (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout", "setInterval", "Date"] });
+    try {
+      const children = [];
+      const mgr = makeManager({
+        maxConcurrentTasks: 10,
+        maxDispatchesPerWindow: 10,
+        dispatchWindowMs: 60000,
+        providerLimits: { "opencode-go": { maxDispatchesPerWindow: 2 } },
+        spawnFn: () => {
+          const c = fakeChild(9250 + children.length);
+          children.push(c);
+          return c;
+        },
+      });
+
+      const first = mgr.dispatch({ prompt: "p0", directory: os.tmpdir(), model: MIMIMAX_MODEL });
+      const second = mgr.dispatch({ prompt: "p1", directory: os.tmpdir(), model: MIMIMAX_MODEL });
+      const third = mgr.dispatch({ prompt: "p2", directory: os.tmpdir(), model: MIMIMAX_MODEL });
+
+      assert.equal(mgr.status(first.id).status, "running", "opencode-go's first task launches");
+      assert.equal(mgr.status(second.id).status, "running", "opencode-go's second task launches within its 2-per-window budget");
+      assert.equal(mgr.status(third.id).status, "queued", "opencode-go's third task is capped at maxDispatchesPerWindow: 2");
+      assert.equal(children.length, 2);
+
+      t.mock.timers.tick(60000);
+
+      assert.equal(mgr.status(third.id).status, "running", "the dispatch window passing lets the queued task launch");
+      assert.equal(children.length, 3);
+    } finally {
+      t.mock.timers.reset();
+    }
+  });
+
   test("global maxConcurrentTasks still caps total launches even when every provider has headroom under its own limit", () => {
     const children = [];
     const mgr = makeManager({

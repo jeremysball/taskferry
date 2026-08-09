@@ -136,7 +136,7 @@ function parseAndValidateConfig(configPath) {
   }
 
   if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
-    throw new Error(`error: ${configPath} must contain a JSON object\nhelp: use a flat {"key": value, ...} object with the recognized config keys`);
+    throw new Error(`error: ${configPath} must be a JSON object\nhelp: use a flat {"key": value, ...} object with the recognized config keys`);
   }
 
   for (const key of Object.keys(parsed)) {

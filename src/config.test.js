@@ -59,7 +59,7 @@ describe("loadConfig()", () => {
   test("throws on a non-object top-level value", () => {
     const dir = tmpConfigDir();
     const configPath = writeConfig(dir, "[1, 2, 3]");
-    assert.throws(() => loadConfig({ configPath }), /error: .*must contain a JSON object.*\nhelp:/s);
+    assert.throws(() => loadConfig({ configPath }), /error: .*must be a JSON object.*\nhelp:/s);
   });
 
   test("throws on an unrecognized top-level key", () => {

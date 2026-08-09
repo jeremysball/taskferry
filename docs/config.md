@@ -117,6 +117,11 @@ provider's rate window reuses the single configured `dispatchWindowMs`.
 var replaces the config file's entire `providerLimits` map wholesale, the
 same all-or-nothing precedence every other field uses — it is not merged
 key-by-key with a config-file `providerLimits` value.
+`TASKFERRY_PROVIDER_LIMITS=""` (explicitly set to empty) clears the
+config-file `providerLimits` entirely — every provider becomes unlimited —
+rather than being ignored; it does not fall through to a config-file
+`providerLimits` value, same "explicit empty overrides, doesn't fall
+through" semantics as `TASKFERRY_ENV_FILE=""` above.
 
 ## Precedence
 

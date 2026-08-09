@@ -224,9 +224,9 @@ export function piExecutor({ execFileFn = execFileAsync } = {}) {
     /** @param {SpawnLaunchContext} ctx @returns {string[]} */
     buildSpawnArgs(ctx) {
       const slash = ctx.model.indexOf("/");
-      const provider = slash === -1 ? null : ctx.model.slice(0, slash);
+      const provider = slash === -1 ? ctx.model : ctx.model.slice(0, slash);
       const modelName = slash === -1 ? ctx.model : ctx.model.slice(slash + 1);
-      const args = provider ? ["--provider", provider, "--model", modelName] : ["--model", modelName];
+      const args = ["--provider", provider, "--model", modelName];
       args.push("--mode", "json");
       if (ctx.sessionId) args.push("--continue", "--session", ctx.sessionId);
       if (!ctx.isSummary && ctx.variant) args.push("--thinking", ctx.variant);

@@ -55,6 +55,18 @@ const PROVIDER_LIMIT_FIELD_TYPES = {
 };
 
 /**
+ * Warns when a per-provider limits object sets neither field, since an empty
+ * `providerLimits.<provider>: {}` silently leaves that provider unlimited
+ * (unlike the top-level `providerLimits: {}`, which intentionally means
+ * "no limits").
+ * @param {string} provider
+ * @param {string} configPath
+ */
+function warnEmptyProviderLimitEntry(provider, configPath) {
+  process.stderr.write(`warning: "providerLimits.${provider}" in ${configPath} sets no limits; this provider will be unlimited\nhelp: set "maxConcurrentTasks" and/or "maxDispatchesPerWindow", or remove the entry entirely\n`);
+}
+
+/**
  * Validates a single provider's limits object inside `providerLimits`.
  * @param {string} provider
  * @param {unknown} limits
@@ -72,6 +84,9 @@ function validateProviderLimitEntry(provider, limits, configPath) {
     if (typeof value !== PROVIDER_LIMIT_FIELD_TYPES[key] || !Number.isInteger(value) || /** @type {number} */ (value) <= 0) {
       throw new Error(`error: config key "providerLimits.${provider}.${key}" in ${configPath} must be a positive integer (got ${JSON.stringify(value)})\nhelp: fix the value's type in ${configPath}`);
     }
+  }
+  if (Object.keys(limits).length === 0) {
+    warnEmptyProviderLimitEntry(provider, configPath);
   }
 }
 

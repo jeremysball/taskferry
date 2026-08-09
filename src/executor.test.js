@@ -34,7 +34,7 @@ describe("piExecutor()", () => {
   test("buildSpawnArgs splits provider/model and supports session", () => {
     const ex = piExecutor();
     assert.deepEqual(ex.buildSpawnArgs({ isSummary: false, model: PI_MODEL, launchDirectory: "/work", promptFilePath: null, prompt: "hi", sessionId: "ses" }), [PROVIDER_FLAG, "minimax", "--model", PI_MODEL_SHORT, "--mode", "json", "--continue", "--session", "ses", "-p", "hi"]);
-    assert.deepEqual(ex.buildSpawnArgs({ isSummary: false, model: "gpt-4o", launchDirectory: "/work", promptFilePath: "/p", prompt: "huge", sessionId: null }), ["--model", "gpt-4o", "--mode", "json", "-p", "Follow the instructions in the attached prompt file exactly.", "@/p"]);
+    assert.deepEqual(ex.buildSpawnArgs({ isSummary: false, model: "gpt-4o", launchDirectory: "/work", promptFilePath: "/p", prompt: "huge", sessionId: null }), [PROVIDER_FLAG, "gpt-4o", "--model", "gpt-4o", "--mode", "json", "-p", "Follow the instructions in the attached prompt file exactly.", "@/p"]);
   });
 
   test("buildSpawnArgs maps --variant to pi's --thinking flag, dispatch only", () => {

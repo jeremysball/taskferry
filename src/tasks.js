@@ -2451,9 +2451,18 @@ function parseNumstatLine(line) {
   if (firstTab === -1) return null;
   const secondTab = line.indexOf("\t", firstTab + 1);
   if (secondTab === -1) return null;
-  const adds = Number(line.slice(0, firstTab));
-  const dels = Number(line.slice(firstTab + 1, secondTab));
-  if (Number.isNaN(adds) || Number.isNaN(dels)) return null;
+  const addsStr = line.slice(0, firstTab);
+  const delsStr = line.slice(firstTab + 1, secondTab);
+  // Number() accepts far more than a numstat integer column ever contains
+  // (Infinity, negatives, fractions, hex/scientific literals, "" -> 0) and
+  // most of that survives a bare isNaN check. args.js's parseNumber already
+  // gets this right for CLI flags with /^\d+$/ before touching Number() at
+  // all; mirror that here rather than trying to characterize the parsed
+  // value after the fact.
+  if (!/^\d+$/.test(addsStr) || !/^\d+$/.test(delsStr)) return null;
+  const adds = Number(addsStr);
+  const dels = Number(delsStr);
+  if (!Number.isSafeInteger(adds) || !Number.isSafeInteger(dels)) return null;
   return { additions: adds, deletions: dels };
 }
 

@@ -219,7 +219,6 @@ cost, roughly a minute. They are the only tests that exercise the real
 
 ## Further reading
 
-- [docs/sourcemap.md](docs/sourcemap.md): file-by-file orientation for new contributors
 - [docs/cli-reference.md](docs/cli-reference.md): every command, flag, and TOON example
 - [docs/daemon.md](docs/daemon.md): process model, socket protocol, recovery
 - [docs/config.md](docs/config.md): config file fields and env var precedence

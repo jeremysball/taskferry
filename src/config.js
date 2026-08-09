@@ -2,6 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { KNOWN_EXECUTORS } from "./executor.js";
+import { isObject, isPositiveInteger } from "./numbers.js";
 
 // Per-path cache so repeated loadConfig() calls in the same process only
 // stat the file (cheap) instead of re-reading, re-parsing, and re-validating
@@ -73,7 +74,7 @@ function warnEmptyProviderLimitEntry(provider, configPath) {
  * @param {string} configPath
  */
 function validateProviderLimitEntry(provider, limits, configPath) {
-  if (limits === null || typeof limits !== "object" || Array.isArray(limits)) {
+  if (!isObject(limits)) {
     throw new Error(`error: config key "providerLimits.${provider}" in ${configPath} must be a JSON object\nhelp: use {"maxConcurrentTasks": N, "maxDispatchesPerWindow": N}`);
   }
   for (const key of Object.keys(limits)) {
@@ -81,7 +82,7 @@ function validateProviderLimitEntry(provider, limits, configPath) {
       throw new Error(`error: unrecognized key "providerLimits.${provider}.${key}" in ${configPath}\nhelp: recognized keys are: ${Object.keys(PROVIDER_LIMIT_FIELD_TYPES).join(", ")}`);
     }
     const value = /** @type {Record<string, unknown>} */ (limits)[key];
-    if (typeof value !== PROVIDER_LIMIT_FIELD_TYPES[key] || !Number.isInteger(value) || /** @type {number} */ (value) <= 0) {
+    if (typeof value !== PROVIDER_LIMIT_FIELD_TYPES[key] || !isPositiveInteger(value)) {
       throw new Error(`error: config key "providerLimits.${provider}.${key}" in ${configPath} must be a positive integer (got ${JSON.stringify(value)})\nhelp: fix the value's type in ${configPath}`);
     }
   }
@@ -100,7 +101,7 @@ function validateProviderLimitEntry(provider, limits, configPath) {
  * @param {string} configPath
  */
 function validateProviderLimits(providerLimits, configPath) {
-  if (providerLimits === null || typeof providerLimits !== "object" || Array.isArray(providerLimits)) {
+  if (!isObject(providerLimits)) {
     throw new Error(`error: config key "providerLimits" in ${configPath} must be a JSON object\nhelp: use {"provider": {"maxConcurrentTasks": N, "maxDispatchesPerWindow": N}, ...}`);
   }
   for (const [provider, limits] of Object.entries(providerLimits)) {

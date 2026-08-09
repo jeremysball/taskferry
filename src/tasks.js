@@ -569,12 +569,12 @@ function parseProviderLimitEntry(entry) {
     throw new Error(`error: malformed TASKFERRY_PROVIDER_LIMITS entry "${entry}": empty provider name\n${PROVIDER_LIMITS_HELP}`);
   }
   const concurrencyLimit = Number(concurrencyStr);
-  if (!Number.isInteger(concurrencyLimit) || concurrencyLimit <= 0) {
+  if (!isPositiveInteger(concurrencyLimit)) {
     throw new Error(`error: malformed TASKFERRY_PROVIDER_LIMITS entry "${entry}": maxConcurrentTasks must be a positive integer\n${PROVIDER_LIMITS_HELP}`);
   }
   if (dispatchStr === undefined) return [provider.trim(), { concurrencyLimit, dispatchLimit: Infinity }];
   const dispatchLimit = Number(dispatchStr);
-  if (!Number.isInteger(dispatchLimit) || dispatchLimit <= 0) {
+  if (!isPositiveInteger(dispatchLimit)) {
     throw new Error(`error: malformed TASKFERRY_PROVIDER_LIMITS entry "${entry}": maxDispatchesPerWindow must be a positive integer\n${PROVIDER_LIMITS_HELP}`);
   }
   return [provider.trim(), { concurrencyLimit, dispatchLimit }];
@@ -593,7 +593,7 @@ function parseProviderLimitEntry(entry) {
 export function parseProviderLimitsEnv(spec) {
   const map = new Map();
   if (!spec) return map;
-  for (const entry of spec.split(",").map((e) => e.trim()).filter(Boolean)) {
+  for (const entry of parseAllowedDirs(spec)) {
     const [provider, limits] = parseProviderLimitEntry(entry);
     map.set(provider, limits);
   }
@@ -603,6 +603,23 @@ export function parseProviderLimitsEnv(spec) {
 /**
  * @typedef {{launchQueue: string[], launchTimes: number[], runningCount: number}} ProviderQueue
  */
+
+/**
+ * Returns the provider's queue, creating and registering an empty one on
+ * first use. Shared by every path that enqueues a launch so a provider's
+ * scheduler state is always created exactly the same way.
+ * @param {Map<string, ProviderQueue>} providerQueues
+ * @param {string} provider
+ * @returns {ProviderQueue}
+ */
+function getOrCreateProviderQueue(providerQueues, provider) {
+  let providerQueue = providerQueues.get(provider);
+  if (!providerQueue) {
+    providerQueue = { launchQueue: [], launchTimes: [], runningCount: 0 };
+    providerQueues.set(provider, providerQueue);
+  }
+  return providerQueue;
+}
 
 /**
  * Derives a task's provider key from its `model` string
@@ -1811,22 +1828,6 @@ function resultNextAction(task, taskId, narrationTruncated) {
 }
 
 /**
- * The subset of `createTaskManager`'s closure that `dispatch`'s extracted
- * helper pipeline needs threaded in explicitly -- the same convention the
- * `startTask`/`result` extractions use. `dispatch` is the actual spawn path
- * for every task this tool runs, so its helpers preserve the exact
- * sequencing of side-effecting operations (task-record persistence,
- * pending-launch registration, queue push, and the launch trigger) rather
- * than reordering anything.
- * @typedef {object} DispatchContext
- * @property {Map<string, Task>} tasks
- * @property {(taskId: string) => void} persistTask
- * @property {Map<string, LaunchSpec>} pendingLaunches
- * @property {Map<string, ProviderQueue>} providerQueues
- * @property {() => void} launchQueuedTasks
- */
-
-/**
  * On a `sessionId` resume, finds the most recent matching prior task so the
  * dispatch can inherit the executor (and, downstream, the model) the session
  * was actually created under instead of silently falling back to the
@@ -2015,11 +2016,7 @@ function queueDispatchLaunch(ctx, { id, task, prompt, sessionId, env, noSandbox,
     noOverlay: noOverlay === true,
   });
   const provider = providerOf(task.model);
-  let providerQueue = ctx.providerQueues.get(provider);
-  if (!providerQueue) {
-    providerQueue = { launchQueue: [], launchTimes: [], runningCount: 0 };
-    ctx.providerQueues.set(provider, providerQueue);
-  }
+  const providerQueue = getOrCreateProviderQueue(ctx.providerQueues, provider);
   providerQueue.launchQueue.push(id);
   ctx.launchQueuedTasks();
 }
@@ -2241,11 +2238,7 @@ function launchSummaryTask(ctx, p) {
     ...(resolvedSummarySessionId ? { summarySessionId: resolvedSummarySessionId } : {}),
   });
   const provider = providerOf(task.model);
-  let providerQueue = ctx.providerQueues.get(provider);
-  if (!providerQueue) {
-    providerQueue = { launchQueue: [], launchTimes: [], runningCount: 0 };
-    ctx.providerQueues.set(provider, providerQueue);
-  }
+  const providerQueue = getOrCreateProviderQueue(ctx.providerQueues, provider);
   providerQueue.launchQueue.push(id);
   ctx.launchQueuedTasks();
   return {
@@ -2881,9 +2874,12 @@ function pruneStaleLaunchTimes(launchTimes, dispatchWindow) {
  * @param {{dispatchLimit: number, concurrencyLimit: number, lowerdirStagger: number, providerLimits: Map<string, {concurrencyLimit: number, dispatchLimit: number}>, tasks: Map<string, Task>, startTask: (task: Task) => void}} ctx
  */
 function drainLaunchQueue(sched, ctx) {
+  // Snapshot once per drain: nothing in the loop body adds providers to
+  // `providerQueues` (startTask only reads the map via incRunning), so the
+  // provider list cannot change between iterations.
+  const providers = Array.from(sched.providerQueues.keys());
   for (;;) {
     if (globalLaunchBlocked(sched, ctx)) return;
-    const providers = Array.from(sched.providerQueues.keys());
     if (!providers.length) return;
     if (!launchOneRoundRobin(sched, ctx, providers)) return;
   }
@@ -2961,6 +2957,20 @@ function launchOneRoundRobin(sched, ctx, providers) {
 }
 
 /**
+ * Whether any provider queue still has queued work. Iterates the map
+ * directly with an early return instead of spreading every queue into an
+ * array just to test emptiness.
+ * @param {Map<string, ProviderQueue>} providerQueues
+ * @returns {boolean}
+ */
+function anyProviderHasQueuedWork(providerQueues) {
+  for (const queue of providerQueues.values()) {
+    if (queue.launchQueue.length) return true;
+  }
+  return false;
+}
+
+/**
  * Arms the next launch tick when any provider queue is non-empty and no
  * timer is already pending, backing off for the longest of: the global
  * rate-window delay, the soonest provider-specific rate-window delay
@@ -2970,7 +2980,7 @@ function launchOneRoundRobin(sched, ctx, providers) {
  * @param {{dispatchLimit: number, dispatchWindow: number, concurrencyLimit: number, lowerdirStagger: number, providerLimits: Map<string, {concurrencyLimit: number, dispatchLimit: number}>, reschedule: () => void}} ctx
  */
 function scheduleNextLaunch(sched, ctx) {
-  const hasQueued = [...sched.providerQueues.values()].some((q) => q.launchQueue.length);
+  const hasQueued = anyProviderHasQueuedWork(sched.providerQueues);
   if (!hasQueued || sched.launchTimer) return;
   const rateDelay = sched.launchTimes.length >= ctx.dispatchLimit ? sched.launchTimes[0] + ctx.dispatchWindow - Date.now() : 0;
   const concurrencyDelay = sched.runningCount >= ctx.concurrencyLimit ? CONCURRENCY_POLL_MS : 0;
@@ -6072,7 +6082,7 @@ function cancelQueuedTask(taskId, task, ctx) {
   void ctx.scheduleActivity(task, { force: true }).then(() => ctx.activityCache.evictTask(task.id));
   ctx.logHasEventCache.delete(task.logPath);
   ctx.settleWaiters(taskId);
-  const anyQueued = [...ctx.launchScheduler.providerQueues.values()].some((q) => q.launchQueue.length);
+  const anyQueued = anyProviderHasQueuedWork(ctx.launchScheduler.providerQueues);
   if (!anyQueued && ctx.launchScheduler.launchTimer) {
     clearTimeout(ctx.launchScheduler.launchTimer);
     ctx.launchScheduler.launchTimer = null;

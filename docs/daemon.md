@@ -152,8 +152,8 @@ CLI usage approaches.
   must clear both its provider's own limit (if configured) and the global
   ceiling above to launch; a provider absent from this map is bound only by
   the global limit. Uses a compact grammar (`provider:maxConcurrentTasks
-  [:maxDispatchesPerWindow]`, comma-separated) instead of JSON — see
-  `docs/config.md#providerLimits`.
+  [:maxDispatchesPerWindow]`, comma-separated) instead of JSON — see the
+  `providerLimits` field in `docs/config.md`.
 
 ## Watchdogs
 

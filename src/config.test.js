@@ -59,7 +59,7 @@ describe("loadConfig()", () => {
   test("throws on a non-object top-level value", () => {
     const dir = tmpConfigDir();
     const configPath = writeConfig(dir, "[1, 2, 3]");
-    assert.throws(() => loadConfig({ configPath }), /error: .*must contain a JSON object.*\nhelp:/s);
+    assert.throws(() => loadConfig({ configPath }), /error: .*must be a JSON object.*\nhelp:/s);
   });
 
   test("throws on an unrecognized top-level key", () => {
@@ -186,5 +186,41 @@ describe("loadConfig()", () => {
     const dir = tmpConfigDir();
     const configPath = writeConfig(dir, JSON.stringify({ sandboxDenylist: ["/home/user/.docker"] }));
     assert.throws(() => loadConfig({ configPath }), /error: config key "sandboxDenylist".*must be a string.*\nhelp:/s);
+  });
+
+  test("accepts a valid providerLimits value", () => {
+    const dir = tmpConfigDir();
+    const configPath = writeConfig(dir, JSON.stringify({ providerLimits: { minimax: { maxConcurrentTasks: 4, maxDispatchesPerWindow: 10 }, ollama: { maxConcurrentTasks: 3 } } }));
+    assert.deepEqual(loadConfig({ configPath }), { providerLimits: { minimax: { maxConcurrentTasks: 4, maxDispatchesPerWindow: 10 }, ollama: { maxConcurrentTasks: 3 } } });
+  });
+
+  test("rejects a providerLimits value that isn't an object", () => {
+    const dir = tmpConfigDir();
+    const configPath = writeConfig(dir, JSON.stringify({ providerLimits: "minimax:4" }));
+    assert.throws(() => loadConfig({ configPath }), /error: config key "providerLimits".*must be a object.*\nhelp:/s);
+  });
+
+  test("rejects a providerLimits array", () => {
+    const dir = tmpConfigDir();
+    const configPath = writeConfig(dir, JSON.stringify({ providerLimits: [1, 2] }));
+    assert.throws(() => loadConfig({ configPath }), /error: config key "providerLimits".*must be a JSON object.*\nhelp:/s);
+  });
+
+  test("rejects a providerLimits entry that isn't an object", () => {
+    const dir = tmpConfigDir();
+    const configPath = writeConfig(dir, JSON.stringify({ providerLimits: { minimax: 4 } }));
+    assert.throws(() => loadConfig({ configPath }), /error: config key "providerLimits\.minimax".*must be a JSON object.*\nhelp:/s);
+  });
+
+  test("rejects an unrecognized key inside a providerLimits entry", () => {
+    const dir = tmpConfigDir();
+    const configPath = writeConfig(dir, JSON.stringify({ providerLimits: { minimax: { maxRpm: 10 } } }));
+    assert.throws(() => loadConfig({ configPath }), /error: unrecognized key "providerLimits\.minimax\.maxRpm".*\nhelp:/s);
+  });
+
+  test("rejects a non-positive-integer providerLimits value", () => {
+    const dir = tmpConfigDir();
+    const configPath = writeConfig(dir, JSON.stringify({ providerLimits: { minimax: { maxConcurrentTasks: 0 } } }));
+    assert.throws(() => loadConfig({ configPath }), /error: config key "providerLimits\.minimax\.maxConcurrentTasks".*must be a positive integer.*\nhelp:/s);
   });
 });

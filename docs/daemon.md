@@ -50,7 +50,8 @@ set when a command first triggers the auto-start takes effect for the
 daemon's entire lifetime — including for other terminals and processes
 that connect to the same socket afterward. Changing a daemon-level env
 var (a different `TASKFERRY_MAX_CONCURRENT_TASKS`, `TASKFERRY_ENV_DENYLIST`,
-etc.) requires the daemon to restart: stop it (see below) and let the next
+`TASKFERRY_PROVIDER_LIMITS`, etc.) requires the daemon to restart: stop it
+(see below) and let the next
 command start a fresh one. A provider credential is different: `dispatch`/
 `advisor`/`summary` (report mode) forward the *calling* shell's own
 environment on every call, so exporting a fresh key before dispatching
@@ -146,6 +147,13 @@ CLI usage approaches.
 - `TASKFERRY_MAX_DISPATCHES_PER_WINDOW` / `TASKFERRY_DISPATCH_WINDOW_MS`
   (defaults `2` per `5000`ms): an independent, optional burst-rate control
   on *launches*, not a concurrency cap.
+- `TASKFERRY_PROVIDER_LIMITS`: per-provider ceilings on the same two axes,
+  scoped to the substring of a task's `model` before its first `/`. A task
+  must clear both its provider's own limit (if configured) and the global
+  ceiling above to launch; a provider absent from this map is bound only by
+  the global limit. Uses a compact grammar (`provider:maxConcurrentTasks
+  [:maxDispatchesPerWindow]`, comma-separated) instead of JSON — see the
+  `providerLimits` field in `docs/config.md`.
 
 ## Watchdogs
 

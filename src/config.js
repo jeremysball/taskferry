@@ -46,11 +46,14 @@ const CONFIG_FIELD_TYPES = {
   waitDefaultTimeoutMs: "number",
   cancelGraceMs: "number",
   defaultExecutor: "string",
+  defaultVariant: "string",
   advisorContextChars: "number",
   envFile: "string",
   profilingEnabled: "boolean",
   providerLimits: "object",
 };
+
+export const KNOWN_VARIANT_LEVELS = /** @type {readonly string[]} */ (["highest", "off", "minimal", "low", "medium", "high", "xhigh", "max"]);
 
 const PROVIDER_LIMIT_FIELD_TYPES = {
   maxConcurrentTasks: "number",
@@ -112,6 +115,21 @@ function validateProviderLimits(providerLimits, configPath) {
 }
 
 /**
+ * Validates `config.json`'s `defaultVariant` field against the known
+ * variant levels. The type check (string) already ran in
+ * {@link parseAndValidateConfig}; this only rejects values outside
+ * {@link KNOWN_VARIANT_LEVELS}, trimming whitespace first so a value like
+ * `" high "` is accepted rather than rejected for incidental padding.
+ * @param {unknown} defaultVariant
+ * @param {string} configPath
+ */
+function validateDefaultVariant(defaultVariant, configPath) {
+  if (defaultVariant !== undefined && !KNOWN_VARIANT_LEVELS.includes(/** @type {string} */ (defaultVariant).trim())) {
+    throw new Error(`error: config key "defaultVariant" in ${configPath} must be one of ${KNOWN_VARIANT_LEVELS.join(", ")} (got ${JSON.stringify(defaultVariant)})\nhelp: fix the value in ${configPath}`);
+  }
+}
+
+/**
  * @param {NodeJS.ProcessEnv} [env]
  * @returns {string}
  */
@@ -155,6 +173,8 @@ function parseAndValidateConfig(configPath) {
   if (parsed.defaultExecutor !== undefined && !KNOWN_EXECUTORS.includes(parsed.defaultExecutor)) {
     throw new Error(`error: config key "defaultExecutor" in ${configPath} must be one of ${KNOWN_EXECUTORS.join(", ")} (got ${JSON.stringify(parsed.defaultExecutor)})\nhelp: fix the value in ${configPath}`);
   }
+
+  validateDefaultVariant(parsed.defaultVariant, configPath);
 
   if (parsed.providerLimits !== undefined) validateProviderLimits(parsed.providerLimits, configPath);
 

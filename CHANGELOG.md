@@ -1,5 +1,12 @@
 # Changelog
 
+## [3.2.0](https://github.com/jeremysball/taskferry/compare/taskferry-v3.1.0...taskferry-v3.2.0) (2026-08-09)
+
+
+### Features
+
+* **tasks:** per-provider concurrency and dispatch-rate limits ([#413](https://github.com/jeremysball/taskferry/issues/413)) ([f2ce2c4](https://github.com/jeremysball/taskferry/commit/f2ce2c496befed2cd013cc9a00595ea0cee83254))
+
 ## [3.1.0](https://github.com/jeremysball/taskferry/compare/taskferry-v3.0.0...taskferry-v3.1.0) (2026-08-07)
 
 

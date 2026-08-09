@@ -52,23 +52,23 @@ with this recover-or-flag behavior).
 
 That handling only fires on a *confirmed* HEAD mismatch, though -- it won't
 catch every way a shared directory can bite you (a concurrent file edit that
-doesn't touch HEAD, for instance), and hitting it mid-session is still lost
-wall time you'd rather not spend. **Always dispatch at a worktree, never the
-main checkout.** This used to carve out an exception for a solo session
-doing one task at a time on the reasoning that nothing else would touch the
+doesn't touch HEAD -- an uncommitted working-tree change, for instance --
+leaves no ref movement for the recovery to detect), and hitting either case
+mid-session is still lost wall time you'd rather not spend even when
+recovery succeeds. **Always dispatch at a worktree, never the main
+checkout.** This used to carve out an exception for a solo session doing
+one task at a time on the reasoning that nothing else would touch the
 directory -- that reasoning failed in practice (taskferry#261): a real
 solo session hit an unexplained branch flip on the main checkout mid-dispatch,
 and `taskferry result --diff` silently produced a diff comparing the wrong
 trees before this HEAD-drift handling existed. "Nothing else touches this
 directory" is an assumption, not a guarantee the sandbox can enforce, and the
-cost of being wrong (a corrupted diff, or now a stalled `changesetError`
-mid-session) is never worth the one worktree-creation step it saves. Create
-a worktree even for a single quick dispatch. The two reasons worktrees help
-beyond this -- branch isolation (parallel sessions on different branches
-without a switch race) and lower-layer stability (a concurrent edit to a
-live main checkout mutates the overlay's *lower* in place while a ferry is
-in flight, which can make `accept` conflict later) -- still apply on top of
-this; they're not the only justification anymore.
+cost of being wrong (lost wall time re-diagnosing a `changesetError`, or an
+uncommitted concurrent edit the drift check can't even see) is never worth
+the one worktree-creation step it saves. Create a worktree even for a single
+quick dispatch. Branch isolation (parallel sessions on different branches
+without a switch race) is the other standing reason worktrees help beyond
+this.
 
 **A worker's writes only land somewhere durable inside `--directory`.** The
 sandbox mounts `--directory` as the one copy-on-write overlay and binds the
@@ -375,6 +375,23 @@ Monitoring" below) already surfaces every ferry's progress, this one
 included, as periodic batched notifications. `run_in_background` notifies
 once, on the whole command's exit; that notification is the settlement
 signal for this specific task.
+
+**Never reach for `ScheduleWakeup` to wait on a settling ferry.**
+`ScheduleWakeup` exists to self-pace a `/loop` session between iterations —
+it takes a `/loop`-shaped `prompt`, not a task id, and errors outside that
+context. It is not a general-purpose "check back later" primitive, and
+nothing about waiting on `taskferry wait`/`taskferry result` should reach
+for it, `/loop`-mode session or not: a `taskferry wait` already backgrounded
+with `Bash` `run_in_background: true` delivers its own settlement
+notification the moment the task finishes — there is nothing left to
+schedule a wakeup for. Confirmed by a direct failed call: invoking
+`ScheduleWakeup` immediately after backgrounding a `wait` errored
+(`prompt is required when stop is not true`), because the tool has no
+notion of "wake me when task X settles" at all. A genuine `/loop` session
+separately polling ferry status as its actual loop body is a different,
+legitimate use of the tool — that loop's own `prompt`/`delaySeconds`
+governs its iteration, which is not the same thing as substituting
+`ScheduleWakeup` for `run_in_background`'s notification.
 
 **Never background `taskferry wait` with a shell `&`, `nohup … &`, `disown`,
 or any equivalent manual detacher — this is NOT ALLOWED, in Claude Code or

@@ -78,7 +78,10 @@ next: Run taskferry wait or taskferry status with task id "oc_mrn4ipkp_19450105"
 
 At most `TASKFERRY_MAX_CONCURRENT_TASKS` tasks (default 4) run at once;
 extra dispatches return `status: "queued"` and start FIFO as running tasks
-finish, are cancelled, fail to spawn, or hit the no-output watchdog. See
+finish, are cancelled, fail to spawn, or hit the no-output watchdog. A
+provider hitting its own `TASKFERRY_PROVIDER_LIMITS` entry (per-provider
+concurrency or dispatch-rate cap) also returns `status: "queued"` for that
+provider's tasks, even when the global ceiling has headroom. See
 [daemon.md](daemon.md) for queueing, the watchdog, and rate limiting.
 
 ## `taskferry wait <id> [options]`
@@ -263,8 +266,8 @@ change with `taskferry result <id> --diff` first — note the diff can
 include files the worker never touched: git-target extraction stages the
 overlay's whole merged view, so files already untracked in the dispatch
 directory at dispatch time appear as new-file entries, and the plain
-`git apply` fails outright if they still exist on disk (see the
-sourcemap's "Things that look like bugs but aren't"). For a git target, the
+`git apply` fails outright if they still exist on disk (see
+[daemon.md](daemon.md)'s "Things that look like bugs but aren't"). For a git target, the
 apply is `git apply` against the real pre-dispatch `HEAD`; for a non-git
 target, it runs an in-sandbox `rsync --delay-updates` that needs the
 live overlay, so a non-git changeset left pending across a reboot fails

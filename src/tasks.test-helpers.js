@@ -266,6 +266,7 @@ function buildManagerOptions(options, stateDir, defaultCacheDir, defaultOverlayT
     ...passthroughIfSet({ allowedDirs: options.allowedDirs }, "allowedDirs", "allowedDirs"),
     ...passthroughIfSet({ rwBind: options.rwBind }, "rwBind", "rwBind"),
     ...passthroughIfSet({ roBind: options.roBind }, "roBind", "roBind"),
+    ...passthroughIfSet({ providerLimits: options.providerLimits }, "providerLimits", "providerLimits"),
     ...passthroughIfSet({ resolveGitCommonDirFn: options.resolveGitCommonDirFn }, "resolveGitCommonDirFn", "resolveGitCommonDirFn"),
     ...passthroughIfSet({ resolveGitDirFn: options.resolveGitDirFn }, "resolveGitDirFn", "resolveGitDirFn"),
     ...passthroughIfSet({ checkOverlaySupportFn: options.checkOverlaySupportFn }, "checkOverlaySupportFn", "checkOverlaySupportFn"),

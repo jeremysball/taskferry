@@ -2,4 +2,8 @@ node_modules/
 .state-smoketest/
 .worktrees/
 !.superpowers/**
+# Ephemeral local brainstorm-server state (render output keyed to a live
+# port, plus a session token) — re-ignored after the blanket .superpowers/
+# override above, per CLAUDE.md's carve-out for genuine scratch.
+.superpowers/brainstorm/
 .claude/

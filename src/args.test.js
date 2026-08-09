@@ -253,6 +253,21 @@ test("rejects the retired --style flag on summary with a rename hint pointing at
   );
 });
 
+test("rejects the retired --rw-dirs/--ro-dirs flags with rename hints pointing at --rw-bind/--ro-bind", () => {
+  assert.throws(
+    () => parseArgs(["dispatch", "--prompt", "p", "--rw-dirs", "/tmp/a"]),
+    (error) => error instanceof UsageError
+      && /unknown flag --rw-dirs/.test(error.message)
+      && /--rw-dirs was renamed; use --rw-bind/.test(error.help)
+  );
+  assert.throws(
+    () => parseArgs(["dispatch", "--prompt", "p", "--ro-dirs", "/tmp/a"]),
+    (error) => error instanceof UsageError
+      && /unknown flag --ro-dirs/.test(error.message)
+      && /--ro-dirs was renamed; use --ro-bind/.test(error.help)
+  );
+});
+
 test("parses watch --task-id and rejects it for commands that don't take it", () => {
   assert.deepEqual(parseArgs(["watch", "--task-id", "oc_1"], { cwd: CWD }).options, {
     directory: void 0,

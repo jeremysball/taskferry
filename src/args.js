@@ -241,6 +241,8 @@ const FLAGS = {
   "--max_words": { mention: "--max_words was renamed; use --max-words" },
   "--session_id": { mention: "--session_id was renamed; use --session-id" },
   "--style": { mention: "--style was renamed; use --mode" },
+  "--rw-dirs": { mention: "--rw-dirs was renamed; use --rw-bind" },
+  "--ro-dirs": { mention: "--ro-dirs was renamed; use --ro-bind" },
 };
 
 // A subset of migration flags point at a target that isn't a valid flag on

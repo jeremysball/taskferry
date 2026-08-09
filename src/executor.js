@@ -224,6 +224,11 @@ export function piExecutor({ execFileFn = execFileAsync } = {}) {
     /** @param {SpawnLaunchContext} ctx @returns {string[]} */
     buildSpawnArgs(ctx) {
       const slash = ctx.model.indexOf("/");
+      // Deliberately NOT providerOf()'s whole-string fallback: that value is a
+      // scheduler map key, where any string works, but this one is pi's
+      // --provider flag, which pi validates against its registered providers
+      // ("Unknown provider" at startup otherwise). A slash-less model has no
+      // provider to name, so omit the flag and let pi pick its own default.
       const provider = slash === -1 ? null : ctx.model.slice(0, slash);
       const modelName = slash === -1 ? ctx.model : ctx.model.slice(slash + 1);
       const args = provider ? ["--provider", provider, "--model", modelName] : ["--model", modelName];

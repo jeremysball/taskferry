@@ -39,6 +39,8 @@ const CONFIG_FIELD_TYPES = {
   sandboxEnabled: "boolean",
   overlayEnabled: "boolean",
   allowedDirs: "string",
+  rwBind: "string",
+  roBind: "string",
   envDenylist: "string",
   sandboxDenylist: "string",
   waitDefaultTimeoutMs: "number",

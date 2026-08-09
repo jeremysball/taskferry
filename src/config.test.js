@@ -140,6 +140,24 @@ describe("loadConfig()", () => {
     assert.throws(() => loadConfig({ configPath }), /error: config key "allowedDirs".*must be a string.*\nhelp:/s);
   });
 
+  test("accepts valid rwBind and roBind values", () => {
+    const dir = tmpConfigDir();
+    const configPath = writeConfig(dir, JSON.stringify({ rwBind: "/opt/a,/opt/b", roBind: "/opt/ro" }));
+    assert.deepEqual(loadConfig({ configPath }), { rwBind: "/opt/a,/opt/b", roBind: "/opt/ro" });
+  });
+
+  test("rejects a wrong-typed rwBind value", () => {
+    const dir = tmpConfigDir();
+    const configPath = writeConfig(dir, JSON.stringify({ rwBind: ["/opt/a"] }));
+    assert.throws(() => loadConfig({ configPath }), /error: config key "rwBind".*must be a string.*\nhelp:/s);
+  });
+
+  test("rejects a wrong-typed roBind value", () => {
+    const dir = tmpConfigDir();
+    const configPath = writeConfig(dir, JSON.stringify({ roBind: ["/opt/ro"] }));
+    assert.throws(() => loadConfig({ configPath }), /error: config key "roBind".*must be a string.*\nhelp:/s);
+  });
+
   test("accepts a valid envDenylist value", () => {
     const dir = tmpConfigDir();
     const configPath = writeConfig(dir, JSON.stringify({ envDenylist: "PI_CODING_AGENT_DIR,SOME_OTHER_VAR" }));

@@ -21,14 +21,30 @@ describe("loadProjectConfig", () => {
   test("no .taskferry.toml -> no gate, no read-only paths, no error", () => {
     const dir = tmpProjectDir();
     const config = loadProjectConfig(dir);
-    assert.deepEqual(config, { check: null, checkTimeoutSeconds: 900, readOnlyPaths: [], parseError: null });
+    assert.deepEqual(config, { check: null, checkTimeoutSeconds: 900, readOnlyPaths: [], deprecatedReadOnlyPaths: false, parseError: null });
   });
 
   test("parses check, check_timeout_seconds, and read_only_paths", () => {
     const dir = tmpProjectDir();
     writeConfig(dir, `check = "bun x check"\ncheck_timeout_seconds = 120\nread_only_paths = ["/a", "/b"]\n`);
     const config = loadProjectConfig(dir);
-    assert.deepEqual(config, { check: "bun x check", checkTimeoutSeconds: 120, readOnlyPaths: ["/a", "/b"], parseError: null });
+    assert.deepEqual(config, { check: "bun x check", checkTimeoutSeconds: 120, readOnlyPaths: ["/a", "/b"], deprecatedReadOnlyPaths: true, parseError: null });
+  });
+
+  test("roBind unions with the deprecated read_only_paths when both are set, and still flags the deprecated alias", () => {
+    const dir = tmpProjectDir();
+    writeConfig(dir, `roBind = ["/a", "/b"]\nread_only_paths = ["/old"]\n`);
+    const config = loadProjectConfig(dir);
+    assert.deepEqual(config.readOnlyPaths, ["/old", "/a", "/b"]);
+    assert.equal(config.deprecatedReadOnlyPaths, true);
+  });
+
+  test("roBind alone sets readOnlyPaths without flagging the deprecated alias", () => {
+    const dir = tmpProjectDir();
+    writeConfig(dir, `roBind = ["/a"]\n`);
+    const config = loadProjectConfig(dir);
+    assert.deepEqual(config.readOnlyPaths, ["/a"]);
+    assert.equal(config.deprecatedReadOnlyPaths, false);
   });
 
   test("check_timeout_seconds defaults to 900 when absent", () => {

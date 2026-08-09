@@ -37,6 +37,8 @@ test("parses dispatch and applies its argument defaults", () => {
       finalMarker: void 0,
       noSandbox: false,
       noOverlay: false,
+      rwBind: void 0,
+      roBind: void 0,
       allowedDirs: void 0,
       executor: void 0,
       class: void 0,
@@ -249,6 +251,34 @@ test("rejects the retired --style flag on summary with a rename hint pointing at
       && /unknown flag --style/.test(error.message)
       && /--style was renamed; use --mode/.test(error.help)
   );
+});
+
+test("rejects the retired --rw-dirs/--ro-dirs flags with rename hints pointing at --rw-bind/--ro-bind", () => {
+  assert.throws(
+    () => parseArgs(["dispatch", "--prompt", "p", "--rw-dirs", "/tmp/a"]),
+    (error) => error instanceof UsageError
+      && /unknown flag --rw-dirs/.test(error.message)
+      && /--rw-dirs was renamed; use --rw-bind/.test(error.help)
+  );
+  assert.throws(
+    () => parseArgs(["dispatch", "--prompt", "p", "--ro-dirs", "/tmp/a"]),
+    (error) => error instanceof UsageError
+      && /unknown flag --ro-dirs/.test(error.message)
+      && /--ro-dirs was renamed; use --ro-bind/.test(error.help)
+  );
+});
+
+test("does not offer the --rw-bind/--ro-bind rename hint on commands that don't accept those flags", () => {
+  for (const flag of ["--rw-dirs", "--ro-dirs"]) {
+    assert.throws(
+      () => parseArgs(["list", flag, "/tmp/a"]),
+      (error) => error instanceof UsageError
+        && new RegExp(`unknown flag ${flag}`).test(error.message)
+        && !/was renamed/.test(error.help)
+        && /Valid flags for list/.test(error.help),
+      `${flag} on \`list\` should fall back to the valid-flags help, not point at a dispatch-only flag`
+    );
+  }
 });
 
 test("parses watch --task-id and rejects it for commands that don't take it", () => {
@@ -580,3 +610,41 @@ test("dispatch rejects --force", () => {
     /unknown flag --force/
   );
 });
+
+test("--rw-bind parses a comma-separated path list into rwBind", () => {
+  const parsed = parseArgs(["dispatch", "--prompt", "x", "--rw-bind", "/a, /b"], { cwd: CWD });
+  assert.deepEqual(parsed.options.rwBind, ["/a", "/b"]);
+  assert.equal(parsed.options.allowedDirs, undefined);
+});
+
+test("--ro-bind parses a comma-separated path list into roBind", () => {
+  const parsed = parseArgs(["dispatch", "--prompt", "x", "--ro-bind", "/a, /b"], { cwd: CWD });
+  assert.deepEqual(parsed.options.roBind, ["/a", "/b"]);
+});
+
+test("--rw-bind / --ro-bind require at least one path", () => {
+  assert.throws(() => parseArgs(["dispatch", "--prompt", "x", "--rw-bind", ","], { cwd: CWD }), /--rw-bind must contain at least one path/);
+  assert.throws(() => parseArgs(["dispatch", "--prompt", "x", "--ro-bind", ","], { cwd: CWD }), /--ro-bind must contain at least one path/);
+});
+
+test("--rw-bind and --ro-bind are rejected on non-dispatch commands", () => {
+  assert.throws(() => parseArgs(["advisor", "--prompt", "x", "--model", "m", "--rw-bind", "/a"], { cwd: CWD }), /unknown flag --rw-bind/);
+  assert.throws(() => parseArgs(["advisor", "--prompt", "x", "--model", "m", "--ro-bind", "/a"], { cwd: CWD }), /unknown flag --ro-bind/);
+  assert.throws(() => parseArgs(["list", "--rw-bind", "/a"], { cwd: CWD }), /unknown flag --rw-bind/);
+});
+
+test("--allowed-dirs still works as a deprecated alias for --rw-bind and warns", () => {
+  const originalWrite = process.stderr.write;
+  let warned = "";
+  process.stderr.write = (chunk) => { warned += chunk; return true; };
+  try {
+    const parsed = parseArgs(["dispatch", "--prompt", "x", "--allowed-dirs", "/a"], { cwd: CWD });
+    assert.deepEqual(parsed.options.allowedDirs, ["/a"]);
+    assert.match(warned, /--allowed-dirs is deprecated/);
+    assert.match(warned, /--rw-bind/);
+    assert.match(warned, /next major release/);
+  } finally {
+    process.stderr.write = originalWrite;
+  }
+});
+

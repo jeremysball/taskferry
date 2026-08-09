@@ -1,5 +1,19 @@
 # Required --model and default variant (pi effort vocabulary)
 
+Status: **Superseded 2026-08-09** by
+`2026-08-09-highest-thinking-default-design.md`. Do not implement from
+this file. The third pass verified pi's own `clampThinkingLevel()` already
+resolves "highest supported level" per model at runtime (including
+extension providers this spec's vendored table structurally cannot see),
+so the whole vendored-table/generator mechanism below (`src/variant-map.js`,
+`scripts/gen-variant-map.js`) is dropped for pi. opencode still needs a
+real lookup — a live `opencode models --verbose` check found declaration
+order is ascending by effort on all 174 models that carry variants, which
+the new spec uses directly instead of a committed static table. The
+required-`--model` fix, resume-inheritance rules, and the "explicit
+`--variant` is never reinterpreted" resolution all carry forward
+unchanged. Kept for its verified findings; do not implement from it.
+
 Status: DRAFT, parked 2026-07-31. Design decisions were made in session but
 this spec never got its user review pass, and no implementation plan was
 written. Resume from the checklist at the bottom.

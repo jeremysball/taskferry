@@ -882,7 +882,7 @@ function resolveUserRoBind({ launchDirectory, roBind, denyList, stateDir, runtim
  * @returns {{rwResolved: string[], roResolved: string[]}}
  */
 function resolveUserRwRoBind(ctx) {
-  const perDispatch = ctx.isSummary ? { allowedDirs: [], roBind: [] } : ctx.dispatchLaunch || { allowedDirs: [], roBind: [] };
+  const perDispatch = (ctx.isSummary ? null : ctx.dispatchLaunch) || { allowedDirs: [], roBind: [] };
   const rwBind = [...ctx.rwBind, ...(perDispatch.allowedDirs || [])];
   const rwResolved = [];
   const denyOverridden = [];
@@ -3517,7 +3517,7 @@ const RW_BIND_DEPRECATION_HINT = "TASKFERRY_ALLOWED_DIRS / allowedDirs / --allow
  * @param {string[]|string|undefined} layer
  * @returns {string[]}
  */
-function unionDirLayer(acc, layer) {
+function unionBindLayer(acc, layer) {
   if (layer === undefined || layer === null) return acc;
   const entries = Array.isArray(layer) ? layer : parseAllowedDirs(layer);
   return [...new Set([...acc, ...entries])];
@@ -3541,14 +3541,14 @@ function resolveRwBind(rawOptions, config) {
   const oldNameSet = rawOptions.allowedDirs !== undefined || process.env.TASKFERRY_ALLOWED_DIRS !== undefined || config.allowedDirs !== undefined;
   if (oldNameSet) process.stderr.write(`warning: ${RW_BIND_DEPRECATION_HINT}\n`);
   if (newNameSet) {
-    resolved = unionDirLayer(resolved, rawOptions.rwBind);
-    resolved = unionDirLayer(resolved, process.env.TASKFERRY_RW_BIND);
-    resolved = unionDirLayer(resolved, config.rwBind);
+    resolved = unionBindLayer(resolved, rawOptions.rwBind);
+    resolved = unionBindLayer(resolved, process.env.TASKFERRY_RW_BIND);
+    resolved = unionBindLayer(resolved, config.rwBind);
   }
   if (oldNameSet) {
-    resolved = unionDirLayer(resolved, rawOptions.allowedDirs);
-    resolved = unionDirLayer(resolved, process.env.TASKFERRY_ALLOWED_DIRS);
-    resolved = unionDirLayer(resolved, config.allowedDirs);
+    resolved = unionBindLayer(resolved, rawOptions.allowedDirs);
+    resolved = unionBindLayer(resolved, process.env.TASKFERRY_ALLOWED_DIRS);
+    resolved = unionBindLayer(resolved, config.allowedDirs);
   }
   return resolved;
 }
@@ -3566,9 +3566,9 @@ function resolveRwBind(rawOptions, config) {
 function resolveRoBind(rawOptions, config) {
   /** @type {string[]} */
   let resolved = [];
-  resolved = unionDirLayer(resolved, rawOptions.roBind);
-  resolved = unionDirLayer(resolved, process.env.TASKFERRY_RO_BIND);
-  resolved = unionDirLayer(resolved, config.roBind);
+  resolved = unionBindLayer(resolved, rawOptions.roBind);
+  resolved = unionBindLayer(resolved, process.env.TASKFERRY_RO_BIND);
+  resolved = unionBindLayer(resolved, config.roBind);
   return resolved;
 }
 

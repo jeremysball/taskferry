@@ -1,18 +1,21 @@
 # taskferry
 
-Read `docs/sourcemap.md` at the start of any session in this repo before
-exploring the codebase further. It orients on the call chain, file-by-file
-responsibilities, env vars, and the gotchas that look like bugs but aren't.
+## Record behavior that looks like a bug but isn't
 
-## Keep the sourcemap up to date
-
-After any commit that changes `src/` — a new file, a new exported function,
-a behavior change worth flagging as a gotcha, or just a line count drifting
-noticeably — update `docs/sourcemap.md` in the same PR: the file-by-file
-line counts, the affected row's responsibility text, and the "Where do I
-look for X" table if the change adds a new thing worth pointing at. Don't
-let it go stale until someone notices a description no longer matches the
+When a change introduces behavior a future reader would reasonably file as a
+bug — a deliberate non-obvious default, a race the design tolerates on
+purpose, a "why doesn't this take effect immediately" — add it to the
+"Things that look like bugs but aren't" section in `docs/daemon.md` in the
+same PR. That section exists so the same thing doesn't get re-diagnosed from
+scratch every time; it is the one piece of orientation documentation worth
+maintaining by hand, because nothing about it can be derived by reading the
 code.
+
+Do not reintroduce a file-by-file index of the codebase (line counts,
+per-file responsibility summaries). The previous `docs/sourcemap.md` went
+stale on essentially every commit that touched `src/`, generated repeated
+review findings about its own staleness, and answered questions that `rg`
+and `wc -l` answer correctly on demand.
 
 ## Isolate your own taskferry runs when testing or developing taskferry itself
 

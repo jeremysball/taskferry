@@ -311,8 +311,7 @@ overrode a blocking gate, including a running override), and
 `projectConfigWarning` (parse error or `read_only_paths` warning,
 `null` when both clear). All of these are omitted from a lean
 `taskferry status <id>` (without `--full`) when their value is at the
-neutral default — see [output.js](sourcemap.md) for the exact
-projection.
+neutral default — see `src/output.js` for the exact projection.
 
 ### Error handling summary
 

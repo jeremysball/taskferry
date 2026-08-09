@@ -869,7 +869,7 @@ function resolveUserRoBind({ launchDirectory, roBind, denyList, stateDir, runtim
  * `ctx.allowedDirs`/`ctx.roBind`) and the per-dispatch entries carried on
  * `dispatchLaunch`. Read-write dirs that don't exist on the host are dropped
  * silently (same as the pre-existing allowedDirs behavior); read-only dirs go
- * through `resolveUserRoBind`' protected-mount validation instead. A path in
+ * through `resolveUserRoBind`'s protected-mount validation instead. A path in
  * both sets binds read-write with a warning naming the path -- never an
  * error, never read-only wins. A read-write dir that overlaps the sandbox's
  * own deny-list (`ctx.denyList`) is still bound read-write -- overriding the

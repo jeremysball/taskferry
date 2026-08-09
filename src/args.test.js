@@ -268,6 +268,19 @@ test("rejects the retired --rw-dirs/--ro-dirs flags with rename hints pointing a
   );
 });
 
+test("does not offer the --rw-bind/--ro-bind rename hint on commands that don't accept those flags", () => {
+  for (const flag of ["--rw-dirs", "--ro-dirs"]) {
+    assert.throws(
+      () => parseArgs(["list", flag, "/tmp/a"]),
+      (error) => error instanceof UsageError
+        && new RegExp(`unknown flag ${flag}`).test(error.message)
+        && !/was renamed/.test(error.help)
+        && /Valid flags for list/.test(error.help),
+      `${flag} on \`list\` should fall back to the valid-flags help, not point at a dispatch-only flag`
+    );
+  }
+});
+
 test("parses watch --task-id and rejects it for commands that don't take it", () => {
   assert.deepEqual(parseArgs(["watch", "--task-id", "oc_1"], { cwd: CWD }).options, {
     directory: void 0,

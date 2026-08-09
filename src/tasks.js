@@ -653,18 +653,29 @@ const CONCURRENCY_POLL_MS = 250;
  * Converts `config.json`'s validated `providerLimits` object (per Task 1's
  * `validateProviderLimits`) into the `Map<string, {concurrencyLimit,
  * dispatchLimit}>` shape the scheduler reads. An omitted per-provider key
- * means unlimited for that axis (`Infinity`), not zero.
- * @param {Record<string, {maxConcurrentTasks?: number, maxDispatchesPerWindow?: number}>|undefined} configValue
+ * means unlimited for that axis (`Infinity`), not zero. Accepts either a
+ * plain object or a `Map`, under either the config naming
+ * (`maxConcurrentTasks`/`maxDispatchesPerWindow`) or the scheduler naming
+ * (`concurrencyLimit`/`dispatchLimit`), and always returns a fresh `Map`.
+ * @param {Record<string, {maxConcurrentTasks?: number, maxDispatchesPerWindow?: number, concurrencyLimit?: number, dispatchLimit?: number}>|Map<string, {maxConcurrentTasks?: number, maxDispatchesPerWindow?: number, concurrencyLimit?: number, dispatchLimit?: number}>|undefined} configValue
  * @returns {Map<string, {concurrencyLimit: number, dispatchLimit: number}>}
  */
 function providerLimitsFromConfig(configValue) {
   const map = new Map();
   if (!configValue) return map;
-  if (configValue instanceof Map) return configValue;
-  for (const [provider, limits] of Object.entries(configValue)) {
+  // A Map is normalized and copied like any other input rather than passed
+  // through: it can carry either naming (a caller using the documented
+  // config keys, or an already-scheduler-shaped map from
+  // parseProviderLimitsEnv), and an un-normalized entry leaves
+  // dispatchLimit undefined, which makes providerCanLaunch's `<` comparison
+  // permanently false -- that provider then queues forever while
+  // scheduleNextLaunch re-arms a 1ms timer. Copying also stops a caller's
+  // later mutation from silently rewriting live scheduler limits.
+  const entries = configValue instanceof Map ? configValue.entries() : Object.entries(configValue);
+  for (const [provider, limits] of entries) {
     map.set(provider, {
-      concurrencyLimit: limits.maxConcurrentTasks ?? Infinity,
-      dispatchLimit: limits.maxDispatchesPerWindow ?? Infinity,
+      concurrencyLimit: limits.concurrencyLimit ?? limits.maxConcurrentTasks ?? Infinity,
+      dispatchLimit: limits.dispatchLimit ?? limits.maxDispatchesPerWindow ?? Infinity,
     });
   }
   return map;

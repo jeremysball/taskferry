@@ -536,6 +536,40 @@ describe("per-provider concurrency and dispatch-rate limits", () => {
     assert.equal(mgr.status(second.id).status, "running", "freeing opencode-go's own slot lets its queued task launch");
   });
 
+  test("a Map-shaped providerLimits using the documented config key names is normalized, not passed through unnormalized", () => {
+    const children = [];
+    const callerMap = new Map([["opencode-go", { maxConcurrentTasks: 1 }]]);
+    const mgr = makeManager({
+      maxConcurrentTasks: 10,
+      maxDispatchesPerWindow: 10,
+      dispatchWindowMs: 60000,
+      providerLimits: callerMap,
+      spawnFn: () => {
+        const c = fakeChild(9300 + children.length);
+        children.push(c);
+        return c;
+      },
+    });
+
+    // Pre-fix the Map was returned verbatim, so dispatchLimit stayed undefined
+    // and providerCanLaunch's `launchTimes.length < undefined` was always
+    // false -- the provider queued forever instead of launching at all.
+    const first = mgr.dispatch({ prompt: "p0", directory: os.tmpdir(), model: MIMIMAX_MODEL });
+    assert.equal(mgr.status(first.id).status, "running", "an omitted maxDispatchesPerWindow means unlimited, not zero");
+
+    const second = mgr.dispatch({ prompt: "p1", directory: os.tmpdir(), model: MIMIMAX_MODEL });
+    assert.equal(mgr.status(second.id).status, "queued", "the Map's maxConcurrentTasks: 1 is still honored");
+
+    // The caller's Map is copied, not aliased: mutating it must not retune a
+    // live scheduler.
+    callerMap.set("opencode-go", { maxConcurrentTasks: 99 });
+    assert.equal(mgr.status(second.id).status, "queued", "mutating the caller's Map does not change live limits");
+
+    // Drain so the scheduler stops re-arming its concurrency poll timer.
+    children[0].emit("exit", 0, null);
+    assert.equal(mgr.status(second.id).status, "running", "freeing the slot lets the queued task launch");
+  });
+
   test("a provider's maxDispatchesPerWindow queues its next task until the dispatch window passes (taskferry#235)", (t) => {
     t.mock.timers.enable({ apis: ["setTimeout", "setInterval", "Date"] });
     try {

@@ -531,4 +531,41 @@ describe("opencodeExecutor()", () => {
   test("resolveExecutor: unknown name throws", () => {
     assert.throws(() => resolveExecutor("bogus"), /unknown executor: bogus/);
   });
+
+  describe("opencodeExecutor().listModelVariantsFn", () => {
+    const FLASH_FREE_MODEL = "opencode/deepseek-v4-flash-free";
+    const FIXTURE = [
+      FLASH_FREE_MODEL,
+      '{"id":"deepseek-v4-flash-free","variants":{"low":{"reasoningEffort":"low"},"high":{"reasoningEffort":"high"},"max":{"reasoningEffort":"max"}}}',
+      "opencode/no-variants-model",
+      '{"id":"no-variants-model","variants":{}}',
+      "minimax/MiniMax-M3",
+      '{"id":"MiniMax-M3","variants":{"none":{"thinking":{"type":"disabled"}},"thinking":{"thinking":{"type":"enabled","budgetTokens":16000}}}}',
+    ].join("\n");
+
+    test("parses provider/model blocks into an ordered variant-key map", async () => {
+      const ex = opencodeExecutor();
+      const result = await ex.listModelVariantsFn(process.env, { execFileFn: async () => ({ stdout: FIXTURE, stderr: "" }) });
+      assert.deepEqual(result.get(FLASH_FREE_MODEL), ["low", "high", "max"]);
+      assert.deepEqual(result.get("minimax/MiniMax-M3"), ["none", "thinking"]);
+    });
+
+    test("omits models with no variants from the map", async () => {
+      const ex = opencodeExecutor();
+      const result = await ex.listModelVariantsFn(process.env, { execFileFn: async () => ({ stdout: FIXTURE, stderr: "" }) });
+      assert.equal(result.has("opencode/no-variants-model"), false);
+    });
+
+    test("skips a malformed JSON block instead of throwing", async () => {
+      const ex = opencodeExecutor();
+      const malformed = "opencode/broken-model\n{not valid json\n" + FLASH_FREE_MODEL + "\n" + FIXTURE.split("\n")[1];
+      const result = await ex.listModelVariantsFn(process.env, { execFileFn: async () => ({ stdout: malformed, stderr: "" }) });
+      assert.equal(result.has("opencode/broken-model"), false);
+      assert.deepEqual(result.get(FLASH_FREE_MODEL), ["low", "high", "max"]);
+    });
+  });
+});
+
+test("piExecutor() has no listModelVariantsFn -- pi needs no variant table", () => {
+  assert.equal(piExecutor().listModelVariantsFn, undefined);
 });

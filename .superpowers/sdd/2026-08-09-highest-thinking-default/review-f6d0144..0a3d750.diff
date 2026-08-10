@@ -1,0 +1,152 @@
+# Review package: f6d0144..0a3d750
+
+## Commits
+0a3d750 feat(config): validate a defaultVariant field
+
+## Files changed
+ src/config.js      | 20 ++++++++++++++++++++
+ src/config.test.js | 32 ++++++++++++++++++++++++++++++++
+ 2 files changed, 52 insertions(+)
+
+## Diff
+diff --git a/src/config.js b/src/config.js
+index 1e43b5e..26cb273 100644
+--- a/src/config.js
++++ b/src/config.js
+@@ -39,26 +39,29 @@ const CONFIG_FIELD_TYPES = {
+   sandboxEnabled: "boolean",
+   overlayEnabled: "boolean",
+   allowedDirs: "string",
+   rwBind: "string",
+   roBind: "string",
+   envDenylist: "string",
+   sandboxDenylist: "string",
+   waitDefaultTimeoutMs: "number",
+   cancelGraceMs: "number",
+   defaultExecutor: "string",
++  defaultVariant: "string",
+   advisorContextChars: "number",
+   envFile: "string",
+   profilingEnabled: "boolean",
+   providerLimits: "object",
+ };
+ 
++export const KNOWN_VARIANT_LEVELS = /** @type {readonly string[]} */ (["highest", "off", "minimal", "low", "medium", "high", "xhigh", "max"]);
++
+ const PROVIDER_LIMIT_FIELD_TYPES = {
+   maxConcurrentTasks: "number",
+   maxDispatchesPerWindow: "number",
+ };
+ 
+ /**
+  * Warns when a per-provider limits object sets neither field, since an empty
+  * `providerLimits.<provider>: {}` silently leaves that provider unlimited
+  * (unlike the top-level `providerLimits: {}`, which intentionally means
+  * "no limits").
+@@ -104,20 +107,35 @@ function validateProviderLimitEntry(provider, limits, configPath) {
+  */
+ function validateProviderLimits(providerLimits, configPath) {
+   if (!isObject(providerLimits)) {
+     throw new Error(`error: config key "providerLimits" in ${configPath} must be a JSON object\nhelp: use {"provider": {"maxConcurrentTasks": N, "maxDispatchesPerWindow": N}, ...}`);
+   }
+   for (const [provider, limits] of Object.entries(providerLimits)) {
+     validateProviderLimitEntry(provider, limits, configPath);
+   }
+ }
+ 
++/**
++ * Validates `config.json`'s `defaultVariant` field against the known
++ * variant levels. The type check (string) already ran in
++ * {@link parseAndValidateConfig}; this only rejects values outside
++ * {@link KNOWN_VARIANT_LEVELS}, trimming whitespace first so a value like
++ * `" high "` is accepted rather than rejected for incidental padding.
++ * @param {unknown} defaultVariant
++ * @param {string} configPath
++ */
++function validateDefaultVariant(defaultVariant, configPath) {
++  if (defaultVariant !== undefined && !KNOWN_VARIANT_LEVELS.includes(/** @type {string} */ (defaultVariant).trim())) {
++    throw new Error(`error: config key "defaultVariant" in ${configPath} must be one of ${KNOWN_VARIANT_LEVELS.join(", ")} (got ${JSON.stringify(defaultVariant)})\nhelp: fix the value in ${configPath}`);
++  }
++}
++
+ /**
+  * @param {NodeJS.ProcessEnv} [env]
+  * @returns {string}
+  */
+ export function resolveConfigPath(env = process.env) {
+   return path.join(
+     env.XDG_CONFIG_HOME || path.join(os.homedir(), ".config"),
+     "taskferry",
+     "config.json"
+   );
+@@ -149,20 +167,22 @@ function parseAndValidateConfig(configPath) {
+     const value = parsed[key];
+     if (typeof value !== expectedType) {
+       throw new Error(`error: config key "${key}" in ${configPath} must be a ${expectedType} (got ${JSON.stringify(value)})\nhelp: fix the value's type in ${configPath}`);
+     }
+   }
+ 
+   if (parsed.defaultExecutor !== undefined && !KNOWN_EXECUTORS.includes(parsed.defaultExecutor)) {
+     throw new Error(`error: config key "defaultExecutor" in ${configPath} must be one of ${KNOWN_EXECUTORS.join(", ")} (got ${JSON.stringify(parsed.defaultExecutor)})\nhelp: fix the value in ${configPath}`);
+   }
+ 
++  validateDefaultVariant(parsed.defaultVariant, configPath);
++
+   if (parsed.providerLimits !== undefined) validateProviderLimits(parsed.providerLimits, configPath);
+ 
+   return parsed;
+ }
+ 
+ /**
+  * @param {object} [options]
+  * @param {NodeJS.ProcessEnv} [options.env]
+  * @param {string} [options.configPath]
+  * @returns {Record<string, unknown>}
+diff --git a/src/config.test.js b/src/config.test.js
+index 60958b7..f807bea 100644
+--- a/src/config.test.js
++++ b/src/config.test.js
+@@ -234,11 +234,43 @@ describe("loadConfig()", () => {
+     const dir = tmpConfigDir();
+     const configPath = writeConfig(dir, JSON.stringify({ providerLimits: { minimax: { maxRpm: 10 } } }));
+     assert.throws(() => loadConfig({ configPath }), /error: unrecognized key "providerLimits\.minimax\.maxRpm".*\nhelp:/s);
+   });
+ 
+   test("rejects a non-positive-integer providerLimits value", () => {
+     const dir = tmpConfigDir();
+     const configPath = writeConfig(dir, JSON.stringify({ providerLimits: { minimax: { maxConcurrentTasks: 0 } } }));
+     assert.throws(() => loadConfig({ configPath }), /error: config key "providerLimits\.minimax\.maxConcurrentTasks".*must be a positive integer.*\nhelp:/s);
+   });
++
++  test("accepts the highest sentinel for defaultVariant", () => {
++    const dir = tmpConfigDir();
++    const configPath = writeConfig(dir, JSON.stringify({ defaultVariant: "highest" }));
++    assert.deepEqual(loadConfig({ configPath }), { defaultVariant: "highest" });
++  });
++
++  test("accepts each of pi's concrete thinking levels for defaultVariant", () => {
++    for (const level of ["off", "minimal", "low", "medium", "high", "xhigh", "max"]) {
++      const dir = tmpConfigDir();
++      const configPath = writeConfig(dir, JSON.stringify({ defaultVariant: level }));
++      assert.deepEqual(loadConfig({ configPath }), { defaultVariant: level });
++    }
++  });
++
++  test("rejects an unrecognized defaultVariant string", () => {
++    const dir = tmpConfigDir();
++    const configPath = writeConfig(dir, JSON.stringify({ defaultVariant: "medium-plus" }));
++    assert.throws(() => loadConfig({ configPath }), /error: config key "defaultVariant" in .* must be one of highest, off, minimal, low, medium, high, xhigh, max \(got "medium-plus"\)\nhelp:/);
++  });
++
++  test("rejects an empty or whitespace-only defaultVariant", () => {
++    const dir = tmpConfigDir();
++    const configPath = writeConfig(dir, JSON.stringify({ defaultVariant: "   " }));
++    assert.throws(() => loadConfig({ configPath }), /error: config key "defaultVariant".*must be one of/);
++  });
++
++  test("rejects a non-string defaultVariant", () => {
++    const dir = tmpConfigDir();
++    const configPath = writeConfig(dir, JSON.stringify({ defaultVariant: 5 }));
++    assert.throws(() => loadConfig({ configPath }), /error: config key "defaultVariant" in .* must be a string \(got 5\)\nhelp:/);
++  });
+ });

@@ -4704,7 +4704,7 @@ function readNarrationExcerpt(logPath) {
  * @param {NodeJS.ProcessEnv} env
  * @returns {string}
  */
-function modelsCacheFingerprint(env = {}) {
+export function modelsCacheFingerprint(env = {}) {
   const suffixNames = ["_API_KEY", "_BASE_URL"];
   const exactNames = [
     "OPENCODE_CONFIG",

@@ -5,6 +5,7 @@
 // immediately before it, plus 0.5, so it reads as "one step up from
 // whatever came before," matching the observed invariant that every
 // model's variants are declared in ascending-effort order.
+/** @type {Record<string, number>} */
 const KNOWN_RANKS = { none: 0, off: 0, minimal: 1, low: 2, medium: 3, high: 4, xhigh: 5, max: 6 };
 
 /**

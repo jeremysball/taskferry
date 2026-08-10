@@ -19,7 +19,7 @@ describe("dispatch() lifecycle, driven through an injected spawnFn (no real open
     assert.equal(captured.cmd, "opencode");
     assert.deepEqual(captured.args, [
       "run", "--dir", os.tmpdir(), "--auto", "--format", "json",
-      "-m", MIMIMAX_MODEL, "--", "hello",
+      "-m", MIMIMAX_MODEL, "--variant", "max", "--", "hello",
     ]);
     assert.equal(captured.opts.cwd, os.tmpdir());
     assert.equal(captured.opts.detached, true);
@@ -966,5 +966,59 @@ describe("dispatch() prompt augmentation from .taskferry.toml", () => {
     // Prompt is well under the 200-char preview threshold, so promptTotalChars stays unset.
     assert.equal("promptTotalChars" in dispatched, false);
     assert.equal(dispatched.promptPreview, DISPATCH_PROMPT);
+  });
+});
+
+describe("dispatch() omitted --variant resolution (defaultVariant: highest)", () => {
+  const THINKING_FLAG = "--thinking";
+
+  test("omitted --variant on pi requests max (highest), by default", () => {
+    let captured = null;
+    const mgr = makeManager({ spawnFn: (_cmd, args) => { captured = args; return fakeChild(); } });
+    mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), model: MIMIMAX_MODEL, executor: "pi" });
+    assert.ok(captured.includes(THINKING_FLAG));
+    assert.equal(captured[captured.indexOf(THINKING_FLAG) + 1], "max");
+  });
+
+  test("omitted --variant on opencode resolves the model's ranked-highest cached variant", () => {
+    let captured = null;
+    const mgr = makeManager({
+      spawnFn: (_cmd, args) => { captured = args; return fakeChild(); },
+      opencodeVariantsTable: new Map([[LUNA_MODEL, ["low", "high", "max"]]]),
+    });
+    mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), model: LUNA_MODEL, executor: "opencode" });
+    assert.deepEqual(captured.slice(captured.indexOf("-m")), ["-m", LUNA_MODEL, "--variant", "max", "--", "hi"]);
+  });
+
+  test("omitted --variant on opencode with no cache entry for the model sends no flag", () => {
+    let captured = null;
+    const mgr = makeManager({ spawnFn: (_cmd, args) => { captured = args; return fakeChild(); }, opencodeVariantsTable: new Map() });
+    mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), model: LUNA_MODEL, executor: "opencode" });
+    assert.equal(captured.includes("--variant"), false);
+  });
+
+  test("explicit --variant is never reinterpreted, even against a cached table", () => {
+    let captured = null;
+    const mgr = makeManager({
+      spawnFn: (_cmd, args) => { captured = args; return fakeChild(); },
+      opencodeVariantsTable: new Map([[LUNA_MODEL, ["low", "high", "max"]]]),
+    });
+    mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), model: LUNA_MODEL, variant: "low", executor: "opencode" });
+    assert.equal(captured[captured.indexOf("--variant") + 1], "low");
+  });
+
+  test("a resumed session with no --variant inherits the resumed task's own variant, not a fresh highest", () => {
+    let captured = null;
+    const mgr = makeManager({ spawnFn: (_cmd, args) => { captured = args; return fakeChild(); } });
+    mgr.dispatch({ prompt: "first", directory: os.tmpdir(), model: MIMIMAX_MODEL, variant: "low", sessionId: "ses_v", executor: "opencode" });
+    mgr.dispatch({ prompt: "resume", directory: os.tmpdir(), sessionId: "ses_v", executor: "opencode" });
+    assert.equal(captured[captured.indexOf("--variant") + 1], "low");
+  });
+
+  test("a configured defaultVariant of a concrete level is requested verbatim when --variant is omitted", () => {
+    let captured = null;
+    const mgr = makeManager({ spawnFn: (_cmd, args) => { captured = args; return fakeChild(); }, defaultVariant: "medium" });
+    mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), model: MIMIMAX_MODEL, executor: "pi" });
+    assert.equal(captured[captured.indexOf(THINKING_FLAG) + 1], "medium");
   });
 });

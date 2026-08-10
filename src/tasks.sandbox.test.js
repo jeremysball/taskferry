@@ -27,9 +27,9 @@ describe("bwrap sandboxing: dispatch argv shape and gitdir scoping", () => {
     const bindIndex = captured.args.indexOf("--bind");
     assert.equal(captured.args[bindIndex + 1], os.tmpdir());
     assert.ok(captured.args.includes(runtimeDir));
-    assert.deepEqual(captured.args.slice(-12), [
+    assert.deepEqual(captured.args.slice(-14), [
       "--", "opencode", "run", "--dir", os.tmpdir(), "--auto", "--format", "json",
-      "-m", "opencode-go/minimax-m3", "--", "hello",
+      "-m", "opencode-go/minimax-m3", "--variant", "max", "--", "hello",
     ]);
     assert.equal(captured.opts.cwd, os.tmpdir());
   });

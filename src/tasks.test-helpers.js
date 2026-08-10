@@ -258,6 +258,8 @@ function buildManagerOptions(options, stateDir, defaultCacheDir, defaultOverlayT
     killFn: options.killFn ?? defaultKillFn(),
     listModelsFn: options.listModelsFn ?? defaultListModelsFn(),
     ...passthroughIfSet({ defaultExecutor: options.defaultExecutor }, "defaultExecutor", "defaultExecutor"),
+    ...passthroughIfSet({ defaultVariant: options.defaultVariant }, "defaultVariant", "defaultVariant"),
+    ...passthroughIfSet({ opencodeVariantsTable: options.opencodeVariantsTable }, "opencodeVariantsTable", "opencodeVariantsTable"),
     ...passthroughIfSet({ config: options.config }, "config", "config"),
     ...passthroughIfSet({ checkBwrapAvailableFn: options.checkBwrapAvailableFn }, "checkBwrapAvailableFn", "checkBwrapAvailableFn"),
     ...passthroughIfSet({ existsFn: options.existsFn }, "existsFn", "existsFn"),

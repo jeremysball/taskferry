@@ -58,7 +58,9 @@ summary immediately.
 | `--variant <name>` | Reasoning-effort override, applied only alongside `--model` — omitting `--model` (including on a `--session-id` resume) always forces variant `high`, regardless of any `--variant` passed. Accepted values depend on the executor: pi takes `off`, `minimal`, `low`, `medium`, `high`, `xhigh`; opencode's `--variant` values depend on the model |
 | `--executor <opencode\|pi>` | Which worker CLI to spawn. Built-in default `pi`, but an omitted flag actually falls back to the daemon's configured default executor (`TASKFERRY_DEFAULT_EXECUTOR` or `config.json`'s `defaultExecutor`) |
 | `--session-id <id>` | Resume an existing session instead of starting fresh (`--continue --session <id>`; both pi and opencode use this syntax). When `--executor` is omitted, inherits whichever executor originally created the session; get session ids from a prior `result` or `status --full` |
-| `--allowed-dirs <path,path,...>` | Extra directories bound read-write inside the sandbox for this dispatch, on top of the auto-detected git-common-dir for a worktree and any config-level `allowedDirs`; see [security.md](security.md). **`/tmp` needs this too** — the sandbox mounts a fresh, empty `--tmpfs /tmp`, so any path under `/tmp` that isn't `--directory`, `runtimeDir`, or an `--allowed-dirs` entry is invisible inside the sandbox even though it exists on the host |
+| `--rw-bind <path,path,...>` | Extra directories bound read-write inside the sandbox for this dispatch, on top of the auto-detected git-common-dir for a worktree and any config-level `rwBind`; see [security.md](security.md). **`/tmp` needs this too** — the sandbox mounts a fresh, empty `--tmpfs /tmp`, so any path under `/tmp` that isn't `--directory`, `runtimeDir`, or an `--rw-bind` entry is invisible inside the sandbox even though it exists on the host. All three layers (this flag, `TASKFERRY_RW_BIND`, config `rwBind`) union rather than replace. |
+| `--ro-bind <path,path,...>` | Extra directories bound **read-only** inside the sandbox for this dispatch — a review-only worker that should read several repos but edit none. Resolved through the same protected-mount safety check as `.taskferry.toml`'s `read_only_paths`: an entry that doesn't exist on the host, or that overlaps a protected mount, is skipped and reported. Unions with `TASKFERRY_RO_BIND` and config `roBind`. If a path also appears in the read-write set, read-write wins with a warning. |
+| `--allowed-dirs <path,path,...>` | **Deprecated** alias for `--rw-bind` (same read-write behavior). Emits a deprecation warning when used; will be removed in the next major release. |
 | `--require-final-marker <regex>` | Fail the task if the final message doesn't match this pattern (case-sensitive, standard JS RegExp semantics). Sets `incomplete: true` on the settled task when the final message is empty (after trimming) or doesn't match. Patterns that don't compile as a standard JS RegExp reject the dispatch up front with a usage error. Useful for enforcing a report-format contract like `^Status: (DONE\|DONE_WITH_CONCERNS\|BLOCKED\|NEEDS_CONTEXT)$` on the last line of model output. |
 | `--class <name>` | Optional free-text task-class tag for telemetry aggregation; any non-empty string, no fixed-list validation — taskferry stores whatever is given |
 | `--parent-task <id>` | Tag this dispatch as fixing/retrying an earlier task. Persisted as `parentTaskId` and surfaced on `taskferry status <id> --full` / `taskferry result <id> --fields parentTaskId` (not on plain `taskferry status <id>`). The earlier task's check-gate failure message echoes the link when this dispatch is the suggested fix-forward resume (see `## taskferry accept <id>` below) |
@@ -76,7 +78,10 @@ next: Run taskferry wait or taskferry status with task id "oc_mrn4ipkp_19450105"
 
 At most `TASKFERRY_MAX_CONCURRENT_TASKS` tasks (default 4) run at once;
 extra dispatches return `status: "queued"` and start FIFO as running tasks
-finish, are cancelled, fail to spawn, or hit the no-output watchdog. See
+finish, are cancelled, fail to spawn, or hit the no-output watchdog. A
+provider hitting its own `TASKFERRY_PROVIDER_LIMITS` entry (per-provider
+concurrency or dispatch-rate cap) also returns `status: "queued"` for that
+provider's tasks, even when the global ceiling has headroom. See
 [daemon.md](daemon.md) for queueing, the watchdog, and rate limiting.
 
 ## `taskferry wait <id> [options]`
@@ -261,8 +266,8 @@ change with `taskferry result <id> --diff` first — note the diff can
 include files the worker never touched: git-target extraction stages the
 overlay's whole merged view, so files already untracked in the dispatch
 directory at dispatch time appear as new-file entries, and the plain
-`git apply` fails outright if they still exist on disk (see the
-sourcemap's "Things that look like bugs but aren't"). For a git target, the
+`git apply` fails outright if they still exist on disk (see
+[daemon.md](daemon.md)'s "Things that look like bugs but aren't"). For a git target, the
 apply is `git apply` against the real pre-dispatch `HEAD`; for a non-git
 target, it runs an in-sandbox `rsync --delay-updates` that needs the
 live overlay, so a non-git changeset left pending across a reboot fails

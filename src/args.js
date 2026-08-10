@@ -166,9 +166,9 @@ function defaultOptions(command, cwd) {
   return factory ? factory(cwd) : {};
 }
 
-function coerceAllowedDirs(value, _name) {
+function coerceDirList(value, name) {
   const dirs = value.split(",").map((entry) => entry.trim()).filter(Boolean);
-  if (!dirs.length) throw new UsageError("--allowed-dirs must contain at least one path", "Use --allowed-dirs with one or more comma-separated paths");
+  if (!dirs.length) throw new UsageError(`${name} must contain at least one path`, `Use ${name} with one or more comma-separated paths`);
   return dirs;
 }
 
@@ -207,7 +207,9 @@ const FLAGS = {
   "--variant": { allow: ["dispatch", "advisor"], key: "variant" },
   "--session-id": { allow: ["dispatch", "advisor"], key: "sessionId" },
   "--require-final-marker": { allow: ["dispatch"], key: "finalMarker", coerce: coerceFinalMarker },
-  "--allowed-dirs": { allow: ["dispatch"], key: "allowedDirs", coerce: coerceAllowedDirs },
+  "--rw-bind": { allow: ["dispatch"], key: "rwBind", coerce: coerceDirList },
+  "--ro-bind": { allow: ["dispatch"], key: "roBind", coerce: coerceDirList },
+  "--allowed-dirs": { allow: ["dispatch"], key: "allowedDirs", coerce: coerceDirList, deprecate: "--allowed-dirs is deprecated; use --rw-bind (same behavior). It will be removed in the next major release." },
   "--executor": { allow: ["dispatch", "advisor"], key: "executor", coerce: coerceExecutor },
   "--class": { allow: ["dispatch", "advisor"], key: "class" },
   "--parent-task": { allow: ["dispatch", "advisor"], key: "parentTaskId" },
@@ -239,6 +241,8 @@ const FLAGS = {
   "--max_words": { mention: "--max_words was renamed; use --max-words" },
   "--session_id": { mention: "--session_id was renamed; use --session-id" },
   "--style": { mention: "--style was renamed; use --mode" },
+  "--rw-dirs": { mention: "--rw-dirs was renamed; use --rw-bind", target: "--rw-bind" },
+  "--ro-dirs": { mention: "--ro-dirs was renamed; use --ro-bind", target: "--ro-bind" },
 };
 
 // A subset of migration flags point at a target that isn't a valid flag on
@@ -270,6 +274,7 @@ function handleBooleanFlag(ctx, name, def, inlineValue, index) {
 
 function handleValueFlag(ctx, name, def, required) {
   const value = def.coerce ? def.coerce(required.value, name, ctx.command) : required.value;
+  if (def.deprecate) process.stderr.write(`warning: ${def.deprecate}\n`);
   setOption(ctx.options, def.key, value, ctx.command, ctx.seen);
   return required.nextIndex + 1;
 }

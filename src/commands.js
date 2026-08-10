@@ -135,11 +135,19 @@ function runVersion() {
 // when the caller set them. The daemon's allowed-params spec rejects unknown
 // keys, so an explicitly-undefined value (the args.js default for an omitted
 // flag) must be omitted entirely -- see isSet() above.
-const DISPATCH_PASSTHROUGH_KEYS = ["model", "variant", "sessionId", "finalMarker", "noSandbox", "noOverlay", "allowedDirs", "executor", "class", "parentTaskId"];
+const DISPATCH_PASSTHROUGH_KEYS = ["model", "variant", "sessionId", "finalMarker", "noSandbox", "noOverlay", "allowedDirs", "rwBind", "roBind", "executor", "class", "parentTaskId"];
 
 function pickDispatchOptions(options) {
   const picked = {};
   for (const key of DISPATCH_PASSTHROUGH_KEYS) {
+    // `--allowed-dirs` is a deprecated alias for `--rw-bind`; pass both keys
+    // through verbatim (as distinct wire params) rather than folding one into
+    // the other here -- the daemon's own dispatchTask already unions
+    // `allowedDirs` and `rwBind` server-side (see tasks.js's `effectiveRwBind`
+    // union in dispatchTask). Collapsing them into a single wire key at this
+    // layer, as an earlier version of this function did, meant passing both
+    // flags on one dispatch silently dropped whichever key iterated first --
+    // the daemon's union could never see two distinct values to union.
     if (isSet(options[key])) picked[key] = options[key];
   }
   return picked;

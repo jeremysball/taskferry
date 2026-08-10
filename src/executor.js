@@ -9,11 +9,14 @@ const LIST_MODEL_VARIANTS_TIMEOUT_MS = 30000;
 
 // `opencode models --verbose` prints one model per block: a `provider/model`
 // line at column 0 with no leading whitespace, followed by that model's
-// full JSON description (always indented -- a JSON body line is never
-// mistaken for the next model-id line). A block that fails to JSON.parse
-// is skipped rather than aborting the whole listing; one malformed model
-// must not cost every other model's variant data.
-const OPENCODE_MODEL_ID_LINE = /^([^\s/]+\/[^\s/]+)$/;
+// full JSON description. The JSON body is not reliably indented -- real
+// output puts `{`/`}` at column 0 too -- but no body line contains a
+// slash, so a column-0 line containing a slash is always the next
+// model-id line (provider ids may themselves contain slashes, e.g.
+// openrouter's `provider/subprovider/model`). A block that fails to
+// JSON.parse is skipped rather than aborting the whole listing; one
+// malformed model must not cost every other model's variant data.
+const OPENCODE_MODEL_ID_LINE = /^([^\s/]+\/.*)$/;
 
 /**
  * @param {string} verboseOutput - raw stdout of `opencode models --verbose`

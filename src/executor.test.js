@@ -541,6 +541,8 @@ describe("opencodeExecutor()", () => {
       '{"id":"no-variants-model","variants":{}}',
       "minimax/MiniMax-M3",
       '{"id":"MiniMax-M3","variants":{"none":{"thinking":{"type":"disabled"}},"thinking":{"thinking":{"type":"enabled","budgetTokens":16000}}}}',
+      "openrouter/openai/gpt-5.6-luna",
+      '{"id":"gpt-5.6-luna","variants":{"low":{"reasoningEffort":"low"},"high":{"reasoningEffort":"high"}}}',
     ].join("\n");
 
     test("parses provider/model blocks into an ordered variant-key map", async () => {
@@ -548,6 +550,12 @@ describe("opencodeExecutor()", () => {
       const result = await ex.listModelVariantsFn(process.env, { execFileFn: async () => ({ stdout: FIXTURE, stderr: "" }) });
       assert.deepEqual(result.get(FLASH_FREE_MODEL), ["low", "high", "max"]);
       assert.deepEqual(result.get("minimax/MiniMax-M3"), ["none", "thinking"]);
+    });
+
+    test("parses multi-slash provider/subprovider/model ids (openrouter format)", async () => {
+      const ex = opencodeExecutor();
+      const result = await ex.listModelVariantsFn(process.env, { execFileFn: async () => ({ stdout: FIXTURE, stderr: "" }) });
+      assert.deepEqual(result.get("openrouter/openai/gpt-5.6-luna"), ["low", "high"]);
     });
 
     test("omits models with no variants from the map", async () => {

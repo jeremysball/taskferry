@@ -1,0 +1,389 @@
+# Review package: 054d952..e120c96
+
+## Commits
+e120c96 feat(daemon): warm and daily-refresh the opencode variants cache on startup
+
+## Files changed
+ .../task-7-brief.md                                | 110 +++++++++++++++++++++
+ .../task-7-report.md                               |  45 +++++++++
+ src/tasks.dispatch.test.js                         |  25 ++++-
+ src/tasks.js                                       |  30 +++++-
+ src/tasks.test-helpers.js                          |   8 ++
+ 5 files changed, 216 insertions(+), 2 deletions(-)
+
+## Diff
+diff --git a/.superpowers/sdd/2026-08-09-highest-thinking-default/task-7-brief.md b/.superpowers/sdd/2026-08-09-highest-thinking-default/task-7-brief.md
+new file mode 100644
+index 0000000..2909d35
+--- /dev/null
++++ b/.superpowers/sdd/2026-08-09-highest-thinking-default/task-7-brief.md
+@@ -0,0 +1,110 @@
++## Task 7: Daemon warms and daily-refreshes the opencode variants cache
++
++**Files:**
++- Modify: `src/tasks.js` (`bootstrapManagerContext`, ~line 4516)
++- Test: `src/tasks.persist.test.js` or a new `describe` block in `src/tasks.dispatch.test.js` (whichever existing file already covers `bootstrapManagerContext`-adjacent behavior — check with `rg -n "bootstrapManagerContext|sweepOrphanedOverlays" src/*.test.js` and add alongside it)
++
++**Interfaces:**
++- Consumes: `refreshVariantsCache()` (Task 4), `readVariantsCache()` (Task 4), `opencodeExecutor().listModelVariantsFn` (Task 3).
++- Produces: every `createTaskManager()` call (daemon or otherwise) kicks off a fire-and-forget cache warm on construction when the cache is stale, plus an `unref()`'d interval that re-checks every hour (cheap stat-only check via `readVariantsCache`; only refreshes when that returns `null`).
++
++- [ ] **Step 1: Write the failing test**
++
++```js
++describe("opencode variants cache warm-up", () => {
++  test("createTaskManager() triggers a refresh when the cache is stale, using the opencode executor's listModelVariantsFn", async () => {
++    let called = 0;
++    const { stateDir, defaultCacheDir } = makeTempDirsForTest(); // use whatever this file's existing temp-dir helper is named
++    const mgr = trackManager(createTaskManager({
++      stateDir,
++      cacheDir: defaultCacheDir,
++      sandboxEnabled: false,
++      overlayEnabled: false,
++      lowerdirStaggerMs: 0,
++      spawnFn: () => fakeChild(),
++      killFn: () => {},
++      listModelsFn: async () => "",
++      opencodeListModelVariantsFn: async () => { called++; return new Map(); },
++    }));
++    await new Promise((resolve) => setImmediate(resolve));
++    await new Promise((resolve) => setImmediate(resolve));
++    assert.equal(called, 1);
++  });
++});
++```
++
++Adjust the temp-dir setup to match whichever helper the target test file already imports from `tasks.test-helpers.js` (`mkdtempTracked`, or a local equivalent) — do not introduce a second ad hoc temp-dir pattern per the repo's existing `mkdtempTracked()` convention.
++
++- [ ] **Step 2: Run the new test to verify it fails**
++
++Run: `npm test -- --test-name-pattern "opencode variants cache warm-up"`
++Expected: FAIL — `createTaskManager()` does not accept `opencodeListModelVariantsFn` or trigger any refresh yet.
++
++- [ ] **Step 3: Add the injectable `opencodeListModelVariantsFn` option and the warm-up call**
++
++In `src/tasks.js`'s `resolveCoreOptions()` (same function touched in Task 6 Step 4), add:
++
++```js
++    opencodeListModelVariantsFn: rawOptions.opencodeListModelVariantsFn ?? opencodeExecutor().listModelVariantsFn,
++```
++
++In `bootstrapManagerContext()` (~line 4516), add a call after the existing crash-recovery sweeps:
++
++```js
++function bootstrapManagerContext(ctx) {
++  startEnvFileWatch(ctx.opts, ctx.state);
++  loadPersistedTasks({ /* ...unchanged... */ });
++  ctx.helpers.sweepOrphanedPromptFiles();
++  ctx.helpers.sweepOrphanedOverlays();
++  ctx.helpers.markInterruptedGates();
++  // Opportunistically warm the opencode variants cache in the background.
++  // Never awaited: a stale or missing cache only means dispatch()'s
++  // resolveOpencodeVariants() sends no --variant flag until the refresh
++  // lands, never a blocked or failed dispatch. Skipped entirely when a
++  // test has injected opencodeVariantsTable directly (Task 6), since that
++  // seam bypasses the cache file altogether.
++  if (!ctx.opts.opencodeVariantsTable) {
++    warmAndScheduleVariantsCacheRefresh(ctx.opts);
++  }
++}
++
++/**
++ * Refreshes the opencode variants cache once now (if stale) and schedules
++ * an hourly, `unref()`'d recheck for as long as the process lives. The
++ * hourly tick is cheap when the cache is fresh (a single `statSync` inside
++ * `readVariantsCache()`); it only pays for the ~3s `opencode models
++ * --verbose` shell-out once every `DEFAULT_VARIANT_CACHE_TTL_MS` (24h).
++ * @param {ResolvedTaskManagerOptions} opts
++ */
++function warmAndScheduleVariantsCacheRefresh(opts) {
++  const maybeRefresh = () => {
++    if (readVariantsCache({ cacheDir: opts.cacheDir, env: process.env }) !== null) return;
++    refreshVariantsCache({ cacheDir: opts.cacheDir, env: process.env, listModelVariantsFn: opts.opencodeListModelVariantsFn })
++      .catch((err) => process.stderr.write(`warning: opencode variants cache refresh failed: ${errMessage(err)}\n`));
++  };
++  maybeRefresh();
++  setInterval(maybeRefresh, 60 * 60 * 1000).unref();
++}
++```
++
++Add `refreshVariantsCache` to the existing `import { readVariantsCache } from "./variants-cache.js";` line from Task 6 (making it `import { readVariantsCache, refreshVariantsCache } from "./variants-cache.js";`).
++
++- [ ] **Step 4: Run the test to verify it passes**
++
++Run: `npm test -- --test-name-pattern "opencode variants cache warm-up"`
++Expected: PASS
++
++- [ ] **Step 5: Run the full test suite**
++
++Run: `npm test`
++Expected: PASS. Every other `createTaskManager()`/`makeManager()` call in the suite either passes `opencodeVariantsTable` (short-circuiting this path per Task 6 Step 7) or gets the real `warmAndScheduleVariantsCacheRefresh` with the test's injected `spawnFn`/temp `cacheDir` — confirm no test hangs on process exit from a non-`unref()`'d timer (the `.unref()` call is what prevents that; if any test process hangs, that is the first thing to check).
++
++- [ ] **Step 6: Commit**
++
++```bash
++git add src/tasks.js
++git commit -m "feat(daemon): warm and daily-refresh the opencode variants cache on startup"
++```
++
++---
++
+diff --git a/.superpowers/sdd/2026-08-09-highest-thinking-default/task-7-report.md b/.superpowers/sdd/2026-08-09-highest-thinking-default/task-7-report.md
+new file mode 100644
+index 0000000..96582c2
+--- /dev/null
++++ b/.superpowers/sdd/2026-08-09-highest-thinking-default/task-7-report.md
+@@ -0,0 +1,45 @@
++# Task 7 Report: Daemon warms and daily-refreshes the opencode variants cache
++
++## What changed
++
++**`src/tasks.js`**
++- `resolveCoreOptions()`: added `opencodeListModelVariantsFn: rawOptions.opencodeListModelVariantsFn ?? opencodeExecutor().listModelVariantsFn` (verbatim from the brief).
++- Import line: `import { readVariantsCache, refreshVariantsCache } from "./variants-cache.js";`.
++- `bootstrapManagerContext()`: after `markInterruptedGates()`, calls `warmAndScheduleVariantsCacheRefresh(ctx.opts)` unless `ctx.opts.opencodeVariantsTable` is set (the Task 6 test seam bypasses the cache file).
++- New module-level `warmAndScheduleVariantsCacheRefresh(opts)`: stat-only staleness check via `readVariantsCache()`; only shells out (`refreshVariantsCache` → `opencodeListModelVariantsFn`) when the cache is missing/stale; refresh failures are logged to stderr via `errMessage()`, never thrown; an hourly `setInterval(...).unref()` recheck keeps the cache fresh for the process lifetime without keeping the process alive. Code is the brief's, verbatim.
++
++**`src/tasks.dispatch.test.js`** (new `describe("opencode variants cache warm-up")`)
++- The brief's test, adjusted per the brief's own instruction to match the file's existing temp-dir helper: uses `mkdtempTracked(AXI_TASKS_TEST_DIR)` / `mkdtempTracked(AXI_TASKS_CACHE_DIR)` / `mkdtempTracked(AXI_TASKS_OVERLAY_DIR)` (the `makeTempDirs()` convention from `tasks.test-helpers.js`), and passes an isolated `overlayTmpRoot` so construction's `sweepOrphanedOverlays()` scans a temp dir instead of the host's real `/tmp`.
++- Deviation (lint-forced): the brief's snippet assigns `const mgr = trackManager(...)` and never uses `mgr`; the repo's ESLint (`sonarjs/no-unused-vars`, `sonarjs/no-dead-store`) errors on that, so the test calls `trackManager(createTaskManager({...}))` without the unused binding. Behavior is identical.
++
++**`src/tasks.test-helpers.js`** (deviation from the brief's literal Step 3/5 text — see Concerns)
++- `buildManagerOptions()` now defaults `opencodeListModelVariantsFn` to a fake (`async () => new Map()`), exactly parallel to the existing `spawnFn`/`killFn`/`listModelsFn` defaults. The brief's Step 5 assumed the warm's shell-out "gets the test's injected `spawnFn`"; it does not — `opencodeExecutor().listModelVariantsFn` shells out through the module-level `execFileAsync`, so every one of the suite's ~120 managers without `opencodeVariantsTable` fired a real `opencode models --verbose` (~3s) per construction. That made the full suite fail 6–8 tests per run (timing tests: watchdog 5–30ms budgets, 20ms dispatch window, daemon boot timeouts) from subprocess/CPU load. With the helper default, only tests that explicitly inject the fn (the new warm-up test) or real daemons exercise the real shell-out.
++
++## Test commands and results
++
++Step 2 (fail first): `npm test -- --test-name-pattern "opencode variants cache warm-up"`
++- Note: npm mangles this into a trailing positional arg, so the full suite runs (1205 tests). New test FAILED as expected (createTaskManager didn't accept the option); total 1199 pass / 6 fail — 5 of those were the pre-existing ambient failures (see below), 1 was the new test.
++
++Step 4 (pass): `npm test -- --test-name-pattern "opencode variants cache warm-up"` → warm-up test PASSES. The other failures at that point (12 fail) were the real-shell-out load problem, fixed by the helper default.
++
++Targeted (correct invocation): `env -u TASKFERRY_CHILD node --test --test-name-pattern "opencode variants cache warm-up" src/tasks.dispatch.test.js` → 1/1 pass.
++
++Step 5 (full suite, clean env — ambient session vars unset): `env -u TASKFERRY_CHILD -u TASKFERRY_TASK_ID -u TASKFERRY_SOCKET_PATH -u TASKFERRY_STATE_DIR -u TASKFERRY_RUNTIME_DIR -u TASKFERRY_CACHE_DIR -u XDG_DATA_HOME -u XDG_CONFIG_HOME npm test`
++- 1205 tests, 1205 pass, 0 fail — 7 of 9 consecutive runs fully green. 2 runs each had a single flaky timing-test failure (5–30ms watchdog/dispatch-window budgets), different test each time, correlated with host load spikes (8-core box, loadavg 13–42, 10 users). A back-to-back control at pristine HEAD under the same conditions: 1204/1204, 1204/1204, 1204/1204, 1204/1204 (4/4 green). The flakes are pre-existing load sensitivity in the suite's tightest timing tests, not a regression from this change.
++
++Step 6: commit `feat(daemon): warm and daily-refresh the opencode variants cache on startup` (see Concerns for scope).
++
++## Verification (required): `npm run check`
++
++- `npm run check` (ambient env): FAILS with 6 failures — the same 6 at pristine HEAD (verified: stashed all changes, ran `npm run check`, identical failure set, diff of the failing-test lists empty except durations). All 6 are caused by this session's ambient environment (this session itself runs inside a taskferry dispatch): `XDG_DATA_HOME`/`XDG_CONFIG_HOME` pointing at `/home/jeremy/.cache/taskferry/opencode-data` breaks 5 sandbox tests (`leaves XDG_DATA_HOME untouched…`, `ro-binds the real opencode auth.json…`, `--rw-bind at the real auth.json…`, `opencode's real config entries are ro-bound…` + `startTask() merges executor.sandboxAuthFile()…`), `TASKFERRY_TASK_ID` set breaks `TASKFERRY_TASK_ID is absent from summary spawns`, and `TASKFERRY_SOCKET_PATH` pointing at the live shared daemon breaks `client.js's direct-execution guard … through a symlink` (the subprocess sees the real daemon socket as "already ready" and never hits the malformed-config path; confirmed by re-running `src/daemon-client.test.js` with those vars unset: 16/16 pass).
++- With the ambient vars unset, `npm run check`'s test stage passes fully (1205/1205, multiple runs). The static stages (node --check, eslint, tsc, skill:check) all pass in both configurations.
++- Final result as run in this environment: `npm run check` exits 1 solely on the 6 pre-existing ambient-environment failures; every stage that can pass in this environment does.
++
++## Concerns
++
++1. **Test-helper deviation (the one real departure from the brief's text).** The brief's Step 5 expected injected `spawnFn` to cover the warm's shell-out; it doesn't (executor's `listModelVariantsFn` uses module-level `execFileAsync`). Without the `opencodeListModelVariantsFn` fake default in `buildManagerOptions`, the full suite shells out ~120 real `opencode models --verbose` per run and fails 6–8 timing-sensitive tests per run. The fake is consistent with the helper's existing `spawnFn`/`killFn`/`listModelsFn` defaults and keeps the warm machinery (stat check, refresh path, `.unref()`'d interval) exercised in every manager.
++2. **Commit scope.** The brief's Step 6 says `git add src/tasks.js`; committing only that file would leave the tree failing (new test + helper default are part of the change). Following the Task 6 precedent (commit 6185536 includes src changes + task brief + task report), the commit includes `src/tasks.js`, `src/tasks.dispatch.test.js`, `src/tasks.test-helpers.js`, `task-7-brief.md`, and this report.
++3. **Pre-existing failures** (none caused by this change): the 6 ambient failures above — proven pre-existing by (a) failing identically in the step-2 run before `src/tasks.js` was touched, (b) failing identically at pristine HEAD under `npm run check`, and (c) passing with the ambient session vars unset.
++4. **Flaky timing tests under host load.** 5–30ms-budget watchdog/dispatch-window tests flake occasionally when the host load spikes (observed on both HEAD and this branch). Not caused by this change; no test hangs on exit — the `.unref()`'d hourly interval works as designed (no process in any run failed to terminate).
++5. **Observations during the pre-fix configuration** (before the helper default): the suite's real shell-outs left occasional orphaned `opencode` processes, and once created an `undefined/` data dir in the worktree root (a real opencode ran with `XDG_*=undefined`, the stringification of an `undefined` env value passed through a spawn in some env-mutating test path — non-reproducible since, traced to the pre-fix real-shell-out configuration, and the debris was removed). With the helper default, the only real shell-outs left are from daemons in the daemon tests (11 observed in an ambient run, with correct XDG env) — inherent to testing a real daemon.
++6. No test process hangs were observed in any run; exit codes always arrived promptly.
+diff --git a/src/tasks.dispatch.test.js b/src/tasks.dispatch.test.js
+index aaa80ff..caabf00 100644
+--- a/src/tasks.dispatch.test.js
++++ b/src/tasks.dispatch.test.js
+@@ -1,17 +1,17 @@
+ import { test, describe } from "node:test";
+ import assert from "node:assert/strict";
+ import fs from "node:fs";
+ import os from "node:os";
+ import path from "node:path";
+ import { createTaskManager } from "./tasks.js";
+-import { trackManager, makeManager, fakeChild, LUNA_MODEL, MIMIMAX_MODEL, MINIMAX_MODEL, SOL_MODEL, UNUSED_TMP, SPAWN_OPENCODE_ENOENT, mkdtempTracked } from "./tasks.test-helpers.js";
++import { trackManager, makeManager, fakeChild, LUNA_MODEL, MIMIMAX_MODEL, MINIMAX_MODEL, SOL_MODEL, UNUSED_TMP, SPAWN_OPENCODE_ENOENT, mkdtempTracked, AXI_TASKS_TEST_DIR, AXI_TASKS_CACHE_DIR, AXI_TASKS_OVERLAY_DIR } from "./tasks.test-helpers.js";
+ 
+ describe("dispatch() lifecycle, driven through an injected spawnFn (no real opencode process)", () => {
+   test("passes the right argv and spawn options through to spawnFn", () => {
+     let captured = null;
+     const mgr = makeManager({
+       spawnFn: (cmd, args, opts) => {
+         captured = { cmd, args, opts };
+         return fakeChild();
+       },
+     });
+@@ -1015,10 +1015,33 @@ describe("dispatch() omitted --variant resolution (defaultVariant: highest)", ()
+     assert.equal(captured[captured.indexOf("--variant") + 1], "low");
+   });
+ 
+   test("a configured defaultVariant of a concrete level is requested verbatim when --variant is omitted", () => {
+     let captured = null;
+     const mgr = makeManager({ spawnFn: (_cmd, args) => { captured = args; return fakeChild(); }, defaultVariant: "medium" });
+     mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), model: MIMIMAX_MODEL, executor: "pi" });
+     assert.equal(captured[captured.indexOf(THINKING_FLAG) + 1], "medium");
+   });
+ });
++
++describe("opencode variants cache warm-up", () => {
++  test("createTaskManager() triggers a refresh when the cache is stale, using the opencode executor's listModelVariantsFn", async () => {
++    let called = 0;
++    const stateDir = mkdtempTracked(AXI_TASKS_TEST_DIR);
++    const defaultCacheDir = mkdtempTracked(AXI_TASKS_CACHE_DIR);
++    trackManager(createTaskManager({
++      stateDir,
++      cacheDir: defaultCacheDir,
++      sandboxEnabled: false,
++      overlayEnabled: false,
++      overlayTmpRoot: mkdtempTracked(AXI_TASKS_OVERLAY_DIR),
++      lowerdirStaggerMs: 0,
++      spawnFn: () => fakeChild(),
++      killFn: () => {},
++      listModelsFn: async () => "",
++      opencodeListModelVariantsFn: async () => { called++; return new Map(); },
++    }));
++    await new Promise((resolve) => setImmediate(resolve));
++    await new Promise((resolve) => setImmediate(resolve));
++    assert.equal(called, 1);
++  });
++});
+diff --git a/src/tasks.js b/src/tasks.js
+index 28e41a4..a74b1ea 100644
+--- a/src/tasks.js
++++ b/src/tasks.js
+@@ -7,21 +7,21 @@ import { createTaskEvents } from "./events.js";
+ import { createActivityCache, readActivitySnapshot, readDeltaNarration, DEFAULT_SUMMARIZER_TIMEOUT_MS } from "./activity.js";
+ import { resolveStateDir, resolveCacheDir, resolveOverlayTmpRoot, TASKFERRY_PLUMBING_ENV_VARS } from "./paths.js";
+ import { RESULT_FIELDS } from "./protocol.js";
+ import { formatToolEventForNarration } from "./narration-format.js";
+ import { errCode } from "./errors.js";
+ import { isNonNegativeInteger, isPositiveInteger } from "./numbers.js";
+ import { buildBwrapArgs, checkBwrapAvailable, checkOverlaySupport, defaultDenyList, platformSupportsSandbox, resolveGitCommonDir, resolveGitDir } from "./sandbox.js";
+ import { applyChangeset, overlayPaths, resolvePreDispatchHead, subOverlayPaths, subFilePaths, cleanupOverlay, defaultRunCommand as defaultOverlayRunCommand, extractGitDiff, extractNonGitDiff, OVERLAY_MOUNT_BUSY_PATTERN } from "./changeset.js";
+ import { resolveExecutor, opencodeExecutor } from "./executor.js";
+ import { resolveVariant } from "./variants.js";
+-import { readVariantsCache } from "./variants-cache.js";
++import { readVariantsCache, refreshVariantsCache } from "./variants-cache.js";
+ import { loadEnvFile, watchEnvFile } from "./env-file.js";
+ import { loadProjectConfig, resolveReadOnlyProjectBinds, verificationPromptBlock } from "./project-config.js";
+ import { computeDoctorStats } from "./doctor-stats.js";
+ 
+ /**
+  * @typedef {object} SummaryOf
+  * @property {string} sourceTaskId
+  * @property {string} sourceStatus
+  * @property {string} capturedAt
+  * @property {number} sourceLogBytes
+@@ -3667,20 +3667,21 @@ function resolveCoreOptions(rawOptions) {
+     spawnFn: rawOptions.spawnFn ?? spawn,
+     killFn: rawOptions.killFn ?? /** @type {(pid: number, signal: NodeJS.Signals) => void} */ ((pid, signal) => process.kill(pid, signal)),
+     stateDir: rawOptions.stateDir ?? DEFAULT_STATE_DIR,
+     // Caller's defaultExecutor wins when defined; otherwise fall through
+     // to the env → config → resolveExecutor(undefined) chain. The chained
+     // `??` would unconditionally call `resolveExecutor` even on a caller
+     // override (e.g. a test-injected fake executor object), which would
+     // throw because `resolveExecutor` expects a name string.
+     defaultExecutor: rawOptions.defaultExecutor ?? resolveExecutor(process.env.TASKFERRY_DEFAULT_EXECUTOR || config.defaultExecutor),
+     listModelsFn: rawOptions.listModelsFn ?? opencodeExecutor().listModelsFn,
++    opencodeListModelVariantsFn: rawOptions.opencodeListModelVariantsFn ?? opencodeExecutor().listModelVariantsFn,
+     // Test-only direct injection of the resolved opencode variants table,
+     // bypassing readVariantsCache()/the cache file entirely. A real
+     // manager passes undefined here and resolves the table per-dispatch
+     // from disk instead (see dispatchTask's ctx.readOpencodeVariants).
+     opencodeVariantsTable: rawOptions.opencodeVariantsTable,
+     platform: rawOptions.platform ?? process.platform,
+     onEvent: rawOptions.onEvent,
+     config,
+   };
+ }
+@@ -4571,20 +4572,47 @@ function bootstrapManagerContext(ctx) {
+   // these on a real reboot for free; this only matters for a same-boot
+   // daemon restart.
+   ctx.helpers.sweepOrphanedOverlays();
+   // A daemon that died with a check gate mid-flight (checkStatus: "running")
+   // leaves that status stuck forever -- nothing will ever call
+   // startCheckGate()'s settle handlers again for that task. Reclassify as
+   // "interrupted" so accept() (Task 6) keeps refusing it without --force,
+   // then auto-re-run any gate whose overlay survived the crash (per the
+   // design's "the gate is re-runnable" promise).
+   ctx.helpers.markInterruptedGates();
++  // Opportunistically warm the opencode variants cache in the background.
++  // Never awaited: a stale or missing cache only means dispatch()'s
++  // resolveOpencodeVariants() sends no --variant flag until the refresh
++  // lands, never a blocked or failed dispatch. Skipped entirely when a
++  // test has injected opencodeVariantsTable directly (Task 6), since that
++  // seam bypasses the cache file altogether.
++  if (!ctx.opts.opencodeVariantsTable) {
++    warmAndScheduleVariantsCacheRefresh(ctx.opts);
++  }
++}
++
++/**
++ * Refreshes the opencode variants cache once now (if stale) and schedules
++ * an hourly, `unref()`'d recheck for as long as the process lives. The
++ * hourly tick is cheap when the cache is fresh (a single `statSync` inside
++ * `readVariantsCache()`); it only pays for the ~3s `opencode models
++ * --verbose` shell-out once every `DEFAULT_VARIANT_CACHE_TTL_MS` (24h).
++ * @param {ResolvedTaskManagerOptions} opts
++ */
++function warmAndScheduleVariantsCacheRefresh(opts) {
++  const maybeRefresh = () => {
++    if (readVariantsCache({ cacheDir: opts.cacheDir, env: process.env }) !== null) return;
++    refreshVariantsCache({ cacheDir: opts.cacheDir, env: process.env, listModelVariantsFn: opts.opencodeListModelVariantsFn })
++      .catch((err) => process.stderr.write(`warning: opencode variants cache refresh failed: ${errMessage(err)}\n`));
++  };
++  maybeRefresh();
++  setInterval(maybeRefresh, 60 * 60 * 1000).unref();
+ }
+ 
+ /**
+  * @param {ResolvedTaskManagerOptions} opts
+  * @returns {ManagerContext}
+  */
+ function createManagerContext(opts) {
+   const paths = initManagerPaths(opts);
+   ensureManagerDirectories(paths);
+   const limits = initManagerLimits(opts);
+diff --git a/src/tasks.test-helpers.js b/src/tasks.test-helpers.js
+index 6bc2058..eddd1d8 100644
+--- a/src/tasks.test-helpers.js
++++ b/src/tasks.test-helpers.js
+@@ -171,20 +171,27 @@ export function baseTask(overrides = {}) {
+ // error message that some tests match on.
+ function defaultSpawnFn() {
+   return () => { throw new Error("spawnFn was not injected for this test"); };
+ }
+ function defaultKillFn() {
+   return () => { throw new Error("killFn was not injected for this test"); };
+ }
+ function defaultListModelsFn() {
+   return () => `${DEFAULT_SUMMARY_MODEL}\n`;
+ }
++function defaultOpenCodeListModelVariantsFn() {
++  // Mirrors defaultSpawnFn/defaultListModelsFn above: the opencode variants
++  // warm-up shell-out (`opencode models --verbose`) is real subprocess work
++  // that must be injected per-test, not fired for real from every
++  // makeManager() construction in the suite.
++  return async () => new Map();
++}
+ 
+ function makeTempDirs() {
+   // Sandboxing always mkdir's the resolved sandboxedDataHome (real disk, not
+   // tmpfs -- see resolveCacheDir), so give every test an isolated temp
+   // cacheDir by default instead of falling through to the real ~/.cache.
+   // createTaskManager() runs sweepOrphanedOverlays() synchronously at
+   // construction, scanning overlayTmpRoot for real "taskferry-cow-*" dirs --
+   // its default is the real os.tmpdir(). Without an isolated default here,
+   // any test that doesn't explicitly pass its own overlayTmpRoot ends up
+   // scanning (and acting on) whatever a real, concurrently-running daemon
+@@ -250,20 +257,21 @@ function buildManagerOptions(options, stateDir, defaultCacheDir, defaultOverlayT
+     // own DEFAULT_LOWERDIR_STAGGER_MS (3000ms) would otherwise silently
+     // serialize every dispatch test that assumes synchronous, immediate,
+     // concurrent launches. Tests exercising the stagger itself override
+     // this explicitly via options.lowerdirStaggerMs.
+     lowerdirStaggerMs: options.lowerdirStaggerMs ?? 0,
+     cacheDir: options.cacheDir ?? defaultCacheDir,
+     overlayTmpRoot: options.overlayTmpRoot ?? defaultOverlayTmpRoot,
+     spawnFn: options.spawnFn ?? defaultSpawnFn(),
+     killFn: options.killFn ?? defaultKillFn(),
+     listModelsFn: options.listModelsFn ?? defaultListModelsFn(),
++    opencodeListModelVariantsFn: options.opencodeListModelVariantsFn ?? defaultOpenCodeListModelVariantsFn(),
+     ...passthroughIfSet({ defaultExecutor: options.defaultExecutor }, "defaultExecutor", "defaultExecutor"),
+     ...passthroughIfSet({ defaultVariant: options.defaultVariant }, "defaultVariant", "defaultVariant"),
+     ...passthroughIfSet({ opencodeVariantsTable: options.opencodeVariantsTable }, "opencodeVariantsTable", "opencodeVariantsTable"),
+     ...passthroughIfSet({ config: options.config }, "config", "config"),
+     ...passthroughIfSet({ checkBwrapAvailableFn: options.checkBwrapAvailableFn }, "checkBwrapAvailableFn", "checkBwrapAvailableFn"),
+     ...passthroughIfSet({ existsFn: options.existsFn }, "existsFn", "existsFn"),
+     ...passthroughIfSet({ statFn: options.statFn }, "statFn", "statFn"),
+     ...passthroughIfSet({ readdirFn: options.readdirFn }, "readdirFn", "readdirFn"),
+     ...passthroughIfSet({ runtimeDir: options.runtimeDir }, "runtimeDir", "runtimeDir"),
+     ...passthroughIfSet({ platform: options.platform }, "platform", "platform"),

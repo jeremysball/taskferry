@@ -116,8 +116,11 @@ below. `init` never overwrites an existing `.taskferry.toml`.
 
 ## Worker Contract
 
-- Select the worker model and variant explicitly when the task needs them:
-  `taskferry dispatch --prompt - --directory "<worktree>" --model
+- Select the worker model explicitly — `--model <provider/model>` is required
+  for a fresh dispatch (only a `--session-id` resume may inherit the prior
+  task's model). Omit `--variant` to get that model's hardest thinking
+  level; pass a concrete variant only when the task wants a lower effort
+  level: `taskferry dispatch --prompt - --directory "<worktree>" --model
   <provider/model> --variant <name> <<'PROMPT_EOF'` ... `PROMPT_EOF`.
 - State the exact `provider/model` slug (and variant, if set) being
   dispatched in your response to the user, not just in the shell command — the
@@ -275,8 +278,10 @@ reviewed was mechanical. Escalate tier when the task is architecturally
 risky, security-sensitive, or has already failed on a lighter model.
 
 - **Always specify the model explicitly when dispatching through
-  `taskferry`.** An omitted `--model` falls back to taskferry's own default,
-  which may not match the tier the task actually needs.
+  `taskferry`.** `--model` is required on a fresh dispatch (inherited from
+  the prior task on a `--session-id` resume), so an omitted flag never
+  silently picks a default that may not match the tier the task actually
+  needs.
 - **Task reviewers need a standard-tier floor, always** — reviewing a diff
   requires judgment even when the diff itself was cheap-tier transcription
   work. Dispatching the cheapest available model as a task reviewer because

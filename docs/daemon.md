@@ -443,3 +443,17 @@ profiling is diagnostic, not on the request's critical path.
   lock. Real contention is always cross-process (a separate `taskferry`
   invocation, each with its own event loop), where this doesn't arise —
   see the note in `state-lock.test.js`.
+- A pi dispatch's task record shows `variant: "max"` but the actual provider
+  ran at, say, `high`. Expected: pi's own `clampThinkingLevel()` clamps a
+  requested level to the model's real ceiling at runtime, including on
+  extension providers (`ollama/*`, custom pi providers) taskferry cannot see
+  the registry for. taskferry records what was requested, not what pi
+  clamped it to, because it has no way to observe the clamp.
+- A model dispatches with no `--variant` flag even though `defaultVariant`
+  is `highest`, until up to 24h after that model first became available
+  through opencode. Expected: the opencode variants cache
+  (`<cacheDir>/opencode-variants.json`) refreshes once at daemon startup and
+  once every 24h afterward, never synchronously on the dispatch path (a
+  fresh `opencode models --verbose` shell-out costs ~3-4s, which would
+  otherwise block the daemon's single thread on every affected dispatch).
+  A model absent from the cache resolves to no variant flag, not an error.

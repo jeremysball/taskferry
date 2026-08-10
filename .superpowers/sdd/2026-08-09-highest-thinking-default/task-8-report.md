@@ -94,3 +94,54 @@ model's highest supported thinking level via `defaultVariant` (default
   (from an unset env var in a test path). I verified the stash diff
   exactly matched the restored worktree, dropped the stash, and removed
   the junk dir. Final `git status` contains only the intended files.
+
+## Fix round 1 (review findings: stale example output)
+
+Reviewer found two Important issues: the `README.md` intro example's
+illustrative output still showed the old pi default
+(`model: minimax/MiniMax-M2.7`) under a command that now passes
+`--model opencode-go/minimax-m3`, and the `docs/cli-reference.md`
+dispatch example block still showed `--executor opencode` with output
+`model: openai/gpt-5.6-luna` — a command that now fails with
+`error: --model is required`, and the old opencode default my Task 8
+edit had explicitly documented as gone.
+
+**Before** (`rg -n "minimax-m3|gpt-5.6-luna" README.md docs/cli-reference.md`):
+
+```
+docs/cli-reference.md:57: (dispatch --model row, contains minimax-m3 example slug)
+docs/cli-reference.md:74:model: openai/gpt-5.6-luna
+README.md:16:$ taskferry dispatch --prompt "Fix the failing tests" --directory /workspace/my-repo --model opencode-go/minimax-m3
+README.md:104:taskferry dispatch --prompt "Fix the failing tests" --directory /workspace/my-repo --model opencode-go/minimax-m3
+```
+
+**Fixes:**
+
+- `README.md:20` — `model: minimax/MiniMax-M2.7` → `model: opencode-go/minimax-m3` (matches the command above it; `task.model` is the resolved requested slug verbatim).
+- `docs/cli-reference.md:70,74` — added `--model opencode-go/minimax-m3` to the example command and changed the output's `model:` line from `openai/gpt-5.6-luna` to `opencode-go/minimax-m3`. The second README block (line 104) is a bare command block with no shown output — left alone per the round instructions.
+
+**After** (`rg -n "minimax-m3|gpt-5.6-luna" README.md docs/cli-reference.md`):
+
+```
+README.md:16:$ taskferry dispatch --prompt "Fix the failing tests" --directory /workspace/my-repo --model opencode-go/minimax-m3
+README.md:20:model: opencode-go/minimax-m3
+README.md:104:taskferry dispatch --prompt "Fix the failing tests" --directory /workspace/my-repo --model opencode-go/minimax-m3
+docs/cli-reference.md:57:| `--model <id>` | ... e.g. `opencode-go/minimax-m3`. ... |
+docs/cli-reference.md:70:$ taskferry dispatch --prompt "Fix the failing tests" --directory /workspace/my-repo --executor opencode --model opencode-go/minimax-m3
+docs/cli-reference.md:74:model: opencode-go/minimax-m3
+```
+
+No `gpt-5.6-luna` or `MiniMax-M2.7` references remain anywhere in
+`README.md` or `docs/cli-reference.md`; every dispatch example block's
+command and shown output now agree.
+
+**Verification:** `env -u TASKFERRY_SOCKET_PATH -u TASKFERRY_STATE_DIR -u
+TASKFERRY_RUNTIME_DIR -u TASKFERRY_TASK_ID -u TASKFERRY_CHILD -u
+TASKFERRY_CACHE_DIR -u XDG_DATA_HOME -u XDG_CONFIG_HOME npm run check`
+(same scrubbed env as the original round — this session's exported
+`TASKFERRY_*`/`XDG_*` vars otherwise leak into the suite): **exit 0,
+1205/1205 tests pass, 0 fail.**
+
+**Scope:** the two deferred items from the review
+(`src/command-specs.js`'s example array, `docs/security.md:138`) were
+not touched, per the round instructions.

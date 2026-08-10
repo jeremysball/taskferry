@@ -17,7 +17,7 @@ $ taskferry dispatch --prompt "Fix the failing tests" --directory /workspace/my-
 id: oc_mrn4ipkp_19450105
 status: running
 directory: /workspace/my-repo
-model: minimax/MiniMax-M2.7
+model: opencode-go/minimax-m3
 next: Run taskferry wait or taskferry status with task id "oc_mrn4ipkp_19450105" to check progress
 
 $ taskferry wait oc_mrn4ipkp_19450105

@@ -14,7 +14,7 @@ import { buildBwrapArgs, checkBwrapAvailable, checkOverlaySupport, defaultDenyLi
 import { applyChangeset, overlayPaths, resolvePreDispatchHead, subOverlayPaths, subFilePaths, cleanupOverlay, defaultRunCommand as defaultOverlayRunCommand, extractGitDiff, extractNonGitDiff, OVERLAY_MOUNT_BUSY_PATTERN } from "./changeset.js";
 import { resolveExecutor, opencodeExecutor } from "./executor.js";
 import { resolveVariant } from "./variants.js";
-import { readVariantsCache } from "./variants-cache.js";
+import { readVariantsCache, refreshVariantsCache } from "./variants-cache.js";
 import { loadEnvFile, watchEnvFile } from "./env-file.js";
 import { loadProjectConfig, resolveReadOnlyProjectBinds, verificationPromptBlock } from "./project-config.js";
 import { computeDoctorStats } from "./doctor-stats.js";
@@ -3674,6 +3674,7 @@ function resolveCoreOptions(rawOptions) {
     // throw because `resolveExecutor` expects a name string.
     defaultExecutor: rawOptions.defaultExecutor ?? resolveExecutor(process.env.TASKFERRY_DEFAULT_EXECUTOR || config.defaultExecutor),
     listModelsFn: rawOptions.listModelsFn ?? opencodeExecutor().listModelsFn,
+    opencodeListModelVariantsFn: rawOptions.opencodeListModelVariantsFn ?? opencodeExecutor().listModelVariantsFn,
     // Test-only direct injection of the resolved opencode variants table,
     // bypassing readVariantsCache()/the cache file entirely. A real
     // manager passes undefined here and resolves the table per-dispatch
@@ -4578,6 +4579,33 @@ function bootstrapManagerContext(ctx) {
   // then auto-re-run any gate whose overlay survived the crash (per the
   // design's "the gate is re-runnable" promise).
   ctx.helpers.markInterruptedGates();
+  // Opportunistically warm the opencode variants cache in the background.
+  // Never awaited: a stale or missing cache only means dispatch()'s
+  // resolveOpencodeVariants() sends no --variant flag until the refresh
+  // lands, never a blocked or failed dispatch. Skipped entirely when a
+  // test has injected opencodeVariantsTable directly (Task 6), since that
+  // seam bypasses the cache file altogether.
+  if (!ctx.opts.opencodeVariantsTable) {
+    warmAndScheduleVariantsCacheRefresh(ctx.opts);
+  }
+}
+
+/**
+ * Refreshes the opencode variants cache once now (if stale) and schedules
+ * an hourly, `unref()`'d recheck for as long as the process lives. The
+ * hourly tick is cheap when the cache is fresh (a single `statSync` inside
+ * `readVariantsCache()`); it only pays for the ~3s `opencode models
+ * --verbose` shell-out once every `DEFAULT_VARIANT_CACHE_TTL_MS` (24h).
+ * @param {ResolvedTaskManagerOptions} opts
+ */
+function warmAndScheduleVariantsCacheRefresh(opts) {
+  const maybeRefresh = () => {
+    if (readVariantsCache({ cacheDir: opts.cacheDir, env: process.env }) !== null) return;
+    refreshVariantsCache({ cacheDir: opts.cacheDir, env: process.env, listModelVariantsFn: opts.opencodeListModelVariantsFn })
+      .catch((err) => process.stderr.write(`warning: opencode variants cache refresh failed: ${errMessage(err)}\n`));
+  };
+  maybeRefresh();
+  setInterval(maybeRefresh, 60 * 60 * 1000).unref();
 }
 
 /**

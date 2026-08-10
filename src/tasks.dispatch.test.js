@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { createTaskManager } from "./tasks.js";
-import { trackManager, makeManager, fakeChild, LUNA_MODEL, MIMIMAX_MODEL, MINIMAX_MODEL, SOL_MODEL, UNUSED_TMP, SPAWN_OPENCODE_ENOENT, mkdtempTracked } from "./tasks.test-helpers.js";
+import { trackManager, makeManager, fakeChild, LUNA_MODEL, MIMIMAX_MODEL, MINIMAX_MODEL, SOL_MODEL, UNUSED_TMP, SPAWN_OPENCODE_ENOENT, mkdtempTracked, AXI_TASKS_TEST_DIR, AXI_TASKS_CACHE_DIR, AXI_TASKS_OVERLAY_DIR } from "./tasks.test-helpers.js";
 
 describe("dispatch() lifecycle, driven through an injected spawnFn (no real opencode process)", () => {
   test("passes the right argv and spawn options through to spawnFn", () => {
@@ -1020,5 +1020,28 @@ describe("dispatch() omitted --variant resolution (defaultVariant: highest)", ()
     const mgr = makeManager({ spawnFn: (_cmd, args) => { captured = args; return fakeChild(); }, defaultVariant: "medium" });
     mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), model: MIMIMAX_MODEL, executor: "pi" });
     assert.equal(captured[captured.indexOf(THINKING_FLAG) + 1], "medium");
+  });
+});
+
+describe("opencode variants cache warm-up", () => {
+  test("createTaskManager() triggers a refresh when the cache is stale, using the opencode executor's listModelVariantsFn", async () => {
+    let called = 0;
+    const stateDir = mkdtempTracked(AXI_TASKS_TEST_DIR);
+    const defaultCacheDir = mkdtempTracked(AXI_TASKS_CACHE_DIR);
+    trackManager(createTaskManager({
+      stateDir,
+      cacheDir: defaultCacheDir,
+      sandboxEnabled: false,
+      overlayEnabled: false,
+      overlayTmpRoot: mkdtempTracked(AXI_TASKS_OVERLAY_DIR),
+      lowerdirStaggerMs: 0,
+      spawnFn: () => fakeChild(),
+      killFn: () => {},
+      listModelsFn: async () => "",
+      opencodeListModelVariantsFn: async () => { called++; return new Map(); },
+    }));
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(called, 1);
   });
 });

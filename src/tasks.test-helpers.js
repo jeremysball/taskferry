@@ -178,6 +178,13 @@ function defaultKillFn() {
 function defaultListModelsFn() {
   return () => `${DEFAULT_SUMMARY_MODEL}\n`;
 }
+function defaultOpenCodeListModelVariantsFn() {
+  // Mirrors defaultSpawnFn/defaultListModelsFn above: the opencode variants
+  // warm-up shell-out (`opencode models --verbose`) is real subprocess work
+  // that must be injected per-test, not fired for real from every
+  // makeManager() construction in the suite.
+  return async () => new Map();
+}
 
 function makeTempDirs() {
   // Sandboxing always mkdir's the resolved sandboxedDataHome (real disk, not
@@ -257,6 +264,7 @@ function buildManagerOptions(options, stateDir, defaultCacheDir, defaultOverlayT
     spawnFn: options.spawnFn ?? defaultSpawnFn(),
     killFn: options.killFn ?? defaultKillFn(),
     listModelsFn: options.listModelsFn ?? defaultListModelsFn(),
+    opencodeListModelVariantsFn: options.opencodeListModelVariantsFn ?? defaultOpenCodeListModelVariantsFn(),
     ...passthroughIfSet({ defaultExecutor: options.defaultExecutor }, "defaultExecutor", "defaultExecutor"),
     ...passthroughIfSet({ defaultVariant: options.defaultVariant }, "defaultVariant", "defaultVariant"),
     ...passthroughIfSet({ opencodeVariantsTable: options.opencodeVariantsTable }, "opencodeVariantsTable", "opencodeVariantsTable"),

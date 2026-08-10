@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { createTaskManager } from "./tasks.js";
-import { trackManager, makeManager, fakeChild, LUNA_MODEL, MIMIMAX_MODEL, SOL_MODEL, UNUSED_TMP, SPAWN_OPENCODE_ENOENT, mkdtempTracked } from "./tasks.test-helpers.js";
+import { trackManager, makeManager, fakeChild, LUNA_MODEL, MIMIMAX_MODEL, MINIMAX_MODEL, SOL_MODEL, UNUSED_TMP, SPAWN_OPENCODE_ENOENT, mkdtempTracked } from "./tasks.test-helpers.js";
 
 describe("dispatch() lifecycle, driven through an injected spawnFn (no real opencode process)", () => {
   test("passes the right argv and spawn options through to spawnFn", () => {
@@ -19,17 +19,18 @@ describe("dispatch() lifecycle, driven through an injected spawnFn (no real open
     assert.equal(captured.cmd, "opencode");
     assert.deepEqual(captured.args, [
       "run", "--dir", os.tmpdir(), "--auto", "--format", "json",
-      "-m", MIMIMAX_MODEL, "--variant", "max", "--", "hello",
+      "-m", MIMIMAX_MODEL, "--", "hello",
     ]);
     assert.equal(captured.opts.cwd, os.tmpdir());
     assert.equal(captured.opts.detached, true);
   });
 
-  test("defaults to openai/gpt-5.6-luna --variant high when no model is given", () => {
-    let captured = null;
-    const mgr = makeManager({ spawnFn: (_cmd, args) => { captured = args; return fakeChild(); } });
-    mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), executor: "opencode" });
-    assert.deepEqual(captured.slice(6, 10), ["-m", LUNA_MODEL, "--variant", "high"]);
+  test("dispatch without --model and without a resolvable --session-id throws", () => {
+    const mgr = makeManager({ spawnFn: () => fakeChild(), autoModel: false });
+    assert.throws(
+      () => mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), executor: "opencode" }),
+      /error: --model is required\nhelp: name the model/
+    );
   });
 
   /** @param {string[]} args @param {string} model */
@@ -53,17 +54,18 @@ describe("dispatch() lifecycle, driven through an injected spawnFn (no real open
     assertDispatchedModel(captured, "opencode/other-model");
   });
 
-  test("an unrecognized --session-id with no --model still falls back to the hardcoded default", () => {
-    let captured = null;
-    const mgr = makeManager({ spawnFn: (_cmd, args) => { captured = args; return fakeChild(); } });
-    mgr.dispatch({ prompt: "resume", directory: os.tmpdir(), sessionId: "ses_never_seen", executor: "opencode" });
-    assertDispatchedModel(captured, LUNA_MODEL);
+  test("an unrecognized --session-id with no --model throws, naming the session id", () => {
+    const mgr = makeManager({ spawnFn: () => fakeChild() });
+    assert.throws(
+      () => mgr.dispatch({ prompt: "resume", directory: os.tmpdir(), sessionId: "ses_never_seen", executor: "opencode" }),
+      /error: no task found for session id "ses_never_seen" to inherit a model from\nhelp:/
+    );
   });
 
   test("resuming with --session-id and no --executor inherits the executor of the task that owned that session", () => {
     let capturedCmd = null;
     const mgr = makeManager({ spawnFn: (cmd) => { capturedCmd = cmd; return fakeChild(); } });
-    mgr.dispatch({ prompt: "first", directory: os.tmpdir(), sessionId: "ses_exec", executor: "pi" });
+    mgr.dispatch({ prompt: "first", directory: os.tmpdir(), model: MINIMAX_MODEL, sessionId: "ses_exec", executor: "pi" });
     mgr.dispatch({ prompt: "resume", directory: os.tmpdir(), sessionId: "ses_exec" });
     assert.equal(capturedCmd, "pi");
   });
@@ -71,8 +73,8 @@ describe("dispatch() lifecycle, driven through an injected spawnFn (no real open
   test("resuming with --session-id and an explicit --executor still uses the explicit executor", () => {
     let capturedCmd = null;
     const mgr = makeManager({ spawnFn: (cmd) => { capturedCmd = cmd; return fakeChild(); } });
-    mgr.dispatch({ prompt: "first", directory: os.tmpdir(), sessionId: "ses_exec2", executor: "pi" });
-    mgr.dispatch({ prompt: "resume", directory: os.tmpdir(), sessionId: "ses_exec2", executor: "opencode" });
+    mgr.dispatch({ prompt: "first", directory: os.tmpdir(), model: MINIMAX_MODEL, sessionId: "ses_exec2", executor: "pi" });
+    mgr.dispatch({ prompt: "resume", directory: os.tmpdir(), model: MINIMAX_MODEL, sessionId: "ses_exec2", executor: "opencode" });
     assert.equal(capturedCmd, "opencode");
   });
 
@@ -86,7 +88,6 @@ describe("dispatch() lifecycle, driven through an injected spawnFn (no real open
       id: "pi",
       taskIdPrefix: "pi",
       errorBucketPrefix: "pi",
-      defaultModel: "fake-pi/marker-model",
       defaultSummaryModel: "fake-pi/marker-model",
       binaryName: "pi",
       listModelsFn: async () => "",
@@ -96,7 +97,7 @@ describe("dispatch() lifecycle, driven through an injected spawnFn (no real open
       sandboxAuthFile: () => ({ extraRoBinds: [], extraRwPairBinds: [], sandboxedDataHome: UNUSED_TMP, sandboxEnv: {} }),
     };
     const mgr = makeManager({ spawnFn: (_cmd, args) => { captured = args; return fakeChild(); }, defaultExecutor: fakePi });
-    mgr.dispatch({ prompt: "first", directory: os.tmpdir(), sessionId: "ses_reuse", executor: "pi" });
+    mgr.dispatch({ prompt: "first", directory: os.tmpdir(), model: MINIMAX_MODEL, sessionId: "ses_reuse", executor: "pi" });
     mgr.dispatch({ prompt: "resume", directory: os.tmpdir(), sessionId: "ses_reuse" });
     assert.deepEqual(captured, ["--fake-pi-marker"]);
   });
@@ -104,7 +105,7 @@ describe("dispatch() lifecycle, driven through an injected spawnFn (no real open
   test("an unrecognized --session-id with no --executor still falls back to the manager's default executor", () => {
     let capturedCmd = null;
     const mgr = makeManager({ spawnFn: (cmd) => { capturedCmd = cmd; return fakeChild(); } });
-    mgr.dispatch({ prompt: "resume", directory: os.tmpdir(), sessionId: "ses_exec_never_seen" });
+    mgr.dispatch({ prompt: "resume", directory: os.tmpdir(), model: MINIMAX_MODEL, sessionId: "ses_exec_never_seen" });
     assert.equal(capturedCmd, "pi");
   });
 
@@ -115,7 +116,7 @@ describe("dispatch() lifecycle, driven through an injected spawnFn (no real open
     // different executor -- resolving executor: "pi" here must not inherit
     // the opencode task's model just because the sessionId string matches.
     mgr.dispatch({ prompt: "first", directory: os.tmpdir(), model: MIMIMAX_MODEL, sessionId: "ses_collide", executor: "opencode" });
-    mgr.dispatch({ prompt: "resume", directory: os.tmpdir(), sessionId: "ses_collide", executor: "pi" });
+    mgr.dispatch({ prompt: "resume", directory: os.tmpdir(), model: MINIMAX_MODEL, sessionId: "ses_collide", executor: "pi" });
     // pi's buildSpawnArgs splits a slashed model into --provider/--model,
     // unlike opencode's single -m flag -- assert pi's own default model
     // (minimax/MiniMax-M2.7), not the opencode task's MIMIMAX_MODEL.

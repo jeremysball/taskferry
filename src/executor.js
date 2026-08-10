@@ -127,7 +127,6 @@ function resolvePiSessionFile(realSessionsDir, sessionId, { readdirFn = (/** @ty
  * @property {"opencode"|"pi"} id
  * @property {string} taskIdPrefix
  * @property {string} errorBucketPrefix
- * @property {string} defaultModel
  * @property {string} defaultSummaryModel
  * @property {string} binaryName
  * @property {(env: NodeJS.ProcessEnv) => Promise<string>} listModelsFn
@@ -262,7 +261,6 @@ export function piExecutor({ execFileFn = execFileAsync } = {}) {
     id: "pi",
     taskIdPrefix: "pi",
     errorBucketPrefix: "pi",
-    defaultModel: "minimax/MiniMax-M2.7",
     defaultSummaryModel: "minimax/MiniMax-M2.7",
     binaryName: "pi",
     /** @type {(env: NodeJS.ProcessEnv) => Promise<string>} */
@@ -368,7 +366,6 @@ export function opencodeExecutor() {
     id: "opencode",
     taskIdPrefix: "oc",
     errorBucketPrefix: "opencode",
-    defaultModel: "openai/gpt-5.6-luna",
     defaultSummaryModel: "opencode/mimo-v2.5-free",
     binaryName: "opencode",
     listModelsFn: async (env) =>

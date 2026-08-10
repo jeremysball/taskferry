@@ -28,7 +28,6 @@ describe("piExecutor()", () => {
     assert.equal(ex.id, "pi");
     assert.equal(ex.taskIdPrefix, "pi");
     assert.equal(ex.errorBucketPrefix, "pi");
-    assert.equal(ex.defaultModel, PI_MODEL);
   });
 
   test("buildSpawnArgs splits provider/model and supports session", () => {

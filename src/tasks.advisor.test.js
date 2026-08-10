@@ -43,7 +43,7 @@ describe("advisor(): validation, completion, and timeouts", () => {
     assert.deepEqual(captured.slice(captured.indexOf("--") + 1), [
       "opencode",
       "run", "--dir", os.tmpdir(), "--auto", "--format", "json",
-      "-m", SOL_MODEL, "--variant", "max", "--", SHARD_QUESTION,
+      "-m", SOL_MODEL, "--", SHARD_QUESTION,
     ]);
 
     // Simulate opencode writing its result log, then exiting.

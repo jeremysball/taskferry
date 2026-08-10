@@ -4,6 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { createTaskManager } from "./tasks.js";
+import { hashFingerprint, VARIANTS_CACHE_SCHEMA } from "./variants-cache.js";
 import { trackManager, makeManager, fakeChild, LUNA_MODEL, MIMIMAX_MODEL, MINIMAX_MODEL, SOL_MODEL, UNUSED_TMP, SPAWN_OPENCODE_ENOENT, mkdtempTracked, AXI_TASKS_TEST_DIR, AXI_TASKS_CACHE_DIR, AXI_TASKS_OVERLAY_DIR } from "./tasks.test-helpers.js";
 
 describe("dispatch() lifecycle, driven through an injected spawnFn (no real opencode process)", () => {
@@ -1020,6 +1021,116 @@ describe("dispatch() omitted --variant resolution (defaultVariant: highest)", ()
     const mgr = makeManager({ spawnFn: (_cmd, args) => { captured = args; return fakeChild(); }, defaultVariant: "medium" });
     mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), model: MIMIMAX_MODEL, executor: "pi" });
     assert.equal(captured[captured.indexOf(THINKING_FLAG) + 1], "medium");
+  });
+});
+
+describe("defaultVariant validation applies to TASKFERRY_DEFAULT_VARIANT and rawOptions too, not just config.json", () => {
+  // Regression: config.json's defaultVariant field is validated during
+  // loadConfig()'s parseAndValidateConfig(), but createTaskManager()'s own
+  // rawOptions.defaultVariant/TASKFERRY_DEFAULT_VARIANT resolution used to
+  // skip that check entirely, so an invalid value there would silently
+  // reach resolveVariant() and resolve to "send no flag" instead of failing
+  // loudly at construction time.
+  test("an invalid TASKFERRY_DEFAULT_VARIANT env var throws at manager construction", () => {
+    const stateDir = mkdtempTracked(AXI_TASKS_TEST_DIR);
+    const prior = process.env.TASKFERRY_DEFAULT_VARIANT;
+    process.env.TASKFERRY_DEFAULT_VARIANT = "medium-plus";
+    try {
+      assert.throws(() => createTaskManager({
+        stateDir,
+        cacheDir: mkdtempTracked(AXI_TASKS_CACHE_DIR),
+        sandboxEnabled: false,
+        overlayEnabled: false,
+        overlayTmpRoot: mkdtempTracked(AXI_TASKS_OVERLAY_DIR),
+        lowerdirStaggerMs: 0,
+        spawnFn: () => fakeChild(),
+        killFn: () => {},
+      }), /error: defaultVariant must be one of highest, off, minimal, low, medium, high, xhigh, max \(got "medium-plus"\)/);
+    } finally {
+      if (prior === undefined) delete process.env.TASKFERRY_DEFAULT_VARIANT;
+      else process.env.TASKFERRY_DEFAULT_VARIANT = prior;
+    }
+  });
+
+  test("an invalid rawOptions.defaultVariant (a programmatic caller) throws too", () => {
+    const stateDir = mkdtempTracked(AXI_TASKS_TEST_DIR);
+    assert.throws(() => createTaskManager({
+      stateDir,
+      cacheDir: mkdtempTracked(AXI_TASKS_CACHE_DIR),
+      sandboxEnabled: false,
+      overlayEnabled: false,
+      overlayTmpRoot: mkdtempTracked(AXI_TASKS_OVERLAY_DIR),
+      lowerdirStaggerMs: 0,
+      spawnFn: () => fakeChild(),
+      killFn: () => {},
+      defaultVariant: "bogus-level",
+    }), /error: defaultVariant must be one of highest, off, minimal, low, medium, high, xhigh, max \(got "bogus-level"\)/);
+  });
+});
+
+describe("opencode variants cache lookup uses the per-dispatch caller env, not the daemon's own process.env", () => {
+  // Regression: resolveOpencodeVariants() used to read process.env directly,
+  // so a caller-forwarded env override (a different credential/base URL for
+  // this one dispatch) had no effect on which cached model catalog was
+  // consulted -- the daemon's own env always won. FAKE_TF_TEST_API_KEY is
+  // a made-up name unlikely to already be set on any real host's env.
+  const FAKE_KEY_NAME = "FAKE_TF_TEST_API_KEY";
+
+  // The daemon's effective env for a dispatch is process.env layered with
+  // the caller's per-dispatch override (buildSanitizedEnvironment()'s merge
+  // in tasks.js), not the override object alone -- fingerprint the fixture
+  // the same way, or a real *_API_KEY already present in this test runner's
+  // own process.env would make the fixture's fingerprint never match.
+  function writeRealVariantsCache(cacheDir, dispatchEnv, models) {
+    fs.mkdirSync(cacheDir, { recursive: true });
+    fs.writeFileSync(path.join(cacheDir, "opencode-variants.json"), JSON.stringify({
+      schema: VARIANTS_CACHE_SCHEMA,
+      generatedAt: new Date().toISOString(),
+      fingerprint: hashFingerprint({ ...process.env, ...dispatchEnv }),
+      models: Object.fromEntries(models),
+    }));
+  }
+
+  test("a dispatch-scoped env override that matches the cache's fingerprint resolves the variant", () => {
+    const stateDir = mkdtempTracked(AXI_TASKS_TEST_DIR);
+    const defaultCacheDir = mkdtempTracked(AXI_TASKS_CACHE_DIR);
+    const dispatchEnv = { [FAKE_KEY_NAME]: "dispatch-scoped-value" };
+    writeRealVariantsCache(defaultCacheDir, dispatchEnv, new Map([[LUNA_MODEL, ["low", "high", "max"]]]));
+    let captured = null;
+    const mgr = trackManager(createTaskManager({
+      stateDir,
+      cacheDir: defaultCacheDir,
+      sandboxEnabled: false,
+      overlayEnabled: false,
+      overlayTmpRoot: mkdtempTracked(AXI_TASKS_OVERLAY_DIR),
+      lowerdirStaggerMs: 0,
+      spawnFn: (_cmd, args) => { captured = args; return fakeChild(); },
+      killFn: () => {},
+    }));
+    mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), model: LUNA_MODEL, executor: "opencode", env: dispatchEnv });
+    assert.equal(captured[captured.indexOf("--variant") + 1], "max");
+  });
+
+  test("without the matching env override, the cache misses and no --variant flag is sent (proves process.env alone isn't consulted)", () => {
+    const stateDir = mkdtempTracked(AXI_TASKS_TEST_DIR);
+    const defaultCacheDir = mkdtempTracked(AXI_TASKS_CACHE_DIR);
+    const dispatchEnv = { [FAKE_KEY_NAME]: "dispatch-scoped-value" };
+    writeRealVariantsCache(defaultCacheDir, dispatchEnv, new Map([[LUNA_MODEL, ["low", "high", "max"]]]));
+    let captured = null;
+    const mgr = trackManager(createTaskManager({
+      stateDir,
+      cacheDir: defaultCacheDir,
+      sandboxEnabled: false,
+      overlayEnabled: false,
+      overlayTmpRoot: mkdtempTracked(AXI_TASKS_OVERLAY_DIR),
+      lowerdirStaggerMs: 0,
+      spawnFn: (_cmd, args) => { captured = args; return fakeChild(); },
+      killFn: () => {},
+    }));
+    // No `env` override on this dispatch -- the real daemon process.env
+    // never has FAKE_TF_TEST_API_KEY set, so the fingerprint can't match.
+    mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), model: LUNA_MODEL, executor: "opencode" });
+    assert.equal(captured.includes("--variant"), false);
   });
 });
 

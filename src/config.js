@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { KNOWN_EXECUTORS } from "./executor.js";
 import { isObject, isPositiveInteger } from "./numbers.js";
+import { KNOWN_VARIANT_LEVELS } from "./variants.js";
 
 // Per-path cache so repeated loadConfig() calls in the same process only
 // stat the file (cheap) instead of re-reading, re-parsing, and re-validating
@@ -52,8 +53,6 @@ const CONFIG_FIELD_TYPES = {
   profilingEnabled: "boolean",
   providerLimits: "object",
 };
-
-export const KNOWN_VARIANT_LEVELS = /** @type {readonly string[]} */ (["highest", "off", "minimal", "low", "medium", "high", "xhigh", "max"]);
 
 const PROVIDER_LIMIT_FIELD_TYPES = {
   maxConcurrentTasks: "number",

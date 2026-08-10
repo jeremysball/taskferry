@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { modelsCacheFingerprint } from "./tasks.js";
@@ -49,13 +50,33 @@ export function readVariantsCache({ cacheDir, env, ttlMs = DEFAULT_VARIANT_CACHE
   return checkFingerprint(result, env);
 }
 
-/** @param {{fingerprint: string, models: Map<string, string[]>}} result @param {NodeJS.ProcessEnv} env @returns {Map<string, string[]> | null} */
-function checkFingerprint(result, env) {
-  return result.fingerprint === modelsCacheFingerprint(env) ? result.models : null;
+/**
+ * `modelsCacheFingerprint()` returns a `NAME=value` line per matching env
+ * var (API keys, `OPENCODE_AUTH_CONTENT`, etc.) -- fine for an in-memory
+ * comparison key, but this cache's fingerprint field is written to a plaintext
+ * JSON file on disk, so the raw credential values must never land there.
+ * SHA-256 keeps the same "does this env produce the same catalog" equality
+ * check without persisting anything reversible to the secret itself.
+ * Exported (only) so tests can build a matching on-disk fixture without
+ * duplicating the hash algorithm.
+ * @param {NodeJS.ProcessEnv} env @returns {string}
+ */
+export function hashFingerprint(env) {
+  return createHash("sha256").update(modelsCacheFingerprint(env)).digest("hex");
 }
 
-// Single-flight per cacheDir: a daemon startup warm and its first 24h
-// interval tick landing at the same moment must not shell out twice.
+/** @param {{fingerprint: string, models: Map<string, string[]>}} result @param {NodeJS.ProcessEnv} env @returns {Map<string, string[]> | null} */
+function checkFingerprint(result, env) {
+  return result.fingerprint === hashFingerprint(env) ? result.models : null;
+}
+
+// Single-flight per (cacheDir, env fingerprint): a daemon startup warm and
+// its first 24h interval tick landing at the same moment must not shell out
+// twice, but two refreshes for the *same* cacheDir under two different
+// caller envs (different credentials/base URLs) are genuinely different
+// requests -- keying on cacheDir alone would let the second caller's
+// fingerprint silently ride along on the first caller's in-flight result
+// and never actually populate its own catalog.
 const _inFlight = new Map();
 
 /**
@@ -70,15 +91,17 @@ const _inFlight = new Map();
  */
 export async function refreshVariantsCache({ cacheDir, env, listModelVariantsFn, writeFileFn = fs.writeFileSync, renameFn = fs.renameSync, mkdirFn = (p) => fs.mkdirSync(p, { recursive: true }) }) {
   const filePath = cacheFilePath(cacheDir);
-  let inFlight = _inFlight.get(filePath);
+  const fingerprint = hashFingerprint(env);
+  const inFlightKey = `${filePath}::${fingerprint}`;
+  let inFlight = _inFlight.get(inFlightKey);
   if (!inFlight) {
     inFlight = (async () => {
       try {
         const models = await listModelVariantsFn(env);
         const body = {
+          fingerprint,
           schema: VARIANTS_CACHE_SCHEMA,
           generatedAt: new Date().toISOString(),
-          fingerprint: modelsCacheFingerprint(env),
           models: Object.fromEntries(models),
         };
         mkdirFn(cacheDir);
@@ -91,10 +114,10 @@ export async function refreshVariantsCache({ cacheDir, env, listModelVariantsFn,
         // stderr if it wants to; this module stays silent by design so
         // it has no test-visible logging seam to inject.
       } finally {
-        _inFlight.delete(filePath);
+        _inFlight.delete(inFlightKey);
       }
     })();
-    _inFlight.set(filePath, inFlight);
+    _inFlight.set(inFlightKey, inFlight);
   }
   await inFlight;
 }

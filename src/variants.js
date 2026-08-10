@@ -1,3 +1,10 @@
+// The full sentinel/concrete variant vocabulary a caller (CLI flag, config.json's
+// `defaultVariant` key, or the TASKFERRY_DEFAULT_VARIANT env var) can name.
+// Lives here (not config.js) so tasks.js -- whose in-repo type-check root the
+// build's tsconfig.json scopes to `src/tasks.js` -- can import it without
+// pulling config.js's own (separately tracked) type errors into that check.
+export const KNOWN_VARIANT_LEVELS = /** @type {readonly string[]} */ (["highest", "off", "minimal", "low", "medium", "high", "xhigh", "max"]);
+
 // Rank table for opencode's known variant vocabulary, observed across the
 // installed catalog (`opencode models --verbose`): none/off < minimal <
 // low < medium < high < xhigh < max. An unknown name (e.g. MiniMax-M3's

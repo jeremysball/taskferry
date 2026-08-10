@@ -13,7 +13,7 @@ import { isNonNegativeInteger, isPositiveInteger } from "./numbers.js";
 import { buildBwrapArgs, checkBwrapAvailable, checkOverlaySupport, defaultDenyList, platformSupportsSandbox, resolveGitCommonDir, resolveGitDir } from "./sandbox.js";
 import { applyChangeset, overlayPaths, resolvePreDispatchHead, subOverlayPaths, subFilePaths, cleanupOverlay, defaultRunCommand as defaultOverlayRunCommand, extractGitDiff, extractNonGitDiff, OVERLAY_MOUNT_BUSY_PATTERN } from "./changeset.js";
 import { resolveExecutor, opencodeExecutor } from "./executor.js";
-import { resolveVariant } from "./variants.js";
+import { resolveVariant, KNOWN_VARIANT_LEVELS } from "./variants.js";
 import { readVariantsCache, refreshVariantsCache } from "./variants-cache.js";
 import { loadEnvFile, watchEnvFile } from "./env-file.js";
 import { loadProjectConfig, resolveReadOnlyProjectBinds, verificationPromptBlock } from "./project-config.js";
@@ -2103,11 +2103,11 @@ function resolveDispatchDirectory(directory) {
  * `oc_` prefix for compatibility. A resume with no `--model` inherits the
  * model the session was created under (a different model can mean a different
  * provider, breaking the whole point of resuming that exact session).
- * @param {{id: string, directory: string, prompt: string, model: string|undefined, executor: import("./executor.js").WorkerExecutor, priorSessionTask: Task|null, variant: string|undefined, sessionId: string|undefined, originSessionId: string|undefined, internal: boolean, finalMarker: string|null, role: "dispatch"|"advisor", logPath: string, class?: string|null, parentTaskId?: string|null, defaultVariant: string, resolveOpencodeVariants: (model: string) => string[]}} params
+ * @param {{id: string, directory: string, prompt: string, model: string|undefined, executor: import("./executor.js").WorkerExecutor, priorSessionTask: Task|null, variant: string|undefined, sessionId: string|undefined, originSessionId: string|undefined, internal: boolean, finalMarker: string|null, role: "dispatch"|"advisor", logPath: string, class?: string|null, parentTaskId?: string|null, defaultVariant: string, resolveOpencodeVariants: (model: string, env: NodeJS.ProcessEnv|undefined) => string[], env?: NodeJS.ProcessEnv}} params
  * @returns {Task}
  */
 // eslint-disable-next-line sonarjs/cyclomatic-complexity, complexity -- adding `class` field per brief; function was already at the 10-point ceiling
-function buildDispatchTask({ id, directory, prompt, model, executor, priorSessionTask, variant, sessionId, originSessionId, internal, finalMarker, role, logPath, class: taskClass, parentTaskId = null, defaultVariant, resolveOpencodeVariants }) {
+function buildDispatchTask({ id, directory, prompt, model, executor, priorSessionTask, variant, sessionId, originSessionId, internal, finalMarker, role, logPath, class: taskClass, parentTaskId = null, defaultVariant, resolveOpencodeVariants, env }) {
   if (!model && !priorSessionTask) {
     if (sessionId) {
       throw new Error(`error: no task found for session id "${sessionId}" to inherit a model from\nhelp: pass --model explicitly, or check the session id with taskferry list`);
@@ -2120,10 +2120,15 @@ function buildDispatchTask({ id, directory, prompt, model, executor, priorSessio
   // needs resolveVariant() -- an explicit or inherited value is already
   // concrete and passes straight through resolveVariant() as a no-op.
   const requestedVariant = variant || priorSessionTask?.variant || defaultVariant;
+  // resolveVariant() only ever consults opencodeVariants when requested ===
+  // "highest" (an explicit or inherited concrete level passes straight
+  // through as a no-op) -- so only pay for the cache lookup in that one
+  // case instead of on every opencode dispatch.
+  const needsOpencodeVariants = executor.id === "opencode" && requestedVariant === "highest";
   const resolvedVariant = resolveVariant({
     executorId: executor.id,
     requested: requestedVariant,
-    opencodeVariants: executor.id === "opencode" ? resolveOpencodeVariants(resolvedModel) : undefined,
+    opencodeVariants: needsOpencodeVariants ? resolveOpencodeVariants(resolvedModel, env) : undefined,
   });
   return {
     id,
@@ -3263,9 +3268,14 @@ function buildCheckGateFailureMessage(task) {
     const indentedOutputTail = task.checkOutputTail.split("\n").map((line) => `    ${line}`).join("\n");
     outputTail = `\n  output tail:\n${indentedOutputTail}`;
   }
+  // The --session-id branch inherits its model from the resumed session (see
+  // buildDispatchTask's doc comment), so --model is optional there; the
+  // sessionId-less branch is a fresh dispatch, which now requires --model
+  // explicitly, so the suggested command must name it or pasting the tool's
+  // own fix-forward hint fails immediately with "error: --model is required".
   const resumeHint = task.sessionId
     ? `  taskferry dispatch --session-id ${task.sessionId} --parent-task ${task.id} \\\n    --prompt "Fix: check gate ${task.checkStatus}. See taskferry result ${task.id} --fields checkOutputTail"`
-    : `  taskferry dispatch --directory ${task.directory} --parent-task ${task.id} \\\n    --prompt "Fix: check gate ${task.checkStatus} for task ${task.id}. See taskferry result ${task.id} --fields checkOutputTail"`;
+    : `  taskferry dispatch --directory ${task.directory} --model ${task.model} --parent-task ${task.id} \\\n    --prompt "Fix: check gate ${task.checkStatus} for task ${task.id}. See taskferry result ${task.id} --fields checkOutputTail"`;
   return `error: check gate ${task.checkStatus} for ${task.id}\n${commandLine}\n${exitLine}${outputTail}\nchangeset NOT accepted. To fix forward, resume the worker session:\n${resumeHint}\nOverride only if you have verified manually: taskferry accept ${task.id} --force`;
 }
 
@@ -3741,9 +3751,19 @@ function resolveToggleOptions(rawOptions) {
  */
 function resolveStringOptions(rawOptions) {
   const config = rawOptions.config || {};
+  // config.defaultVariant already passed validateDefaultVariant() during
+  // loadConfig()'s parseAndValidateConfig() -- but rawOptions.defaultVariant
+  // (a programmatic caller) and TASKFERRY_DEFAULT_VARIANT (an env var, which
+  // has no load-time validation pass of its own) never go through that
+  // check, so an invalid value here would otherwise reach resolveVariant()
+  // silently and fall through as "send no flag" rather than fail loudly.
+  const defaultVariant = rawOptions.defaultVariant ?? process.env.TASKFERRY_DEFAULT_VARIANT ?? config.defaultVariant ?? "highest";
+  if (!KNOWN_VARIANT_LEVELS.includes(defaultVariant.trim())) {
+    throw new Error(`error: defaultVariant must be one of ${KNOWN_VARIANT_LEVELS.join(", ")} (got ${JSON.stringify(defaultVariant)})\nhelp: fix config.json's "defaultVariant" key or the TASKFERRY_DEFAULT_VARIANT env var`);
+  }
   return {
     activitySummaryModel: rawOptions.activitySummaryModel ?? process.env.TASKFERRY_SUMMARY_MODEL ?? config.summaryModel ?? DEFAULT_SUMMARY_MODEL,
-    defaultVariant: rawOptions.defaultVariant ?? process.env.TASKFERRY_DEFAULT_VARIANT ?? config.defaultVariant ?? "highest",
+    defaultVariant,
   };
 }
 
@@ -4291,15 +4311,20 @@ function buildManagerInternalHelpers(ctx) {
     /** @param {Task} task */
     hasLiveOverlay: (task) => hasLiveOverlayForTask(task, { existsFn: ctx.opts.existsFn }),
     sweepOrphanedPromptFiles: () => sweepOrphanedPromptFilesFor({ PROMPT_DIR: ctx.paths.PROMPT_DIR, tasks: ctx.maps.tasks }),
-    /** @param {string} model @returns {string[]} Resolves the opencode
-     * variants table for a model: the test-injected `opencodeVariantsTable`
-     * seam when set, otherwise the on-disk `readVariantsCache()` table (a
-     * real daemon's path). An absent entry or absent cache means "no
-     * variants known" -- resolveVariant() then sends no flag rather than
-     * guessing. */
-    resolveOpencodeVariants: (model) => {
+    /** @param {string} model @param {NodeJS.ProcessEnv} [env] @returns {string[]} Resolves the
+     * opencode variants table for a model: the test-injected
+     * `opencodeVariantsTable` seam when set, otherwise the on-disk
+     * `readVariantsCache()` table (a real daemon's path). Reads against
+     * this specific dispatch's effective env (`ctx.env.sanitizedEnvironment`
+     * -- the daemon's own env layered with any envFileVars/caller overrides,
+     * the same merge the actual spawn uses), not the daemon's raw
+     * `process.env`, since a per-dispatch caller override of a credential or
+     * base URL can expose a different model catalog than the daemon's own
+     * environment. An absent entry or absent cache means "no variants
+     * known" -- resolveVariant() then sends no flag rather than guessing. */
+    resolveOpencodeVariants: (model, env) => {
       if (ctx.opts.opencodeVariantsTable) return ctx.opts.opencodeVariantsTable.get(model) ?? [];
-      const table = readVariantsCache({ cacheDir: ctx.opts.cacheDir, env: process.env });
+      const table = readVariantsCache({ cacheDir: ctx.opts.cacheDir, env: ctx.env.sanitizedEnvironment(env) });
       return table?.get(model) ?? [];
     },
     sweepOrphanedOverlays: () => sweepOrphanedOverlaysFor({ tasks: ctx.maps.tasks, overlayTmpRoot: ctx.opts.overlayTmpRoot, releaseOverlay: (task) => ctx.env.releaseOverlay(task), persistTask: (taskId) => ctx.helpers.persistTask(taskId), readdirFn: ctx.opts.readdirFn }),
@@ -6282,7 +6307,7 @@ function startRunningWatcherFor(task, ctx) {
  * helpers are plain module-level functions called directly. The factory
  * bindings are threaded in via `ctx`.
  * @param {{prompt: string, directory: string, model?: string, variant?: string, sessionId?: string, internal?: boolean, finalMarker?: string|null, originSessionId?: string, noSandbox?: boolean, noOverlay?: boolean, allowedDirs?: string[], rwBind?: string[], roBind?: string[], executor?: string, env?: NodeJS.ProcessEnv, role?: "dispatch"|"advisor", class?: string|null, parentTaskId?: string|null}} params
- * @param {{ensureStateLoaded: () => void, tasks: Map<string, Task>, defaultExecutor: import("./executor.js").WorkerExecutor, LOG_DIR: string, persistTask: (taskId: string) => void, pendingLaunches: Map<string, LaunchSpec>, providerQueues: Map<string, ProviderQueue>, launchQueuedTasks: () => void, defaultVariant: string, resolveOpencodeVariants: (model: string) => string[]}} ctx
+ * @param {{ensureStateLoaded: () => void, tasks: Map<string, Task>, defaultExecutor: import("./executor.js").WorkerExecutor, LOG_DIR: string, persistTask: (taskId: string) => void, pendingLaunches: Map<string, LaunchSpec>, providerQueues: Map<string, ProviderQueue>, launchQueuedTasks: () => void, defaultVariant: string, resolveOpencodeVariants: (model: string, env: NodeJS.ProcessEnv|undefined) => string[]}} ctx
  * @returns {TaskSummary & {next: string}}
  */
 function dispatchTask(params, ctx) {
@@ -6303,7 +6328,7 @@ function dispatchTask(params, ctx) {
   // Task IDs retain the literal "oc_" prefix for compatibility; WorkerExecutor.taskIdPrefix is not wired in this issue.
   const id = `oc_${Date.now().toString(36)}_${randomUUID().slice(0, 8)}`;
   const logPath = path.join(ctx.LOG_DIR, `${id}.ndjson`);
-  const task = buildDispatchTask({ id, model, executor, priorSessionTask, variant, sessionId, originSessionId, internal, finalMarker, role, logPath, parentTaskId, class: taskClass, prompt: dispatchPrompt, directory: normalizedDirectory, defaultVariant: ctx.defaultVariant, resolveOpencodeVariants: ctx.resolveOpencodeVariants });
+  const task = buildDispatchTask({ id, model, executor, priorSessionTask, variant, sessionId, originSessionId, internal, finalMarker, role, logPath, parentTaskId, env, class: taskClass, prompt: dispatchPrompt, directory: normalizedDirectory, defaultVariant: ctx.defaultVariant, resolveOpencodeVariants: ctx.resolveOpencodeVariants });
   queueDispatchLaunch({ tasks: ctx.tasks, persistTask: ctx.persistTask, pendingLaunches: ctx.pendingLaunches, providerQueues: ctx.providerQueues, launchQueuedTasks: ctx.launchQueuedTasks }, { id, task, sessionId, env, noSandbox, noOverlay, executor, role, prompt: dispatchPrompt, allowedDirs: effectiveRwBind, roBind: dispatchRoBind });
   const summary = summarize(task);
   return {

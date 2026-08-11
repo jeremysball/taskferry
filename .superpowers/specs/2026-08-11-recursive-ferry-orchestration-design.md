@@ -1,6 +1,8 @@
 # Recursive Ferry Orchestration and Task-Scoped Identity — Design
 
-Date: 2026-08-11. Status: proposed architecture; protocol details pending implementation plan.
+Date: 2026-08-11. Status: proposed architecture, revised against verified
+substrate behavior. Ready for an implementation plan, subject to the
+prerequisite defects listed near the end.
 
 ## Background
 
@@ -19,6 +21,58 @@ The motivating workflow is hierarchical:
 - "Captain", "first mate", "implementer", and "reviewer" are roles expressed by prompt/skill policy, not distinct daemon task types. There is one task/ferry protocol.
 
 The goal is therefore not to add a second class of worker. The goal is to let any dispatched ferry safely become a parent.
+
+## What the substrate already does, verified
+
+Everything in this section was run against the real implementation on
+bubblewrap 0.11.2 rather than inferred from reading the code. It changes
+several of the assumptions the rest of this document was originally
+written on.
+
+**Nested dispatch already works, unsupervised.** `buildBwrapArgs` binds the
+whole runtime directory read-write into every dispatch sandbox
+(`src/sandbox.js`), and the daemon socket lives there. The `taskferry`
+binary is visible too, because the root filesystem is bound read-only. A
+ferry can therefore already call `taskferry dispatch` today. The result is
+an orphan task with no parent link and no accounting. This design is not
+opening a door; it is putting a frame around one that is already open.
+
+**Sibling ferries are not isolated from each other.** `resolveOverlayTmpRoot()`
+places the overlay tree under the runtime directory, so it sits inside that
+same read-write bind. From inside one sandbox, another task's pending
+changeset upper directory was listed, read, and overwritten, and the write
+was confirmed on the host afterward. Each ferry is handed its own overlay
+subdirectory by naming convention, and nothing enforces the boundary.
+
+**Adding the overlay tree to the sandbox deny list does not fix that.**
+Deny-list `--tmpfs` entries are emitted before the runtime directory bind,
+and bubblewrap applies mounts in argument order, so binding the parent
+afterward un-masks everything nested under it. Both orderings were run: mask
+then bind still exposed the file; bind then mask produced an empty
+directory. A future change that adds the overlay root to `sandboxDenylist`
+will silently do nothing, with no error.
+
+**A read-only bind does not block a Unix socket connection.** The advisor
+role passes `runtimeDirWritable: false` specifically so that, per its own
+documentation, "connect() fails on a read-only mount". It does not. Through
+a `--ro-bind`, a client connected to a live listening socket and received
+its reply, while `touch` in the same directory failed with `Read-only file
+system`. The kernel checks the socket inode's permission bits on
+`connect()`, not the mount's read-only flag. Advisors can reach the daemon
+today despite the code intending the opposite.
+
+**Overlay lower layers stack, and deletions compose.** Multiple
+`--overlay-src` flags stack as lower layers, with the last one topmost.
+Mounting a parent's upper directory over a base checkout, with a child's own
+upper on top, gave the child the parent's uncommitted edit; the child's
+writes landed only in the child's upper; the parent's upper and the base
+checkout were both untouched. A child deleting a base-layer file produced a
+whiteout character device in the child's upper, leaving the base intact.
+
+Three of these are defects that exist independently of recursive
+orchestration: the sibling overlay exposure, the deny-list ordering no-op,
+and the ineffective read-only socket guard. They should be filed and fixed
+on their own schedule, not folded into this work.
 
 ## Design principles
 
@@ -89,17 +143,44 @@ This is the same boundary the repository already states for the existing `using-
 
 ## Proposed task identity mechanism
 
-### Identity file/capability
+### Threat model
 
-At task launch, the daemon creates identity material associated with the new task and mounts it read-only at a fixed private path inside the sandbox.
+The protocol is built for ferries that are fallible rather than hostile. A
+worker is assumed to be capable of confusing itself about which task it is,
+and not assumed to be actively trying to impersonate a sibling. Two
+structural choices keep the stronger model reachable later without a
+protocol break: identity material never lives anywhere the sandbox can
+enumerate, and self-scoped calls go through their own daemon method that can
+later be made to require a capability.
 
-Conceptually:
+Under that model no opaque capability token is needed for the first version.
+The mount itself is the capability. A ferry that has no socket bound cannot
+dispatch, cannot ask a question, and cannot impersonate anyone, and there is
+no token to validate and nothing to get wrong.
+
+### Identity file and mounts
+
+The whole-runtime-directory bind is replaced by three narrow mounts, because
+as established above it cannot be made safe by flipping it to read-only:
 
 ```text
-/run/taskferry/self
+--bind    <runtimeDir>/tasks/<taskId>     <runtimeDir>/self
+--ro-bind <runtimeDir>/tasks/<taskId>/id  <runtimeDir>/self/id
+--bind    <runtimeDir>/daemon.sock        <runtimeDir>/self/sock
 ```
 
-The exact host/runtime path is implementation detail. The important properties are:
+The source path is per-task; the destination path is fixed. Because every
+sandbox has its own mount namespace, the fixed destination resolves to a
+different host file for every ferry, and a child's mount replaces its
+parent's with no masking logic to write or to get wrong.
+
+The socket bind is the one that is conditional; see the recursion gate
+below.
+
+Sibling overlays become unreachable as a side effect, because nothing binds
+their parent directory any more.
+
+The important properties are:
 
 - created by the daemon;
 - unique to the spawned task;
@@ -110,20 +191,22 @@ The exact host/runtime path is implementation detail. The important properties a
 
 The initial discussion considered placing the task ID in a file whose filename also contains the task's spawn/start time converted to Unix epoch, allowing a nested worker to distinguish its own record from an inherited parent record.
 
-That remains a viable identification scheme, but the cleaner invariant is stronger: a child sandbox should receive exactly one authoritative self identity at one fixed path. If the sandbox construction can mask/replace any inherited parent identity at that path, no timestamp search is required.
+That scheme is no longer needed. Per-task source with fixed destination
+gives a child exactly one authoritative self identity at one fixed path by
+construction, so there is nothing to search and no ambiguity to resolve.
 
-For accidental misuse protection, a read-only task ID at the fixed path may be sufficient. If the daemon socket is directly reachable from arbitrary code inside the sandbox and the protocol needs to prevent deliberate impersonation, the file should additionally contain a daemon-issued opaque capability/nonce bound to that task. Self-scoped RPCs then require both the task identity and valid capability.
-
-This security choice should be made explicitly during implementation planning rather than accidentally relying on task IDs being hard to guess.
+The file holds the task ID and nothing else in the first version. Adding a
+daemon-issued capability later means adding a field to a file the daemon
+already writes and a check to a method that already exists, which is why the
+decision can be deferred without being designed around.
 
 ### Nested sandbox invariant
 
 A child ferry must never see its parent's injected identity as its own.
 
-At child spawn, sandbox setup must either:
-
-- mask the parent identity path and mount the child's identity file over it; or
-- place identity outside all directories inherited from the parent's filesystem view.
+The mount arrangement above satisfies this without additional logic: the
+child's own per-task source is mounted at the same fixed destination, so it
+covers whatever the parent had there.
 
 The correct invariant is:
 
@@ -141,16 +224,14 @@ The desired operation is semantically simple: existing `status` behavior with th
 
 The public `main` branch currently already uses `taskferry context` for a different operation: compact current-workspace state used by session-start hooks. Therefore the new self-scoped operation cannot silently reuse that command name without changing an existing CLI contract.
 
-The final spelling is an implementation decision. Possible shapes include:
+The chosen spelling is `taskferry self`, which leaves `taskferry context`
+untouched:
 
 ```text
 taskferry self
-taskferry self status
-taskferry status --self
-taskferry task-context
 ```
 
-Whatever name is chosen, its semantics should remain thin:
+Its semantics remain thin:
 
 ```text
 resolve self identity
@@ -173,6 +254,20 @@ If no valid self identity is present, dispatch behaves as it does for an externa
 If valid self identity is present, the daemon records that task as the new task's parent. Parentage should be additive metadata on the normal task object, not a separate nested-task store.
 
 The CLI should not expose a normal `--parent-task-id` override to ferries. Parentage is derived by the daemon.
+
+### Recursion gate
+
+Every ferry gets the socket bind, up to a depth limit. The daemon stamps
+`depth` on each task record, derives a child's depth as `parent.depth + 1`,
+and omits the socket bind entirely once the limit is reached.
+
+This matters because it is structural rather than advisory. A ferry at the
+limit is not told not to dispatch; it has no socket, so `taskferry dispatch`
+fails with a connection error it cannot reason its way around. A prompt that
+instructs a worker to dispatch itself cannot produce a runaway subtree.
+
+The default limit is 3, which covers captain to first mate to leaf with one
+level spare, and is configurable.
 
 ## Question / answer protocol
 
@@ -198,7 +293,12 @@ answer
 answeredAt
 ```
 
-The command blocks until the question is answered, cancelled, the task is cancelled, or a defined operational failure occurs.
+The command blocks until the question is answered, cancelled, the task is cancelled, or a defined operational failure occurs. The task is parked while it blocks, per the scheduling section above.
+
+The exchange is two phases on the wire rather than one. **Register** returns
+a durable `questionId` immediately; **await** then blocks on that ID. The
+split is what makes daemon restart survivable, because a reconnecting CLI
+re-awaits an ID it already holds instead of asking a second question.
 
 The worker can therefore write ordinary control flow around it:
 
@@ -233,7 +333,13 @@ taskferry answer <question-id> --text "..."
 
 The answer is persisted by the daemon and wakes the blocked `question` call.
 
-Whether answers are permitted from any local Task Ferry client or restricted to the direct parent is an authorization/policy decision still to be made. The protocol should not conflate that question with identity attribution: the daemon must always know who asked, even if multiple actors are allowed to answer.
+Any local Task Ferry client may answer in the first version. The daemon
+always records who asked, so narrowing who may answer is policy that can be
+tightened later without touching the protocol. Restricting answers to the
+direct parent now would be actively wrong: the parent may itself be blocked,
+and the human is the answerer of last resort.
+
+The protocol must not conflate authorization with identity attribution. The daemon always knows who asked, even where several actors are allowed to answer.
 
 ### Question state and daemon restart
 
@@ -245,9 +351,11 @@ Implementation planning must specify what happens if the daemon restarts while:
 - an answer is already persisted but the caller has not received it;
 - a pending question has not yet been answered.
 
-The minimum reliable design is for questions and answers to have stable IDs and durable daemon state, so a reconnecting CLI can determine whether its request is still pending or already answered instead of creating a duplicate question.
-
-Exact restart/reconnect mechanics can be a follow-up if recursive orchestration ships behind a deliberately narrower first version, but silent loss of pending questions is not an acceptable final state.
+The two-phase register-then-await split above resolves all three cases. The
+`questionId` is durable and is returned before the CLI blocks, so on
+reconnect the CLI re-awaits an ID the daemon can look up: still pending,
+already answered, or cancelled. No case produces a duplicate question, and
+silent loss of a pending question is not reachable.
 
 ## Parent/child task model
 
@@ -255,7 +363,13 @@ Add lineage metadata to the existing task record:
 
 ```text
 parentTaskId: string | null
+depth: number
 ```
+
+`depth` is 0 for an externally dispatched root and `parent.depth + 1`
+otherwise. It is stored rather than derived because the launch path needs it
+to decide whether to bind the socket, and walking ancestors on every launch
+to recompute it would be work the record can just carry.
 
 Derived views may expose children without storing a second authoritative list:
 
@@ -308,7 +422,7 @@ Task Ferry records lineage and results. The skill decides the review topology an
 
 If reviewer disagreement needs a formal resolution loop, that belongs in the skill/lifecycle spec unless a missing daemon primitive is discovered while implementing it.
 
-## Critical filesystem problem: nested changesets
+## Nested changesets
 
 Recursive dispatch cannot be correct until nested filesystem semantics are explicit.
 
@@ -324,39 +438,96 @@ For a nested task:
 
 > Accepting a child's changeset applies it into the parent ferry's visible working state exactly as if the parent had made that edit itself; it does not escape directly to the root host checkout unless the parent itself is rooted there by design.
 
-This creates a path-resolution problem because the path passed by the parent is a path inside the parent's sandbox namespace, while the daemon manages mounts and changesets from the host namespace.
+### Mount strategy: stacked lower layers
 
-Implementation planning must trace the current bwrap/overlay construction and define a canonical mapping from:
+The original draft anticipated a path-resolution problem here, on the
+assumption that a parent-visible path and its host-side backing path would
+differ and need a canonical mapping between them. Stacked lower layers make
+that mapping unnecessary.
+
+A child launches with one `--overlay-src` per ancestor, ordered bottom-first
+from the real checkout up to its immediate parent, with its own upper on
+top, mounted at the same absolute path the parent sees:
 
 ```text
-parent-visible path
-→ parent task's host-side merged/overlay backing path
-→ child sandbox target
+--overlay-src <base checkout>
+--overlay-src <grandparent upper>
+--overlay-src <parent upper>
+--overlay <child upper> <child work> <directory>
 ```
 
-This should be solved in the daemon/sandbox layer, not by teaching model prompts to reason about host overlay paths.
+Because the child's `directory` is literally the same string as the
+parent's, the daemon translates nothing. It resolves the caller's task,
+walks that task's ancestor chain, and prepends one flag per ancestor.
+
+This arrangement was tested directly: the child saw the parent's uncommitted
+edit, the child's writes and deletions landed only in its own upper, and
+both the parent's upper and the base checkout were unmodified afterward.
+
+### Promotion on accept
+
+Accepting a child moves its work up exactly one level, by changing only
+where the existing apply step writes.
+
+For a non-git target, `applyChangeset` today mounts the finished task's
+overlay as a merged view at a synthetic mount point, read-write binds
+`directory`, and rsyncs one into the other. For a nested task the source is
+unchanged; the destination bind on `directory` becomes an overlay mount
+whose lower stack is the parent's ancestry and whose upper is the parent's
+upper. Every byte rsync writes then lands in the parent's upper rather than
+on the host checkout. It is one additional parameter on
+`buildMergedViewBwrapArgs`.
+
+Reject is unchanged: delete the child's upper.
+
+The git target path is the larger piece of work. It currently never enters a
+sandbox at all, shelling out to `git apply --3way` directly against the host
+directory. To nest, that call has to move inside a bwrap whose `directory`
+is the parent's writable merged view. This is the path this repository uses
+for nearly every dispatch, so it should be planned as real work rather than
+as a variation on the non-git case.
+
+Promotion deliberately reuses the diff pipeline rather than merging upper
+directories directly. Deletions then arrive as ordinary diff hunks, so no
+whiteout device has to be recreated, and accept behaves identically at every
+level.
+
+### Overlay lifetime constraint
+
+A parent's overlay cannot be torn down while any descendant still mounts it
+as a lower layer. `cleanupOverlay` and the daemon's orphan-overlay sweep
+both need to consult lineage before removing anything, which neither does
+today.
 
 ### Child accept authority
 
-The first version also needs a decision about who performs `accept` for child changes:
+The parent ferry explicitly runs `taskferry accept <child-id>`. This is the
+conservative choice and it preserves review before integration, which is the
+property the whole changeset model exists to provide.
 
-- the parent ferry explicitly runs `taskferry accept <child-id>`;
-- the child auto-accepts into the parent view after successful completion;
-- skill policy chooses between explicit and automatic acceptance.
-
-Given Task Ferry's existing safety model, explicit parent acceptance is the conservative default because it preserves review-before-integration.
+Auto-acceptance on successful completion, and letting skill policy choose
+between the two, are both deferred. Neither should be added until a real
+lifecycle demonstrates that explicit acceptance is the bottleneck.
 
 ## Making Task Ferry available inside ferries
 
 Recursive orchestration requires a launched ferry to have access to the Task Ferry CLI and daemon transport.
 
-Sandbox construction therefore needs to expose, read-only:
+Sandbox construction needs to expose three things, at three different
+access levels:
 
-- the Task Ferry executable/entrypoint needed by the worker;
-- the daemon Unix socket;
-- the task's self-identity material.
+- the Task Ferry executable, read-only. This already happens, since the root filesystem is bound read-only.
+- the task's self-identity material, read-only, from a per-task source at a fixed destination.
+- the daemon socket, read-write, and only below the depth limit.
 
-The socket must be usable for the allowed nested operations without turning the sandbox into an unscoped daemon client. If capability validation is added, the daemon can authorize self-scoped operations from the injected identity while still allowing ordinary non-self operations according to the intended threat model.
+The socket bind must be read-write. A read-only bind does not prevent
+connecting to a Unix socket, so it is neither a working restriction nor a
+meaningful signal of intent; the only real gate is whether the socket is
+bound at all.
+
+Nothing else from the runtime directory is exposed. That is what keeps the
+sandbox from being an unscoped daemon client with visibility into every
+other task's pending work.
 
 No writable copy of Task Ferry itself is required inside the worker.
 
@@ -370,17 +541,50 @@ Possible semantics:
 2. cancel parent cascades to all descendants;
 3. default parent-only plus an explicit cascade option.
 
-The safest substrate default is probably not to invent implicit cascade until the lifecycle semantics are proven. However, the daemon should make descendants discoverable so the skill/orchestrator can cancel a subtree deterministically.
+Option 3. Cancelling a parent does not implicitly cancel its descendants,
+and an explicit cascade is available for callers that want a subtree gone.
+Descendants are discoverable either way, so the skill layer can walk and
+cancel a subtree deterministically without the daemon inventing a policy.
 
-This remains an explicit design decision.
+The overlay lifetime constraint above interacts with this: cancelling a
+parent while a child still runs must not release the parent's overlay, since
+the child has it mounted as a lower layer.
 
 ## Scheduling and concurrency
 
-The existing global Task Ferry queue and concurrency cap should continue to apply to nested tasks.
+Recursive orchestration must not create a second scheduler, and a child
+dispatch is an ordinary dispatch with lineage metadata that enters the same
+queue.
 
-Recursive orchestration must not create a second scheduler.
+Left at that, it deadlocks.
 
-A child dispatch is an ordinary dispatch with lineage metadata and therefore enters the same queue.
+The global launch gate refuses to start anything once `runningCount` reaches
+the concurrency ceiling. A first mate blocked in `taskferry wait` is still
+`running`, so it still holds a slot. Fill every slot with first mates
+waiting on children, and no child can launch, so no parent can finish. This
+is a permanent stall rather than a slowdown, and it needs only as many
+simultaneous first mates as the concurrency limit to trigger. Below that
+threshold every blocked parent still consumes capacity for work it is not
+performing.
+
+The fix stays inside the existing scheduler. A ferry blocked in a
+daemon-mediated `wait` or `question` is **parked**, and a parked ferry does
+not count toward `runningCount`. This is defensible on the ceiling's own
+terms: the cap exists to bound provider load, and a parked ferry issues no
+inference. Per-provider queues are unaffected.
+
+Parking has a second consumer. The inactivity watchdog fails a running task
+that produces no parseable log events for long enough, which is precisely
+what a ferry waiting on an answer looks like. Parking must suspend the
+watchdog as well as the concurrency accounting, or every blocked ferry is
+eventually killed as stalled.
+
+A parked ferry takes a distinct, visible status rather than an indefinite
+silent block. It should read as waiting on someone in `list` output and in
+session-start orientation, instead of appearing alive. An explicit
+`--timeout` remains available for callers that want one, but there is no
+default timeout, because a legitimate overnight question may wait hours and
+killing that work is worse than surfacing it.
 
 Per-parent concurrency, subtree budgets, token budgets, or model budgets may become useful later, but they are not required to establish the recursive protocol.
 
@@ -388,13 +592,16 @@ Per-parent concurrency, subtree budgets, token budgets, or model budgets may bec
 
 Existing task views should gain enough lineage information to debug a hierarchy without introducing a completely separate UI.
 
-Candidate additions:
+The minimum set:
 
-- `parentTaskId` on full status/result output;
+- `parentTaskId` and `depth` on full status/result output;
 - child count on full task status;
-- optional tree-oriented list/watch rendering;
-- question-pending metadata/events;
-- root-task or ancestor identifiers if repeated traversal becomes expensive.
+- a pending-question flag, so a parked ferry reads as waiting on someone;
+- question events on `watch`.
+
+Deferred until a real hierarchy exists to justify them: tree-oriented
+list/watch rendering, and cached root/ancestor identifiers if repeated
+traversal turns out to be expensive.
 
 The stored source of truth should remain the task records plus parent links. Any tree is a view.
 
@@ -439,8 +646,11 @@ captain
   -> taskferry dispatch
   -> daemon creates task A
        parentTaskId = null
-       selfCapability = cap_A
-  -> launch A with cap_A mounted read-only
+       depth = 0
+  -> daemon writes <runtimeDir>/tasks/A/id
+  -> launch A with
+       <runtimeDir>/tasks/A/id -> <runtimeDir>/self/id   (read-only)
+       daemon.sock             -> <runtimeDir>/self/sock (read-write)
 ```
 
 Nested dispatch:
@@ -448,12 +658,14 @@ Nested dispatch:
 ```text
 ferry A
   -> taskferry dispatch
-  -> CLI presents cap_A
+  -> CLI reads <runtimeDir>/self/id, connects on <runtimeDir>/self/sock
   -> daemon resolves caller = A
   -> daemon creates task B
        parentTaskId = A
-       selfCapability = cap_B
-  -> launch B with cap_B mounted read-only
+       depth = 1
+  -> launch B with B's own id mounted at the same fixed path,
+     socket bound only if depth < limit,
+     and A's overlay upper stacked as a lower layer under B's own
 ```
 
 Question:
@@ -461,11 +673,12 @@ Question:
 ```text
 ferry B
   -> taskferry question "Need decision X"
-  -> CLI presents cap_B
+  -> CLI reads self id, registers Q1, receives questionId, then awaits it
   -> daemon records Q1 { taskId: B, parentTaskId: A, status: pending }
+  -> daemon parks B: slot released, watchdog suspended
   -> watch emits Q1
-  -> caller answers Q1
-  -> daemon persists answer and wakes B
+  -> any local client answers Q1
+  -> daemon persists answer, unparks B, wakes the await
   -> B continues
 ```
 
@@ -473,8 +686,8 @@ Self status:
 
 ```text
 ferry B
-  -> taskferry <self-status-command>
-  -> CLI presents cap_B
+  -> taskferry self
+  -> CLI reads <runtimeDir>/self/id
   -> daemon resolves B
   -> existing status path for B
 ```
@@ -485,14 +698,17 @@ ferry B
 | --- | --- |
 | self-scoped command outside a ferry | fail fast with a usage/operational error explaining no task identity is available |
 | self identity file missing inside a launched ferry | task/environment bug; fail loudly, never guess from environment or cwd |
-| malformed/unknown capability | reject the self-scoped RPC |
+| self identity file names an unknown/stale task ID | reject the self-scoped RPC |
 | nested dispatch | daemon derives `parentTaskId` from authenticated caller identity |
 | child receives parent identity | invariant violation; integration test must catch this |
 | ferry asks a question | daemon attributes question to authenticated caller and blocks until answer/cancel/failure |
 | ferry attempts to claim another task in a self-scoped call | impossible through supported CLI; daemon ignores caller-supplied identity |
 | parent exits while child runs | child remains a normal durable task unless cancellation policy explicitly says otherwise |
 | child changeset accepted | must apply into the correct parent-visible working state, not silently escape to root checkout |
-| daemon restarts with pending question | final implementation must preserve or deterministically recover question state |
+| daemon restarts with pending question | CLI re-awaits its durable `questionId`; never asks a second time |
+| ferry at the depth limit calls dispatch | no socket is bound, so the call fails to connect |
+| parent cancelled while a child still runs | parent's overlay is retained, because the child mounts it as a lower layer |
+| parked ferry exceeds the no-output timeout | watchdog does not fire; parking suspends it |
 
 ## Testing
 
@@ -528,6 +744,22 @@ This requires real system tests; mocks are not proof of namespace/overlay behavi
 - Repeat at three nesting levels.
 - Reject B and prove its changes disappear without affecting A's preexisting modifications.
 
+### Depth gate and sandbox narrowing
+
+- Dispatch a ferry at the depth limit; prove it has no socket and that `taskferry dispatch` fails from inside it.
+- From inside a sandbox, attempt to read another running task's overlay upper directory; prove it is not reachable.
+- Attempt to read another task's identity file; prove it is not reachable.
+- Prove the identity file cannot be modified from inside the sandbox.
+
+### Scheduling
+
+These need a real daemon with a real concurrency limit; the deadlock is a
+scheduler property and cannot be observed against mocked launches.
+
+- Set the concurrency limit to N. Start N first mates that each dispatch a child and wait. Prove every child eventually launches and every parent finishes.
+- Prove a parked ferry does not count toward `runningCount`.
+- Prove the inactivity watchdog does not kill a ferry parked on a question for longer than the no-output timeout.
+
 ### Generic substrate boundary
 
 - A non-SDD caller can use nested dispatch and questions without loading SDD skills.
@@ -546,27 +778,45 @@ This requires real system tests; mocks are not proof of namespace/overlay behavi
 - Requiring models to manually track or interpolate their own Task Ferry task IDs.
 - Using mutable environment variables as the sole authority for ferry identity.
 
-## Open decisions before implementation planning
+## Decisions
 
-1. **Self-status command spelling.** Current `taskferry context` is already occupied; choose a non-conflicting thin wrapper around status.
-2. **Identity strength.** Fixed read-only task ID only, or task ID plus daemon-issued opaque capability.
-3. **Nested filesystem mapping.** Precisely map a parent-visible directory to a host-side child sandbox target and prove accept/reject composes recursively.
-4. **Question authorization.** Can any local caller answer, only the direct parent, or a defined set of supervisors?
-5. **Question restart behavior.** Define durable reconnect semantics across daemon replacement.
-6. **Cancellation.** Decide whether descendant cancellation is explicit, automatic, or policy-driven.
-7. **Child acceptance.** Parent-explicit accept is the conservative default; decide whether the skill may opt into auto-accept.
-8. **Lineage presentation.** Minimum CLI fields/events needed to debug trees without bloating normal output.
+1. **Self-status command spelling.** Resolved: `taskferry self`, leaving `taskferry context` untouched.
+2. **Identity strength.** Resolved: read-only task ID for the first version, with the mount itself acting as the capability. Identity material lives outside anything the sandbox can enumerate, and self-scoped calls get their own daemon method, so an opaque capability can be added later without a protocol break.
+3. **Nested filesystem mapping.** Resolved: stacked overlay lower layers mounted at the same absolute path, so no mapping is required. Accept promotes one level by retargeting the existing apply at the parent's writable merged view.
+4. **Question authorization.** Resolved for the first version: any local caller may answer. The daemon always records who asked, so this can be narrowed later.
+5. **Question restart behavior.** Resolved: two-phase register-then-await, so a reconnecting CLI re-awaits a durable ID rather than asking again.
+6. **Cancellation.** Resolved: parent-only by default, explicit cascade available, descendants always discoverable.
+7. **Child acceptance.** Resolved: parent-explicit accept, preserving review before integration. Whether a skill may opt into auto-accept is deferred until a real lifecycle asks for it.
+8. **Lineage presentation.** Resolved to a minimum set; tree rendering deferred.
+
+Still genuinely open, deferred because no evidence yet justifies a choice:
+
+- The default depth limit of 3 is a guess. It should be revisited once real hierarchies exist and their actual depths are known.
+- Whether the git-target accept path is worth restructuring generally, or only wrapped for the nested case.
+
+## Prerequisite defects
+
+These exist independently of recursive orchestration and should be filed and
+fixed separately. Two of them block this design, because it cannot be built
+correctly on top of them.
+
+1. **Sibling overlay exposure.** Every running ferry can read and write every other running ferry's pending changeset. Blocks this design: identity material cannot be protected while the overlay tree's parent directory is bound read-write.
+2. **Ineffective read-only socket guard.** The advisor role's read-only bind does not prevent connecting to the daemon socket. Blocks this design: the socket bind is the recursion capability, so it has to actually gate.
+3. **Deny-list ordering no-op.** A deny-list entry nested under the runtime directory is silently un-masked by the later parent bind. Does not block, but will mislead whoever tries to fix the first defect the obvious way.
 
 ## Recommended implementation sequence
 
-1. Add task lineage (`parentTaskId`) without recursive dispatch behavior.
-2. Add daemon-issued self identity and a self-status CLI wrapper; integration-test nested identity masking.
-3. Make the Task Ferry CLI/socket safely available inside sandboxes.
+0. Fix the two blocking prerequisite defects above: narrow the runtime-directory bind, and stop relying on a read-only bind to gate the socket.
+1. Add task lineage (`parentTaskId`, `depth`) without recursive dispatch behavior.
+2. Add daemon-issued self identity and `taskferry self`; integration-test that nested identity resolves to exactly one task per level.
+3. Bind the socket per task, gated on depth. Prove a ferry at the limit cannot dispatch.
 4. Enable nested `dispatch` with daemon-derived parentage.
-5. Solve nested overlay/changeset mapping and prove two- and three-level accept/reject behavior with real integration tests.
-6. Add durable `question` / `answer` plus watch events.
-7. Add minimal lineage observability.
-8. Only then update SDD skills to introduce captain/first-mate recursive decomposition and review loops.
-9. Iterate on decomposition/review policy in skills independently of the substrate.
+5. Add parking, so a ferry blocked in `wait` releases its concurrency slot and is exempt from the inactivity watchdog. This precedes any multi-level work, because without it a two-level hierarchy can deadlock the queue.
+6. Stack overlay lower layers for nested launches; teach overlay cleanup and the orphan sweep to respect lineage.
+7. Retarget accept at the parent's merged view, non-git path first, then the git path. Prove two- and three-level accept/reject with real integration tests.
+8. Add durable `question` / `answer` plus watch events.
+9. Add minimal lineage observability.
+10. Only then update SDD skills to introduce captain/first-mate recursive decomposition and review loops.
+11. Iterate on decomposition/review policy in skills independently of the substrate.
 
 The substrate is complete when an ordinary ferry can safely behave like an orchestrator without Task Ferry needing to know that it is a "first mate."

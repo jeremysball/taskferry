@@ -720,24 +720,24 @@ async function runDoctor(options, deps) {
 // here and registering it below -- the top-level switch is gone. Each handler
 // has its own per-command options shape, so the table is typed loosely and
 // the per-handler JSDoc carries the real signature.
-/** @type {Record<string, (options: object, deps: Deps) => unknown>} */
+/** @type {Record<string, (options: Record<string, unknown>, deps: ResolvedDeps) => unknown>} */
 const HANDLERS = {
-  home: /** @type {(options: object, deps: Deps) => unknown} */ (runHome),
-  version: /** @type {(options: object, deps: Deps) => unknown} */ (runVersion),
-  dispatch: /** @type {(options: object, deps: Deps) => unknown} */ (runDispatch),
-  cancel: /** @type {(options: object, deps: Deps) => unknown} */ (runCancel),
-  accept: /** @type {(options: object, deps: Deps) => unknown} */ (runAccept),
-  reject: /** @type {(options: object, deps: Deps) => unknown} */ (runReject),
-  wait: /** @type {(options: object, deps: Deps) => unknown} */ (runWait),
-  advisor: /** @type {(options: object, deps: Deps) => unknown} */ (runAdvisor),
-  status: /** @type {(options: object, deps: Deps) => unknown} */ (runStatus),
-  tail: /** @type {(options: object, deps: Deps) => unknown} */ (runTail),
-  summary: /** @type {(options: object, deps: Deps) => unknown} */ (runSummary),
-  result: /** @type {(options: object, deps: Deps) => unknown} */ (runResult),
-  list: /** @type {(options: object, deps: Deps) => unknown} */ (runList),
-  watch: /** @type {(options: object, deps: Deps) => unknown} */ (runWatch),
-  context: /** @type {(options: object, deps: Deps) => unknown} */ (runContext),
-  doctor: /** @type {(options: object, deps: Deps) => unknown} */ (runDoctor),
+  home: /** @type {(options: Record<string, unknown>, deps: ResolvedDeps) => unknown} */ (runHome),
+  version: /** @type {(options: Record<string, unknown>, deps: ResolvedDeps) => unknown} */ (runVersion),
+  dispatch: /** @type {(options: Record<string, unknown>, deps: ResolvedDeps) => unknown} */ (runDispatch),
+  cancel: /** @type {(options: Record<string, unknown>, deps: ResolvedDeps) => unknown} */ (runCancel),
+  accept: /** @type {(options: Record<string, unknown>, deps: ResolvedDeps) => unknown} */ (runAccept),
+  reject: /** @type {(options: Record<string, unknown>, deps: ResolvedDeps) => unknown} */ (runReject),
+  wait: /** @type {(options: Record<string, unknown>, deps: ResolvedDeps) => unknown} */ (runWait),
+  advisor: /** @type {(options: Record<string, unknown>, deps: ResolvedDeps) => unknown} */ (runAdvisor),
+  status: /** @type {(options: Record<string, unknown>, deps: ResolvedDeps) => unknown} */ (runStatus),
+  tail: /** @type {(options: Record<string, unknown>, deps: ResolvedDeps) => unknown} */ (runTail),
+  summary: /** @type {(options: Record<string, unknown>, deps: ResolvedDeps) => unknown} */ (runSummary),
+  result: /** @type {(options: Record<string, unknown>, deps: ResolvedDeps) => unknown} */ (runResult),
+  list: /** @type {(options: Record<string, unknown>, deps: ResolvedDeps) => unknown} */ (runList),
+  watch: /** @type {(options: Record<string, unknown>, deps: ResolvedDeps) => unknown} */ (runWatch),
+  context: /** @type {(options: Record<string, unknown>, deps: ResolvedDeps) => unknown} */ (runContext),
+  doctor: /** @type {(options: Record<string, unknown>, deps: ResolvedDeps) => unknown} */ (runDoctor),
 };
 
 // Resolve the default values for the per-command deps once so every handler
@@ -745,9 +745,15 @@ const HANDLERS = {
 // (etc.) through every call.
 /**
  * @param {Deps} deps
+ * @returns {ResolvedDeps}
  */
 function resolveRunCommandDeps(deps) {
-  return {
+  return /** @type {ResolvedDeps} */ ({
+    // No default: `client` is genuinely absent for `version`, the one
+    // handler that answers without the daemon (see Deps.client above).
+    // ResolvedDeps declares it required because every other handler does
+    // require it; the cast on this return documents that one exception
+    // rather than widening the type for every handler.
     client: deps.client,
     io: deps.io ?? process,
     signal: deps.signal,
@@ -758,12 +764,12 @@ function resolveRunCommandDeps(deps) {
     runShellCommand: deps.runShellCommand ?? defaultShellRunner,
     platform: deps.platform ?? process.platform,
     resolveWorkspaceRoot: deps.resolveWorkspaceRoot ?? resolveWorkspaceRoot,
-  };
+  });
 }
 
 /**
  * @param {string} command
- * @param {object} options
+ * @param {Record<string, unknown>} options
  * @param {Deps} [deps]
  */
 export async function runCommand(command, options, deps = /** @type {Deps} */ ({})) {

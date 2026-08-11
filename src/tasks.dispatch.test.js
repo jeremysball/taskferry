@@ -1155,4 +1155,41 @@ describe("opencode variants cache warm-up", () => {
     await new Promise((resolve) => setImmediate(resolve));
     assert.equal(called, 1);
   });
+
+  test("warm-up writes the cache under the daemon's effective env (envFileVars included), so an omitted --variant resolves the model's cached highest", async () => {
+    // Regression: warmAndScheduleVariantsCacheRefresh() fingerprinted the
+    // cache against raw process.env, but resolveOpencodeVariants() reads it
+    // under the sanitized merge (process.env + envFileVars + caller env).
+    // When envFileVars overrides a fingerprint-relevant var, the warm's file
+    // never matched a dispatch's read -- every dispatch was a cache miss and
+    // the highest-thinking default silently never applied. FAKE_TF_TEST_API_KEY
+    // is unlikely to already be set on any real host's env.
+    const FAKE_KEY_NAME = "FAKE_TF_TEST_API_KEY";
+    const stateDir = mkdtempTracked(AXI_TASKS_TEST_DIR);
+    const defaultCacheDir = mkdtempTracked(AXI_TASKS_CACHE_DIR);
+    const cacheFile = path.join(defaultCacheDir, "opencode-variants.json");
+    let captured = null;
+    const mgr = trackManager(createTaskManager({
+      stateDir,
+      cacheDir: defaultCacheDir,
+      sandboxEnabled: false,
+      overlayEnabled: false,
+      overlayTmpRoot: mkdtempTracked(AXI_TASKS_OVERLAY_DIR),
+      lowerdirStaggerMs: 0,
+      spawnFn: (_cmd, args) => { captured = args; return fakeChild(); },
+      killFn: () => {},
+      // envFile config whose contents override a credential var the
+      // fingerprint reads (the effective spawn env for every dispatch).
+      envFileVars: { [FAKE_KEY_NAME]: "from-env-file" },
+      opencodeListModelVariantsFn: async () => new Map([[LUNA_MODEL, ["low", "high", "max"]]]),
+    }));
+    // The daemon warms the cache in the background; wait for the file rather
+    // than racing the async refresh.
+    for (let i = 0; i < 100 && !fs.existsSync(cacheFile); i++) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.equal(fs.existsSync(cacheFile), true, "warm should have written the variants cache");
+    mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), model: LUNA_MODEL, executor: "opencode" });
+    assert.equal(captured[captured.indexOf("--variant") + 1], "max");
+  });
 });

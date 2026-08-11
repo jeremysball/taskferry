@@ -4620,7 +4620,7 @@ function bootstrapManagerContext(ctx) {
   // test has injected opencodeVariantsTable directly (Task 6), since that
   // seam bypasses the cache file altogether.
   if (!ctx.opts.opencodeVariantsTable) {
-    warmAndScheduleVariantsCacheRefresh(ctx.opts);
+    warmAndScheduleVariantsCacheRefresh(ctx.opts, ctx.env.sanitizedEnvironment);
   }
 }
 
@@ -4631,11 +4631,18 @@ function bootstrapManagerContext(ctx) {
  * `readVariantsCache()`); it only pays for the ~3s `opencode models
  * --verbose` shell-out once every `DEFAULT_VARIANT_CACHE_TTL_MS` (24h).
  * @param {ResolvedTaskManagerOptions} opts
+ * @param {(env?: NodeJS.ProcessEnv) => NodeJS.ProcessEnv} sanitizeEnvironment The same
+ * env merge dispatch() fingerprints the cache against (process.env +
+ * envFileVars + caller env). Fingerprinting the warm against raw
+ * process.env while dispatch reads under the sanitized merge meant any
+ * envFile/denylist change to a credential var made the cache a permanent
+ * miss -- the highest-thinking default silently never applied.
  */
-function warmAndScheduleVariantsCacheRefresh(opts) {
+function warmAndScheduleVariantsCacheRefresh(opts, sanitizeEnvironment) {
   const maybeRefresh = () => {
-    if (readVariantsCache({ cacheDir: opts.cacheDir, env: process.env }) !== null) return;
-    refreshVariantsCache({ cacheDir: opts.cacheDir, env: process.env, listModelVariantsFn: opts.opencodeListModelVariantsFn })
+    const env = sanitizeEnvironment(process.env);
+    if (readVariantsCache({ cacheDir: opts.cacheDir, env: env }) !== null) return;
+    refreshVariantsCache({ cacheDir: opts.cacheDir, env: env, listModelVariantsFn: opts.opencodeListModelVariantsFn })
       .catch((err) => process.stderr.write(`warning: opencode variants cache refresh failed: ${errMessage(err)}\n`));
   };
   maybeRefresh();

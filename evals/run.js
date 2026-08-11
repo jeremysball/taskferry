@@ -44,7 +44,12 @@ fs.cpSync(path.join(root, "skills", "using-taskferry"), path.join(sandbox, "skil
 fs.mkdirSync(path.join(sandbox, "bin"), { recursive: true });
 fs.copyFileSync(fixturePath, path.join(sandbox, "fixture.json"));
 
-const logPath = path.join(sandbox, "commands.jsonl");
+// The command log must live OUTSIDE the dispatched --directory. That directory
+// is a copy-on-write overlay, so a log written inside it never reaches the host
+// unless the changeset is extracted, and the sandbox is not a git repo for a
+// diff to be computed against. A separate dir bound read-write lands directly.
+const logDir = fs.mkdtempSync(path.join(os.tmpdir(), `taskferry-evallog-${fixture.name}-`));
+const logPath = path.join(logDir, "commands.jsonl");
 const launcher = path.join(sandbox, "bin", "taskferry");
 fs.writeFileSync(
   launcher,
@@ -76,9 +81,12 @@ const delimiter = `TF_EOF_${crypto.randomBytes(8).toString("hex")}`;
 if (prompt.split("\n").includes(delimiter)) throw new Error("delimiter collision");
 
 const variantFlag = args.variant ? ` --variant ${args.variant}` : "";
+// --rw-bind is required for the log dir: the sandbox mounts an empty /tmp, so a
+// host path under /tmp is otherwise invisible to the worker.
 const command =
   `taskferry dispatch --prompt - --directory ${JSON.stringify(sandbox)} --model ${args.model}` +
-  `${variantFlag} --class skill-eval-${fixture.name} <<'${delimiter}'\n${prompt}\n${delimiter}\n`;
+  `${variantFlag} --rw-bind ${JSON.stringify(logDir)} --class skill-eval-${fixture.name}` +
+  ` <<'${delimiter}'\n${prompt}\n${delimiter}\n`;
 
 process.stdout.write(`sandbox: ${sandbox}\ndispatching ${args.model}${variantFlag} for ${fixture.name}\n`);
 const dispatched = spawnSync("/bin/bash", ["-c", command], { encoding: ENCODING });
@@ -97,9 +105,9 @@ if (!taskId) {
 process.stdout.write(`waiting on ${taskId}\n`);
 spawnSync("taskferry", ["wait", taskId], { encoding: ENCODING, env: { ...process.env, TASKFERRY_WAIT_DEFAULT_TIMEOUT_MS: "0" } });
 
-// The worker writes into an overlay, so the log has to come back through the
-// changeset rather than off the host filesystem.
-spawnSync("taskferry", ["accept", taskId, "--force"], { encoding: ENCODING });
+// Nothing to accept: the eval only cares about the command log, which the
+// --rw-bind above already landed on the host. Release the overlay instead.
+spawnSync("taskferry", ["reject", taskId], { encoding: ENCODING });
 
 const scored = scoreRun(fixture, readCommandLog(logPath));
 process.stdout.write(`\n${formatReport(fixture, scored)}\n`);

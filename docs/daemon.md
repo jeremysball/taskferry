@@ -385,6 +385,11 @@ profiling is diagnostic, not on the request's critical path.
   refresh after two seconds and stop rendering after ten seconds if refreshes
   fail. Refresh commands keep `TASKFERRY_AUTO_START=0`, so a statusline poll
   never boots the daemon.
+- `tf-sl` printing bare, uncolored pipe-delimited text (`id|status|running|queued`
+  plus a summary line and a freshness flag) when run by hand from a terminal —
+  expected, not a broken render. `tf-sl` does no width or color rendering of
+  its own; it is a data source for a caller's statusline script, which owns
+  every presentation decision (mode/width tiers, coloring, id truncation).
 - `status: "unknown"` after a daemon restart — expected; see
   `docs/daemon.md#recovery`. There is deliberately no re-attachment to
   already-running child processes.

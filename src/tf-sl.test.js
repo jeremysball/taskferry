@@ -7,7 +7,6 @@ import { after, test } from "node:test";
 import { fileURLToPath } from "node:url";
 
 const STATUSLINE = fileURLToPath(new URL("./tf-sl.sh", import.meta.url));
-const ANSI_RE = new RegExp(`${String.fromCharCode(0x1b)}\\[[0-9;]*m`, "g");
 const REFRESH_DID_NOT_PUBLISH = "background refresh did not publish a snapshot";
 const trackedRoots = [];
 
@@ -69,7 +68,6 @@ esac
       TASKFERRY_SOCKET_PATH: path.join(runtime, "taskferry.sock"),
       TASKFERRY_TEST_CALL_LOG: callLog,
       TASKFERRY_TEST_DELAY_SECONDS: delaySeconds,
-      COLUMNS: "120",
     },
   };
 }
@@ -122,7 +120,7 @@ async function waitFor(predicate, message, timeoutMs = 3000) {
   return assert.fail(message);
 }
 
-test("returns a cold statusline immediately, then renders the cached task", async () => {
+test("returns a cold statusline immediately, then the raw fields for the cached task", async () => {
   const fixture = makeFixture();
   const first = await runStatusline(fixture);
   assert.equal(first.stdout, "");
@@ -130,7 +128,9 @@ test("returns a cold statusline immediately, then renders the cached task", asyn
 
   await waitFor(() => findSnapshot(fixture), REFRESH_DID_NOT_PUBLISH);
   const second = await runStatusline(fixture);
-  assert.match(second.stdout.replace(ANSI_RE, ""), /^tf:12345678 running \(1r\/2q\)$/);
+  // Raw, uncolored, mode-agnostic: id|status|running|queued, then the
+  // summary text, then "1" since this summary was just first seen.
+  assert.equal(second.stdout, "oc_12345678|running|1|2\nIndexing files\n1\n");
   assert.deepEqual(readCalls(fixture), [
     `list --directory ${fixture.workspace} --limit 5`,
     "status oc_12345678",

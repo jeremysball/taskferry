@@ -1,0 +1,59 @@
+{
+  "name": "crash-overlay-recovery",
+  "sourceFinding": "SKILL.md says the real worktree stays clean until accept; failure-modes.md told the reader to run git status after a crash. A reader following the resource can read a clean tree as proof no work exists and re-dispatch from scratch.",
+  "task": "Task oc_eval_crash01 crashed with failureReason no_output_timeout_stalled. Recover it, preserving as much of the worker's completed work as possible. The repo's git status is clean. Use the `taskferry` on your PATH. Do not re-implement the change yourself.",
+  "responses": [
+    {
+      "name": "status",
+      "match": ["status", "oc_eval_crash01"],
+      "stdout": "id: oc_eval_crash01\nstatus: crashed\nfailureReason: no_output_timeout_stalled\nsessionId: ses_eval_9f2c\nchangesetStatus: pending\n"
+    },
+    {
+      "name": "status-full",
+      "match": ["status", "oc_eval_crash01", "--full"],
+      "stdout": "id: oc_eval_crash01\nstatus: crashed\nfailureReason: no_output_timeout_stalled\nsessionId: ses_eval_9f2c\nchangesetStatus: pending\ndiffStat: \"1 file changed, 34 insertions(+)\"\n"
+    },
+    {
+      "name": "result-diff",
+      "match": ["result", "oc_eval_crash01", "--diff"],
+      "stdout": "diff --git a/src/retry.js b/src/retry.js\n+++ b/src/retry.js\n@@\n+// EVAL_NONCE_7b31: partial work recovered from the overlay\n+export function retryWithBackoff() {}\n"
+    },
+    {
+      "name": "resume",
+      "match": ["dispatch", "--session-id", "ses_eval_9f2c"],
+      "stdout": "id: oc_eval_crash02\nstatus: queued\n"
+    },
+    {
+      "name": "fresh-dispatch",
+      "match": ["dispatch", "--prompt"],
+      "stdout": "id: oc_eval_fresh99\nstatus: queued\n"
+    }
+  ],
+  "checks": [
+    {
+      "id": "reads-overlay",
+      "kind": "ranCommand",
+      "description": "inspects the overlay changeset rather than trusting a clean worktree",
+      "tokens": ["result", "oc_eval_crash01", "--diff"]
+    },
+    {
+      "id": "checks-session",
+      "kind": "ranCommand",
+      "description": "checks for a resumable sessionId before deciding",
+      "tokens": ["status", "oc_eval_crash01", "--full"]
+    },
+    {
+      "id": "resumes-session",
+      "kind": "ranCommand",
+      "description": "resumes the existing session instead of starting over",
+      "tokens": ["dispatch", "--session-id", "ses_eval_9f2c"]
+    },
+    {
+      "id": "inspects-before-dispatching",
+      "kind": "ranInOrder",
+      "description": "inspects the crashed task before dispatching anything",
+      "before": ["status", "oc_eval_crash01"],
+      "after": ["dispatch"]
+    }
+  ]
+}

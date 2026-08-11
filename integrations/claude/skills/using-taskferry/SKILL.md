@@ -67,6 +67,17 @@ quick dispatch. Branch isolation (parallel sessions on different branches
 without a switch race) is the other standing reason worktrees help beyond
 this.
 
+**Two flags turn that isolation off, and both change how you verify a
+result.** `--no-overlay` runs the dispatch without the copy-on-write overlay,
+so writes land in the directory immediately and are not gated by
+`accept`/`reject`. `--no-sandbox` runs it without the bwrap filesystem
+sandbox (sandboxing is the default on Linux). Everything below, and the whole
+accept/reject loop, assumes the default overlayed dispatch. Under
+`--no-overlay` there is no changeset to inspect and no accept step, so
+`git status` in the directory becomes the way to see what happened, and a bad
+dispatch has already written to your tree. Reach for either flag only when you
+specifically want that.
+
 **A worker's writes only land somewhere durable inside `--directory`.** The
 sandbox mounts `--directory` as the one copy-on-write overlay and binds the
 rest of the root read-only, plus a small set of explicitly read-write paths
@@ -129,6 +140,24 @@ allowed dirs) instead of symlinking across the sandbox boundary.
   (`--prompt "$(cat some_file)"`) — both risk shell-quoting breakage on prompts
   containing quotes, `$`, or backticks, and substitution is capped by the
   platform's argv-length limit on large prompts.
+- **The delimiter must not appear on its own line anywhere inside the prompt.**
+  A heredoc ends at the first line equal to its delimiter, so a prompt that
+  contains a bare `PROMPT_EOF` is silently cut off there, and whatever followed
+  is handed to the shell as commands. Nothing errors: `taskferry` receives a
+  truncated prompt, the worker answers the question it was actually asked, and
+  the task settles `done` with `exitCode: 0`. **Whenever the prompt embeds
+  content you did not write** (a file's contents, a diff, a transcript, another
+  prompt), pick a delimiter and verify it is absent from the payload before
+  dispatching, rather than reaching for `PROMPT_EOF` out of habit. A random
+  suffix makes collision effectively impossible:
+
+  ```sh
+  TF_EOF="TF_EOF_$(head -c8 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+  grep -qxF "$TF_EOF" prompt-payload && echo "delimiter collides, regenerate" >&2
+  ```
+
+  This bites hardest on prompts that embed taskferry's own documentation,
+  because every example of this very rule contains the literal token.
 - End every dispatch prompt with an explicit instruction to close on a line
   starting `Status:` — one of `DONE | DONE_WITH_CONCERNS | BLOCKED |
   NEEDS_CONTEXT` for implementers, or `Approved | Needs fixes` after a `Task
@@ -151,7 +180,7 @@ PROMPT_EOF
 Then wait for settlement, and inspect:
 
 ```sh
-taskferry wait <id> --summarize   # blocks until settled, streams progress
+taskferry wait <id> --summarize   # blocks, streams progress; check the status it returns
 taskferry status <id>             # point-in-time state, including checkStatus
 taskferry tail <id> --chars 2000  # one-shot look at recent narration
 taskferry result <id>             # the settled result

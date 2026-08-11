@@ -19,9 +19,24 @@ out of `taskferry result` or `taskferry tail`. Don't poll for a report file or a
 commit to appear, and don't `tail` mid-run just to check progress absent a real
 need to inspect activity.
 
-**Do not pass `--timeout` to `taskferry wait`.** The process exits on its own the
-moment the task settles; a timeout only makes the caller re-issue `wait` in a
-polling loop for no benefit.
+**`wait` returning is not the same as the task settling.** `wait` carries a
+default timeout of 15 minutes (`DEFAULT_WAIT_TIMEOUT_MS` in
+`src/commands.js`), and when that fires it returns the task detail with
+`status: "running"` or `"queued"` and exits **0**. A long task therefore
+produces a clean, successful-looking `wait` exit while the worker is still
+going. **Always read `status` off what `wait` returned; never treat the
+command's exit alone as settlement.** If it came back non-terminal, re-issue
+`wait` on the same id.
+
+To block for as long as a task actually takes, set
+`TASKFERRY_WAIT_DEFAULT_TIMEOUT_MS=0`, which disables the default timeout
+entirely. That is the right setting for an unattended dispatch you intend to
+wait out.
+
+**Do not pass `--timeout` to `taskferry wait`** to shorten that window.
+Deliberately timing out early only makes the caller re-issue `wait` in a
+polling loop for no benefit; the fix for a long task is to disable the
+timeout, not to shorten it.
 
 `wait` also takes a `--tail-chars <number>` option, but it only fires on a
 timeout (trailing text characters from that point) — including the default
@@ -74,8 +89,10 @@ different purpose), never a per-task `wait`.
 second, per-task `Monitor` for it — the fleet-wide `watch --summaries`
 `Monitor` armed once per session (below) already surfaces every ferry's
 progress, this one included, as periodic batched notifications.
-`run_in_background` notifies once, on the whole command's exit; that
-notification is the settlement signal for this specific task.
+`run_in_background` notifies once, on the whole command's exit. Treat that
+notification as "go read the result," not as proof the task settled: per the
+default-timeout rule above, `wait` can exit 0 with the task still running.
+Check `status` on what it returned before reporting anything as done.
 
 **Never reach for `ScheduleWakeup` to wait on a settling ferry.**
 `ScheduleWakeup` exists to self-pace a `/loop` session between iterations —
@@ -227,15 +244,35 @@ reuses the same watcher rather than spawning a duplicate:
 
 ```sh
 WATCH_DIR="<this repo's root, e.g. the main checkout's path>"
-SLUG=$(echo "$WATCH_DIR" | tr -c 'A-Za-z0-9_-' '-')
-FLEET_LOG="/tmp/taskferry-fleet-watch${SLUG}.log"
-FLEET_PID="/tmp/taskferry-fleet-watch${SLUG}.pid"
-if ! kill -0 "$(cat "$FLEET_PID" 2>/dev/null)" 2>/dev/null; then
-  taskferry watch --summaries --flush-interval 15m --directory "$WATCH_DIR" > "$FLEET_LOG" 2>&1 &
-  disown
-  echo $! > "$FLEET_PID"
+SLUG=$(printf '%s' "$WATCH_DIR" | sha256sum | cut -c1-16)
+FLEET_LOG="/tmp/taskferry-fleet-watch-${SLUG}.log"
+FLEET_PID="/tmp/taskferry-fleet-watch-${SLUG}.pid"
+FLEET_LOCK="/tmp/taskferry-fleet-watch-${SLUG}.lock"
+if mkdir "$FLEET_LOCK" 2>/dev/null; then
+  if ! kill -0 "$(cat "$FLEET_PID" 2>/dev/null)" 2>/dev/null; then
+    taskferry watch --summaries --flush-interval 15m --directory "$WATCH_DIR" > "$FLEET_LOG" 2>&1 &
+    disown
+    echo $! > "$FLEET_PID"
+  fi
+  rmdir "$FLEET_LOCK"
 fi
 ```
+
+Two details in that snippet are load-bearing, and both replace an earlier
+version that got them wrong:
+
+- **The slug is a hash, not a character substitution.** Mapping every
+  non-alphanumeric byte to `-` collides: `/tmp/a/b` and `/tmp/a-b` both
+  become `-tmp-a-b-`, so two unrelated repos would share one log and one pid
+  file, and each would see the other's events. A hash of the full path
+  collides only on a genuine hash collision.
+- **The pid check is wrapped in a `mkdir` lock.** A bare `kill -0` test
+  followed by a spawn is check-then-act: two sessions starting at the same
+  moment both see no live pid, both spawn, and the second overwrites the
+  first's pid file, leaking an untracked watcher. `mkdir` fails atomically if
+  the directory exists, so exactly one session enters the branch. A session
+  that loses the race skips arming, which is correct: the winner's watcher
+  covers the same repo.
 
 Then arm a `Monitor` tailing `$FLEET_LOG` (`tail -n0 -F "$FLEET_LOG"`,
 `persistent: true`) — one notification per flush tick instead of one per raw

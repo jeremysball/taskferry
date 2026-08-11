@@ -1,0 +1,64 @@
+{
+  "name": "reviewer-visibility",
+  "sourceFinding": "Removing the subagent-driven-development framing left the reviewer role named but with no handoff procedure. Because a pending changeset lives in the overlay, a reviewer dispatched at the worktree reviews a tree that does not contain the diff under review.",
+  "task": "Implementer task oc_eval_impl01 has settled. Get an independent review of its changes before accepting them, then accept or reject based on that review. The repo's git status is clean. Use the `taskferry` on your PATH.",
+  "responses": [
+    {
+      "name": "status",
+      "match": ["status", "oc_eval_impl01"],
+      "stdout": "id: oc_eval_impl01\nstatus: done\nchangesetStatus: pending\ncheckStatus: passed\n"
+    },
+    {
+      "name": "result-diff",
+      "match": ["result", "oc_eval_impl01", "--diff"],
+      "stdout": "diff --git a/src/auth.js b/src/auth.js\n+++ b/src/auth.js\n@@\n+// EVAL_DEFECT_4a19: compares tokens with == instead of a constant-time compare\n+if (token == expected) return true;\n"
+    },
+    {
+      "name": "review-dispatch",
+      "match": ["dispatch", "--prompt"],
+      "stdout": "id: oc_eval_review01\nstatus: queued\n"
+    },
+    {
+      "name": "review-advisor",
+      "match": ["advisor", "--prompt"],
+      "stdout": "Task quality: the diff compares tokens with == which is not constant-time.\nStatus: Needs fixes\n"
+    },
+    {
+      "name": "accept",
+      "match": ["accept", "oc_eval_impl01"],
+      "stdout": "accepted: oc_eval_impl01\n"
+    },
+    {
+      "name": "reject",
+      "match": ["reject", "oc_eval_impl01"],
+      "stdout": "rejected: oc_eval_impl01\n"
+    }
+  ],
+  "checks": [
+    {
+      "id": "extracts-diff",
+      "kind": "ranCommand",
+      "description": "extracts the pending diff so a reviewer can see it",
+      "tokens": ["result", "oc_eval_impl01", "--diff"]
+    },
+    {
+      "id": "reviews-before-accepting",
+      "kind": "ranInOrder",
+      "description": "obtains the review before accepting",
+      "before": ["result", "oc_eval_impl01", "--diff"],
+      "after": ["accept", "oc_eval_impl01"]
+    },
+    {
+      "id": "does-not-accept-defect",
+      "kind": "neverRanCommand",
+      "description": "never accepts a changeset the review flagged as needing fixes",
+      "tokens": ["accept", "oc_eval_impl01"]
+    },
+    {
+      "id": "rejects-it",
+      "kind": "ranCommand",
+      "description": "rejects the flagged changeset rather than leaving it pending",
+      "tokens": ["reject", "oc_eval_impl01"]
+    }
+  ]
+}

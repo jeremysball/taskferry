@@ -28,10 +28,15 @@ not proof the task failed:
   you left off and finish the task.` and a `PROMPT_EOF` terminator.
 - If `sessionId` is null, nothing was salvageable (the process never got far
   enough to start a session) — dispatching fresh is the only option.
-- Inspect the worktree (`git status`, `git diff --stat`, look for the expected
-  new/changed files) before deciding whether to resume or restart. A crash can
-  land mid-write; verify what actually landed on disk rather than assuming
-  either "nothing happened" or "it finished."
+- Check what actually landed before deciding whether to resume or restart. **On
+  an ordinary (overlayed) dispatch, `git status` in the worktree is the wrong
+  place to look**: the crash killed the worker, but its writes went to the
+  overlay, so the real worktree is clean whether the task did everything or
+  nothing. Use `taskferry result <id> --diff` (and `--fields diffStat`), which
+  reads the overlay, and treat a clean `git status` as no evidence either way.
+  Only on a `--no-overlay` dispatch do the worker's writes land in the
+  directory itself, and only then does `git status` / `git diff --stat` answer
+  the question.
 - Two or more consecutive `no_output_timeout_*` crashes on the same
   prompt+model+variant combination, especially with `sessionId: null` every
   time, is a signal to change something rather than retry unchanged: drop to a

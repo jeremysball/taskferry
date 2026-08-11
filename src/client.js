@@ -241,6 +241,18 @@ export function ensureDaemonStarted({
  * @typedef {(event: Record<string, unknown>) => void} EventHandler
  */
 
+/**
+ * The transport surface every daemon-facing consumer (commands.js,
+ * commands-stream.js, opencode-plugin.js) actually depends on. `DaemonClient`
+ * below satisfies it; this is the one canonical typedef other modules import
+ * instead of redeclaring their own copy. `close` is required — some callers
+ * (opencode-plugin.js) invoke it unguarded.
+ * @typedef {object} ClientTransport
+ * @property {(method: string, params?: Record<string, unknown>) => Promise<unknown>} request
+ * @property {(params: Record<string, unknown>, onEvent: EventHandler) => Promise<string>} subscribe
+ * @property {() => void} close
+ */
+
 class DaemonClient {
   /** @type {net.Socket} */
   socket;

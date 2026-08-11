@@ -29,15 +29,11 @@ const TASK_STATE_EVENT_TYPE = "task.state";
  */
 
 /**
- * @typedef {object} Client
- * @property {(method: string, params?: Record<string, unknown>) => Promise<any>} request
- * @property {(params: Record<string, unknown>, onEvent: (event: Record<string, unknown>) => void) => Promise<string>} subscribe
- * @property {() => void} [close]
+ * @typedef {import("./client.js").ClientTransport} Client
  */
 
 /**
- * @typedef {object} Io
- * @property {{write: (chunk: string) => unknown, isTTY?: boolean}} stdout
+ * @typedef {import("./output.js").IoLike} Io
  */
 
 // Watch considers a task "settled" (no further events worth emitting) when
@@ -189,7 +185,8 @@ function streamTaskEvents({ client, io, signal, directory, taskId, all, summarie
       // resolving task.status above and the subscription actually registering, would
       // otherwise never deliver a terminal event and hang forever.
       if (!taskId || settled) return undefined;
-      return client.request(TASK_STATUS_METHOD, { taskId }).then((detail) => {
+      return client.request(TASK_STATUS_METHOD, { taskId }).then((rawDetail) => {
+        const detail = /** @type {{id: string, directory: string, status: string, originSessionId?: string|null}} */ (rawDetail);
         if (settled || !TERMINAL_STATUSES.has(detail.status)) return;
         const event = terminalEventFromStatus(detail);
         resolvedDirectory = detail.directory;

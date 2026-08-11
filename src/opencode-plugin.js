@@ -62,10 +62,7 @@ export const TERMINAL_STATUSES = new Set(["done", "crashed", "cancelled"]);
  */
 
 /**
- * @typedef {object} DaemonClient
- * @property {(method: string, params?: Record<string, unknown>) => Promise<unknown>} request
- * @property {(params: Record<string, unknown>, onEvent: (event: Record<string, unknown>) => void) => Promise<unknown>} subscribe
- * @property {() => void} close
+ * @typedef {import("./client.js").ClientTransport} DaemonClient
  */
 
 /**

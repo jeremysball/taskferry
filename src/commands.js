@@ -43,15 +43,11 @@ const ADVISOR_SUMMARIZE_MODEL = "opencode/mimo-v2.5-free";
 const ADVISOR_SUMMARIZE_TIMEOUT_MS = 120000;
 
 /**
- * @typedef {object} Client
- * @property {(method: string, params?: Record<string, unknown>) => Promise<any>} request
- * @property {(params: Record<string, unknown>, onEvent: (event: Record<string, unknown>) => void) => Promise<string>} subscribe
- * @property {() => void | Promise<void>} [close]
+ * @typedef {import("./client.js").ClientTransport} Client
  */
 
 /**
- * @typedef {object} Io
- * @property {{write: (chunk: string) => unknown, isTTY?: boolean}} stdout
+ * @typedef {import("./output.js").IoLike} Io
  */
 
 /**
@@ -91,7 +87,7 @@ const ADVISOR_SUMMARIZE_TIMEOUT_MS = 120000;
  * error, timeout, empty result) it returns `text` unchanged, since
  * condensation is a convenience, not a hard dependency of a working
  * advisor call.
- * @param {{request: (method: string, params?: Record<string, unknown>) => Promise<any>}} client
+ * @param {Pick<Client, "request">} client
  * @param {string} text
  * @param {{env: NodeJS.ProcessEnv, directory: string}} options
  * @returns {Promise<string>}
@@ -99,14 +95,14 @@ const ADVISOR_SUMMARIZE_TIMEOUT_MS = 120000;
 async function summarizeContextText(client, text, { env, directory }) {
   const prompt = `Condense the following into a dense technical summary preserving key facts, decisions, and code references. Do not add commentary or a preamble.\n\n${text}`;
   try {
-    const dispatched = await client.request("task.dispatch", {
+    const dispatched = /** @type {{id: string}} */ (await client.request("task.dispatch", {
       env,
       prompt,
       directory,
       model: env.TASKFERRY_ADVISOR_SUMMARIZER_MODEL || ADVISOR_SUMMARIZE_MODEL,
-    });
+    }));
     await client.request("task.wait", { taskId: dispatched.id, timeoutMs: ADVISOR_SUMMARIZE_TIMEOUT_MS });
-    const result = await client.request("task.result", { taskId: dispatched.id, fields: ["message"] });
+    const result = /** @type {{message?: string}} */ (await client.request("task.result", { taskId: dispatched.id, fields: ["message"] }));
     if (typeof result.message === "string" && result.message.length) return result.message;
   } catch {
     // best-effort -- fall through to the raw text below.
@@ -177,7 +173,7 @@ function isSet(value) {
  */
 async function runHome(options, { client, executablePath, cwd, resolveWorkspaceRoot: resolveWorkspaceRootFn }) {
   const directory = normalizeDirectory(options.directory || resolveWorkspaceRootFn(cwd));
-  const listed = await client.request(TASK_LIST_METHOD, { directory });
+  const listed = /** @type {import("./output.js").ListValue} */ (await client.request(TASK_LIST_METHOD, { directory }));
   return homeView(projectList(listed, { limit: Infinity }), { executablePath, workspace: directory });
 }
 
@@ -257,7 +253,9 @@ function warnIfCleanupFailed(label, result) {
  * @param {ResolvedDeps} deps
  */
 async function runAccept(options, { client }) {
-  const accepted = await client.request("task.accept", { taskId: options.taskId, ...(options.force === true && { force: true }) });
+  const accepted = /** @type {{applied?: boolean, checkStatus?: string|null, cleanupFailed?: boolean, taskId: string}} */ (
+    await client.request("task.accept", { taskId: options.taskId, ...(options.force === true && { force: true }) })
+  );
   // Review finding #11: a failed cleanup must not be swallowed -- without
   // this, the leftover overlay is invisible until the daemon-restart sweep.
   warnIfCleanupFailed("changeset applied", accepted);
@@ -273,7 +271,7 @@ async function runAccept(options, { client }) {
  * @param {ResolvedDeps} deps
  */
 async function runReject(options, { client }) {
-  const rejected = await client.request("task.reject", { taskId: options.taskId });
+  const rejected = /** @type {{cleanupFailed?: boolean, taskId: string}} */ (await client.request("task.reject", { taskId: options.taskId }));
   warnIfCleanupFailed("changeset rejected", rejected);
   return rejected;
 }
@@ -288,7 +286,7 @@ async function runReject(options, { client }) {
  * @param {ResolvedDeps} deps
  */
 async function runWaitWithSummarize(options, { client, io, signal }) {
-  const initial = await client.request(TASK_STATUS_METHOD, { taskId: options.taskId });
+  const initial = /** @type {import("./output.js").StatusDetailBase} */ (await client.request(TASK_STATUS_METHOD, { taskId: options.taskId }));
   const streamed = await streamTaskEvents({
     client,
     io,
@@ -304,7 +302,7 @@ async function runWaitWithSummarize(options, { client, io, signal }) {
     // Ctrl-C. Skip it and report the last known state instead.
     return leanStatus(streamed.event ? { ...initial, status: streamed.event.status } : initial, { full: options.full });
   }
-  const detail = await client.request(TASK_STATUS_METHOD, { taskId: options.taskId });
+  const detail = /** @type {import("./output.js").StatusDetailBase} */ (await client.request(TASK_STATUS_METHOD, { taskId: options.taskId }));
   return leanStatus(detail, { full: options.full });
 }
 
@@ -318,11 +316,11 @@ async function runWaitWithSummarize(options, { client, io, signal }) {
  */
 async function runWaitWithoutSummarize(options, { client, env }) {
   const waitTimeoutMs = options.timeoutMs ?? resolveWaitDefaultTimeoutMs(env);
-  const detail = await client.request("task.wait", {
+  const detail = /** @type {import("./output.js").StatusDetailBase} */ (await client.request("task.wait", {
     taskId: options.taskId,
     ...(waitTimeoutMs != null && { timeoutMs: waitTimeoutMs }),
     ...(isSet(options.tailChars) && { tailChars: options.tailChars }),
-  });
+  }));
   return leanStatus(detail, { full: options.full });
 }
 
@@ -434,7 +432,7 @@ async function runAdvisor(options, { client, env, cwd, homeDirectory }) {
  * @param {ResolvedDeps} deps
  */
 async function runStatus(options, { client }) {
-  const detail = await client.request(TASK_STATUS_METHOD, { taskId: options.taskId });
+  const detail = /** @type {import("./output.js").StatusDetailBase} */ (await client.request(TASK_STATUS_METHOD, { taskId: options.taskId }));
   return leanStatus(detail, { full: options.full });
 }
 
@@ -459,10 +457,10 @@ async function runTail(options, { client }) {
  */
 async function runSummaryWait(options, { client, env }) {
   const waitTimeoutMs = resolveWaitDefaultTimeoutMs(env);
-  const waited = await client.request("task.wait", {
+  const waited = /** @type {import("./output.js").StatusDetailBase} */ (await client.request("task.wait", {
     taskId: options.taskId,
     ...(waitTimeoutMs != null && { timeoutMs: waitTimeoutMs }),
-  });
+  }));
   if (waited.status === "running" || waited.status === "queued") {
     return {
       ...leanStatus(waited, { full: options.full }),
@@ -492,12 +490,12 @@ async function runSummary(options, { client, env }) {
   // caller env into. Report mode (the default) and any future mode
   // keep forwarding env exactly as before.
   const isActivity = options.mode === "activity";
-  const summary = await client.request("task.summary", {
+  const summary = /** @type {Record<string, unknown>} */ (await client.request("task.summary", {
     taskId: options.taskId,
     ...(isSet(options.maxWords) && { maxWords: options.maxWords }),
     ...(isActivity && { mode: options.mode }),
     ...(isActivity ? null : { env }),
-  });
+  }));
   return isActivity ? { mode: options.mode, ...summary } : summary;
 }
 
@@ -517,11 +515,11 @@ async function runResult(options, { client }) {
   // so the local-narrowing step mirrors the server-side contract regardless
   // of which branch was taken above.
   const fields = options.diff ? ["diff"] : options.fields;
-  const detail = await client.request("task.result", {
+  const detail = /** @type {import("./output.js").ResultDetailBase} */ (await client.request("task.result", {
     taskId: options.taskId,
     ...(fields && { fields }),
     ...(options.full && !options.diff && { full: true }),
-  });
+  }));
   return leanResult(detail, /** @type {{full?: boolean, fields?: string[]}} */ ({ full: options.full, fields }));
 }
 
@@ -534,7 +532,7 @@ async function runResult(options, { client }) {
  */
 async function runList(options, { client, cwd, resolveWorkspaceRoot: resolveWorkspaceRootFn }) {
   const params = options.all ? {} : { directory: normalizeDirectory(options.directory || resolveWorkspaceRootFn(cwd)) };
-  const listed = await client.request(TASK_LIST_METHOD, params);
+  const listed = /** @type {import("./output.js").ListValue} */ (await client.request(TASK_LIST_METHOD, params));
   return projectList(listed, { limit: options.limit });
 }
 
@@ -560,7 +558,7 @@ async function runWatch(options, { client, io, signal, cwd, resolveWorkspaceRoot
  */
 async function runContext(options, { client, cwd, resolveWorkspaceRoot: resolveWorkspaceRootFn }) {
   const directory = normalizeDirectory(options.directory || resolveWorkspaceRootFn(cwd));
-  const context = await client.request("task.context", { directory });
+  const context = /** @type {import("./output.js").ListValue} */ (await client.request("task.context", { directory }));
   return contextForHook(projectContext(context), options.format);
 }
 
@@ -581,7 +579,7 @@ async function runDoctorChecks({ client, homeDirectory, env, runShellCommand, pl
     platform === "linux" ? checkBwrapAvailableAsync(runShellCommand) : Promise.resolve(null),
   ]);
   return {
-    health: checks[0].status === "fulfilled" ? checks[0].value : {},
+    health: checks[0].status === "fulfilled" ? /** @type {object} */ (checks[0].value) : {},
     claude: checks[1].status === "fulfilled" ? checks[1].value : { installed: false, reason: CHECK_FAILED },
     opencodeMCP: checks[2].status === "fulfilled" ? checks[2].value : failedCheck(),
     claudeCodeMCP: checks[3].status === "fulfilled" ? checks[3].value : failedCheck(),
@@ -689,7 +687,7 @@ async function runDoctorStats(client) {
   // past the daemon's outbound message cap and the connection is silently
   // torn down with no error frame (taskferry#doctor-stats-connection-closed).
   try {
-    const stats = await client.request(TASK_STATS_METHOD, {});
+    const stats = /** @type {import("./output.js").DoctorStatsInput} */ (await client.request(TASK_STATS_METHOD, {}));
     return projectDoctorStats(stats);
   } catch (error) {
     // Version-skew fallback: a still-running pre-PR daemon (whose self-restart
@@ -700,7 +698,7 @@ async function runDoctorStats(client) {
     // task.list on the client side, the way the pre-PR code path did. Once
     // the upgrade completes and the daemon restarts, the new path takes over.
     if (errCode(error) !== "UNKNOWN_METHOD") throw error;
-    const listed = await client.request(TASK_LIST_METHOD, {});
+    const listed = /** @type {{tasks?: import("./doctor-stats.js").DoctorStatsRow[]}} */ (await client.request(TASK_LIST_METHOD, {}));
     return projectDoctorStats(computeDoctorStats(Array.isArray(listed?.tasks) ? listed.tasks : []));
   }
 }

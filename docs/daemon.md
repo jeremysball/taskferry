@@ -374,6 +374,22 @@ profiling is diagnostic, not on the request's critical path.
 
 ## Things that look like bugs but aren't
 
+- The Claude statusline showing no Taskferry segment on its first poll, or
+  lagging a task transition by one poll — expected. `tf-sl` never runs the CLI
+  in its foreground render path: it reads a per-workspace snapshot under
+  `TASKFERRY_RUNTIME_DIR/statusline` (mirroring `resolveRuntimeDir()`'s own
+  fallback chain rather than the cache dir; the snapshot is a few bytes,
+  rewritten every couple of seconds, with no reason to survive a reboot) and
+  uses an atomic lock to start at most one detached refresh. A cold poll
+  therefore renders nothing while the first refresh runs; normal snapshots
+  refresh after two seconds and stop rendering after ten seconds if refreshes
+  fail. Refresh commands keep `TASKFERRY_AUTO_START=0`, so a statusline poll
+  never boots the daemon.
+- `tf-sl` printing bare, uncolored pipe-delimited text (`id|status|running|queued`
+  plus a summary line and a freshness flag) when run by hand from a terminal —
+  expected, not a broken render. `tf-sl` does no width or color rendering of
+  its own; it is a data source for a caller's statusline script, which owns
+  every presentation decision (mode/width tiers, coloring, id truncation).
 - `status: "unknown"` after a daemon restart — expected; see
   `docs/daemon.md#recovery`. There is deliberately no re-attachment to
   already-running child processes.

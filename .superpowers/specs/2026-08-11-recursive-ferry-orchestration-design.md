@@ -788,6 +788,22 @@ scheduler property and cannot be observed against mocked launches.
 6. **Cancellation.** Resolved: parent-only by default, explicit cascade available, descendants always discoverable.
 7. **Child acceptance.** Resolved: parent-explicit accept, preserving review before integration. Whether a skill may opt into auto-accept is deferred until a real lifecycle asks for it.
 8. **Lineage presentation.** Resolved to a minimum set; tree rendering deferred.
+9. **`parentTaskId` field collision.** Discovered during implementation
+   planning, not during the original design pass: `parentTaskId` was already
+   a live field before this design existed (`--parent-task <id>`,
+   `src/args.js:215`, `protocol.js:193`/`259`) — an arbitrary, caller-supplied
+   string tagging a dispatch as "fixing/retrying task X," unverified by the
+   daemon, persisted, and echoed in check-gate failure messages. That is
+   incompatible with this design's `parentTaskId`, which must be
+   daemon-derived and authenticated, never caller-suppliable, since it drives
+   the socket-gating depth limit, overlay-layer stacking, cancellation
+   cascade, and accept target. Resolved: repurpose `parentTaskId` for the
+   structural, daemon-derived meaning everywhere in this spec (no spec text
+   changes as a result — it already used the name that way); reject any
+   caller-supplied `parentTaskId`/`--parent-task` going forward; rename the
+   old fix/retry-tagging feature to a distinct flag/field
+   (`--fixes-task`/`fixesTaskId`) that preserves its exact current behavior
+   unchanged under the new name.
 
 Still genuinely open, deferred because no evidence yet justifies a choice:
 

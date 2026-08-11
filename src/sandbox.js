@@ -1,5 +1,6 @@
 import { spawnSync } from "node:child_process";
 import path from "node:path";
+import { errCode } from "./errors.js";
 
 /**
  * @param {NodeJS.Platform} [platform]
@@ -35,7 +36,7 @@ function getBwrapAvailabilityResult(result) {
       checked: true,
       available: false,
       reason:
-        result.error.code === "ENOENT"
+        errCode(result.error) === "ENOENT"
           ? "bwrap not found"
           : `bwrap --version failed: ${result.error.message}`,
     };

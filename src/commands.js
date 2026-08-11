@@ -147,7 +147,7 @@ function resolveWaitDefaultTimeoutMs(env) {
 async function checkClaudeIntegration(runShellCommand) {
   const probe = await runShellCommand("claude", ["plugin", "list", "--json"]);
   if (probe.error) {
-    return probe.error.code === "ENOENT"
+    return errCode(probe.error) === "ENOENT"
       ? { installed: false, reason: "claude CLI not found" }
       : { installed: false, reason: `claude plugin list failed: ${probe.error.message}` };
   }

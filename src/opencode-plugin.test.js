@@ -6,11 +6,19 @@ import path from "node:path";
 import { test, after } from "node:test";
 import taskferryPlugin, { createOpenCodePlugin } from "./opencode-plugin.js";
 import { createTaskManager, DEFAULT_SUMMARY_MODEL } from "./tasks.js";
+import { TEST_DEFAULT_MODEL } from "./tasks.test-helpers.js";
 
 const trackedTmpDirs = [];
 const trackedManagers = [];
 function trackManager(manager) {
   trackedManagers.push(manager);
+  const realDispatch = manager.dispatch;
+  manager.dispatch = (opts) => {
+    if (opts.model == null && opts.sessionId == null) {
+      return realDispatch({ ...opts, model: TEST_DEFAULT_MODEL });
+    }
+    return realDispatch(opts);
+  };
   return manager;
 }
 after(() => {

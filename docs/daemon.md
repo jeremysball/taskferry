@@ -50,7 +50,8 @@ set when a command first triggers the auto-start takes effect for the
 daemon's entire lifetime — including for other terminals and processes
 that connect to the same socket afterward. Changing a daemon-level env
 var (a different `TASKFERRY_MAX_CONCURRENT_TASKS`, `TASKFERRY_ENV_DENYLIST`,
-etc.) requires the daemon to restart: stop it (see below) and let the next
+`TASKFERRY_PROVIDER_LIMITS`, etc.) requires the daemon to restart: stop it
+(see below) and let the next
 command start a fresh one. A provider credential is different: `dispatch`/
 `advisor`/`summary` (report mode) forward the *calling* shell's own
 environment on every call, so exporting a fresh key before dispatching
@@ -146,6 +147,13 @@ CLI usage approaches.
 - `TASKFERRY_MAX_DISPATCHES_PER_WINDOW` / `TASKFERRY_DISPATCH_WINDOW_MS`
   (defaults `2` per `5000`ms): an independent, optional burst-rate control
   on *launches*, not a concurrency cap.
+- `TASKFERRY_PROVIDER_LIMITS`: per-provider ceilings on the same two axes,
+  scoped to the substring of a task's `model` before its first `/`. A task
+  must clear both its provider's own limit (if configured) and the global
+  ceiling above to launch; a provider absent from this map is bound only by
+  the global limit. Uses a compact grammar (`provider:maxConcurrentTasks
+  [:maxDispatchesPerWindow]`, comma-separated) instead of JSON — see the
+  `providerLimits` field in `docs/config.md`.
 
 ## Watchdogs
 
@@ -363,3 +371,105 @@ on every write. This is independent of `logs/`'s lack of rotation above.
 A failure to write `perf.log` itself (e.g. a full disk) is caught and
 reported as a `warn:` line on stderr rather than crashing request handling —
 profiling is diagnostic, not on the request's critical path.
+
+## Things that look like bugs but aren't
+
+- The Claude statusline showing no Taskferry segment on its first poll, or
+  lagging a task transition by one poll — expected. `tf-sl` never runs the CLI
+  in its foreground render path: it reads a per-workspace snapshot under
+  `TASKFERRY_RUNTIME_DIR/statusline` (mirroring `resolveRuntimeDir()`'s own
+  fallback chain rather than the cache dir; the snapshot is a few bytes,
+  rewritten every couple of seconds, with no reason to survive a reboot) and
+  uses an atomic lock to start at most one detached refresh. A cold poll
+  therefore renders nothing while the first refresh runs; normal snapshots
+  refresh after two seconds and stop rendering after ten seconds if refreshes
+  fail. Refresh commands keep `TASKFERRY_AUTO_START=0`, so a statusline poll
+  never boots the daemon.
+- `tf-sl` printing bare, uncolored pipe-delimited text (`id|status|running|queued`
+  plus a summary line and a freshness flag) when run by hand from a terminal —
+  expected, not a broken render. `tf-sl` does no width or color rendering of
+  its own; it is a data source for a caller's statusline script, which owns
+  every presentation decision (mode/width tiers, coloring, id truncation).
+- `status: "unknown"` after a daemon restart — expected; see
+  `docs/daemon.md#recovery`. There is deliberately no re-attachment to
+  already-running child processes.
+- `checkStatus: "interrupted"` on a task after a daemon restart that killed
+  the previous daemon mid-gate — expected (Task 7); the only way out is to
+  re-run the gate (auto re-run if the overlay survived, or accept with
+  `--force` after manual verification if the gate is the wrong gate to
+  re-run). The pre-fix alternative was `checkStatus: "running"` forever,
+  with no settle path and no error message, and `accept --force` blocked
+  by Task 6's gate-supervisor because the gate was technically still
+  "running".
+- `taskferry wait` returning with `status: "running"` and a `note` about
+  timing out — expected when the 15-minute default timeout (or an explicit
+  `--timeout`) elapses before the task settles; re-run `taskferry wait`
+  to keep polling or pass `--timeout` for a longer cap.
+- A `SKILL.md` edit not showing up in `integrations/claude/skills/...` —
+  run `npm run skill:generate`; the distributed copies are generated, not
+  hand-edited. Commit them alongside the canonical file anyway — they aren't
+  build output regenerated at install time, they're the literal content each
+  plugin marketplace serves from this repo's git history.
+- Editing `~/.claude/skills/using-taskferry/SKILL.md` directly does nothing for
+  this repo — it's a separate manual copy for global availability outside
+  the plugin (see `docs/integrations/claude-code.md`), not synced from or
+  to the canonical `skills/using-taskferry/SKILL.md`. Edit the canonical file,
+  run `npm run skill:generate`, then re-copy to `~/.claude/skills/` by hand.
+- The daemon restarting itself with no `taskferry` command involved — expected
+  when a source `.js` file's mtime moved forward since startup (a merge
+  landed) and no tasks were running/queued; see
+  `docs/daemon.md#self-restart-on-source-change`.
+- Editing `TASKFERRY_ENV_FILE`'s target file and a spawned worker not seeing
+  the new/changed var right away — expected within a short debounce window,
+  not a restart. `envFileVars` is loaded once via `env-file.js`'s
+  `loadEnvFile()` at `createTaskManager()` construction (daemon startup), then
+  kept live by `env-file.js`'s `watchEnvFile()`, which watches the file's
+  parent directory (filtered by basename, to survive a mktemp+rename secret
+  rotation swapping the file's inode) and re-runs `loadEnvFile()` on a change,
+  debounced ~100ms — no daemon restart required. A reload that fails to parse,
+  or a torn read caught mid-rewrite, is reported via `onError` (a stderr
+  warning, itself EPIPE-guarded) and the previous `envFileVars` is kept
+  as-is. Editing the `envFile` config key itself (not the file it points at),
+  or the running daemon's own launch environment, still requires a restart —
+  those are read once at `createTaskManager()` construction, same as
+  `envDenylist` and the other config-file-backed options. This is unlike a
+  caller-forwarded key, which does take effect immediately on the very next
+  `dispatch`/`advisor`/`summary` call with no restart (see
+  `docs/security.md#caller-env-forwarding`) — the three mechanisms (env-file
+  hot-reload, config-key restart, caller-forwarded immediacy) solve different
+  problems and have different freshness guarantees on purpose.
+- A pending changeset listing files the worker never touched — expected when
+  the dispatch directory had untracked files at dispatch time. Git-target
+  extraction stages the overlay's whole merged view (`git add -A && git diff
+  --cached <pre-dispatch HEAD>`, `changeset.js`'s `extractGitDiff`) so
+  pre-existing untracked files surface as new-file entries alongside the
+  worker's own writes. `accept` runs a plain `git apply`, which fails
+  outright when those paths already exist in the working tree — blocking the
+  worker's real changes too — so commit or shelve untracked files before
+  dispatching against a dirty tree. Non-git targets are unaffected: their
+  extraction diffs the directory against the merged view, so untouched files
+  never appear.
+- A test that has two same-process calls contend on the same
+  `withFileLockAsync()`/`withFileLock()` lock path (one holding it across an
+  `await`, another trying to acquire it concurrently) hanging or timing out
+  at exactly the lock's `timeoutMs` — expected, not a bug in the lock.
+  `acquireLock()`'s retry loop blocks the JS thread synchronously via
+  `Atomics.wait` with zero yield back to the event loop, so a contending
+  same-process caller starves the very continuation that would release the
+  lock. Real contention is always cross-process (a separate `taskferry`
+  invocation, each with its own event loop), where this doesn't arise —
+  see the note in `state-lock.test.js`.
+- A pi dispatch's task record shows `variant: "max"` but the actual provider
+  ran at, say, `high`. Expected: pi's own `clampThinkingLevel()` clamps a
+  requested level to the model's real ceiling at runtime, including on
+  extension providers (`ollama/*`, custom pi providers) taskferry cannot see
+  the registry for. taskferry records what was requested, not what pi
+  clamped it to, because it has no way to observe the clamp.
+- A model dispatches with no `--variant` flag even though `defaultVariant`
+  is `highest`, until up to 24h after that model first became available
+  through opencode. Expected: the opencode variants cache
+  (`<cacheDir>/opencode-variants.json`) refreshes once at daemon startup and
+  once every 24h afterward, never synchronously on the dispatch path (a
+  fresh `opencode models --verbose` shell-out costs ~3-4s, which would
+  otherwise block the daemon's single thread on every affected dispatch).
+  A model absent from the cache resolves to no variant flag, not an error.

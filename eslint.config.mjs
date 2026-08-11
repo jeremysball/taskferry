@@ -67,14 +67,17 @@ export default [
     },
   },
 
-  // src/tasks.js is a user-approved permanent exception to the whole-file
-  // max-lines caps: splitting createTaskManager()'s home file into multiple
-  // modules was judged a materially bigger architectural change than the
-  // rest of the lint-fixup plan, with higher regression risk than it's
-  // worth (see .superpowers/plans/2026-07-31-sonarjs-lint-fixup.md). Every
-  // per-function rule (complexity, max-lines-per-function, etc.) still
-  // applies and is clean on this file -- only the two whole-file line-count
-  // rules are relaxed.
+  // src/tasks.js was a user-approved exception to the whole-file max-lines
+  // caps (originally judged a materially bigger architectural change than
+  // the rest of the lint-fixup plan was worth -- see
+  // .superpowers/.completed/plans/2026-07-31-sonarjs-lint-fixup.md for that
+  // original call). That call has since been reversed (2026-08-08): the
+  // split is judged worth doing after all -- see GitHub issue #30. This
+  // override stays in place only until that split lands; remove it in the
+  // same PR that splits createTaskManager()'s home file into multiple
+  // modules. Every per-function rule (complexity, max-lines-per-function,
+  // etc.) still applies and is clean on this file -- only the two
+  // whole-file line-count rules are relaxed in the meantime.
   {
     files: ["src/tasks.js"],
     rules: {

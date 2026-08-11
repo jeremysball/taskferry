@@ -13,11 +13,11 @@ shell out can dispatch. You send work, get an id back immediately, and
 read the result whenever you're ready, from any terminal.
 
 ```
-$ taskferry dispatch --prompt "Fix the failing tests" --directory /workspace/my-repo
+$ taskferry dispatch --prompt "Fix the failing tests" --directory /workspace/my-repo --model opencode-go/minimax-m3
 id: oc_mrn4ipkp_19450105
 status: running
 directory: /workspace/my-repo
-model: minimax/MiniMax-M2.7
+model: opencode-go/minimax-m3
 next: Run taskferry wait or taskferry status with task id "oc_mrn4ipkp_19450105" to check progress
 
 $ taskferry wait oc_mrn4ipkp_19450105
@@ -101,7 +101,7 @@ happens.
 Then dispatch:
 
 ```bash
-taskferry dispatch --prompt "Fix the failing tests" --directory /workspace/my-repo
+taskferry dispatch --prompt "Fix the failing tests" --directory /workspace/my-repo --model opencode-go/minimax-m3
 taskferry wait <id>
 taskferry result <id>
 ```
@@ -219,7 +219,6 @@ cost, roughly a minute. They are the only tests that exercise the real
 
 ## Further reading
 
-- [docs/sourcemap.md](docs/sourcemap.md): file-by-file orientation for new contributors
 - [docs/cli-reference.md](docs/cli-reference.md): every command, flag, and TOON example
 - [docs/daemon.md](docs/daemon.md): process model, socket protocol, recovery
 - [docs/config.md](docs/config.md): config file fields and env var precedence

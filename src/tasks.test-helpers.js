@@ -36,8 +36,17 @@ export function mkdtempTracked(prefix) {
 // "failed to persist task state: ENOENT" to stderr. Flushing every tracked
 // manager synchronously first (before removing any directory) closes that
 // race regardless of how fast or slow the rest of the file ran.
-export function trackManager(manager) {
+export function trackManager(manager, { autoModel = true } = {}) {
   trackedManagers.push(manager);
+  if (autoModel) {
+    const realDispatch = manager.dispatch;
+    manager.dispatch = (opts) => {
+      if (opts.model == null && opts.sessionId == null) {
+        return realDispatch({ ...opts, model: TEST_DEFAULT_MODEL });
+      }
+      return realDispatch(opts);
+    };
+  }
   return manager;
 }
 
@@ -114,6 +123,12 @@ export const SRC1_LOG = "src1.ndjson";
 export const DID_THING = "did the thing";
 export const CAPTURED_DISPATCH = "captured-at-dispatch-time";
 export const MIMO_MODEL = "opencode/mimo-v2.5-free";
+// Used only by trackManager()'s auto-fill below -- an arbitrary,
+// obviously-synthetic model string, not a real provider/model. Real
+// dispatches still require --model per Task 5; this exists purely so
+// the ~230 test call sites that don't care which model gets used don't
+// need individual edits.
+export const TEST_DEFAULT_MODEL = "taskferry-test/auto-default";
 export const AXI_TASKS_CACHE_PI = "axi-tasks-cache-pi-";
 
 // A fake ChildProcess: an EventEmitter with the pid/unref surface dispatch()
@@ -162,6 +177,13 @@ function defaultKillFn() {
 }
 function defaultListModelsFn() {
   return () => `${DEFAULT_SUMMARY_MODEL}\n`;
+}
+function defaultOpenCodeListModelVariantsFn() {
+  // Mirrors defaultSpawnFn/defaultListModelsFn above: the opencode variants
+  // warm-up shell-out (`opencode models --verbose`) is real subprocess work
+  // that must be injected per-test, not fired for real from every
+  // makeManager() construction in the suite.
+  return async () => new Map();
 }
 
 function makeTempDirs() {
@@ -242,7 +264,11 @@ function buildManagerOptions(options, stateDir, defaultCacheDir, defaultOverlayT
     spawnFn: options.spawnFn ?? defaultSpawnFn(),
     killFn: options.killFn ?? defaultKillFn(),
     listModelsFn: options.listModelsFn ?? defaultListModelsFn(),
+    opencodeListModelVariantsFn: options.opencodeListModelVariantsFn ?? defaultOpenCodeListModelVariantsFn(),
     ...passthroughIfSet({ defaultExecutor: options.defaultExecutor }, "defaultExecutor", "defaultExecutor"),
+    ...passthroughIfSet({ defaultVariant: options.defaultVariant }, "defaultVariant", "defaultVariant"),
+    ...passthroughIfSet({ opencodeVariantsTable: options.opencodeVariantsTable }, "opencodeVariantsTable", "opencodeVariantsTable"),
+    ...passthroughIfSet({ config: options.config }, "config", "config"),
     ...passthroughIfSet({ checkBwrapAvailableFn: options.checkBwrapAvailableFn }, "checkBwrapAvailableFn", "checkBwrapAvailableFn"),
     ...passthroughIfSet({ existsFn: options.existsFn }, "existsFn", "existsFn"),
     ...passthroughIfSet({ statFn: options.statFn }, "statFn", "statFn"),
@@ -263,6 +289,9 @@ function buildManagerOptions(options, stateDir, defaultCacheDir, defaultOverlayT
     ...passthroughIfSet({ envFileVars: options.envFileVars }, "envFileVars", "envFileVars"),
     ...passthroughIfSet({ sandboxDenylist: options.sandboxDenylist }, "sandboxDenylist", "sandboxDenylist"),
     ...passthroughIfSet({ allowedDirs: options.allowedDirs }, "allowedDirs", "allowedDirs"),
+    ...passthroughIfSet({ rwBind: options.rwBind }, "rwBind", "rwBind"),
+    ...passthroughIfSet({ roBind: options.roBind }, "roBind", "roBind"),
+    ...passthroughIfSet({ providerLimits: options.providerLimits }, "providerLimits", "providerLimits"),
     ...passthroughIfSet({ resolveGitCommonDirFn: options.resolveGitCommonDirFn }, "resolveGitCommonDirFn", "resolveGitCommonDirFn"),
     ...passthroughIfSet({ resolveGitDirFn: options.resolveGitDirFn }, "resolveGitDirFn", "resolveGitDirFn"),
     ...passthroughIfSet({ checkOverlaySupportFn: options.checkOverlaySupportFn }, "checkOverlaySupportFn", "checkOverlaySupportFn"),
@@ -278,5 +307,8 @@ function buildManagerOptions(options, stateDir, defaultCacheDir, defaultOverlayT
 export function makeManager(options = {}) {
   const { stateDir, defaultCacheDir, defaultOverlayTmpRoot } = makeTempDirs();
   seedTestFixtures(stateDir, options.tasksFixture ?? [], options.logs ?? {});
-  return trackManager(createTaskManager(buildManagerOptions(options, stateDir, defaultCacheDir, defaultOverlayTmpRoot)));
+  return trackManager(
+    createTaskManager(buildManagerOptions(options, stateDir, defaultCacheDir, defaultOverlayTmpRoot)),
+    { autoModel: options.autoModel !== false }
+  );
 }

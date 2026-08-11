@@ -4,7 +4,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { createTaskManager } from "./tasks.js";
-import { trackManager, makeManager, fakeChild, LUNA_MODEL, MIMIMAX_MODEL, SOL_MODEL, UNUSED_TMP, SPAWN_OPENCODE_ENOENT, mkdtempTracked } from "./tasks.test-helpers.js";
+import { hashFingerprint, VARIANTS_CACHE_SCHEMA } from "./variants-cache.js";
+import { trackManager, makeManager, fakeChild, LUNA_MODEL, MIMIMAX_MODEL, MINIMAX_MODEL, SOL_MODEL, UNUSED_TMP, SPAWN_OPENCODE_ENOENT, mkdtempTracked, AXI_TASKS_TEST_DIR, AXI_TASKS_CACHE_DIR, AXI_TASKS_OVERLAY_DIR } from "./tasks.test-helpers.js";
 
 describe("dispatch() lifecycle, driven through an injected spawnFn (no real opencode process)", () => {
   test("passes the right argv and spawn options through to spawnFn", () => {
@@ -25,11 +26,12 @@ describe("dispatch() lifecycle, driven through an injected spawnFn (no real open
     assert.equal(captured.opts.detached, true);
   });
 
-  test("defaults to openai/gpt-5.6-luna --variant high when no model is given", () => {
-    let captured = null;
-    const mgr = makeManager({ spawnFn: (_cmd, args) => { captured = args; return fakeChild(); } });
-    mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), executor: "opencode" });
-    assert.deepEqual(captured.slice(6, 10), ["-m", LUNA_MODEL, "--variant", "high"]);
+  test("dispatch without --model and without a resolvable --session-id throws", () => {
+    const mgr = makeManager({ spawnFn: () => fakeChild(), autoModel: false });
+    assert.throws(
+      () => mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), executor: "opencode" }),
+      /error: --model is required\nhelp: name the model/
+    );
   });
 
   /** @param {string[]} args @param {string} model */
@@ -53,17 +55,18 @@ describe("dispatch() lifecycle, driven through an injected spawnFn (no real open
     assertDispatchedModel(captured, "opencode/other-model");
   });
 
-  test("an unrecognized --session-id with no --model still falls back to the hardcoded default", () => {
-    let captured = null;
-    const mgr = makeManager({ spawnFn: (_cmd, args) => { captured = args; return fakeChild(); } });
-    mgr.dispatch({ prompt: "resume", directory: os.tmpdir(), sessionId: "ses_never_seen", executor: "opencode" });
-    assertDispatchedModel(captured, LUNA_MODEL);
+  test("an unrecognized --session-id with no --model throws, naming the session id", () => {
+    const mgr = makeManager({ spawnFn: () => fakeChild() });
+    assert.throws(
+      () => mgr.dispatch({ prompt: "resume", directory: os.tmpdir(), sessionId: "ses_never_seen", executor: "opencode" }),
+      /error: no task found for session id "ses_never_seen" to inherit a model from\nhelp:/
+    );
   });
 
   test("resuming with --session-id and no --executor inherits the executor of the task that owned that session", () => {
     let capturedCmd = null;
     const mgr = makeManager({ spawnFn: (cmd) => { capturedCmd = cmd; return fakeChild(); } });
-    mgr.dispatch({ prompt: "first", directory: os.tmpdir(), sessionId: "ses_exec", executor: "pi" });
+    mgr.dispatch({ prompt: "first", directory: os.tmpdir(), model: MINIMAX_MODEL, sessionId: "ses_exec", executor: "pi" });
     mgr.dispatch({ prompt: "resume", directory: os.tmpdir(), sessionId: "ses_exec" });
     assert.equal(capturedCmd, "pi");
   });
@@ -71,8 +74,8 @@ describe("dispatch() lifecycle, driven through an injected spawnFn (no real open
   test("resuming with --session-id and an explicit --executor still uses the explicit executor", () => {
     let capturedCmd = null;
     const mgr = makeManager({ spawnFn: (cmd) => { capturedCmd = cmd; return fakeChild(); } });
-    mgr.dispatch({ prompt: "first", directory: os.tmpdir(), sessionId: "ses_exec2", executor: "pi" });
-    mgr.dispatch({ prompt: "resume", directory: os.tmpdir(), sessionId: "ses_exec2", executor: "opencode" });
+    mgr.dispatch({ prompt: "first", directory: os.tmpdir(), model: MINIMAX_MODEL, sessionId: "ses_exec2", executor: "pi" });
+    mgr.dispatch({ prompt: "resume", directory: os.tmpdir(), model: MINIMAX_MODEL, sessionId: "ses_exec2", executor: "opencode" });
     assert.equal(capturedCmd, "opencode");
   });
 
@@ -86,7 +89,6 @@ describe("dispatch() lifecycle, driven through an injected spawnFn (no real open
       id: "pi",
       taskIdPrefix: "pi",
       errorBucketPrefix: "pi",
-      defaultModel: "fake-pi/marker-model",
       defaultSummaryModel: "fake-pi/marker-model",
       binaryName: "pi",
       listModelsFn: async () => "",
@@ -96,7 +98,7 @@ describe("dispatch() lifecycle, driven through an injected spawnFn (no real open
       sandboxAuthFile: () => ({ extraRoBinds: [], extraRwPairBinds: [], sandboxedDataHome: UNUSED_TMP, sandboxEnv: {} }),
     };
     const mgr = makeManager({ spawnFn: (_cmd, args) => { captured = args; return fakeChild(); }, defaultExecutor: fakePi });
-    mgr.dispatch({ prompt: "first", directory: os.tmpdir(), sessionId: "ses_reuse", executor: "pi" });
+    mgr.dispatch({ prompt: "first", directory: os.tmpdir(), model: MINIMAX_MODEL, sessionId: "ses_reuse", executor: "pi" });
     mgr.dispatch({ prompt: "resume", directory: os.tmpdir(), sessionId: "ses_reuse" });
     assert.deepEqual(captured, ["--fake-pi-marker"]);
   });
@@ -104,7 +106,7 @@ describe("dispatch() lifecycle, driven through an injected spawnFn (no real open
   test("an unrecognized --session-id with no --executor still falls back to the manager's default executor", () => {
     let capturedCmd = null;
     const mgr = makeManager({ spawnFn: (cmd) => { capturedCmd = cmd; return fakeChild(); } });
-    mgr.dispatch({ prompt: "resume", directory: os.tmpdir(), sessionId: "ses_exec_never_seen" });
+    mgr.dispatch({ prompt: "resume", directory: os.tmpdir(), model: MINIMAX_MODEL, sessionId: "ses_exec_never_seen" });
     assert.equal(capturedCmd, "pi");
   });
 
@@ -115,7 +117,7 @@ describe("dispatch() lifecycle, driven through an injected spawnFn (no real open
     // different executor -- resolving executor: "pi" here must not inherit
     // the opencode task's model just because the sessionId string matches.
     mgr.dispatch({ prompt: "first", directory: os.tmpdir(), model: MIMIMAX_MODEL, sessionId: "ses_collide", executor: "opencode" });
-    mgr.dispatch({ prompt: "resume", directory: os.tmpdir(), sessionId: "ses_collide", executor: "pi" });
+    mgr.dispatch({ prompt: "resume", directory: os.tmpdir(), model: MINIMAX_MODEL, sessionId: "ses_collide", executor: "pi" });
     // pi's buildSpawnArgs splits a slashed model into --provider/--model,
     // unlike opencode's single -m flag -- assert pi's own default model
     // (minimax/MiniMax-M2.7), not the opencode task's MIMIMAX_MODEL.
@@ -509,6 +511,173 @@ describe("dispatch queue", () => {
   });
 });
 
+describe("per-provider concurrency and dispatch-rate limits", () => {
+  test("a provider at its own dispatch-rate cap is skipped so another provider's queued task still launches (round-robin, taskferry#235)", () => {
+    const children = [];
+    const mgr = makeManager({
+      maxConcurrentTasks: 10,
+      maxDispatchesPerWindow: 10,
+      dispatchWindowMs: 60000,
+      providerLimits: { "opencode-go": { maxConcurrentTasks: 1 } },
+      spawnFn: () => {
+        const c = fakeChild(9200 + children.length);
+        children.push(c);
+        return c;
+      },
+    });
+
+    const first = mgr.dispatch({ prompt: "p0", directory: os.tmpdir(), model: MIMIMAX_MODEL });
+    const second = mgr.dispatch({ prompt: "p1", directory: os.tmpdir(), model: MIMIMAX_MODEL });
+    const third = mgr.dispatch({ prompt: "p2", directory: os.tmpdir(), model: LUNA_MODEL });
+
+    assert.equal(mgr.status(first.id).status, "running", "opencode-go's first task launches");
+    assert.equal(mgr.status(second.id).status, "queued", "opencode-go's second task is capped at maxConcurrentTasks: 1");
+    assert.equal(mgr.status(third.id).status, "running", "openai's task launches despite opencode-go's queue being blocked");
+
+    children[0].emit("exit", 0, null);
+    assert.equal(mgr.status(second.id).status, "running", "freeing opencode-go's own slot lets its queued task launch");
+  });
+
+  test("a Map-shaped providerLimits using the documented config key names is normalized, not passed through unnormalized", () => {
+    const children = [];
+    const callerMap = new Map([["opencode-go", { maxConcurrentTasks: 1 }]]);
+    const mgr = makeManager({
+      maxConcurrentTasks: 10,
+      maxDispatchesPerWindow: 10,
+      dispatchWindowMs: 60000,
+      providerLimits: callerMap,
+      spawnFn: () => {
+        const c = fakeChild(9300 + children.length);
+        children.push(c);
+        return c;
+      },
+    });
+
+    // Pre-fix the Map was returned verbatim, so dispatchLimit stayed undefined
+    // and providerCanLaunch's `launchTimes.length < undefined` was always
+    // false -- the provider queued forever instead of launching at all.
+    const first = mgr.dispatch({ prompt: "p0", directory: os.tmpdir(), model: MIMIMAX_MODEL });
+    assert.equal(mgr.status(first.id).status, "running", "an omitted maxDispatchesPerWindow means unlimited, not zero");
+
+    const second = mgr.dispatch({ prompt: "p1", directory: os.tmpdir(), model: MIMIMAX_MODEL });
+    assert.equal(mgr.status(second.id).status, "queued", "the Map's maxConcurrentTasks: 1 is still honored");
+
+    // The caller's Map is copied, not aliased: mutating it must not retune a
+    // live scheduler.
+    callerMap.set("opencode-go", { maxConcurrentTasks: 99 });
+    assert.equal(mgr.status(second.id).status, "queued", "mutating the caller's Map does not change live limits");
+
+    // Drain so the scheduler stops re-arming its concurrency poll timer.
+    children[0].emit("exit", 0, null);
+    assert.equal(mgr.status(second.id).status, "running", "freeing the slot lets the queued task launch");
+  });
+
+  test("a provider's maxDispatchesPerWindow queues its next task until the dispatch window passes (taskferry#235)", (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout", "setInterval", "Date"] });
+    try {
+      const children = [];
+      const mgr = makeManager({
+        maxConcurrentTasks: 10,
+        maxDispatchesPerWindow: 10,
+        dispatchWindowMs: 60000,
+        providerLimits: { "opencode-go": { maxDispatchesPerWindow: 2 } },
+        spawnFn: () => {
+          const c = fakeChild(9250 + children.length);
+          children.push(c);
+          return c;
+        },
+      });
+
+      const first = mgr.dispatch({ prompt: "p0", directory: os.tmpdir(), model: MIMIMAX_MODEL });
+      const second = mgr.dispatch({ prompt: "p1", directory: os.tmpdir(), model: MIMIMAX_MODEL });
+      const third = mgr.dispatch({ prompt: "p2", directory: os.tmpdir(), model: MIMIMAX_MODEL });
+
+      assert.equal(mgr.status(first.id).status, "running", "opencode-go's first task launches");
+      assert.equal(mgr.status(second.id).status, "running", "opencode-go's second task launches within its 2-per-window budget");
+      assert.equal(mgr.status(third.id).status, "queued", "opencode-go's third task is capped at maxDispatchesPerWindow: 2");
+      assert.equal(children.length, 2);
+
+      t.mock.timers.tick(60000);
+
+      assert.equal(mgr.status(third.id).status, "running", "the dispatch window passing lets the queued task launch");
+      assert.equal(children.length, 3);
+    } finally {
+      t.mock.timers.reset();
+    }
+  });
+
+  test("global maxConcurrentTasks still caps total launches even when every provider has headroom under its own limit", () => {
+    const children = [];
+    const mgr = makeManager({
+      maxConcurrentTasks: 1,
+      maxDispatchesPerWindow: 10,
+      dispatchWindowMs: 60000,
+      providerLimits: { "opencode-go": { maxConcurrentTasks: 5 }, openai: { maxConcurrentTasks: 5 } },
+      spawnFn: () => {
+        const c = fakeChild(9300 + children.length);
+        children.push(c);
+        return c;
+      },
+    });
+
+    const first = mgr.dispatch({ prompt: "p0", directory: os.tmpdir(), model: MIMIMAX_MODEL });
+    const second = mgr.dispatch({ prompt: "p1", directory: os.tmpdir(), model: LUNA_MODEL });
+
+    assert.equal(mgr.status(first.id).status, "running");
+    assert.equal(mgr.status(second.id).status, "queued", "global maxConcurrentTasks: 1 still binds across providers");
+
+    children[0].emit("exit", 0, null);
+    assert.equal(mgr.status(second.id).status, "running", "freeing the global slot lets the other provider's task launch");
+  });
+
+  test("an unconfigured provider is unlimited on its own axis (only the global ceiling applies)", () => {
+    const children = [];
+    const mgr = makeManager({
+      maxConcurrentTasks: 4,
+      maxDispatchesPerWindow: 10,
+      dispatchWindowMs: 60000,
+      providerLimits: { "opencode-go": { maxConcurrentTasks: 1 } },
+      spawnFn: () => {
+        const c = fakeChild(9400 + children.length);
+        children.push(c);
+        return c;
+      },
+    });
+
+    const dispatched = [
+      mgr.dispatch({ prompt: "p0", directory: os.tmpdir(), model: LUNA_MODEL }),
+      mgr.dispatch({ prompt: "p1", directory: os.tmpdir(), model: LUNA_MODEL }),
+      mgr.dispatch({ prompt: "p2", directory: os.tmpdir(), model: LUNA_MODEL }),
+    ];
+    for (const d of dispatched) assert.equal(mgr.status(d.id).status, "running", "openai has no providerLimits entry, so only the global cap (4) applies");
+  });
+
+  test("cancelling a queued task removes it from its own provider's queue, not another provider's", () => {
+    const children = [];
+    const mgr = makeManager({
+      maxConcurrentTasks: 1,
+      maxDispatchesPerWindow: 10,
+      dispatchWindowMs: 60000,
+      spawnFn: () => {
+        const c = fakeChild(9500 + children.length);
+        children.push(c);
+        return c;
+      },
+    });
+
+    mgr.dispatch({ prompt: "p0", directory: os.tmpdir(), model: MIMIMAX_MODEL });
+    const queuedA = mgr.dispatch({ prompt: "p1", directory: os.tmpdir(), model: MIMIMAX_MODEL });
+    const queuedB = mgr.dispatch({ prompt: "p2", directory: os.tmpdir(), model: LUNA_MODEL });
+
+    const cancelled = mgr.cancel(queuedA.id);
+    assert.equal(cancelled.status, "cancelled");
+    assert.equal(mgr.status(queuedB.id).status, "queued", "cancelling opencode-go's queued task must not touch openai's queued task");
+
+    children[0].emit("exit", 0, null);
+    assert.equal(mgr.status(queuedB.id).status, "running", "openai's queued task still launches once the global slot frees");
+  });
+});
+
 describe("lowerdir launch stagger (taskferry#318: bwrap overlay-mount EBUSY under concurrent launches)", () => {
   // Allow a few ms of scheduling jitter below the nominal stagger: the
   // assertion cares about "roughly staggered, not simultaneous", not
@@ -798,5 +967,229 @@ describe("dispatch() prompt augmentation from .taskferry.toml", () => {
     // Prompt is well under the 200-char preview threshold, so promptTotalChars stays unset.
     assert.equal("promptTotalChars" in dispatched, false);
     assert.equal(dispatched.promptPreview, DISPATCH_PROMPT);
+  });
+});
+
+describe("dispatch() omitted --variant resolution (defaultVariant: highest)", () => {
+  const THINKING_FLAG = "--thinking";
+
+  test("omitted --variant on pi requests max (highest), by default", () => {
+    let captured = null;
+    const mgr = makeManager({ spawnFn: (_cmd, args) => { captured = args; return fakeChild(); } });
+    mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), model: MIMIMAX_MODEL, executor: "pi" });
+    assert.ok(captured.includes(THINKING_FLAG));
+    assert.equal(captured[captured.indexOf(THINKING_FLAG) + 1], "max");
+  });
+
+  test("omitted --variant on opencode resolves the model's ranked-highest cached variant", () => {
+    let captured = null;
+    const mgr = makeManager({
+      spawnFn: (_cmd, args) => { captured = args; return fakeChild(); },
+      opencodeVariantsTable: new Map([[LUNA_MODEL, ["low", "high", "max"]]]),
+    });
+    mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), model: LUNA_MODEL, executor: "opencode" });
+    assert.deepEqual(captured.slice(captured.indexOf("-m")), ["-m", LUNA_MODEL, "--variant", "max", "--", "hi"]);
+  });
+
+  test("omitted --variant on opencode with no cache entry for the model sends no flag", () => {
+    let captured = null;
+    const mgr = makeManager({ spawnFn: (_cmd, args) => { captured = args; return fakeChild(); }, opencodeVariantsTable: new Map() });
+    mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), model: LUNA_MODEL, executor: "opencode" });
+    assert.equal(captured.includes("--variant"), false);
+  });
+
+  test("explicit --variant is never reinterpreted, even against a cached table", () => {
+    let captured = null;
+    const mgr = makeManager({
+      spawnFn: (_cmd, args) => { captured = args; return fakeChild(); },
+      opencodeVariantsTable: new Map([[LUNA_MODEL, ["low", "high", "max"]]]),
+    });
+    mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), model: LUNA_MODEL, variant: "low", executor: "opencode" });
+    assert.equal(captured[captured.indexOf("--variant") + 1], "low");
+  });
+
+  test("a resumed session with no --variant inherits the resumed task's own variant, not a fresh highest", () => {
+    let captured = null;
+    const mgr = makeManager({ spawnFn: (_cmd, args) => { captured = args; return fakeChild(); } });
+    mgr.dispatch({ prompt: "first", directory: os.tmpdir(), model: MIMIMAX_MODEL, variant: "low", sessionId: "ses_v", executor: "opencode" });
+    mgr.dispatch({ prompt: "resume", directory: os.tmpdir(), sessionId: "ses_v", executor: "opencode" });
+    assert.equal(captured[captured.indexOf("--variant") + 1], "low");
+  });
+
+  test("a configured defaultVariant of a concrete level is requested verbatim when --variant is omitted", () => {
+    let captured = null;
+    const mgr = makeManager({ spawnFn: (_cmd, args) => { captured = args; return fakeChild(); }, defaultVariant: "medium" });
+    mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), model: MIMIMAX_MODEL, executor: "pi" });
+    assert.equal(captured[captured.indexOf(THINKING_FLAG) + 1], "medium");
+  });
+});
+
+describe("defaultVariant validation applies to TASKFERRY_DEFAULT_VARIANT and rawOptions too, not just config.json", () => {
+  // Regression: config.json's defaultVariant field is validated during
+  // loadConfig()'s parseAndValidateConfig(), but createTaskManager()'s own
+  // rawOptions.defaultVariant/TASKFERRY_DEFAULT_VARIANT resolution used to
+  // skip that check entirely, so an invalid value there would silently
+  // reach resolveVariant() and resolve to "send no flag" instead of failing
+  // loudly at construction time.
+  test("an invalid TASKFERRY_DEFAULT_VARIANT env var throws at manager construction", () => {
+    const stateDir = mkdtempTracked(AXI_TASKS_TEST_DIR);
+    const prior = process.env.TASKFERRY_DEFAULT_VARIANT;
+    process.env.TASKFERRY_DEFAULT_VARIANT = "medium-plus";
+    try {
+      assert.throws(() => createTaskManager({
+        stateDir,
+        cacheDir: mkdtempTracked(AXI_TASKS_CACHE_DIR),
+        sandboxEnabled: false,
+        overlayEnabled: false,
+        overlayTmpRoot: mkdtempTracked(AXI_TASKS_OVERLAY_DIR),
+        lowerdirStaggerMs: 0,
+        spawnFn: () => fakeChild(),
+        killFn: () => {},
+      }), /error: defaultVariant must be one of highest, off, minimal, low, medium, high, xhigh, max \(got "medium-plus"\)/);
+    } finally {
+      if (prior === undefined) delete process.env.TASKFERRY_DEFAULT_VARIANT;
+      else process.env.TASKFERRY_DEFAULT_VARIANT = prior;
+    }
+  });
+
+  test("an invalid rawOptions.defaultVariant (a programmatic caller) throws too", () => {
+    const stateDir = mkdtempTracked(AXI_TASKS_TEST_DIR);
+    assert.throws(() => createTaskManager({
+      stateDir,
+      cacheDir: mkdtempTracked(AXI_TASKS_CACHE_DIR),
+      sandboxEnabled: false,
+      overlayEnabled: false,
+      overlayTmpRoot: mkdtempTracked(AXI_TASKS_OVERLAY_DIR),
+      lowerdirStaggerMs: 0,
+      spawnFn: () => fakeChild(),
+      killFn: () => {},
+      defaultVariant: "bogus-level",
+    }), /error: defaultVariant must be one of highest, off, minimal, low, medium, high, xhigh, max \(got "bogus-level"\)/);
+  });
+});
+
+describe("opencode variants cache lookup uses the per-dispatch caller env, not the daemon's own process.env", () => {
+  // Regression: resolveOpencodeVariants() used to read process.env directly,
+  // so a caller-forwarded env override (a different credential/base URL for
+  // this one dispatch) had no effect on which cached model catalog was
+  // consulted -- the daemon's own env always won. FAKE_TF_TEST_API_KEY is
+  // a made-up name unlikely to already be set on any real host's env.
+  const FAKE_KEY_NAME = "FAKE_TF_TEST_API_KEY";
+
+  // The daemon's effective env for a dispatch is process.env layered with
+  // the caller's per-dispatch override (buildSanitizedEnvironment()'s merge
+  // in tasks.js), not the override object alone -- fingerprint the fixture
+  // the same way, or a real *_API_KEY already present in this test runner's
+  // own process.env would make the fixture's fingerprint never match.
+  function writeRealVariantsCache(cacheDir, dispatchEnv, models) {
+    fs.mkdirSync(cacheDir, { recursive: true });
+    fs.writeFileSync(path.join(cacheDir, "opencode-variants.json"), JSON.stringify({
+      schema: VARIANTS_CACHE_SCHEMA,
+      generatedAt: new Date().toISOString(),
+      fingerprint: hashFingerprint({ ...process.env, ...dispatchEnv }),
+      models: Object.fromEntries(models),
+    }));
+  }
+
+  test("a dispatch-scoped env override that matches the cache's fingerprint resolves the variant", () => {
+    const stateDir = mkdtempTracked(AXI_TASKS_TEST_DIR);
+    const defaultCacheDir = mkdtempTracked(AXI_TASKS_CACHE_DIR);
+    const dispatchEnv = { [FAKE_KEY_NAME]: "dispatch-scoped-value" };
+    writeRealVariantsCache(defaultCacheDir, dispatchEnv, new Map([[LUNA_MODEL, ["low", "high", "max"]]]));
+    let captured = null;
+    const mgr = trackManager(createTaskManager({
+      stateDir,
+      cacheDir: defaultCacheDir,
+      sandboxEnabled: false,
+      overlayEnabled: false,
+      overlayTmpRoot: mkdtempTracked(AXI_TASKS_OVERLAY_DIR),
+      lowerdirStaggerMs: 0,
+      spawnFn: (_cmd, args) => { captured = args; return fakeChild(); },
+      killFn: () => {},
+    }));
+    mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), model: LUNA_MODEL, executor: "opencode", env: dispatchEnv });
+    assert.equal(captured[captured.indexOf("--variant") + 1], "max");
+  });
+
+  test("without the matching env override, the cache misses and no --variant flag is sent (proves process.env alone isn't consulted)", () => {
+    const stateDir = mkdtempTracked(AXI_TASKS_TEST_DIR);
+    const defaultCacheDir = mkdtempTracked(AXI_TASKS_CACHE_DIR);
+    const dispatchEnv = { [FAKE_KEY_NAME]: "dispatch-scoped-value" };
+    writeRealVariantsCache(defaultCacheDir, dispatchEnv, new Map([[LUNA_MODEL, ["low", "high", "max"]]]));
+    let captured = null;
+    const mgr = trackManager(createTaskManager({
+      stateDir,
+      cacheDir: defaultCacheDir,
+      sandboxEnabled: false,
+      overlayEnabled: false,
+      overlayTmpRoot: mkdtempTracked(AXI_TASKS_OVERLAY_DIR),
+      lowerdirStaggerMs: 0,
+      spawnFn: (_cmd, args) => { captured = args; return fakeChild(); },
+      killFn: () => {},
+    }));
+    // No `env` override on this dispatch -- the real daemon process.env
+    // never has FAKE_TF_TEST_API_KEY set, so the fingerprint can't match.
+    mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), model: LUNA_MODEL, executor: "opencode" });
+    assert.equal(captured.includes("--variant"), false);
+  });
+});
+
+describe("opencode variants cache warm-up", () => {
+  test("createTaskManager() triggers a refresh when the cache is stale, using the opencode executor's listModelVariantsFn", async () => {
+    let called = 0;
+    const stateDir = mkdtempTracked(AXI_TASKS_TEST_DIR);
+    const defaultCacheDir = mkdtempTracked(AXI_TASKS_CACHE_DIR);
+    trackManager(createTaskManager({
+      stateDir,
+      cacheDir: defaultCacheDir,
+      sandboxEnabled: false,
+      overlayEnabled: false,
+      overlayTmpRoot: mkdtempTracked(AXI_TASKS_OVERLAY_DIR),
+      lowerdirStaggerMs: 0,
+      spawnFn: () => fakeChild(),
+      killFn: () => {},
+      listModelsFn: async () => "",
+      opencodeListModelVariantsFn: async () => { called++; return new Map(); },
+    }));
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(called, 1);
+  });
+
+  test("warm-up writes the cache under the daemon's effective env (envFileVars included), so an omitted --variant resolves the model's cached highest", async () => {
+    // Regression: warmAndScheduleVariantsCacheRefresh() fingerprinted the
+    // cache against raw process.env, but resolveOpencodeVariants() reads it
+    // under the sanitized merge (process.env + envFileVars + caller env).
+    // When envFileVars overrides a fingerprint-relevant var, the warm's file
+    // never matched a dispatch's read -- every dispatch was a cache miss and
+    // the highest-thinking default silently never applied. FAKE_TF_TEST_API_KEY
+    // is unlikely to already be set on any real host's env.
+    const FAKE_KEY_NAME = "FAKE_TF_TEST_API_KEY";
+    const stateDir = mkdtempTracked(AXI_TASKS_TEST_DIR);
+    const defaultCacheDir = mkdtempTracked(AXI_TASKS_CACHE_DIR);
+    const cacheFile = path.join(defaultCacheDir, "opencode-variants.json");
+    let captured = null;
+    const mgr = trackManager(createTaskManager({
+      stateDir,
+      cacheDir: defaultCacheDir,
+      sandboxEnabled: false,
+      overlayEnabled: false,
+      overlayTmpRoot: mkdtempTracked(AXI_TASKS_OVERLAY_DIR),
+      lowerdirStaggerMs: 0,
+      spawnFn: (_cmd, args) => { captured = args; return fakeChild(); },
+      killFn: () => {},
+      // envFile config whose contents override a credential var the
+      // fingerprint reads (the effective spawn env for every dispatch).
+      envFileVars: { [FAKE_KEY_NAME]: "from-env-file" },
+      opencodeListModelVariantsFn: async () => new Map([[LUNA_MODEL, ["low", "high", "max"]]]),
+    }));
+    // The daemon warms the cache in the background; wait for the file rather
+    // than racing the async refresh.
+    for (let i = 0; i < 100 && !fs.existsSync(cacheFile); i++) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.equal(fs.existsSync(cacheFile), true, "warm should have written the variants cache");
+    mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), model: LUNA_MODEL, executor: "opencode" });
+    assert.equal(captured[captured.indexOf("--variant") + 1], "max");
   });
 });

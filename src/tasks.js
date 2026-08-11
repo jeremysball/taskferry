@@ -13,6 +13,8 @@ import { isNonNegativeInteger, isPositiveInteger } from "./numbers.js";
 import { buildBwrapArgs, checkBwrapAvailable, checkOverlaySupport, defaultDenyList, platformSupportsSandbox, resolveGitCommonDir, resolveGitDir } from "./sandbox.js";
 import { applyChangeset, overlayPaths, resolvePreDispatchHead, subOverlayPaths, subFilePaths, cleanupOverlay, defaultRunCommand as defaultOverlayRunCommand, extractGitDiff, extractNonGitDiff, OVERLAY_MOUNT_BUSY_PATTERN } from "./changeset.js";
 import { resolveExecutor, opencodeExecutor } from "./executor.js";
+import { resolveVariant, KNOWN_VARIANT_LEVELS } from "./variants.js";
+import { readVariantsCache, refreshVariantsCache } from "./variants-cache.js";
 import { loadEnvFile, watchEnvFile } from "./env-file.js";
 import { loadProjectConfig, resolveReadOnlyProjectBinds, verificationPromptBlock } from "./project-config.js";
 import { computeDoctorStats } from "./doctor-stats.js";
@@ -145,6 +147,7 @@ import { computeDoctorStats } from "./doctor-stats.js";
  * @property {boolean} [noOverlay]
  * @property {"dispatch"|"advisor"} [role]
  * @property {string[]} [allowedDirs]
+ * @property {string[]} [roBind]
  * @property {import("./executor.js").WorkerExecutor} executor
  * @property {undefined} [kind]
  * @property {undefined} [snapshotPath]
@@ -551,6 +554,155 @@ export function parseEnvDenylist(spec) {
   return parseAllowedDirs(spec);
 }
 
+const PROVIDER_LIMITS_HELP =
+  "help: use provider:maxConcurrentTasks[:maxDispatchesPerWindow], comma-separated";
+
+/**
+ * Parses one `provider:maxConcurrentTasks[:maxDispatchesPerWindow]` entry.
+ * @param {string} entry
+ * @returns {[string, {concurrencyLimit: number, dispatchLimit: number}]}
+ */
+function parseProviderLimitEntry(entry) {
+  const parts = entry.split(":");
+  if (parts.length < 2 || parts.length > 3) {
+    throw new Error(`error: malformed TASKFERRY_PROVIDER_LIMITS entry "${entry}"\n${PROVIDER_LIMITS_HELP}`);
+  }
+  const [provider, concurrencyStr, dispatchStr] = parts;
+  if (!provider.trim()) {
+    throw new Error(`error: malformed TASKFERRY_PROVIDER_LIMITS entry "${entry}": empty provider name\n${PROVIDER_LIMITS_HELP}`);
+  }
+  const concurrencyLimit = Number(concurrencyStr);
+  if (!isPositiveInteger(concurrencyLimit)) {
+    throw new Error(`error: malformed TASKFERRY_PROVIDER_LIMITS entry "${entry}": maxConcurrentTasks must be a positive integer\n${PROVIDER_LIMITS_HELP}`);
+  }
+  if (dispatchStr === undefined) return [provider.trim(), { concurrencyLimit, dispatchLimit: Infinity }];
+  const dispatchLimit = Number(dispatchStr);
+  if (!isPositiveInteger(dispatchLimit)) {
+    throw new Error(`error: malformed TASKFERRY_PROVIDER_LIMITS entry "${entry}": maxDispatchesPerWindow must be a positive integer\n${PROVIDER_LIMITS_HELP}`);
+  }
+  return [provider.trim(), { concurrencyLimit, dispatchLimit }];
+}
+
+/**
+ * Parses `TASKFERRY_PROVIDER_LIMITS`'s comma-separated grammar:
+ * `provider:maxConcurrentTasks[:maxDispatchesPerWindow]` per entry. A
+ * provider's `dispatchLimit` is `Infinity` (unbounded) when the third field
+ * is omitted. Throws a two-line `error:`/`help:` message on any malformed
+ * entry, matching config.js's no-silent-typo-tolerance posture, since a
+ * malformed provider limit is a daemon-startup-time config error.
+ * @param {string|undefined} spec
+ * @returns {Map<string, {concurrencyLimit: number, dispatchLimit: number}>}
+ */
+export function parseProviderLimitsEnv(spec) {
+  const map = new Map();
+  if (!spec) return map;
+  for (const entry of parseAllowedDirs(spec)) {
+    const [provider, limits] = parseProviderLimitEntry(entry);
+    map.set(provider, limits);
+  }
+  return map;
+}
+
+/**
+ * @typedef {{launchQueue: string[], launchTimes: number[], runningCount: number}} ProviderQueue
+ */
+
+/**
+ * Returns the provider's queue, creating and registering an empty one on
+ * first use. Shared by every path that enqueues a launch so a provider's
+ * scheduler state is always created exactly the same way.
+ * @param {Map<string, ProviderQueue>} providerQueues
+ * @param {string} provider
+ * @returns {ProviderQueue}
+ */
+function getOrCreateProviderQueue(providerQueues, provider) {
+  let providerQueue = providerQueues.get(provider);
+  if (!providerQueue) {
+    providerQueue = { launchQueue: [], launchTimes: [], runningCount: 0 };
+    providerQueues.set(provider, providerQueue);
+  }
+  return providerQueue;
+}
+
+/**
+ * Derives a task's provider key from its `model` string
+ * ("provider/model"), used to route scheduler state per-provider (design
+ * spec §1). Falls back to the whole string when there's no "/" -- every
+ * real dispatch always sets a "provider/model"-shaped model, so this is
+ * defensive only.
+ * @param {string} model
+ * @returns {string}
+ */
+function providerOf(model) {
+  const slash = model.indexOf("/");
+  return slash === -1 ? model : model.slice(0, slash);
+}
+
+/**
+ * The zero-limit sentinel used when a provider has no `providerLimits`
+ * entry: both axes unbounded, so only the global ceiling applies to it.
+ * @type {{concurrencyLimit: number, dispatchLimit: number}}
+ */
+const UNLIMITED_PROVIDER = { concurrencyLimit: Infinity, dispatchLimit: Infinity };
+
+/**
+ * Re-poll cadence for a concurrency cap, global or per-provider. A rate
+ * window has a timestamp to wait for; a concurrency cap only clears when a
+ * running task exits, which fires no scheduler event, so it's polled.
+ */
+const CONCURRENCY_POLL_MS = 250;
+
+/**
+ * Converts `config.json`'s validated `providerLimits` object (per Task 1's
+ * `validateProviderLimits`) into the `Map<string, {concurrencyLimit,
+ * dispatchLimit}>` shape the scheduler reads. An omitted per-provider key
+ * means unlimited for that axis (`Infinity`), not zero. Accepts either a
+ * plain object or a `Map`, under either the config naming
+ * (`maxConcurrentTasks`/`maxDispatchesPerWindow`) or the scheduler naming
+ * (`concurrencyLimit`/`dispatchLimit`), and always returns a fresh `Map`.
+ * @param {Record<string, {maxConcurrentTasks?: number, maxDispatchesPerWindow?: number, concurrencyLimit?: number, dispatchLimit?: number}>|Map<string, {maxConcurrentTasks?: number, maxDispatchesPerWindow?: number, concurrencyLimit?: number, dispatchLimit?: number}>|undefined} configValue
+ * @returns {Map<string, {concurrencyLimit: number, dispatchLimit: number}>}
+ */
+function providerLimitsFromConfig(configValue) {
+  const map = new Map();
+  if (!configValue) return map;
+  // A Map is normalized and copied like any other input rather than passed
+  // through: it can carry either naming (a caller using the documented
+  // config keys, or an already-scheduler-shaped map from
+  // parseProviderLimitsEnv), and an un-normalized entry leaves
+  // dispatchLimit undefined, which makes providerCanLaunch's `<` comparison
+  // permanently false -- that provider then queues forever while
+  // scheduleNextLaunch re-arms a 1ms timer. Copying also stops a caller's
+  // later mutation from silently rewriting live scheduler limits.
+  const entries = configValue instanceof Map ? configValue.entries() : Object.entries(configValue);
+  for (const [provider, limits] of entries) {
+    map.set(provider, {
+      concurrencyLimit: limits.concurrencyLimit ?? limits.maxConcurrentTasks ?? Infinity,
+      dispatchLimit: limits.dispatchLimit ?? limits.maxDispatchesPerWindow ?? Infinity,
+    });
+  }
+  return map;
+}
+
+/**
+ * Resolves `providerLimits` via the same caller -> env -> config -> default
+ * chain every other option uses, with one difference: setting the env var
+ * replaces the config file's entire map wholesale (same semantics
+ * `TASKFERRY_ENV_FILE=""` already uses for `envFile` -- "explicit empty
+ * overrides, doesn't fall through"), never merged key-by-key.
+ * @param {Record<string, any>} rawOptions
+ */
+function resolveProviderLimitsOption(rawOptions) {
+  if (rawOptions.providerLimits !== undefined) {
+    return { providerLimits: providerLimitsFromConfig(/** @type {any} */ (rawOptions.providerLimits)) };
+  }
+  if (process.env.TASKFERRY_PROVIDER_LIMITS !== undefined) {
+    return { providerLimits: parseProviderLimitsEnv(process.env.TASKFERRY_PROVIDER_LIMITS) };
+  }
+  const config = rawOptions.config || {};
+  return { providerLimits: providerLimitsFromConfig(/** @type {any} */ (config.providerLimits)) };
+}
+
 /**
  * Parses a comma-separated list of extra sandbox deny-list paths, merged
  * with {@link defaultDenyList} at every bwrap call site (see denyList
@@ -591,6 +743,7 @@ export function isOutsideDirectory(directory, candidate) {
  * @property {boolean} overlayEnabled
  * @property {string} overlayTmpRoot
  * @property {string[]} allowedDirs
+ * @property {string[]} roBind
  * @property {string} stateDir
  * @property {string} cacheDir
  * @property {string} runtimeDir
@@ -620,8 +773,8 @@ export function isOutsideDirectory(directory, candidate) {
  * @property {Set<string>} logHasEventCache
  * @property {Map<string, NodeJS.Timeout>} escalationTimers
  * @property {Map<string, Task>} tasks
- * @property {() => void} decRunning
- * @property {() => void} incRunning
+ * @property {(task: Task) => void} decRunning
+ * @property {(task: Task) => void} incRunning
  */
 
 /**
@@ -837,6 +990,137 @@ function applyProjectConfigReadOnlyBinds({ launchDirectory, denyList, stateDir, 
 }
 
 /**
+ * Resolves the user-supplied `--ro-bind` set (a union of the manager-level
+ * default and per-dispatch entries) against the same protected sandbox mount
+ * set the `.taskferry.toml` read_only_paths resolver uses: a path that does
+ * not exist on the host, or that overlaps a protected mount (deny-list,
+ * stateDir, runtimeDir, launchDirectory), is skipped with a warning rather
+ * than failing silently. Returns the resolved absolute paths to bind
+ * read-only (as same-path pairs by the caller).
+ * @param {{launchDirectory: string, roBind: string[], denyList: string[], stateDir: string, runtimeDir: string, existsFn: (p: string) => boolean}} ctx
+ * @returns {string[]}
+ */
+function resolveUserRoBind({ launchDirectory, roBind, denyList, stateDir, runtimeDir, existsFn }) {
+  if (!roBind.length) return [];
+  const { roBinds, missing, unsafe } = resolveReadOnlyProjectBinds(roBind, {
+    protectedPaths: [...denyList, stateDir, runtimeDir, launchDirectory],
+    existsFn,
+  });
+  const warnings = [];
+  if (missing.length) warnings.push(`not found on this host, skipped: ${missing.join(", ")}`);
+  if (unsafe.length) warnings.push(`overlaps a protected sandbox mount, skipped: ${unsafe.join(", ")}`);
+  if (warnings.length) process.stderr.write(`warning: --ro-bind ${warnings.join("; ")}\n`);
+  return roBinds.map(([src]) => src);
+}
+
+/**
+ * Resolves the user-supplied read-write and read-only dir sets for one
+ * dispatch and applies the read-write-wins conflict rule. Both sets are a
+ * union of the manager-level default (flag/env/config, already folded into
+ * `ctx.allowedDirs`/`ctx.roBind`) and the per-dispatch entries carried on
+ * `dispatchLaunch`. Read-write dirs that don't exist on the host are dropped
+ * silently (same as the pre-existing allowedDirs behavior); read-only dirs go
+ * through `resolveUserRoBind`'s protected-mount validation instead. A path in
+ * both sets binds read-write with a warning naming the path -- never an
+ * error, never read-only wins. A read-write dir that overlaps the sandbox's
+ * own deny-list (`ctx.denyList`) is still bound read-write -- overriding the
+ * deny-list is the user's call to make, not something this function blocks
+ * -- but it warns loudly at dispatch time, since re-exposing a deny-listed
+ * path like ~/.ssh as writable deserves more visibility than a docs
+ * footnote. Returns the resolved absolute path lists ready for
+ * `extraRwBinds`/`extraRoBinds`.
+ * @param {{launchDirectory: string, dispatchLaunch: {allowedDirs?: string[], roBind?: string[]}|null, isSummary: boolean, rwBind: string[], roBind: string[], denyList: string[], stateDir: string, runtimeDir: string, existsFn: (p: string) => boolean}} ctx
+ * @returns {{rwResolved: string[], roResolved: string[]}}
+ */
+function resolveUserRwRoBind(ctx) {
+  const perDispatch = (ctx.isSummary ? null : ctx.dispatchLaunch) || { allowedDirs: [], roBind: [] };
+  const rwBind = [...ctx.rwBind, ...(perDispatch.allowedDirs || [])];
+  const rwResolved = [];
+  const denyOverridden = [];
+  /** @param {string} base */
+  const childPrefix = (base) => (base === path.sep ? base : base + path.sep);
+  /** @param {string} p */
+  const overlapsDenyList = (p) => ctx.denyList.some((deny) => p === deny || p.startsWith(childPrefix(deny)) || deny.startsWith(childPrefix(p)));
+  for (const dir of rwBind) {
+    const resolved = path.isAbsolute(dir) ? dir : path.resolve(ctx.launchDirectory, dir);
+    if (!ctx.existsFn(resolved)) continue;
+    rwResolved.push(resolved);
+    // --rw-bind is allowed to re-expose a deny-listed path (e.g. ~/.ssh) as
+    // read-write -- that's the user's call to make, per policy -- but a
+    // silent override of the sandbox's own deny-list deserves a loud warning
+    // at the moment it happens, not just a docs footnote.
+    if (overlapsDenyList(resolved)) denyOverridden.push(resolved);
+  }
+  if (denyOverridden.length) {
+    process.stderr.write(`warning: --rw-bind overrides the sandbox deny-list for: ${denyOverridden.join(", ")} (bound read-write anyway; this was your explicit choice)\n`);
+  }
+  const roBind = [...ctx.roBind, ...(perDispatch.roBind || [])];
+  const roResolved = resolveUserRoBind({
+    roBind,
+    launchDirectory: ctx.launchDirectory,
+    denyList: ctx.denyList,
+    stateDir: ctx.stateDir,
+    runtimeDir: ctx.runtimeDir,
+    existsFn: ctx.existsFn,
+  });
+  // Any rw/ro conflict -- including one where the same path also shows up in
+  // `.taskferry.toml`'s read_only_paths/roBind -- is resolved and warned
+  // about exactly once, centrally, by dropReadWriteConflicts once every ro
+  // source (user --ro-bind, project config, executor credentials) has been
+  // accumulated. Warning here too would double-print for a path that's
+  // listed read-only from more than one source.
+  return { rwResolved, roResolved };
+}
+
+/**
+ * Promotes any read-only bind pair whose source is also bound read-write,
+ * re-emitting it as a read-write `--bind` pair (same source/dest) instead of
+ * dropping it, with a warning naming the path (rw wins, never an error, and
+ * the destination still gets *something*). This is the escape hatch that
+ * lets a `.taskferry.toml` read_only_paths entry -- or an executor's own
+ * credential ro-bind pair (e.g. an auth.json bind whose source happens to sit
+ * under a user's --rw-bind path) -- be promoted to read-write from the
+ * command line rather than silently vanishing from the sandbox. Making a
+ * credential read-write is the user's call to make (they passed --rw-bind at
+ * that path on purpose); losing the credential entirely because of an
+ * incidental path collision is not a choice they made.
+ *
+ * The same source path can legitimately show up more than once in
+ * `extraRoBinds` (e.g. listed in both `--ro-bind` and a project's
+ * `.taskferry.toml` read_only_paths) -- this is the single, centralized
+ * place the rw-wins conflict is resolved for every ro source, specifically
+ * so a path duplicated across sources warns and promotes exactly once
+ * instead of once per source.
+ * @param {[string, string][]} extraRoBinds
+ * @param {string[]} rwResolved
+ * @returns {{roBinds: [string, string][], promotedPairBinds: [string, string][]}}
+ */
+function dropReadWriteConflicts(extraRoBinds, rwResolved) {
+  const rwSet = new Set(rwResolved);
+  const promoted = extraRoBinds.filter(([src]) => rwSet.has(src));
+  const warnedSrcs = new Set();
+  for (const [src] of promoted) {
+    if (warnedSrcs.has(src)) continue;
+    warnedSrcs.add(src);
+    process.stderr.write(`warning: ${src} is bound read-write (also listed read-only); read-write wins\n`);
+  }
+  if (!promoted.length) return { roBinds: extraRoBinds, promotedPairBinds: [] };
+  // Dedupe the promoted pairs themselves (by src+dest) so a path duplicated
+  // across ro sources emits one --bind pair, not one per source.
+  const seenPairs = new Set();
+  const promotedPairBinds = promoted.filter(([src, dest]) => {
+    const key = `${src}\0${dest}`;
+    if (seenPairs.has(key)) return false;
+    seenPairs.add(key);
+    return true;
+  });
+  return {
+    roBinds: extraRoBinds.filter(([src]) => !rwSet.has(src)),
+    promotedPairBinds,
+  };
+}
+
+/**
  * Computes the bwrap bind set for a sandboxed dispatch: the deny-list (with
  * entries the user simply doesn't have dropped, since bwrap --tmpfs fails if
  * the mount point doesn't exist), the executor's ro-bind auth file, the
@@ -886,7 +1170,7 @@ function buildBwrapBinds(ctx, launchInfo, task, spawnEnv, role) {
     ...(isSummary ? {} : { sessionId: dispatchLaunch.sessionId ?? null, launchDirectory: launchDirectory || null }),
   });
   /** @type {[string, string][]} */
-  const extraRoBinds = [...executorRoBinds];
+  let extraRoBinds = [...executorRoBinds];
   if (promptFilePath) extraRoBinds.push([ctx.PROMPT_DIR, ctx.PROMPT_DIR]);
   extraRoBinds.push(...applyProjectConfigReadOnlyBinds({ launchDirectory, task, denyList: fullDenyList, existsFn: ctx.existsFn, stateDir: ctx.stateDir, runtimeDir: ctx.runtimeDir }));
   /** @type {string[]} */
@@ -899,12 +1183,37 @@ function buildBwrapBinds(ctx, launchInfo, task, spawnEnv, role) {
   extraRwBinds.push(sandboxedDataHome);
   const overlayInfo = createOverlayIfNeeded(ctx, launchInfo, task, role);
   const gitBinds = buildGitBinds(ctx, launchDirectory, overlayInfo, extraRwBinds);
-  for (const dir of [...ctx.allowedDirs, ...(isSummary ? [] : dispatchLaunch.allowedDirs || [])]) {
-    const resolved = path.isAbsolute(dir) ? dir : path.resolve(launchDirectory, dir);
-    if (ctx.existsFn(resolved)) extraRwBinds.push(resolved);
-  }
+  // Read-write/read-only dirs: each resolves as a union of the manager-level
+  // default (flag/env/config, already folded into ctx.allowedDirs/ctx.roBind)
+  // and the per-dispatch `--rw-bind`/`--ro-bind` entries. The rw set drops
+  // nonexistent paths silently; the ro set goes through the same protected
+  // mount validation `.taskferry.toml` read_only_paths uses. A path in both
+  // sets binds read-write with a warning (rw wins, never an error).
+  const { rwResolved, roResolved } = resolveUserRwRoBind({
+    launchDirectory,
+    dispatchLaunch,
+    isSummary,
+    rwBind: ctx.allowedDirs,
+    roBind: ctx.roBind,
+    denyList: fullDenyList,
+    stateDir: ctx.stateDir,
+    runtimeDir: ctx.runtimeDir,
+    existsFn: ctx.existsFn,
+  });
+  extraRwBinds.push(...rwResolved);
+  for (const dir of roResolved) extraRoBinds.push([dir, dir]);
+  // Conflict rule, again over the accumulated ro list (which now includes the
+  // `.taskferry.toml` read_only_paths pairs and the executor's own credential
+  // ro-bind pairs): any ro source that is also resolved read-write is
+  // promoted to a read-write `--bind` pair rather than dropped, so a
+  // collision with e.g. the executor's auth.json bind still reaches the
+  // sandbox (just writable) instead of vanishing.
+  const conflictResult = dropReadWriteConflicts(extraRoBinds, rwResolved);
+  extraRoBinds = conflictResult.roBinds;
+  const allExecutorRwPairBinds = [...executorRwPairBinds, ...conflictResult.promotedPairBinds];
   return {
-    homeDir, denyList, extraRoBinds, extraRwBinds, overlayInfo, executorRwPairBinds, sandboxEnv, spawnEnv, role,
+    homeDir, denyList, extraRoBinds, extraRwBinds, overlayInfo, sandboxEnv, spawnEnv, role,
+    executorRwPairBinds: allExecutorRwPairBinds,
     overlayRwBinds: gitBinds.overlayRwBinds,
     overlayRwFileBinds: gitBinds.overlayRwFileBinds,
   };
@@ -1131,7 +1440,7 @@ function finishChildSettlement(ctx, shared) {
     // unhandled throw crashes the daemon and orphans every other in-flight task.
     console.error(`taskferry: failed to clean up scratch files for task ${task.id}: ${errMessage(err)}`);
   } finally {
-    ctx.decRunning();
+    ctx.decRunning(task);
     ctx.settleWaiters(task.id);
     ctx.launchQueuedTasks();
   }
@@ -1338,7 +1647,7 @@ function spawnTaskChild(ctx, launchInfo, task) {
     child.on("error", (err) => onChildError(ctx, shared, err));
     task.status = "running";
     task.pid = child.pid ?? null;
-    ctx.incRunning();
+    ctx.incRunning(task);
     ctx.persistTask(task.id);
     ctx.scheduleActivity(task, { force: true });
     ctx.startRunningWatcher(task, executor);
@@ -1690,22 +1999,6 @@ function resultNextAction(task, taskId, narrationTruncated) {
 }
 
 /**
- * The subset of `createTaskManager`'s closure that `dispatch`'s extracted
- * helper pipeline needs threaded in explicitly -- the same convention the
- * `startTask`/`result` extractions use. `dispatch` is the actual spawn path
- * for every task this tool runs, so its helpers preserve the exact
- * sequencing of side-effecting operations (task-record persistence,
- * pending-launch registration, queue push, and the launch trigger) rather
- * than reordering anything.
- * @typedef {object} DispatchContext
- * @property {Map<string, Task>} tasks
- * @property {(taskId: string) => void} persistTask
- * @property {Map<string, LaunchSpec>} pendingLaunches
- * @property {string[]} launchQueue
- * @property {() => void} launchQueuedTasks
- */
-
-/**
  * On a `sessionId` resume, finds the most recent matching prior task so the
  * dispatch can inherit the executor (and, downstream, the model) the session
  * was actually created under instead of silently falling back to the
@@ -1810,13 +2103,33 @@ function resolveDispatchDirectory(directory) {
  * `oc_` prefix for compatibility. A resume with no `--model` inherits the
  * model the session was created under (a different model can mean a different
  * provider, breaking the whole point of resuming that exact session).
- * @param {{id: string, directory: string, prompt: string, model: string|undefined, executor: import("./executor.js").WorkerExecutor, priorSessionTask: Task|null, variant: string|undefined, sessionId: string|undefined, originSessionId: string|undefined, internal: boolean, finalMarker: string|null, role: "dispatch"|"advisor", logPath: string, class?: string|null, parentTaskId?: string|null}} params
+ * @param {{id: string, directory: string, prompt: string, model: string|undefined, executor: import("./executor.js").WorkerExecutor, priorSessionTask: Task|null, variant: string|undefined, sessionId: string|undefined, originSessionId: string|undefined, internal: boolean, finalMarker: string|null, role: "dispatch"|"advisor", logPath: string, class?: string|null, parentTaskId?: string|null, defaultVariant: string, resolveOpencodeVariants: (model: string, env: NodeJS.ProcessEnv|undefined) => string[], env?: NodeJS.ProcessEnv}} params
  * @returns {Task}
  */
-// eslint-disable-next-line sonarjs/cyclomatic-complexity -- adding `class` field per brief; function was already at the 10-point ceiling
-function buildDispatchTask({ id, directory, prompt, model, executor, priorSessionTask, variant, sessionId, originSessionId, internal, finalMarker, role, logPath, class: taskClass, parentTaskId = null }) {
-  const usingDefaultModel = !model;
-  const resolvedModel = model || priorSessionTask?.model || executor.defaultModel;
+// eslint-disable-next-line sonarjs/cyclomatic-complexity, complexity -- adding `class` field per brief; function was already at the 10-point ceiling
+function buildDispatchTask({ id, directory, prompt, model, executor, priorSessionTask, variant, sessionId, originSessionId, internal, finalMarker, role, logPath, class: taskClass, parentTaskId = null, defaultVariant, resolveOpencodeVariants, env }) {
+  if (!model && !priorSessionTask) {
+    if (sessionId) {
+      throw new Error(`error: no task found for session id "${sessionId}" to inherit a model from\nhelp: pass --model explicitly, or check the session id with taskferry list`);
+    }
+    throw new Error(`error: --model is required\nhelp: name the model, e.g. --model provider/model (opencode models or pi --list-models lists what's available); to resume an existing session and inherit its model, pass --session-id instead`);
+  }
+  const resolvedModel = model || /** @type {Task} */ (priorSessionTask).model;
+  // Precedence: explicit --variant > resumed session's own variant > the
+  // configured defaultVariant sentinel/level. Only the third case ever
+  // needs resolveVariant() -- an explicit or inherited value is already
+  // concrete and passes straight through resolveVariant() as a no-op.
+  const requestedVariant = variant || priorSessionTask?.variant || defaultVariant;
+  // resolveVariant() only ever consults opencodeVariants when requested ===
+  // "highest" (an explicit or inherited concrete level passes straight
+  // through as a no-op) -- so only pay for the cache lookup in that one
+  // case instead of on every opencode dispatch.
+  const needsOpencodeVariants = executor.id === "opencode" && requestedVariant === "highest";
+  const resolvedVariant = resolveVariant({
+    executorId: executor.id,
+    requested: requestedVariant,
+    opencodeVariants: needsOpencodeVariants ? resolveOpencodeVariants(resolvedModel, env) : undefined,
+  });
   return {
     id,
     directory,
@@ -1825,7 +2138,7 @@ function buildDispatchTask({ id, directory, prompt, model, executor, priorSessio
     status: "queued",
     model: resolvedModel,
     executorId: executor.id,
-    variant: usingDefaultModel ? "high" : variant || null,
+    variant: resolvedVariant,
     sessionId: sessionId || null,
     originSessionId: originSessionId || null,
     pid: null,
@@ -1873,10 +2186,10 @@ function buildDispatchTask({ id, directory, prompt, model, executor, priorSessio
  * between queue time and the queued launch's actual spawn would change what
  * reaches the child. Pinned by tasks.test.js's "dispatch()'s queued env is
  * frozen against later caller mutations" gate.
- * @param {DispatchContext} ctx
- * @param {{id: string, task: Task, prompt: string, sessionId: string|undefined, env: NodeJS.ProcessEnv|undefined, noSandbox: boolean, noOverlay: boolean, allowedDirs: string[]|undefined, executor: import("./executor.js").WorkerExecutor, role: "dispatch"|"advisor"}} params
+ * @param {{tasks: Map<string, Task>, persistTask: (taskId: string) => void, pendingLaunches: Map<string, LaunchSpec>, providerQueues: Map<string, ProviderQueue>, launchQueuedTasks: () => void}} ctx
+ * @param {{id: string, task: Task, prompt: string, sessionId: string|undefined, env: NodeJS.ProcessEnv|undefined, noSandbox: boolean, noOverlay: boolean, allowedDirs: string[]|undefined, roBind: string[]|undefined, executor: import("./executor.js").WorkerExecutor, role: "dispatch"|"advisor"}} params
  */
-function queueDispatchLaunch(ctx, { id, task, prompt, sessionId, env, noSandbox, noOverlay, allowedDirs, executor, role }) {
+function queueDispatchLaunch(ctx, { id, task, prompt, sessionId, env, noSandbox, noOverlay, allowedDirs, roBind, executor, role }) {
   ctx.tasks.set(id, task);
   ctx.persistTask(task.id);
   const capturedEnv = env === undefined ? undefined : { ...env };
@@ -1884,6 +2197,7 @@ function queueDispatchLaunch(ctx, { id, task, prompt, sessionId, env, noSandbox,
     prompt,
     sessionId,
     allowedDirs,
+    roBind,
     executor,
     role,
     directory: task.directory,
@@ -1893,7 +2207,9 @@ function queueDispatchLaunch(ctx, { id, task, prompt, sessionId, env, noSandbox,
     noSandbox: noSandbox === true,
     noOverlay: noOverlay === true,
   });
-  ctx.launchQueue.push(id);
+  const provider = providerOf(task.model);
+  const providerQueue = getOrCreateProviderQueue(ctx.providerQueues, provider);
+  providerQueue.launchQueue.push(id);
   ctx.launchQueuedTasks();
 }
 
@@ -1920,7 +2236,7 @@ function queueDispatchLaunch(ctx, { id, task, prompt, sessionId, env, noSandbox,
  * @property {(taskId: string) => void} persistTask
  * @property {Map<string, LaunchSpec>} pendingLaunches
  * @property {() => import("./executor.js").WorkerExecutor} opencodeExecutor
- * @property {string[]} launchQueue
+ * @property {Map<string, ProviderQueue>} providerQueues
  * @property {() => void} launchQueuedTasks
  */
 
@@ -2113,7 +2429,9 @@ function launchSummaryTask(ctx, p) {
     executor: ctx.opencodeExecutor(),
     ...(resolvedSummarySessionId ? { summarySessionId: resolvedSummarySessionId } : {}),
   });
-  ctx.launchQueue.push(id);
+  const provider = providerOf(task.model);
+  const providerQueue = getOrCreateProviderQueue(ctx.providerQueues, provider);
+  providerQueue.launchQueue.push(id);
   ctx.launchQueuedTasks();
   return {
     sourceStatus,
@@ -2451,9 +2769,18 @@ function parseNumstatLine(line) {
   if (firstTab === -1) return null;
   const secondTab = line.indexOf("\t", firstTab + 1);
   if (secondTab === -1) return null;
-  const adds = Number(line.slice(0, firstTab));
-  const dels = Number(line.slice(firstTab + 1, secondTab));
-  if (Number.isNaN(adds) || Number.isNaN(dels)) return null;
+  const addsStr = line.slice(0, firstTab);
+  const delsStr = line.slice(firstTab + 1, secondTab);
+  // Number() accepts far more than a numstat integer column ever contains
+  // (Infinity, negatives, fractions, hex/scientific literals, "" -> 0) and
+  // most of that survives a bare isNaN check. args.js's parseNumber already
+  // gets this right for CLI flags with /^\d+$/ before touching Number() at
+  // all; mirror that here rather than trying to characterize the parsed
+  // value after the fact.
+  if (!/^\d+$/.test(addsStr) || !/^\d+$/.test(delsStr)) return null;
+  const adds = Number(addsStr);
+  const dels = Number(delsStr);
+  if (!Number.isSafeInteger(adds) || !Number.isSafeInteger(dels)) return null;
   return { additions: adds, deletions: dels };
 }
 
@@ -2733,57 +3060,181 @@ function pruneStaleLaunchTimes(launchTimes, dispatchWindow) {
 }
 
 /**
- * Launches queued tasks while both the per-window dispatch limit and the
- * concurrency limit have headroom, and the global lowerdir stagger has
- * elapsed since the last launch (any directory -- see
- * DEFAULT_LOWERDIR_STAGGER_MS's doc comment for why this is deliberately
- * not scoped per-directory). A task that vanished from `tasks` (or is no
- * longer queued) is skipped but still consumed from the queue, matching
- * the original loop.
- * @param {{launchTimes: number[], launchQueue: string[], runningCount: number, lastLaunchAt: number}} sched
- * @param {{dispatchLimit: number, concurrencyLimit: number, lowerdirStagger: number, tasks: Map<string, Task>, startTask: (task: Task) => void}} ctx
+ * One round-robin pass over every provider queue, starting from the
+ * scheduler's rotating cursor: attempts to launch at most one task per
+ * provider per pass, skipping (not blocking on) a provider that has no
+ * queued work or is at its own concurrency/rate cap, then repeats passes
+ * until nothing more can launch this tick (global cap/rate window
+ * exhausted, the lowerdir stagger hasn't elapsed -- see
+ * DEFAULT_LOWERDIR_STAGGER_MS's doc comment for why that one is
+ * deliberately not scoped per-directory -- or every remaining provider is
+ * empty or capped). A stale queue entry (task vanished from `tasks`, or is
+ * no longer `queued`) is dropped and doesn't count as a pass's launch. See
+ * the design spec's sections 2-3 for the rationale.
+ * @param {{launchTimes: number[], providerQueues: Map<string, ProviderQueue>, runningCount: number, lastLaunchAt: number, cursor: number}} sched
+ * @param {{dispatchLimit: number, concurrencyLimit: number, lowerdirStagger: number, providerLimits: Map<string, {concurrencyLimit: number, dispatchLimit: number}>, tasks: Map<string, Task>, startTask: (task: Task) => void}} ctx
  */
 function drainLaunchQueue(sched, ctx) {
-  while (
-    sched.launchQueue.length &&
-    sched.launchTimes.length < ctx.dispatchLimit &&
-    sched.runningCount < ctx.concurrencyLimit &&
-    Date.now() - sched.lastLaunchAt >= ctx.lowerdirStagger
-  ) {
-    const id = /** @type {string} */ (sched.launchQueue.shift());
-    const task = ctx.tasks.get(id);
-    if (!task || task.status !== "queued") continue;
-    const launchedAt = Date.now();
-    sched.launchTimes.push(launchedAt);
-    sched.lastLaunchAt = launchedAt;
-    ctx.startTask(task);
+  // Snapshot once per drain: nothing in the loop body adds providers to
+  // `providerQueues` (startTask only reads the map via incRunning), so the
+  // provider list cannot change between iterations.
+  const providers = Array.from(sched.providerQueues.keys());
+  for (;;) {
+    if (globalLaunchBlocked(sched, ctx)) return;
+    if (!providers.length) return;
+    if (!launchOneRoundRobin(sched, ctx, providers)) return;
   }
 }
 
 /**
- * Arms the next launch tick when the queue is non-empty and no timer is
- * already pending, backing off for the remaining dispatch-window rate delay,
- * a fixed 250ms concurrency delay, or the remaining lowerdir stagger delay,
- * whichever is longest.
- * @param {{launchTimer: NodeJS.Timeout|null, launchTimes: number[], launchQueue: string[], runningCount: number, lastLaunchAt: number}} sched
- * @param {{dispatchLimit: number, dispatchWindow: number, concurrencyLimit: number, lowerdirStagger: number, reschedule: () => void}} ctx
+ * Whether the global (all-provider) gates rule out launching anything right
+ * now: the rate window is full, the concurrency ceiling is reached, or the
+ * lowerdir stagger hasn't elapsed since the last launch.
+ * @param {{launchTimes: number[], runningCount: number, lastLaunchAt: number}} sched
+ * @param {{dispatchLimit: number, concurrencyLimit: number, lowerdirStagger: number}} ctx
+ * @returns {boolean}
+ */
+function globalLaunchBlocked(sched, ctx) {
+  if (sched.launchTimes.length >= ctx.dispatchLimit) return true;
+  if (sched.runningCount >= ctx.concurrencyLimit) return true;
+  return Date.now() - sched.lastLaunchAt < ctx.lowerdirStagger;
+}
+
+/**
+ * Discards queue-head entries whose task vanished from `tasks` or is no
+ * longer `queued`, so the head is either launchable or the queue is empty.
+ * @param {ProviderQueue} providerQueue
+ * @param {Map<string, Task>} tasks
+ */
+function dropStaleQueueHead(providerQueue, tasks) {
+  while (providerQueue.launchQueue.length) {
+    const task = tasks.get(providerQueue.launchQueue[0]);
+    if (task && task.status === "queued") return;
+    providerQueue.launchQueue.shift();
+  }
+}
+
+/**
+ * Whether this provider has queued work its own caps allow launching now.
+ * @param {string} provider
+ * @param {ProviderQueue} providerQueue
+ * @param {Map<string, {concurrencyLimit: number, dispatchLimit: number}>} providerLimits
+ * @returns {boolean}
+ */
+function providerCanLaunch(provider, providerQueue, providerLimits) {
+  if (!providerQueue.launchQueue.length) return false;
+  const limit = providerLimits.get(provider) ?? UNLIMITED_PROVIDER;
+  return providerQueue.launchTimes.length < limit.dispatchLimit && providerQueue.runningCount < limit.concurrencyLimit;
+}
+
+/**
+ * One round-robin pass from the scheduler's cursor: launches at most one
+ * task, from the first provider that has launchable work, and advances the
+ * cursor past it so the next pass starts at the following provider.
+ * @param {{launchTimes: number[], providerQueues: Map<string, ProviderQueue>, lastLaunchAt: number, cursor: number}} sched
+ * @param {{providerLimits: Map<string, {concurrencyLimit: number, dispatchLimit: number}>, tasks: Map<string, Task>, startTask: (task: Task) => void}} ctx
+ * @param {string[]} providers
+ * @returns {boolean} whether a task was launched
+ */
+function launchOneRoundRobin(sched, ctx, providers) {
+  for (let i = 0; i < providers.length; i++) {
+    const provider = providers[(sched.cursor + i) % providers.length];
+    const providerQueue = /** @type {ProviderQueue} */ (sched.providerQueues.get(provider));
+    dropStaleQueueHead(providerQueue, ctx.tasks);
+    if (!providerCanLaunch(provider, providerQueue, ctx.providerLimits)) continue;
+    const id = /** @type {string} */ (providerQueue.launchQueue.shift());
+    const task = /** @type {Task} */ (ctx.tasks.get(id));
+    const launchedAt = Date.now();
+    sched.launchTimes.push(launchedAt);
+    providerQueue.launchTimes.push(launchedAt);
+    sched.lastLaunchAt = launchedAt;
+    // Advanced before startTask because startTask re-enters the scheduler
+    // synchronously; a stale cursor there would replay this same provider.
+    sched.cursor = (sched.cursor + i + 1) % providers.length;
+    ctx.startTask(task);
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Whether any provider queue still has queued work. Iterates the map
+ * directly with an early return instead of spreading every queue into an
+ * array just to test emptiness.
+ * @param {Map<string, ProviderQueue>} providerQueues
+ * @returns {boolean}
+ */
+function anyProviderHasQueuedWork(providerQueues) {
+  for (const queue of providerQueues.values()) {
+    if (queue.launchQueue.length) return true;
+  }
+  return false;
+}
+
+/**
+ * Arms the next launch tick when any provider queue is non-empty and no
+ * timer is already pending, backing off for the longest of: the global
+ * rate-window delay, the soonest provider-specific rate-window delay
+ * among providers still queued, a fixed 250ms concurrency-poll delay, or
+ * the remaining lowerdir stagger delay (design spec section 3).
+ * @param {{launchTimer: NodeJS.Timeout|null, launchTimes: number[], providerQueues: Map<string, ProviderQueue>, runningCount: number, lastLaunchAt: number}} sched
+ * @param {{dispatchLimit: number, dispatchWindow: number, concurrencyLimit: number, lowerdirStagger: number, providerLimits: Map<string, {concurrencyLimit: number, dispatchLimit: number}>, reschedule: () => void}} ctx
  */
 function scheduleNextLaunch(sched, ctx) {
-  if (!sched.launchQueue.length || sched.launchTimer) return;
+  const hasQueued = anyProviderHasQueuedWork(sched.providerQueues);
+  if (!hasQueued || sched.launchTimer) return;
   const rateDelay = sched.launchTimes.length >= ctx.dispatchLimit ? sched.launchTimes[0] + ctx.dispatchWindow - Date.now() : 0;
-  const concurrencyDelay = sched.runningCount >= ctx.concurrencyLimit ? 250 : 0;
+  const concurrencyDelay = sched.runningCount >= ctx.concurrencyLimit ? CONCURRENCY_POLL_MS : 0;
   const staggerDelay = Math.max(0, sched.lastLaunchAt + ctx.lowerdirStagger - Date.now());
-  sched.launchTimer = setTimeout(ctx.reschedule, Math.max(1, rateDelay, concurrencyDelay, staggerDelay));
+  const providerDelay = soonestProviderDelay(sched.providerQueues, ctx.providerLimits, ctx.dispatchWindow);
+  sched.launchTimer = setTimeout(ctx.reschedule, Math.max(1, rateDelay, concurrencyDelay, staggerDelay, providerDelay));
+}
+
+/**
+ * How long the soonest-unblockable provider with queued work has to wait,
+ * so a tick isn't armed earlier than anything can actually launch.
+ * @param {Map<string, ProviderQueue>} providerQueues
+ * @param {Map<string, {concurrencyLimit: number, dispatchLimit: number}>} providerLimits
+ * @param {number} dispatchWindow
+ * @returns {number}
+ */
+function soonestProviderDelay(providerQueues, providerLimits, dispatchWindow) {
+  let soonest = Infinity;
+  for (const [provider, queue] of providerQueues) {
+    if (!queue.launchQueue.length) continue;
+    soonest = Math.min(soonest, providerQueueDelay(provider, queue, providerLimits, dispatchWindow));
+  }
+  return soonest === Infinity ? 0 : soonest;
+}
+
+/**
+ * The backoff one queued provider needs before it could launch again. A
+ * provider capped on its own concurrency has no deadline to wait for --
+ * only a running task exiting frees it -- so it polls on the same fixed
+ * cadence the global concurrency cap uses. Without that term a
+ * provider-capped queue backs off by 0ms and re-arms in a 1ms spin.
+ * @param {string} provider
+ * @param {ProviderQueue} queue
+ * @param {Map<string, {concurrencyLimit: number, dispatchLimit: number}>} providerLimits
+ * @param {number} dispatchWindow
+ * @returns {number}
+ */
+function providerQueueDelay(provider, queue, providerLimits, dispatchWindow) {
+  const limit = providerLimits.get(provider) ?? UNLIMITED_PROVIDER;
+  if (queue.runningCount >= limit.concurrencyLimit) return CONCURRENCY_POLL_MS;
+  if (queue.launchTimes.length >= limit.dispatchLimit) return queue.launchTimes[0] + dispatchWindow - Date.now();
+  return 0;
 }
 
 /**
  * Runs one launch-queue tick: cancel any pending timer, prune stale window
- * timestamps, drain as many queued tasks as the limits allow, then re-arm a
- * timer if the queue still has work. Threads the factory's mutable scheduler
- * state via `sched` so the module-level helpers can read/write `launchTimer`
- * and `runningCount` without closing over the factory.
- * @param {{launchTimer: NodeJS.Timeout|null, launchTimes: number[], launchQueue: string[], runningCount: number, lastLaunchAt: number}} sched
- * @param {{dispatchLimit: number, dispatchWindow: number, concurrencyLimit: number, lowerdirStagger: number, tasks: Map<string, Task>, startTask: (task: Task) => void, reschedule: () => void}} ctx
+ * timestamps (global and every provider bucket's own), drain as many queued
+ * tasks as the limits allow, then re-arm a timer if any provider queue still
+ * has work. Threads the factory's mutable scheduler state via `sched` so the
+ * module-level helpers can read/write `launchTimer` and `runningCount`
+ * without closing over the factory.
+ * @param {{launchTimer: NodeJS.Timeout|null, launchTimes: number[], providerQueues: Map<string, ProviderQueue>, runningCount: number, lastLaunchAt: number, cursor: number}} sched
+ * @param {{dispatchLimit: number, dispatchWindow: number, concurrencyLimit: number, lowerdirStagger: number, providerLimits: Map<string, {concurrencyLimit: number, dispatchLimit: number}>, tasks: Map<string, Task>, startTask: (task: Task) => void, reschedule: () => void}} ctx
  */
 function runLaunchQueuedTasks(sched, ctx) {
   if (sched.launchTimer) {
@@ -2791,6 +3242,10 @@ function runLaunchQueuedTasks(sched, ctx) {
     sched.launchTimer = null;
   }
   pruneStaleLaunchTimes(sched.launchTimes, ctx.dispatchWindow);
+  for (const queue of sched.providerQueues.values()) {
+    if (queue.launchTimes.length === 0) continue;
+    pruneStaleLaunchTimes(queue.launchTimes, ctx.dispatchWindow);
+  }
   drainLaunchQueue(sched, ctx);
   scheduleNextLaunch(sched, ctx);
 }
@@ -2822,9 +3277,14 @@ function buildCheckGateFailureMessage(task) {
     const indentedOutputTail = task.checkOutputTail.split("\n").map((line) => `    ${line}`).join("\n");
     outputTail = `\n  output tail:\n${indentedOutputTail}`;
   }
+  // The --session-id branch inherits its model from the resumed session (see
+  // buildDispatchTask's doc comment), so --model is optional there; the
+  // sessionId-less branch is a fresh dispatch, which now requires --model
+  // explicitly, so the suggested command must name it or pasting the tool's
+  // own fix-forward hint fails immediately with "error: --model is required".
   const resumeHint = task.sessionId
     ? `  taskferry dispatch --session-id ${task.sessionId} --parent-task ${task.id} \\\n    --prompt "Fix: check gate ${task.checkStatus}. See taskferry result ${task.id} --fields checkOutputTail"`
-    : `  taskferry dispatch --directory ${task.directory} --parent-task ${task.id} \\\n    --prompt "Fix: check gate ${task.checkStatus} for task ${task.id}. See taskferry result ${task.id} --fields checkOutputTail"`;
+    : `  taskferry dispatch --directory ${task.directory} --model ${task.model} --parent-task ${task.id} \\\n    --prompt "Fix: check gate ${task.checkStatus} for task ${task.id}. See taskferry result ${task.id} --fields checkOutputTail"`;
   return `error: check gate ${task.checkStatus} for ${task.id}\n${commandLine}\n${exitLine}${outputTail}\nchangeset NOT accepted. To fix forward, resume the worker session:\n${resumeHint}\nOverride only if you have verified manually: taskferry accept ${task.id} --force`;
 }
 
@@ -3132,8 +3592,14 @@ function watchdogTick(state, ctx) {
  * @param {string[]} [options.envDenylist] - env var names stripped from every spawned child's
  *   environment, applied last (after the caller-env union), regardless of whether the value
  *   came from the daemon's own ambient environment or the caller.
- * @param {string[]} [options.allowedDirs] - extra directories always bound read-write inside the sandbox,
+ * @param {string[]} [options.allowedDirs] - deprecated alias for `rwBind`; extra directories always bound read-write inside the sandbox,
  *   in addition to the auto-detected git-common-dir for a worktree dispatch directory.
+ * @param {string[]} [options.rwBind] - extra directories always bound read-write inside the sandbox,
+ *   in addition to the auto-detected git-common-dir for a worktree dispatch directory. Resolved as a
+ *   union of this, `TASKFERRY_RW_BIND`, and config `rwBind`.
+ * @param {string[]} [options.roBind] - extra directories always bound read-only inside the sandbox.
+ *   Resolved as a union of this, `TASKFERRY_RO_BIND`, and config `roBind`; a path that is also bound
+ *   read-write wins read-write (with a warning).
  * @param {(directory: string) => string|null} [options.resolveGitCommonDirFn]
  * @param {(directory: string) => string|null} [options.resolveGitDirFn]
  * @param {boolean} [options.overlayEnabled]
@@ -3227,6 +3693,12 @@ function resolveCoreOptions(rawOptions) {
     // throw because `resolveExecutor` expects a name string.
     defaultExecutor: rawOptions.defaultExecutor ?? resolveExecutor(process.env.TASKFERRY_DEFAULT_EXECUTOR || config.defaultExecutor),
     listModelsFn: rawOptions.listModelsFn ?? opencodeExecutor().listModelsFn,
+    opencodeListModelVariantsFn: rawOptions.opencodeListModelVariantsFn ?? opencodeExecutor().listModelVariantsFn,
+    // Test-only direct injection of the resolved opencode variants table,
+    // bypassing readVariantsCache()/the cache file entirely. A real
+    // manager passes undefined here and resolves the table per-dispatch
+    // from disk instead (see dispatchTask's ctx.readOpencodeVariants).
+    opencodeVariantsTable: rawOptions.opencodeVariantsTable,
     platform: rawOptions.platform ?? process.platform,
     onEvent: rawOptions.onEvent,
     config,
@@ -3280,14 +3752,27 @@ function resolveToggleOptions(rawOptions) {
 }
 
 /**
- * The string option whose default chain crosses env, config, and a
- * constant: `activitySummaryModel` (the only manager option that does).
+ * The string options whose default chain crosses env, config, and a
+ * constant: `activitySummaryModel` (the only manager option that does) and
+ * `defaultVariant` (the sentinel/concrete level an omitted `--variant`
+ * resolves through).
  * @param {Record<string, any>} rawOptions
  */
 function resolveStringOptions(rawOptions) {
   const config = rawOptions.config || {};
+  // config.defaultVariant already passed validateDefaultVariant() during
+  // loadConfig()'s parseAndValidateConfig() -- but rawOptions.defaultVariant
+  // (a programmatic caller) and TASKFERRY_DEFAULT_VARIANT (an env var, which
+  // has no load-time validation pass of its own) never go through that
+  // check, so an invalid value here would otherwise reach resolveVariant()
+  // silently and fall through as "send no flag" rather than fail loudly.
+  const defaultVariant = rawOptions.defaultVariant ?? process.env.TASKFERRY_DEFAULT_VARIANT ?? config.defaultVariant ?? "highest";
+  if (!KNOWN_VARIANT_LEVELS.includes(defaultVariant.trim())) {
+    throw new Error(`error: defaultVariant must be one of ${KNOWN_VARIANT_LEVELS.join(", ")} (got ${JSON.stringify(defaultVariant)})\nhelp: fix config.json's "defaultVariant" key or the TASKFERRY_DEFAULT_VARIANT env var`);
+  }
   return {
     activitySummaryModel: rawOptions.activitySummaryModel ?? process.env.TASKFERRY_SUMMARY_MODEL ?? config.summaryModel ?? DEFAULT_SUMMARY_MODEL,
+    defaultVariant,
   };
 }
 
@@ -3331,10 +3816,80 @@ function resolveFilesystemSimpleOptions(rawOptions) {
  */
 function resolveFilesystemDenylists(rawOptions, config) {
   return {
-    allowedDirs: rawOptions.allowedDirs ?? parseAllowedDirs(process.env.TASKFERRY_ALLOWED_DIRS ?? config.allowedDirs),
+    allowedDirs: resolveRwBind(rawOptions, config),
+    roBind: resolveRoBind(rawOptions, config),
     envDenylist: rawOptions.envDenylist ?? parseEnvDenylist(process.env.TASKFERRY_ENV_DENYLIST ?? config.envDenylist),
     sandboxDenylist: rawOptions.sandboxDenylist ?? parseSandboxDenylist(process.env.TASKFERRY_SANDBOX_DENYLIST ?? config.sandboxDenylist),
   };
+}
+
+// `allowedDirs` is kept as the resolved (post-union) value so existing
+// `ctx.allowedDirs` call sites keep working; the deprecated name itself just
+// feeds the union below. It is renamed conceptually to `rwBind` for the
+// user-facing flags/env/config keys.
+const RW_BIND_DEPRECATION_HINT = "TASKFERRY_ALLOWED_DIRS / allowedDirs / --allowed-dirs is deprecated; use rwBind / TASKFERRY_RW_BIND / --rw-bind instead. It will be removed in the next major release.";
+
+/**
+ * Unions one directory-list layer into the accumulator. Each layer is either
+ * an array (a createTaskManager option / test injection) or a comma-separated
+ * string (env var or config key). Returns the merged, deduplicated list.
+ * @param {string[]} acc
+ * @param {string[]|string|undefined} layer
+ * @returns {string[]}
+ */
+function unionBindLayer(acc, layer) {
+  if (layer === undefined || layer === null) return acc;
+  const entries = Array.isArray(layer) ? layer : parseAllowedDirs(layer);
+  return [...new Set([...acc, ...entries])];
+}
+
+/**
+ * Resolves the read-write bind set as a UNION across every layer (flag, env
+ * var, config) -- deliberately unlike the replace-semantics `??` chain the
+ * numeric options use. `--rw-bind` does not replace `TASKFERRY_RW_BIND` or
+ * config `rwBind`; they all contribute. The deprecated `allowedDirs` name
+ * feeds the same union, and emits a deprecation warning whenever it
+ * contributes (even when the new name is also set).
+ * @param {Record<string, any>} rawOptions
+ * @param {Record<string, any>} config
+ * @returns {string[]}
+ */
+function resolveRwBind(rawOptions, config) {
+  /** @type {string[]} */
+  let resolved = [];
+  const newNameSet = rawOptions.rwBind !== undefined || process.env.TASKFERRY_RW_BIND !== undefined || config.rwBind !== undefined;
+  const oldNameSet = rawOptions.allowedDirs !== undefined || process.env.TASKFERRY_ALLOWED_DIRS !== undefined || config.allowedDirs !== undefined;
+  if (oldNameSet) process.stderr.write(`warning: ${RW_BIND_DEPRECATION_HINT}\n`);
+  if (newNameSet) {
+    resolved = unionBindLayer(resolved, rawOptions.rwBind);
+    resolved = unionBindLayer(resolved, process.env.TASKFERRY_RW_BIND);
+    resolved = unionBindLayer(resolved, config.rwBind);
+  }
+  if (oldNameSet) {
+    resolved = unionBindLayer(resolved, rawOptions.allowedDirs);
+    resolved = unionBindLayer(resolved, process.env.TASKFERRY_ALLOWED_DIRS);
+    resolved = unionBindLayer(resolved, config.allowedDirs);
+  }
+  return resolved;
+}
+
+/**
+ * Resolves the read-only bind set as a UNION across the manager-level layers
+ * (createTaskManager option, env, config `roBind`); per-dispatch `--ro-bind`
+ * is unioned in at spawn time in buildBwrapBinds. Same union-not-replace
+ * semantics as {@link resolveRwBind}. (The `read_only_paths` project-config
+ * alias is resolved separately at spawn time.)
+ * @param {Record<string, any>} rawOptions
+ * @param {Record<string, any>} config
+ * @returns {string[]}
+ */
+function resolveRoBind(rawOptions, config) {
+  /** @type {string[]} */
+  let resolved = [];
+  resolved = unionBindLayer(resolved, rawOptions.roBind);
+  resolved = unionBindLayer(resolved, process.env.TASKFERRY_RO_BIND);
+  resolved = unionBindLayer(resolved, config.roBind);
+  return resolved;
 }
 
 /**
@@ -3416,6 +3971,7 @@ function resolveTaskManagerOptions(rawOptions = {}) {
     ...resolveStringOptions(rawOptions),
     ...resolveEnvFileOptions(rawOptions),
     ...resolveFilesystemOptions(rawOptions),
+    ...resolveProviderLimitsOption(rawOptions),
   };
 }
 
@@ -3489,6 +4045,7 @@ function initManagerLimits(opts) {
     dispatchLimit: positiveInteger(opts.maxDispatchesPerWindow, DEFAULT_MAX_DISPATCHES_PER_WINDOW),
     dispatchWindow: positiveInteger(opts.dispatchWindowMs, DEFAULT_DISPATCH_WINDOW_MS),
     concurrencyLimit: positiveInteger(opts.maxConcurrentTasks, DEFAULT_MAX_CONCURRENT_TASKS),
+    providerLimits: opts.providerLimits,
     summaryConcurrencyLimit: Math.max(1, Math.floor(positiveInteger(opts.maxConcurrentTasks, DEFAULT_MAX_CONCURRENT_TASKS) / 2)),
     advisorTtl: positiveInteger(opts.advisorSessionTtlMs, DEFAULT_ADVISOR_SESSION_TTL_MS),
     noOutputTimeout: positiveInteger(opts.noOutputTimeoutMs, DEFAULT_NO_OUTPUT_TIMEOUT_MS),
@@ -3593,7 +4150,7 @@ function initManagerMaps() {
     waiters: new Map(),
     advisorSessions: new Map(),
     pendingLaunches: new Map(),
-    launchQueue: [],
+    providerQueues: new Map(),
     launchTimes: [],
     modelsCache: new Map(),
     modelsCacheInFlight: new Map(),
@@ -3605,22 +4162,29 @@ function initManagerMaps() {
 
 /**
  * @param {{launchTimer: NodeJS.Timeout|null, runningCount: number, eventSequence: number, activitySummarySubscriptions: number, lastLaunchAt: number}} state
- * @param {{launchTimes: number[], launchQueue: string[]}} maps
+ * @param {{launchTimes: number[], providerQueues: Map<string, ProviderQueue>}} maps
  */
 function initManagerSchedulers(state, maps) {
   return {
     // Getter/setter pair lets the module-level launch helpers
     // read/write `launchTimer` and `runningCount` (the factory's own
     // `let` bindings) without closing over the factory, while
-    // `launchTimes`/`launchQueue` are shared by reference.
+    // `launchTimes`/`providerQueues` are shared by reference.
     launchScheduler: {
       launchTimes: maps.launchTimes,
-      launchQueue: maps.launchQueue,
+      providerQueues: maps.providerQueues,
       get runningCount() { return state.runningCount; },
       get launchTimer() { return state.launchTimer; },
       set launchTimer(v) { state.launchTimer = v; },
       get lastLaunchAt() { return state.lastLaunchAt; },
       set lastLaunchAt(v) { state.lastLaunchAt = v; },
+      // Round-robin cursor into providerQueues' iteration order, advanced
+      // by the drain algorithm so a heavy provider's backlog doesn't
+      // starve a lighter one's when the global ceiling binds (design
+      // spec §3). Plain mutable property: this object is created once
+      // per manager and lives for the daemon's lifetime, so it needs no
+      // getter/setter indirection the way `state`'s `let` bindings do.
+      cursor: 0,
     },
     // Mutable bindings the extracted activity-schedule helper needs
     // read/write access to (the monotonic event sequence and the
@@ -3756,6 +4320,22 @@ function buildManagerInternalHelpers(ctx) {
     /** @param {Task} task */
     hasLiveOverlay: (task) => hasLiveOverlayForTask(task, { existsFn: ctx.opts.existsFn }),
     sweepOrphanedPromptFiles: () => sweepOrphanedPromptFilesFor({ PROMPT_DIR: ctx.paths.PROMPT_DIR, tasks: ctx.maps.tasks }),
+    /** @param {string} model @param {NodeJS.ProcessEnv} [env] @returns {string[]} Resolves the
+     * opencode variants table for a model: the test-injected
+     * `opencodeVariantsTable` seam when set, otherwise the on-disk
+     * `readVariantsCache()` table (a real daemon's path). Reads against
+     * this specific dispatch's effective env (`ctx.env.sanitizedEnvironment`
+     * -- the daemon's own env layered with any envFileVars/caller overrides,
+     * the same merge the actual spawn uses), not the daemon's raw
+     * `process.env`, since a per-dispatch caller override of a credential or
+     * base URL can expose a different model catalog than the daemon's own
+     * environment. An absent entry or absent cache means "no variants
+     * known" -- resolveVariant() then sends no flag rather than guessing. */
+    resolveOpencodeVariants: (model, env) => {
+      if (ctx.opts.opencodeVariantsTable) return ctx.opts.opencodeVariantsTable.get(model) ?? [];
+      const table = readVariantsCache({ cacheDir: ctx.opts.cacheDir, env: ctx.env.sanitizedEnvironment(env) });
+      return table?.get(model) ?? [];
+    },
     sweepOrphanedOverlays: () => sweepOrphanedOverlaysFor({ tasks: ctx.maps.tasks, overlayTmpRoot: ctx.opts.overlayTmpRoot, releaseOverlay: (task) => ctx.env.releaseOverlay(task), persistTask: (taskId) => ctx.helpers.persistTask(taskId), readdirFn: ctx.opts.readdirFn }),
     markInterruptedGates: () => markInterruptedGatesFor({ tasks: ctx.maps.tasks, hasLiveOverlay: (task) => ctx.helpers.hasLiveOverlay(task), startCheckGate: (task) => ctx.env.startCheckGate(task), sendSignal: (pid, signal) => ctx.helpers.sendSignal(pid, signal), persistTask: (taskId) => ctx.helpers.persistTask(taskId) }),
     /**
@@ -3796,16 +4376,16 @@ function buildManagerInternalHelpers(ctx) {
      * @param {{maxWords?: number, allowPromptFallback?: boolean, previousActivity?: string|null, summarySessionId?: string|null, lastSummarizedWatermark?: number|null, respectConcurrencyReserve?: boolean, env?: NodeJS.ProcessEnv}} [options]
      * @returns {Promise<{sourceTaskId: string, sourceStatus: string, summary?: string, help?: string, capturedAt?: string, sourceLogBytes?: number, summaryInputBytes?: number, next?: string, summaryTask?: {id: string, status: string, model: string}}>}
      */
-    summarizeTask: (taskId, options = {}) => summarizeTaskFor(taskId, options, { ensureStateLoaded: () => ctx.helpers.ensureStateLoaded(), tasks: ctx.maps.tasks, summaryConcurrencyLimit: ctx.limits.summaryConcurrencyLimit, activityCache: ctx.activity.cache, activitySummaryModel: ctx.opts.activitySummaryModel, summaryModelAvailable: (model, env) => ctx.helpers.summaryModelAvailable(model, env), LOG_DIR: ctx.paths.LOG_DIR, SUMMARY_DIR: ctx.paths.SUMMARY_DIR, persistTask: (taskId) => ctx.helpers.persistTask(taskId), pendingLaunches: ctx.maps.pendingLaunches, launchQueue: ctx.maps.launchQueue, launchQueuedTasks: () => ctx.helpers.launchQueuedTasks(), noSuchTask, readNarrationExcerpt, opencodeExecutor }),
+    summarizeTask: (taskId, options = {}) => summarizeTaskFor(taskId, options, { ensureStateLoaded: () => ctx.helpers.ensureStateLoaded(), tasks: ctx.maps.tasks, summaryConcurrencyLimit: ctx.limits.summaryConcurrencyLimit, activityCache: ctx.activity.cache, activitySummaryModel: ctx.opts.activitySummaryModel, summaryModelAvailable: (model, env) => ctx.helpers.summaryModelAvailable(model, env), LOG_DIR: ctx.paths.LOG_DIR, SUMMARY_DIR: ctx.paths.SUMMARY_DIR, persistTask: (taskId) => ctx.helpers.persistTask(taskId), pendingLaunches: ctx.maps.pendingLaunches, providerQueues: ctx.maps.providerQueues, launchQueuedTasks: () => ctx.helpers.launchQueuedTasks(), noSuchTask, readNarrationExcerpt, opencodeExecutor }),
     /** @returns {void} */
-    launchQueuedTasks: () => { runLaunchQueuedTasks(ctx.schedulers.launchScheduler, { dispatchLimit: ctx.limits.dispatchLimit, dispatchWindow: ctx.limits.dispatchWindow, concurrencyLimit: ctx.limits.concurrencyLimit, lowerdirStagger: ctx.limits.lowerdirStagger, tasks: ctx.maps.tasks, startTask: (task) => ctx.helpers.startTask(task), reschedule: () => ctx.helpers.launchQueuedTasks() }); },
+    launchQueuedTasks: () => { runLaunchQueuedTasks(ctx.schedulers.launchScheduler, { dispatchLimit: ctx.limits.dispatchLimit, dispatchWindow: ctx.limits.dispatchWindow, concurrencyLimit: ctx.limits.concurrencyLimit, lowerdirStagger: ctx.limits.lowerdirStagger, providerLimits: ctx.limits.providerLimits, tasks: ctx.maps.tasks, startTask: (task) => ctx.helpers.startTask(task), reschedule: () => ctx.helpers.launchQueuedTasks() }); },
     /** Spawns a queued launch's worker process. The launch's pre-parsed
      * metadata (target dir, prompt-file routing, buildSpawnArgs output) comes
      * from resolveStartTaskLaunch; the actual spawn + child lifecycle is
      * delegated to {@link startTaskFor}, which takes every factory closure
      * dependency explicitly via `ctx`.
      * @param {Task} task */
-    startTask: (task) => startTaskFor(task, { pendingLaunches: ctx.maps.pendingLaunches, SUMMARY_DIR: ctx.paths.SUMMARY_DIR, PROMPT_DIR: ctx.paths.PROMPT_DIR, spawnFn: ctx.opts.spawnFn, runOverlayCommandFn: ctx.opts.runOverlayCommandFn, sandboxEnabled: ctx.opts.sandboxEnabled, platform: ctx.opts.platform, overlayEnabled: ctx.opts.overlayEnabled, overlayTmpRoot: ctx.opts.overlayTmpRoot, allowedDirs: ctx.opts.allowedDirs, stateDir: ctx.opts.stateDir, cacheDir: ctx.opts.cacheDir, runtimeDir: ctx.opts.runtimeDir, existsFn: ctx.opts.existsFn, statFn: ctx.opts.statFn, readdirFn: ctx.opts.readdirFn, sandboxDenylist: ctx.opts.sandboxDenylist, resolveGitCommonDirFn: ctx.opts.resolveGitCommonDirFn, resolveGitDirFn: ctx.opts.resolveGitDirFn, requireBwrap: () => ctx.env.requireBwrap(), requireOverlaySupport: () => ctx.env.requireOverlaySupport(), dispatchEnvironment: (env, taskId) => ctx.env.dispatchEnvironment(env, taskId), summaryEnvironment: (env) => ctx.env.summaryEnvironment(env), settleWaiters: (taskId) => ctx.helpers.settleWaiters(taskId), launchQueuedTasks: () => ctx.helpers.launchQueuedTasks(), persistTask: (taskId) => ctx.helpers.persistTask(taskId), scheduleActivity: (task, options) => ctx.helpers.scheduleActivity(task, options), classifyTrailingLogFailure: (task, executor) => ctx.helpers.classifyTrailingLogFailure(task, executor), startRunningWatcher: (task, executor) => ctx.helpers.startRunningWatcher(task, executor), stopRunningWatcher: (taskId) => ctx.helpers.stopRunningWatcher(taskId), extractChangesetForTask: (task) => ctx.env.extractChangesetForTask(task), sendSignal: (pid, signal) => ctx.helpers.sendSignal(pid, signal), activityCache: ctx.activity.cache, logHasEventCache: ctx.maps.logHasEventCache, escalationTimers: ctx.maps.escalationTimers, tasks: ctx.maps.tasks, decRunning: () => { ctx.state.runningCount--; }, incRunning: () => { ctx.state.runningCount++; }, readSessionIdFromLog, evaluateOutputCompleteness, attemptCrashRecovery }),
+    startTask: (task) => startTaskFor(task, { pendingLaunches: ctx.maps.pendingLaunches, SUMMARY_DIR: ctx.paths.SUMMARY_DIR, PROMPT_DIR: ctx.paths.PROMPT_DIR, spawnFn: ctx.opts.spawnFn, runOverlayCommandFn: ctx.opts.runOverlayCommandFn, sandboxEnabled: ctx.opts.sandboxEnabled, platform: ctx.opts.platform, overlayEnabled: ctx.opts.overlayEnabled, overlayTmpRoot: ctx.opts.overlayTmpRoot, allowedDirs: ctx.opts.allowedDirs, roBind: ctx.opts.roBind, stateDir: ctx.opts.stateDir, cacheDir: ctx.opts.cacheDir, runtimeDir: ctx.opts.runtimeDir, existsFn: ctx.opts.existsFn, statFn: ctx.opts.statFn, readdirFn: ctx.opts.readdirFn, sandboxDenylist: ctx.opts.sandboxDenylist, resolveGitCommonDirFn: ctx.opts.resolveGitCommonDirFn, resolveGitDirFn: ctx.opts.resolveGitDirFn, requireBwrap: () => ctx.env.requireBwrap(), requireOverlaySupport: () => ctx.env.requireOverlaySupport(), dispatchEnvironment: (env, taskId) => ctx.env.dispatchEnvironment(env, taskId), summaryEnvironment: (env) => ctx.env.summaryEnvironment(env), settleWaiters: (taskId) => ctx.helpers.settleWaiters(taskId), launchQueuedTasks: () => ctx.helpers.launchQueuedTasks(), persistTask: (taskId) => ctx.helpers.persistTask(taskId), scheduleActivity: (task, options) => ctx.helpers.scheduleActivity(task, options), classifyTrailingLogFailure: (task, executor) => ctx.helpers.classifyTrailingLogFailure(task, executor), startRunningWatcher: (task, executor) => ctx.helpers.startRunningWatcher(task, executor), stopRunningWatcher: (taskId) => ctx.helpers.stopRunningWatcher(taskId), extractChangesetForTask: (task) => ctx.env.extractChangesetForTask(task), sendSignal: (pid, signal) => ctx.helpers.sendSignal(pid, signal), activityCache: ctx.activity.cache, logHasEventCache: ctx.maps.logHasEventCache, escalationTimers: ctx.maps.escalationTimers, tasks: ctx.maps.tasks, decRunning: (task) => { ctx.state.runningCount--; const q = ctx.maps.providerQueues.get(providerOf(task.model)); if (q) { q.runningCount--; } }, incRunning: (task) => { ctx.state.runningCount++; const q = ctx.maps.providerQueues.get(providerOf(task.model)); if (q) { q.runningCount++; } }, readSessionIdFromLog, evaluateOutputCompleteness, attemptCrashRecovery }),
     /**
      * @param {string} taskId
      * @param {{force?: boolean}} options
@@ -3853,7 +4433,7 @@ function buildManagerInternalHelpers(ctx) {
     sendSignal: (pid, signal) => sendSignalToProcess(pid, signal, { killFn: ctx.opts.killFn }),
     /** @param {string} taskId
      * @param {{graceMs?: number}} [options] */
-    cancel: (taskId, { graceMs = ctx.limits.cancelGrace } = {}) => cancelTask(taskId, { graceMs }, { noSuchTask, ensureStateLoaded: () => ctx.helpers.ensureStateLoaded(), tasks: ctx.maps.tasks, launchScheduler: { get launchQueue() { return ctx.maps.launchQueue; }, get launchTimer() { return ctx.state.launchTimer; }, set launchTimer(value) { ctx.state.launchTimer = value; } }, pendingLaunches: ctx.maps.pendingLaunches, persistTask: (id) => ctx.helpers.persistTask(id), scheduleActivity: (task, options2) => ctx.helpers.scheduleActivity(task, options2), activityCache: ctx.activity.cache, logHasEventCache: ctx.maps.logHasEventCache, settleWaiters: (id) => ctx.helpers.settleWaiters(id), stopRunningWatcher: (id) => ctx.helpers.stopRunningWatcher(id), escalationTimers: ctx.maps.escalationTimers, sendSignal: (pid, signal) => ctx.helpers.sendSignal(pid, signal) }),
+    cancel: (taskId, { graceMs = ctx.limits.cancelGrace } = {}) => cancelTask(taskId, { graceMs }, { noSuchTask, ensureStateLoaded: () => ctx.helpers.ensureStateLoaded(), tasks: ctx.maps.tasks, launchScheduler: { get providerQueues() { return ctx.maps.providerQueues; }, get launchTimer() { return ctx.state.launchTimer; }, set launchTimer(value) { ctx.state.launchTimer = value; } }, pendingLaunches: ctx.maps.pendingLaunches, persistTask: (id) => ctx.helpers.persistTask(id), scheduleActivity: (task, options2) => ctx.helpers.scheduleActivity(task, options2), activityCache: ctx.activity.cache, logHasEventCache: ctx.maps.logHasEventCache, settleWaiters: (id) => ctx.helpers.settleWaiters(id), stopRunningWatcher: (id) => ctx.helpers.stopRunningWatcher(id), escalationTimers: ctx.maps.escalationTimers, sendSignal: (pid, signal) => ctx.helpers.sendSignal(pid, signal) }),
   };
 }
 
@@ -3883,8 +4463,12 @@ function buildTaskManagerApi(ctx) {
      * @param {boolean} [params.noSandbox]
      * @param {boolean} [params.noOverlay]
      * @param {"dispatch"|"advisor"} [params.role]
-     * @param {string[]} [params.allowedDirs] - extra directories bound read-write for this dispatch only, on
+     * @param {string[]} [params.allowedDirs] - deprecated alias for `rwBind`; extra directories bound read-write for this dispatch only, on
      *   top of the manager-level default (see createTaskManager's `allowedDirs` option)
+     * @param {string[]} [params.rwBind] - extra directories bound read-write for this dispatch only, on
+     *   top of the manager-level default (see createTaskManager's `allowedDirs` option)
+     * @param {string[]} [params.roBind] - extra directories bound read-only for this dispatch only, on
+     *   top of the manager-level default (see createTaskManager's `roBind` option)
      * @param {string} [params.executor] - "opencode" | "pi". When omitted on a `sessionId` resume, inherits
      *   the executor that originally created the session (a different executor can't continue another CLI's
      *   session file); otherwise defaults to the manager's defaultExecutor (itself the result of
@@ -3892,7 +4476,7 @@ function buildTaskManagerApi(ctx) {
      *   misrouted CLI/RPC call fails fast rather than silently picking the default.
      * @returns {TaskSummary & {next: string}}
      */
-    dispatch: (params) => dispatchTask(params, { ensureStateLoaded: () => ctx.helpers.ensureStateLoaded(), tasks: ctx.maps.tasks, defaultExecutor: ctx.opts.defaultExecutor, LOG_DIR: ctx.paths.LOG_DIR, persistTask: (taskId) => ctx.helpers.persistTask(taskId), pendingLaunches: ctx.maps.pendingLaunches, launchQueue: ctx.maps.launchQueue, launchQueuedTasks: () => ctx.helpers.launchQueuedTasks() }),
+    dispatch: (params) => dispatchTask(params, { ensureStateLoaded: () => ctx.helpers.ensureStateLoaded(), tasks: ctx.maps.tasks, defaultExecutor: ctx.opts.defaultExecutor, LOG_DIR: ctx.paths.LOG_DIR, persistTask: (taskId) => ctx.helpers.persistTask(taskId), pendingLaunches: ctx.maps.pendingLaunches, providerQueues: ctx.maps.providerQueues, launchQueuedTasks: () => ctx.helpers.launchQueuedTasks(), defaultVariant: ctx.opts.defaultVariant, resolveOpencodeVariants: ctx.helpers.resolveOpencodeVariants }),
     /**
      * @param {string} taskId
      * @param {{graceMs?: number}} [options]
@@ -4029,6 +4613,40 @@ function bootstrapManagerContext(ctx) {
   // then auto-re-run any gate whose overlay survived the crash (per the
   // design's "the gate is re-runnable" promise).
   ctx.helpers.markInterruptedGates();
+  // Opportunistically warm the opencode variants cache in the background.
+  // Never awaited: a stale or missing cache only means dispatch()'s
+  // resolveOpencodeVariants() sends no --variant flag until the refresh
+  // lands, never a blocked or failed dispatch. Skipped entirely when a
+  // test has injected opencodeVariantsTable directly (Task 6), since that
+  // seam bypasses the cache file altogether.
+  if (!ctx.opts.opencodeVariantsTable) {
+    warmAndScheduleVariantsCacheRefresh(ctx.opts, ctx.env.sanitizedEnvironment);
+  }
+}
+
+/**
+ * Refreshes the opencode variants cache once now (if stale) and schedules
+ * an hourly, `unref()`'d recheck for as long as the process lives. The
+ * hourly tick is cheap when the cache is fresh (a single `statSync` inside
+ * `readVariantsCache()`); it only pays for the ~3s `opencode models
+ * --verbose` shell-out once every `DEFAULT_VARIANT_CACHE_TTL_MS` (24h).
+ * @param {ResolvedTaskManagerOptions} opts
+ * @param {(env?: NodeJS.ProcessEnv) => NodeJS.ProcessEnv} sanitizeEnvironment The same
+ * env merge dispatch() fingerprints the cache against (process.env +
+ * envFileVars + caller env). Fingerprinting the warm against raw
+ * process.env while dispatch reads under the sanitized merge meant any
+ * envFile/denylist change to a credential var made the cache a permanent
+ * miss -- the highest-thinking default silently never applied.
+ */
+function warmAndScheduleVariantsCacheRefresh(opts, sanitizeEnvironment) {
+  const maybeRefresh = () => {
+    const env = sanitizeEnvironment(process.env);
+    if (readVariantsCache({ cacheDir: opts.cacheDir, env: env }) !== null) return;
+    refreshVariantsCache({ cacheDir: opts.cacheDir, env: env, listModelVariantsFn: opts.opencodeListModelVariantsFn })
+      .catch((err) => process.stderr.write(`warning: opencode variants cache refresh failed: ${errMessage(err)}\n`));
+  };
+  maybeRefresh();
+  setInterval(maybeRefresh, 60 * 60 * 1000).unref();
 }
 
 /**
@@ -4191,7 +4809,7 @@ function readNarrationExcerpt(logPath) {
  * @param {NodeJS.ProcessEnv} env
  * @returns {string}
  */
-function modelsCacheFingerprint(env = {}) {
+export function modelsCacheFingerprint(env = {}) {
   const suffixNames = ["_API_KEY", "_BASE_URL"];
   const exactNames = [
     "OPENCODE_CONFIG",
@@ -5704,12 +6322,15 @@ function startRunningWatcherFor(task, ctx) {
  * `createTaskManager`'s `dispatch` closure; all the validation/build/queue
  * helpers are plain module-level functions called directly. The factory
  * bindings are threaded in via `ctx`.
- * @param {{prompt: string, directory: string, model?: string, variant?: string, sessionId?: string, internal?: boolean, finalMarker?: string|null, originSessionId?: string, noSandbox?: boolean, noOverlay?: boolean, allowedDirs?: string[], executor?: string, env?: NodeJS.ProcessEnv, role?: "dispatch"|"advisor", class?: string|null, parentTaskId?: string|null}} params
- * @param {{ensureStateLoaded: () => void, tasks: Map<string, Task>, defaultExecutor: import("./executor.js").WorkerExecutor, LOG_DIR: string, persistTask: (taskId: string) => void, pendingLaunches: Map<string, LaunchSpec>, launchQueue: string[], launchQueuedTasks: () => void}} ctx
+ * @param {{prompt: string, directory: string, model?: string, variant?: string, sessionId?: string, internal?: boolean, finalMarker?: string|null, originSessionId?: string, noSandbox?: boolean, noOverlay?: boolean, allowedDirs?: string[], rwBind?: string[], roBind?: string[], executor?: string, env?: NodeJS.ProcessEnv, role?: "dispatch"|"advisor", class?: string|null, parentTaskId?: string|null}} params
+ * @param {{ensureStateLoaded: () => void, tasks: Map<string, Task>, defaultExecutor: import("./executor.js").WorkerExecutor, LOG_DIR: string, persistTask: (taskId: string) => void, pendingLaunches: Map<string, LaunchSpec>, providerQueues: Map<string, ProviderQueue>, launchQueuedTasks: () => void, defaultVariant: string, resolveOpencodeVariants: (model: string, env: NodeJS.ProcessEnv|undefined) => string[]}} ctx
  * @returns {TaskSummary & {next: string}}
  */
 function dispatchTask(params, ctx) {
-  const { prompt, directory, model, variant, sessionId, internal = false, finalMarker = null, originSessionId, noSandbox = false, noOverlay = false, allowedDirs: dispatchAllowedDirs, executor: executorName, env, role = "dispatch", class: taskClass = null, parentTaskId = null } = params;
+  const { prompt, directory, model, variant, sessionId, internal = false, finalMarker = null, originSessionId, noSandbox = false, noOverlay = false, allowedDirs: dispatchAllowedDirs, rwBind: dispatchRwBind, roBind: dispatchRoBind, executor: executorName, env, role = "dispatch", class: taskClass = null, parentTaskId = null } = params;
+  // `allowedDirs` is the deprecated per-dispatch alias for `rwBind`; fold it
+  // into the modern name so the launch carries one concept.
+  const effectiveRwBind = [...new Set([...(dispatchRwBind ?? []), ...(dispatchAllowedDirs ?? [])])];
   ctx.ensureStateLoaded();
   const priorSessionTask = resolvePriorSessionTask(ctx.tasks, sessionId, executorName);
   const executor = resolveDispatchExecutor(priorSessionTask, executorName, ctx.defaultExecutor);
@@ -5723,8 +6344,8 @@ function dispatchTask(params, ctx) {
   // Task IDs retain the literal "oc_" prefix for compatibility; WorkerExecutor.taskIdPrefix is not wired in this issue.
   const id = `oc_${Date.now().toString(36)}_${randomUUID().slice(0, 8)}`;
   const logPath = path.join(ctx.LOG_DIR, `${id}.ndjson`);
-  const task = buildDispatchTask({ id, model, executor, priorSessionTask, variant, sessionId, originSessionId, internal, finalMarker, role, logPath, parentTaskId, class: taskClass, prompt: dispatchPrompt, directory: normalizedDirectory });
-  queueDispatchLaunch({ tasks: ctx.tasks, persistTask: ctx.persistTask, pendingLaunches: ctx.pendingLaunches, launchQueue: ctx.launchQueue, launchQueuedTasks: ctx.launchQueuedTasks }, { id, task, sessionId, env, noSandbox, noOverlay, executor, role, prompt: dispatchPrompt, allowedDirs: dispatchAllowedDirs });
+  const task = buildDispatchTask({ id, model, executor, priorSessionTask, variant, sessionId, originSessionId, internal, finalMarker, role, logPath, parentTaskId, env, class: taskClass, prompt: dispatchPrompt, directory: normalizedDirectory, defaultVariant: ctx.defaultVariant, resolveOpencodeVariants: ctx.resolveOpencodeVariants });
+  queueDispatchLaunch({ tasks: ctx.tasks, persistTask: ctx.persistTask, pendingLaunches: ctx.pendingLaunches, providerQueues: ctx.providerQueues, launchQueuedTasks: ctx.launchQueuedTasks }, { id, task, sessionId, env, noSandbox, noOverlay, executor, role, prompt: dispatchPrompt, allowedDirs: effectiveRwBind, roBind: dispatchRoBind });
   const summary = summarize(task);
   return {
     ...summary,
@@ -5798,6 +6419,39 @@ function scheduleActivityFor(task, { force }, ctx) {
 }
 
 /**
+ * Cancels a queued task: removes it from its provider's launch queue,
+ * clears its pending launch scratch files, marks it cancelled, and clears
+ * the launch timer if no provider still has queued work. Extracted out of
+ * `cancelTask` so that function stays under the sonarjs complexity ceiling.
+ * @param {string} taskId
+ * @param {Task} task
+ * @param {{launchScheduler: {providerQueues: Map<string, ProviderQueue>, launchTimer: NodeJS.Timeout|null}, pendingLaunches: Map<string, LaunchSpec>, persistTask: (taskId: string) => void, scheduleActivity: (task: Task, options?: {force?: boolean}) => Promise<unknown>, activityCache: {evictTask: (taskId: string) => void}, logHasEventCache: Set<string>, settleWaiters: (taskId: string) => void}} ctx
+ * @returns {TaskSummary & {note: string}}
+ */
+function cancelQueuedTask(taskId, task, ctx) {
+  const providerQueue = ctx.launchScheduler.providerQueues.get(providerOf(task.model));
+  if (providerQueue) {
+    const index = providerQueue.launchQueue.indexOf(taskId);
+    if (index !== -1) providerQueue.launchQueue.splice(index, 1);
+  }
+  const launch = ctx.pendingLaunches.get(taskId);
+  ctx.pendingLaunches.delete(taskId);
+  if (launch?.snapshotPath) removeFileIfPresent(launch.snapshotPath);
+  task.status = "cancelled";
+  task.endedAt = new Date().toISOString();
+  ctx.persistTask(task.id);
+  void ctx.scheduleActivity(task, { force: true }).then(() => ctx.activityCache.evictTask(task.id));
+  ctx.logHasEventCache.delete(task.logPath);
+  ctx.settleWaiters(taskId);
+  const anyQueued = anyProviderHasQueuedWork(ctx.launchScheduler.providerQueues);
+  if (!anyQueued && ctx.launchScheduler.launchTimer) {
+    clearTimeout(ctx.launchScheduler.launchTimer);
+    ctx.launchScheduler.launchTimer = null;
+  }
+  return { ...summarize(task), note: "queued task cancelled before launch" };
+}
+
+/**
  * Cancels a task: removes a queued task from the queue (and clears its
  * pending launch scratch files), or SIGTERM-escalates a running task to
  * SIGKILL after the grace period. Extracted out of `createTaskManager`'s
@@ -5806,7 +6460,7 @@ function scheduleActivityFor(task, { force }, ctx) {
  * `ctx`. `summarize`/`removeFileIfPresent` are module-level helpers.
  * @param {string} taskId
  * @param {{graceMs: number}} options
- * @param {{ensureStateLoaded: () => void, tasks: Map<string, Task>, noSuchTask: (taskId: string) => Error, launchScheduler: {launchQueue: string[], launchTimer: NodeJS.Timeout|null}, pendingLaunches: Map<string, LaunchSpec>, persistTask: (taskId: string) => void, scheduleActivity: (task: Task, options?: {force?: boolean}) => Promise<unknown>, activityCache: {evictTask: (taskId: string) => void}, logHasEventCache: Set<string>, settleWaiters: (taskId: string) => void, stopRunningWatcher: (taskId: string) => void, escalationTimers: Map<string, NodeJS.Timeout>, sendSignal: (pid: number, signal: NodeJS.Signals) => void}} ctx
+ * @param {{ensureStateLoaded: () => void, tasks: Map<string, Task>, noSuchTask: (taskId: string) => Error, launchScheduler: {providerQueues: Map<string, ProviderQueue>, launchTimer: NodeJS.Timeout|null}, pendingLaunches: Map<string, LaunchSpec>, persistTask: (taskId: string) => void, scheduleActivity: (task: Task, options?: {force?: boolean}) => Promise<unknown>, activityCache: {evictTask: (taskId: string) => void}, logHasEventCache: Set<string>, settleWaiters: (taskId: string) => void, stopRunningWatcher: (taskId: string) => void, escalationTimers: Map<string, NodeJS.Timeout>, sendSignal: (pid: number, signal: NodeJS.Signals) => void}} ctx
  * @returns {TaskSummary & {note: string}}
  */
 function cancelTask(taskId, { graceMs }, ctx) {
@@ -5814,22 +6468,7 @@ function cancelTask(taskId, { graceMs }, ctx) {
   const task = ctx.tasks.get(taskId);
   if (!task) throw ctx.noSuchTask(taskId);
   if (task.status === "queued") {
-    const index = ctx.launchScheduler.launchQueue.indexOf(taskId);
-    if (index !== -1) ctx.launchScheduler.launchQueue.splice(index, 1);
-    const launch = ctx.pendingLaunches.get(taskId);
-    ctx.pendingLaunches.delete(taskId);
-    if (launch?.snapshotPath) removeFileIfPresent(launch.snapshotPath);
-    task.status = "cancelled";
-    task.endedAt = new Date().toISOString();
-    ctx.persistTask(task.id);
-    void ctx.scheduleActivity(task, { force: true }).then(() => ctx.activityCache.evictTask(task.id));
-    ctx.logHasEventCache.delete(task.logPath);
-    ctx.settleWaiters(taskId);
-    if (!ctx.launchScheduler.launchQueue.length && ctx.launchScheduler.launchTimer) {
-      clearTimeout(ctx.launchScheduler.launchTimer);
-      ctx.launchScheduler.launchTimer = null;
-    }
-    return { ...summarize(task), note: "queued task cancelled before launch" };
+    return cancelQueuedTask(taskId, task, ctx);
   }
   if (task.status !== "running") {
     return { ...summarize(task), note: `task is already ${task.status}; nothing to cancel` };

@@ -12,14 +12,14 @@ cleanup_refresh() {
 
 refresh_snapshot() {
   refresh_cwd=$1
-  refresh_cache_dir=$2
+  refresh_snapshot_dir=$2
   refresh_snapshot_file=$3
   refresh_lock_dir="${refresh_snapshot_file}.lock"
   refresh_lock_pid="$refresh_lock_dir/pid"
   refresh_tmp="${refresh_snapshot_file}.$$"
 
   umask 077
-  mkdir -p "$refresh_cache_dir" 2>/dev/null || return
+  mkdir -p "$refresh_snapshot_dir" 2>/dev/null || return
   if ! mkdir "$refresh_lock_dir" 2>/dev/null; then
     refresh_owner=""
     [ -r "$refresh_lock_pid" ] && refresh_owner=$(cat "$refresh_lock_pid")
@@ -103,10 +103,28 @@ RESET='\033[0m'
 tf_seg=""
 tf_summary_fresh=""
 if command -v taskferry >/dev/null 2>&1 && [ -n "$cwd" ]; then
-  cache_root="${TASKFERRY_CACHE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/taskferry}"
-  cache_dir="$cache_root/statusline"
+  # A statusline snapshot is a few bytes, rewritten every couple of seconds,
+  # and has no reason to survive a reboot -- that's the runtime dir's job
+  # (transient sockets/locks, see resolveRuntimeDir() in src/paths.js), not
+  # the cache dir's (larger regenerable data, see resolveCacheDir() there --
+  # that one exists because worker caches filled the small runtime tmpfs).
+  # Mirror resolveRuntimeDir()'s own fallback chain rather than inventing a
+  # separate one here.
+  runtime_root="$TASKFERRY_RUNTIME_DIR"
+  if [ -z "$runtime_root" ] && [ -n "$XDG_RUNTIME_DIR" ]; then
+    runtime_root="$XDG_RUNTIME_DIR/taskferry"
+  fi
+  if [ -z "$runtime_root" ]; then
+    run_candidate="/run/user/$(id -u 2>/dev/null)"
+    if [ -d "$run_candidate" ]; then
+      runtime_root="$run_candidate/taskferry"
+    else
+      runtime_root="${XDG_STATE_HOME:-$HOME/.local/state}/taskferry/run"
+    fi
+  fi
+  snapshot_dir="$runtime_root/statusline"
   workspace_key=$(printf '%s' "$cwd" | cksum | awk '{print $1 "-" $2}')
-  snapshot_file="$cache_dir/${workspace_key}.snapshot"
+  snapshot_file="$snapshot_dir/${workspace_key}.snapshot"
   snapshot_epoch=""
   snapshot_segment=""
   snapshot_summary=""
@@ -134,7 +152,7 @@ if command -v taskferry >/dev/null 2>&1 && [ -n "$cwd" ]; then
     fi
   fi
   if [ "$refresh_due" = 1 ]; then
-    /bin/bash "$0" --refresh-statusline-snapshot "$cwd" "$cache_dir" "$snapshot_file" </dev/null >/dev/null 2>&1 &
+    /bin/bash "$0" --refresh-statusline-snapshot "$cwd" "$snapshot_dir" "$snapshot_file" </dev/null >/dev/null 2>&1 &
   fi
 fi
 

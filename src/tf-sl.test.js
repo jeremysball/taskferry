@@ -102,10 +102,10 @@ function readCalls(fixture) {
 }
 
 function findSnapshot(fixture) {
-  const statuslineCache = path.join(fixture.env.TASKFERRY_CACHE_DIR, "statusline");
+  const statuslineDir = path.join(fixture.env.TASKFERRY_RUNTIME_DIR, "statusline");
   try {
-    return fs.readdirSync(statuslineCache)
-      .map((entry) => path.join(statuslineCache, entry))
+    return fs.readdirSync(statuslineDir)
+      .map((entry) => path.join(statuslineDir, entry))
       .find((entry) => entry.endsWith(".snapshot"));
   } catch (error) {
     if (error.code === "ENOENT") return undefined;

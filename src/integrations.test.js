@@ -13,6 +13,8 @@ const HOOKS_FILE = "hooks.json";
 const HOOK_BIN_PREFIX = "taskferry-hook-bin-";
 const SKILL_FILE = "SKILL.md";
 const SKILL_DIR = "using-taskferry";
+const RESOURCES_DIR = "resources";
+const GENERATE_SCRIPT = "generate-skill.js";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const claudeRoot = path.join(root, "integrations", "claude");
@@ -20,6 +22,16 @@ const codexRoot = path.join(root, "integrations", "codex");
 
 function readJson(...parts) {
   return JSON.parse(fs.readFileSync(path.join(root, ...parts), ENCODING));
+}
+
+// Copy the real generator into a throwaway tree so a --check run can be staled
+// without touching the live repo (node --test runs files concurrently).
+function stageGenerateScript(sandbox) {
+  const relative = path.join("scripts", GENERATE_SCRIPT);
+  const destination = path.join(sandbox, relative);
+  fs.mkdirSync(path.dirname(destination), { recursive: true });
+  fs.copyFileSync(path.join(root, relative), destination);
+  return destination;
 }
 
 test("Claude plugin manifests describe only the taskferry native integration", () => {
@@ -291,6 +303,61 @@ test("distributed skills are generated from the canonical source", () => {
   assert.equal(result.status, 0, result.stderr);
 });
 
+test("skill resources are distributed alongside SKILL.md", () => {
+  const canonicalResources = path.join(root, "skills", SKILL_DIR, RESOURCES_DIR);
+  const names = fs.readdirSync(canonicalResources).sort();
+  assert.ok(names.length > 0, "expected canonical skill resources");
+
+  // Every resource SKILL.md points at must ship with each integration copy, or
+  // a plugin consumer following the link hits a missing file.
+  const skill = fs.readFileSync(path.join(root, "skills", SKILL_DIR, SKILL_FILE), ENCODING);
+  for (const name of names) {
+    assert.match(skill, new RegExp(`${RESOURCES_DIR}/${name.replace(/\./gu, "\\.")}`));
+    const canonical = fs.readFileSync(path.join(canonicalResources, name), ENCODING);
+    for (const integrationRoot of [claudeRoot, codexRoot]) {
+      const copy = path.join(integrationRoot, "skills", SKILL_DIR, RESOURCES_DIR, name);
+      assert.equal(fs.readFileSync(copy, ENCODING), canonical, `stale copy: ${copy}`);
+    }
+  }
+});
+
+test("skill check detects a stale generated resource copy", () => {
+  const sandbox = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-resource-check-")));
+  const resourceName = fs.readdirSync(path.join(root, "skills", SKILL_DIR, RESOURCES_DIR)).sort()[0];
+  const files = [
+    path.join("skills", SKILL_DIR, SKILL_FILE),
+    path.join("integrations", "claude", "skills", SKILL_DIR, SKILL_FILE),
+    path.join("integrations", "codex", "skills", SKILL_DIR, SKILL_FILE),
+    path.join("skills", SKILL_DIR, RESOURCES_DIR, resourceName),
+    path.join("integrations", "claude", "skills", SKILL_DIR, RESOURCES_DIR, resourceName),
+    path.join("integrations", "codex", "skills", SKILL_DIR, RESOURCES_DIR, resourceName),
+  ];
+  try {
+    for (const relativePath of files) {
+      const destination = path.join(sandbox, relativePath);
+      fs.mkdirSync(path.dirname(destination), { recursive: true });
+      fs.copyFileSync(path.join(root, relativePath), destination);
+    }
+    const scriptDestination = stageGenerateScript(sandbox);
+
+    fs.appendFileSync(
+      path.join(sandbox, "integrations", "codex", "skills", SKILL_DIR, RESOURCES_DIR, resourceName),
+      "\nstale\n"
+    );
+
+    const result = spawnSync(process.execPath, [scriptDestination, "--check"], {
+      cwd: sandbox,
+      encoding: ENCODING,
+    });
+
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /stale/iu);
+    assert.match(result.stderr, new RegExp(`${RESOURCES_DIR}/${resourceName.replace(/\./gu, "\\.")}`));
+  } finally {
+    fs.rmSync(sandbox, { recursive: true, force: true });
+  }
+});
+
 test("skill check detects a stale generated copy", () => {
   // Run the check against a miniature tree in tmpdir, never the live repo:
   // node --test runs test files concurrently, and staling the real
@@ -309,9 +376,7 @@ test("skill check detects a stale generated copy", () => {
       fs.mkdirSync(path.dirname(destination), { recursive: true });
       fs.copyFileSync(path.join(root, relativePath), destination);
     }
-    const scriptDestination = path.join(sandbox, "scripts", "generate-skill.js");
-    fs.mkdirSync(path.dirname(scriptDestination), { recursive: true });
-    fs.copyFileSync(path.join(root, "scripts", "generate-skill.js"), scriptDestination);
+    const scriptDestination = stageGenerateScript(sandbox);
 
     fs.appendFileSync(
       path.join(sandbox, "integrations", "codex", "skills", SKILL_DIR, SKILL_FILE),
@@ -339,8 +404,8 @@ test("bundled skill teaches the AXI worker contract without extra plugin surface
   assert.match(skill, /taskferry dispatch/);
   assert.match(skill, /taskferry wait/);
   assert.match(skill, /taskferry result/);
-  assert.match(skill, /subagent-driven-development/);
-  assert.match(skill, /worker backend/);
+  assert.match(skill, /ferries/);
+  assert.match(skill, /worker backend/i);
   assert.match(skill, /fresh sessions/);
   assert.match(skill, /resume only the implementer session/i);
   assert.doesNotMatch(skill, /\bMCP\b/i);

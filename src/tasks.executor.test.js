@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { makeManager, fakeChild, LUNA_MODEL, MIMO_MODEL, MINIMAX_MODEL, UNUSED_TMP, OPENCODE_DATA, AXI_TASKS_CACHE_PI, NO_API_KEY_FOUND, mkdtempTracked } from "./tasks.test-helpers.js";
+import { makeManager, fakeChild, MIMO_MODEL, MINIMAX_MODEL, TEST_DEFAULT_MODEL, UNUSED_TMP, OPENCODE_DATA, AXI_TASKS_CACHE_PI, NO_API_KEY_FOUND, mkdtempTracked } from "./tasks.test-helpers.js";
 
 const OPENCODE_JSONC = "opencode.jsonc";
 const GITIGNORE = ".gitignore";
@@ -16,7 +16,6 @@ describe("startTask() writes stdout through executor.normalizeLogEvent (Task 7: 
       id: "opencode",
       taskIdPrefix: "oc",
       errorBucketPrefix: "opencode",
-      defaultModel: LUNA_MODEL,
       defaultSummaryModel: MIMO_MODEL,
       binaryName: "opencode",
       listModelsFn: async () => "",
@@ -47,7 +46,6 @@ describe("startTask() writes stdout through executor.normalizeLogEvent (Task 7: 
       id: "opencode",
       taskIdPrefix: "oc",
       errorBucketPrefix: "opencode",
-      defaultModel: LUNA_MODEL,
       defaultSummaryModel: MIMO_MODEL,
       binaryName: "opencode",
       listModelsFn: async () => "",
@@ -72,7 +70,6 @@ describe("startTask() writes stdout through executor.normalizeLogEvent (Task 7: 
       id: "opencode",
       taskIdPrefix: "oc",
       errorBucketPrefix: "opencode",
-      defaultModel: LUNA_MODEL,
       defaultSummaryModel: MIMO_MODEL,
       binaryName: "opencode",
       listModelsFn: async () => "",
@@ -99,7 +96,6 @@ describe("startTask() spawns the executor's CLI binary, not a hardcoded command 
       id: "pi",
       taskIdPrefix: "pi",
       errorBucketPrefix: "pi",
-      defaultModel: MINIMAX_MODEL,
       defaultSummaryModel: MINIMAX_MODEL,
       binaryName: "pi",
       listModelsFn: async () => "",
@@ -114,7 +110,7 @@ describe("startTask() spawns the executor's CLI binary, not a hardcoded command 
     });
     mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
     assert.equal(captured.cmd, "pi");
-    assert.deepEqual(captured.args, ["--model", MINIMAX_MODEL, "--mode", "json", "-p", "hi"]);
+    assert.deepEqual(captured.args, ["--model", TEST_DEFAULT_MODEL, "--mode", "json", "-p", "hi"]);
   });
 
   test("a default (pi) dispatch still spawns `pi`", () => {
@@ -204,7 +200,6 @@ describe("startTask() merges executor.sandboxAuthFile().sandboxEnv into spawnEnv
       id: "pi",
       taskIdPrefix: "pi",
       errorBucketPrefix: "pi",
-      defaultModel: MINIMAX_MODEL,
       defaultSummaryModel: MINIMAX_MODEL,
       binaryName: "pi",
       listModelsFn: async () => "",
@@ -261,7 +256,6 @@ describe("startTask() merges executor.sandboxAuthFile().sandboxEnv into spawnEnv
       id: "pi",
       taskIdPrefix: "pi",
       errorBucketPrefix: "pi",
-      defaultModel: MINIMAX_MODEL,
       defaultSummaryModel: MINIMAX_MODEL,
       binaryName: "pi",
       listModelsFn: async () => "",
@@ -290,7 +284,7 @@ describe("startTask() merges executor.sandboxAuthFile().sandboxEnv into spawnEnv
       existsFn: (p) => p === realAuthFile,
       cacheDir,
     });
-    mgr.dispatch({ prompt: "resume me", directory, sessionId });
+    mgr.dispatch({ directory, sessionId, prompt: "resume me", model: MINIMAX_MODEL });
     assert.notEqual(capturedArgs, null, "sandboxAuthFile must be invoked for a sandboxed dispatch");
     assert.equal(capturedArgs.sessionId, sessionId, "sandboxAuthFile must receive the dispatch's sessionId so the bind can scope to that single file");
     assert.equal(capturedArgs.launchDirectory, directory, "sandboxAuthFile must receive the dispatch's launchDirectory so it can compute pi's per-cwd sessions subdirectory");
@@ -305,7 +299,6 @@ describe("startTask() merges executor.sandboxAuthFile().sandboxEnv into spawnEnv
       id: "pi",
       taskIdPrefix: "pi",
       errorBucketPrefix: "pi",
-      defaultModel: MINIMAX_MODEL,
       defaultSummaryModel: MINIMAX_MODEL,
       binaryName: "pi",
       listModelsFn: async () => "",
@@ -361,7 +354,6 @@ describe("startTask() resolves the resumed session file via Array.find (no break
       id: "pi",
       taskIdPrefix: "pi",
       errorBucketPrefix: "pi",
-      defaultModel: MINIMAX_MODEL,
       defaultSummaryModel: MINIMAX_MODEL,
       binaryName: "pi",
       listModelsFn: async () => "",
@@ -413,7 +405,7 @@ describe("startTask() resolves the resumed session file via Array.find (no break
       readdirFn: (p) => (p === path.join(realSessionsDir, "--tmp--") ? [path.basename(realSessionFile)] : []),
       cacheDir,
     });
-    mgr.dispatch({ prompt: "resume", sessionId: "019f90ea-1234-70e0-98dc-6847db316eb4", directory });
+    mgr.dispatch({ prompt: "resume", model: MINIMAX_MODEL, sessionId: "019f90ea-1234-70e0-98dc-6847db316eb4", directory });
     assert.equal(captured.cmd, "bwrap");
     // Look for a --bind whose src is the whole realSessionsDir (not the
     // single file). Pre-fix this would appear; post-fix it must not.
@@ -448,7 +440,6 @@ describe("startTask() never lets normalizeLogEvent() throws escape the stdout ha
       id: "opencode",
       taskIdPrefix: "oc",
       errorBucketPrefix: "opencode",
-      defaultModel: LUNA_MODEL,
       defaultSummaryModel: MIMO_MODEL,
       binaryName: "opencode",
       listModelsFn: async () => "",
@@ -481,7 +472,6 @@ describe("startTask() never lets normalizeLogEvent() throws escape the stdout ha
       id: "opencode",
       taskIdPrefix: "oc",
       errorBucketPrefix: "opencode",
-      defaultModel: LUNA_MODEL,
       defaultSummaryModel: MIMO_MODEL,
       binaryName: "opencode",
       listModelsFn: async () => "",
@@ -519,7 +509,6 @@ describe("startTask() never lets normalizeLogEvent() throws escape the stdout ha
       id: "opencode",
       taskIdPrefix: "oc",
       errorBucketPrefix: "opencode",
-      defaultModel: LUNA_MODEL,
       defaultSummaryModel: MIMO_MODEL,
       binaryName: "opencode",
       listModelsFn: async () => "",

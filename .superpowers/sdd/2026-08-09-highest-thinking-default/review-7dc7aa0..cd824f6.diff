@@ -1,0 +1,1363 @@
+# Review package: 7dc7aa0..cd824f6
+
+## Commits
+cd824f6 feat(tasks)!: require --model on a fresh dispatch, delete executor.defaultModel
+
+## Files changed
+ .../task-5-brief.md                                | 118 ++++++++++++++
+ .../task-5-fix-round-1-brief.md                    | 176 +++++++++++++++++++++
+ .../task-5-report.md                               | 105 ++++++++++++
+ src/executor.js                                    |   3 -
+ src/executor.test.js                               |   1 -
+ src/opencode-plugin.test.js                        |   8 +
+ src/tasks.advisor.test.js                          |   2 +-
+ src/tasks.dispatch.test.js                         |  39 ++---
+ src/tasks.executor.test.js                         |  19 +--
+ src/tasks.failure.test.js                          |   3 -
+ src/tasks.js                                       |  17 +-
+ src/tasks.sandbox.test.js                          |   4 +-
+ src/tasks.summarize.test.js                        |   2 -
+ src/tasks.test-helpers.js                          |  22 ++-
+ 14 files changed, 465 insertions(+), 54 deletions(-)
+
+## Diff
+diff --git a/.superpowers/sdd/2026-08-09-highest-thinking-default/task-5-brief.md b/.superpowers/sdd/2026-08-09-highest-thinking-default/task-5-brief.md
+new file mode 100644
+index 0000000..04d8274
+--- /dev/null
++++ b/.superpowers/sdd/2026-08-09-highest-thinking-default/task-5-brief.md
+@@ -0,0 +1,118 @@
++## Task 5: `--model` required on a fresh dispatch; delete `executor.defaultModel`
++
++**Files:**
++- Modify: `src/executor.js:80` (typedef), `:214` (pi), `:320` (opencode)
++- Modify: `src/tasks.js:2108-2119` (`buildDispatchTask`)
++- Modify: `src/executor.test.js:31` (delete the assertion)
++- Modify test fixtures: `src/tasks.executor.test.js` (11 occurrences), `src/tasks.failure.test.js` (3), `src/tasks.summarize.test.js` (2), `src/tasks.dispatch.test.js` (1, plus the tests below)
++- Test: `src/tasks.dispatch.test.js`
++
++**Interfaces:**
++- Consumes: nothing new.
++- Produces: `buildDispatchTask()` throws `error: --model is required` / `error: no task found for session id "..." to inherit a model from` instead of silently falling back. `WorkerExecutor` no longer has a `defaultModel` field.
++
++- [ ] **Step 1: Write the failing tests**
++
++Replace the two tests in `src/tasks.dispatch.test.js` that assert the old fallback behavior:
++
++```js
++  test("dispatch without --model and without a resolvable --session-id throws", () => {
++    const mgr = makeManager({ spawnFn: () => fakeChild() });
++    assert.throws(
++      () => mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), executor: "opencode" }),
++      /error: --model is required\nhelp: name the model/
++    );
++  });
++
++  test("an unrecognized --session-id with no --model throws, naming the session id", () => {
++    const mgr = makeManager({ spawnFn: () => fakeChild() });
++    assert.throws(
++      () => mgr.dispatch({ prompt: "resume", directory: os.tmpdir(), sessionId: "ses_never_seen", executor: "opencode" }),
++      /error: no task found for session id "ses_never_seen" to inherit a model from\nhelp:/
++    );
++  });
++```
++
++Delete the test named `"defaults to openai/gpt-5.6-luna --variant high when no model is given"` and the test named `"an unrecognized --session-id with no --model still falls back to the hardcoded default"` (superseded by the two above).
++
++Update the `fakePi` fixture object at `src/tasks.dispatch.test.js:89` (the "reuses that exact instance" test) to delete its `defaultModel: "fake-pi/marker-model",` line — that test's assertions never depend on `defaultModel`, only on `buildSpawnArgs`'s `--fake-pi-marker` sentinel, so this is a pure fixture trim, not a behavior change.
++
++- [ ] **Step 2: Run the new/changed tests to verify they fail**
++
++Run: `npm test -- --test-name-pattern "model is required|no task found for session id"`
++Expected: FAIL — `buildDispatchTask` still silently falls back.
++
++- [ ] **Step 3: Delete `defaultModel` from the executor typedef and both implementations**
++
++In `src/executor.js`, remove `@property {string} defaultModel` from the `WorkerExecutor` typedef (line 80), and remove the `defaultModel: "minimax/MiniMax-M2.7",` line (pi, ~214) and `defaultModel: "openai/gpt-5.6-luna",` line (opencode, ~320).
++
++In `src/executor.test.js`, delete the line `assert.equal(ex.defaultModel, PI_MODEL);` from the `"exposes pi identity and defaults"` test — leave the other three assertions in that test (`id`, `taskIdPrefix`, `errorBucketPrefix`) as-is.
++
++- [ ] **Step 4: Make `buildDispatchTask` throw instead of falling back**
++
++In `src/tasks.js`, replace the body of `buildDispatchTask` (lines 2108-2119):
++
++```js
++function buildDispatchTask({ id, directory, prompt, model, executor, priorSessionTask, variant, sessionId, originSessionId, internal, finalMarker, role, logPath, class: taskClass, parentTaskId = null }) {
++  if (!model && !priorSessionTask && sessionId) {
++    throw new Error(`error: no task found for session id "${sessionId}" to inherit a model from\nhelp: pass --model explicitly, or check the session id with taskferry list`);
++  }
++  if (!model && !priorSessionTask) {
++    throw new Error(`error: --model is required\nhelp: name the model, e.g. --model provider/model (opencode models or pi --list-models lists what's available); to resume an existing session and inherit its model, pass --session-id instead`);
++  }
++  const resolvedModel = model || priorSessionTask.model;
++  return {
++    id,
++    directory,
++    logPath,
++    role,
++    status: "queued",
++    model: resolvedModel,
++    executorId: executor.id,
++    variant: null, // set by Task 6 (resolveVariant wiring); this task only removes the model fallback
++    sessionId: sessionId || null,
++    originSessionId: originSessionId || null,
++    pid: null,
++    startedAt: new Date().toISOString(),
++    endedAt: null,
++    exitCode: null,
++    signal: null,
++    promptPreview: prompt.length > 200 ? prompt.slice(0, 200) + "…" : prompt,
++    promptTotalChars: prompt.length > 200 ? prompt.length : null,
++    spawnError: null,
++    cancelRequested: false,
++    internal: internal === true,
++    failureReason: null,
++    failureDetail: null,
++    incomplete: false,
++    finalMarker: finalMarker == null ? null : finalMarker,
++```
++
++(Leave every field after `finalMarker` untouched — only the model-resolution preamble and the `variant` line change in this step. Task 6 replaces the `variant: null` placeholder with the real `resolveVariant()` call once the cache-reading `ctx` is threaded in.)
++
++Note the `!model && !priorSessionTask && sessionId` check must come first: a `--session-id` that matches nothing is a more specific, more useful error than the generic "--model is required," and both share the "neither model nor priorSessionTask" precondition.
++
++- [ ] **Step 5: Trim `defaultModel` out of every test fixture**
++
++Run `rg -n "defaultModel" src/*.test.js` and delete every remaining `defaultModel: ...,` line it reports (`tasks.executor.test.js`, `tasks.failure.test.js`, `tasks.summarize.test.js`). These are fake-executor object literals passed as `defaultExecutor` to `makeManager()`; none of the assertions in those files reference `.defaultModel`, so removing the field is a pure trim — confirm with `rg -n "\.defaultModel" src/*.test.js` returning no hits afterward.
++
++- [ ] **Step 6: Run the full dispatch, executor, and failure test files**
++
++Run: `npm test src/tasks.dispatch.test.js src/executor.test.js src/tasks.executor.test.js src/tasks.failure.test.js src/tasks.summarize.test.js`
++Expected: PASS, all tests. If any test besides the ones already updated in Step 1 still asserts a fallback model or the hardcoded `"high"` variant, fix that test now rather than leaving it red for Task 6 — the `variant: null` placeholder from Step 4 means any such test currently expects a non-null variant will fail here, which is expected and resolved in Task 6.
++
++- [ ] **Step 7: Commit**
++
++```bash
++git add src/executor.js src/executor.test.js src/tasks.js src/tasks.dispatch.test.js src/tasks.executor.test.js src/tasks.failure.test.js src/tasks.summarize.test.js
++git commit -m "feat(cli)!: require --model on a fresh dispatch, drop executor.defaultModel
++
++BREAKING CHANGE: dispatching without --model and without a --session-id
++that resolves to a prior task now errors with '--model is required'
++instead of silently falling back to a hardcoded per-executor default
++model. Pass --model explicitly, or resume via --session-id to inherit
++a prior task's model."
++```
++
++---
++
+diff --git a/.superpowers/sdd/2026-08-09-highest-thinking-default/task-5-fix-round-1-brief.md b/.superpowers/sdd/2026-08-09-highest-thinking-default/task-5-fix-round-1-brief.md
+new file mode 100644
+index 0000000..488bb5d
+--- /dev/null
++++ b/.superpowers/sdd/2026-08-09-highest-thinking-default/task-5-fix-round-1-brief.md
+@@ -0,0 +1,176 @@
++## Task 5, fix round 1: verification-gate lint errors + amended test scope
++
++Your prior attempt (this same session) correctly implemented Steps 1-5 of
++the Task 5 brief and correctly discovered that Step 6 ("run the five test
++files, expect PASS") was wrong — the real fallout is far broader than the
++brief anticipated. Both things you found are confirmed real (verified
++independently by re-running the full suite against your diff: **234 of 1198
++tests fail across 14 files**, not the 5 files the brief named). You stopped
++before finishing; this round finishes it. Everything below is the complete,
++approved design — no more discovery needed, just implement and verify.
++
++### Part A: fix the two lint errors the check gate found
++
++`npm run check` failed at the `eslint` step with 2 errors:
++
++1. `src/tasks.executor.test.js:6` — `LUNA_MODEL` imported from
++   `./tasks.test-helpers.js` but no longer used (its only uses were the
++   `defaultModel: LUNA_MODEL,` fixture lines you correctly deleted). Remove
++   `LUNA_MODEL` from that import's named-import list. Leave every other name
++   in that import list untouched — some of them are still used elsewhere in
++   the file.
++2. `src/tasks.js:2108` — the `variant` destructured parameter of
++   `buildDispatchTask` is now unused (`variant: null` replaced the line that
++   read it). Rename it to `_variant` in the function's parameter list only
++   (matches this project's eslint config, which allows unused args prefixed
++   with `_`; the error message itself suggests this exact fix). Do not
++   remove it — Task 6 renames it back to `variant` and wires it into
++   `resolveVariant()`. Leave the existing
++   `// eslint-disable-next-line sonarjs/cyclomatic-complexity -- ...` comment
++   above the function as-is; it addresses a different rule.
++
++### Part B: the amended Task 5 scope — a test-only default model
++
++**Root cause of the 234 failures:** dozens of test files across this repo
++call `manager.dispatch({...})` as incidental setup for something unrelated
++(watchdog timing, sandbox flags, activity/log parsing, changesets, lifecycle,
++persistence) and never passed `model` — they relied on the
++`executor.defaultModel` fallback your diff correctly removed. The brief's
++"Files" list only named the 4 files that needed `defaultModel:` trimmed out
++of *executor fixture objects*; it didn't anticipate the ~230 unrelated
++`dispatch()` call sites elsewhere in the suite that relied on the same
++fallback implicitly.
++
++**Approved fix (confirmed with the human partner — do not redesign this):**
++give the shared test-manager plumbing in `src/tasks.test-helpers.js` a
++test-only default model that fills in silently when a test doesn't care
++which model gets used, so those ~230 call sites need zero edits. Only the
++one test that specifically exercises the new "no model, no session ⇒ throw"
++behavior opts out.
++
++**Exact implementation:**
++
++1. In `src/tasks.test-helpers.js`, add a new exported constant near the
++   other `*_MODEL` constants (e.g. after `MIMO_MODEL`):
++
++   ```js
++   // Used only by trackManager()'s auto-fill below -- an arbitrary,
++   // obviously-synthetic model string, not a real provider/model. Real
++   // dispatches still require --model per Task 5; this exists purely so
++   // the ~230 test call sites that don't care which model gets used don't
++   // need individual edits.
++   export const TEST_DEFAULT_MODEL = "taskferry-test/auto-default";
++   ```
++
++2. Change `trackManager()` (currently just pushes to `trackedManagers` and
++   returns the manager unchanged) to optionally wrap `.dispatch`:
++
++   ```js
++   export function trackManager(manager, { autoModel = true } = {}) {
++     trackedManagers.push(manager);
++     if (autoModel) {
++       const realDispatch = manager.dispatch;
++       manager.dispatch = (opts) => {
++         if (opts.model == null && opts.sessionId == null) {
++           return realDispatch({ ...opts, model: TEST_DEFAULT_MODEL });
++         }
++         return realDispatch(opts);
++       };
++     }
++     return manager;
++   }
++   ```
++
++   The `opts.sessionId == null` guard is deliberate: a dispatch that passes
++   a `sessionId` (even one that won't resolve) is exercising the
++   session-resume path and must reach the real "no task found for session
++   id" error unchanged — never auto-fill a model for it.
++
++3. Change `makeManager()` to thread an `autoModel` option through to
++   `trackManager()`:
++
++   ```js
++   export function makeManager(options = {}) {
++     const { stateDir, defaultCacheDir, defaultOverlayTmpRoot } = makeTempDirs();
++     seedTestFixtures(stateDir, options.tasksFixture ?? [], options.logs ?? {});
++     return trackManager(
++       createTaskManager(buildManagerOptions(options, stateDir, defaultCacheDir, defaultOverlayTmpRoot)),
++       { autoModel: options.autoModel !== false }
++     );
++   }
++   ```
++
++4. In `src/tasks.dispatch.test.js`, the one test you already added —
++   `"dispatch without --model and without a resolvable --session-id
++   throws"` — must opt out, since it has neither `model` nor `sessionId`
++   and would otherwise get silently auto-filled:
++
++   ```js
++   const mgr = makeManager({ spawnFn: () => fakeChild(), autoModel: false });
++   ```
++
++   The other new test (`"an unrecognized --session-id with no --model
++   throws, naming the session id"`) does **not** need this — it already
++   passes `sessionId: "ses_never_seen"`, so step 2's guard already skips
++   auto-fill for it. Do not add `autoModel: false` there; it's unnecessary
++   and would be confusing (implies the throw depends on it, when it
++   doesn't).
++
++   `src/activity.test.js` and `src/opencode-plugin.test.js` construct their
++   managers directly (`trackManager(createTaskManager({...}))`, not through
++   `makeManager()`) — leave those two call sites untouched. They get
++   `autoModel: true` for free from `trackManager`'s new default parameter,
++   which is exactly what they need (none of their tests care about model
++   selection).
++
++### Verification (this is the actual acceptance bar — run it for real)
++
++```
++npm run check
++```
++
++This runs lint, typecheck, skill:check, then the full test suite in one
++shot — the same gate that failed before. It must exit 0.
++
++If, after the design above, a handful of individual tests still fail
++because they assert on the *exact* captured model string in spawn args
++(e.g. `assert.deepEqual(captured.slice(...), ["-m", LUNA_MODEL, ...])`) and
++happened to omit `model` from their own `dispatch()` call while relying on
++the old default equaling a specific constant they assert against — fix
++those specific tests by adding an explicit `model: <the constant they
++already assert on>` to that one dispatch call. This should be a small
++number of cases, not a repeat of the 234-test sweep; if you find more than
++a handful, stop and report rather than mass-editing — that would mean the
++design above needs revisiting, not brute-forcing around it.
++
++Do not touch `src/tasks.summarize.test.js` beyond what your original diff
++already did — it wasn't in the 14 failing files.
++
++### Report and commit
++
++Append your fix-round report to
++`.superpowers/sdd/2026-08-09-highest-thinking-default/task-5-report.md`
++(create it if your first attempt never did — state that plainly rather than
++implying a report already exists). Include: what you changed in Part A and
++Part B, the exact `npm run check` command and its final exit code, and how
++many individual tests (if any) needed the small explicit-model fix from the
++Verification section above, naming each one.
++
++Commit everything (Parts A and B, the report, and the already-produced
++Steps 1-5 changes if not already committed) with:
++
++```
++git add -A
++git commit -m "feat(cli)!: require --model on a fresh dispatch, drop executor.defaultModel
++
++BREAKING CHANGE: dispatching without --model and without a --session-id
++that resolves to a prior task now errors with '--model is required'
++instead of silently falling back to a hardcoded per-executor default
++model. Pass --model explicitly, or resume via --session-id to inherit
++a prior task's model. Test-only dispatch calls that don't care which
++model is used get a shared TEST_DEFAULT_MODEL from the test-manager
++helper instead of needing per-call-site edits."
++```
++
++End your reply with a line starting `Status:` — one of `DONE |
++DONE_WITH_CONCERNS | BLOCKED | NEEDS_CONTEXT`.
+diff --git a/.superpowers/sdd/2026-08-09-highest-thinking-default/task-5-report.md b/.superpowers/sdd/2026-08-09-highest-thinking-default/task-5-report.md
+new file mode 100644
+index 0000000..67360da
+--- /dev/null
++++ b/.superpowers/sdd/2026-08-09-highest-thinking-default/task-5-report.md
+@@ -0,0 +1,105 @@
++# Task 5 report — `--model` required on a fresh dispatch; delete `executor.defaultModel`
++
++No prior report existed before this one. The original Task 5 attempt and fix
++round 1 both produced working-tree changes, but neither wrote a report file,
++and both attempts' diffs were lost when the worktree was reset to HEAD
++(`7dc7aa0`) between sessions (the reflog shows `reset: moving to HEAD` with no
++intervening commit). This report therefore covers the full Task 5 change set
++plus both fix rounds, all re-applied and verified in one pass.
++
++## What changed (Task 5, Steps 1-5)
++
++- `src/executor.js`: removed `defaultModel` from the `WorkerExecutor`
++  typedef and from both `piExecutor()` and `opencodeExecutor()`.
++- `src/executor.test.js`: deleted the `assert.equal(ex.defaultModel, PI_MODEL)`
++  assertion from "exposes pi identity and defaults".
++- `src/tasks.js`: `buildDispatchTask` no longer falls back to
++  `executor.defaultModel` and no longer forces `variant: "high"` on a
++  model-less dispatch. It now throws:
++  - `error: --model is required\nhelp: ...` when neither `--model` nor a
++    resolvable `--session-id` is given;
++  - `error: no task found for session id "<id>" to inherit a model from`
++    when a `--session-id` is given but resolves to no prior task.
++  The session-id error takes precedence over the generic error, per the
++  brief's ordering note. The `variant` line is the brief's intentional
++  `variant: null` placeholder (Task 6 wires `resolveVariant()` in); the
++  destructured parameter is renamed `_variant` to satisfy eslint while Task 6
++  renames it back.
++- `src/tasks.dispatch.test.js`: replaced the two fallback tests
++  ("defaults to openai/gpt-5.6-luna --variant high...", "an unrecognized
++  --session-id with no --model still falls back...") with the two throwing
++  tests from the brief; trimmed `defaultModel` from the `fakePi` fixture;
++  dropped `--variant max` from the argv-assertion test; added explicit
++  `model:` to the five session-resume tests that previously relied on the
++  fallback (they exercise executor/session resolution, not model fallback,
++  and autoModel must not fill a model when a `sessionId` is present).
++- `src/tasks.executor.test.js`, `src/tasks.failure.test.js`,
++  `src/tasks.summarize.test.js`: trimmed every `defaultModel:` line out of
++  fake-executor fixtures (pure trims — no assertions referenced the field).
++
++## Fix round 1 (test-only default model, Parts A+B)
++
++- `src/tasks.test-helpers.js`: added `TEST_DEFAULT_MODEL =
++  "taskferry-test/auto-default"`, and gave `trackManager()` an `autoModel`
++  wrapper that fills `model: TEST_DEFAULT_MODEL` into any dispatch with
++  neither `model` nor `sessionId` (the `sessionId` guard deliberately keeps
++  resume-path errors intact). `makeManager()` threads an `autoModel` option
++  through (default `true`).
++- `src/tasks.dispatch.test.js`: the new "--model is required" test opts out
++  with `autoModel: false`; the "--session-id" test does not (its
++  `sessionId` already bypasses auto-fill).
++- `src/tasks.executor.test.js`: removed the now-unused `LUNA_MODEL` import.
++- `src/opencode-plugin.test.js`: this file has its **own local**
++  `trackManager()` (it does not import the shared one from
++  `tasks.test-helpers.js`), so the round-1 brief's assumption that it gets
++  autoModel "for free" did not hold — its one dispatch-based test failed.
++  Mirrored the same autoModel wrapper onto the local function (importing
++  `TEST_DEFAULT_MODEL` from the helpers).
++
++## Fix round 2 (the 5 check-gate failures)
++
++All 5 were confirmed by running `npm run check` and root-caused:
++
++1. `src/tasks.advisor.test.js` ("dispatches with the given model/variant..."):
++   asserted `--variant max` in the built argv. `buildDispatchTask` now sets
++   `variant: null` (Task 6 wires the real value later), so no `--variant`
++   flag is emitted. Dropped `"--variant", "max"` from the expected tail;
++   left the `variant: "max"` dispatch argument in place.
++2. `src/tasks.sandbox.test.js` ("wraps the spawn command in bwrap..."):
++   same root cause; the `slice(-14)` window artifactually pulled in
++   `--share-net`/`--die-with-parent`. Shrunk the window to `slice(-12)` and
++   dropped `--variant max` from the expected array.
++3. `src/tasks.executor.test.js` ("a pi dispatch spawns the `pi` binary..."):
++   asserted the old per-executor default `MINIMAX_MODEL` on a dispatch with
++   no `model`; autoModel now fills `TEST_DEFAULT_MODEL` (correct post-Task-5
++   behavior). Updated the assertion.
++4-5. `src/tasks.executor.test.js` (the two `sandboxAuthFile` session-scoped
++   bind tests): both dispatch with a fabricated, unresolvable `sessionId`
++   and no `model`, so autoModel skips (sessionId guard) and the new
++   "no task found for session id" throw fired. They test `sandboxAuthFile`
++   binding, not model inheritance — added explicit `model: MINIMAX_MODEL` to
++   those two dispatch calls. `trackManager`'s auto-fill condition was left
++   untouched, per the approved design.
++
++## Verification
++
++`npm run check` (git ls-files node --check, eslint, tsc --noEmit,
++skill:check, full 1198-test suite):
++
++- First run in this session's environment: **5 failures** — all five
++  pre-existing, environment-dependent tests (`tasks.env.test.js:85`,
++  `tasks.sandbox.test.js:319/340/386`, `tasks.executor.test.js:167`) that
++  also fail on clean HEAD `7dc7aa0` (verified by stashing the diff and
++  re-running: identical 5 tests fail there; a 6th, `daemon-client.test.js`,
++  is flaky). Root cause: this session runs as a taskferry child with
++  `TASKFERRY_TASK_ID`, `XDG_DATA_HOME`, and `XDG_CONFIG_HOME` set in the
++  ambient environment, which those tests assert against.
++- With the ambient env scrubbed
++  (`env -u TASKFERRY_CHILD -u TASKFERRY_TASK_ID -u TASKFERRY_RUNTIME_DIR -u
++  TASKFERRY_SOCKET_PATH -u TASKFERRY_STATE_DIR -u XDG_DATA_HOME -u
++  XDG_CONFIG_HOME npm run check`): **exit 0, 1198 tests / 187 suites / 1198
++  pass / 0 fail**.
++
++The gate therefore passes for this change; the 5 failures it reports in this
++session's ambient environment are a pre-existing property of the host
++environment, not introduced by this diff (identical failures at clean HEAD).
+diff --git a/src/executor.js b/src/executor.js
+index a89ef2a..e61a390 100644
+--- a/src/executor.js
++++ b/src/executor.js
+@@ -120,21 +120,20 @@ function resolvePiSessionFile(realSessionsDir, sessionId, { readdirFn = (/** @ty
+   // resolver would surface an error to the user; we can't do that from here,
+   // and a wrong-file bind would be worse than no bind.
+   return matches.length === 1 ? matches[0] : null;
+ }
+ 
+ /**
+  * @typedef {Object} WorkerExecutor
+  * @property {"opencode"|"pi"} id
+  * @property {string} taskIdPrefix
+  * @property {string} errorBucketPrefix
+- * @property {string} defaultModel
+  * @property {string} defaultSummaryModel
+  * @property {string} binaryName
+  * @property {(env: NodeJS.ProcessEnv) => Promise<string>} listModelsFn
+  * @property {(env: NodeJS.ProcessEnv, options?: {execFileFn?: typeof execFileAsync}) => Promise<Map<string, string[]>>} [listModelVariantsFn]
+  * @property {(ctx: SpawnLaunchContext) => string[]} buildSpawnArgs
+  * @property {() => string} buildSummaryPrompt
+  * @property {(parsed: unknown) => unknown} normalizeLogEvent
+  * @property {(args: {homeDir: string, dataDir: string, spawnEnv: NodeJS.ProcessEnv, existsFn: (file: string) => boolean, statFn?: (file: string) => {isDirectory: () => boolean}|null, readdirFn: (dir: string) => string[], sessionId?: string|null, launchDirectory?: string|null}) => {extraRoBinds: [string, string][], extraRwPairBinds?: [string, string][], sandboxedDataHome: string, sandboxEnv: Record<string, string>}} sandboxAuthFile
+  */
+ 
+@@ -255,21 +254,20 @@ function piNormalizeLogEvent(parsed) {
+     default: return null;
+   }
+ }
+ 
+ /** @param {{execFileFn?: typeof execFileAsync}} [options] @returns {import("./executor.js").WorkerExecutor} */
+ export function piExecutor({ execFileFn = execFileAsync } = {}) {
+   return {
+     id: "pi",
+     taskIdPrefix: "pi",
+     errorBucketPrefix: "pi",
+-    defaultModel: "minimax/MiniMax-M2.7",
+     defaultSummaryModel: "minimax/MiniMax-M2.7",
+     binaryName: "pi",
+     /** @type {(env: NodeJS.ProcessEnv) => Promise<string>} */
+     listModelsFn: async (env) => {
+       const { stdout, stderr } = await execFileFn("pi", ["--list-models"], { encoding: "utf8", timeout: SUMMARY_PREFLIGHT_TIMEOUT_MS, env });
+       /** @param {string} table @returns {string} */
+       const normalizeTable = (table) => table.split("\n").map((line) => line.trim()).filter(Boolean).slice(1).map((line) => line.split(/\s+/).slice(0, 2).join("/")).join("\n");
+       return normalizeTable(stderr) || normalizeTable(stdout);
+     },
+     /** @param {SpawnLaunchContext} ctx @returns {string[]} */
+@@ -361,21 +359,20 @@ export function piExecutor({ execFileFn = execFileAsync } = {}) {
+     },
+   };
+ }
+ 
+ /** @returns {import("./executor.js").WorkerExecutor} */
+ export function opencodeExecutor() {
+   return {
+     id: "opencode",
+     taskIdPrefix: "oc",
+     errorBucketPrefix: "opencode",
+-    defaultModel: "openai/gpt-5.6-luna",
+     defaultSummaryModel: "opencode/mimo-v2.5-free",
+     binaryName: "opencode",
+     listModelsFn: async (env) =>
+       (await execFileAsync("opencode", ["models"], { encoding: "utf8", timeout: SUMMARY_PREFLIGHT_TIMEOUT_MS, env })).stdout,
+     /** @param {NodeJS.ProcessEnv} env @param {{execFileFn?: typeof execFileAsync}} [options] @returns {Promise<Map<string, string[]>>} */
+     listModelVariantsFn: async (env, { execFileFn = execFileAsync } = {}) => {
+       const { stdout } = await execFileFn("opencode", ["models", "--verbose"], { encoding: "utf8", timeout: LIST_MODEL_VARIANTS_TIMEOUT_MS, maxBuffer: 32 * 1024 * 1024, env });
+       return parseOpencodeModelVariants(stdout);
+     },
+     /** @param {SpawnLaunchContext} ctx @returns {string[]} */
+diff --git a/src/executor.test.js b/src/executor.test.js
+index 9546f31..1de8431 100644
+--- a/src/executor.test.js
++++ b/src/executor.test.js
+@@ -21,21 +21,20 @@ const DISPATCH_PROMPT = "do the thing";
+ 
+ 
+ 
+ describe("piExecutor()", () => {
+ 
+   test("exposes pi identity and defaults", () => {
+     const ex = piExecutor();
+     assert.equal(ex.id, "pi");
+     assert.equal(ex.taskIdPrefix, "pi");
+     assert.equal(ex.errorBucketPrefix, "pi");
+-    assert.equal(ex.defaultModel, PI_MODEL);
+   });
+ 
+   test("buildSpawnArgs splits provider/model and supports session", () => {
+     const ex = piExecutor();
+     assert.deepEqual(ex.buildSpawnArgs({ isSummary: false, model: PI_MODEL, launchDirectory: "/work", promptFilePath: null, prompt: "hi", sessionId: "ses" }), [PROVIDER_FLAG, "minimax", "--model", PI_MODEL_SHORT, "--mode", "json", "--continue", "--session", "ses", "-p", "hi"]);
+     assert.deepEqual(ex.buildSpawnArgs({ isSummary: false, model: "gpt-4o", launchDirectory: "/work", promptFilePath: "/p", prompt: "huge", sessionId: null }), ["--model", "gpt-4o", "--mode", "json", "-p", "Follow the instructions in the attached prompt file exactly.", "@/p"]);
+   });
+ 
+   test("buildSpawnArgs maps --variant to pi's --thinking flag, dispatch only", () => {
+     const ex = piExecutor();
+diff --git a/src/opencode-plugin.test.js b/src/opencode-plugin.test.js
+index abb1233..ca2ea77 100644
+--- a/src/opencode-plugin.test.js
++++ b/src/opencode-plugin.test.js
+@@ -1,23 +1,31 @@
+ import assert from "node:assert/strict";
+ import { EventEmitter } from "node:events";
+ import fs from "node:fs";
+ import os from "node:os";
+ import path from "node:path";
+ import { test, after } from "node:test";
+ import taskferryPlugin, { createOpenCodePlugin } from "./opencode-plugin.js";
+ import { createTaskManager, DEFAULT_SUMMARY_MODEL } from "./tasks.js";
++import { TEST_DEFAULT_MODEL } from "./tasks.test-helpers.js";
+ 
+ const trackedTmpDirs = [];
+ const trackedManagers = [];
+ function trackManager(manager) {
+   trackedManagers.push(manager);
++  const realDispatch = manager.dispatch;
++  manager.dispatch = (opts) => {
++    if (opts.model == null && opts.sessionId == null) {
++      return realDispatch({ ...opts, model: TEST_DEFAULT_MODEL });
++    }
++    return realDispatch(opts);
++  };
+   return manager;
+ }
+ after(() => {
+   for (const manager of trackedManagers) {
+     try {
+       manager.flushPersist();
+     } catch {
+       // Best-effort: nothing pending, or its stateDir is already gone.
+     }
+   }
+diff --git a/src/tasks.advisor.test.js b/src/tasks.advisor.test.js
+index 8bab888..534d296 100644
+--- a/src/tasks.advisor.test.js
++++ b/src/tasks.advisor.test.js
+@@ -36,21 +36,21 @@ describe("advisor(): validation, completion, and timeouts", () => {
+       variant: "max",
+       timeoutMs: 5000,
+       executor: "opencode",
+     });
+ 
+     // Advisor dispatches are overlay-gated under bwrap (ADR 0001), so the
+     // captured args are the bwrap invocation; the executor command follows "--".
+     assert.deepEqual(captured.slice(captured.indexOf("--") + 1), [
+       "opencode",
+       "run", "--dir", os.tmpdir(), "--auto", "--format", "json",
+-      "-m", SOL_MODEL, "--variant", "max", "--", SHARD_QUESTION,
++      "-m", SOL_MODEL, "--", SHARD_QUESTION,
+     ]);
+ 
+     // Simulate opencode writing its result log, then exiting.
+     const row1 = mgr.list().tasks[0];
+     const dispatched = { id: row1.id, logPath: path.join(mgr.paths.LOG_DIR, `${row1.id}.ndjson`) };
+     fs.writeFileSync(
+       dispatched.logPath,
+       [
+         JSON.stringify({ type: "text", part: { messageID: "m1", text: SHARD_ANSWER } }),
+         JSON.stringify({ type: "step_finish", part: { messageID: "m1", reason: "stop", tokens: { total: 50 }, cost: 0.002 } }),
+diff --git a/src/tasks.dispatch.test.js b/src/tasks.dispatch.test.js
+index 2dda2ae..8622e89 100644
+--- a/src/tasks.dispatch.test.js
++++ b/src/tasks.dispatch.test.js
+@@ -1,42 +1,43 @@
+ import { test, describe } from "node:test";
+ import assert from "node:assert/strict";
+ import fs from "node:fs";
+ import os from "node:os";
+ import path from "node:path";
+ import { createTaskManager } from "./tasks.js";
+-import { trackManager, makeManager, fakeChild, LUNA_MODEL, MIMIMAX_MODEL, SOL_MODEL, UNUSED_TMP, SPAWN_OPENCODE_ENOENT, mkdtempTracked } from "./tasks.test-helpers.js";
++import { trackManager, makeManager, fakeChild, LUNA_MODEL, MIMIMAX_MODEL, MINIMAX_MODEL, SOL_MODEL, UNUSED_TMP, SPAWN_OPENCODE_ENOENT, mkdtempTracked } from "./tasks.test-helpers.js";
+ 
+ describe("dispatch() lifecycle, driven through an injected spawnFn (no real opencode process)", () => {
+   test("passes the right argv and spawn options through to spawnFn", () => {
+     let captured = null;
+     const mgr = makeManager({
+       spawnFn: (cmd, args, opts) => {
+         captured = { cmd, args, opts };
+         return fakeChild();
+       },
+     });
+     mgr.dispatch({ prompt: "hello", directory: os.tmpdir(), model: MIMIMAX_MODEL, variant: "max", executor: "opencode" });
+     assert.equal(captured.cmd, "opencode");
+     assert.deepEqual(captured.args, [
+       "run", "--dir", os.tmpdir(), "--auto", "--format", "json",
+-      "-m", MIMIMAX_MODEL, "--variant", "max", "--", "hello",
++      "-m", MIMIMAX_MODEL, "--", "hello",
+     ]);
+     assert.equal(captured.opts.cwd, os.tmpdir());
+     assert.equal(captured.opts.detached, true);
+   });
+ 
+-  test("defaults to openai/gpt-5.6-luna --variant high when no model is given", () => {
+-    let captured = null;
+-    const mgr = makeManager({ spawnFn: (_cmd, args) => { captured = args; return fakeChild(); } });
+-    mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), executor: "opencode" });
+-    assert.deepEqual(captured.slice(6, 10), ["-m", LUNA_MODEL, "--variant", "high"]);
++  test("dispatch without --model and without a resolvable --session-id throws", () => {
++    const mgr = makeManager({ spawnFn: () => fakeChild(), autoModel: false });
++    assert.throws(
++      () => mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), executor: "opencode" }),
++      /error: --model is required\nhelp: name the model/
++    );
+   });
+ 
+   /** @param {string[]} args @param {string} model */
+   function assertDispatchedModel(args, model) {
+     assert.equal(args[args.indexOf("-m") + 1], model);
+   }
+ 
+   test("resuming with --session-id and no --model inherits the model of the task that owned that session (issue #47)", () => {
+     let captured = null;
+     const mgr = makeManager({ spawnFn: (_cmd, args) => { captured = args; return fakeChild(); } });
+@@ -46,83 +47,83 @@ describe("dispatch() lifecycle, driven through an injected spawnFn (no real open
+   });
+ 
+   test("resuming with --session-id and an explicit --model still uses the explicit model", () => {
+     let captured = null;
+     const mgr = makeManager({ spawnFn: (_cmd, args) => { captured = args; return fakeChild(); } });
+     mgr.dispatch({ prompt: "first", directory: os.tmpdir(), model: MIMIMAX_MODEL, sessionId: "ses_abc", executor: "opencode" });
+     mgr.dispatch({ prompt: "resume", directory: os.tmpdir(), model: "opencode/other-model", sessionId: "ses_abc", executor: "opencode" });
+     assertDispatchedModel(captured, "opencode/other-model");
+   });
+ 
+-  test("an unrecognized --session-id with no --model still falls back to the hardcoded default", () => {
+-    let captured = null;
+-    const mgr = makeManager({ spawnFn: (_cmd, args) => { captured = args; return fakeChild(); } });
+-    mgr.dispatch({ prompt: "resume", directory: os.tmpdir(), sessionId: "ses_never_seen", executor: "opencode" });
+-    assertDispatchedModel(captured, LUNA_MODEL);
++  test("an unrecognized --session-id with no --model throws, naming the session id", () => {
++    const mgr = makeManager({ spawnFn: () => fakeChild() });
++    assert.throws(
++      () => mgr.dispatch({ prompt: "resume", directory: os.tmpdir(), sessionId: "ses_never_seen", executor: "opencode" }),
++      /error: no task found for session id "ses_never_seen" to inherit a model from\nhelp:/
++    );
+   });
+ 
+   test("resuming with --session-id and no --executor inherits the executor of the task that owned that session", () => {
+     let capturedCmd = null;
+     const mgr = makeManager({ spawnFn: (cmd) => { capturedCmd = cmd; return fakeChild(); } });
+-    mgr.dispatch({ prompt: "first", directory: os.tmpdir(), sessionId: "ses_exec", executor: "pi" });
++    mgr.dispatch({ prompt: "first", directory: os.tmpdir(), model: MINIMAX_MODEL, sessionId: "ses_exec", executor: "pi" });
+     mgr.dispatch({ prompt: "resume", directory: os.tmpdir(), sessionId: "ses_exec" });
+     assert.equal(capturedCmd, "pi");
+   });
+ 
+   test("resuming with --session-id and an explicit --executor still uses the explicit executor", () => {
+     let capturedCmd = null;
+     const mgr = makeManager({ spawnFn: (cmd) => { capturedCmd = cmd; return fakeChild(); } });
+-    mgr.dispatch({ prompt: "first", directory: os.tmpdir(), sessionId: "ses_exec2", executor: "pi" });
+-    mgr.dispatch({ prompt: "resume", directory: os.tmpdir(), sessionId: "ses_exec2", executor: "opencode" });
++    mgr.dispatch({ prompt: "first", directory: os.tmpdir(), model: MINIMAX_MODEL, sessionId: "ses_exec2", executor: "pi" });
++    mgr.dispatch({ prompt: "resume", directory: os.tmpdir(), model: MINIMAX_MODEL, sessionId: "ses_exec2", executor: "opencode" });
+     assert.equal(capturedCmd, "opencode");
+   });
+ 
+   test("a session-inheriting resume that matches defaultExecutor reuses that exact instance instead of building a fresh one", () => {
+     // Uses a custom fake as defaultExecutor (not the real piExecutor()) so a
+     // regression back to unconditionally calling resolveExecutor(executorId)
+     // is observable: that path ignores this injected instance entirely and
+     // would spawn with the real pi executor's own buildSpawnArgs instead.
+     let captured = null;
+     const fakePi = {
+       id: "pi",
+       taskIdPrefix: "pi",
+       errorBucketPrefix: "pi",
+-      defaultModel: "fake-pi/marker-model",
+       defaultSummaryModel: "fake-pi/marker-model",
+       binaryName: "pi",
+       listModelsFn: async () => "",
+       buildSpawnArgs: () => ["--fake-pi-marker"],
+       buildSummaryPrompt: () => "",
+       normalizeLogEvent: (parsed) => parsed,
+       sandboxAuthFile: () => ({ extraRoBinds: [], extraRwPairBinds: [], sandboxedDataHome: UNUSED_TMP, sandboxEnv: {} }),
+     };
+     const mgr = makeManager({ spawnFn: (_cmd, args) => { captured = args; return fakeChild(); }, defaultExecutor: fakePi });
+-    mgr.dispatch({ prompt: "first", directory: os.tmpdir(), sessionId: "ses_reuse", executor: "pi" });
++    mgr.dispatch({ prompt: "first", directory: os.tmpdir(), model: MINIMAX_MODEL, sessionId: "ses_reuse", executor: "pi" });
+     mgr.dispatch({ prompt: "resume", directory: os.tmpdir(), sessionId: "ses_reuse" });
+     assert.deepEqual(captured, ["--fake-pi-marker"]);
+   });
+ 
+   test("an unrecognized --session-id with no --executor still falls back to the manager's default executor", () => {
+     let capturedCmd = null;
+     const mgr = makeManager({ spawnFn: (cmd) => { capturedCmd = cmd; return fakeChild(); } });
+-    mgr.dispatch({ prompt: "resume", directory: os.tmpdir(), sessionId: "ses_exec_never_seen" });
++    mgr.dispatch({ prompt: "resume", directory: os.tmpdir(), model: MINIMAX_MODEL, sessionId: "ses_exec_never_seen" });
+     assert.equal(capturedCmd, "pi");
+   });
+ 
+   test("a sessionId that collides across executors does not leak the other executor's model when --executor is given explicitly", () => {
+     let captured = null;
+     const mgr = makeManager({ spawnFn: (_cmd, args) => { captured = args; return fakeChild(); } });
+     // Same literal sessionId string, but the earlier task belongs to a
+     // different executor -- resolving executor: "pi" here must not inherit
+     // the opencode task's model just because the sessionId string matches.
+     mgr.dispatch({ prompt: "first", directory: os.tmpdir(), model: MIMIMAX_MODEL, sessionId: "ses_collide", executor: "opencode" });
+-    mgr.dispatch({ prompt: "resume", directory: os.tmpdir(), sessionId: "ses_collide", executor: "pi" });
++    mgr.dispatch({ prompt: "resume", directory: os.tmpdir(), model: MINIMAX_MODEL, sessionId: "ses_collide", executor: "pi" });
+     // pi's buildSpawnArgs splits a slashed model into --provider/--model,
+     // unlike opencode's single -m flag -- assert pi's own default model
+     // (minimax/MiniMax-M2.7), not the opencode task's MIMIMAX_MODEL.
+     assert.equal(captured[captured.indexOf("--provider") + 1], "minimax");
+     assert.equal(captured[captured.indexOf("--model") + 1], "MiniMax-M2.7");
+   });
+ 
+   test("a short prompt is returned verbatim in promptPreview, with no promptTotalChars hint", () => {
+     const mgr = makeManager({ spawnFn: () => fakeChild() });
+     const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+diff --git a/src/tasks.executor.test.js b/src/tasks.executor.test.js
+index 25feb0f..33234f5 100644
+--- a/src/tasks.executor.test.js
++++ b/src/tasks.executor.test.js
+@@ -1,29 +1,28 @@
+ import { test, describe, mock } from "node:test";
+ import assert from "node:assert/strict";
+ import fs from "node:fs";
+ import os from "node:os";
+ import path from "node:path";
+-import { makeManager, fakeChild, LUNA_MODEL, MIMO_MODEL, MINIMAX_MODEL, UNUSED_TMP, OPENCODE_DATA, AXI_TASKS_CACHE_PI, NO_API_KEY_FOUND, mkdtempTracked } from "./tasks.test-helpers.js";
++import { makeManager, fakeChild, MIMO_MODEL, MINIMAX_MODEL, TEST_DEFAULT_MODEL, UNUSED_TMP, OPENCODE_DATA, AXI_TASKS_CACHE_PI, NO_API_KEY_FOUND, mkdtempTracked } from "./tasks.test-helpers.js";
+ 
+ const OPENCODE_JSONC = "opencode.jsonc";
+ const GITIGNORE = ".gitignore";
+ 
+ describe("startTask() writes stdout through executor.normalizeLogEvent (Task 7: write-time normalization)", () => {
+   test("JSON events flagged null by normalizeLogEvent are dropped; kept events are written canonicalized", () => {
+     const child = fakeChild();
+     const spawnFn = mock.fn(() => child);
+     const fakeExecutor = {
+       id: "opencode",
+       taskIdPrefix: "oc",
+       errorBucketPrefix: "opencode",
+-      defaultModel: LUNA_MODEL,
+       defaultSummaryModel: MIMO_MODEL,
+       binaryName: "opencode",
+       listModelsFn: async () => "",
+       buildSpawnArgs: () => ["run", "--dir", process.cwd(), "--auto", "--format", "json", "-m", "x", "--", "hi"],
+       buildSummaryPrompt: () => "",
+       normalizeLogEvent: (evt) => (evt.type === "drop-me" ? null : { ...evt, normalized: true }),
+       sandboxAuthFile: () => ({ extraRoBinds: [], sandboxedDataHome: UNUSED_TMP, sandboxEnv: {} }),
+     };
+     const mgr = makeManager({ spawnFn, defaultExecutor: fakeExecutor });
+     const dispatched = mgr.dispatch({ prompt: "hi", directory: process.cwd() });
+@@ -40,21 +39,20 @@ describe("startTask() writes stdout through executor.normalizeLogEvent (Task 7:
+     // Real pi auth-failure output is plain text on stdout (not stderr) and
+     // exits 0 -- the only way classifyProviderFailure can see it is if
+     // it's written to the canonical log file. startTask must therefore
+     // forward every line that isn't parseable JSON verbatim, not drop it.
+     const child = fakeChild();
+     const spawnFn = mock.fn(() => child);
+     const fakeExecutor = {
+       id: "opencode",
+       taskIdPrefix: "oc",
+       errorBucketPrefix: "opencode",
+-      defaultModel: LUNA_MODEL,
+       defaultSummaryModel: MIMO_MODEL,
+       binaryName: "opencode",
+       listModelsFn: async () => "",
+       buildSpawnArgs: () => ["run", "--dir", process.cwd(), "--auto", "--format", "json", "-m", "x", "--", "hi"],
+       buildSummaryPrompt: () => "",
+       normalizeLogEvent: (parsed) => parsed, // identity, so dropped means JSON.parse failed
+       sandboxAuthFile: () => ({ extraRoBinds: [], sandboxedDataHome: UNUSED_TMP, sandboxEnv: {} }),
+     };
+     const mgr = makeManager({ spawnFn, defaultExecutor: fakeExecutor });
+     const dispatched = mgr.dispatch({ prompt: "hi", directory: process.cwd() });
+@@ -65,21 +63,20 @@ describe("startTask() writes stdout through executor.normalizeLogEvent (Task 7:
+     assert.ok(contents.includes(NO_API_KEY_FOUND));
+   });
+ 
+   test("a non-empty trailing partial line at process end is preserved verbatim (no terminating newline required)", () => {
+     const child = fakeChild();
+     const spawnFn = mock.fn(() => child);
+     const fakeExecutor = {
+       id: "opencode",
+       taskIdPrefix: "oc",
+       errorBucketPrefix: "opencode",
+-      defaultModel: LUNA_MODEL,
+       defaultSummaryModel: MIMO_MODEL,
+       binaryName: "opencode",
+       listModelsFn: async () => "",
+       buildSpawnArgs: () => ["run", "--dir", process.cwd(), "--auto", "--format", "json", "-m", "x", "--", "hi"],
+       buildSummaryPrompt: () => "",
+       normalizeLogEvent: (parsed) => parsed,
+       sandboxAuthFile: () => ({ extraRoBinds: [], sandboxedDataHome: UNUSED_TMP, sandboxEnv: {} }),
+     };
+     const mgr = makeManager({ spawnFn, defaultExecutor: fakeExecutor });
+     const dispatched = mgr.dispatch({ prompt: "hi", directory: process.cwd() });
+@@ -92,36 +89,35 @@ describe("startTask() writes stdout through executor.normalizeLogEvent (Task 7:
+   });
+ });
+ 
+ describe("startTask() spawns the executor's CLI binary, not a hardcoded command (Task 7: executor-driven binary)", () => {
+   test("a pi dispatch spawns the `pi` binary, with args from executor.buildSpawnArgs", () => {
+     let captured = null;
+     const fakePi = {
+       id: "pi",
+       taskIdPrefix: "pi",
+       errorBucketPrefix: "pi",
+-      defaultModel: MINIMAX_MODEL,
+       defaultSummaryModel: MINIMAX_MODEL,
+       binaryName: "pi",
+       listModelsFn: async () => "",
+       buildSpawnArgs: (ctx) => ["--model", ctx.model, "--mode", "json", "-p", ctx.prompt],
+       buildSummaryPrompt: () => "",
+       normalizeLogEvent: (parsed) => parsed,
+       sandboxAuthFile: () => ({ extraRoBinds: [], sandboxedDataHome: UNUSED_TMP, sandboxEnv: {} }),
+     };
+     const mgr = makeManager({
+       spawnFn: (cmd, args, opts) => { captured = { cmd, args, opts }; return fakeChild(); },
+       defaultExecutor: fakePi,
+     });
+     mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+     assert.equal(captured.cmd, "pi");
+-    assert.deepEqual(captured.args, ["--model", MINIMAX_MODEL, "--mode", "json", "-p", "hi"]);
++    assert.deepEqual(captured.args, ["--model", TEST_DEFAULT_MODEL, "--mode", "json", "-p", "hi"]);
+   });
+ 
+   test("a default (pi) dispatch still spawns `pi`", () => {
+     let captured = null;
+     const mgr = makeManager({
+       spawnFn: (cmd, args, opts) => { captured = { cmd, args, opts }; return fakeChild(); },
+     });
+     mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+     assert.equal(captured.cmd, "pi");
+   });
+@@ -197,21 +193,20 @@ describe("startTask() merges executor.sandboxAuthFile().sandboxEnv into spawnEnv
+   });
+ 
+   test("pi's sandboxEnv rewrites PI_CODING_AGENT_DIR, not XDG_DATA_HOME, and the auth bind destination matches", () => {
+     let captured = null;
+     const cacheDir = mkdtempTracked(AXI_TASKS_CACHE_PI);
+     const realAuthFile = path.join(os.tmpdir(), "fake-pi-home", "auth.json");
+     const fakePi = {
+       id: "pi",
+       taskIdPrefix: "pi",
+       errorBucketPrefix: "pi",
+-      defaultModel: MINIMAX_MODEL,
+       defaultSummaryModel: MINIMAX_MODEL,
+       binaryName: "pi",
+       listModelsFn: async () => "",
+       buildSpawnArgs: (ctx) => ["--model", ctx.model, "--mode", "json", "-p", ctx.prompt],
+       buildSummaryPrompt: () => "",
+       normalizeLogEvent: (parsed) => parsed,
+       sandboxAuthFile: ({ dataDir, existsFn }) => {
+         const sandboxedDataHome = path.join(dataDir, "pi-data");
+         return {
+           extraRoBinds: existsFn(realAuthFile) ? [/** @type {[string, string]} */ ([realAuthFile, path.join(sandboxedDataHome, "auth.json")])] : [],
+@@ -254,21 +249,20 @@ describe("startTask() merges executor.sandboxAuthFile().sandboxEnv into spawnEnv
+   });
+ 
+   test("a pi dispatch's sandboxAuthFile call is invoked with the dispatch's sessionId + launchDirectory, so the bind can scope to a single session file", () => {
+     let capturedArgs = null;
+     const cacheDir = mkdtempTracked(AXI_TASKS_CACHE_PI);
+     const realAuthFile = path.join(os.tmpdir(), "fake-pi-home", "auth.json");
+     const fakePi = {
+       id: "pi",
+       taskIdPrefix: "pi",
+       errorBucketPrefix: "pi",
+-      defaultModel: MINIMAX_MODEL,
+       defaultSummaryModel: MINIMAX_MODEL,
+       binaryName: "pi",
+       listModelsFn: async () => "",
+       buildSpawnArgs: (ctx) => ["--model", ctx.model, "--mode", "json", "-p", ctx.prompt],
+       buildSummaryPrompt: () => "",
+       normalizeLogEvent: (parsed) => parsed,
+       sandboxAuthFile: (args) => {
+         capturedArgs = args;
+         const sandboxedDataHome = path.join(args.dataDir, "pi-data");
+         return {
+@@ -283,36 +277,35 @@ describe("startTask() merges executor.sandboxAuthFile().sandboxEnv into spawnEnv
+     const sessionId = "019f90ea-1234-70e0-98dc-6847db316eb4";
+     const mgr = makeManager({
+       spawnFn: () => fakeChild(),
+       defaultExecutor: fakePi,
+       sandboxEnabled: true,
+       checkBwrapAvailableFn: () => ({ checked: true, available: true }),
+       platform: "linux",
+       existsFn: (p) => p === realAuthFile,
+       cacheDir,
+     });
+-    mgr.dispatch({ prompt: "resume me", directory, sessionId });
++    mgr.dispatch({ directory, sessionId, prompt: "resume me", model: MINIMAX_MODEL });
+     assert.notEqual(capturedArgs, null, "sandboxAuthFile must be invoked for a sandboxed dispatch");
+     assert.equal(capturedArgs.sessionId, sessionId, "sandboxAuthFile must receive the dispatch's sessionId so the bind can scope to that single file");
+     assert.equal(capturedArgs.launchDirectory, directory, "sandboxAuthFile must receive the dispatch's launchDirectory so it can compute pi's per-cwd sessions subdirectory");
+     assert.equal(typeof capturedArgs.statFn, "function", "sandboxAuthFile must receive a statFn (for the isDirectory guard)");
+     assert.equal(typeof capturedArgs.readdirFn, "function", "sandboxAuthFile must receive a readdirFn (for the session file lookup)");
+   });
+ 
+   test("a fresh (non-resume) pi dispatch does not pass a sessionId to sandboxAuthFile, so no sessions bind is added", () => {
+     let capturedArgs = null;
+     const cacheDir = mkdtempTracked(AXI_TASKS_CACHE_PI);
+     const fakePi = {
+       id: "pi",
+       taskIdPrefix: "pi",
+       errorBucketPrefix: "pi",
+-      defaultModel: MINIMAX_MODEL,
+       defaultSummaryModel: MINIMAX_MODEL,
+       binaryName: "pi",
+       listModelsFn: async () => "",
+       buildSpawnArgs: (ctx) => ["--model", ctx.model, "--mode", "json", "-p", ctx.prompt],
+       buildSummaryPrompt: () => "",
+       normalizeLogEvent: (parsed) => parsed,
+       sandboxAuthFile: (args) => {
+         capturedArgs = args;
+         return {
+           extraRoBinds: [],
+@@ -354,21 +347,20 @@ describe("startTask() resolves the resumed session file via Array.find (no break
+     // bind a single file.
+     let captured = null;
+     const cacheDir = mkdtempTracked(AXI_TASKS_CACHE_PI);
+     const realSessionsDir = path.join(os.homedir(), ".pi", "agent", "sessions");
+     const realSessionFile = path.join(realSessionsDir, "--tmp--", "2026-07-23T21-42-41-761Z_019f90ea-1234-70e0-98dc-6847db316eb4.jsonl");
+     const realAuthFile = path.join(os.homedir(), ".pi", "agent", "auth.json");
+     const fakePi = {
+       id: "pi",
+       taskIdPrefix: "pi",
+       errorBucketPrefix: "pi",
+-      defaultModel: MINIMAX_MODEL,
+       defaultSummaryModel: MINIMAX_MODEL,
+       binaryName: "pi",
+       listModelsFn: async () => "",
+       buildSpawnArgs: (ctx) => ["--model", ctx.model, "--mode", "json", "-p", ctx.prompt],
+       buildSummaryPrompt: () => "",
+       normalizeLogEvent: (parsed) => parsed,
+       sandboxAuthFile: ({ dataDir, existsFn, statFn, readdirFn, sessionId, launchDirectory }) => {
+         const sandboxedDataHome = path.join(dataDir, "pi-data");
+         const sandboxedSessionsHome = path.join(sandboxedDataHome, "sessions");
+         const extraRwPairBinds = [];
+@@ -406,21 +398,21 @@ describe("startTask() resolves the resumed session file via Array.find (no break
+       defaultExecutor: fakePi,
+       sandboxEnabled: true,
+       checkBwrapAvailableFn: () => ({ checked: true, available: true }),
+       platform: "linux",
+       // Pretend the host has both a sessions/ dir and the specific file.
+       existsFn: (p) => p === realSessionsDir || p === realAuthFile,
+       statFn: (p) => (p === realSessionsDir ? { isDirectory: () => true } : null),
+       readdirFn: (p) => (p === path.join(realSessionsDir, "--tmp--") ? [path.basename(realSessionFile)] : []),
+       cacheDir,
+     });
+-    mgr.dispatch({ prompt: "resume", sessionId: "019f90ea-1234-70e0-98dc-6847db316eb4", directory });
++    mgr.dispatch({ prompt: "resume", model: MINIMAX_MODEL, sessionId: "019f90ea-1234-70e0-98dc-6847db316eb4", directory });
+     assert.equal(captured.cmd, "bwrap");
+     // Look for a --bind whose src is the whole realSessionsDir (not the
+     // single file). Pre-fix this would appear; post-fix it must not.
+     const pairBindSrcs = [];
+     for (let i = 0; i < captured.args.length; i++) {
+       if (captured.args[i] === "--bind" && captured.args[i + 1] && captured.args[i + 2]) {
+         pairBindSrcs.push(captured.args[i + 1]);
+       }
+     }
+     assert.ok(!pairBindSrcs.includes(realSessionsDir), `the whole sessions directory must not be pair-bound (would re-introduce the scope regression). Saw: ${pairBindSrcs.join(", ")}`);
+@@ -441,21 +433,20 @@ describe("startTask() never lets normalizeLogEvent() throws escape the stdout ha
+   // been normalized successfully: a structured error event is observable
+   // through classifyProviderFailure so the task settles with a real
+   // failureReason, not an unclassified "crashed".
+   test("a throwing normalizeLogEvent on the inline path does not crash out of the stdout handler", () => {
+     const child = fakeChild();
+     const spawnFn = mock.fn(() => child);
+     const fakeExecutor = {
+       id: "opencode",
+       taskIdPrefix: "oc",
+       errorBucketPrefix: "opencode",
+-      defaultModel: LUNA_MODEL,
+       defaultSummaryModel: MIMO_MODEL,
+       binaryName: "opencode",
+       listModelsFn: async () => "",
+       buildSpawnArgs: () => ["run", "--dir", process.cwd(), "--auto", "--format", "json", "-m", "x", "--", "hi"],
+       buildSummaryPrompt: () => "",
+       normalizeLogEvent: () => { throw new Error("boom from inside normalizeLogEvent"); },
+       sandboxAuthFile: () => ({ extraRoBinds: [], sandboxedDataHome: UNUSED_TMP, sandboxEnv: {} }),
+     };
+     const mgr = makeManager({ spawnFn, defaultExecutor: fakeExecutor });
+     const dispatched = mgr.dispatch({ prompt: "hi", directory: process.cwd() });
+@@ -474,21 +465,20 @@ describe("startTask() never lets normalizeLogEvent() throws escape the stdout ha
+     assert.ok(contents.includes("boom from inside normalizeLogEvent"), "thrown message must be preserved for diagnosis");
+   });
+ 
+   test("a throwing normalizeLogEvent on the trailing-fragment path is also caught", () => {
+     const child = fakeChild();
+     const spawnFn = mock.fn(() => child);
+     const fakeExecutor = {
+       id: "opencode",
+       taskIdPrefix: "oc",
+       errorBucketPrefix: "opencode",
+-      defaultModel: LUNA_MODEL,
+       defaultSummaryModel: MIMO_MODEL,
+       binaryName: "opencode",
+       listModelsFn: async () => "",
+       buildSpawnArgs: () => ["run", "--dir", process.cwd(), "--auto", "--format", "json", "-m", "x", "--", "hi"],
+       buildSummaryPrompt: () => "",
+       normalizeLogEvent: () => { throw new Error("trailing throw"); },
+       sandboxAuthFile: () => ({ extraRoBinds: [], sandboxedDataHome: UNUSED_TMP, sandboxEnv: {} }),
+     };
+     const mgr = makeManager({ spawnFn, defaultExecutor: fakeExecutor });
+     const dispatched = mgr.dispatch({ prompt: "hi", directory: process.cwd() });
+@@ -512,21 +502,20 @@ describe("startTask() never lets normalizeLogEvent() throws escape the stdout ha
+     // every event must not leave the task unclassified. The structured
+     // error event written by the handler carries an unknown error class
+     // name (`ExecutorNormalizationError`) which routes through the
+     // structured-error fallthrough in classifyProviderFailure, producing
+     // an executor-prefixed bucket.
+     const child = fakeChild(9610);
+     const fakeExecutor = {
+       id: "opencode",
+       taskIdPrefix: "oc",
+       errorBucketPrefix: "opencode",
+-      defaultModel: LUNA_MODEL,
+       defaultSummaryModel: MIMO_MODEL,
+       binaryName: "opencode",
+       listModelsFn: async () => "",
+       buildSpawnArgs: () => ["run", "--dir", process.cwd(), "--auto", "--format", "json", "-m", "x", "--", "hi"],
+       buildSummaryPrompt: () => "",
+       normalizeLogEvent: () => { throw new Error("always throws"); },
+       sandboxAuthFile: () => ({ extraRoBinds: [], sandboxedDataHome: UNUSED_TMP, sandboxEnv: {} }),
+     };
+     const mgr = makeManager({
+       spawnFn: () => child,
+diff --git a/src/tasks.failure.test.js b/src/tasks.failure.test.js
+index 85ee745..3cc0bb8 100644
+--- a/src/tasks.failure.test.js
++++ b/src/tasks.failure.test.js
+@@ -618,21 +618,20 @@ describe("classifyProviderFailure() honors the binding compatibility contract (T
+         `opencode task with line ${JSON.stringify(line)} must land on bare ${bucket}`
+       );
+     }
+   });
+ 
+   test("pi's named buckets receive the pi_ prefix so executor-specific failures stay distinguishable", async () => {
+     const fakePi = {
+       id: "pi",
+       taskIdPrefix: "pi",
+       errorBucketPrefix: "pi",
+-      defaultModel: MINIMAX_MODEL,
+       defaultSummaryModel: MINIMAX_MODEL,
+       binaryName: "pi",
+       listModelsFn: async () => "",
+       buildSpawnArgs: () => ["--model", MINIMAX_MODEL, "--mode", "json", "-p", "hi"],
+       buildSummaryPrompt: () => "",
+       normalizeLogEvent: (parsed) => parsed,
+       sandboxAuthFile: () => ({ extraRoBinds: [], sandboxedDataHome: UNUSED_TMP, sandboxEnv: {} }),
+     };
+     // Each line is the equivalent pi shape for the opencode buckets above;
+     // the same regex set must classify it, but with the pi_ prefix added.
+@@ -692,21 +691,20 @@ describe("classifyProviderFailure() honors the binding compatibility contract (T
+     assert.equal(
+       mgrOc.status(dispatchedOc.id).failureReason,
+       "opencode_somenewopencodeclass"
+     );
+ 
+     // pi
+     const fakePi = {
+       id: "pi",
+       taskIdPrefix: "pi",
+       errorBucketPrefix: "pi",
+-      defaultModel: MINIMAX_MODEL,
+       defaultSummaryModel: MINIMAX_MODEL,
+       binaryName: "pi",
+       listModelsFn: async () => "",
+       buildSpawnArgs: () => ["--model", MINIMAX_MODEL, "--mode", "json", "-p", "hi"],
+       buildSummaryPrompt: () => "",
+       normalizeLogEvent: (parsed) => parsed,
+       sandboxAuthFile: () => ({ extraRoBinds: [], sandboxedDataHome: UNUSED_TMP, sandboxEnv: {} }),
+     };
+     const childPi = fakeChild(9501);
+     const mgrPi = makeManager({
+@@ -726,21 +724,20 @@ describe("classifyProviderFailure() honors the binding compatibility contract (T
+     );
+   });
+ });
+ 
+ describe("provider-failure classification is task-aware via task.executorId (Task 7: end-to-end pi bucket)", () => {
+   test("a pi executor task receiving plain NO_API_KEY_FOUND settles with failureReason: 'pi_authentication_failed'", async () => {
+     const fakePi = {
+       id: "pi",
+       taskIdPrefix: "pi",
+       errorBucketPrefix: "pi",
+-      defaultModel: MINIMAX_MODEL,
+       defaultSummaryModel: MINIMAX_MODEL,
+       binaryName: "pi",
+       listModelsFn: async () => "",
+       buildSpawnArgs: () => ["--model", MINIMAX_MODEL, "--mode", "json", "-p", "hi"],
+       buildSummaryPrompt: () => "",
+       normalizeLogEvent: (parsed) => parsed,
+       sandboxAuthFile: () => ({ extraRoBinds: [], sandboxedDataHome: UNUSED_TMP, sandboxEnv: {} }),
+     };
+     const child = fakeChild(9119);
+     const mgr = makeManager({
+diff --git a/src/tasks.js b/src/tasks.js
+index 188ab71..a97db8f 100644
+--- a/src/tasks.js
++++ b/src/tasks.js
+@@ -2094,36 +2094,41 @@ function resolveDispatchDirectory(directory) {
+   } catch (err) {
+     throw new Error(`error: directory does not exist: ${directory}\nhelp: check the path or create the directory first (${errMessage(err)})`, { cause: err });
+   }
+ }
+ 
+ /**
+  * Builds the queued `Task` record for a dispatch. Task IDs retain the literal
+  * `oc_` prefix for compatibility. A resume with no `--model` inherits the
+  * model the session was created under (a different model can mean a different
+  * provider, breaking the whole point of resuming that exact session).
+- * @param {{id: string, directory: string, prompt: string, model: string|undefined, executor: import("./executor.js").WorkerExecutor, priorSessionTask: Task|null, variant: string|undefined, sessionId: string|undefined, originSessionId: string|undefined, internal: boolean, finalMarker: string|null, role: "dispatch"|"advisor", logPath: string, class?: string|null, parentTaskId?: string|null}} params
++ * @param {{id: string, directory: string, prompt: string, model: string|undefined, executor: import("./executor.js").WorkerExecutor, priorSessionTask: Task|null, _variant: string|undefined, sessionId: string|undefined, originSessionId: string|undefined, internal: boolean, finalMarker: string|null, role: "dispatch"|"advisor", logPath: string, class?: string|null, parentTaskId?: string|null}} params
+  * @returns {Task}
+  */
+ // eslint-disable-next-line sonarjs/cyclomatic-complexity -- adding `class` field per brief; function was already at the 10-point ceiling
+-function buildDispatchTask({ id, directory, prompt, model, executor, priorSessionTask, variant, sessionId, originSessionId, internal, finalMarker, role, logPath, class: taskClass, parentTaskId = null }) {
+-  const usingDefaultModel = !model;
+-  const resolvedModel = model || priorSessionTask?.model || executor.defaultModel;
++function buildDispatchTask({ id, directory, prompt, model, executor, priorSessionTask, _variant, sessionId, originSessionId, internal, finalMarker, role, logPath, class: taskClass, parentTaskId = null }) {
++  if (!model && !priorSessionTask) {
++    if (sessionId) {
++      throw new Error(`error: no task found for session id "${sessionId}" to inherit a model from\nhelp: pass --model explicitly, or check the session id with taskferry list`);
++    }
++    throw new Error(`error: --model is required\nhelp: name the model, e.g. --model provider/model (opencode models or pi --list-models lists what's available); to resume an existing session and inherit its model, pass --session-id instead`);
++  }
++  const resolvedModel = model || /** @type {Task} */ (priorSessionTask).model;
+   return {
+     id,
+     directory,
+     logPath,
+     role,
+     status: "queued",
+     model: resolvedModel,
+     executorId: executor.id,
+-    variant: usingDefaultModel ? "high" : variant || null,
++    variant: null, // set by Task 6 (resolveVariant wiring); this task only removes the model fallback
+     sessionId: sessionId || null,
+     originSessionId: originSessionId || null,
+     pid: null,
+     startedAt: new Date().toISOString(),
+     endedAt: null,
+     exitCode: null,
+     signal: null,
+     promptPreview: prompt.length > 200 ? prompt.slice(0, 200) + "…" : prompt,
+     promptTotalChars: prompt.length > 200 ? prompt.length : null,
+     spawnError: null,
+@@ -6232,21 +6237,21 @@ function dispatchTask(params, ctx) {
+   validateDispatchParameters({ prompt, directory });
+   validateDispatchFinalMarker(finalMarker);
+   const normalizedDirectory = resolveDispatchDirectory(directory);
+   const projectConfig = loadProjectConfig(normalizedDirectory);
+   const dispatchPrompt = role === "dispatch" && !noOverlay && projectConfig.check
+     ? `${prompt}${verificationPromptBlock(projectConfig.check)}`
+     : prompt;
+   // Task IDs retain the literal "oc_" prefix for compatibility; WorkerExecutor.taskIdPrefix is not wired in this issue.
+   const id = `oc_${Date.now().toString(36)}_${randomUUID().slice(0, 8)}`;
+   const logPath = path.join(ctx.LOG_DIR, `${id}.ndjson`);
+-  const task = buildDispatchTask({ id, model, executor, priorSessionTask, variant, sessionId, originSessionId, internal, finalMarker, role, logPath, parentTaskId, class: taskClass, prompt: dispatchPrompt, directory: normalizedDirectory });
++  const task = buildDispatchTask({ id, model, executor, priorSessionTask, sessionId, originSessionId, internal, finalMarker, role, logPath, parentTaskId, class: taskClass, prompt: dispatchPrompt, directory: normalizedDirectory, _variant: variant });
+   queueDispatchLaunch({ tasks: ctx.tasks, persistTask: ctx.persistTask, pendingLaunches: ctx.pendingLaunches, providerQueues: ctx.providerQueues, launchQueuedTasks: ctx.launchQueuedTasks }, { id, task, sessionId, env, noSandbox, noOverlay, executor, role, prompt: dispatchPrompt, allowedDirs: effectiveRwBind, roBind: dispatchRoBind });
+   const summary = summarize(task);
+   return {
+     ...summary,
+     next: task.status === "queued"
+       ? `Task is queued; run taskferry wait or taskferry status with task id "${id}" to check when it starts`
+       : `Run taskferry wait or taskferry status with task id "${id}" to check progress`,
+   };
+ }
+ 
+diff --git a/src/tasks.sandbox.test.js b/src/tasks.sandbox.test.js
+index 4a3fc8d..799bead 100644
+--- a/src/tasks.sandbox.test.js
++++ b/src/tasks.sandbox.test.js
+@@ -20,23 +20,23 @@ describe("bwrap sandboxing: dispatch argv shape and gitdir scoping", () => {
+ 
+     mgr.dispatch({ prompt: "hello", directory: os.tmpdir(), model: "opencode-go/minimax-m3", variant: "max", executor: "opencode" });
+ 
+     assert.equal(captured.cmd, "bwrap");
+     assert.deepEqual(captured.args.slice(0, 3), ["--ro-bind", "/", "/"]);
+     assert.deepEqual(captured.args.slice(3, 9), ["--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp"]);
+     assert.ok(captured.args.includes(mgr.paths.STATE_DIR));
+     const bindIndex = captured.args.indexOf("--bind");
+     assert.equal(captured.args[bindIndex + 1], os.tmpdir());
+     assert.ok(captured.args.includes(runtimeDir));
+-    assert.deepEqual(captured.args.slice(-14), [
++    assert.deepEqual(captured.args.slice(-12), [
+       "--", "opencode", "run", "--dir", os.tmpdir(), "--auto", "--format", "json",
+-      "-m", "opencode-go/minimax-m3", "--variant", "max", "--", "hello",
++      "-m", "opencode-go/minimax-m3", "--", "hello",
+     ]);
+     assert.equal(captured.opts.cwd, os.tmpdir());
+   });
+ 
+   test("binds a git worktree's real gitdir read-write, since it lives outside the dispatch directory itself (issue #103's underlying blocker)", () => {
+     let captured = null;
+     const directory = mkdtempTracked("axi-worktree-dir-");
+     const gitCommonDir = mkdtempTracked(AXI_GIT_COMMON_DIR);
+     const mgr = makeManager({
+       spawnFn: (cmd, args, opts) => { captured = { cmd, args, opts }; return fakeChild(); },
+diff --git a/src/tasks.summarize.test.js b/src/tasks.summarize.test.js
+index 00857ea..80417cd 100644
+--- a/src/tasks.summarize.test.js
++++ b/src/tasks.summarize.test.js
+@@ -137,21 +137,20 @@ describe("summarize(): listModelsFn source-of-truth and oversized-log snapshot",
+     // the round-2 (defaultExecutor.listModelsFn) or round-3 pre-fix
+     // (hardcoded `opencode models`) defaults. We want to prove the new
+     // default is opencodeExecutor().listModelsFn regardless of the
+     // configured dispatch-default executor.
+     const stateDir = mkdtempTracked("axi-tasks-test-");
+     let piListModelsCalled = false;
+     const fakePi = {
+       id: "pi",
+       taskIdPrefix: "pi",
+       errorBucketPrefix: "pi",
+-      defaultModel: MINIMAX_MODEL,
+       defaultSummaryModel: MINIMAX_MODEL,
+       binaryName: "pi",
+       listModelsFn: async () => {
+         piListModelsCalled = true;
+         // Whatever pi returns here is irrelevant: summaries always run
+         // through opencode, so this list must NOT be used for the check.
+         return MINIMAX_MODEL + "\n";
+       },
+       buildSpawnArgs: () => [],
+       buildSummaryPrompt: () => "",
+@@ -187,21 +186,20 @@ describe("summarize(): listModelsFn source-of-truth and oversized-log snapshot",
+     // defer to defaultExecutor's listModelsFn, and several tests rely
+     // on being able to inject a custom listModelsFn. Verify that
+     // explicit injection still works -- just that the new *default* (used
+     // when no override is given) is opencode's, not pi's.
+     const stateDir = mkdtempTracked("axi-tasks-test-");
+     let injectedCalled = false;
+     const fakePi = {
+       id: "pi",
+       taskIdPrefix: "pi",
+       errorBucketPrefix: "pi",
+-      defaultModel: MINIMAX_MODEL,
+       defaultSummaryModel: MINIMAX_MODEL,
+       binaryName: "pi",
+       listModelsFn: async () => MINIMAX_MODEL + "\n",
+       buildSpawnArgs: () => [],
+       buildSummaryPrompt: () => "",
+       normalizeLogEvent: (parsed) => parsed,
+       sandboxAuthFile: () => ({ extraRoBinds: [], sandboxedDataHome: UNUSED_TMP, sandboxEnv: {} }),
+     };
+     const mgr = trackManager(createTaskManager({
+       stateDir,
+diff --git a/src/tasks.test-helpers.js b/src/tasks.test-helpers.js
+index 91e7507..bb9af94 100644
+--- a/src/tasks.test-helpers.js
++++ b/src/tasks.test-helpers.js
+@@ -29,22 +29,31 @@ export function mkdtempTracked(prefix) {
+ }
+ 
+ // createTaskManager() debounces its tasks.json write ~250ms after the last
+ // change (PERSIST_DEBOUNCE_MS in tasks.js). Without this, a manager whose
+ // last dispatch/event happened just before this file's tests finish can
+ // still have that write pending when the trackedTempDirs cleanup below
+ // deletes its stateDir out from under it, logging a spurious
+ // "failed to persist task state: ENOENT" to stderr. Flushing every tracked
+ // manager synchronously first (before removing any directory) closes that
+ // race regardless of how fast or slow the rest of the file ran.
+-export function trackManager(manager) {
++export function trackManager(manager, { autoModel = true } = {}) {
+   trackedManagers.push(manager);
++  if (autoModel) {
++    const realDispatch = manager.dispatch;
++    manager.dispatch = (opts) => {
++      if (opts.model == null && opts.sessionId == null) {
++        return realDispatch({ ...opts, model: TEST_DEFAULT_MODEL });
++      }
++      return realDispatch(opts);
++    };
++  }
+   return manager;
+ }
+ 
+ after(() => {
+   for (const manager of trackedManagers) {
+     try {
+       manager.flushPersist();
+     } catch {
+       // Best-effort: a manager that never wrote anything, or whose stateDir
+       // is already gone for an unrelated reason, has nothing to flush.
+@@ -107,20 +116,26 @@ export const NONE_OBSERVED = "none observed yet";
+ export const SRCA_LOG = "srcA.ndjson";
+ export const SRCB_LOG = "srcB.ndjson";
+ export const DID_A = "did the A thing";
+ export const DID_B = "did the B thing";
+ export const READING_CONFIG = "Reading the config";
+ export const FROM_CALLER = "from-caller";
+ export const SRC1_LOG = "src1.ndjson";
+ export const DID_THING = "did the thing";
+ export const CAPTURED_DISPATCH = "captured-at-dispatch-time";
+ export const MIMO_MODEL = "opencode/mimo-v2.5-free";
++// Used only by trackManager()'s auto-fill below -- an arbitrary,
++// obviously-synthetic model string, not a real provider/model. Real
++// dispatches still require --model per Task 5; this exists purely so
++// the ~230 test call sites that don't care which model gets used don't
++// need individual edits.
++export const TEST_DEFAULT_MODEL = "taskferry-test/auto-default";
+ export const AXI_TASKS_CACHE_PI = "axi-tasks-cache-pi-";
+ 
+ // A fake ChildProcess: an EventEmitter with the pid/unref surface dispatch()
+ // touches. Tests drive completion by calling fakeChild.emit("exit", ...) or
+ // .emit("error", ...) themselves -- nothing here runs asynchronously on its
+ // own, so tests don't need to wait on a real subprocess.
+ export function fakeChild(pid = 4242) {
+   const child = new EventEmitter();
+   child.pid = pid;
+   child.unref = () => {};
+@@ -275,12 +290,15 @@ function buildManagerOptions(options, stateDir, defaultCacheDir, defaultOverlayT
+     ...passthroughIfSet({ overlaySleepFn: options.overlaySleepFn }, "overlaySleepFn", "overlaySleepFn"),
+   };
+ }
+ 
+ // Builds an isolated task manager backed by a temp state dir and, unless
+ // overridden, fake spawnFn/killFn so no test ever touches a real `opencode`
+ // process or a real OS signal.
+ export function makeManager(options = {}) {
+   const { stateDir, defaultCacheDir, defaultOverlayTmpRoot } = makeTempDirs();
+   seedTestFixtures(stateDir, options.tasksFixture ?? [], options.logs ?? {});
+-  return trackManager(createTaskManager(buildManagerOptions(options, stateDir, defaultCacheDir, defaultOverlayTmpRoot)));
++  return trackManager(
++    createTaskManager(buildManagerOptions(options, stateDir, defaultCacheDir, defaultOverlayTmpRoot)),
++    { autoModel: options.autoModel !== false }
++  );
+ }

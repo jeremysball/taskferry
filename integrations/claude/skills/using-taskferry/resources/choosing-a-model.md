@@ -146,9 +146,11 @@ before quoting it as fact — scores drift with every release.
 - Don't over-provision effort on mechanical work either. A transcription
   task doesn't need `max` effort; it needs the model to type what the brief
   already specifies.
-- **Pass `--variant` explicitly.** Leaving it unset leaves the effort level
-  to a default you didn't choose, which is exactly where a cheap model's
-  behavior is least predictable.
+- **An omitted `--variant` resolves to `defaultVariant: "highest"`** — that
+  model's hardest supported thinking level, not an undefined fallback. Pass a
+  concrete `--variant` only when you're deliberately choosing a *lower*
+  effort than the model's ceiling (mechanical work, a cheap explorer pass);
+  omitting it is no longer a way to avoid an absent default.
 
 ## Mixed-strength review panels
 

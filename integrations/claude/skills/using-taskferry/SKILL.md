@@ -97,14 +97,13 @@ allowed dirs) instead of symlinking across the sandbox boundary.
 
 ## Worker Contract
 
-- **Always pass `--model` and `--variant` explicitly**: `taskferry dispatch
-  --prompt - --directory "<worktree>" --model <provider/model> --variant
-  <name> <<'PROMPT_EOF'` ... `PROMPT_EOF`. An omitted `--model` falls back to
-  taskferry's own default, which may not match the tier the task actually
-  needs; an omitted `--variant` leaves the effort level to a default you
-  didn't choose, which is where a cheap model's behavior is least
-  predictable. See `resources/choosing-a-model.md` for which tier each role
-  needs.
+- Select the worker model explicitly — `--model <provider/model>` is required
+  for a fresh dispatch (only a `--session-id` resume may inherit the prior
+  task's model). Omit `--variant` to get that model's hardest thinking
+  level; pass a concrete variant only when the task wants a lower effort
+  level: `taskferry dispatch --prompt - --directory "<worktree>" --model
+  <provider/model> --variant <name> <<'PROMPT_EOF'` ... `PROMPT_EOF`. See
+  `resources/choosing-a-model.md` for which tier each role needs.
 - State the exact `provider/model` slug (and variant, if set) being
   dispatched in your response to the user, not just in the shell command — the
   user shouldn't have to read the command to know what's running. `dispatch`/

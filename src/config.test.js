@@ -241,4 +241,36 @@ describe("loadConfig()", () => {
     const configPath = writeConfig(dir, JSON.stringify({ providerLimits: { minimax: { maxConcurrentTasks: 0 } } }));
     assert.throws(() => loadConfig({ configPath }), /error: config key "providerLimits\.minimax\.maxConcurrentTasks".*must be a positive integer.*\nhelp:/s);
   });
+
+  test("accepts the highest sentinel for defaultVariant", () => {
+    const dir = tmpConfigDir();
+    const configPath = writeConfig(dir, JSON.stringify({ defaultVariant: "highest" }));
+    assert.deepEqual(loadConfig({ configPath }), { defaultVariant: "highest" });
+  });
+
+  test("accepts each of pi's concrete thinking levels for defaultVariant", () => {
+    for (const level of ["off", "minimal", "low", "medium", "high", "xhigh", "max"]) {
+      const dir = tmpConfigDir();
+      const configPath = writeConfig(dir, JSON.stringify({ defaultVariant: level }));
+      assert.deepEqual(loadConfig({ configPath }), { defaultVariant: level });
+    }
+  });
+
+  test("rejects an unrecognized defaultVariant string", () => {
+    const dir = tmpConfigDir();
+    const configPath = writeConfig(dir, JSON.stringify({ defaultVariant: "medium-plus" }));
+    assert.throws(() => loadConfig({ configPath }), /error: config key "defaultVariant" in .* must be one of highest, off, minimal, low, medium, high, xhigh, max \(got "medium-plus"\)\nhelp:/);
+  });
+
+  test("rejects an empty or whitespace-only defaultVariant", () => {
+    const dir = tmpConfigDir();
+    const configPath = writeConfig(dir, JSON.stringify({ defaultVariant: "   " }));
+    assert.throws(() => loadConfig({ configPath }), /error: config key "defaultVariant".*must be one of/);
+  });
+
+  test("rejects a non-string defaultVariant", () => {
+    const dir = tmpConfigDir();
+    const configPath = writeConfig(dir, JSON.stringify({ defaultVariant: 5 }));
+    assert.throws(() => loadConfig({ configPath }), /error: config key "defaultVariant" in .* must be a string \(got 5\)\nhelp:/);
+  });
 });

@@ -144,7 +144,7 @@ Dispatch with an explicit workspace, feeding the prompt straight over stdin
 with a quoted heredoc — `--prompt -` reads until EOF:
 
 ```sh
-taskferry dispatch --prompt - --directory "<worktree>" --model <provider/model> <<'PROMPT_EOF'
+taskferry dispatch --prompt - --directory "<worktree>" --model <provider/model> --variant <name> <<'PROMPT_EOF'
 <full prompt text>
 PROMPT_EOF
 ```

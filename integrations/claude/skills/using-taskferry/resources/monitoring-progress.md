@@ -1,9 +1,11 @@
 # Monitoring a ferry's progress
 
 How to wait on a dispatch, surface its progress, and relay updates. The
-mechanics differ by host runtime, so find your host below. The core
-`dispatch`/`wait`/`result` commands live in SKILL.md; this file covers
-everything about *watching* a run in flight.
+mechanics differ by host runtime, so find your host below — Claude Code and
+OpenCode are covered explicitly; anything else falls back to the "Host: any
+other runtime" section at the end. The core `dispatch`/`wait`/`result`
+commands live in SKILL.md; this file covers everything about *watching* a
+run in flight.
 
 ## Waiting rules that hold in every host
 
@@ -165,6 +167,19 @@ The "never manually detach a `wait`" rule above applies here unchanged: a
 notification, the only way to learn it finished being a polled `cat`/`tail`
 of a `/tmp` log on a timer. The foreground `wait` (option 1) or a one-shot
 `tail` (options 2–3) cover every legitimate opencode need without that cost.
+
+## Host: any other runtime
+
+This file documents Claude Code and OpenCode explicitly because those are
+the two hosts this repo's own sessions run under; nothing here has been
+verified against any other host's tool surface, Codex included. If you're on
+a host not listed above, check whether it has a genuine backgrounded-execution
+primitive with its own settlement notification (like Claude Code's
+`run_in_background: true`) before assuming one. If it doesn't — or you
+haven't confirmed it does — default to the same **foreground** `wait
+--summarize` the OpenCode section above uses: a foreground wait blocks the
+turn but works correctly on every host by construction, with no risk of the
+untracked-orphan failure mode the manual-detach rule above warns about.
 
 ## Fleet-wide monitoring
 

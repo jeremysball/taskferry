@@ -46,23 +46,36 @@ function copyTree(root, sourceRelative, destRelative) {
 // deleted canonically doesn't survive as an orphan. checkSkills() reports such
 // an orphan as drift, so leaving it behind would make `skill:generate` unable
 // to fix what `skill:check` complains about.
+//
+// Fail fast on a missing canonical source instead of silently clearing the
+// destination: copyTree() no-ops when its source is absent, so a mistakenly
+// deleted or renamed canonical resources dir would otherwise wipe every
+// integration's copy on the next `skill:generate` with no error.
 function mirrorTree(root, sourceRelative, destRelative) {
+  const source = path.join(root, sourceRelative);
+  if (!fs.existsSync(source)) {
+    throw new Error(`mirrorTree: canonical source is missing: ${sourceRelative}`);
+  }
   fs.rmSync(path.join(root, destRelative), { recursive: true, force: true });
   copyTree(root, sourceRelative, destRelative);
 }
 
-function collectRelativeFiles(root, sourceRelative) {
+// `baseRelative` stays fixed at the top-level call's sourceRelative across
+// every recursive call, so a nested file's relative path keeps its full
+// subdirectory prefix (e.g. "guides/foo.md") instead of being recomputed
+// against the recursion-local sourceRelative, which would report "foo.md".
+function collectRelativeFiles(root, sourceRelative, baseRelative = sourceRelative) {
   const source = path.join(root, sourceRelative);
   if (!fs.existsSync(source)) return [];
   const files = [];
   for (const entry of fs.readdirSync(source, { withFileTypes: true })) {
     const srcPath = path.join(source, entry.name);
     if (entry.isDirectory()) {
-      for (const f of collectRelativeFiles(root, path.join(sourceRelative, entry.name))) {
+      for (const f of collectRelativeFiles(root, path.join(sourceRelative, entry.name), baseRelative)) {
         files.push(f);
       }
     } else {
-      files.push(path.relative(path.join(root, sourceRelative), srcPath));
+      files.push(path.relative(path.join(root, baseRelative), srcPath));
     }
   }
   return files;

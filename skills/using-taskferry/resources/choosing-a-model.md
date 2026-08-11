@@ -7,8 +7,10 @@ within a tier, and how effort/variant interacts with all of it.
 **Account-specific state deliberately lives outside this file** — which
 providers are live on your account, per-provider time windows, key state,
 rate limits, current outages, and today's specific model picks all drift on
-a timescale no checked-in file can track. Keep those in your own CLAUDE.md
-or a personal skill and check them before dispatching to a gated provider.
+a timescale no checked-in file can track. Keep those in whatever your host
+reads for standing instructions (`CLAUDE.md` for Claude Code, `AGENTS.md` for
+Codex, or a personal skill) and check them before dispatching to a gated
+provider.
 When a provider you wanted is gated shut, pick an equivalent-tier model on
 another provider rather than waiting idle or dispatching outside the allowed
 window. Everything below is the stable logic that sits on top.
@@ -201,6 +203,6 @@ positives.
 Listing a model is not the same as reaching it. Before relying on a route:
 
 ```sh
-opencode models | rg -e ':free$' -e -- '-free$'   # what's actually offered
+opencode models | rg -e ':free$' -e '-free$'      # what's actually offered
 opencode run -m <id> "Reply with: PONG"           # what actually responds
 ```

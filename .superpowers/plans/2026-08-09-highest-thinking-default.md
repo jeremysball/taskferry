@@ -1281,4 +1281,7 @@ Run `gh-axi issue view 137` and `gh-axi issue view 236`, re-read each against th
 
 - [ ] **Step 3: Update the retiring memory entry**
 
-The `feedback_explicit_variant_naming` memory (`/home/jeremy/.claude/projects/-workspace-taskferry/memory/feedback_explicit_variant_naming.md`) says to always pass `--variant` explicitly, especially for cheap models, because there was previously no good default. Update it to note that an omitted `--variant` now defaults to the model's highest supported level (`defaultVariant: "highest"`), so the explicit-pass rule is now about *choosing a lower* effort deliberately, not about avoiding an absent default.
+The `feedback_explicit_variant_naming` memory (under this project's Claude
+memory directory — `~/.claude/projects/<this-workspace's-slug>/memory/`; look
+it up via that directory's `MEMORY.md` index rather than a hardcoded path)
+says to always pass `--variant` explicitly, especially for cheap models, because there was previously no good default. Update it to note that an omitted `--variant` now defaults to the model's highest supported level (`defaultVariant: "highest"`), so the explicit-pass rule is now about *choosing a lower* effort deliberately, not about avoiding an absent default.

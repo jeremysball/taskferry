@@ -308,9 +308,13 @@ test("skill resources are distributed alongside SKILL.md", () => {
   const names = fs.readdirSync(canonicalResources).sort();
   assert.ok(names.length > 0, "expected canonical skill resources");
 
-  // Every resource SKILL.md points at must ship with each integration copy, or
-  // a plugin consumer following the link hits a missing file.
+  // Every resource file on disk must be linked from SKILL.md, and every link
+  // SKILL.md actually contains must resolve to a resource that exists — either
+  // direction going stale leaves a plugin consumer with a dead reference.
   const skill = fs.readFileSync(path.join(root, "skills", SKILL_DIR, SKILL_FILE), ENCODING);
+  const linkedNames = new Set(
+    [...skill.matchAll(new RegExp(`${RESOURCES_DIR}/([\\w.-]+\\.md)`, "gu"))].map((match) => match[1])
+  );
   for (const name of names) {
     assert.match(skill, new RegExp(`${RESOURCES_DIR}/${name.replace(/\./gu, "\\.")}`));
     const canonical = fs.readFileSync(path.join(canonicalResources, name), ENCODING);
@@ -318,6 +322,9 @@ test("skill resources are distributed alongside SKILL.md", () => {
       const copy = path.join(integrationRoot, "skills", SKILL_DIR, RESOURCES_DIR, name);
       assert.equal(fs.readFileSync(copy, ENCODING), canonical, `stale copy: ${copy}`);
     }
+  }
+  for (const linked of linkedNames) {
+    assert.ok(names.includes(linked), `SKILL.md links resources/${linked}, which does not exist canonically`);
   }
 });
 
@@ -353,6 +360,80 @@ test("skill check detects a stale generated resource copy", () => {
     assert.notEqual(result.status, 0);
     assert.match(result.stderr, /stale/iu);
     assert.match(result.stderr, new RegExp(`${RESOURCES_DIR}/${resourceName.replace(/\./gu, "\\.")}`));
+  } finally {
+    fs.rmSync(sandbox, { recursive: true, force: true });
+  }
+});
+
+test("skill check does not false-flag a nested canonical resource as stale", () => {
+  // Regression coverage for collectRelativeFiles() recomputing each recursive
+  // call's relative base from the recursion-local sourceRelative instead of a
+  // fixed top-level base, which dropped nested directory prefixes and made
+  // this exact scenario (identical nested copies) falsely report as drift.
+  const sandbox = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-nested-resource-")));
+  const files = [
+    path.join("skills", SKILL_DIR, SKILL_FILE),
+    path.join("integrations", "claude", "skills", SKILL_DIR, SKILL_FILE),
+    path.join("integrations", "codex", "skills", SKILL_DIR, SKILL_FILE),
+  ];
+  try {
+    for (const relativePath of files) {
+      const destination = path.join(sandbox, relativePath);
+      fs.mkdirSync(path.dirname(destination), { recursive: true });
+      fs.copyFileSync(path.join(root, relativePath), destination);
+    }
+    const nestedContent = "# Nested guide\n\nRegression coverage for a nested resource path.\n";
+    for (const base of [
+      path.join("skills", SKILL_DIR),
+      path.join("integrations", "claude", "skills", SKILL_DIR),
+      path.join("integrations", "codex", "skills", SKILL_DIR),
+    ]) {
+      const destination = path.join(sandbox, base, RESOURCES_DIR, "guides", "nested.md");
+      fs.mkdirSync(path.dirname(destination), { recursive: true });
+      fs.writeFileSync(destination, nestedContent);
+    }
+    const scriptDestination = stageGenerateScript(sandbox);
+
+    const result = spawnSync(process.execPath, [scriptDestination, "--check"], {
+      cwd: sandbox,
+      encoding: ENCODING,
+    });
+
+    assert.equal(result.status, 0, result.stderr);
+  } finally {
+    fs.rmSync(sandbox, { recursive: true, force: true });
+  }
+});
+
+test("skill generate fails fast instead of wiping resources when the canonical dir is missing", () => {
+  // Regression coverage for mirrorTree() silently no-opping (via copyTree's
+  // own missing-source no-op) after it had already deleted the destination,
+  // which would wipe every integration's resource copy with no error if the
+  // canonical resources dir were ever accidentally removed or renamed.
+  const sandbox = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-missing-resources-")));
+  const resourceName = fs.readdirSync(path.join(root, "skills", SKILL_DIR, RESOURCES_DIR)).sort()[0];
+  const skillFile = path.join("skills", SKILL_DIR, SKILL_FILE);
+  const existingCopy = path.join(sandbox, "integrations", "claude", "skills", SKILL_DIR, RESOURCES_DIR, resourceName);
+  try {
+    const skillDestination = path.join(sandbox, skillFile);
+    fs.mkdirSync(path.dirname(skillDestination), { recursive: true });
+    fs.copyFileSync(path.join(root, skillFile), skillDestination);
+
+    // Seed a pre-existing integration resource copy, but deliberately never
+    // create the canonical skills/using-taskferry/resources dir in the sandbox.
+    fs.mkdirSync(path.dirname(existingCopy), { recursive: true });
+    fs.copyFileSync(path.join(root, "skills", SKILL_DIR, RESOURCES_DIR, resourceName), existingCopy);
+
+    const scriptDestination = stageGenerateScript(sandbox);
+
+    const result = spawnSync(process.execPath, [scriptDestination], {
+      cwd: sandbox,
+      encoding: ENCODING,
+    });
+
+    assert.notEqual(result.status, 0, "generate should fail, not silently succeed");
+    assert.match(result.stderr, /canonical source is missing/iu);
+    assert.ok(fs.existsSync(existingCopy), "a failed generate must not delete the pre-existing integration copy");
   } finally {
     fs.rmSync(sandbox, { recursive: true, force: true });
   }

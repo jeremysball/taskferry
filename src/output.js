@@ -62,13 +62,11 @@ function shellQuote(value) {
  * @returns {void}
  */
 export function writeToon(value, io = process) {
-  /** @type {IoLike} */
-  const ioTyped = /** @type {IoLike} */ (io);
-  if (ioTyped.stdout.isTTY) {
-    ioTyped.stdout.write(`${renderPretty(/** @type {Parameters<typeof renderPretty>[0]} */ (value))}\n`);
+  if (io.stdout.isTTY) {
+    io.stdout.write(`${renderPretty(/** @type {Parameters<typeof renderPretty>[0]} */ (value))}\n`);
     return;
   }
-  ioTyped.stdout.write(`${encode(value)}\n`);
+  io.stdout.write(`${encode(value)}\n`);
 }
 
 /**

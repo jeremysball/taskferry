@@ -99,8 +99,6 @@ function streamTaskEvents({ client, io, signal, directory, taskId, all, summarie
   // non-null assertion at the call sites.
   /** @type {(result?: WatchResult) => void} */
   let settle = () => {};
-  /** @type {(() => void) | undefined} */
-  let abortHandler;
   // `directory` is only known upfront when the caller already had it (plain
   // `watch --directory`); a taskId-scoped `watch --task-id` subscribes by
   // taskId directly (the daemon resolves the directory server-side) and only
@@ -144,6 +142,14 @@ function streamTaskEvents({ client, io, signal, directory, taskId, all, summarie
     }
     writeRaw(event);
   };
+  // Hoisted above the Promise executor so the abort listener sites have a
+  // stable const to register and remove -- no `undefined` state and no
+  // force-cast. It closes over `settle`, which the executor assigns
+  // synchronously on construction, before any abort could possibly fire.
+  const abortHandler = () => {
+    if (buffered && buffered.size > 0) flush();
+    settle();
+  };
   const finished = new Promise((resolve, reject) => {
     let settled = false;
     /** @param {WatchResult} [result] */
@@ -158,16 +164,11 @@ function streamTaskEvents({ client, io, signal, directory, taskId, all, summarie
     // (exit code 0) abort. The setInterval is cleared in the `.finally`
     // below, so this is the only path that emits them on the abort
     // boundary.
-    abortHandler = () => {
-      if (buffered && buffered.size > 0) flush();
-      settle();
-    };
     if (signal?.aborted) {
-      if (buffered && buffered.size > 0) flush();
-      settle();
+      abortHandler();
       return;
     }
-    signal?.addEventListener("abort", /** @type {() => void} */ (abortHandler), { once: true });
+    signal?.addEventListener("abort", abortHandler, { once: true });
     Promise.resolve(client.subscribe({ ...subscribeSelector({ all, directory, taskId }), ...(summaries ? { summaries: true } : {}) }, (rawEvent) => {
       // The client is a transport: it hands back whatever JSON the daemon sent,
       // typed only as a bag of keys. The daemon's own event contract (protocol.js)
@@ -202,7 +203,7 @@ function streamTaskEvents({ client, io, signal, directory, taskId, all, summarie
     });
   });
   return finished.finally(() => {
-    signal?.removeEventListener("abort", /** @type {() => void} */ (abortHandler));
+    signal?.removeEventListener("abort", abortHandler);
     if (timer) clearInterval(timer);
   });
 }

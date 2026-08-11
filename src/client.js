@@ -276,15 +276,26 @@ class DaemonClient {
     this.maxBufferBytes = maxBufferBytes;
     this.maxQueuedEvents = maxQueuedEvents;
     socket.setEncoding("utf8");
-    socket.on("data", (chunk) => this.onData(/** @type {string} */ (chunk)));
+    socket.on("data", (chunk) => this.onData(chunk));
     socket.on("error", (error) => this.failAll(error));
     socket.on("close", () => this.failAll(this.shutdownReason === "restart"
       ? new Error("taskferry daemon is restarting (config or version change) — retry your command in a moment")
       : new Error("taskferry daemon connection closed")));
   }
 
-  /** @param {string} chunk */
+  /**
+   * The socket runs in utf8 mode (setEncoding in the constructor), so Node
+   * hands strings here. Accept `string | Buffer` so that coupling is explicit:
+   * a Buffer means the encoding contract was broken, and decoding it per-chunk
+   * would silently corrupt multi-byte characters split across frames. Fail
+   * loudly instead.
+   * @param {string|Buffer} chunk
+   */
   onData(chunk) {
+    if (typeof chunk !== "string") {
+      this.protocolFailure("daemon socket is not in utf8 mode; expected string data");
+      return;
+    }
     this.buffer += chunk;
     for (;;) {
       const newline = this.buffer.indexOf("\n");

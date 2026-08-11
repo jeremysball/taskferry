@@ -91,6 +91,33 @@ jobs:
         if: steps.integration_gate.outputs.run == 'true'
         run: npm install -g opencode-ai
 
+      # A fresh runner has no ~/.config/opencode, so opencode boots on its
+      # stock defaults -- which include the built-in `title` agent. That agent
+      # fires a second, separate model request per session purely to name the
+      # session for the TUI's session list. Nothing in a headless CI dispatch
+      # ever reads that name: the smoke tests drive `opencode run`, assert on
+      # task state, and exit. So every session in the integration leg was
+      # spending an extra billed OPENROUTER_API_KEY call, and taking an extra
+      # chance at a 429 or a provider hiccup, to produce a string no one reads.
+      # `agent.title.disable` is opencode's own config key for this
+      # (Config.agent.title -> AgentConfig.disable in https://opencode.ai/config.json).
+      #
+      # This has to land in the real ~/.config/opencode rather than a repo-local
+      # file because that is the directory executor.js's sandboxAuthFile()
+      # read-only-binds into each sandboxed dispatch (src/executor.js) -- a
+      # config written anywhere else is invisible inside the sandbox.
+      - name: Disable opencode's title agent (no one reads a CI session's title)
+        if: steps.integration_gate.outputs.run == 'true'
+        run: |
+          mkdir -p "$HOME/.config/opencode"
+          cat > "$HOME/.config/opencode/opencode.json" <<'JSON'
+          {
+            "$schema": "https://opencode.ai/config.json",
+            "agent": { "title": { "disable": true } }
+          }
+          JSON
+          node -e 'JSON.parse(require("fs").readFileSync(process.env.HOME + "/.config/opencode/opencode.json", "utf8"))'
+
       - name: Run integration (real CLI + daemon + live dispatch, no mocks)
         if: steps.integration_gate.outputs.run == 'true'
         env:

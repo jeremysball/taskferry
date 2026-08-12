@@ -2,6 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { KNOWN_EXECUTORS } from "./executor.js";
+import { errCode } from "./errors.js";
 import { isObject, isPositiveInteger } from "./numbers.js";
 import { KNOWN_VARIANT_LEVELS } from "./variants.js";
 
@@ -23,6 +24,7 @@ export function _resetConfigCache() {
   _configCache.clear();
 }
 
+/** @type {Record<string, string>} */
 const CONFIG_FIELD_TYPES = {
   maxConcurrentTasks: "number",
   maxDispatchesPerWindow: "number",
@@ -54,6 +56,7 @@ const CONFIG_FIELD_TYPES = {
   providerLimits: "object",
 };
 
+/** @type {Record<string, string>} */
 const PROVIDER_LIMIT_FIELD_TYPES = {
   maxConcurrentTasks: "number",
   maxDispatchesPerWindow: "number",
@@ -141,23 +144,11 @@ export function resolveConfigPath(env = process.env) {
 }
 
 /**
+ * @param {Record<string, unknown>} parsed
  * @param {string} configPath
  * @returns {Record<string, unknown>}
  */
-function parseAndValidateConfig(configPath) {
-  const raw = fs.readFileSync(configPath, "utf8");
-
-  let parsed;
-  try {
-    parsed = JSON.parse(raw);
-  } catch (err) {
-    throw new Error(`error: could not parse ${configPath}: ${err.message}\nhelp: fix the JSON syntax, or delete the file to use built-in defaults`, { cause: err });
-  }
-
-  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
-    throw new Error(`error: ${configPath} must be a JSON object\nhelp: use a flat {"key": value, ...} object with the recognized config keys`);
-  }
-
+function validateConfigFieldTypes(parsed, configPath) {
   for (const key of Object.keys(parsed)) {
     if (!Object.hasOwn(CONFIG_FIELD_TYPES, key)) {
       throw new Error(`error: unrecognized config key "${key}" in ${configPath}\nhelp: recognized keys are: ${Object.keys(CONFIG_FIELD_TYPES).join(", ")}`);
@@ -168,6 +159,29 @@ function parseAndValidateConfig(configPath) {
       throw new Error(`error: config key "${key}" in ${configPath} must be a ${expectedType} (got ${JSON.stringify(value)})\nhelp: fix the value's type in ${configPath}`);
     }
   }
+  return parsed;
+}
+
+/**
+ * @param {string} configPath
+ * @returns {Record<string, unknown>}
+ */
+function parseAndValidateConfig(configPath) {
+  const raw = fs.readFileSync(configPath, "utf8");
+
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    throw new Error(`error: could not parse ${configPath}: ${detail}\nhelp: fix the JSON syntax, or delete the file to use built-in defaults`, { cause: err });
+  }
+
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error(`error: ${configPath} must be a JSON object\nhelp: use a flat {"key": value, ...} object with the recognized config keys`);
+  }
+
+  validateConfigFieldTypes(parsed, configPath);
 
   if (parsed.defaultExecutor !== undefined && !KNOWN_EXECUTORS.includes(parsed.defaultExecutor)) {
     throw new Error(`error: config key "defaultExecutor" in ${configPath} must be one of ${KNOWN_EXECUTORS.join(", ")} (got ${JSON.stringify(parsed.defaultExecutor)})\nhelp: fix the value in ${configPath}`);
@@ -192,7 +206,7 @@ export function loadConfig({ env = process.env, configPath = resolveConfigPath(e
   try {
     currentMtimeMs = fs.statSync(configPath).mtimeMs;
   } catch (err) {
-    if (err.code === "ENOENT") {
+    if (errCode(err) === "ENOENT") {
       const cached = _configCache.get(configPath);
       if (cached && cached.mtimeMs === null) return cached.result;
       const result = {};

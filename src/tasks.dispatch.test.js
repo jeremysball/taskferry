@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { createTaskManager } from "./tasks.js";
 import { hashFingerprint, VARIANTS_CACHE_SCHEMA } from "./variants-cache.js";
-import { trackManager, makeManager, fakeChild, LUNA_MODEL, MIMIMAX_MODEL, MINIMAX_MODEL, SOL_MODEL, UNUSED_TMP, SPAWN_OPENCODE_ENOENT, mkdtempTracked, AXI_TASKS_TEST_DIR, AXI_TASKS_CACHE_DIR, AXI_TASKS_OVERLAY_DIR } from "./tasks.test-helpers.js";
+import { trackManager, makeManager, fakeChild, LUNA_MODEL, MIMIMAX_MODEL, MINIMAX_MODEL, SOL_MODEL, UNUSED_TMP, SPAWN_OPENCODE_ENOENT, preserveEnvVars, mkdtempTracked, AXI_TASKS_TEST_DIR, AXI_TASKS_CACHE_DIR, AXI_TASKS_OVERLAY_DIR } from "./tasks.test-helpers.js";
 
 describe("dispatch() lifecycle, driven through an injected spawnFn (no real opencode process)", () => {
   test("passes the right argv and spawn options through to spawnFn", () => {
@@ -737,34 +737,29 @@ describe("lowerdir launch stagger (taskferry#318: bwrap overlay-mount EBUSY unde
     assert.ok(children[2].at - children[1].at >= 60 - JITTER_TOLERANCE_MS);
   });
 
-  test("TASKFERRY_LOWERDIR_STAGGER_MS=0 disables the gate (tasks launch as fast as rate/concurrency limits already allow)", () => {
+  test("TASKFERRY_LOWERDIR_STAGGER_MS=0 disables the gate (tasks launch as fast as rate/concurrency limits already allow)", (t) => {
     const children = [];
-    const originalEnv = process.env.TASKFERRY_LOWERDIR_STAGGER_MS;
+    preserveEnvVars(t, ["TASKFERRY_LOWERDIR_STAGGER_MS"]);
     process.env.TASKFERRY_LOWERDIR_STAGGER_MS = "0";
-    try {
-      const mgr = trackManager(createTaskManager({
-        stateDir: mkdtempTracked("axi-stagger-disabled-"),
-        sandboxEnabled: false,
-        maxDispatchesPerWindow: 10,
-        dispatchWindowMs: 60000,
-        maxConcurrentTasks: 10,
-        spawnFn: () => {
-          const child = fakeChild(6200 + children.length);
-          children.push(child);
-          return child;
-        },
-        killFn: () => {},
-      }));
+    const mgr = trackManager(createTaskManager({
+      stateDir: mkdtempTracked("axi-stagger-disabled-"),
+      sandboxEnabled: false,
+      maxDispatchesPerWindow: 10,
+      dispatchWindowMs: 60000,
+      maxConcurrentTasks: 10,
+      spawnFn: () => {
+        const child = fakeChild(6200 + children.length);
+        children.push(child);
+        return child;
+      },
+      killFn: () => {},
+    }));
 
-      mgr.dispatch({ prompt: "first", directory: os.tmpdir() });
-      const second = mgr.dispatch({ prompt: "second", directory: os.tmpdir() });
+    mgr.dispatch({ prompt: "first", directory: os.tmpdir() });
+    const second = mgr.dispatch({ prompt: "second", directory: os.tmpdir() });
 
-      assert.equal(second.status, "running", "with the stagger disabled, the second launch must start synchronously");
-      assert.equal(children.length, 2);
-    } finally {
-      if (originalEnv === undefined) delete process.env.TASKFERRY_LOWERDIR_STAGGER_MS;
-      else process.env.TASKFERRY_LOWERDIR_STAGGER_MS = originalEnv;
-    }
+    assert.equal(second.status, "running", "with the stagger disabled, the second launch must start synchronously");
+    assert.equal(children.length, 2);
   });
 });
 
@@ -835,13 +830,9 @@ describe("config file precedence (maxConcurrentTasks)", () => {
   function managerWithLimit(t, { env, config }) {
     const stateDir = mkdtempTracked("axi-cfg-precedence-");
     const children = [];
-    const originalEnv = process.env.TASKFERRY_MAX_CONCURRENT_TASKS;
+    preserveEnvVars(t, ["TASKFERRY_MAX_CONCURRENT_TASKS"]);
     if (env === undefined) delete process.env.TASKFERRY_MAX_CONCURRENT_TASKS;
     else process.env.TASKFERRY_MAX_CONCURRENT_TASKS = env;
-    t.after(() => {
-      if (originalEnv === undefined) delete process.env.TASKFERRY_MAX_CONCURRENT_TASKS;
-      else process.env.TASKFERRY_MAX_CONCURRENT_TASKS = originalEnv;
-    });
     const manager = trackManager(createTaskManager({
       stateDir,
       config,
@@ -1031,25 +1022,20 @@ describe("defaultVariant validation applies to TASKFERRY_DEFAULT_VARIANT and raw
   // skip that check entirely, so an invalid value there would silently
   // reach resolveVariant() and resolve to "send no flag" instead of failing
   // loudly at construction time.
-  test("an invalid TASKFERRY_DEFAULT_VARIANT env var throws at manager construction", () => {
+  test("an invalid TASKFERRY_DEFAULT_VARIANT env var throws at manager construction", (t) => {
     const stateDir = mkdtempTracked(AXI_TASKS_TEST_DIR);
-    const prior = process.env.TASKFERRY_DEFAULT_VARIANT;
+    preserveEnvVars(t, ["TASKFERRY_DEFAULT_VARIANT"]);
     process.env.TASKFERRY_DEFAULT_VARIANT = "medium-plus";
-    try {
-      assert.throws(() => createTaskManager({
-        stateDir,
-        cacheDir: mkdtempTracked(AXI_TASKS_CACHE_DIR),
-        sandboxEnabled: false,
-        overlayEnabled: false,
-        overlayTmpRoot: mkdtempTracked(AXI_TASKS_OVERLAY_DIR),
-        lowerdirStaggerMs: 0,
-        spawnFn: () => fakeChild(),
-        killFn: () => {},
-      }), /error: defaultVariant must be one of highest, off, minimal, low, medium, high, xhigh, max \(got "medium-plus"\)/);
-    } finally {
-      if (prior === undefined) delete process.env.TASKFERRY_DEFAULT_VARIANT;
-      else process.env.TASKFERRY_DEFAULT_VARIANT = prior;
-    }
+    assert.throws(() => createTaskManager({
+      stateDir,
+      cacheDir: mkdtempTracked(AXI_TASKS_CACHE_DIR),
+      sandboxEnabled: false,
+      overlayEnabled: false,
+      overlayTmpRoot: mkdtempTracked(AXI_TASKS_OVERLAY_DIR),
+      lowerdirStaggerMs: 0,
+      spawnFn: () => fakeChild(),
+      killFn: () => {},
+    }), /error: defaultVariant must be one of highest, off, minimal, low, medium, high, xhigh, max \(got "medium-plus"\)/);
   });
 
   test("an invalid rawOptions.defaultVariant (a programmatic caller) throws too", () => {

@@ -13,6 +13,7 @@ const GIT_DIR = REPO_DIR + "/.git";
 const MY_REPO_DIR = "/workspace/my-repo";
 const STATE_DIR = "/home/user/.local/state/taskferry";
 const RUNTIME_DIR = "/home/user/.local/state/taskferry/run";
+const SOCKET_PATH = RUNTIME_DIR + "/daemon.sock";
 const HOME_DIR = "/home/user";
 const UNSHARE_ALL = "--unshare-all";
 const SHARE_NET = "--share-net";
@@ -65,6 +66,17 @@ describe("checkBwrapAvailable()", () => {
     const result = checkBwrapAvailable(runCommand);
     assert.equal(result.available, false);
     assert.match(result.reason, /EACCES/);
+  });
+
+  test("does not treat a numeric error code as the ENOENT 'bwrap not found' case", () => {
+    // A spawned-probe failure can surface with a numeric ExecException.code
+    // (e.g. 127). errCode() stringifies, so a numeric code must fall through to
+    // the spawn-error message, not be misreported as a missing bwrap binary.
+    const runCommand = () => ({ status: null, stdout: "", stderr: "", error: { code: 127, message: "spawnSync bwrap ENOENT" } });
+    const result = checkBwrapAvailable(runCommand);
+    assert.equal(result.available, false);
+    assert.doesNotMatch(result.reason, /bwrap not found/);
+    assert.match(result.reason, /spawnSync bwrap ENOENT/);
   });
 
   test("reports unavailable when the probe exits non-zero with no spawn error", () => {
@@ -227,21 +239,23 @@ describe("buildBwrapArgs()", () => {
       assert.ok(index > 8, `expected ${denied} to be denied after the /proc+/dev+/tmp scaffolding`);
     }
 
-    // The state dir's tmpfs deny must come before the runtime dir's read-write
-    // bind, since runtimeDir is nested under stateDir in the default layout
-    // and bwrap applies rules in argument order.
+    // The state dir's tmpfs deny must come before the daemon socket bind,
+    // since runtimeDir is nested under stateDir in the default layout and
+    // bwrap applies rules in argument order -- the socket bind re-exposes
+    // only the socket file under the stateDir tmpfs, not the whole runtimeDir.
     const stateDirTmpfsIndex = args.indexOf(STATE_DIR);
-    const runtimeDirBindIndex = args.lastIndexOf(RUNTIME_DIR);
-    assert.ok(stateDirTmpfsIndex < runtimeDirBindIndex);
-    assert.equal(args[runtimeDirBindIndex - 1], RUNTIME_DIR);
-    assert.equal(args[runtimeDirBindIndex - 2], "--bind");
+    const socketPath = SOCKET_PATH;
+    const socketBindIndex = args.lastIndexOf(socketPath);
+    assert.ok(stateDirTmpfsIndex < socketBindIndex);
+    assert.equal(args[socketBindIndex - 1], socketPath);
+    assert.equal(args[socketBindIndex - 2], "--bind");
 
     const directoryBindIndex = args.lastIndexOf(MY_REPO_DIR);
     assert.equal(args[directoryBindIndex - 1], MY_REPO_DIR);
     assert.equal(args[directoryBindIndex - 2], "--bind");
     // The read-write binds must be the very last mounts, so they win over
     // every other mount above regardless of path nesting.
-    assert.ok(directoryBindIndex < runtimeDirBindIndex);
+    assert.ok(directoryBindIndex < socketBindIndex);
 
     assert.deepEqual(args.slice(-3), [UNSHARE_ALL, SHARE_NET, DIE_WITH_PARENT]);
   });
@@ -259,7 +273,7 @@ describe("buildBwrapArgs()", () => {
     assert.equal(args.indexOf(SSH_DIR), -1);
   });
 
-  test("binds a directory and runtimeDir nested under /tmp after the /tmp tmpfs, so the fresh /tmp mount doesn't shadow them", () => {
+  test("binds a directory and the daemon socket nested under /tmp after the /tmp tmpfs, so the fresh /tmp mount doesn't shadow them", () => {
     const args = buildBwrapArgs({
       directory: "/tmp/my-scratch-repo",
       stateDir: STATE_DIR,
@@ -274,9 +288,10 @@ describe("buildBwrapArgs()", () => {
     assert.equal(args[directoryBindIndex + 1], "/tmp/my-scratch-repo");
     assert.ok(directoryBindIndex > tmpTmpfsIndex);
 
-    const runtimeDirBindIndex = args.lastIndexOf("--bind");
-    assert.equal(args[runtimeDirBindIndex + 1], "/tmp/taskferry-runtime");
-    assert.ok(runtimeDirBindIndex > tmpTmpfsIndex);
+    const socketPath = "/tmp/taskferry-runtime/daemon.sock";
+    const socketBindIndex = args.lastIndexOf("--bind");
+    assert.equal(args[socketBindIndex + 1], socketPath);
+    assert.ok(socketBindIndex > tmpTmpfsIndex);
   });
 
   test("appends extraRwBinds after directory/runtimeDir and before extraRoBinds", () => {
@@ -287,12 +302,13 @@ describe("buildBwrapArgs()", () => {
       homeDir: HOME_DIR,
       extraRwBinds: [MAIN_WORKTREE_GITDIR],
     });
-    const runtimeDirBindIndex = args.lastIndexOf(RUNTIME_DIR);
+    const socketPath = SOCKET_PATH;
+    const socketBindIndex = args.lastIndexOf(socketPath);
     const extraBindIndex = args.indexOf(MAIN_WORKTREE_GITDIR);
     assert.notEqual(extraBindIndex, -1);
     assert.equal(args[extraBindIndex - 1], "--bind");
     assert.equal(args[extraBindIndex + 1], MAIN_WORKTREE_GITDIR);
-    assert.ok(extraBindIndex > runtimeDirBindIndex);
+    assert.ok(extraBindIndex > socketBindIndex);
   });
 
   test("appends extraRwPairBinds after extraRwBinds and before extraRoBinds, as a --bind (not --ro-bind) with different src/dest", () => {
@@ -327,12 +343,13 @@ describe("buildBwrapArgs()", () => {
       extraRoBinds: [["/home/user/.local/share/opencode/auth.json", "/home/user/.local/state/taskferry/run/opencode-data/opencode/auth.json"]],
     });
 
-    const runtimeDirBindIndex = args.lastIndexOf(RUNTIME_DIR);
-    const roBindIndex = args.indexOf("--ro-bind", runtimeDirBindIndex);
+    const socketPath = SOCKET_PATH;
+    const socketBindIndex = args.lastIndexOf(socketPath);
+    const roBindIndex = args.indexOf("--ro-bind", socketBindIndex);
     assert.notEqual(roBindIndex, -1);
     assert.equal(args[roBindIndex + 1], "/home/user/.local/share/opencode/auth.json");
     assert.equal(args[roBindIndex + 2], "/home/user/.local/state/taskferry/run/opencode-data/opencode/auth.json");
-    assert.ok(roBindIndex > runtimeDirBindIndex);
+    assert.ok(roBindIndex > socketBindIndex);
     assert.deepEqual(args.slice(-3), [UNSHARE_ALL, SHARE_NET, DIE_WITH_PARENT]);
   });
 
@@ -393,15 +410,19 @@ describe("buildBwrapArgs()", () => {
     assert.deepEqual(withoutNet.slice(-3), [UNSHARE_ALL, "--unshare-net", DIE_WITH_PARENT]);
   });
 
-  test("binds runtimeDir read-only when runtimeDirWritable is false (advisor isolation)", () => {
-    const args = buildBwrapArgs({ directory: "/w", stateDir: "/s", runtimeDir: "/s/run", homeDir: "/h", denyList: [], runtimeDirWritable: false });
-    assert.notEqual(args.findIndex((a, i) => a === "--ro-bind" && args[i + 1] === "/s/run"), -1);
+  test("binds only the daemon socket, not the whole runtimeDir, when socketPath is set (the #453/#455 fix)", () => {
+    const args = buildBwrapArgs({ directory: "/w", stateDir: "/s", runtimeDir: "/s/run", homeDir: "/h", denyList: [] });
+    // The socket is bound at its own path; the whole runtimeDir is not.
+    assert.notEqual(args.findIndex((a, i) => a === "--bind" && args[i + 1] === "/s/run/daemon.sock"), -1);
     assert.equal(args.findIndex((a, i) => a === "--bind" && args[i + 1] === "/s/run"), -1);
+    assert.equal(args.findIndex((a, i) => a === "--ro-bind" && args[i + 1] === "/s/run"), -1);
   });
 
-  test("defaults to a writable runtimeDir bind (unchanged dispatch behavior)", () => {
-    const args = buildBwrapArgs({ directory: "/w", stateDir: "/s", runtimeDir: "/s/run", homeDir: "/h", denyList: [] });
-    assert.notEqual(args.findIndex((a, i) => a === "--bind" && args[i + 1] === "/s/run"), -1);
+  test("omits the socket bind entirely when socketPath is null, so the daemon is unreachable (the #454 fix)", () => {
+    const args = buildBwrapArgs({ directory: "/w", stateDir: "/s", runtimeDir: "/s/run", homeDir: "/h", denyList: [], socketPath: null });
+    assert.equal(args.findIndex((a, i) => a === "--bind" && args[i + 1] === "/s/run/daemon.sock"), -1);
+    assert.equal(args.findIndex((a, i) => a === "--bind" && args[i + 1] === "/s/run"), -1);
+    assert.equal(args.findIndex((a, i) => a === "--ro-bind" && args[i + 1] === "/s/run"), -1);
   });
 });
 
@@ -444,7 +465,7 @@ describe("buildBwrapArgs() byte-identical output (Task 5: post-refactor regressi
       "--tmpfs", "/home/user/.gnupg",
       "--tmpfs", "/home/user/.claude",
       "--bind", MY_REPO_DIR, MY_REPO_DIR,
-      "--bind", RUNTIME_DIR, RUNTIME_DIR,
+      "--bind", SOCKET_PATH, SOCKET_PATH,
       UNSHARE_ALL, SHARE_NET, DIE_WITH_PARENT,
     ]);
   });
@@ -469,7 +490,7 @@ describe("buildBwrapArgs() byte-identical output (Task 5: post-refactor regressi
       "--tmpfs", "/home/user/.claude",
       OVERLAY_SRC, MY_REPO_DIR,
       "--overlay", COW_UPPER_MAIN, COW_WORK_MAIN, MY_REPO_DIR,
-      "--bind", RUNTIME_DIR, RUNTIME_DIR,
+      "--bind", SOCKET_PATH, SOCKET_PATH,
       UNSHARE_ALL, SHARE_NET, DIE_WITH_PARENT,
     ]);
   });

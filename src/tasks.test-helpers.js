@@ -22,6 +22,30 @@ import { createTaskManager, DEFAULT_SUMMARY_MODEL, parseEnvDenylist } from "./ta
 const trackedTempDirs = [];
 const trackedManagers = [];
 
+// Snapshot each named env var and restore it in `t.after` exactly as found,
+// so a test can mutate `process.env` without leaving its values absent (or
+// stringified) for later tests in the file. The restore uses
+// `prior[name] !== undefined` rather than a separate "was it present" flag:
+// Node env values are always strings, so a key that was never set reads back
+// as `undefined` and a key set to any value (including a stringified
+// "undefined") reads back as a string -- presence is fully derivable from the
+// prior value, and a separate flag would be redundant state to keep in sync.
+// A blanket delete would instead leave the process's real PATH/HOME absent
+// for every later test, which is what let a subsequent test's
+// `process.env.HOME = realHome` (realHome already undefined) stringify into
+// the literal "undefined" -- the HOME the variants-cache warm spawn then
+// handed real opencode.
+export function preserveEnvVars(t, names) {
+  const prior = Object.fromEntries(names.map((name) => [name, process.env[name]]));
+  t.after(() => {
+    for (const name of names) {
+      if (prior[name] !== undefined) process.env[name] = prior[name];
+      else delete process.env[name];
+    }
+  });
+  return prior;
+}
+
 export function mkdtempTracked(prefix) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
   trackedTempDirs.push(dir);

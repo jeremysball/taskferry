@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { makeManager, fakeChild, mkdtempTracked } from "./tasks.test-helpers.js";
+import { makeManager, fakeChild, mkdtempTracked, preserveEnvVars } from "./tasks.test-helpers.js";
 
 // The dispatch directory and the bound dirs must NOT share an ancestor
 // relationship: roBind that are descendants of the launch directory are
@@ -33,51 +33,41 @@ const baseManagerOpts = {
 };
 
 describe("bwrap sandboxing: --rw-bind and --ro-bind -- binding and conflict resolution", () => {
-  test("--rw-bind binds read-write (--bind), unioning the manager default, env, and config layers", () => {
+  test("--rw-bind binds read-write (--bind), unioning the manager default, env, and config layers", (t) => {
     const managerDefault = roTarget();
     const envDir = roTarget();
     const configDir = roTarget();
-    const oldEnv = process.env.TASKFERRY_RW_BIND;
+    preserveEnvVars(t, ["TASKFERRY_RW_BIND"]);
     process.env.TASKFERRY_RW_BIND = envDir;
-    try {
-      const mgr = makeManager({
-        ...baseManagerOpts,
-        allowedDirs: [],
-        rwBind: [managerDefault],
-        config: { rwBind: configDir },
-      });
-      mgr.dispatch({ prompt: "hello", directory: launchDir(), rwBind: [roTarget()] });
-      const bindPairs = pairsFor(captured.args, "--bind");
-      assert.ok(bindPairs.some(([src]) => src === managerDefault), `manager default rwBind not bound: ${JSON.stringify(bindPairs)}`);
-      assert.ok(bindPairs.some(([src]) => src === envDir), `TASKFERRY_RW_BIND not bound: ${JSON.stringify(bindPairs)}`);
-      assert.ok(bindPairs.some(([src]) => src === configDir), `config rwBind not bound: ${JSON.stringify(bindPairs)}`);
-    } finally {
-      if (oldEnv === undefined) delete process.env.TASKFERRY_RW_BIND;
-      else process.env.TASKFERRY_RW_BIND = oldEnv;
-    }
+    const mgr = makeManager({
+      ...baseManagerOpts,
+      allowedDirs: [],
+      rwBind: [managerDefault],
+      config: { rwBind: configDir },
+    });
+    mgr.dispatch({ prompt: "hello", directory: launchDir(), rwBind: [roTarget()] });
+    const bindPairs = pairsFor(captured.args, "--bind");
+    assert.ok(bindPairs.some(([src]) => src === managerDefault), `manager default rwBind not bound: ${JSON.stringify(bindPairs)}`);
+    assert.ok(bindPairs.some(([src]) => src === envDir), `TASKFERRY_RW_BIND not bound: ${JSON.stringify(bindPairs)}`);
+    assert.ok(bindPairs.some(([src]) => src === configDir), `config rwBind not bound: ${JSON.stringify(bindPairs)}`);
   });
 
-  test("--ro-bind binds read-only (--ro-bind), unioning the manager default, env, and config layers", () => {
+  test("--ro-bind binds read-only (--ro-bind), unioning the manager default, env, and config layers", (t) => {
     const managerDefault = roTarget();
     const envDir = roTarget();
     const configDir = roTarget();
-    const oldEnv = process.env.TASKFERRY_RO_BIND;
+    preserveEnvVars(t, ["TASKFERRY_RO_BIND"]);
     process.env.TASKFERRY_RO_BIND = envDir;
-    try {
-      const mgr = makeManager({
-        ...baseManagerOpts,
-        roBind: [managerDefault],
-        config: { roBind: configDir },
-      });
-      mgr.dispatch({ prompt: "hello", directory: launchDir(), roBind: [roTarget()] });
-      const roPairs = pairsFor(captured.args, "--ro-bind");
-      assert.ok(roPairs.some(([src, dest]) => src === managerDefault && dest === managerDefault), `manager default roBind not bound: ${JSON.stringify(roPairs)}`);
-      assert.ok(roPairs.some(([src, dest]) => src === envDir && dest === envDir), `TASKFERRY_RO_BIND not bound: ${JSON.stringify(roPairs)}`);
-      assert.ok(roPairs.some(([src, dest]) => src === configDir && dest === configDir), `config roBind not bound: ${JSON.stringify(roPairs)}`);
-    } finally {
-      if (oldEnv === undefined) delete process.env.TASKFERRY_RO_BIND;
-      else process.env.TASKFERRY_RO_BIND = oldEnv;
-    }
+    const mgr = makeManager({
+      ...baseManagerOpts,
+      roBind: [managerDefault],
+      config: { roBind: configDir },
+    });
+    mgr.dispatch({ prompt: "hello", directory: launchDir(), roBind: [roTarget()] });
+    const roPairs = pairsFor(captured.args, "--ro-bind");
+    assert.ok(roPairs.some(([src, dest]) => src === managerDefault && dest === managerDefault), `manager default roBind not bound: ${JSON.stringify(roPairs)}`);
+    assert.ok(roPairs.some(([src, dest]) => src === envDir && dest === envDir), `TASKFERRY_RO_BIND not bound: ${JSON.stringify(roPairs)}`);
+    assert.ok(roPairs.some(([src, dest]) => src === configDir && dest === configDir), `config roBind not bound: ${JSON.stringify(roPairs)}`);
   });
 
   test("a path in both rw and ro sets binds read-write and warns (read-write wins)", () => {
@@ -209,12 +199,12 @@ describe("bwrap sandboxing: --rw-bind and --ro-bind -- validation and deprecated
     assert.ok(bindPairs.some(([src]) => src === viaOld));
   });
 
-  test("the deprecated TASKFERRY_ALLOWED_DIRS env var feeds the rw union and warns at manager construction", () => {
+  test("the deprecated TASKFERRY_ALLOWED_DIRS env var feeds the rw union and warns at manager construction", (t) => {
     const viaEnv = roTarget();
     const originalWrite = process.stderr.write;
     let warned = "";
     process.stderr.write = (chunk) => { warned += chunk; return true; };
-    const oldEnv = process.env.TASKFERRY_ALLOWED_DIRS;
+    preserveEnvVars(t, ["TASKFERRY_ALLOWED_DIRS"]);
     process.env.TASKFERRY_ALLOWED_DIRS = viaEnv;
     try {
       const mgr = makeManager({ ...baseManagerOpts });
@@ -225,8 +215,6 @@ describe("bwrap sandboxing: --rw-bind and --ro-bind -- validation and deprecated
       assert.match(warned, /next major release/);
     } finally {
       process.stderr.write = originalWrite;
-      if (oldEnv === undefined) delete process.env.TASKFERRY_ALLOWED_DIRS;
-      else process.env.TASKFERRY_ALLOWED_DIRS = oldEnv;
     }
   });
 

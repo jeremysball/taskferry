@@ -1,0 +1,567 @@
+# Review package: 967ac0c..016c16f
+
+## Commits
+016c16f docs: document required --model and the highest-thinking default variant
+
+## Files changed
+ .../task-8-brief.md                                | 85 +++++++++++++++++++
+ .../task-8-report.md                               | 96 ++++++++++++++++++++++
+ README.md                                          |  4 +-
+ docs/cli-reference.md                              |  6 +-
+ docs/config.md                                     |  1 +
+ docs/daemon.md                                     | 14 ++++
+ .../claude/skills/using-taskferry/SKILL.md         | 13 ++-
+ integrations/codex/skills/using-taskferry/SKILL.md | 13 ++-
+ skills/using-taskferry/SKILL.md                    | 13 ++-
+ src/command-specs.js                               |  2 +-
+ 10 files changed, 229 insertions(+), 18 deletions(-)
+
+## Diff
+diff --git a/.superpowers/sdd/2026-08-09-highest-thinking-default/task-8-brief.md b/.superpowers/sdd/2026-08-09-highest-thinking-default/task-8-brief.md
+new file mode 100644
+index 0000000..950122a
+--- /dev/null
++++ b/.superpowers/sdd/2026-08-09-highest-thinking-default/task-8-brief.md
+@@ -0,0 +1,85 @@
++## Task 8: Documentation sweep
++
++**Files:**
++- Modify: `docs/cli-reference.md:57-58`, `:135`, `:137`
++- Modify: `docs/config.md:57-61`
++- Modify: `docs/daemon.md:375` (append two entries after the existing list)
++- Modify: `src/command-specs.js` (dispatch's `--model`/`--variant` option text)
++- Modify: `skills/using-taskferry/SKILL.md` (canonical only, then regenerate)
++- Modify: `README.md`
++
++**Interfaces:** none (docs only).
++
++- [ ] **Step 1: Update `docs/cli-reference.md`**
++
++Replace line 57:
++
++```
++| `--model <id>` | `provider/model`, e.g. `opencode-go/minimax-m3`. Run `opencode models` to list installed models. Required unless resuming via `--session-id` with a matching prior task, in which case the model is inherited from that task |
++```
++
++Replace line 58:
++
++```
++| `--variant <name>` | Reasoning-effort override. Precedence when omitted: the resumed session's own variant (on a `--session-id` resume) wins, otherwise the configured `defaultVariant` (default `highest`) applies -- see `docs/config.md`. `highest` resolves to `--thinking max` on pi (pi clamps to the model's real ceiling itself) or the model's highest cached opencode variant, sending no flag at all if the model has none. Accepted concrete values: pi takes `off`, `minimal`, `low`, `medium`, `high`, `xhigh`; opencode's depend on the model and are never validated by taskferry -- an unrecognized value is silently ignored by opencode itself |
++```
++
++Replace line 135 (`advisor`'s `--model <id>` row) — no change needed; `advisor` already requires `--model`, but drop any stale cross-reference to a default if present. Verify by reading the current line before editing; if it already reads "Required, no default; the caller picks the advisor," leave it as-is.
++
++Replace line 137:
++
++```
++| `--variant <name>` | Optional reasoning-effort override. Same omitted-flag resolution chain as `dispatch`'s `--variant` above (resumed session, then `defaultVariant`, default `highest`) |
++```
++
++- [ ] **Step 2: Update `docs/config.md`**
++
++Add a row after the `defaultExecutor` row (line 57):
++
++```
++| `defaultVariant` | `TASKFERRY_DEFAULT_VARIANT` | string (`highest`, or one of `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`) | `highest` |
++```
++
++- [ ] **Step 3: Update `docs/daemon.md`'s "Things that look like bugs but aren't"**
++
++Append two entries after the existing last bullet in that section (find it with `rg -n "## Things that look like bugs but aren't" -A 200 docs/daemon.md` to locate the true end of the list before editing, since the list has grown since this plan was written):
++
++```markdown
++- A pi dispatch's task record shows `variant: "max"` but the actual provider
++  ran at, say, `high`. Expected: pi's own `clampThinkingLevel()` clamps a
++  requested level to the model's real ceiling at runtime, including on
++  extension providers (`ollama/*`, custom pi providers) taskferry cannot see
++  the registry for. taskferry records what was requested, not what pi
++  clamped it to, because it has no way to observe the clamp.
++- A model dispatches with no `--variant` flag even though `defaultVariant`
++  is `highest`, until up to 24h after that model first became available
++  through opencode. Expected: the opencode variants cache
++  (`<cacheDir>/opencode-variants.json`) refreshes once at daemon startup and
++  once every 24h afterward, never synchronously on the dispatch path (a
++  fresh `opencode models --verbose` shell-out costs ~3-4s, which would
++  otherwise block the daemon's single thread on every affected dispatch).
++  A model absent from the cache resolves to no variant flag, not an error.
++```
++
++- [ ] **Step 4: Update `src/command-specs.js`**
++
++In the `dispatch` entry's `options` object, change:
++
++```js
++"--model <id>": "required unless resuming via --session-id with a matching prior task",
++"--variant <name>": "optional; defaults to the model's highest supported thinking level (see defaultVariant in docs/config.md)",
++```
++
++- [ ] **Step 5: Regenerate the skill and sweep the README**
++
++Edit `skills/using-taskferry/SKILL.md` (canonical copy) to state `--model` is required for a fresh dispatch and that an omitted `--variant` now means "this model's hardest thinking level," then run `npm run skill:generate` and commit the regenerated integration copies alongside it. Run `rg -n "taskferry dispatch" README.md` and add `--model <provider/model>` to any example invocation that currently omits it.
++
++- [ ] **Step 6: Commit**
++
++```bash
++git add docs/cli-reference.md docs/config.md docs/daemon.md src/command-specs.js skills/using-taskferry/SKILL.md README.md
++git commit -m "docs: document required --model and the highest-thinking default variant"
++```
++
++---
++
+diff --git a/.superpowers/sdd/2026-08-09-highest-thinking-default/task-8-report.md b/.superpowers/sdd/2026-08-09-highest-thinking-default/task-8-report.md
+new file mode 100644
+index 0000000..a839067
+--- /dev/null
++++ b/.superpowers/sdd/2026-08-09-highest-thinking-default/task-8-report.md
+@@ -0,0 +1,96 @@
++# Task 8 Report: Documentation sweep
++
++## Summary
++
++Brought the docs in line with the landed Tasks 1-7 behavior: `--model`
++required on a fresh dispatch, and an omitted `--variant` resolving to the
++model's highest supported thinking level via `defaultVariant` (default
++`highest`).
++
++## Files touched
++
++- **`docs/cli-reference.md`** — Replaced `dispatch`'s `--model <id>` row
++  (line 57) with the required-unless-resuming text and `dispatch`'s
++  `--variant <name>` row (line 58) with the full resolution-chain text
++  (`--session-id` resume wins, then `defaultVariant`, default `highest`;
++  pi `highest` = `--thinking max`, opencode = highest cached variant or no
++  flag). Replaced `advisor`'s `--variant` row (line 137) with the
++  shortened same-chain text. `advisor`'s `--model` row (line 135) already
++  read "Required, no default; the caller picks the advisor" — left as-is
++  per the brief's instruction.
++- **`docs/config.md`** — Added the `defaultVariant` config-table row after
++  `defaultExecutor` (line 57): `TASKFERRY_DEFAULT_VARIANT`, values
++  `highest | off | minimal | low | medium | high | xhigh | max`, default
++  `highest`. Verified against `KNOWN_VARIANT_LEVELS` in `src/config.js:56`.
++- **`docs/daemon.md`** — Appended the two "Things that look like bugs but
++  aren't" entries (pi `variant: "max"` record vs provider clamp; the
++  24h-refresh opencode variants cache and missing-from-cache = no flag)
++  verbatim from the brief, after the real last bullet (the
++  `withFileLockAsync` contention entry ending at line 445, EOF). The
++  brief's line reference (375) was just the section header; the list had
++  grown by seven bullets since the plan was written. Both entries verified
++  against the code: `src/variants.js` (pi `highest` → `max`), pi's
++  `clampThinkingLevel` behavior, `src/variants-cache.js` (24h TTL,
++  `<cacheDir>/opencode-variants.json`, `null` on any read failure → no
++  flag, refresh never on the dispatch path), and
++  `src/tasks.js:4598` (24h refresh cadence).
++- **`src/command-specs.js`** — `dispatch` entry's `--model <id>` option
++  text changed to "required unless resuming via --session-id with a
++  matching prior task" and `--variant <name>` to "optional; defaults to the
++  model's highest supported thinking level (see defaultVariant in
++  docs/config.md)" — exactly per the brief.
++- **`skills/using-taskferry/SKILL.md`** (canonical) — Worker Contract
++  bullet now states `--model` is required for a fresh dispatch (only a
++  `--session-id` resume may inherit the prior task's model) and that an
++  omitted `--variant` means "that model's hardest thinking level"; the
++  Choosing a Model bullet no longer claims an omitted `--model` falls back
++  to a default.
++- **`integrations/claude/skills/using-taskferry/SKILL.md`** and
++  **`integrations/codex/skills/using-taskferry/SKILL.md`** — Regenerated
++  via `npm run skill:generate`; identical to the canonical edit.
++- **`README.md`** — Added `--model opencode-go/minimax-m3` to both example
++  `taskferry dispatch` invocations (intro block, line 16, and the "Then
++  dispatch" bash block, line 104) that omitted it.
++- **`.superpowers/sdd/2026-08-09-highest-thinking-default/task-8-brief.md`** —
++  Included in the commit (repo convention: briefs/reports ride along with
++  the task commit, per git history for tasks 5-7).
++
++## Verification
++
++`npm run check` — declared in `.taskferry.toml`.
++
++- Initial run failed 6 tests, all **environment leakage from this session,
++  not my edits**: this ferry session exports `TASKFERRY_TASK_ID`,
++  `TASKFERRY_CHILD`, `TASKFERRY_SOCKET_PATH`, `TASKFERRY_STATE_DIR`,
++  `TASKFERRY_RUNTIME_DIR`, `XDG_DATA_HOME`, and `XDG_CONFIG_HOME` (the
++  last two pointing at taskferry's own opencode-data dirs), and the test
++  suite assumes none of those are set. The failures (`TASKFERRY_TASK_ID is
++  absent from summary spawns`, the three opencode auth/data-home sandbox
++  tests, `leaves XDG_DATA_HOME untouched`, and the daemon-client symlink
++  guard test whose subprocess connected to the session's live daemon) are
++  ambient-env artifacts. Proof it's not my change: a stash-clean run on
++  the same tree failed 5 of the same tests (all but the symlink one, whose
++  outcome depends on whether the real daemon is up).
++- Final run with a scrubbed env
++  (`env -u TASKFERRY_SOCKET_PATH -u TASKFERRY_STATE_DIR -u
++  TASKFERRY_RUNTIME_DIR -u TASKFERRY_TASK_ID -u TASKFERRY_CHILD -u
++  TASKFERRY_CACHE_DIR -u XDG_DATA_HOME -u XDG_CONFIG_HOME npm run check`):
++  **exit 0, 1205/1205 tests pass, 0 fail.** (This task touches no source
++  logic, so nothing else could have changed the result.)
++
++## Concerns
++
++- Line-number drift: `docs/daemon.md`'s section start (375) was correct
++  but the list's real end had grown to line 445 — found with the mandated
++  `rg -n "## Things that look like bugs but aren't" -A 200` and appended
++  after the true last bullet. `docs/cli-reference.md` line numbers 57/58
++  and 135/137 were still accurate (re-checked with `rg` before editing).
++- `docs/config.md` row placement: the brief said "after the `defaultExecutor`
++  row (line 57)" and the actual `defaultExecutor` row was at line 57 —
++  exact.
++- Stash-side-effect note: while verifying the pre-existing failures I
++  stashed and re-popped; the pop failed on a readonly git dir for the
++  untracked `undefined/` test-artifact dir the check runs had created
++  (from an unset env var in a test path). I verified the stash diff
++  exactly matched the restored worktree, dropped the stash, and removed
++  the junk dir. Final `git status` contains only the intended files.
+diff --git a/README.md b/README.md
+index 7b24264..da97e4a 100644
+--- a/README.md
++++ b/README.md
+@@ -6,21 +6,21 @@
+ Dispatch background coding tasks to cheap worker models, so your main
+ agent keeps its context for planning and review instead of grunt work.
+ 
+ taskferry is a daemon-backed CLI that runs those tasks as `pi` or
+ `opencode` worker processes. Claude Code is the first-class frontend;
+ OpenCode and Codex get native integrations too, and anything that can
+ shell out can dispatch. You send work, get an id back immediately, and
+ read the result whenever you're ready, from any terminal.
+ 
+ ```
+-$ taskferry dispatch --prompt "Fix the failing tests" --directory /workspace/my-repo
++$ taskferry dispatch --prompt "Fix the failing tests" --directory /workspace/my-repo --model opencode-go/minimax-m3
+ id: oc_mrn4ipkp_19450105
+ status: running
+ directory: /workspace/my-repo
+ model: minimax/MiniMax-M2.7
+ next: Run taskferry wait or taskferry status with task id "oc_mrn4ipkp_19450105" to check progress
+ 
+ $ taskferry wait oc_mrn4ipkp_19450105
+ id: oc_mrn4ipkp_19450105
+ status: done
+ exitCode: 0
+@@ -94,21 +94,21 @@ crashes a few seconds later when the worker reaches its provider;
+ `taskferry status <id> --full` shows the `failureReason` when that
+ happens.
+ 
+ - **`pi`** (the default executor): run `pi` once and type `/login`, or
+   set the provider's API key env var (e.g. `OPENAI_API_KEY`).
+ - **`opencode`** (`--executor opencode`): run `opencode auth login`.
+ 
+ Then dispatch:
+ 
+ ```bash
+-taskferry dispatch --prompt "Fix the failing tests" --directory /workspace/my-repo
++taskferry dispatch --prompt "Fix the failing tests" --directory /workspace/my-repo --model opencode-go/minimax-m3
+ taskferry wait <id>
+ taskferry result <id>
+ ```
+ 
+ That is the whole loop. Bare `taskferry` shows the live workspace: task
+ counts by status, the task list, and the suggested next action.
+ 
+ ## What you get
+ 
+ - **Dispatch returns an id immediately.** `wait`, `status`, `result`,
+diff --git a/docs/cli-reference.md b/docs/cli-reference.md
+index d5c350b..8b7639c 100644
+--- a/docs/cli-reference.md
++++ b/docs/cli-reference.md
+@@ -47,22 +47,22 @@ Queues a `pi --model <model> --mode json -p <prompt>` invocation (the
+ built-in default executor), or the equivalent `opencode run --dir
+ <directory> --auto --format json -m <model> -- <prompt>` when `--executor
+ opencode` is given, as a background child process and returns a task
+ summary immediately.
+ 
+ | Flag | Notes |
+ |---|---|
+ | `--prompt <text>` | Required. Pass `-` to read the prompt from piped stdin instead (`cat prompt.txt \| taskferry dispatch --prompt -`) — use this for prompts too large to pass as a single command-line argument |
+ | `--directory <path>` | Defaults to the current workspace; an existing directory (relative paths are resolved against the current working directory) |
+ | (no flag — always on) | `dispatch`, `advisor`, and `summary` (report mode) forward the calling shell's own environment to the daemon on every call, with no per-call opt-out; see [security.md](security.md#caller-env-forwarding) |
+-| `--model <id>` | `provider/model`, e.g. `opencode-go/minimax-m3`. Run `opencode models` to list installed models. Defaults to `minimax/MiniMax-M2.7` for the default `pi` executor; `--executor opencode` defaults to `openai/gpt-5.6-luna` instead. When `--session-id` is given without `--model`, the model is instead inherited from the most recent prior task dispatched with that session id |
+-| `--variant <name>` | Reasoning-effort override, applied only alongside `--model` — omitting `--model` (including on a `--session-id` resume) always forces variant `high`, regardless of any `--variant` passed. Accepted values depend on the executor: pi takes `off`, `minimal`, `low`, `medium`, `high`, `xhigh`; opencode's `--variant` values depend on the model |
++| `--model <id>` | `provider/model`, e.g. `opencode-go/minimax-m3`. Run `opencode models` to list installed models. Required unless resuming via `--session-id` with a matching prior task, in which case the model is inherited from that task |
++| `--variant <name>` | Reasoning-effort override. Precedence when omitted: the resumed session's own variant (on a `--session-id` resume) wins, otherwise the configured `defaultVariant` (default `highest`) applies -- see `docs/config.md`. `highest` resolves to `--thinking max` on pi (pi clamps to the model's real ceiling itself) or the model's highest cached opencode variant, sending no flag at all if the model has none. Accepted concrete values: pi takes `off`, `minimal`, `low`, `medium`, `high`, `xhigh`; opencode's depend on the model and are never validated by taskferry -- an unrecognized value is silently ignored by opencode itself |
+ | `--executor <opencode\|pi>` | Which worker CLI to spawn. Built-in default `pi`, but an omitted flag actually falls back to the daemon's configured default executor (`TASKFERRY_DEFAULT_EXECUTOR` or `config.json`'s `defaultExecutor`) |
+ | `--session-id <id>` | Resume an existing session instead of starting fresh (`--continue --session <id>`; both pi and opencode use this syntax). When `--executor` is omitted, inherits whichever executor originally created the session; get session ids from a prior `result` or `status --full` |
+ | `--rw-bind <path,path,...>` | Extra directories bound read-write inside the sandbox for this dispatch, on top of the auto-detected git-common-dir for a worktree and any config-level `rwBind`; see [security.md](security.md). **`/tmp` needs this too** — the sandbox mounts a fresh, empty `--tmpfs /tmp`, so any path under `/tmp` that isn't `--directory`, `runtimeDir`, or an `--rw-bind` entry is invisible inside the sandbox even though it exists on the host. All three layers (this flag, `TASKFERRY_RW_BIND`, config `rwBind`) union rather than replace. |
+ | `--ro-bind <path,path,...>` | Extra directories bound **read-only** inside the sandbox for this dispatch — a review-only worker that should read several repos but edit none. Resolved through the same protected-mount safety check as `.taskferry.toml`'s `read_only_paths`: an entry that doesn't exist on the host, or that overlaps a protected mount, is skipped and reported. Unions with `TASKFERRY_RO_BIND` and config `roBind`. If a path also appears in the read-write set, read-write wins with a warning. |
+ | `--allowed-dirs <path,path,...>` | **Deprecated** alias for `--rw-bind` (same read-write behavior). Emits a deprecation warning when used; will be removed in the next major release. |
+ | `--require-final-marker <regex>` | Fail the task if the final message doesn't match this pattern (case-sensitive, standard JS RegExp semantics). Sets `incomplete: true` on the settled task when the final message is empty (after trimming) or doesn't match. Patterns that don't compile as a standard JS RegExp reject the dispatch up front with a usage error. Useful for enforcing a report-format contract like `^Status: (DONE\|DONE_WITH_CONCERNS\|BLOCKED\|NEEDS_CONTEXT)$` on the last line of model output. |
+ | `--class <name>` | Optional free-text task-class tag for telemetry aggregation; any non-empty string, no fixed-list validation — taskferry stores whatever is given |
+ | `--parent-task <id>` | Tag this dispatch as fixing/retrying an earlier task. Persisted as `parentTaskId` and surfaced on `taskferry status <id> --full` / `taskferry result <id> --fields parentTaskId` (not on plain `taskferry status <id>`). The earlier task's check-gate failure message echoes the link when this dispatch is the suggested fix-forward resume (see `## taskferry accept <id>` below) |
+ | `--no-sandbox` | Run this dispatch without the bwrap filesystem sandbox (default: sandboxed on Linux, no-op on macOS); see [security.md](security.md) |
+ 
+@@ -127,21 +127,21 @@ A blocking "ask a bigger model" call: dispatches like `dispatch`, then waits
+ internally and returns the answer inline instead of a separate `wait`
+ round-trip. Use it the way a weaker model consults a stronger one for
+ planning or hard-debugging help mid-task, not for open-ended background work
+ (use `dispatch` for that).
+ 
+ | Flag | Notes |
+ |---|---|
+ | `--prompt <text>` | Optional; auto-attaches caller context (Claude Code session transcript or the calling ferry's own task log) when omitted, and prepends that context ahead of `--prompt` when both are present. Pass `-` to read the prompt from piped stdin instead, same as `dispatch` |
+ | `--model <id>` | Required, no default; the caller picks the advisor |
+ | `--directory <path>` | Defaults to the current git workspace root (falls back to the literal current directory outside a git repo) |
+-| `--variant <name>` | Optional reasoning-effort override |
++| `--variant <name>` | Optional reasoning-effort override. Same omitted-flag resolution chain as `dispatch`'s `--variant` above (resumed session, then `defaultVariant`, default `highest`) |
+ | `--executor <opencode\|pi>` | Which worker CLI to spawn. Built-in default `pi`, but an omitted flag actually falls back to the daemon's configured default executor (`TASKFERRY_DEFAULT_EXECUTOR` or `config.json`'s `defaultExecutor`) |
+ | `--session-id <id>` | Resume a prior advisor exchange |
+ | `--class <name>` | Optional free-text task-class tag for telemetry aggregation; any non-empty string, no fixed-list validation |
+ | `--parent-task <id>` | Same `--parent-task` semantics as `dispatch`: tag the advisor task as fixing/retrying an earlier task, persisted as `parentTaskId`, surfaced by `taskferry status <id>` / `taskferry result <id> --fields parentTaskId`. A review-fix round that uses `advisor` to read the failing task's output and re-prompt a new `dispatch` can thread the lineage through both legs of the chain. |
+ | `--timeout <duration>` | Early-return cap — milliseconds or a duration string (30s, 5m, 1h), same semantics as `wait`; omitting it does not block indefinitely — it falls back to a 45-second internal cap, after which the "still running" response below is returned |
+ 
+ If it times out before the advisor answers, the response is `status:
+ "running"` plus `task_id` and `session_id`; call `wait` or `advisor` again
+ (with that `session_id`) to continue. If a resumed `session_id` has gone idle past
+ `TASKFERRY_ADVISOR_SESSION_TTL_MS` (default 30 minutes) or is unrecognized
+diff --git a/docs/config.md b/docs/config.md
+index 89abb75..b65223d 100644
+--- a/docs/config.md
++++ b/docs/config.md
+@@ -48,20 +48,21 @@ message — there is no silent typo tolerance.
+ | `envDenylist` | `TASKFERRY_ENV_DENYLIST` | string (comma-separated var names) | (none) |
+ | `sandboxEnabled` | `TASKFERRY_DISABLE_SANDBOX` (inverted: `1`/`true` disables) | boolean | `true` |
+ | `overlayEnabled` | `TASKFERRY_DISABLE_OVERLAY` (inverted: `1`/`true` disables) | boolean | `true` |
+ | `allowedDirs` | `TASKFERRY_ALLOWED_DIRS` | string (comma-separated paths) | (none) |
+ | `rwBind` | `TASKFERRY_RW_BIND` | string (comma-separated paths) | (none) |
+ | `roBind` | `TASKFERRY_RO_BIND` | string (comma-separated paths) | (none) |
+ | `sandboxDenylist` | `TASKFERRY_SANDBOX_DENYLIST` | string (comma-separated paths) | (none) |
+ | `waitDefaultTimeoutMs` | `TASKFERRY_WAIT_DEFAULT_TIMEOUT_MS` | number | `900000` (15 min); `0` disables via the env var only — a config-file value of `0` is ignored and falls back to the 15-minute default |
+ | `cancelGraceMs` | `TASKFERRY_CANCEL_GRACE_MS` | number | `5000`; overridden per-call by `cancel --grace-ms` |
+ | `defaultExecutor` | `TASKFERRY_DEFAULT_EXECUTOR` | string (`opencode` or `pi`) | `pi` |
++| `defaultVariant` | `TASKFERRY_DEFAULT_VARIANT` | string (`highest`, or one of `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`) | `highest` |
+ | `envFile` | `TASKFERRY_ENV_FILE` | string (path to a `.env`-style file) | (none) |
+ | `profilingEnabled` | `TASKFERRY_PROFILING_ENABLED` | boolean | `false`; see `docs/daemon.md#request-latency-profiling` |
+ | `lowerdirStaggerMs` | `TASKFERRY_LOWERDIR_STAGGER_MS` | number | `3000`; `0` disables |
+ | `providerLimits` | `TASKFERRY_PROVIDER_LIMITS` | object (provider -> `{maxConcurrentTasks?, maxDispatchesPerWindow?}`) | `{}` (no per-provider limit; only the global ceiling applies) |
+ 
+ `envDenylist` uses the same comma-separated grammar as `allowedDirs` — a
+ flat list of env var names, always stripped from every spawned child
+ regardless of whether the value came from the daemon's own ambient
+ environment or a caller's forwarded env; see `docs/security.md`.
+ 
+diff --git a/docs/daemon.md b/docs/daemon.md
+index 254949c..45d5e91 100644
+--- a/docs/daemon.md
++++ b/docs/daemon.md
+@@ -436,10 +436,24 @@ profiling is diagnostic, not on the request's critical path.
+ - A test that has two same-process calls contend on the same
+   `withFileLockAsync()`/`withFileLock()` lock path (one holding it across an
+   `await`, another trying to acquire it concurrently) hanging or timing out
+   at exactly the lock's `timeoutMs` — expected, not a bug in the lock.
+   `acquireLock()`'s retry loop blocks the JS thread synchronously via
+   `Atomics.wait` with zero yield back to the event loop, so a contending
+   same-process caller starves the very continuation that would release the
+   lock. Real contention is always cross-process (a separate `taskferry`
+   invocation, each with its own event loop), where this doesn't arise —
+   see the note in `state-lock.test.js`.
++- A pi dispatch's task record shows `variant: "max"` but the actual provider
++  ran at, say, `high`. Expected: pi's own `clampThinkingLevel()` clamps a
++  requested level to the model's real ceiling at runtime, including on
++  extension providers (`ollama/*`, custom pi providers) taskferry cannot see
++  the registry for. taskferry records what was requested, not what pi
++  clamped it to, because it has no way to observe the clamp.
++- A model dispatches with no `--variant` flag even though `defaultVariant`
++  is `highest`, until up to 24h after that model first became available
++  through opencode. Expected: the opencode variants cache
++  (`<cacheDir>/opencode-variants.json`) refreshes once at daemon startup and
++  once every 24h afterward, never synchronously on the dispatch path (a
++  fresh `opencode models --verbose` shell-out costs ~3-4s, which would
++  otherwise block the daemon's single thread on every affected dispatch).
++  A model absent from the cache resolves to no variant flag, not an error.
+diff --git a/integrations/claude/skills/using-taskferry/SKILL.md b/integrations/claude/skills/using-taskferry/SKILL.md
+index 6bda413..32bd3f8 100644
+--- a/integrations/claude/skills/using-taskferry/SKILL.md
++++ b/integrations/claude/skills/using-taskferry/SKILL.md
+@@ -109,22 +109,25 @@ fill-in template, so the file is never silently encoded with a guess
+ nobody approved. Run it once per repo (or per worktree if each
+ worktree wants its own gate), commit the result, and the next dispatch
+ picks it up automatically — no daemon restart required. The schema is
+ documented in `docs/config.md#taskferrytoml`; the gate's accept
+ refusal / `--force` override behavior is in "Verification gate (`accept`
+ refusal and `--force`)" under "Verifying A Worker's Claimed Changeset"
+ below. `init` never overwrites an existing `.taskferry.toml`.
+ 
+ ## Worker Contract
+ 
+-- Select the worker model and variant explicitly when the task needs them:
+-  `taskferry dispatch --prompt - --directory "<worktree>" --model
++- Select the worker model explicitly — `--model <provider/model>` is required
++  for a fresh dispatch (only a `--session-id` resume may inherit the prior
++  task's model). Omit `--variant` to get that model's hardest thinking
++  level; pass a concrete variant only when the task wants a lower effort
++  level: `taskferry dispatch --prompt - --directory "<worktree>" --model
+   <provider/model> --variant <name> <<'PROMPT_EOF'` ... `PROMPT_EOF`.
+ - State the exact `provider/model` slug (and variant, if set) being
+   dispatched in your response to the user, not just in the shell command — the
+   user shouldn't have to read the command to know what's running. `dispatch`/
+   `advisor`/`summary` (report mode) forward your own shell's environment to
+   the daemon on every call, with no per-call opt-out — export a fresh
+   provider key before dispatching and it's visible immediately, no daemon
+   restart needed.
+ - Both `dispatch` and `advisor` also accept `--executor <opencode|pi>` to pick
+   which worker CLI is spawned. Omit it to use the configured default (built-in:
+@@ -268,22 +271,24 @@ verify independently, not to accept on narration alone.
+ 
+ See `choosing-a-model` for the full tier breakdown (cheapest/standard/
+ most-capable), the role-to-tier mapping, and effort-level nuances. The
+ summary that matters here: use the least powerful model that can handle
+ each role, not reflexively the strongest one available — but the review
+ role never inherits the implementer's tier just because the diff being
+ reviewed was mechanical. Escalate tier when the task is architecturally
+ risky, security-sensitive, or has already failed on a lighter model.
+ 
+ - **Always specify the model explicitly when dispatching through
+-  `taskferry`.** An omitted `--model` falls back to taskferry's own default,
+-  which may not match the tier the task actually needs.
++  `taskferry`.** `--model` is required on a fresh dispatch (inherited from
++  the prior task on a `--session-id` resume), so an omitted flag never
++  silently picks a default that may not match the tier the task actually
++  needs.
+ - **Task reviewers need a standard-tier floor, always** — reviewing a diff
+   requires judgment even when the diff itself was cheap-tier transcription
+   work. Dispatching the cheapest available model as a task reviewer because
+   the implementer task was cheap is a documented anti-pattern (see
+   `choosing-a-model`), not an acceptable cost optimization.
+ - **Turn count beats token price.** The cheapest models routinely take
+   2-3× the turns on multi-step work, costing more overall in wall-clock and
+   context than a standard-tier model that finishes clean. Reserve the cheapest
+   tier for implementers whose brief already contains the exact code to
+   write (transcription plus testing) and single-file mechanical fixes.
+diff --git a/integrations/codex/skills/using-taskferry/SKILL.md b/integrations/codex/skills/using-taskferry/SKILL.md
+index 6bda413..32bd3f8 100644
+--- a/integrations/codex/skills/using-taskferry/SKILL.md
++++ b/integrations/codex/skills/using-taskferry/SKILL.md
+@@ -109,22 +109,25 @@ fill-in template, so the file is never silently encoded with a guess
+ nobody approved. Run it once per repo (or per worktree if each
+ worktree wants its own gate), commit the result, and the next dispatch
+ picks it up automatically — no daemon restart required. The schema is
+ documented in `docs/config.md#taskferrytoml`; the gate's accept
+ refusal / `--force` override behavior is in "Verification gate (`accept`
+ refusal and `--force`)" under "Verifying A Worker's Claimed Changeset"
+ below. `init` never overwrites an existing `.taskferry.toml`.
+ 
+ ## Worker Contract
+ 
+-- Select the worker model and variant explicitly when the task needs them:
+-  `taskferry dispatch --prompt - --directory "<worktree>" --model
++- Select the worker model explicitly — `--model <provider/model>` is required
++  for a fresh dispatch (only a `--session-id` resume may inherit the prior
++  task's model). Omit `--variant` to get that model's hardest thinking
++  level; pass a concrete variant only when the task wants a lower effort
++  level: `taskferry dispatch --prompt - --directory "<worktree>" --model
+   <provider/model> --variant <name> <<'PROMPT_EOF'` ... `PROMPT_EOF`.
+ - State the exact `provider/model` slug (and variant, if set) being
+   dispatched in your response to the user, not just in the shell command — the
+   user shouldn't have to read the command to know what's running. `dispatch`/
+   `advisor`/`summary` (report mode) forward your own shell's environment to
+   the daemon on every call, with no per-call opt-out — export a fresh
+   provider key before dispatching and it's visible immediately, no daemon
+   restart needed.
+ - Both `dispatch` and `advisor` also accept `--executor <opencode|pi>` to pick
+   which worker CLI is spawned. Omit it to use the configured default (built-in:
+@@ -268,22 +271,24 @@ verify independently, not to accept on narration alone.
+ 
+ See `choosing-a-model` for the full tier breakdown (cheapest/standard/
+ most-capable), the role-to-tier mapping, and effort-level nuances. The
+ summary that matters here: use the least powerful model that can handle
+ each role, not reflexively the strongest one available — but the review
+ role never inherits the implementer's tier just because the diff being
+ reviewed was mechanical. Escalate tier when the task is architecturally
+ risky, security-sensitive, or has already failed on a lighter model.
+ 
+ - **Always specify the model explicitly when dispatching through
+-  `taskferry`.** An omitted `--model` falls back to taskferry's own default,
+-  which may not match the tier the task actually needs.
++  `taskferry`.** `--model` is required on a fresh dispatch (inherited from
++  the prior task on a `--session-id` resume), so an omitted flag never
++  silently picks a default that may not match the tier the task actually
++  needs.
+ - **Task reviewers need a standard-tier floor, always** — reviewing a diff
+   requires judgment even when the diff itself was cheap-tier transcription
+   work. Dispatching the cheapest available model as a task reviewer because
+   the implementer task was cheap is a documented anti-pattern (see
+   `choosing-a-model`), not an acceptable cost optimization.
+ - **Turn count beats token price.** The cheapest models routinely take
+   2-3× the turns on multi-step work, costing more overall in wall-clock and
+   context than a standard-tier model that finishes clean. Reserve the cheapest
+   tier for implementers whose brief already contains the exact code to
+   write (transcription plus testing) and single-file mechanical fixes.
+diff --git a/skills/using-taskferry/SKILL.md b/skills/using-taskferry/SKILL.md
+index 6bda413..32bd3f8 100644
+--- a/skills/using-taskferry/SKILL.md
++++ b/skills/using-taskferry/SKILL.md
+@@ -109,22 +109,25 @@ fill-in template, so the file is never silently encoded with a guess
+ nobody approved. Run it once per repo (or per worktree if each
+ worktree wants its own gate), commit the result, and the next dispatch
+ picks it up automatically — no daemon restart required. The schema is
+ documented in `docs/config.md#taskferrytoml`; the gate's accept
+ refusal / `--force` override behavior is in "Verification gate (`accept`
+ refusal and `--force`)" under "Verifying A Worker's Claimed Changeset"
+ below. `init` never overwrites an existing `.taskferry.toml`.
+ 
+ ## Worker Contract
+ 
+-- Select the worker model and variant explicitly when the task needs them:
+-  `taskferry dispatch --prompt - --directory "<worktree>" --model
++- Select the worker model explicitly — `--model <provider/model>` is required
++  for a fresh dispatch (only a `--session-id` resume may inherit the prior
++  task's model). Omit `--variant` to get that model's hardest thinking
++  level; pass a concrete variant only when the task wants a lower effort
++  level: `taskferry dispatch --prompt - --directory "<worktree>" --model
+   <provider/model> --variant <name> <<'PROMPT_EOF'` ... `PROMPT_EOF`.
+ - State the exact `provider/model` slug (and variant, if set) being
+   dispatched in your response to the user, not just in the shell command — the
+   user shouldn't have to read the command to know what's running. `dispatch`/
+   `advisor`/`summary` (report mode) forward your own shell's environment to
+   the daemon on every call, with no per-call opt-out — export a fresh
+   provider key before dispatching and it's visible immediately, no daemon
+   restart needed.
+ - Both `dispatch` and `advisor` also accept `--executor <opencode|pi>` to pick
+   which worker CLI is spawned. Omit it to use the configured default (built-in:
+@@ -268,22 +271,24 @@ verify independently, not to accept on narration alone.
+ 
+ See `choosing-a-model` for the full tier breakdown (cheapest/standard/
+ most-capable), the role-to-tier mapping, and effort-level nuances. The
+ summary that matters here: use the least powerful model that can handle
+ each role, not reflexively the strongest one available — but the review
+ role never inherits the implementer's tier just because the diff being
+ reviewed was mechanical. Escalate tier when the task is architecturally
+ risky, security-sensitive, or has already failed on a lighter model.
+ 
+ - **Always specify the model explicitly when dispatching through
+-  `taskferry`.** An omitted `--model` falls back to taskferry's own default,
+-  which may not match the tier the task actually needs.
++  `taskferry`.** `--model` is required on a fresh dispatch (inherited from
++  the prior task on a `--session-id` resume), so an omitted flag never
++  silently picks a default that may not match the tier the task actually
++  needs.
+ - **Task reviewers need a standard-tier floor, always** — reviewing a diff
+   requires judgment even when the diff itself was cheap-tier transcription
+   work. Dispatching the cheapest available model as a task reviewer because
+   the implementer task was cheap is a documented anti-pattern (see
+   `choosing-a-model`), not an acceptable cost optimization.
+ - **Turn count beats token price.** The cheapest models routinely take
+   2-3× the turns on multi-step work, costing more overall in wall-clock and
+   context than a standard-tier model that finishes clean. Reserve the cheapest
+   tier for implementers whose brief already contains the exact code to
+   write (transcription plus testing) and single-file mechanical fixes.
+diff --git a/src/command-specs.js b/src/command-specs.js
+index ce32f50..298cad6 100644
+--- a/src/command-specs.js
++++ b/src/command-specs.js
+@@ -1,15 +1,15 @@
+ export const commandSpecs = {
+   dispatch: {
+     usage: "taskferry dispatch --prompt <text> [options]",
+     description: "Queue a background OpenCode run.",
+-    options: { "--prompt <text>": "required", "--directory <path>": "defaults to the current workspace", "--model <id>": "use the default model when omitted", "--variant <name>": "optional model reasoning variant", "--session-id <id>": "resume an existing OpenCode session", "--require-final-marker <regex>": "flag the task as incomplete if the final message doesn't match this pattern (case-sensitive, standard JS RegExp semantics)", "--no-sandbox": "run this dispatch without the bwrap filesystem sandbox (default: sandboxed on Linux)", "--no-overlay": "run this dispatch without the copy-on-write overlay (writes land directly, not gated by accept/reject)", "--rw-bind <path,path,...>": "extra directories bound read-write inside the sandbox, in addition to the auto-detected git-common-dir for a worktree; required for anything under /tmp — the sandbox mounts it empty by default, hiding paths that exist on the host; unions with TASKFERRY_RW_BIND and config rwBind", "--ro-bind <path,path,...>": "extra directories bound read-only inside the sandbox; a path is skipped and reported if it is missing on this host or overlaps a protected sandbox mount; a path also listed in --rw-bind binds read-write (read-write always wins, never an error); unions with TASKFERRY_RO_BIND and config roBind", "--allowed-dirs <path,path,...>": "deprecated alias for --rw-bind (same behavior, still unions with it); will be removed in the next major release", "--executor <opencode|pi>": "worker backend to dispatch through, default pi", "--class <name>": "optional free-text task-class tag for external telemetry consumers; taskferry does not validate against a fixed list", "--parent-task <id>": "tag this dispatch as fixing/retrying an earlier task; persisted as parentTaskId, and echoed by that task's check-gate failure message" },
++    options: { "--prompt <text>": "required", "--directory <path>": "defaults to the current workspace", "--model <id>": "required unless resuming via --session-id with a matching prior task", "--variant <name>": "optional; defaults to the model's highest supported thinking level (see defaultVariant in docs/config.md)", "--session-id <id>": "resume an existing OpenCode session", "--require-final-marker <regex>": "flag the task as incomplete if the final message doesn't match this pattern (case-sensitive, standard JS RegExp semantics)", "--no-sandbox": "run this dispatch without the bwrap filesystem sandbox (default: sandboxed on Linux)", "--no-overlay": "run this dispatch without the copy-on-write overlay (writes land directly, not gated by accept/reject)", "--rw-bind <path,path,...>": "extra directories bound read-write inside the sandbox, in addition to the auto-detected git-common-dir for a worktree; required for anything under /tmp — the sandbox mounts it empty by default, hiding paths that exist on the host; unions with TASKFERRY_RW_BIND and config rwBind", "--ro-bind <path,path,...>": "extra directories bound read-only inside the sandbox; a path is skipped and reported if it is missing on this host or overlaps a protected sandbox mount; a path also listed in --rw-bind binds read-write (read-write always wins, never an error); unions with TASKFERRY_RO_BIND and config roBind", "--allowed-dirs <path,path,...>": "deprecated alias for --rw-bind (same behavior, still unions with it); will be removed in the next major release", "--executor <opencode|pi>": "worker backend to dispatch through, default pi", "--class <name>": "optional free-text task-class tag for external telemetry consumers; taskferry does not validate against a fixed list", "--parent-task <id>": "tag this dispatch as fixing/retrying an earlier task; persisted as parentTaskId, and echoed by that task's check-gate failure message" },
+     examples: ['taskferry dispatch --prompt "Fix the failing tests"', 'taskferry dispatch --prompt "Review this change" --model openai/gpt-5.6-sol', 'taskferry dispatch --prompt "Investigate" --require-final-marker "^Status: (DONE|DONE_WITH_CONCERNS)$"', 'taskferry dispatch --prompt "Run one-off shell tooling" --no-sandbox', 'taskferry dispatch --prompt "Update the shared cache dir" --rw-bind /home/user/.cache/myapp', 'taskferry dispatch --prompt "Review the vendored deps" --ro-bind /home/user/reference-repo', 'taskferry dispatch --prompt "Fix the failing tests" --class implementer', 'taskferry dispatch --prompt "Fix: check gate failed" --parent-task oc_msgabc12'],
+   },
+   cancel: {
+     usage: "taskferry cancel <id> [--grace-ms <number>]",
+     description: "Cancel queued or running work.",
+     options: { "--grace-ms <number>": "milliseconds before SIGKILL, default 5000" },
+     examples: ['taskferry cancel <id>', 'taskferry cancel <id> --grace-ms 10000'],
+   },
+   accept: {
+     usage: "taskferry accept <id>",

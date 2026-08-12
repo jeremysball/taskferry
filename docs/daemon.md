@@ -374,6 +374,22 @@ profiling is diagnostic, not on the request's critical path.
 
 ## Things that look like bugs but aren't
 
+- The Claude statusline showing no Taskferry segment on its first poll, or
+  lagging a task transition by one poll — expected. `tf-sl` never runs the CLI
+  in its foreground render path: it reads a per-workspace snapshot under
+  `TASKFERRY_RUNTIME_DIR/statusline` (mirroring `resolveRuntimeDir()`'s own
+  fallback chain rather than the cache dir; the snapshot is a few bytes,
+  rewritten every couple of seconds, with no reason to survive a reboot) and
+  uses an atomic lock to start at most one detached refresh. A cold poll
+  therefore renders nothing while the first refresh runs; normal snapshots
+  refresh after two seconds and stop rendering after ten seconds if refreshes
+  fail. Refresh commands keep `TASKFERRY_AUTO_START=0`, so a statusline poll
+  never boots the daemon.
+- `tf-sl` printing bare, uncolored pipe-delimited text (`id|status|running|queued`
+  plus a summary line and a freshness flag) when run by hand from a terminal —
+  expected, not a broken render. `tf-sl` does no width or color rendering of
+  its own; it is a data source for a caller's statusline script, which owns
+  every presentation decision (mode/width tiers, coloring, id truncation).
 - `status: "unknown"` after a daemon restart — expected; see
   `docs/daemon.md#recovery`. There is deliberately no re-attachment to
   already-running child processes.
@@ -443,3 +459,34 @@ profiling is diagnostic, not on the request's critical path.
   lock. Real contention is always cross-process (a separate `taskferry`
   invocation, each with its own event loop), where this doesn't arise —
   see the note in `state-lock.test.js`.
+- A pi dispatch's task record shows `variant: "max"` but the actual provider
+  ran at, say, `high`. Expected: pi's own `clampThinkingLevel()` clamps a
+  requested level to the model's real ceiling at runtime, including on
+  extension providers (`ollama/*`, custom pi providers) taskferry cannot see
+  the registry for. taskferry records what was requested, not what pi
+  clamped it to, because it has no way to observe the clamp.
+- A model dispatches with no `--variant` flag even though `defaultVariant`
+  is `highest`, until up to 24h after that model first became available
+  through opencode. Expected: the opencode variants cache
+  (`<cacheDir>/opencode-variants.json`) refreshes once at daemon startup and
+  once every 24h afterward, never synchronously on the dispatch path (a
+  fresh `opencode models --verbose` shell-out costs ~3-4s, which would
+  otherwise block the daemon's single thread on every affected dispatch).
+  A model absent from the cache resolves to no variant flag, not an error.
+- A CLI connecting to the daemon being torn down hard when the socket hands
+  back a `Buffer` instead of a string — expected, not a crash bug. The client
+  socket runs in utf8 mode (`setEncoding("utf8")` in `DaemonClient`'s
+  constructor, `src/client.js`), so Node delivers strings to the data
+  listener; a `Buffer` there means the encoding contract was broken, and
+  decoding it per-chunk would silently corrupt multi-byte characters split
+  across frames. `onData` therefore fails loudly
+  (`protocolFailure` + `socket.destroy`) rather than guessing.
+- `taskferry --version` answering instantly with no daemon running — expected.
+  `version` is the one command that answers without the daemon, and that is
+  an invariant, not a per-handler accident: every other command in the
+  `HANDLERS` table calls `client.request(...)` and requires a live daemon
+  connection. `version` never touches `client` — its resolved deps carry
+  `client: undefined` (see `Deps.client` in `src/commands.js`), and
+  `resolveRunCommandDeps` documents that single exception with a field-level
+  `@type {Client}` cast on the `client` field instead of widening
+  `ResolvedDeps.client` to optional for every handler.

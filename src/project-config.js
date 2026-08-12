@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { parse, TomlError } from "smol-toml";
+import { errCode } from "./errors.js";
 
 const CONFIG_FILENAME = ".taskferry.toml";
 const DEFAULT_CHECK_TIMEOUT_SECONDS = 900;
@@ -110,7 +111,7 @@ export function loadProjectConfig(directory, { statFn = fs.statSync, readFileFn 
   try {
     currentMtimeMs = statFn(configPath).mtimeMs;
   } catch (err) {
-    if (/** @type {NodeJS.ErrnoException} */ (err).code === "ENOENT") {
+    if (errCode(err) === "ENOENT") {
       const cached = _projectConfigCache.get(configPath);
       if (cached && cached.mtimeMs === null) return cached.result;
       _projectConfigCache.set(configPath, { mtimeMs: null, result: EMPTY_CONFIG });

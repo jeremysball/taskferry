@@ -13,6 +13,8 @@ import { isNonNegativeInteger, isPositiveInteger } from "./numbers.js";
 import { buildBwrapArgs, checkBwrapAvailable, checkOverlaySupport, defaultDenyList, platformSupportsSandbox, resolveGitCommonDir, resolveGitDir } from "./sandbox.js";
 import { applyChangeset, overlayPaths, resolvePreDispatchHead, subOverlayPaths, subFilePaths, cleanupOverlay, defaultRunCommand as defaultOverlayRunCommand, extractGitDiff, extractNonGitDiff, OVERLAY_MOUNT_BUSY_PATTERN } from "./changeset.js";
 import { resolveExecutor, opencodeExecutor } from "./executor.js";
+import { resolveVariant, KNOWN_VARIANT_LEVELS } from "./variants.js";
+import { readVariantsCache, refreshVariantsCache } from "./variants-cache.js";
 import { loadEnvFile, watchEnvFile } from "./env-file.js";
 import { loadProjectConfig, resolveReadOnlyProjectBinds, verificationPromptBlock } from "./project-config.js";
 import { computeDoctorStats } from "./doctor-stats.js";
@@ -745,6 +747,7 @@ export function isOutsideDirectory(directory, candidate) {
  * @property {string} stateDir
  * @property {string} cacheDir
  * @property {string} runtimeDir
+ * @property {string} socketPath
  * @property {(path: string) => boolean} existsFn
  * @property {(path: string) => {isDirectory: () => boolean}|null} statFn
  * @property {(path: string) => string[]} readdirFn
@@ -1300,7 +1303,13 @@ function assembleBwrapSpawn(ctx, launchInfo, binds, task) {
     extraRwPairBinds: binds.executorRwPairBinds,
     extraRoBinds: binds.extraRoBinds,
     ...(binds.overlayInfo ? { overlay: { upperDir: binds.overlayInfo.upperDir, workDir: binds.overlayInfo.workDir }, overlayRwBinds: binds.overlayRwBinds, overlayRwFileBinds: binds.overlayRwFileBinds } : {}),
-    runtimeDirWritable: binds.role !== "advisor",
+    // Narrow per-task runtime mounts (#453/#454/#455): bind only the daemon
+    // socket, not the whole runtimeDir. Advisor roles get no socket bind at
+    // all, so they cannot reach the daemon (the #454 fix -- a read-only bind
+    // never gated connect()). Sibling overlays and other tasks' state under
+    // runtimeDir are no longer reachable (#453), and the stateDir deny-list is
+    // no longer un-masked by a whole-runtimeDir bind (#455).
+    socketPath: binds.role !== "advisor" ? ctx.socketPath : null,
   }).concat(["--", executor.binaryName, ...args]);
   const spawnEnv = { ...binds.spawnEnv, ...binds.sandboxEnv };
   if (binds.overlayInfo && !isSummary) {
@@ -2101,13 +2110,33 @@ function resolveDispatchDirectory(directory) {
  * `oc_` prefix for compatibility. A resume with no `--model` inherits the
  * model the session was created under (a different model can mean a different
  * provider, breaking the whole point of resuming that exact session).
- * @param {{id: string, directory: string, prompt: string, model: string|undefined, executor: import("./executor.js").WorkerExecutor, priorSessionTask: Task|null, variant: string|undefined, sessionId: string|undefined, originSessionId: string|undefined, internal: boolean, finalMarker: string|null, role: "dispatch"|"advisor", logPath: string, class?: string|null, parentTaskId?: string|null}} params
+ * @param {{id: string, directory: string, prompt: string, model: string|undefined, executor: import("./executor.js").WorkerExecutor, priorSessionTask: Task|null, variant: string|undefined, sessionId: string|undefined, originSessionId: string|undefined, internal: boolean, finalMarker: string|null, role: "dispatch"|"advisor", logPath: string, class?: string|null, parentTaskId?: string|null, defaultVariant: string, resolveOpencodeVariants: (model: string, env: NodeJS.ProcessEnv|undefined) => string[], env?: NodeJS.ProcessEnv}} params
  * @returns {Task}
  */
-// eslint-disable-next-line sonarjs/cyclomatic-complexity -- adding `class` field per brief; function was already at the 10-point ceiling
-function buildDispatchTask({ id, directory, prompt, model, executor, priorSessionTask, variant, sessionId, originSessionId, internal, finalMarker, role, logPath, class: taskClass, parentTaskId = null }) {
-  const usingDefaultModel = !model;
-  const resolvedModel = model || priorSessionTask?.model || executor.defaultModel;
+// eslint-disable-next-line sonarjs/cyclomatic-complexity, complexity -- adding `class` field per brief; function was already at the 10-point ceiling
+function buildDispatchTask({ id, directory, prompt, model, executor, priorSessionTask, variant, sessionId, originSessionId, internal, finalMarker, role, logPath, class: taskClass, parentTaskId = null, defaultVariant, resolveOpencodeVariants, env }) {
+  if (!model && !priorSessionTask) {
+    if (sessionId) {
+      throw new Error(`error: no task found for session id "${sessionId}" to inherit a model from\nhelp: pass --model explicitly, or check the session id with taskferry list`);
+    }
+    throw new Error(`error: --model is required\nhelp: name the model, e.g. --model provider/model (opencode models or pi --list-models lists what's available); to resume an existing session and inherit its model, pass --session-id instead`);
+  }
+  const resolvedModel = model || /** @type {Task} */ (priorSessionTask).model;
+  // Precedence: explicit --variant > resumed session's own variant > the
+  // configured defaultVariant sentinel/level. Only the third case ever
+  // needs resolveVariant() -- an explicit or inherited value is already
+  // concrete and passes straight through resolveVariant() as a no-op.
+  const requestedVariant = variant || priorSessionTask?.variant || defaultVariant;
+  // resolveVariant() only ever consults opencodeVariants when requested ===
+  // "highest" (an explicit or inherited concrete level passes straight
+  // through as a no-op) -- so only pay for the cache lookup in that one
+  // case instead of on every opencode dispatch.
+  const needsOpencodeVariants = executor.id === "opencode" && requestedVariant === "highest";
+  const resolvedVariant = resolveVariant({
+    executorId: executor.id,
+    requested: requestedVariant,
+    opencodeVariants: needsOpencodeVariants ? resolveOpencodeVariants(resolvedModel, env) : undefined,
+  });
   return {
     id,
     directory,
@@ -2116,7 +2145,7 @@ function buildDispatchTask({ id, directory, prompt, model, executor, priorSessio
     status: "queued",
     model: resolvedModel,
     executorId: executor.id,
-    variant: usingDefaultModel ? "high" : variant || null,
+    variant: resolvedVariant,
     sessionId: sessionId || null,
     originSessionId: originSessionId || null,
     pid: null,
@@ -3255,9 +3284,14 @@ function buildCheckGateFailureMessage(task) {
     const indentedOutputTail = task.checkOutputTail.split("\n").map((line) => `    ${line}`).join("\n");
     outputTail = `\n  output tail:\n${indentedOutputTail}`;
   }
+  // The --session-id branch inherits its model from the resumed session (see
+  // buildDispatchTask's doc comment), so --model is optional there; the
+  // sessionId-less branch is a fresh dispatch, which now requires --model
+  // explicitly, so the suggested command must name it or pasting the tool's
+  // own fix-forward hint fails immediately with "error: --model is required".
   const resumeHint = task.sessionId
     ? `  taskferry dispatch --session-id ${task.sessionId} --parent-task ${task.id} \\\n    --prompt "Fix: check gate ${task.checkStatus}. See taskferry result ${task.id} --fields checkOutputTail"`
-    : `  taskferry dispatch --directory ${task.directory} --parent-task ${task.id} \\\n    --prompt "Fix: check gate ${task.checkStatus} for task ${task.id}. See taskferry result ${task.id} --fields checkOutputTail"`;
+    : `  taskferry dispatch --directory ${task.directory} --model ${task.model} --parent-task ${task.id} \\\n    --prompt "Fix: check gate ${task.checkStatus} for task ${task.id}. See taskferry result ${task.id} --fields checkOutputTail"`;
   return `error: check gate ${task.checkStatus} for ${task.id}\n${commandLine}\n${exitLine}${outputTail}\nchangeset NOT accepted. To fix forward, resume the worker session:\n${resumeHint}\nOverride only if you have verified manually: taskferry accept ${task.id} --force`;
 }
 
@@ -3666,6 +3700,12 @@ function resolveCoreOptions(rawOptions) {
     // throw because `resolveExecutor` expects a name string.
     defaultExecutor: rawOptions.defaultExecutor ?? resolveExecutor(process.env.TASKFERRY_DEFAULT_EXECUTOR || config.defaultExecutor),
     listModelsFn: rawOptions.listModelsFn ?? opencodeExecutor().listModelsFn,
+    opencodeListModelVariantsFn: rawOptions.opencodeListModelVariantsFn ?? opencodeExecutor().listModelVariantsFn,
+    // Test-only direct injection of the resolved opencode variants table,
+    // bypassing readVariantsCache()/the cache file entirely. A real
+    // manager passes undefined here and resolves the table per-dispatch
+    // from disk instead (see dispatchTask's ctx.readOpencodeVariants).
+    opencodeVariantsTable: rawOptions.opencodeVariantsTable,
     platform: rawOptions.platform ?? process.platform,
     onEvent: rawOptions.onEvent,
     config,
@@ -3719,14 +3759,27 @@ function resolveToggleOptions(rawOptions) {
 }
 
 /**
- * The string option whose default chain crosses env, config, and a
- * constant: `activitySummaryModel` (the only manager option that does).
+ * The string options whose default chain crosses env, config, and a
+ * constant: `activitySummaryModel` (the only manager option that does) and
+ * `defaultVariant` (the sentinel/concrete level an omitted `--variant`
+ * resolves through).
  * @param {Record<string, any>} rawOptions
  */
 function resolveStringOptions(rawOptions) {
   const config = rawOptions.config || {};
+  // config.defaultVariant already passed validateDefaultVariant() during
+  // loadConfig()'s parseAndValidateConfig() -- but rawOptions.defaultVariant
+  // (a programmatic caller) and TASKFERRY_DEFAULT_VARIANT (an env var, which
+  // has no load-time validation pass of its own) never go through that
+  // check, so an invalid value here would otherwise reach resolveVariant()
+  // silently and fall through as "send no flag" rather than fail loudly.
+  const defaultVariant = rawOptions.defaultVariant ?? process.env.TASKFERRY_DEFAULT_VARIANT ?? config.defaultVariant ?? "highest";
+  if (!KNOWN_VARIANT_LEVELS.includes(defaultVariant.trim())) {
+    throw new Error(`error: defaultVariant must be one of ${KNOWN_VARIANT_LEVELS.join(", ")} (got ${JSON.stringify(defaultVariant)})\nhelp: fix config.json's "defaultVariant" key or the TASKFERRY_DEFAULT_VARIANT env var`);
+  }
   return {
     activitySummaryModel: rawOptions.activitySummaryModel ?? process.env.TASKFERRY_SUMMARY_MODEL ?? config.summaryModel ?? DEFAULT_SUMMARY_MODEL,
+    defaultVariant,
   };
 }
 
@@ -3868,6 +3921,10 @@ function resolveFilesystemDerivedOptions(rawOptions) {
     overlayTmpRoot: rawOptions.overlayTmpRoot ?? resolveOverlayTmpRoot({ env: process.env, runtimeDir }),
     cacheDir: rawOptions.cacheDir ?? resolveCacheDir(process.env),
     runtimeDir,
+    // The daemon's Unix socket path, threaded through so the sandbox can bind
+    // exactly the socket the worker's CLI will connect to (which may be a
+    // custom TASKFERRY_SOCKET_PATH, not the default <runtimeDir>/daemon.sock).
+    socketPath: rawOptions.socketPath ?? process.env.TASKFERRY_SOCKET_PATH ?? path.join(runtimeDir, "daemon.sock"),
   };
 }
 
@@ -4274,6 +4331,22 @@ function buildManagerInternalHelpers(ctx) {
     /** @param {Task} task */
     hasLiveOverlay: (task) => hasLiveOverlayForTask(task, { existsFn: ctx.opts.existsFn }),
     sweepOrphanedPromptFiles: () => sweepOrphanedPromptFilesFor({ PROMPT_DIR: ctx.paths.PROMPT_DIR, tasks: ctx.maps.tasks }),
+    /** @param {string} model @param {NodeJS.ProcessEnv} [env] @returns {string[]} Resolves the
+     * opencode variants table for a model: the test-injected
+     * `opencodeVariantsTable` seam when set, otherwise the on-disk
+     * `readVariantsCache()` table (a real daemon's path). Reads against
+     * this specific dispatch's effective env (`ctx.env.sanitizedEnvironment`
+     * -- the daemon's own env layered with any envFileVars/caller overrides,
+     * the same merge the actual spawn uses), not the daemon's raw
+     * `process.env`, since a per-dispatch caller override of a credential or
+     * base URL can expose a different model catalog than the daemon's own
+     * environment. An absent entry or absent cache means "no variants
+     * known" -- resolveVariant() then sends no flag rather than guessing. */
+    resolveOpencodeVariants: (model, env) => {
+      if (ctx.opts.opencodeVariantsTable) return ctx.opts.opencodeVariantsTable.get(model) ?? [];
+      const table = readVariantsCache({ cacheDir: ctx.opts.cacheDir, env: ctx.env.sanitizedEnvironment(env) });
+      return table?.get(model) ?? [];
+    },
     sweepOrphanedOverlays: () => sweepOrphanedOverlaysFor({ tasks: ctx.maps.tasks, overlayTmpRoot: ctx.opts.overlayTmpRoot, releaseOverlay: (task) => ctx.env.releaseOverlay(task), persistTask: (taskId) => ctx.helpers.persistTask(taskId), readdirFn: ctx.opts.readdirFn }),
     markInterruptedGates: () => markInterruptedGatesFor({ tasks: ctx.maps.tasks, hasLiveOverlay: (task) => ctx.helpers.hasLiveOverlay(task), startCheckGate: (task) => ctx.env.startCheckGate(task), sendSignal: (pid, signal) => ctx.helpers.sendSignal(pid, signal), persistTask: (taskId) => ctx.helpers.persistTask(taskId) }),
     /**
@@ -4323,7 +4396,7 @@ function buildManagerInternalHelpers(ctx) {
      * delegated to {@link startTaskFor}, which takes every factory closure
      * dependency explicitly via `ctx`.
      * @param {Task} task */
-    startTask: (task) => startTaskFor(task, { pendingLaunches: ctx.maps.pendingLaunches, SUMMARY_DIR: ctx.paths.SUMMARY_DIR, PROMPT_DIR: ctx.paths.PROMPT_DIR, spawnFn: ctx.opts.spawnFn, runOverlayCommandFn: ctx.opts.runOverlayCommandFn, sandboxEnabled: ctx.opts.sandboxEnabled, platform: ctx.opts.platform, overlayEnabled: ctx.opts.overlayEnabled, overlayTmpRoot: ctx.opts.overlayTmpRoot, allowedDirs: ctx.opts.allowedDirs, roBind: ctx.opts.roBind, stateDir: ctx.opts.stateDir, cacheDir: ctx.opts.cacheDir, runtimeDir: ctx.opts.runtimeDir, existsFn: ctx.opts.existsFn, statFn: ctx.opts.statFn, readdirFn: ctx.opts.readdirFn, sandboxDenylist: ctx.opts.sandboxDenylist, resolveGitCommonDirFn: ctx.opts.resolveGitCommonDirFn, resolveGitDirFn: ctx.opts.resolveGitDirFn, requireBwrap: () => ctx.env.requireBwrap(), requireOverlaySupport: () => ctx.env.requireOverlaySupport(), dispatchEnvironment: (env, taskId) => ctx.env.dispatchEnvironment(env, taskId), summaryEnvironment: (env) => ctx.env.summaryEnvironment(env), settleWaiters: (taskId) => ctx.helpers.settleWaiters(taskId), launchQueuedTasks: () => ctx.helpers.launchQueuedTasks(), persistTask: (taskId) => ctx.helpers.persistTask(taskId), scheduleActivity: (task, options) => ctx.helpers.scheduleActivity(task, options), classifyTrailingLogFailure: (task, executor) => ctx.helpers.classifyTrailingLogFailure(task, executor), startRunningWatcher: (task, executor) => ctx.helpers.startRunningWatcher(task, executor), stopRunningWatcher: (taskId) => ctx.helpers.stopRunningWatcher(taskId), extractChangesetForTask: (task) => ctx.env.extractChangesetForTask(task), sendSignal: (pid, signal) => ctx.helpers.sendSignal(pid, signal), activityCache: ctx.activity.cache, logHasEventCache: ctx.maps.logHasEventCache, escalationTimers: ctx.maps.escalationTimers, tasks: ctx.maps.tasks, decRunning: (task) => { ctx.state.runningCount--; const q = ctx.maps.providerQueues.get(providerOf(task.model)); if (q) { q.runningCount--; } }, incRunning: (task) => { ctx.state.runningCount++; const q = ctx.maps.providerQueues.get(providerOf(task.model)); if (q) { q.runningCount++; } }, readSessionIdFromLog, evaluateOutputCompleteness, attemptCrashRecovery }),
+    startTask: (task) => startTaskFor(task, { pendingLaunches: ctx.maps.pendingLaunches, SUMMARY_DIR: ctx.paths.SUMMARY_DIR, PROMPT_DIR: ctx.paths.PROMPT_DIR, spawnFn: ctx.opts.spawnFn, runOverlayCommandFn: ctx.opts.runOverlayCommandFn, sandboxEnabled: ctx.opts.sandboxEnabled, platform: ctx.opts.platform, overlayEnabled: ctx.opts.overlayEnabled, overlayTmpRoot: ctx.opts.overlayTmpRoot, allowedDirs: ctx.opts.allowedDirs, roBind: ctx.opts.roBind, stateDir: ctx.opts.stateDir, cacheDir: ctx.opts.cacheDir, runtimeDir: ctx.opts.runtimeDir, socketPath: ctx.opts.socketPath, existsFn: ctx.opts.existsFn, statFn: ctx.opts.statFn, readdirFn: ctx.opts.readdirFn, sandboxDenylist: ctx.opts.sandboxDenylist, resolveGitCommonDirFn: ctx.opts.resolveGitCommonDirFn, resolveGitDirFn: ctx.opts.resolveGitDirFn, requireBwrap: () => ctx.env.requireBwrap(), requireOverlaySupport: () => ctx.env.requireOverlaySupport(), dispatchEnvironment: (env, taskId) => ctx.env.dispatchEnvironment(env, taskId), summaryEnvironment: (env) => ctx.env.summaryEnvironment(env), settleWaiters: (taskId) => ctx.helpers.settleWaiters(taskId), launchQueuedTasks: () => ctx.helpers.launchQueuedTasks(), persistTask: (taskId) => ctx.helpers.persistTask(taskId), scheduleActivity: (task, options) => ctx.helpers.scheduleActivity(task, options), classifyTrailingLogFailure: (task, executor) => ctx.helpers.classifyTrailingLogFailure(task, executor), startRunningWatcher: (task, executor) => ctx.helpers.startRunningWatcher(task, executor), stopRunningWatcher: (taskId) => ctx.helpers.stopRunningWatcher(taskId), extractChangesetForTask: (task) => ctx.env.extractChangesetForTask(task), sendSignal: (pid, signal) => ctx.helpers.sendSignal(pid, signal), activityCache: ctx.activity.cache, logHasEventCache: ctx.maps.logHasEventCache, escalationTimers: ctx.maps.escalationTimers, tasks: ctx.maps.tasks, decRunning: (task) => { ctx.state.runningCount--; const q = ctx.maps.providerQueues.get(providerOf(task.model)); if (q) { q.runningCount--; } }, incRunning: (task) => { ctx.state.runningCount++; const q = ctx.maps.providerQueues.get(providerOf(task.model)); if (q) { q.runningCount++; } }, readSessionIdFromLog, evaluateOutputCompleteness, attemptCrashRecovery }),
     /**
      * @param {string} taskId
      * @param {{force?: boolean}} options
@@ -4414,7 +4487,7 @@ function buildTaskManagerApi(ctx) {
      *   misrouted CLI/RPC call fails fast rather than silently picking the default.
      * @returns {TaskSummary & {next: string}}
      */
-    dispatch: (params) => dispatchTask(params, { ensureStateLoaded: () => ctx.helpers.ensureStateLoaded(), tasks: ctx.maps.tasks, defaultExecutor: ctx.opts.defaultExecutor, LOG_DIR: ctx.paths.LOG_DIR, persistTask: (taskId) => ctx.helpers.persistTask(taskId), pendingLaunches: ctx.maps.pendingLaunches, providerQueues: ctx.maps.providerQueues, launchQueuedTasks: () => ctx.helpers.launchQueuedTasks() }),
+    dispatch: (params) => dispatchTask(params, { ensureStateLoaded: () => ctx.helpers.ensureStateLoaded(), tasks: ctx.maps.tasks, defaultExecutor: ctx.opts.defaultExecutor, LOG_DIR: ctx.paths.LOG_DIR, persistTask: (taskId) => ctx.helpers.persistTask(taskId), pendingLaunches: ctx.maps.pendingLaunches, providerQueues: ctx.maps.providerQueues, launchQueuedTasks: () => ctx.helpers.launchQueuedTasks(), defaultVariant: ctx.opts.defaultVariant, resolveOpencodeVariants: ctx.helpers.resolveOpencodeVariants }),
     /**
      * @param {string} taskId
      * @param {{graceMs?: number}} [options]
@@ -4551,6 +4624,40 @@ function bootstrapManagerContext(ctx) {
   // then auto-re-run any gate whose overlay survived the crash (per the
   // design's "the gate is re-runnable" promise).
   ctx.helpers.markInterruptedGates();
+  // Opportunistically warm the opencode variants cache in the background.
+  // Never awaited: a stale or missing cache only means dispatch()'s
+  // resolveOpencodeVariants() sends no --variant flag until the refresh
+  // lands, never a blocked or failed dispatch. Skipped entirely when a
+  // test has injected opencodeVariantsTable directly (Task 6), since that
+  // seam bypasses the cache file altogether.
+  if (!ctx.opts.opencodeVariantsTable) {
+    warmAndScheduleVariantsCacheRefresh(ctx.opts, ctx.env.sanitizedEnvironment);
+  }
+}
+
+/**
+ * Refreshes the opencode variants cache once now (if stale) and schedules
+ * an hourly, `unref()`'d recheck for as long as the process lives. The
+ * hourly tick is cheap when the cache is fresh (a single `statSync` inside
+ * `readVariantsCache()`); it only pays for the ~3s `opencode models
+ * --verbose` shell-out once every `DEFAULT_VARIANT_CACHE_TTL_MS` (24h).
+ * @param {ResolvedTaskManagerOptions} opts
+ * @param {(env?: NodeJS.ProcessEnv) => NodeJS.ProcessEnv} sanitizeEnvironment The same
+ * env merge dispatch() fingerprints the cache against (process.env +
+ * envFileVars + caller env). Fingerprinting the warm against raw
+ * process.env while dispatch reads under the sanitized merge meant any
+ * envFile/denylist change to a credential var made the cache a permanent
+ * miss -- the highest-thinking default silently never applied.
+ */
+function warmAndScheduleVariantsCacheRefresh(opts, sanitizeEnvironment) {
+  const maybeRefresh = () => {
+    const env = sanitizeEnvironment(process.env);
+    if (readVariantsCache({ cacheDir: opts.cacheDir, env: env }) !== null) return;
+    refreshVariantsCache({ cacheDir: opts.cacheDir, env: env, listModelVariantsFn: opts.opencodeListModelVariantsFn })
+      .catch((err) => process.stderr.write(`warning: opencode variants cache refresh failed: ${errMessage(err)}\n`));
+  };
+  maybeRefresh();
+  setInterval(maybeRefresh, 60 * 60 * 1000).unref();
 }
 
 /**
@@ -4713,7 +4820,7 @@ function readNarrationExcerpt(logPath) {
  * @param {NodeJS.ProcessEnv} env
  * @returns {string}
  */
-function modelsCacheFingerprint(env = {}) {
+export function modelsCacheFingerprint(env = {}) {
   const suffixNames = ["_API_KEY", "_BASE_URL"];
   const exactNames = [
     "OPENCODE_CONFIG",
@@ -5459,15 +5566,15 @@ function startCheckGate(task, ctx) {
     overlay: { upperDir: task.overlayDirs.upperDir, workDir: task.overlayDirs.workDir },
     overlayRwBinds: task.overlayDirs.rwBinds ?? [],
     overlayRwFileBinds: task.overlayDirs.rwFileBinds ?? [],
-    // Security (review finding, verified against src/sandbox.js:277-308
-    // directly): buildBwrapArgs defaults runtimeDirWritable to true, which
-    // would hand the gate's check command a writable bind onto the daemon's
-    // control socket -- a worker-controlled check (npm test, a Makefile
-    // target) could then connect out and call `taskferry accept --force` on
-    // its own pending task. The gate is verification, not a trusted daemon
-    // component; it gets read-only access to the runtime dir, same as any
-    // other untrusted sandboxed process.
-    runtimeDirWritable: false,
+    // Security (review finding, verified against src/sandbox.js directly):
+    // buildBwrapArgs defaults socketPath to <runtimeDir>/daemon.sock, which
+    // would hand the gate's check command a bind onto the daemon's control
+    // socket -- a worker-controlled check (npm test, a Makefile target) could
+    // then connect out and call `taskferry accept --force` on its own pending
+    // task. The gate is verification, not a trusted daemon component; it gets
+    // no socket bind at all, so the daemon is unreachable from the gate, same
+    // as any other untrusted sandboxed process.
+    socketPath: null,
     denyList,
   }).concat(["--", "sh", "-c", projectConfig.check]);
   // Known gap, not fixed in this pass: unlike the worker's spawn
@@ -6227,7 +6334,7 @@ function startRunningWatcherFor(task, ctx) {
  * helpers are plain module-level functions called directly. The factory
  * bindings are threaded in via `ctx`.
  * @param {{prompt: string, directory: string, model?: string, variant?: string, sessionId?: string, internal?: boolean, finalMarker?: string|null, originSessionId?: string, noSandbox?: boolean, noOverlay?: boolean, allowedDirs?: string[], rwBind?: string[], roBind?: string[], executor?: string, env?: NodeJS.ProcessEnv, role?: "dispatch"|"advisor", class?: string|null, parentTaskId?: string|null}} params
- * @param {{ensureStateLoaded: () => void, tasks: Map<string, Task>, defaultExecutor: import("./executor.js").WorkerExecutor, LOG_DIR: string, persistTask: (taskId: string) => void, pendingLaunches: Map<string, LaunchSpec>, providerQueues: Map<string, ProviderQueue>, launchQueuedTasks: () => void}} ctx
+ * @param {{ensureStateLoaded: () => void, tasks: Map<string, Task>, defaultExecutor: import("./executor.js").WorkerExecutor, LOG_DIR: string, persistTask: (taskId: string) => void, pendingLaunches: Map<string, LaunchSpec>, providerQueues: Map<string, ProviderQueue>, launchQueuedTasks: () => void, defaultVariant: string, resolveOpencodeVariants: (model: string, env: NodeJS.ProcessEnv|undefined) => string[]}} ctx
  * @returns {TaskSummary & {next: string}}
  */
 function dispatchTask(params, ctx) {
@@ -6248,7 +6355,7 @@ function dispatchTask(params, ctx) {
   // Task IDs retain the literal "oc_" prefix for compatibility; WorkerExecutor.taskIdPrefix is not wired in this issue.
   const id = `oc_${Date.now().toString(36)}_${randomUUID().slice(0, 8)}`;
   const logPath = path.join(ctx.LOG_DIR, `${id}.ndjson`);
-  const task = buildDispatchTask({ id, model, executor, priorSessionTask, variant, sessionId, originSessionId, internal, finalMarker, role, logPath, parentTaskId, class: taskClass, prompt: dispatchPrompt, directory: normalizedDirectory });
+  const task = buildDispatchTask({ id, model, executor, priorSessionTask, variant, sessionId, originSessionId, internal, finalMarker, role, logPath, parentTaskId, env, class: taskClass, prompt: dispatchPrompt, directory: normalizedDirectory, defaultVariant: ctx.defaultVariant, resolveOpencodeVariants: ctx.resolveOpencodeVariants });
   queueDispatchLaunch({ tasks: ctx.tasks, persistTask: ctx.persistTask, pendingLaunches: ctx.pendingLaunches, providerQueues: ctx.providerQueues, launchQueuedTasks: ctx.launchQueuedTasks }, { id, task, sessionId, env, noSandbox, noOverlay, executor, role, prompt: dispatchPrompt, allowedDirs: effectiveRwBind, roBind: dispatchRoBind });
   const summary = summarize(task);
   return {

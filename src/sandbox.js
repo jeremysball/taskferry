@@ -1,5 +1,6 @@
 import { spawnSync } from "node:child_process";
 import path from "node:path";
+import { errCode } from "./errors.js";
 
 /**
  * @param {NodeJS.Platform} [platform]
@@ -26,7 +27,7 @@ export function defaultRunCommand(command, args) {
  * `raw` carries bwrap's own `--version` stdout so callers that need the version
  * (checkOverlaySupport() via parseBwrapVersion()) don't have to re-probe. It is
  * only set when bwrap is actually available.
- * @param {{status: number|null, stdout: string, stderr: string, error?: NodeJS.ErrnoException}} result
+ * @param {import("./setup.js").CommandResult} result
  * @returns {{checked: boolean, available: boolean, reason?: string, raw?: string}}
  */
 function getBwrapAvailabilityResult(result) {
@@ -35,7 +36,7 @@ function getBwrapAvailabilityResult(result) {
       checked: true,
       available: false,
       reason:
-        result.error.code === "ENOENT"
+        errCode(result.error) === "ENOENT"
           ? "bwrap not found"
           : `bwrap --version failed: ${result.error.message}`,
     };
@@ -98,7 +99,7 @@ export function checkOverlaySupport(runCommand = defaultRunCommand) {
 
 /**
  * Async variant of checkBwrapAvailable for use with async runCommand implementations.
- * @param {(command: string, args: readonly string[]) => Promise<{status: number|null, stdout: string, stderr: string, error?: NodeJS.ErrnoException}>} runCommand
+ * @param {(command: string, args: readonly string[]) => Promise<import("./setup.js").CommandResult>} runCommand
  * @returns {Promise<{checked: boolean, available: boolean, reason?: string}>}
  */
 export async function checkBwrapAvailableAsync(runCommand) {
@@ -269,9 +270,12 @@ function pushOverlayRwBinds(args, overlays) {
  *   is bound rw from a scratch copy (bindSrc) onto its host path (path). Applied right after overlayRwBinds.
  * @param {boolean} [options.shareNet] - default true (matches today's --share-net); pass false for
  *   advisor-role dispatches to emit --unshare-net instead.
- * @param {boolean} [options.runtimeDirWritable] - default true (today's --bind runtimeDir for dispatch
- *   roles); pass false for advisor-role dispatches to emit --ro-bind instead, so the daemon's Unix
- *   socket inside runtimeDir is unreachable from the sandbox (connect() fails on a read-only mount).
+ * @param {string|null} [options.socketPath] - the daemon's Unix socket path to bind into the sandbox
+ *   (roles that need to call back to the daemon), or null to bind no socket at all. When null, the
+ *   daemon is unreachable from the sandbox (the #454 fix -- a read-only bind never gated connect(),
+ *   so the old ro-bind approach was ineffective). This replaces the legacy whole-runtimeDir bind,
+ *   which exposed every sibling overlay (#453) and un-masked the stateDir deny-list (#455); only the
+ *   socket is now reachable, not the rest of runtimeDir. Defaults to `<runtimeDir>/daemon.sock`.
  * @returns {string[]}
  */
 export function buildBwrapArgs({
@@ -287,7 +291,7 @@ export function buildBwrapArgs({
   overlayRwBinds = [],
   overlayRwFileBinds = [],
   shareNet = true,
-  runtimeDirWritable = true,
+  socketPath = path.join(runtimeDir, "daemon.sock"),
 }) {
   const args = buildBwrapBaseArgs({ denyList });
   if (overlay) {
@@ -295,7 +299,15 @@ export function buildBwrapArgs({
   } else {
     args.push("--bind", directory, directory);
   }
-  args.push(runtimeDirWritable ? "--bind" : "--ro-bind", runtimeDir, runtimeDir);
+  // Narrow per-task runtime mounts (the #453/#454/#455 fix): bind only the
+  // daemon socket, not the whole runtimeDir. bwrap creates the intermediate
+  // destination directories, so the socket bind works even when runtimeDir is
+  // masked by the stateDir deny-list tmpfs. Sibling overlays and other tasks'
+  // state under runtimeDir are no longer reachable, and the stateDir deny is
+  // no longer un-masked by a whole-runtimeDir bind.
+  if (socketPath) {
+    args.push("--bind", socketPath, socketPath);
+  }
   pushSamePathBinds(args, extraRwBinds);
   pushOverlayRwBinds(args, overlayRwBinds);
   for (const { bindSrc, path: filePath } of overlayRwFileBinds) {

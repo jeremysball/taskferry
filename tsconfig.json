@@ -11,5 +11,6 @@
     "lib": ["es2023"],
     "types": ["node"]
   },
-  "include": ["src/tasks.js"]
+  "//": "Seeded from the three real entrypoints -- package.json's bin (cli.js), the file the daemon respawns itself as (daemon.js), and package.json's exports (opencode-plugin.js). tsc pulls in each one's transitive imports, which together cover every non-test file in src/. A file that stops being reachable from any entrypoint drops out of the program, and that is the intended signal: nothing enters the package by any other door.",
+  "include": ["src/cli.js", "src/daemon.js", "src/opencode-plugin.js"]
 }

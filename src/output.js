@@ -7,6 +7,7 @@ const ANSI_RESET = "\x1b[0m";
 const ANSI_GREEN = "\x1b[32m";
 const ANSI_RED = "\x1b[31m";
 const ANSI_YELLOW = "\x1b[33m";
+/** @type {Record<string, string>} */
 const ANSI_BY_STATUS = {
   done: ANSI_GREEN,
   crashed: ANSI_RED,
@@ -15,41 +16,87 @@ const ANSI_BY_STATUS = {
   queued: ANSI_YELLOW,
 };
 
-/** Wrap text in an ANSI color code, but only when `enabled` (i.e. the target stream is a TTY). */
+/**
+ * Wrap text in an ANSI color code, but only when `enabled` (i.e. the target stream is a TTY).
+ * @param {string} text
+ * @param {string | null} code
+ * @param {boolean} enabled
+ * @returns {string}
+ */
 export function colorize(text, code, enabled) {
   return enabled && code ? `${code}${text}${ANSI_RESET}` : text;
 }
 
-/** @param {string} status */
+/**
+ * @param {string} status
+ * @returns {string | null}
+ */
 export function colorForStatus(status) {
   return ANSI_BY_STATUS[status] || null;
 }
 
+/**
+ * @param {unknown} value
+ * @returns {string}
+ */
 function shellQuote(value) {
   return `'${String(value).replaceAll("'", "'\\''")}'`;
 }
 
+/**
+ * @typedef {object} IoLike
+ * @property {{isTTY?: boolean, write: (chunk: string) => void}} stdout
+ */
+
+/**
+ * @typedef {{argv: string[], execPath: string, stdout: IoLike["stdout"]}} NodeLike
+ */
+
+/**
+ * @typedef {IoLike | NodeLike} WriteIo
+ */
+
+/**
+ * @param {unknown} value
+ * @param {WriteIo} [io]
+ * @returns {void}
+ */
 export function writeToon(value, io = process) {
   if (io.stdout.isTTY) {
-    io.stdout.write(`${renderPretty(value)}\n`);
+    io.stdout.write(`${renderPretty(/** @type {Parameters<typeof renderPretty>[0]} */ (value))}\n`);
     return;
   }
   io.stdout.write(`${encode(value)}\n`);
 }
 
+/**
+ * @param {string} line
+ * @param {string} prefix
+ * @returns {string | null}
+ */
 function stripPrefix(line, prefix) {
   return line.startsWith(prefix) ? line.slice(prefix.length).trim() : null;
 }
 
-/** @param {unknown} error @param {string|undefined} helpLine */
+/**
+ * @param {unknown} error
+ * @param {string | undefined} helpLine
+ * @returns {string}
+ */
 function errorHelp(error, helpLine) {
-  if (error && typeof error === "object" && typeof error.help === "string") return error.help;
+  if (error && typeof error === "object" && typeof /** @type {{help?: unknown}} */ (error).help === "string") {
+    return /** @type {{help: string}} */ (error).help;
+  }
   return helpLine || "Retry the command or run `taskferry --help`";
 }
 
 // Single pass over `lines`: finds the first `error:`/`help:` line (if any)
 // and collects every other line as a detail line. Split out of errorValue()
 // so its own branch count stays low.
+/**
+ * @param {string[]} lines
+ * @returns {{errorLine: string | undefined, helpLine: string | undefined, detailLines: string[]}}
+ */
 function extractErrorParts(lines) {
   let errorLine;
   let helpLine;
@@ -64,6 +111,10 @@ function extractErrorParts(lines) {
   return { errorLine, helpLine, detailLines };
 }
 
+/**
+ * @param {unknown} error
+ * @returns {{error: string, help: string}}
+ */
 export function errorValue(error) {
   const text = error instanceof Error ? error.message : String(error);
   const lines = text.split("\n");
@@ -77,11 +128,53 @@ export function errorValue(error) {
   return { error: message, help };
 }
 
+/**
+ * @param {unknown} error
+ * @param {WriteIo} [io]
+ * @returns {void}
+ */
 export function writeError(error, io = process) {
   writeToon(errorValue(error), io);
 }
 
-/** @param {{id: string, status: string, directory?: string, sessionId?: string}} detail @param {string} id @param {string} status */
+/**
+ * @typedef {object} StatusDetailBase
+ * @property {string} id
+ * @property {string} status
+ * @property {string} [directory]
+ * @property {string|null} [sessionId]
+ * @property {string} [startedAt]
+ * @property {number|null} [exitCode]
+ * @property {NodeJS.Signals|null} [signal]
+ * @property {number} [logBytesWritten]
+ * @property {string|null} [logLastWriteAt]
+ * @property {boolean} [logHasEvent]
+ * @property {string} [outputTail]
+ * @property {number} [outputTailTotalChars]
+ * @property {boolean} [outputTailTruncated]
+ * @property {boolean} [timedOut]
+ * @property {"none"|"pending"|"accepted"|"rejected"} [changesetStatus]
+ * @property {string|null} [changesetError]
+ * @property {string|null} [projectConfigWarning]
+ * @property {"none"|"running"|"passed"|"failed"|"timeout"|"interrupted"} [checkStatus]
+ * @property {string|null} [checkCommand]
+ * @property {number|null} [checkExitCode]
+ * @property {string|null} [checkStartedAt]
+ * @property {string|null} [checkEndedAt]
+ * @property {boolean} [checkOverride]
+ * @property {{root?: string, tmpRoot?: string} | null} [overlayDirs]
+ */
+
+/**
+ * @typedef {StatusDetailBase & {id: string, status: string}} NextHintDetail
+ */
+
+/**
+ * @param {NextHintDetail} detail
+ * @param {string} id
+ * @param {string} status
+ * @returns {string}
+ */
 function nextHint(detail, id, status) {
   if (status === "running" || status === "queued") {
     return `Run taskferry wait or taskferry status with task id "${id}" to check progress; pass --full for directory/model/log path details`;
@@ -104,7 +197,8 @@ function nextHint(detail, id, status) {
  * the task record, not off a status response. Keep just `root` (the overlay's
  * own scratch dir, useful for manually inspecting a stuck/crashed changeset)
  * and `tmpRoot` (its parent, `resolveOverlayTmpRoot()`'s output).
- * @param {object} detail
+ * @param {StatusDetailBase} detail
+ * @returns {StatusDetailBase}
  */
 function trimOverlayDirs(detail) {
   if (!detail.overlayDirs) return detail;
@@ -113,16 +207,12 @@ function trimOverlayDirs(detail) {
 }
 
 /**
- * Keep polling output small. Static task metadata is available through
- * `--full`; lifecycle and log activity remain visible on every lookup.
- */
-/**
  * Extract the conditional check-gate fields a non-`--full` lean status surfaces
  * when a gate has actually run (status other than "none"). Split out of
  * leanStatus to keep its cyclomatic count under the ceiling once the new
  * fields land.
- * @param {Record<string, unknown>} detail
- * @returns {Record<string, unknown>}
+ * @param {StatusDetailBase} detail
+ * @returns {Partial<StatusDetailBase>}
  */
 function leanCheckGateFields(detail) {
   if (!detail.checkStatus || detail.checkStatus === "none") return {};
@@ -136,8 +226,13 @@ function leanCheckGateFields(detail) {
   };
 }
 
+/**
+ * @param {StatusDetailBase} detail
+ * @param {{full?: boolean}} [options]
+ * @returns {Record<string, unknown>}
+ */
 export function leanStatus(detail, { full = false } = {}) {
-  if (full) return trimOverlayDirs(detail);
+  if (full) return /** @type {Record<string, unknown>} */ (trimOverlayDirs(detail));
   const {
     id,
     status,
@@ -153,6 +248,7 @@ export function leanStatus(detail, { full = false } = {}) {
     timedOut,
     changesetStatus,
   } = detail;
+  /** @type {Record<string, unknown>} */
   const lean = { id, status, startedAt };
   if (status !== "running" && status !== "queued") {
     lean.exitCode = exitCode;
@@ -177,10 +273,25 @@ export function leanStatus(detail, { full = false } = {}) {
   if (timedOut) {
     lean.note = `wait timed out; the task may still be running. Run taskferry wait again to keep waiting, or pass --timeout to set a longer cap`;
   }
-  lean.next = nextHint(detail, id, status);
+  lean.next = nextHint(/** @type {NextHintDetail} */ (detail), /** @type {string} */ (id), /** @type {string} */ (status));
   return lean;
 }
 
+/**
+ * @typedef {object} ResultDetailBase
+ * @property {string} taskId
+ * @property {string} [status]
+ * @property {string} [narration]
+ * @property {boolean} [narrationTruncated]
+ * @property {number} [narrationTotalChars]
+ * @property {string} [next]
+ */
+
+/**
+ * @param {ResultDetailBase} detail
+ * @param {{full?: boolean, fields?: string[]}} [options]
+ * @returns {ResultDetailBase}
+ */
 export function leanResult(detail, { full = false, fields } = {}) {
   if (full || fields) return detail;
   const rest = { ...detail };
@@ -198,6 +309,23 @@ export function leanResult(detail, { full = false, fields } = {}) {
   };
 }
 
+/**
+ * @typedef {object} ListRowInput
+ * @property {string} id
+ * @property {string} status
+ * @property {string} model
+ * @property {string} startedAt
+ * @property {string|null} [failureReason]
+ */
+
+/**
+ * @typedef {{id: string, status: string, model: string, startedAt: string, failureReason?: string}} ListRow
+ */
+
+/**
+ * @param {ListRowInput} row
+ * @returns {ListRow}
+ */
 function listRow(row) {
   return {
     id: row.id,
@@ -208,8 +336,21 @@ function listRow(row) {
   };
 }
 
+/**
+ * @typedef {object} ListValue
+ * @property {ListRowInput[] | string} tasks
+ * @property {string} [directory]
+ * @property {Record<string, number>} [counts]
+ */
+
 // Shared by projectList/projectContext: rows the raw task array down to
 // `limit`, reporting whether anything was cut off.
+/**
+ * @param {ListValue} value
+ * @param {number | undefined} limit
+ * @param {number} defaultLimit
+ * @returns {{tasks: ListRow[] | string, truncated: boolean, total: number}}
+ */
 function limitTasks(value, limit, defaultLimit) {
   let rows;
   if (Array.isArray(value.tasks)) {
@@ -226,6 +367,15 @@ function limitTasks(value, limit, defaultLimit) {
 
 const DEFAULT_LIST_LIMIT = 30;
 
+/**
+ * @param {ListValue} value
+ * @param {{limit?: number}} [options]
+ * The declared return is deliberately narrower than Record<string, unknown>:
+ * homeView() takes a ListValue, and projectList() always produces one (`tasks`
+ * is unconditional below), so erasing that to a bare key bag would break the
+ * projectList -> homeView pipeline runHome() depends on.
+ * @returns {ListValue & {next?: string[]}}
+ */
 export function projectList(value, { limit } = {}) {
   const { tasks, truncated, total } = limitTasks(value, limit, DEFAULT_LIST_LIMIT);
   return {
@@ -238,6 +388,11 @@ export function projectList(value, { limit } = {}) {
 
 const DEFAULT_CONTEXT_LIMIT = 10;
 
+/**
+ * @param {ListValue} value
+ * @param {{limit?: number}} [options]
+ * @returns {Record<string, unknown>}
+ */
 export function projectContext(value, { limit } = {}) {
   const { tasks, truncated, total } = limitTasks(value, limit, DEFAULT_CONTEXT_LIMIT);
   return {
@@ -248,6 +403,11 @@ export function projectContext(value, { limit } = {}) {
   };
 }
 
+/**
+ * @param {ListValue} value
+ * @param {{executablePath?: string, workspace?: string}} options
+ * @returns {Record<string, unknown>}
+ */
 export function homeView(value, { executablePath, workspace }) {
   const home = os.homedir();
   const absolutePath = path.resolve(executablePath || process.argv[1] || process.execPath);
@@ -277,10 +437,52 @@ export function homeView(value, { executablePath, workspace }) {
 // biggest readability problem in `doctor --stats` today. Formatted for
 // display only; the daemon's own `task.stats` response (and the tested,
 // reusable computeDoctorStats()) keep the raw numeric form.
+/**
+ * @param {number | null | undefined} rate
+ * @returns {number | null | string | undefined}
+ */
 function formatRate(rate) {
-  return rate === null || rate === undefined ? rate : `${(rate * 100).toFixed(1)}%`;
+  if (rate === null || rate === undefined) return rate;
+  return `${(rate * 100).toFixed(1)}%`;
 }
 
+/**
+ * @typedef {object} DoctorStatsEntry
+ * @property {string} [model]
+ * @property {number} [dispatches]
+ * @property {number} [done]
+ * @property {number} [crashed]
+ * @property {number | null | undefined} [doneRate]
+ * @property {number | null | undefined} [crashRate]
+ */
+
+/**
+ * @typedef {object} DoctorStatsTrendPeriod
+ * @property {number | null | undefined} [crashRate]
+ */
+
+/**
+ * @typedef {object} DoctorStatsTrend
+ * @property {DoctorStatsTrendPeriod} [current]
+ * @property {DoctorStatsTrendPeriod} [previous]
+ * @property {string} [window]
+ * @property {string} [direction]
+ */
+
+/**
+ * @typedef {object} DoctorStatsInput
+ * @property {DoctorStatsEntry[]} [byModel]
+ * @property {DoctorStatsTrend} [trend]
+ * @property {Record<string, unknown>} [statusMix]
+ * @property {unknown[]} [failureReasons]
+ * @property {unknown} [unknownBacklog]
+ * @property {string} [computedAt]
+ */
+
+/**
+ * @param {DoctorStatsInput | null | undefined} stats
+ * @returns {Record<string, unknown>}
+ */
 export function projectDoctorStats(stats) {
   // Defensive shape guards: a partial / stubbed / version-skewed response
   // (e.g. the fallback path in commands.js's runDoctorStats that aggregates
@@ -291,10 +493,15 @@ export function projectDoctorStats(stats) {
   // to their documented empty shapes; the rest of the response
   // (`statusMix`, `failureReasons`, `unknownBacklog`, `computedAt`) is
   // already a pass-through via the `...stats` spread.
-  const safeStats = stats && typeof stats === "object" ? stats : {};
+  /** @type {Partial<DoctorStatsInput>} */
+  const safeStats = stats && typeof stats === "object" ? /** @type {Partial<DoctorStatsInput>} */ (stats) : {};
+  /** @type {DoctorStatsEntry[]} */
   const byModel = Array.isArray(safeStats.byModel) ? safeStats.byModel : [];
+  /** @type {DoctorStatsTrend} */
   const trend = safeStats.trend && typeof safeStats.trend === "object" ? safeStats.trend : {};
+  /** @type {DoctorStatsTrendPeriod} */
   const trendCurrent = trend.current && typeof trend.current === "object" ? trend.current : {};
+  /** @type {DoctorStatsTrendPeriod} */
   const trendPrevious = trend.previous && typeof trend.previous === "object" ? trend.previous : {};
   return {
     ...safeStats,
@@ -307,15 +514,36 @@ export function projectDoctorStats(stats) {
   };
 }
 
+/**
+ * @param {unknown} occurredAt
+ * @returns {string}
+ */
 function shortTime(occurredAt) {
-  const parsed = new Date(occurredAt);
+  const parsed = new Date(/** @type {string | number | Date} */ (occurredAt));
   return Number.isNaN(parsed.getTime()) ? "" : parsed.toLocaleTimeString("en-US", { hour12: false });
 }
+
+/**
+ * @typedef {object} ActivityEvent
+ * @property {"task.activity" | "task.state"} type
+ * @property {string} taskId
+ * @property {string} status
+ * @property {string} [previousStatus]
+ * @property {string|null|undefined} [activity]
+ * @property {boolean} [summaryFailed]
+ * @property {string} [summaryError]
+ * @property {unknown} [occurredAt]
+ */
 
 // A raw task.activity/task.state event carries protocol plumbing (sequence,
 // directory, outputWatermark, a previousStatus that's usually null) that's
 // noise to a human watching progress at a glance. Collapse each event to one
 // line: just the time, the task, and what actually changed.
+/**
+ * @param {ActivityEvent} event
+ * @param {boolean} useColor
+ * @returns {string}
+ */
 function formatActivityLine(event, useColor) {
   const time = shortTime(event.occurredAt);
   const prefix = time ? `${time} ` : "";
@@ -338,12 +566,28 @@ function formatActivityLine(event, useColor) {
   return `${prefix}${event.taskId} ${status}: ${activity}`;
 }
 
+/**
+ * @param {ActivityEvent | Record<string, unknown>} event
+ * @param {string} [format] -- absent unless `--format` was passed; the only
+ *   test below is an equality check, so undefined selects the default rendering
+ * @param {boolean} [useColor]
+ * @returns {string}
+ */
 export function formatWatchEvent(event, format, useColor = false) {
   if (format === "ndjson") return JSON.stringify(event);
-  if (event.type === "task.activity" || event.type === "task.state") return formatActivityLine(event, useColor);
+  if (event.type === "task.activity" || event.type === "task.state") {
+    return formatActivityLine(/** @type {ActivityEvent} */ (event), useColor);
+  }
   return encode(event);
 }
 
+/**
+ * @param {unknown} context
+ * @param {string} [format] -- `--format` has no default, so this is genuinely
+ *   absent unless the caller passed one; every branch below is an equality
+ *   test, so undefined falls through to the plain `additionalContext` shape.
+ * @returns {unknown}
+ */
 export function contextForHook(context, format) {
   if (format === "toon") return context;
   const additionalContext = encode(context);

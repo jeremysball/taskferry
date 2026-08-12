@@ -6,11 +6,19 @@ import path from "node:path";
 import { test, after } from "node:test";
 import taskferryPlugin, { createOpenCodePlugin } from "./opencode-plugin.js";
 import { createTaskManager, DEFAULT_SUMMARY_MODEL } from "./tasks.js";
+import { TEST_DEFAULT_MODEL, preserveEnvVars } from "./tasks.test-helpers.js";
 
 const trackedTmpDirs = [];
 const trackedManagers = [];
 function trackManager(manager) {
   trackedManagers.push(manager);
+  const realDispatch = manager.dispatch;
+  manager.dispatch = (opts) => {
+    if (opts.model == null && opts.sessionId == null) {
+      return realDispatch({ ...opts, model: TEST_DEFAULT_MODEL });
+    }
+    return realDispatch(opts);
+  };
   return manager;
 }
 after(() => {
@@ -64,15 +72,10 @@ function fakeDaemon(context = { tasks: [] }) {
   };
 }
 
-test("returns no hooks in a taskferry child process", async () => {
-  const previous = process.env.TASKFERRY_CHILD;
+test("returns no hooks in a taskferry child process", async (t) => {
+  preserveEnvVars(t, ["TASKFERRY_CHILD"]);
   process.env.TASKFERRY_CHILD = "1";
-  try {
-    assert.deepEqual(await taskferryPlugin({}), {});
-  } finally {
-    if (previous === undefined) delete process.env.TASKFERRY_CHILD;
-    else process.env.TASKFERRY_CHILD = previous;
-  }
+  assert.deepEqual(await taskferryPlugin({}), {});
 });
 
 test("subscribes once for the realpathed workspace and closes through dispose", async () => {

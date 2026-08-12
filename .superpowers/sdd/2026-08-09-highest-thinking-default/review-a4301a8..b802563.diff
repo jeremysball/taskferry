@@ -1,0 +1,91 @@
+# Review package: a4301a8..b802563
+
+## Commits
+b802563 fix(executor): recover multi-slash opencode model-id lines in listModelVariantsFn
+
+## Files changed
+ src/executor.js      | 13 ++++++++-----
+ src/executor.test.js |  8 ++++++++
+ 2 files changed, 16 insertions(+), 5 deletions(-)
+
+## Diff
+diff --git a/src/executor.js b/src/executor.js
+index d68c6c6..a89ef2a 100644
+--- a/src/executor.js
++++ b/src/executor.js
+@@ -2,25 +2,28 @@ import { execFile } from "node:child_process";
+ import fs from "node:fs";
+ import path from "node:path";
+ import { promisify } from "node:util";
+ 
+ const execFileAsync = promisify(execFile);
+ const SUMMARY_PREFLIGHT_TIMEOUT_MS = 10000;
+ const LIST_MODEL_VARIANTS_TIMEOUT_MS = 30000;
+ 
+ // `opencode models --verbose` prints one model per block: a `provider/model`
+ // line at column 0 with no leading whitespace, followed by that model's
+-// full JSON description (always indented -- a JSON body line is never
+-// mistaken for the next model-id line). A block that fails to JSON.parse
+-// is skipped rather than aborting the whole listing; one malformed model
+-// must not cost every other model's variant data.
+-const OPENCODE_MODEL_ID_LINE = /^([^\s/]+\/[^\s/]+)$/;
++// full JSON description. The JSON body is not reliably indented -- real
++// output puts `{`/`}` at column 0 too -- but no body line contains a
++// slash, so a column-0 line containing a slash is always the next
++// model-id line (provider ids may themselves contain slashes, e.g.
++// openrouter's `provider/subprovider/model`). A block that fails to
++// JSON.parse is skipped rather than aborting the whole listing; one
++// malformed model must not cost every other model's variant data.
++const OPENCODE_MODEL_ID_LINE = /^([^\s/]+\/.*)$/;
+ 
+ /**
+  * @param {string} verboseOutput - raw stdout of `opencode models --verbose`
+  * @returns {Map<string, string[]>}
+  */
+ function parseOpencodeModelVariants(verboseOutput) {
+   /** @type {Map<string, string[]>} */
+   const result = new Map();
+   const lines = verboseOutput.split("\n");
+   /** @type {string|null} */
+diff --git a/src/executor.test.js b/src/executor.test.js
+index 0944b9e..9546f31 100644
+--- a/src/executor.test.js
++++ b/src/executor.test.js
+@@ -534,29 +534,37 @@ describe("opencodeExecutor()", () => {
+ 
+   describe("opencodeExecutor().listModelVariantsFn", () => {
+     const FLASH_FREE_MODEL = "opencode/deepseek-v4-flash-free";
+     const FIXTURE = [
+       FLASH_FREE_MODEL,
+       '{"id":"deepseek-v4-flash-free","variants":{"low":{"reasoningEffort":"low"},"high":{"reasoningEffort":"high"},"max":{"reasoningEffort":"max"}}}',
+       "opencode/no-variants-model",
+       '{"id":"no-variants-model","variants":{}}',
+       "minimax/MiniMax-M3",
+       '{"id":"MiniMax-M3","variants":{"none":{"thinking":{"type":"disabled"}},"thinking":{"thinking":{"type":"enabled","budgetTokens":16000}}}}',
++      "openrouter/openai/gpt-5.6-luna",
++      '{"id":"gpt-5.6-luna","variants":{"low":{"reasoningEffort":"low"},"high":{"reasoningEffort":"high"}}}',
+     ].join("\n");
+ 
+     test("parses provider/model blocks into an ordered variant-key map", async () => {
+       const ex = opencodeExecutor();
+       const result = await ex.listModelVariantsFn(process.env, { execFileFn: async () => ({ stdout: FIXTURE, stderr: "" }) });
+       assert.deepEqual(result.get(FLASH_FREE_MODEL), ["low", "high", "max"]);
+       assert.deepEqual(result.get("minimax/MiniMax-M3"), ["none", "thinking"]);
+     });
+ 
++    test("parses multi-slash provider/subprovider/model ids (openrouter format)", async () => {
++      const ex = opencodeExecutor();
++      const result = await ex.listModelVariantsFn(process.env, { execFileFn: async () => ({ stdout: FIXTURE, stderr: "" }) });
++      assert.deepEqual(result.get("openrouter/openai/gpt-5.6-luna"), ["low", "high"]);
++    });
++
+     test("omits models with no variants from the map", async () => {
+       const ex = opencodeExecutor();
+       const result = await ex.listModelVariantsFn(process.env, { execFileFn: async () => ({ stdout: FIXTURE, stderr: "" }) });
+       assert.equal(result.has("opencode/no-variants-model"), false);
+     });
+ 
+     test("skips a malformed JSON block instead of throwing", async () => {
+       const ex = opencodeExecutor();
+       const malformed = "opencode/broken-model\n{not valid json\n" + FLASH_FREE_MODEL + "\n" + FIXTURE.split("\n")[1];
+       const result = await ex.listModelVariantsFn(process.env, { execFileFn: async () => ({ stdout: malformed, stderr: "" }) });

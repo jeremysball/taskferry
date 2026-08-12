@@ -22,6 +22,30 @@ import { createTaskManager, DEFAULT_SUMMARY_MODEL, parseEnvDenylist } from "./ta
 const trackedTempDirs = [];
 const trackedManagers = [];
 
+// Snapshot each named env var and restore it in `t.after` exactly as found,
+// so a test can mutate `process.env` without leaving its values absent (or
+// stringified) for later tests in the file. The restore uses
+// `prior[name] !== undefined` rather than a separate "was it present" flag:
+// Node env values are always strings, so a key that was never set reads back
+// as `undefined` and a key set to any value (including a stringified
+// "undefined") reads back as a string -- presence is fully derivable from the
+// prior value, and a separate flag would be redundant state to keep in sync.
+// A blanket delete would instead leave the process's real PATH/HOME absent
+// for every later test, which is what let a subsequent test's
+// `process.env.HOME = realHome` (realHome already undefined) stringify into
+// the literal "undefined" -- the HOME the variants-cache warm spawn then
+// handed real opencode.
+export function preserveEnvVars(t, names) {
+  const prior = Object.fromEntries(names.map((name) => [name, process.env[name]]));
+  t.after(() => {
+    for (const name of names) {
+      if (prior[name] !== undefined) process.env[name] = prior[name];
+      else delete process.env[name];
+    }
+  });
+  return prior;
+}
+
 export function mkdtempTracked(prefix) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
   trackedTempDirs.push(dir);
@@ -36,8 +60,17 @@ export function mkdtempTracked(prefix) {
 // "failed to persist task state: ENOENT" to stderr. Flushing every tracked
 // manager synchronously first (before removing any directory) closes that
 // race regardless of how fast or slow the rest of the file ran.
-export function trackManager(manager) {
+export function trackManager(manager, { autoModel = true } = {}) {
   trackedManagers.push(manager);
+  if (autoModel) {
+    const realDispatch = manager.dispatch;
+    manager.dispatch = (opts) => {
+      if (opts.model == null && opts.sessionId == null) {
+        return realDispatch({ ...opts, model: TEST_DEFAULT_MODEL });
+      }
+      return realDispatch(opts);
+    };
+  }
   return manager;
 }
 
@@ -114,6 +147,12 @@ export const SRC1_LOG = "src1.ndjson";
 export const DID_THING = "did the thing";
 export const CAPTURED_DISPATCH = "captured-at-dispatch-time";
 export const MIMO_MODEL = "opencode/mimo-v2.5-free";
+// Used only by trackManager()'s auto-fill below -- an arbitrary,
+// obviously-synthetic model string, not a real provider/model. Real
+// dispatches still require --model per Task 5; this exists purely so
+// the ~230 test call sites that don't care which model gets used don't
+// need individual edits.
+export const TEST_DEFAULT_MODEL = "taskferry-test/auto-default";
 export const AXI_TASKS_CACHE_PI = "axi-tasks-cache-pi-";
 
 // A fake ChildProcess: an EventEmitter with the pid/unref surface dispatch()
@@ -162,6 +201,13 @@ function defaultKillFn() {
 }
 function defaultListModelsFn() {
   return () => `${DEFAULT_SUMMARY_MODEL}\n`;
+}
+function defaultOpenCodeListModelVariantsFn() {
+  // Mirrors defaultSpawnFn/defaultListModelsFn above: the opencode variants
+  // warm-up shell-out (`opencode models --verbose`) is real subprocess work
+  // that must be injected per-test, not fired for real from every
+  // makeManager() construction in the suite.
+  return async () => new Map();
 }
 
 function makeTempDirs() {
@@ -242,7 +288,10 @@ function buildManagerOptions(options, stateDir, defaultCacheDir, defaultOverlayT
     spawnFn: options.spawnFn ?? defaultSpawnFn(),
     killFn: options.killFn ?? defaultKillFn(),
     listModelsFn: options.listModelsFn ?? defaultListModelsFn(),
+    opencodeListModelVariantsFn: options.opencodeListModelVariantsFn ?? defaultOpenCodeListModelVariantsFn(),
     ...passthroughIfSet({ defaultExecutor: options.defaultExecutor }, "defaultExecutor", "defaultExecutor"),
+    ...passthroughIfSet({ defaultVariant: options.defaultVariant }, "defaultVariant", "defaultVariant"),
+    ...passthroughIfSet({ opencodeVariantsTable: options.opencodeVariantsTable }, "opencodeVariantsTable", "opencodeVariantsTable"),
     ...passthroughIfSet({ config: options.config }, "config", "config"),
     ...passthroughIfSet({ checkBwrapAvailableFn: options.checkBwrapAvailableFn }, "checkBwrapAvailableFn", "checkBwrapAvailableFn"),
     ...passthroughIfSet({ existsFn: options.existsFn }, "existsFn", "existsFn"),
@@ -282,5 +331,8 @@ function buildManagerOptions(options, stateDir, defaultCacheDir, defaultOverlayT
 export function makeManager(options = {}) {
   const { stateDir, defaultCacheDir, defaultOverlayTmpRoot } = makeTempDirs();
   seedTestFixtures(stateDir, options.tasksFixture ?? [], options.logs ?? {});
-  return trackManager(createTaskManager(buildManagerOptions(options, stateDir, defaultCacheDir, defaultOverlayTmpRoot)));
+  return trackManager(
+    createTaskManager(buildManagerOptions(options, stateDir, defaultCacheDir, defaultOverlayTmpRoot)),
+    { autoModel: options.autoModel !== false }
+  );
 }

@@ -102,24 +102,14 @@ jobs:
       # `agent.title.disable` is opencode's own config key for this
       # (Config.agent.title -> AgentConfig.disable in https://opencode.ai/config.json).
       #
-      # This has to land in the real ~/.config/opencode rather than a repo-local
-      # file because that is the directory executor.js's sandboxAuthFile()
-      # read-only-binds into each sandboxed dispatch (src/executor.js) -- a
-      # config written anywhere else is invisible inside the sandbox.
-      - name: Disable opencode's title agent (no one reads a CI session's title)
-        if: steps.integration_gate.outputs.run == 'true'
-        run: |
-          mkdir -p "$HOME/.config/opencode"
-          cat > "$HOME/.config/opencode/opencode.json" <<'JSON'
-          {
-            "$schema": "https://opencode.ai/config.json",
-            "agent": { "title": { "disable": true } }
-          }
-          JSON
-          node -e 'JSON.parse(require("fs").readFileSync(process.env.HOME + "/.config/opencode/opencode.json", "utf8"))'
-
+      # Inline config via OPENCODE_CONFIG_CONTENT, not a checked-in file: the
+      # SDK injects this env var as the config JSON (server.js:15), and the
+      # daemon passes the parent's full env through to each sandboxed dispatch
+      # (src/tasks.js:1307), so it reaches the worker without a repo-local file
+      # to ship or keep in sync.
       - name: Run integration (real CLI + daemon + live dispatch, no mocks)
         if: steps.integration_gate.outputs.run == 'true'
         env:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          OPENCODE_CONFIG_CONTENT: '{"agent":{"title":{"disable":true}}}'
         run: npm run test:integration

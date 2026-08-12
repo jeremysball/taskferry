@@ -1,11 +1,6 @@
 node_modules/
 .state-smoketest/
 .worktrees/
-# Scratch dir a tool (observed: something opencode-related, spawned during
-# `npm run check`) writes into when it resolves an unset HOME/XDG env var
-# to the literal string "undefined" instead of a real path. Not a real
-# config/state location -- never track it.
-undefined/
 !.superpowers/**
 # Ephemeral local brainstorm-server state (render output keyed to a live
 # port, plus a session token) — re-ignored after the blanket .superpowers/

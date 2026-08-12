@@ -4,13 +4,14 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { createTaskManager } from "./tasks.js";
-import { trackManager, makeManager, fakeChild, baseTask, AMBIENT_VALUE, FAKE_SECRETS_ENV_PATH, AXI_TASKS_TEST_DIR, AXI_TASKS_CACHE_DIR, AXI_TASKS_OVERLAY_DIR, TASKS_STATE_FILE, FROM_CALLER, OCCUPYING_TASK, CAPTURED_DISPATCH, SRC1_LOG, DID_THING, SOL_MODEL, mkdtempTracked } from "./tasks.test-helpers.js";
+import { trackManager, makeManager, fakeChild, baseTask, AMBIENT_VALUE, FAKE_SECRETS_ENV_PATH, AXI_TASKS_TEST_DIR, AXI_TASKS_CACHE_DIR, AXI_TASKS_OVERLAY_DIR, TASKS_STATE_FILE, FROM_CALLER, OCCUPYING_TASK, CAPTURED_DISPATCH, SRC1_LOG, DID_THING, SOL_MODEL, mkdtempTracked, preserveEnvVars } from "./tasks.test-helpers.js";
 import { DEFAULT_SUMMARY_MODEL } from "./tasks.js";
+import { TASKFERRY_PLUMBING_ENV_VARS } from "./paths.js";
 
 describe("caller-env union: basic dispatch and TASKFERRY_TASK_ID", () => {
   test("a caller-supplied env value overlays the daemon's own ambient environment", (t) => {
+    preserveEnvVars(t, ["AXI_TEST_CALLER_VAR"]);
     delete process.env.AXI_TEST_CALLER_VAR;
-    t.after(() => delete process.env.AXI_TEST_CALLER_VAR);
     let capturedOpts = null;
     const mgr = makeManager({ spawnFn: (_cmd, _args, opts) => { capturedOpts = opts; return fakeChild(); } });
 
@@ -20,9 +21,13 @@ describe("caller-env union: basic dispatch and TASKFERRY_TASK_ID", () => {
   });
 
   test("caller env cannot override the fixed excluded set of daemon-controlled vars", (t) => {
-    const excluded = ["PATH", "HOME", "TASKFERRY_STATE_DIR", "TASKFERRY_RUNTIME_DIR", "TASKFERRY_CACHE_DIR", "TASKFERRY_SOCKET_PATH"];
+    // Build the excluded set from paths.js's shared export (plus PATH/HOME,
+    // which tasks.js's CALLER_ENV_EXCLUDED also prepends) so this list cannot
+    // drift from the daemon's real derivation again. preserveEnvVars restores
+    // each var exactly as found in t.after.
+    const excluded = ["PATH", "HOME", ...TASKFERRY_PLUMBING_ENV_VARS];
+    preserveEnvVars(t, excluded);
     for (const name of excluded) process.env[name] = `real-${name}`;
-    t.after(() => { for (const name of excluded) delete process.env[name]; });
     let capturedOpts = null;
     const mgr = makeManager({ spawnFn: (_cmd, _args, opts) => { capturedOpts = opts; return fakeChild(); } });
 
@@ -97,8 +102,8 @@ describe("caller-env union: basic dispatch and TASKFERRY_TASK_ID", () => {
   });
 
   test("omitting env behaves as ambient-only, same as before caller-env forwarding existed", (t) => {
+    preserveEnvVars(t, ["AXI_TEST_AMBIENT_ONLY"]);
     process.env.AXI_TEST_AMBIENT_ONLY = AMBIENT_VALUE;
-    t.after(() => delete process.env.AXI_TEST_AMBIENT_ONLY);
     let capturedOpts = null;
     const mgr = makeManager({ spawnFn: (_cmd, _args, opts) => { capturedOpts = opts; return fakeChild(); } });
 
@@ -109,7 +114,8 @@ describe("caller-env union: basic dispatch and TASKFERRY_TASK_ID", () => {
 });
 
 describe("caller-env union: envFileVars merge with caller/ambient", () => {
-  test("envFileVars supplies a var missing from both the daemon's ambient env and the caller's env", () => {
+  test("envFileVars supplies a var missing from both the daemon's ambient env and the caller's env", (t) => {
+    preserveEnvVars(t, ["AXI_TEST_FILE_ONLY"]);
     delete process.env.AXI_TEST_FILE_ONLY;
     let capturedOpts = null;
     const mgr = makeManager({
@@ -123,8 +129,8 @@ describe("caller-env union: envFileVars merge with caller/ambient", () => {
   });
 
   test("the daemon's own ambient env overrides the same key in envFileVars", (t) => {
+    preserveEnvVars(t, ["AXI_TEST_FILE_VS_AMBIENT"]);
     process.env.AXI_TEST_FILE_VS_AMBIENT = AMBIENT_VALUE;
-    t.after(() => delete process.env.AXI_TEST_FILE_VS_AMBIENT);
     let capturedOpts = null;
     const mgr = makeManager({
       spawnFn: (_cmd, _args, opts) => { capturedOpts = opts; return fakeChild(); },
@@ -162,8 +168,8 @@ describe("caller-env union: envFileVars merge with caller/ambient", () => {
   });
 
   test("a var from envFileVars cannot override the daemon's real ambient PATH", (t) => {
+    preserveEnvVars(t, ["PATH"]);
     process.env.PATH = "real-path";
-    t.after(() => delete process.env.PATH);
     let capturedOpts = null;
     const mgr = makeManager({
       spawnFn: (_cmd, _args, opts) => { capturedOpts = opts; return fakeChild(); },
@@ -176,8 +182,8 @@ describe("caller-env union: envFileVars merge with caller/ambient", () => {
   });
 
   test("envFileVars cannot smuggle a value for a plumbing var the ambient env never set (review finding: CALLER_ENV_EXCLUDED was only applied to caller env)", (t) => {
+    preserveEnvVars(t, ["TASKFERRY_SOCKET_PATH"]);
     delete process.env.TASKFERRY_SOCKET_PATH;
-    t.after(() => delete process.env.TASKFERRY_SOCKET_PATH);
     let capturedOpts = null;
     const mgr = makeManager({
       spawnFn: (_cmd, _args, opts) => { capturedOpts = opts; return fakeChild(); },
@@ -190,9 +196,8 @@ describe("caller-env union: envFileVars merge with caller/ambient", () => {
   });
 
   test("envFileVars cannot smuggle a value for HOME either, when ambient HOME is unset", (t) => {
-    const realHome = process.env.HOME;
+    preserveEnvVars(t, ["HOME"]);
     delete process.env.HOME;
-    t.after(() => { process.env.HOME = realHome; });
     let capturedOpts = null;
     const mgr = makeManager({
       spawnFn: (_cmd, _args, opts) => { capturedOpts = opts; return fakeChild(); },
@@ -278,8 +283,8 @@ describe("caller-env union: envFile load at construction", () => {
   });
 
   test("an explicit empty-string TASKFERRY_ENV_FILE disables loading rather than falling through to config.envFile (review finding: the old `||` check treated \"\" as unset)", (t) => {
+    preserveEnvVars(t, ["TASKFERRY_ENV_FILE"]);
     process.env.TASKFERRY_ENV_FILE = "";
-    t.after(() => delete process.env.TASKFERRY_ENV_FILE);
     const stateDir = mkdtempTracked(AXI_TASKS_TEST_DIR);
     fs.writeFileSync(path.join(stateDir, TASKS_STATE_FILE), "[]");
     const cacheDir = mkdtempTracked(AXI_TASKS_CACHE_DIR);
@@ -494,8 +499,8 @@ describe("caller-env union: summary/advisor/report env forwarding", () => {
   });
 
   test("advisor() forwards a caller-supplied env value into the dispatched child", async (t) => {
+    preserveEnvVars(t, ["AXI_TEST_ADVISOR_CALLER_VAR"]);
     delete process.env.AXI_TEST_ADVISOR_CALLER_VAR;
-    t.after(() => delete process.env.AXI_TEST_ADVISOR_CALLER_VAR);
     let capturedOpts = null;
     const child = fakeChild();
     const mgr = makeManager({
@@ -521,8 +526,8 @@ describe("caller-env union: summary/advisor/report env forwarding", () => {
   });
 
   test("summarize() report mode forwards a caller-supplied env value into the spawned summary child", async (t) => {
+    preserveEnvVars(t, ["AXI_TEST_REPORT_CALLER_VAR"]);
     delete process.env.AXI_TEST_REPORT_CALLER_VAR;
-    t.after(() => delete process.env.AXI_TEST_REPORT_CALLER_VAR);
     let capturedEnv = null;
     const mgr = makeManager({
       tasksFixture: (logDir) => [{ ...baseTask({ id: "src1", status: "done", logPath: path.join(logDir, SRC1_LOG) }) }],
@@ -540,8 +545,8 @@ describe("caller-env union: summary/advisor/report env forwarding", () => {
 
 describe("caller-env union: queue-time env freezing and ambient-read-fresh", () => {
   test("a queued dispatch's stored env is the one captured at dispatch() time, not re-read later", async (t) => {
+    preserveEnvVars(t, ["AXI_TEST_LATE_AMBIENT"]);
     delete process.env.AXI_TEST_LATE_AMBIENT;
-    t.after(() => delete process.env.AXI_TEST_LATE_AMBIENT);
     const occupyingChild = fakeChild(9001);
     /** @type {any} */
     let secondCapturedOpts = null;
@@ -583,12 +588,9 @@ describe("caller-env union: queue-time env freezing and ambient-read-fresh", () 
     // not see the post-queue addition. The b45de81 clone makes this test
     // pass; if that clone is ever removed, this test will fail and the
     // removal must be reverted -- see the BLOCKED note in the PR description.
+    preserveEnvVars(t, ["AXI_TEST_QUEUE_REASSIGN", "AXI_TEST_QUEUE_ADDED"]);
     delete process.env.AXI_TEST_QUEUE_REASSIGN;
     delete process.env.AXI_TEST_QUEUE_ADDED;
-    t.after(() => {
-      delete process.env.AXI_TEST_QUEUE_REASSIGN;
-      delete process.env.AXI_TEST_QUEUE_ADDED;
-    });
     const occupyingChild = fakeChild(9001);
     /** @type {any} */
     let secondCapturedOpts = null;
@@ -630,8 +632,8 @@ describe("caller-env union: queue-time env freezing and ambient-read-fresh", () 
     // The summary path now mirrors dispatch()'s pattern: caller env is
     // snapshot at request time (cloned, like dispatch), and the merged env
     // is computed in startTask() at spawn time.
+    preserveEnvVars(t, ["AXI_TEST_SUMMARY_LATE_AMBIENT"]);
     delete process.env.AXI_TEST_SUMMARY_LATE_AMBIENT;
-    t.after(() => delete process.env.AXI_TEST_SUMMARY_LATE_AMBIENT);
     const occupyingChild = fakeChild(9001);
     /** @type {any} */
     let summaryCapturedOpts = null;
@@ -671,12 +673,9 @@ describe("caller-env union: queue-time env freezing and ambient-read-fresh", () 
 
 describe("caller-env union: single-pass merge and key validation", () => {
   test("excluded names, denylist names, and caller-wins are all applied in a single merge pass (review fix: caller-wins/denylist-last/denylist-strips-ambient semantics)", (t) => {
+    preserveEnvVars(t, ["TASKFERRY_STATE_DIR", "AXI_TEST_DENY_AMBIENT"]);
     process.env.TASKFERRY_STATE_DIR = "real-state";
     process.env.AXI_TEST_DENY_AMBIENT = "ambient-leak";
-    t.after(() => {
-      delete process.env.TASKFERRY_STATE_DIR;
-      delete process.env.AXI_TEST_DENY_AMBIENT;
-    });
     let capturedOpts = null;
     const mgr = makeManager({
       spawnFn: (_cmd, _args, opts) => { capturedOpts = opts; return fakeChild(); },
@@ -704,15 +703,11 @@ describe("caller-env union: single-pass merge and key validation", () => {
     // misroute a nested taskferry call (e.g. via TASKFERRY_SOCKET_PATH). The
     // set is now built from paths.js's TASKFERRY_PLUMBING_ENV_VARS export
     // plus PATH and HOME; this test exercises every name in that export to
-    // pin the derivation.
-    for (const name of ["TASKFERRY_STATE_DIR", "TASKFERRY_RUNTIME_DIR", "TASKFERRY_CACHE_DIR", "TASKFERRY_SOCKET_PATH", "TASKFERRY_OVERLAY_TMP_DIR"]) {
+    // pin the derivation. preserveEnvVars restores each var exactly as found.
+    preserveEnvVars(t, TASKFERRY_PLUMBING_ENV_VARS);
+    for (const name of TASKFERRY_PLUMBING_ENV_VARS) {
       process.env[name] = `real-${name}`;
     }
-    t.after(() => {
-      for (const name of ["TASKFERRY_STATE_DIR", "TASKFERRY_RUNTIME_DIR", "TASKFERRY_CACHE_DIR", "TASKFERRY_SOCKET_PATH", "TASKFERRY_OVERLAY_TMP_DIR"]) {
-        delete process.env[name];
-      }
-    });
     let capturedOpts = null;
     const mgr = makeManager({ spawnFn: (_cmd, _args, opts) => { capturedOpts = opts; return fakeChild(); } });
 

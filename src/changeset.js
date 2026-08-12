@@ -260,7 +260,12 @@ export function extractGitDiff({
   sleepFn = sleepSync,
   scratchDirFn = () => path.join(os.tmpdir(), `taskferry-stale-base-${crypto.randomUUID()}`),
 }) {
-  const bwrapArgs = buildBwrapArgs({ directory, stateDir, runtimeDir, homeDir, denyList, overlay, overlayRwBinds, overlayRwFileBinds });
+  // socketPath: null -- this is a daemon-internal changeset extraction, not a
+  // worker sandbox; it never calls back to the daemon, so no socket bind. The
+  // default (<runtimeDir>/daemon.sock) would also fail when runtimeDir is a
+  // fresh temp dir with no socket file (bwrap requires the bind source to
+  // exist).
+  const bwrapArgs = buildBwrapArgs({ directory, stateDir, runtimeDir, homeDir, denyList, overlay, overlayRwBinds, overlayRwFileBinds, socketPath: null });
   // The final `exit $rc` propagates the diff's own status: the previous
   // `; git reset` tail made the whole script exit with reset's status, so a
   // failed diff still reported success. reset runs first regardless (undo

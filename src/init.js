@@ -3,6 +3,11 @@ import path from "node:path";
 import readline from "node:readline/promises";
 import { resolveProjectConfigPath } from "./project-config.js";
 
+/**
+ * @param {string} packageJsonPath
+ * @param {(p: string) => string} readFileFn
+ * @returns {string|null}
+ */
 function packageCheckCommand(packageJsonPath, readFileFn) {
   const content = readFileFn(packageJsonPath);
   let pkg;
@@ -17,6 +22,7 @@ function packageCheckCommand(packageJsonPath, readFileFn) {
   return composed.length ? composed.map((name) => `npm run ${name}`).join(" && ") : null;
 }
 
+/** @type {Array<[string[], string]>} */
 const ECOSYSTEM_CHECKS = [
   [["pyproject.toml"], "uv run pytest && uv run ruff check ."],
   [["go.mod"], "go vet ./... && go test ./..."],

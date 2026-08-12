@@ -26,7 +26,11 @@ describe("bwrap sandboxing: dispatch argv shape and gitdir scoping", () => {
     assert.ok(captured.args.includes(mgr.paths.STATE_DIR));
     const bindIndex = captured.args.indexOf("--bind");
     assert.equal(captured.args[bindIndex + 1], os.tmpdir());
-    assert.ok(captured.args.includes(runtimeDir));
+    // The daemon socket is bound at its own path; the whole runtimeDir is not
+    // (the #453/#455 fix -- sibling overlays and other tasks' state under
+    // runtimeDir are no longer reachable).
+    assert.ok(captured.args.includes(path.join(runtimeDir, "daemon.sock")));
+    assert.ok(!captured.args.includes(runtimeDir));
     assert.deepEqual(captured.args.slice(-14), [
       "--", "opencode", "run", "--dir", os.tmpdir(), "--auto", "--format", "json",
       "-m", "opencode-go/minimax-m3", "--variant", "max", "--", "hello",
@@ -732,9 +736,9 @@ describe("bwrap sandboxing: overlay rwBinds and shareNet", () => {
     // not just the daemon socket -- so the worker CLI could never reach its
     // model provider's API at all. It failed instantly (connection refused)
     // or hung until the no-output watchdog killed it, depending on the
-    // executor. The daemon socket is protected by runtimeDirWritable: false
-    // instead (see the read-only-runtimeDir test below), which doesn't touch
-    // network access.
+    // executor. The daemon socket is protected by omitting the socket bind
+    // for advisor roles instead (see the advisor-guardrails test below), which
+    // doesn't touch network access.
     let dispatchArgs = null;
     let advisorArgs = null;
     const mgr = makeManager({
@@ -867,10 +871,12 @@ describe("bwrap sandboxing: packed-refs file binds (overlayfs mounts are directo
 });
 
 describe("bwrap sandboxing: advisor guardrails", () => {
-  test("binds runtimeDir read-only for advisor spawns so the daemon socket is unreachable", async () => {
+  test("binds the daemon socket for dispatch spawns and omits it entirely for advisor spawns so the daemon is unreachable", async () => {
     // --unshare-net alone does not block Unix-domain-socket access to a
     // writable bind-mounted path, and runtimeDir holds daemon.sock (review
-    // finding #6); a read-only bind makes connect() fail instead.
+    // finding #6). The #454 fix: instead of a read-only bind (which never
+    // gated connect()), the advisor gets no socket bind at all, so the daemon
+    // is unreachable from the advisor sandbox.
     let dispatchArgs = null;
     let advisorArgs = null;
     const mgr = makeManager({
@@ -887,6 +893,7 @@ describe("bwrap sandboxing: advisor guardrails", () => {
       platform: "linux",
     });
     const runtimeDir = path.join(mgr.paths.STATE_DIR, "run");
+    const socketPath = path.join(runtimeDir, "daemon.sock");
 
     mgr.dispatch({ prompt: "hello", directory: os.tmpdir() });
     const flagPairs = (args) => {
@@ -896,11 +903,12 @@ describe("bwrap sandboxing: advisor guardrails", () => {
       }
       return pairs;
     };
-    assert.ok(flagPairs(dispatchArgs).some(([flag, p]) => flag === "--bind" && p === runtimeDir), "dispatch keeps today's writable runtimeDir bind");
+    assert.ok(flagPairs(dispatchArgs).some(([flag, p]) => flag === "--bind" && p === socketPath), "dispatch binds the daemon socket");
+    assert.ok(!flagPairs(dispatchArgs).some(([_flag, p]) => p === runtimeDir), "dispatch must not bind the whole runtimeDir");
 
     await mgr.advisor({ prompt: "hello", directory: os.tmpdir(), model: SOL_MODEL });
-    assert.ok(flagPairs(advisorArgs).some(([flag, p]) => flag === "--ro-bind" && p === runtimeDir), "advisor must get a read-only runtimeDir bind");
-    assert.ok(!flagPairs(advisorArgs).some(([flag, p]) => flag === "--bind" && p === runtimeDir), "advisor must not get a writable runtimeDir bind");
+    assert.ok(!flagPairs(advisorArgs).some(([_flag, p]) => p === socketPath), "advisor must not get any bind onto the daemon socket");
+    assert.ok(!flagPairs(advisorArgs).some(([_flag, p]) => p === runtimeDir), "advisor must not get any bind onto the whole runtimeDir");
   });
 
   test("crashes an advisor dispatch instead of running it unguarded when overlay is globally disabled", async () => {

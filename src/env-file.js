@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { errCode } from "./errors.js";
 
 const KEY_RE = /^[A-Za-z_]\w*$/;
 
@@ -119,7 +120,7 @@ export function loadEnvFile(filePath, { readFileFn = fs.readFileSync, statFn = f
   try {
     raw = readFileFn(filePath, "utf8");
   } catch (err) {
-    if (/** @type {NodeJS.ErrnoException} */ (err).code === "ENOENT") {
+    if (errCode(err) === "ENOENT") {
       throw new Error(`error: env file not found: ${filePath}\nhelp: fix the path in TASKFERRY_ENV_FILE / the "envFile" config key, or remove the setting to stop loading one`, { cause: err });
     }
     throw err;

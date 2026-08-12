@@ -473,3 +473,20 @@ profiling is diagnostic, not on the request's critical path.
   fresh `opencode models --verbose` shell-out costs ~3-4s, which would
   otherwise block the daemon's single thread on every affected dispatch).
   A model absent from the cache resolves to no variant flag, not an error.
+- A CLI connecting to the daemon being torn down hard when the socket hands
+  back a `Buffer` instead of a string — expected, not a crash bug. The client
+  socket runs in utf8 mode (`setEncoding("utf8")` in `DaemonClient`'s
+  constructor, `src/client.js`), so Node delivers strings to the data
+  listener; a `Buffer` there means the encoding contract was broken, and
+  decoding it per-chunk would silently corrupt multi-byte characters split
+  across frames. `onData` therefore fails loudly
+  (`protocolFailure` + `socket.destroy`) rather than guessing.
+- `taskferry --version` answering instantly with no daemon running — expected.
+  `version` is the one command that answers without the daemon, and that is
+  an invariant, not a per-handler accident: every other command in the
+  `HANDLERS` table calls `client.request(...)` and requires a live daemon
+  connection. `version` never touches `client` — its resolved deps carry
+  `client: undefined` (see `Deps.client` in `src/commands.js`), and
+  `resolveRunCommandDeps` documents that single exception with a field-level
+  `@type {Client}` cast on the `client` field instead of widening
+  `ResolvedDeps.client` to optional for every handler.

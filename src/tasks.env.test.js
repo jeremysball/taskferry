@@ -4,8 +4,9 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { createTaskManager } from "./tasks.js";
-import { trackManager, makeManager, fakeChild, baseTask, AMBIENT_VALUE, FAKE_SECRETS_ENV_PATH, AXI_TASKS_TEST_DIR, AXI_TASKS_CACHE_DIR, AXI_TASKS_OVERLAY_DIR, TASKS_STATE_FILE, FROM_CALLER, OCCUPYING_TASK, CAPTURED_DISPATCH, SRC1_LOG, DID_THING, SOL_MODEL, mkdtempTracked } from "./tasks.test-helpers.js";
+import { trackManager, makeManager, fakeChild, baseTask, AMBIENT_VALUE, FAKE_SECRETS_ENV_PATH, AXI_TASKS_TEST_DIR, AXI_TASKS_CACHE_DIR, AXI_TASKS_OVERLAY_DIR, TASKS_STATE_FILE, FROM_CALLER, OCCUPYING_TASK, CAPTURED_DISPATCH, SRC1_LOG, DID_THING, SOL_MODEL, mkdtempTracked, preserveEnvVars } from "./tasks.test-helpers.js";
 import { DEFAULT_SUMMARY_MODEL } from "./tasks.js";
+import { TASKFERRY_PLUMBING_ENV_VARS } from "./paths.js";
 
 describe("caller-env union: basic dispatch and TASKFERRY_TASK_ID", () => {
   test("a caller-supplied env value overlays the daemon's own ambient environment", (t) => {
@@ -20,22 +21,13 @@ describe("caller-env union: basic dispatch and TASKFERRY_TASK_ID", () => {
   });
 
   test("caller env cannot override the fixed excluded set of daemon-controlled vars", (t) => {
-    const excluded = ["PATH", "HOME", "TASKFERRY_STATE_DIR", "TASKFERRY_RUNTIME_DIR", "TASKFERRY_CACHE_DIR", "TASKFERRY_SOCKET_PATH"];
-    // Record each excluded var's pre-test state so the restore below can put
-    // PATH/HOME back exactly as it found them. A blanket delete would leave
-    // the process's real PATH/HOME absent for every later test in this file,
-    // which is what let a subsequent test's `process.env.HOME = realHome`
-    // (realHome already undefined) stringify into the literal "undefined" --
-    // the HOME the variants-cache warm spawn then handed real opencode.
-    const hadVar = Object.fromEntries(excluded.map((name) => [name, name in process.env]));
-    const priorVar = Object.fromEntries(excluded.map((name) => [name, process.env[name]]));
+    // Build the excluded set from paths.js's shared export (plus PATH/HOME,
+    // which tasks.js's CALLER_ENV_EXCLUDED also prepends) so this list cannot
+    // drift from the daemon's real derivation again. preserveEnvVars restores
+    // each var exactly as found in t.after.
+    const excluded = ["PATH", "HOME", ...TASKFERRY_PLUMBING_ENV_VARS];
+    preserveEnvVars(t, excluded);
     for (const name of excluded) process.env[name] = `real-${name}`;
-    t.after(() => {
-      for (const name of excluded) {
-        if (hadVar[name]) process.env[name] = priorVar[name];
-        else delete process.env[name];
-      }
-    });
     let capturedOpts = null;
     const mgr = makeManager({ spawnFn: (_cmd, _args, opts) => { capturedOpts = opts; return fakeChild(); } });
 
@@ -175,8 +167,8 @@ describe("caller-env union: envFileVars merge with caller/ambient", () => {
   });
 
   test("a var from envFileVars cannot override the daemon's real ambient PATH", (t) => {
+    preserveEnvVars(t, ["PATH"]);
     process.env.PATH = "real-path";
-    t.after(() => delete process.env.PATH);
     let capturedOpts = null;
     const mgr = makeManager({
       spawnFn: (_cmd, _args, opts) => { capturedOpts = opts; return fakeChild(); },
@@ -189,8 +181,8 @@ describe("caller-env union: envFileVars merge with caller/ambient", () => {
   });
 
   test("envFileVars cannot smuggle a value for a plumbing var the ambient env never set (review finding: CALLER_ENV_EXCLUDED was only applied to caller env)", (t) => {
+    preserveEnvVars(t, ["TASKFERRY_SOCKET_PATH"]);
     delete process.env.TASKFERRY_SOCKET_PATH;
-    t.after(() => delete process.env.TASKFERRY_SOCKET_PATH);
     let capturedOpts = null;
     const mgr = makeManager({
       spawnFn: (_cmd, _args, opts) => { capturedOpts = opts; return fakeChild(); },
@@ -203,18 +195,8 @@ describe("caller-env union: envFileVars merge with caller/ambient", () => {
   });
 
   test("envFileVars cannot smuggle a value for HOME either, when ambient HOME is unset", (t) => {
-    const hadHome = "HOME" in process.env;
-    const realHome = process.env.HOME;
+    preserveEnvVars(t, ["HOME"]);
     delete process.env.HOME;
-    t.after(() => {
-      // State-preserving restore: `process.env.HOME = undefined` would store
-      // the literal string "undefined" (Node stringifies env assignments),
-      // which the async variants-cache warm spawn then passes to real
-      // opencode, making it write an `undefined/.config`+`undefined/.cache`
-      // tree at the repo root.
-      if (hadHome) process.env.HOME = realHome;
-      else delete process.env.HOME;
-    });
     let capturedOpts = null;
     const mgr = makeManager({
       spawnFn: (_cmd, _args, opts) => { capturedOpts = opts; return fakeChild(); },
@@ -300,8 +282,8 @@ describe("caller-env union: envFile load at construction", () => {
   });
 
   test("an explicit empty-string TASKFERRY_ENV_FILE disables loading rather than falling through to config.envFile (review finding: the old `||` check treated \"\" as unset)", (t) => {
+    preserveEnvVars(t, ["TASKFERRY_ENV_FILE"]);
     process.env.TASKFERRY_ENV_FILE = "";
-    t.after(() => delete process.env.TASKFERRY_ENV_FILE);
     const stateDir = mkdtempTracked(AXI_TASKS_TEST_DIR);
     fs.writeFileSync(path.join(stateDir, TASKS_STATE_FILE), "[]");
     const cacheDir = mkdtempTracked(AXI_TASKS_CACHE_DIR);
@@ -693,12 +675,9 @@ describe("caller-env union: queue-time env freezing and ambient-read-fresh", () 
 
 describe("caller-env union: single-pass merge and key validation", () => {
   test("excluded names, denylist names, and caller-wins are all applied in a single merge pass (review fix: caller-wins/denylist-last/denylist-strips-ambient semantics)", (t) => {
+    preserveEnvVars(t, ["TASKFERRY_STATE_DIR", "AXI_TEST_DENY_AMBIENT"]);
     process.env.TASKFERRY_STATE_DIR = "real-state";
     process.env.AXI_TEST_DENY_AMBIENT = "ambient-leak";
-    t.after(() => {
-      delete process.env.TASKFERRY_STATE_DIR;
-      delete process.env.AXI_TEST_DENY_AMBIENT;
-    });
     let capturedOpts = null;
     const mgr = makeManager({
       spawnFn: (_cmd, _args, opts) => { capturedOpts = opts; return fakeChild(); },
@@ -726,15 +705,11 @@ describe("caller-env union: single-pass merge and key validation", () => {
     // misroute a nested taskferry call (e.g. via TASKFERRY_SOCKET_PATH). The
     // set is now built from paths.js's TASKFERRY_PLUMBING_ENV_VARS export
     // plus PATH and HOME; this test exercises every name in that export to
-    // pin the derivation.
-    for (const name of ["TASKFERRY_STATE_DIR", "TASKFERRY_RUNTIME_DIR", "TASKFERRY_CACHE_DIR", "TASKFERRY_SOCKET_PATH", "TASKFERRY_OVERLAY_TMP_DIR"]) {
+    // pin the derivation. preserveEnvVars restores each var exactly as found.
+    preserveEnvVars(t, TASKFERRY_PLUMBING_ENV_VARS);
+    for (const name of TASKFERRY_PLUMBING_ENV_VARS) {
       process.env[name] = `real-${name}`;
     }
-    t.after(() => {
-      for (const name of ["TASKFERRY_STATE_DIR", "TASKFERRY_RUNTIME_DIR", "TASKFERRY_CACHE_DIR", "TASKFERRY_SOCKET_PATH", "TASKFERRY_OVERLAY_TMP_DIR"]) {
-        delete process.env[name];
-      }
-    });
     let capturedOpts = null;
     const mgr = makeManager({ spawnFn: (_cmd, _args, opts) => { capturedOpts = opts; return fakeChild(); } });
 

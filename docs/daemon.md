@@ -482,8 +482,11 @@ profiling is diagnostic, not on the request's critical path.
   across frames. `onData` therefore fails loudly
   (`protocolFailure` + `socket.destroy`) rather than guessing.
 - `taskferry --version` answering instantly with no daemon running — expected.
-  `version` is the one command that answers without the daemon: its resolved
-  deps carry `client: undefined` (see `Deps.client` in `src/commands.js`),
-  and `resolveRunCommandDeps` documents that single exception with a
-  field-level `@type {Client}` cast on the `client` field instead of widening
+  `version` is the one command that answers without the daemon, and that is
+  an invariant, not a per-handler accident: every other command in the
+  `HANDLERS` table calls `client.request(...)` and requires a live daemon
+  connection. `version` never touches `client` — its resolved deps carry
+  `client: undefined` (see `Deps.client` in `src/commands.js`), and
+  `resolveRunCommandDeps` documents that single exception with a field-level
+  `@type {Client}` cast on the `client` field instead of widening
   `ResolvedDeps.client` to optional for every handler.

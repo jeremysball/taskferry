@@ -39,7 +39,10 @@ const skip = skipReason ? { skip: `overlay integration skipped: ${skipReason}` }
 // Runs one real bwrap invocation against a directory mounted as a CoW
 // overlay (plus any sub-overlays), executing `script` inside.
 function runInOverlay({ directory, overlay, overlayRwBinds = [], overlayRwFileBinds = [], script, runtimeDir, homeDir }) {
-  const args = buildBwrapArgs({ stateDir: os.tmpdir(), denyList: [], overlay: { upperDir: overlay.upperDir, workDir: overlay.workDir }, directory, runtimeDir, homeDir, overlayRwBinds, overlayRwFileBinds });
+  // socketPath: null -- these tests exercise overlay round-trips, not daemon
+  // connectivity, and the fresh temp runtimeDir has no daemon.sock for bwrap
+  // to bind (bwrap fails if the bind source doesn't exist).
+  const args = buildBwrapArgs({ stateDir: os.tmpdir(), denyList: [], overlay: { upperDir: overlay.upperDir, workDir: overlay.workDir }, socketPath: null, directory, runtimeDir, homeDir, overlayRwBinds, overlayRwFileBinds });
   return spawnSync("bwrap", [...args, "--", "sh", "-c", script], { encoding: "utf8" });
 }
 

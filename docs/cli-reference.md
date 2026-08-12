@@ -54,22 +54,24 @@ summary immediately.
 | `--prompt <text>` | Required. Pass `-` to read the prompt from piped stdin instead (`cat prompt.txt \| taskferry dispatch --prompt -`) — use this for prompts too large to pass as a single command-line argument |
 | `--directory <path>` | Defaults to the current workspace; an existing directory (relative paths are resolved against the current working directory) |
 | (no flag — always on) | `dispatch`, `advisor`, and `summary` (report mode) forward the calling shell's own environment to the daemon on every call, with no per-call opt-out; see [security.md](security.md#caller-env-forwarding) |
-| `--model <id>` | `provider/model`, e.g. `opencode-go/minimax-m3`. Run `opencode models` to list installed models. Defaults to `minimax/MiniMax-M2.7` for the default `pi` executor; `--executor opencode` defaults to `openai/gpt-5.6-luna` instead. When `--session-id` is given without `--model`, the model is instead inherited from the most recent prior task dispatched with that session id |
-| `--variant <name>` | Reasoning-effort override, applied only alongside `--model` — omitting `--model` (including on a `--session-id` resume) always forces variant `high`, regardless of any `--variant` passed. Accepted values depend on the executor: pi takes `off`, `minimal`, `low`, `medium`, `high`, `xhigh`; opencode's `--variant` values depend on the model |
+| `--model <id>` | `provider/model`, e.g. `opencode-go/minimax-m3`. Run `opencode models` to list installed models. Required unless resuming via `--session-id` with a matching prior task, in which case the model is inherited from that task |
+| `--variant <name>` | Reasoning-effort override. Precedence when omitted: the resumed session's own variant (on a `--session-id` resume) wins, otherwise the configured `defaultVariant` (default `highest`) applies -- see `docs/config.md`. `highest` resolves to `--thinking max` on pi (pi clamps to the model's real ceiling itself) or the model's highest cached opencode variant, sending no flag at all if the model has none. Accepted concrete values: pi takes `off`, `minimal`, `low`, `medium`, `high`, `xhigh`; opencode's depend on the model and are never validated by taskferry -- an unrecognized value is silently ignored by opencode itself |
 | `--executor <opencode\|pi>` | Which worker CLI to spawn. Built-in default `pi`, but an omitted flag actually falls back to the daemon's configured default executor (`TASKFERRY_DEFAULT_EXECUTOR` or `config.json`'s `defaultExecutor`) |
 | `--session-id <id>` | Resume an existing session instead of starting fresh (`--continue --session <id>`; both pi and opencode use this syntax). When `--executor` is omitted, inherits whichever executor originally created the session; get session ids from a prior `result` or `status --full` |
-| `--allowed-dirs <path,path,...>` | Extra directories bound read-write inside the sandbox for this dispatch, on top of the auto-detected git-common-dir for a worktree and any config-level `allowedDirs`; see [security.md](security.md). **`/tmp` needs this too** — the sandbox mounts a fresh, empty `--tmpfs /tmp`, so any path under `/tmp` that isn't `--directory`, `runtimeDir`, or an `--allowed-dirs` entry is invisible inside the sandbox even though it exists on the host |
+| `--rw-bind <path,path,...>` | Extra directories bound read-write inside the sandbox for this dispatch, on top of the auto-detected git-common-dir for a worktree and any config-level `rwBind`; see [security.md](security.md). **`/tmp` needs this too** — the sandbox mounts a fresh, empty `--tmpfs /tmp`, so any path under `/tmp` that isn't `--directory`, `runtimeDir`, or an `--rw-bind` entry is invisible inside the sandbox even though it exists on the host. All three layers (this flag, `TASKFERRY_RW_BIND`, config `rwBind`) union rather than replace. |
+| `--ro-bind <path,path,...>` | Extra directories bound **read-only** inside the sandbox for this dispatch — a review-only worker that should read several repos but edit none. Resolved through the same protected-mount safety check as `.taskferry.toml`'s `read_only_paths`: an entry that doesn't exist on the host, or that overlaps a protected mount, is skipped and reported. Unions with `TASKFERRY_RO_BIND` and config `roBind`. If a path also appears in the read-write set, read-write wins with a warning. |
+| `--allowed-dirs <path,path,...>` | **Deprecated** alias for `--rw-bind` (same read-write behavior). Emits a deprecation warning when used; will be removed in the next major release. |
 | `--require-final-marker <regex>` | Fail the task if the final message doesn't match this pattern (case-sensitive, standard JS RegExp semantics). Sets `incomplete: true` on the settled task when the final message is empty (after trimming) or doesn't match. Patterns that don't compile as a standard JS RegExp reject the dispatch up front with a usage error. Useful for enforcing a report-format contract like `^Status: (DONE\|DONE_WITH_CONCERNS\|BLOCKED\|NEEDS_CONTEXT)$` on the last line of model output. |
 | `--class <name>` | Optional free-text task-class tag for telemetry aggregation; any non-empty string, no fixed-list validation — taskferry stores whatever is given |
 | `--parent-task <id>` | Tag this dispatch as fixing/retrying an earlier task. Persisted as `parentTaskId` and surfaced on `taskferry status <id> --full` / `taskferry result <id> --fields parentTaskId` (not on plain `taskferry status <id>`). The earlier task's check-gate failure message echoes the link when this dispatch is the suggested fix-forward resume (see `## taskferry accept <id>` below) |
 | `--no-sandbox` | Run this dispatch without the bwrap filesystem sandbox (default: sandboxed on Linux, no-op on macOS); see [security.md](security.md) |
 
 ```
-$ taskferry dispatch --prompt "Fix the failing tests" --directory /workspace/my-repo --executor opencode
+$ taskferry dispatch --prompt "Fix the failing tests" --directory /workspace/my-repo --executor opencode --model opencode-go/minimax-m3
 id: oc_mrn4ipkp_19450105
 status: running
 directory: /workspace/my-repo
-model: openai/gpt-5.6-luna
+model: opencode-go/minimax-m3
 ...
 next: Run taskferry wait or taskferry status with task id "oc_mrn4ipkp_19450105" to check progress
 ```
@@ -132,7 +134,7 @@ planning or hard-debugging help mid-task, not for open-ended background work
 | `--prompt <text>` | Optional; auto-attaches caller context (Claude Code session transcript or the calling ferry's own task log) when omitted, and prepends that context ahead of `--prompt` when both are present. Pass `-` to read the prompt from piped stdin instead, same as `dispatch` |
 | `--model <id>` | Required, no default; the caller picks the advisor |
 | `--directory <path>` | Defaults to the current git workspace root (falls back to the literal current directory outside a git repo) |
-| `--variant <name>` | Optional reasoning-effort override |
+| `--variant <name>` | Optional reasoning-effort override. Same omitted-flag resolution chain as `dispatch`'s `--variant` above (resumed session, then `defaultVariant`, default `highest`) |
 | `--executor <opencode\|pi>` | Which worker CLI to spawn. Built-in default `pi`, but an omitted flag actually falls back to the daemon's configured default executor (`TASKFERRY_DEFAULT_EXECUTOR` or `config.json`'s `defaultExecutor`) |
 | `--session-id <id>` | Resume a prior advisor exchange |
 | `--class <name>` | Optional free-text task-class tag for telemetry aggregation; any non-empty string, no fixed-list validation |

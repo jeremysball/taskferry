@@ -140,6 +140,24 @@ describe("loadConfig()", () => {
     assert.throws(() => loadConfig({ configPath }), /error: config key "allowedDirs".*must be a string.*\nhelp:/s);
   });
 
+  test("accepts valid rwBind and roBind values", () => {
+    const dir = tmpConfigDir();
+    const configPath = writeConfig(dir, JSON.stringify({ rwBind: "/opt/a,/opt/b", roBind: "/opt/ro" }));
+    assert.deepEqual(loadConfig({ configPath }), { rwBind: "/opt/a,/opt/b", roBind: "/opt/ro" });
+  });
+
+  test("rejects a wrong-typed rwBind value", () => {
+    const dir = tmpConfigDir();
+    const configPath = writeConfig(dir, JSON.stringify({ rwBind: ["/opt/a"] }));
+    assert.throws(() => loadConfig({ configPath }), /error: config key "rwBind".*must be a string.*\nhelp:/s);
+  });
+
+  test("rejects a wrong-typed roBind value", () => {
+    const dir = tmpConfigDir();
+    const configPath = writeConfig(dir, JSON.stringify({ roBind: ["/opt/ro"] }));
+    assert.throws(() => loadConfig({ configPath }), /error: config key "roBind".*must be a string.*\nhelp:/s);
+  });
+
   test("accepts a valid envDenylist value", () => {
     const dir = tmpConfigDir();
     const configPath = writeConfig(dir, JSON.stringify({ envDenylist: "PI_CODING_AGENT_DIR,SOME_OTHER_VAR" }));
@@ -222,5 +240,37 @@ describe("loadConfig()", () => {
     const dir = tmpConfigDir();
     const configPath = writeConfig(dir, JSON.stringify({ providerLimits: { minimax: { maxConcurrentTasks: 0 } } }));
     assert.throws(() => loadConfig({ configPath }), /error: config key "providerLimits\.minimax\.maxConcurrentTasks".*must be a positive integer.*\nhelp:/s);
+  });
+
+  test("accepts the highest sentinel for defaultVariant", () => {
+    const dir = tmpConfigDir();
+    const configPath = writeConfig(dir, JSON.stringify({ defaultVariant: "highest" }));
+    assert.deepEqual(loadConfig({ configPath }), { defaultVariant: "highest" });
+  });
+
+  test("accepts each of pi's concrete thinking levels for defaultVariant", () => {
+    for (const level of ["off", "minimal", "low", "medium", "high", "xhigh", "max"]) {
+      const dir = tmpConfigDir();
+      const configPath = writeConfig(dir, JSON.stringify({ defaultVariant: level }));
+      assert.deepEqual(loadConfig({ configPath }), { defaultVariant: level });
+    }
+  });
+
+  test("rejects an unrecognized defaultVariant string", () => {
+    const dir = tmpConfigDir();
+    const configPath = writeConfig(dir, JSON.stringify({ defaultVariant: "medium-plus" }));
+    assert.throws(() => loadConfig({ configPath }), /error: config key "defaultVariant" in .* must be one of highest, off, minimal, low, medium, high, xhigh, max \(got "medium-plus"\)\nhelp:/);
+  });
+
+  test("rejects an empty or whitespace-only defaultVariant", () => {
+    const dir = tmpConfigDir();
+    const configPath = writeConfig(dir, JSON.stringify({ defaultVariant: "   " }));
+    assert.throws(() => loadConfig({ configPath }), /error: config key "defaultVariant".*must be one of/);
+  });
+
+  test("rejects a non-string defaultVariant", () => {
+    const dir = tmpConfigDir();
+    const configPath = writeConfig(dir, JSON.stringify({ defaultVariant: 5 }));
+    assert.throws(() => loadConfig({ configPath }), /error: config key "defaultVariant" in .* must be a string \(got 5\)\nhelp:/);
   });
 });

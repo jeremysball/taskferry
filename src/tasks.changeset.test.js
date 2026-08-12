@@ -6,12 +6,13 @@ import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { createTaskManager, DEFAULT_SUMMARY_MODEL } from "./tasks.js";
-import { trackManager, makeManager, fakeChild, AXI_TASKS_ORPHAN, AXI_TASKS_TEST_DIR, AXI_TASKS_CACHE_DIR, TASKS_STATE_FILE, OVERLAY_DIR_PENDING, DIFF_LINE, SPAWN_BWRAP_TIMEOUT, SOL_MODEL, baseTask, mkdtempTracked } from "./tasks.test-helpers.js";
+import { trackManager, makeManager, fakeChild, AXI_TASKS_ORPHAN, AXI_TASKS_TEST_DIR, AXI_TASKS_CACHE_DIR, TASKS_STATE_FILE, OVERLAY_DIR_PENDING, DIFF_LINE, SPAWN_BWRAP_TIMEOUT, SOL_MODEL, LUNA_MODEL, baseTask, mkdtempTracked } from "./tasks.test-helpers.js";
 
 const CHECK_GATE_CONFIG = `check = "npm test"\n`;
 const CHECK_GATE_HEAD = "abc123\n";
 const CHECK_GATE_DIFF = "diff --git a/f b/f\n+changed\n";
 const CHECK_GATE_SESSION_ID = "ses_gate_fix";
+const CHECK_GATE_FAILED_OUTPUT = "2 tests failed";
 
 function fakeGateChild(pid = 9000) {
   const child = new EventEmitter();
@@ -270,7 +271,7 @@ describe("accept() check-gate gating", () => {
       checkStatus: "failed",
       checkCommand: "npm test",
       checkExitCode: 1,
-      checkOutputTail: "2 tests failed",
+      checkOutputTail: CHECK_GATE_FAILED_OUTPUT,
     });
     const mgr = managerWithPendingCheckGateTask(task);
 
@@ -279,8 +280,29 @@ describe("accept() check-gate gating", () => {
       (error) => {
         assert.match(error.message, /command: npm test \(from \.taskferry\.toml\)/);
         assert.match(error.message, /exit: 1/);
-        assert.match(error.message, /2 tests failed/);
+        assert.match(error.message, new RegExp(CHECK_GATE_FAILED_OUTPUT));
         assert.match(error.message, new RegExp(`taskferry dispatch --session-id ${CHECK_GATE_SESSION_ID} --parent-task ${task.id}`));
+        return true;
+      }
+    );
+  });
+
+  test("the fix-forward hint includes --model for a sessionId-less task (--model is required on a fresh dispatch)", async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "axi-gate-accept-failed-nosession-"));
+    const task = pendingCheckGateTask(directory, {
+      sessionId: null,
+      model: LUNA_MODEL,
+      checkStatus: "failed",
+      checkCommand: "npm test",
+      checkExitCode: 1,
+      checkOutputTail: CHECK_GATE_FAILED_OUTPUT,
+    });
+    const mgr = managerWithPendingCheckGateTask(task);
+
+    await assert.rejects(
+      () => mgr.accept(task.id, {}),
+      (error) => {
+        assert.match(error.message, new RegExp(`taskferry dispatch --directory ${directory} --model ${LUNA_MODEL.replace(/\//g, "\\/")} --parent-task ${task.id}`));
         return true;
       }
     );
@@ -292,7 +314,7 @@ describe("accept() check-gate gating", () => {
       checkStatus: "failed",
       checkCommand: "npm test",
       checkExitCode: 1,
-      checkOutputTail: "2 tests failed",
+      checkOutputTail: CHECK_GATE_FAILED_OUTPUT,
     });
     const mgr = managerWithPendingCheckGateTask(task);
 

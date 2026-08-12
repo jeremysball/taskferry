@@ -1,15 +1,16 @@
 import fs from "node:fs";
 import path from "node:path";
 import { parse, TomlError } from "smol-toml";
+import { errCode } from "./errors.js";
 
 const CONFIG_FILENAME = ".taskferry.toml";
 const DEFAULT_CHECK_TIMEOUT_SECONDS = 900;
-const KNOWN_KEYS = new Set(["check", "check_timeout_seconds", "read_only_paths"]);
+const KNOWN_KEYS = new Set(["check", "check_timeout_seconds", "read_only_paths", "roBind"]);
 
-/** @typedef {{check: string|null, checkTimeoutSeconds: number, readOnlyPaths: string[], parseError: string|null}} ProjectConfig */
+/** @typedef {{check: string|null, checkTimeoutSeconds: number, readOnlyPaths: string[], deprecatedReadOnlyPaths: boolean, parseError: string|null}} ProjectConfig */
 
 /** @type {ProjectConfig} */
-const EMPTY_CONFIG = Object.freeze({ check: null, checkTimeoutSeconds: DEFAULT_CHECK_TIMEOUT_SECONDS, readOnlyPaths: [], parseError: null });
+const EMPTY_CONFIG = Object.freeze({ check: null, checkTimeoutSeconds: DEFAULT_CHECK_TIMEOUT_SECONDS, readOnlyPaths: [], deprecatedReadOnlyPaths: false, parseError: null });
 
 // Per-path cache: configPath -> { mtimeMs: number|null, result: ProjectConfig }.
 // mtimeMs null means "file did not exist at last load" -- same shape as
@@ -46,22 +47,47 @@ function validateAndNormalize(raw, configPath) {
   if (checkTimeoutSeconds !== undefined && !(typeof checkTimeoutSeconds === "number" && Number.isInteger(checkTimeoutSeconds) && checkTimeoutSeconds > 0)) {
     errors.push(`"check_timeout_seconds" must be a positive integer (got ${JSON.stringify(checkTimeoutSeconds)})`);
   }
-  const readOnlyPaths = record.read_only_paths;
-  if (readOnlyPaths !== undefined && !(Array.isArray(readOnlyPaths) && readOnlyPaths.every((entry) => typeof entry === "string"))) {
-    errors.push(`"read_only_paths" must be an array of strings (got ${JSON.stringify(readOnlyPaths)})`);
-  }
+  const readOnlyPaths = validateStringArray(record.read_only_paths, "read_only_paths", errors);
+  const roBind = validateStringArray(record.roBind, "roBind", errors);
   for (const key of Object.keys(record)) {
     if (!KNOWN_KEYS.has(key)) errors.push(`unrecognized key "${key}"`);
   }
   if (errors.length) {
     return { ...EMPTY_CONFIG, parseError: `${configPath}: ${errors.join("; ")}` };
   }
+  const deprecatedReadOnlyPathsUsed = readOnlyPaths !== undefined;
+  // The deprecated `read_only_paths` key UNIONS into the new `roBind` key
+  // rather than being replaced by it, matching the union-not-replace pattern
+  // the deprecated `allowedDirs`/`rwBind` CLI-flag alias already uses (see
+  // resolveRwBind in tasks.js) -- a renamed key aliasing a still-live one is
+  // the same shape of problem whether the rename lives in one config file or
+  // across flag/env/config layers, so it gets the same answer.
+  // `deprecatedReadOnlyPaths` records whether the old key contributed at all
+  // (even when the new key also did) so callers can warn either way.
+  const effectiveRoBind = [...new Set([...(readOnlyPaths ?? []), ...(roBind ?? [])])];
   return {
     check: /** @type {string|undefined} */ (record.check) ?? null,
     checkTimeoutSeconds: /** @type {number|undefined} */ (record.check_timeout_seconds) ?? DEFAULT_CHECK_TIMEOUT_SECONDS,
-    readOnlyPaths: /** @type {string[]|undefined} */ (record.read_only_paths) ?? [],
+    readOnlyPaths: effectiveRoBind,
+    deprecatedReadOnlyPaths: deprecatedReadOnlyPathsUsed,
     parseError: null,
   };
+}
+
+/**
+ * Validates a config value as an array of strings (or `undefined`), pushing a
+ * descriptive error when it isn't. Returns the value unchanged when it's a
+ * valid string array or absent.
+ * @param {unknown} value
+ * @param {string} key
+ * @param {string[]} errors
+ * @returns {string[]|undefined}
+ */
+function validateStringArray(value, key, errors) {
+  if (value === undefined) return undefined;
+  if (Array.isArray(value) && value.every((entry) => typeof entry === "string")) return value;
+  errors.push(`"${key}" must be an array of strings (got ${JSON.stringify(value)})`);
+  return undefined;
 }
 
 /**
@@ -85,7 +111,7 @@ export function loadProjectConfig(directory, { statFn = fs.statSync, readFileFn 
   try {
     currentMtimeMs = statFn(configPath).mtimeMs;
   } catch (err) {
-    if (/** @type {NodeJS.ErrnoException} */ (err).code === "ENOENT") {
+    if (errCode(err) === "ENOENT") {
       const cached = _projectConfigCache.get(configPath);
       if (cached && cached.mtimeMs === null) return cached.result;
       _projectConfigCache.set(configPath, { mtimeMs: null, result: EMPTY_CONFIG });

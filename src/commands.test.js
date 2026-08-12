@@ -461,6 +461,23 @@ test("dispatch forwards executor to the RPC payload when set", async () => {
   assert.equal(captured.params.executor, "pi");
 });
 
+test("dispatch forwards both --allowed-dirs and --rw-bind as distinct RPC params when both are set, so the daemon can union them (regression: pickDispatchOptions used to collapse both into one wire key)", async () => {
+  const root = mkTmpRoot(TASKFERRY_TEST_TMP_PREFIX);
+  let captured;
+  const client = {
+    request: async (method, params) => {
+      captured = { method, params };
+      return { id: "oc_1" };
+    },
+  };
+
+  await runCommand("dispatch", { prompt: "hi", directory: root, allowedDirs: ["/old"], rwBind: ["/new"] }, { client, cwd: root });
+
+  assert.equal(captured.method, TASK_DISPATCH_METHOD);
+  assert.deepEqual(captured.params.allowedDirs, ["/old"]);
+  assert.deepEqual(captured.params.rwBind, ["/new"]);
+});
+
 test("advisor forwards executor to the RPC payload when set", async () => {
   const root = mkTmpRoot(TASKFERRY_TEST_TMP_PREFIX);
   let captured;

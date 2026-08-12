@@ -60,6 +60,22 @@ notes or a hand-written CHANGELOG, whichever this repo uses). Don't let a
 squash-merge or a release-please rollup silently absorb their contribution
 under a generic entry with no attribution.
 
+## Commit skill changes as `fix`/`feat`, not `docs`
+
+Skills in this repo are executable documentation — `skill-guidance.test.js`
+runs their recipes — so a change that alters how a skill behaves is a
+behavior change, not a prose edit. Commit it with a `fix(skills)` or
+`feat(skills)` prefix, never `docs(skills)`. Reserve `docs(skills)` for pure
+prose that changes no behavior.
+
+The reason is release-please: its default changelog excludes `docs`/`chore`/
+`ci`/`refactor` commits, so a `docs(skills)` change silently vanishes from
+the release notes even when it changes how the shipped skill is consumed
+(e.g. splitting `using-taskferry` into SKILL.md plus resources, or flagging
+that bare `--timeout` values are milliseconds). A `fix(skills)`/`feat(skills)`
+commit surfaces in the changelog automatically and needs no hand-add at
+release time.
+
 ## Always filter, then process
 
 When code needs to act on a subset of a larger collection (tasks, rows,

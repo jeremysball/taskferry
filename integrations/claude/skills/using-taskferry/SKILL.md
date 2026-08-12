@@ -252,12 +252,70 @@ taskferry reject <id>
 `reject` is always allowed regardless of `checkStatus`, and tears down any
 in-flight gate before releasing the overlay.
 
-If `accept` itself fails for an unrelated reason (a conflicting `git
-apply` -- the lower moved under a long-running ferry, see "Always Use A
-Worktree" above), don't re-dispatch reflexively: `taskferry result <id>
---diff` still has the worker's changes, so resolve the conflict by hand
-or reject and retry with a fresh dispatch against the now-current
-directory.
+### `accept` requires a clean target tree
+
+**Every path in the diff must have identical content in the target's working
+tree and in its index, or `accept` applies nothing at all.** This is the most
+common way a good changeset fails to land, it destroys the worker's real work
+when it fires, and it has nothing to do with the quality of the diff.
+
+Extraction stages everything before diffing (`changeset.js`):
+
+```sh
+git -C <directory> add -A && git -C <directory> diff --cached <preDispatchHead>
+```
+
+The overlay inherits the real directory's untracked files from the lower, so
+`add -A` sweeps them into the patch as `new file` entries the worker never
+wrote. `accept` then runs `git apply --3way`, which refuses the **entire**
+patch when any one path is unclean and rolls back what it had already applied.
+Reproduced on stock git: a single untracked `ambient.txt` present before
+dispatch discarded a `brand-new.txt` the worker had legitimately created.
+
+```
+error: ambient.txt: does not exist in index
+error: cannot read the current contents of 'ambient.txt'
+error: ambient.txt: patch does not apply
+```
+
+Two states violate the rule, and the second one is easy to miss:
+
+- **An untracked, non-ignored file anywhere in the target directory.**
+  Gitignored paths are safe, since `add -A` honors `.gitignore`, so
+  dependencies and build output are not the hazard. Stray scratch files, plan
+  dumps, and screenshots dropped at the repo root are.
+- **An uncommitted edit to a file the ferry also touched.** `git apply`
+  refuses any path whose working-tree content disagrees with its index entry,
+  even for an ordinary tracked file with the base blob available. Editing a
+  file while a ferry runs on it is enough to trigger this.
+
+**Stage before accepting.** Staging makes tree and index agree by definition,
+satisfying both cases without deleting scratch you may still want:
+
+```sh
+git -C "<worktree>" add -A && taskferry accept <id>
+```
+
+To check first, `git -C "<worktree>" status --short` printing any line at all
+means `accept` is at risk.
+
+**Until taskferry#414 is fixed, `accept` can exit 0 after the apply failed**,
+so a zero exit code is not evidence the changeset landed. Confirm with `git -C
+"<worktree>" status --short` or `git diff --stat HEAD` afterward.
+
+**New files are the unrecoverable case.** A patch that creates a file records
+a null preimage hash (`index 0000000..<hash>`), so there is no merge base and
+no three-way merge is possible. Direct application is the only path left, and
+it refuses to write over a path that already exists. A conflict in a *tracked*
+file can often be resolved by the three-way merge; a new file colliding with
+an untracked one cannot, unless an index entry exists for it, which is exactly
+what staging supplies.
+
+If `accept` fails for a different reason, a genuinely conflicting `git apply`
+after the lower moved under a long-running ferry (see "Always Use A Worktree"
+above), don't re-dispatch reflexively: `taskferry result <id> --diff` still
+holds the worker's changes, so resolve the conflict by hand or reject and
+retry with a fresh dispatch against the now-current directory.
 
 A worker's `git commit` made *inside* the sandbox is never preserved as a
 commit -- it's flattened into the same diff an uncommitted edit would

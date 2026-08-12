@@ -10,8 +10,8 @@ import { TASKFERRY_PLUMBING_ENV_VARS } from "./paths.js";
 
 describe("caller-env union: basic dispatch and TASKFERRY_TASK_ID", () => {
   test("a caller-supplied env value overlays the daemon's own ambient environment", (t) => {
+    preserveEnvVars(t, ["AXI_TEST_CALLER_VAR"]);
     delete process.env.AXI_TEST_CALLER_VAR;
-    t.after(() => delete process.env.AXI_TEST_CALLER_VAR);
     let capturedOpts = null;
     const mgr = makeManager({ spawnFn: (_cmd, _args, opts) => { capturedOpts = opts; return fakeChild(); } });
 
@@ -102,8 +102,8 @@ describe("caller-env union: basic dispatch and TASKFERRY_TASK_ID", () => {
   });
 
   test("omitting env behaves as ambient-only, same as before caller-env forwarding existed", (t) => {
+    preserveEnvVars(t, ["AXI_TEST_AMBIENT_ONLY"]);
     process.env.AXI_TEST_AMBIENT_ONLY = AMBIENT_VALUE;
-    t.after(() => delete process.env.AXI_TEST_AMBIENT_ONLY);
     let capturedOpts = null;
     const mgr = makeManager({ spawnFn: (_cmd, _args, opts) => { capturedOpts = opts; return fakeChild(); } });
 
@@ -114,7 +114,8 @@ describe("caller-env union: basic dispatch and TASKFERRY_TASK_ID", () => {
 });
 
 describe("caller-env union: envFileVars merge with caller/ambient", () => {
-  test("envFileVars supplies a var missing from both the daemon's ambient env and the caller's env", () => {
+  test("envFileVars supplies a var missing from both the daemon's ambient env and the caller's env", (t) => {
+    preserveEnvVars(t, ["AXI_TEST_FILE_ONLY"]);
     delete process.env.AXI_TEST_FILE_ONLY;
     let capturedOpts = null;
     const mgr = makeManager({
@@ -128,8 +129,8 @@ describe("caller-env union: envFileVars merge with caller/ambient", () => {
   });
 
   test("the daemon's own ambient env overrides the same key in envFileVars", (t) => {
+    preserveEnvVars(t, ["AXI_TEST_FILE_VS_AMBIENT"]);
     process.env.AXI_TEST_FILE_VS_AMBIENT = AMBIENT_VALUE;
-    t.after(() => delete process.env.AXI_TEST_FILE_VS_AMBIENT);
     let capturedOpts = null;
     const mgr = makeManager({
       spawnFn: (_cmd, _args, opts) => { capturedOpts = opts; return fakeChild(); },
@@ -498,8 +499,8 @@ describe("caller-env union: summary/advisor/report env forwarding", () => {
   });
 
   test("advisor() forwards a caller-supplied env value into the dispatched child", async (t) => {
+    preserveEnvVars(t, ["AXI_TEST_ADVISOR_CALLER_VAR"]);
     delete process.env.AXI_TEST_ADVISOR_CALLER_VAR;
-    t.after(() => delete process.env.AXI_TEST_ADVISOR_CALLER_VAR);
     let capturedOpts = null;
     const child = fakeChild();
     const mgr = makeManager({
@@ -525,8 +526,8 @@ describe("caller-env union: summary/advisor/report env forwarding", () => {
   });
 
   test("summarize() report mode forwards a caller-supplied env value into the spawned summary child", async (t) => {
+    preserveEnvVars(t, ["AXI_TEST_REPORT_CALLER_VAR"]);
     delete process.env.AXI_TEST_REPORT_CALLER_VAR;
-    t.after(() => delete process.env.AXI_TEST_REPORT_CALLER_VAR);
     let capturedEnv = null;
     const mgr = makeManager({
       tasksFixture: (logDir) => [{ ...baseTask({ id: "src1", status: "done", logPath: path.join(logDir, SRC1_LOG) }) }],
@@ -544,8 +545,8 @@ describe("caller-env union: summary/advisor/report env forwarding", () => {
 
 describe("caller-env union: queue-time env freezing and ambient-read-fresh", () => {
   test("a queued dispatch's stored env is the one captured at dispatch() time, not re-read later", async (t) => {
+    preserveEnvVars(t, ["AXI_TEST_LATE_AMBIENT"]);
     delete process.env.AXI_TEST_LATE_AMBIENT;
-    t.after(() => delete process.env.AXI_TEST_LATE_AMBIENT);
     const occupyingChild = fakeChild(9001);
     /** @type {any} */
     let secondCapturedOpts = null;
@@ -587,12 +588,9 @@ describe("caller-env union: queue-time env freezing and ambient-read-fresh", () 
     // not see the post-queue addition. The b45de81 clone makes this test
     // pass; if that clone is ever removed, this test will fail and the
     // removal must be reverted -- see the BLOCKED note in the PR description.
+    preserveEnvVars(t, ["AXI_TEST_QUEUE_REASSIGN", "AXI_TEST_QUEUE_ADDED"]);
     delete process.env.AXI_TEST_QUEUE_REASSIGN;
     delete process.env.AXI_TEST_QUEUE_ADDED;
-    t.after(() => {
-      delete process.env.AXI_TEST_QUEUE_REASSIGN;
-      delete process.env.AXI_TEST_QUEUE_ADDED;
-    });
     const occupyingChild = fakeChild(9001);
     /** @type {any} */
     let secondCapturedOpts = null;
@@ -634,8 +632,8 @@ describe("caller-env union: queue-time env freezing and ambient-read-fresh", () 
     // The summary path now mirrors dispatch()'s pattern: caller env is
     // snapshot at request time (cloned, like dispatch), and the merged env
     // is computed in startTask() at spawn time.
+    preserveEnvVars(t, ["AXI_TEST_SUMMARY_LATE_AMBIENT"]);
     delete process.env.AXI_TEST_SUMMARY_LATE_AMBIENT;
-    t.after(() => delete process.env.AXI_TEST_SUMMARY_LATE_AMBIENT);
     const occupyingChild = fakeChild(9001);
     /** @type {any} */
     let summaryCapturedOpts = null;

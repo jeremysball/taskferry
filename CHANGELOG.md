@@ -1,5 +1,31 @@
 # Changelog
 
+## [4.0.0](https://github.com/jeremysball/taskferry/compare/taskferry-v3.2.0...taskferry-v4.0.0) (2026-08-12)
+
+
+### ⚠ BREAKING CHANGES
+
+* **tasks:** dispatch() and buildDispatchTask() no longer fall back to a hardcoded per-executor default model (pi's minimax default, opencode's luna default) when --model is omitted. A fresh dispatch (no --model, no resolvable --session-id to inherit a model from) now throws "error: --model is required"; an unresolvable --session-id with no --model throws naming the session id. WorkerExecutor's defaultModel field is removed.
+
+### Features
+
+* **sandbox:** add --ro-bind, rename --allowed-dirs to --rw-bind ([#401](https://github.com/jeremysball/taskferry/issues/401)) ([bdbd8c8](https://github.com/jeremysball/taskferry/commit/bdbd8c85bdbcc205101ed298d29e516f139ef74d))
+* **tasks:** require --model on dispatch, default omitted --variant to highest-thinking ([#435](https://github.com/jeremysball/taskferry/issues/435)) ([fd1b2f5](https://github.com/jeremysball/taskferry/commit/fd1b2f5fbb59d33f66fc80deaa766e96ed1b863a))
+* **types:** typecheck the whole of src/, not just tasks.js ([#400](https://github.com/jeremysball/taskferry/issues/400)) ([b56fb3f](https://github.com/jeremysball/taskferry/commit/b56fb3f55686ab2c0b144de5ce37b596949aa158))
+
+
+### Bug Fixes
+
+* **sandbox:** narrow the runtime-dir bind to the daemon socket only ([#457](https://github.com/jeremysball/taskferry/issues/457)) ([070f32c](https://github.com/jeremysball/taskferry/commit/070f32cce8ec60e2aede8b598c84e6cc240a3115))
+* **skills:** correct four defects in using-taskferry and add executable tests ([085ef7c](https://github.com/jeremysball/taskferry/commit/085ef7cbd1f0e2a0d5f00ea19d78f30642b64551))
+* **tasks:** tighten parseNumstatLine to reject non-integer/non-finite numstat tokens ([#417](https://github.com/jeremysball/taskferry/issues/417)) ([ee0184f](https://github.com/jeremysball/taskferry/commit/ee0184f1003c81f4d592de16bce8443b1bf88bd9))
+* **tests:** remove the undefined/ gitignore bandaid at its root ([#463](https://github.com/jeremysball/taskferry/issues/463)) ([02d637d](https://github.com/jeremysball/taskferry/commit/02d637d5b2aae48e9d6bfc8e7e4129eab5e00cfa))
+
+
+### Performance Improvements
+
+* **statusline:** cache Taskferry refreshes ([#441](https://github.com/jeremysball/taskferry/issues/441)) ([ab50d93](https://github.com/jeremysball/taskferry/commit/ab50d93f4241189dddfe39f46b764d61a21bf9fa))
+
 ## [3.2.0](https://github.com/jeremysball/taskferry/compare/taskferry-v3.1.0...taskferry-v3.2.0) (2026-08-09)
 
 

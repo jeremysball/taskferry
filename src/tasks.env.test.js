@@ -21,8 +21,21 @@ describe("caller-env union: basic dispatch and TASKFERRY_TASK_ID", () => {
 
   test("caller env cannot override the fixed excluded set of daemon-controlled vars", (t) => {
     const excluded = ["PATH", "HOME", "TASKFERRY_STATE_DIR", "TASKFERRY_RUNTIME_DIR", "TASKFERRY_CACHE_DIR", "TASKFERRY_SOCKET_PATH"];
+    // Record each excluded var's pre-test state so the restore below can put
+    // PATH/HOME back exactly as it found them. A blanket delete would leave
+    // the process's real PATH/HOME absent for every later test in this file,
+    // which is what let a subsequent test's `process.env.HOME = realHome`
+    // (realHome already undefined) stringify into the literal "undefined" --
+    // the HOME the variants-cache warm spawn then handed real opencode.
+    const hadVar = Object.fromEntries(excluded.map((name) => [name, name in process.env]));
+    const priorVar = Object.fromEntries(excluded.map((name) => [name, process.env[name]]));
     for (const name of excluded) process.env[name] = `real-${name}`;
-    t.after(() => { for (const name of excluded) delete process.env[name]; });
+    t.after(() => {
+      for (const name of excluded) {
+        if (hadVar[name]) process.env[name] = priorVar[name];
+        else delete process.env[name];
+      }
+    });
     let capturedOpts = null;
     const mgr = makeManager({ spawnFn: (_cmd, _args, opts) => { capturedOpts = opts; return fakeChild(); } });
 
@@ -190,9 +203,18 @@ describe("caller-env union: envFileVars merge with caller/ambient", () => {
   });
 
   test("envFileVars cannot smuggle a value for HOME either, when ambient HOME is unset", (t) => {
+    const hadHome = "HOME" in process.env;
     const realHome = process.env.HOME;
     delete process.env.HOME;
-    t.after(() => { process.env.HOME = realHome; });
+    t.after(() => {
+      // State-preserving restore: `process.env.HOME = undefined` would store
+      // the literal string "undefined" (Node stringifies env assignments),
+      // which the async variants-cache warm spawn then passes to real
+      // opencode, making it write an `undefined/.config`+`undefined/.cache`
+      // tree at the repo root.
+      if (hadHome) process.env.HOME = realHome;
+      else delete process.env.HOME;
+    });
     let capturedOpts = null;
     const mgr = makeManager({
       spawnFn: (_cmd, _args, opts) => { capturedOpts = opts; return fakeChild(); },

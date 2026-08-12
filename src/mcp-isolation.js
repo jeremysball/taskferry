@@ -3,11 +3,15 @@ import path from "node:path";
 
 const ISOLATED_FLAG = "--isolated";
 
-// A JSON string can't legally contain a raw newline, so if we can't find a
-// closing quote before one, this is an unterminated string -- return null
-// rather than hunting across lines for the next real quote, which is what
-// let a comment on a later line survive unstripped.
-// @returns {number|null} index just past the closing quote, or null
+/**
+ * A JSON string can't legally contain a raw newline, so if we can't find a
+ * closing quote before one, this is an unterminated string -- return null
+ * rather than hunting across lines for the next real quote, which is what
+ * let a comment on a later line survive unstripped.
+ * @param {string} text
+ * @param {number} start
+ * @returns {number|null} index just past the closing quote, or null
+ */
 function findStringEnd(text, start) {
   const n = text.length;
   let j = start + 1;
@@ -20,10 +24,14 @@ function findStringEnd(text, start) {
   return null;
 }
 
-// @returns {number|null} index just past a `//`/`/* */` comment starting at
-// `i`, or null if `i` isn't a comment start (including an unterminated
-// block comment, which is left as literal text rather than swallowing the
-// rest of the file).
+/**
+ * @param {string} text
+ * @param {number} i
+ * @returns {number|null} index just past a `//`/`/* *\/` comment starting at
+ * `i`, or null if `i` isn't a comment start (including an unterminated
+ * block comment, which is left as literal text rather than swallowing the
+ * rest of the file).
+ */
 function commentSkipEnd(text, i) {
   if (text[i] !== "/") return null;
   if (text[i + 1] === "/") {
@@ -42,6 +50,10 @@ function commentSkipEnd(text, i) {
 // super-linear shape sonarjs flags, and this parses config files whose
 // content isn't guaranteed trusted. A single forward pass is O(n) by
 // construction, so there's nothing left to backtrack.
+/**
+ * @param {string} text
+ * @returns {string}
+ */
 export function stripJsonComments(text) {
   let result = "";
   let i = 0;
@@ -63,10 +75,20 @@ export function stripJsonComments(text) {
   return result;
 }
 
+/**
+ * @param {string} homeDirectory
+ * @param {NodeJS.ProcessEnv} env
+ * @returns {string}
+ */
 function resolveOpencodeConfigDir(homeDirectory, env) {
   return path.join(env.XDG_CONFIG_HOME || path.join(homeDirectory, ".config"), "opencode");
 }
 
+/**
+ * @param {string} homeDirectory
+ * @param {NodeJS.ProcessEnv} env
+ * @returns {{checked: boolean, path?: string, isolated?: boolean, reason?: string}}
+ */
 export function checkOpencodePlaywrightIsolation(homeDirectory, env) {
   const configDir = resolveOpencodeConfigDir(homeDirectory, env);
   const jsoncPath = path.join(configDir, "opencode.jsonc");
@@ -87,6 +109,11 @@ export function checkOpencodePlaywrightIsolation(homeDirectory, env) {
   return { checked: false, reason: "no opencode config with a playwright MCP entry found" };
 }
 
+/**
+ * @param {string} homeDirectory
+ * @param {NodeJS.ProcessEnv} env
+ * @returns {{changed: boolean, path?: string, reason?: string}}
+ */
 export function ensureOpencodePlaywrightIsolation(homeDirectory, env) {
   const configDir = resolveOpencodeConfigDir(homeDirectory, env);
   const jsonPath = path.join(configDir, "opencode.json");
@@ -111,6 +138,10 @@ export function ensureOpencodePlaywrightIsolation(homeDirectory, env) {
   return { changed: true, path: jsonPath };
 }
 
+/**
+ * @param {string} homeDirectory
+ * @returns {{checked: boolean, path?: string, isolated?: boolean, reason?: string}}
+ */
 export function checkClaudeCodePlaywrightIsolation(homeDirectory) {
   const claudePath = path.join(homeDirectory, ".claude.json");
   if (!fs.existsSync(claudePath)) {
@@ -127,7 +158,7 @@ export function checkClaudeCodePlaywrightIsolation(homeDirectory) {
     return { checked: false, reason: "no playwright MCP entry found in ~/.claude.json" };
   }
   const args = parsed.mcpServers.playwright.args;
-  const configIdx = args.findIndex((arg) => arg === "--config");
+  const configIdx = args.findIndex((/** @type {unknown} */ arg) => arg === "--config");
   if (configIdx === -1 || configIdx + 1 >= args.length) {
     return { checked: true, isolated: false, reason: "playwright MCP entry has no --config file; cannot verify isolation" };
   }
@@ -145,6 +176,10 @@ export function checkClaudeCodePlaywrightIsolation(homeDirectory) {
   return { checked: true, path: configPath, isolated: config?.browser?.isolated === true };
 }
 
+/**
+ * @param {string} homeDirectory
+ * @returns {{changed: boolean, path?: string, reason?: string}}
+ */
 export function ensureClaudeCodePlaywrightIsolation(homeDirectory) {
   const check = checkClaudeCodePlaywrightIsolation(homeDirectory);
   if (!check.checked || !check.path) {

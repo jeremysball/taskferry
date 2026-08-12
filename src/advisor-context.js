@@ -172,7 +172,7 @@ Format: bulleted, terse, no preamble, no closing summary. Short sentences. Refer
  * TASKFERRY_TASK_ID is set (this call came from inside a taskferry-spawned
  * worker), else null (no source available).
  * @param {object} params
- * @param {{request: (method: string, params: object) => Promise<any>}} params.client
+ * @param {Pick<import("./client.js").ClientTransport, "request">} params.client
  * @param {NodeJS.ProcessEnv} params.env
  * @param {string} params.cwd
  * @param {string} params.homeDirectory
@@ -190,7 +190,7 @@ export async function gatherAdvisorContext({ client, env, cwd, homeDirectory }) 
     return text ? { source: "claude-session", text } : null;
   }
   if (env.TASKFERRY_TASK_ID) {
-    const tailed = await client.request("task.tail", { taskId: env.TASKFERRY_TASK_ID, chars: Math.min(budget, ADVISOR_TAIL_CHARS_CAP) });
+    const tailed = /** @type {{text?: string}} */ (await client.request("task.tail", { taskId: env.TASKFERRY_TASK_ID, chars: Math.min(budget, ADVISOR_TAIL_CHARS_CAP) }));
     const text = tailed.text === "none observed yet" ? "" : tailed.text;
     return text ? { source: "ferry-log", text } : null;
   }

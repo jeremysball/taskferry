@@ -24,6 +24,155 @@ import {
   makeWriteMessage,
   syncActivitySubscriptions,
 } from "./daemon-server.js";
+import { errCode } from "./errors.js";
+
+/**
+ * @typedef {import("./tasks.js").Task} Task
+ * @typedef {import("./tasks.js").TaskSummary} TaskSummary
+ * @typedef {import("./tasks.js").TaskStatus} TaskStatus
+ * @typedef {import("./tasks.js").ResultDetail} ResultDetail
+ * tasks.js types the manager's api object as Record<string, any> on purpose --
+ * it is assembled with forward references (see the notes around ctx.api
+ * there) -- so this inherits that looseness rather than restating a contract
+ * that would drift. daemon-server.js declares its own narrow TaskManager for
+ * the handful of members the connection layer touches; the one cast bridging
+ * the two lives at that call site, not here.
+ * @typedef {ReturnType<typeof createTaskManager>} TaskManager
+ */
+
+/**
+ * @typedef {import("./daemon-server.js").Request} DaemonRequest
+ */
+
+/**
+ * @typedef {object} SocketHealthResult
+ * @property {boolean} listening
+ * @property {boolean} healthy
+ */
+
+/**
+ * @typedef {object} Counts
+ * @property {number} queued
+ * @property {number} running
+ * @property {number} done
+ * @property {number} crashed
+ * @property {number} cancelled
+ * @property {number} unknown
+ */
+
+/**
+ * @typedef {object} DaemonEvent
+ * @property {string} [type]
+ * @property {string} [taskId]
+ * @property {string} directory
+ * @property {string|null} [originSessionId]
+ * @property {Record<string, unknown>} [activityVariants]
+ */
+
+/**
+ * @typedef {object} RequestTimerRecord
+ * @property {string} method
+ * @property {number} durationMs
+ * @property {boolean} ok
+ * @property {string} ts
+ */
+
+/**
+ * @typedef {object} RestartState
+ * @property {boolean} pending
+ * @property {boolean} restarting
+ */
+
+/**
+ * @typedef {object} InFlightRef
+ * @property {number} current
+ */
+
+/**
+ * @typedef {object} MaybeRestartRef
+ * @property {(() => void) | null} current
+ */
+
+/**
+ * @typedef {object} ProfilingConfig
+ * @property {boolean} [profilingEnabled]
+ */
+
+/**
+ * @typedef {object} DaemonOptionsInput
+ * @property {NodeJS.Platform} [platform]
+ * @property {NodeJS.ProcessEnv} [env]
+ * @property {string} [stateDir]
+ * @property {string} [runtimeDir]
+ * @property {string} [socketPath]
+ * @property {(startDir: string) => string} [resolveWorkspaceRoot]
+ * @property {number} [healthCheckTimeoutMs]
+ * @property {number} [maxOutboundBytes]
+ * @property {number} [maxInFlightRequests]
+ * @property {TaskManagerFactory} [taskManagerFactory]
+ * @property {Record<string, any>} [taskManagerOptions]
+ * @property {string} [sourceDir]
+ * @property {string} [daemonEntry]
+ * @property {SpawnReplacement} [spawnReplacement]
+ * @property {() => void} [exitProcess]
+ * @property {ProfilingConfig} [config]
+ */
+
+/**
+ * @typedef {object} DaemonOptions
+ * @property {NodeJS.Platform} platform
+ * @property {NodeJS.ProcessEnv} env
+ * @property {string} stateDir
+ * @property {string} runtimeDir
+ * @property {string} socketPath
+ * @property {(startDir: string) => string} resolveWorkspaceRoot
+ * @property {number} healthCheckTimeoutMs
+ * @property {number} maxOutboundBytes
+ * @property {number} maxInFlightRequests
+ * @property {TaskManagerFactory} taskManagerFactory
+ * @property {Record<string, any>} taskManagerOptions
+ * @property {string} sourceDir
+ * @property {string} daemonEntry
+ * @property {SpawnReplacement} spawnReplacement
+ * @property {() => void} exitProcess
+ */
+
+/**
+ * @typedef {(options?: Record<string, any>) => TaskManager} TaskManagerFactory
+ */
+
+/**
+ * @typedef {object} SpawnReplacementArgs
+ * @property {string} daemonEntry
+ * @property {NodeJS.ProcessEnv} env
+ */
+
+/**
+ * @typedef {(args: SpawnReplacementArgs) => void} SpawnReplacement
+ */
+
+/**
+ * @callback AppendLineFn
+ * @param {string} filePath
+ * @param {string} line
+ * @returns {void}
+ */
+
+/**
+ * @typedef {object} RequestTimerDeps
+ * @property {string} stateDir
+ * @property {NodeJS.ProcessEnv} [env]
+ * @property {ProfilingConfig} [config]
+ * @property {AppendLineFn} [appendLine]
+ */
+
+/**
+ * @typedef {object} BindSocketDeps
+ * @property {net.Server} server
+ * @property {string} runtimeDir
+ * @property {string} socketPath
+ * @property {number} healthCheckTimeoutMs
+ */
 
 const DAEMON_ENTRY = fileURLToPath(import.meta.url);
 const SOURCE_DIR = path.dirname(DAEMON_ENTRY);
@@ -31,6 +180,10 @@ const SOURCE_DIR = path.dirname(DAEMON_ENTRY);
 // Detects a source-code update (e.g. a merge picked up while the daemon was
 // running) so the daemon can restart itself onto the new code. Recomputed
 // after every request and compared against the value captured at startup.
+/**
+ * @param {string} [dir]
+ * @returns {number}
+ */
 function sourceSignature(dir = SOURCE_DIR) {
   let max = 0;
   for (const entry of fs.readdirSync(dir)) {
@@ -41,6 +194,10 @@ function sourceSignature(dir = SOURCE_DIR) {
   return max;
 }
 
+/**
+ * @param {{socketPath?: string, env?: NodeJS.ProcessEnv, stateDir?: string, runtimeDir?: string}} [options]
+ * @returns {string}
+ */
 function resolveSocketPath(options = {}) {
   return options.socketPath || options.env?.TASKFERRY_SOCKET_PATH || path.join(resolveRuntimeDir(options), "daemon.sock");
 }
@@ -48,10 +205,19 @@ function resolveSocketPath(options = {}) {
 const DEFAULT_SLOW_REQUEST_MS = 500;
 const DEFAULT_PERF_LOG_MAX_BYTES = 5 * 1024 * 1024; // 5 MiB
 
+/**
+ * @param {string|undefined} value
+ * @returns {boolean}
+ */
 function isEnabledFlag(value) {
-  return ["1", "true"].includes(value);
+  return ["1", "true"].includes(/** @type {string} */ (value));
 }
 
+/**
+ * @param {NodeJS.ProcessEnv} [env]
+ * @param {ProfilingConfig} [config]
+ * @returns {boolean}
+ */
 function profilingEnabled(env, config) {
   if (env?.TASKFERRY_PROFILING_ENABLED !== undefined) return isEnabledFlag(env.TASKFERRY_PROFILING_ENABLED);
   return config?.profilingEnabled ?? false;
@@ -62,6 +228,12 @@ function profilingEnabled(env, config) {
 // Number("") === 0 -- a false "valid, explicit zero" that would otherwise
 // slip past isPositiveInteger/isNonNegativeInteger instead of falling back
 // to the default the same way a genuinely non-numeric value does.
+/**
+ * @param {string|undefined} rawValue
+ * @param {(value: unknown) => boolean} isValid
+ * @param {number} fallback
+ * @returns {number}
+ */
 function parsedEnvNumber(rawValue, isValid, fallback) {
   if (!rawValue) return fallback;
   const parsed = Number(rawValue);
@@ -73,12 +245,17 @@ function parsedEnvNumber(rawValue, isValid, fallback) {
 // indefinitely without the log growing unbounded. A rename right before the
 // write that would tip it over keeps this a single stat+rename per request,
 // not a periodic sweep.
+/**
+ * @param {string} perfLogPath
+ * @param {number} maxBytes
+ * @param {number} nextLineBytes
+ */
 function rotateIfOversized(perfLogPath, maxBytes, nextLineBytes) {
   let size;
   try {
     ({ size } = fs.statSync(perfLogPath));
   } catch (error) {
-    if (error.code === "ENOENT") return;
+    if (errCode(error) === "ENOENT") return;
     throw error;
   }
   if (size + nextLineBytes <= maxBytes) return;
@@ -92,11 +269,23 @@ function rotateIfOversized(perfLogPath, maxBytes, nextLineBytes) {
 // -- disabled by default so every daemon isn't paying an append-per-request
 // write it never asked for. Returns null when disabled, so the caller can
 // skip performance.now() entirely rather than timing into a discarded value.
-function makeRequestTimer({ stateDir, env, config, appendLine = (filePath, line) => fs.appendFileSync(filePath, line) }) {
+/**
+ * @type {AppendLineFn}
+ */
+const defaultAppendLine = (filePath, line) => fs.appendFileSync(filePath, line);
+
+/**
+ * @param {RequestTimerDeps} deps
+ * @returns {((record: {method: string, durationMs: number, ok: boolean}) => void) | null}
+ */
+function makeRequestTimer({ stateDir, env, config, appendLine = defaultAppendLine }) {
   if (!profilingEnabled(env, config)) return null;
   const perfLogPath = path.join(stateDir, "perf.log");
   const maxBytes = parsedEnvNumber(env?.TASKFERRY_PERF_LOG_MAX_BYTES, isPositiveInteger, DEFAULT_PERF_LOG_MAX_BYTES);
   const slowRequestMs = parsedEnvNumber(env?.TASKFERRY_SLOW_REQUEST_MS, isNonNegativeInteger, DEFAULT_SLOW_REQUEST_MS);
+  /**
+   * @param {{method: string, durationMs: number, ok: boolean}} record
+   */
   return function onRequestTimed({ method, durationMs, ok }) {
     const rounded = Math.round(durationMs * 100) / 100;
     const record = { method, ok, ts: new Date().toISOString(), durationMs: rounded };
@@ -113,20 +302,31 @@ function makeRequestTimer({ stateDir, env, config, appendLine = (filePath, line)
   };
 }
 
+/**
+ * @param {SpawnReplacementArgs} args
+ */
 function defaultSpawnReplacement({ daemonEntry, env }) {
   spawn(process.execPath, [daemonEntry], { detached: true, stdio: "ignore", env }).unref();
 }
 
+/**
+ * @param {string} socketPath
+ * @param {number} timeoutMs
+ * @returns {Promise<SocketHealthResult>}
+ */
 function socketHealth(socketPath, timeoutMs) {
   return new Promise((resolve, reject) => {
     const socket = net.createConnection(socketPath);
     let connected = false;
     let settled = false;
     let buffer = "";
+    /**
+     * @param {SocketHealthResult} result
+     */
     const finish = (result) => {
       if (settled) return;
       settled = true;
-      clearTimeout(timer);
+      clearTimeout(/** @type {NodeJS.Timeout} */ (timer));
       socket.destroy();
       resolve(result);
     };
@@ -156,17 +356,21 @@ function socketHealth(socketPath, timeoutMs) {
     });
     socket.on("error", (error) => {
       if (settled) return;
-      if (["ENOENT", "ECONNREFUSED", "ENOTSOCK"].includes(error.code)) {
+      if (["ENOENT", "ECONNREFUSED", "ENOTSOCK"].includes(/** @type {string} */ (errCode(error)))) {
         finish({ listening: false, healthy: false });
         return;
       }
-      clearTimeout(timer);
+      clearTimeout(/** @type {NodeJS.Timeout} */ (timer));
       settled = true;
       reject(error);
     });
   });
 }
 
+/**
+ * @param {number} ms
+ * @returns {Promise<void>}
+ */
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -177,6 +381,13 @@ function delay(ms) {
 // resolves near-instantly (an ECONNREFUSED/ENOENT socketHealth check fires in
 // well under a millisecond), so the loop busy-spins a full CPU core for as
 // long as the race lasts instead of actually converging.
+/**
+ * @param {string} runtimeDir
+ * @param {string} socketPath
+ * @param {number} healthCheckTimeoutMs
+ * @param {number} [retryDelayMs]
+ * @returns {Promise<void>}
+ */
 export async function prepareSocket(runtimeDir, socketPath, healthCheckTimeoutMs, retryDelayMs = 25) {
   fs.mkdirSync(runtimeDir, { recursive: true, mode: 0o700 });
   fs.chmodSync(runtimeDir, 0o700);
@@ -186,7 +397,7 @@ export async function prepareSocket(runtimeDir, socketPath, healthCheckTimeoutMs
     try {
       checkedIdentity = fs.statSync(socketPath);
     } catch (error) {
-      if (error.code === "ENOENT") {
+      if (errCode(error) === "ENOENT") {
         await delay(retryDelayMs);
         continue;
       }
@@ -202,6 +413,12 @@ export async function prepareSocket(runtimeDir, socketPath, healthCheckTimeoutMs
   }
 }
 
+/**
+ * @param {string} socketPath
+ * @param {fs.Stats} checkedIdentity
+ * @param {string} runtimeDir
+ * @returns {boolean}
+ */
 export function removeStaleSocketIfUnchanged(socketPath, checkedIdentity, runtimeDir) {
   const cleanupLock = path.join(runtimeDir, "socket-cleanup.lock");
   return withFileLock(cleanupLock, () => {
@@ -209,7 +426,7 @@ export function removeStaleSocketIfUnchanged(socketPath, checkedIdentity, runtim
     try {
       currentIdentity = fs.statSync(socketPath);
     } catch (error) {
-      if (error.code === "ENOENT") return false;
+      if (errCode(error) === "ENOENT") return false;
       throw error;
     }
     // dev+ino alone can collide: an unlink immediately followed by a create
@@ -225,15 +442,28 @@ export function removeStaleSocketIfUnchanged(socketPath, checkedIdentity, runtim
   });
 }
 
+/**
+ * @returns {Counts}
+ */
 function emptyCounts() {
   return { queued: 0, running: 0, done: 0, crashed: 0, cancelled: 0, unknown: 0 };
 }
 
+/**
+ * @param {TaskManager} manager
+ * @returns {Task[]}
+ */
 function listRows(manager) {
   const listed = manager.list();
   return Array.isArray(listed.tasks) ? listed.tasks : [];
 }
 
+/**
+ * @param {TaskManager} manager
+ * @param {string} directory
+ * @param {(startDir: string) => string} resolveWorkspaceRootFn
+ * @returns {{directory: string, tasks: TaskStatus[]}}
+ */
 function filteredTaskDetails(manager, directory, resolveWorkspaceRootFn) {
   const normalized = normalizeDirectory(directory);
   return {
@@ -252,6 +482,12 @@ function filteredTaskDetails(manager, directory, resolveWorkspaceRootFn) {
   };
 }
 
+/**
+ * @param {TaskManager} manager
+ * @param {string|undefined} directory
+ * @param {(startDir: string) => string} resolveWorkspaceRootFn
+ * @returns {ReturnType<TaskManager["list"]>}
+ */
 function filteredList(manager, directory, resolveWorkspaceRootFn) {
   if (directory === undefined) return manager.list();
   const details = filteredTaskDetails(manager, directory, resolveWorkspaceRootFn);
@@ -260,14 +496,22 @@ function filteredList(manager, directory, resolveWorkspaceRootFn) {
   return { counts, tasks: rows.length ? rows : "none found in this workspace" };
 }
 
+/**
+ * @param {TaskStatus[]} tasks
+ * @returns {Counts}
+ */
 function countTasks(tasks) {
   const counts = emptyCounts();
   for (const task of tasks) {
-    if (counts[task.status] !== undefined) counts[task.status]++;
+    if (counts[/** @type {keyof Counts} */ (task.status)] !== undefined) counts[/** @type {keyof Counts} */ (task.status)]++;
   }
   return counts;
 }
 
+/**
+ * @param {unknown} error
+ * @param {string|null} requestId
+ */
 function responseError(error, requestId) {
   if (error instanceof ProtocolError) {
     return errorResponse(error.requestId, error.code, error.message, error.help, error.message);
@@ -285,32 +529,46 @@ function responseError(error, requestId) {
 // rather than rebuilding a field list -- the explicit rebuild was the shape
 // that silently dropped newly-added fields, whereas forwarding (task.dispatch's
 // pattern) means new fields arrive at the manager without a daemon.js change.
+/**
+ * @typedef {(
+ *   manager: TaskManager,
+ *   params: Record<string, unknown>,
+ *   resolveWorkspaceRootFn: (startDir: string) => string
+ * ) => unknown} InvokeHandler
+ */
+/** @type {Record<string, InvokeHandler>} */
 const invokeHandlers = {
   "system.health": () => ({ healthy: true, pid: process.pid, version: PROTOCOL_VERSION }),
-  "task.dispatch": (manager, params) => manager.dispatch(params),
-  "task.cancel": (manager, params) => manager.cancel(params.taskId, params.graceMs === undefined ? undefined : { graceMs: params.graceMs }),
-  "task.status": (manager, params) => manager.status(params.taskId),
-  "task.wait": (manager, params) => manager.poll(params.taskId, params),
-  "task.list": (manager, params, resolveWorkspaceRootFn) => filteredList(manager, params.directory, resolveWorkspaceRootFn),
+  "task.dispatch": (manager, params) => manager.dispatch(/** @type {any} */ (params)),
+  "task.cancel": (manager, params) => manager.cancel(/** @type {string} */ (params.taskId), params.graceMs === undefined ? undefined : { graceMs: /** @type {number} */ (params.graceMs) }),
+  "task.status": (manager, params) => manager.status(/** @type {string} */ (params.taskId)),
+  "task.wait": (manager, params) => manager.poll(/** @type {string} */ (params.taskId), /** @type {any} */ (params)),
+  "task.list": (manager, params, resolveWorkspaceRootFn) => filteredList(manager, /** @type {string|undefined} */ (params.directory), resolveWorkspaceRootFn),
   "task.stats": (manager) => manager.stats(),
-  "task.result": (manager, params) => manager.result(params.taskId, params),
-  "task.tail": (manager, params) => manager.tail(params.taskId, params.chars === undefined ? undefined : { chars: params.chars }),
-  "task.summary": (manager, params) => manager.summarize(params.taskId, params),
-  "task.advisor": (manager, params) => manager.advisor(params),
+  "task.result": (manager, params) => manager.result(/** @type {string} */ (params.taskId), /** @type {any} */ (params)),
+  "task.tail": (manager, params) => manager.tail(/** @type {string} */ (params.taskId), params.chars === undefined ? undefined : { chars: /** @type {number} */ (params.chars) }),
+  "task.summary": (manager, params) => manager.summarize(/** @type {string} */ (params.taskId), /** @type {any} */ (params)),
+  "task.advisor": (manager, params) => manager.advisor(/** @type {any} */ (params)),
   "task.context": (manager, params, resolveWorkspaceRootFn) => {
-    const context = filteredTaskDetails(manager, params.directory, resolveWorkspaceRootFn);
+    const context = filteredTaskDetails(manager, /** @type {string} */ (params.directory), resolveWorkspaceRootFn);
     return { ...context, counts: countTasks(context.tasks) };
   },
-  "task.accept": (manager, params) => manager.accept(params.taskId, { force: params.force === true }),
-  "task.reject": (manager, params) => manager.reject(params.taskId),
+  "task.accept": (manager, params) => manager.accept(/** @type {string} */ (params.taskId), { force: params.force === true }),
+  "task.reject": (manager, params) => manager.reject(/** @type {string} */ (params.taskId)),
 };
 
+/**
+ * @param {TaskManager} manager
+ * @param {DaemonRequest} request
+ * @param {(startDir: string) => string} resolveWorkspaceRootFn
+ */
 function invoke(manager, request, resolveWorkspaceRootFn) {
   const handler = invokeHandlers[request.method];
   if (!handler) throw new Error(`unsupported method after validation: ${request.method}`);
   return handler(manager, request.params, resolveWorkspaceRootFn);
 }
 
+/** @type {Partial<DaemonOptions>} */
 const DAEMON_DEFAULTS = {
   platform: process.platform,
   env: process.env,
@@ -325,12 +583,17 @@ const DAEMON_DEFAULTS = {
   exitProcess: () => process.exit(0),
 };
 
+/**
+ * @param {DaemonOptionsInput} [options]
+ * @returns {DaemonOptions}
+ */
 function resolveDaemonOptions(options = {}) {
+  /** @type {Partial<DaemonOptions>} */
   const merged = { ...DAEMON_DEFAULTS, ...options };
   for (const key of Object.keys(DAEMON_DEFAULTS)) {
-    if (merged[key] === undefined) merged[key] = DAEMON_DEFAULTS[key];
+    if (merged[/** @type {keyof DaemonOptions} */ (key)] === undefined) merged[/** @type {keyof DaemonOptions} */ (key)] = /** @type {any} */ (DAEMON_DEFAULTS[/** @type {keyof DaemonOptions} */ (key)]);
   }
-  const env = merged.env;
+  const env = /** @type {NodeJS.ProcessEnv} */ (merged.env);
   const stateDir = merged.stateDir ?? resolveStateDir(env);
   const runtimeDir = merged.runtimeDir ?? resolveRuntimeDir({ env, stateDir });
   const socketPath = merged.socketPath ?? resolveSocketPath({ env, stateDir, runtimeDir });
@@ -345,16 +608,16 @@ function resolveDaemonOptions(options = {}) {
     runtimeDir,
     socketPath,
     resolveWorkspaceRoot,
-    platform: merged.platform,
-    healthCheckTimeoutMs: merged.healthCheckTimeoutMs,
-    maxOutboundBytes: merged.maxOutboundBytes,
-    maxInFlightRequests: merged.maxInFlightRequests,
-    taskManagerFactory: merged.taskManagerFactory,
-    taskManagerOptions: merged.taskManagerOptions,
-    sourceDir: merged.sourceDir,
-    daemonEntry: merged.daemonEntry,
-    spawnReplacement: merged.spawnReplacement,
-    exitProcess: merged.exitProcess,
+    platform: /** @type {NodeJS.Platform} */ (merged.platform),
+    healthCheckTimeoutMs: /** @type {number} */ (merged.healthCheckTimeoutMs),
+    maxOutboundBytes: /** @type {number} */ (merged.maxOutboundBytes),
+    maxInFlightRequests: /** @type {number} */ (merged.maxInFlightRequests),
+    taskManagerFactory: /** @type {TaskManagerFactory} */ (merged.taskManagerFactory),
+    taskManagerOptions: /** @type {Record<string, any>} */ (merged.taskManagerOptions),
+    sourceDir: /** @type {string} */ (merged.sourceDir),
+    daemonEntry: /** @type {string} */ (merged.daemonEntry),
+    spawnReplacement: /** @type {SpawnReplacement} */ (merged.spawnReplacement),
+    exitProcess: /** @type {() => void} */ (merged.exitProcess),
   };
 }
 
@@ -385,11 +648,21 @@ function resolveDaemonOptions(options = {}) {
 // for this; the identity check itself doesn't distinguish "dead" from
 // "alive but didn't answer in 250ms" and remains a latent gap worth a
 // follow-up (e.g. a short retry before concluding stale).
+/**
+ * @param {BindSocketDeps} deps
+ * @returns {Promise<void>}
+ */
 async function bindDaemonSocket({ server, runtimeDir, socketPath, healthCheckTimeoutMs }) {
   const bindLockPath = path.join(runtimeDir, "socket-bind.lock");
   await withFileLockAsync(bindLockPath, async () => {
     await prepareSocket(runtimeDir, socketPath, healthCheckTimeoutMs);
-    await new Promise((resolve, reject) => {
+    /**
+     * @type {Promise<void>}
+     */
+    const listenPromise = new Promise((resolve, reject) => {
+      /**
+       * @param {Error} error
+       */
       const onError = (error) => reject(error);
       server.once("error", onError);
       server.listen(socketPath, () => {
@@ -397,10 +670,15 @@ async function bindDaemonSocket({ server, runtimeDir, socketPath, healthCheckTim
         resolve();
       });
     });
+    await listenPromise;
   });
   fs.chmodSync(socketPath, 0o600);
 }
 
+/**
+ * @param {DaemonOptionsInput} [options]
+ * @returns {Promise<{socketPath: string, close: () => Promise<void>, stats: () => {connections: number, subscriptions: number}}>}
+ */
 export async function startDaemon(options = {}) {
   const {
     platform,
@@ -425,36 +703,53 @@ export async function startDaemon(options = {}) {
   }
   fs.mkdirSync(runtimeDir, { recursive: true, mode: 0o700 });
 
+  /** @type {Set<net.Socket>} */
   const clients = new Set();
+  /** @type {Map<string, {socket: net.Socket, directory: string|null, summaries: boolean, originSessionId: string|null}>} */
   const subscriptions = new Map();
+  /** @type {InFlightRef} */
   const inFlightRef = { current: 0 };
   const writeMessage = makeWriteMessage(maxOutboundBytes);
+  /**
+   * @param {DaemonEvent} event
+   */
   const onEvent = (event) => deliverEvent(subscriptions, writeMessage, event, resolveWorkspaceRoot);
   const manager = taskManagerFactory({ ...taskManagerOptions, onEvent, stateDir, runtimeDir });
+  // The manager is a Record<string, any> by construction (see the TaskManager
+  // typedef above). daemon-server.js states the narrow contract it depends on;
+  // assert it once here so every hand-off below carries it, instead of casting
+  // at each of the four call sites.
+  const serverManager = /** @type {import("./daemon-server.js").TaskManager} */ (manager);
   const onRequestTimed = makeRequestTimer({ stateDir, env, config: taskManagerOptions.config });
   const startupSourceSignature = sourceSignature(sourceDir);
-  const syncActivity = () => syncActivitySubscriptions(manager, subscriptions);
+  const syncActivity = () => syncActivitySubscriptions(serverManager, subscriptions);
+  /** @type {RestartState} */
   const restart = { pending: false, restarting: false };
+  /** @type {MaybeRestartRef} */
   const maybeRestartRef = { current: null };
   const server = createDaemonServer({
     clients,
     subscriptions,
-    manager,
     writeMessage,
     syncActivity,
     inFlightRef,
     maxInFlightRequests,
     responseError,
     onRequestTimed,
+    manager: serverManager,
+    /**
+     * @param {TaskManager} targetManager
+     * @param {DaemonRequest} request
+     */
     invoke: (targetManager, request) => invoke(targetManager, request, resolveWorkspaceRoot),
     maybeRestart: () => maybeRestartRef.current?.(),
   });
 
   await bindDaemonSocket({ server, runtimeDir, socketPath, healthCheckTimeoutMs });
 
-  const close = makeClose({ manager, clients, server, socketPath, restart });
+  const close = makeClose({ manager: serverManager, clients, server, socketPath, restart });
   maybeRestartRef.current = makeMaybeRestart({
-    manager,
+    manager: serverManager,
     sourceDir,
     sourceSignature,
     startupSourceSignature,

@@ -16,6 +16,55 @@ const DAEMON_ENTRY = fileURLToPath(new URL("./daemon.js", import.meta.url));
 const CLIENT_ENTRY = fileURLToPath(import.meta.url);
 const SOCKET_FILENAME = "daemon.sock";
 
+/**
+ * @typedef {object} DaemonBooterOptions
+ * @property {NodeJS.ProcessEnv} env
+ * @property {string} stateDir
+ * @property {string} runtimeDir
+ * @property {string} socketPath
+ */
+
+/**
+ * @typedef {object} StartDaemonBooterOptions
+ * @property {NodeJS.ProcessEnv} [env]
+ * @property {string} [stateDir]
+ * @property {string} [runtimeDir]
+ * @property {string} [socketPath]
+ * @property {(options: DaemonBooterOptions) => unknown} [spawnBooterFn]
+ */
+
+/**
+ * @typedef {object} EnsureDaemonOptions
+ * @property {NodeJS.ProcessEnv} [env]
+ * @property {string} [stateDir]
+ * @property {string} [runtimeDir]
+ * @property {string} [socketPath]
+ * @property {number} [startupTimeoutMs]
+ * @property {number} [retryDelayMs]
+ * @property {<T>(lockPath: string, callback: () => T, options: {timeoutMs: number, staleMs: number, retryMs: number}) => T} [withLockFn]
+ * @property {(socketPath: string) => boolean} [isDaemonReadySync]
+ * @property {(options: DaemonBooterOptions) => unknown} [spawnDaemonFn]
+ * @property {({env}: {env: NodeJS.ProcessEnv}) => unknown} [loadConfigFn]
+ */
+
+/**
+ * @typedef {object} DaemonClientOptions
+ * @property {number} maxBufferBytes
+ * @property {number} maxQueuedEvents
+ */
+
+/**
+ * @typedef {{resolve: (result: unknown) => void, reject: (error: Error) => void}} PendingRequest
+ */
+
+/**
+ * @typedef {object} ErrorEnvelope
+ * @property {string} code
+ * @property {string} message
+ * @property {string} help
+ * @property {string} detail
+ */
+
 const HEALTH_PROBE = String.raw`
 const net = require("node:net");
 const socket = net.createConnection(process.argv[1]);
@@ -36,6 +85,12 @@ socket.on("data", (chunk) => {
 socket.on("error", () => process.exit(1));
 `;
 
+/**
+ * Probe the daemon via a short-lived child that runs HEALTH_PROBE against the
+ * socket. Returns true iff the probe got a healthy response within the timeout.
+ * @param {string} socketPath
+ * @returns {boolean}
+ */
 function daemonReadySync(socketPath) {
   return spawnSync(process.execPath, ["-e", HEALTH_PROBE, socketPath], {
     stdio: "ignore",
@@ -43,6 +98,13 @@ function daemonReadySync(socketPath) {
   }).status === 0;
 }
 
+/**
+ * Spawn the long-lived daemon process and unref it so the parent can exit
+ * without waiting on it. Returns the spawned child so callers/tests can stub
+ * or observe the spawn.
+ * @param {DaemonBooterOptions} options
+ * @returns {import("node:child_process").ChildProcess}
+ */
 function spawnDaemon({ env, stateDir, runtimeDir, socketPath }) {
   const child = spawn(process.execPath, [DAEMON_ENTRY], {
     detached: true,
@@ -58,6 +120,10 @@ function spawnDaemon({ env, stateDir, runtimeDir, socketPath }) {
   return child;
 }
 
+/**
+ * @param {string} runtimeDir
+ * @returns {string}
+ */
 function bootErrorPath(runtimeDir) {
   return path.join(runtimeDir, "daemon-boot.err");
 }
@@ -67,11 +133,20 @@ function bootErrorPath(runtimeDir) {
 // missing import dependency). Node then prints to stderr, and with
 // `stdio: "ignore"` discards the message. Piping stderr to a file next to
 // daemon-boot.err preserves it.
+/**
+ * @param {string} runtimeDir
+ * @returns {string}
+ */
 function bootStderrPath(runtimeDir) {
   return path.join(runtimeDir, "daemon-boot-stderr.log");
 }
 
+/**
+ * @param {DaemonBooterOptions} options
+ * @returns {import("node:child_process").ChildProcess}
+ */
 function spawnDaemonBooter({ env, stateDir, runtimeDir, socketPath }) {
+  /** @type {number | undefined} */
   let stderrFd;
   try {
     stderrFd = fs.openSync(bootStderrPath(runtimeDir), "w", 0o600);
@@ -99,6 +174,10 @@ function spawnDaemonBooter({ env, stateDir, runtimeDir, socketPath }) {
 // on it. The subprocess isn't tied to this process's lifetime, so a caller
 // with a short external timeout (e.g. a 1s-refresh statusline) can be killed
 // mid-boot without ever having held daemon-start.lock itself.
+/**
+ * @param {StartDaemonBooterOptions} [options]
+ * @returns {Promise<void>}
+ */
 export async function startDaemonBooter({
   env = process.env,
   stateDir = resolveStateDir(env),
@@ -115,6 +194,10 @@ export async function startDaemonBooter({
   spawnBooterFn({ env, stateDir, runtimeDir, socketPath });
 }
 
+/**
+ * @param {EnsureDaemonOptions} [options]
+ * @returns {boolean}
+ */
 export function ensureDaemonStarted({
   env = process.env,
   stateDir = resolveStateDir(env),
@@ -150,7 +233,50 @@ export function ensureDaemonStarted({
   });
 }
 
+/**
+ * @typedef {"restart" | "shutdown" | null} ShutdownReason
+ */
+
+/**
+ * @typedef {(event: Record<string, unknown>) => void} EventHandler
+ */
+
+/**
+ * The transport surface every daemon-facing consumer (commands.js,
+ * commands-stream.js, opencode-plugin.js) actually depends on. `DaemonClient`
+ * below satisfies it; this is the one canonical typedef other modules import
+ * instead of redeclaring their own copy. `close` is required — some callers
+ * (opencode-plugin.js) invoke it unguarded.
+ * @typedef {object} ClientTransport
+ * @property {(method: string, params?: Record<string, unknown>) => Promise<unknown>} request
+ * @property {(params: Record<string, unknown>, onEvent: EventHandler) => Promise<string>} subscribe
+ * @property {() => void} close
+ */
+
 class DaemonClient {
+  /** @type {net.Socket} */
+  socket;
+  /** @type {string} */
+  buffer;
+  /** @type {boolean} */
+  closed;
+  /** @type {ShutdownReason} */
+  shutdownReason;
+  /** @type {Map<string, PendingRequest>} */
+  pending;
+  /** @type {Map<string, EventHandler>} */
+  eventHandlers;
+  /** @type {Map<string, Array<Record<string, unknown>>>} */
+  queuedEvents;
+  /** @type {number} */
+  maxBufferBytes;
+  /** @type {number} */
+  maxQueuedEvents;
+
+  /**
+   * @param {net.Socket} socket
+   * @param {DaemonClientOptions} options
+   */
   constructor(socket, { maxBufferBytes, maxQueuedEvents }) {
     this.socket = socket;
     this.buffer = "";
@@ -169,7 +295,19 @@ class DaemonClient {
       : new Error("taskferry daemon connection closed")));
   }
 
+  /**
+   * The socket runs in utf8 mode (setEncoding in the constructor), so Node
+   * hands strings here. Accept `string | Buffer` so that coupling is explicit:
+   * a Buffer means the encoding contract was broken, and decoding it per-chunk
+   * would silently corrupt multi-byte characters split across frames. Fail
+   * loudly instead.
+   * @param {string|Buffer} chunk
+   */
   onData(chunk) {
+    if (typeof chunk !== "string") {
+      this.protocolFailure("daemon socket is not in utf8 mode; expected string data");
+      return;
+    }
     this.buffer += chunk;
     for (;;) {
       const newline = this.buffer.indexOf("\n");
@@ -187,6 +325,7 @@ class DaemonClient {
 
   // Process a single newline-delimited frame. Returns false when the connection
   // must be torn down (malformed/protocol-invalid data), true to keep reading.
+  /** @param {string} line @returns {boolean} */
   consumeFrame(line) {
     if (!line) return true;
     let message;
@@ -209,10 +348,11 @@ class DaemonClient {
       this.shutdownReason = message.reason === "restart" ? "restart" : "shutdown";
       return true;
     }
-    if (message.type === "event") return this.consumeEvent(message);
-    return this.consumeResponse(message);
+    if (message.type === "event") return this.consumeEvent(/** @type {Record<string, unknown> & {subscriptionId: string, event: Record<string, unknown>}} */ (message));
+    return this.consumeResponse(/** @type {Record<string, unknown>} */ (message));
   }
 
+  /** @param {Record<string, unknown> & {subscriptionId: string, event: Record<string, unknown>}} message @returns {boolean} */
   consumeEvent(message) {
     if (!isExactObject(message, ["version", "type", "subscriptionId", "event"])
       || typeof message.subscriptionId !== "string"
@@ -237,6 +377,7 @@ class DaemonClient {
     return true;
   }
 
+  /** @param {Record<string, unknown>} message @returns {boolean} */
   consumeResponse(message) {
     const responseKeys = message.ok === true
       ? ["version", "id", "ok", "result"]
@@ -245,22 +386,24 @@ class DaemonClient {
       this.protocolFailure("taskferry daemon sent an invalid response envelope");
       return false;
     }
-    const pending = this.pending.get(message.id);
+    const pending = this.pending.get(/** @type {string} */ (message.id));
     if (!pending) return true;
-    this.pending.delete(message.id);
+    this.pending.delete(/** @type {string} */ (message.id));
     if (message.ok === true) {
       pending.resolve(message.result);
     } else {
-      pending.reject(buildRequestError(message.error));
+      pending.reject(buildRequestError(/** @type {ErrorEnvelope} */ (message.error)));
     }
     return true;
   }
 
+  /** @param {string} message */
   protocolFailure(message) {
     this.failAll(new Error(message));
     this.socket.destroy();
   }
 
+  /** @param {Error} error */
   failAll(error) {
     if (this.closed) return;
     this.closed = true;
@@ -268,6 +411,11 @@ class DaemonClient {
     this.pending.clear();
   }
 
+  /**
+   * @param {string} method
+   * @param {Record<string, unknown>} [params]
+   * @returns {Promise<unknown>}
+   */
   request(method, params = {}) {
     if (this.closed) return Promise.reject(new Error("taskferry daemon connection is closed"));
     const id = randomUUID();
@@ -276,9 +424,14 @@ class DaemonClient {
     return response;
   }
 
+  /**
+   * @param {Record<string, unknown>} params
+   * @param {EventHandler} onEvent
+   * @returns {Promise<string>}
+   */
   async subscribe(params, onEvent) {
     if (typeof onEvent !== "function") throw new TypeError("event subscription requires an onEvent callback");
-    const { subscriptionId } = await this.request("event.subscribe", params);
+    const { subscriptionId } = /** @type {{subscriptionId: string}} */ (await this.request("event.subscribe", params));
     this.eventHandlers.set(subscriptionId, onEvent);
     const queued = this.queuedEvents.get(subscriptionId) || [];
     this.queuedEvents.delete(subscriptionId);
@@ -292,12 +445,21 @@ class DaemonClient {
   }
 }
 
+/**
+ * @param {unknown} value
+ * @param {string[]} keys
+ * @returns {value is Record<string, unknown>}
+ */
 function isExactObject(value, keys) {
   return isObject(value)
     && Object.keys(value).length === keys.length
-    && Object.keys(value).every((key) => keys.includes(key));
+    && Object.keys(value).every((key) => keys.includes(/** @type {string} */ (key)));
 }
 
+/**
+ * @param {unknown} error
+ * @returns {boolean}
+ */
 function validError(error) {
   if (!isExactObject(error, ["code", "message", "help", "detail"])) return false;
   return typeof error.code === "string"
@@ -306,6 +468,11 @@ function validError(error) {
     && typeof error.detail === "string";
 }
 
+/**
+ * @param {unknown} message
+ * @param {string[]} responseKeys
+ * @returns {boolean}
+ */
 function isValidResponseEnvelope(message, responseKeys) {
   if (!isExactObject(message, responseKeys)
     || typeof message.id !== "string"
@@ -315,16 +482,26 @@ function isValidResponseEnvelope(message, responseKeys) {
   return !(message.ok === false && !validError(message.error));
 }
 
+/**
+ * @param {ErrorEnvelope} error
+ * @returns {Error & {code: string}}
+ */
 function buildRequestError(error) {
   const message = error?.message || "daemon request failed";
   const help = error?.help || "retry the request";
   let body = `${message}\nhelp: ${help}`;
   if (error?.detail && error.detail !== error.message) body = error.detail;
-  const err = new Error(body);
+  /** @type {Error & {code: string}} */
+  const err = /** @type {Error & {code: string}} */ (new Error(body));
   err.code = error?.code || "REQUEST_FAILED";
   return err;
 }
 
+/**
+ * @param {string} socketPath
+ * @param {DaemonClientOptions} clientOptions
+ * @returns {Promise<DaemonClient>}
+ */
 async function openClient(socketPath, clientOptions) {
   const socket = net.createConnection(socketPath);
   const client = new DaemonClient(socket, clientOptions);
@@ -335,12 +512,17 @@ async function openClient(socketPath, clientOptions) {
   return client;
 }
 
+/** @param {number} ms @returns {Promise<void>} */
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 // Read a daemon diagnostic file, tolerating a missing file (ENOENT) as "no
 // diagnostics". Any other read error is real and must propagate.
+/**
+ * @param {string} file
+ * @returns {string | undefined}
+ */
 function readStartupDiagnostic(file) {
   try {
     return fs.readFileSync(file, "utf8").trim();
@@ -353,6 +535,10 @@ function readStartupDiagnostic(file) {
 // Capture both startup diagnostics, but read the stderr log only when
 // bootError is absent: the booter subprocess failed at import time, before
 // reaching the try/catch that writes bootError above.
+/**
+ * @param {string} runtimeDir
+ * @returns {{bootError: string | undefined, bootStderr: string | undefined}}
+ */
 function readStartupDiagnostics(runtimeDir) {
   const bootError = readStartupDiagnostic(bootErrorPath(runtimeDir));
   const bootStderr = bootError ? "" : readStartupDiagnostic(bootStderrPath(runtimeDir));
@@ -361,6 +547,13 @@ function readStartupDiagnostics(runtimeDir) {
 
 // Retry connecting to the socket until the deadline passes. Returns the first
 // successful client, or { client: null, lastError } on timeout.
+/**
+ * @param {string} socketPath
+ * @param {DaemonClientOptions} clientOptions
+ * @param {number} retryDelayMs
+ * @param {number} deadline
+ * @returns {Promise<{client: DaemonClient | null, lastError?: unknown}>}
+ */
 async function retryOpenClient(socketPath, clientOptions, retryDelayMs, deadline) {
   let lastError;
   do {
@@ -377,6 +570,25 @@ async function retryOpenClient(socketPath, clientOptions, retryDelayMs, deadline
 // Resolve the connect-time defaults, then delegate to the core connection
 // logic (kept as a separate function so the default-heavy signature doesn't
 // inflate its cyclomatic complexity).
+/**
+ * @typedef {object} ConnectClientOptions
+ * @property {NodeJS.ProcessEnv} [env]
+ * @property {string} [stateDir]
+ * @property {string} [runtimeDir]
+ * @property {string} [socketPath]
+ * @property {boolean} [autoStart]
+ * @property {number} [startupTimeoutMs]
+ * @property {number} [retryDelayMs]
+ * @property {number} [maxBufferBytes]
+ * @property {number} [maxQueuedEvents]
+ * @property {(options: {env: NodeJS.ProcessEnv, stateDir: string, runtimeDir: string, socketPath: string, startupTimeoutMs: number, retryDelayMs: number}) => Promise<void> | void} [ensureDaemonFn]
+ * @property {Record<string, unknown>} [startupOptions]
+ */
+
+/**
+ * @param {ConnectClientOptions} [options]
+ * @returns {Promise<DaemonClient>}
+ */
 export async function connectClient({
   env = process.env,
   stateDir = resolveStateDir(env),
@@ -402,6 +614,10 @@ export async function connectClient({
   });
 }
 
+/**
+ * @param {{env: NodeJS.ProcessEnv, stateDir: string, runtimeDir: string, socketPath: string, autoStart: boolean, startupTimeoutMs: number, retryDelayMs: number, maxBufferBytes: number, maxQueuedEvents: number, ensureDaemonFn: (options: {env: NodeJS.ProcessEnv, stateDir: string, runtimeDir: string, socketPath: string, startupTimeoutMs: number, retryDelayMs: number}) => Promise<void> | void, startupOptions: Record<string, unknown>}} args
+ * @returns {Promise<DaemonClient>}
+ */
 async function connectClientCore({
   env, stateDir, runtimeDir, socketPath, autoStart, startupTimeoutMs,
   retryDelayMs, maxBufferBytes, maxQueuedEvents, ensureDaemonFn, startupOptions,
@@ -419,8 +635,10 @@ async function connectClientCore({
   if (client) return client;
 
   const { bootError, bootStderr } = readStartupDiagnostics(runtimeDir);
+  /** @type {{message?: string} | undefined} */
+  const lastErrorTyped = /** @type {{message?: string} | undefined} */ (lastError);
   throw new Error(
-    `error: taskferry daemon did not become ready within ${startupTimeoutMs}ms: ${lastError?.message || "connection failed"}\n`
+    `error: taskferry daemon did not become ready within ${startupTimeoutMs}ms: ${lastErrorTyped?.message || "connection failed"}\n`
     + (bootError ? `daemon boot failed: ${bootError}\n` : "")
     + (bootStderr ? `booter subprocess failed before startup: ${bootStderr}\n` : "")
     + `help: check ${runtimeDir} permissions and daemon startup diagnostics, then retry`

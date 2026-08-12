@@ -67,6 +67,17 @@ describe("checkBwrapAvailable()", () => {
     assert.match(result.reason, /EACCES/);
   });
 
+  test("does not treat a numeric error code as the ENOENT 'bwrap not found' case", () => {
+    // A spawned-probe failure can surface with a numeric ExecException.code
+    // (e.g. 127). errCode() stringifies, so a numeric code must fall through to
+    // the spawn-error message, not be misreported as a missing bwrap binary.
+    const runCommand = () => ({ status: null, stdout: "", stderr: "", error: { code: 127, message: "spawnSync bwrap ENOENT" } });
+    const result = checkBwrapAvailable(runCommand);
+    assert.equal(result.available, false);
+    assert.doesNotMatch(result.reason, /bwrap not found/);
+    assert.match(result.reason, /spawnSync bwrap ENOENT/);
+  });
+
   test("reports unavailable when the probe exits non-zero with no spawn error", () => {
     const runCommand = () => ({ status: 1, stdout: "", stderr: "boom", error: null });
     const result = checkBwrapAvailable(runCommand);

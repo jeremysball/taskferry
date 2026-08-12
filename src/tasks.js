@@ -747,6 +747,7 @@ export function isOutsideDirectory(directory, candidate) {
  * @property {string} stateDir
  * @property {string} cacheDir
  * @property {string} runtimeDir
+ * @property {string} socketPath
  * @property {(path: string) => boolean} existsFn
  * @property {(path: string) => {isDirectory: () => boolean}|null} statFn
  * @property {(path: string) => string[]} readdirFn
@@ -1302,7 +1303,13 @@ function assembleBwrapSpawn(ctx, launchInfo, binds, task) {
     extraRwPairBinds: binds.executorRwPairBinds,
     extraRoBinds: binds.extraRoBinds,
     ...(binds.overlayInfo ? { overlay: { upperDir: binds.overlayInfo.upperDir, workDir: binds.overlayInfo.workDir }, overlayRwBinds: binds.overlayRwBinds, overlayRwFileBinds: binds.overlayRwFileBinds } : {}),
-    runtimeDirWritable: binds.role !== "advisor",
+    // Narrow per-task runtime mounts (#453/#454/#455): bind only the daemon
+    // socket, not the whole runtimeDir. Advisor roles get no socket bind at
+    // all, so they cannot reach the daemon (the #454 fix -- a read-only bind
+    // never gated connect()). Sibling overlays and other tasks' state under
+    // runtimeDir are no longer reachable (#453), and the stateDir deny-list is
+    // no longer un-masked by a whole-runtimeDir bind (#455).
+    socketPath: binds.role !== "advisor" ? ctx.socketPath : null,
   }).concat(["--", executor.binaryName, ...args]);
   const spawnEnv = { ...binds.spawnEnv, ...binds.sandboxEnv };
   if (binds.overlayInfo && !isSummary) {
@@ -3914,6 +3921,10 @@ function resolveFilesystemDerivedOptions(rawOptions) {
     overlayTmpRoot: rawOptions.overlayTmpRoot ?? resolveOverlayTmpRoot({ env: process.env, runtimeDir }),
     cacheDir: rawOptions.cacheDir ?? resolveCacheDir(process.env),
     runtimeDir,
+    // The daemon's Unix socket path, threaded through so the sandbox can bind
+    // exactly the socket the worker's CLI will connect to (which may be a
+    // custom TASKFERRY_SOCKET_PATH, not the default <runtimeDir>/daemon.sock).
+    socketPath: rawOptions.socketPath ?? process.env.TASKFERRY_SOCKET_PATH ?? path.join(runtimeDir, "daemon.sock"),
   };
 }
 
@@ -4385,7 +4396,7 @@ function buildManagerInternalHelpers(ctx) {
      * delegated to {@link startTaskFor}, which takes every factory closure
      * dependency explicitly via `ctx`.
      * @param {Task} task */
-    startTask: (task) => startTaskFor(task, { pendingLaunches: ctx.maps.pendingLaunches, SUMMARY_DIR: ctx.paths.SUMMARY_DIR, PROMPT_DIR: ctx.paths.PROMPT_DIR, spawnFn: ctx.opts.spawnFn, runOverlayCommandFn: ctx.opts.runOverlayCommandFn, sandboxEnabled: ctx.opts.sandboxEnabled, platform: ctx.opts.platform, overlayEnabled: ctx.opts.overlayEnabled, overlayTmpRoot: ctx.opts.overlayTmpRoot, allowedDirs: ctx.opts.allowedDirs, roBind: ctx.opts.roBind, stateDir: ctx.opts.stateDir, cacheDir: ctx.opts.cacheDir, runtimeDir: ctx.opts.runtimeDir, existsFn: ctx.opts.existsFn, statFn: ctx.opts.statFn, readdirFn: ctx.opts.readdirFn, sandboxDenylist: ctx.opts.sandboxDenylist, resolveGitCommonDirFn: ctx.opts.resolveGitCommonDirFn, resolveGitDirFn: ctx.opts.resolveGitDirFn, requireBwrap: () => ctx.env.requireBwrap(), requireOverlaySupport: () => ctx.env.requireOverlaySupport(), dispatchEnvironment: (env, taskId) => ctx.env.dispatchEnvironment(env, taskId), summaryEnvironment: (env) => ctx.env.summaryEnvironment(env), settleWaiters: (taskId) => ctx.helpers.settleWaiters(taskId), launchQueuedTasks: () => ctx.helpers.launchQueuedTasks(), persistTask: (taskId) => ctx.helpers.persistTask(taskId), scheduleActivity: (task, options) => ctx.helpers.scheduleActivity(task, options), classifyTrailingLogFailure: (task, executor) => ctx.helpers.classifyTrailingLogFailure(task, executor), startRunningWatcher: (task, executor) => ctx.helpers.startRunningWatcher(task, executor), stopRunningWatcher: (taskId) => ctx.helpers.stopRunningWatcher(taskId), extractChangesetForTask: (task) => ctx.env.extractChangesetForTask(task), sendSignal: (pid, signal) => ctx.helpers.sendSignal(pid, signal), activityCache: ctx.activity.cache, logHasEventCache: ctx.maps.logHasEventCache, escalationTimers: ctx.maps.escalationTimers, tasks: ctx.maps.tasks, decRunning: (task) => { ctx.state.runningCount--; const q = ctx.maps.providerQueues.get(providerOf(task.model)); if (q) { q.runningCount--; } }, incRunning: (task) => { ctx.state.runningCount++; const q = ctx.maps.providerQueues.get(providerOf(task.model)); if (q) { q.runningCount++; } }, readSessionIdFromLog, evaluateOutputCompleteness, attemptCrashRecovery }),
+    startTask: (task) => startTaskFor(task, { pendingLaunches: ctx.maps.pendingLaunches, SUMMARY_DIR: ctx.paths.SUMMARY_DIR, PROMPT_DIR: ctx.paths.PROMPT_DIR, spawnFn: ctx.opts.spawnFn, runOverlayCommandFn: ctx.opts.runOverlayCommandFn, sandboxEnabled: ctx.opts.sandboxEnabled, platform: ctx.opts.platform, overlayEnabled: ctx.opts.overlayEnabled, overlayTmpRoot: ctx.opts.overlayTmpRoot, allowedDirs: ctx.opts.allowedDirs, roBind: ctx.opts.roBind, stateDir: ctx.opts.stateDir, cacheDir: ctx.opts.cacheDir, runtimeDir: ctx.opts.runtimeDir, socketPath: ctx.opts.socketPath, existsFn: ctx.opts.existsFn, statFn: ctx.opts.statFn, readdirFn: ctx.opts.readdirFn, sandboxDenylist: ctx.opts.sandboxDenylist, resolveGitCommonDirFn: ctx.opts.resolveGitCommonDirFn, resolveGitDirFn: ctx.opts.resolveGitDirFn, requireBwrap: () => ctx.env.requireBwrap(), requireOverlaySupport: () => ctx.env.requireOverlaySupport(), dispatchEnvironment: (env, taskId) => ctx.env.dispatchEnvironment(env, taskId), summaryEnvironment: (env) => ctx.env.summaryEnvironment(env), settleWaiters: (taskId) => ctx.helpers.settleWaiters(taskId), launchQueuedTasks: () => ctx.helpers.launchQueuedTasks(), persistTask: (taskId) => ctx.helpers.persistTask(taskId), scheduleActivity: (task, options) => ctx.helpers.scheduleActivity(task, options), classifyTrailingLogFailure: (task, executor) => ctx.helpers.classifyTrailingLogFailure(task, executor), startRunningWatcher: (task, executor) => ctx.helpers.startRunningWatcher(task, executor), stopRunningWatcher: (taskId) => ctx.helpers.stopRunningWatcher(taskId), extractChangesetForTask: (task) => ctx.env.extractChangesetForTask(task), sendSignal: (pid, signal) => ctx.helpers.sendSignal(pid, signal), activityCache: ctx.activity.cache, logHasEventCache: ctx.maps.logHasEventCache, escalationTimers: ctx.maps.escalationTimers, tasks: ctx.maps.tasks, decRunning: (task) => { ctx.state.runningCount--; const q = ctx.maps.providerQueues.get(providerOf(task.model)); if (q) { q.runningCount--; } }, incRunning: (task) => { ctx.state.runningCount++; const q = ctx.maps.providerQueues.get(providerOf(task.model)); if (q) { q.runningCount++; } }, readSessionIdFromLog, evaluateOutputCompleteness, attemptCrashRecovery }),
     /**
      * @param {string} taskId
      * @param {{force?: boolean}} options
@@ -5555,15 +5566,15 @@ function startCheckGate(task, ctx) {
     overlay: { upperDir: task.overlayDirs.upperDir, workDir: task.overlayDirs.workDir },
     overlayRwBinds: task.overlayDirs.rwBinds ?? [],
     overlayRwFileBinds: task.overlayDirs.rwFileBinds ?? [],
-    // Security (review finding, verified against src/sandbox.js:277-308
-    // directly): buildBwrapArgs defaults runtimeDirWritable to true, which
-    // would hand the gate's check command a writable bind onto the daemon's
-    // control socket -- a worker-controlled check (npm test, a Makefile
-    // target) could then connect out and call `taskferry accept --force` on
-    // its own pending task. The gate is verification, not a trusted daemon
-    // component; it gets read-only access to the runtime dir, same as any
-    // other untrusted sandboxed process.
-    runtimeDirWritable: false,
+    // Security (review finding, verified against src/sandbox.js directly):
+    // buildBwrapArgs defaults socketPath to <runtimeDir>/daemon.sock, which
+    // would hand the gate's check command a bind onto the daemon's control
+    // socket -- a worker-controlled check (npm test, a Makefile target) could
+    // then connect out and call `taskferry accept --force` on its own pending
+    // task. The gate is verification, not a trusted daemon component; it gets
+    // no socket bind at all, so the daemon is unreachable from the gate, same
+    // as any other untrusted sandboxed process.
+    socketPath: null,
     denyList,
   }).concat(["--", "sh", "-c", projectConfig.check]);
   // Known gap, not fixed in this pass: unlike the worker's spawn

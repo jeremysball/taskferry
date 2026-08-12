@@ -748,13 +748,14 @@ const HANDLERS = {
  * @returns {ResolvedDeps}
  */
 function resolveRunCommandDeps(deps) {
-  return /** @type {ResolvedDeps} */ ({
+  return {
     // No default: `client` is genuinely absent for `version`, the one
     // handler that answers without the daemon (see Deps.client above).
     // ResolvedDeps declares it required because every other handler does
-    // require it; the cast on this return documents that one exception
-    // rather than widening the type for every handler.
-    client: deps.client,
+    // require it; the field-level cast documents that one exception rather
+    // than widening the type for every handler, and the other nine fields
+    // below stay fully typechecked.
+    client: /** @type {Client} */ (deps.client),
     io: deps.io ?? process,
     signal: deps.signal,
     executablePath: deps.executablePath,
@@ -764,7 +765,7 @@ function resolveRunCommandDeps(deps) {
     runShellCommand: deps.runShellCommand ?? defaultShellRunner,
     platform: deps.platform ?? process.platform,
     resolveWorkspaceRoot: deps.resolveWorkspaceRoot ?? resolveWorkspaceRoot,
-  });
+  };
 }
 
 /**

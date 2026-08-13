@@ -58,7 +58,7 @@ function getBwrapAvailabilityResult(result) {
 }
 
 /**
- * @param {(command: string, args: readonly string[]) => {status: number|null, stdout: string, stderr: string, error?: NodeJS.ErrnoException}} [runCommand]
+ * @param {import("./setup.js").RunCommandFn} [runCommand]
  * @returns {{checked: boolean, available: boolean, reason?: string, raw?: string}}
  */
 export function checkBwrapAvailable(runCommand = defaultRunCommand) {
@@ -98,13 +98,16 @@ export function checkOverlaySupport(runCommand = defaultRunCommand) {
 }
 
 /**
- * Async variant of checkBwrapAvailable for use with async runCommand implementations.
+ * Async variant of checkBwrapAvailable for use with async runCommand
+ * implementations. Awaits the async runCommand, then delegates the rest to
+ * checkBwrapAvailable so both variants share the same probe invocation and
+ * classification logic.
  * @param {(command: string, args: readonly string[]) => Promise<import("./setup.js").CommandResult>} runCommand
- * @returns {Promise<{checked: boolean, available: boolean, reason?: string}>}
+ * @returns {Promise<{checked: boolean, available: boolean, reason?: string, raw?: string}>}
  */
 export async function checkBwrapAvailableAsync(runCommand) {
   const result = await runCommand("bwrap", ["--version"]);
-  return getBwrapAvailabilityResult(result);
+  return checkBwrapAvailable(() => result);
 }
 
 /**

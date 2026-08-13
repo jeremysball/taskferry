@@ -4,7 +4,7 @@ import net from "node:net";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { createTaskManager } from "./tasks.js";
+import { createTaskManager, emptyStatusCounts } from "./tasks.js";
 import { loadConfig } from "./config.js";
 import { withFileLock, withFileLockAsync } from "./state-lock.js";
 import { isNonNegativeInteger, isPositiveInteger } from "./numbers.js";
@@ -51,13 +51,7 @@ import { errCode } from "./errors.js";
  */
 
 /**
- * @typedef {object} Counts
- * @property {number} queued
- * @property {number} running
- * @property {number} done
- * @property {number} crashed
- * @property {number} cancelled
- * @property {number} unknown
+ * @typedef {import("./tasks.js").Counts} Counts
  */
 
 /**
@@ -443,13 +437,6 @@ export function removeStaleSocketIfUnchanged(socketPath, checkedIdentity, runtim
 }
 
 /**
- * @returns {Counts}
- */
-function emptyCounts() {
-  return { queued: 0, running: 0, done: 0, crashed: 0, cancelled: 0, unknown: 0 };
-}
-
-/**
  * @param {TaskManager} manager
  * @returns {Task[]}
  */
@@ -501,7 +488,7 @@ function filteredList(manager, directory, resolveWorkspaceRootFn) {
  * @returns {Counts}
  */
 function countTasks(tasks) {
-  const counts = emptyCounts();
+  const counts = emptyStatusCounts();
   for (const task of tasks) {
     if (counts[/** @type {keyof Counts} */ (task.status)] !== undefined) counts[/** @type {keyof Counts} */ (task.status)]++;
   }

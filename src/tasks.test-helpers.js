@@ -188,6 +188,34 @@ export function baseTask(overrides = {}) {
   };
 }
 
+// A fake WorkerExecutor with pi-shaped defaults (pi is resolveExecutor's
+// default), so a test that only cares about one or two fields passes just
+// those as overrides instead of hand-writing a full executor literal at
+// every call site. The next WorkerExecutor shape change -- like the
+// extraRoBind -> extraRoBinds rename that prompted this helper -- then
+// touches this one object instead of the dozen+ test literals that copy
+// it. defaultSummaryModel defaults to MINIMAX_MODEL, the real pi
+// executor's summary model; listModelsFn defaults to the empty string,
+// matching what the pi-shaped fakes below all inject. normalizeLogEvent
+// defaults to identity, and sandboxAuthFile to the byte-for-byte common
+// stub shared by most call sites (override with an extraRwPairBinds-adding
+// version if the test exercises the resumed-session bind path).
+export function makeFakeExecutor(overrides = {}) {
+  return {
+    id: "pi",
+    taskIdPrefix: "pi",
+    errorBucketPrefix: "pi",
+    defaultSummaryModel: MINIMAX_MODEL,
+    binaryName: "pi",
+    listModelsFn: async () => "",
+    buildSpawnArgs: () => [],
+    buildSummaryPrompt: () => "",
+    normalizeLogEvent: (parsed) => parsed,
+    sandboxAuthFile: () => ({ extraRoBinds: [], sandboxedDataHome: UNUSED_TMP, sandboxEnv: {} }),
+    ...overrides,
+  };
+}
+
 // Each of these is thrown by makeManager's default delegate for the matching
 // lifecycle hook, so a test that forgot to inject it fails loudly at first
 // use (rather than silently getting a no-op and asserting against stale

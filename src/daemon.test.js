@@ -425,6 +425,56 @@ describe("Unix socket daemon", () => {
 
 });
 
+describe("Unix socket daemon: error envelope", () => {
+  test("keeps the envelope message single-line with the daemon help fallback when the manager throws a multi-line error", async (t) => {
+    const paths = temporaryPaths(t);
+    const fake = fakeManagerFactory();
+    const baseFactory = fake.factory;
+    const factory = (options) => {
+      const manager = baseFactory(options);
+      manager.advisor = () => {
+        throw new Error("error: multi-line boom\n  context line A\n  context line B");
+      };
+      return manager;
+    };
+    const daemon = await startDaemon({ ...paths, taskManagerFactory: factory });
+    t.after(() => daemon.close());
+    const peer = await openPeer(paths.socketPath);
+    t.after(() => peer.close());
+
+    const response = await peer.request("advise", TASK_ADVISOR, { prompt: "hi", directory: paths.root, model: "m", executor: "pi" });
+
+    assert.equal(response.ok, false);
+    assert.equal(response.error.message, "multi-line boom");
+    assert.equal(response.error.help, "Retry the request or inspect the daemon logs");
+    assert.equal(response.error.detail, "error: multi-line boom\n  context line A\n  context line B");
+  });
+
+  test("keeps an empty error text empty in the envelope message instead of fabricating a default", async (t) => {
+    const paths = temporaryPaths(t);
+    const fake = fakeManagerFactory();
+    const baseFactory = fake.factory;
+    const factory = (options) => {
+      const manager = baseFactory(options);
+      manager.advisor = () => {
+        throw new Error("");
+      };
+      return manager;
+    };
+    const daemon = await startDaemon({ ...paths, taskManagerFactory: factory });
+    t.after(() => daemon.close());
+    const peer = await openPeer(paths.socketPath);
+    t.after(() => peer.close());
+
+    const response = await peer.request("advise", TASK_ADVISOR, { prompt: "hi", directory: paths.root, model: "m", executor: "pi" });
+
+    assert.equal(response.ok, false);
+    assert.equal(response.error.message, "");
+    assert.equal(response.error.help, "Retry the request or inspect the daemon logs");
+    assert.equal(response.error.detail, "");
+  });
+});
+
 describe("Unix socket daemon: concurrency", () => {
   test("multiplexes concurrent out-of-order responses on one connection", async (t) => {
       const paths = temporaryPaths(t);

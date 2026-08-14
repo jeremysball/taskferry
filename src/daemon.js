@@ -517,8 +517,20 @@ function responseError(error, requestId) {
   if (error instanceof ProtocolError) {
     return errorResponse(error.requestId, error.code, error.message, error.help, error.message);
   }
-  const { error: message, help } = errorValue(error);
   const text = error instanceof Error ? error.message : String(error);
+  // The error envelope's `message` is single-line by contract: the
+  // hand-rolled parser this replaced shipped the first `error:` line (or
+  // first raw line) and put the full text in `detail`. errorValue()'s
+  // detail-line folding and fabricated "taskferry request failed" for empty
+  // text are CLI presentation; keep the wire shape unchanged, so a
+  // multi-line error stays single-line in `message` (detail lines live in
+  // `detail`), empty error text stays empty, and the help fallback is
+  // daemon-oriented, not the CLI's "run `taskferry --help`".
+  const { error: message, help } = errorValue(error, {
+    helpFallback: "Retry the request or inspect the daemon logs",
+    messageFallback: "",
+    foldDetailLines: false,
+  });
   const code = /unknown task id:/.test(text) ? "UNKNOWN_TASK" : "REQUEST_FAILED";
   return errorResponse(requestId, code, message, help, text);
 }

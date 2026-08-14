@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { createTaskEvents } from "./events.js";
 import { createActivityCache, readActivitySnapshot, readDeltaNarration, DEFAULT_SUMMARIZER_TIMEOUT_MS } from "./activity.js";
-import { resolveStateDir, resolveCacheDir, resolveOverlayTmpRoot, TASKFERRY_PLUMBING_ENV_VARS } from "./paths.js";
+import { normalizeActivitySubscriptionKey, resolveStateDir, resolveCacheDir, resolveOverlayTmpRoot, TASKFERRY_PLUMBING_ENV_VARS } from "./paths.js";
 import { RESULT_FIELDS } from "./protocol.js";
 import { formatToolEventForNarration } from "./narration-format.js";
 import { errCode } from "./errors.js";
@@ -3782,6 +3782,7 @@ function resolveBooleanToggle(envValue, configValue, defaultValue, invert = fals
 function resolveCoreOptions(rawOptions) {
   const config = rawOptions.config || {};
   return {
+    resolveWorkspaceRootFn: resolveWorkspaceRootFnOption(rawOptions),
     spawnFn: rawOptions.spawnFn ?? spawn,
     killFn: rawOptions.killFn ?? /** @type {(pid: number, signal: NodeJS.Signals) => void} */ ((pid, signal) => process.kill(pid, signal)),
     stateDir: rawOptions.stateDir ?? DEFAULT_STATE_DIR,
@@ -3802,6 +3803,21 @@ function resolveCoreOptions(rawOptions) {
     onEvent: rawOptions.onEvent,
     config,
   };
+}
+
+/**
+ * Resolves a directory to its git workspace root, so scheduleActivityFor()
+ * can group a task's own directory under the same key a root-scoped watch
+ * subscription was normalized to by syncActivitySubscriptions()
+ * (taskferry#335) -- the identity fallback preserves today's literal
+ * directory-string behavior for a caller (e.g. a test) that doesn't pass
+ * one. Split out of resolveCoreOptions() to keep that function's
+ * cyclomatic complexity under the lint threshold.
+ * @param {Record<string, any>} rawOptions
+ * @returns {(directory: string) => string}
+ */
+function resolveWorkspaceRootFnOption(rawOptions) {
+  return rawOptions.resolveWorkspaceRootFn ?? ((dir) => dir);
 }
 
 /**
@@ -4413,7 +4429,7 @@ function buildManagerInternalHelpers(ctx) {
      * @param {Task} task
      * @param {{force?: boolean}} [options]
      */
-    scheduleActivity: (task, options = {}) => scheduleActivityFor(task, options, { onEvent: ctx.opts.onEvent, activitySubscriptions: ctx.maps.activitySubscriptions, activitySummariesEnabled: ctx.opts.activitySummariesEnabled, activityCache: ctx.activity.cache, state: ctx.schedulers.activityScheduleState }),
+    scheduleActivity: (task, options = {}) => scheduleActivityFor(task, options, { onEvent: ctx.opts.onEvent, activitySubscriptions: ctx.maps.activitySubscriptions, activitySummariesEnabled: ctx.opts.activitySummariesEnabled, activityCache: ctx.activity.cache, state: ctx.schedulers.activityScheduleState, resolveWorkspaceRootFn: ctx.opts.resolveWorkspaceRootFn }),
     /**
      * @param {string|undefined} sessionId
      * @returns {{sessionId: string|undefined, reset: boolean, previousSessionId: string|undefined}}
@@ -6500,13 +6516,20 @@ function dispatchTask(params, ctx) {
  * (event sequence, subscription count) are read/written through `ctx.state`.
  * @param {Task} task
  * @param {{force?: boolean}} options
- * @param {{onEvent?: (event: object) => void, state: {eventSequence: number, activitySummarySubscriptions: number}, activitySubscriptions: Map<string|null, Set<boolean>>, activitySummariesEnabled: boolean, activityCache: {refresh: (task: Task, options: {force?: boolean, includeSummary?: boolean}) => Promise<{activity: string, outputWatermark: number}|null>}}} ctx
+ * @param {{onEvent?: (event: object) => void, state: {eventSequence: number, activitySummarySubscriptions: number}, activitySubscriptions: Map<string|null, Set<boolean>>, activitySummariesEnabled: boolean, activityCache: {refresh: (task: Task, options: {force?: boolean, includeSummary?: boolean}) => Promise<{activity: string, outputWatermark: number}|null>}, resolveWorkspaceRootFn: (directory: string) => string}} ctx
  * @returns {Promise<unknown>}
  */
 function scheduleActivityFor(task, { force }, ctx) {
   if (typeof ctx.onEvent !== "function" || task.internal) return Promise.resolve();
   const scheduledStatus = task.status;
   const scheduledDirectory = task.directory;
+  const allVariants = ctx.activitySubscriptions.get(null);
+  const literalVariants = ctx.activitySubscriptions.get(scheduledDirectory);
+  // Normalize only when a non-literal subscription exists; this avoids a
+  // synchronous git spawn for unsubscribed activity refreshes.
+  const workspaceRootDirectory = allVariants || literalVariants || ctx.activitySubscriptions.size === 0
+    ? scheduledDirectory
+    : normalizeActivitySubscriptionKey(scheduledDirectory, ctx.resolveWorkspaceRootFn);
   const baseEvent = () => {
     ++ctx.state.eventSequence;
     const sequence = ctx.state.eventSequence;
@@ -6533,8 +6556,7 @@ function scheduleActivityFor(task, { force }, ctx) {
   // ALL_DIRECTORIES sentinel, taskferry#315) regardless of any task's own
   // directory, so its variants apply to every task alongside whatever this
   // task's own directory has subscribed to.
-  const dirVariants = ctx.activitySubscriptions.get(scheduledDirectory);
-  const allVariants = ctx.activitySubscriptions.get(null);
+  const dirVariants = ctx.activitySubscriptions.get(workspaceRootDirectory);
   const mergedVariants = new Set([...(dirVariants ?? []), ...(allVariants ?? [])]);
   const variants = mergedVariants.size > 0
     ? [...mergedVariants]

@@ -203,6 +203,18 @@ export function createWorkspaceRootResolver({ runCommand = defaultRunCommand } =
 }
 
 /**
+ * Returns the activity-subscription key for a directory. The null key is the
+ * all-directories subscription and is intentionally not passed to the root
+ * resolver.
+ * @param {string|null} directory
+ * @param {(startDir: string) => string} resolveRoot
+ * @returns {string|null}
+ */
+export function normalizeActivitySubscriptionKey(directory, resolveRoot) {
+  return directory === null ? null : resolveRoot(directory);
+}
+
+/**
  * True when `a` and `b` are the exact same directory, or resolve to the same
  * git workspace root (e.g. a repo's root and one of its linked worktrees,
  * both dispatched into by `--directory`) -- the shared "same workspace" check

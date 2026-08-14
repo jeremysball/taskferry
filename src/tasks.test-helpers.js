@@ -346,6 +346,7 @@ function buildManagerOptions(options, stateDir, defaultCacheDir, defaultOverlayT
     ...passthroughIfSet({ runtimeDir: options.runtimeDir }, "runtimeDir", "runtimeDir"),
     ...passthroughIfSet({ platform: options.platform }, "platform", "platform"),
     ...passthroughIfSet({ onEvent: options.onEvent }, "onEvent", "onEvent"),
+    ...passthroughIfSet({ resolveWorkspaceRootFn: options.resolveWorkspaceRootFn }, "resolveWorkspaceRootFn", "resolveWorkspaceRootFn"),
     ...passthroughIfSet({ maxDispatchesPerWindow: options.maxDispatchesPerWindow }, "maxDispatchesPerWindow", "maxDispatchesPerWindow"),
     ...passthroughIfSet({ dispatchWindowMs: options.dispatchWindowMs }, "dispatchWindowMs", "dispatchWindowMs"),
     ...passthroughIfSet({ advisorSessionTtlMs: options.advisorSessionTtlMs }, "advisorSessionTtlMs", "advisorSessionTtlMs"),

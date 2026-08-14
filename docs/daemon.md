@@ -502,3 +502,27 @@ profiling is diagnostic, not on the request's critical path.
   `messageFallback: ""`, its own help fallback); the CLI's richer multi-line
   message is presentation for a terminal, deliberately not shared with the
   protocol.
+- A config entry, credential, or session file that passed the lstat symlink
+  guard at bind-computation time still resolving through a symlink into the
+  sandbox — expected, and tolerated on purpose. The guard's lstat check
+  (`isSafeBindSource` in `src/executor.js`) and bwrap's own host-side path
+  resolution at spawn time are two separate, non-atomic steps, so a path
+  swapped in between them (a classic TOCTOU race) can still bind whatever
+  the new symlink points at. This is a deliberate race, not a bug to fix:
+  exploiting it requires write access to the config dir or the path's parent
+  at dispatch time, which is the same attacker capability the guard already
+  assumes (a plugin that can plant a symlink there can also rewrite the
+  config files the symlink points at — so racing back buys nothing).
+  "Fixing" it by pre-resolving every path with `fs.realpathSync` would also
+  break legitimate symlinked config trees (dotfiles repos symlink
+  `~/.config/opencode` and its entries into the checkout), so the guard
+  stays a best-effort check against the static attack, not a lock against a
+  race that requires the attacker to already hold the keys.
+- A legitimate symlinked config entry (`opencode.jsonc` symlinked into a
+  dotfiles repo) silently missing from the sandbox after an upgrade —
+  expected, and now diagnosed: the guard deliberately refuses to bind
+  symlinked entries (bwrap would bind the link's *target*, which is the
+  whole vulnerability #392 closes), and warns on stderr naming the skipped
+  path so the drop is visible rather than silent. The fix is to bind the
+  real file (`cp` the config into `~/.config/opencode`), not to weaken the
+  guard.

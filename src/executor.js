@@ -84,28 +84,49 @@ const piSafePathForCwd = (/** @type {string} */ cwd) =>
  * write/delete access to every other session in the user's pi history.
  *
  * Returns null when no unambiguous match is found; the caller should then
- * skip the bind entirely rather than guess.
+ * skip the bind entirely rather than guess. A matched file that lstat shows
+ * to be a symlink is also rejected here (same guard as every other bound
+ * host path): the resume bind is read-write, so a symlinked session file
+ * would hand the sandboxed worker write access to the link's target.
  *
  * @param {string} realSessionsDir - pi's `<agentDir>/sessions/` on the host.
  * @param {string} sessionId
- * @param {{ readdirFn?: (dir: string) => string[] }} [deps]
+ * @param {{ readdirFn?: (dir: string) => string[], lstatFn?: (file: string) => {isSymbolicLink: () => boolean, isFile?: () => boolean, nlink?: number}} } [deps]
  * @returns {string|null}
  */
-function resolvePiSessionFile(realSessionsDir, sessionId, { readdirFn = (/** @type {string} */ dir) => fs.readdirSync(dir) } = {}) {
+function resolvePiSessionFile(realSessionsDir, sessionId, { readdirFn = (/** @type {string} */ dir) => fs.readdirSync(dir), lstatFn = fs.lstatSync } = {}) {
   if (!sessionId) return null;
   // Pi treats --session as a literal path when it looks like one.
   if (sessionId.includes("/") || sessionId.includes("\\") || sessionId.endsWith(".jsonl")) {
+    if (!isSafeBindSource(sessionId, lstatFn)) return null;
     return sessionId;
   }
-  // Pi names session files `<isoTimestamp>_<sessionId>.jsonl`, with exactly one
-  // underscore separating the timestamp from the UUID. Match by prefix on the
-  // session-id portion of the filename -- this avoids reading every .jsonl's
-  // first line just to filter candidates.
+  const matches = listPiSessionFileMatches(realSessionsDir, sessionId, readdirFn);
+  // Ambiguous (zero or multiple matches) -> don't bind anything. Pi's own
+  // resolver would surface an error to the user; we can't do that from here,
+  // and a wrong-file bind would be worse than no bind.
+  if (matches.length !== 1) return null;
+  if (!isSafeBindSource(matches[0], lstatFn)) return null;
+  return matches[0];
+}
+
+/**
+ * Pi names session files `<isoTimestamp>_<sessionId>.jsonl`, with exactly one
+ * underscore separating the timestamp from the UUID. Match by prefix on the
+ * session-id portion of the filename -- this avoids reading every .jsonl's
+ * first line just to filter candidates. Returns every matching full path;
+ * the caller rejects ambiguous result sets.
+ * @param {string} realSessionsDir
+ * @param {string} sessionId
+ * @param {(dir: string) => string[]} readdirFn
+ * @returns {string[]}
+ */
+function listPiSessionFileMatches(realSessionsDir, sessionId, readdirFn) {
   let entries;
   try {
     entries = readdirFn(realSessionsDir);
   } catch {
-    return null;
+    return [];
   }
   const matches = [];
   for (const entry of entries) {
@@ -116,32 +137,78 @@ function resolvePiSessionFile(realSessionsDir, sessionId, { readdirFn = (/** @ty
       matches.push(path.join(realSessionsDir, entry));
     }
   }
-  // Ambiguous (zero or multiple matches) -> don't bind anything. Pi's own
-  // resolver would surface an error to the user; we can't do that from here,
-  // and a wrong-file bind would be worse than no bind.
-  return matches.length === 1 ? matches[0] : null;
+  return matches;
 }
 
 /**
- * Whether a real opencode config-dir entry is safe to ro-bind into the
- * sandbox. lstat, never stat: a plain stat follows the symlink and defeats
- * the check, while bwrap resolves a symlink on the host at bind time -- so
- * binding a symlinked entry would ro-bind whatever it points at, letting a
- * plugin-planted symlink pull arbitrary host paths (e.g. ~/.ssh) into the
- * sandbox. Entries whose lstat fails outright are skipped too (fail closed:
- * never bind what we couldn't verify isn't a symlink).
- * @param {string} fullPath
- * @param {(file: string) => {isSymbolicLink: () => boolean}} lstatFn
+ * Whether an lstat failure means "the path genuinely does not exist" -- the
+ * one case worth swallowing silently (a vanished entry is an ordinary race,
+ * not a problem to surface). Every other error (EACCES, EMFILE, EIO, ...)
+ * indicates the path is unverifiable for a real reason the user should hear
+ * about; the guard fails closed either way.
+ * @param {unknown} err
  * @returns {boolean}
  */
-function isBindableConfigEntry(fullPath, lstatFn) {
+function isEnoentError(err) {
+  const e = /** @type {{code?: unknown, message?: unknown}} */ (err);
+  return e?.code === "ENOENT" || String(e?.message ?? "").includes("ENOENT");
+}
+
+/**
+ * Whether a real host path is safe to bind into the sandbox. lstat, never
+ * stat: a plain stat follows the symlink and defeats the check, while bwrap
+ * resolves a symlink on the host at bind time -- so binding a symlinked
+ * path would bind whatever it points at, letting a plugin-planted symlink
+ * pull arbitrary host paths (e.g. ~/.ssh) into the sandbox. Paths whose
+ * lstat fails outright are skipped too (fail closed: never bind what we
+ * couldn't verify isn't a symlink). A skipped path warns on stderr -- a
+ * symlinked config entry is often a legitimate dotfiles-repo setup, and
+ * dropping it silently would be an invisible regression -- except for the
+ * plain ENOENT case, which is an ordinary existsFn/lstat race, not a
+ * diagnostic.
+ *
+ * Hardlinked files are rejected too (isFile() && nlink > 1), so this check
+ * is deliberately NOT a realpath-inside-the-tree comparison: fs.realpathSync
+ * only resolves symlink components, and a hardlinked entry's realpath is its
+ * own path inside the tree, so that check cannot see the inode's other name.
+ * nlink > 1 is the only lstat-visible evidence an entry is reachable from
+ * elsewhere on the host, and on kernels without fs.protected_hardlinks
+ * (default-on since 2012, but absent on some older/embedded/NFS setups) a
+ * plugin with config-dir write access could otherwise hardlink a sensitive
+ * host file into the tree and leak it into the next dispatch. The false
+ * positive is a dropped entry plus a warning -- acceptable for a setup as
+ * rare as a hardlinked config entry (dotfiles repos use symlinks, which the
+ * isSymbolicLink() check already rejects on purpose) -- and directories are
+ * exempt because they cannot be hardlinked and their nlink counts
+ * subdirectories.
+ * @param {string} fullPath
+ * @param {(file: string) => {isSymbolicLink: () => boolean, isFile?: () => boolean, nlink?: number}} lstatFn
+ * @returns {boolean}
+ */
+function isSafeBindSource(fullPath, lstatFn) {
   let entryStat;
   try {
     entryStat = lstatFn(fullPath);
-  } catch {
+    // The isSymbolicLink() call sits inside the try on purpose: a
+    // null-returning lstatFn (matching the sibling statFn seam's
+    // null-on-failure convention) must fail closed here, not crash on a
+    // TypeError in the line below.
+    if (entryStat != null && entryStat.isSymbolicLink()) {
+      process.stderr.write(`warning: ${fullPath} is a symlink; skipping the bind (bwrap would bind the link target instead)\n`);
+      return false;
+    }
+  } catch (err) {
+    if (!isEnoentError(err)) {
+      process.stderr.write(`warning: could not verify ${fullPath} is not a symlink (${/** @type {Error} */ (err).message}); skipping the bind\n`);
+    }
     return false;
   }
-  return !entryStat.isSymbolicLink();
+  if (entryStat == null) return false;
+  if (typeof entryStat.isFile === "function" && entryStat.isFile() && typeof entryStat.nlink === "number" && entryStat.nlink > 1) {
+    process.stderr.write(`warning: ${fullPath} is hardlinked (${entryStat.nlink} names for one inode); skipping the bind\n`);
+    return false;
+  }
+  return true;
 }
 
 /**
@@ -156,7 +223,7 @@ function isBindableConfigEntry(fullPath, lstatFn) {
  * @property {(ctx: SpawnLaunchContext) => string[]} buildSpawnArgs
  * @property {() => string} buildSummaryPrompt
  * @property {(parsed: unknown) => unknown} normalizeLogEvent
- * @property {(args: {homeDir: string, dataDir: string, spawnEnv: NodeJS.ProcessEnv, existsFn: (file: string) => boolean, statFn?: (file: string) => {isDirectory: () => boolean}|null, lstatFn?: (file: string) => {isSymbolicLink: () => boolean}, readdirFn: (dir: string) => string[], sessionId?: string|null, launchDirectory?: string|null}) => {extraRoBinds: [string, string][], extraRwPairBinds?: [string, string][], sandboxedDataHome: string, sandboxEnv: Record<string, string>}} sandboxAuthFile
+ * @property {(args: {homeDir: string, dataDir: string, spawnEnv: NodeJS.ProcessEnv, existsFn: (file: string) => boolean, statFn?: (file: string) => {isDirectory: () => boolean}|null, lstatFn?: (file: string) => {isSymbolicLink: () => boolean, isFile?: () => boolean, nlink?: number}, readdirFn: (dir: string) => string[], sessionId?: string|null, launchDirectory?: string|null}) => {extraRoBinds: [string, string][], extraRwPairBinds?: [string, string][], sandboxedDataHome: string, sandboxEnv: Record<string, string>}} sandboxAuthFile
  */
 
 /**
@@ -319,8 +386,8 @@ export function piExecutor({ execFileFn = execFileAsync } = {}) {
     // small tmpfs: pi's sandboxed data home grows with every dispatch and an
     // unbounded tmpfs directory eventually starves the whole XDG_RUNTIME_DIR
     // (sockets, locks) of space.
-    /** @param {{homeDir: string, dataDir: string, spawnEnv: NodeJS.ProcessEnv, existsFn: (file: string) => boolean, statFn?: (file: string) => {isDirectory: () => boolean}|null, readdirFn?: (dir: string) => string[], sessionId?: string|null, launchDirectory?: string|null}} args @returns {{extraRoBinds: [string, string][], extraRwPairBinds: [string, string][], sandboxedDataHome: string, sandboxEnv: Record<string, string>}} */
-    sandboxAuthFile({ homeDir, dataDir, spawnEnv, existsFn, statFn = fs.statSync, readdirFn, sessionId, launchDirectory }) {
+    /** @param {{homeDir: string, dataDir: string, spawnEnv: NodeJS.ProcessEnv, existsFn: (file: string) => boolean, statFn?: (file: string) => {isDirectory: () => boolean}|null, lstatFn?: (file: string) => {isSymbolicLink: () => boolean, isFile?: () => boolean, nlink?: number}, readdirFn?: (dir: string) => string[], sessionId?: string|null, launchDirectory?: string|null}} args @returns {{extraRoBinds: [string, string][], extraRwPairBinds: [string, string][], sandboxedDataHome: string, sandboxEnv: Record<string, string>}} */
+    sandboxAuthFile({ homeDir, dataDir, spawnEnv, existsFn, statFn = fs.statSync, lstatFn = fs.lstatSync, readdirFn, sessionId, launchDirectory }) {
       const realAgentDir = spawnEnv.PI_CODING_AGENT_DIR || path.join(homeDir, ".pi", "agent");
       const realAuthFile = path.join(realAgentDir, "auth.json");
       // Pi roots both state (auth, sessions) and config (custom-provider
@@ -344,8 +411,12 @@ export function piExecutor({ execFileFn = execFileAsync } = {}) {
       const sandboxedSessionsHome = path.join(sandboxedDataHome, "sessions");
       /** @type {[string, string][]} */
       const extraRoBinds = [];
-      if (existsFn(realAuthFile)) extraRoBinds.push([realAuthFile, path.join(sandboxedDataHome, "auth.json")]);
-      if (existsFn(realExtensionsDir)) extraRoBinds.push([realExtensionsDir, path.join(sandboxedDataHome, "extensions")]);
+      // existsFn gates the cheap no-file case; isSafeBindSource then lstat-
+      // rejects a symlinked auth.json/extensions dir (a planted link would
+      // ro-bind its target into the sandbox) the same way config entries are
+      // guarded, and warns when it skips one.
+      if (existsFn(realAuthFile) && isSafeBindSource(realAuthFile, lstatFn)) extraRoBinds.push([realAuthFile, path.join(sandboxedDataHome, "auth.json")]);
+      if (existsFn(realExtensionsDir) && isSafeBindSource(realExtensionsDir, lstatFn)) extraRoBinds.push([realExtensionsDir, path.join(sandboxedDataHome, "extensions")]);
       /** @type {[string, string][]} */
       const extraRwPairBinds = [];
       // Only bind a single resumed session file, and only when a resume was
@@ -365,7 +436,7 @@ export function piExecutor({ execFileFn = execFileAsync } = {}) {
         })();
         if (sessionsDirStat?.isDirectory()) {
           const safePath = piSafePathForCwd(launchDirectory);
-          const realSessionFile = resolvePiSessionFile(path.join(realSessionsDir, safePath), sessionId, { readdirFn });
+          const realSessionFile = resolvePiSessionFile(path.join(realSessionsDir, safePath), sessionId, { readdirFn, lstatFn });
           if (realSessionFile) {
             const sandboxedSessionFile = path.join(sandboxedSessionsHome, safePath, path.basename(realSessionFile));
             extraRwPairBinds.push([realSessionFile, sandboxedSessionFile]);
@@ -418,7 +489,7 @@ export function opencodeExecutor() {
     // small tmpfs: opencode's snapshot store under here grows unbounded
     // across dispatches (no gc) and previously filled the whole
     // XDG_RUNTIME_DIR tmpfs, starving it of space for sockets/locks too.
-    /** @param {{homeDir: string, dataDir: string, spawnEnv: NodeJS.ProcessEnv, existsFn: (file: string) => boolean, statFn?: (file: string) => {isDirectory: () => boolean}|null, lstatFn?: (file: string) => {isSymbolicLink: () => boolean}, readdirFn: (dir: string) => string[], sessionId?: string|null, launchDirectory?: string|null}} args @returns {{extraRoBinds: [string, string][], extraRwPairBinds?: [string, string][], sandboxedDataHome: string, sandboxEnv: Record<string, string>}} */
+    /** @param {{homeDir: string, dataDir: string, spawnEnv: NodeJS.ProcessEnv, existsFn: (file: string) => boolean, statFn?: (file: string) => {isDirectory: () => boolean}|null, lstatFn?: (file: string) => {isSymbolicLink: () => boolean, isFile?: () => boolean, nlink?: number}, readdirFn: (dir: string) => string[], sessionId?: string|null, launchDirectory?: string|null}} args @returns {{extraRoBinds: [string, string][], extraRwPairBinds?: [string, string][], sandboxedDataHome: string, sandboxEnv: Record<string, string>}} */
     sandboxAuthFile({ homeDir, dataDir, spawnEnv, existsFn, lstatFn = fs.lstatSync, readdirFn }) {
       const realDataHome = spawnEnv.XDG_DATA_HOME || path.join(homeDir, ".local", "share");
       const realAuthFile = path.join(realDataHome, "opencode", "auth.json");
@@ -434,18 +505,22 @@ export function opencodeExecutor() {
       const sandboxedConfigHome = path.join(sandboxedDataHome, "config");
       const sandboxedConfigDir = path.join(sandboxedConfigHome, "opencode");
       /** @type {[string, string][]} */
-      const extraRoBinds = existsFn(realAuthFile) ? [[realAuthFile, path.join(sandboxedDataHome, "opencode", "auth.json")]] : [];
+      const extraRoBinds = existsFn(realAuthFile) && isSafeBindSource(realAuthFile, lstatFn) ? [[realAuthFile, path.join(sandboxedDataHome, "opencode", "auth.json")]] : [];
       // Bind the user's real config entries (custom provider definitions,
       // plugins, agents) in read-only so a sandboxed dispatch still resolves
       // the same models it would unsandboxed. .gitignore is skipped on
       // purpose: opencode rewrites it on boot, so a read-only bind there
       // would fail the same way the unredirected path did.
       const realConfigDir = path.join(spawnEnv.XDG_CONFIG_HOME || path.join(homeDir, ".config"), "opencode");
-      if (existsFn(realConfigDir)) {
+      // lstat the config dir itself before trusting it: existsFn/readdirFn
+      // follow a symlink, so a symlinked realConfigDir would let every entry
+      // inside pass the per-entry guard while the whole tree points outside.
+      // A symlinked dir is treated as absent (fail closed, same as an entry).
+      if (existsFn(realConfigDir) && isSafeBindSource(realConfigDir, lstatFn)) {
         for (const entry of readdirFn(realConfigDir)) {
           if (entry === ".gitignore") continue;
           const fullPath = path.join(realConfigDir, entry);
-          if (isBindableConfigEntry(fullPath, lstatFn)) {
+          if (isSafeBindSource(fullPath, lstatFn)) {
             extraRoBinds.push([fullPath, path.join(sandboxedConfigDir, entry)]);
           }
         }

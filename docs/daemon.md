@@ -490,22 +490,32 @@ profiling is diagnostic, not on the request's critical path.
   `resolveRunCommandDeps` documents that single exception with a field-level
   `@type {Client}` cast on the `client` field instead of widening
   `ResolvedDeps.client` to optional for every handler.
-- `spawnTaskChild()` calling `ctx.persistTask(task.id)` a second time,
-  immediately after `buildSandboxedSpawn()` and before `ctx.spawnFn(...)`, on
-  top of the existing post-spawn `persistTask()` call a few lines later —
-  expected, not a leftover duplicate (taskferry#346). `buildSandboxedSpawn()`
-  (via `assembleBwrapSpawn()`) has already created the on-disk overlay and
-  set `task.overlayDirs`/`changesetStatus` in memory by the time it returns,
-  but a daemon crash between that point and the *old* single post-spawn
-  `persistTask()` call (which spans the spawn itself, the single riskiest
-  step in this function) used to leave `tasks.json` with no record of the
-  overlay at all. On restart, `sweepOverlayEntry()` can only spare an
-  overlay whose owning task is loaded with `overlayDirs.root` matching and
-  `changesetStatus: "pending"` — an unmatched `taskferry-cow-<taskId>`
-  directory looks indistinguishable from a genuine orphan and gets deleted,
-  even though the detached child (spawned with `detached: true`, so it can
-  outlive the daemon) may still be writing into it. The early persist call
-  closes that window; the later one is unchanged and still needed to record
+- `spawnTaskChild()` calling both `ctx.persistTask(task.id)` *and*
+  `ctx.flushPersist()` immediately after `buildSandboxedSpawn()` and before
+  `ctx.spawnFn(...)`, on top of the existing post-spawn `persistTask()` call
+  a few lines later — expected, not redundant (taskferry#346).
+  `buildSandboxedSpawn()` (via `assembleBwrapSpawn()`) has already created
+  the on-disk overlay and set `task.overlayDirs`/`changesetStatus` in memory
+  by the time it returns, but a daemon crash between that point and the
+  *old* single post-spawn `persistTask()` call (which spans the spawn
+  itself, the single riskiest step in this function) used to leave
+  `tasks.json` with no record of the overlay at all. On restart,
+  `sweepOverlayEntry()` can only spare an overlay whose owning task is
+  loaded with `overlayDirs.root` matching and `changesetStatus: "pending"`
+  — an unmatched `taskferry-cow-<taskId>` directory looks indistinguishable
+  from a genuine orphan and gets deleted, even though the detached child
+  (spawned with `detached: true`, so it can outlive the daemon) may still be
+  writing into it. `persistTask()` alone is not enough to close that window:
+  it only flips `ctx.state.persistDirty` and arms a 250ms debounce timer
+  (`PERSIST_DEBOUNCE_MS`, in `persistTaskRecord()`) rather than writing
+  synchronously — and by this point in `spawnTaskChild()`,
+  `queueDispatchLaunch()` has typically already called `persistTask()` once
+  at dispatch/queue time, so the dirty flag may already be set and a second
+  debounced call is a no-op for write timing. `ctx.flushPersist()` (bound to
+  `flushPersistRecords()`, the same synchronous `fs.writeFileSync` +
+  `fs.renameSync` path the debounce timer eventually calls) is what actually
+  forces the write before `ctx.spawnFn(...)` runs. The later, post-spawn
+  `persistTask()` call is unchanged and still needed to record
   `status: "running"` and the real `pid`.
 - An error response envelope whose `message` is a single line (detail lines
   collapsed away) or empty — expected, not dropped data. The envelope keeps

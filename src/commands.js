@@ -276,6 +276,25 @@ async function runReject(options, { client }) {
   return rejected;
 }
 
+/**
+ * Lists a task's scratch output directory (or reads one file in it). Every
+ * dispatch has a per-task writable scratch dir at <stateDir>/outputs/<id>,
+ * rw-bound into the sandbox at the same path and exposed as
+ * $TASKFERRY_OUTPUT_DIR; this is the surface for deliverables that survive a
+ * worker whose final assistant message ended on a tool call. taskferry#423.
+ * @param {{taskId: string, path?: string}} options
+ * @param {{client: Client}} deps
+ * @returns {Promise<{taskId: string, outputDir: string|null, files: Array<{path: string, size: number}>, bytes: number, total: number, truncated: boolean, file?: {content: string|null, size: number, truncated: boolean, error?: string}}>}
+ */
+/**
+ * Lists a task's scratch output directory (or reads one file in it). taskferry#423.
+ * @param {Record<string, unknown>} options
+ * @param {ResolvedDeps} deps
+ */
+async function runOutput(options, { client }) {
+  return /** @type {unknown} */ (await client.request("task.output", { taskId: options.taskId, ...(typeof options.path === "string" && options.path.length > 0 ? { path: options.path } : {}) }));
+}
+
 // `wait --summarize` keeps the client open (cli.js's top-level finally owns the
 // lifecycle) and re-uses streamTaskEvents to print periodic summaries, then a
 // trailing task.status RPC to project the final lean shape.
@@ -728,6 +747,7 @@ const HANDLERS = {
   cancel: /** @type {(options: Record<string, unknown>, deps: ResolvedDeps) => unknown} */ (runCancel),
   accept: /** @type {(options: Record<string, unknown>, deps: ResolvedDeps) => unknown} */ (runAccept),
   reject: /** @type {(options: Record<string, unknown>, deps: ResolvedDeps) => unknown} */ (runReject),
+  output: /** @type {(options: Record<string, unknown>, deps: ResolvedDeps) => unknown} */ (runOutput),
   wait: /** @type {(options: Record<string, unknown>, deps: ResolvedDeps) => unknown} */ (runWait),
   advisor: /** @type {(options: Record<string, unknown>, deps: ResolvedDeps) => unknown} */ (runAdvisor),
   status: /** @type {(options: Record<string, unknown>, deps: ResolvedDeps) => unknown} */ (runStatus),

@@ -31,10 +31,26 @@ describe("bwrap sandboxing: dispatch argv shape and gitdir scoping", () => {
     // runtimeDir are no longer reachable).
     assert.ok(captured.args.includes(path.join(runtimeDir, "daemon.sock")));
     assert.ok(!captured.args.includes(runtimeDir));
-    assert.deepEqual(captured.args.slice(-14), [
+    assert.deepEqual(captured.args.slice(-14).slice(0, 13), [
       "--", "opencode", "run", "--dir", os.tmpdir(), "--auto", "--format", "json",
-      "-m", "opencode-go/minimax-m3", "--variant", "max", "--", "hello",
+      "-m", "opencode-go/minimax-m3", "--variant", "max", "--",
     ]);
+    assert.ok(captured.args.at(-1).startsWith("hello\n\n## Persistent output dir"),
+      `expected prompt to be augmented with the scratch-dir block, got: ${captured.args.at(-1)}`);
+    // taskferry#423: the per-task scratch dir is rw-bound inside the sandbox
+    // at the same path. There must be at least one --bind whose src and dst
+    // both live under <stateDir>/outputs/.
+    const outputsRoot = path.join(mgr.paths.STATE_DIR, "outputs");
+    let outputBindFound = false;
+    for (let i = 0; i + 2 < captured.args.length; i++) {
+      const src = captured.args[i + 1];
+      const dst = captured.args[i + 2];
+      if (captured.args[i] === "--bind" && src === dst && src.startsWith(outputsRoot + path.sep)) {
+        outputBindFound = true;
+        break;
+      }
+    }
+    assert.ok(outputBindFound, `expected an rw-bind for a path under ${outputsRoot} in argv: ${JSON.stringify(captured.args)}`);
     assert.equal(captured.opts.cwd, os.tmpdir());
   });
 
@@ -76,9 +92,10 @@ describe("bwrap sandboxing: dispatch argv shape and gitdir scoping", () => {
     mgr.dispatch({ prompt: "hello", directory });
 
     const bindCount = captured.args.filter((arg) => arg === "--bind").length;
-    // directory + runtimeDir + the sandboxed opencode data home -- the
-    // git-common-dir sits inside `directory`, already covered by that one bind.
-    assert.equal(bindCount, 3);
+    // directory + runtimeDir + the sandboxed opencode data home + the per-task
+    // scratch dir (taskferry#423) -- the git-common-dir sits inside `directory`,
+    // already covered by that one bind.
+    assert.equal(bindCount, 4);
   });
 
   test("falls back to binding the whole common dir for a submodule layout, where gitDir resolves to the same path as gitCommonDir", () => {

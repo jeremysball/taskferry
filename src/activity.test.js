@@ -107,7 +107,11 @@ describe("task activity events", () => {
       [TASK_STATE, "running"],
     ]);
     assert.equal(events[2].type, TASK_ACTIVITY);
-    assert.equal(events[2].activityVariants["false"].activity, "Check the server");
+    // taskferry#423: the augmented prompt carries the scratch-dir tail; the
+    // activity envelope keeps the literal user prompt as the activity text so
+    // the operator UI shows what the user actually asked, not the wrapper.
+    assert.ok(events[2].activityVariants["false"].activity.startsWith("Check the server"),
+      `expected activity text to start with literal prompt, got: ${events[2].activityVariants["false"].activity.slice(0, 64)}`);
 
     child.emit("exit", 0, null);
     await new Promise((resolve) => setImmediate(resolve));

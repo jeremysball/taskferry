@@ -19,6 +19,7 @@ export const RPC_METHODS = Object.freeze([
   "task.context",
   "task.accept",
   "task.reject",
+  "task.output",
 ]);
 
 const METHOD_SUMMARY = "task.summary";
@@ -270,6 +271,10 @@ const METHOD_PARAMS = {
   "task.reject": {
     required: [["taskId", isNonEmptyString]],
     optional: [],
+  },
+  "task.output": {
+    required: [["taskId", isNonEmptyString]],
+    optional: [["path", isNonEmptyString], ["resolve", isBoolean]],
   },
   [METHOD_SUBSCRIBE]: {
     // Either an explicit directory, a taskId the daemon resolves the

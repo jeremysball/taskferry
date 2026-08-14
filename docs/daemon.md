@@ -490,3 +490,15 @@ profiling is diagnostic, not on the request's critical path.
   `resolveRunCommandDeps` documents that single exception with a field-level
   `@type {Client}` cast on the `client` field instead of widening
   `ResolvedDeps.client` to optional for every handler.
+- An error response envelope whose `message` is a single line (detail lines
+  collapsed away) or empty — expected, not dropped data. The envelope keeps
+  the historical wire shape: `message` is exactly the first `error:` line
+  (or the first raw line, which stays `""` when the error text is empty),
+  every other line lives in `detail`, and the help fallback is the
+  daemon-oriented "Retry the request or inspect the daemon logs", not the
+  CLI's "Retry the command or run `taskferry --help`". `responseError()` in
+  `src/daemon.js` reuses the same `errorValue()` the CLI renders with, but
+  overrides its CLI-oriented defaults (`foldDetailLines: false`,
+  `messageFallback: ""`, its own help fallback); the CLI's richer multi-line
+  message is presentation for a terminal, deliberately not shared with the
+  protocol.

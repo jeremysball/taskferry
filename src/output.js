@@ -81,13 +81,17 @@ function stripPrefix(line, prefix) {
 /**
  * @param {unknown} error
  * @param {string | undefined} helpLine
+ * @param {string} [fallback] -- caller-supplied default when neither
+ *   `error.help` nor a parsed `help:` line exists. Defaults to the
+ *   CLI-oriented text; the daemon's responseError() passes its own
+ *   log-oriented one.
  * @returns {string}
  */
-function errorHelp(error, helpLine) {
+function errorHelp(error, helpLine, fallback = "Retry the command or run `taskferry --help`") {
   if (error && typeof error === "object" && typeof /** @type {{help?: unknown}} */ (error).help === "string") {
     return /** @type {{help: string}} */ (error).help;
   }
-  return helpLine || "Retry the command or run `taskferry --help`";
+  return helpLine || fallback;
 }
 
 // Single pass over `lines`: finds the first `error:`/`help:` line (if any)
@@ -113,18 +117,25 @@ function extractErrorParts(lines) {
 
 /**
  * @param {unknown} error
+ * @param {{helpFallback?: string, messageFallback?: string, foldDetailLines?: boolean}} [options]
+ *   The defaults are CLI-oriented: the help fallback suggests `taskferry
+ *   --help`, an empty error text fabricates "taskferry request failed",
+ *   and detail lines fold into the message for a rich terminal display.
+ *   The daemon's responseError() overrides all three so its wire envelope
+ *   keeps the historical shape (single-line message, empty text stays
+ *   empty, daemon-flavored help fallback) -- see docs/daemon.md.
  * @returns {{error: string, help: string}}
  */
-export function errorValue(error) {
+export function errorValue(error, { helpFallback = "Retry the command or run `taskferry --help`", messageFallback = "taskferry request failed", foldDetailLines = true } = {}) {
   const text = error instanceof Error ? error.message : String(error);
   const lines = text.split("\n");
   const { errorLine, helpLine, detailLines } = extractErrorParts(lines);
-  const primary = errorLine || lines[0] || "taskferry request failed";
+  const primary = errorLine || lines[0] || messageFallback;
   // Detail lines only fold in when we found an `error:` line as the primary,
   // so the plain single-line fallback (no recognized prefixes) keeps
   // returning `lines[0]` unchanged.
-  const message = errorLine !== undefined && detailLines.length ? `${primary}\n${detailLines.join("\n")}` : primary;
-  const help = errorHelp(error, helpLine);
+  const message = errorLine !== undefined && detailLines.length && foldDetailLines ? `${primary}\n${detailLines.join("\n")}` : primary;
+  const help = errorHelp(error, helpLine, helpFallback);
   return { error: message, help };
 }
 

@@ -25,6 +25,7 @@ import {
   syncActivitySubscriptions,
 } from "./daemon-server.js";
 import { errCode } from "./errors.js";
+import { errorValue } from "./output.js";
 
 /**
  * @typedef {import("./tasks.js").Task} Task
@@ -504,9 +505,19 @@ function responseError(error, requestId) {
     return errorResponse(error.requestId, error.code, error.message, error.help, error.message);
   }
   const text = error instanceof Error ? error.message : String(error);
-  const lines = text.split("\n");
-  const message = lines.find((line) => line.startsWith("error:"))?.slice(6).trim() || lines[0];
-  const help = lines.find((line) => line.startsWith("help:"))?.slice(5).trim() || "Retry the request or inspect the daemon logs";
+  // The error envelope's `message` is single-line by contract: the
+  // hand-rolled parser this replaced shipped the first `error:` line (or
+  // first raw line) and put the full text in `detail`. errorValue()'s
+  // detail-line folding and fabricated "taskferry request failed" for empty
+  // text are CLI presentation; keep the wire shape unchanged, so a
+  // multi-line error stays single-line in `message` (detail lines live in
+  // `detail`), empty error text stays empty, and the help fallback is
+  // daemon-oriented, not the CLI's "run `taskferry --help`".
+  const { error: message, help } = errorValue(error, {
+    helpFallback: "Retry the request or inspect the daemon logs",
+    messageFallback: "",
+    foldDetailLines: false,
+  });
   const code = /unknown task id:/.test(text) ? "UNKNOWN_TASK" : "REQUEST_FAILED";
   return errorResponse(requestId, code, message, help, text);
 }

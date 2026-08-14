@@ -23,6 +23,12 @@ export const commandSpecs = {
     options: {},
     examples: ['taskferry reject <id>'],
   },
+  output: {
+    usage: "taskferry output <id> [--path <relpath>]",
+    description: "List a task's scratch output directory (or read one file in it). Every dispatch reserves a per-task writable directory at <stateDir>/outputs/<id>/, rw-bound into the bwrap sandbox at the same path and exposed to the worker as $TASKFERRY_OUTPUT_DIR. Works on every terminal status (done, crashed, cancelled, and incomplete).",
+    options: { "--path <relpath>": "read one file relative to the task's output dir instead of listing; rejects any path that would escape the per-task directory (e.g. \"../sibling\", absolute paths)" },
+    examples: ['taskferry output <id>', 'taskferry output <id> --path deliverable.txt'],
+  },
   wait: {
     usage: "taskferry wait <id> [options]",
     description: "Wait for a task to settle or return its current status after a timeout.",

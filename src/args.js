@@ -16,7 +16,7 @@ import { isNonNegativeInteger } from "./numbers.js";
 /** @type {Record<string, CommandSpec>} */
 const COMMAND_SPECS = commandSpecs;
 
-const POSITIONAL_TASK_COMMANDS = ["cancel", "wait", "status", "tail", "summary", "result", "accept", "reject"];
+const POSITIONAL_TASK_COMMANDS = ["cancel", "wait", "status", "tail", "summary", "result", "accept", "reject", "output"];
 const PROMPT_REQUIRED_COMMANDS = ["dispatch"];
 
 export { UsageError };
@@ -278,6 +278,7 @@ const DEFAULT_OPTIONS = {
   result: () => ({ taskId: void 0, ...flagDefaultsFor("result") }),
   accept: () => ({ taskId: void 0, ...flagDefaultsFor("accept") }),
   reject: () => ({ taskId: void 0 }),
+  output: () => ({ taskId: void 0, path: void 0 }),
   list: () => flagDefaultsFor("list"),
   watch: () => ({ ...flagDefaultsFor("watch"), format: "toon", taskId: void 0 }),
   context: () => ({ ...flagDefaultsFor("context"), format: "toon" }),
@@ -374,6 +375,7 @@ const FLAGS = {
   "--timeout": { allow: ["wait", "advisor"], key: "timeoutMs", coerce: (v, n) => parseDuration(v, n) },
   "--tail-chars": { allow: ["wait"], key: "tailChars", coerce: (v, n) => parseNumber(v, n, { min: 1, max: 65536 }) },
   "--chars": { allow: ["tail"], key: "chars", coerce: (v, n) => parseNumber(v, n, { min: 1, max: 131072 }) },
+  "--path": { allow: ["output"], key: "path" },
   "--mode": { allow: ["summary"], key: "mode", coerce: coerceMode },
   "--max-words": { allow: ["summary"], key: "maxWords", coerce: (v, n) => parseNumber(v, n, { min: 75, max: 300 }) },
   "--fields": { allow: ["result"], key: "fields", coerce: parseFields },

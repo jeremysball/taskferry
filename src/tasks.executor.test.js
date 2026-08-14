@@ -78,7 +78,9 @@ describe("startTask() spawns the executor's CLI binary, not a hardcoded command 
     });
     mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
     assert.equal(captured.cmd, "pi");
-    assert.deepEqual(captured.args, ["--model", TEST_DEFAULT_MODEL, "--mode", "json", "-p", "hi"]);
+    assert.deepEqual(captured.args.slice(0, 5), ["--model", TEST_DEFAULT_MODEL, "--mode", "json", "-p"]);
+    assert.ok(captured.args.at(-1).startsWith("hi\n\n## Persistent output dir"),
+      `expected pi -p arg to carry scratch-dir tail, got: ${captured.args.at(-1)}`);
   });
 
   test("a default (pi) dispatch still spawns `pi`", () => {

@@ -17,6 +17,7 @@ import { resolveVariant, KNOWN_VARIANT_LEVELS } from "./variants.js";
 import { readVariantsCache, refreshVariantsCache } from "./variants-cache.js";
 import { loadEnvFile, watchEnvFile } from "./env-file.js";
 import { loadProjectConfig, resolveReadOnlyProjectBinds, verificationPromptBlock } from "./project-config.js";
+import { TASKFERRY_OUTPUT_DIR_ENV, ensureTaskOutputDir, listTaskOutputFiles, outputDirPromptBlock, readTaskOutputFile, resolveTaskOutputDir } from "./output-dir.js";
 import { computeDoctorStats } from "./doctor-stats.js";
 
 /**
@@ -44,6 +45,7 @@ import { computeDoctorStats } from "./doctor-stats.js";
  * @property {number|null} exitCode
  * @property {NodeJS.Signals|null} signal
  * @property {string} logPath
+ * @property {string} prompt
  * @property {string} promptPreview
  * @property {number|null} promptTotalChars
  * @property {string|null} spawnError
@@ -76,6 +78,7 @@ import { computeDoctorStats } from "./doctor-stats.js";
  * @property {string|null} [headDriftFrom]
  * @property {string|null} [headDriftTo]
  * @property {boolean|null} [headDriftRecovered]
+ * @property {string|null} [outputDir]
  */
 
 /**
@@ -122,6 +125,7 @@ import { computeDoctorStats } from "./doctor-stats.js";
  * @property {string|null} [headDriftFrom]
  * @property {string|null} [headDriftTo]
  * @property {boolean|null} [headDriftRecovered]
+ * @property {string|null} [outputDir]
  */
 
 /**
@@ -149,6 +153,7 @@ import { computeDoctorStats } from "./doctor-stats.js";
  * @property {string[]} [allowedDirs]
  * @property {string[]} [roBind]
  * @property {import("./executor.js").WorkerExecutor} executor
+ * @property {string|null} [outputDir]
  * @property {undefined} [kind]
  * @property {undefined} [snapshotPath]
  */
@@ -872,6 +877,7 @@ function resolveStartTaskLaunch(task, launch, ctx) {
 function resolveSpawnPlan(ctx, launchInfo, taskId) {
   const { isSummary, summaryLaunch, dispatchLaunch, executor, args } = launchInfo;
   const spawnEnv = isSummary ? ctx.summaryEnvironment(summaryLaunch.env) : ctx.dispatchEnvironment(dispatchLaunch.env, taskId);
+  applyOutputDirEnv(spawnEnv, isSummary, dispatchLaunch.outputDir ?? null);
   const noSandbox = !isSummary && dispatchLaunch.noSandbox === true;
   const spawnCommand = executor.binaryName;
   const spawnArgs = args;
@@ -879,22 +885,29 @@ function resolveSpawnPlan(ctx, launchInfo, taskId) {
   // to the target directory in any sense the changeset model cares
   // about, so the plain v1 bind is correct and unchanged for them.
   const role = isSummary ? null : (dispatchLaunch.role ?? "dispatch");
-  // Review finding #5 (dispatch-launch side): overlay-gating lives inside
-  // the bwrap block below, so when sandboxing is force-disabled
-  // (--no-sandbox / TASKFERRY_DISABLE_SANDBOX=1) or unsupported on this
-  // platform (non-Linux) an advisor would silently launch with a plain
-  // writable bind on the target -- a path to persist a write,
-  // contradicting ADR 0001's "an advisor has no path to persist a write."
-  // Fail closed at dispatch-launch time, mirroring the overlay-disabled
-  // check inside the sandbox block below, instead of degrading to
-  // unsandboxed writes.
-  if (role === "advisor" && !(ctx.sandboxEnabled && !noSandbox && platformSupportsSandbox(ctx.platform))) {
-    throw new Error(
-      "error: advisor dispatch requires overlay-gated writes, but the sandbox is unavailable\n" +
-      "help: advisor writes must be gated by a copy-on-write overlay (docs/adr/0001-cow-overlays-and-diff-gated-writes.md), which requires the bwrap sandbox -- unset TASKFERRY_DISABLE_SANDBOX (or drop --no-sandbox) and run on a supported platform with bubblewrap >= 0.8"
-    );
-  }
+  assertAdvisorSandboxAvailable({ role, noSandbox, sandboxEnabled: ctx.sandboxEnabled, platform: ctx.platform });
   return { noSandbox, spawnCommand, spawnArgs, spawnEnv, role };
+}
+
+/**
+ * Review finding #5 (dispatch-launch side): overlay-gating lives inside the
+ * bwrap block, so when sandboxing is force-disabled (--no-sandbox /
+ * TASKFERRY_DISABLE_SANDBOX=1) or unsupported on this platform (non-Linux)
+ * an advisor would silently launch with a plain writable bind on the target
+ * -- a path to persist a write, contradicting ADR 0001's "an advisor has no
+ * path to persist a write." Fail closed at dispatch-launch time, mirroring
+ * the overlay-disabled check inside the sandbox block, instead of degrading
+ * to unsandboxed writes. Extracted out of `resolveSpawnPlan` to keep its
+ * complexity under the ceiling.
+ * @param {{role: "advisor"|"dispatch"|null, noSandbox: boolean, sandboxEnabled: boolean, platform: NodeJS.Platform}} args
+ */
+function assertAdvisorSandboxAvailable({ role, noSandbox, sandboxEnabled, platform }) {
+  if (role !== "advisor") return;
+  if (sandboxEnabled && !noSandbox && platformSupportsSandbox(platform)) return;
+  throw new Error(
+    "error: advisor dispatch requires overlay-gated writes, but the sandbox is unavailable\n" +
+    "help: advisor writes must be gated by a copy-on-write overlay (docs/adr/0001-cow-overlays-and-diff-gated-writes.md), which requires the bwrap sandbox -- unset TASKFERRY_DISABLE_SANDBOX (or drop --no-sandbox) and run on a supported platform with bubblewrap >= 0.8"
+  );
 }
 
 /**
@@ -1215,6 +1228,15 @@ function buildBwrapBinds(ctx, launchInfo, task, spawnEnv, role) {
   // hence the mkdir here rather than leaving it for the sandboxed process.
   fs.mkdirSync(sandboxedDataHome, { recursive: true, mode: 0o700 });
   extraRwBinds.push(sandboxedDataHome);
+  // Per-task scratch dir is read-write inside the sandbox at the same path
+  // the worker sees via $TASKFERRY_OUTPUT_DIR. Only dispatch (not summary)
+  // launches get one -- summaries don't take a deliverable. The dir already
+  // exists by the time startTask fires (dispatchTask creates it at queue
+  // time so a worker that exits before reading the prompt still has the
+  // path). taskferry#423.
+  if (!isSummary && dispatchLaunch.outputDir) {
+    extraRwBinds.push(dispatchLaunch.outputDir);
+  }
   const overlayInfo = createOverlayIfNeeded(ctx, launchInfo, task, role);
   const gitBinds = buildGitBinds(ctx, launchDirectory, overlayInfo, extraRwBinds, { taskId: task.id, registerScratchCleanup });
   // Read-write/read-only dirs: each resolves as a union of the manager-level
@@ -2183,6 +2205,23 @@ function validateDispatchFinalMarker(finalMarker) {
 }
 
 /**
+ * Validates that a dispatch names a model, or can inherit one from a resumed
+ * session. Split out of `buildDispatchTask` and run early in `dispatchTask`
+ * (before the per-task output dir is created) so a rejected dispatch --
+ * missing model, unknown session id -- doesn't leave an orphan output
+ * directory on disk with nothing to reference it. taskferry#423 review.
+ * @param {{model: string|undefined, priorSessionTask: Task|null, sessionId: string|undefined}} params
+ */
+function validateDispatchModel({ model, priorSessionTask, sessionId }) {
+  if (!model && !priorSessionTask) {
+    if (sessionId) {
+      throw new Error(`error: no task found for session id "${sessionId}" to inherit a model from\nhelp: pass --model explicitly, or check the session id with taskferry list`);
+    }
+    throw new Error(`error: --model is required\nhelp: name the model, e.g. --model provider/model (opencode models or pi --list-models lists what's available); to resume an existing session and inherit its model, pass --session-id instead`);
+  }
+}
+
+/**
  * Resolves the dispatch target directory to its real path. Runs after the
  * prompt/finalMarker validation (preserving the original throw order) and
  * surfaces the same user-facing guidance when resolution fails.
@@ -2202,17 +2241,14 @@ function resolveDispatchDirectory(directory) {
  * `oc_` prefix for compatibility. A resume with no `--model` inherits the
  * model the session was created under (a different model can mean a different
  * provider, breaking the whole point of resuming that exact session).
- * @param {{id: string, directory: string, prompt: string, model: string|undefined, executor: import("./executor.js").WorkerExecutor, priorSessionTask: Task|null, variant: string|undefined, sessionId: string|undefined, originSessionId: string|undefined, internal: boolean, finalMarker: string|null, role: "dispatch"|"advisor", logPath: string, class?: string|null, parentTaskId?: string|null, defaultVariant: string, resolveOpencodeVariants: (model: string, env: NodeJS.ProcessEnv|undefined) => string[], env?: NodeJS.ProcessEnv}} params
+ * @param {{id: string, directory: string, prompt: string, model: string|undefined, executor: import("./executor.js").WorkerExecutor, priorSessionTask: Task|null, variant: string|undefined, sessionId: string|undefined, originSessionId: string|undefined, internal: boolean, finalMarker: string|null, role: "dispatch"|"advisor", logPath: string, class?: string|null, parentTaskId?: string|null, defaultVariant: string, resolveOpencodeVariants: (model: string, env: NodeJS.ProcessEnv|undefined) => string[], env?: NodeJS.ProcessEnv, outputDir?: string|null, originalPrompt?: string}} params
  * @returns {Task}
  */
 // eslint-disable-next-line sonarjs/cyclomatic-complexity, complexity -- adding `class` field per brief; function was already at the 10-point ceiling
-function buildDispatchTask({ id, directory, prompt, model, executor, priorSessionTask, variant, sessionId, originSessionId, internal, finalMarker, role, logPath, class: taskClass, parentTaskId = null, defaultVariant, resolveOpencodeVariants, env }) {
-  if (!model && !priorSessionTask) {
-    if (sessionId) {
-      throw new Error(`error: no task found for session id "${sessionId}" to inherit a model from\nhelp: pass --model explicitly, or check the session id with taskferry list`);
-    }
-    throw new Error(`error: --model is required\nhelp: name the model, e.g. --model provider/model (opencode models or pi --list-models lists what's available); to resume an existing session and inherit its model, pass --session-id instead`);
-  }
+function buildDispatchTask({ id, directory, prompt, model, executor, priorSessionTask, variant, sessionId, originSessionId, internal, finalMarker, role, logPath, class: taskClass, parentTaskId = null, defaultVariant, resolveOpencodeVariants, env, outputDir = null, originalPrompt = prompt }) {
+  // Model presence is validated earlier by validateDispatchModel(), before
+  // the output dir is created -- by this point model-or-priorSessionTask is
+  // guaranteed.
   const resolvedModel = model || /** @type {Task} */ (priorSessionTask).model;
   // Precedence: explicit --variant > resumed session's own variant > the
   // configured defaultVariant sentinel/level. Only the third case ever
@@ -2234,6 +2270,10 @@ function buildDispatchTask({ id, directory, prompt, model, executor, priorSessio
     directory,
     logPath,
     role,
+    // prompt here is the *augmented* prompt (user prompt + injected blocks),
+    // since this is what the worker actually sees; promptPreview remains the
+    // literal user prompt so display surfaces don't show the injection tail.
+    prompt,
     status: "queued",
     model: resolvedModel,
     executorId: executor.id,
@@ -2245,8 +2285,8 @@ function buildDispatchTask({ id, directory, prompt, model, executor, priorSessio
     endedAt: null,
     exitCode: null,
     signal: null,
-    promptPreview: prompt.length > 200 ? prompt.slice(0, 200) + "…" : prompt,
-    promptTotalChars: prompt.length > 200 ? prompt.length : null,
+    promptPreview: originalPrompt.length > 200 ? originalPrompt.slice(0, 200) + "…" : originalPrompt,
+    promptTotalChars: originalPrompt.length > 200 ? originalPrompt.length : null,
     spawnError: null,
     cancelRequested: false,
     internal: internal === true,
@@ -2271,6 +2311,7 @@ function buildDispatchTask({ id, directory, prompt, model, executor, priorSessio
     checkOverride: false,
     projectConfigWarning: null,
     checkGatePid: null,
+    outputDir: outputDir ?? null,
   };
 }
 
@@ -2286,9 +2327,9 @@ function buildDispatchTask({ id, directory, prompt, model, executor, priorSessio
  * reaches the child. Pinned by tasks.test.js's "dispatch()'s queued env is
  * frozen against later caller mutations" gate.
  * @param {{tasks: Map<string, Task>, persistTask: (taskId: string) => void, pendingLaunches: Map<string, LaunchSpec>, providerQueues: Map<string, ProviderQueue>, launchQueuedTasks: () => void}} ctx
- * @param {{id: string, task: Task, prompt: string, sessionId: string|undefined, env: NodeJS.ProcessEnv|undefined, noSandbox: boolean, noOverlay: boolean, allowedDirs: string[]|undefined, roBind: string[]|undefined, executor: import("./executor.js").WorkerExecutor, role: "dispatch"|"advisor"}} params
+ * @param {{id: string, task: Task, prompt: string, sessionId: string|undefined, env: NodeJS.ProcessEnv|undefined, noSandbox: boolean, noOverlay: boolean, allowedDirs: string[]|undefined, roBind: string[]|undefined, executor: import("./executor.js").WorkerExecutor, role: "dispatch"|"advisor", outputDir?: string|null}} params
  */
-function queueDispatchLaunch(ctx, { id, task, prompt, sessionId, env, noSandbox, noOverlay, allowedDirs, roBind, executor, role }) {
+function queueDispatchLaunch(ctx, { id, task, prompt, sessionId, env, noSandbox, noOverlay, allowedDirs, roBind, executor, role, outputDir = null }) {
   ctx.tasks.set(id, task);
   ctx.persistTask(task.id);
   const capturedEnv = env === undefined ? undefined : { ...env };
@@ -2305,6 +2346,7 @@ function queueDispatchLaunch(ctx, { id, task, prompt, sessionId, env, noSandbox,
     env: capturedEnv,
     noSandbox: noSandbox === true,
     noOverlay: noOverlay === true,
+    outputDir: outputDir ?? null,
   });
   const provider = providerOf(task.model);
   const providerQueue = getOrCreateProviderQueue(ctx.providerQueues, provider);
@@ -2510,6 +2552,7 @@ function launchSummaryTask(ctx, p) {
     endedAt: null,
     exitCode: null,
     signal: null,
+    prompt: "Summarize the attached task transcript.",
     promptPreview: "Summarize the attached task transcript.",
     promptTotalChars: null,
     spawnError: null,
@@ -4530,6 +4573,8 @@ function buildManagerInternalHelpers(ctx) {
      * @returns {Promise<{taskId: string, changesetStatus: string, cleanupFailed?: boolean}>}
      */
     reject: (taskId) => rejectTaskChangeset(taskId, { ensureStateLoaded: () => ctx.helpers.ensureStateLoaded(), tasks: ctx.maps.tasks, persistTask: (taskId) => ctx.helpers.persistTask(taskId), releaseOverlay: (task) => ctx.env.releaseOverlay(task), killGateAndWait: (taskId2) => ctx.env.killGateAndWait(taskId2), noSuchTask }),
+    /** @param {string} taskId @param {{path?: string}} [options] */
+    output: (taskId, options) => outputFor(taskId, ctx, options),
     /** @param {string} taskId */
     stopRunningWatcher: (taskId) => stopRunningWatcherFor(taskId, { runningWatchers: ctx.maps.runningWatchers, runningWatcherState: ctx.maps.runningWatcherState }),
     /** Forces a running task to stop for a reason other than user cancellation
@@ -4609,7 +4654,7 @@ function buildTaskManagerApi(ctx) {
      *   misrouted CLI/RPC call fails fast rather than silently picking the default.
      * @returns {TaskSummary & {next: string}}
      */
-    dispatch: (params) => dispatchTask(params, { ensureStateLoaded: () => ctx.helpers.ensureStateLoaded(), tasks: ctx.maps.tasks, defaultExecutor: ctx.opts.defaultExecutor, LOG_DIR: ctx.paths.LOG_DIR, persistTask: (taskId) => ctx.helpers.persistTask(taskId), pendingLaunches: ctx.maps.pendingLaunches, providerQueues: ctx.maps.providerQueues, launchQueuedTasks: () => ctx.helpers.launchQueuedTasks(), defaultVariant: ctx.opts.defaultVariant, resolveOpencodeVariants: ctx.helpers.resolveOpencodeVariants }),
+    dispatch: (params) => dispatchTask(params, { ensureStateLoaded: () => ctx.helpers.ensureStateLoaded(), tasks: ctx.maps.tasks, defaultExecutor: ctx.opts.defaultExecutor, STATE_DIR: ctx.opts.stateDir, LOG_DIR: ctx.paths.LOG_DIR, persistTask: (taskId) => ctx.helpers.persistTask(taskId), pendingLaunches: ctx.maps.pendingLaunches, providerQueues: ctx.maps.providerQueues, launchQueuedTasks: () => ctx.helpers.launchQueuedTasks(), defaultVariant: ctx.opts.defaultVariant, resolveOpencodeVariants: ctx.helpers.resolveOpencodeVariants }),
     /**
      * @param {string} taskId
      * @param {{graceMs?: number}} [options]
@@ -4628,6 +4673,12 @@ function buildTaskManagerApi(ctx) {
      * @returns {Promise<{taskId: string, changesetStatus: string, cleanupFailed?: boolean}>}
      */
     reject: (taskId) => ctx.helpers.reject(taskId),
+    /**
+     * @param {string} taskId
+     * @param {{path?: string}} [options]
+     * @returns {{taskId: string, outputDir: string|null, files: Array<{path: string, size: number}>, bytes: number, total: number, truncated: boolean, file?: {content: string|null, size: number, truncated: boolean, error?: string}}}
+     */
+    output: (taskId, options) => ctx.helpers.output(taskId, options),
     /**
      * @param {string} taskId
      * @returns {TaskStatus}
@@ -4997,7 +5048,7 @@ function summarizeRow(task) {
  * @returns {TaskSummary}
  */
 function summarize(task) {
-  const { promptPreview, id, status, directory, model, sessionId, originSessionId, pid, startedAt, endedAt, exitCode, signal, logPath, cancelRequested, spawnError } = task;
+  const { promptPreview, id, status, directory, model, sessionId, originSessionId, pid, startedAt, endedAt, exitCode, signal, logPath, cancelRequested, spawnError, outputDir } = task;
   return {
     id, status, directory, model, sessionId, originSessionId, pid, startedAt, endedAt, exitCode, signal, logPath,
     ...failureFields(task),
@@ -5006,6 +5057,7 @@ function summarize(task) {
     ...summarizeOptionalFields(task),
     ...summarizeChangesetFields(task),
     cancelRequested: !!cancelRequested,
+    outputDir: outputDir ?? null,
   };
 }
 
@@ -6125,6 +6177,41 @@ async function rejectTaskChangeset(taskId, ctx) {
 }
 
 /**
+ * Retrieves the scratch output directory (or one file from it) for a task.
+ * Works on every terminal status -- done, crashed, cancelled, or incomplete --
+ * because the scratch dir is per-task state the worker owns, not a parsed log
+ * result. taskferry#423.
+ * @param {string} taskId
+ * @param {{maps: {tasks: Map<string, Task>}, opts: {stateDir: string}, helpers: {ensureStateLoaded: () => void}}} ctx
+ * @param {{path?: string}} [options]
+ */
+function outputFor(taskId, ctx, options = {}) {
+  ctx.helpers.ensureStateLoaded();
+  const task = ctx.maps.tasks.get(taskId);
+  if (!task) throw new Error(`unknown task id: ${taskId}\nhelp: run \`taskferry list\` to see active task ids`);
+  const outputDir = task.outputDir ?? null;
+  if (typeof options.path === "string" && options.path.length > 0) {
+    if (!outputDir) {
+      return { taskId, outputDir: null, files: [], bytes: 0, total: 0, truncated: false, file: { content: null, size: 0, truncated: false, error: "no_output_dir" } };
+    }
+    const file = readTaskOutputFile(outputDir, options.path);
+    return { taskId: taskId, outputDir: outputDir, files: [], bytes: 0, total: 0, truncated: false, file };
+  }
+  if (!outputDir) {
+    return { taskId, outputDir: null, files: [], bytes: 0, total: 0, truncated: false };
+  }
+  const listing = listTaskOutputFiles(outputDir);
+  return {
+    taskId,
+    outputDir,
+    files: listing.files,
+    bytes: listing.bytes,
+    total: listing.total,
+    truncated: listing.truncated,
+  };
+}
+
+/**
  * Waits for a running/queued task to settle, resolving immediately (or with a
  * timeout) via the shared per-task waiter list. Extracted out of
  * `createTaskManager`'s `poll` closure; `summarize`/`readNarration` are plain
@@ -6477,7 +6564,37 @@ function startRunningWatcherFor(task, ctx) {
  * helpers are plain module-level functions called directly. The factory
  * bindings are threaded in via `ctx`.
  * @param {{prompt: string, directory: string, model?: string, variant?: string, sessionId?: string, internal?: boolean, finalMarker?: string|null, originSessionId?: string, noSandbox?: boolean, noOverlay?: boolean, allowedDirs?: string[], rwBind?: string[], roBind?: string[], executor?: string, env?: NodeJS.ProcessEnv, role?: "dispatch"|"advisor", class?: string|null, parentTaskId?: string|null}} params
- * @param {{ensureStateLoaded: () => void, tasks: Map<string, Task>, defaultExecutor: import("./executor.js").WorkerExecutor, LOG_DIR: string, persistTask: (taskId: string) => void, pendingLaunches: Map<string, LaunchSpec>, providerQueues: Map<string, ProviderQueue>, launchQueuedTasks: () => void, defaultVariant: string, resolveOpencodeVariants: (model: string, env: NodeJS.ProcessEnv|undefined) => string[]}} ctx
+ * @param {{ensureStateLoaded: () => void, tasks: Map<string, Task>, defaultExecutor: import("./executor.js").WorkerExecutor, STATE_DIR: string, LOG_DIR: string, persistTask: (taskId: string) => void, pendingLaunches: Map<string, LaunchSpec>, providerQueues: Map<string, ProviderQueue>, launchQueuedTasks: () => void, defaultVariant: string, resolveOpencodeVariants: (model: string, env: NodeJS.ProcessEnv|undefined) => string[]}} ctx
+ * @returns {TaskSummary & {next: string}}
+ */
+/**
+ * Composes the augmented prompt the worker actually sees. The user's literal
+ * prompt is preserved verbatim as `originalPrompt`; this string is what gets
+ * stored on `task.prompt` and passed via `-p`. The two blocks are:
+ *   - verificationPromptBlock: only on dispatch (advisor never gates) and
+ *     suppressed by --no-overlay (parity with the rest of the overlay machinery).
+ *   - outputDirPromptBlock: always on dispatch, since it's the only surface a
+ *     tool-call-ending worker has to leave its deliverable. taskferry#423.
+ * @param {{role: "dispatch"|"advisor", noOverlay: boolean, projectConfig: {check: string|null}, prompt: string, outputDir: string|null}} args
+ * @returns {string}
+ */
+function buildDispatchPrompt({ role, noOverlay, projectConfig, prompt, outputDir }) {
+  const injected = [
+    role === "dispatch" && !noOverlay && projectConfig.check ? verificationPromptBlock(projectConfig.check) : "",
+    outputDirPromptBlock(outputDir),
+  ].join("");
+  return `${prompt}${injected}`;
+}
+
+/**
+ * Dispatches a new task: resolves the prior session/executor, validates and
+ * normalizes the request, builds the task record, queues its launch, and
+ * returns the summary plus a next-step hint. Extracted out of
+ * `createTaskManager`'s `dispatch` closure; all the validation/build/queue
+ * helpers are plain module-level functions called directly. The factory
+ * bindings are threaded in via `ctx`.
+ * @param {{prompt: string, directory: string, model?: string, variant?: string, sessionId?: string, internal?: boolean, finalMarker?: string|null, originSessionId?: string, noSandbox?: boolean, noOverlay?: boolean, allowedDirs?: string[], rwBind?: string[], roBind?: string[], executor?: string, env?: NodeJS.ProcessEnv, role?: "dispatch"|"advisor", class?: string|null, parentTaskId?: string|null}} params
+ * @param {{ensureStateLoaded: () => void, tasks: Map<string, Task>, defaultExecutor: import("./executor.js").WorkerExecutor, STATE_DIR: string, LOG_DIR: string, persistTask: (taskId: string) => void, pendingLaunches: Map<string, LaunchSpec>, providerQueues: Map<string, ProviderQueue>, launchQueuedTasks: () => void, defaultVariant: string, resolveOpencodeVariants: (model: string, env: NodeJS.ProcessEnv|undefined) => string[]}} ctx
  * @returns {TaskSummary & {next: string}}
  */
 function dispatchTask(params, ctx) {
@@ -6490,16 +6607,21 @@ function dispatchTask(params, ctx) {
   const executor = resolveDispatchExecutor(priorSessionTask, executorName, ctx.defaultExecutor);
   validateDispatchParameters({ prompt, directory });
   validateDispatchFinalMarker(finalMarker);
+  validateDispatchModel({ model, priorSessionTask, sessionId });
   const normalizedDirectory = resolveDispatchDirectory(directory);
   const projectConfig = loadProjectConfig(normalizedDirectory);
-  const dispatchPrompt = role === "dispatch" && !noOverlay && projectConfig.check
-    ? `${prompt}${verificationPromptBlock(projectConfig.check)}`
-    : prompt;
   // Task IDs retain the literal "oc_" prefix for compatibility; WorkerExecutor.taskIdPrefix is not wired in this issue.
   const id = `oc_${Date.now().toString(36)}_${randomUUID().slice(0, 8)}`;
   const logPath = path.join(ctx.LOG_DIR, `${id}.ndjson`);
-  const task = buildDispatchTask({ id, model, executor, priorSessionTask, variant, sessionId, originSessionId, internal, finalMarker, role, logPath, parentTaskId, env, class: taskClass, prompt: dispatchPrompt, directory: normalizedDirectory, defaultVariant: ctx.defaultVariant, resolveOpencodeVariants: ctx.resolveOpencodeVariants });
-  queueDispatchLaunch({ tasks: ctx.tasks, persistTask: ctx.persistTask, pendingLaunches: ctx.pendingLaunches, providerQueues: ctx.providerQueues, launchQueuedTasks: ctx.launchQueuedTasks }, { id, task, sessionId, env, noSandbox, noOverlay, executor, role, prompt: dispatchPrompt, allowedDirs: effectiveRwBind, roBind: dispatchRoBind });
+  // Per-task scratch dir: a writable, rw-bound surface the worker can use to
+  // hand back deliverables whose final assistant message ended on a tool call
+  // (so `taskferry result` can't parse a result). The same path is exported as
+  // $TASKFERRY_OUTPUT_DIR inside the sandbox. taskferry#423.
+  const outputDir = role === "dispatch" ? resolveTaskOutputDir(ctx.STATE_DIR, id) : null;
+  if (outputDir) ensureTaskOutputDir(outputDir);
+  const dispatchPrompt = buildDispatchPrompt({ role, noOverlay, projectConfig, prompt, outputDir });
+  const task = buildDispatchTask({ id, model, executor, priorSessionTask, variant, sessionId, originSessionId, internal, finalMarker, role, logPath, parentTaskId, env, prompt: dispatchPrompt, originalPrompt: prompt, directory: normalizedDirectory, defaultVariant: ctx.defaultVariant, resolveOpencodeVariants: ctx.resolveOpencodeVariants, class: taskClass, outputDir: outputDir });
+  queueDispatchLaunch({ tasks: ctx.tasks, persistTask: ctx.persistTask, pendingLaunches: ctx.pendingLaunches, providerQueues: ctx.providerQueues, launchQueuedTasks: ctx.launchQueuedTasks }, { id, task, sessionId, env, noSandbox, noOverlay, executor, role, prompt: dispatchPrompt, allowedDirs: effectiveRwBind, roBind: dispatchRoBind, outputDir: outputDir });
   const summary = summarize(task);
   return {
     ...summary,
@@ -6694,6 +6816,22 @@ function buildSummaryEnvironment(ctx, env) {
   delete result.OPENCODE_CONFIG_CONTENT;
   result.TASKFERRY_CHILD = "1";
   return result;
+}
+
+/**
+ * Sets or clears $TASKFERRY_OUTPUT_DIR on a spawn env. Dispatches get the
+ * scratch dir path so workers can write deliverables there; summaries don't,
+ * because they don't take a deliverable. taskferry#423.
+ * @param {NodeJS.ProcessEnv} spawnEnv
+ * @param {boolean} isSummary
+ * @param {string|null} outputDir
+ */
+function applyOutputDirEnv(spawnEnv, isSummary, outputDir) {
+  if (isSummary || !outputDir) {
+    delete spawnEnv[TASKFERRY_OUTPUT_DIR_ENV];
+    return;
+  }
+  spawnEnv[TASKFERRY_OUTPUT_DIR_ENV] = outputDir;
 }
 
 /**

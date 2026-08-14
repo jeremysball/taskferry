@@ -346,6 +346,35 @@ accepted, already rejected, or auto-resolved task is a no-op that
 returns a `note` instead of an error, exit code `0`. Frees the CoW
 overlay.
 
+## `taskferry output <id> [--path <relpath>]`
+
+Lists a task's scratch output directory, or reads one file from it.
+Every dispatch reserves a per-task writable directory at
+`<stateDir>/outputs/<id>/`, rw-bound into the bwrap sandbox at the same
+path and exposed to the worker as `$TASKFERRY_OUTPUT_DIR`. Use it for
+deliverables that must survive the task settling, getting cancelled, or
+ending on a tool call instead of a final assistant message (taskferry#423).
+
+- Without `--path`: prints a JSON listing of `{ path, size }` for every
+  file in the scratch dir, plus `bytes`, `total`, and `truncated`
+  (capped at `256` files / `8 MiB`; `node_modules` and `.git` subtrees
+  are skipped).
+- With `--path <relpath>`: prints the file's UTF-8 content. Single files
+  are capped at `1 MiB`; an over-cap read returns `{ content: null,
+  truncated: true, error: "too_large", size }`. Any path that would
+  escape the per-task dir (absolute paths, leading `/`, `..` segments)
+  is rejected.
+- Works on every terminal status: `done`, `crashed`, `cancelled`, and
+  even an `incomplete` task that the worker never finished — the scratch
+  dir is per-task state the worker owns, not parsed-from-log output.
+
+Example:
+
+```sh
+taskferry output oc_mssiwul9_b23e173c
+taskferry output oc_mssiwul9_b23e173c --path deliverable.txt
+```
+
 ## `taskferry list [options]`
 
 Lists tasks scoped to a workspace, newest first, with counts by status.

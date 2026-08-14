@@ -321,6 +321,21 @@ out rather than done half right.
 No log rotation or cleanup: `logs/` grows unbounded. Fine for interactive
 use; long-lived automation wants an external retention policy.
 
+### Scratch output dir survives across every terminal status (taskferry#423)
+
+Every dispatch reserves a per-task writable directory at
+`<stateDir>/outputs/<id>/`, rw-bound into the bwrap sandbox at the same
+path and exposed to the worker as `$TASKFERRY_OUTPUT_DIR`. Unlike the
+git-target overlay (which only exists when a dispatch ran with an overlay
+and is consumed by `accept`/`reject`), the scratch dir is per-task state
+the worker owns directly: it persists on every terminal status
+(`done`, `crashed`, `cancelled`, `incomplete`), is never consumed by
+`accept`/`reject`, and is read back via `taskferry output <id>` (or the
+`task.output` RPC). The CLI is the right surface for retrieving anything
+a worker wrote there — including a deliverable the worker produced but
+whose final assistant message ended on a tool call rather than a clean
+speak turn.
+
 ## Request-latency profiling
 
 Opt-in, off by default: set `TASKFERRY_PROFILING_ENABLED=1`, or the
@@ -541,6 +556,15 @@ profiling is diagnostic, not on the request's critical path.
   `messageFallback: ""`, its own help fallback); the CLI's richer multi-line
   message is presentation for a terminal, deliberately not shared with the
   protocol.
+- A worker that "ended on a tool call" producing no visible final assistant
+  message — expected, and not a failure of the dispatch. Workers can settle
+  with `crashed`, `cancelled`, or `done` while the last assistant turn is
+  still a tool_use whose deliverable the worker wrote to its scratch output
+  dir (see `docs/daemon.md#scratch-output-dir-survives-across-every-terminal-status-taskferry423`).
+  Read it back with `taskferry output <id>` rather than the log — the log
+  captured the *calls*, the scratch dir is where the work actually landed.
+  This is the whole reason the per-task scratch dir exists separately from
+  the changeset overlay.
 - A config entry, credential, or session file that passed the lstat symlink
   guard at bind-computation time still resolving through a symlink into the
   sandbox — expected, and tolerated on purpose. The guard's lstat check

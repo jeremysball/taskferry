@@ -105,6 +105,25 @@ describe("computeDoctorStats: byModel", () => {
     assert.equal(m1.cancelled, 1);
   });
 
+  test("an unrecognized status counts toward the settled denominator instead of vanishing from the rate math", () => {
+    // Regression (fix-forward on PR #466): settledCounts used to hand-list
+    // done/crashed/cancelled/unknown and drop every other status from both
+    // the numerator and the denominator, so 8 superseded + 2 crashed read as
+    // a 100% crash rate. Unknown-status rows now count as settled, so the
+    // same history reads as the true 20% (2/10).
+    const rows = [
+      ...Array.from({ length: 8 }, (_, i) => row({ id: `s${i}`, status: "superseded", model: "m1", hoursAgo: i + 1 })),
+      row({ id: "x", status: "crashed", model: "m1", hoursAgo: 1 }),
+      row({ id: "y", status: "crashed", model: "m1", hoursAgo: 2 }),
+    ];
+    const stats = computeDoctorStats(rows, { now: NOW });
+    const m1 = stats.byModel.find((entry) => entry.model === "m1");
+    assert.equal(m1.dispatches, 10);
+    assert.equal(m1.crashed, 2);
+    assert.equal(m1.crashRate, 0.2);
+    assert.equal(stats.statusMix.overall.other, 8, "superseded rows still surface in the status mix's 'other' bucket");
+  });
+
   test("dominantFailureReason picks the most common reason among this model's crashed tasks", () => {
     const rows = [
       row({ id: "a", status: "crashed", model: "m1", hoursAgo: 3, failureReason: "no_output_timeout" }),

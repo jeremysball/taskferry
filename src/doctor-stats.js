@@ -1,3 +1,9 @@
+import { emptyStatusCounts } from "./tasks.js";
+
+/**
+ * @typedef {import("./tasks.js").Counts} Counts
+ */
+
 const DAY_MS = 24 * 60 * 60 * 1000;
 
 /**
@@ -16,7 +22,12 @@ function toMs(iso) {
 
 /** @returns {Record<string, number>} */
 function emptyStatusMix() {
-  return { queued: 0, running: 0, done: 0, crashed: 0, cancelled: 0, unknown: 0, other: 0, total: 0 };
+  // The named statuses come from the shared definition (`Counts` /
+  // `emptyStatusCounts()` in tasks.js), so a status added there becomes a
+  // named bucket here automatically instead of decaying into `other`.
+  // `other` stays as the catch-all for a status this version doesn't know
+  // about, and `total` is the every-row sum both buckets must equal.
+  return { ...emptyStatusCounts(), other: 0, total: 0 };
 }
 
 /** @param {DoctorStatsRow[]} rows */
@@ -38,27 +49,37 @@ function statusMixFor(rows) {
 }
 
 /**
- * Per-status counts plus `settled`: done+crashed only. Rates (`doneRate`,
- * `crashRate`, the trend) are computed against `settled`, not every
- * terminal-ish status -- `cancelled` was a deliberate stop, not a run
- * outcome, and `unknown` means "we lost track after a daemon restart," not
- * "this task succeeded." Folding either into the denominator dilutes the
- * reported crash rate: 8 unknown + 2 crashed would otherwise read as a 20%
- * crash rate instead of the true 100% of tasks whose outcome we do know.
+ * Per-status counts plus `settled`. Rates (`doneRate`, `crashRate`, the
+ * trend) are computed against `settled`: every task except the four statuses
+ * that are never a run outcome -- `queued`/`running` (not terminal),
+ * `cancelled` (a deliberate stop, not a run outcome), and `unknown` ("we
+ * lost track after a daemon restart," not "this task succeeded"). Folding
+ * those into the denominator dilutes the reported crash rate: 8 unknown + 2
+ * crashed would otherwise read as a 20% crash rate instead of the true 100%
+ * of tasks whose outcome we do know. Everything else counts as settled --
+ * including a status outside the six canonical ones (which matches no named
+ * bucket but still lands in `total`), so a newly added status can never
+ * silently vanish from the rate math the way this function's hand-listed
+ * buckets used to (taskferry#168).
  * @param {DoctorStatsRow[]} rows
  * @returns {{done: number, crashed: number, cancelled: number, unknown: number, settled: number}}
  */
 function settledCounts(rows) {
-  /** @type {Record<string, number>} */
-  const counts = { done: 0, crashed: 0, cancelled: 0, unknown: 0 };
+  const counts = emptyStatusCounts();
+  let total = 0;
   for (const row of rows) {
-    if (counts[row.status] != null) counts[row.status]++;
+    if (counts[/** @type {keyof Counts} */ (row.status)] != null) counts[/** @type {keyof Counts} */ (row.status)]++;
+    total++;
   }
-  const settled = counts.done + counts.crashed;
+  // `settled` is every row except the four excluded statuses above, so a
+  // status added to the shared `Counts` definition -- or one outside it
+  // entirely -- is part of the denominator by construction rather than
+  // needing its own named bucket to avoid being dropped.
+  const settled = total - counts.queued - counts.running - counts.cancelled - counts.unknown;
   // Rebuilt as a named literal, not `{...counts, settled}`: spreading the
-  // Record<string, number>-typed `counts` loses its individual property
-  // names for type-checking purposes, so every caller below would otherwise
-  // see only `settled` and none of the per-status counts.
+  // Counts-typed `counts` loses its individual property names for
+  // type-checking purposes, so every caller below would otherwise see only
+  // `settled` and none of the per-status counts.
   return { done: counts.done, crashed: counts.crashed, cancelled: counts.cancelled, unknown: counts.unknown, settled };
 }
 

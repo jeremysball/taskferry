@@ -544,6 +544,16 @@ profiling is diagnostic, not on the request's critical path.
   forces the write before `ctx.spawnFn(...)` runs. The later, post-spawn
   `persistTask()` call is unchanged and still needed to record
   `status: "running"` and the real `pid`.
+- `taskferry list --all` showing at most the 500 most recent rows even when
+  the counts line says far more tasks exist — expected, not a truncation bug.
+  All-time history grows without bound, and an unfiltered `task.list`
+  response used to ship every row ever recorded, eventually exceeding the
+  daemon's 1 MiB outbound message cap and killing the connection with no
+  error frame ("daemon connection closed", taskferry#342). The daemon now
+  caps the shipped rows at the newest `MAX_LIST_ROWS` (500) while keeping
+  `counts` computed over the full set (a cheap in-memory tally), so
+  `list --all` always answers. To see an older or scoped slice, narrow with
+  `--directory`; `doctor --stats` summarizes the whole history server-side.
 - An error response envelope whose `message` is a single line (detail lines
   collapsed away) or empty — expected, not dropped data. The envelope keeps
   the historical wire shape: `message` is exactly the first `error:` line

@@ -470,6 +470,30 @@ function filteredTaskDetails(manager, directory, resolveWorkspaceRootFn) {
   };
 }
 
+// `list --all` (task.list with no `directory`) returns every task ever
+// recorded, and all-time history grows without bound. An unfiltered
+// response can outgrow the daemon's 1 MiB outbound message cap
+// (MAX_BUFFER_BYTES) and -- before daemon-server.js's RESPONSE_TOO_LARGE
+// degradation landed -- tear the connection down with no error frame,
+// which surfaced to the CLI as "taskferry daemon connection closed"
+// (taskferry#342). Cap the shipped rows at the newest MAX_LIST_ROWS rows
+// while keeping counts over the full set: counts are a cheap in-memory
+// tally (no per-task log I/O, unlike the directory path's manager.status()
+// calls), and the capped frame stays well under the wire cap even for a
+// pathological row. The same server-side-bounding treatment was already
+// applied to `doctor --stats` (task.stats, taskferry#332).
+export const MAX_LIST_ROWS = 500;
+
+/**
+ * @param {TaskManager} manager
+ * @returns {ReturnType<TaskManager["list"]>}
+ */
+function cappedList(manager) {
+  const { counts, tasks } = manager.list();
+  if (!Array.isArray(tasks) || tasks.length <= MAX_LIST_ROWS) return { counts, tasks };
+  return { counts, tasks: tasks.slice(0, MAX_LIST_ROWS) };
+}
+
 /**
  * @param {TaskManager} manager
  * @param {string|undefined} directory
@@ -477,7 +501,7 @@ function filteredTaskDetails(manager, directory, resolveWorkspaceRootFn) {
  * @returns {ReturnType<TaskManager["list"]>}
  */
 function filteredList(manager, directory, resolveWorkspaceRootFn) {
-  if (directory === undefined) return manager.list();
+  if (directory === undefined) return cappedList(manager);
   const details = filteredTaskDetails(manager, directory, resolveWorkspaceRootFn);
   const counts = countTasks(details.tasks);
   const rows = details.tasks.map(({ id, status, model, startedAt, failureReason }) => ({ id, status, model, startedAt, failureReason: failureReason ?? null }));

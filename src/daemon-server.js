@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import net from "node:net";
 import { randomUUID } from "node:crypto";
-import { normalizeDirectory, sameWorkspace } from "./paths.js";
+import { normalizeActivitySubscriptionKey, normalizeDirectory, sameWorkspace } from "./paths.js";
 import {
   PROTOCOL_VERSION,
   encodeMessage,
@@ -196,7 +196,13 @@ export function syncActivitySubscriptions(manager, subscriptions, resolveWorkspa
   /** @type {Map<string|null, Set<boolean>>} */
   const subs = new Map();
   for (const subscription of subscriptions.values()) {
-    const key = subscription.directory === ALL_DIRECTORIES ? ALL_DIRECTORIES : resolveWorkspaceRootFn(subscription.directory);
+    let key;
+    try {
+      key = normalizeActivitySubscriptionKey(subscription.directory, resolveWorkspaceRootFn);
+    } catch (err) {
+      console.error(`taskferry: failed to resolve activity subscription directory ${subscription.directory}: ${err instanceof Error ? err.message : String(err)}`);
+      continue;
+    }
     let variants = subs.get(key);
     if (!variants) {
       variants = new Set();

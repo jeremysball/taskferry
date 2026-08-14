@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { createTaskEvents } from "./events.js";
 import { createActivityCache, readActivitySnapshot, readDeltaNarration, DEFAULT_SUMMARIZER_TIMEOUT_MS } from "./activity.js";
-import { resolveStateDir, resolveCacheDir, resolveOverlayTmpRoot, TASKFERRY_PLUMBING_ENV_VARS } from "./paths.js";
+import { normalizeActivitySubscriptionKey, resolveStateDir, resolveCacheDir, resolveOverlayTmpRoot, TASKFERRY_PLUMBING_ENV_VARS } from "./paths.js";
 import { RESULT_FIELDS } from "./protocol.js";
 import { formatToolEventForNarration } from "./narration-format.js";
 import { errCode } from "./errors.js";
@@ -6523,12 +6523,13 @@ function scheduleActivityFor(task, { force }, ctx) {
   if (typeof ctx.onEvent !== "function" || task.internal) return Promise.resolve();
   const scheduledStatus = task.status;
   const scheduledDirectory = task.directory;
-  // Normalized the same way syncActivitySubscriptions() (daemon-server.js)
-  // keys ctx.activitySubscriptions -- a root-scoped `watch` subscription and
-  // a task dispatched into a linked worktree of that same repo both resolve
-  // to the same workspace-root key here (taskferry#335), instead of the
-  // literal `task.directory` string missing the root subscriber entirely.
-  const workspaceRootDirectory = ctx.resolveWorkspaceRootFn(scheduledDirectory);
+  const allVariants = ctx.activitySubscriptions.get(null);
+  const literalVariants = ctx.activitySubscriptions.get(scheduledDirectory);
+  // Normalize only when a non-literal subscription exists; this avoids a
+  // synchronous git spawn for unsubscribed activity refreshes.
+  const workspaceRootDirectory = allVariants || literalVariants || ctx.activitySubscriptions.size === 0
+    ? scheduledDirectory
+    : normalizeActivitySubscriptionKey(scheduledDirectory, ctx.resolveWorkspaceRootFn);
   const baseEvent = () => {
     ++ctx.state.eventSequence;
     const sequence = ctx.state.eventSequence;
@@ -6556,7 +6557,6 @@ function scheduleActivityFor(task, { force }, ctx) {
   // directory, so its variants apply to every task alongside whatever this
   // task's own directory has subscribed to.
   const dirVariants = ctx.activitySubscriptions.get(workspaceRootDirectory);
-  const allVariants = ctx.activitySubscriptions.get(null);
   const mergedVariants = new Set([...(dirVariants ?? []), ...(allVariants ?? [])]);
   const variants = mergedVariants.size > 0
     ? [...mergedVariants]

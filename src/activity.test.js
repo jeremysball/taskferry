@@ -7,7 +7,8 @@ import { createActivityCache, buildLocalActivity, snapshotNarration, activityCac
 import { runCli } from "./cli.js";
 import { parseRequestLine } from "./protocol.js";
 import { createTaskManager, DEFAULT_SUMMARY_MODEL } from "./tasks.js";
-import { resolveWorkspaceRoot } from "./paths.js";
+import { createWorkspaceRootResolver, resolveWorkspaceRoot } from "./paths.js";
+import { syncActivitySubscriptions } from "./daemon-server.js";
 import { trackManager, fakeChild, mkdtempTracked } from "./tasks.test-helpers.js";
 
 const TASK_ACTIVITY = "task.activity";
@@ -162,7 +163,13 @@ describe("task activity events", () => {
     // directory strings are literally different, only resolveWorkspaceRootFn
     // ties them together, the same way daemon.js's real resolver does via
     // `git rev-parse --git-common-dir`.
-    const resolveWorkspaceRootFn = (directory) => (directory === worktreeDir ? repoRoot : directory);
+    const resolveWorkspaceRootFn = createWorkspaceRootResolver({
+      runCommand: (_command, args) => ({
+        status: args[1] === worktreeDir || args[1] === repoRoot ? 0 : 1,
+        stdout: args[1] === worktreeDir || args[1] === repoRoot ? `${repoRoot}/.git\n` : "",
+        stderr: "",
+      }),
+    });
     const manager = trackManager(createTaskManager({
       stateDir,
       resolveWorkspaceRootFn,
@@ -175,19 +182,10 @@ describe("task activity events", () => {
     }));
     t.after(() => manager.close());
 
-    // daemon-server.js's syncActivitySubscriptions() would key this the same
-    // way once it normalizes subscription.directory through the same
-    // resolver -- keyed here directly at the repo root to isolate the
-    // scheduleActivityFor() lookup side of the fix. A decoy subscription
-    // sits at the *unresolved* literal worktree path with the opposite
-    // variant, so a lookup that skips workspace-root resolution (the bug)
-    // matches the decoy's "true" instead of the real subscriber's "false",
-    // making the two outcomes distinguishable without needing the "true"
-    // variant's real-summarization codepath to actually settle.
-    manager.setActivitySubscriptions(new Map([
-      [repoRoot, new Set([false])],
-      [worktreeDir, new Set([true])],
-    ]));
+    syncActivitySubscriptions(manager, new Map([
+      ["repo", { directory: repoRoot, summaries: false }],
+      ["unrelated", { directory: "/some/other/unrelated/directory", summaries: true }],
+    ]), resolveWorkspaceRootFn);
 
     manager.dispatch({ prompt: "Watch the fleet", directory: worktreeDir });
     await new Promise((resolve) => setImmediate(resolve));

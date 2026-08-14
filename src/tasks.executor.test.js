@@ -145,6 +145,7 @@ describe("startTask() merges executor.sandboxAuthFile().sandboxEnv into spawnEnv
       platform: "linux",
       existsFn: (p) => p === realConfigDir || p === realJsonc || p === realGitignore,
       readdirFn: (p) => (p === realConfigDir ? [OPENCODE_JSONC, GITIGNORE] : []),
+      lstatFn: () => ({ isSymbolicLink: () => false }),
       cacheDir,
     });
     mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), executor: "opencode" });
@@ -240,6 +241,7 @@ describe("startTask() merges executor.sandboxAuthFile().sandboxEnv into spawnEnv
     assert.equal(capturedArgs.sessionId, sessionId, "sandboxAuthFile must receive the dispatch's sessionId so the bind can scope to that single file");
     assert.equal(capturedArgs.launchDirectory, directory, "sandboxAuthFile must receive the dispatch's launchDirectory so it can compute pi's per-cwd sessions subdirectory");
     assert.equal(typeof capturedArgs.statFn, "function", "sandboxAuthFile must receive a statFn (for the isDirectory guard)");
+    assert.equal(typeof capturedArgs.lstatFn, "function", "sandboxAuthFile must receive a lstatFn (for the config-entry symlink guard)");
     assert.equal(typeof capturedArgs.readdirFn, "function", "sandboxAuthFile must receive a readdirFn (for the session file lookup)");
   });
 

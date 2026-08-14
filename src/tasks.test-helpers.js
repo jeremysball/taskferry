@@ -341,6 +341,7 @@ function buildManagerOptions(options, stateDir, defaultCacheDir, defaultOverlayT
     ...passthroughIfSet({ checkBwrapAvailableFn: options.checkBwrapAvailableFn }, "checkBwrapAvailableFn", "checkBwrapAvailableFn"),
     ...passthroughIfSet({ existsFn: options.existsFn }, "existsFn", "existsFn"),
     ...passthroughIfSet({ statFn: options.statFn }, "statFn", "statFn"),
+    ...passthroughIfSet({ lstatFn: options.lstatFn }, "lstatFn", "lstatFn"),
     ...passthroughIfSet({ readdirFn: options.readdirFn }, "readdirFn", "readdirFn"),
     ...passthroughIfSet({ runtimeDir: options.runtimeDir }, "runtimeDir", "runtimeDir"),
     ...passthroughIfSet({ platform: options.platform }, "platform", "platform"),

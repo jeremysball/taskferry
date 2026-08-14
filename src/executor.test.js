@@ -16,6 +16,11 @@ const LAUNCH_DIR_FOO = "/home/user/projects/foo";
 const SESSION_FILE = "2026-07-23T21-42-41-761Z_019f90ea-1234-70e0-98dc-6847db316eb4.jsonl";
 const RATE_LIMIT_MESSAGE = "rate limit exceeded";
 const DISPATCH_PROMPT = "do the thing";
+const OPENCODE_CONFIG_DIR = "/home/user/.config/opencode";
+const OPENCODE_JSONC = "opencode.jsonc";
+const SANDBOXED_CONFIG_DIR = "/state/run/opencode-data/config/opencode";
+const OPENCODE_JSONC_DEST = `${SANDBOXED_CONFIG_DIR}/opencode.jsonc`;
+const PLUGINS_DEST = `${SANDBOXED_CONFIG_DIR}/plugins`;
 
 
 
@@ -496,15 +501,51 @@ describe("opencodeExecutor()", () => {
 
   test("sandboxAuthFile: ro-binds the real config dir's entries, skipping the .gitignore opencode rewrites on boot", () => {
     const ex = opencodeExecutor();
-    const realConfigDir = "/home/user/.config/opencode";
+    const realConfigDir = OPENCODE_CONFIG_DIR;
     const result = ex.sandboxAuthFile({
       homeDir: HOME_DIR, dataDir: DATA_DIR, spawnEnv: {},
       existsFn: (p) => p === realConfigDir,
-      readdirFn: (p) => (p === realConfigDir ? ["opencode.jsonc", "plugins", ".gitignore"] : []),
+      readdirFn: (p) => (p === realConfigDir ? [OPENCODE_JSONC, "plugins", ".gitignore"] : []),
+      lstatFn: () => ({ isSymbolicLink: () => false }),
     });
     assert.deepEqual(result.extraRoBinds, [
-      [`${realConfigDir}/opencode.jsonc`, "/state/run/opencode-data/config/opencode/opencode.jsonc"],
-      [`${realConfigDir}/plugins`, "/state/run/opencode-data/config/opencode/plugins"],
+      [`${realConfigDir}/${OPENCODE_JSONC}`, OPENCODE_JSONC_DEST],
+      [`${realConfigDir}/plugins`, PLUGINS_DEST],
+    ]);
+  });
+
+  test("sandboxAuthFile: skips a symlinked config entry, so its out-of-tree target is never ro-bound into the sandbox", () => {
+    const ex = opencodeExecutor();
+    const realConfigDir = OPENCODE_CONFIG_DIR;
+    const result = ex.sandboxAuthFile({
+      homeDir: HOME_DIR, dataDir: DATA_DIR, spawnEnv: {},
+      existsFn: (p) => p === realConfigDir,
+      readdirFn: (p) => (p === realConfigDir ? [OPENCODE_JSONC, "plugins", "planted-link"] : []),
+      // planted-link points outside the config dir (say, at ~/.ssh): binding
+      // it would hand the sandbox a ro view of the symlink target, so it must
+      // be dropped while regular entries survive.
+      lstatFn: (p) => ({ isSymbolicLink: () => p === `${realConfigDir}/planted-link` }),
+    });
+    assert.deepEqual(result.extraRoBinds, [
+      [`${realConfigDir}/${OPENCODE_JSONC}`, OPENCODE_JSONC_DEST],
+      [`${realConfigDir}/plugins`, PLUGINS_DEST],
+    ]);
+  });
+
+  test("sandboxAuthFile: drops a config entry whose lstat fails, binding nothing it couldn't verify", () => {
+    const ex = opencodeExecutor();
+    const realConfigDir = OPENCODE_CONFIG_DIR;
+    const result = ex.sandboxAuthFile({
+      homeDir: HOME_DIR, dataDir: DATA_DIR, spawnEnv: {},
+      existsFn: (p) => p === realConfigDir,
+      readdirFn: (p) => (p === realConfigDir ? [OPENCODE_JSONC, "vanished-entry"] : []),
+      lstatFn: (p) => {
+        if (p === `${realConfigDir}/vanished-entry`) throw new Error("ENOENT");
+        return { isSymbolicLink: () => false };
+      },
+    });
+    assert.deepEqual(result.extraRoBinds, [
+      [`${realConfigDir}/${OPENCODE_JSONC}`, OPENCODE_JSONC_DEST],
     ]);
   });
 

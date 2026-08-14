@@ -123,6 +123,28 @@ function resolvePiSessionFile(realSessionsDir, sessionId, { readdirFn = (/** @ty
 }
 
 /**
+ * Whether a real opencode config-dir entry is safe to ro-bind into the
+ * sandbox. lstat, never stat: a plain stat follows the symlink and defeats
+ * the check, while bwrap resolves a symlink on the host at bind time -- so
+ * binding a symlinked entry would ro-bind whatever it points at, letting a
+ * plugin-planted symlink pull arbitrary host paths (e.g. ~/.ssh) into the
+ * sandbox. Entries whose lstat fails outright are skipped too (fail closed:
+ * never bind what we couldn't verify isn't a symlink).
+ * @param {string} fullPath
+ * @param {(file: string) => {isSymbolicLink: () => boolean}} lstatFn
+ * @returns {boolean}
+ */
+function isBindableConfigEntry(fullPath, lstatFn) {
+  let entryStat;
+  try {
+    entryStat = lstatFn(fullPath);
+  } catch {
+    return false;
+  }
+  return !entryStat.isSymbolicLink();
+}
+
+/**
  * @typedef {Object} WorkerExecutor
  * @property {"opencode"|"pi"} id
  * @property {string} taskIdPrefix
@@ -134,7 +156,7 @@ function resolvePiSessionFile(realSessionsDir, sessionId, { readdirFn = (/** @ty
  * @property {(ctx: SpawnLaunchContext) => string[]} buildSpawnArgs
  * @property {() => string} buildSummaryPrompt
  * @property {(parsed: unknown) => unknown} normalizeLogEvent
- * @property {(args: {homeDir: string, dataDir: string, spawnEnv: NodeJS.ProcessEnv, existsFn: (file: string) => boolean, statFn?: (file: string) => {isDirectory: () => boolean}|null, readdirFn: (dir: string) => string[], sessionId?: string|null, launchDirectory?: string|null}) => {extraRoBinds: [string, string][], extraRwPairBinds?: [string, string][], sandboxedDataHome: string, sandboxEnv: Record<string, string>}} sandboxAuthFile
+ * @property {(args: {homeDir: string, dataDir: string, spawnEnv: NodeJS.ProcessEnv, existsFn: (file: string) => boolean, statFn?: (file: string) => {isDirectory: () => boolean}|null, lstatFn?: (file: string) => {isSymbolicLink: () => boolean}, readdirFn: (dir: string) => string[], sessionId?: string|null, launchDirectory?: string|null}) => {extraRoBinds: [string, string][], extraRwPairBinds?: [string, string][], sandboxedDataHome: string, sandboxEnv: Record<string, string>}} sandboxAuthFile
  */
 
 /**
@@ -396,8 +418,8 @@ export function opencodeExecutor() {
     // small tmpfs: opencode's snapshot store under here grows unbounded
     // across dispatches (no gc) and previously filled the whole
     // XDG_RUNTIME_DIR tmpfs, starving it of space for sockets/locks too.
-    /** @param {{homeDir: string, dataDir: string, spawnEnv: NodeJS.ProcessEnv, existsFn: (file: string) => boolean, statFn?: (file: string) => {isDirectory: () => boolean}|null, readdirFn: (dir: string) => string[], sessionId?: string|null, launchDirectory?: string|null}} args @returns {{extraRoBinds: [string, string][], extraRwPairBinds?: [string, string][], sandboxedDataHome: string, sandboxEnv: Record<string, string>}} */
-    sandboxAuthFile({ homeDir, dataDir, spawnEnv, existsFn, readdirFn }) {
+    /** @param {{homeDir: string, dataDir: string, spawnEnv: NodeJS.ProcessEnv, existsFn: (file: string) => boolean, statFn?: (file: string) => {isDirectory: () => boolean}|null, lstatFn?: (file: string) => {isSymbolicLink: () => boolean}, readdirFn: (dir: string) => string[], sessionId?: string|null, launchDirectory?: string|null}} args @returns {{extraRoBinds: [string, string][], extraRwPairBinds?: [string, string][], sandboxedDataHome: string, sandboxEnv: Record<string, string>}} */
+    sandboxAuthFile({ homeDir, dataDir, spawnEnv, existsFn, lstatFn = fs.lstatSync, readdirFn }) {
       const realDataHome = spawnEnv.XDG_DATA_HOME || path.join(homeDir, ".local", "share");
       const realAuthFile = path.join(realDataHome, "opencode", "auth.json");
       const sandboxedDataHome = path.join(dataDir, "opencode-data");
@@ -422,7 +444,10 @@ export function opencodeExecutor() {
       if (existsFn(realConfigDir)) {
         for (const entry of readdirFn(realConfigDir)) {
           if (entry === ".gitignore") continue;
-          extraRoBinds.push([path.join(realConfigDir, entry), path.join(sandboxedConfigDir, entry)]);
+          const fullPath = path.join(realConfigDir, entry);
+          if (isBindableConfigEntry(fullPath, lstatFn)) {
+            extraRoBinds.push([fullPath, path.join(sandboxedConfigDir, entry)]);
+          }
         }
       }
       return {

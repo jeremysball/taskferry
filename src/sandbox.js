@@ -1,6 +1,7 @@
 import { spawnSync } from "node:child_process";
 import path from "node:path";
 import { errCode } from "./errors.js";
+import { defaultRunCommandAsync } from "./setup.js";
 
 /**
  * @param {NodeJS.Platform} [platform]
@@ -102,10 +103,10 @@ export function checkOverlaySupport(runCommand = defaultRunCommand) {
  * implementations. Awaits the async runCommand, then delegates the rest to
  * checkBwrapAvailable so both variants share the same probe invocation and
  * classification logic.
- * @param {(command: string, args: readonly string[]) => Promise<import("./setup.js").CommandResult>} runCommand
+ * @param {(command: string, args: readonly string[]) => Promise<import("./setup.js").CommandResult>} [runCommand]
  * @returns {Promise<{checked: boolean, available: boolean, reason?: string, raw?: string}>}
  */
-export async function checkBwrapAvailableAsync(runCommand) {
+export async function checkBwrapAvailableAsync(runCommand = defaultRunCommandAsync) {
   const result = await runCommand("bwrap", ["--version"]);
   return checkBwrapAvailable(() => result);
 }

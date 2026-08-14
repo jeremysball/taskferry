@@ -6,7 +6,12 @@ export const TASKFERRY_OUTPUT_DIR_ENV = "TASKFERRY_OUTPUT_DIR";
 
 const PROMPT_BLOCK_SEPARATOR = "\n\n";
 
-const MAX_OUTPUT_FILE_BYTES = 1024 * 1024;
+// Kept well under daemon-server.js's MAX_BUFFER_BYTES (1 MiB) rather than
+// matching it exactly -- the file's raw bytes are only part of the wire
+// response; JSON-string escaping plus the surrounding RPC envelope add
+// overhead on top, so a cap equal to the response ceiling still risks
+// RESPONSE_TOO_LARGE for a file that fits this check.
+const MAX_OUTPUT_FILE_BYTES = 512 * 1024;
 const MAX_OUTPUT_LIST_ENTRIES = 256;
 const MAX_OUTPUT_TOTAL_BYTES = 8 * 1024 * 1024;
 
@@ -138,6 +143,11 @@ function processEntry(entry, current, dir, fileCount, byteCount) {
   const rel = path.relative(dir, full);
   const classified = classifyEntry(entry, full);
   if (classified.kind === "file") {
+    // Checked here (with this entry's own size), not just via the
+    // pre-entry shouldStopListing() cap above -- otherwise a single file
+    // larger than MAX_OUTPUT_TOTAL_BYTES is admitted whole because the
+    // running total was still 0 (or under-cap) before this entry.
+    if (byteCount + classified.size > MAX_OUTPUT_TOTAL_BYTES) return "truncated";
     return { rel, size: classified.size, kind: "file" };
   }
   if (classified.kind === "directory") {
@@ -181,7 +191,12 @@ function classifyEntry(entry, full) {
       throw err;
     }
     if (target.isFile()) return { kind: "file", size: target.size };
-    if (target.isDirectory()) return { kind: "directory" };
+    // Deliberately not { kind: "directory" } here: descending into a
+    // symlinked directory has no cycle detection (a self- or
+    // ancestor-referential symlink would re-enter itself via the
+    // traversal stack indefinitely) and can walk arbitrary host
+    // directories the symlink points outside the output dir. Only a
+    // symlink-to-file is reported (as its resolved size, above).
     return { kind: "skip" };
   }
   if (entry.isDirectory()) {
@@ -234,6 +249,18 @@ export function readTaskOutputFile(dir, relativePath) {
     throw err;
   }
   if (!stat.isFile()) return { content: null, size: stat.size, truncated: false, error: "not_a_file" };
+  // resolveInsideDir only rejects lexical escape (`..`, an absolute path);
+  // it does not stop a symlink planted inside dir from pointing outside
+  // it, since path.resolve() doesn't dereference the final symlink. Now
+  // that the target is known to exist, check its *real* path against the
+  // real path of dir so a worker-planted symlink can't leak arbitrary
+  // host files (/etc/passwd, /proc/self/environ) through this RPC.
+  const realTarget = fs.realpathSync(target);
+  const realDir = fs.realpathSync(dir);
+  const realDirWithSep = realDir.endsWith(path.sep) ? realDir : realDir + path.sep;
+  if (realTarget !== realDir && !realTarget.startsWith(realDirWithSep)) {
+    throw new Error(`error: --path "${relativePath}" escapes the task's output directory\nhelp: pass a relative path like "deliverable.txt" or "subdir/notes.md"`);
+  }
   if (stat.size > MAX_OUTPUT_FILE_BYTES) return { content: null, size: stat.size, truncated: true, error: "too_large" };
   const buffer = fs.readFileSync(target);
   return { content: buffer.toString("utf8"), size: stat.size, truncated: false };

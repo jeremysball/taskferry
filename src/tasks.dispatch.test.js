@@ -44,6 +44,14 @@ describe("dispatch() lifecycle, driven through an injected spawnFn (no real open
     );
   });
 
+  test("a rejected dispatch (missing --model) does not orphan an output dir on disk (PR #474 review, taskferry#423)", () => {
+    const mgr = makeManager({ spawnFn: () => fakeChild(), autoModel: false });
+    assert.throws(() => mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), executor: "opencode" }));
+    const outputsRoot = path.join(mgr.paths.STATE_DIR, "outputs");
+    const leftover = fs.existsSync(outputsRoot) ? fs.readdirSync(outputsRoot) : [];
+    assert.deepEqual(leftover, [], `expected no orphan output dirs, found: ${JSON.stringify(leftover)}`);
+  });
+
   /** @param {string[]} args @param {string} model */
   function assertDispatchedModel(args, model) {
     assert.equal(args[args.indexOf("-m") + 1], model);

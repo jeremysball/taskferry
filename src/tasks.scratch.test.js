@@ -281,4 +281,41 @@ describe("scratch output dir retrieval (taskferry#423)", () => {
     assert.equal(resolveInsideDir(base, "ok.txt"), path.join(base, "ok.txt"));
     assert.equal(resolveInsideDir(base, "subdir/ok.txt"), path.join(base, "subdir", "ok.txt"));
   });
+
+  test("readTaskOutputFile rejects a symlink whose real target escapes the output dir (PR #474 review)", () => {
+    const dir = mkdtempTracked(AXI_TASKS_TEST_DIR + "-symlink-read-");
+    const outside = mkdtempTracked(AXI_TASKS_TEST_DIR + "-symlink-target-");
+    const secret = path.join(outside, "secret.txt");
+    fs.writeFileSync(secret, "not for the worker to read");
+    fs.symlinkSync(secret, path.join(dir, "escape.txt"));
+    assert.throws(() => readTaskOutputFile(dir, "escape.txt"), /escapes/i);
+  });
+
+  test("listTaskOutputFiles does not descend into a symlinked directory (PR #474 review)", () => {
+    const dir = mkdtempTracked(AXI_TASKS_TEST_DIR + "-symlink-list-");
+    const outside = mkdtempTracked(AXI_TASKS_TEST_DIR + "-symlink-list-target-");
+    fs.writeFileSync(path.join(outside, "outside.txt"), "should not be listed");
+    fs.symlinkSync(outside, path.join(dir, "linked-dir"));
+    fs.writeFileSync(path.join(dir, "keep.txt"), "k");
+    const result = listTaskOutputFiles(dir);
+    assert.deepEqual(result.files.map((f) => f.path), ["keep.txt"]);
+  });
+
+  test("listTaskOutputFiles does not loop on a self-referential symlinked directory (PR #474 review)", () => {
+    const dir = mkdtempTracked(AXI_TASKS_TEST_DIR + "-symlink-cycle-");
+    fs.symlinkSync(dir, path.join(dir, "self"));
+    fs.writeFileSync(path.join(dir, "keep.txt"), "k");
+    const result = listTaskOutputFiles(dir);
+    assert.deepEqual(result.files.map((f) => f.path), ["keep.txt"]);
+  });
+
+  test("listTaskOutputFiles stops before admitting a single file that would exceed MAX_OUTPUT_TOTAL_BYTES (PR #474 review)", () => {
+    const dir = mkdtempTracked(AXI_TASKS_TEST_DIR + "-oversize-");
+    const oversized = "x".repeat(9 * 1024 * 1024); // > the 8 MiB total cap
+    fs.writeFileSync(path.join(dir, "huge.bin"), oversized);
+    const result = listTaskOutputFiles(dir);
+    assert.equal(result.files.length, 0, "the oversized entry must not be admitted whole");
+    assert.equal(result.truncated, true);
+    assert.equal(result.bytes, 0);
+  });
 });

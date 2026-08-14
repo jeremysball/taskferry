@@ -56,6 +56,20 @@ describe("activity snapshots", () => {
     );
   });
 
+  test("prefers promptPreview over the raw (possibly augmented) prompt (PR #474 review, taskferry#423)", () => {
+    // `prompt` on a dispatched task is the augmented string the worker
+    // actually sees (## Persistent output dir block etc. appended);
+    // promptPreview is always the clean, user-facing text. Before the
+    // first log event exists, activity display must not leak the
+    // injected wrapper block or the internal state-dir path.
+    const cleanPrompt = "Inspect the server";
+    const augmented = `${cleanPrompt}\n\n## Persistent output dir\nThis task has a writable scratch directory at \`/home/user/.local/state/taskferry/outputs/oc_abc\``;
+    assert.equal(
+      buildLocalActivity({ status: "running", prompt: augmented, promptPreview: cleanPrompt }),
+      cleanPrompt
+    );
+  });
+
   test("readDeltaNarration returns only the narration appended since fromOffset", async () => {
     const logDir = mkdtempTracked("taskferry-delta-snap-");
     const logPath = path.join(logDir, "log.ndjson");

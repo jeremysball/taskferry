@@ -2205,6 +2205,23 @@ function validateDispatchFinalMarker(finalMarker) {
 }
 
 /**
+ * Validates that a dispatch names a model, or can inherit one from a resumed
+ * session. Split out of `buildDispatchTask` and run early in `dispatchTask`
+ * (before the per-task output dir is created) so a rejected dispatch --
+ * missing model, unknown session id -- doesn't leave an orphan output
+ * directory on disk with nothing to reference it. taskferry#423 review.
+ * @param {{model: string|undefined, priorSessionTask: Task|null, sessionId: string|undefined}} params
+ */
+function validateDispatchModel({ model, priorSessionTask, sessionId }) {
+  if (!model && !priorSessionTask) {
+    if (sessionId) {
+      throw new Error(`error: no task found for session id "${sessionId}" to inherit a model from\nhelp: pass --model explicitly, or check the session id with taskferry list`);
+    }
+    throw new Error(`error: --model is required\nhelp: name the model, e.g. --model provider/model (opencode models or pi --list-models lists what's available); to resume an existing session and inherit its model, pass --session-id instead`);
+  }
+}
+
+/**
  * Resolves the dispatch target directory to its real path. Runs after the
  * prompt/finalMarker validation (preserving the original throw order) and
  * surfaces the same user-facing guidance when resolution fails.
@@ -2229,12 +2246,9 @@ function resolveDispatchDirectory(directory) {
  */
 // eslint-disable-next-line sonarjs/cyclomatic-complexity, complexity -- adding `class` field per brief; function was already at the 10-point ceiling
 function buildDispatchTask({ id, directory, prompt, model, executor, priorSessionTask, variant, sessionId, originSessionId, internal, finalMarker, role, logPath, class: taskClass, parentTaskId = null, defaultVariant, resolveOpencodeVariants, env, outputDir = null, originalPrompt = prompt }) {
-  if (!model && !priorSessionTask) {
-    if (sessionId) {
-      throw new Error(`error: no task found for session id "${sessionId}" to inherit a model from\nhelp: pass --model explicitly, or check the session id with taskferry list`);
-    }
-    throw new Error(`error: --model is required\nhelp: name the model, e.g. --model provider/model (opencode models or pi --list-models lists what's available); to resume an existing session and inherit its model, pass --session-id instead`);
-  }
+  // Model presence is validated earlier by validateDispatchModel(), before
+  // the output dir is created -- by this point model-or-priorSessionTask is
+  // guaranteed.
   const resolvedModel = model || /** @type {Task} */ (priorSessionTask).model;
   // Precedence: explicit --variant > resumed session's own variant > the
   // configured defaultVariant sentinel/level. Only the third case ever
@@ -6593,6 +6607,7 @@ function dispatchTask(params, ctx) {
   const executor = resolveDispatchExecutor(priorSessionTask, executorName, ctx.defaultExecutor);
   validateDispatchParameters({ prompt, directory });
   validateDispatchFinalMarker(finalMarker);
+  validateDispatchModel({ model, priorSessionTask, sessionId });
   const normalizedDirectory = resolveDispatchDirectory(directory);
   const projectConfig = loadProjectConfig(normalizedDirectory);
   // Task IDs retain the literal "oc_" prefix for compatibility; WorkerExecutor.taskIdPrefix is not wired in this issue.

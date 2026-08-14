@@ -274,7 +274,7 @@ const METHOD_PARAMS = {
   },
   "task.output": {
     required: [["taskId", isNonEmptyString]],
-    optional: [["path", isNonEmptyString], ["resolve", isBoolean]],
+    optional: [["path", isNonEmptyString]],
   },
   [METHOD_SUBSCRIBE]: {
     // Either an explicit directory, a taskId the daemon resolves the

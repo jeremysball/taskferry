@@ -534,6 +534,27 @@ test("advisor's directory is never passed through resolveWorkspaceRoot even when
   assert.equal(calls[0].params.directory, workspace);
 });
 
+test("list --all requests every workspace (no directory resolution) and renders the daemon's rows (taskferry#342)", async () => {
+  const capture = capturedIo();
+  let resolveCalled = false;
+  const { client, calls } = fakeClient({
+    "task.list": {
+      counts,
+      tasks: [{ id: taskId, model: testModel, status: "done", failureReason: null, startedAt }],
+    },
+  });
+  const result = await runCli(["list", "--all"], {
+    io: capture.io,
+    connectClient: async () => client,
+    resolveWorkspaceRoot: () => { resolveCalled = true; throw new Error(mustNotConnect); },
+  });
+
+  assert.equal(result.exitCode, 0);
+  assert.equal(resolveCalled, false, "--all must not fall back to resolving cwd's workspace root");
+  assert.deepEqual(calls, [{ method: "task.list", params: {} }]);
+  assert.deepEqual(capture.output().value.tasks, [{ id: taskId, status: "done", model: testModel, startedAt }]);
+});
+
 test("watch --all skips resolveWorkspaceRoot (even when injected) and subscribes with {all: true}, not a directory (taskferry#315)", async () => {
   const capture = capturedIo();
   const controller = new AbortController();

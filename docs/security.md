@@ -320,11 +320,14 @@ runs wrapped in
   on that directory alone. Every dispatch resolves `git rev-parse
   --git-common-dir` against its working directory and, when the result sits
   outside that directory (i.e. this is a worktree, not the main checkout),
-  binds a narrow slice of it read-write: the worktree's own private admin
-  dir (`.git/worktrees/<name>` — its `HEAD`/`index`/logs) plus the pieces of
-  the shared common dir a commit actually writes (`objects/`, `refs/`,
-  `logs/refs/`, `packed-refs` if present) — otherwise `git commit`/`git add`
-  inside the sandbox fails with a read-only filesystem error. It does
+  binds a narrow slice of it read-write: a scratch snapshot of the worktree's
+  own private admin dir (`.git/worktrees/<name>` — its `HEAD`/`index`/logs)
+  plus the pieces of the shared common dir a commit actually writes
+  (`objects/`, `refs/`, `logs/refs/`, `packed-refs` if present) — otherwise
+  `git commit`/`git add` inside the sandbox fails with a read-only filesystem
+  error. The private snapshot is used with overlays and with `--no-overlay`,
+  so disabling the target overlay does not expose the live `worktrees/` tree.
+  It does
   **not** bind the common dir's own top level, which holds the *main*
   checkout's private `HEAD`/`index`/`config` — those stay part of the
   read-only root bind, so a dispatch against one worktree cannot flip the
@@ -339,8 +342,9 @@ runs wrapped in
   data, never the common dir's top level. Only when the worktree-private
   gitdir genuinely can't be distinguished from the common dir at all (e.g.
   a submodule, whose "common dir" already *is* its own private gitdir with
-  no sibling checkout to protect) or its resolution fails outright does the
-  whole common dir still get bound, matching the original behavior.
+  no sibling checkout to protect) or its resolution fails outright, the whole
+  common dir is snapshot-bound instead. This keeps the fallback from
+  live-mounting the `worktrees/` tree.
 - **Two distinct mount operations, not one generic "directory access"
   toggle.** `rwBind`/`roBind` (below) bind a specific host path straight into
   the sandbox, read-write or read-only. The copy-on-write overlay described

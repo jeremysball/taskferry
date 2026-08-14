@@ -38,23 +38,26 @@ describe("bwrap sandboxing: dispatch argv shape and gitdir scoping", () => {
     assert.equal(captured.opts.cwd, os.tmpdir());
   });
 
-  test("binds a git worktree's real gitdir read-write, since it lives outside the dispatch directory itself (issue #103's underlying blocker)", () => {
+  test("snapshots the fallback git-common-dir bind when gitDir resolves to the common dir", () => {
     let captured = null;
     const directory = mkdtempTracked("axi-worktree-dir-");
     const gitCommonDir = mkdtempTracked(AXI_GIT_COMMON_DIR);
+    fs.writeFileSync(path.join(gitCommonDir, "HEAD"), "ref: refs/heads/main\n");
     const mgr = makeManager({
       spawnFn: (cmd, args, opts) => { captured = { cmd, args, opts }; return fakeChild(); },
       sandboxEnabled: true,
       checkBwrapAvailableFn: () => ({ checked: true, available: true }),
       platform: "linux",
       resolveGitCommonDirFn: () => gitCommonDir,
+      resolveGitDirFn: () => gitCommonDir,
     });
 
     mgr.dispatch({ prompt: "hello", directory });
 
-    const bindIndex = captured.args.indexOf(gitCommonDir);
+    const bindIndex = captured.args.findIndex((arg, index) => arg === "--bind" && captured.args[index + 2] === gitCommonDir);
     assert.notEqual(bindIndex, -1);
-    assert.equal(captured.args[bindIndex - 1], "--bind");
+    assert.notEqual(captured.args[bindIndex + 1], gitCommonDir, "fallback must bind a scratch snapshot, not the live common dir");
+    assert.equal(fs.readFileSync(path.join(captured.args[bindIndex + 1], "HEAD"), "utf8"), "ref: refs/heads/main\n");
   });
 
   test("does not add a redundant bind when the resolved git-common-dir is already inside the dispatch directory", () => {
@@ -81,7 +84,7 @@ describe("bwrap sandboxing: dispatch argv shape and gitdir scoping", () => {
     assert.equal(bindCount, 3);
   });
 
-  test("falls back to binding the whole common dir for a submodule layout, where gitDir resolves to the same path as gitCommonDir", () => {
+  test("snapshots the whole common dir for a submodule layout, where gitDir resolves to the same path as gitCommonDir", () => {
     let captured = null;
     const directory = mkdtempTracked("axi-submodule-dir-");
     const gitCommonDir = mkdtempTracked(AXI_GIT_COMMON_DIR);
@@ -96,12 +99,12 @@ describe("bwrap sandboxing: dispatch argv shape and gitdir scoping", () => {
 
     mgr.dispatch({ prompt: "hello", directory });
 
-    const bindIndex = captured.args.indexOf(gitCommonDir);
+    const bindIndex = captured.args.findIndex((arg, index) => arg === "--bind" && captured.args[index + 2] === gitCommonDir);
     assert.notEqual(bindIndex, -1);
-    assert.equal(captured.args[bindIndex - 1], "--bind");
+    assert.notEqual(captured.args[bindIndex + 1], gitCommonDir);
   });
 
-  test("falls back to binding the whole common dir when gitDir resolution fails outright", () => {
+  test("snapshots the whole common dir when gitDir resolution fails outright", () => {
     let captured = null;
     const directory = mkdtempTracked("axi-resolve-fail-dir-");
     const gitCommonDir = mkdtempTracked(AXI_GIT_COMMON_DIR);
@@ -116,12 +119,12 @@ describe("bwrap sandboxing: dispatch argv shape and gitdir scoping", () => {
 
     mgr.dispatch({ prompt: "hello", directory });
 
-    const bindIndex = captured.args.indexOf(gitCommonDir);
+    const bindIndex = captured.args.findIndex((arg, index) => arg === "--bind" && captured.args[index + 2] === gitCommonDir);
     assert.notEqual(bindIndex, -1);
-    assert.equal(captured.args[bindIndex - 1], "--bind");
+    assert.notEqual(captured.args[bindIndex + 1], gitCommonDir);
   });
 
-  test("scopes the bind (never the whole common dir) even when gitDir resolves to a non-standard layout outside gitCommonDir's own tree", () => {
+  test("snapshots only the private gitDir, never the whole common dir, in the no-overlay path", () => {
     let captured = null;
     const directory = mkdtempTracked("axi-separate-gitdir-dir-");
     const gitCommonDir = mkdtempTracked(AXI_GIT_COMMON_DIR);
@@ -134,19 +137,26 @@ describe("bwrap sandboxing: dispatch argv shape and gitdir scoping", () => {
       spawnFn: (cmd, args, opts) => { captured = { cmd, args, opts }; return fakeChild(); },
       sandboxEnabled: true,
       checkBwrapAvailableFn: () => ({ checked: true, available: true }),
+      overlayEnabled: true,
+      checkOverlaySupportFn: () => ({ supported: true }),
       platform: "linux",
       resolveGitCommonDirFn: () => gitCommonDir,
       resolveGitDirFn: () => gitDir,
     });
 
-    mgr.dispatch({ prompt: "hello", directory });
+    mgr.dispatch({ directory, prompt: "hello", noOverlay: true });
 
-    const boundPaths = [];
+    const boundDestinations = [];
     for (let i = 0; i < captured.args.length - 1; i++) {
-      if (captured.args[i] === "--bind") boundPaths.push(captured.args[i + 1]);
+      if (captured.args[i] === "--bind") {
+        boundDestinations.push(captured.args[i + 2]);
+      }
     }
-    assert.ok(boundPaths.includes(gitDir), "should bind the resolved private gitdir");
-    assert.equal(boundPaths.includes(gitCommonDir), false, "must never bind the whole common dir once a distinct gitDir was resolved");
+    assert.ok(boundDestinations.includes(gitDir), "should bind the resolved private gitdir");
+    assert.equal(boundDestinations.includes(gitCommonDir), false, "must never bind the whole common dir once a distinct gitDir was resolved");
+    const gitDirBindIndex = captured.args.findIndex((arg, index) => arg === "--bind" && captured.args[index + 2] === gitDir);
+    assert.notEqual(gitDirBindIndex, -1, "the private gitDir must still be mounted into the sandbox");
+    assert.notEqual(captured.args[gitDirBindIndex + 1], gitDir, "--no-overlay must use a scratch snapshot for the private gitDir");
   });
 
   test("scopes the git-common-dir bind to the worktree's own admin dir + shared objects/refs, never the main checkout's private HEAD/index/config (regression for taskferry#224)", () => {
@@ -177,13 +187,17 @@ describe("bwrap sandboxing: dispatch argv shape and gitdir scoping", () => {
     mgr.dispatch({ prompt: "hello", directory: worktreeDir });
 
     const boundPaths = [];
+    const boundDestinations = [];
     for (let i = 0; i < captured.args.length - 1; i++) {
-      if (captured.args[i] === "--bind") boundPaths.push(captured.args[i + 1]);
+      if (captured.args[i] === "--bind") {
+        boundPaths.push(captured.args[i + 1]);
+        boundDestinations.push(captured.args[i + 2]);
+      }
     }
     const mainGitDir = path.join(mainCheckout, ".git");
     const worktreeGitDir = path.join(mainGitDir, "worktrees", "wt");
 
-    assert.ok(boundPaths.includes(worktreeGitDir), "should bind the worktree's own private gitdir");
+    assert.ok(boundDestinations.includes(worktreeGitDir), "should bind the worktree's own private gitdir");
     assert.ok(boundPaths.includes(path.join(mainGitDir, "objects")), "should bind shared objects");
     assert.ok(boundPaths.includes(path.join(mainGitDir, "refs")), "should bind shared refs");
 
@@ -713,7 +727,7 @@ describe("bwrap sandboxing: overlay mount and probe gating", () => {
 });
 
 describe("bwrap sandboxing: overlay rwBinds and shareNet", () => {
-  test("converts the git-common-dir binds into per-path overlays instead of plain writable binds when overlay is active", () => {
+  test("snapshots the whole common-dir fallback instead of live-overlaying it when overlay is active", () => {
     let captured = null;
     const directory = mkdtempTracked("axi-worktree-overlay-dir-");
     const gitCommonDir = mkdtempTracked("axi-git-common-overlay-");
@@ -730,12 +744,49 @@ describe("bwrap sandboxing: overlay rwBinds and shareNet", () => {
     mgr.dispatch({ prompt: "hello", directory });
 
     // The whole-common-dir fallback path (no resolveGitDirFn override -> gitDir
-    // resolves to the same as gitCommonDir via the real `git` binary failing in
-    // this temp dir, matching the existing "falls back to binding the whole
-    // common dir" test's setup) must appear as an overlay, not a plain --bind.
-    const overlaySrcIndex = captured.args.indexOf(OVERLAY_SRC, captured.args.indexOf(OVERLAY_SRC) + 1);
-    assert.notEqual(overlaySrcIndex, -1, "expected a second --overlay-src for the git-common-dir slice");
-    assert.equal(captured.args[overlaySrcIndex + 1], gitCommonDir);
+    // resolution fails in this temp dir) must use the same isolated snapshot as
+    // a linked worktree's private gitDir, not a live overlay of worktrees/.
+    assert.equal(captured.args.filter((arg) => arg === OVERLAY_SRC).length, 1, "only the target directory should use an overlay");
+    const bindIndex = captured.args.findIndex((arg, index) => arg === "--bind" && captured.args[index + 2] === gitCommonDir);
+    assert.notEqual(bindIndex, -1, "expected a scratch-copy bind for the common-dir fallback");
+    assert.notEqual(captured.args[bindIndex + 1], gitCommonDir);
+  });
+
+  test("retries a private gitDir snapshot after transient ENOENT and ENOTDIR copy failures", (t) => {
+    const realCpSync = fs.cpSync;
+    let attempts = 0;
+    t.mock.method(fs, "cpSync", (source, destination, options) => {
+      attempts++;
+      if (attempts <= 2) {
+        const error = new Error(`transient copy failure ${attempts}`);
+        error.code = attempts === 1 ? "ENOENT" : "ENOTDIR";
+        throw error;
+      }
+      return realCpSync(source, destination, options);
+    });
+
+    const directory = mkdtempTracked("axi-snapshot-retry-dir-");
+    const gitCommonDir = mkdtempTracked("axi-snapshot-retry-common-");
+    const gitDir = path.join(gitCommonDir, "worktrees", "wt");
+    fs.mkdirSync(gitDir, { recursive: true });
+    fs.writeFileSync(path.join(gitDir, "HEAD"), "ref: refs/heads/feature\n");
+    const mgr = makeManager({
+      spawnFn: () => fakeChild(),
+      sandboxEnabled: true,
+      checkBwrapAvailableFn: () => ({ checked: true, available: true }),
+      overlayEnabled: true,
+      checkOverlaySupportFn: () => ({ supported: true }),
+      platform: "linux",
+      resolveGitCommonDirFn: () => gitCommonDir,
+      resolveGitDirFn: () => gitDir,
+    });
+
+    const result = mgr.dispatch({ prompt: "hello", directory });
+
+    assert.equal(attempts, 3, "the copy should retry twice before succeeding");
+    const snapshot = mgr.status(result.id).overlayDirs.rwFileBinds.find((bind) => bind.path === gitDir);
+    assert.ok(snapshot, "the successful retry must still produce the gitDir snapshot bind");
+    assert.equal(fs.readFileSync(path.join(snapshot.bindSrc, "HEAD"), "utf8"), "ref: refs/heads/feature\n");
   });
 
   test("shareNet stays true (--share-net) for both a plain dispatch and an advisor role", async () => {
@@ -771,7 +822,7 @@ describe("bwrap sandboxing: overlay rwBinds and shareNet", () => {
     assert.ok(!advisorArgs.includes("--unshare-net"));
   });
 
-  test("persists the git-common-dir sub-overlays onto the task record for extraction", () => {
+  test("persists the whole-common-dir fallback snapshot onto the task record for extraction", () => {
     const directory = mkdtempTracked("axi-rwbinds-persist-dir-");
     const gitCommonDir = mkdtempTracked("axi-rwbinds-common-");
     const mgr = makeManager({
@@ -786,12 +837,12 @@ describe("bwrap sandboxing: overlay rwBinds and shareNet", () => {
 
     const result = mgr.dispatch({ prompt: "hello", directory });
 
-    // Review finding #1: extraction (Task 10) re-mounts the exact sub-overlays
-    // the worker ran with; they must be persisted here, not re-derived later.
+    // Review finding #1: extraction (Task 10) re-mounts the exact snapshot
+    // bind the worker ran with; it must be persisted here, not re-derived later.
     const status = mgr.status(result.id);
     assert.ok(Array.isArray(status.overlayDirs.rwBinds));
-    assert.ok(status.overlayDirs.rwBinds.length > 0, "the whole-common-dir fallback must be persisted as a sub-overlay");
-    assert.ok(status.overlayDirs.rwBinds.every((b) => b.path && b.upperDir && b.workDir));
+    assert.equal(status.overlayDirs.rwBinds.length, 0, "the whole-common-dir fallback must not use a live sub-overlay");
+    assert.ok(status.overlayDirs.rwFileBinds.some((bind) => bind.path === gitCommonDir), "the fallback snapshot must be persisted as a file bind");
   });
 });
 

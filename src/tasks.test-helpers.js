@@ -216,6 +216,23 @@ export function makeFakeExecutor(overrides = {}) {
   };
 }
 
+// makeFakeExecutor's defaults are pi-shaped (see above), but the opencode
+// fakes all override the same five identity fields -- id, taskIdPrefix,
+// errorBucketPrefix, defaultSummaryModel, and binaryName -- to opencode's
+// values. This wrapper pre-applies that opencode-shaped identity so a call
+// site passes only the behavior fields it actually exercises (buildSpawnArgs,
+// normalizeLogEvent, ...) instead of repeating the five-field block.
+export function makeFakeOpencodeExecutor(overrides = {}) {
+  return makeFakeExecutor({
+    id: "opencode",
+    taskIdPrefix: "oc",
+    errorBucketPrefix: "opencode",
+    defaultSummaryModel: MIMO_MODEL,
+    binaryName: "opencode",
+    ...overrides,
+  });
+}
+
 // Each of these is thrown by makeManager's default delegate for the matching
 // lifecycle hook, so a test that forgot to inject it fails loudly at first
 // use (rather than silently getting a no-op and asserting against stale

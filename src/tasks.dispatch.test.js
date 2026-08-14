@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { createTaskManager } from "./tasks.js";
 import { hashFingerprint, VARIANTS_CACHE_SCHEMA } from "./variants-cache.js";
-import { trackManager, makeManager, fakeChild, LUNA_MODEL, MIMIMAX_MODEL, MINIMAX_MODEL, SOL_MODEL, UNUSED_TMP, SPAWN_OPENCODE_ENOENT, preserveEnvVars, mkdtempTracked, AXI_TASKS_TEST_DIR, AXI_TASKS_CACHE_DIR, AXI_TASKS_OVERLAY_DIR, makeFakeExecutor } from "./tasks.test-helpers.js";
+import { trackManager, makeManager, fakeChild, LUNA_MODEL, MIMIMAX_MODEL, MINIMAX_MODEL, SOL_MODEL, SPAWN_OPENCODE_ENOENT, preserveEnvVars, mkdtempTracked, AXI_TASKS_TEST_DIR, AXI_TASKS_CACHE_DIR, AXI_TASKS_OVERLAY_DIR, makeFakeExecutor } from "./tasks.test-helpers.js";
 
 describe("dispatch() lifecycle, driven through an injected spawnFn (no real opencode process)", () => {
   test("passes the right argv and spawn options through to spawnFn", () => {
@@ -88,7 +88,6 @@ describe("dispatch() lifecycle, driven through an injected spawnFn (no real open
     const fakePi = makeFakeExecutor({
       defaultSummaryModel: "fake-pi/marker-model",
       buildSpawnArgs: () => ["--fake-pi-marker"],
-      sandboxAuthFile: () => ({ extraRoBinds: [], extraRwPairBinds: [], sandboxedDataHome: UNUSED_TMP, sandboxEnv: {} }),
     });
     const mgr = makeManager({ spawnFn: (_cmd, args) => { captured = args; return fakeChild(); }, defaultExecutor: fakePi });
     mgr.dispatch({ prompt: "first", directory: os.tmpdir(), model: MINIMAX_MODEL, sessionId: "ses_reuse", executor: "pi" });

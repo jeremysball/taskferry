@@ -836,16 +836,26 @@ describe("bwrap sandboxing: packed-refs file binds (overlayfs mounts are directo
     assert.equal(fs.readFileSync(scratchPath, "utf8"), "# packfile refs\naaaa1111 refs/heads/main\n");
 
     const status = mgr.status(result.id);
-    // Directory slices stay sub-overlays (gitDir, objects, refs, logs/refs)...
-    assert.equal(status.overlayDirs.rwBinds.length, 4);
-    // ...and the file bind is persisted separately for extraction to re-mount.
-    assert.deepEqual(status.overlayDirs.rwFileBinds, [{ path: packedRefs, bindSrc: scratchPath }]);
+    // Directory slices are only objects/refs/logs/refs now -- the worktree's
+    // own gitDir moved to a scratch-copy file bind (taskferry#304) so a
+    // concurrent `git worktree add` for a sibling worktree can't perturb a
+    // live overlay mount of it.
+    assert.equal(status.overlayDirs.rwBinds.length, 3);
+    // ...and both the gitDir snapshot and the packed-refs scratch copy are
+    // persisted as file binds for extraction to re-mount.
+    assert.equal(status.overlayDirs.rwFileBinds.length, 2);
+    const gitDirBind = status.overlayDirs.rwFileBinds.find((b) => b.path === gitDir);
+    assert.ok(gitDirBind, "expected a snapshot bind for the worktree's own gitDir");
+    assert.notEqual(gitDirBind.bindSrc, gitDir, "the bind source must be a scratch copy, not the live gitDir itself");
+    assert.deepEqual(status.overlayDirs.rwFileBinds.find((b) => b.path === packedRefs), { path: packedRefs, bindSrc: scratchPath });
   });
 
-  test("a git-common-dir with no packed-refs file (unborn/fresh repo) gets no file bind", () => {
+  test("a git-common-dir with no packed-refs file (unborn/fresh repo) gets a gitDir snapshot bind but no packed-refs file bind", () => {
     // Companion to the packed-refs regression test above -- a fresh worktree
     // with no packed refs yet must not synthesize a scratch-copy bind for a
-    // file that doesn't exist (existsFn(packedRefs) guards this).
+    // file that doesn't exist (existsFn(packedRefs) guards this). The
+    // worktree's own gitDir still gets its unconditional snapshot bind
+    // (taskferry#304).
     let captured = null;
     const directory = mkdtempTracked("axi-nofilebind-dir-");
     const gitCommonDir = mkdtempTracked("axi-nofilebind-common-");
@@ -873,8 +883,9 @@ describe("bwrap sandboxing: packed-refs file binds (overlayfs mounts are directo
     assert.equal(scratchIdx, -1, "no rw bind should target a packed-refs file that doesn't exist");
 
     const status = mgr.status(result.id);
-    assert.deepEqual(status.overlayDirs.rwFileBinds, [], "rwFileBinds must be empty when there is no writable file to bind");
-    assert.equal(status.overlayDirs.rwBinds.length, 4, "the directory slices are unaffected");
+    assert.equal(status.overlayDirs.rwFileBinds.length, 1, "only the gitDir snapshot bind, no packed-refs bind");
+    assert.equal(status.overlayDirs.rwFileBinds[0].path, gitDir);
+    assert.equal(status.overlayDirs.rwBinds.length, 3, "objects/refs/logs/refs are unaffected");
   });
 });
 

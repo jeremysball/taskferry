@@ -1225,12 +1225,16 @@ function buildBwrapBinds(ctx, launchInfo, task, spawnEnv, role) {
 /**
  * Builds the write-through binds for a git dispatch directory whose real
  * gitdir lives outside the read-write mount: the gitdir (or git-common-dir)
- * becomes a rw overlay sub-mount or a scratch-copied file bind, depending on
- * whether the target is a directory or a file (overlayfs is directory-only).
- * A git worktree's real gitdir (objects/refs it shares with the main
- * checkout, plus its own HEAD/index) lives outside `launchDirectory` and is
- * otherwise invisible to the read-write bind on it alone -- without this,
- * `git commit` inside the sandbox fails read-only.
+ * becomes a rw overlay sub-mount (shared, live-tracking) or a scratch-copied
+ * bind (isolated snapshot), depending on the target. objects/refs/logs/refs
+ * stay overlay-mounted against the live directory since the sandbox needs to
+ * see the real repo's history. A git worktree's own private gitDir instead
+ * gets a one-time recursive-copy snapshot bind (taskferry#304) so a
+ * concurrent `git worktree add` for a sibling worktree can't perturb an
+ * in-flight dispatch's live mount. A git worktree's real gitdir (objects/refs
+ * it shares with the main checkout, plus its own HEAD/index) lives outside
+ * `launchDirectory` and is otherwise invisible to the read-write bind on it
+ * alone -- without this, `git commit` inside the sandbox fails read-only.
  * @param {StartTaskContext} ctx
  * @param {string} launchDirectory
  * @param {{root: string, upperDir: string, workDir: string}|null} overlayInfo
@@ -1266,8 +1270,35 @@ function buildGitBinds(ctx, launchDirectory, overlayInfo, extraRwBinds) {
         extraRwBinds.push(p);
       }
     };
+    /**
+     * A worktree's own gitDir (`<git-common-dir>/worktrees/<name>`) sits
+     * directly inside the `worktrees/` directory that `git worktree add`
+     * touches for *every* worktree, not just the one being added
+     * (taskferry#304) -- an overlay mount whose lowerdir is that live
+     * directory can be perturbed by a concurrent `git worktree add` for a
+     * sibling worktree, crashing an in-flight dispatch with "directory is
+     * missing" even though the worktree itself was never touched. Unlike
+     * objects/refs (shared, can be large, and must stay live so the sandbox
+     * sees new commits), a worktree's private gitDir is small and doesn't
+     * need to track post-dispatch upstream changes -- like a sandboxed `git
+     * commit`, any writes to it are discarded once the task settles -- so a
+     * one-time recursive copy into the overlay root, bound rw at the same
+     * host path, gets full isolation from the live directory for the price
+     * of a few KB copy instead of a live overlay mount.
+     * @param {string} p
+     */
+    const snapshotWritable = (p) => {
+      if (overlayInfo) {
+        const bind = subFilePaths(overlayInfo.root, p);
+        fs.mkdirSync(bind.bindSrc, { recursive: true, mode: 0o700 });
+        fs.cpSync(p, bind.bindSrc, { recursive: true });
+        overlayRwFileBinds.push(bind);
+      } else {
+        extraRwBinds.push(p);
+      }
+    };
     if (gitDir && ctx.existsFn(gitDir) && gitDir !== gitCommonDir) {
-      addWritable(gitDir);
+      snapshotWritable(gitDir);
       for (const rel of ["objects", "refs", path.join("logs", "refs")]) {
         const resolved = path.join(gitCommonDir, rel);
         fs.mkdirSync(resolved, { recursive: true });

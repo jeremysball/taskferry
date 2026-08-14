@@ -526,3 +526,23 @@ profiling is diagnostic, not on the request's critical path.
   path so the drop is visible rather than silent. The fix is to bind the
   real file (`cp` the config into `~/.config/opencode`), not to weaken the
   guard.
+- A worktree dispatch's own private gitDir (`objects`/`refs`/`logs/refs` stay
+  on the old mechanism, but `gitDir` itself doesn't) getting a one-time
+  scratch copy instead of a live overlay mount, even though it's a
+  directory and overlayfs mounts directories fine — expected, not a
+  leftover file-vs-directory special case (taskferry#304). A worktree's
+  private gitDir (`<git-common-dir>/worktrees/<name>`) sits directly inside
+  the `worktrees/` tree that `git worktree add` touches/locks for *every*
+  worktree as part of its own bookkeeping, not just the one being added —
+  an overlay mount whose lowerdir is that live directory can be perturbed
+  by a concurrent `git worktree add` for an unrelated sibling worktree,
+  crashing an in-flight dispatch with "directory is missing" even though
+  the dispatched worktree itself was never touched. Snapshotting costs
+  nothing in correctness: like a sandboxed `git commit`, any writes a
+  dispatch makes inside its private gitDir are discarded at settlement
+  regardless of bind mechanism, and only the extracted diff (not git-state
+  mutations) ever reaches the real repo. `objects`/`refs`/`logs/refs` stay
+  on the original live-overlay mechanism because they're shared with the
+  main checkout, can be large, and must track live upstream state (new
+  commits) during the dispatch — the tradeoffs don't apply to a private
+  gitDir the same way.

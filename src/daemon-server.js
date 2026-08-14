@@ -179,19 +179,28 @@ export function deliverEvent(subscriptions, writeMessage, event, resolveWorkspac
 /**
  * @param {TaskManager} manager
  * @param {Map<string, Subscription>} subscriptions
+ * @param {(directory: string) => string} [resolveWorkspaceRootFn]
  */
-export function syncActivitySubscriptions(manager, subscriptions) {
+export function syncActivitySubscriptions(manager, subscriptions, resolveWorkspaceRootFn = identityWorkspaceRoot) {
   if (typeof manager.setActivitySubscriptions !== "function") return;
   // A `watch --all` subscription groups under the ALL_DIRECTORIES (null)
   // key here; tasks.js's scheduleActivityFor() unions that bucket's variants
-  // into every task's lookup regardless of the task's own directory.
+  // into every task's lookup regardless of the task's own directory. Every
+  // other key is normalized to its git workspace root (taskferry#335), the
+  // same normalization scheduleActivityFor() applies to a task's own
+  // directory before looking this map up -- otherwise a root-scoped `watch`
+  // is keyed under the repo root while a task dispatched into a linked
+  // worktree looks itself up under the worktree path, and the two never
+  // meet even though deliverEvent() already treats them as the same
+  // subscriber via sameWorkspace().
   /** @type {Map<string|null, Set<boolean>>} */
   const subs = new Map();
   for (const subscription of subscriptions.values()) {
-    let variants = subs.get(subscription.directory);
+    const key = subscription.directory === ALL_DIRECTORIES ? ALL_DIRECTORIES : resolveWorkspaceRootFn(subscription.directory);
+    let variants = subs.get(key);
     if (!variants) {
       variants = new Set();
-      subs.set(subscription.directory, variants);
+      subs.set(key, variants);
     }
     variants.add(subscription.summaries);
   }

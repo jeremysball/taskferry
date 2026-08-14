@@ -151,6 +151,52 @@ describe("task activity events", () => {
     assert.deepEqual(Object.keys(activityEvent.activityVariants), ["false"], "only the --all bucket's variant applies; the unrelated directory's variant must not leak in");
   });
 
+  test("resolves a task's directory to its workspace root before the activitySubscriptions lookup, so a root-scoped watch subscriber still receives task.activity for a linked worktree (taskferry#335)", async (t) => {
+    const stateDir = mkdtempTracked(ACTIVITY_DIR_PREFIX);
+    const child = fakeChild();
+    const events = [];
+    const repoRoot = "/repo/root";
+    const worktreeDir = os.tmpdir();
+    // Simulates a task dispatched into a linked worktree whose git workspace
+    // root is the repo root a `watch` subscriber scoped to -- the two
+    // directory strings are literally different, only resolveWorkspaceRootFn
+    // ties them together, the same way daemon.js's real resolver does via
+    // `git rev-parse --git-common-dir`.
+    const resolveWorkspaceRootFn = (directory) => (directory === worktreeDir ? repoRoot : directory);
+    const manager = trackManager(createTaskManager({
+      stateDir,
+      resolveWorkspaceRootFn,
+      sandboxEnabled: false,
+      spawnFn: () => child,
+      killFn: () => {},
+      activitySummariesEnabled: false,
+      summarizerTimeoutMs: 0,
+      onEvent: (event) => events.push(event),
+    }));
+    t.after(() => manager.close());
+
+    // daemon-server.js's syncActivitySubscriptions() would key this the same
+    // way once it normalizes subscription.directory through the same
+    // resolver -- keyed here directly at the repo root to isolate the
+    // scheduleActivityFor() lookup side of the fix. A decoy subscription
+    // sits at the *unresolved* literal worktree path with the opposite
+    // variant, so a lookup that skips workspace-root resolution (the bug)
+    // matches the decoy's "true" instead of the real subscriber's "false",
+    // making the two outcomes distinguishable without needing the "true"
+    // variant's real-summarization codepath to actually settle.
+    manager.setActivitySubscriptions(new Map([
+      [repoRoot, new Set([false])],
+      [worktreeDir, new Set([true])],
+    ]));
+
+    manager.dispatch({ prompt: "Watch the fleet", directory: worktreeDir });
+    await new Promise((resolve) => setImmediate(resolve));
+
+    const activityEvent = events.find((event) => event.type === TASK_ACTIVITY);
+    assert.ok(activityEvent, "a root-scoped watch subscriber must still receive task.activity for a task dispatched into a linked worktree, not have the event silently dropped");
+    assert.deepEqual(Object.keys(activityEvent.activityVariants), ["false"], "must resolve the task's directory to its workspace root and find the repoRoot-keyed subscription's real variant, not the literal-directory decoy's");
+  });
+
   test("refreshes running activity only after 4096 more log bytes", async (t) => {
     const stateDir = mkdtempTracked(ACTIVITY_DIR_PREFIX);
     const child = fakeChild();

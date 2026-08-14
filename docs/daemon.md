@@ -448,7 +448,19 @@ profiling is diagnostic, not on the request's critical path.
   worker's real changes too — so commit or shelve untracked files before
   dispatching against a dirty tree. Non-git targets are unaffected: their
   extraction diffs the directory against the merged view, so untouched files
-  never appear.
+  never appear. The same root cause means a `taskferry result <id>` (or
+  `result --diff`) payload can exceed the daemon's 1 MiB response cap on a
+  dirty tree even for a one-file task — the CLI fails that case with a clear
+  error naming the cause instead of the raw size error, and the workaround
+  is the same: clean up the unrelated working-tree changes, or fetch a
+  narrower `--fields` set.
+- `taskferry accept` exiting nonzero with `applied: false` in the response
+  body — not a crash: the RPC succeeded but `git apply --3way` rejected the
+  patch, which the daemon can only report as a body field (a failed apply
+  deliberately leaves the changeset `pending` so accept can be retried
+  after the conflict is resolved). The CLI turns that into a nonzero exit
+  (taskferry#414); the `applied` field remains the authoritative
+  machine-readable signal.
 - A test that has two same-process calls contend on the same
   `withFileLockAsync()`/`withFileLock()` lock path (one holding it across an
   `await`, another trying to acquire it concurrently) hanging or timing out

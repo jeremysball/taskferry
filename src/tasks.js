@@ -822,12 +822,13 @@ function buildLaunchSpawnArgs(executor, { isSummary, summaryLaunch, dispatchLaun
  * which kind of launch this is (summary vs dispatch), the target directory,
  * whether the prompt must be routed through a prompt file to dodge the argv
  * E2BIG limit (issue #78), and the executor's buildSpawnArgs output. Also
- * returns the closure that cleans up scratch files (the summary snapshot and
- * any prompt file) on settlement -- shared by every settle path.
+ * returns the closure that cleans up scratch files (the summary snapshot,
+ * prompt file, and any sandbox snapshots) on settlement -- shared by every
+ * settle path.
  * @param {Task} task
  * @param {LaunchSpec} launch
  * @param {{SUMMARY_DIR: string, PROMPT_DIR: string}} ctx
- * @returns {{isSummary: boolean, summaryLaunch: SummaryLaunch, dispatchLaunch: DispatchLaunch, executor: import("./executor.js").WorkerExecutor, launchDirectory: string, promptFilePath: string|null, args: string[], cleanUpScratchFiles: () => void}}
+ * @returns {{isSummary: boolean, summaryLaunch: SummaryLaunch, dispatchLaunch: DispatchLaunch, executor: import("./executor.js").WorkerExecutor, launchDirectory: string, promptFilePath: string|null, args: string[], cleanUpScratchFiles: () => void, registerScratchCleanup: (cleanup: () => void) => void}}
  */
 function resolveStartTaskLaunch(task, launch, ctx) {
   const isSummary = launch.kind === "summary";
@@ -843,11 +844,16 @@ function resolveStartTaskLaunch(task, launch, ctx) {
     ? path.join(ctx.PROMPT_DIR, `${task.id}.prompt.txt`)
     : null;
   const args = buildLaunchSpawnArgs(executor, { isSummary, summaryLaunch, dispatchLaunch, launchDirectory, promptFilePath });
+  /** @type {Array<() => void>} */
+  const scratchCleanups = [];
   const cleanUpScratchFiles = () => {
     if (isSummary && summaryLaunch.snapshotPath) removeFileIfPresent(summaryLaunch.snapshotPath);
     if (promptFilePath) removeFileIfPresent(promptFilePath);
+    for (const cleanup of scratchCleanups.splice(0)) cleanup();
   };
-  return { isSummary, summaryLaunch, dispatchLaunch, executor, launchDirectory, promptFilePath, args, cleanUpScratchFiles };
+  /** @param {() => void} cleanup */
+  const registerScratchCleanup = (cleanup) => { scratchCleanups.push(cleanup); };
+  return { isSummary, summaryLaunch, dispatchLaunch, executor, launchDirectory, promptFilePath, args, cleanUpScratchFiles, registerScratchCleanup };
 }
 
 /**
@@ -1122,6 +1128,30 @@ function dropReadWriteConflicts(extraRoBinds, rwResolved) {
   };
 }
 
+const GIT_SNAPSHOT_MAX_RETRIES = 2;
+
+/**
+ * Copies a private git directory, retrying the whole copy when worktree
+ * bookkeeping briefly removes or renames an entry under the source tree.
+ * @param {string} source
+ * @param {string} destination
+ */
+function copyGitSnapshot(source, destination) {
+  for (let attempt = 0; attempt <= GIT_SNAPSHOT_MAX_RETRIES; attempt++) {
+    try {
+      fs.cpSync(source, destination, { recursive: true });
+      return;
+    } catch (err) {
+      const code = errCode(err);
+      if (code !== "ENOENT" && code !== "ENOTDIR") throw err;
+      if (attempt === GIT_SNAPSHOT_MAX_RETRIES) throw err;
+      fs.rmSync(destination, { recursive: true, force: true });
+      fs.mkdirSync(destination, { recursive: true, mode: 0o700 });
+    }
+  }
+  throw new Error("unreachable");
+}
+
 /**
  * Computes the bwrap bind set for a sandboxed dispatch: the deny-list (with
  * entries the user simply doesn't have dropped, since bwrap --tmpfs fails if
@@ -1136,10 +1166,10 @@ function dropReadWriteConflicts(extraRoBinds, rwResolved) {
  * @param {Task} task
  * @param {NodeJS.ProcessEnv} spawnEnv
  * @param {"dispatch"|"advisor"|null} role
- * @returns {{homeDir: string, denyList: string[], extraRoBinds: [string, string][], extraRwBinds: string[], overlayInfo: {root: string, upperDir: string, workDir: string}|null, overlayRwBinds: Array<{path: string, upperDir: string, workDir: string}>, overlayRwFileBinds: Array<{path: string, bindSrc: string}>, executorRwPairBinds: [string, string][], sandboxEnv: NodeJS.ProcessEnv, spawnEnv: NodeJS.ProcessEnv, role: "dispatch"|"advisor"|null}}
+ * @returns {{homeDir: string, denyList: string[], extraRoBinds: [string, string][], extraRwBinds: string[], extraRwPairBinds: [string, string][], overlayInfo: {root: string, upperDir: string, workDir: string}|null, overlayRwBinds: Array<{path: string, upperDir: string, workDir: string}>, overlayRwFileBinds: Array<{path: string, bindSrc: string}>, sandboxEnv: NodeJS.ProcessEnv, spawnEnv: NodeJS.ProcessEnv, role: "dispatch"|"advisor"|null}}
  */
 function buildBwrapBinds(ctx, launchInfo, task, spawnEnv, role) {
-  const { isSummary, dispatchLaunch, executor, launchDirectory, promptFilePath } = launchInfo;
+  const { isSummary, dispatchLaunch, executor, launchDirectory, promptFilePath, registerScratchCleanup } = launchInfo;
   ctx.requireBwrap();
   const homeDir = os.homedir();
   // bwrap's --tmpfs fails ("Read-only file system") if the mount point
@@ -1185,7 +1215,7 @@ function buildBwrapBinds(ctx, launchInfo, task, spawnEnv, role) {
   fs.mkdirSync(sandboxedDataHome, { recursive: true, mode: 0o700 });
   extraRwBinds.push(sandboxedDataHome);
   const overlayInfo = createOverlayIfNeeded(ctx, launchInfo, task, role);
-  const gitBinds = buildGitBinds(ctx, launchDirectory, overlayInfo, extraRwBinds);
+  const gitBinds = buildGitBinds(ctx, launchDirectory, overlayInfo, extraRwBinds, { taskId: task.id, registerScratchCleanup });
   // Read-write/read-only dirs: each resolves as a union of the manager-level
   // default (flag/env/config, already folded into ctx.allowedDirs/ctx.roBind)
   // and the per-dispatch `--rw-bind`/`--ro-bind` entries. The rw set drops
@@ -1213,10 +1243,10 @@ function buildBwrapBinds(ctx, launchInfo, task, spawnEnv, role) {
   // sandbox (just writable) instead of vanishing.
   const conflictResult = dropReadWriteConflicts(extraRoBinds, rwResolved);
   extraRoBinds = conflictResult.roBinds;
-  const allExecutorRwPairBinds = [...executorRwPairBinds, ...conflictResult.promotedPairBinds];
+  const allRwPairBinds = [...executorRwPairBinds, ...conflictResult.promotedPairBinds, ...gitBinds.extraRwPairBinds];
   return {
     homeDir, denyList, extraRoBinds, extraRwBinds, overlayInfo, sandboxEnv, spawnEnv, role,
-    executorRwPairBinds: allExecutorRwPairBinds,
+    extraRwPairBinds: allRwPairBinds,
     overlayRwBinds: gitBinds.overlayRwBinds,
     overlayRwFileBinds: gitBinds.overlayRwFileBinds,
   };
@@ -1224,27 +1254,40 @@ function buildBwrapBinds(ctx, launchInfo, task, spawnEnv, role) {
 
 /**
  * Builds the write-through binds for a git dispatch directory whose real
- * gitdir lives outside the read-write mount: the gitdir (or git-common-dir)
- * becomes a rw overlay sub-mount or a scratch-copied file bind, depending on
- * whether the target is a directory or a file (overlayfs is directory-only).
- * A git worktree's real gitdir (objects/refs it shares with the main
- * checkout, plus its own HEAD/index) lives outside `launchDirectory` and is
- * otherwise invisible to the read-write bind on it alone -- without this,
- * `git commit` inside the sandbox fails read-only.
+ * gitdir lives outside the read-write mount: shared objects/refs/logs/refs
+ * become rw overlay sub-mounts (or direct binds when overlay is disabled),
+ * while the private gitDir (or an indistinguishable git-common-dir fallback)
+ * always becomes a scratch-copied bind. A git worktree's own private gitDir
+ * gets a one-time recursive-copy snapshot bind (taskferry#304) so a
+ * concurrent `git worktree add` for a sibling worktree can't perturb an
+ * in-flight dispatch's live mount. Its real gitdir (objects/refs shared with
+ * the main checkout, plus its own HEAD/index) lives outside `launchDirectory`
+ * and is otherwise invisible to the read-write bind on it alone -- without
+ * this, `git commit` inside the sandbox fails read-only.
  * @param {StartTaskContext} ctx
  * @param {string} launchDirectory
  * @param {{root: string, upperDir: string, workDir: string}|null} overlayInfo
  * @param {string[]} extraRwBinds
- * @returns {{overlayRwBinds: Array<{path: string, upperDir: string, workDir: string}>, overlayRwFileBinds: Array<{path: string, bindSrc: string}>}}
+ * @param {{taskId: string, registerScratchCleanup: (cleanup: () => void) => void}} snapshotContext
+ * @returns {{overlayRwBinds: Array<{path: string, upperDir: string, workDir: string}>, overlayRwFileBinds: Array<{path: string, bindSrc: string}>, extraRwPairBinds: [string, string][]}}
  */
-function buildGitBinds(ctx, launchDirectory, overlayInfo, extraRwBinds) {
+function buildGitBinds(ctx, launchDirectory, overlayInfo, extraRwBinds, { taskId, registerScratchCleanup }) {
   /** @type {Array<{path: string, upperDir: string, workDir: string}>} */
   const overlayRwBinds = [];
   /** @type {Array<{path: string, bindSrc: string}>} */
   const overlayRwFileBinds = [];
+  /** @type {[string, string][]} */
+  const extraRwPairBinds = [];
   const gitCommonDir = ctx.resolveGitCommonDirFn(launchDirectory);
   if (gitCommonDir && ctx.existsFn(gitCommonDir) && isOutsideDirectory(launchDirectory, gitCommonDir)) {
     const gitDir = ctx.resolveGitDirFn(launchDirectory);
+    /** @param {string} root @param {string} p */
+    const copySnapshot = (root, p) => {
+      const bind = subFilePaths(root, p);
+      fs.mkdirSync(bind.bindSrc, { recursive: true, mode: 0o700 });
+      copyGitSnapshot(p, bind.bindSrc);
+      return bind;
+    };
     /** @param {string} p */
     const addWritable = (p) => {
       if (overlayInfo) {
@@ -1266,8 +1309,39 @@ function buildGitBinds(ctx, launchDirectory, overlayInfo, extraRwBinds) {
         extraRwBinds.push(p);
       }
     };
+    /**
+     * A worktree's own gitDir (`<git-common-dir>/worktrees/<name>`) sits
+     * directly inside the `worktrees/` directory that `git worktree add`
+     * touches for *every* worktree, not just the one being added
+     * (taskferry#304) -- an overlay mount whose lowerdir is that live
+     * directory can be perturbed by a concurrent `git worktree add` for a
+     * sibling worktree, crashing an in-flight dispatch with "directory is
+     * missing" even though the worktree itself was never touched. Unlike
+     * objects/refs (shared, can be large, and must stay live so the sandbox
+     * sees new commits), a worktree's private gitDir is small and doesn't
+     * need to track post-dispatch upstream changes -- like a sandboxed `git
+     * commit`, any writes to it are discarded once the task settles -- so a
+     * one-time recursive copy into the overlay root (or a per-task scratch
+     * root when overlays are disabled), bound rw at the same host path, gets
+     * full isolation from the live directory for the price of a few KB copy
+     * instead of a live overlay mount.
+     * @param {string} p
+     */
+    const snapshotWritable = (p) => {
+      if (overlayInfo) {
+        const bind = copySnapshot(overlayInfo.root, p);
+        overlayRwFileBinds.push(bind);
+      } else {
+        const snapshotRoot = overlayPaths(taskId, ctx.overlayTmpRoot).root;
+        fs.mkdirSync(ctx.overlayTmpRoot, { recursive: true, mode: 0o700 });
+        fs.mkdirSync(snapshotRoot, { mode: 0o700 });
+        registerScratchCleanup(() => fs.rmSync(snapshotRoot, { recursive: true, force: true }));
+        const bind = copySnapshot(snapshotRoot, p);
+        extraRwPairBinds.push([bind.bindSrc, bind.path]);
+      }
+    };
     if (gitDir && ctx.existsFn(gitDir) && gitDir !== gitCommonDir) {
-      addWritable(gitDir);
+      snapshotWritable(gitDir);
       for (const rel of ["objects", "refs", path.join("logs", "refs")]) {
         const resolved = path.join(gitCommonDir, rel);
         fs.mkdirSync(resolved, { recursive: true });
@@ -1276,10 +1350,10 @@ function buildGitBinds(ctx, launchDirectory, overlayInfo, extraRwBinds) {
       const packedRefs = path.join(gitCommonDir, "packed-refs");
       if (ctx.existsFn(packedRefs)) addWritable(packedRefs);
     } else {
-      addWritable(gitCommonDir);
+      snapshotWritable(gitCommonDir);
     }
   }
-  return { overlayRwBinds, overlayRwFileBinds };
+  return { overlayRwBinds, overlayRwFileBinds, extraRwPairBinds };
 }
 
 /**
@@ -1302,7 +1376,7 @@ function assembleBwrapSpawn(ctx, launchInfo, binds, task) {
     homeDir: binds.homeDir,
     denyList: binds.denyList,
     extraRwBinds: binds.extraRwBinds,
-    extraRwPairBinds: binds.executorRwPairBinds,
+    extraRwPairBinds: binds.extraRwPairBinds,
     extraRoBinds: binds.extraRoBinds,
     ...(binds.overlayInfo ? { overlay: { upperDir: binds.overlayInfo.upperDir, workDir: binds.overlayInfo.workDir }, overlayRwBinds: binds.overlayRwBinds, overlayRwFileBinds: binds.overlayRwFileBinds } : {}),
     // Narrow per-task runtime mounts (#453/#454/#455): bind only the daemon

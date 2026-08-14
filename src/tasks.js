@@ -1698,6 +1698,16 @@ function spawnTaskChild(ctx, launchInfo, task) {
     fs.chmodSync(task.logPath, 0o600);
     const plan = resolveSpawnPlan(ctx, launchInfo, task.id);
     const sandbox = buildSandboxedSpawn(ctx, launchInfo, plan, task);
+    // taskferry#346: buildSandboxedSpawn (via assembleBwrapSpawn) has already
+    // created the on-disk overlay and set task.overlayDirs/changesetStatus
+    // in memory, but nothing durable reflects that yet -- persist it here,
+    // before the crash-prone spawnFn call below, so a daemon crash between
+    // overlay creation and process spawn leaves tasks.json pointing at the
+    // overlay instead of leaving it unowned. Without this, sweepOverlayEntry
+    // on restart can't match the on-disk overlay to any "pending" task and
+    // deletes it as an orphan out from under a detached child that may still
+    // be writing into it.
+    ctx.persistTask(task.id);
     // No tmux: the child has no shared session to introspect. It is its own
     // process group so cancellation can stop any subprocesses it creates.
     // stdout is normalized line-by-line through executor.normalizeLogEvent

@@ -106,6 +106,38 @@ describe("changeset extraction at settlement", () => {
     assert.equal(extractCommand.command, "bwrap");
   });
 
+  test("persists task.overlayDirs before spawning the child (taskferry#346): a flush that lands during spawnFn already sees the overlay", () => {
+    const directory = mkdtempTracked("axi-persist-race-dir-");
+    const overlayTmpRoot = mkdtempTracked("axi-persist-race-tmp-");
+    /** @type {{root: string, tmpRoot: string}|undefined} */
+    let flushedOverlayDirs;
+    const mgr = makeManager({
+      // A crash between overlay creation and the *old* post-spawn
+      // persistTask() call is exactly what this test simulates: force a
+      // flush from inside spawnFn, i.e. before spawnTaskChild's own
+      // post-spawn persistTask() call has had any chance to run, and check
+      // whether tasks.json already reflects the overlay this fake process
+      // is about to write into.
+      spawnFn: (_cmd, _args) => {
+        mgr.flushPersist();
+        const persisted = JSON.parse(fs.readFileSync(path.join(mgr.paths.STATE_DIR, TASKS_STATE_FILE), "utf8"));
+        flushedOverlayDirs = persisted[0]?.overlayDirs;
+        return fakeChild();
+      },
+      sandboxEnabled: true,
+      checkBwrapAvailableFn: () => ({ checked: true, available: true }),
+      overlayEnabled: true,
+      checkOverlaySupportFn: () => ({ supported: true }),
+      platform: "linux",
+      overlayTmpRoot,
+    });
+
+    mgr.dispatch({ prompt: "hello", directory });
+
+    assert.ok(flushedOverlayDirs, "overlayDirs must already be persisted to disk before spawnFn is called, not only after it returns");
+    assert.equal(fs.existsSync(flushedOverlayDirs.root), true, "the persisted overlayDirs.root must point at the overlay this dispatch actually created");
+  });
+
   test("auto-rejects and cleans up an advisor's changeset at settlement", async () => {
     let cleanedRoot = null;
     const directory = mkdtempTracked("axi-advisor-extract-dir-");

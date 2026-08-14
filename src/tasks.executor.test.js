@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { makeManager, fakeChild, MIMO_MODEL, MINIMAX_MODEL, TEST_DEFAULT_MODEL, UNUSED_TMP, OPENCODE_DATA, AXI_TASKS_CACHE_PI, NO_API_KEY_FOUND, mkdtempTracked } from "./tasks.test-helpers.js";
+import { makeManager, fakeChild, MINIMAX_MODEL, TEST_DEFAULT_MODEL, OPENCODE_DATA, AXI_TASKS_CACHE_PI, NO_API_KEY_FOUND, mkdtempTracked, makeFakeExecutor, makeFakeOpencodeExecutor } from "./tasks.test-helpers.js";
 
 const OPENCODE_JSONC = "opencode.jsonc";
 const GITIGNORE = ".gitignore";
@@ -12,18 +12,10 @@ describe("startTask() writes stdout through executor.normalizeLogEvent (Task 7: 
   test("JSON events flagged null by normalizeLogEvent are dropped; kept events are written canonicalized", () => {
     const child = fakeChild();
     const spawnFn = mock.fn(() => child);
-    const fakeExecutor = {
-      id: "opencode",
-      taskIdPrefix: "oc",
-      errorBucketPrefix: "opencode",
-      defaultSummaryModel: MIMO_MODEL,
-      binaryName: "opencode",
-      listModelsFn: async () => "",
+    const fakeExecutor = makeFakeOpencodeExecutor({
       buildSpawnArgs: () => ["run", "--dir", process.cwd(), "--auto", "--format", "json", "-m", "x", "--", "hi"],
-      buildSummaryPrompt: () => "",
       normalizeLogEvent: (evt) => (evt.type === "drop-me" ? null : { ...evt, normalized: true }),
-      sandboxAuthFile: () => ({ extraRoBinds: [], sandboxedDataHome: UNUSED_TMP, sandboxEnv: {} }),
-    };
+    });
     const mgr = makeManager({ spawnFn, defaultExecutor: fakeExecutor });
     const dispatched = mgr.dispatch({ prompt: "hi", directory: process.cwd() });
     const logPath = mgr.status(dispatched.id).logPath;
@@ -42,18 +34,11 @@ describe("startTask() writes stdout through executor.normalizeLogEvent (Task 7: 
     // forward every line that isn't parseable JSON verbatim, not drop it.
     const child = fakeChild();
     const spawnFn = mock.fn(() => child);
-    const fakeExecutor = {
-      id: "opencode",
-      taskIdPrefix: "oc",
-      errorBucketPrefix: "opencode",
-      defaultSummaryModel: MIMO_MODEL,
-      binaryName: "opencode",
-      listModelsFn: async () => "",
+    // normalizeLogEvent defaults to identity in makeFakeExecutor, so dropped
+    // lines here mean JSON.parse failed.
+    const fakeExecutor = makeFakeOpencodeExecutor({
       buildSpawnArgs: () => ["run", "--dir", process.cwd(), "--auto", "--format", "json", "-m", "x", "--", "hi"],
-      buildSummaryPrompt: () => "",
-      normalizeLogEvent: (parsed) => parsed, // identity, so dropped means JSON.parse failed
-      sandboxAuthFile: () => ({ extraRoBinds: [], sandboxedDataHome: UNUSED_TMP, sandboxEnv: {} }),
-    };
+    });
     const mgr = makeManager({ spawnFn, defaultExecutor: fakeExecutor });
     const dispatched = mgr.dispatch({ prompt: "hi", directory: process.cwd() });
     const logPath = mgr.status(dispatched.id).logPath;
@@ -66,18 +51,9 @@ describe("startTask() writes stdout through executor.normalizeLogEvent (Task 7: 
   test("a non-empty trailing partial line at process end is preserved verbatim (no terminating newline required)", () => {
     const child = fakeChild();
     const spawnFn = mock.fn(() => child);
-    const fakeExecutor = {
-      id: "opencode",
-      taskIdPrefix: "oc",
-      errorBucketPrefix: "opencode",
-      defaultSummaryModel: MIMO_MODEL,
-      binaryName: "opencode",
-      listModelsFn: async () => "",
+    const fakeExecutor = makeFakeOpencodeExecutor({
       buildSpawnArgs: () => ["run", "--dir", process.cwd(), "--auto", "--format", "json", "-m", "x", "--", "hi"],
-      buildSummaryPrompt: () => "",
-      normalizeLogEvent: (parsed) => parsed,
-      sandboxAuthFile: () => ({ extraRoBinds: [], sandboxedDataHome: UNUSED_TMP, sandboxEnv: {} }),
-    };
+    });
     const mgr = makeManager({ spawnFn, defaultExecutor: fakeExecutor });
     const dispatched = mgr.dispatch({ prompt: "hi", directory: process.cwd() });
     const logPath = mgr.status(dispatched.id).logPath;
@@ -92,18 +68,9 @@ describe("startTask() writes stdout through executor.normalizeLogEvent (Task 7: 
 describe("startTask() spawns the executor's CLI binary, not a hardcoded command (Task 7: executor-driven binary)", () => {
   test("a pi dispatch spawns the `pi` binary, with args from executor.buildSpawnArgs", () => {
     let captured = null;
-    const fakePi = {
-      id: "pi",
-      taskIdPrefix: "pi",
-      errorBucketPrefix: "pi",
-      defaultSummaryModel: MINIMAX_MODEL,
-      binaryName: "pi",
-      listModelsFn: async () => "",
+    const fakePi = makeFakeExecutor({
       buildSpawnArgs: (ctx) => ["--model", ctx.model, "--mode", "json", "-p", ctx.prompt],
-      buildSummaryPrompt: () => "",
-      normalizeLogEvent: (parsed) => parsed,
-      sandboxAuthFile: () => ({ extraRoBinds: [], sandboxedDataHome: UNUSED_TMP, sandboxEnv: {} }),
-    };
+    });
     const mgr = makeManager({
       spawnFn: (cmd, args, opts) => { captured = { cmd, args, opts }; return fakeChild(); },
       defaultExecutor: fakePi,
@@ -196,16 +163,8 @@ describe("startTask() merges executor.sandboxAuthFile().sandboxEnv into spawnEnv
     let captured = null;
     const cacheDir = mkdtempTracked(AXI_TASKS_CACHE_PI);
     const realAuthFile = path.join(os.tmpdir(), "fake-pi-home", "auth.json");
-    const fakePi = {
-      id: "pi",
-      taskIdPrefix: "pi",
-      errorBucketPrefix: "pi",
-      defaultSummaryModel: MINIMAX_MODEL,
-      binaryName: "pi",
-      listModelsFn: async () => "",
+    const fakePi = makeFakeExecutor({
       buildSpawnArgs: (ctx) => ["--model", ctx.model, "--mode", "json", "-p", ctx.prompt],
-      buildSummaryPrompt: () => "",
-      normalizeLogEvent: (parsed) => parsed,
       sandboxAuthFile: ({ dataDir, existsFn }) => {
         const sandboxedDataHome = path.join(dataDir, "pi-data");
         return {
@@ -214,7 +173,7 @@ describe("startTask() merges executor.sandboxAuthFile().sandboxEnv into spawnEnv
           sandboxedDataHome,
         };
       },
-    };
+    });
     const mgr = makeManager({
       spawnFn: (cmd, args, opts) => { captured = { cmd, args, opts }; return fakeChild(); },
       defaultExecutor: fakePi,
@@ -252,16 +211,8 @@ describe("startTask() merges executor.sandboxAuthFile().sandboxEnv into spawnEnv
     let capturedArgs = null;
     const cacheDir = mkdtempTracked(AXI_TASKS_CACHE_PI);
     const realAuthFile = path.join(os.tmpdir(), "fake-pi-home", "auth.json");
-    const fakePi = {
-      id: "pi",
-      taskIdPrefix: "pi",
-      errorBucketPrefix: "pi",
-      defaultSummaryModel: MINIMAX_MODEL,
-      binaryName: "pi",
-      listModelsFn: async () => "",
+    const fakePi = makeFakeExecutor({
       buildSpawnArgs: (ctx) => ["--model", ctx.model, "--mode", "json", "-p", ctx.prompt],
-      buildSummaryPrompt: () => "",
-      normalizeLogEvent: (parsed) => parsed,
       sandboxAuthFile: (args) => {
         capturedArgs = args;
         const sandboxedDataHome = path.join(args.dataDir, "pi-data");
@@ -272,7 +223,7 @@ describe("startTask() merges executor.sandboxAuthFile().sandboxEnv into spawnEnv
           sandboxedDataHome,
         };
       },
-    };
+    });
     const directory = os.tmpdir();
     const sessionId = "019f90ea-1234-70e0-98dc-6847db316eb4";
     const mgr = makeManager({
@@ -295,16 +246,8 @@ describe("startTask() merges executor.sandboxAuthFile().sandboxEnv into spawnEnv
   test("a fresh (non-resume) pi dispatch does not pass a sessionId to sandboxAuthFile, so no sessions bind is added", () => {
     let capturedArgs = null;
     const cacheDir = mkdtempTracked(AXI_TASKS_CACHE_PI);
-    const fakePi = {
-      id: "pi",
-      taskIdPrefix: "pi",
-      errorBucketPrefix: "pi",
-      defaultSummaryModel: MINIMAX_MODEL,
-      binaryName: "pi",
-      listModelsFn: async () => "",
+    const fakePi = makeFakeExecutor({
       buildSpawnArgs: (ctx) => ["--model", ctx.model, "--mode", "json", "-p", ctx.prompt],
-      buildSummaryPrompt: () => "",
-      normalizeLogEvent: (parsed) => parsed,
       sandboxAuthFile: (args) => {
         capturedArgs = args;
         return {
@@ -314,7 +257,7 @@ describe("startTask() merges executor.sandboxAuthFile().sandboxEnv into spawnEnv
           sandboxEnv: { PI_CODING_AGENT_DIR: path.join(args.dataDir, "pi-data") },
         };
       },
-    };
+    });
     const mgr = makeManager({
       spawnFn: () => fakeChild(),
       defaultExecutor: fakePi,
@@ -350,16 +293,8 @@ describe("startTask() resolves the resumed session file via Array.find (no break
     const realSessionsDir = path.join(os.homedir(), ".pi", "agent", "sessions");
     const realSessionFile = path.join(realSessionsDir, "--tmp--", "2026-07-23T21-42-41-761Z_019f90ea-1234-70e0-98dc-6847db316eb4.jsonl");
     const realAuthFile = path.join(os.homedir(), ".pi", "agent", "auth.json");
-    const fakePi = {
-      id: "pi",
-      taskIdPrefix: "pi",
-      errorBucketPrefix: "pi",
-      defaultSummaryModel: MINIMAX_MODEL,
-      binaryName: "pi",
-      listModelsFn: async () => "",
+    const fakePi = makeFakeExecutor({
       buildSpawnArgs: (ctx) => ["--model", ctx.model, "--mode", "json", "-p", ctx.prompt],
-      buildSummaryPrompt: () => "",
-      normalizeLogEvent: (parsed) => parsed,
       sandboxAuthFile: ({ dataDir, existsFn, statFn, readdirFn, sessionId, launchDirectory }) => {
         const sandboxedDataHome = path.join(dataDir, "pi-data");
         const sandboxedSessionsHome = path.join(sandboxedDataHome, "sessions");
@@ -391,7 +326,7 @@ describe("startTask() resolves the resumed session file via Array.find (no break
           sandboxedDataHome,
         };
       },
-    };
+    });
     const directory = os.tmpdir();
     const mgr = makeManager({
       spawnFn: (cmd, args, opts) => { captured = { cmd, args, opts }; return fakeChild(); },
@@ -436,18 +371,10 @@ describe("startTask() never lets normalizeLogEvent() throws escape the stdout ha
   test("a throwing normalizeLogEvent on the inline path does not crash out of the stdout handler", () => {
     const child = fakeChild();
     const spawnFn = mock.fn(() => child);
-    const fakeExecutor = {
-      id: "opencode",
-      taskIdPrefix: "oc",
-      errorBucketPrefix: "opencode",
-      defaultSummaryModel: MIMO_MODEL,
-      binaryName: "opencode",
-      listModelsFn: async () => "",
+    const fakeExecutor = makeFakeOpencodeExecutor({
       buildSpawnArgs: () => ["run", "--dir", process.cwd(), "--auto", "--format", "json", "-m", "x", "--", "hi"],
-      buildSummaryPrompt: () => "",
       normalizeLogEvent: () => { throw new Error("boom from inside normalizeLogEvent"); },
-      sandboxAuthFile: () => ({ extraRoBinds: [], sandboxedDataHome: UNUSED_TMP, sandboxEnv: {} }),
-    };
+    });
     const mgr = makeManager({ spawnFn, defaultExecutor: fakeExecutor });
     const dispatched = mgr.dispatch({ prompt: "hi", directory: process.cwd() });
     const logPath = mgr.status(dispatched.id).logPath;
@@ -468,18 +395,10 @@ describe("startTask() never lets normalizeLogEvent() throws escape the stdout ha
   test("a throwing normalizeLogEvent on the trailing-fragment path is also caught", () => {
     const child = fakeChild();
     const spawnFn = mock.fn(() => child);
-    const fakeExecutor = {
-      id: "opencode",
-      taskIdPrefix: "oc",
-      errorBucketPrefix: "opencode",
-      defaultSummaryModel: MIMO_MODEL,
-      binaryName: "opencode",
-      listModelsFn: async () => "",
+    const fakeExecutor = makeFakeOpencodeExecutor({
       buildSpawnArgs: () => ["run", "--dir", process.cwd(), "--auto", "--format", "json", "-m", "x", "--", "hi"],
-      buildSummaryPrompt: () => "",
       normalizeLogEvent: () => { throw new Error("trailing throw"); },
-      sandboxAuthFile: () => ({ extraRoBinds: [], sandboxedDataHome: UNUSED_TMP, sandboxEnv: {} }),
-    };
+    });
     const mgr = makeManager({ spawnFn, defaultExecutor: fakeExecutor });
     const dispatched = mgr.dispatch({ prompt: "hi", directory: process.cwd() });
     const logPath = mgr.status(dispatched.id).logPath;
@@ -505,18 +424,10 @@ describe("startTask() never lets normalizeLogEvent() throws escape the stdout ha
     // structured-error fallthrough in classifyProviderFailure, producing
     // an executor-prefixed bucket.
     const child = fakeChild(9610);
-    const fakeExecutor = {
-      id: "opencode",
-      taskIdPrefix: "oc",
-      errorBucketPrefix: "opencode",
-      defaultSummaryModel: MIMO_MODEL,
-      binaryName: "opencode",
-      listModelsFn: async () => "",
+    const fakeExecutor = makeFakeOpencodeExecutor({
       buildSpawnArgs: () => ["run", "--dir", process.cwd(), "--auto", "--format", "json", "-m", "x", "--", "hi"],
-      buildSummaryPrompt: () => "",
       normalizeLogEvent: () => { throw new Error("always throws"); },
-      sandboxAuthFile: () => ({ extraRoBinds: [], sandboxedDataHome: UNUSED_TMP, sandboxEnv: {} }),
-    };
+    });
     const mgr = makeManager({
       spawnFn: () => child,
       killFn: () => {},

@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { createTaskManager } from "./tasks.js";
 import { hashFingerprint, VARIANTS_CACHE_SCHEMA } from "./variants-cache.js";
-import { trackManager, makeManager, fakeChild, LUNA_MODEL, MIMIMAX_MODEL, MINIMAX_MODEL, SOL_MODEL, UNUSED_TMP, SPAWN_OPENCODE_ENOENT, preserveEnvVars, mkdtempTracked, AXI_TASKS_TEST_DIR, AXI_TASKS_CACHE_DIR, AXI_TASKS_OVERLAY_DIR } from "./tasks.test-helpers.js";
+import { trackManager, makeManager, fakeChild, LUNA_MODEL, MIMIMAX_MODEL, MINIMAX_MODEL, SOL_MODEL, SPAWN_OPENCODE_ENOENT, preserveEnvVars, mkdtempTracked, AXI_TASKS_TEST_DIR, AXI_TASKS_CACHE_DIR, AXI_TASKS_OVERLAY_DIR, makeFakeExecutor } from "./tasks.test-helpers.js";
 
 describe("dispatch() lifecycle, driven through an injected spawnFn (no real opencode process)", () => {
   test("passes the right argv and spawn options through to spawnFn", () => {
@@ -85,18 +85,10 @@ describe("dispatch() lifecycle, driven through an injected spawnFn (no real open
     // is observable: that path ignores this injected instance entirely and
     // would spawn with the real pi executor's own buildSpawnArgs instead.
     let captured = null;
-    const fakePi = {
-      id: "pi",
-      taskIdPrefix: "pi",
-      errorBucketPrefix: "pi",
+    const fakePi = makeFakeExecutor({
       defaultSummaryModel: "fake-pi/marker-model",
-      binaryName: "pi",
-      listModelsFn: async () => "",
       buildSpawnArgs: () => ["--fake-pi-marker"],
-      buildSummaryPrompt: () => "",
-      normalizeLogEvent: (parsed) => parsed,
-      sandboxAuthFile: () => ({ extraRoBinds: [], extraRwPairBinds: [], sandboxedDataHome: UNUSED_TMP, sandboxEnv: {} }),
-    };
+    });
     const mgr = makeManager({ spawnFn: (_cmd, args) => { captured = args; return fakeChild(); }, defaultExecutor: fakePi });
     mgr.dispatch({ prompt: "first", directory: os.tmpdir(), model: MINIMAX_MODEL, sessionId: "ses_reuse", executor: "pi" });
     mgr.dispatch({ prompt: "resume", directory: os.tmpdir(), sessionId: "ses_reuse" });

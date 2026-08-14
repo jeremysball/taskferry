@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import { bucketFor } from "./tasks.js";
-import { makeManager, fakeChild, RATE_LIMIT_ERROR, RATE_LIMIT_PLAIN, UNAUTHORIZED_ERROR, UNAUTHORIZED_SHORT, USAGE_LIMIT_ERROR, QUOTA_ERROR, NO_API_KEY_FOUND, EXTENSION_CONFIG_ERROR, MINIMAX_MODEL, UNUSED_TMP } from "./tasks.test-helpers.js";
+import { makeManager, fakeChild, RATE_LIMIT_ERROR, RATE_LIMIT_PLAIN, UNAUTHORIZED_ERROR, UNAUTHORIZED_SHORT, USAGE_LIMIT_ERROR, QUOTA_ERROR, NO_API_KEY_FOUND, EXTENSION_CONFIG_ERROR, MINIMAX_MODEL, makeFakeExecutor } from "./tasks.test-helpers.js";
 
 describe("provider-failure classification: rate limits, payment, authentication", () => {
   test("a rate-limit diagnostic in the log stops the child early with failureReason rate_limited and captures failureDetail", async () => {
@@ -621,18 +621,9 @@ describe("classifyProviderFailure() honors the binding compatibility contract (T
   });
 
   test("pi's named buckets receive the pi_ prefix so executor-specific failures stay distinguishable", async () => {
-    const fakePi = {
-      id: "pi",
-      taskIdPrefix: "pi",
-      errorBucketPrefix: "pi",
-      defaultSummaryModel: MINIMAX_MODEL,
-      binaryName: "pi",
-      listModelsFn: async () => "",
+    const fakePi = makeFakeExecutor({
       buildSpawnArgs: () => ["--model", MINIMAX_MODEL, "--mode", "json", "-p", "hi"],
-      buildSummaryPrompt: () => "",
-      normalizeLogEvent: (parsed) => parsed,
-      sandboxAuthFile: () => ({ extraRoBinds: [], sandboxedDataHome: UNUSED_TMP, sandboxEnv: {} }),
-    };
+    });
     // Each line is the equivalent pi shape for the opencode buckets above;
     // the same regex set must classify it, but with the pi_ prefix added.
     const cases = [
@@ -694,18 +685,9 @@ describe("classifyProviderFailure() honors the binding compatibility contract (T
     );
 
     // pi
-    const fakePi = {
-      id: "pi",
-      taskIdPrefix: "pi",
-      errorBucketPrefix: "pi",
-      defaultSummaryModel: MINIMAX_MODEL,
-      binaryName: "pi",
-      listModelsFn: async () => "",
+    const fakePi = makeFakeExecutor({
       buildSpawnArgs: () => ["--model", MINIMAX_MODEL, "--mode", "json", "-p", "hi"],
-      buildSummaryPrompt: () => "",
-      normalizeLogEvent: (parsed) => parsed,
-      sandboxAuthFile: () => ({ extraRoBinds: [], sandboxedDataHome: UNUSED_TMP, sandboxEnv: {} }),
-    };
+    });
     const childPi = fakeChild(9501);
     const mgrPi = makeManager({
       spawnFn: () => childPi,
@@ -727,18 +709,9 @@ describe("classifyProviderFailure() honors the binding compatibility contract (T
 
 describe("provider-failure classification is task-aware via task.executorId (Task 7: end-to-end pi bucket)", () => {
   test("a pi executor task receiving plain NO_API_KEY_FOUND settles with failureReason: 'pi_authentication_failed'", async () => {
-    const fakePi = {
-      id: "pi",
-      taskIdPrefix: "pi",
-      errorBucketPrefix: "pi",
-      defaultSummaryModel: MINIMAX_MODEL,
-      binaryName: "pi",
-      listModelsFn: async () => "",
+    const fakePi = makeFakeExecutor({
       buildSpawnArgs: () => ["--model", MINIMAX_MODEL, "--mode", "json", "-p", "hi"],
-      buildSummaryPrompt: () => "",
-      normalizeLogEvent: (parsed) => parsed,
-      sandboxAuthFile: () => ({ extraRoBinds: [], sandboxedDataHome: UNUSED_TMP, sandboxEnv: {} }),
-    };
+    });
     const child = fakeChild(9119);
     const mgr = makeManager({
       spawnFn: () => child,

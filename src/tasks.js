@@ -6091,6 +6091,28 @@ function settleWaitersFor(taskId, ctx) {
 }
 
 /**
+ * @typedef {object} Counts
+ * @property {number} queued
+ * @property {number} running
+ * @property {number} done
+ * @property {number} crashed
+ * @property {number} cancelled
+ * @property {number} unknown
+ */
+
+/**
+ * A fresh all-zero status-counts object. Both `listTasks` here and the
+ * daemon's filtered list tally into it by mutating the returned object, so
+ * it must mint a new object per call rather than hand out one shared
+ * constant. One definition keeps a newly added status from silently
+ * undercounting at the other call site (taskferry#168).
+ * @returns {Counts}
+ */
+export function emptyStatusCounts() {
+  return { queued: 0, running: 0, done: 0, crashed: 0, cancelled: 0, unknown: 0 };
+}
+
+/**
  * Sorts all live tasks newest-first and buckets them by status for the list
  * view. Extracted out of `createTaskManager`'s `list` closure; `summarizeRow`
  * is a module-level helper.
@@ -6099,10 +6121,9 @@ function settleWaitersFor(taskId, ctx) {
 function listTasks(ctx) {
   ctx.ensureStateLoaded();
   const all = Array.from(ctx.tasks.values()).sort((a, b) => (a.startedAt < b.startedAt ? 1 : -1));
-  /** @type {Record<string, number>} */
-  const counts = { queued: 0, running: 0, done: 0, crashed: 0, cancelled: 0, unknown: 0 };
+  const counts = emptyStatusCounts();
   for (const t of all) {
-    if (counts[t.status] != null) counts[t.status]++;
+    if (counts[/** @type {keyof Counts} */ (t.status)] != null) counts[/** @type {keyof Counts} */ (t.status)]++;
   }
   return {
     counts,

@@ -79,12 +79,13 @@ function fakeManagerFactory(tasks = [], { checkSummaryModelReady, throwOnClose =
       await new Promise((resolve) => setTimeout(resolve, delay));
       return { id: taskId, status: "done" };
     },
-    list() {
+    list({ limit } = {}) {
       calls.push(["list"]);
+      const rows = limit !== undefined ? tasks.slice(0, limit) : tasks;
       return {
         counts: { queued: 0, running: 0, done: tasks.length, crashed: 0, cancelled: 0, unknown: 0 },
-        tasks: tasks.length
-          ? tasks.map(({ id, status, model = TEST_MODEL, startedAt = TEST_STARTED_AT, directory }) => ({ id, status, model, startedAt, directory }))
+        tasks: rows.length
+          ? rows.map(({ id, status, model = TEST_MODEL, startedAt = TEST_STARTED_AT, directory }) => ({ id, status, model, startedAt, directory }))
           : "none found (this server process's lifetime)",
       };
     },

@@ -750,6 +750,7 @@ export function isOutsideDirectory(directory, candidate) {
  * @property {string} socketPath
  * @property {(path: string) => boolean} existsFn
  * @property {(path: string) => {isDirectory: () => boolean}|null} statFn
+ * @property {(path: string) => {isSymbolicLink: () => boolean}} lstatFn
  * @property {(path: string) => string[]} readdirFn
  * @property {string[]} sandboxDenylist
  * @property {(directory: string) => string|null} resolveGitCommonDirFn
@@ -1167,6 +1168,7 @@ function buildBwrapBinds(ctx, launchInfo, task, spawnEnv, role) {
     spawnEnv,
     existsFn: ctx.existsFn,
     statFn: ctx.statFn,
+    lstatFn: ctx.lstatFn,
     readdirFn: ctx.readdirFn,
     ...(isSummary ? {} : { sessionId: dispatchLaunch.sessionId ?? null, launchDirectory: launchDirectory || null }),
   });
@@ -3784,6 +3786,22 @@ function resolveStringOptions(rawOptions) {
 }
 
 /**
+ * The fs test-inject seams (existsFn/statFn/lstatFn/readdirFn). Kept in
+ * their own helper for the same reason {@link resolveFilesystemSimpleOptions}
+ * exists: each `??` mapping adds 1 to the function's cyclomatic complexity,
+ * and the sandbox launch path alone already needed four of them.
+ * @param {Record<string, any>} rawOptions
+ */
+function resolveFilesystemFnSeams(rawOptions) {
+  return {
+    existsFn: rawOptions.existsFn ?? fs.existsSync,
+    statFn: rawOptions.statFn ?? ((/** @type {string} */ p) => { try { return fs.statSync(p); } catch { return null; } }),
+    lstatFn: rawOptions.lstatFn ?? fs.lstatSync,
+    readdirFn: rawOptions.readdirFn ?? ((/** @type {string} */ p) => fs.readdirSync(p)),
+  };
+}
+
+/**
  * The simple test-inject seams: every field is a direct
  * `rawOptions.X ?? DEFAULT` mapping (or, for `rmOverlayTreeFn`, the raw
  * option, no default). Extracted from {@link resolveFilesystemOptions} so
@@ -3811,9 +3829,7 @@ function resolveFilesystemSimpleOptions(rawOptions) {
     resolveGitCommonDirFn: rawOptions.resolveGitCommonDirFn ?? resolveGitCommonDir,
     resolveGitDirFn: rawOptions.resolveGitDirFn ?? resolveGitDir,
     checkBwrapAvailableFn: rawOptions.checkBwrapAvailableFn ?? checkBwrapAvailable,
-    existsFn: rawOptions.existsFn ?? fs.existsSync,
-    statFn: rawOptions.statFn ?? ((/** @type {string} */ p) => { try { return fs.statSync(p); } catch { return null; } }),
-    readdirFn: rawOptions.readdirFn ?? ((/** @type {string} */ p) => fs.readdirSync(p)),
+    ...resolveFilesystemFnSeams(rawOptions),
   };
 }
 
@@ -4396,7 +4412,7 @@ function buildManagerInternalHelpers(ctx) {
      * delegated to {@link startTaskFor}, which takes every factory closure
      * dependency explicitly via `ctx`.
      * @param {Task} task */
-    startTask: (task) => startTaskFor(task, { pendingLaunches: ctx.maps.pendingLaunches, SUMMARY_DIR: ctx.paths.SUMMARY_DIR, PROMPT_DIR: ctx.paths.PROMPT_DIR, spawnFn: ctx.opts.spawnFn, runOverlayCommandFn: ctx.opts.runOverlayCommandFn, sandboxEnabled: ctx.opts.sandboxEnabled, platform: ctx.opts.platform, overlayEnabled: ctx.opts.overlayEnabled, overlayTmpRoot: ctx.opts.overlayTmpRoot, allowedDirs: ctx.opts.allowedDirs, roBind: ctx.opts.roBind, stateDir: ctx.opts.stateDir, cacheDir: ctx.opts.cacheDir, runtimeDir: ctx.opts.runtimeDir, socketPath: ctx.opts.socketPath, existsFn: ctx.opts.existsFn, statFn: ctx.opts.statFn, readdirFn: ctx.opts.readdirFn, sandboxDenylist: ctx.opts.sandboxDenylist, resolveGitCommonDirFn: ctx.opts.resolveGitCommonDirFn, resolveGitDirFn: ctx.opts.resolveGitDirFn, requireBwrap: () => ctx.env.requireBwrap(), requireOverlaySupport: () => ctx.env.requireOverlaySupport(), dispatchEnvironment: (env, taskId) => ctx.env.dispatchEnvironment(env, taskId), summaryEnvironment: (env) => ctx.env.summaryEnvironment(env), settleWaiters: (taskId) => ctx.helpers.settleWaiters(taskId), launchQueuedTasks: () => ctx.helpers.launchQueuedTasks(), persistTask: (taskId) => ctx.helpers.persistTask(taskId), scheduleActivity: (task, options) => ctx.helpers.scheduleActivity(task, options), classifyTrailingLogFailure: (task, executor) => ctx.helpers.classifyTrailingLogFailure(task, executor), startRunningWatcher: (task, executor) => ctx.helpers.startRunningWatcher(task, executor), stopRunningWatcher: (taskId) => ctx.helpers.stopRunningWatcher(taskId), extractChangesetForTask: (task) => ctx.env.extractChangesetForTask(task), sendSignal: (pid, signal) => ctx.helpers.sendSignal(pid, signal), activityCache: ctx.activity.cache, logHasEventCache: ctx.maps.logHasEventCache, escalationTimers: ctx.maps.escalationTimers, tasks: ctx.maps.tasks, decRunning: (task) => { ctx.state.runningCount--; const q = ctx.maps.providerQueues.get(providerOf(task.model)); if (q) { q.runningCount--; } }, incRunning: (task) => { ctx.state.runningCount++; const q = ctx.maps.providerQueues.get(providerOf(task.model)); if (q) { q.runningCount++; } }, readSessionIdFromLog, evaluateOutputCompleteness, attemptCrashRecovery }),
+    startTask: (task) => startTaskFor(task, { pendingLaunches: ctx.maps.pendingLaunches, SUMMARY_DIR: ctx.paths.SUMMARY_DIR, PROMPT_DIR: ctx.paths.PROMPT_DIR, spawnFn: ctx.opts.spawnFn, runOverlayCommandFn: ctx.opts.runOverlayCommandFn, sandboxEnabled: ctx.opts.sandboxEnabled, platform: ctx.opts.platform, overlayEnabled: ctx.opts.overlayEnabled, overlayTmpRoot: ctx.opts.overlayTmpRoot, allowedDirs: ctx.opts.allowedDirs, roBind: ctx.opts.roBind, stateDir: ctx.opts.stateDir, cacheDir: ctx.opts.cacheDir, runtimeDir: ctx.opts.runtimeDir, socketPath: ctx.opts.socketPath, existsFn: ctx.opts.existsFn, statFn: ctx.opts.statFn, lstatFn: ctx.opts.lstatFn, readdirFn: ctx.opts.readdirFn, sandboxDenylist: ctx.opts.sandboxDenylist, resolveGitCommonDirFn: ctx.opts.resolveGitCommonDirFn, resolveGitDirFn: ctx.opts.resolveGitDirFn, requireBwrap: () => ctx.env.requireBwrap(), requireOverlaySupport: () => ctx.env.requireOverlaySupport(), dispatchEnvironment: (env, taskId) => ctx.env.dispatchEnvironment(env, taskId), summaryEnvironment: (env) => ctx.env.summaryEnvironment(env), settleWaiters: (taskId) => ctx.helpers.settleWaiters(taskId), launchQueuedTasks: () => ctx.helpers.launchQueuedTasks(), persistTask: (taskId) => ctx.helpers.persistTask(taskId), scheduleActivity: (task, options) => ctx.helpers.scheduleActivity(task, options), classifyTrailingLogFailure: (task, executor) => ctx.helpers.classifyTrailingLogFailure(task, executor), startRunningWatcher: (task, executor) => ctx.helpers.startRunningWatcher(task, executor), stopRunningWatcher: (taskId) => ctx.helpers.stopRunningWatcher(taskId), extractChangesetForTask: (task) => ctx.env.extractChangesetForTask(task), sendSignal: (pid, signal) => ctx.helpers.sendSignal(pid, signal), activityCache: ctx.activity.cache, logHasEventCache: ctx.maps.logHasEventCache, escalationTimers: ctx.maps.escalationTimers, tasks: ctx.maps.tasks, decRunning: (task) => { ctx.state.runningCount--; const q = ctx.maps.providerQueues.get(providerOf(task.model)); if (q) { q.runningCount--; } }, incRunning: (task) => { ctx.state.runningCount++; const q = ctx.maps.providerQueues.get(providerOf(task.model)); if (q) { q.runningCount++; } }, readSessionIdFromLog, evaluateOutputCompleteness, attemptCrashRecovery }),
     /**
      * @param {string} taskId
      * @param {{force?: boolean}} options

@@ -329,6 +329,10 @@ describe("bwrap sandboxing: opencode auth and data home", () => {
       sandboxEnabled: true,
       checkBwrapAvailableFn: () => ({ checked: true, available: true }),
       existsFn: (p) => p === realAuthFile,
+      lstatFn: (p) => {
+        if (p !== realAuthFile) throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+        return { isSymbolicLink: () => false, isFile: () => true, nlink: 1 };
+      },
       platform: "linux",
       cacheDir,
     });
@@ -350,6 +354,10 @@ describe("bwrap sandboxing: opencode auth and data home", () => {
       sandboxEnabled: true,
       checkBwrapAvailableFn: () => ({ checked: true, available: true }),
       existsFn: (p) => p === realAuthFile,
+      lstatFn: (p) => {
+        if (p !== realAuthFile) throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+        return { isSymbolicLink: () => false, isFile: () => true, nlink: 1 };
+      },
       platform: "linux",
       cacheDir,
     });

@@ -1097,6 +1097,23 @@ test("result rewrites a RESPONSE_TOO_LARGE failure into a clear, actionable erro
   );
 });
 
+test("result rewrites a RESPONSE_TOO_LARGE failure without diff blame when the diff was not requested (taskferry#472 review)", async () => {
+  const tooLarge = new Error("daemon response for this request exceeds 1048576 bytes\nhelp: Narrow the request (e.g. pass --directory)");
+  tooLarge.code = "RESPONSE_TOO_LARGE";
+  const client = { request: async () => { throw tooLarge; } };
+
+  await assert.rejects(
+    () => runCommand("result", { taskId: "t1", fields: ["message"] }, { client }),
+    (error) => {
+      assert.match(error.message, /response size cap/);
+      assert.doesNotMatch(error.message, /unrelated uncommitted changes/);
+      assert.doesNotMatch(error.message, /pre-dispatch HEAD/);
+      assert.match(error.message, /--fields message,tokens/);
+      return true;
+    },
+  );
+});
+
 test("result passes through non-size daemon errors unchanged", async () => {
   const daemonError = new Error("error: unknown task id: t1\nhelp: run `taskferry list` to see valid task ids");
   daemonError.code = "UNKNOWN_TASK";

@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { createTaskEvents } from "./events.js";
 import { createActivityCache, readActivitySnapshot, readDeltaNarration, DEFAULT_SUMMARIZER_TIMEOUT_MS } from "./activity.js";
-import { resolveStateDir, resolveCacheDir, resolveOverlayTmpRoot, TASKFERRY_PLUMBING_ENV_VARS } from "./paths.js";
+import { normalizeActivitySubscriptionKey, resolveStateDir, resolveCacheDir, resolveOverlayTmpRoot, TASKFERRY_PLUMBING_ENV_VARS } from "./paths.js";
 import { RESULT_FIELDS } from "./protocol.js";
 import { formatToolEventForNarration } from "./narration-format.js";
 import { errCode } from "./errors.js";
@@ -755,6 +755,7 @@ export function isOutsideDirectory(directory, candidate) {
  * @property {string} socketPath
  * @property {(path: string) => boolean} existsFn
  * @property {(path: string) => {isDirectory: () => boolean}|null} statFn
+ * @property {(path: string) => {isSymbolicLink: () => boolean}} lstatFn
  * @property {(path: string) => string[]} readdirFn
  * @property {string[]} sandboxDenylist
  * @property {(directory: string) => string|null} resolveGitCommonDirFn
@@ -766,6 +767,7 @@ export function isOutsideDirectory(directory, candidate) {
  * @property {(taskId: string) => void} settleWaiters
  * @property {() => void} launchQueuedTasks
  * @property {(taskId: string) => void} persistTask
+ * @property {() => void} flushPersist
  * @property {(task: Task, opts?: {force?: boolean}) => Promise<unknown>} scheduleActivity
  * @property {(task: Task, executor: import("./executor.js").WorkerExecutor) => void} classifyTrailingLogFailure
  * @property {(task: Task, executor: import("./executor.js").WorkerExecutor) => void} startRunningWatcher
@@ -826,12 +828,13 @@ function buildLaunchSpawnArgs(executor, { isSummary, summaryLaunch, dispatchLaun
  * which kind of launch this is (summary vs dispatch), the target directory,
  * whether the prompt must be routed through a prompt file to dodge the argv
  * E2BIG limit (issue #78), and the executor's buildSpawnArgs output. Also
- * returns the closure that cleans up scratch files (the summary snapshot and
- * any prompt file) on settlement -- shared by every settle path.
+ * returns the closure that cleans up scratch files (the summary snapshot,
+ * prompt file, and any sandbox snapshots) on settlement -- shared by every
+ * settle path.
  * @param {Task} task
  * @param {LaunchSpec} launch
  * @param {{SUMMARY_DIR: string, PROMPT_DIR: string}} ctx
- * @returns {{isSummary: boolean, summaryLaunch: SummaryLaunch, dispatchLaunch: DispatchLaunch, executor: import("./executor.js").WorkerExecutor, launchDirectory: string, promptFilePath: string|null, args: string[], cleanUpScratchFiles: () => void}}
+ * @returns {{isSummary: boolean, summaryLaunch: SummaryLaunch, dispatchLaunch: DispatchLaunch, executor: import("./executor.js").WorkerExecutor, launchDirectory: string, promptFilePath: string|null, args: string[], cleanUpScratchFiles: () => void, registerScratchCleanup: (cleanup: () => void) => void}}
  */
 function resolveStartTaskLaunch(task, launch, ctx) {
   const isSummary = launch.kind === "summary";
@@ -847,11 +850,16 @@ function resolveStartTaskLaunch(task, launch, ctx) {
     ? path.join(ctx.PROMPT_DIR, `${task.id}.prompt.txt`)
     : null;
   const args = buildLaunchSpawnArgs(executor, { isSummary, summaryLaunch, dispatchLaunch, launchDirectory, promptFilePath });
+  /** @type {Array<() => void>} */
+  const scratchCleanups = [];
   const cleanUpScratchFiles = () => {
     if (isSummary && summaryLaunch.snapshotPath) removeFileIfPresent(summaryLaunch.snapshotPath);
     if (promptFilePath) removeFileIfPresent(promptFilePath);
+    for (const cleanup of scratchCleanups.splice(0)) cleanup();
   };
-  return { isSummary, summaryLaunch, dispatchLaunch, executor, launchDirectory, promptFilePath, args, cleanUpScratchFiles };
+  /** @param {() => void} cleanup */
+  const registerScratchCleanup = (cleanup) => { scratchCleanups.push(cleanup); };
+  return { isSummary, summaryLaunch, dispatchLaunch, executor, launchDirectory, promptFilePath, args, cleanUpScratchFiles, registerScratchCleanup };
 }
 
 /**
@@ -1134,6 +1142,30 @@ function dropReadWriteConflicts(extraRoBinds, rwResolved) {
   };
 }
 
+const GIT_SNAPSHOT_MAX_RETRIES = 2;
+
+/**
+ * Copies a private git directory, retrying the whole copy when worktree
+ * bookkeeping briefly removes or renames an entry under the source tree.
+ * @param {string} source
+ * @param {string} destination
+ */
+function copyGitSnapshot(source, destination) {
+  for (let attempt = 0; attempt <= GIT_SNAPSHOT_MAX_RETRIES; attempt++) {
+    try {
+      fs.cpSync(source, destination, { recursive: true });
+      return;
+    } catch (err) {
+      const code = errCode(err);
+      if (code !== "ENOENT" && code !== "ENOTDIR") throw err;
+      if (attempt === GIT_SNAPSHOT_MAX_RETRIES) throw err;
+      fs.rmSync(destination, { recursive: true, force: true });
+      fs.mkdirSync(destination, { recursive: true, mode: 0o700 });
+    }
+  }
+  throw new Error("unreachable");
+}
+
 /**
  * Computes the bwrap bind set for a sandboxed dispatch: the deny-list (with
  * entries the user simply doesn't have dropped, since bwrap --tmpfs fails if
@@ -1148,10 +1180,10 @@ function dropReadWriteConflicts(extraRoBinds, rwResolved) {
  * @param {Task} task
  * @param {NodeJS.ProcessEnv} spawnEnv
  * @param {"dispatch"|"advisor"|null} role
- * @returns {{homeDir: string, denyList: string[], extraRoBinds: [string, string][], extraRwBinds: string[], overlayInfo: {root: string, upperDir: string, workDir: string}|null, overlayRwBinds: Array<{path: string, upperDir: string, workDir: string}>, overlayRwFileBinds: Array<{path: string, bindSrc: string}>, executorRwPairBinds: [string, string][], sandboxEnv: NodeJS.ProcessEnv, spawnEnv: NodeJS.ProcessEnv, role: "dispatch"|"advisor"|null}}
+ * @returns {{homeDir: string, denyList: string[], extraRoBinds: [string, string][], extraRwBinds: string[], extraRwPairBinds: [string, string][], overlayInfo: {root: string, upperDir: string, workDir: string}|null, overlayRwBinds: Array<{path: string, upperDir: string, workDir: string}>, overlayRwFileBinds: Array<{path: string, bindSrc: string}>, sandboxEnv: NodeJS.ProcessEnv, spawnEnv: NodeJS.ProcessEnv, role: "dispatch"|"advisor"|null}}
  */
 function buildBwrapBinds(ctx, launchInfo, task, spawnEnv, role) {
-  const { isSummary, dispatchLaunch, executor, launchDirectory, promptFilePath } = launchInfo;
+  const { isSummary, dispatchLaunch, executor, launchDirectory, promptFilePath, registerScratchCleanup } = launchInfo;
   ctx.requireBwrap();
   const homeDir = os.homedir();
   // bwrap's --tmpfs fails ("Read-only file system") if the mount point
@@ -1180,6 +1212,7 @@ function buildBwrapBinds(ctx, launchInfo, task, spawnEnv, role) {
     spawnEnv,
     existsFn: ctx.existsFn,
     statFn: ctx.statFn,
+    lstatFn: ctx.lstatFn,
     readdirFn: ctx.readdirFn,
     ...(isSummary ? {} : { sessionId: dispatchLaunch.sessionId ?? null, launchDirectory: launchDirectory || null }),
   });
@@ -1205,7 +1238,7 @@ function buildBwrapBinds(ctx, launchInfo, task, spawnEnv, role) {
     extraRwBinds.push(dispatchLaunch.outputDir);
   }
   const overlayInfo = createOverlayIfNeeded(ctx, launchInfo, task, role);
-  const gitBinds = buildGitBinds(ctx, launchDirectory, overlayInfo, extraRwBinds);
+  const gitBinds = buildGitBinds(ctx, launchDirectory, overlayInfo, extraRwBinds, { taskId: task.id, registerScratchCleanup });
   // Read-write/read-only dirs: each resolves as a union of the manager-level
   // default (flag/env/config, already folded into ctx.allowedDirs/ctx.roBind)
   // and the per-dispatch `--rw-bind`/`--ro-bind` entries. The rw set drops
@@ -1233,10 +1266,10 @@ function buildBwrapBinds(ctx, launchInfo, task, spawnEnv, role) {
   // sandbox (just writable) instead of vanishing.
   const conflictResult = dropReadWriteConflicts(extraRoBinds, rwResolved);
   extraRoBinds = conflictResult.roBinds;
-  const allExecutorRwPairBinds = [...executorRwPairBinds, ...conflictResult.promotedPairBinds];
+  const allRwPairBinds = [...executorRwPairBinds, ...conflictResult.promotedPairBinds, ...gitBinds.extraRwPairBinds];
   return {
     homeDir, denyList, extraRoBinds, extraRwBinds, overlayInfo, sandboxEnv, spawnEnv, role,
-    executorRwPairBinds: allExecutorRwPairBinds,
+    extraRwPairBinds: allRwPairBinds,
     overlayRwBinds: gitBinds.overlayRwBinds,
     overlayRwFileBinds: gitBinds.overlayRwFileBinds,
   };
@@ -1244,27 +1277,40 @@ function buildBwrapBinds(ctx, launchInfo, task, spawnEnv, role) {
 
 /**
  * Builds the write-through binds for a git dispatch directory whose real
- * gitdir lives outside the read-write mount: the gitdir (or git-common-dir)
- * becomes a rw overlay sub-mount or a scratch-copied file bind, depending on
- * whether the target is a directory or a file (overlayfs is directory-only).
- * A git worktree's real gitdir (objects/refs it shares with the main
- * checkout, plus its own HEAD/index) lives outside `launchDirectory` and is
- * otherwise invisible to the read-write bind on it alone -- without this,
- * `git commit` inside the sandbox fails read-only.
+ * gitdir lives outside the read-write mount: shared objects/refs/logs/refs
+ * become rw overlay sub-mounts (or direct binds when overlay is disabled),
+ * while the private gitDir (or an indistinguishable git-common-dir fallback)
+ * always becomes a scratch-copied bind. A git worktree's own private gitDir
+ * gets a one-time recursive-copy snapshot bind (taskferry#304) so a
+ * concurrent `git worktree add` for a sibling worktree can't perturb an
+ * in-flight dispatch's live mount. Its real gitdir (objects/refs shared with
+ * the main checkout, plus its own HEAD/index) lives outside `launchDirectory`
+ * and is otherwise invisible to the read-write bind on it alone -- without
+ * this, `git commit` inside the sandbox fails read-only.
  * @param {StartTaskContext} ctx
  * @param {string} launchDirectory
  * @param {{root: string, upperDir: string, workDir: string}|null} overlayInfo
  * @param {string[]} extraRwBinds
- * @returns {{overlayRwBinds: Array<{path: string, upperDir: string, workDir: string}>, overlayRwFileBinds: Array<{path: string, bindSrc: string}>}}
+ * @param {{taskId: string, registerScratchCleanup: (cleanup: () => void) => void}} snapshotContext
+ * @returns {{overlayRwBinds: Array<{path: string, upperDir: string, workDir: string}>, overlayRwFileBinds: Array<{path: string, bindSrc: string}>, extraRwPairBinds: [string, string][]}}
  */
-function buildGitBinds(ctx, launchDirectory, overlayInfo, extraRwBinds) {
+function buildGitBinds(ctx, launchDirectory, overlayInfo, extraRwBinds, { taskId, registerScratchCleanup }) {
   /** @type {Array<{path: string, upperDir: string, workDir: string}>} */
   const overlayRwBinds = [];
   /** @type {Array<{path: string, bindSrc: string}>} */
   const overlayRwFileBinds = [];
+  /** @type {[string, string][]} */
+  const extraRwPairBinds = [];
   const gitCommonDir = ctx.resolveGitCommonDirFn(launchDirectory);
   if (gitCommonDir && ctx.existsFn(gitCommonDir) && isOutsideDirectory(launchDirectory, gitCommonDir)) {
     const gitDir = ctx.resolveGitDirFn(launchDirectory);
+    /** @param {string} root @param {string} p */
+    const copySnapshot = (root, p) => {
+      const bind = subFilePaths(root, p);
+      fs.mkdirSync(bind.bindSrc, { recursive: true, mode: 0o700 });
+      copyGitSnapshot(p, bind.bindSrc);
+      return bind;
+    };
     /** @param {string} p */
     const addWritable = (p) => {
       if (overlayInfo) {
@@ -1286,8 +1332,39 @@ function buildGitBinds(ctx, launchDirectory, overlayInfo, extraRwBinds) {
         extraRwBinds.push(p);
       }
     };
+    /**
+     * A worktree's own gitDir (`<git-common-dir>/worktrees/<name>`) sits
+     * directly inside the `worktrees/` directory that `git worktree add`
+     * touches for *every* worktree, not just the one being added
+     * (taskferry#304) -- an overlay mount whose lowerdir is that live
+     * directory can be perturbed by a concurrent `git worktree add` for a
+     * sibling worktree, crashing an in-flight dispatch with "directory is
+     * missing" even though the worktree itself was never touched. Unlike
+     * objects/refs (shared, can be large, and must stay live so the sandbox
+     * sees new commits), a worktree's private gitDir is small and doesn't
+     * need to track post-dispatch upstream changes -- like a sandboxed `git
+     * commit`, any writes to it are discarded once the task settles -- so a
+     * one-time recursive copy into the overlay root (or a per-task scratch
+     * root when overlays are disabled), bound rw at the same host path, gets
+     * full isolation from the live directory for the price of a few KB copy
+     * instead of a live overlay mount.
+     * @param {string} p
+     */
+    const snapshotWritable = (p) => {
+      if (overlayInfo) {
+        const bind = copySnapshot(overlayInfo.root, p);
+        overlayRwFileBinds.push(bind);
+      } else {
+        const snapshotRoot = overlayPaths(taskId, ctx.overlayTmpRoot).root;
+        fs.mkdirSync(ctx.overlayTmpRoot, { recursive: true, mode: 0o700 });
+        fs.mkdirSync(snapshotRoot, { mode: 0o700 });
+        registerScratchCleanup(() => fs.rmSync(snapshotRoot, { recursive: true, force: true }));
+        const bind = copySnapshot(snapshotRoot, p);
+        extraRwPairBinds.push([bind.bindSrc, bind.path]);
+      }
+    };
     if (gitDir && ctx.existsFn(gitDir) && gitDir !== gitCommonDir) {
-      addWritable(gitDir);
+      snapshotWritable(gitDir);
       for (const rel of ["objects", "refs", path.join("logs", "refs")]) {
         const resolved = path.join(gitCommonDir, rel);
         fs.mkdirSync(resolved, { recursive: true });
@@ -1296,10 +1373,10 @@ function buildGitBinds(ctx, launchDirectory, overlayInfo, extraRwBinds) {
       const packedRefs = path.join(gitCommonDir, "packed-refs");
       if (ctx.existsFn(packedRefs)) addWritable(packedRefs);
     } else {
-      addWritable(gitCommonDir);
+      snapshotWritable(gitCommonDir);
     }
   }
-  return { overlayRwBinds, overlayRwFileBinds };
+  return { overlayRwBinds, overlayRwFileBinds, extraRwPairBinds };
 }
 
 /**
@@ -1322,7 +1399,7 @@ function assembleBwrapSpawn(ctx, launchInfo, binds, task) {
     homeDir: binds.homeDir,
     denyList: binds.denyList,
     extraRwBinds: binds.extraRwBinds,
-    extraRwPairBinds: binds.executorRwPairBinds,
+    extraRwPairBinds: binds.extraRwPairBinds,
     extraRoBinds: binds.extraRoBinds,
     ...(binds.overlayInfo ? { overlay: { upperDir: binds.overlayInfo.upperDir, workDir: binds.overlayInfo.workDir }, overlayRwBinds: binds.overlayRwBinds, overlayRwFileBinds: binds.overlayRwFileBinds } : {}),
     // Narrow per-task runtime mounts (#453/#454/#455): bind only the daemon
@@ -1644,6 +1721,21 @@ function spawnTaskChild(ctx, launchInfo, task) {
     fs.chmodSync(task.logPath, 0o600);
     const plan = resolveSpawnPlan(ctx, launchInfo, task.id);
     const sandbox = buildSandboxedSpawn(ctx, launchInfo, plan, task);
+    // taskferry#346: buildSandboxedSpawn (via assembleBwrapSpawn) has already
+    // created the on-disk overlay and set task.overlayDirs/changesetStatus
+    // in memory, but nothing durable reflects that yet -- persist it here,
+    // before the crash-prone spawnFn call below, so a daemon crash between
+    // overlay creation and process spawn leaves tasks.json pointing at the
+    // overlay instead of leaving it unowned. Without this, sweepOverlayEntry
+    // on restart can't match the on-disk overlay to any "pending" task and
+    // deletes it as an orphan out from under a detached child that may still
+    // be writing into it. persistTask() alone is not enough: it only flips
+    // ctx.state.persistDirty and arms a 250ms debounce timer
+    // (PERSIST_DEBOUNCE_MS), so the crash window this comment describes
+    // stays open for up to 250ms after this line unless the write is forced
+    // synchronously right here.
+    ctx.persistTask(task.id);
+    ctx.flushPersist();
     // No tmux: the child has no shared session to introspect. It is its own
     // process group so cancellation can stop any subprocesses it creates.
     // stdout is normalized line-by-line through executor.normalizeLogEvent
@@ -3719,6 +3811,7 @@ function resolveBooleanToggle(envValue, configValue, defaultValue, invert = fals
 function resolveCoreOptions(rawOptions) {
   const config = rawOptions.config || {};
   return {
+    resolveWorkspaceRootFn: resolveWorkspaceRootFnOption(rawOptions),
     spawnFn: rawOptions.spawnFn ?? spawn,
     killFn: rawOptions.killFn ?? /** @type {(pid: number, signal: NodeJS.Signals) => void} */ ((pid, signal) => process.kill(pid, signal)),
     stateDir: rawOptions.stateDir ?? DEFAULT_STATE_DIR,
@@ -3739,6 +3832,21 @@ function resolveCoreOptions(rawOptions) {
     onEvent: rawOptions.onEvent,
     config,
   };
+}
+
+/**
+ * Resolves a directory to its git workspace root, so scheduleActivityFor()
+ * can group a task's own directory under the same key a root-scoped watch
+ * subscription was normalized to by syncActivitySubscriptions()
+ * (taskferry#335) -- the identity fallback preserves today's literal
+ * directory-string behavior for a caller (e.g. a test) that doesn't pass
+ * one. Split out of resolveCoreOptions() to keep that function's
+ * cyclomatic complexity under the lint threshold.
+ * @param {Record<string, any>} rawOptions
+ * @returns {(directory: string) => string}
+ */
+function resolveWorkspaceRootFnOption(rawOptions) {
+  return rawOptions.resolveWorkspaceRootFn ?? ((dir) => dir);
 }
 
 /**
@@ -3813,6 +3921,22 @@ function resolveStringOptions(rawOptions) {
 }
 
 /**
+ * The fs test-inject seams (existsFn/statFn/lstatFn/readdirFn). Kept in
+ * their own helper for the same reason {@link resolveFilesystemSimpleOptions}
+ * exists: each `??` mapping adds 1 to the function's cyclomatic complexity,
+ * and the sandbox launch path alone already needed four of them.
+ * @param {Record<string, any>} rawOptions
+ */
+function resolveFilesystemFnSeams(rawOptions) {
+  return {
+    existsFn: rawOptions.existsFn ?? fs.existsSync,
+    statFn: rawOptions.statFn ?? ((/** @type {string} */ p) => { try { return fs.statSync(p); } catch { return null; } }),
+    lstatFn: rawOptions.lstatFn ?? fs.lstatSync,
+    readdirFn: rawOptions.readdirFn ?? ((/** @type {string} */ p) => fs.readdirSync(p)),
+  };
+}
+
+/**
  * The simple test-inject seams: every field is a direct
  * `rawOptions.X ?? DEFAULT` mapping (or, for `rmOverlayTreeFn`, the raw
  * option, no default). Extracted from {@link resolveFilesystemOptions} so
@@ -3840,9 +3964,7 @@ function resolveFilesystemSimpleOptions(rawOptions) {
     resolveGitCommonDirFn: rawOptions.resolveGitCommonDirFn ?? resolveGitCommonDir,
     resolveGitDirFn: rawOptions.resolveGitDirFn ?? resolveGitDir,
     checkBwrapAvailableFn: rawOptions.checkBwrapAvailableFn ?? checkBwrapAvailable,
-    existsFn: rawOptions.existsFn ?? fs.existsSync,
-    statFn: rawOptions.statFn ?? ((/** @type {string} */ p) => { try { return fs.statSync(p); } catch { return null; } }),
-    readdirFn: rawOptions.readdirFn ?? ((/** @type {string} */ p) => fs.readdirSync(p)),
+    ...resolveFilesystemFnSeams(rawOptions),
   };
 }
 
@@ -4336,7 +4458,7 @@ function buildManagerInternalHelpers(ctx) {
      * @param {Task} task
      * @param {{force?: boolean}} [options]
      */
-    scheduleActivity: (task, options = {}) => scheduleActivityFor(task, options, { onEvent: ctx.opts.onEvent, activitySubscriptions: ctx.maps.activitySubscriptions, activitySummariesEnabled: ctx.opts.activitySummariesEnabled, activityCache: ctx.activity.cache, state: ctx.schedulers.activityScheduleState }),
+    scheduleActivity: (task, options = {}) => scheduleActivityFor(task, options, { onEvent: ctx.opts.onEvent, activitySubscriptions: ctx.maps.activitySubscriptions, activitySummariesEnabled: ctx.opts.activitySummariesEnabled, activityCache: ctx.activity.cache, state: ctx.schedulers.activityScheduleState, resolveWorkspaceRootFn: ctx.opts.resolveWorkspaceRootFn }),
     /**
      * @param {string|undefined} sessionId
      * @returns {{sessionId: string|undefined, reset: boolean, previousSessionId: string|undefined}}
@@ -4425,7 +4547,7 @@ function buildManagerInternalHelpers(ctx) {
      * delegated to {@link startTaskFor}, which takes every factory closure
      * dependency explicitly via `ctx`.
      * @param {Task} task */
-    startTask: (task) => startTaskFor(task, { pendingLaunches: ctx.maps.pendingLaunches, SUMMARY_DIR: ctx.paths.SUMMARY_DIR, PROMPT_DIR: ctx.paths.PROMPT_DIR, spawnFn: ctx.opts.spawnFn, runOverlayCommandFn: ctx.opts.runOverlayCommandFn, sandboxEnabled: ctx.opts.sandboxEnabled, platform: ctx.opts.platform, overlayEnabled: ctx.opts.overlayEnabled, overlayTmpRoot: ctx.opts.overlayTmpRoot, allowedDirs: ctx.opts.allowedDirs, roBind: ctx.opts.roBind, stateDir: ctx.opts.stateDir, cacheDir: ctx.opts.cacheDir, runtimeDir: ctx.opts.runtimeDir, socketPath: ctx.opts.socketPath, existsFn: ctx.opts.existsFn, statFn: ctx.opts.statFn, readdirFn: ctx.opts.readdirFn, sandboxDenylist: ctx.opts.sandboxDenylist, resolveGitCommonDirFn: ctx.opts.resolveGitCommonDirFn, resolveGitDirFn: ctx.opts.resolveGitDirFn, requireBwrap: () => ctx.env.requireBwrap(), requireOverlaySupport: () => ctx.env.requireOverlaySupport(), dispatchEnvironment: (env, taskId) => ctx.env.dispatchEnvironment(env, taskId), summaryEnvironment: (env) => ctx.env.summaryEnvironment(env), settleWaiters: (taskId) => ctx.helpers.settleWaiters(taskId), launchQueuedTasks: () => ctx.helpers.launchQueuedTasks(), persistTask: (taskId) => ctx.helpers.persistTask(taskId), scheduleActivity: (task, options) => ctx.helpers.scheduleActivity(task, options), classifyTrailingLogFailure: (task, executor) => ctx.helpers.classifyTrailingLogFailure(task, executor), startRunningWatcher: (task, executor) => ctx.helpers.startRunningWatcher(task, executor), stopRunningWatcher: (taskId) => ctx.helpers.stopRunningWatcher(taskId), extractChangesetForTask: (task) => ctx.env.extractChangesetForTask(task), sendSignal: (pid, signal) => ctx.helpers.sendSignal(pid, signal), activityCache: ctx.activity.cache, logHasEventCache: ctx.maps.logHasEventCache, escalationTimers: ctx.maps.escalationTimers, tasks: ctx.maps.tasks, decRunning: (task) => { ctx.state.runningCount--; const q = ctx.maps.providerQueues.get(providerOf(task.model)); if (q) { q.runningCount--; } }, incRunning: (task) => { ctx.state.runningCount++; const q = ctx.maps.providerQueues.get(providerOf(task.model)); if (q) { q.runningCount++; } }, readSessionIdFromLog, evaluateOutputCompleteness, attemptCrashRecovery }),
+    startTask: (task) => startTaskFor(task, { pendingLaunches: ctx.maps.pendingLaunches, SUMMARY_DIR: ctx.paths.SUMMARY_DIR, PROMPT_DIR: ctx.paths.PROMPT_DIR, spawnFn: ctx.opts.spawnFn, runOverlayCommandFn: ctx.opts.runOverlayCommandFn, sandboxEnabled: ctx.opts.sandboxEnabled, platform: ctx.opts.platform, overlayEnabled: ctx.opts.overlayEnabled, overlayTmpRoot: ctx.opts.overlayTmpRoot, allowedDirs: ctx.opts.allowedDirs, roBind: ctx.opts.roBind, stateDir: ctx.opts.stateDir, cacheDir: ctx.opts.cacheDir, runtimeDir: ctx.opts.runtimeDir, socketPath: ctx.opts.socketPath, existsFn: ctx.opts.existsFn, statFn: ctx.opts.statFn, lstatFn: ctx.opts.lstatFn, readdirFn: ctx.opts.readdirFn, sandboxDenylist: ctx.opts.sandboxDenylist, resolveGitCommonDirFn: ctx.opts.resolveGitCommonDirFn, resolveGitDirFn: ctx.opts.resolveGitDirFn, requireBwrap: () => ctx.env.requireBwrap(), requireOverlaySupport: () => ctx.env.requireOverlaySupport(), dispatchEnvironment: (env, taskId) => ctx.env.dispatchEnvironment(env, taskId), summaryEnvironment: (env) => ctx.env.summaryEnvironment(env), settleWaiters: (taskId) => ctx.helpers.settleWaiters(taskId), launchQueuedTasks: () => ctx.helpers.launchQueuedTasks(), persistTask: (taskId) => ctx.helpers.persistTask(taskId), flushPersist: () => ctx.helpers.flushPersist(), scheduleActivity: (task, options) => ctx.helpers.scheduleActivity(task, options), classifyTrailingLogFailure: (task, executor) => ctx.helpers.classifyTrailingLogFailure(task, executor), startRunningWatcher: (task, executor) => ctx.helpers.startRunningWatcher(task, executor), stopRunningWatcher: (taskId) => ctx.helpers.stopRunningWatcher(taskId), extractChangesetForTask: (task) => ctx.env.extractChangesetForTask(task), sendSignal: (pid, signal) => ctx.helpers.sendSignal(pid, signal), activityCache: ctx.activity.cache, logHasEventCache: ctx.maps.logHasEventCache, escalationTimers: ctx.maps.escalationTimers, tasks: ctx.maps.tasks, decRunning: (task) => { ctx.state.runningCount--; const q = ctx.maps.providerQueues.get(providerOf(task.model)); if (q) { q.runningCount--; } }, incRunning: (task) => { ctx.state.runningCount++; const q = ctx.maps.providerQueues.get(providerOf(task.model)); if (q) { q.runningCount++; } }, readSessionIdFromLog, evaluateOutputCompleteness, attemptCrashRecovery }),
     /**
      * @param {string} taskId
      * @param {{force?: boolean}} options
@@ -6501,13 +6623,20 @@ function dispatchTask(params, ctx) {
  * (event sequence, subscription count) are read/written through `ctx.state`.
  * @param {Task} task
  * @param {{force?: boolean}} options
- * @param {{onEvent?: (event: object) => void, state: {eventSequence: number, activitySummarySubscriptions: number}, activitySubscriptions: Map<string|null, Set<boolean>>, activitySummariesEnabled: boolean, activityCache: {refresh: (task: Task, options: {force?: boolean, includeSummary?: boolean}) => Promise<{activity: string, outputWatermark: number}|null>}}} ctx
+ * @param {{onEvent?: (event: object) => void, state: {eventSequence: number, activitySummarySubscriptions: number}, activitySubscriptions: Map<string|null, Set<boolean>>, activitySummariesEnabled: boolean, activityCache: {refresh: (task: Task, options: {force?: boolean, includeSummary?: boolean}) => Promise<{activity: string, outputWatermark: number}|null>}, resolveWorkspaceRootFn: (directory: string) => string}} ctx
  * @returns {Promise<unknown>}
  */
 function scheduleActivityFor(task, { force }, ctx) {
   if (typeof ctx.onEvent !== "function" || task.internal) return Promise.resolve();
   const scheduledStatus = task.status;
   const scheduledDirectory = task.directory;
+  const allVariants = ctx.activitySubscriptions.get(null);
+  const literalVariants = ctx.activitySubscriptions.get(scheduledDirectory);
+  // Normalize only when a non-literal subscription exists; this avoids a
+  // synchronous git spawn for unsubscribed activity refreshes.
+  const workspaceRootDirectory = allVariants || literalVariants || ctx.activitySubscriptions.size === 0
+    ? scheduledDirectory
+    : normalizeActivitySubscriptionKey(scheduledDirectory, ctx.resolveWorkspaceRootFn);
   const baseEvent = () => {
     ++ctx.state.eventSequence;
     const sequence = ctx.state.eventSequence;
@@ -6534,8 +6663,7 @@ function scheduleActivityFor(task, { force }, ctx) {
   // ALL_DIRECTORIES sentinel, taskferry#315) regardless of any task's own
   // directory, so its variants apply to every task alongside whatever this
   // task's own directory has subscribed to.
-  const dirVariants = ctx.activitySubscriptions.get(scheduledDirectory);
-  const allVariants = ctx.activitySubscriptions.get(null);
+  const dirVariants = ctx.activitySubscriptions.get(workspaceRootDirectory);
   const mergedVariants = new Set([...(dirVariants ?? []), ...(allVariants ?? [])]);
   const variants = mergedVariants.size > 0
     ? [...mergedVariants]

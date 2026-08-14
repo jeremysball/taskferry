@@ -106,6 +106,35 @@ describe("changeset extraction at settlement", () => {
     assert.equal(extractCommand.command, "bwrap");
   });
 
+  test("persists task.overlayDirs to disk synchronously before spawning the child (taskferry#346): a daemon crash right after dispatch() returns must not orphan the overlay", () => {
+    const directory = mkdtempTracked("axi-persist-race-dir-");
+    const overlayTmpRoot = mkdtempTracked("axi-persist-race-tmp-");
+    const mgr = makeManager({
+      spawnFn: (_cmd, _args) => fakeChild(),
+      sandboxEnabled: true,
+      checkBwrapAvailableFn: () => ({ checked: true, available: true }),
+      overlayEnabled: true,
+      checkOverlaySupportFn: () => ({ supported: true }),
+      platform: "linux",
+      overlayTmpRoot,
+    });
+
+    mgr.dispatch({ prompt: "hello", directory });
+
+    // No timers advanced and no explicit flush requested here: this
+    // simulates the daemon process being killed the instant dispatch()
+    // returns, before the persistTaskRecord() debounce timer (250ms,
+    // PERSIST_DEBOUNCE_MS) would otherwise have fired. The on-disk file is
+    // read directly rather than through mgr.flushPersist(), since calling
+    // that would itself perform the synchronous write this test exists to
+    // prove already happened.
+    const persisted = JSON.parse(fs.readFileSync(path.join(mgr.paths.STATE_DIR, TASKS_STATE_FILE), "utf8"));
+    const persistedOverlayDirs = persisted[0]?.overlayDirs;
+
+    assert.ok(persistedOverlayDirs, "overlayDirs must already be persisted to disk before the debounce timer fires, not only after it does");
+    assert.equal(fs.existsSync(persistedOverlayDirs.root), true, "the persisted overlayDirs.root must point at the overlay this dispatch actually created");
+  });
+
   test("auto-rejects and cleans up an advisor's changeset at settlement", async () => {
     let cleanedRoot = null;
     const directory = mkdtempTracked("axi-advisor-extract-dir-");

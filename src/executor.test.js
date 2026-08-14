@@ -16,6 +16,14 @@ const LAUNCH_DIR_FOO = "/home/user/projects/foo";
 const SESSION_FILE = "2026-07-23T21-42-41-761Z_019f90ea-1234-70e0-98dc-6847db316eb4.jsonl";
 const RATE_LIMIT_MESSAGE = "rate limit exceeded";
 const DISPATCH_PROMPT = "do the thing";
+const OPENCODE_CONFIG_DIR = "/home/user/.config/opencode";
+const OPENCODE_JSONC = "opencode.jsonc";
+const SANDBOXED_CONFIG_DIR = "/state/run/opencode-data/config/opencode";
+const OPENCODE_JSONC_DEST = `${SANDBOXED_CONFIG_DIR}/opencode.jsonc`;
+const PLUGINS_DEST = `${SANDBOXED_CONFIG_DIR}/plugins`;
+const PI_EXTENSIONS = "/custom/pi/extensions";
+const PI_SESSIONS_FOO_DIR = "/custom/pi/sessions/--home-user-projects-foo--";
+const OPENCODE_AUTH = "/home/user/.local/share/opencode/auth.json";
 
 
 
@@ -72,7 +80,7 @@ describe("piExecutor().sandboxAuthFile (auth and extension binds)", () => {
 
   test("sandboxAuthFile binds auth and overrides pi data directory", () => {
     const ex = piExecutor();
-    assert.deepEqual(ex.sandboxAuthFile({ homeDir: HOME_DIR, dataDir: DATA_DIR, spawnEnv: { PI_CODING_AGENT_DIR: PI_AGENT_DIR }, existsFn: (p) => p === PI_AUTH }), {
+    assert.deepEqual(ex.sandboxAuthFile({ homeDir: HOME_DIR, dataDir: DATA_DIR, spawnEnv: { PI_CODING_AGENT_DIR: PI_AGENT_DIR }, existsFn: (p) => p === PI_AUTH, lstatFn: () => ({ isSymbolicLink: () => false }) }), {
       extraRoBinds: [[PI_AUTH, PI_DATA_AUTH]],
       extraRwPairBinds: [],
       sandboxedDataHome: "/state/run/pi-data",
@@ -82,7 +90,7 @@ describe("piExecutor().sandboxAuthFile (auth and extension binds)", () => {
 
   test("sandboxAuthFile falls back to ~/.pi/agent", () => {
     const ex = piExecutor();
-    const result = ex.sandboxAuthFile({ homeDir: HOME_DIR, dataDir: DATA_DIR, spawnEnv: {}, existsFn: (p) => p === "/home/user/.pi/agent/auth.json" });
+    const result = ex.sandboxAuthFile({ homeDir: HOME_DIR, dataDir: DATA_DIR, spawnEnv: {}, existsFn: (p) => p === "/home/user/.pi/agent/auth.json", lstatFn: () => ({ isSymbolicLink: () => false }) });
     assert.deepEqual(result.extraRoBinds, [["/home/user/.pi/agent/auth.json", PI_DATA_AUTH]]);
   });
 
@@ -92,18 +100,51 @@ describe("piExecutor().sandboxAuthFile (auth and extension binds)", () => {
       homeDir: HOME_DIR,
       dataDir: DATA_DIR,
       spawnEnv: { PI_CODING_AGENT_DIR: PI_AGENT_DIR },
-      existsFn: (p) => p === PI_AUTH || p === "/custom/pi/extensions",
+      existsFn: (p) => p === PI_AUTH || p === PI_EXTENSIONS,
+      lstatFn: () => ({ isSymbolicLink: () => false }),
     });
     assert.deepEqual(result.extraRoBinds, [
       [PI_AUTH, PI_DATA_AUTH],
-      ["/custom/pi/extensions", "/state/run/pi-data/extensions"],
+      [PI_EXTENSIONS, "/state/run/pi-data/extensions"],
     ]);
   });
 
   test("sandboxAuthFile omits the extensions bind when the real extensions directory doesn't exist", () => {
     const ex = piExecutor();
-    const result = ex.sandboxAuthFile({ homeDir: HOME_DIR, dataDir: DATA_DIR, spawnEnv: { PI_CODING_AGENT_DIR: PI_AGENT_DIR }, existsFn: (p) => p === PI_AUTH });
+    const result = ex.sandboxAuthFile({ homeDir: HOME_DIR, dataDir: DATA_DIR, spawnEnv: { PI_CODING_AGENT_DIR: PI_AGENT_DIR }, existsFn: (p) => p === PI_AUTH, lstatFn: () => ({ isSymbolicLink: () => false }) });
     assert.deepEqual(result.extraRoBinds, [[PI_AUTH, PI_DATA_AUTH]]);
+  });
+
+  test("sandboxAuthFile drops a symlinked auth.json instead of ro-binding its target", () => {
+    const ex = piExecutor();
+    const result = ex.sandboxAuthFile({
+      homeDir: HOME_DIR,
+      dataDir: DATA_DIR,
+      spawnEnv: { PI_CODING_AGENT_DIR: PI_AGENT_DIR },
+      existsFn: (p) => p === PI_AUTH || p === PI_EXTENSIONS,
+      // auth.json is a planted symlink (say, at ~/.ssh/config): binding it
+      // would ro-bind the link target into the sandbox, so it is dropped
+      // while the plain extensions dir still binds.
+      lstatFn: (p) => ({ isSymbolicLink: () => p === PI_AUTH }),
+    });
+    assert.deepEqual(result.extraRoBinds, [
+      [PI_EXTENSIONS, "/state/run/pi-data/extensions"],
+    ]);
+  });
+
+  test("sandboxAuthFile drops a symlinked extensions dir instead of ro-binding its target", () => {
+    const ex = piExecutor();
+    const result = ex.sandboxAuthFile({
+      homeDir: HOME_DIR,
+      dataDir: DATA_DIR,
+      spawnEnv: { PI_CODING_AGENT_DIR: PI_AGENT_DIR },
+      existsFn: (p) => p === PI_AUTH || p === PI_EXTENSIONS,
+      lstatFn: (p) => ({ isSymbolicLink: () => p === PI_EXTENSIONS }),
+    });
+    // The auth bind survives; the symlinked extensions dir is skipped.
+    assert.deepEqual(result.extraRoBinds, [
+      [PI_AUTH, PI_DATA_AUTH],
+    ]);
   });
 });
 
@@ -121,6 +162,7 @@ describe("piExecutor().sandboxAuthFile (single session bind)", () => {
       existsFn: (p) => p === PI_AUTH || p === realSessionsDir,
       statFn: (p) => (p === realSessionsDir ? { isDirectory: () => true } : null),
       readdirFn: (p) => (p === realSafePathDir ? [realSessionFile.split("/").pop()] : []),
+      lstatFn: () => ({ isSymbolicLink: () => false }),
       sessionId: SESSION_ID_PREFIX,
       launchDirectory: LAUNCH_DIR_FOO,
     });
@@ -136,7 +178,7 @@ describe("piExecutor().sandboxAuthFile (single session bind)", () => {
 
   test("sandboxAuthFile matches a sessionId prefix to a session file under the per-cwd encoded subdirectory", () => {
     const ex = piExecutor();
-    const realSafePathDir = "/custom/pi/sessions/--home-user-projects-foo--";
+    const realSafePathDir = PI_SESSIONS_FOO_DIR;
     const realSessionFile = `${realSafePathDir}/2026-07-23T21-42-41-761Z_019f90ea-1234-70e0-98dc-6847db316eb4.jsonl`;
     const result = ex.sandboxAuthFile({
       homeDir: HOME_DIR,
@@ -145,6 +187,7 @@ describe("piExecutor().sandboxAuthFile (single session bind)", () => {
       existsFn: () => true,
       statFn: (p) => (p === PI_SESSIONS ? { isDirectory: () => true } : null),
       readdirFn: (p) => (p === realSafePathDir ? [SESSION_FILE] : []),
+      lstatFn: () => ({ isSymbolicLink: () => false }),
       // A UUID prefix -- pi's own --session <id> resolver accepts the same.
       sessionId: "019f90ea",
       launchDirectory: LAUNCH_DIR_FOO,
@@ -165,6 +208,7 @@ describe("piExecutor().sandboxAuthFile (single session bind)", () => {
       existsFn: () => true,
       statFn: () => ({ isDirectory: () => true }),
       readdirFn: (p) => { readdirCalls.push(p); return []; },
+      lstatFn: () => ({ isSymbolicLink: () => false }),
       sessionId: literalSessionPath,
       launchDirectory: "/home/user/projects/bar",
     });
@@ -172,6 +216,44 @@ describe("piExecutor().sandboxAuthFile (single session bind)", () => {
     // A path-shaped sessionId must not trigger a readdir of the per-cwd
     // subdirectory -- pi treats it as a literal path, no lookup needed.
     assert.equal(readdirCalls.length, 0);
+  });
+
+  test("sandboxAuthFile drops a symlinked resumed session file (prefix match), so the read-write bind never exposes the link target", () => {
+    const ex = piExecutor();
+    const realSafePathDir = PI_SESSIONS_FOO_DIR;
+    const realSessionFile = `${realSafePathDir}/2026-07-23T21-42-41-761Z_019f90ea-1234-70e0-98dc-6847db316eb4.jsonl`;
+    const result = ex.sandboxAuthFile({
+      homeDir: HOME_DIR,
+      dataDir: DATA_DIR,
+      spawnEnv: { PI_CODING_AGENT_DIR: PI_AGENT_DIR },
+      existsFn: () => true,
+      statFn: () => ({ isDirectory: () => true }),
+      readdirFn: (p) => (p === realSafePathDir ? [SESSION_FILE] : []),
+      // The matched session file is a symlink pointing elsewhere: a resumed
+      // session bind is read-write, so binding it would hand the worker
+      // write access to the link's target. Fail closed: bind nothing.
+      lstatFn: (p) => ({ isSymbolicLink: () => p === realSessionFile }),
+      sessionId: "019f90ea",
+      launchDirectory: LAUNCH_DIR_FOO,
+    });
+    assert.deepEqual(result.extraRwPairBinds, []);
+  });
+
+  test("sandboxAuthFile drops a symlinked literal-path session file (path-shaped sessionId)", () => {
+    const ex = piExecutor();
+    const literalSessionPath = "/custom/pi/sessions/--home-user-projects-bar--/manual-session.jsonl";
+    const result = ex.sandboxAuthFile({
+      homeDir: HOME_DIR,
+      dataDir: DATA_DIR,
+      spawnEnv: { PI_CODING_AGENT_DIR: PI_AGENT_DIR },
+      existsFn: () => true,
+      statFn: () => ({ isDirectory: () => true }),
+      readdirFn: () => [],
+      lstatFn: (p) => ({ isSymbolicLink: () => p === literalSessionPath }),
+      sessionId: literalSessionPath,
+      launchDirectory: "/home/user/projects/bar",
+    });
+    assert.deepEqual(result.extraRwPairBinds, []);
   });
 });
 
@@ -184,6 +266,7 @@ describe("piExecutor().sandboxAuthFile (session bind guards)", () => {
       dataDir: DATA_DIR,
       spawnEnv: { PI_CODING_AGENT_DIR: PI_AGENT_DIR },
       existsFn: (p) => p === PI_AUTH || p === PI_SESSIONS,
+      lstatFn: () => ({ isSymbolicLink: () => false }),
       // no sessionId -- a fresh dispatch, not a resume.
     });
     assert.deepEqual(result.extraRoBinds, [[PI_AUTH, PI_DATA_AUTH]]);
@@ -192,7 +275,7 @@ describe("piExecutor().sandboxAuthFile (session bind guards)", () => {
 
   test("sandboxAuthFile omits the sessions bind when the real sessions directory doesn't exist", () => {
     const ex = piExecutor();
-    const result = ex.sandboxAuthFile({ homeDir: HOME_DIR, dataDir: DATA_DIR, spawnEnv: { PI_CODING_AGENT_DIR: PI_AGENT_DIR }, existsFn: (p) => p === PI_AUTH });
+    const result = ex.sandboxAuthFile({ homeDir: HOME_DIR, dataDir: DATA_DIR, spawnEnv: { PI_CODING_AGENT_DIR: PI_AGENT_DIR }, existsFn: (p) => p === PI_AUTH, lstatFn: () => ({ isSymbolicLink: () => false }) });
     assert.deepEqual(result.extraRoBinds, [[PI_AUTH, PI_DATA_AUTH]]);
     assert.deepEqual(result.extraRwPairBinds, []);
   });
@@ -206,6 +289,7 @@ describe("piExecutor().sandboxAuthFile (session bind guards)", () => {
       existsFn: () => true,
       statFn: () => ({ isDirectory: () => true }),
       readdirFn: () => ["unrelated.jsonl"], // No file with this sessionId prefix.
+      lstatFn: () => ({ isSymbolicLink: () => false }),
       sessionId: "nonexistent",
       launchDirectory: LAUNCH_DIR_FOO,
     });
@@ -216,7 +300,7 @@ describe("piExecutor().sandboxAuthFile (session bind guards)", () => {
 
   test("sandboxAuthFile omits the sessions bind when the per-cwd subdirectory has multiple matching session files (ambiguous prefix)", () => {
     const ex = piExecutor();
-    const realSafePathDir = "/custom/pi/sessions/--home-user-projects-foo--";
+    const realSafePathDir = PI_SESSIONS_FOO_DIR;
     const result = ex.sandboxAuthFile({
       homeDir: HOME_DIR,
       dataDir: DATA_DIR,
@@ -231,6 +315,7 @@ describe("piExecutor().sandboxAuthFile (session bind guards)", () => {
             ]
           : []
       ),
+      lstatFn: () => ({ isSymbolicLink: () => false }),
       // A short prefix matches two distinct files -- pi's own resolver
       // surfaces "no session found matching..." to the user. We can't do
       // that from here, and a guess would write to the wrong file.
@@ -247,6 +332,7 @@ describe("piExecutor().sandboxAuthFile (session bind guards)", () => {
       dataDir: DATA_DIR,
       spawnEnv: { PI_CODING_AGENT_DIR: PI_AGENT_DIR },
       existsFn: (p) => p === PI_AUTH || p === PI_SESSIONS,
+      lstatFn: () => ({ isSymbolicLink: () => false }),
       // existsFn lies and says the path is there, but statFn reports it as
       // a stray non-directory file (e.g. a stale symlink to a regular file).
       statFn: (p) => (p === PI_SESSIONS ? { isDirectory: () => false } : null),
@@ -265,6 +351,7 @@ describe("piExecutor().sandboxAuthFile (session bind guards)", () => {
       dataDir: DATA_DIR,
       spawnEnv: { PI_CODING_AGENT_DIR: PI_AGENT_DIR },
       existsFn: (p) => p === PI_AUTH || p === PI_SESSIONS,
+      lstatFn: () => ({ isSymbolicLink: () => false }),
       statFn: () => { throw new Error("EACCES"); },
       sessionId: SESSION_ID_PREFIX,
       launchDirectory: LAUNCH_DIR_FOO,
@@ -281,6 +368,7 @@ describe("piExecutor().sandboxAuthFile (session bind guards)", () => {
       existsFn: () => true,
       statFn: () => ({ isDirectory: () => true }),
       readdirFn: () => { throw new Error("EACCES"); },
+      lstatFn: () => ({ isSymbolicLink: () => false }),
       sessionId: SESSION_ID_PREFIX,
       launchDirectory: LAUNCH_DIR_FOO,
     });
@@ -302,6 +390,7 @@ describe("piExecutor().sandboxAuthFile (session bind guards)", () => {
       existsFn: () => true,
       statFn: () => ({ isDirectory: () => true }),
       readdirFn: (p) => { seenPaths.push(p); return p === realSafePathDir ? [SESSION_FILE] : []; },
+      lstatFn: () => ({ isSymbolicLink: () => false }),
       sessionId: SESSION_ID_PREFIX,
       launchDirectory: "/var/folders/abc/T/project",
     });
@@ -477,43 +566,6 @@ describe("opencodeExecutor()", () => {
     assert.equal(ex.normalizeLogEvent(evt), evt);
   });
 
-  test("sandboxAuthFile: binds real auth.json when present", () => {
-    const ex = opencodeExecutor();
-    const result = ex.sandboxAuthFile({
-      homeDir: HOME_DIR, dataDir: DATA_DIR, spawnEnv: {},
-      existsFn: (p) => p === "/home/user/.local/share/opencode/auth.json",
-    });
-    assert.deepEqual(result, {
-      extraRoBinds: [["/home/user/.local/share/opencode/auth.json", "/state/run/opencode-data/opencode/auth.json"]],
-      sandboxedDataHome: "/state/run/opencode-data",
-      // XDG_CONFIG_HOME is redirected unconditionally, whether or not the user
-      // has a real opencode config to bind in: opencode writes its own
-      // .gitignore there on boot and the real ~/.config is read-only in the
-      // sandbox.
-      sandboxEnv: { XDG_DATA_HOME: "/state/run/opencode-data", XDG_CONFIG_HOME: "/state/run/opencode-data/config" },
-    });
-  });
-
-  test("sandboxAuthFile: ro-binds the real config dir's entries, skipping the .gitignore opencode rewrites on boot", () => {
-    const ex = opencodeExecutor();
-    const realConfigDir = "/home/user/.config/opencode";
-    const result = ex.sandboxAuthFile({
-      homeDir: HOME_DIR, dataDir: DATA_DIR, spawnEnv: {},
-      existsFn: (p) => p === realConfigDir,
-      readdirFn: (p) => (p === realConfigDir ? ["opencode.jsonc", "plugins", ".gitignore"] : []),
-    });
-    assert.deepEqual(result.extraRoBinds, [
-      [`${realConfigDir}/opencode.jsonc`, "/state/run/opencode-data/config/opencode/opencode.jsonc"],
-      [`${realConfigDir}/plugins`, "/state/run/opencode-data/config/opencode/plugins"],
-    ]);
-  });
-
-  test("sandboxAuthFile: no bind when auth.json is missing", () => {
-    const ex = opencodeExecutor();
-    const result = ex.sandboxAuthFile({ homeDir: HOME_DIR, dataDir: DATA_DIR, spawnEnv: {}, existsFn: () => false });
-    assert.deepEqual(result.extraRoBinds, []);
-  });
-
   test("resolveExecutor: undefined and \"pi\" both resolve to piExecutor", () => {
     assert.equal(resolveExecutor(undefined).id, "pi");
     assert.equal(resolveExecutor("pi").id, "pi");
@@ -570,6 +622,242 @@ describe("opencodeExecutor()", () => {
       assert.equal(result.has("opencode/broken-model"), false);
       assert.deepEqual(result.get(FLASH_FREE_MODEL), ["low", "high", "max"]);
     });
+  });
+});
+
+describe("opencodeExecutor().sandboxAuthFile (auth and config binds)", () => {
+
+  test("sandboxAuthFile: binds real auth.json when present", () => {
+    const ex = opencodeExecutor();
+    const result = ex.sandboxAuthFile({
+      homeDir: HOME_DIR, dataDir: DATA_DIR, spawnEnv: {},
+      existsFn: (p) => p === OPENCODE_AUTH,
+      lstatFn: () => ({ isSymbolicLink: () => false }),
+    });
+    assert.deepEqual(result, {
+      extraRoBinds: [[OPENCODE_AUTH, "/state/run/opencode-data/opencode/auth.json"]],
+      sandboxedDataHome: "/state/run/opencode-data",
+      // XDG_CONFIG_HOME is redirected unconditionally, whether or not the user
+      // has a real opencode config to bind in: opencode writes its own
+      // .gitignore there on boot and the real ~/.config is read-only in the
+      // sandbox.
+      sandboxEnv: { XDG_DATA_HOME: "/state/run/opencode-data", XDG_CONFIG_HOME: "/state/run/opencode-data/config" },
+    });
+  });
+
+  test("sandboxAuthFile: drops a symlinked auth.json instead of ro-binding its target", () => {
+    const ex = opencodeExecutor();
+    const realAuthFile = OPENCODE_AUTH;
+    const result = ex.sandboxAuthFile({
+      homeDir: HOME_DIR, dataDir: DATA_DIR, spawnEnv: {},
+      existsFn: (p) => p === realAuthFile,
+      // A planted symlink at auth.json (e.g. -> ~/.ssh/authorized_keys):
+      // binding it would ro-bind the target into the sandbox, so it must be
+      // dropped exactly like a symlinked config entry.
+      lstatFn: () => ({ isSymbolicLink: () => true }),
+    });
+    assert.deepEqual(result.extraRoBinds, []);
+  });
+
+  test("sandboxAuthFile: ro-binds the real config dir's entries, skipping the .gitignore opencode rewrites on boot", () => {
+    const ex = opencodeExecutor();
+    const realConfigDir = OPENCODE_CONFIG_DIR;
+    const result = ex.sandboxAuthFile({
+      homeDir: HOME_DIR, dataDir: DATA_DIR, spawnEnv: {},
+      existsFn: (p) => p === realConfigDir,
+      readdirFn: (p) => (p === realConfigDir ? [OPENCODE_JSONC, "plugins", ".gitignore"] : []),
+      lstatFn: () => ({ isSymbolicLink: () => false }),
+    });
+    assert.deepEqual(result.extraRoBinds, [
+      [`${realConfigDir}/${OPENCODE_JSONC}`, OPENCODE_JSONC_DEST],
+      [`${realConfigDir}/plugins`, PLUGINS_DEST],
+    ]);
+  });
+
+  test("sandboxAuthFile: skips a symlinked config entry, so its out-of-tree target is never ro-bound into the sandbox", () => {
+    const ex = opencodeExecutor();
+    const realConfigDir = OPENCODE_CONFIG_DIR;
+    const result = ex.sandboxAuthFile({
+      homeDir: HOME_DIR, dataDir: DATA_DIR, spawnEnv: {},
+      existsFn: (p) => p === realConfigDir,
+      readdirFn: (p) => (p === realConfigDir ? [OPENCODE_JSONC, "plugins", "planted-link"] : []),
+      // planted-link points outside the config dir (say, at ~/.ssh): binding
+      // it would hand the sandbox a ro view of the symlink target, so it must
+      // be dropped while regular entries survive.
+      lstatFn: (p) => ({ isSymbolicLink: () => p === `${realConfigDir}/planted-link` }),
+    });
+    assert.deepEqual(result.extraRoBinds, [
+      [`${realConfigDir}/${OPENCODE_JSONC}`, OPENCODE_JSONC_DEST],
+      [`${realConfigDir}/plugins`, PLUGINS_DEST],
+    ]);
+  });
+
+  test("sandboxAuthFile: drops a config entry whose lstat fails, binding nothing it couldn't verify", () => {
+    const ex = opencodeExecutor();
+    const realConfigDir = OPENCODE_CONFIG_DIR;
+    const result = ex.sandboxAuthFile({
+      homeDir: HOME_DIR, dataDir: DATA_DIR, spawnEnv: {},
+      existsFn: (p) => p === realConfigDir,
+      readdirFn: (p) => (p === realConfigDir ? [OPENCODE_JSONC, "vanished-entry"] : []),
+      lstatFn: (p) => {
+        if (p === `${realConfigDir}/vanished-entry`) throw new Error("ENOENT");
+        return { isSymbolicLink: () => false };
+      },
+    });
+    assert.deepEqual(result.extraRoBinds, [
+      [`${realConfigDir}/${OPENCODE_JSONC}`, OPENCODE_JSONC_DEST],
+    ]);
+  });
+});
+
+describe("opencodeExecutor().sandboxAuthFile (symlink and hardlink guard behavior)", () => {
+
+  test("sandboxAuthFile: skips the whole config loop when the config dir itself is a symlink (per-entry guards would all pass otherwise)", () => {
+    const ex = opencodeExecutor();
+    const realConfigDir = OPENCODE_CONFIG_DIR;
+    const readdirCalls = [];
+    const result = ex.sandboxAuthFile({
+      homeDir: HOME_DIR, dataDir: DATA_DIR, spawnEnv: {},
+      existsFn: (p) => p === realConfigDir,
+      readdirFn: (p) => { readdirCalls.push(p); return [OPENCODE_JSONC, "plugins"]; },
+      // existsFn/readdirFn follow the symlinked dir, so every entry inside
+      // would pass the per-entry lstat guard while the whole tree points
+      // elsewhere; the dir itself must be lstat-checked and treated as
+      // absent when it is a symlink.
+      lstatFn: (p) => ({ isSymbolicLink: () => p === realConfigDir }),
+    });
+    assert.deepEqual(result.extraRoBinds, []);
+    assert.deepEqual(readdirCalls, [], "readdirFn must not be called on a symlinked config dir");
+  });
+
+  test("sandboxAuthFile: drops a hardlinked config entry (nlink > 1), which the isSymbolicLink check alone cannot see", () => {
+    const ex = opencodeExecutor();
+    const realConfigDir = OPENCODE_CONFIG_DIR;
+    const result = ex.sandboxAuthFile({
+      homeDir: HOME_DIR, dataDir: DATA_DIR, spawnEnv: {},
+      existsFn: (p) => p === realConfigDir,
+      readdirFn: (p) => (p === realConfigDir ? [OPENCODE_JSONC, "hardlinked-secret"] : []),
+      // Not a symlink -- a plain fs.Stats-shaped object whose nlink reveals
+      // the inode is reachable under a second name on the host. The lstat
+      // guard must reject it without rejecting regular entries.
+      lstatFn: (p) => {
+        if (p === `${realConfigDir}/hardlinked-secret`) {
+          return { isSymbolicLink: () => false, isFile: () => true, nlink: 2 };
+        }
+        return { isSymbolicLink: () => false, isFile: () => true, nlink: 1 };
+      },
+    });
+    assert.deepEqual(result.extraRoBinds, [
+      [`${realConfigDir}/${OPENCODE_JSONC}`, OPENCODE_JSONC_DEST],
+    ]);
+  });
+
+  test("sandboxAuthFile: keeps a directory entry whose nlink > 1 (a dir's nlink counts its subdirectories; dirs cannot be hardlinked)", () => {
+    const ex = opencodeExecutor();
+    const realConfigDir = OPENCODE_CONFIG_DIR;
+    const result = ex.sandboxAuthFile({
+      homeDir: HOME_DIR, dataDir: DATA_DIR, spawnEnv: {},
+      existsFn: (p) => p === realConfigDir,
+      readdirFn: (p) => (p === realConfigDir ? ["plugins"] : []),
+      lstatFn: () => ({ isSymbolicLink: () => false, isFile: () => false, nlink: 5 }),
+    });
+    assert.deepEqual(result.extraRoBinds, [
+      [`${realConfigDir}/plugins`, PLUGINS_DEST],
+    ]);
+  });
+
+  test("sandboxAuthFile: a null-returning lstatFn (the statFn seam's null-on-failure convention) fails closed instead of crashing", () => {
+    const ex = opencodeExecutor();
+    const realConfigDir = OPENCODE_CONFIG_DIR;
+    const result = ex.sandboxAuthFile({
+      homeDir: HOME_DIR, dataDir: DATA_DIR, spawnEnv: {},
+      existsFn: (p) => p === realConfigDir,
+      readdirFn: (p) => (p === realConfigDir ? [OPENCODE_JSONC, "plugins"] : []),
+      // Returns null (entry could not be statted) for everything -- a
+      // pre-fix version threw a TypeError on entryStat.isSymbolicLink().
+      lstatFn: () => null,
+    });
+    assert.deepEqual(result.extraRoBinds, []);
+  });
+
+  test("sandboxAuthFile: warns on stderr (once per skipped symlink) instead of silently dropping a legitimate symlinked config entry", () => {
+    const ex = opencodeExecutor();
+    const realConfigDir = OPENCODE_CONFIG_DIR;
+    const originalWrite = process.stderr.write;
+    let warned = "";
+    process.stderr.write = (chunk) => { warned += chunk; return true; };
+    try {
+      const result = ex.sandboxAuthFile({
+        homeDir: HOME_DIR, dataDir: DATA_DIR, spawnEnv: {},
+        existsFn: (p) => p === realConfigDir,
+        readdirFn: (p) => (p === realConfigDir ? [OPENCODE_JSONC, "planted-link"] : []),
+        lstatFn: (p) => ({ isSymbolicLink: () => p === `${realConfigDir}/planted-link` }),
+      });
+      assert.deepEqual(result.extraRoBinds, [
+        [`${realConfigDir}/${OPENCODE_JSONC}`, OPENCODE_JSONC_DEST],
+      ]);
+      assert.match(warned, /warning: .*planted-link is a symlink; skipping the bind/);
+      assert.ok(!warned.includes("opencode.jsonc"), "a bound entry must not be warned about");
+    } finally {
+      process.stderr.write = originalWrite;
+    }
+  });
+
+  test("sandboxAuthFile: swallows ENOENT silently (a vanished entry is an ordinary race) but warns on non-ENOENT lstat failures like EACCES", () => {
+    const ex = opencodeExecutor();
+    const realConfigDir = OPENCODE_CONFIG_DIR;
+    const originalWrite = process.stderr.write;
+    let warned = "";
+    process.stderr.write = (chunk) => { warned += chunk; return true; };
+    try {
+      const silentResult = ex.sandboxAuthFile({
+        homeDir: HOME_DIR, dataDir: DATA_DIR, spawnEnv: {},
+        existsFn: (p) => p === realConfigDir,
+        readdirFn: (p) => (p === realConfigDir ? [OPENCODE_JSONC, "vanished"] : []),
+        // Real lstatSync ENOENT errors carry err.code === "ENOENT".
+        lstatFn: (p) => {
+          if (p === `${realConfigDir}/vanished`) {
+            const err = new Error("ENOENT: no such file or directory, lstat");
+            err.code = "ENOENT";
+            throw err;
+          }
+          return { isSymbolicLink: () => false };
+        },
+      });
+      assert.deepEqual(silentResult.extraRoBinds, [
+        [`${realConfigDir}/${OPENCODE_JSONC}`, OPENCODE_JSONC_DEST],
+      ]);
+      assert.equal(warned, "", "a plain ENOENT must not warn -- it is an ordinary exists/lstat race, not a diagnostic");
+
+      const eaccesResult = ex.sandboxAuthFile({
+        homeDir: HOME_DIR, dataDir: DATA_DIR, spawnEnv: {},
+        existsFn: (p) => p === realConfigDir,
+        readdirFn: (p) => (p === realConfigDir ? [OPENCODE_JSONC, "forbidden-entry"] : []),
+        // EACCES means the entry is unverifiable for a real reason (bad
+        // permissions, a dead mount) -- the bind is still skipped (fail
+        // closed), but the user must hear about it.
+        lstatFn: (p) => {
+          if (p === `${realConfigDir}/forbidden-entry`) {
+            const err = new Error("EACCES: permission denied, lstat");
+            err.code = "EACCES";
+            throw err;
+          }
+          return { isSymbolicLink: () => false };
+        },
+      });
+      assert.deepEqual(eaccesResult.extraRoBinds, [
+        [`${realConfigDir}/${OPENCODE_JSONC}`, OPENCODE_JSONC_DEST],
+      ]);
+      assert.match(warned, /warning: could not verify .*forbidden-entry is not a symlink \(EACCES: permission denied/);
+    } finally {
+      process.stderr.write = originalWrite;
+    }
+  });
+
+  test("sandboxAuthFile: no bind when auth.json is missing", () => {
+    const ex = opencodeExecutor();
+    const result = ex.sandboxAuthFile({ homeDir: HOME_DIR, dataDir: DATA_DIR, spawnEnv: {}, existsFn: () => false });
+    assert.deepEqual(result.extraRoBinds, []);
   });
 });
 

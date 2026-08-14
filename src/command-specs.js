@@ -13,7 +13,7 @@ export const commandSpecs = {
   },
   accept: {
     usage: "taskferry accept <id>",
-    description: "Apply a dispatch task's pending changeset to its target directory.",
+    description: "Apply a dispatch task's pending changeset to its target directory. Exits nonzero when the apply fails; the response's `applied` field (`applied: false`) is the authoritative signal to check when scripting.",
     options: { "--force": "apply the changeset even though its check gate failed, timed out, is still running, or was interrupted by a daemon restart; records checkOverride: true" },
     examples: ['taskferry accept <id>', 'taskferry accept <id> --force'],
   },

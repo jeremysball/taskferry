@@ -7,6 +7,7 @@ import { makeManager, fakeChild, MINIMAX_MODEL, TEST_DEFAULT_MODEL, OPENCODE_DAT
 
 const OPENCODE_JSONC = "opencode.jsonc";
 const GITIGNORE = ".gitignore";
+const PI_SESSION_ID = "019f90ea-1234-70e0-98dc-6847db316eb4";
 
 describe("startTask() writes stdout through executor.normalizeLogEvent (Task 7: write-time normalization)", () => {
   test("JSON events flagged null by normalizeLogEvent are dropped; kept events are written canonicalized", () => {
@@ -147,6 +148,7 @@ describe("startTask() merges executor.sandboxAuthFile().sandboxEnv into spawnEnv
       platform: "linux",
       existsFn: (p) => p === realConfigDir || p === realJsonc || p === realGitignore,
       readdirFn: (p) => (p === realConfigDir ? [OPENCODE_JSONC, GITIGNORE] : []),
+      lstatFn: () => ({ isSymbolicLink: () => false }),
       cacheDir,
     });
     mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), executor: "opencode" });
@@ -227,7 +229,7 @@ describe("startTask() merges executor.sandboxAuthFile().sandboxEnv into spawnEnv
       },
     });
     const directory = os.tmpdir();
-    const sessionId = "019f90ea-1234-70e0-98dc-6847db316eb4";
+    const sessionId = PI_SESSION_ID;
     const mgr = makeManager({
       spawnFn: () => fakeChild(),
       defaultExecutor: fakePi,
@@ -242,6 +244,7 @@ describe("startTask() merges executor.sandboxAuthFile().sandboxEnv into spawnEnv
     assert.equal(capturedArgs.sessionId, sessionId, "sandboxAuthFile must receive the dispatch's sessionId so the bind can scope to that single file");
     assert.equal(capturedArgs.launchDirectory, directory, "sandboxAuthFile must receive the dispatch's launchDirectory so it can compute pi's per-cwd sessions subdirectory");
     assert.equal(typeof capturedArgs.statFn, "function", "sandboxAuthFile must receive a statFn (for the isDirectory guard)");
+    assert.equal(typeof capturedArgs.lstatFn, "function", "sandboxAuthFile must receive a lstatFn (for the config-entry symlink guard)");
     assert.equal(typeof capturedArgs.readdirFn, "function", "sandboxAuthFile must receive a readdirFn (for the session file lookup)");
   });
 
@@ -277,6 +280,82 @@ describe("startTask() merges executor.sandboxAuthFile().sandboxEnv into spawnEnv
     // for diagnostics. The bind itself stays empty because there's no
     // sessionId to resolve a file for.
     assert.equal(typeof capturedArgs.launchDirectory, "string");
+  });
+});
+
+describe("startTask() lstat-guards every executor bind source against symlink planting (issue #392)", () => {
+  test("a pi dispatch skips the auth.json ro-bind when the host auth.json is a symlink", () => {
+    let captured = null;
+    const cacheDir = mkdtempTracked(AXI_TASKS_CACHE_PI);
+    const realAuthFile = path.join(os.homedir(), ".pi", "agent", "auth.json");
+    const mgr = makeManager({
+      spawnFn: (cmd, args, opts) => { captured = { cmd, args, opts }; return fakeChild(); },
+      sandboxEnabled: true,
+      checkBwrapAvailableFn: () => ({ checked: true, available: true }),
+      platform: "linux",
+      // existsFn lies and says auth.json exists; lstatFn reveals it is a
+      // planted symlink. The executor must not ro-bind it into the sandbox.
+      existsFn: (p) => p === realAuthFile,
+      lstatFn: (p) => ({ isSymbolicLink: () => p === realAuthFile }),
+      cacheDir,
+    });
+    mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+    assert.equal(captured.cmd, "bwrap");
+    assert.equal(captured.args.indexOf(realAuthFile), -1, "the symlinked auth.json must not reach the bwrap argv");
+    assert.equal(captured.args.indexOf(path.join(cacheDir, "pi-data", "auth.json")), -1);
+  });
+
+  test("an opencode dispatch binds no config entries when the real config dir itself is a symlink", () => {
+    let captured = null;
+    const cacheDir = mkdtempTracked("axi-tasks-cache-oc-symlink-dir-");
+    const realConfigDir = path.join(os.homedir(), ".config", "opencode");
+    const realJsonc = path.join(realConfigDir, OPENCODE_JSONC);
+    const readdirCalls = [];
+    const mgr = makeManager({
+      spawnFn: (cmd, args, opts) => { captured = { cmd, args, opts }; return fakeChild(); },
+      sandboxEnabled: true,
+      checkBwrapAvailableFn: () => ({ checked: true, available: true }),
+      platform: "linux",
+      existsFn: (p) => p === realConfigDir,
+      readdirFn: (p) => { readdirCalls.push(p); return [OPENCODE_JSONC]; },
+      // The config dir itself is a symlink: existsFn/readdirFn follow it, so
+      // every entry inside would pass the per-entry guard. The dir-level
+      // lstat check must skip the whole loop instead.
+      lstatFn: (p) => ({ isSymbolicLink: () => p === realConfigDir }),
+      cacheDir,
+    });
+    mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), executor: "opencode" });
+    assert.equal(captured.cmd, "bwrap");
+    assert.equal(captured.args.indexOf(realJsonc), -1, "no config-entry bind may exist when the config dir is a symlink");
+    // (Construction itself readdirs the overlay tmp root; filter to the
+    // config dir to prove the guarded loop never ran.)
+    const configDirReaddirCalls = readdirCalls.filter((p) => p === realConfigDir);
+    assert.deepEqual(configDirReaddirCalls, [], "readdirFn must not be called on a symlinked config dir");
+  });
+
+  test("a pi dispatch skips the resumed-session --bind when the session file is a symlink", () => {
+    let captured = null;
+    const cacheDir = mkdtempTracked(AXI_TASKS_CACHE_PI);
+    const realSessionsDir = path.join(os.homedir(), ".pi", "agent", "sessions");
+    const safePath = `--${os.tmpdir().replace(/^[/\\]/, "").replace(/[/\\:]/g, "-")}--`;
+    const realSafePathDir = path.join(realSessionsDir, safePath);
+    const realSessionFile = path.join(realSafePathDir, "2026-07-23T21-42-41-761Z_019f90ea-1234-70e0-98dc-6847db316eb4.jsonl");
+    const mgr = makeManager({
+      spawnFn: (cmd, args, opts) => { captured = { cmd, args, opts }; return fakeChild(); },
+      sandboxEnabled: true,
+      checkBwrapAvailableFn: () => ({ checked: true, available: true }),
+      platform: "linux",
+      existsFn: () => true,
+      statFn: (p) => (p === realSessionsDir ? { isDirectory: () => true } : null),
+      readdirFn: (p) => (p === realSafePathDir ? [path.basename(realSessionFile)] : []),
+      // The matched session file is a symlink; the resume bind is read-write,
+      // so binding it would hand the worker write access to the link target.
+      lstatFn: (p) => ({ isSymbolicLink: () => p === realSessionFile }),
+      cacheDir,
+    });
+    mgr.dispatch({ prompt: "resume", directory: os.tmpdir(), model: MINIMAX_MODEL, sessionId: PI_SESSION_ID });
+    assert.equal(captured.cmd, "bwrap");
+    assert.equal(captured.args.indexOf(realSessionFile), -1, "a symlinked session file must not be bound read-write");
   });
 });
 
@@ -342,7 +421,7 @@ describe("startTask() resolves the resumed session file via Array.find (no break
       readdirFn: (p) => (p === path.join(realSessionsDir, "--tmp--") ? [path.basename(realSessionFile)] : []),
       cacheDir,
     });
-    mgr.dispatch({ prompt: "resume", model: MINIMAX_MODEL, sessionId: "019f90ea-1234-70e0-98dc-6847db316eb4", directory });
+    mgr.dispatch({ prompt: "resume", model: MINIMAX_MODEL, sessionId: PI_SESSION_ID, directory });
     assert.equal(captured.cmd, "bwrap");
     // Look for a --bind whose src is the whole realSessionsDir (not the
     // single file). Pre-fix this would appear; post-fix it must not.

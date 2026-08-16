@@ -13,7 +13,7 @@ export const commandSpecs = {
   },
   accept: {
     usage: "taskferry accept <id>",
-    description: "Apply a dispatch task's pending changeset to its target directory.",
+    description: "Apply a dispatch task's pending changeset to its target directory. Exits nonzero when the apply fails; the response's `applied` field (`applied: false`) is the authoritative signal to check when scripting.",
     options: { "--force": "apply the changeset even though its check gate failed, timed out, is still running, or was interrupted by a daemon restart; records checkOverride: true" },
     examples: ['taskferry accept <id>', 'taskferry accept <id> --force'],
   },
@@ -22,6 +22,12 @@ export const commandSpecs = {
     description: "Discard a task's pending changeset without applying it.",
     options: {},
     examples: ['taskferry reject <id>'],
+  },
+  output: {
+    usage: "taskferry output <id> [--path <relpath>]",
+    description: "List a task's scratch output directory (or read one file in it). Every dispatch reserves a per-task writable directory at <stateDir>/outputs/<id>/, rw-bound into the bwrap sandbox at the same path and exposed to the worker as $TASKFERRY_OUTPUT_DIR. Works on every terminal status (done, crashed, cancelled, and incomplete).",
+    options: { "--path <relpath>": "read one file relative to the task's output dir instead of listing; rejects any path that would escape the per-task directory (e.g. \"../sibling\", absolute paths)" },
+    examples: ['taskferry output <id>', 'taskferry output <id> --path deliverable.txt'],
   },
   wait: {
     usage: "taskferry wait <id> [options]",

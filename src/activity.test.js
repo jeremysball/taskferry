@@ -7,7 +7,8 @@ import { createActivityCache, buildLocalActivity, snapshotNarration, activityCac
 import { runCli } from "./cli.js";
 import { parseRequestLine } from "./protocol.js";
 import { createTaskManager, DEFAULT_SUMMARY_MODEL } from "./tasks.js";
-import { resolveWorkspaceRoot } from "./paths.js";
+import { createWorkspaceRootResolver, resolveWorkspaceRoot } from "./paths.js";
+import { syncActivitySubscriptions } from "./daemon-server.js";
 import { trackManager, fakeChild, mkdtempTracked } from "./tasks.test-helpers.js";
 
 const TASK_ACTIVITY = "task.activity";
@@ -52,6 +53,20 @@ describe("activity snapshots", () => {
     assert.equal(
       buildLocalActivity({ status: "running", prompt: "Inspect\n\u001b[31mthe server\u001b[0m" }),
       "Inspect the server"
+    );
+  });
+
+  test("prefers promptPreview over the raw (possibly augmented) prompt (PR #474 review, taskferry#423)", () => {
+    // `prompt` on a dispatched task is the augmented string the worker
+    // actually sees (## Persistent output dir block etc. appended);
+    // promptPreview is always the clean, user-facing text. Before the
+    // first log event exists, activity display must not leak the
+    // injected wrapper block or the internal state-dir path.
+    const cleanPrompt = "Inspect the server";
+    const augmented = `${cleanPrompt}\n\n## Persistent output dir\nThis task has a writable scratch directory at \`/home/user/.local/state/taskferry/outputs/oc_abc\``;
+    assert.equal(
+      buildLocalActivity({ status: "running", prompt: augmented, promptPreview: cleanPrompt }),
+      cleanPrompt
     );
   });
 
@@ -107,7 +122,11 @@ describe("task activity events", () => {
       [TASK_STATE, "running"],
     ]);
     assert.equal(events[2].type, TASK_ACTIVITY);
-    assert.equal(events[2].activityVariants["false"].activity, "Check the server");
+    // taskferry#423: the augmented prompt carries the scratch-dir tail; the
+    // activity envelope keeps the literal user prompt as the activity text so
+    // the operator UI shows what the user actually asked, not the wrapper.
+    assert.ok(events[2].activityVariants["false"].activity.startsWith("Check the server"),
+      `expected activity text to start with literal prompt, got: ${events[2].activityVariants["false"].activity.slice(0, 64)}`);
 
     child.emit("exit", 0, null);
     await new Promise((resolve) => setImmediate(resolve));
@@ -149,6 +168,49 @@ describe("task activity events", () => {
     const activityEvent = events.find((event) => event.type === TASK_ACTIVITY);
     assert.ok(activityEvent, "the null-keyed --all bucket must still trigger activity scheduling for a task in a directory it didn't explicitly subscribe to");
     assert.deepEqual(Object.keys(activityEvent.activityVariants), ["false"], "only the --all bucket's variant applies; the unrelated directory's variant must not leak in");
+  });
+
+  test("resolves a task's directory to its workspace root before the activitySubscriptions lookup, so a root-scoped watch subscriber still receives task.activity for a linked worktree (taskferry#335)", async (t) => {
+    const stateDir = mkdtempTracked(ACTIVITY_DIR_PREFIX);
+    const child = fakeChild();
+    const events = [];
+    const repoRoot = "/repo/root";
+    const worktreeDir = os.tmpdir();
+    // Simulates a task dispatched into a linked worktree whose git workspace
+    // root is the repo root a `watch` subscriber scoped to -- the two
+    // directory strings are literally different, only resolveWorkspaceRootFn
+    // ties them together, the same way daemon.js's real resolver does via
+    // `git rev-parse --git-common-dir`.
+    const resolveWorkspaceRootFn = createWorkspaceRootResolver({
+      runCommand: (_command, args) => ({
+        status: args[1] === worktreeDir || args[1] === repoRoot ? 0 : 1,
+        stdout: args[1] === worktreeDir || args[1] === repoRoot ? `${repoRoot}/.git\n` : "",
+        stderr: "",
+      }),
+    });
+    const manager = trackManager(createTaskManager({
+      stateDir,
+      resolveWorkspaceRootFn,
+      sandboxEnabled: false,
+      spawnFn: () => child,
+      killFn: () => {},
+      activitySummariesEnabled: false,
+      summarizerTimeoutMs: 0,
+      onEvent: (event) => events.push(event),
+    }));
+    t.after(() => manager.close());
+
+    syncActivitySubscriptions(manager, new Map([
+      ["repo", { directory: repoRoot, summaries: false }],
+      ["unrelated", { directory: "/some/other/unrelated/directory", summaries: true }],
+    ]), resolveWorkspaceRootFn);
+
+    manager.dispatch({ prompt: "Watch the fleet", directory: worktreeDir });
+    await new Promise((resolve) => setImmediate(resolve));
+
+    const activityEvent = events.find((event) => event.type === TASK_ACTIVITY);
+    assert.ok(activityEvent, "a root-scoped watch subscriber must still receive task.activity for a task dispatched into a linked worktree, not have the event silently dropped");
+    assert.deepEqual(Object.keys(activityEvent.activityVariants), ["false"], "must resolve the task's directory to its workspace root and find the repoRoot-keyed subscription's real variant, not the literal-directory decoy's");
   });
 
   test("refreshes running activity only after 4096 more log bytes", async (t) => {

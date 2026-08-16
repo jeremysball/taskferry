@@ -1034,6 +1034,37 @@ test("accept warns when the accepted changeset had no check gate", async (t) => 
   assert.match(warning, /declares no check command/);
 });
 
+test("accept throws (nonzero exit) when the response reports applied: false, surfacing the reason (taskferry#414)", async () => {
+  const client = {
+    request: async () => ({ taskId: "t1", changesetStatus: "pending", applied: false, reason: "error: CLAUDE.md: does not match index\n...[~20 more unrelated files]" }),
+  };
+
+  await assert.rejects(
+    () => runCommand("accept", { taskId: "t1" }, { client }),
+    (error) => {
+      assert.match(error.message, /failed to apply/);
+      assert.match(error.message, /CLAUDE.md: does not match index/);
+      assert.match(error.message, /still pending/);
+      assert.match(error.message, /help: /);
+      return true;
+    },
+  );
+});
+
+test("accept with applied: false does not emit the no-check-command warning (nothing landed)", async (t) => {
+  let warning = "";
+  const originalWrite = process.stderr.write;
+  t.after(() => { process.stderr.write = originalWrite; });
+  process.stderr.write = (chunk) => { warning += String(chunk); return true; };
+  const client = {
+    request: async () => ({ taskId: "t1", changesetStatus: "pending", applied: false, reason: "git apply failed" }),
+  };
+
+  await assert.rejects(() => runCommand("accept", { taskId: "t1" }, { client }));
+
+  assert.equal(warning, "");
+});
+
 test("reject calls task.reject via the client", async () => {
   let capturedMethod = null;
   const client = { request: async (method) => { capturedMethod = method; return { taskId: "t1", changesetStatus: "rejected" }; } };
@@ -1047,6 +1078,55 @@ test("result --diff requests fields: ['diff']", async () => {
   const client = { request: async (_method, params) => { capturedParams = params; return { taskId: "t1", status: "done", diff: "diff --git a/x b/x\n" }; } };
   await runCommand("result", { taskId: "t1", diff: true }, { client });
   assert.deepEqual(capturedParams.fields, ["diff"]);
+});
+
+test("result rewrites a RESPONSE_TOO_LARGE failure into a clear, actionable error naming the dirty-tree cause (taskferry#414)", async () => {
+  const tooLarge = new Error("daemon response for this request exceeds 1048576 bytes\nhelp: Narrow the request (e.g. pass --directory)");
+  tooLarge.code = "RESPONSE_TOO_LARGE";
+  const client = { request: async () => { throw tooLarge; } };
+
+  await assert.rejects(
+    () => runCommand("result", { taskId: "t1", diff: true }, { client }),
+    (error) => {
+      assert.match(error.message, /response size cap/);
+      assert.match(error.message, /unrelated uncommitted changes/);
+      assert.match(error.message, /pre-dispatch HEAD/);
+      assert.match(error.message, /--fields message,tokens/);
+      return true;
+    },
+  );
+});
+
+test("result rewrites a RESPONSE_TOO_LARGE failure without diff blame when the diff was not requested (taskferry#472 review)", async () => {
+  const tooLarge = new Error("daemon response for this request exceeds 1048576 bytes\nhelp: Narrow the request (e.g. pass --directory)");
+  tooLarge.code = "RESPONSE_TOO_LARGE";
+  const client = { request: async () => { throw tooLarge; } };
+
+  await assert.rejects(
+    () => runCommand("result", { taskId: "t1", fields: ["message"] }, { client }),
+    (error) => {
+      assert.match(error.message, /response size cap/);
+      assert.doesNotMatch(error.message, /unrelated uncommitted changes/);
+      assert.doesNotMatch(error.message, /pre-dispatch HEAD/);
+      assert.match(error.message, /--fields message,tokens/);
+      return true;
+    },
+  );
+});
+
+test("result passes through non-size daemon errors unchanged", async () => {
+  const daemonError = new Error("error: unknown task id: t1\nhelp: run `taskferry list` to see valid task ids");
+  daemonError.code = "UNKNOWN_TASK";
+  const client = { request: async () => { throw daemonError; } };
+
+  await assert.rejects(
+    () => runCommand("result", { taskId: "t1" }, { client }),
+    (error) => {
+      assert.match(error.message, /unknown task id: t1/);
+      assert.doesNotMatch(error.message, /response size cap/);
+      return true;
+    },
+  );
 });
 
 test("dispatch forwards noOverlay to task.dispatch", async () => {

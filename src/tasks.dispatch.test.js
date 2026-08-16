@@ -5,7 +5,12 @@ import os from "node:os";
 import path from "node:path";
 import { createTaskManager } from "./tasks.js";
 import { hashFingerprint, VARIANTS_CACHE_SCHEMA } from "./variants-cache.js";
-import { trackManager, makeManager, fakeChild, LUNA_MODEL, MIMIMAX_MODEL, MINIMAX_MODEL, SOL_MODEL, UNUSED_TMP, SPAWN_OPENCODE_ENOENT, preserveEnvVars, mkdtempTracked, AXI_TASKS_TEST_DIR, AXI_TASKS_CACHE_DIR, AXI_TASKS_OVERLAY_DIR } from "./tasks.test-helpers.js";
+import { trackManager, makeManager, fakeChild, LUNA_MODEL, MIMIMAX_MODEL, MINIMAX_MODEL, SOL_MODEL, SPAWN_OPENCODE_ENOENT, preserveEnvVars, mkdtempTracked, AXI_TASKS_TEST_DIR, AXI_TASKS_CACHE_DIR, AXI_TASKS_OVERLAY_DIR, makeFakeExecutor } from "./tasks.test-helpers.js";
+
+// The literal suffix appended to every dispatch prompt by outputDirPromptBlock.
+// Tests assert on it directly to verify the prompt was augmented; one constant
+// keeps the duplicated literal below sonarjs/no-duplicate-string's threshold.
+const PERSISTENT_OUTPUT_DIR_HEADING = "\n\n## Persistent output dir";
 
 describe("dispatch() lifecycle, driven through an injected spawnFn (no real opencode process)", () => {
   test("passes the right argv and spawn options through to spawnFn", () => {
@@ -18,10 +23,15 @@ describe("dispatch() lifecycle, driven through an injected spawnFn (no real open
     });
     mgr.dispatch({ prompt: "hello", directory: os.tmpdir(), model: MIMIMAX_MODEL, variant: "max", executor: "opencode" });
     assert.equal(captured.cmd, "opencode");
-    assert.deepEqual(captured.args, [
+    assert.deepEqual(captured.args.slice(0, 11), [
       "run", "--dir", os.tmpdir(), "--auto", "--format", "json",
-      "-m", MIMIMAX_MODEL, "--variant", "max", "--", "hello",
+      "-m", MIMIMAX_MODEL, "--variant", "max", "--",
     ]);
+    // taskferry#423: dispatch augments the user prompt with the scratch-dir
+    // block so workers know where to drop deliverables that must survive
+    // turn end.
+    assert.ok(captured.args.at(-1).startsWith("hello" + PERSISTENT_OUTPUT_DIR_HEADING),
+      `expected augmented prompt tail, got: ${captured.args.at(-1)}`);
     assert.equal(captured.opts.cwd, os.tmpdir());
     assert.equal(captured.opts.detached, true);
   });
@@ -32,6 +42,14 @@ describe("dispatch() lifecycle, driven through an injected spawnFn (no real open
       () => mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), executor: "opencode" }),
       /error: --model is required\nhelp: name the model/
     );
+  });
+
+  test("a rejected dispatch (missing --model) does not orphan an output dir on disk (PR #474 review, taskferry#423)", () => {
+    const mgr = makeManager({ spawnFn: () => fakeChild(), autoModel: false });
+    assert.throws(() => mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), executor: "opencode" }));
+    const outputsRoot = path.join(mgr.paths.STATE_DIR, "outputs");
+    const leftover = fs.existsSync(outputsRoot) ? fs.readdirSync(outputsRoot) : [];
+    assert.deepEqual(leftover, [], `expected no orphan output dirs, found: ${JSON.stringify(leftover)}`);
   });
 
   /** @param {string[]} args @param {string} model */
@@ -85,18 +103,10 @@ describe("dispatch() lifecycle, driven through an injected spawnFn (no real open
     // is observable: that path ignores this injected instance entirely and
     // would spawn with the real pi executor's own buildSpawnArgs instead.
     let captured = null;
-    const fakePi = {
-      id: "pi",
-      taskIdPrefix: "pi",
-      errorBucketPrefix: "pi",
+    const fakePi = makeFakeExecutor({
       defaultSummaryModel: "fake-pi/marker-model",
-      binaryName: "pi",
-      listModelsFn: async () => "",
       buildSpawnArgs: () => ["--fake-pi-marker"],
-      buildSummaryPrompt: () => "",
-      normalizeLogEvent: (parsed) => parsed,
-      sandboxAuthFile: () => ({ extraRoBinds: [], extraRwPairBinds: [], sandboxedDataHome: UNUSED_TMP, sandboxEnv: {} }),
-    };
+    });
     const mgr = makeManager({ spawnFn: (_cmd, args) => { captured = args; return fakeChild(); }, defaultExecutor: fakePi });
     mgr.dispatch({ prompt: "first", directory: os.tmpdir(), model: MINIMAX_MODEL, sessionId: "ses_reuse", executor: "pi" });
     mgr.dispatch({ prompt: "resume", directory: os.tmpdir(), sessionId: "ses_reuse" });
@@ -394,12 +404,16 @@ describe("dispatch() with a prompt over the argv-safe size (issue #78: spawn E2B
   test("a prompt at or under the argv-safe threshold is still passed inline, no -f attachment", () => {
     let captured = null;
     const mgr = makeManager({ spawnFn: (_cmd, args, opts) => { captured = { args, opts }; return fakeChild(); } });
-    const prompt = "x".repeat(96 * 1024);
+    // Pick a size that stays below the threshold even after the #423 scratch-dir
+    // tail (~600 bytes) is appended, so the dispatcher still passes the prompt
+    // inline rather than spilling it to a temp file.
+    const prompt = "x".repeat(96 * 1024 - 1024);
 
     mgr.dispatch({ prompt, directory: os.tmpdir() });
 
     assert.equal(captured.args.includes("-f"), false);
-    assert.equal(captured.args[captured.args.length - 1], prompt);
+    assert.ok(captured.args.at(-1).startsWith(prompt + PERSISTENT_OUTPUT_DIR_HEADING),
+      `expected prompt+augmented tail, got prefix ${captured.args.at(-1).slice(0, 64)}`);
   });
 
   test("a prompt over the argv-safe threshold is written to a scratch file and attached via -f, never appearing in argv", () => {
@@ -411,7 +425,13 @@ describe("dispatch() with a prompt over the argv-safe size (issue #78: spawn E2B
 
     assert.ok(captured.args.includes("-f"), "expected -f attachment flag in argv");
     const attachment = captured.args[captured.args.indexOf("-f") + 1];
-    assert.equal(fs.readFileSync(attachment, "utf8"), prompt);
+    // taskferry#423: the file contains the augmented prompt (literal user
+    // prompt + scratch-dir tail) -- the augmentation is what the worker
+    // actually sees; the file content matches what would have been passed
+    // inline if argv were large enough.
+    const fileContent = fs.readFileSync(attachment, "utf8");
+    assert.ok(fileContent.startsWith(prompt + PERSISTENT_OUTPUT_DIR_HEADING),
+      `expected file to start with prompt + scratch-dir tail, got prefix: ${fileContent.slice(0, 96)}`);
     assert.equal(fs.statSync(attachment).mode & 0o777, 0o600);
     assert.ok(!captured.args.includes(prompt), "the raw oversized prompt must never be passed as a single argv element");
     // A short instruction still follows "--" so opencode has a message, per its own CLI contract.
@@ -942,7 +962,11 @@ describe("dispatch() prompt augmentation from .taskferry.toml", () => {
     const mgr = makeManager({ spawnFn: (_cmd, args) => { captured = args; return fakeChild(); } });
     mgr.dispatch({ prompt: DISPATCH_PROMPT, directory: dir, noOverlay: true, executor: "opencode", model: MIMIMAX_MODEL, variant: "max" });
     assert.equal(captured.at(-2), "--");
-    assert.equal(captured.at(-1), DISPATCH_PROMPT);
+    // taskferry#423: scratch-dir block is always appended (independent of the
+    // verification block, which IS gated on overlay); the literal user prompt
+    // still comes first.
+    assert.ok(captured.at(-1).startsWith(DISPATCH_PROMPT + PERSISTENT_OUTPUT_DIR_HEADING),
+      `expected DISPATCH_PROMPT + scratch-dir tail, got: ${captured.at(-1)}`);
     assert.ok(!captured.join(" ").includes(VERIFICATION_MARKER));
   });
 
@@ -951,9 +975,12 @@ describe("dispatch() prompt augmentation from .taskferry.toml", () => {
     let captured = null;
     const mgr = makeManager({ spawnFn: (_cmd, args) => { captured = args; return fakeChild(); } });
     const dispatched = mgr.dispatch({ prompt: DISPATCH_PROMPT, directory: dir, executor: "opencode", model: MIMIMAX_MODEL, variant: "max" });
-    // opencode's trailing positional is the literal prompt, no block appended.
+    // opencode's trailing positional is the literal prompt + scratch-dir tail.
+    // No .taskferry.toml means no verification block, but the scratch-dir
+    // tail is independent of project config (taskferry#423).
     assert.equal(captured.at(-2), "--");
-    assert.equal(captured.at(-1), DISPATCH_PROMPT);
+    assert.ok(captured.at(-1).startsWith(DISPATCH_PROMPT + PERSISTENT_OUTPUT_DIR_HEADING),
+      `expected DISPATCH_PROMPT + scratch-dir tail, got: ${captured.at(-1)}`);
     assert.ok(!captured.join(" ").includes(VERIFICATION_MARKER));
     // Prompt is well under the 200-char preview threshold, so promptTotalChars stays unset.
     assert.equal("promptTotalChars" in dispatched, false);
@@ -979,7 +1006,10 @@ describe("dispatch() omitted --variant resolution (defaultVariant: highest)", ()
       opencodeVariantsTable: new Map([[LUNA_MODEL, ["low", "high", "max"]]]),
     });
     mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), model: LUNA_MODEL, executor: "opencode" });
-    assert.deepEqual(captured.slice(captured.indexOf("-m")), ["-m", LUNA_MODEL, "--variant", "max", "--", "hi"]);
+    assert.deepEqual(captured.slice(captured.indexOf("-m"), captured.indexOf("--")), ["-m", LUNA_MODEL, "--variant", "max"]);
+    // taskferry#423: the trailing positional is the literal prompt + scratch-dir tail.
+    assert.ok(captured.at(-1).startsWith("hi" + PERSISTENT_OUTPUT_DIR_HEADING),
+      `expected 'hi' + scratch-dir tail, got: ${captured.at(-1)}`);
   });
 
   test("omitted --variant on opencode with no cache entry for the model sends no flag", () => {

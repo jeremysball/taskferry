@@ -244,6 +244,15 @@ tripped.
 | `--fields <comma-list>` | Project only the fields you need: `message`, `narration`, `tokens`, `cost`, `sessionId`, `exitCode`, `signal`, `spawnError`, `failureReason`, `failureDetail`, `logPath`, `incomplete`, `finalMarker`, `diff`, `diffStat`, `changesetError`, `finalStatus`, `class`, `checkStatus`, `checkCommand`, `checkExitCode`, `checkOutputTail`, `checkStartedAt`, `checkEndedAt`, `checkOverride`, `parentTaskId`, `projectConfigWarning` |
 | `--diff` | Print the task's pending changeset (read-only; cannot combine with `--fields` or `--full`) |
 
+The payload (the diff included) rides the daemon's response size cap. A
+diff covers the whole target directory against its pre-dispatch `HEAD`,
+so unrelated uncommitted changes in the directory count toward the cap —
+a dirty tree can make even a one-file task's result exceed it. The CLI
+then fails with an error naming the cause: commit or shelve the unrelated
+working-tree changes and retry, or fetch a narrower `--fields` set when
+you don't need the diff (see [daemon.md](daemon.md)'s "Things that look
+like bugs but aren't").
+
 ```
 $ taskferry result oc_mrn4ipkp_19450105
 taskId: oc_mrn4ipkp_19450105
@@ -274,10 +283,14 @@ live overlay, so a non-git changeset left pending across a reboot fails
 loudly and can only be rejected, never applied. A successful apply
 transitions the task to `changesetStatus: "accepted"` and frees the CoW
 overlay. A failed apply leaves the task pending so a retry or reject can
-follow. Calling it on a task that already settled (no pending changeset)
-is a no-op that returns a `note` instead of an error, exit code `0`. The
-advisor role (`taskferry advisor`) has no accept path — its changeset is
-auto-rejected right after extraction.
+follow — and makes the CLI exit nonzero. The RPC itself succeeds either
+way, so the response body's `applied` field is the authoritative signal to
+check when scripting (the exit code can't cover every case where the
+request succeeds but the apply does not). Calling it on a task that
+already settled (no pending changeset) is a no-op that returns a `note`
+instead of an error, exit code `0`. The advisor role (`taskferry advisor`)
+has no accept path — its changeset is auto-rejected right after
+extraction.
 
 ### Check-gate refusal and `--force`
 
@@ -332,6 +345,35 @@ meaningful for a task with `changesetStatus: "pending"`; an already
 accepted, already rejected, or auto-resolved task is a no-op that
 returns a `note` instead of an error, exit code `0`. Frees the CoW
 overlay.
+
+## `taskferry output <id> [--path <relpath>]`
+
+Lists a task's scratch output directory, or reads one file from it.
+Every dispatch reserves a per-task writable directory at
+`<stateDir>/outputs/<id>/`, rw-bound into the bwrap sandbox at the same
+path and exposed to the worker as `$TASKFERRY_OUTPUT_DIR`. Use it for
+deliverables that must survive the task settling, getting cancelled, or
+ending on a tool call instead of a final assistant message (taskferry#423).
+
+- Without `--path`: prints a JSON listing of `{ path, size }` for every
+  file in the scratch dir, plus `bytes`, `total`, and `truncated`
+  (capped at `256` files / `8 MiB`; `node_modules` and `.git` subtrees
+  are skipped).
+- With `--path <relpath>`: prints the file's UTF-8 content. Single files
+  are capped at `1 MiB`; an over-cap read returns `{ content: null,
+  truncated: true, error: "too_large", size }`. Any path that would
+  escape the per-task dir (absolute paths, leading `/`, `..` segments)
+  is rejected.
+- Works on every terminal status: `done`, `crashed`, `cancelled`, and
+  even an `incomplete` task that the worker never finished — the scratch
+  dir is per-task state the worker owns, not parsed-from-log output.
+
+Example:
+
+```sh
+taskferry output oc_mssiwul9_b23e173c
+taskferry output oc_mssiwul9_b23e173c --path deliverable.txt
+```
 
 ## `taskferry list [options]`
 

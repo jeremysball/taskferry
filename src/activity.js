@@ -178,7 +178,13 @@ export function sanitizeActivityText(value, maxChars = DEFAULT_ACTIVITY_MAX_CHAR
 
 /** @param {{status?: string, prompt?: string, promptPreview?: string, narration?: string, text?: string}} activity */
 export function buildLocalActivity({ status, prompt, promptPreview, narration, text } = {}) {
-  const local = sanitizeActivityText(narration || text || prompt || promptPreview);
+  // promptPreview is preferred over the raw prompt: prompt is the augmented
+  // string a worker actually sees (dispatch/check-gate/output-dir prompt
+  // blocks appended), so falling back to it here would surface that
+  // injected wrapper text and internal paths as "activity" before the
+  // task's first real log event. promptPreview is always the clean,
+  // truncated user-facing text.
+  const local = sanitizeActivityText(narration || text || promptPreview || prompt);
   return local || `Task ${status || "activity"}`;
 }
 

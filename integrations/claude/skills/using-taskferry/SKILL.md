@@ -247,6 +247,7 @@ taskferry wait <id> --summarize   # blocks, streams progress; check the status i
 taskferry status <id>             # point-in-time state, including checkStatus
 taskferry tail <id> --chars 2000  # one-shot look at recent narration
 taskferry result <id>             # the settled result
+taskferry output <id>             # scratch dir the worker wrote (taskferry#423); use --path <relpath> to read one file
 ```
 
 Pull only the fields you need instead of the full payload with `taskferry

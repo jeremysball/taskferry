@@ -321,6 +321,21 @@ out rather than done half right.
 No log rotation or cleanup: `logs/` grows unbounded. Fine for interactive
 use; long-lived automation wants an external retention policy.
 
+### Scratch output dir survives across every terminal status (taskferry#423)
+
+Every dispatch reserves a per-task writable directory at
+`<stateDir>/outputs/<id>/`, rw-bound into the bwrap sandbox at the same
+path and exposed to the worker as `$TASKFERRY_OUTPUT_DIR`. Unlike the
+git-target overlay (which only exists when a dispatch ran with an overlay
+and is consumed by `accept`/`reject`), the scratch dir is per-task state
+the worker owns directly: it persists on every terminal status
+(`done`, `crashed`, `cancelled`, `incomplete`), is never consumed by
+`accept`/`reject`, and is read back via `taskferry output <id>` (or the
+`task.output` RPC). The CLI is the right surface for retrieving anything
+a worker wrote there — including a deliverable the worker produced but
+whose final assistant message ended on a tool call rather than a clean
+speak turn.
+
 ## Request-latency profiling
 
 Opt-in, off by default: set `TASKFERRY_PROFILING_ENABLED=1`, or the
@@ -448,7 +463,19 @@ profiling is diagnostic, not on the request's critical path.
   worker's real changes too — so commit or shelve untracked files before
   dispatching against a dirty tree. Non-git targets are unaffected: their
   extraction diffs the directory against the merged view, so untouched files
-  never appear.
+  never appear. The same root cause means a `taskferry result <id>` (or
+  `result --diff`) payload can exceed the daemon's 1 MiB response cap on a
+  dirty tree even for a one-file task — the CLI fails that case with a clear
+  error naming the cause instead of the raw size error, and the workaround
+  is the same: clean up the unrelated working-tree changes, or fetch a
+  narrower `--fields` set.
+- `taskferry accept` exiting nonzero with `applied: false` in the response
+  body — not a crash: the RPC succeeded but `git apply --3way` rejected the
+  patch, which the daemon can only report as a body field (a failed apply
+  deliberately leaves the changeset `pending` so accept can be retried
+  after the conflict is resolved). The CLI turns that into a nonzero exit
+  (taskferry#414); the `applied` field remains the authoritative
+  machine-readable signal.
 - A test that has two same-process calls contend on the same
   `withFileLockAsync()`/`withFileLock()` lock path (one holding it across an
   `await`, another trying to acquire it concurrently) hanging or timing out
@@ -490,3 +517,105 @@ profiling is diagnostic, not on the request's critical path.
   `resolveRunCommandDeps` documents that single exception with a field-level
   `@type {Client}` cast on the `client` field instead of widening
   `ResolvedDeps.client` to optional for every handler.
+- `spawnTaskChild()` calling both `ctx.persistTask(task.id)` *and*
+  `ctx.flushPersist()` immediately after `buildSandboxedSpawn()` and before
+  `ctx.spawnFn(...)`, on top of the existing post-spawn `persistTask()` call
+  a few lines later — expected, not redundant (taskferry#346).
+  `buildSandboxedSpawn()` (via `assembleBwrapSpawn()`) has already created
+  the on-disk overlay and set `task.overlayDirs`/`changesetStatus` in memory
+  by the time it returns, but a daemon crash between that point and the
+  *old* single post-spawn `persistTask()` call (which spans the spawn
+  itself, the single riskiest step in this function) used to leave
+  `tasks.json` with no record of the overlay at all. On restart,
+  `sweepOverlayEntry()` can only spare an overlay whose owning task is
+  loaded with `overlayDirs.root` matching and `changesetStatus: "pending"`
+  — an unmatched `taskferry-cow-<taskId>` directory looks indistinguishable
+  from a genuine orphan and gets deleted, even though the detached child
+  (spawned with `detached: true`, so it can outlive the daemon) may still be
+  writing into it. `persistTask()` alone is not enough to close that window:
+  it only flips `ctx.state.persistDirty` and arms a 250ms debounce timer
+  (`PERSIST_DEBOUNCE_MS`, in `persistTaskRecord()`) rather than writing
+  synchronously — and by this point in `spawnTaskChild()`,
+  `queueDispatchLaunch()` has typically already called `persistTask()` once
+  at dispatch/queue time, so the dirty flag may already be set and a second
+  debounced call is a no-op for write timing. `ctx.flushPersist()` (bound to
+  `flushPersistRecords()`, the same synchronous `fs.writeFileSync` +
+  `fs.renameSync` path the debounce timer eventually calls) is what actually
+  forces the write before `ctx.spawnFn(...)` runs. The later, post-spawn
+  `persistTask()` call is unchanged and still needed to record
+  `status: "running"` and the real `pid`.
+- `taskferry list --all` showing at most the 500 most recent rows even when
+  the counts line says far more tasks exist — expected, not a truncation bug.
+  All-time history grows without bound, and an unfiltered `task.list`
+  response used to ship every row ever recorded, eventually exceeding the
+  daemon's 1 MiB outbound message cap and killing the connection with no
+  error frame ("daemon connection closed", taskferry#342). The daemon now
+  caps the shipped rows at the newest `MAX_LIST_ROWS` (500) while keeping
+  `counts` computed over the full set (a cheap in-memory tally), so
+  `list --all` always answers. To see an older or scoped slice, narrow with
+  `--directory`; `doctor --stats` summarizes the whole history server-side.
+- An error response envelope whose `message` is a single line (detail lines
+  collapsed away) or empty — expected, not dropped data. The envelope keeps
+  the historical wire shape: `message` is exactly the first `error:` line
+  (or the first raw line, which stays `""` when the error text is empty),
+  every other line lives in `detail`, and the help fallback is the
+  daemon-oriented "Retry the request or inspect the daemon logs", not the
+  CLI's "Retry the command or run `taskferry --help`". `responseError()` in
+  `src/daemon.js` reuses the same `errorValue()` the CLI renders with, but
+  overrides its CLI-oriented defaults (`foldDetailLines: false`,
+  `messageFallback: ""`, its own help fallback); the CLI's richer multi-line
+  message is presentation for a terminal, deliberately not shared with the
+  protocol.
+- A worker that "ended on a tool call" producing no visible final assistant
+  message — expected, and not a failure of the dispatch. Workers can settle
+  with `crashed`, `cancelled`, or `done` while the last assistant turn is
+  still a tool_use whose deliverable the worker wrote to its scratch output
+  dir (see `docs/daemon.md#scratch-output-dir-survives-across-every-terminal-status-taskferry423`).
+  Read it back with `taskferry output <id>` rather than the log — the log
+  captured the *calls*, the scratch dir is where the work actually landed.
+  This is the whole reason the per-task scratch dir exists separately from
+  the changeset overlay.
+- A config entry, credential, or session file that passed the lstat symlink
+  guard at bind-computation time still resolving through a symlink into the
+  sandbox — expected, and tolerated on purpose. The guard's lstat check
+  (`isSafeBindSource` in `src/executor.js`) and bwrap's own host-side path
+  resolution at spawn time are two separate, non-atomic steps, so a path
+  swapped in between them (a classic TOCTOU race) can still bind whatever
+  the new symlink points at. This is a deliberate race, not a bug to fix:
+  exploiting it requires write access to the config dir or the path's parent
+  at dispatch time, which is the same attacker capability the guard already
+  assumes (a plugin that can plant a symlink there can also rewrite the
+  config files the symlink points at — so racing back buys nothing).
+  "Fixing" it by pre-resolving every path with `fs.realpathSync` would also
+  break legitimate symlinked config trees (dotfiles repos symlink
+  `~/.config/opencode` and its entries into the checkout), so the guard
+  stays a best-effort check against the static attack, not a lock against a
+  race that requires the attacker to already hold the keys.
+- A legitimate symlinked config entry (`opencode.jsonc` symlinked into a
+  dotfiles repo) silently missing from the sandbox after an upgrade —
+  expected, and now diagnosed: the guard deliberately refuses to bind
+  symlinked entries (bwrap would bind the link's *target*, which is the
+  whole vulnerability #392 closes), and warns on stderr naming the skipped
+  path so the drop is visible rather than silent. The fix is to bind the
+  real file (`cp` the config into `~/.config/opencode`), not to weaken the
+  guard.
+- A dispatch's private gitDir (`<git-common-dir>/worktrees/<name>` for a
+  linked worktree) getting a one-time scratch copy instead of a live overlay
+  or live bind, even though it's a directory and overlayfs mounts directories
+  fine — expected, not a leftover file-vs-directory special case
+  (taskferry#304). That directory sits directly inside the `worktrees/` tree
+  that `git worktree add` touches/locks for *every* worktree as part of its
+  own bookkeeping, not just the one being added — a live mount can therefore
+  be perturbed by an unrelated sibling worktree operation and crash an
+  in-flight dispatch with "directory is missing". The same snapshot rule is
+  used by `--no-overlay`; that flag leaves the target working tree live, but
+  does not re-expose the private gitDir. If gitDir cannot be distinguished
+  from gitCommonDir (or cannot be resolved), the fallback snapshots the whole
+  common dir for the same reason: it may contain the live `worktrees/` tree.
+  Snapshotting costs nothing in correctness: like a sandboxed `git commit`,
+  writes inside the copied git metadata are discarded at settlement regardless
+  of bind mechanism, and only the extracted diff (not git-state mutations)
+  ever reaches the real repo. `objects`/`refs`/`logs/refs` stay on the shared
+  mechanism because they are common to the main checkout, can be large, and
+  must track live upstream state (new commits) during a linked-worktree
+  dispatch — the tradeoffs don't apply to private git metadata the same way.

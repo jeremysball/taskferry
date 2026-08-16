@@ -5,7 +5,7 @@ import fs from "node:fs";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
-import { prepareSocket, removeStaleSocketIfUnchanged, startDaemon } from "./daemon.js";
+import { MAX_LIST_ROWS, prepareSocket, removeStaleSocketIfUnchanged, startDaemon } from "./daemon.js";
 import { resolveRuntimeDir } from "./paths.js";
 
 const TEST_MODEL = "test/model";
@@ -79,12 +79,13 @@ function fakeManagerFactory(tasks = [], { checkSummaryModelReady, throwOnClose =
       await new Promise((resolve) => setTimeout(resolve, delay));
       return { id: taskId, status: "done" };
     },
-    list() {
+    list({ limit } = {}) {
       calls.push(["list"]);
+      const rows = limit !== undefined ? tasks.slice(0, limit) : tasks;
       return {
         counts: { queued: 0, running: 0, done: tasks.length, crashed: 0, cancelled: 0, unknown: 0 },
-        tasks: tasks.length
-          ? tasks.map(({ id, status, model = TEST_MODEL, startedAt = TEST_STARTED_AT, directory }) => ({ id, status, model, startedAt, directory }))
+        tasks: rows.length
+          ? rows.map(({ id, status, model = TEST_MODEL, startedAt = TEST_STARTED_AT, directory }) => ({ id, status, model, startedAt, directory }))
           : "none found (this server process's lifetime)",
       };
     },
@@ -423,6 +424,56 @@ describe("Unix socket daemon", () => {
     assert.equal(fake.options.runtimeDir, paths.runtimeDir);
   });
 
+});
+
+describe("Unix socket daemon: error envelope", () => {
+  test("keeps the envelope message single-line with the daemon help fallback when the manager throws a multi-line error", async (t) => {
+    const paths = temporaryPaths(t);
+    const fake = fakeManagerFactory();
+    const baseFactory = fake.factory;
+    const factory = (options) => {
+      const manager = baseFactory(options);
+      manager.advisor = () => {
+        throw new Error("error: multi-line boom\n  context line A\n  context line B");
+      };
+      return manager;
+    };
+    const daemon = await startDaemon({ ...paths, taskManagerFactory: factory });
+    t.after(() => daemon.close());
+    const peer = await openPeer(paths.socketPath);
+    t.after(() => peer.close());
+
+    const response = await peer.request("advise", TASK_ADVISOR, { prompt: "hi", directory: paths.root, model: "m", executor: "pi" });
+
+    assert.equal(response.ok, false);
+    assert.equal(response.error.message, "multi-line boom");
+    assert.equal(response.error.help, "Retry the request or inspect the daemon logs");
+    assert.equal(response.error.detail, "error: multi-line boom\n  context line A\n  context line B");
+  });
+
+  test("keeps an empty error text empty in the envelope message instead of fabricating a default", async (t) => {
+    const paths = temporaryPaths(t);
+    const fake = fakeManagerFactory();
+    const baseFactory = fake.factory;
+    const factory = (options) => {
+      const manager = baseFactory(options);
+      manager.advisor = () => {
+        throw new Error("");
+      };
+      return manager;
+    };
+    const daemon = await startDaemon({ ...paths, taskManagerFactory: factory });
+    t.after(() => daemon.close());
+    const peer = await openPeer(paths.socketPath);
+    t.after(() => peer.close());
+
+    const response = await peer.request("advise", TASK_ADVISOR, { prompt: "hi", directory: paths.root, model: "m", executor: "pi" });
+
+    assert.equal(response.ok, false);
+    assert.equal(response.error.message, "");
+    assert.equal(response.error.help, "Retry the request or inspect the daemon logs");
+    assert.equal(response.error.detail, "");
+  });
 });
 
 describe("Unix socket daemon: concurrency", () => {
@@ -815,6 +866,57 @@ describe("Unix socket daemon: oversized response downgrade", () => {
     await new Promise((resolve) => setTimeout(resolve, 50));
 
     assert.equal(peer.socket.destroyed, true);
+  });
+});
+
+describe("Unix socket daemon: list --all row cap (taskferry#342)", () => {
+  test("task.list with no directory (list --all) caps rows at MAX_LIST_ROWS while preserving counts over the full set, instead of shipping all-time history and blowing the 1 MiB outbound cap", async (t) => {
+    const paths = temporaryPaths(t);
+    // Uncapped, a history this large would serialize past MAX_BUFFER_BYTES
+    // and the request would fail (RESPONSE_TOO_LARGE today; on a
+    // pre-degradation daemon, "daemon connection closed" -- taskferry#342).
+    const tasks = Array.from({ length: MAX_LIST_ROWS + 100 }, (_, i) => ({
+      id: `t${i}`, status: "done", directory: paths.root, model: TEST_MODEL, startedAt: TEST_STARTED_AT,
+    }));
+    const fake = fakeManagerFactory(tasks);
+    const daemon = await startDaemon({ ...paths, taskManagerFactory: fake.factory });
+    t.after(() => daemon.close());
+    const peer = await openPeer(paths.socketPath);
+    t.after(() => peer.close());
+
+    const response = await peer.request("list-1", "task.list", {});
+
+    assert.equal(response.ok, true, response.error?.message);
+    assert.deepEqual(
+      response.result.tasks.map((row) => row.id),
+      tasks.slice(0, MAX_LIST_ROWS).map((row) => row.id),
+      "the newest MAX_LIST_ROWS rows come back, in order"
+    );
+    assert.equal(response.result.counts.done, tasks.length, "counts must cover the full set, not just the capped rows");
+
+    // The connection must survive -- the whole point is a normal response,
+    // not a torn-down socket.
+    const health = await peer.request("health-2", SYSTEM_HEALTH);
+    assert.equal(health.ok, true, health.error?.message);
+  });
+
+  test("a directory-scoped task.list is not capped: every row in the workspace comes back", async (t) => {
+    const paths = temporaryPaths(t);
+    const otherDirectory = path.join(paths.root, "other");
+    fs.mkdirSync(otherDirectory);
+    const here = Array.from({ length: MAX_LIST_ROWS + 100 }, (_, i) => ({
+      id: `here-${i}`, status: "done", directory: paths.root, model: TEST_MODEL, startedAt: TEST_STARTED_AT,
+    }));
+    const fake = fakeManagerFactory([...here, { id: "there", status: "done", directory: otherDirectory, model: TEST_MODEL, startedAt: TEST_STARTED_AT }]);
+    const daemon = await startDaemon({ ...paths, taskManagerFactory: fake.factory });
+    t.after(() => daemon.close());
+    const peer = await openPeer(paths.socketPath);
+    t.after(() => peer.close());
+
+    const response = await peer.request("list-2", "task.list", { directory: paths.root });
+
+    assert.equal(response.ok, true, response.error?.message);
+    assert.equal(response.result.tasks.length, here.length, "the cap must apply only to the unfiltered (--all) path");
   });
 });
 

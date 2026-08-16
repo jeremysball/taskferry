@@ -81,13 +81,17 @@ function stripPrefix(line, prefix) {
 /**
  * @param {unknown} error
  * @param {string | undefined} helpLine
+ * @param {string} [fallback] -- caller-supplied default when neither
+ *   `error.help` nor a parsed `help:` line exists. Defaults to the
+ *   CLI-oriented text; the daemon's responseError() passes its own
+ *   log-oriented one.
  * @returns {string}
  */
-function errorHelp(error, helpLine) {
+function errorHelp(error, helpLine, fallback = "Retry the command or run `taskferry --help`") {
   if (error && typeof error === "object" && typeof /** @type {{help?: unknown}} */ (error).help === "string") {
     return /** @type {{help: string}} */ (error).help;
   }
-  return helpLine || "Retry the command or run `taskferry --help`";
+  return helpLine || fallback;
 }
 
 // Single pass over `lines`: finds the first `error:`/`help:` line (if any)
@@ -113,18 +117,25 @@ function extractErrorParts(lines) {
 
 /**
  * @param {unknown} error
+ * @param {{helpFallback?: string, messageFallback?: string, foldDetailLines?: boolean}} [options]
+ *   The defaults are CLI-oriented: the help fallback suggests `taskferry
+ *   --help`, an empty error text fabricates "taskferry request failed",
+ *   and detail lines fold into the message for a rich terminal display.
+ *   The daemon's responseError() overrides all three so its wire envelope
+ *   keeps the historical shape (single-line message, empty text stays
+ *   empty, daemon-flavored help fallback) -- see docs/daemon.md.
  * @returns {{error: string, help: string}}
  */
-export function errorValue(error) {
+export function errorValue(error, { helpFallback = "Retry the command or run `taskferry --help`", messageFallback = "taskferry request failed", foldDetailLines = true } = {}) {
   const text = error instanceof Error ? error.message : String(error);
   const lines = text.split("\n");
   const { errorLine, helpLine, detailLines } = extractErrorParts(lines);
-  const primary = errorLine || lines[0] || "taskferry request failed";
+  const primary = errorLine || lines[0] || messageFallback;
   // Detail lines only fold in when we found an `error:` line as the primary,
   // so the plain single-line fallback (no recognized prefixes) keeps
   // returning `lines[0]` unchanged.
-  const message = errorLine !== undefined && detailLines.length ? `${primary}\n${detailLines.join("\n")}` : primary;
-  const help = errorHelp(error, helpLine);
+  const message = errorLine !== undefined && detailLines.length && foldDetailLines ? `${primary}\n${detailLines.join("\n")}` : primary;
+  const help = errorHelp(error, helpLine, helpFallback);
   return { error: message, help };
 }
 
@@ -345,11 +356,20 @@ function listRow(row) {
 
 // Shared by projectList/projectContext: rows the raw task array down to
 // `limit`, reporting whether anything was cut off.
+//
+// `total` is the row count actually shipped by the daemon in this response,
+// not the all-time task count -- the unfiltered `task.list` path caps rows
+// server-side (daemon.js's MAX_LIST_ROWS) while still reporting the true
+// all-time tally in `value.counts`. `serverTotal` sums `value.counts` to
+// recover that true tally, so callers can tell "the CLI's own --limit cut
+// this batch down" (serverTotal === total, raising --limit reveals more)
+// apart from "the daemon already capped what it sent" (serverTotal > total,
+// no --limit value can reveal more; only a narrower --directory query can).
 /**
  * @param {ListValue} value
  * @param {number | undefined} limit
  * @param {number} defaultLimit
- * @returns {{tasks: ListRow[] | string, truncated: boolean, total: number}}
+ * @returns {{tasks: ListRow[] | string, truncated: boolean, total: number, serverTotal: number, serverTruncated: boolean}}
  */
 function limitTasks(value, limit, defaultLimit) {
   let rows;
@@ -359,13 +379,28 @@ function limitTasks(value, limit, defaultLimit) {
     rows = value.tasks;
   }
   const total = Array.isArray(rows) ? rows.length : 0;
+  const serverTotal = value.counts ? Object.values(value.counts).reduce((sum, n) => sum + n, 0) : total;
   const effectiveLimit = limit !== undefined ? limit : defaultLimit;
   const tasks = Array.isArray(rows) ? rows.slice(0, effectiveLimit) : rows;
   const truncated = Array.isArray(tasks) && tasks.length < total;
-  return { tasks, truncated, total };
+  const serverTruncated = serverTotal > total;
+  return { tasks, truncated, total, serverTotal, serverTruncated };
 }
 
 const DEFAULT_LIST_LIMIT = 30;
+
+/**
+ * @param {{truncated: boolean, total: number, serverTotal: number, serverTruncated: boolean}} limited
+ * @returns {string[] | undefined}
+ */
+function listNextHint(limited) {
+  const { truncated, total, serverTotal, serverTruncated } = limited;
+  if (serverTruncated) {
+    return [`Showing the newest ${total} of ${serverTotal} tasks (server-capped); pass --directory to narrow further`];
+  }
+  if (truncated) return [`Run taskferry list --limit ${total} for all ${total} tasks`];
+  return undefined;
+}
 
 /**
  * @param {ListValue} value
@@ -377,12 +412,13 @@ const DEFAULT_LIST_LIMIT = 30;
  * @returns {ListValue & {next?: string[]}}
  */
 export function projectList(value, { limit } = {}) {
-  const { tasks, truncated, total } = limitTasks(value, limit, DEFAULT_LIST_LIMIT);
+  const limited = limitTasks(value, limit, DEFAULT_LIST_LIMIT);
+  const next = listNextHint(limited);
   return {
     ...(value.directory ? { directory: value.directory } : {}),
     counts: value.counts,
-    tasks,
-    ...(truncated ? { next: [`Run taskferry list --limit ${total} for all ${total} tasks`] } : {}),
+    tasks: limited.tasks,
+    ...(next ? { next } : {}),
   };
 }
 
@@ -394,12 +430,13 @@ const DEFAULT_CONTEXT_LIMIT = 10;
  * @returns {Record<string, unknown>}
  */
 export function projectContext(value, { limit } = {}) {
-  const { tasks, truncated, total } = limitTasks(value, limit, DEFAULT_CONTEXT_LIMIT);
+  const limited = limitTasks(value, limit, DEFAULT_CONTEXT_LIMIT);
+  const next = listNextHint(limited);
   return {
     directory: value.directory,
     counts: value.counts,
-    tasks,
-    ...(truncated ? { next: [`Run taskferry list --limit ${total} for all ${total} tasks`] } : {}),
+    tasks: limited.tasks,
+    ...(next ? { next } : {}),
   };
 }
 

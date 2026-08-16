@@ -4,7 +4,7 @@ import net from "node:net";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { createTaskManager } from "./tasks.js";
+import { createTaskManager, emptyStatusCounts } from "./tasks.js";
 import { loadConfig } from "./config.js";
 import { withFileLock, withFileLockAsync } from "./state-lock.js";
 import { isNonNegativeInteger, isPositiveInteger } from "./numbers.js";
@@ -25,6 +25,7 @@ import {
   syncActivitySubscriptions,
 } from "./daemon-server.js";
 import { errCode } from "./errors.js";
+import { errorValue } from "./output.js";
 
 /**
  * @typedef {import("./tasks.js").Task} Task
@@ -51,13 +52,7 @@ import { errCode } from "./errors.js";
  */
 
 /**
- * @typedef {object} Counts
- * @property {number} queued
- * @property {number} running
- * @property {number} done
- * @property {number} crashed
- * @property {number} cancelled
- * @property {number} unknown
+ * @typedef {import("./tasks.js").Counts} Counts
  */
 
 /**
@@ -443,10 +438,11 @@ export function removeStaleSocketIfUnchanged(socketPath, checkedIdentity, runtim
 }
 
 /**
- * @returns {Counts}
+ * @param {ReturnType<TaskManager["list"]>["tasks"]} tasks
+ * @returns {Task[]}
  */
-function emptyCounts() {
-  return { queued: 0, running: 0, done: 0, crashed: 0, cancelled: 0, unknown: 0 };
+function asTaskArray(tasks) {
+  return Array.isArray(tasks) ? tasks : [];
 }
 
 /**
@@ -454,8 +450,7 @@ function emptyCounts() {
  * @returns {Task[]}
  */
 function listRows(manager) {
-  const listed = manager.list();
-  return Array.isArray(listed.tasks) ? listed.tasks : [];
+  return asTaskArray(manager.list().tasks);
 }
 
 /**
@@ -482,6 +477,40 @@ function filteredTaskDetails(manager, directory, resolveWorkspaceRootFn) {
   };
 }
 
+// `list --all` (task.list with no `directory`) returns every task ever
+// recorded, and all-time history grows without bound. An unfiltered
+// response can outgrow the daemon's 1 MiB outbound message cap
+// (MAX_BUFFER_BYTES) and -- before daemon-server.js's RESPONSE_TOO_LARGE
+// degradation landed -- tear the connection down with no error frame,
+// which surfaced to the CLI as "taskferry daemon connection closed"
+// (taskferry#342). Cap the shipped rows at the newest MAX_LIST_ROWS rows
+// while keeping counts over the full set: counts are a cheap in-memory
+// tally (no per-task log I/O, unlike the directory path's manager.status()
+// calls). This is a row-count cap, not a byte-budget cap -- 500 rows with
+// pathologically long `directory` values could in principle still exceed
+// MAX_BUFFER_BYTES -- so daemon-server.js's RESPONSE_TOO_LARGE degradation
+// stays in place as the wire-level backstop for that case; it just no
+// longer fires for the common case this cap is sized for. Truncation is
+// no longer silent either: output.js's projectList/projectContext diff
+// `counts` (the true all-time tally) against the shipped row count to
+// tell the CLI user when more rows exist than were sent. The same
+// server-side-bounding treatment was already applied to `doctor --stats`
+// (task.stats, taskferry#332).
+export const MAX_LIST_ROWS = 500;
+
+/**
+ * @param {TaskManager} manager
+ * @returns {ReturnType<TaskManager["list"]>}
+ */
+function cappedList(manager) {
+  // Pass the limit into manager.list() itself rather than slicing its
+  // result afterward -- listTasks() (tasks.js) slices to `limit` before
+  // running summarizeRow() over the surviving rows, so summarize work never
+  // runs on a row this cap is about to discard (CLAUDE.md "Always filter,
+  // then process").
+  return manager.list({ limit: MAX_LIST_ROWS });
+}
+
 /**
  * @param {TaskManager} manager
  * @param {string|undefined} directory
@@ -489,10 +518,20 @@ function filteredTaskDetails(manager, directory, resolveWorkspaceRootFn) {
  * @returns {ReturnType<TaskManager["list"]>}
  */
 function filteredList(manager, directory, resolveWorkspaceRootFn) {
-  if (directory === undefined) return manager.list();
+  if (directory === undefined) return cappedList(manager);
   const details = filteredTaskDetails(manager, directory, resolveWorkspaceRootFn);
+  // `counts` here is a fresh tally over the workspace-filtered rows
+  // (countTasks), not the cheap in-memory tally cappedList() reuses from
+  // manager.list() -- different populations (this workspace's tasks vs.
+  // every task ever recorded), computed differently for that reason, but
+  // both represent the true total for their own scope, unaffected by any
+  // row cap.
   const counts = countTasks(details.tasks);
-  const rows = details.tasks.map(({ id, status, model, startedAt, failureReason }) => ({ id, status, model, startedAt, failureReason: failureReason ?? null }));
+  // Keep `directory` on each row (summarizeRow already includes it) so
+  // task.list {} and task.list {directory} ship structurally identical
+  // rows -- a non-CLI RPC consumer shouldn't see the field appear/disappear
+  // depending on which branch answered the request.
+  const rows = details.tasks.map(({ id, status, model, startedAt, directory, failureReason }) => ({ id, status, model, startedAt, directory, failureReason: failureReason ?? null }));
   return { counts, tasks: rows.length ? rows : "none found in this workspace" };
 }
 
@@ -501,7 +540,7 @@ function filteredList(manager, directory, resolveWorkspaceRootFn) {
  * @returns {Counts}
  */
 function countTasks(tasks) {
-  const counts = emptyCounts();
+  const counts = emptyStatusCounts();
   for (const task of tasks) {
     if (counts[/** @type {keyof Counts} */ (task.status)] !== undefined) counts[/** @type {keyof Counts} */ (task.status)]++;
   }
@@ -517,9 +556,19 @@ function responseError(error, requestId) {
     return errorResponse(error.requestId, error.code, error.message, error.help, error.message);
   }
   const text = error instanceof Error ? error.message : String(error);
-  const lines = text.split("\n");
-  const message = lines.find((line) => line.startsWith("error:"))?.slice(6).trim() || lines[0];
-  const help = lines.find((line) => line.startsWith("help:"))?.slice(5).trim() || "Retry the request or inspect the daemon logs";
+  // The error envelope's `message` is single-line by contract: the
+  // hand-rolled parser this replaced shipped the first `error:` line (or
+  // first raw line) and put the full text in `detail`. errorValue()'s
+  // detail-line folding and fabricated "taskferry request failed" for empty
+  // text are CLI presentation; keep the wire shape unchanged, so a
+  // multi-line error stays single-line in `message` (detail lines live in
+  // `detail`), empty error text stays empty, and the help fallback is
+  // daemon-oriented, not the CLI's "run `taskferry --help`".
+  const { error: message, help } = errorValue(error, {
+    helpFallback: "Retry the request or inspect the daemon logs",
+    messageFallback: "",
+    foldDetailLines: false,
+  });
   const code = /unknown task id:/.test(text) ? "UNKNOWN_TASK" : "REQUEST_FAILED";
   return errorResponse(requestId, code, message, help, text);
 }
@@ -555,6 +604,7 @@ const invokeHandlers = {
   },
   "task.accept": (manager, params) => manager.accept(/** @type {string} */ (params.taskId), { force: params.force === true }),
   "task.reject": (manager, params) => manager.reject(/** @type {string} */ (params.taskId)),
+  "task.output": (manager, params) => manager.output(/** @type {string} */ (params.taskId), { path: typeof params.path === "string" ? params.path : undefined }),
 };
 
 /**
@@ -714,7 +764,7 @@ export async function startDaemon(options = {}) {
    * @param {DaemonEvent} event
    */
   const onEvent = (event) => deliverEvent(subscriptions, writeMessage, event, resolveWorkspaceRoot);
-  const manager = taskManagerFactory({ ...taskManagerOptions, onEvent, stateDir, runtimeDir, socketPath });
+  const manager = taskManagerFactory({ ...taskManagerOptions, onEvent, stateDir, runtimeDir, socketPath, resolveWorkspaceRootFn: resolveWorkspaceRoot });
   // The manager is a Record<string, any> by construction (see the TaskManager
   // typedef above). daemon-server.js states the narrow contract it depends on;
   // assert it once here so every hand-off below carries it, instead of casting
@@ -722,7 +772,7 @@ export async function startDaemon(options = {}) {
   const serverManager = /** @type {import("./daemon-server.js").TaskManager} */ (manager);
   const onRequestTimed = makeRequestTimer({ stateDir, env, config: taskManagerOptions.config });
   const startupSourceSignature = sourceSignature(sourceDir);
-  const syncActivity = () => syncActivitySubscriptions(serverManager, subscriptions);
+  const syncActivity = () => syncActivitySubscriptions(serverManager, subscriptions, resolveWorkspaceRoot);
   /** @type {RestartState} */
   const restart = { pending: false, restarting: false };
   /** @type {MaybeRestartRef} */

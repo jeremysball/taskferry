@@ -3,6 +3,7 @@ import os from "node:os";
 import { fileURLToPath } from "node:url";
 import { UsageError } from "./args.js";
 import { errCode } from "./errors.js";
+import { MAX_BUFFER_BYTES } from "./daemon-server.js";
 import { PROTOCOL_VERSION } from "./protocol.js";
 import {
   contextForHook,
@@ -253,9 +254,23 @@ function warnIfCleanupFailed(label, result) {
  * @param {ResolvedDeps} deps
  */
 async function runAccept(options, { client }) {
-  const accepted = /** @type {{applied?: boolean, checkStatus?: string|null, cleanupFailed?: boolean, taskId: string}} */ (
+  const accepted = /** @type {{applied?: boolean, checkStatus?: string|null, cleanupFailed?: boolean, taskId: string, reason?: string|null}} */ (
     await client.request("task.accept", { taskId: options.taskId, ...(options.force === true && { force: true }) })
   );
+  // taskferry#414: the RPC succeeded but the patch did not land -- `git apply
+  // --3way` failed and the daemon only reports that via `applied: false` plus
+  // a `reason` string. Trusting the (previously zero) exit code made callers
+  // treat a failed apply as success, so surface it as a hard error instead.
+  // The reason text is indented (never prefixed with "error:"/"help:") so
+  // output.js's error/help line parsing keeps this error's own headline.
+  if (accepted.applied === false) {
+    const reason = (accepted.reason || "the target directory rejected the patch").trim();
+    const reasonBlock = reason.split("\n").map((line, index) => (index === 0 ? `  reason: ${line}` : `  ${line}`)).join("\n");
+    throw new Error(
+      `error: changeset for task ${accepted.taskId} failed to apply\n${reasonBlock}\n` +
+      `help: the task is still pending -- resolve the reported conflict in the target directory, then retry "taskferry accept ${accepted.taskId}", or discard the changeset with "taskferry reject ${accepted.taskId}"`
+    );
+  }
   // Review finding #11: a failed cleanup must not be swallowed -- without
   // this, the leftover overlay is invisible until the daemon-restart sweep.
   warnIfCleanupFailed("changeset applied", accepted);
@@ -274,6 +289,25 @@ async function runReject(options, { client }) {
   const rejected = /** @type {{cleanupFailed?: boolean, taskId: string}} */ (await client.request("task.reject", { taskId: options.taskId }));
   warnIfCleanupFailed("changeset rejected", rejected);
   return rejected;
+}
+
+/**
+ * Lists a task's scratch output directory (or reads one file in it). Every
+ * dispatch has a per-task writable scratch dir at <stateDir>/outputs/<id>,
+ * rw-bound into the sandbox at the same path and exposed as
+ * $TASKFERRY_OUTPUT_DIR; this is the surface for deliverables that survive a
+ * worker whose final assistant message ended on a tool call. taskferry#423.
+ * @param {{taskId: string, path?: string}} options
+ * @param {{client: Client}} deps
+ * @returns {Promise<{taskId: string, outputDir: string|null, files: Array<{path: string, size: number}>, bytes: number, total: number, truncated: boolean, file?: {content: string|null, size: number, truncated: boolean, error?: string}}>}
+ */
+/**
+ * Lists a task's scratch output directory (or reads one file in it). taskferry#423.
+ * @param {Record<string, unknown>} options
+ * @param {ResolvedDeps} deps
+ */
+async function runOutput(options, { client }) {
+  return /** @type {unknown} */ (await client.request("task.output", { taskId: options.taskId, ...(typeof options.path === "string" && options.path.length > 0 ? { path: options.path } : {}) }));
 }
 
 // `wait --summarize` keeps the client open (cli.js's top-level finally owns the
@@ -515,11 +549,35 @@ async function runResult(options, { client }) {
   // so the local-narrowing step mirrors the server-side contract regardless
   // of which branch was taken above.
   const fields = options.diff ? ["diff"] : options.fields;
-  const detail = /** @type {import("./output.js").ResultDetailBase} */ (await client.request("task.result", {
-    taskId: options.taskId,
-    ...(fields && { fields }),
-    ...(options.full && !options.diff && { full: true }),
-  }));
+  let detail;
+  try {
+    detail = /** @type {import("./output.js").ResultDetailBase} */ (await client.request("task.result", {
+      taskId: options.taskId,
+      ...(fields && { fields }),
+      ...(options.full && !options.diff && { full: true }),
+    }));
+  } catch (error) {
+    // taskferry#414: when the requested fields include the diff, that diff
+    // covers the whole target directory against its pre-dispatch HEAD --
+    // unrelated uncommitted changes in the directory count toward the
+    // daemon's response cap, not just the task's own edits. Rewrite the
+    // daemon's opaque size error into one that names the cause and the way
+    // out, but only attribute it to the diff when the diff was actually
+    // requested -- a plain `--fields message` or `--full` overflow on
+    // narration alone has nothing to do with the target directory's tree.
+    if (errCode(error) === "RESPONSE_TOO_LARGE") {
+      const diffRequested = !fields || fields.includes("diff");
+      const capMiB = MAX_BUFFER_BYTES / (1024 * 1024);
+      const help = diffRequested
+        ? `help: the payload includes the task's diff, which covers the whole target directory against its pre-dispatch HEAD -- unrelated uncommitted changes in that directory count toward the cap, not just the task's own edits. Commit or shelve the unrelated working-tree changes and retry, or fetch a narrower set of fields instead (e.g. "taskferry result ${options.taskId} --fields message,tokens")`
+        : `help: fetch a narrower set of fields instead (e.g. "taskferry result ${options.taskId} --fields message,tokens")`;
+      throw new Error(
+        `error: the result payload for task ${options.taskId} exceeds the daemon's response size cap (${capMiB} MiB)\n${help}`,
+        { cause: error }
+      );
+    }
+    throw error;
+  }
   return leanResult(detail, /** @type {{full?: boolean, fields?: string[]}} */ ({ full: options.full, fields }));
 }
 
@@ -728,6 +786,7 @@ const HANDLERS = {
   cancel: /** @type {(options: Record<string, unknown>, deps: ResolvedDeps) => unknown} */ (runCancel),
   accept: /** @type {(options: Record<string, unknown>, deps: ResolvedDeps) => unknown} */ (runAccept),
   reject: /** @type {(options: Record<string, unknown>, deps: ResolvedDeps) => unknown} */ (runReject),
+  output: /** @type {(options: Record<string, unknown>, deps: ResolvedDeps) => unknown} */ (runOutput),
   wait: /** @type {(options: Record<string, unknown>, deps: ResolvedDeps) => unknown} */ (runWait),
   advisor: /** @type {(options: Record<string, unknown>, deps: ResolvedDeps) => unknown} */ (runAdvisor),
   status: /** @type {(options: Record<string, unknown>, deps: ResolvedDeps) => unknown} */ (runStatus),

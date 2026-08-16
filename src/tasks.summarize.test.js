@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { createTaskManager } from "./tasks.js";
-import { trackManager, makeManager, fakeChild, baseTask, INVESTIGATED_TEXT, SOURCE_LOG, LUNA_MODEL, MINIMAX_MODEL, UNUSED_TMP, READING_CONFIG, CONTINUE_FLAG, SRCA_LOG, SRCB_LOG, DID_A, DID_B, mkdtempTracked } from "./tasks.test-helpers.js";
+import { trackManager, makeManager, fakeChild, baseTask, INVESTIGATED_TEXT, SOURCE_LOG, LUNA_MODEL, MINIMAX_MODEL, READING_CONFIG, CONTINUE_FLAG, SRCA_LOG, SRCB_LOG, DID_A, DID_B, mkdtempTracked, makeFakeExecutor } from "./tasks.test-helpers.js";
 
 describe("summarize(): spawn shape, attachment, and snapshot content", () => {
   test("uses --pure and a private attachment", async () => {
@@ -140,23 +140,14 @@ describe("summarize(): listModelsFn source-of-truth and oversized-log snapshot",
     // configured dispatch-default executor.
     const stateDir = mkdtempTracked("axi-tasks-test-");
     let piListModelsCalled = false;
-    const fakePi = {
-      id: "pi",
-      taskIdPrefix: "pi",
-      errorBucketPrefix: "pi",
-      defaultSummaryModel: MINIMAX_MODEL,
-      binaryName: "pi",
+    const fakePi = makeFakeExecutor({
       listModelsFn: async () => {
         piListModelsCalled = true;
         // Whatever pi returns here is irrelevant: summaries always run
         // through opencode, so this list must NOT be used for the check.
         return MINIMAX_MODEL + "\n";
       },
-      buildSpawnArgs: () => [],
-      buildSummaryPrompt: () => "",
-      normalizeLogEvent: (parsed) => parsed,
-      sandboxAuthFile: () => ({ extraRoBinds: [], sandboxedDataHome: UNUSED_TMP, sandboxEnv: {} }),
-    };
+    });
     const mgr = trackManager(createTaskManager({
       stateDir,
       sandboxEnabled: false,
@@ -189,18 +180,7 @@ describe("summarize(): listModelsFn source-of-truth and oversized-log snapshot",
     // when no override is given) is opencode's, not pi's.
     const stateDir = mkdtempTracked("axi-tasks-test-");
     let injectedCalled = false;
-    const fakePi = {
-      id: "pi",
-      taskIdPrefix: "pi",
-      errorBucketPrefix: "pi",
-      defaultSummaryModel: MINIMAX_MODEL,
-      binaryName: "pi",
-      listModelsFn: async () => MINIMAX_MODEL + "\n",
-      buildSpawnArgs: () => [],
-      buildSummaryPrompt: () => "",
-      normalizeLogEvent: (parsed) => parsed,
-      sandboxAuthFile: () => ({ extraRoBinds: [], sandboxedDataHome: UNUSED_TMP, sandboxEnv: {} }),
-    };
+    const fakePi = makeFakeExecutor({ listModelsFn: async () => MINIMAX_MODEL + "\n" });
     const mgr = trackManager(createTaskManager({
       stateDir,
       sandboxEnabled: false,

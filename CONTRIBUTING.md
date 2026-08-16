@@ -97,6 +97,37 @@ asked to restructure.
   yet, that's why — a maintainer needs to approve the run, not something
   wrong with your PR.
 
+## Agentic PRs are welcome
+
+PRs authored or driven by an AI coding agent (Claude Code, Codex, Devin,
+Cursor, OpenHands, or your own script) are evaluated the same as any other
+PR: does the diff fix the linked issue, does `npm run check` pass, does it
+follow the conventions above. No disclosure requirement, no separate
+review lane, no penalty for the PR having an agent in the loop.
+
+That said, this repo's `good first issue` label is written with an
+agent-friendly shape on purpose — every issue names exact files, line
+numbers, and the current behavior versus the expected one, specifically so
+scope isn't something you have to go dig for. That shape is also what
+makes a PR fast to review and merge, agent-authored or not:
+
+- **Match the issue's stated scope exactly.** An issue naming one function
+  in one file is a request to fix that function, not to refactor the
+  surrounding module. Scope creep is the single fastest way to turn a
+  same-day merge into a multi-round review.
+- **Run `npm run check` yourself before opening the PR**, and paste its
+  real output (or a summary of it) in the PR description. A claim that
+  tests pass is worth nothing without the command actually having been
+  run, whether the PR was opened by a person or an agent.
+- **Don't claim verification you didn't do.** If you patched the bug but
+  didn't confirm the original failure mode is actually gone (ran the
+  reproduction, hit the changed code path), say so in the PR instead of
+  asserting it's fixed. A wrong-but-confident claim costs more review time
+  than an honest "I didn't verify X."
+- **One issue, one PR.** Bundling several unrelated `good first issue`
+  fixes into a single PR makes it harder to review and to credit
+  correctly; open one PR per issue.
+
 ## Credit
 
 External contributions are credited by name/handle in the merge commit and

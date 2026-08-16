@@ -103,6 +103,52 @@ test("renders operational daemon errors as TOON on stdout with exit code 1", asy
   assert.equal(capture.output().stderr, "");
 });
 
+test("accept exits 1 and renders the apply failure when the daemon reports applied: false (taskferry#414)", async () => {
+  const capture = capturedIo();
+  const { client } = fakeClient({
+    "task.accept": { taskId: "oc_1", changesetStatus: "pending", applied: false, reason: "error: CLAUDE.md: does not match index" },
+  });
+  const result = await runCli(["accept", "oc_1"], {
+    io: capture.io,
+    connectClient: async () => client,
+  });
+
+  assert.equal(result.exitCode, 1);
+  assert.match(capture.output().value.error, /failed to apply/);
+  assert.match(capture.output().value.error, /CLAUDE.md: does not match index/);
+  assert.match(capture.output().value.help, /still pending/);
+});
+
+test("accept exits 0 when the changeset applied", async () => {
+  const capture = capturedIo();
+  const { client } = fakeClient({
+    "task.accept": { taskId: "oc_1", changesetStatus: "accepted", applied: true, checkStatus: "passed" },
+  });
+  const result = await runCli(["accept", "oc_1"], {
+    io: capture.io,
+    connectClient: async () => client,
+  });
+
+  assert.equal(result.exitCode, 0);
+  assert.equal(capture.output().value.applied, true);
+});
+
+test("result surfaces a clear dirty-tree error instead of the raw size error when the payload exceeds the daemon cap (taskferry#414)", async () => {
+  const capture = capturedIo();
+  const tooLarge = new Error("daemon response for this request exceeds 1048576 bytes\nhelp: Narrow the request");
+  tooLarge.code = "RESPONSE_TOO_LARGE";
+  const { client } = fakeClient({ "task.result": tooLarge });
+  const result = await runCli(["result", "oc_1", "--diff"], {
+    io: capture.io,
+    connectClient: async () => client,
+  });
+
+  assert.equal(result.exitCode, 1);
+  assert.match(capture.output().value.error, /response size cap/);
+  assert.match(capture.output().value.help, /unrelated uncommitted changes/);
+  assert.match(capture.output().value.help, /--fields message,tokens/);
+});
+
 test("dispatch --prompt - reads the prompt from piped stdin, stripping one trailing newline", async () => {
   const capture = capturedIo({ stdin: fakePipedStdin("large prompt content\n") });
   const { client, calls } = fakeClient({
@@ -486,6 +532,27 @@ test("advisor's directory is never passed through resolveWorkspaceRoot even when
   assert.equal(result.exitCode, 0);
   assert.equal(called, false);
   assert.equal(calls[0].params.directory, workspace);
+});
+
+test("list --all requests every workspace (no directory resolution) and renders the daemon's rows (taskferry#342)", async () => {
+  const capture = capturedIo();
+  let resolveCalled = false;
+  const { client, calls } = fakeClient({
+    "task.list": {
+      counts,
+      tasks: [{ id: taskId, model: testModel, status: "done", failureReason: null, startedAt }],
+    },
+  });
+  const result = await runCli(["list", "--all"], {
+    io: capture.io,
+    connectClient: async () => client,
+    resolveWorkspaceRoot: () => { resolveCalled = true; throw new Error(mustNotConnect); },
+  });
+
+  assert.equal(result.exitCode, 0);
+  assert.equal(resolveCalled, false, "--all must not fall back to resolving cwd's workspace root");
+  assert.deepEqual(calls, [{ method: "task.list", params: {} }]);
+  assert.deepEqual(capture.output().value.tasks, [{ id: taskId, status: "done", model: testModel, startedAt }]);
 });
 
 test("watch --all skips resolveWorkspaceRoot (even when injected) and subscribes with {all: true}, not a directory (taskferry#315)", async () => {

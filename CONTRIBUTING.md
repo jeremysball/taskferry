@@ -62,6 +62,16 @@ asked to restructure.
   suite on its own, but it's still ordinary `src/` code subject to the
   normal (non-test) ESLint rules, unlike the test files that import it.
 
+  Adoption is partial, so treat this as the target rather than a description
+  of the whole suite. Eighteen test files import the shared helpers, but
+  `commands.test.js`, `advisor-context.test.js`, `changeset.test.js`,
+  `changeset.integration.test.js`, and `env-file.test.js` still keep local
+  copies of every helper instead of importing them, and `opencode-plugin.test.js`
+  imports only a couple of the shared helpers while still keeping local
+  copies of the rest. Issues #372, #374, and #375 track the remaining work.
+  Import the shared helper in new code; copying a neighbor's local version
+  deepens the duplication those issues describe.
+
 ## Documentation conventions
 
 - **Don't add a file-by-file index of the codebase** (line counts, per-file

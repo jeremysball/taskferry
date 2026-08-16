@@ -126,8 +126,9 @@ allowed dirs) instead of symlinking across the sandbox boundary.
   fix-forward round is resuming from a known failing task — the parent
   task's check-gate failure message echoes the link, so the chain stays
   traceable across rounds instead of looking like an unrelated re-dispatch.
-- Start fresh sessions for each separate implementation task and each reviewer.
-- Resume only the implementer session for a fix to that same task.
+- Resume the session that already did the work for any follow-up on it, and
+  start a fresh session only in the cases listed under "Resume The Session
+  That Did The Work" below.
 - Keep the task brief and directory explicit so the worker operates in the intended
   worktree.
 - Feed every prompt to `--prompt -` over stdin via a heredoc: `taskferry dispatch
@@ -165,6 +166,68 @@ allowed dirs) instead of symlinking across the sandbox boundary.
   flourish; `--require-final-marker` enforces it.
 - Wait for settlement, retrieve the result, handle crashes, and validate the
   worker's deliverables yourself.
+
+## Resume The Session That Did The Work
+
+**Every dispatch that continues work a prior ferry already did resumes that
+ferry's session.** Pass `--session-id`, drop `--model` (a resume inherits the
+prior task's model, executor, and variant), and keep `--directory` on the
+worktree the original ran in -- on the `pi` executor the session lookup is
+keyed by that launch directory:
+
+```sh
+taskferry dispatch --prompt - --directory "<same worktree>" --session-id <sessionId> <<'PROMPT_EOF'
+<the delta only: what changed since that worker's last turn, and what to do now>
+PROMPT_EOF
+```
+
+`taskferry result <id> --fields sessionId` prints the id, and a crashed
+task's `next:` line prints the whole resume command ready to paste.
+
+"Continues work a prior ferry did" is the predicate, and it is broader than a
+fix round:
+
+| The follow-up | Resume |
+|---|---|
+| A fix round on the reviewer's findings | that task's implementer session |
+| A later fix round, or another bug found in the same change | that same implementer session |
+| Finishing a task cut short by a crash, a timeout, or a cancel | the interrupted session |
+| A re-review checking whether the findings were addressed | the reviewer session that wrote those findings |
+| A follow-up question about work a worker already reported on | that worker's session |
+
+A resumed worker still holds the brief, the files it read, and the findings
+it wrote. **Send it the delta, not the briefing** -- "your three findings were
+fixed; the diff is at HEAD; verify only those" -- never the brief, the report
+and the diff over again. Re-briefing a session that already has the context
+pays twice: once for the prompt, and again for the worker re-reading every
+file it had already read.
+
+**Start a fresh session only when one of these holds:**
+
+- **It is different work**, not a continuation of the same change.
+- **It is the first review of a change.** A reviewer must not be the session
+  that wrote the code, and must not inherit an earlier review's frame. This
+  covers the first review only -- a *re*-review of that same reviewer's own
+  findings is a continuation, and resumes.
+- **There is nothing to resume.** `sessionId` is null, or the session has
+  crashed twice in a row (see `resources/failure-modes.md`).
+- **The executor changes.** Session ids are unique per executor, so a session
+  created under `--executor opencode` can't be resumed under `--executor pi`,
+  or the reverse.
+- **The sandbox mode changes.** Sandboxed and `--no-sandbox` dispatches
+  resolve sessions against different worker data homes: on `opencode` neither
+  can resume the other's session, and on `pi` only a host-created session can
+  be bound into a sandboxed resume, never the reverse.
+
+Wanting a *different model* is not on that list. `--session-id` with an
+explicit `--model` hands the prior transcript to a stronger model, which
+beats starting that model cold.
+
+| Excuse | Reality |
+|---|---|
+| "A re-review is a review, not a fix, so it needs a fresh session" | A re-review of findings that reviewer itself produced continues that reviewer's work. Resume it. |
+| "Fresh sessions for each reviewer" | Every reviewer *assignment* -- the first review of a change. Round 2 is the same assignment, not a new one. |
+| "The fresh prompt reproduces the brief and the findings, so nothing is lost" | The context was rebuilt, not preserved. The worker re-reads every file and re-derives every conclusion it already had, and you pay for both. |
 
 ## The Core Loop
 

@@ -1,0 +1,28 @@
+{
+  "description": "Inject current workspace Taskferry context at session start and before each user turn (Kilo)",
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|clear|compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "if command -v taskferry >/dev/null 2>&1; then if context=\"$(taskferry context --format kilo-hook 2>/dev/null || taskferry context --format toon)\"; then printf '%s\\n' \"$context\" | node -e 'const fs=require(\"node:fs\"); const raw=fs.readFileSync(0,\"utf8\"); let out; try{const j=JSON.parse(raw); out=j.additionalContext||j.hookSpecificOutput?.additionalContext||raw} catch{out=raw} process.stdout.write(JSON.stringify({hookSpecificOutput:{hookEventName:\"SessionStart\",additionalContext:out}}));'; else printf '%s\\n' '{\"hookSpecificOutput\":{\"hookEventName\":\"SessionStart\",\"additionalContext\":\"taskferry context failed. Run taskferry doctor to diagnose.\"}}'; fi; else printf '%s\\n' '{\"hookSpecificOutput\":{\"hookEventName\":\"SessionStart\",\"additionalContext\":\"taskferry is unavailable. Install taskferry and ensure it is on PATH, then restart Kilo Code.\"}}'; fi",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "if command -v taskferry >/dev/null 2>&1; then if context=\"$(taskferry context --format kilo-hook 2>/dev/null || taskferry context --format toon)\"; then printf '%s\\n' \"$context\" | node -e 'const fs=require(\"node:fs\"); const raw=fs.readFileSync(0,\"utf8\"); let out; try{const j=JSON.parse(raw); out=j.additionalContext||j.hookSpecificOutput?.additionalContext||raw} catch{out=raw} process.stdout.write(JSON.stringify({additionalContext:out}));'; else printf '%s\\n' '{\"additionalContext\":\"taskferry context failed. Run taskferry doctor to diagnose.\"}'; fi; else printf '%s\\n' '{\"additionalContext\":\"taskferry is unavailable. Install taskferry and ensure it is on PATH, then restart Kilo Code.\"}'; fi",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -8,10 +8,12 @@ import { errCode } from "./errors.js";
 
 const PLUGIN_ID = "taskferry@taskferry";
 
+const SRC = "src";
 const MANAGED_TARGETS = new Set([
-  path.join("src", "cli.js"),
-  path.join("src", "opencode-plugin.js"),
-  path.join("src", "tf-sl.sh"),
+  path.join(SRC, "cli.js"),
+  path.join(SRC, "opencode-plugin.js"),
+  path.join(SRC, "kilo-plugin.js"),
+  path.join(SRC, "tf-sl.sh"),
 ]);
 
 /**
@@ -63,10 +65,15 @@ function isManagedSymlinkTarget(resolvedExisting, resolvedNewSource) {
   if (existingCheckout !== newCheckout) {
     return false;
   }
-  if (!MANAGED_TARGETS.has(path.join("src", path.basename(resolvedExisting)))) {
-    return path.basename(resolvedExisting) === "taskferry.js"
-      && path.dirname(resolvedExisting).endsWith(path.join("opencode", "plugins"))
-      && isTaskferryCheckout(resolvedExisting);
+  if (!MANAGED_TARGETS.has(path.join(SRC, path.basename(resolvedExisting)))) {
+    // eslint-disable-next-line sonarjs/no-duplicate-string -- three "plugins" paths flagged only after kilo added third
+    const isTaskferryJs = path.basename(resolvedExisting) === "taskferry.js"
+      && (
+        path.dirname(resolvedExisting).endsWith(path.join("opencode", "plugins"))
+        || path.dirname(resolvedExisting).endsWith(path.join("kilo", "plugins"))
+        || path.dirname(resolvedExisting).endsWith(path.join(".config", "kilo", "plugins"))
+      );
+    return isTaskferryJs && isTaskferryCheckout(resolvedExisting);
   }
   return isTaskferryCheckout(resolvedExisting);
 }
@@ -349,10 +356,29 @@ export function registerCodex(checkoutDirectory, runCommand) {
 }
 
 /**
+ * @param {string} _checkoutDirectory
+ * @param {RunCommandFn} runCommand
+ * @param {string} _homeDirectory
+ * @param {NodeJS.ProcessEnv} _env
+ * @returns {{status: "installed"}|{status: "unavailable"}}
+ */
+export function installKilo(_checkoutDirectory, runCommand, _homeDirectory, _env) {
+  const probe = runCommand("kilo", ["plugin", "--help"]);
+  if (!detectExecutable(probe)) return { status: "unavailable" };
+
+  // Kilo's plugin system is npm-based; the file symlink is the primary
+  // integration surface (like OpenCode). Marketplace registration via
+  // `kilo plugin` is handled by the symlink itself, not a marketplace add.
+  // This probe just confirms `kilo` is present so setup can report status.
+  return { status: "installed" };
+}
+
+/**
  * @param {RunSetupOptions} options
  * @returns {{
  *   cli: {path: string, source: string},
  *   opencode: {path: string, source: string},
+ *   kilo: {path: string, source: string},
  *   statusline: {path: string, source: string},
  *   dependencies: string,
  *   path: "available"|"missing",
@@ -360,6 +386,7 @@ export function registerCodex(checkoutDirectory, runCommand) {
  *   integrations: {
  *     claude: ReturnType<typeof installClaude>,
  *     codex: ReturnType<typeof registerCodex>,
+ *     kilo: ReturnType<typeof installKilo>,
  *   },
  *   playwrightMcpIsolation: {
  *     opencode: ReturnType<typeof ensureOpencodePlaywrightIsolation>,
@@ -389,10 +416,18 @@ export function runSetup({
     "taskferry.js",
   );
   const opencodeSource = path.join(checkoutDirectory, "src", "opencode-plugin.js");
+  const kiloPath = path.join(
+    env.XDG_CONFIG_HOME || path.join(homeDirectory, ".config"),
+    "kilo",
+    "plugins",
+    "taskferry.js",
+  );
+  const kiloSource = path.join(checkoutDirectory, "src", "kilo-plugin.js");
   const tfSlPath = path.join(homeDirectory, ".local", "bin", "tf-sl");
   const tfSlSource = path.join(checkoutDirectory, "src", "tf-sl.sh");
   replaceManagedSymlink(binPath, cliPath);
   replaceManagedSymlink(opencodePath, opencodeSource);
+  replaceManagedSymlink(kiloPath, kiloSource);
   replaceManagedSymlink(tfSlPath, tfSlSource);
 
   const binDirectory = path.dirname(binPath);
@@ -407,6 +442,7 @@ export function runSetup({
   return {
     cli: { path: binPath, source: cliPath },
     opencode: { path: opencodePath, source: opencodeSource },
+    kilo: { path: kiloPath, source: kiloSource },
     statusline: { path: tfSlPath, source: tfSlSource },
     dependencies: "installed",
     path: onPath ? "available" : "missing",
@@ -414,6 +450,7 @@ export function runSetup({
     integrations: {
       claude: installClaude(checkoutDirectory, runCommand, homeDirectory, env),
       codex: registerCodex(checkoutDirectory, runCommand),
+      kilo: installKilo(checkoutDirectory, runCommand, homeDirectory, env),
     },
     playwrightMcpIsolation: { opencode: opencodeMCP, claudeCode: claudeCodeMCP },
   };

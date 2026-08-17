@@ -67,8 +67,9 @@ Earlier versions of this tool ran as an MCP server registered with
    runs.
 
 Each agent gets a *native* integration instead of one MCP server shape
-bent to fit all three: [Claude Code](docs/integrations/claude-code.md),
+bent to fit all: [Claude Code](docs/integrations/claude-code.md),
 [OpenCode](docs/integrations/opencode.md),
+[Kilo Code](docs/integrations/kilo.md) (first-class, with live monitoring),
 [Codex](docs/integrations/codex.md).
 
 ## Quickstart
@@ -84,7 +85,7 @@ taskferry --version
 `node src/cli.js setup` is the one-time bootstrap: it runs `npm install`
 in the checkout, symlinks `taskferry` into `~/.local/bin`, and registers
 native integrations for whichever agents it finds on `PATH` (Claude
-Code, OpenCode, Codex). Add the `export PATH` line to your shell rc file
+Code, OpenCode, Kilo Code, Codex). Add the `export PATH` line to your shell rc file
 too, so future shells resolve `taskferry` without re-running it.
 taskferry needs Unix domain sockets, so it runs on Linux and macOS.
 
@@ -190,8 +191,8 @@ is idempotent and never replaces a symlink it cannot prove it created.
 
 ## As a subagent-driven-development worker backend
 
-The bundled `using-taskferry` skill (shipped inside the Claude Code and
-OpenCode plugins, or copyable to `~/.claude/skills/`) makes taskferry the
+The bundled `using-taskferry` skill (shipped inside the Claude Code,
+OpenCode, Kilo Code, and Codex plugins, or copyable to `~/.claude/skills/`) makes taskferry the
 external-worker execution layer for a
 `subagent-driven-development`-style lifecycle: that lifecycle owns task
 briefs, worktrees, and the review loop, while taskferry owns model

@@ -95,8 +95,8 @@ export const commandSpecs = {
   context: {
     usage: "taskferry context [options]",
     description: "Print compact current-workspace context for an agent hook.",
-    options: { "--directory <path>": "workspace to inspect, defaults to the current workspace; also matches tasks dispatched into any git worktree of the same repo", "--format toon|claude-hook|codex-hook": "context format, default toon" },
-    examples: ['taskferry context', 'taskferry context --format claude-hook', 'taskferry context --format codex-hook'],
+    options: { "--directory <path>": "workspace to inspect, defaults to the current workspace; also matches tasks dispatched into any git worktree of the same repo", "--format toon|claude-hook|codex-hook|kilo-hook": "context format, default toon (kilo-hook is alias for claude-hook)" },
+    examples: ['taskferry context', 'taskferry context --format claude-hook', 'taskferry context --format codex-hook', 'taskferry context --format kilo-hook'],
   },
   doctor: {
     usage: "taskferry doctor [--full] [--stats]",
@@ -109,7 +109,7 @@ export const commandSpecs = {
   },
   setup: {
     usage: "taskferry setup",
-    description: "Install dependencies and create the CLI and OpenCode plugin symlinks without contacting the daemon.",
+    description: "Install dependencies and create the CLI, OpenCode, and Kilo Code plugin symlinks without contacting the daemon.",
     options: {},
     examples: ['taskferry setup', 'node src/cli.js setup'],
   },

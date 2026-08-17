@@ -631,5 +631,15 @@ export function contextForHook(context, format) {
   if (format === "claude-hook") {
     return { hookSpecificOutput: { hookEventName: "SessionStart", additionalContext } };
   }
+  if (format === "kilo-hook") {
+    // Kilo's hook envelope mirrors Claude's SessionStart shape but the
+    // UserPromptSubmit path also accepts plain {additionalContext}.
+    // Returning hookSpecificOutput here keeps SessionStart compatible; the
+    // UserPromptSubmit shell hook unwraps whichever shape the daemon returned.
+    return { hookSpecificOutput: { hookEventName: "SessionStart", additionalContext } };
+  }
+  if (format === "codex-hook") {
+    return { additionalContext };
+  }
   return { additionalContext };
 }

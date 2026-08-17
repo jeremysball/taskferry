@@ -315,7 +315,7 @@ function coerceDirList(value, name) {
  * @returns {string}
  */
 function coerceFormat(value, name, command) {
-  const allowed = command === "watch" ? ["toon", "ndjson"] : ["toon", "claude-hook", "codex-hook"];
+  const allowed = command === "watch" ? ["toon", "ndjson"] : ["toon", "claude-hook", "codex-hook", "kilo-hook"];
   if (!allowed.includes(value)) throw new UsageError(`${name} must be one of ${allowed.join(", ")}`, `Use ${name} with one of: ${allowed.join(", ")}`);
   return value;
 }

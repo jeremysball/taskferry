@@ -23,6 +23,8 @@ primitive; a detach mode would be a pollable state-file, deferred).
 ```
 taskferry wait-all [<id>...] [options]
   --directory <path>   workspace to scope when no ids given (default: cwd's git root)
+  --mine               wait for this ferry's own direct children (self-scoped; fails outside a ferry)
+  --parent <id>        wait for tasks whose parentTaskId == <id> (explicit form of --mine)
   --timeout <duration> per-task timeout (ms or 30s/5m/1h, same parse as wait)
   --summarize          periodic live table while waiting
   --interval <duration> redraw interval for --summarize (default 15s)
@@ -50,6 +52,25 @@ Design decisions locked (2026-08-18 brainstorming):
 - Exit code: 0 only if every waited task settled with a terminal success
   shape (`status: done`); any `timedOut`, non-done status, or RPC rejection
   makes the command exit non-zero (caller can still inspect per-task lines).
+- `--mine`/`--parent` and positional ids are mutually exclusive — same
+  parse-time rejection pattern as ids vs `--directory`.
+- `--mine`/`--parent` combine with `--directory` as an intersection filter
+  (children of the parent that also fall in that workspace).
+- `--mine` resolves the caller's identity from the per-task self mount the
+  recursive design specifies (`<runtimeDir>/self/id`); outside a ferry it
+  fails fast with "no task identity available," the same error class as
+  `taskferry self`. v1 accepts the current caller-supplied `parentTaskId`
+  field (the fix/retry tag); after the recursive design's step 2
+  (daemon-derived identity) the same flag becomes authenticated with no CLI
+  change — Decision 9 of that spec covers the field repurposing.
+- `--parent`/`--mine` need a `parentTaskId` filter on `task.list` (small
+  daemon change: optional filter param in `protocol.js` + the list handler
+  in `tasks.js`), because list rows do not currently carry `parentTaskId`.
+- Known v1 limitation: without daemon parking (recursive design step 5), N
+  first-mates each blocking inside `wait-all` hold a scheduler slot, so a
+  full complement of waiting parents can deadlock the queue at
+  `concurrencyLimit`. First-mates must keep their child counts inside the
+  limit until parking lands; `wait-all` then becomes the parking trigger.
 
 ### Output
 
@@ -79,11 +100,38 @@ activity snapshots, no new daemon instrumentation.
   /`--full` flags, mutual-exclusion validation, `DEFAULT_OPTIONS["wait-all"]`
 - `src/commands.js` — `runWaitAll` + `HANDLERS["wait-all"]`; reuses
   `runList` directory logic, `resolveWaitDefaultTimeoutMs`, `leanStatus`
+- `src/protocol.js` + `src/tasks.js` — optional `parentTaskId` filter param
+  on `task.list` (backs `--parent`/`--mine`)
 - `src/cli.js` — `normalizeCommandDirectory`/`usesWorkspaceRoot` updated to
   cover `wait-all`'s directory default
 - `docs/cli-reference.md` — new `wait-all` section
-- Tests: `src/args.test.js`, `src/commands.test.js`, `src/cli.test.js`
+- Tests: `src/args.test.js`, `src/commands.test.js`, `src/cli.test.js`,
+  `src/daemon.test.js` (list-filter cases)
   (pattern-follow existing `wait`/`list` tests)
+
+### Fit with recursive orchestration
+
+The parent-scoped mode is what makes `wait-all` the first-mate's step-4
+primitive in `2026-08-11-recursive-ferry-orchestration-design.md` ("wait/watch
+as appropriate" in the recursive control loop). Directory scope alone is too
+coarse: a child is launched at the same absolute `directory` as its parent
+(that spec's stacked-lower-layer mount strategy), so `task.list --directory`
+returns every task in the repo's workspace, not just the first-mate's
+children. `--mine` filters `parentTaskId == self` instead.
+
+`wait-all` is a client fan-out of the existing `task.wait` RPC — one ferry
+type, no daemon task class, consistent with the recursive spec's "one ferry
+type" principle. It deliberately does not accept changesets: promotion stays
+parent-explicit via `taskferry accept <childId>` per that spec's "Child
+accept authority" decision.
+
+Two recursive-spec prerequisites gate `--mine`, not the rest of `wait-all`:
+the sibling-overlay-exposure and read-only-socket-guard defects (steps 0 of
+that spec) must land before the `<runtimeDir>/self/id` mount can be trusted;
+until then `--mine` is an advisory filter over the caller-supplied
+`parentTaskId` field, not an enforced isolation boundary. Parking (step 5)
+is the prerequisite for using `wait-all` from inside ferries at scale, per
+the deadlock limitation above.
 
 Future (not in v1): `src/activity.js` heartbeat integration for `--summarize`
 table, and the CLAUDE.md addendum follow-up replacing the bash loop with
@@ -108,5 +156,7 @@ deferred — if introduced, follow taskferry's `waitDefaultTimeoutMs` pattern.
   on this host to justify it — foreground block covers v1)
 - Extending `wait` itself to variadic ids (rejected — would break single-id
   contract)
-- New daemon RPC (reuse existing `task.list` + `task.wait`)
+- New daemon RPC for waiting (reuse existing `task.list` + `task.wait`;
+  the only daemon change is the optional `parentTaskId` filter on
+  `task.list`, not a new method)
 - Config/env triplet for `--interval` (defer until need is proven)

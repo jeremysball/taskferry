@@ -132,6 +132,44 @@ describe("bwrap sandboxing: --rw-bind and --ro-bind -- binding and conflict reso
     }
   });
 
+  test("--ro-bind targeting a sandboxDenylist entry still binds read-only, but warns loudly that it overrides the deny-list", () => {
+    const denied = roTarget();
+    const originalWrite = process.stderr.write;
+    let warned = "";
+    process.stderr.write = (chunk) => { warned += chunk; return true; };
+    try {
+      const mgr = makeManager({ ...baseManagerOpts, sandboxDenylist: [denied], roBind: [denied] });
+      mgr.dispatch({ prompt: "hello", directory: launchDir() });
+      const roPairs = pairsFor(captured.args, "--ro-bind");
+      assert.ok(roPairs.some(([src]) => src === denied), `deny-listed path not bound read-only: ${JSON.stringify(roPairs)}`);
+      assert.match(warned, /overrides the sandbox deny-list/);
+      assert.match(warned, /bound read-only anyway/);
+      assert.match(warned, new RegExp(denied.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+    } finally {
+      process.stderr.write = originalWrite;
+    }
+  });
+
+  test("a deny-listed path in both rw and ro sets binds read-write with the rw override warning, not the ro one", () => {
+    const denied = roTarget();
+    const originalWrite = process.stderr.write;
+    let warned = "";
+    process.stderr.write = (chunk) => { warned += chunk; return true; };
+    try {
+      const mgr = makeManager({ ...baseManagerOpts, sandboxDenylist: [denied], rwBind: [denied], roBind: [denied] });
+      mgr.dispatch({ prompt: "hello", directory: launchDir() });
+      const bindPairs = pairsFor(captured.args, "--bind");
+      const roPairs = pairsFor(captured.args, "--ro-bind");
+      assert.ok(bindPairs.some(([src]) => src === denied), `rw-wins path not bound rw: ${JSON.stringify(bindPairs)}`);
+      assert.ok(!roPairs.some(([src]) => src === denied), `rw-wins path must not stay ro: ${JSON.stringify(roPairs)}`);
+      assert.match(warned, /read-write wins/);
+      assert.match(warned, /overrides the sandbox deny-list/);
+      assert.ok(!warned.match(/bound read-only anyway/), `ro override warning must be suppressed when rw wins: ${warned}`);
+    } finally {
+      process.stderr.write = originalWrite;
+    }
+  });
+
   test("a path listed read-only via both --ro-bind and a project's read_only_paths warns exactly once when it also collides with --rw-bind", () => {
     const conflict = roTarget();
     const directory = launchDir();
@@ -179,11 +217,36 @@ describe("bwrap sandboxing: --rw-bind and --ro-bind -- validation and deprecated
     let warned = "";
     process.stderr.write = (chunk) => { warned += chunk; return true; };
     try {
-      const mgr = makeManager({ ...baseManagerOpts, roBind: [os.homedir()] });
-      mgr.dispatch({ prompt: "hello", directory: launchDir() });
+      const mgr = makeManager({ ...baseManagerOpts });
+      const protectedPath = path.join(mgr.paths.STATE_DIR, "prompts");
+      mgr.dispatch({ prompt: "hello", directory: launchDir(), roBind: [protectedPath] });
       const roPairs = pairsFor(captured.args, "--ro-bind");
-      assert.ok(!roPairs.some(([src]) => src === os.homedir()), `protected path bound ro: ${JSON.stringify(roPairs)}`);
+      assert.ok(!roPairs.some(([src]) => src === protectedPath), `protected path bound ro: ${JSON.stringify(roPairs)}`);
       assert.match(warned, /overlaps a protected sandbox mount, skipped/);
+    } finally {
+      process.stderr.write = originalWrite;
+    }
+  });
+
+  test("--ro-bind skips stateDir/runtimeDir/launchDirectory even when they also overlap the deny-list, with no override warning", () => {
+    const originalWrite = process.stderr.write;
+    let warned = "";
+    process.stderr.write = (chunk) => { warned += chunk; return true; };
+    try {
+      const mgr = makeManager({ ...baseManagerOpts });
+      const directory = launchDir();
+      // stateDir is in the default deny-list AND the structural protected
+      // set; runtimeDir (stateDir/run) is a deny-list descendant. The
+      // structural check must win for all three -- dropped, never overridden.
+      const runtimeDir = path.join(mgr.paths.STATE_DIR, "run");
+      fs.mkdirSync(runtimeDir, { recursive: true });
+      mgr.dispatch({ prompt: "hello", roBind: [mgr.paths.STATE_DIR, runtimeDir, directory], directory });
+      const roPairs = pairsFor(captured.args, "--ro-bind");
+      for (const protectedPath of [mgr.paths.STATE_DIR, runtimeDir, directory]) {
+        assert.ok(!roPairs.some(([src]) => src === protectedPath), `protected path bound ro: ${protectedPath} in ${JSON.stringify(roPairs)}`);
+      }
+      assert.match(warned, /overlaps a protected sandbox mount, skipped/);
+      assert.ok(!warned.match(/overrides the sandbox deny-list/), `structural paths must not get the deny-list override warning: ${warned}`);
     } finally {
       process.stderr.write = originalWrite;
     }

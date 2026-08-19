@@ -1012,27 +1012,61 @@ function applyProjectConfigReadOnlyBinds({ launchDirectory, denyList, stateDir, 
 }
 
 /**
+ * True when `p` equals a deny-list entry, is an ancestor of one, or is a
+ * descendant of one -- the same mount-order overlap shape
+ * `resolveReadOnlyProjectBinds` uses for protected mounts, applied to the
+ * deny-list alone. Shared by the rw and ro user-bind resolvers so both warn
+ * on exactly the same overlap set.
+ * @param {string} p
+ * @param {string[]} denyList
+ * @returns {boolean}
+ */
+function overlapsDenyList(p, denyList) {
+  /** @param {string} base */
+  const childPrefix = (base) => (base === path.sep ? base : base + path.sep);
+  return denyList.some((deny) => p === deny || p.startsWith(childPrefix(deny)) || deny.startsWith(childPrefix(p)));
+}
+
+/**
  * Resolves the user-supplied `--ro-bind` set (a union of the manager-level
- * default and per-dispatch entries) against the same protected sandbox mount
- * set the `.taskferry.toml` read_only_paths resolver uses: a path that does
- * not exist on the host, or that overlaps a protected mount (deny-list,
- * stateDir, runtimeDir, launchDirectory), is skipped with a warning rather
- * than failing silently. Returns the resolved absolute paths to bind
- * read-only (as same-path pairs by the caller).
- * @param {{launchDirectory: string, roBind: string[], denyList: string[], stateDir: string, runtimeDir: string, existsFn: (p: string) => boolean}} ctx
+ * default and per-dispatch entries) against the structural protected sandbox
+ * mount set (stateDir, runtimeDir, launchDirectory): a path that does not
+ * exist on the host, or that overlaps one of those, is skipped with a
+ * warning rather than failing silently. A path that overlaps the sandbox
+ * deny-list but NOT a structural mount is still bound read-only -- the
+ * deny-list is the user's own call to override, same as `--rw-bind` -- but
+ * it warns loudly at dispatch time, since re-exposing a deny-listed path
+ * like ~/.ssh (even read-only) deserves more visibility than a docs
+ * footnote. The structural set is checked first, so a path in both sets
+ * (e.g. stateDir, which is also a default deny-list entry) is dropped, not
+ * overridden. Returns the resolved absolute paths to bind read-only (as
+ * same-path pairs by the caller).
+ * @param {{launchDirectory: string, roBind: string[], denyList: string[], stateDir: string, runtimeDir: string, existsFn: (p: string) => boolean, rwResolved?: string[]}} ctx
  * @returns {string[]}
  */
-function resolveUserRoBind({ launchDirectory, roBind, denyList, stateDir, runtimeDir, existsFn }) {
+function resolveUserRoBind({ launchDirectory, roBind, denyList, stateDir, runtimeDir, existsFn, rwResolved = [] }) {
   if (!roBind.length) return [];
   const { roBinds, missing, unsafe } = resolveReadOnlyProjectBinds(roBind, {
-    protectedPaths: [...denyList, stateDir, runtimeDir, launchDirectory],
+    protectedPaths: [stateDir, runtimeDir, launchDirectory],
     existsFn,
   });
   const warnings = [];
   if (missing.length) warnings.push(`not found on this host, skipped: ${missing.join(", ")}`);
   if (unsafe.length) warnings.push(`overlaps a protected sandbox mount, skipped: ${unsafe.join(", ")}`);
   if (warnings.length) process.stderr.write(`warning: --ro-bind ${warnings.join("; ")}\n`);
-  return roBinds.map(([src]) => src);
+  const resolved = roBinds.map(([src]) => src);
+  // --ro-bind is allowed to re-expose a deny-listed path (e.g. ~/.ssh) as
+  // read-only -- that's the user's call to make, per policy -- but a silent
+  // override of the sandbox's own deny-list deserves a loud warning at the
+  // moment it happens, not just a docs footnote. Paths that are also bound
+  // read-write are excluded: the rw resolver already warned about the
+  // override, and "bound read-only anyway" would be a lie for them.
+  const rwSet = new Set(rwResolved);
+  const denyOverridden = resolved.filter((p) => !rwSet.has(p) && overlapsDenyList(p, denyList));
+  if (denyOverridden.length) {
+    process.stderr.write(`warning: --ro-bind overrides the sandbox deny-list for: ${denyOverridden.join(", ")} (bound read-only anyway; this was your explicit choice)\n`);
+  }
+  return resolved;
 }
 
 /**
@@ -1059,10 +1093,6 @@ function resolveUserRwRoBind(ctx) {
   const rwBind = [...ctx.rwBind, ...(perDispatch.allowedDirs || [])];
   const rwResolved = [];
   const denyOverridden = [];
-  /** @param {string} base */
-  const childPrefix = (base) => (base === path.sep ? base : base + path.sep);
-  /** @param {string} p */
-  const overlapsDenyList = (p) => ctx.denyList.some((deny) => p === deny || p.startsWith(childPrefix(deny)) || deny.startsWith(childPrefix(p)));
   for (const dir of rwBind) {
     const resolved = path.isAbsolute(dir) ? dir : path.resolve(ctx.launchDirectory, dir);
     if (!ctx.existsFn(resolved)) continue;
@@ -1071,19 +1101,20 @@ function resolveUserRwRoBind(ctx) {
     // read-write -- that's the user's call to make, per policy -- but a
     // silent override of the sandbox's own deny-list deserves a loud warning
     // at the moment it happens, not just a docs footnote.
-    if (overlapsDenyList(resolved)) denyOverridden.push(resolved);
+    if (overlapsDenyList(resolved, ctx.denyList)) denyOverridden.push(resolved);
   }
   if (denyOverridden.length) {
     process.stderr.write(`warning: --rw-bind overrides the sandbox deny-list for: ${denyOverridden.join(", ")} (bound read-write anyway; this was your explicit choice)\n`);
   }
   const roBind = [...ctx.roBind, ...(perDispatch.roBind || [])];
   const roResolved = resolveUserRoBind({
-    roBind,
     launchDirectory: ctx.launchDirectory,
     denyList: ctx.denyList,
     stateDir: ctx.stateDir,
     runtimeDir: ctx.runtimeDir,
     existsFn: ctx.existsFn,
+    roBind,
+    rwResolved,
   });
   // Any rw/ro conflict -- including one where the same path also shows up in
   // `.taskferry.toml`'s read_only_paths/roBind -- is resolved and warned

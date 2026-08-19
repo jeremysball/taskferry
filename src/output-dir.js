@@ -14,6 +14,9 @@ const PROMPT_BLOCK_SEPARATOR = "\n\n";
 const MAX_OUTPUT_FILE_BYTES = 512 * 1024;
 const MAX_OUTPUT_LIST_ENTRIES = 256;
 const MAX_OUTPUT_TOTAL_BYTES = 8 * 1024 * 1024;
+const DIRECTORY_OPEN_FLAGS = fs.constants.O_RDONLY
+  | (fs.constants.O_DIRECTORY ?? 0)
+  | (fs.constants.O_NOFOLLOW ?? 0);
 
 /**
  * @param {string} stateDir
@@ -43,14 +46,37 @@ export function resolveTaskOutputDir(stateDir, taskId) {
 
 /**
  * Creates the task's scratch dir with 0o700 permissions. Idempotent
- * (`recursive: true` + best-effort chmod): re-running for the same taskId
- * should not fail, so the boot-time orphan sweep can pre-create them when
- * it re-discovers them.
+ * (`recursive: true` + chmod on an opened directory fd): re-running for the
+ * same taskId should not fail. Refuses a symlink in the task-dir position so
+ * permission repair cannot be redirected to another directory.
  * @param {string} dir
  */
 export function ensureTaskOutputDir(dir) {
+  let existing;
+  try {
+    existing = fs.lstatSync(dir);
+  } catch (err) {
+    if (errCode(err) !== "ENOENT") throw err;
+  }
+  if (existing?.isSymbolicLink()) throw outputDirSymlinkError(dir);
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-  fs.chmodSync(dir, 0o700);
+  const fd = openDirectoryNoFollow(dir);
+  if (fd === null) {
+    let current;
+    try {
+      current = fs.lstatSync(dir);
+    } catch (err) {
+      if (errCode(err) === "ENOENT") throw new Error(`error: task output directory disappeared while creating it: ${dir}`, { cause: err });
+      throw err;
+    }
+    if (current.isSymbolicLink()) throw outputDirSymlinkError(dir);
+    throw new Error(`error: task output path is not a directory: ${dir}`);
+  }
+  try {
+    fs.fchmodSync(fd, 0o700);
+  } finally {
+    fs.closeSync(fd);
+  }
 }
 
 /**
@@ -81,20 +107,35 @@ export function outputDirPromptBlock(outputDir) {
  * @returns {{files: Array<{path: string, size: number}>, bytes: number, total: number, truncated: boolean}}
  */
 export function listTaskOutputFiles(dir) {
+  const rootFd = openDirectoryNoFollow(dir);
+  if (rootFd === null) return emptyListing();
+  const rootPath = pathForDirectoryFd(rootFd, dir);
+  try {
+    return collectOutputFiles(rootPath);
+  } finally {
+    fs.closeSync(rootFd);
+  }
+}
+
+/**
+ * @param {string} rootPath
+ * @returns {{files: Array<{path: string, size: number}>, bytes: number, total: number, truncated: boolean}}
+ */
+function collectOutputFiles(rootPath) {
   /** @type {Array<{path: string, size: number}>} */
   const files = [];
   let bytes = 0;
   let truncated = false;
-  /** @type {string[]} */
-  const stack = [dir];
+  /** @type {Array<{full: string, relative: string}>} */
+  const stack = [{ full: rootPath, relative: "" }];
   while (stack.length && !truncated) {
     if (shouldStopListing(files.length, bytes)) {
       truncated = true;
     } else {
-      const current = /** @type {string} */ (stack.pop());
-      const entries = readdirSafe(current);
+      const current = /** @type {{full: string, relative: string}} */ (stack.pop());
+      const entries = readdirSafe(current.full);
       entries.some((entry) => {
-        const result = processEntry(entry, current, dir, files.length, bytes);
+        const result = processEntry(entry, current.full, current.relative, files.length, bytes);
         if (result === null) return false;
         if (result === "truncated") {
           truncated = true;
@@ -104,7 +145,7 @@ export function listTaskOutputFiles(dir) {
           files.push({ path: result.rel, size: result.size });
           bytes += result.size;
         } else if (result.kind === "directory") {
-          stack.push(result.full);
+          stack.push({ full: result.full, relative: result.rel });
         } else {
           // "skip" -> no-op (symlinks to nowhere, non-regular entries)
         }
@@ -126,21 +167,21 @@ export function listTaskOutputFiles(dir) {
  *  - `null` for excluded entries (skip-list: node_modules, .git).
  *  - `"truncated"` if the listing caps have been hit (caller should stop).
  *  - `{ kind: "file", rel, size }` for a regular file.
- *  - `{ kind: "directory", full }` for a subdirectory to descend into.
+ *  - `{ kind: "directory", full, rel }` for a subdirectory to descend into.
  *  - `{ kind: "skip" }` for anything else (symlinks to nowhere, etc.).
  *
  * @param {import("node:fs").Dirent} entry
  * @param {string} current
- * @param {string} dir
+ * @param {string} currentRelative
  * @param {number} fileCount
  * @param {number} byteCount
- * @returns {null | "truncated" | {kind: "file", rel: string, size: number} | {kind: "directory", full: string} | {kind: "skip"}}
+ * @returns {null | "truncated" | {kind: "file", rel: string, size: number} | {kind: "directory", full: string, rel: string} | {kind: "skip"}}
  */
-function processEntry(entry, current, dir, fileCount, byteCount) {
+function processEntry(entry, current, currentRelative, fileCount, byteCount) {
   if (excludedEntry(entry.name)) return null;
   if (shouldStopListing(fileCount, byteCount)) return "truncated";
   const full = path.join(current, entry.name);
-  const rel = path.relative(dir, full);
+  const rel = path.join(currentRelative, entry.name);
   const classified = classifyEntry(entry, full);
   if (classified.kind === "file") {
     // Checked here (with this entry's own size), not just via the
@@ -151,7 +192,7 @@ function processEntry(entry, current, dir, fileCount, byteCount) {
     return { rel, size: classified.size, kind: "file" };
   }
   if (classified.kind === "directory") {
-    return { kind: "directory", full };
+    return { kind: "directory", full, rel };
   }
   return { kind: "skip" };
 }
@@ -169,6 +210,68 @@ function readdirSafe(dir) {
     if (errCode(err) === "ENOENT") return [];
     throw err;
   }
+}
+
+/**
+ * Opens a real directory without following a symlink in the final path
+ * component. Keeping the descriptor open also lets callers traverse the root
+ * through the descriptor rather than resolving the root path again.
+ * @param {string} dir
+ * @returns {number|null}
+ */
+function openDirectoryNoFollow(dir) {
+  let stat;
+  try {
+    stat = fs.lstatSync(dir);
+  } catch (err) {
+    if (errCode(err) === "ENOENT") return null;
+    throw err;
+  }
+  if (!stat.isDirectory()) return null;
+  try {
+    return fs.openSync(dir, DIRECTORY_OPEN_FLAGS);
+  } catch (err) {
+    if (errCode(err) === "ENOENT" || errCode(err) === "ENOTDIR" || errCode(err) === "ELOOP") return null;
+    throw err;
+  }
+}
+
+/** @param {number} fd @returns {string|null} */
+function descriptorPath(fd) {
+  if (process.platform === "linux") return `/proc/self/fd/${fd}`;
+  if (process.platform === "darwin") return `/dev/fd/${fd}`;
+  return null;
+}
+
+/** @param {number} fd @param {string} fallback */
+function pathForDirectoryFd(fd, fallback) {
+  return descriptorPath(fd) ?? fallback;
+}
+
+/** @param {number} fd @param {string} fallback */
+function realpathForFd(fd, fallback) {
+  return fs.realpathSync(descriptorPath(fd) ?? fallback);
+}
+
+/** @returns {{files: Array<{path: string, size: number}>, bytes: number, total: number, truncated: boolean}} */
+function emptyListing() {
+  return { files: [], bytes: 0, total: 0, truncated: false };
+}
+
+/** @param {string} dir @param {string} target */
+function isInsideDirectory(dir, target) {
+  const dirWithSep = dir.endsWith(path.sep) ? dir : dir + path.sep;
+  return target === dir || target.startsWith(dirWithSep);
+}
+
+/** @param {string} dir */
+function outputDirSymlinkError(dir) {
+  return new Error(`error: task output directory is a symlink: ${dir}\nhelp: remove the symlink before retrying`);
+}
+
+/** @param {string} relativePath */
+function outputPathEscapeError(relativePath) {
+  return new Error(`error: --path "${relativePath}" escapes the task's output directory\nhelp: pass a relative path like "deliverable.txt" or "subdir/notes.md"`);
 }
 
 /** @param {string} name */
@@ -221,7 +324,7 @@ export function resolveInsideDir(baseDir, relativePath) {
   const resolved = path.resolve(baseDir, relativePath);
   const baseWithSep = baseDir.endsWith(path.sep) ? baseDir : baseDir + path.sep;
   if (resolved !== baseDir && !resolved.startsWith(baseWithSep)) {
-    throw new Error(`error: --path "${relativePath}" escapes the task's output directory\nhelp: pass a relative path like "deliverable.txt" or "subdir/notes.md"`);
+    throw outputPathEscapeError(relativePath);
   }
   return resolved;
 }
@@ -240,28 +343,34 @@ export function resolveInsideDir(baseDir, relativePath) {
  */
 export function readTaskOutputFile(dir, relativePath) {
   const target = resolveInsideDir(dir, relativePath);
-  /** @type {fs.Stats} */
-  let stat;
+  const dirFd = openDirectoryNoFollow(dir);
+  if (dirFd === null) return { content: null, size: 0, truncated: false, error: "not_found" };
+  let fd;
   try {
-    stat = fs.statSync(target);
-  } catch (err) {
-    if (errCode(err) === "ENOENT") return { content: null, size: 0, truncated: false, error: "not_found" };
-    throw err;
+    try {
+      fd = fs.openSync(target, "r");
+    } catch (err) {
+      if (errCode(err) === "ENOENT") return { content: null, size: 0, truncated: false, error: "not_found" };
+      throw err;
+    }
+    try {
+      const stat = fs.fstatSync(fd);
+      if (!stat.isFile()) return { content: null, size: stat.size, truncated: false, error: "not_a_file" };
+      // The descriptor is opened before this check. Its real path remains
+      // pinned even if the worker replaces the path string with a symlink
+      // before the read below.
+      const realTarget = realpathForFd(fd, target);
+      const realDir = realpathForFd(dirFd, dir);
+      if (!isInsideDirectory(realDir, realTarget)) {
+        throw outputPathEscapeError(relativePath);
+      }
+      if (stat.size > MAX_OUTPUT_FILE_BYTES) return { content: null, size: stat.size, truncated: true, error: "too_large" };
+      const buffer = fs.readFileSync(fd);
+      return { content: buffer.toString("utf8"), size: stat.size, truncated: false };
+    } finally {
+      fs.closeSync(fd);
+    }
+  } finally {
+    fs.closeSync(dirFd);
   }
-  if (!stat.isFile()) return { content: null, size: stat.size, truncated: false, error: "not_a_file" };
-  // resolveInsideDir only rejects lexical escape (`..`, an absolute path);
-  // it does not stop a symlink planted inside dir from pointing outside
-  // it, since path.resolve() doesn't dereference the final symlink. Now
-  // that the target is known to exist, check its *real* path against the
-  // real path of dir so a worker-planted symlink can't leak arbitrary
-  // host files (/etc/passwd, /proc/self/environ) through this RPC.
-  const realTarget = fs.realpathSync(target);
-  const realDir = fs.realpathSync(dir);
-  const realDirWithSep = realDir.endsWith(path.sep) ? realDir : realDir + path.sep;
-  if (realTarget !== realDir && !realTarget.startsWith(realDirWithSep)) {
-    throw new Error(`error: --path "${relativePath}" escapes the task's output directory\nhelp: pass a relative path like "deliverable.txt" or "subdir/notes.md"`);
-  }
-  if (stat.size > MAX_OUTPUT_FILE_BYTES) return { content: null, size: stat.size, truncated: true, error: "too_large" };
-  const buffer = fs.readFileSync(target);
-  return { content: buffer.toString("utf8"), size: stat.size, truncated: false };
 }

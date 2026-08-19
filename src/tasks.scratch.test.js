@@ -21,6 +21,7 @@ const TEST_PROMPT = "hi";
 const TEST_DIRECTORY = "/tmp";
 const DELIVERABLE_NAME = "deliverable.txt";
 const DELIVERABLE_CONTENT = "the answer";
+const OUTSIDE_FILE_CONTENT = "should not be listed";
 
 const captureSpawn = (overrides = {}) => {
   let captured = null;
@@ -61,6 +62,19 @@ describe("scratch output dir (taskferry#423)", () => {
     const stat = fs.statSync(out);
     assert.ok(stat.isDirectory());
     assert.equal(stat.mode & 0o777, 0o700);
+  });
+
+  test("ensureTaskOutputDir refuses a symlink in the task-dir position", () => {
+    const parent = mkdtempTracked(AXI_TASKS_TEST_DIR + "-ensure-symlink-");
+    const outside = mkdtempTracked(AXI_TASKS_TEST_DIR + "-ensure-target-");
+    const out = path.join(parent, "task");
+    // eslint-disable-next-line sonarjs/file-permissions -- a non-700 target proves chmod did not follow the symlink
+    fs.chmodSync(outside, 0o755);
+    fs.symlinkSync(outside, out);
+
+    assert.throws(() => ensureTaskOutputDir(out), /symlink/i);
+    assert.equal(fs.lstatSync(out).isSymbolicLink(), true);
+    assert.equal(fs.statSync(outside).mode & 0o777, 0o755, "the symlink target must not be chmod-ed");
   });
 
   test("dispatch creates the per-task outputDir on disk before launch", () => {
@@ -294,7 +308,7 @@ describe("scratch output dir retrieval (taskferry#423)", () => {
   test("listTaskOutputFiles does not descend into a symlinked directory (PR #474 review)", () => {
     const dir = mkdtempTracked(AXI_TASKS_TEST_DIR + "-symlink-list-");
     const outside = mkdtempTracked(AXI_TASKS_TEST_DIR + "-symlink-list-target-");
-    fs.writeFileSync(path.join(outside, "outside.txt"), "should not be listed");
+    fs.writeFileSync(path.join(outside, "outside.txt"), OUTSIDE_FILE_CONTENT);
     fs.symlinkSync(outside, path.join(dir, "linked-dir"));
     fs.writeFileSync(path.join(dir, "keep.txt"), "k");
     const result = listTaskOutputFiles(dir);
@@ -317,5 +331,47 @@ describe("scratch output dir retrieval (taskferry#423)", () => {
     assert.equal(result.files.length, 0, "the oversized entry must not be admitted whole");
     assert.equal(result.truncated, true);
     assert.equal(result.bytes, 0);
+  });
+});
+
+describe("scratch output dir security regressions", () => {
+  test("readTaskOutputFile does not follow a symlink swapped immediately before the read", () => {
+    const dir = mkdtempTracked(AXI_TASKS_TEST_DIR + "-toctou-read-");
+    const outside = mkdtempTracked(AXI_TASKS_TEST_DIR + "-toctou-target-");
+    const target = path.join(dir, DELIVERABLE_NAME);
+    const secret = path.join(outside, "secret.txt");
+    fs.writeFileSync(target, "safe content");
+    fs.writeFileSync(secret, "outside secret");
+
+    const originalReadFileSync = fs.readFileSync;
+    let readArgument;
+    fs.readFileSync = (...args) => {
+      [readArgument] = args;
+      fs.unlinkSync(target);
+      fs.symlinkSync(secret, target);
+      return originalReadFileSync(...args);
+    };
+    try {
+      const result = readTaskOutputFile(dir, DELIVERABLE_NAME);
+      assert.equal(typeof readArgument, "number", "the read must use the opened file descriptor");
+      assert.equal(result.content, "safe content", "a post-check symlink swap must not redirect the read");
+    } finally {
+      fs.readFileSync = originalReadFileSync;
+    }
+  });
+
+  test("listTaskOutputFiles ignores a symlinked root output directory", () => {
+    const parent = mkdtempTracked(AXI_TASKS_TEST_DIR + "-root-symlink-");
+    const outside = mkdtempTracked(AXI_TASKS_TEST_DIR + "-root-target-");
+    const dir = path.join(parent, "task");
+    fs.mkdirSync(path.join(outside, "nested"));
+    fs.writeFileSync(path.join(outside, "outside.txt"), OUTSIDE_FILE_CONTENT);
+    fs.writeFileSync(path.join(outside, "nested", "also-outside.txt"), OUTSIDE_FILE_CONTENT);
+    fs.symlinkSync(outside, dir);
+
+    const result = listTaskOutputFiles(dir);
+    assert.deepEqual(result.files, []);
+    assert.equal(result.bytes, 0);
+    assert.equal(result.truncated, false);
   });
 });

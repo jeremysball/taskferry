@@ -674,22 +674,76 @@ describe("opencodeExecutor().sandboxAuthFile (auth and config binds)", () => {
     ]);
   });
 
-  test("sandboxAuthFile: skips a symlinked config entry, so its out-of-tree target is never ro-bound into the sandbox", () => {
+  test("sandboxAuthFile: resolves a symlinked config entry to its real target and ro-binds that target (dotfiles-managed setup)", () => {
+    const ex = opencodeExecutor();
+    const realConfigDir = OPENCODE_CONFIG_DIR;
+    const resolvedPlanted = "/home/user/.dotfiles/opencode/planted-link";
+    const result = ex.sandboxAuthFile({
+      homeDir: HOME_DIR, dataDir: DATA_DIR, spawnEnv: {},
+      existsFn: (p) => p === realConfigDir,
+      readdirFn: (p) => (p === realConfigDir ? [OPENCODE_JSONC, "plugins", "planted-link"] : []),
+      // planted-link is a dotfiles symlink (e.g. -> ~/.dotfiles/...): it must
+      // be resolved and the real target bound read-only at the same
+      // sandboxed destination, not dropped.
+      lstatFn: (p) => {
+        if (p === `${realConfigDir}/planted-link`) return { isSymbolicLink: () => true };
+        if (p === resolvedPlanted) return { isSymbolicLink: () => false, isFile: () => true, nlink: 1 };
+        return { isSymbolicLink: () => false };
+      },
+      realpathFn: (p) => {
+        if (p === `${realConfigDir}/planted-link`) return resolvedPlanted;
+        throw new Error(`unexpected realpath ${p}`);
+      },
+    });
+    assert.deepEqual(result.extraRoBinds, [
+      [`${realConfigDir}/${OPENCODE_JSONC}`, OPENCODE_JSONC_DEST],
+      [`${realConfigDir}/plugins`, PLUGINS_DEST],
+      [resolvedPlanted, `${SANDBOXED_CONFIG_DIR}/planted-link`],
+    ]);
+  });
+
+  test("sandboxAuthFile: symlinked config file (opencode.jsonc) resolves to its real dotfiles target", () => {
+    const ex = opencodeExecutor();
+    const realConfigDir = OPENCODE_CONFIG_DIR;
+    const realTarget = "/home/user/.dotfiles/.config/opencode/opencode.jsonc";
+    const result = ex.sandboxAuthFile({
+      homeDir: HOME_DIR, dataDir: DATA_DIR, spawnEnv: {},
+      existsFn: (p) => p === realConfigDir,
+      readdirFn: (p) => (p === realConfigDir ? [OPENCODE_JSONC] : []),
+      lstatFn: (p) => {
+        if (p === `${realConfigDir}/${OPENCODE_JSONC}`) return { isSymbolicLink: () => true };
+        if (p === realTarget) return { isSymbolicLink: () => false, isFile: () => true, nlink: 1 };
+        return { isSymbolicLink: () => false };
+      },
+      realpathFn: (p) => {
+        if (p === `${realConfigDir}/${OPENCODE_JSONC}`) return realTarget;
+        throw new Error(`unexpected realpath ${p}`);
+      },
+    });
+    assert.deepEqual(result.extraRoBinds, [[realTarget, OPENCODE_JSONC_DEST]]);
+  });
+
+  test("sandboxAuthFile: dangling/broken symlinked config entry fails closed (no crash, entry skipped, other entries still bound)", () => {
     const ex = opencodeExecutor();
     const realConfigDir = OPENCODE_CONFIG_DIR;
     const result = ex.sandboxAuthFile({
       homeDir: HOME_DIR, dataDir: DATA_DIR, spawnEnv: {},
       existsFn: (p) => p === realConfigDir,
-      readdirFn: (p) => (p === realConfigDir ? [OPENCODE_JSONC, "plugins", "planted-link"] : []),
-      // planted-link points outside the config dir (say, at ~/.ssh): binding
-      // it would hand the sandbox a ro view of the symlink target, so it must
-      // be dropped while regular entries survive.
-      lstatFn: (p) => ({ isSymbolicLink: () => p === `${realConfigDir}/planted-link` }),
+      readdirFn: (p) => (p === realConfigDir ? [OPENCODE_JSONC, "dangling-link"] : []),
+      lstatFn: (p) => {
+        if (p === `${realConfigDir}/dangling-link`) return { isSymbolicLink: () => true };
+        return { isSymbolicLink: () => false };
+      },
+      realpathFn: (p) => {
+        if (p === `${realConfigDir}/dangling-link`) {
+          const err = new Error("ENOENT: no such file or directory, realpath");
+          err.code = "ENOENT";
+          throw err;
+        }
+        throw new Error(`unexpected realpath ${p}`);
+      },
     });
-    assert.deepEqual(result.extraRoBinds, [
-      [`${realConfigDir}/${OPENCODE_JSONC}`, OPENCODE_JSONC_DEST],
-      [`${realConfigDir}/plugins`, PLUGINS_DEST],
-    ]);
+    assert.deepEqual(result.extraRoBinds, [[`${realConfigDir}/${OPENCODE_JSONC}`, OPENCODE_JSONC_DEST]]);
   });
 
   test("sandboxAuthFile: drops a config entry whose lstat fails, binding nothing it couldn't verify", () => {
@@ -780,7 +834,40 @@ describe("opencodeExecutor().sandboxAuthFile (symlink and hardlink guard behavio
     assert.deepEqual(result.extraRoBinds, []);
   });
 
-  test("sandboxAuthFile: warns on stderr (once per skipped symlink) instead of silently dropping a legitimate symlinked config entry", () => {
+  test("sandboxAuthFile: a successfully resolved symlinked config entry does not warn (the resolved target is bound, not skipped)", () => {
+    const ex = opencodeExecutor();
+    const realConfigDir = OPENCODE_CONFIG_DIR;
+    const resolvedPlanted = "/home/user/.dotfiles/opencode/planted-link";
+    const originalWrite = process.stderr.write;
+    let warned = "";
+    process.stderr.write = (chunk) => { warned += chunk; return true; };
+    try {
+      const result = ex.sandboxAuthFile({
+        homeDir: HOME_DIR, dataDir: DATA_DIR, spawnEnv: {},
+        existsFn: (p) => p === realConfigDir,
+        readdirFn: (p) => (p === realConfigDir ? [OPENCODE_JSONC, "planted-link"] : []),
+        lstatFn: (p) => {
+          if (p === `${realConfigDir}/planted-link`) return { isSymbolicLink: () => true };
+          if (p === resolvedPlanted) return { isSymbolicLink: () => false, isFile: () => true, nlink: 1 };
+          return { isSymbolicLink: () => false };
+        },
+        realpathFn: (p) => {
+          if (p === `${realConfigDir}/planted-link`) return resolvedPlanted;
+          throw new Error(`unexpected realpath ${p}`);
+        },
+      });
+      assert.deepEqual(result.extraRoBinds, [
+        [`${realConfigDir}/${OPENCODE_JSONC}`, OPENCODE_JSONC_DEST],
+        [resolvedPlanted, `${SANDBOXED_CONFIG_DIR}/planted-link`],
+      ]);
+      assert.equal(warned, "", "a successfully resolved symlink must not warn -- the bind succeeds");
+      assert.ok(!warned.includes("opencode.jsonc"), "a bound entry must not be warned about");
+    } finally {
+      process.stderr.write = originalWrite;
+    }
+  });
+
+  test("sandboxAuthFile: dangling symlink whose realpath throws ENOENT is skipped silently (no warning), other entries still bound", () => {
     const ex = opencodeExecutor();
     const realConfigDir = OPENCODE_CONFIG_DIR;
     const originalWrite = process.stderr.write;
@@ -790,14 +877,53 @@ describe("opencodeExecutor().sandboxAuthFile (symlink and hardlink guard behavio
       const result = ex.sandboxAuthFile({
         homeDir: HOME_DIR, dataDir: DATA_DIR, spawnEnv: {},
         existsFn: (p) => p === realConfigDir,
-        readdirFn: (p) => (p === realConfigDir ? [OPENCODE_JSONC, "planted-link"] : []),
-        lstatFn: (p) => ({ isSymbolicLink: () => p === `${realConfigDir}/planted-link` }),
+        readdirFn: (p) => (p === realConfigDir ? [OPENCODE_JSONC, "dangling-link"] : []),
+        lstatFn: (p) => {
+          if (p === `${realConfigDir}/dangling-link`) return { isSymbolicLink: () => true };
+          return { isSymbolicLink: () => false };
+        },
+        realpathFn: (p) => {
+          if (p === `${realConfigDir}/dangling-link`) {
+            const err = new Error("ENOENT: no such file or directory, realpath");
+            err.code = "ENOENT";
+            throw err;
+          }
+          throw new Error(`unexpected realpath ${p}`);
+        },
       });
-      assert.deepEqual(result.extraRoBinds, [
-        [`${realConfigDir}/${OPENCODE_JSONC}`, OPENCODE_JSONC_DEST],
-      ]);
-      assert.match(warned, /warning: .*planted-link is a symlink; skipping the bind/);
-      assert.ok(!warned.includes("opencode.jsonc"), "a bound entry must not be warned about");
+      assert.deepEqual(result.extraRoBinds, [[`${realConfigDir}/${OPENCODE_JSONC}`, OPENCODE_JSONC_DEST]]);
+      assert.equal(warned, "", "ENOENT on realpath must be silent, same as ENOENT on lstat");
+    } finally {
+      process.stderr.write = originalWrite;
+    }
+  });
+
+  test("sandboxAuthFile: symlink whose realpath throws non-ENOENT (EACCES) warns and is skipped, other entries still bound", () => {
+    const ex = opencodeExecutor();
+    const realConfigDir = OPENCODE_CONFIG_DIR;
+    const originalWrite = process.stderr.write;
+    let warned = "";
+    process.stderr.write = (chunk) => { warned += chunk; return true; };
+    try {
+      const result = ex.sandboxAuthFile({
+        homeDir: HOME_DIR, dataDir: DATA_DIR, spawnEnv: {},
+        existsFn: (p) => p === realConfigDir,
+        readdirFn: (p) => (p === realConfigDir ? [OPENCODE_JSONC, "forbidden-link"] : []),
+        lstatFn: (p) => {
+          if (p === `${realConfigDir}/forbidden-link`) return { isSymbolicLink: () => true };
+          return { isSymbolicLink: () => false };
+        },
+        realpathFn: (p) => {
+          if (p === `${realConfigDir}/forbidden-link`) {
+            const err = new Error("EACCES: permission denied, realpath");
+            err.code = "EACCES";
+            throw err;
+          }
+          throw new Error(`unexpected realpath ${p}`);
+        },
+      });
+      assert.deepEqual(result.extraRoBinds, [[`${realConfigDir}/${OPENCODE_JSONC}`, OPENCODE_JSONC_DEST]]);
+      assert.match(warned, /warning: could not resolve symlink .*forbidden-link \(EACCES: permission denied/);
     } finally {
       process.stderr.write = originalWrite;
     }

@@ -14,8 +14,10 @@ import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
-import { makeManager, fakeChild, baseTask, AXI_TASKS_TEST_DIR, mkdtempTracked } from "./tasks.test-helpers.js";
+import { execFileSync } from "node:child_process";
+import { makeManager, fakeChild, baseTask, trackManager, AXI_TASKS_TEST_DIR, mkdtempTracked } from "./tasks.test-helpers.js";
 import { TASKFERRY_OUTPUT_DIR_ENV, ensureTaskOutputDir, listTaskOutputFiles, readTaskOutputFile, resolveTaskOutputDir, resolveOutputDirRoot, resolveInsideDir } from "./output-dir.js";
+import { createTaskManager } from "./tasks.js";
 
 const TEST_PROMPT = "hi";
 const TEST_DIRECTORY = "/tmp";
@@ -334,7 +336,90 @@ describe("scratch output dir retrieval (taskferry#423)", () => {
   });
 });
 
+describe("scratch output dir walk caps (PR #482 review)", () => {
+  test("listTaskOutputFiles caps the walk at MAX_OUTPUT_LIST_DIRS and marks truncated", () => {
+    const dir = mkdtempTracked(AXI_TASKS_TEST_DIR + "-dirs-");
+    // More sibling directories than the cap, with one file each.
+    for (let i = 0; i < 300; i++) {
+      fs.mkdirSync(path.join(dir, `d${i}`));
+      fs.writeFileSync(path.join(dir, `d${i}`, "f.txt"), "x");
+    }
+    const result = listTaskOutputFiles(dir);
+    assert.equal(result.truncated, true);
+    assert.ok(result.files.length < 300, `expected at most ${300} files (capped by dir count), got ${result.files.length}`);
+    assert.ok(result.files.length > 0, "the walk should have started before hitting the cap");
+  });
+
+  test("listTaskOutputFiles caps the walk at MAX_OUTPUT_LIST_DEPTH and marks truncated", () => {
+    const dir = mkdtempTracked(AXI_TASKS_TEST_DIR + "-depth-");
+    // Build a deep chain of empty nested directories past the depth cap.
+    let cur = dir;
+    for (let i = 0; i < 50; i++) {
+      cur = path.join(cur, `lvl${i}`);
+      fs.mkdirSync(cur);
+    }
+    fs.writeFileSync(path.join(cur, "deep.txt"), "x");
+    const result = listTaskOutputFiles(dir);
+    assert.equal(result.truncated, true, "deep nested trees must truncate rather than walking the daemon's request thread to exhaustion");
+    assert.equal(result.files.length, 0, "the deep file is past the depth cap and must not be listed");
+  });
+
+  test("readTaskOutputFile caps the read at MAX_OUTPUT_FILE_BYTES when the file grows past the cap between fstat and read", () => {
+    const dir = mkdtempTracked(AXI_TASKS_TEST_DIR + "-grow-read-");
+    const target = path.join(dir, "grow.txt");
+    // Start small so the real fstat would let the read proceed past the
+    // pre-read size check (we then grow the file inside the readSync mock
+    // to simulate the worker extending the file after we already passed
+    // fstat, between fstat and read).
+    fs.writeFileSync(target, "tiny seed");
+
+    const cap = 512 * 1024;
+    const originalFstatSync = fs.fstatSync;
+    const originalReadSync = fs.readSync;
+    let readCalls = 0;
+    fs.fstatSync = (...args) => {
+      const stat = originalFstatSync(...args);
+      // Lie about size so the pre-read check passes. Mirror the real
+      // Stats surface so isFile() keeps reporting true.
+      return Object.assign(Object.create(Object.getPrototypeOf(stat)), stat, { size: 12 });
+    };
+    fs.readSync = (...args) => {
+      readCalls++;
+      // Grow the file on disk past the cap before the read completes, so
+      // the bounded read actually reads past the cap.
+      const oversize = Buffer.alloc(cap + 1, "x");
+      fs.writeFileSync(target, oversize);
+      return originalReadSync(...args);
+    };
+    try {
+      const result = readTaskOutputFile(dir, "grow.txt");
+      assert.equal(readCalls, 1, "the read must happen exactly once (the bounded read, not the open's read)");
+      assert.equal(result.truncated, true, "a file that grew past the cap between fstat and read must surface as too_large");
+      assert.equal(result.error, "too_large");
+      assert.equal(result.content, null);
+    } finally {
+      fs.fstatSync = originalFstatSync;
+      fs.readSync = originalReadSync;
+    }
+  });
+});
+
 describe("scratch output dir security regressions", () => {
+  test("readTaskOutputFile does not block on a worker-created FIFO with no writer (PR #482 review)", () => {
+    const dir = mkdtempTracked(AXI_TASKS_TEST_DIR + "-fifo-read-");
+    const target = path.join(dir, "wedge.fifo");
+    // node has no mkfifoSync; execFileSync("mkfifo", [target]) creates
+    // a real FIFO on the host. With no writer attached, a plain
+    // fs.openSync(target, "r") would block the daemon's request thread
+    // forever; the O_NONBLOCK open path must surface this as not_a_file
+    // (via ENXIO) instead.
+    execFileSync("mkfifo", [target]);
+    const result = readTaskOutputFile(dir, "wedge.fifo");
+    assert.equal(result.error, "not_a_file");
+    assert.equal(result.truncated, false);
+    assert.equal(result.content, null);
+  });
+
   test("readTaskOutputFile does not follow a symlink swapped immediately before the read", () => {
     const dir = mkdtempTracked(AXI_TASKS_TEST_DIR + "-toctou-read-");
     const outside = mkdtempTracked(AXI_TASKS_TEST_DIR + "-toctou-target-");
@@ -343,20 +428,20 @@ describe("scratch output dir security regressions", () => {
     fs.writeFileSync(target, "safe content");
     fs.writeFileSync(secret, "outside secret");
 
-    const originalReadFileSync = fs.readFileSync;
+    const originalReadSync = fs.readSync;
     let readArgument;
-    fs.readFileSync = (...args) => {
+    fs.readSync = (...args) => {
       [readArgument] = args;
       fs.unlinkSync(target);
       fs.symlinkSync(secret, target);
-      return originalReadFileSync(...args);
+      return originalReadSync(...args);
     };
     try {
       const result = readTaskOutputFile(dir, DELIVERABLE_NAME);
       assert.equal(typeof readArgument, "number", "the read must use the opened file descriptor");
       assert.equal(result.content, "safe content", "a post-check symlink swap must not redirect the read");
     } finally {
-      fs.readFileSync = originalReadFileSync;
+      fs.readSync = originalReadSync;
     }
   });
 
@@ -373,5 +458,74 @@ describe("scratch output dir security regressions", () => {
     assert.deepEqual(result.files, []);
     assert.equal(result.bytes, 0);
     assert.equal(result.truncated, false);
+  });
+
+  test("listTaskOutputFiles skips an entry that vanishes between readdir and stat (PR #482 review)", () => {
+    const dir = mkdtempTracked(AXI_TASKS_TEST_DIR + "-vanish-");
+    fs.writeFileSync(path.join(dir, "keep.txt"), "k");
+    fs.writeFileSync(path.join(dir, "ghost.txt"), "g");
+    const originalStatSync = fs.statSync;
+    fs.statSync = (...args) => {
+      const p = typeof args[0] === "string" ? args[0] : "";
+      if (p.endsWith("/ghost.txt")) {
+        const err = new Error("ENOENT: no such file or directory");
+        err.code = "ENOENT";
+        throw err;
+      }
+      return originalStatSync(...args);
+    };
+    try {
+      const result = listTaskOutputFiles(dir);
+      assert.deepEqual(result.files.map((f) => f.path), ["keep.txt"], "only the surviving entry must be listed");
+      assert.equal(result.bytes, 1);
+      assert.equal(result.truncated, false);
+    } finally {
+      fs.statSync = originalStatSync;
+    }
+  });
+});
+
+describe("boot-time sweep of orphaned output dirs under <stateDir>/outputs (PR #482 review)", () => {
+  let sweepTestCounter = 0;
+  test("deletes an output dir whose task id is not in tasks.json at startup", () => {
+    sweepTestCounter++;
+    const stateDir = mkdtempTracked(AXI_TASKS_TEST_DIR + "-orphan-output-");
+    const orphanId = `oc_orphan_output_${sweepTestCounter}_${process.pid}`;
+    const orphanDir = path.join(stateDir, "outputs", orphanId);
+    fs.mkdirSync(orphanDir, { recursive: true });
+    fs.writeFileSync(path.join(orphanDir, "stale.txt"), "leftover from a prior crash");
+
+    const mgr = trackManager(createTaskManager({
+      stateDir,
+      sandboxEnabled: false,
+      spawnFn: () => fakeChild(),
+      killFn: () => {},
+    }));
+
+    assert.equal(fs.existsSync(orphanDir), false, "the orphan output dir should have been swept at boot");
+    mgr.close();
+  });
+
+  test("keeps an output dir whose task id IS in tasks.json (settled tasks are intentional)", () => {
+    sweepTestCounter++;
+    const stateDir = mkdtempTracked(AXI_TASKS_TEST_DIR + "-keep-output-");
+    const taskId = `oc_kept_output_${sweepTestCounter}_${process.pid}`;
+    const taskDir = path.join(stateDir, "outputs", taskId);
+    fs.mkdirSync(taskDir, { recursive: true });
+    fs.writeFileSync(path.join(taskDir, "deliverable.txt"), "keep this");
+    fs.mkdirSync(stateDir, { recursive: true });
+    fs.writeFileSync(path.join(stateDir, "tasks.json"), JSON.stringify([
+      { id: taskId, status: "done" },
+    ]));
+
+    const mgr = trackManager(createTaskManager({
+      stateDir,
+      sandboxEnabled: false,
+      spawnFn: () => fakeChild(),
+      killFn: () => {},
+    }));
+
+    assert.equal(fs.existsSync(taskDir), true, "a tracked settled task's dir must be preserved by the boot sweep");
+    mgr.close();
   });
 });

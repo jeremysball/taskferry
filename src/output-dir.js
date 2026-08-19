@@ -13,6 +13,15 @@ const PROMPT_BLOCK_SEPARATOR = "\n\n";
 // RESPONSE_TOO_LARGE for a file that fits this check.
 const MAX_OUTPUT_FILE_BYTES = 512 * 1024;
 const MAX_OUTPUT_LIST_ENTRIES = 256;
+// Sibling caps on the directory walk: without them a worker that
+// mkmdir's unbounded nested empty directories (or unbounded shallow
+// ones) would force an unbounded synchronous readdir/stat walk on the
+// daemon's single request thread (the listing call does the traversal
+// in-process because it must return the whole tree in one RPC). Pair
+// each with MAX_OUTPUT_LIST_ENTRIES / MAX_OUTPUT_TOTAL_BYTES so a worker
+// can't pick whichever axis is uncapped to make the listing unbounded.
+const MAX_OUTPUT_LIST_DIRS = 256;
+const MAX_OUTPUT_LIST_DEPTH = 32;
 const MAX_OUTPUT_TOTAL_BYTES = 8 * 1024 * 1024;
 const DIRECTORY_OPEN_FLAGS = fs.constants.O_RDONLY
   | (fs.constants.O_DIRECTORY ?? 0)
@@ -123,10 +132,11 @@ export function listTaskOutputFiles(dir) {
  * @returns {{files: Array<{path: string, size: number}>, bytes: number, total: number, truncated: boolean}}
  */
 function collectOutputFiles(rootFd, rootPath) {
-  /** @type {{files: Array<{path: string, size: number}>, bytes: number, truncated: boolean}} */
-  const state = { files: [], bytes: 0, truncated: false };
-  /** @type {Array<{fd: number, full: string, relative: string}>} */
-  const stack = [{ fd: rootFd, full: rootPath, relative: "" }];
+  /** @type {{files: Array<{path: string, size: number}>, bytes: number, truncated: boolean, visitedDirs: number}} */
+  const state = { files: [], bytes: 0, truncated: false, visitedDirs: 0 };
+  // depth=0 on the root, increments by 1 each time we push a subdirectory.
+  /** @type {Array<{fd: number, full: string, relative: string, depth: number}>} */
+  const stack = [{ fd: rootFd, full: rootPath, relative: "", depth: 0 }];
   try {
     while (stack.length && !state.truncated) {
       visitStackFrame(stack, state, rootFd);
@@ -147,16 +157,17 @@ function collectOutputFiles(rootFd, rootPath) {
 /**
  * Pops one directory off the traversal stack, reads it, and folds every
  * entry into `state` (or pushes a freshly pinned fd for a subdirectory).
- * @param {Array<{fd: number, full: string, relative: string}>} stack
- * @param {{files: Array<{path: string, size: number}>, bytes: number, truncated: boolean}} state
+ * @param {Array<{fd: number, full: string, relative: string, depth: number}>} stack
+ * @param {{files: Array<{path: string, size: number}>, bytes: number, truncated: boolean, visitedDirs: number}} state
  * @param {number} rootFd
  */
 function visitStackFrame(stack, state, rootFd) {
-  if (shouldStopListing(state.files.length, state.bytes)) {
+  if (shouldStopListing(state)) {
     state.truncated = true;
     return;
   }
-  const current = /** @type {{fd: number, full: string, relative: string}} */ (stack.pop());
+  const current = /** @type {{fd: number, full: string, relative: string, depth: number}} */ (stack.pop());
+  state.visitedDirs++;
   const entries = readdirSafe(current.full);
   entries.some((entry) => visitEntry(entry, current, state, stack));
   if (current.fd !== rootFd) fs.closeSync(current.fd);
@@ -164,13 +175,13 @@ function visitStackFrame(stack, state, rootFd) {
 
 /**
  * @param {import("node:fs").Dirent} entry
- * @param {{full: string, relative: string}} current
- * @param {{files: Array<{path: string, size: number}>, bytes: number, truncated: boolean}} state
- * @param {Array<{fd: number, full: string, relative: string}>} stack
+ * @param {{full: string, relative: string, depth: number}} current
+ * @param {{files: Array<{path: string, size: number}>, bytes: number, truncated: boolean, visitedDirs: number}} state
+ * @param {Array<{fd: number, full: string, relative: string, depth: number}>} stack
  * @returns {boolean} true to stop iterating this directory's entries early
  */
 function visitEntry(entry, current, state, stack) {
-  const result = processEntry(entry, current.full, current.relative, state.files.length, state.bytes);
+  const result = processEntry(entry, current.full, current.relative, state);
   if (result === null) return false;
   if (result === "truncated") {
     state.truncated = true;
@@ -186,9 +197,16 @@ function visitEntry(entry, current, state, stack) {
     // exactly where a worker can swap a real subdirectory for a symlink
     // between discovery (readdir) and traversal (the next readdirSafe
     // call on that path).
+    // Hit the depth cap: skip pushing this subdirectory. Mark truncated
+    // so the caller's listing clearly reports the cut rather than a
+    // silently smaller tree.
+    if (current.depth + 1 > MAX_OUTPUT_LIST_DEPTH) {
+      state.truncated = true;
+      return true;
+    }
     const childFd = openDirectoryNoFollow(result.full);
     if (childFd !== null) {
-      stack.push({ fd: childFd, full: pathForDirectoryFd(childFd, result.full), relative: result.rel });
+      stack.push({ fd: childFd, full: pathForDirectoryFd(childFd, result.full), relative: result.rel, depth: current.depth + 1 });
     }
     // else: no longer a real directory by the time we opened it (removed,
     // or swapped for a symlink and rejected by O_NOFOLLOW) -- treat it as
@@ -200,7 +218,7 @@ function visitEntry(entry, current, state, stack) {
 }
 
 /**
- * @param {Array<{fd: number, full: string, relative: string}>} stack
+ * @param {Array<{fd: number, full: string, relative: string, depth: number}>} stack
  * @param {number} rootFd
  */
 function closeStackFds(stack, rootFd) {
@@ -220,13 +238,12 @@ function closeStackFds(stack, rootFd) {
  * @param {import("node:fs").Dirent} entry
  * @param {string} current
  * @param {string} currentRelative
- * @param {number} fileCount
- * @param {number} byteCount
+ * @param {{files: Array<{path: string, size: number}>, bytes: number, visitedDirs: number}} state
  * @returns {null | "truncated" | {kind: "file", rel: string, size: number} | {kind: "directory", full: string, rel: string} | {kind: "skip"}}
  */
-function processEntry(entry, current, currentRelative, fileCount, byteCount) {
+function processEntry(entry, current, currentRelative, state) {
   if (excludedEntry(entry.name)) return null;
-  if (shouldStopListing(fileCount, byteCount)) return "truncated";
+  if (shouldStopListing(state)) return "truncated";
   const full = path.join(current, entry.name);
   const rel = path.join(currentRelative, entry.name);
   const classified = classifyEntry(entry, full);
@@ -235,18 +252,24 @@ function processEntry(entry, current, currentRelative, fileCount, byteCount) {
     // pre-entry shouldStopListing() cap above -- otherwise a single file
     // larger than MAX_OUTPUT_TOTAL_BYTES is admitted whole because the
     // running total was still 0 (or under-cap) before this entry.
-    if (byteCount + classified.size > MAX_OUTPUT_TOTAL_BYTES) return "truncated";
+    if (state.bytes + classified.size > MAX_OUTPUT_TOTAL_BYTES) return "truncated";
     return { rel, size: classified.size, kind: "file" };
   }
   if (classified.kind === "directory") {
+    // Sibling directory-count cap on top of the depth cap the caller
+    // enforces in visitEntry: either axis independently can be hit by a
+    // worker (a chain of nested empties vs. a wide tree of empties).
+    if (state.visitedDirs >= MAX_OUTPUT_LIST_DIRS) return "truncated";
     return { kind: "directory", full, rel };
   }
   return { kind: "skip" };
 }
 
-/** @param {number} fileCount @param {number} bytes */
-function shouldStopListing(fileCount, bytes) {
-  return fileCount >= MAX_OUTPUT_LIST_ENTRIES || bytes >= MAX_OUTPUT_TOTAL_BYTES;
+/** @param {{files: Array<{path: string, size: number}>, bytes: number, visitedDirs: number}} state */
+function shouldStopListing(state) {
+  return state.files.length >= MAX_OUTPUT_LIST_ENTRIES
+    || state.bytes >= MAX_OUTPUT_TOTAL_BYTES
+    || state.visitedDirs >= MAX_OUTPUT_LIST_DIRS;
 }
 
 /** @param {string} dir */
@@ -346,28 +369,43 @@ function excludedEntry(name) {
  */
 function classifyEntry(entry, full) {
   if (entry.isSymbolicLink()) {
-    let target;
-    try {
-      target = fs.statSync(full);
-    } catch (err) {
-      if (errCode(err) === "ENOENT" || errCode(err) === "ELOOP") return { kind: "skip" };
-      throw err;
-    }
-    if (target.isFile()) return { kind: "file", size: target.size };
-    // Deliberately not { kind: "directory" } here: descending into a
-    // symlinked directory has no cycle detection (a self- or
-    // ancestor-referential symlink would re-enter itself via the
-    // traversal stack indefinitely) and can walk arbitrary host
-    // directories the symlink points outside the output dir. Only a
-    // symlink-to-file is reported (as its resolved size, above).
-    return { kind: "skip" };
+    return classifySymlink(full);
   }
   if (entry.isDirectory()) {
     return { kind: "directory" };
-  } else if (!entry.isFile()) {
+  }
+  if (!entry.isFile()) {
     return { kind: "skip" };
-  } else {
+  }
+  return statRegularFile(full);
+}
+
+/** @param {string} full @returns {{kind: "file", size: number} | {kind: "skip"}} */
+function classifySymlink(full) {
+  let target;
+  try {
+    target = fs.statSync(full);
+  } catch (err) {
+    if (errCode(err) === "ENOENT" || errCode(err) === "ELOOP") return { kind: "skip" };
+    throw err;
+  }
+  if (target.isFile()) return { kind: "file", size: target.size };
+  // Deliberately not { kind: "directory" } here: descending into a
+  // symlinked directory has no cycle detection (a self- or
+  // ancestor-referential symlink would re-enter itself via the
+  // traversal stack indefinitely) and can walk arbitrary host
+  // directories the symlink points outside the output dir. Only a
+  // symlink-to-file is reported (as its resolved size, above).
+  return { kind: "skip" };
+}
+
+/** @param {string} full @returns {{kind: "file", size: number} | {kind: "skip"}} */
+function statRegularFile(full) {
+  try {
     return { kind: "file", size: fs.statSync(full).size };
+  } catch (err) {
+    if (errCode(err) === "ENOENT") return { kind: "skip" };
+    throw err;
   }
 }
 
@@ -382,8 +420,7 @@ function classifyEntry(entry, full) {
  */
 export function resolveInsideDir(baseDir, relativePath) {
   const resolved = path.resolve(baseDir, relativePath);
-  const baseWithSep = baseDir.endsWith(path.sep) ? baseDir : baseDir + path.sep;
-  if (resolved !== baseDir && !resolved.startsWith(baseWithSep)) {
+  if (!isInsideDirectory(baseDir, resolved)) {
     throw outputPathEscapeError(relativePath);
   }
   return resolved;
@@ -408,9 +445,20 @@ export function readTaskOutputFile(dir, relativePath) {
   let fd;
   try {
     try {
-      fd = fs.openSync(target, "r");
+      // O_NONBLOCK on the read so a worker-created FIFO at the path can't
+      // block the daemon's request thread waiting for a writer that never
+      // arrives (FIFOs block open() for readers until a writer connects).
+      // The errno is ENXIO on Linux for "open with O_NONBLOCK against a
+      // FIFO with no writers"; we translate it into not_a_file below via
+      // the fstat check, since the worker replaced a regular file with a
+      // FIFO (which is a non-file), not actually expecting a write.
+      fd = fs.openSync(target, fs.constants.O_RDONLY | fs.constants.O_NONBLOCK);
     } catch (err) {
       if (errCode(err) === "ENOENT") return { content: null, size: 0, truncated: false, error: "not_found" };
+      // ENXIO = O_NONBLOCK open against a FIFO with no writer attached.
+      // Surface as not_a_file: the worker swapped a regular file for a
+      // pipe to wedge the daemon's read, not to legitimately stream.
+      if (errCode(err) === "ENXIO") return { content: null, size: 0, truncated: false, error: "not_a_file" };
       throw err;
     }
     try {
@@ -425,8 +473,18 @@ export function readTaskOutputFile(dir, relativePath) {
         throw outputPathEscapeError(relativePath);
       }
       if (stat.size > MAX_OUTPUT_FILE_BYTES) return { content: null, size: stat.size, truncated: true, error: "too_large" };
-      const buffer = fs.readFileSync(fd);
-      return { content: buffer.toString("utf8"), size: stat.size, truncated: false };
+      // Read with a size cap rather than `fs.readFileSync(fd)` (which
+      // allocates by stat.size): the file might have grown past the cap
+      // between the fstat and the read, and the daemon-server's
+      // MAX_BUFFER_BYTES response ceiling plus JSON escaping can't carry
+      // more than that cap. Read up to MAX+1 so a single byte over the
+      // cap is detectable on the post-read size check.
+      const buffer = Buffer.allocUnsafe(MAX_OUTPUT_FILE_BYTES + 1);
+      const totalRead = fs.readSync(fd, buffer, 0, buffer.length, 0);
+      if (totalRead > MAX_OUTPUT_FILE_BYTES) {
+        return { content: null, size: totalRead, truncated: true, error: "too_large" };
+      }
+      return { content: buffer.toString("utf8", 0, totalRead), size: totalRead, truncated: false };
     } finally {
       fs.closeSync(fd);
     }

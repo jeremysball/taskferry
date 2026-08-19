@@ -946,8 +946,17 @@ describe("dispatch() prompt augmentation from .taskferry.toml", () => {
       platform: "linux",
     });
     mgr.advisor({ prompt: "Review this", directory: dir, model: SOL_MODEL, executor: "opencode" });
-    // Advisor's argv is the bwrap invocation; the trailing positional is the unmodified prompt.
-    assert.equal(captured.at(-1), "Review this");
+    // Advisor's argv is the bwrap invocation; the trailing positional keeps
+    // the user prompt (no verification block per advisor role, and no
+    // persistent-output-dir block either — advisors are read-only opinion
+    // turns and the "use it for deliverables" framing is misleading for
+    // them). Advisor dispatches DO still get a per-task scratch dir
+    // allocated and TASKFERRY_OUTPUT_DIR set (taskferry#423) so a tool
+    // call that hands back a path resolves, but the worker isn't told
+    // about it in the prompt.
+    const spawnedPrompt = /** @type {string} */ (captured.at(-1));
+    assert.match(spawnedPrompt, /Review this/);
+    assert.ok(!/## Persistent output dir/.test(spawnedPrompt), "advisor prompt must not contain the persistent-output-dir block");
     assert.ok(!captured.join(" ").includes(VERIFICATION_MARKER));
   });
 

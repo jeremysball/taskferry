@@ -111,55 +111,102 @@ export function listTaskOutputFiles(dir) {
   if (rootFd === null) return emptyListing();
   const rootPath = pathForDirectoryFd(rootFd, dir);
   try {
-    return collectOutputFiles(rootPath);
+    return collectOutputFiles(rootFd, rootPath);
   } finally {
     fs.closeSync(rootFd);
   }
 }
 
 /**
+ * @param {number} rootFd
  * @param {string} rootPath
  * @returns {{files: Array<{path: string, size: number}>, bytes: number, total: number, truncated: boolean}}
  */
-function collectOutputFiles(rootPath) {
-  /** @type {Array<{path: string, size: number}>} */
-  const files = [];
-  let bytes = 0;
-  let truncated = false;
-  /** @type {Array<{full: string, relative: string}>} */
-  const stack = [{ full: rootPath, relative: "" }];
-  while (stack.length && !truncated) {
-    if (shouldStopListing(files.length, bytes)) {
-      truncated = true;
-    } else {
-      const current = /** @type {{full: string, relative: string}} */ (stack.pop());
-      const entries = readdirSafe(current.full);
-      entries.some((entry) => {
-        const result = processEntry(entry, current.full, current.relative, files.length, bytes);
-        if (result === null) return false;
-        if (result === "truncated") {
-          truncated = true;
-          return true;
-        }
-        if (result.kind === "file") {
-          files.push({ path: result.rel, size: result.size });
-          bytes += result.size;
-        } else if (result.kind === "directory") {
-          stack.push({ full: result.full, relative: result.rel });
-        } else {
-          // "skip" -> no-op (symlinks to nowhere, non-regular entries)
-        }
-        return false;
-      });
+function collectOutputFiles(rootFd, rootPath) {
+  /** @type {{files: Array<{path: string, size: number}>, bytes: number, truncated: boolean}} */
+  const state = { files: [], bytes: 0, truncated: false };
+  /** @type {Array<{fd: number, full: string, relative: string}>} */
+  const stack = [{ fd: rootFd, full: rootPath, relative: "" }];
+  try {
+    while (stack.length && !state.truncated) {
+      visitStackFrame(stack, state, rootFd);
     }
+  } finally {
+    // Close any subdirectory fds left on the stack from an early exit
+    // (truncation). The root fd is the caller's to close.
+    closeStackFds(stack, rootFd);
   }
-  files.sort((a, b) => {
+  state.files.sort((a, b) => {
     if (a.path < b.path) return -1;
     if (a.path > b.path) return 1;
     return 0;
   });
-  const total = files.length;
-  return { files, bytes, total, truncated };
+  return { files: state.files, bytes: state.bytes, total: state.files.length, truncated: state.truncated };
+}
+
+/**
+ * Pops one directory off the traversal stack, reads it, and folds every
+ * entry into `state` (or pushes a freshly pinned fd for a subdirectory).
+ * @param {Array<{fd: number, full: string, relative: string}>} stack
+ * @param {{files: Array<{path: string, size: number}>, bytes: number, truncated: boolean}} state
+ * @param {number} rootFd
+ */
+function visitStackFrame(stack, state, rootFd) {
+  if (shouldStopListing(state.files.length, state.bytes)) {
+    state.truncated = true;
+    return;
+  }
+  const current = /** @type {{fd: number, full: string, relative: string}} */ (stack.pop());
+  const entries = readdirSafe(current.full);
+  entries.some((entry) => visitEntry(entry, current, state, stack));
+  if (current.fd !== rootFd) fs.closeSync(current.fd);
+}
+
+/**
+ * @param {import("node:fs").Dirent} entry
+ * @param {{full: string, relative: string}} current
+ * @param {{files: Array<{path: string, size: number}>, bytes: number, truncated: boolean}} state
+ * @param {Array<{fd: number, full: string, relative: string}>} stack
+ * @returns {boolean} true to stop iterating this directory's entries early
+ */
+function visitEntry(entry, current, state, stack) {
+  const result = processEntry(entry, current.full, current.relative, state.files.length, state.bytes);
+  if (result === null) return false;
+  if (result === "truncated") {
+    state.truncated = true;
+    return true;
+  }
+  if (result.kind === "file") {
+    state.files.push({ path: result.rel, size: result.size });
+    state.bytes += result.size;
+  } else if (result.kind === "directory") {
+    // Pin the subdirectory with its own O_NOFOLLOW fd the moment we
+    // descend into it, rather than trusting the dirent's cached d_type
+    // and re-resolving the plain path string later -- that gap is
+    // exactly where a worker can swap a real subdirectory for a symlink
+    // between discovery (readdir) and traversal (the next readdirSafe
+    // call on that path).
+    const childFd = openDirectoryNoFollow(result.full);
+    if (childFd !== null) {
+      stack.push({ fd: childFd, full: pathForDirectoryFd(childFd, result.full), relative: result.rel });
+    }
+    // else: no longer a real directory by the time we opened it (removed,
+    // or swapped for a symlink and rejected by O_NOFOLLOW) -- treat it as
+    // vanished rather than following it.
+  } else {
+    // "skip" -> no-op (symlinks to nowhere, non-regular entries)
+  }
+  return false;
+}
+
+/**
+ * @param {Array<{fd: number, full: string, relative: string}>} stack
+ * @param {number} rootFd
+ */
+function closeStackFds(stack, rootFd) {
+  for (const entry of stack) {
+    if (entry.fd !== rootFd) fs.closeSync(entry.fd);
+  }
 }
 
 /**
@@ -236,21 +283,34 @@ function openDirectoryNoFollow(dir) {
   }
 }
 
-/** @param {number} fd @returns {string|null} */
+/**
+ * The magic-symlink path through which fd-pinned directory/file access is
+ * implemented: /proc/self/fd/<n> (Linux) and /dev/fd/<n> (Darwin) both
+ * resolve to whatever the fd is actually attached to, immune to the
+ * original path string being renamed or replaced with a symlink afterward.
+ * No other supported platform exists (taskferry does not run on Windows),
+ * so there is no real fallback case here -- surface that loudly instead of
+ * silently resolving the caller's mutable path string, which would quietly
+ * defeat every TOCTOU protection built on top of this function.
+ * @param {number} fd @returns {string}
+ */
 function descriptorPath(fd) {
   if (process.platform === "linux") return `/proc/self/fd/${fd}`;
   if (process.platform === "darwin") return `/dev/fd/${fd}`;
-  return null;
+  throw new Error(
+    `error: task output directory access requires linux or darwin (got "${process.platform}")\n` +
+      `help: fd-pinned path resolution has no implementation on this platform`
+  );
 }
 
-/** @param {number} fd @param {string} fallback */
-function pathForDirectoryFd(fd, fallback) {
-  return descriptorPath(fd) ?? fallback;
+/** @param {number} fd @param {string} _fallback unused; kept so call sites don't need to change */
+function pathForDirectoryFd(fd, _fallback) {
+  return descriptorPath(fd);
 }
 
-/** @param {number} fd @param {string} fallback */
-function realpathForFd(fd, fallback) {
-  return fs.realpathSync(descriptorPath(fd) ?? fallback);
+/** @param {number} fd @param {string} _fallback unused; kept so call sites don't need to change */
+function realpathForFd(fd, _fallback) {
+  return fs.realpathSync(descriptorPath(fd));
 }
 
 /** @returns {{files: Array<{path: string, size: number}>, bytes: number, total: number, truncated: boolean}} */

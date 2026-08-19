@@ -60,6 +60,7 @@ message — there is no silent typo tolerance.
 | `profilingEnabled` | `TASKFERRY_PROFILING_ENABLED` | boolean | `false`; see `docs/daemon.md#request-latency-profiling` |
 | `lowerdirStaggerMs` | `TASKFERRY_LOWERDIR_STAGGER_MS` | number | `3000`; `0` disables |
 | `providerLimits` | `TASKFERRY_PROVIDER_LIMITS` | object (provider -> `{maxConcurrentTasks?, maxDispatchesPerWindow?}`) | `{}` (no per-provider limit; only the global ceiling applies) |
+| `restartWaitForIdle` | `TASKFERRY_RESTART_WAIT_FOR_IDLE` | boolean | `false` — when `false` (the default) the daemon restarts immediately on source-file change even with tasks in flight (auto-resuming resumable sessions — see `docs/daemon.md#self-restart-on-source-change`); when `true`, restores the old behavior of deferring the restart until zero `running` and zero `queued` tasks |
 
 `envDenylist` uses the same comma-separated grammar as `allowedDirs` — a
 flat list of env var names, always stripped from every spawned child

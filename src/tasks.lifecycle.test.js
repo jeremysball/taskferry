@@ -100,11 +100,13 @@ describe("cancel()", () => {
     assert.match(result.note, /task is already done; nothing to cancel/);
   });
 
-  test("a persisted 'running' task reloads as 'unknown' and is also treated as settled", () => {
+  test("a persisted 'running' task without a resumable session reloads as crashed with daemon_restarted_session_lost", () => {
     const mgr = makeManager({ tasksFixture: [baseTask({ id: "t1", status: "running" })] });
-    assert.equal(mgr.status("t1").status, "unknown");
+    const status = mgr.status("t1");
+    assert.equal(status.status, "crashed");
+    assert.equal(status.failureReason, "daemon_restarted_session_lost");
     const result = mgr.cancel("t1");
-    assert.match(result.note, /task is already unknown; nothing to cancel/);
+    assert.match(result.note, /task is already crashed; nothing to cancel/);
   });
 
   test("a persisted queued task reloads as 'unknown' and is never launched", () => {
@@ -456,16 +458,16 @@ describe("list()", () => {
     assert.equal(l.tasks, "none found (this server process's lifetime)");
   });
 
-  test("tallies counts across mixed statuses, including a rehydrated 'unknown'", () => {
+  test("tallies counts across mixed statuses, including a rehydrated running that becomes crashed (daemon_restarted_session_lost)", () => {
     const mgr = makeManager({
       tasksFixture: [
         baseTask({ id: "t1", status: "done" }),
         baseTask({ id: "t2", status: "crashed" }),
         baseTask({ id: "t3", status: "cancelled" }),
-        baseTask({ id: "t4", status: "running" }), // becomes "unknown" on load
+        baseTask({ id: "t4", status: "running" }), // becomes crashed with daemon_restarted_session_lost (no session)
       ],
     });
-    assert.deepEqual(mgr.list().counts, { queued: 0, running: 0, done: 1, crashed: 1, cancelled: 1, unknown: 1 });
+    assert.deepEqual(mgr.list().counts, { queued: 0, running: 0, done: 1, crashed: 2, cancelled: 1, unknown: 0 });
   });
 
   test("rows use the minimal schema plus failureReason, not the full detail object", () => {

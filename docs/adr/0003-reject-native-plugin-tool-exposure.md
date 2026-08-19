@@ -111,7 +111,8 @@ Costs and hazards:
 - `ls -la ~/.config/kilo/plugins/taskferry.js` showed a symlink to
   `/workspace/taskferry/.worktrees/opencode-tool-integration/src/kilo-plugin.js`;
   removed as part of this fix.
-- `rg -n "kilo" -g '!node_modules' -g '!.git'` against `main` returns no
-  hits outside this ADR and `docs/integrations/kilo.md` (unrelated,
-  toast/context-only Kilo Code frontend integration tracked separately in
-  PR #489, out of scope for this decision).
+- `rg -il "kilo" -g '!node_modules' -g '!.git'` against `main` returns no
+  hits at all (`docs/integrations/kilo.md` and `src/kilo-plugin.js` live only
+  on the still-open, unmerged `feat/kilo-integration` branch / PR #489 —
+  an unrelated, toast/context-only Kilo Code frontend integration, out of
+  scope for this decision).

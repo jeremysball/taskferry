@@ -604,7 +604,7 @@ const invokeHandlers = {
   },
   "task.accept": (manager, params) => manager.accept(/** @type {string} */ (params.taskId), { force: params.force === true }),
   "task.reject": (manager, params) => manager.reject(/** @type {string} */ (params.taskId)),
-  "task.output": (manager, params) => manager.output(/** @type {string} */ (params.taskId), { path: typeof params.path === "string" ? params.path : undefined }),
+  "task.output": (manager, params) => manager.output(/** @type {string} */ (params.taskId), { path: typeof params.path === "string" ? params.path : undefined, ...(typeof params.maxOutputFileBytes === "number" ? { maxOutputFileBytes: params.maxOutputFileBytes } : {}) }),
 };
 
 /**

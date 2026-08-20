@@ -26,8 +26,8 @@ export const commandSpecs = {
   output: {
     usage: "taskferry output <id> [--path <relpath>]",
     description: "List a task's scratch output directory (or read one file in it). Every dispatch reserves a per-task writable directory at <stateDir>/outputs/<id>/, rw-bound into the bwrap sandbox at the same path and exposed to the worker as $TASKFERRY_OUTPUT_DIR. Works on every terminal status (done, crashed, cancelled, and incomplete).",
-    options: { "--path <relpath>": "read one file relative to the task's output dir instead of listing; rejects any path that would escape the per-task directory (e.g. \"../sibling\", absolute paths)" },
-    examples: ['taskferry output <id>', 'taskferry output <id> --path deliverable.txt'],
+    options: { "--path <relpath>": "read one file relative to the task's output dir instead of listing; rejects any path that would escape the per-task directory (e.g. \"../sibling\", absolute paths)", "--max-output-file-bytes <number>": "maximum bytes to read for a single file when --path is used; default 524288 (512 KiB); capped by the daemon so a large file does not blow past the 1 MiB response budget after JSON escaping -- lower it if control-character-heavy files hit RESPONSE_TOO_LARGE. Precedence: flag > TASKFERRY_MAX_OUTPUT_FILE_BYTES env var > config.json maxOutputFileBytes > built-in default" },
+    examples: ['taskferry output <id>', 'taskferry output <id> --path deliverable.txt', 'taskferry output <id> --path deliverable.txt --max-output-file-bytes 1048576'],
   },
   wait: {
     usage: "taskferry wait <id> [options]",

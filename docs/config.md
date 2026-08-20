@@ -60,6 +60,7 @@ message — there is no silent typo tolerance.
 | `profilingEnabled` | `TASKFERRY_PROFILING_ENABLED` | boolean | `false`; see `docs/daemon.md#request-latency-profiling` |
 | `lowerdirStaggerMs` | `TASKFERRY_LOWERDIR_STAGGER_MS` | number | `3000`; `0` disables |
 | `providerLimits` | `TASKFERRY_PROVIDER_LIMITS` | object (provider -> `{maxConcurrentTasks?, maxDispatchesPerWindow?}`) | `{}` (no per-provider limit; only the global ceiling applies) |
+| `maxOutputFileBytes` | `TASKFERRY_MAX_OUTPUT_FILE_BYTES` | number | `524288` (512 KiB); must be a positive integer. Per-read `--max-output-file-bytes` flag overrides this daemon default for that single `taskferry output --path` call (flag > env var > config file > built-in default). Kept well under the daemon's 1 MiB `MAX_BUFFER_BYTES` response ceiling because JSON-escaped control characters (`\uXXXX`) and the RPC envelope add overhead — a 512 KiB raw file heavy on `\x00`-`\x1f` can blow past the wire cap (see `src/output-dir.js` / `src/tasks.js` `maxOutputFileBytes` handling and `src/daemon-server.js` `RESPONSE_TOO_LARGE`). Lower the cap if large files with many control characters still hit `RESPONSE_TOO_LARGE`. |
 
 `envDenylist` uses the same comma-separated grammar as `allowedDirs` — a
 flat list of env var names, always stripped from every spawned child

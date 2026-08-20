@@ -360,10 +360,11 @@ ending on a tool call instead of a final assistant message (taskferry#423).
   (capped at `256` files / `8 MiB`; `node_modules` and `.git` subtrees
   are skipped).
 - With `--path <relpath>`: prints the file's UTF-8 content. Single files
-  are capped at `512 KiB`; an over-cap read returns `{ content: null,
+  are capped at `512 KiB` by default; an over-cap read returns `{ content: null,
   truncated: true, error: "too_large", size }`. Any path that would
   escape the per-task dir (absolute paths, leading `/`, `..` segments)
-  is rejected.
+  is rejected. The cap is configurable: flag `--max-output-file-bytes` > env var `TASKFERRY_MAX_OUTPUT_FILE_BYTES` > config key `maxOutputFileBytes` > built-in default `524288` (512 KiB); lower it if control-character-heavy files still hit `RESPONSE_TOO_LARGE` after JSON escaping (see `src/output-dir.js` and `docs/config.md`).
+  Use `--max-output-file-bytes` per-read to override the daemon's default for that single call (e.g. `taskferry output <id> --path deliverable.txt --max-output-file-bytes 1048576`).
 - Works on every terminal status: `done`, `crashed`, `cancelled`, and
   even an `incomplete` task that the worker never finished — the scratch
   dir is per-task state the worker owns, not parsed-from-log output.
@@ -373,6 +374,7 @@ Example:
 ```sh
 taskferry output oc_mssiwul9_b23e173c
 taskferry output oc_mssiwul9_b23e173c --path deliverable.txt
+taskferry output oc_mssiwul9_b23e173c --path deliverable.txt --max-output-file-bytes 1048576
 ```
 
 ## `taskferry list [options]`

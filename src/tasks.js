@@ -17,8 +17,10 @@ import { resolveVariant, KNOWN_VARIANT_LEVELS } from "./variants.js";
 import { readVariantsCache, refreshVariantsCache } from "./variants-cache.js";
 import { loadEnvFile, watchEnvFile } from "./env-file.js";
 import { loadProjectConfig, resolveReadOnlyProjectBinds, verificationPromptBlock } from "./project-config.js";
-import { TASKFERRY_OUTPUT_DIR_ENV, ensureTaskOutputDir, listTaskOutputFiles, outputDirPromptBlock, readTaskOutputFile, resolveOutputDirRoot, resolveTaskOutputDir } from "./output-dir.js";
+import { TASKFERRY_OUTPUT_DIR_ENV, DEFAULT_MAX_OUTPUT_FILE_BYTES, ensureTaskOutputDir, listTaskOutputFiles, outputDirPromptBlock, readTaskOutputFile, resolveOutputDirRoot, resolveTaskOutputDir } from "./output-dir.js";
 import { computeDoctorStats } from "./doctor-stats.js";
+
+export { DEFAULT_MAX_OUTPUT_FILE_BYTES };
 
 /**
  * @typedef {object} SummaryOf
@@ -3729,6 +3731,7 @@ function watchdogTick(state, ctx) {
  * @param {number} [options.summarizerTimeoutMs]
  * @param {string} [options.activitySummaryModel]
  * @param {number} [options.activityMaxWords]
+ * @param {number} [options.maxOutputFileBytes]
  * @param {NodeJS.Platform} [options.platform]
  * @param {boolean} [options.sandboxEnabled]
  * @param {string[]} [options.envDenylist] - env var names stripped from every spawned child's
@@ -3887,6 +3890,7 @@ function resolveTimeoutOptions(rawOptions) {
     maxWaitMs: rawOptions.maxWaitMs ?? MAX_WAIT_MS,
     summarizerTimeoutMs: resolveNonNegativeIntOption(rawOptions.summarizerTimeoutMs, process.env.TASKFERRY_SUMMARIZER_TIMEOUT_MS, config.summarizerTimeoutMs, DEFAULT_SUMMARIZER_TIMEOUT_MS),
     activityMaxWords: resolvePositiveIntOption(rawOptions.activityMaxWords, process.env.TASKFERRY_ACTIVITY_MAX_WORDS, config.activityMaxWords, 75),
+    maxOutputFileBytes: resolvePositiveIntOption(rawOptions.maxOutputFileBytes, process.env.TASKFERRY_MAX_OUTPUT_FILE_BYTES, config.maxOutputFileBytes, DEFAULT_MAX_OUTPUT_FILE_BYTES),
   };
 }
 
@@ -4234,6 +4238,7 @@ function initManagerLimits(opts) {
     maxWait: positiveInteger(opts.maxWaitMs, MAX_WAIT_MS),
     summarizerTimeout: nonNegativeInteger(opts.summarizerTimeoutMs, DEFAULT_SUMMARIZER_TIMEOUT_MS),
     activityWords: positiveInteger(opts.activityMaxWords, 75),
+    maxOutputFileBytes: positiveInteger(opts.maxOutputFileBytes, DEFAULT_MAX_OUTPUT_FILE_BYTES),
   };
 }
 
@@ -6191,13 +6196,28 @@ async function rejectTaskChangeset(taskId, ctx) {
 }
 
 /**
+ * @param {{maxOutputFileBytes?: number}} options
+ * @param {{limits?: {maxOutputFileBytes?: number}}} ctx
+ * @returns {number}
+ */
+function resolveOutputMaxBytes(options, ctx) {
+  if (options.maxOutputFileBytes !== undefined) {
+    if (!isPositiveInteger(options.maxOutputFileBytes)) {
+      throw new Error(`error: maxOutputFileBytes must be a positive integer (got ${JSON.stringify(options.maxOutputFileBytes)})\nhelp: use --max-output-file-bytes with a positive integer`);
+    }
+    return options.maxOutputFileBytes;
+  }
+  return (ctx.limits && typeof ctx.limits.maxOutputFileBytes === "number") ? ctx.limits.maxOutputFileBytes : DEFAULT_MAX_OUTPUT_FILE_BYTES;
+}
+
+/**
  * Retrieves the scratch output directory (or one file from it) for a task.
  * Works on every terminal status -- done, crashed, cancelled, or incomplete --
  * because the scratch dir is per-task state the worker owns, not a parsed log
  * result. taskferry#423.
  * @param {string} taskId
- * @param {{maps: {tasks: Map<string, Task>}, opts: {stateDir: string}, helpers: {ensureStateLoaded: () => void}, noSuchTask: (taskId: string) => Error}} ctx
- * @param {{path?: string}} [options]
+ * @param {{maps: {tasks: Map<string, Task>}, opts: {stateDir: string}, helpers: {ensureStateLoaded: () => void}, limits?: {maxOutputFileBytes?: number}, noSuchTask: (taskId: string) => Error}} ctx
+ * @param {{path?: string, maxOutputFileBytes?: number}} [options]
  */
 function outputFor(taskId, ctx, options = {}) {
   ctx.helpers.ensureStateLoaded();
@@ -6208,7 +6228,8 @@ function outputFor(taskId, ctx, options = {}) {
     if (!outputDir) {
       return { taskId, outputDir: null, files: [], bytes: 0, total: 0, truncated: false, file: { content: null, size: 0, truncated: false, error: "no_output_dir" } };
     }
-    const file = readTaskOutputFile(outputDir, options.path);
+    const maxBytes = resolveOutputMaxBytes(options, ctx);
+    const file = readTaskOutputFile(outputDir, options.path, maxBytes);
     return { taskId: taskId, outputDir: outputDir, files: [], bytes: 0, total: 0, truncated: false, file };
   }
   if (!outputDir) {

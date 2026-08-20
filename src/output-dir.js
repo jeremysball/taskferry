@@ -11,7 +11,8 @@ const PROMPT_BLOCK_SEPARATOR = "\n\n";
 // response; JSON-string escaping plus the surrounding RPC envelope add
 // overhead on top, so a cap equal to the response ceiling still risks
 // RESPONSE_TOO_LARGE for a file that fits this check.
-const MAX_OUTPUT_FILE_BYTES = 512 * 1024;
+export const DEFAULT_MAX_OUTPUT_FILE_BYTES = 512 * 1024;
+export const MAX_OUTPUT_FILE_BYTES = DEFAULT_MAX_OUTPUT_FILE_BYTES;
 const MAX_OUTPUT_LIST_ENTRIES = 256;
 // Sibling caps on the directory walk: without them a worker that
 // mkmdir's unbounded nested empty directories (or unbounded shallow
@@ -436,9 +437,10 @@ export function resolveInsideDir(baseDir, relativePath) {
  * outside the scratch root.
  * @param {string} dir
  * @param {string} relativePath
+ * @param {number} [maxBytes]
  * @returns {{content: string|null, size: number, truncated: boolean, error?: string}}
  */
-export function readTaskOutputFile(dir, relativePath) {
+export function readTaskOutputFile(dir, relativePath, maxBytes = MAX_OUTPUT_FILE_BYTES) {
   const target = resolveInsideDir(dir, relativePath);
   const dirFd = openDirectoryNoFollow(dir);
   if (dirFd === null) return { content: null, size: 0, truncated: false, error: "not_found" };
@@ -472,16 +474,16 @@ export function readTaskOutputFile(dir, relativePath) {
       if (!isInsideDirectory(realDir, realTarget)) {
         throw outputPathEscapeError(relativePath);
       }
-      if (stat.size > MAX_OUTPUT_FILE_BYTES) return { content: null, size: stat.size, truncated: true, error: "too_large" };
+      if (stat.size > maxBytes) return { content: null, size: stat.size, truncated: true, error: "too_large" };
       // Read with a size cap rather than `fs.readFileSync(fd)` (which
       // allocates by stat.size): the file might have grown past the cap
       // between the fstat and the read, and the daemon-server's
       // MAX_BUFFER_BYTES response ceiling plus JSON escaping can't carry
       // more than that cap. Read up to MAX+1 so a single byte over the
       // cap is detectable on the post-read size check.
-      const buffer = Buffer.allocUnsafe(MAX_OUTPUT_FILE_BYTES + 1);
+      const buffer = Buffer.allocUnsafe(maxBytes + 1);
       const totalRead = fs.readSync(fd, buffer, 0, buffer.length, 0);
-      if (totalRead > MAX_OUTPUT_FILE_BYTES) {
+      if (totalRead > maxBytes) {
         return { content: null, size: totalRead, truncated: true, error: "too_large" };
       }
       return { content: buffer.toString("utf8", 0, totalRead), size: totalRead, truncated: false };

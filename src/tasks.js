@@ -187,6 +187,7 @@ import { computeDoctorStats } from "./doctor-stats.js";
  * @property {unknown} [tokens]
  * @property {number|null} [cost]
  * @property {string} [logPath]
+ * @property {string|null} [outputDir]
  * @property {SummaryOf} [summaryOf]
  * @property {string} [next]
  * @property {boolean} [incomplete]
@@ -2073,6 +2074,7 @@ function computeResultDetail(task, { taskId, full, fields }, ctx) {
     narrationTruncated: narration.narrationTruncated,
     ...(next ? { next } : {}),
     logPath: task.logPath,
+    outputDir: task.outputDir ?? null,
   };
 }
 

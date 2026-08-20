@@ -67,6 +67,48 @@ describe("dispatch() lifecycle, driven through an injected spawnFn (no real open
     assert.ok(fs.existsSync(path.join(outputsRoot, second.id)));
   });
 
+  test("a dispatch that fails inside buildSpawnArgs after the queue shift rolls back scheduler and does not orphan output dir (taskferry#510 follow-up)", () => {
+    let builds = 0;
+    let spawns = 0;
+    const throwingExecutor = makeFakeExecutor({
+      buildSpawnArgs: () => {
+        builds++;
+        if (builds === 1) throw new Error("build failed");
+        return [];
+      },
+    });
+    const mgr = makeManager({
+      spawnFn: () => { spawns++; return fakeChild(); },
+      defaultExecutor: throwingExecutor,
+      maxDispatchesPerWindow: 1,
+      dispatchWindowMs: 60000,
+      maxConcurrentTasks: 10,
+    });
+    assert.throws(() => mgr.dispatch({ prompt: "first", directory: os.tmpdir() }), /build failed/);
+    const outputsRoot = path.join(mgr.paths.STATE_DIR, "outputs");
+    const leftover = fs.existsSync(outputsRoot) ? fs.readdirSync(outputsRoot) : [];
+    assert.deepEqual(leftover, [], `expected no orphan output dirs after buildSpawnArgs failure, found: ${JSON.stringify(leftover)}`);
+    assert.equal(builds, 1);
+    assert.equal(spawns, 0, "failed build should not have spawned");
+    // Scheduler must be rolled back: a phantom launchTimes entry would keep the
+    // next dispatch queued under maxDispatchesPerWindow: 1.
+    const second = mgr.dispatch({ prompt: "second", directory: os.tmpdir() });
+    assert.equal(mgr.status(second.id).status, "running", "second dispatch should launch immediately, not remain queued due to phantom launchTimes");
+    assert.equal(builds, 2);
+    assert.equal(spawns, 1);
+    assert.ok(fs.existsSync(path.join(outputsRoot, second.id)));
+  });
+
+  test("fs.rmSync failure during dispatch cleanup surfaces instead of being swallowed (taskferry#510)", (t) => {
+    const mgr = makeManager({ spawnFn: () => fakeChild(), opencodeVariantsTable: { get: () => { throw new Error("injected"); } } });
+    const originalRmSync = fs.rmSync;
+    t.mock.method(fs, "rmSync", (target, opts) => {
+      if (String(target).includes(`${path.sep}outputs${path.sep}`)) throw new Error("rm failed");
+      return originalRmSync(target, opts);
+    });
+    assert.throws(() => mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), model: LUNA_MODEL, executor: "opencode" }), /rm failed/);
+  });
+
   /** @param {string[]} args @param {string} model */
   function assertDispatchedModel(args, model) {
     assert.equal(args[args.indexOf("-m") + 1], model);

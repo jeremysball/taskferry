@@ -278,6 +278,18 @@ describe("formatWatchEvent color (TTY-gated)", () => {
   });
 });
 
+test("leanStatus includes outputDir", () => {
+  const detail = { id: "test", status: "done", startedAt: TASK_STARTED_AT, outputDir: "/tmp/outputs/test", exitCode: 0, signal: null };
+  const lean = leanStatus(detail);
+  assert.equal(lean.outputDir, "/tmp/outputs/test");
+});
+
+test("leanStatus omits outputDir when detail has none", () => {
+  const detail = { id: "test", status: "done", startedAt: TASK_STARTED_AT, exitCode: 0, signal: null };
+  const lean = leanStatus(detail);
+  assert.equal("outputDir" in lean, false);
+});
+
 test("leanStatus surfaces a pending changesetStatus without --full", () => {
   const detail = { id: "t1", status: "done", startedAt: TASK_STARTED_AT, exitCode: 0, signal: null, role: "dispatch", changesetStatus: "pending" };
   const lean = leanStatus(detail);

@@ -415,9 +415,7 @@ function classifySymlink(full, realRoot) {
     if (!isInsideDirectory(realRoot, realTarget)) return { kind: "skip" };
     return { kind: "file", size: stat.size };
   } finally {
-    try {
-      fs.closeSync(fd);
-    } catch {}
+    fs.closeSync(fd);
   }
 }
 

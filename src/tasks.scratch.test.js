@@ -404,6 +404,7 @@ describe("scratch output dir walk caps (PR #482 review)", () => {
   });
 });
 
+// eslint-disable-next-line sonarjs/max-lines-per-function -- security regression suite bundles related PR #482/#507 cases; splitting would obscure the shared setup
 describe("scratch output dir security regressions", () => {
   test("readTaskOutputFile does not block on a worker-created FIFO with no writer (PR #482 review)", () => {
     const dir = mkdtempTracked(AXI_TASKS_TEST_DIR + "-fifo-read-");
@@ -592,6 +593,37 @@ describe("scratch output dir security regressions", () => {
     assert.equal(swapped2, true);
     assert.equal(result2.files.some((f) => f.path === "leak.txt"), false, "outside-pinned symlink must be skipped even after it is swapped to inside");
     assert.deepEqual(result2.files.map((f) => f.path), ["safe.bin"]);
+  });
+
+  test("listTaskOutputFiles surfaces a close failure on the symlink fd (fail-fast, PR #507 follow-up)", () => {
+    const dir = mkdtempTracked(AXI_TASKS_TEST_DIR + "-close-fail-");
+    const target = path.join(dir, "real.txt");
+    fs.writeFileSync(target, "inside");
+    const link = path.join(dir, "link.txt");
+    fs.symlinkSync(target, link);
+    const originalOpen = fs.openSync;
+    const originalClose = fs.closeSync;
+    let symlinkFd = null;
+    fs.openSync = (p, flags) => {
+      const fd = originalOpen(p, flags);
+      const s = typeof p === "string" ? p : "";
+      if (s.endsWith("link.txt")) symlinkFd = fd;
+      return fd;
+    };
+    fs.closeSync = (fd) => {
+      if (fd === symlinkFd) {
+        const err = new Error("close failed");
+        err.code = "EIO";
+        throw err;
+      }
+      return originalClose(fd);
+    };
+    try {
+      assert.throws(() => listTaskOutputFiles(dir), /close failed/);
+    } finally {
+      fs.openSync = originalOpen;
+      fs.closeSync = originalClose;
+    }
   });
 });
 

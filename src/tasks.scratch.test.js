@@ -496,6 +496,103 @@ describe("scratch output dir security regressions", () => {
     assert.equal(result.bytes, 1);
     assert.equal(result.truncated, false);
   });
+
+  test("listTaskOutputFiles reports a symlink to a file inside the output dir (PR #507)", () => {
+    const dir = mkdtempTracked(AXI_TASKS_TEST_DIR + "-symlink-inside-");
+    const target = path.join(dir, "real.txt");
+    fs.writeFileSync(target, "inside");
+    fs.symlinkSync(target, path.join(dir, "link.txt"));
+    const result = listTaskOutputFiles(dir);
+    assert.deepEqual(result.files.map((f) => f.path).sort(), ["link.txt", "real.txt"]);
+    const link = result.files.find((f) => f.path === "link.txt");
+    assert.equal(link.size, 6);
+    assert.equal(result.bytes, 12);
+    assert.equal(result.truncated, false);
+  });
+
+  test("listTaskOutputFiles does not leak size via TOCTOU swap after open (PR #507)", () => {
+    const dir = mkdtempTracked(AXI_TASKS_TEST_DIR + "-toctou-list-");
+    const outside = mkdtempTracked(AXI_TASKS_TEST_DIR + "-toctou-list-target-");
+    const safe = path.join(dir, "safe.bin");
+    fs.writeFileSync(safe, "x");
+    const outsideFile = path.join(outside, "outside.bin");
+    fs.writeFileSync(outsideFile, "y".repeat(22));
+    const leak = path.join(dir, "leak.txt");
+    fs.symlinkSync(safe, leak);
+
+    const originalOpen = fs.openSync;
+    const originalStat = fs.statSync;
+    let swapped = false;
+    const swapToOutside = () => {
+      if (!swapped) {
+        fs.unlinkSync(leak);
+        fs.symlinkSync(outsideFile, leak);
+        swapped = true;
+      }
+    };
+    fs.openSync = (p, flags) => {
+      const fd = originalOpen(p, flags);
+      const s = typeof p === "string" ? p : "";
+      if (s.endsWith("leak.txt")) swapToOutside();
+      return fd;
+    };
+    // Fallback for the old stat+realpath path: if classifySymlink still uses statSync, the openSync mock above won't fire.
+    fs.statSync = (p) => {
+      const res = originalStat(p);
+      const s = typeof p === "string" ? p : "";
+      if (s.endsWith("leak.txt")) swapToOutside();
+      return res;
+    };
+    let result;
+    try {
+      result = listTaskOutputFiles(dir);
+    } finally {
+      fs.openSync = originalOpen;
+      fs.statSync = originalStat;
+    }
+    assert.equal(swapped, true, "the TOCTOU swap must have been triggered");
+    const leakEntry = result.files.find((f) => f.path === "leak.txt");
+    assert.ok(leakEntry, "inside-pinned symlink must still be reported, not skipped by an overbroad skip-all");
+    assert.equal(leakEntry.size, 1, "must report the pinned inside size, not the swapped outside size");
+    assert.equal(result.bytes, 2);
+
+    // Opposite direction: initially outside, swapped to inside after open must still be skipped.
+    const dir2 = mkdtempTracked(AXI_TASKS_TEST_DIR + "-toctou-list2-");
+    const safe2 = path.join(dir2, "safe.bin");
+    fs.writeFileSync(safe2, "x");
+    const leak2 = path.join(dir2, "leak.txt");
+    fs.symlinkSync(outsideFile, leak2);
+    let swapped2 = false;
+    const swapToInside = () => {
+      if (!swapped2) {
+        fs.unlinkSync(leak2);
+        fs.symlinkSync(safe2, leak2);
+        swapped2 = true;
+      }
+    };
+    fs.openSync = (p, flags) => {
+      const fd = originalOpen(p, flags);
+      const s = typeof p === "string" ? p : "";
+      if (s.endsWith("leak.txt")) swapToInside();
+      return fd;
+    };
+    fs.statSync = (p) => {
+      const res = originalStat(p);
+      const s = typeof p === "string" ? p : "";
+      if (s.endsWith("leak.txt")) swapToInside();
+      return res;
+    };
+    let result2;
+    try {
+      result2 = listTaskOutputFiles(dir2);
+    } finally {
+      fs.openSync = originalOpen;
+      fs.statSync = originalStat;
+    }
+    assert.equal(swapped2, true);
+    assert.equal(result2.files.some((f) => f.path === "leak.txt"), false, "outside-pinned symlink must be skipped even after it is swapped to inside");
+    assert.deepEqual(result2.files.map((f) => f.path), ["safe.bin"]);
+  });
 });
 
 describe("boot-time sweep of orphaned output dirs under <stateDir>/outputs (PR #482 review)", () => {

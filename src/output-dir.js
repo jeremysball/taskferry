@@ -387,31 +387,38 @@ function classifyEntry(entry, full, realRoot) {
 
 /** @param {string} full @param {string} realRoot @returns {{kind: "file", size: number} | {kind: "skip"}} */
 function classifySymlink(full, realRoot) {
-  let target;
+  let fd;
   try {
-    target = fs.statSync(full);
+    fd = fs.openSync(full, fs.constants.O_RDONLY | fs.constants.O_NONBLOCK);
   } catch (err) {
-    if (errCode(err) === "ENOENT" || errCode(err) === "ELOOP") return { kind: "skip" };
+    if (errCode(err) === "ENOENT" || errCode(err) === "ELOOP" || errCode(err) === "ENXIO") return { kind: "skip" };
     throw err;
   }
-  if (!target.isFile()) {
-    // Deliberately not { kind: "directory" } here: descending into a
-    // symlinked directory has no cycle detection (a self- or
-    // ancestor-referential symlink would re-enter itself via the
-    // traversal stack indefinitely) and can walk arbitrary host
-    // directories the symlink points outside the output dir. Only a
-    // symlink-to-file is reported (as its resolved size, above).
-    return { kind: "skip" };
-  }
-  let realTarget;
   try {
-    realTarget = fs.realpathSync(full);
-  } catch (err) {
-    if (errCode(err) === "ENOENT" || errCode(err) === "ELOOP") return { kind: "skip" };
-    throw err;
+    const stat = fs.fstatSync(fd);
+    if (!stat.isFile()) {
+      // Deliberately not { kind: "directory" } here: descending into a
+      // symlinked directory has no cycle detection (a self- or
+      // ancestor-referential symlink would re-enter itself via the
+      // traversal stack indefinitely) and can walk arbitrary host
+      // directories the symlink points outside the output dir. Only a
+      // symlink-to-file is reported (as its resolved size, above).
+      return { kind: "skip" };
+    }
+    let realTarget;
+    try {
+      realTarget = realpathForFd(fd, full);
+    } catch (err) {
+      if (errCode(err) === "ENOENT" || errCode(err) === "ELOOP") return { kind: "skip" };
+      throw err;
+    }
+    if (!isInsideDirectory(realRoot, realTarget)) return { kind: "skip" };
+    return { kind: "file", size: stat.size };
+  } finally {
+    try {
+      fs.closeSync(fd);
+    } catch {}
   }
-  if (!isInsideDirectory(realRoot, realTarget)) return { kind: "skip" };
-  return { kind: "file", size: target.size };
 }
 
 /** @param {string} full @returns {{kind: "file", size: number} | {kind: "skip"}} */

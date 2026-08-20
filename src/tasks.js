@@ -2355,30 +2355,156 @@ function queueDispatchLaunch(ctx, { id, task, prompt, sessionId, env, noSandbox,
 }
 
 /**
+ * Snapshots the launch scheduler's mutable state before a dispatch that may
+ * throw inside launchQueuedTasks (taskferry#510 follow-up). The scheduler
+ * mutates launchQueue (shift), launchTimes (push), lastLaunchAt and cursor
+ * synchronously before startTask -- a throw from buildSpawnArgs (which runs
+ * before spawnTaskChild's own try/catch, see startTaskFor) would otherwise
+ * leave those mutations in place and stall the next dispatch.
+ * @param {{launchTimes: number[], lastLaunchAt: number, cursor: number, launchTimer: NodeJS.Timeout|null, providerQueues: Map<string, ProviderQueue>}} sched
+ * @returns {{launchTimes: number[], lastLaunchAt: number, cursor: number, launchTimer: NodeJS.Timeout|null, providerQueues: Map<string, {launchQueue: string[], launchTimes: number[], runningCount: number}>}}
+ */
+function snapshotDispatchScheduler(sched) {
+  const providerQueues = new Map();
+  for (const [provider, queue] of sched.providerQueues.entries()) {
+    providerQueues.set(provider, {
+      launchQueue: [...queue.launchQueue],
+      launchTimes: [...queue.launchTimes],
+      runningCount: queue.runningCount,
+    });
+  }
+  return {
+    launchTimes: [...sched.launchTimes],
+    lastLaunchAt: sched.lastLaunchAt,
+    cursor: sched.cursor,
+    launchTimer: sched.launchTimer,
+    providerQueues,
+  };
+}
+
+/**
+ * Restores the scheduler snapshot taken before a failed dispatch. Clears any
+ * timer that was armed during the failed launch attempt and restores
+ * launchTimes/cursor/providerQueues to their pre-dispatch values so the next
+ * dispatch is not throttled by a phantom launch.
+ * @param {{launchTimes: number[], lastLaunchAt: number, cursor: number, launchTimer: NodeJS.Timeout|null, providerQueues: Map<string, ProviderQueue>}} sched
+ * @param {ReturnType<typeof snapshotDispatchScheduler>} snapshot
+ */
+function restoreDispatchScheduler(sched, snapshot) {
+  if (sched.launchTimer && sched.launchTimer !== snapshot.launchTimer) {
+    clearTimeout(sched.launchTimer);
+  }
+  sched.launchTimes.length = 0;
+  sched.launchTimes.push(...snapshot.launchTimes);
+  sched.lastLaunchAt = snapshot.lastLaunchAt;
+  sched.cursor = snapshot.cursor;
+  // Remove queues that were created during the failed dispatch.
+  for (const provider of [...sched.providerQueues.keys()]) {
+    if (!snapshot.providerQueues.has(provider)) {
+      sched.providerQueues.delete(provider);
+    }
+  }
+  for (const [provider, snap] of snapshot.providerQueues.entries()) {
+    let queue = sched.providerQueues.get(provider);
+    if (!queue) {
+      queue = { launchQueue: [], launchTimes: [], runningCount: 0 };
+      sched.providerQueues.set(provider, queue);
+    }
+    queue.launchQueue.length = 0;
+    queue.launchQueue.push(...snap.launchQueue);
+    queue.launchTimes.length = 0;
+    queue.launchTimes.push(...snap.launchTimes);
+    queue.runningCount = snap.runningCount;
+  }
+  // The timer handle from the snapshot was cleared at the start of
+  // runLaunchQueuedTasks, so restoring the handle itself would point at a
+  // cleared timeout. Leave timer null -- the next successful dispatch's
+  // launchQueuedTasks will re-arm it if queued work remains.
+  sched.launchTimer = null;
+}
+
+/**
+ * Captures the pre-dispatch output-dir existence and scheduler/persist state
+ * needed to roll back a failed dispatch (taskferry#510). Extracted so
+ * dispatchTask stays under the complexity ceiling.
+ * @param {{launchScheduler?: {launchTimes: number[], lastLaunchAt: number, cursor: number, launchTimer: NodeJS.Timeout|null, providerQueues: Map<string, ProviderQueue>}, state?: {persistDirty: boolean, persistTimer: NodeJS.Timeout|null}}} ctx
+ * @param {string} outputDir
+ * @returns {{preExists: boolean, schedulerSnapshot: ReturnType<typeof snapshotDispatchScheduler>|null, persistSnapshot: {persistDirty: boolean, persistTimer: NodeJS.Timeout|null}|null}}
+ */
+function prepareDispatchRollback(ctx, outputDir) {
+  let preExists = false;
+  try {
+    preExists = fs.existsSync(outputDir);
+  } catch {}
+  const schedulerSnapshot = ctx.launchScheduler ? snapshotDispatchScheduler(ctx.launchScheduler) : null;
+  const persistSnapshot = ctx.state ? { persistDirty: ctx.state.persistDirty, persistTimer: ctx.state.persistTimer } : null;
+  return { preExists, schedulerSnapshot, persistSnapshot };
+}
+
+/**
+ * Whether the output dir should be considered newly created after a failed
+ * dispatch, handling the case where ensureTaskOutputDir threw after a partial
+ * mkdir. Extracted so dispatchTask's catch stays flat.
+ * @param {boolean} outputDirCreated
+ * @param {boolean} preExists
+ * @param {string} outputDir
+ * @returns {boolean}
+ */
+function resolveFailedOutputDirCreated(outputDirCreated, preExists, outputDir) {
+  if (outputDirCreated || preExists) return outputDirCreated;
+  try {
+    if (fs.existsSync(outputDir)) return true;
+  } catch {}
+  return false;
+}
+
+/**
+ * Restores scheduler and persist state captured by prepareDispatchRollback.
+ * @param {{launchScheduler?: {launchTimes: number[], lastLaunchAt: number, cursor: number, launchTimer: NodeJS.Timeout|null, providerQueues: Map<string, ProviderQueue>}, state?: {persistDirty: boolean, persistTimer: NodeJS.Timeout|null}}} ctx
+ * @param {ReturnType<typeof snapshotDispatchScheduler>|null} schedulerSnapshot
+ * @param {{persistDirty: boolean, persistTimer: NodeJS.Timeout|null}|null} persistSnapshot
+ */
+function rollbackDispatchState(ctx, schedulerSnapshot, persistSnapshot) {
+  if (schedulerSnapshot && ctx.launchScheduler) {
+    restoreDispatchScheduler(ctx.launchScheduler, schedulerSnapshot);
+  }
+  if (persistSnapshot && ctx.state) {
+    if (ctx.state.persistTimer && ctx.state.persistTimer !== persistSnapshot.persistTimer) {
+      clearTimeout(ctx.state.persistTimer);
+    }
+    ctx.state.persistDirty = persistSnapshot.persistDirty;
+    ctx.state.persistTimer = persistSnapshot.persistTimer;
+  }
+}
+
+/**
  * Rolls back a just-created output dir and any half-queued dispatch state
  * after a failure between ensureTaskOutputDir and the durable queue step
  * (taskferry#510). queueDispatchLaunch sets tasks/pendingLaunches/providerQueue
  * in sequence, so a throw in later steps can leave earlier ones populated;
  * the catch here deletes all of them and removes the directory that was
  * created just before the failure, keeping the invariant that every output
- * dir on disk corresponds to a task in tasks.json. Best-effort: the rm and
- * map deletions tolerate the dir or queue entry already being absent.
+ * dir on disk corresponds to a task in tasks.json.
  * @param {string} id
  * @param {string} outputDir
  * @param {boolean} outputDirCreated
- * @param {{tasks: Map<string, Task>, pendingLaunches: Map<string, LaunchSpec>, providerQueues: Map<string, ProviderQueue>}} ctx
+ * @param {{tasks: Map<string, Task>, pendingLaunches: Map<string, LaunchSpec>, providerQueues: Map<string, ProviderQueue>, taskEvents?: {deleteEmittedStatus: (taskId: string) => void}}} ctx
  */
 function cleanupFailedDispatchOutputDir(id, outputDir, outputDirCreated, ctx) {
-  if (outputDirCreated) {
-    try {
-      fs.rmSync(outputDir, { recursive: true, force: true });
-    } catch {}
-  }
+  // Delete in-memory state first so a throwing rm does not leave a phantom
+  // task in the maps. The caller restores scheduler/persist state before
+  // calling this, so only the queue entry for this id remains to be removed.
   ctx.tasks.delete(id);
   ctx.pendingLaunches.delete(id);
   for (const queue of ctx.providerQueues.values()) {
     const idx = queue.launchQueue.indexOf(id);
     if (idx !== -1) queue.launchQueue.splice(idx, 1);
+  }
+  if (ctx.taskEvents?.deleteEmittedStatus) {
+    ctx.taskEvents.deleteEmittedStatus(id);
+  }
+  if (outputDirCreated) {
+    fs.rmSync(outputDir, { recursive: true, force: true });
   }
 }
 
@@ -4683,7 +4809,7 @@ function buildTaskManagerApi(ctx) {
      *   misrouted CLI/RPC call fails fast rather than silently picking the default.
      * @returns {TaskSummary & {next: string}}
      */
-    dispatch: (params) => dispatchTask(params, { ensureStateLoaded: () => ctx.helpers.ensureStateLoaded(), tasks: ctx.maps.tasks, defaultExecutor: ctx.opts.defaultExecutor, STATE_DIR: ctx.opts.stateDir, LOG_DIR: ctx.paths.LOG_DIR, persistTask: (taskId) => ctx.helpers.persistTask(taskId), pendingLaunches: ctx.maps.pendingLaunches, providerQueues: ctx.maps.providerQueues, launchQueuedTasks: () => ctx.helpers.launchQueuedTasks(), defaultVariant: ctx.opts.defaultVariant, resolveOpencodeVariants: ctx.helpers.resolveOpencodeVariants }),
+     dispatch: (params) => dispatchTask(params, { ensureStateLoaded: () => ctx.helpers.ensureStateLoaded(), tasks: ctx.maps.tasks, defaultExecutor: ctx.opts.defaultExecutor, STATE_DIR: ctx.opts.stateDir, LOG_DIR: ctx.paths.LOG_DIR, persistTask: (taskId) => ctx.helpers.persistTask(taskId), pendingLaunches: ctx.maps.pendingLaunches, providerQueues: ctx.maps.providerQueues, launchQueuedTasks: () => ctx.helpers.launchQueuedTasks(), defaultVariant: ctx.opts.defaultVariant, resolveOpencodeVariants: ctx.helpers.resolveOpencodeVariants, launchScheduler: ctx.schedulers.launchScheduler, state: ctx.state, taskEvents: ctx.events.taskEvents }),
     /**
      * @param {string} taskId
      * @param {{graceMs?: number}} [options]
@@ -6691,7 +6817,7 @@ function buildDispatchPrompt({ role, noOverlay, projectConfig, prompt, outputDir
  * helpers are plain module-level functions called directly. The factory
  * bindings are threaded in via `ctx`.
  * @param {{prompt: string, directory: string, model?: string, variant?: string, sessionId?: string, internal?: boolean, finalMarker?: string|null, originSessionId?: string, noSandbox?: boolean, noOverlay?: boolean, allowedDirs?: string[], rwBind?: string[], roBind?: string[], executor?: string, env?: NodeJS.ProcessEnv, role?: "dispatch"|"advisor", class?: string|null, parentTaskId?: string|null}} params
- * @param {{ensureStateLoaded: () => void, tasks: Map<string, Task>, defaultExecutor: import("./executor.js").WorkerExecutor, STATE_DIR: string, LOG_DIR: string, persistTask: (taskId: string) => void, pendingLaunches: Map<string, LaunchSpec>, providerQueues: Map<string, ProviderQueue>, launchQueuedTasks: () => void, defaultVariant: string, resolveOpencodeVariants: (model: string, env: NodeJS.ProcessEnv|undefined) => string[]}} ctx
+ * @param {{ensureStateLoaded: () => void, tasks: Map<string, Task>, defaultExecutor: import("./executor.js").WorkerExecutor, STATE_DIR: string, LOG_DIR: string, persistTask: (taskId: string) => void, pendingLaunches: Map<string, LaunchSpec>, providerQueues: Map<string, ProviderQueue>, launchQueuedTasks: () => void, defaultVariant: string, resolveOpencodeVariants: (model: string, env: NodeJS.ProcessEnv|undefined) => string[], launchScheduler?: {launchTimes: number[], lastLaunchAt: number, cursor: number, launchTimer: NodeJS.Timeout|null, providerQueues: Map<string, ProviderQueue>}, state?: {persistDirty: boolean, persistTimer: NodeJS.Timeout|null}, taskEvents?: {deleteEmittedStatus: (taskId: string) => void}}} ctx
  * @returns {TaskSummary & {next: string}}
  */
 function dispatchTask(params, ctx) {
@@ -6728,16 +6854,19 @@ function dispatchTask(params, ctx) {
   // would clean. Wrap the window so a failure after the mkdir rolls the
   // just-created directory back synchronously, keeping the invariant that
   // every output dir on disk corresponds to a task in tasks.json.
+  const { preExists, schedulerSnapshot, persistSnapshot } = prepareDispatchRollback(ctx, outputDir);
   let outputDirCreated = false;
   let dispatchPrompt;
   let task;
   try {
     ensureTaskOutputDir(outputDir);
-    outputDirCreated = true;
+    outputDirCreated = !preExists;
     dispatchPrompt = buildDispatchPrompt({ role, noOverlay, projectConfig, prompt, outputDir });
     task = buildDispatchTask({ id, model, executor, priorSessionTask, variant, sessionId, originSessionId, internal, finalMarker, role, logPath, parentTaskId, env, prompt: dispatchPrompt, originalPrompt: prompt, directory: normalizedDirectory, defaultVariant: ctx.defaultVariant, resolveOpencodeVariants: ctx.resolveOpencodeVariants, class: taskClass, outputDir: outputDir });
     queueDispatchLaunch({ tasks: ctx.tasks, persistTask: ctx.persistTask, pendingLaunches: ctx.pendingLaunches, providerQueues: ctx.providerQueues, launchQueuedTasks: ctx.launchQueuedTasks }, { id, task, sessionId, env, noSandbox, noOverlay, executor, role, prompt: dispatchPrompt, allowedDirs: effectiveRwBind, roBind: dispatchRoBind, outputDir: outputDir });
   } catch (err) {
+    outputDirCreated = resolveFailedOutputDirCreated(outputDirCreated, preExists, outputDir);
+    rollbackDispatchState(ctx, schedulerSnapshot, persistSnapshot);
     cleanupFailedDispatchOutputDir(id, outputDir, outputDirCreated, ctx);
     throw err;
   }

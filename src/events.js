@@ -54,5 +54,12 @@ export function createTaskEvents(onEvent) {
     }
   }
 
-  return { emitState };
+  /**
+   * @param {string} taskId
+   */
+  function deleteEmittedStatus(taskId) {
+    emittedStatuses.delete(taskId);
+  }
+
+  return { emitState, deleteEmittedStatus };
 }

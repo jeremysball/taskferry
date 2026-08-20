@@ -569,7 +569,8 @@ function responseError(error, requestId) {
     messageFallback: "",
     foldDetailLines: false,
   });
-  const code = /unknown task id:/.test(text) ? "UNKNOWN_TASK" : "REQUEST_FAILED";
+  // eslint-disable-next-line sonarjs/no-nested-conditional -- two disjoint error-code branches, collapsed to keep responseError under the 80-line cap
+  const code = /unknown task id:/.test(text) ? "UNKNOWN_TASK" : /output file not found:/.test(text) ? "OUTPUT_NOT_FOUND" : "REQUEST_FAILED";
   return errorResponse(requestId, code, message, help, text);
 }
 

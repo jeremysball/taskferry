@@ -4575,7 +4575,7 @@ function buildManagerInternalHelpers(ctx) {
      */
     reject: (taskId) => rejectTaskChangeset(taskId, { ensureStateLoaded: () => ctx.helpers.ensureStateLoaded(), tasks: ctx.maps.tasks, persistTask: (taskId) => ctx.helpers.persistTask(taskId), releaseOverlay: (task) => ctx.env.releaseOverlay(task), killGateAndWait: (taskId2) => ctx.env.killGateAndWait(taskId2), noSuchTask }),
     /** @param {string} taskId @param {{path?: string}} [options] */
-    output: (taskId, options) => outputFor(taskId, { ...ctx, noSuchTask }, options),
+    output: (taskId, options) => outputFor(taskId, { ...ctx, noSuchTask, noSuchOutputFile }, options),
     /** @param {string} taskId */
     stopRunningWatcher: (taskId) => stopRunningWatcherFor(taskId, { runningWatchers: ctx.maps.runningWatchers, runningWatcherState: ctx.maps.runningWatcherState }),
     /** Forces a running task to stop for a reason other than user cancellation
@@ -5035,6 +5035,15 @@ export function modelsCacheFingerprint(env = {}) {
  */
 function noSuchTask(taskId) {
   return new Error(`error: unknown task id: ${taskId}\nhelp: run taskferry list to see valid task ids`);
+}
+
+/**
+ * @param {string} taskId
+ * @param {string} relativePath
+ * @returns {Error}
+ */
+function noSuchOutputFile(taskId, relativePath) {
+  return new Error(`error: output file not found: "${relativePath}" for task ${taskId}\nhelp: run taskferry output ${taskId} to see available files`);
 }
 
 // Minimal per-row schema for taskferry list: an agent scanning a task list
@@ -6196,7 +6205,7 @@ async function rejectTaskChangeset(taskId, ctx) {
  * because the scratch dir is per-task state the worker owns, not a parsed log
  * result. taskferry#423.
  * @param {string} taskId
- * @param {{maps: {tasks: Map<string, Task>}, opts: {stateDir: string}, helpers: {ensureStateLoaded: () => void}, noSuchTask: (taskId: string) => Error}} ctx
+ * @param {{maps: {tasks: Map<string, Task>}, opts: {stateDir: string}, helpers: {ensureStateLoaded: () => void}, noSuchTask: (taskId: string) => Error, noSuchOutputFile: (taskId: string, relativePath: string) => Error}} ctx
  * @param {{path?: string}} [options]
  */
 function outputFor(taskId, ctx, options = {}) {
@@ -6206,9 +6215,10 @@ function outputFor(taskId, ctx, options = {}) {
   const outputDir = task.outputDir ?? null;
   if (typeof options.path === "string" && options.path.length > 0) {
     if (!outputDir) {
-      return { taskId, outputDir: null, files: [], bytes: 0, total: 0, truncated: false, file: { content: null, size: 0, truncated: false, error: "no_output_dir" } };
+      throw ctx.noSuchOutputFile(taskId, options.path);
     }
     const file = readTaskOutputFile(outputDir, options.path);
+    if (file.error === "not_found") throw ctx.noSuchOutputFile(taskId, options.path);
     return { taskId: taskId, outputDir: outputDir, files: [], bytes: 0, total: 0, truncated: false, file };
   }
   if (!outputDir) {

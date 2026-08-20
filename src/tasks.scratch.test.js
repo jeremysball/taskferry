@@ -243,6 +243,23 @@ describe("scratch output dir retrieval (taskferry#423)", () => {
     assert.throws(() => mgr.output(dispatched.id, { path: "../../etc/passwd" }), /escapes/i);
   });
 
+  test("taskferry output: --path on nonexistent file throws 'output file not found' instead of silent empty success (taskferry#511)", async () => {
+    const child = fakeChild();
+    const mgr = makeManager({ spawnFn: () => child });
+    const dispatched = mgr.dispatch({ prompt: TEST_PROMPT, directory: TEST_DIRECTORY });
+    fs.writeFileSync(path.join(dispatched.outputDir, "real.txt"), "hi");
+    child.emit("exit", 0, null);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.throws(() => mgr.output(dispatched.id, { path: "nonexistent.txt" }), /output file not found/i);
+  });
+
+  test("taskferry output: --path on a task with no outputDir throws 'output file not found' (taskferry#511)", () => {
+    const mgr = makeManager({
+      tasksFixture: (logDir) => [baseTask({ id: "oc_no_dir_511", outputDir: null, logPath: path.join(logDir, "x.ndjson") })],
+    });
+    assert.throws(() => mgr.output("oc_no_dir_511", { path: "any.txt" }), /output file not found/i);
+  });
+
   test("listTaskOutputFiles caps at MAX_OUTPUT_LIST_ENTRIES and reports truncated", () => {
     const dir = mkdtempTracked(AXI_TASKS_TEST_DIR + "-list-");
     for (let i = 0; i < 300; i++) {

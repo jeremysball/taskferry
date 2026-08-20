@@ -575,6 +575,11 @@ profiling is diagnostic, not on the request's critical path.
   captured the *calls*, the scratch dir is where the work actually landed.
   This is the whole reason the per-task scratch dir exists separately from
   the changeset overlay.
+- An empty `taskferry output` listing, or a `not_found` file result, after a
+  worker replaces its task output directory with a symlink — expected, not
+  lost deliverables. Output inspection opens the root without following a
+  symlink and reads through a pinned file descriptor; directory permission
+  repair likewise refuses a symlink instead of changing the linked target.
 - A config entry, credential, or session file that passed the lstat symlink
   guard at bind-computation time still resolving through a symlink into the
   sandbox — expected, and tolerated on purpose. The guard's lstat check

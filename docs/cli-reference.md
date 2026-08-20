@@ -360,7 +360,7 @@ ending on a tool call instead of a final assistant message (taskferry#423).
   (capped at `256` files / `8 MiB`; `node_modules` and `.git` subtrees
   are skipped).
 - With `--path <relpath>`: prints the file's UTF-8 content. Single files
-  are capped at `1 MiB`; an over-cap read returns `{ content: null,
+  are capped at `512 KiB`; an over-cap read returns `{ content: null,
   truncated: true, error: "too_large", size }`. Any path that would
   escape the per-task dir (absolute paths, leading `/`, `..` segments)
   is rejected.

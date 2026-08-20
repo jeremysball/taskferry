@@ -17,7 +17,7 @@ import { resolveVariant, KNOWN_VARIANT_LEVELS } from "./variants.js";
 import { readVariantsCache, refreshVariantsCache } from "./variants-cache.js";
 import { loadEnvFile, watchEnvFile } from "./env-file.js";
 import { loadProjectConfig, resolveReadOnlyProjectBinds, verificationPromptBlock } from "./project-config.js";
-import { TASKFERRY_OUTPUT_DIR_ENV, ensureTaskOutputDir, listTaskOutputFiles, outputDirPromptBlock, readTaskOutputFile, resolveTaskOutputDir } from "./output-dir.js";
+import { TASKFERRY_OUTPUT_DIR_ENV, ensureTaskOutputDir, listTaskOutputFiles, outputDirPromptBlock, readTaskOutputFile, resolveOutputDirRoot, resolveTaskOutputDir } from "./output-dir.js";
 import { computeDoctorStats } from "./doctor-stats.js";
 
 /**
@@ -4496,6 +4496,7 @@ function buildManagerInternalHelpers(ctx) {
     /** @param {Task} task */
     hasLiveOverlay: (task) => hasLiveOverlayForTask(task, { existsFn: ctx.opts.existsFn }),
     sweepOrphanedPromptFiles: () => sweepOrphanedPromptFilesFor({ PROMPT_DIR: ctx.paths.PROMPT_DIR, tasks: ctx.maps.tasks }),
+    sweepOrphanedOutputDirs: () => sweepOrphanedOutputDirsFor({ OUTPUT_DIR_ROOT: resolveOutputDirRoot(ctx.opts.stateDir), tasks: ctx.maps.tasks, readdirFn: ctx.opts.readdirFn }),
     /** @param {string} model @param {NodeJS.ProcessEnv} [env] @returns {string[]} Resolves the
      * opencode variants table for a model: the test-injected
      * `opencodeVariantsTable` seam when set, otherwise the on-disk
@@ -4574,7 +4575,7 @@ function buildManagerInternalHelpers(ctx) {
      */
     reject: (taskId) => rejectTaskChangeset(taskId, { ensureStateLoaded: () => ctx.helpers.ensureStateLoaded(), tasks: ctx.maps.tasks, persistTask: (taskId) => ctx.helpers.persistTask(taskId), releaseOverlay: (task) => ctx.env.releaseOverlay(task), killGateAndWait: (taskId2) => ctx.env.killGateAndWait(taskId2), noSuchTask }),
     /** @param {string} taskId @param {{path?: string}} [options] */
-    output: (taskId, options) => outputFor(taskId, ctx, options),
+    output: (taskId, options) => outputFor(taskId, { ...ctx, noSuchTask }, options),
     /** @param {string} taskId */
     stopRunningWatcher: (taskId) => stopRunningWatcherFor(taskId, { runningWatchers: ctx.maps.runningWatchers, runningWatcherState: ctx.maps.runningWatcherState }),
     /** Forces a running task to stop for a reason other than user cancellation
@@ -4786,6 +4787,16 @@ function bootstrapManagerContext(ctx) {
   // own exit/error paths -- but a SIGKILL of the daemon mid-task skips
   // both cleanup paths and orphans the file forever.
   ctx.helpers.sweepOrphanedPromptFiles();
+  // Mirrors sweepOrphanedPromptFiles/sweepOrphanedOverlays above: a
+  // daemon crash after ensureTaskOutputDir ran for a dispatch but
+  // before the task ever landed in tasks.json (or after a task settled
+  // but its scratch dir was never cleared) leaves <stateDir>/outputs/<id>
+  // behind. Output dirs only ever outlive their task when a state-load
+  // failure or boot crash happened mid-dispatch; the normal settled/exit
+  // paths intentionally keep the dir (it's the worker's deliverable
+  // surface for `taskferry output <id>`), so the sweep only removes dirs
+  // whose task id is not present in tasks.json at all.
+  ctx.helpers.sweepOrphanedOutputDirs();
   // Mirrors sweepOrphanedPromptFiles() above: a daemon that crashed after
   // an overlay was created but before its cleanup (reject/accept, or the
   // advisor auto-reject in extractChangesetForTask()) ever ran leaves a
@@ -6185,13 +6196,13 @@ async function rejectTaskChangeset(taskId, ctx) {
  * because the scratch dir is per-task state the worker owns, not a parsed log
  * result. taskferry#423.
  * @param {string} taskId
- * @param {{maps: {tasks: Map<string, Task>}, opts: {stateDir: string}, helpers: {ensureStateLoaded: () => void}}} ctx
+ * @param {{maps: {tasks: Map<string, Task>}, opts: {stateDir: string}, helpers: {ensureStateLoaded: () => void}, noSuchTask: (taskId: string) => Error}} ctx
  * @param {{path?: string}} [options]
  */
 function outputFor(taskId, ctx, options = {}) {
   ctx.helpers.ensureStateLoaded();
   const task = ctx.maps.tasks.get(taskId);
-  if (!task) throw new Error(`unknown task id: ${taskId}\nhelp: run \`taskferry list\` to see active task ids`);
+  if (!task) throw ctx.noSuchTask(taskId);
   const outputDir = task.outputDir ?? null;
   if (typeof options.path === "string" && options.path.length > 0) {
     if (!outputDir) {
@@ -6445,6 +6456,47 @@ function sweepOrphanedPromptFilesFor(ctx) {
 }
 
 /**
+ * Sweeps orphaned output dirs under <stateDir>/outputs/. Each dispatch
+ * reserves its output dir via ensureTaskOutputDir() before launch --
+ * `bwrap --bind` needs the source path to exist on the host -- so a
+ * daemon that crashed after that mkdir but before the task id was
+ * persisted into tasks.json (or that died before any cleanup ran) leaves
+ * an <id> entry under outputs/ with no matching task. Settled tasks
+ * intentionally keep their output dir (it's the worker's deliverable
+ * surface for `taskferry output <id>`), so the sweep only removes dirs
+ * whose task id is absent from the loaded tasks.json entirely. Mirrors
+ * sweepOrphanedPromptFiles() / sweepOrphanedOverlays() at startup.
+ * @param {{OUTPUT_DIR_ROOT: string, tasks: Map<string, Task>, readdirFn: (path: string) => string[]}} ctx
+ */
+function sweepOrphanedOutputDirsFor(ctx) {
+  let entries;
+  try {
+    entries = ctx.readdirFn(ctx.OUTPUT_DIR_ROOT);
+  } catch {
+    return;
+  }
+  for (const entry of entries) {
+    // Skip the root "." and ".." entries readdir can hand back on some
+    // platforms, anything that isn't a task-id-shaped directory, and any
+    // task id that is already tracked in tasks.json (settled tasks
+    // intentionally retain their output dir as the deliverable surface).
+    if (entry && entry !== "." && entry !== ".." && !ctx.tasks.has(entry)) {
+      removeDirIfPresent(path.join(ctx.OUTPUT_DIR_ROOT, entry));
+    }
+  }
+}
+
+/** Recursively remove a directory tree, tolerating it already being gone (ENOENT).
+ * @param {string} dirPath */
+function removeDirIfPresent(dirPath) {
+  try {
+    fs.rmSync(dirPath, { recursive: true, force: false });
+  } catch (err) {
+    if (errCode(err) !== "ENOENT") throw err;
+  }
+}
+
+/**
  * Forces a refresh of a task's activity summary via the activity cache and
  * returns the refreshed snapshot. Extracted out of `createTaskManager`'s
  * `activitySummary` closure.
@@ -6581,15 +6633,24 @@ function startRunningWatcherFor(task, ctx) {
  * stored on `task.prompt` and passed via `-p`. The two blocks are:
  *   - verificationPromptBlock: only on dispatch (advisor never gates) and
  *     suppressed by --no-overlay (parity with the rest of the overlay machinery).
- *   - outputDirPromptBlock: always on dispatch, since it's the only surface a
- *     tool-call-ending worker has to leave its deliverable. taskferry#423.
+ *   - outputDirPromptBlock: gated on outputDir being allocated at all, not
+ *     on role. An advisor turn gets the exact same scratch dir and
+ *     TASKFERRY_OUTPUT_DIR as a dispatch (see dispatchTask), so it needs
+ *     the same in-prompt notification to actually discover it -- a worker
+ *     that has a writable dir and an env var pointing at it but no prompt
+ *     text explaining either can't use the "deliverable survives turn end"
+ *     mechanism this exists for. Previously gated on role === "dispatch",
+ *     which left advisor's allocation silently undiscoverable
+ *     (taskferry#504); tying the prompt block to outputDir itself instead
+ *     of duplicating a separate role check means it can't drift out of
+ *     sync with what dispatchTask actually allocated. taskferry#423.
  * @param {{role: "dispatch"|"advisor", noOverlay: boolean, projectConfig: {check: string|null}, prompt: string, outputDir: string|null}} args
  * @returns {string}
  */
 function buildDispatchPrompt({ role, noOverlay, projectConfig, prompt, outputDir }) {
   const injected = [
     role === "dispatch" && !noOverlay && projectConfig.check ? verificationPromptBlock(projectConfig.check) : "",
-    outputDirPromptBlock(outputDir),
+    outputDir ? outputDirPromptBlock(outputDir) : "",
   ].join("");
   return `${prompt}${injected}`;
 }
@@ -6624,9 +6685,14 @@ function dispatchTask(params, ctx) {
   // Per-task scratch dir: a writable, rw-bound surface the worker can use to
   // hand back deliverables whose final assistant message ended on a tool call
   // (so `taskferry result` can't parse a result). The same path is exported as
-  // $TASKFERRY_OUTPUT_DIR inside the sandbox. taskferry#423.
-  const outputDir = role === "dispatch" ? resolveTaskOutputDir(ctx.STATE_DIR, id) : null;
-  if (outputDir) ensureTaskOutputDir(outputDir);
+  // $TASKFERRY_OUTPUT_DIR inside the sandbox. Allocated for every dispatch
+  // regardless of role (dispatch + advisor both go through this code path) so
+  // the docs/skill text claiming "every dispatch gets a per-task scratch dir"
+  // stays accurate; the advisor role also has a final-message window where
+  // the answer can end on a tool call and the caller wants the deliverable
+  // back the same way. taskferry#423.
+  const outputDir = resolveTaskOutputDir(ctx.STATE_DIR, id);
+  ensureTaskOutputDir(outputDir);
   const dispatchPrompt = buildDispatchPrompt({ role, noOverlay, projectConfig, prompt, outputDir });
   const task = buildDispatchTask({ id, model, executor, priorSessionTask, variant, sessionId, originSessionId, internal, finalMarker, role, logPath, parentTaskId, env, prompt: dispatchPrompt, originalPrompt: prompt, directory: normalizedDirectory, defaultVariant: ctx.defaultVariant, resolveOpencodeVariants: ctx.resolveOpencodeVariants, class: taskClass, outputDir: outputDir });
   queueDispatchLaunch({ tasks: ctx.tasks, persistTask: ctx.persistTask, pendingLaunches: ctx.pendingLaunches, providerQueues: ctx.providerQueues, launchQueuedTasks: ctx.launchQueuedTasks }, { id, task, sessionId, env, noSandbox, noOverlay, executor, role, prompt: dispatchPrompt, allowedDirs: effectiveRwBind, roBind: dispatchRoBind, outputDir: outputDir });

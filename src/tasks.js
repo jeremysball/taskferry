@@ -6,8 +6,9 @@ import path from "node:path";
 import { createTaskEvents } from "./events.js";
 import { createActivityCache, readActivitySnapshot, readDeltaNarration, DEFAULT_SUMMARIZER_TIMEOUT_MS } from "./activity.js";
 import { normalizeActivitySubscriptionKey, resolveStateDir, resolveCacheDir, resolveOverlayTmpRoot, TASKFERRY_PLUMBING_ENV_VARS } from "./paths.js";
-import { RESULT_FIELDS } from "./protocol.js";
+import { RESULT_FIELDS, encodeMessage, successResponse } from "./protocol.js";
 import { formatToolEventForNarration } from "./narration-format.js";
+import { MAX_BUFFER_BYTES } from "./daemon-server.js";
 import { errCode } from "./errors.js";
 import { isNonNegativeInteger, isPositiveInteger } from "./numbers.js";
 import { buildBwrapArgs, checkBwrapAvailable, checkOverlaySupport, defaultDenyList, platformSupportsSandbox, resolveGitCommonDir, resolveGitDir } from "./sandbox.js";
@@ -17,10 +18,10 @@ import { resolveVariant, KNOWN_VARIANT_LEVELS } from "./variants.js";
 import { readVariantsCache, refreshVariantsCache } from "./variants-cache.js";
 import { loadEnvFile, watchEnvFile } from "./env-file.js";
 import { loadProjectConfig, resolveReadOnlyProjectBinds, verificationPromptBlock } from "./project-config.js";
-import { TASKFERRY_OUTPUT_DIR_ENV, DEFAULT_MAX_OUTPUT_FILE_BYTES, ensureTaskOutputDir, listTaskOutputFiles, outputDirPromptBlock, readTaskOutputFile, resolveOutputDirRoot, resolveTaskOutputDir } from "./output-dir.js";
+import { TASKFERRY_OUTPUT_DIR_ENV, DEFAULT_MAX_OUTPUT_FILE_BYTES, MAX_SAFE_OUTPUT_FILE_BYTES, ensureTaskOutputDir, listTaskOutputFiles, outputDirPromptBlock, readTaskOutputFile, resolveOutputDirRoot, resolveTaskOutputDir } from "./output-dir.js";
 import { computeDoctorStats } from "./doctor-stats.js";
 
-export { DEFAULT_MAX_OUTPUT_FILE_BYTES };
+export { DEFAULT_MAX_OUTPUT_FILE_BYTES, MAX_SAFE_OUTPUT_FILE_BYTES };
 
 /**
  * @typedef {object} SummaryOf
@@ -3875,6 +3876,10 @@ function resolveWorkspaceRootFnOption(rawOptions) {
  */
 function resolveTimeoutOptions(rawOptions) {
   const config = rawOptions.config || {};
+  const maxOutputFileBytes = resolvePositiveIntOption(rawOptions.maxOutputFileBytes, process.env.TASKFERRY_MAX_OUTPUT_FILE_BYTES, config.maxOutputFileBytes, DEFAULT_MAX_OUTPUT_FILE_BYTES);
+  if (maxOutputFileBytes > MAX_BUFFER_BYTES) {
+    throw new Error(`error: maxOutputFileBytes ${maxOutputFileBytes} exceeds daemon response limit ${MAX_BUFFER_BYTES} bytes\nhelp: lower TASKFERRY_MAX_OUTPUT_FILE_BYTES, config maxOutputFileBytes, or --max-output-file-bytes to ≤ ${MAX_BUFFER_BYTES} (and ≤ ${MAX_SAFE_OUTPUT_FILE_BYTES} for worst-case JSON escaping)`);
+  }
   return {
     maxDispatchesPerWindow: resolvePositiveIntOption(rawOptions.maxDispatchesPerWindow, process.env.TASKFERRY_MAX_DISPATCHES_PER_WINDOW, config.maxDispatchesPerWindow, DEFAULT_MAX_DISPATCHES_PER_WINDOW),
     dispatchWindowMs: resolvePositiveIntOption(rawOptions.dispatchWindowMs, process.env.TASKFERRY_DISPATCH_WINDOW_MS, config.dispatchWindowMs, DEFAULT_DISPATCH_WINDOW_MS),
@@ -3890,7 +3895,7 @@ function resolveTimeoutOptions(rawOptions) {
     maxWaitMs: rawOptions.maxWaitMs ?? MAX_WAIT_MS,
     summarizerTimeoutMs: resolveNonNegativeIntOption(rawOptions.summarizerTimeoutMs, process.env.TASKFERRY_SUMMARIZER_TIMEOUT_MS, config.summarizerTimeoutMs, DEFAULT_SUMMARIZER_TIMEOUT_MS),
     activityMaxWords: resolvePositiveIntOption(rawOptions.activityMaxWords, process.env.TASKFERRY_ACTIVITY_MAX_WORDS, config.activityMaxWords, 75),
-    maxOutputFileBytes: resolvePositiveIntOption(rawOptions.maxOutputFileBytes, process.env.TASKFERRY_MAX_OUTPUT_FILE_BYTES, config.maxOutputFileBytes, DEFAULT_MAX_OUTPUT_FILE_BYTES),
+    maxOutputFileBytes,
   };
 }
 
@@ -4238,7 +4243,13 @@ function initManagerLimits(opts) {
     maxWait: positiveInteger(opts.maxWaitMs, MAX_WAIT_MS),
     summarizerTimeout: nonNegativeInteger(opts.summarizerTimeoutMs, DEFAULT_SUMMARIZER_TIMEOUT_MS),
     activityWords: positiveInteger(opts.activityMaxWords, 75),
-    maxOutputFileBytes: positiveInteger(opts.maxOutputFileBytes, DEFAULT_MAX_OUTPUT_FILE_BYTES),
+    maxOutputFileBytes: (() => {
+      const v = positiveInteger(opts.maxOutputFileBytes, DEFAULT_MAX_OUTPUT_FILE_BYTES);
+      if (v > MAX_BUFFER_BYTES) {
+        throw new Error(`error: maxOutputFileBytes ${v} exceeds daemon response limit ${MAX_BUFFER_BYTES} bytes\nhelp: lower to ≤ ${MAX_SAFE_OUTPUT_FILE_BYTES} for worst-case JSON escaping`);
+      }
+      return v;
+    })(),
   };
 }
 
@@ -6205,9 +6216,40 @@ function resolveOutputMaxBytes(options, ctx) {
     if (!isPositiveInteger(options.maxOutputFileBytes)) {
       throw new Error(`error: maxOutputFileBytes must be a positive integer (got ${JSON.stringify(options.maxOutputFileBytes)})\nhelp: use --max-output-file-bytes with a positive integer`);
     }
+    if (options.maxOutputFileBytes > MAX_BUFFER_BYTES) {
+      throw new Error(`error: --max-output-file-bytes ${options.maxOutputFileBytes} exceeds daemon response limit ${MAX_BUFFER_BYTES} bytes\nhelp: lower --max-output-file-bytes to ≤ ${MAX_SAFE_OUTPUT_FILE_BYTES} (safe for worst-case JSON escaping, 6×) or ≤ ${MAX_BUFFER_BYTES} raw, or set TASKFERRY_MAX_OUTPUT_FILE_BYTES / config maxOutputFileBytes accordingly`);
+    }
     return options.maxOutputFileBytes;
   }
   return (ctx.limits && typeof ctx.limits.maxOutputFileBytes === "number") ? ctx.limits.maxOutputFileBytes : DEFAULT_MAX_OUTPUT_FILE_BYTES;
+}
+
+/**
+ * Response-budget guard for taskferry#508: even a file that fits the raw
+ * maxOutputFileBytes cap can still exceed the daemon's 1 MiB response
+ * ceiling after JSON string escaping (control characters expand 6× to
+ * \uXXXX). Estimate the wire size of the full successResponse envelope
+ * (including taskId/outputDir/file) and surface a clear knob-specific error
+ * instead of letting daemon-server.js's generic RESPONSE_TOO_LARGE fallback
+ * fire with no indication which cap caused it.
+ * @param {string} taskId
+ * @param {string} outputDir
+ * @param {{content: string|null, size: number, truncated: boolean, error?: string}} file
+ * @param {string} relativePath
+ * @param {number} maxBytes
+ */
+function assertOutputResponseFits(taskId, outputDir, file, relativePath, maxBytes) {
+  if (file.content === null) return;
+  const payload = { taskId, outputDir, file, files: [], bytes: 0, total: 0, truncated: false };
+  const encoded = encodeMessage(successResponse("budget-check", payload));
+  const size = Buffer.byteLength(encoded);
+  if (size > MAX_BUFFER_BYTES) {
+    const encodedContentBytes = Buffer.byteLength(JSON.stringify(file.content));
+    throw new Error(
+      `error: output file "${relativePath}" (raw ${file.size} bytes, JSON-escaped ≈${encodedContentBytes} bytes) would exceed daemon response limit ${MAX_BUFFER_BYTES} bytes (≈${size} bytes on the wire, 6× worst-case for control characters)\n` +
+      `help: lower --max-output-file-bytes (current ${maxBytes}), TASKFERRY_MAX_OUTPUT_FILE_BYTES, or config maxOutputFileBytes to ≤ ${MAX_SAFE_OUTPUT_FILE_BYTES} (provably safe) or retrieve the file directly from ${path.join(outputDir, relativePath)}`
+    );
+  }
 }
 
 /**
@@ -6230,6 +6272,7 @@ function outputFor(taskId, ctx, options = {}) {
     }
     const maxBytes = resolveOutputMaxBytes(options, ctx);
     const file = readTaskOutputFile(outputDir, options.path, maxBytes);
+    assertOutputResponseFits(taskId, outputDir, file, options.path, maxBytes);
     return { taskId: taskId, outputDir: outputDir, files: [], bytes: 0, total: 0, truncated: false, file };
   }
   if (!outputDir) {

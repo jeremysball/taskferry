@@ -16,8 +16,9 @@ import fs from "node:fs";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { makeManager, fakeChild, baseTask, trackManager, AXI_TASKS_TEST_DIR, mkdtempTracked } from "./tasks.test-helpers.js";
-import { TASKFERRY_OUTPUT_DIR_ENV, ensureTaskOutputDir, listTaskOutputFiles, readTaskOutputFile, resolveTaskOutputDir, resolveOutputDirRoot, resolveInsideDir } from "./output-dir.js";
-import { createTaskManager } from "./tasks.js";
+import { TASKFERRY_OUTPUT_DIR_ENV, ensureTaskOutputDir, listTaskOutputFiles, readTaskOutputFile, resolveTaskOutputDir, resolveOutputDirRoot, resolveInsideDir, MAX_SAFE_OUTPUT_FILE_BYTES } from "./output-dir.js";
+import { createTaskManager, MAX_SAFE_OUTPUT_FILE_BYTES as TASK_SAFE } from "./tasks.js";
+import { MAX_BUFFER_BYTES } from "./daemon-server.js";
 
 const TEST_PROMPT = "hi";
 const TEST_DIRECTORY = "/tmp";
@@ -527,5 +528,86 @@ describe("boot-time sweep of orphaned output dirs under <stateDir>/outputs (PR #
 
     assert.equal(fs.existsSync(taskDir), true, "a tracked settled task's dir must be preserved by the boot sweep");
     mgr.close();
+  });
+});
+
+describe("response-budget guard (taskferry#508 review)", () => {
+  test("control-character-heavy file that fits raw cap but exceeds wire budget surfaces clear knob-specific error, not generic RESPONSE_TOO_LARGE", () => {
+    const mgr = makeManager({ spawnFn: () => fakeChild() });
+    const dispatched = mgr.dispatch({ prompt: TEST_PROMPT, directory: TEST_DIRECTORY });
+    // 300 KiB of \x01: raw 307200, JSON-escaped ≈ 6× = 1.8 MiB > 1 MiB ceiling
+    const heavy = String.fromCharCode(1).repeat(300 * 1024);
+    fs.writeFileSync(path.join(dispatched.outputDir, "heavy.bin"), heavy);
+    assert.throws(
+      () => mgr.output(dispatched.id, { path: "heavy.bin", maxOutputFileBytes: 512 * 1024 }),
+      (err) => {
+        const msg = err instanceof Error ? err.message : String(err);
+        // Must mention the knob and safe ceiling, not the generic fallback
+        assert.match(msg, /would exceed daemon response limit/);
+        assert.match(msg, /--max-output-file-bytes/);
+        assert.match(msg, new RegExp(String(MAX_SAFE_OUTPUT_FILE_BYTES)));
+        assert.match(msg, /help:/);
+        // Generic fallback must NOT appear
+        assert.doesNotMatch(msg, /daemon response for this request exceeds/);
+        return true;
+      },
+    );
+  });
+
+  test("ASCII file of same raw size succeeds under same cap (no false positive)", () => {
+    const mgr = makeManager({ spawnFn: () => fakeChild() });
+    const dispatched = mgr.dispatch({ prompt: TEST_PROMPT, directory: TEST_DIRECTORY });
+    const ascii = "a".repeat(300 * 1024);
+    fs.writeFileSync(path.join(dispatched.outputDir, "ascii.txt"), ascii);
+    const result = mgr.output(dispatched.id, { path: "ascii.txt", maxOutputFileBytes: 512 * 1024 });
+    assert.equal(result.file.content, ascii);
+    assert.equal(result.file.truncated, false);
+  });
+
+  test("small control file within safe ceiling succeeds", () => {
+    const mgr = makeManager({ spawnFn: () => fakeChild() });
+    const dispatched = mgr.dispatch({ prompt: TEST_PROMPT, directory: TEST_DIRECTORY });
+    const smallHeavy = String.fromCharCode(1).repeat(50 * 1024);
+    fs.writeFileSync(path.join(dispatched.outputDir, "small.bin"), smallHeavy);
+    const result = mgr.output(dispatched.id, { path: "small.bin", maxOutputFileBytes: 512 * 1024 });
+    assert.equal(result.file.content, smallHeavy);
+    assert.equal(result.file.truncated, false);
+    // Also assert computed safe is indeed ≈ (1MiB-4096)/6 and matches both exports
+    assert.equal(MAX_SAFE_OUTPUT_FILE_BYTES, TASK_SAFE);
+    assert.equal(MAX_SAFE_OUTPUT_FILE_BYTES, Math.floor((MAX_BUFFER_BYTES - 4096) / 6));
+  });
+
+  test("--max-output-file-bytes exceeding raw daemon ceiling throws clear error", () => {
+    const mgr = makeManager({ spawnFn: () => fakeChild() });
+    const dispatched = mgr.dispatch({ prompt: TEST_PROMPT, directory: TEST_DIRECTORY });
+    fs.writeFileSync(path.join(dispatched.outputDir, "tiny.txt"), "x");
+    assert.throws(
+      () => mgr.output(dispatched.id, { path: "tiny.txt", maxOutputFileBytes: MAX_BUFFER_BYTES + 1 }),
+      (err) => {
+        const msg = err instanceof Error ? err.message : String(err);
+        assert.match(msg, /exceeds daemon response limit/);
+        assert.match(msg, /--max-output-file-bytes/);
+        return true;
+      },
+    );
+  });
+
+  test("creates manager with TASKFERRY_MAX_OUTPUT_FILE_BYTES exceeding raw ceiling throws at construction", () => {
+    const prev = process.env.TASKFERRY_MAX_OUTPUT_FILE_BYTES;
+    process.env.TASKFERRY_MAX_OUTPUT_FILE_BYTES = String(MAX_BUFFER_BYTES + 1000);
+    try {
+      assert.throws(
+        () => createTaskManager({ stateDir: mkdtempTracked(AXI_TASKS_TEST_DIR + "-guard-env-"), config: {} }),
+        (err) => {
+          const msg = err instanceof Error ? err.message : String(err);
+          assert.match(msg, /exceeds daemon response limit/);
+          assert.match(msg, /TASKFERRY_MAX_OUTPUT_FILE_BYTES/);
+          return true;
+        },
+      );
+    } finally {
+      if (prev === undefined) delete process.env.TASKFERRY_MAX_OUTPUT_FILE_BYTES;
+      else process.env.TASKFERRY_MAX_OUTPUT_FILE_BYTES = prev;
+    }
   });
 });

@@ -363,8 +363,8 @@ ending on a tool call instead of a final assistant message (taskferry#423).
   are capped at `512 KiB` by default; an over-cap read returns `{ content: null,
   truncated: true, error: "too_large", size }`. Any path that would
   escape the per-task dir (absolute paths, leading `/`, `..` segments)
-  is rejected. The cap is configurable: flag `--max-output-file-bytes` > env var `TASKFERRY_MAX_OUTPUT_FILE_BYTES` > config key `maxOutputFileBytes` > built-in default `524288` (512 KiB); lower it if control-character-heavy files still hit `RESPONSE_TOO_LARGE` after JSON escaping (see `src/output-dir.js` and `docs/config.md`).
-  Use `--max-output-file-bytes` per-read to override the daemon's default for that single call (e.g. `taskferry output <id> --path deliverable.txt --max-output-file-bytes 1048576`).
+  is rejected. The cap is configurable: flag `--max-output-file-bytes` > env var `TASKFERRY_MAX_OUTPUT_FILE_BYTES` > config key `maxOutputFileBytes` > built-in default `524288` (512 KiB). The daemon response budget is `1 MiB` (`src/daemon-server.js:14`); worst-case JSON escaping expands control characters 6× to `\uXXXX`, so the provably safe ceiling is `174080` bytes (`(1 MiB-4096)/6`, `src/output-dir.js:25`). A file that fits the raw cap but would exceed the wire budget after escaping no longer fails with generic `RESPONSE_TOO_LARGE` — the daemon surfaces a clear `would exceed daemon response limit` error naming the knob (`--max-output-file-bytes`/`TASKFERRY_MAX_OUTPUT_FILE_BYTES`/`maxOutputFileBytes`) and the on-disk path (taskferry#508).
+  Use `--max-output-file-bytes` per-read to override the daemon's default for that single call (e.g. `taskferry output <id> --path deliverable.txt --max-output-file-bytes 1048576`; values > `1048576` are rejected, and values that would still exceed the wire budget surface the clear knob-specific error).
 - Works on every terminal status: `done`, `crashed`, `cancelled`, and
   even an `incomplete` task that the worker never finished — the scratch
   dir is per-task state the worker owns, not parsed-from-log output.

@@ -18,6 +18,8 @@ import { execFileSync } from "node:child_process";
 import { makeManager, fakeChild, baseTask, trackManager, AXI_TASKS_TEST_DIR, mkdtempTracked } from "./tasks.test-helpers.js";
 import { TASKFERRY_OUTPUT_DIR_ENV, ensureTaskOutputDir, listTaskOutputFiles, readTaskOutputFile, resolveTaskOutputDir, resolveOutputDirRoot, resolveInsideDir } from "./output-dir.js";
 import { createTaskManager, sweepOrphanedOutputDirsFor } from "./tasks.js";
+import { errCode } from "./errors.js";
+import { responseError } from "./daemon.js";
 
 const TEST_PROMPT = "hi";
 const TEST_DIRECTORY = "/tmp";
@@ -158,6 +160,31 @@ describe("scratch output dir (taskferry#423)", () => {
   });
 });
 
+describe("scratch output dir result --fields outputDir (regression: #514)", () => {
+  test("result --fields outputDir returns the correct output dir path", async () => {
+    const child = fakeChild();
+    const mgr = makeManager({ spawnFn: () => child });
+    const dispatched = mgr.dispatch({ prompt: TEST_PROMPT, directory: TEST_DIRECTORY });
+    child.emit("exit", 0, null);
+    await new Promise((resolve) => setImmediate(resolve));
+
+    const result = mgr.result(dispatched.id, { fields: ["outputDir"] });
+    assert.equal(result.outputDir, dispatched.outputDir);
+  });
+
+  test("result without --fields also includes outputDir", async () => {
+    const child = fakeChild();
+    const mgr = makeManager({ spawnFn: () => child });
+    const dispatched = mgr.dispatch({ prompt: TEST_PROMPT, directory: TEST_DIRECTORY });
+    child.emit("exit", 0, null);
+    await new Promise((resolve) => setImmediate(resolve));
+
+    const result = mgr.result(dispatched.id);
+    assert.equal(result.outputDir, dispatched.outputDir);
+  });
+});
+
+// eslint-disable-next-line sonarjs/max-lines-per-function -- retrieval suite bundles many small caps/edge cases; tracked in #30
 describe("scratch output dir retrieval (taskferry#423)", () => {
   test("taskferry output: lists files written under the scratch dir after a clean exit", async () => {
     const child = fakeChild();
@@ -268,14 +295,83 @@ describe("scratch output dir retrieval (taskferry#423)", () => {
     fs.writeFileSync(path.join(dispatched.outputDir, "real.txt"), "hi");
     child.emit("exit", 0, null);
     await new Promise((resolve) => setImmediate(resolve));
-    assert.throws(() => mgr.output(dispatched.id, { path: "nonexistent.txt" }), /output file not found/i);
+    try {
+      mgr.output(dispatched.id, { path: "nonexistent.txt" });
+      assert.fail("expected to throw");
+    } catch (error) {
+      assert.match(String(error.message), /output file not found/i);
+      assert.equal(errCode(error), "OUTPUT_NOT_FOUND");
+    }
   });
 
-  test("taskferry output: --path on a task with no outputDir throws 'output file not found' (taskferry#511)", () => {
+  test("taskferry output: --path on a task with no outputDir throws distinct 'has no output directory' error (taskferry#511)", () => {
     const mgr = makeManager({
       tasksFixture: (logDir) => [baseTask({ id: "oc_no_dir_511", outputDir: null, logPath: path.join(logDir, "x.ndjson") })],
     });
-    assert.throws(() => mgr.output("oc_no_dir_511", { path: "any.txt" }), /output file not found/i);
+    try {
+      mgr.output("oc_no_dir_511", { path: "any.txt" });
+      assert.fail("expected to throw");
+    } catch (error) {
+      assert.match(String(error.message), /has no output directory/i);
+      assert.equal(errCode(error), "NO_OUTPUT_DIR");
+    }
+  });
+
+  test("taskferry output: --path errors for no-output-dir vs missing file are distinguishable (taskferry#511)", async () => {
+    const child = fakeChild();
+    const mgrWithDir = makeManager({ spawnFn: () => child });
+    const dispatched = mgrWithDir.dispatch({ prompt: TEST_PROMPT, directory: TEST_DIRECTORY });
+    fs.writeFileSync(path.join(dispatched.outputDir, "real.txt"), "hi");
+    child.emit("exit", 0, null);
+    await new Promise((resolve) => setImmediate(resolve));
+    let errMissing;
+    try {
+      mgrWithDir.output(dispatched.id, { path: "missing.txt" });
+    } catch (error) {
+      errMissing = error;
+    }
+    const mgrNoDir = makeManager({
+      tasksFixture: (logDir) => [baseTask({ id: "oc_no_dir_distinct", outputDir: null, logPath: path.join(logDir, "x.ndjson") })],
+    });
+    let errNoDir;
+    try {
+      mgrNoDir.output("oc_no_dir_distinct", { path: "missing.txt" });
+    } catch (error) {
+      errNoDir = error;
+    }
+    assert.ok(errMissing);
+    assert.ok(errNoDir);
+    assert.notEqual(errCode(errMissing), errCode(errNoDir));
+    assert.notEqual(String(errMissing.message), String(errNoDir.message));
+    assert.equal(errCode(errMissing), "OUTPUT_NOT_FOUND");
+    assert.equal(errCode(errNoDir), "NO_OUTPUT_DIR");
+  });
+
+  test("taskferry output: unrelated error containing 'output file not found' substring is not typed as OUTPUT_NOT_FOUND (taskferry#511)", () => {
+    const collision = new Error("output file not found: this is just a substring collision");
+    assert.equal(errCode(collision), undefined);
+    assert.match(String(collision.message), /output file not found/i);
+    assert.notEqual(errCode(collision), "OUTPUT_NOT_FOUND");
+  });
+
+  test("daemon output error codes are typed via error.code, not substring matching -- collision stays REQUEST_FAILED (taskferry#511)", () => {
+    const collision = new Error("output file not found: collision payload");
+    const collisionResp = responseError(collision, "req-collision");
+    assert.equal(collisionResp.error.code, "REQUEST_FAILED");
+    assert.equal(collisionResp.error.detail, "output file not found: collision payload");
+
+    const exact = new Error('error: output file not found: "missing.txt" for task oc_exact\nhelp: run taskferry output oc_exact to see available files');
+    /** @type {any} */ (exact).code = "OUTPUT_NOT_FOUND";
+    const exactResp = responseError(exact, "req-exact");
+    assert.equal(exactResp.error.code, "OUTPUT_NOT_FOUND");
+
+    const noDir = new Error('error: task oc_nodir has no output directory (requested "missing.txt")\nhelp: run taskferry output oc_nodir without --path to list available outputs');
+    /** @type {any} */ (noDir).code = "NO_OUTPUT_DIR";
+    const noDirResp = responseError(noDir, "req-nodir");
+    assert.equal(noDirResp.error.code, "NO_OUTPUT_DIR");
+
+    assert.notEqual(collisionResp.error.code, exactResp.error.code);
+    assert.notEqual(collisionResp.error.code, noDirResp.error.code);
   });
 
   test("listTaskOutputFiles caps at MAX_OUTPUT_LIST_ENTRIES and reports truncated", () => {

@@ -551,7 +551,7 @@ function countTasks(tasks) {
  * @param {unknown} error
  * @param {string|null} requestId
  */
-function responseError(error, requestId) {
+export function responseError(error, requestId) {
   if (error instanceof ProtocolError) {
     return errorResponse(error.requestId, error.code, error.message, error.help, error.message);
   }
@@ -569,8 +569,9 @@ function responseError(error, requestId) {
     messageFallback: "",
     foldDetailLines: false,
   });
-  // eslint-disable-next-line sonarjs/no-nested-conditional -- two disjoint error-code branches, collapsed to keep responseError under the 80-line cap
-  const code = /unknown task id:/.test(text) ? "UNKNOWN_TASK" : /output file not found:/.test(text) ? "OUTPUT_NOT_FOUND" : "REQUEST_FAILED";
+  const maybeCode = errCode(error);
+  // eslint-disable-next-line sonarjs/no-nested-conditional, sonarjs/expression-complexity -- typed codes first, then legacy regex for UNKNOWN_TASK; output codes must not fall back to substring matching
+  const code = maybeCode === "OUTPUT_NOT_FOUND" || maybeCode === "NO_OUTPUT_DIR" ? maybeCode : maybeCode === "UNKNOWN_TASK" || /unknown task id:/.test(text) ? "UNKNOWN_TASK" : "REQUEST_FAILED";
   return errorResponse(requestId, code, message, help, text);
 }
 

@@ -1,5 +1,7 @@
 [tools]
 node = "26.5.1"
+"npm:eslint" = "10.7.0"
+"npm:typescript" = "7.0.2"
 
 # Pulls the same account-wide secrets (provider API keys, etc.) this shell
 # gets interactively via ~/.bashrc -> ~/.config/secrets.sh, but through

@@ -168,9 +168,12 @@ function visitStackFrame(stack, state, rootFd) {
   }
   const current = /** @type {{fd: number, full: string, relative: string, depth: number}} */ (stack.pop());
   state.visitedDirs++;
-  const entries = readdirSafe(current.full);
-  entries.some((entry) => visitEntry(entry, current, state, stack));
-  if (current.fd !== rootFd) fs.closeSync(current.fd);
+  try {
+    const entries = readdirSafe(current.full);
+    entries.some((entry) => visitEntry(entry, current, state, stack));
+  } finally {
+    if (current.fd !== rootFd) fs.closeSync(current.fd);
+  }
 }
 
 /**
@@ -206,7 +209,7 @@ function visitEntry(entry, current, state, stack) {
     }
     const childFd = openDirectoryNoFollow(result.full);
     if (childFd !== null) {
-      stack.push({ fd: childFd, full: pathForDirectoryFd(childFd, result.full), relative: result.rel, depth: current.depth + 1 });
+      pushChildStack(stack, childFd, result.full, result.rel, current.depth + 1);
     }
     // else: no longer a real directory by the time we opened it (removed,
     // or swapped for a symlink and rejected by O_NOFOLLOW) -- treat it as
@@ -215,6 +218,22 @@ function visitEntry(entry, current, state, stack) {
     // "skip" -> no-op (symlinks to nowhere, non-regular entries)
   }
   return false;
+}
+
+/**
+ * @param {Array<{fd: number, full: string, relative: string, depth: number}>} stack
+ * @param {number} childFd
+ * @param {string} full
+ * @param {string} rel
+ * @param {number} depth
+ */
+function pushChildStack(stack, childFd, full, rel, depth) {
+  try {
+    stack.push({ fd: childFd, full: pathForDirectoryFd(childFd, full), relative: rel, depth });
+  } catch (err) {
+    try { fs.closeSync(childFd); } catch {}
+    throw err;
+  }
 }
 
 /**

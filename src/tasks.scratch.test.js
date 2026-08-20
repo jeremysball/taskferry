@@ -17,7 +17,7 @@ import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { makeManager, fakeChild, baseTask, trackManager, AXI_TASKS_TEST_DIR, mkdtempTracked } from "./tasks.test-helpers.js";
 import { TASKFERRY_OUTPUT_DIR_ENV, ensureTaskOutputDir, listTaskOutputFiles, readTaskOutputFile, resolveTaskOutputDir, resolveOutputDirRoot, resolveInsideDir } from "./output-dir.js";
-import { createTaskManager } from "./tasks.js";
+import { createTaskManager, sweepOrphanedOutputDirsFor } from "./tasks.js";
 
 const TEST_PROMPT = "hi";
 const TEST_DIRECTORY = "/tmp";
@@ -137,6 +137,24 @@ describe("scratch output dir (taskferry#423)", () => {
     assert.ok(trailing.startsWith("user's original prompt\n"), `expected user prompt at the head, got: ${JSON.stringify(trailing.slice(0, 80))}`);
     assert.ok(trailing.includes(dispatched.outputDir), "prompt block must name the output dir");
     assert.ok(trailing.includes(TASKFERRY_OUTPUT_DIR_ENV), "prompt block must name the env var");
+  });
+
+  test("dispatch prompt varies with noSandbox: noSandbox omits 'inside the sandbox'", () => {
+    const { mgr: mgrDefault, captured: capturedDefault } = captureSpawn();
+    mgrDefault.dispatch({ prompt: "test", directory: "/tmp" });
+    const promptDefault = capturedDefault().args.at(-1);
+
+    const { mgr: mgrNoSandbox, captured: capturedNoSandbox } = captureSpawn();
+    mgrNoSandbox.dispatch({ prompt: "test", directory: "/tmp", noSandbox: true });
+    const promptNoSandbox = capturedNoSandbox().args.at(-1);
+
+    assert.ok(typeof promptDefault === "string", "default prompt must be a string");
+    assert.ok(typeof promptNoSandbox === "string", "noSandbox prompt must be a string");
+    assert.ok(promptDefault.includes("inside the sandbox"), "default prompt should contain 'inside the sandbox'");
+    assert.ok(!promptNoSandbox.includes("inside the sandbox"), "noSandbox prompt must not contain 'inside the sandbox'");
+    assert.ok(promptDefault.includes(TASKFERRY_OUTPUT_DIR_ENV), "default prompt must name the env var");
+    assert.ok(promptNoSandbox.includes(TASKFERRY_OUTPUT_DIR_ENV), "noSandbox prompt must name the env var");
+    assert.notEqual(promptDefault, promptNoSandbox, "prompts should differ between sandbox and noSandbox");
   });
 });
 
@@ -543,6 +561,79 @@ describe("boot-time sweep of orphaned output dirs under <stateDir>/outputs (PR #
     }));
 
     assert.equal(fs.existsSync(taskDir), true, "a tracked settled task's dir must be preserved by the boot sweep");
+    mgr.close();
+  });
+});
+
+describe("boot-time output sweep scales with orphan set, not all-time count (taskferry#513)", () => {
+  test("expensive per-entry FS work (lstat + rm) scales with eligible orphans, not retained history", () => {
+    // Direct unit test of sweepOrphanedOutputDirsFor with mocked expensive ops.
+    // Simulates all-time history of 50 retained tasks plus 3 orphans; the
+    // sweep should only stat/rm the 3 orphans, not all 53 entries. This is
+    // the filter-then-process ordering mandated by CLAUDE.md ("Always filter,
+    // then process") and fixed alongside #287's filteredTaskDetails.
+    const keptIds = Array.from({ length: 50 }, (_, i) => `oc_kept_513_${i}_${process.pid}`);
+    const orphanIds = [`oc_orphan_513_a_${process.pid}`, `oc_orphan_513_b_${process.pid}`, `oc_orphan_513_c_${process.pid}`];
+    const allEntries = [...keptIds, ...orphanIds, ".", ".."];
+    const tasks = new Map(keptIds.map((id) => [id, { id, status: "done" }]));
+    const statCalls = [];
+    const removeCalls = [];
+    const readdirFn = () => allEntries;
+    const lstatFn = (p) => {
+      statCalls.push(path.basename(p));
+      return { isDirectory: () => true, isSymbolicLink: () => false };
+    };
+    const removeDirFn = (p) => { removeCalls.push(path.basename(p)); };
+
+    sweepOrphanedOutputDirsFor({
+      OUTPUT_DIR_ROOT: "/tmp/fake-outputs-513",
+      tasks,
+      readdirFn,
+      lstatFn,
+      removeDirFn,
+    });
+    assert.equal(removeCalls.length, orphanIds.length, `removeDir should be called only for orphans (${orphanIds.length}), not for all ${keptIds.length} retained entries`);
+    assert.deepEqual(removeCalls.sort(), orphanIds.sort(), "only orphan ids should be removed");
+    assert.equal(statCalls.length, orphanIds.length, `lstat (expensive FS work) should be called only for orphans (${orphanIds.length}), not for all ${keptIds.length} retained entries`);
+    assert.deepEqual(statCalls.sort(), orphanIds.sort(), "only orphan ids should be stated");
+  });
+
+  test("boot sweep via createTaskManager only deletes orphans and leaves many retained dirs intact (integration)", () => {
+    const stateDir = mkdtempTracked(AXI_TASKS_TEST_DIR + "-513-scale-");
+    const outputsRoot = path.join(stateDir, "outputs");
+    fs.mkdirSync(outputsRoot, { recursive: true });
+    const keptIds = Array.from({ length: 20 }, (_, i) => `oc_513_int_kept_${i}_${process.pid}_${Date.now()}`);
+    const orphanIds = [`oc_513_int_orphan_a_${process.pid}`, `oc_513_int_orphan_b_${process.pid}`];
+    for (const id of [...keptIds, ...orphanIds]) {
+      const dir = path.join(outputsRoot, id);
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(path.join(dir, "file.txt"), "data");
+    }
+    // Seed tasks.json with only kept ids; orphans have no record.
+    fs.writeFileSync(path.join(stateDir, "tasks.json"), JSON.stringify(keptIds.map((id) => ({ id, status: "done" }))));
+
+    const statCalls = [];
+    const lstatFn = (p) => {
+      if (typeof p === "string" && p.startsWith(outputsRoot)) statCalls.push(path.basename(p));
+      return fs.lstatSync(p);
+    };
+    const mgr = trackManager(createTaskManager({
+      stateDir,
+      lstatFn,
+      sandboxEnabled: false,
+      spawnFn: () => fakeChild(),
+      killFn: () => {},
+    }));
+    for (const id of keptIds) {
+      assert.equal(fs.existsSync(path.join(outputsRoot, id)), true, `kept dir ${id} must survive boot sweep`);
+    }
+    for (const id of orphanIds) {
+      assert.equal(fs.existsSync(path.join(outputsRoot, id)), false, `orphan dir ${id} must be swept`);
+    }
+    const orphanStats = statCalls.filter((b) => orphanIds.includes(b));
+    const keptStats = statCalls.filter((b) => keptIds.includes(b));
+    assert.equal(orphanStats.length, orphanIds.length, "stat should have run for each orphan");
+    assert.equal(keptStats.length, 0, `expensive lstat must not run for retained history (${keptStats.length} unexpected calls for ${keptIds.length} kept entries); sweep must scale with orphan set, not all-time count`);
     mgr.close();
   });
 });

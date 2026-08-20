@@ -6226,7 +6226,11 @@ function resolveOutputMaxBytes(options, ctx) {
   return (ctx.limits && typeof ctx.limits.maxOutputFileBytes === "number") ? ctx.limits.maxOutputFileBytes : DEFAULT_MAX_OUTPUT_FILE_BYTES;
 }
 
-const BUDGET_CHECK_ID = "budget-check";
+// 36 chars to match real request UUIDs (see src/protocol.js:randomUUID) — keeps the
+// budget check conservative so a listing/file that fits with this placeholder
+// will also fit with any real 36-char id, avoiding a 24-byte window where
+// "budget-check" (12) fits but a real id overflows to generic RESPONSE_TOO_LARGE.
+export const BUDGET_CHECK_ID = "00000000-0000-4000-a000-000000000000";
 
 /**
  * Response-budget guard for taskferry#508: even a file that fits the raw

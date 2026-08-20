@@ -52,6 +52,21 @@ describe("dispatch() lifecycle, driven through an injected spawnFn (no real open
     assert.deepEqual(leftover, [], `expected no orphan output dirs, found: ${JSON.stringify(leftover)}`);
   });
 
+  test("a dispatch that fails between output-dir creation and queueing does not orphan an output dir on disk (taskferry#510)", () => {
+    const throwingTable = { get: () => { throw new Error("injected failure between mkdir and persist"); } };
+    const mgr = makeManager({ spawnFn: () => fakeChild(), opencodeVariantsTable: throwingTable });
+    assert.throws(() => mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), model: LUNA_MODEL, executor: "opencode" }), /injected failure/);
+    const outputsRoot = path.join(mgr.paths.STATE_DIR, "outputs");
+    const leftover = fs.existsSync(outputsRoot) ? fs.readdirSync(outputsRoot) : [];
+    assert.deepEqual(leftover, [], `expected no orphan output dirs after injected failure, found: ${JSON.stringify(leftover)}`);
+    // The half-queued state must not linger in memory either -- a follow-up
+    // dispatch should succeed and create its own dir without seeing the
+    // failed id in any provider queue.
+    const second = mgr.dispatch({ prompt: "ok", directory: os.tmpdir() });
+    assert.ok(second.id);
+    assert.ok(fs.existsSync(path.join(outputsRoot, second.id)));
+  });
+
   /** @param {string[]} args @param {string} model */
   function assertDispatchedModel(args, model) {
     assert.equal(args[args.indexOf("-m") + 1], model);

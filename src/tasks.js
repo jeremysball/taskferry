@@ -2354,6 +2354,34 @@ function queueDispatchLaunch(ctx, { id, task, prompt, sessionId, env, noSandbox,
   ctx.launchQueuedTasks();
 }
 
+/**
+ * Rolls back a just-created output dir and any half-queued dispatch state
+ * after a failure between ensureTaskOutputDir and the durable queue step
+ * (taskferry#510). queueDispatchLaunch sets tasks/pendingLaunches/providerQueue
+ * in sequence, so a throw in later steps can leave earlier ones populated;
+ * the catch here deletes all of them and removes the directory that was
+ * created just before the failure, keeping the invariant that every output
+ * dir on disk corresponds to a task in tasks.json. Best-effort: the rm and
+ * map deletions tolerate the dir or queue entry already being absent.
+ * @param {string} id
+ * @param {string} outputDir
+ * @param {boolean} outputDirCreated
+ * @param {{tasks: Map<string, Task>, pendingLaunches: Map<string, LaunchSpec>, providerQueues: Map<string, ProviderQueue>}} ctx
+ */
+function cleanupFailedDispatchOutputDir(id, outputDir, outputDirCreated, ctx) {
+  if (outputDirCreated) {
+    try {
+      fs.rmSync(outputDir, { recursive: true, force: true });
+    } catch {}
+  }
+  ctx.tasks.delete(id);
+  ctx.pendingLaunches.delete(id);
+  for (const queue of ctx.providerQueues.values()) {
+    const idx = queue.launchQueue.indexOf(id);
+    if (idx !== -1) queue.launchQueue.splice(idx, 1);
+  }
+}
+
 
 /**
  * The subset of `createTaskManager`'s closure that `summarizeTask`'s
@@ -6692,10 +6720,27 @@ function dispatchTask(params, ctx) {
   // the answer can end on a tool call and the caller wants the deliverable
   // back the same way. taskferry#423.
   const outputDir = resolveTaskOutputDir(ctx.STATE_DIR, id);
-  ensureTaskOutputDir(outputDir);
-  const dispatchPrompt = buildDispatchPrompt({ role, noOverlay, projectConfig, prompt, outputDir });
-  const task = buildDispatchTask({ id, model, executor, priorSessionTask, variant, sessionId, originSessionId, internal, finalMarker, role, logPath, parentTaskId, env, prompt: dispatchPrompt, originalPrompt: prompt, directory: normalizedDirectory, defaultVariant: ctx.defaultVariant, resolveOpencodeVariants: ctx.resolveOpencodeVariants, class: taskClass, outputDir: outputDir });
-  queueDispatchLaunch({ tasks: ctx.tasks, persistTask: ctx.persistTask, pendingLaunches: ctx.pendingLaunches, providerQueues: ctx.providerQueues, launchQueuedTasks: ctx.launchQueuedTasks }, { id, task, sessionId, env, noSandbox, noOverlay, executor, role, prompt: dispatchPrompt, allowedDirs: effectiveRwBind, roBind: dispatchRoBind, outputDir: outputDir });
+  // taskferry#510: ensureTaskOutputDir creates the directory on disk before the
+  // task record is persisted (queueDispatchLaunch persists via persistTask).
+  // A throw between those two steps (e.g. a transient read of the variants
+  // cache during buildDispatchTask) previously left an orphaned outputs/<id>
+  // directory that only the next daemon boot's sweepOrphanedOutputDirsFor
+  // would clean. Wrap the window so a failure after the mkdir rolls the
+  // just-created directory back synchronously, keeping the invariant that
+  // every output dir on disk corresponds to a task in tasks.json.
+  let outputDirCreated = false;
+  let dispatchPrompt;
+  let task;
+  try {
+    ensureTaskOutputDir(outputDir);
+    outputDirCreated = true;
+    dispatchPrompt = buildDispatchPrompt({ role, noOverlay, projectConfig, prompt, outputDir });
+    task = buildDispatchTask({ id, model, executor, priorSessionTask, variant, sessionId, originSessionId, internal, finalMarker, role, logPath, parentTaskId, env, prompt: dispatchPrompt, originalPrompt: prompt, directory: normalizedDirectory, defaultVariant: ctx.defaultVariant, resolveOpencodeVariants: ctx.resolveOpencodeVariants, class: taskClass, outputDir: outputDir });
+    queueDispatchLaunch({ tasks: ctx.tasks, persistTask: ctx.persistTask, pendingLaunches: ctx.pendingLaunches, providerQueues: ctx.providerQueues, launchQueuedTasks: ctx.launchQueuedTasks }, { id, task, sessionId, env, noSandbox, noOverlay, executor, role, prompt: dispatchPrompt, allowedDirs: effectiveRwBind, roBind: dispatchRoBind, outputDir: outputDir });
+  } catch (err) {
+    cleanupFailedDispatchOutputDir(id, outputDir, outputDirCreated, ctx);
+    throw err;
+  }
   const summary = summarize(task);
   return {
     ...summary,

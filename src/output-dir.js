@@ -118,8 +118,8 @@ export function outputDirPromptBlock(outputDir) {
 export function listTaskOutputFiles(dir) {
   const rootFd = openDirectoryNoFollow(dir);
   if (rootFd === null) return emptyListing();
-  const rootPath = pathForDirectoryFd(rootFd, dir);
   try {
+    const rootPath = pathForDirectoryFd(rootFd, dir);
     return collectOutputFiles(rootFd, rootPath);
   } finally {
     fs.closeSync(rootFd);
@@ -167,8 +167,8 @@ function visitStackFrame(stack, state, rootFd) {
     return;
   }
   const current = /** @type {{fd: number, full: string, relative: string, depth: number}} */ (stack.pop());
-  state.visitedDirs++;
   try {
+    state.visitedDirs++;
     const entries = readdirSafe(current.full);
     entries.some((entry) => visitEntry(entry, current, state, stack));
   } finally {
@@ -231,7 +231,7 @@ function pushChildStack(stack, childFd, full, rel, depth) {
   try {
     stack.push({ fd: childFd, full: pathForDirectoryFd(childFd, full), relative: rel, depth });
   } catch (err) {
-    try { fs.closeSync(childFd); } catch {}
+    fs.closeSync(childFd);
     throw err;
   }
 }
@@ -241,9 +241,17 @@ function pushChildStack(stack, childFd, full, rel, depth) {
  * @param {number} rootFd
  */
 function closeStackFds(stack, rootFd) {
+  let firstError;
   for (const entry of stack) {
-    if (entry.fd !== rootFd) fs.closeSync(entry.fd);
+    if (entry.fd !== rootFd) {
+      try {
+        fs.closeSync(entry.fd);
+      } catch (err) {
+        firstError ??= err;
+      }
+    }
   }
+  if (firstError) throw firstError;
 }
 
 /**

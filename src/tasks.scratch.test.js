@@ -580,7 +580,10 @@ describe("output-dir fd leak (taskferry#509)", () => {
     }
     const dir = mkdtempTracked(AXI_TASKS_TEST_DIR + "-fd-leak-stat-");
     fs.mkdirSync(path.join(dir, "subdir"), { recursive: true });
-    fs.writeFileSync(path.join(dir, "keep.txt"), "k");
+    // Throwing file lives under subdir so the walk must pop a non-root fd
+    // (the subdir) before the stat throws — otherwise `current.fd === rootFd`
+    // and the outer `finally` in listTaskOutputFiles would mask the leak.
+    fs.writeFileSync(path.join(dir, "subdir", "keep.txt"), "k");
 
     const countFds = () => fs.readdirSync(PROC_SELF_FD).length;
     const originalOpenSync = fs.openSync;
@@ -594,7 +597,7 @@ describe("output-dir fd leak (taskferry#509)", () => {
     let statCalls = 0;
     fs.statSync = (...args) => {
       const p = typeof args[0] === "string" ? String(args[0]) : "";
-      if (p.endsWith("/keep.txt")) {
+      if (p.endsWith("/subdir/keep.txt") || p.endsWith("/keep.txt")) {
         statCalls++;
         if (statCalls === 1) {
           const err = new Error("EACCES: permission denied");

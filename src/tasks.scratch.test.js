@@ -138,6 +138,24 @@ describe("scratch output dir (taskferry#423)", () => {
     assert.ok(trailing.includes(dispatched.outputDir), "prompt block must name the output dir");
     assert.ok(trailing.includes(TASKFERRY_OUTPUT_DIR_ENV), "prompt block must name the env var");
   });
+
+  test("dispatch prompt varies with noSandbox: noSandbox omits 'inside the sandbox'", () => {
+    const { mgr: mgrDefault, captured: capturedDefault } = captureSpawn();
+    mgrDefault.dispatch({ prompt: "test", directory: "/tmp" });
+    const promptDefault = capturedDefault().args.at(-1);
+
+    const { mgr: mgrNoSandbox, captured: capturedNoSandbox } = captureSpawn();
+    mgrNoSandbox.dispatch({ prompt: "test", directory: "/tmp", noSandbox: true });
+    const promptNoSandbox = capturedNoSandbox().args.at(-1);
+
+    assert.ok(typeof promptDefault === "string", "default prompt must be a string");
+    assert.ok(typeof promptNoSandbox === "string", "noSandbox prompt must be a string");
+    assert.ok(promptDefault.includes("inside the sandbox"), "default prompt should contain 'inside the sandbox'");
+    assert.ok(!promptNoSandbox.includes("inside the sandbox"), "noSandbox prompt must not contain 'inside the sandbox'");
+    assert.ok(promptDefault.includes(TASKFERRY_OUTPUT_DIR_ENV), "default prompt must name the env var");
+    assert.ok(promptNoSandbox.includes(TASKFERRY_OUTPUT_DIR_ENV), "noSandbox prompt must name the env var");
+    assert.notEqual(promptDefault, promptNoSandbox, "prompts should differ between sandbox and noSandbox");
+  });
 });
 
 describe("scratch output dir result --fields outputDir (regression: #514)", () => {

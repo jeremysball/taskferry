@@ -6226,6 +6226,8 @@ function resolveOutputMaxBytes(options, ctx) {
   return (ctx.limits && typeof ctx.limits.maxOutputFileBytes === "number") ? ctx.limits.maxOutputFileBytes : DEFAULT_MAX_OUTPUT_FILE_BYTES;
 }
 
+const BUDGET_CHECK_ID = "budget-check";
+
 /**
  * Response-budget guard for taskferry#508: even a file that fits the raw
  * maxOutputFileBytes cap can still exceed the daemon's 1 MiB response
@@ -6240,10 +6242,10 @@ function resolveOutputMaxBytes(options, ctx) {
  * @param {string} relativePath
  * @param {number} maxBytes
  */
-function assertOutputResponseFits(taskId, outputDir, file, relativePath, maxBytes) {
+export function assertOutputResponseFits(taskId, outputDir, file, relativePath, maxBytes) {
   if (file.content === null) return;
   const payload = { taskId, outputDir, file, files: [], bytes: 0, total: 0, truncated: false };
-  const encoded = encodeMessage(successResponse("budget-check", payload));
+  const encoded = encodeMessage(successResponse(BUDGET_CHECK_ID, payload));
   const size = Buffer.byteLength(encoded);
   if (size > MAX_BUFFER_BYTES) {
     const encodedContentBytes = Buffer.byteLength(JSON.stringify(file.content));
@@ -6252,6 +6254,48 @@ function assertOutputResponseFits(taskId, outputDir, file, relativePath, maxByte
       `help: lower --max-output-file-bytes (current ${maxBytes}), TASKFERRY_MAX_OUTPUT_FILE_BYTES, or config maxOutputFileBytes to ≤ ${MAX_SAFE_OUTPUT_FILE_BYTES} (provably safe) or retrieve the file directly from ${path.join(outputDir, relativePath)}`
     );
   }
+}
+
+/**
+ * Response-budget guard for listing responses (taskferry#508 follow-up):
+ * `assertOutputResponseFits()` only covers the `--path` branch. A plain
+ * `taskferry output <id>` listing with many control-character-heavy
+ * filenames can also exceed the 1 MiB daemon response ceiling after JSON
+ * escaping (6×) even though each filename fits its filesystem limit.
+ * Check the actual success-response envelope and bound the listing to the
+ * response budget without falling through to generic RESPONSE_TOO_LARGE.
+ * When the full listing would overflow, truncate to the largest prefix that
+ * fits (preserving sorted order) and mark `truncated:true`; if even an
+ * empty listing would overflow (outputDir path itself too large), surface
+ * a clear path-specific error.
+ * @param {string} taskId
+ * @param {string} outputDir
+ * @param {{files: Array<{path: string, size: number}>, bytes: number, total: number, truncated: boolean}} listing
+ * @returns {{files: Array<{path: string, size: number}>, bytes: number, total: number, truncated: boolean}}
+ */
+export function assertListingResponseFits(taskId, outputDir, listing) {
+  const basePayload = { taskId, outputDir, files: listing.files, bytes: listing.bytes, total: listing.total, truncated: listing.truncated };
+  if (Buffer.byteLength(encodeMessage(successResponse(BUDGET_CHECK_ID, basePayload))) <= MAX_BUFFER_BYTES) return listing;
+  // Bound by truncating to the largest prefix that fits. Files are already
+  // sorted lexicographically, so dropping from the end is deterministic.
+  let files = [...listing.files];
+  while (files.length > 0) {
+    files.pop();
+    const bytes = files.reduce((sum, f) => sum + f.size, 0);
+    const payload = { taskId, outputDir, files, bytes, total: files.length, truncated: true };
+    if (Buffer.byteLength(encodeMessage(successResponse(BUDGET_CHECK_ID, payload))) <= MAX_BUFFER_BYTES) {
+      return { files, bytes, total: files.length, truncated: true };
+    }
+  }
+  const emptyPayload = { taskId, outputDir, files: [], bytes: 0, total: 0, truncated: true };
+  const emptySize = Buffer.byteLength(encodeMessage(successResponse(BUDGET_CHECK_ID, emptyPayload)));
+  if (emptySize > MAX_BUFFER_BYTES) {
+    throw new Error(
+      `error: output listing for "${taskId}" (outputDir "${outputDir}") would exceed daemon response limit ${MAX_BUFFER_BYTES} bytes even when empty (≈${emptySize} bytes on the wire)\n` +
+      `help: output directory path is too long or contains many control characters; retrieve files directly from ${outputDir} via filesystem access or use --path for individual files`
+    );
+  }
+  return { files: [], bytes: 0, total: 0, truncated: true };
 }
 
 /**
@@ -6281,13 +6325,14 @@ function outputFor(taskId, ctx, options = {}) {
     return { taskId, outputDir: null, files: [], bytes: 0, total: 0, truncated: false };
   }
   const listing = listTaskOutputFiles(outputDir);
+  const guarded = assertListingResponseFits(taskId, outputDir, listing);
   return {
     taskId,
     outputDir,
-    files: listing.files,
-    bytes: listing.bytes,
-    total: listing.total,
-    truncated: listing.truncated,
+    files: guarded.files,
+    bytes: guarded.bytes,
+    total: guarded.total,
+    truncated: guarded.truncated,
   };
 }
 

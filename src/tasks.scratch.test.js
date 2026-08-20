@@ -17,8 +17,9 @@ import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { makeManager, fakeChild, baseTask, trackManager, AXI_TASKS_TEST_DIR, mkdtempTracked } from "./tasks.test-helpers.js";
 import { TASKFERRY_OUTPUT_DIR_ENV, ensureTaskOutputDir, listTaskOutputFiles, readTaskOutputFile, resolveTaskOutputDir, resolveOutputDirRoot, resolveInsideDir, MAX_SAFE_OUTPUT_FILE_BYTES } from "./output-dir.js";
-import { createTaskManager, sweepOrphanedOutputDirsFor, MAX_SAFE_OUTPUT_FILE_BYTES as TASK_SAFE } from "./tasks.js";
+import { createTaskManager, sweepOrphanedOutputDirsFor, MAX_SAFE_OUTPUT_FILE_BYTES as TASK_SAFE, assertListingResponseFits } from "./tasks.js";
 import { MAX_BUFFER_BYTES } from "./daemon-server.js";
+import { encodeMessage, successResponse } from "./protocol.js";
 
 const TEST_PROMPT = "hi";
 const TEST_DIRECTORY = "/tmp";
@@ -651,6 +652,58 @@ describe("response-budget guard (taskferry#508 review)", () => {
       if (prev === undefined) delete process.env.TASKFERRY_MAX_OUTPUT_FILE_BYTES;
       else process.env.TASKFERRY_MAX_OUTPUT_FILE_BYTES = prev;
     }
+  });
+});
+
+describe("listing response-budget guard (taskferry#508 follow-up)", () => {
+  const BUDGET_CHECK = "budget-check";
+  test("synthetic listing with control-character-heavy filenames that would exceed wire budget is truncated to fit, not generic RESPONSE_TOO_LARGE", () => {
+    const taskId = "oc_listing_guard_synthetic";
+    const outputDir = "/tmp/state/outputs/oc_listing_guard_synthetic";
+    const files = [];
+    for (let i = 0; i < 256; i++) {
+      files.push({ path: String.fromCharCode(1).repeat(800) + `_${i}.txt`, size: 10 });
+    }
+    const listing = { files, bytes: files.reduce((s, f) => s + f.size, 0), total: files.length, truncated: false };
+    const fullPayload = { taskId, outputDir, files: listing.files, bytes: listing.bytes, total: listing.total, truncated: listing.truncated };
+    const fullSize = Buffer.byteLength(encodeMessage(successResponse(BUDGET_CHECK, fullPayload)));
+    assert.ok(fullSize > MAX_BUFFER_BYTES, `synthetic full listing must exceed budget to test guard (got ${fullSize} <= ${MAX_BUFFER_BYTES})`);
+    const guarded = assertListingResponseFits(taskId, outputDir, listing);
+    assert.ok(guarded.truncated, "guarded listing must be marked truncated");
+    assert.ok(guarded.files.length < listing.files.length, "guarded listing must have fewer files than the original");
+    const guardedPayload = { taskId, outputDir, files: guarded.files, bytes: guarded.bytes, total: guarded.total, truncated: guarded.truncated };
+    const guardedSize = Buffer.byteLength(encodeMessage(successResponse(BUDGET_CHECK, guardedPayload)));
+    assert.ok(guardedSize <= MAX_BUFFER_BYTES, `guarded listing must fit budget (got ${guardedSize} > ${MAX_BUFFER_BYTES})`);
+  });
+
+  test("plain taskferry output listing with control-character-heavy filenames is bounded to the response budget (integration)", async () => {
+    const mgr = makeManager({ spawnFn: () => fakeChild() });
+    const dispatched = mgr.dispatch({ prompt: TEST_PROMPT, directory: TEST_DIRECTORY });
+    const deepPrefix = Array.from({ length: 8 }, () => String.fromCharCode(1).repeat(100)).join("/");
+    const deepDir = path.join(dispatched.outputDir, deepPrefix);
+    fs.mkdirSync(deepDir, { recursive: true });
+    for (let i = 0; i < 256; i++) {
+      const name = String.fromCharCode(1).repeat(50) + `_${i}.txt`;
+      fs.writeFileSync(path.join(deepDir, name), "x");
+    }
+    const fullListing = mgr.output(dispatched.id);
+    // Must not throw generic fallback and must be bounded
+    assert.ok(fullListing.truncated, "oversized listing must be truncated to the response budget");
+    assert.ok(fullListing.files.length < 256, `expected fewer than 256 files after budget truncation, got ${fullListing.files.length}`);
+    const payload = { taskId: dispatched.id, outputDir: dispatched.outputDir, files: fullListing.files, bytes: fullListing.bytes, total: fullListing.total, truncated: fullListing.truncated };
+    const size = Buffer.byteLength(encodeMessage(successResponse(BUDGET_CHECK, payload)));
+    assert.ok(size <= MAX_BUFFER_BYTES, `guarded listing response must fit budget (got ${size} > ${MAX_BUFFER_BYTES})`);
+    // Ensure file-read guard preserved: a heavy file still surfaces knob-specific error
+    const heavy = String.fromCharCode(1).repeat(300 * 1024);
+    fs.writeFileSync(path.join(dispatched.outputDir, "heavy2.bin"), heavy);
+    assert.throws(
+      () => mgr.output(dispatched.id, { path: "heavy2.bin", maxOutputFileBytes: 512 * 1024 }),
+      (err) => {
+        const msg = err instanceof Error ? err.message : String(err);
+        assert.match(msg, /would exceed daemon response limit/);
+        return true;
+      },
+    );
   });
 });
 

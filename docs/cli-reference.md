@@ -359,7 +359,12 @@ ending on a tool call instead of a final assistant message (taskferry#423).
 - Without `--path`: prints a JSON listing of `{ path, size }` for every
   file in the scratch dir, plus `bytes`, `total`, and `truncated`
   (capped at `256` files / `8 MiB`; `node_modules` and `.git` subtrees
-  are skipped).
+  are skipped). Listings are also bounded to the daemon's `1 MiB` response
+  budget (`src/daemon-server.js:14`); a directory with many control-
+  character-heavy filenames that would exceed the wire budget after JSON
+  escaping (`\uXXXX`, 6×) is truncated to the largest prefix that fits
+  (with `truncated:true`) rather than failing with generic `RESPONSE_TOO_LARGE`
+  (taskferry#508 follow-up, `src/tasks.js:assertListingResponseFits`).
 - With `--path <relpath>`: prints the file's UTF-8 content. Single files
   are capped at `512 KiB` by default; an over-cap read returns `{ content: null,
   truncated: true, error: "too_large", size }`. Any path that would

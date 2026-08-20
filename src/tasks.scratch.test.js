@@ -483,6 +483,19 @@ describe("scratch output dir security regressions", () => {
       fs.statSync = originalStatSync;
     }
   });
+
+  test("listTaskOutputFiles skips a symlink to a file outside the output dir (PR #507)", () => {
+    const dir = mkdtempTracked(AXI_TASKS_TEST_DIR + "-symlink-escape-file-");
+    const outside = mkdtempTracked(AXI_TASKS_TEST_DIR + "-symlink-escape-file-target-");
+    const secret = path.join(outside, "escaped.txt");
+    fs.writeFileSync(secret, OUTSIDE_FILE_CONTENT);
+    fs.symlinkSync(secret, path.join(dir, "leak.txt"));
+    fs.writeFileSync(path.join(dir, "keep.txt"), "k");
+    const result = listTaskOutputFiles(dir);
+    assert.deepEqual(result.files.map((f) => f.path), ["keep.txt"], "a symlink whose real target escapes the output dir must be skipped, not reported with the outside size");
+    assert.equal(result.bytes, 1);
+    assert.equal(result.truncated, false);
+  });
 });
 
 describe("boot-time sweep of orphaned output dirs under <stateDir>/outputs (PR #482 review)", () => {

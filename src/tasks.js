@@ -4696,7 +4696,10 @@ function buildTaskManagerApi(ctx) {
      * @returns {Promise<TaskStatus>}
      */
     poll: (taskId, options = {}) => pollTask(taskId, options, { ensureStateLoaded: () => ctx.helpers.ensureStateLoaded(), tasks: ctx.maps.tasks, waiters: ctx.maps.waiters, noSuchTask }),
-    list: () => listTasks({ ensureStateLoaded: () => ctx.helpers.ensureStateLoaded(), tasks: ctx.maps.tasks }),
+    /**
+     * @param {{limit?: number}} [options]
+     */
+    list: (options) => listTasks({ ensureStateLoaded: () => ctx.helpers.ensureStateLoaded(), tasks: ctx.maps.tasks }, options),
     stats: () => statsTasks({ ensureStateLoaded: () => ctx.helpers.ensureStateLoaded(), tasks: ctx.maps.tasks }),
     /**
      * @param {string} taskId
@@ -6199,7 +6202,7 @@ async function rejectTaskChangeset(taskId, ctx) {
 function outputFor(taskId, ctx, options = {}) {
   ctx.helpers.ensureStateLoaded();
   const task = ctx.maps.tasks.get(taskId);
-  if (!task) throw noSuchTask(taskId);
+  if (!task) throw ctx.noSuchTask(taskId);
   const outputDir = task.outputDir ?? null;
   if (typeof options.path === "string" && options.path.length > 0) {
     if (!outputDir) {
@@ -6335,19 +6338,24 @@ export function emptyStatusCounts() {
 /**
  * Sorts all live tasks newest-first and buckets them by status for the list
  * view. Extracted out of `createTaskManager`'s `list` closure; `summarizeRow`
- * is a module-level helper.
+ * is a module-level helper. `counts` is always tallied over every task, but
+ * `tasks` is sliced down to `limit` (when given) before `summarizeRow` runs,
+ * so a caller that only needs the newest N rows (daemon.js's MAX_LIST_ROWS
+ * cap) doesn't pay per-row summarize work for rows it's about to discard.
  * @param {{ensureStateLoaded: () => void, tasks: Map<string, Task>}} ctx
+ * @param {{limit?: number}} [options]
  */
-function listTasks(ctx) {
+function listTasks(ctx, { limit } = {}) {
   ctx.ensureStateLoaded();
   const all = Array.from(ctx.tasks.values()).sort((a, b) => (a.startedAt < b.startedAt ? 1 : -1));
   const counts = emptyStatusCounts();
   for (const t of all) {
     if (counts[/** @type {keyof Counts} */ (t.status)] != null) counts[/** @type {keyof Counts} */ (t.status)]++;
   }
+  const rows = limit !== undefined ? all.slice(0, limit) : all;
   return {
     counts,
-    tasks: all.length ? all.map(summarizeRow) : "none found (this server process's lifetime)",
+    tasks: rows.length ? rows.map(summarizeRow) : "none found (this server process's lifetime)",
   };
 }
 

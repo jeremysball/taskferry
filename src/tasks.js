@@ -2420,8 +2420,8 @@ function restoreDispatchScheduler(sched, snapshot) {
   }
   // The timer handle from the snapshot was cleared at the start of
   // runLaunchQueuedTasks, so restoring the handle itself would point at a
-  // cleared timeout. Leave timer null -- the next successful dispatch's
-  // launchQueuedTasks will re-arm it if queued work remains.
+  // cleared timeout. Leave timer null and let the caller re-arm via the
+  // normal scheduler if queued work remains (taskferry#510 timer fix).
   sched.launchTimer = null;
 }
 
@@ -2462,13 +2462,22 @@ function resolveFailedOutputDirCreated(outputDirCreated, preExists, outputDir) {
 
 /**
  * Restores scheduler and persist state captured by prepareDispatchRollback.
- * @param {{launchScheduler?: {launchTimes: number[], lastLaunchAt: number, cursor: number, launchTimer: NodeJS.Timeout|null, providerQueues: Map<string, ProviderQueue>}, state?: {persistDirty: boolean, persistTimer: NodeJS.Timeout|null}}} ctx
+ * @param {{launchScheduler?: {launchTimes: number[], lastLaunchAt: number, cursor: number, launchTimer: NodeJS.Timeout|null, providerQueues: Map<string, ProviderQueue>}, state?: {persistDirty: boolean, persistTimer: NodeJS.Timeout|null}, launchQueuedTasks?: () => void}} ctx
  * @param {ReturnType<typeof snapshotDispatchScheduler>|null} schedulerSnapshot
  * @param {{persistDirty: boolean, persistTimer: NodeJS.Timeout|null}|null} persistSnapshot
  */
 function rollbackDispatchState(ctx, schedulerSnapshot, persistSnapshot) {
   if (schedulerSnapshot && ctx.launchScheduler) {
     restoreDispatchScheduler(ctx.launchScheduler, schedulerSnapshot);
+    // runLaunchQueuedTasks clears any pre-existing launch timer before the
+    // failed launch. The snapshot's handle is already cleared, so re-arming
+    // through the normal scheduler recreates the timer with the correct
+    // remaining delay instead of stranding a queued, rate-limited task.
+    if (ctx.launchQueuedTasks) {
+      try {
+        ctx.launchQueuedTasks();
+      } catch {}
+    }
   }
   if (persistSnapshot && ctx.state) {
     if (ctx.state.persistTimer && ctx.state.persistTimer !== persistSnapshot.persistTimer) {

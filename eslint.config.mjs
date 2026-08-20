@@ -86,6 +86,17 @@ export default [
     },
   },
 
+  // taskferry#510 regression coverage keeps all dispatch rollback cases in one
+  // file for atomic verification; the suite has grown past sonarjs' 1000-line
+  // soft cap but remains the right place for these tightly-coupled cases.
+  {
+    files: ["src/tasks.dispatch.test.js"],
+    rules: {
+      "sonarjs/max-lines": "off",
+      "sonarjs/max-lines-per-function": "off",
+    },
+  },
+
   {
     files: ["**/*.js"],
     languageOptions: {

@@ -109,6 +109,52 @@ describe("dispatch() lifecycle, driven through an injected spawnFn (no real open
     assert.throws(() => mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), model: LUNA_MODEL, executor: "opencode" }), /rm failed/);
   });
 
+  test("failed dispatch does not strand a queued provider-rate-limited task's timer (taskferry#510 timer rollback)", async () => {
+    let spawns = 0;
+    let builds = 0;
+    const mgr = makeManager({
+      spawnFn: () => { spawns++; return fakeChild(); },
+      defaultExecutor: makeFakeExecutor({
+        buildSpawnArgs: (ctx) => {
+          builds++;
+          if (ctx.model === "other/bad") throw new Error("build failed");
+          return [];
+        },
+      }),
+      maxDispatchesPerWindow: 10,
+      dispatchWindowMs: 100,
+      maxConcurrentTasks: 10,
+      lowerdirStaggerMs: 0,
+      providerLimits: new Map([["openai", { maxDispatchesPerWindow: 1, maxConcurrentTasks: 10 }]]),
+    });
+    // First opencode consumes its provider window and launches immediately.
+    const first = mgr.dispatch({ prompt: "first", directory: os.tmpdir(), model: LUNA_MODEL });
+    assert.equal(mgr.status(first.id).status, "running");
+    assert.equal(spawns, 1);
+    assert.equal(builds, 1);
+    // Second opencode hits its provider dispatch window and queues, arming a timer.
+    const second = mgr.dispatch({ prompt: "second", directory: os.tmpdir(), model: LUNA_MODEL });
+    assert.equal(mgr.status(second.id).status, "queued");
+    assert.equal(spawns, 1);
+    assert.equal(builds, 1);
+    // Third dispatch from an unlimited provider would launch immediately but its
+    // build throws. runLaunchQueuedTasks clears the pre-existing timer before the
+    // throw, so rollback must re-arm it or the second task strands.
+    assert.throws(() => mgr.dispatch({ prompt: "third", directory: os.tmpdir(), model: "other/bad" }), /build failed/);
+    assert.equal(mgr.status(second.id).status, "queued");
+    assert.equal(spawns, 1);
+    assert.equal(builds, 2);
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    assert.equal(mgr.status(second.id).status, "running", "queued provider-rate-limited task should launch after timer re-armed");
+    assert.equal(spawns, 2);
+    assert.equal(builds, 3);
+    const outputsRoot = path.join(mgr.paths.STATE_DIR, "outputs");
+    const leftover = fs.existsSync(outputsRoot) ? fs.readdirSync(outputsRoot) : [];
+    assert.equal(leftover.length, 2, `expected 2 output dirs (first+second), got ${JSON.stringify(leftover)}`);
+    assert.ok(fs.existsSync(path.join(outputsRoot, first.id)));
+    assert.ok(fs.existsSync(path.join(outputsRoot, second.id)));
+  });
+
   /** @param {string[]} args @param {string} model */
   function assertDispatchedModel(args, model) {
     assert.equal(args[args.indexOf("-m") + 1], model);

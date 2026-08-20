@@ -109,11 +109,15 @@ export function ensureTaskOutputDir(dir) {
  * prompt "gets a line naming that path, the same way the check-gate
  * command already gets injected via verificationPromptBlock."
  * @param {string|null|undefined} outputDir
+ * @param {boolean} [noSandbox]
  * @returns {string}
  */
-export function outputDirPromptBlock(outputDir) {
+export function outputDirPromptBlock(outputDir, noSandbox = false) {
   if (!outputDir) return "";
-  return `${PROMPT_BLOCK_SEPARATOR}## Persistent output dir\nThis task has a writable scratch directory at \`${outputDir}\` (also exposed as the \`${TASKFERRY_OUTPUT_DIR_ENV}\` environment variable inside the sandbox). Anything you write here persists past turn end — use it for deliverables that must survive the task settling, getting cancelled, or ending on a tool call instead of a final message. Retrieve its contents with \`taskferry output <id>\` after settlement.`;
+  const envVarNote = noSandbox
+    ? ` (also exposed as the \`${TASKFERRY_OUTPUT_DIR_ENV}\` environment variable)`
+    : ` (also exposed as the \`${TASKFERRY_OUTPUT_DIR_ENV}\` environment variable inside the sandbox)`;
+  return `${PROMPT_BLOCK_SEPARATOR}## Persistent output dir\nThis task has a writable scratch directory at \`${outputDir}\`${envVarNote}. Anything you write here persists past turn end — use it for deliverables that must survive the task settling, getting cancelled, or ending on a tool call instead of a final message. Retrieve its contents with \`taskferry output <id>\` after settlement.`;
 }
 
 /**

@@ -168,7 +168,8 @@ daemon restarted while the task was still running; see
 [daemon.md](daemon.md#recovery).
 
 Lean fields by default; pass `--full` for directory, model, session id, log
-path, and prompt preview. `failureReason` is `null` unless the task was
+path, and prompt preview. `outputDir` is always present in lean status.
+`failureReason` is `null` unless the task was
 stopped by the no-output watchdog (`"no_output_timeout_dead_spawn"` if it
 never produced output, `"no_output_timeout_stalled"` if it produced output
 and then went silent), a
@@ -241,7 +242,7 @@ tripped.
 | Flag | Notes |
 |---|---|
 | `--full` | Include untruncated narration; only rejected as a usage error when combined with `--fields` that omits `narration` — `--full` alone (no `--fields`) works fine |
-| `--fields <comma-list>` | Project only the fields you need: `message`, `narration`, `tokens`, `cost`, `sessionId`, `exitCode`, `signal`, `spawnError`, `failureReason`, `failureDetail`, `logPath`, `incomplete`, `finalMarker`, `diff`, `diffStat`, `changesetError`, `finalStatus`, `class`, `checkStatus`, `checkCommand`, `checkExitCode`, `checkOutputTail`, `checkStartedAt`, `checkEndedAt`, `checkOverride`, `parentTaskId`, `projectConfigWarning` |
+| `--fields <comma-list>` | Project only the fields you need: `message`, `narration`, `tokens`, `cost`, `sessionId`, `exitCode`, `signal`, `spawnError`, `failureReason`, `failureDetail`, `logPath`, `outputDir`, `incomplete`, `finalMarker`, `diff`, `diffStat`, `changesetError`, `finalStatus`, `class`, `checkStatus`, `checkCommand`, `checkExitCode`, `checkOutputTail`, `checkStartedAt`, `checkEndedAt`, `checkOverride`, `parentTaskId`, `projectConfigWarning` |
 | `--diff` | Print the task's pending changeset (read-only; cannot combine with `--fields` or `--full`) |
 
 The payload (the diff included) rides the daemon's response size cap. A

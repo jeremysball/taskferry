@@ -38,6 +38,7 @@ export const RESULT_FIELDS = new Set([
   "failureReason",
   "failureDetail",
   "logPath",
+  "outputDir",
   "incomplete",
   "finalMarker",
   "finalStatus",

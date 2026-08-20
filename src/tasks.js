@@ -4496,7 +4496,7 @@ function buildManagerInternalHelpers(ctx) {
     /** @param {Task} task */
     hasLiveOverlay: (task) => hasLiveOverlayForTask(task, { existsFn: ctx.opts.existsFn }),
     sweepOrphanedPromptFiles: () => sweepOrphanedPromptFilesFor({ PROMPT_DIR: ctx.paths.PROMPT_DIR, tasks: ctx.maps.tasks }),
-    sweepOrphanedOutputDirs: () => sweepOrphanedOutputDirsFor({ OUTPUT_DIR_ROOT: resolveOutputDirRoot(ctx.opts.stateDir), tasks: ctx.maps.tasks, readdirFn: ctx.opts.readdirFn }),
+    sweepOrphanedOutputDirs: () => sweepOrphanedOutputDirsFor({ OUTPUT_DIR_ROOT: resolveOutputDirRoot(ctx.opts.stateDir), tasks: ctx.maps.tasks, readdirFn: ctx.opts.readdirFn, lstatFn: ctx.opts.lstatFn }),
     /** @param {string} model @param {NodeJS.ProcessEnv} [env] @returns {string[]} Resolves the
      * opencode variants table for a model: the test-injected
      * `opencodeVariantsTable` seam when set, otherwise the on-disk
@@ -6466,24 +6466,63 @@ function sweepOrphanedPromptFilesFor(ctx) {
  * surface for `taskferry output <id>`), so the sweep only removes dirs
  * whose task id is absent from the loaded tasks.json entirely. Mirrors
  * sweepOrphanedPromptFiles() / sweepOrphanedOverlays() at startup.
- * @param {{OUTPUT_DIR_ROOT: string, tasks: Map<string, Task>, readdirFn: (path: string) => string[]}} ctx
+ * @param {{OUTPUT_DIR_ROOT: string, tasks: Map<string, Task>, readdirFn: (path: string) => string[], lstatFn?: (path: string) => fs.Stats, removeDirFn?: (path: string) => void}} ctx
  */
-function sweepOrphanedOutputDirsFor(ctx) {
+export function sweepOrphanedOutputDirsFor(ctx) {
   let entries;
   try {
     entries = ctx.readdirFn(ctx.OUTPUT_DIR_ROOT);
   } catch {
     return;
   }
-  for (const entry of entries) {
-    // Skip the root "." and ".." entries readdir can hand back on some
-    // platforms, anything that isn't a task-id-shaped directory, and any
-    // task id that is already tracked in tasks.json (settled tasks
-    // intentionally retain their output dir as the deliverable surface).
-    if (entry && entry !== "." && entry !== ".." && !ctx.tasks.has(entry)) {
-      removeDirIfPresent(path.join(ctx.OUTPUT_DIR_ROOT, entry));
-    }
+  // Always filter, then process (CLAUDE.md, taskferry#513): narrow to the
+  // orphan subset via cheap in-memory tasks.has before any per-entry FS work
+  // (stat/rm). Previously this mixed readdir iteration with immediate
+  // removal, but the expensive per-entry work (lstat + rm -rf) still scaled
+  // with every historical directory even when only a handful are orphans.
+  // Collecting the eligible set first bounds FS work to that set.
+  const orphanEntries = collectOrphanOutputEntries(entries, ctx.tasks);
+  if (orphanEntries.length === 0) return;
+  const lstat = ctx.lstatFn ?? fs.lstatSync;
+  const removeDir = ctx.removeDirFn ?? removeDirIfPresent;
+  for (const entry of orphanEntries) {
+    sweepOrphanOutputEntry(path.join(ctx.OUTPUT_DIR_ROOT, entry), lstat, removeDir);
   }
+}
+
+/**
+ * Cheap in-memory filter for the sweep: returns only entries whose id has
+ * no matching task. No FS work here, so this scales with the directory
+ * listing size but does no per-entry I/O.
+ * @param {string[]} entries
+ * @param {Map<string, Task>} tasks
+ * @returns {string[]}
+ */
+function collectOrphanOutputEntries(entries, tasks) {
+  const orphans = [];
+  for (const entry of entries) {
+    if (entry && entry !== "." && entry !== ".." && !tasks.has(entry)) orphans.push(entry);
+  }
+  return orphans;
+}
+
+/**
+ * Expensive per-orphan FS work: stat the path then rm it. Called only for
+ * the filtered orphan set, so this scales with the orphan count, not the
+ * all-time directory count. The lstat is intentionally after the has-filter
+ * so it is not run for retained history.
+ * @param {string} full
+ * @param {(path: string) => fs.Stats} lstat
+ * @param {(path: string) => void} removeDir
+ */
+function sweepOrphanOutputEntry(full, lstat, removeDir) {
+  try {
+    lstat(full);
+  } catch (err) {
+    if (errCode(err) === "ENOENT") return;
+    throw err;
+  }
+  removeDir(full);
 }
 
 /** Recursively remove a directory tree, tolerating it already being gone (ENOENT).

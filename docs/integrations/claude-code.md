@@ -7,26 +7,30 @@ session-start hook that shells out to the `taskferry` binary.
 
 The plugin's hook command starts with `command -v taskferry
 >/dev/null 2>&1` and degrades to a plain-text notice if that check fails.
-Running `taskferry setup` once from the taskferry checkout puts the CLI
-on `PATH` and registers the marketplace/plugin in the same step — see
-the [Quickstart section in the README](../../README.md#quickstart) for the full
+For a fresh checkout, run `node src/cli.js setup`, then add
+`~/.local/bin` to `PATH` with `export PATH="$HOME/.local/bin:$PATH"`.
+Once `taskferry` already resolves on `PATH`, rerun `taskferry setup` to
+refresh the symlinks and register the marketplace/plugin. See the
+[Quickstart section in the README](../../README.md#quickstart) for the full
 bootstrap.
 
 ## Install
 
-From the taskferry checkout, run:
+From a fresh checkout, run:
 
 ```bash
-taskferry setup
+node src/cli.js setup
 ```
 
-When the `claude` CLI is on `PATH`, `taskferry setup` adds the checkout
+When the `claude` CLI is on `PATH`, setup adds the checkout
 as a Claude Code marketplace (if it is not already registered) and
 either installs the `taskferry@taskferry` plugin at user scope or
 updates it if it is already installed. When `claude` is not on `PATH`,
 the Claude Code leg of `setup` reports `status: "unavailable"` and the
 rest of the bootstrap (CLI symlink, OpenCode plugin symlink, Codex
-marketplace if `codex` is present) still runs.
+  marketplace if `codex` is present) still runs. Setup also creates
+  `~/.local/bin/tf-sl` -> `<checkout>/src/tf-sl.sh`, a statusline data source
+  for a Claude Code statusline configuration.
 
 The marketplace catalog is `.claude-plugin/marketplace.json` at the
 repository root; the plugin itself lives under `integrations/claude/`
@@ -73,7 +77,9 @@ want it gone too (see [daemon.md](../daemon.md#stopping-the-daemon)).
   skill:generate`; `npm run skill:check` fails the build if it drifts),
   bundled into the plugin so installing it also gives Claude Code the
   taskferry worker-backend skill directly, without a separate manual copy
-  into `~/.claude/skills/`.
+  into `~/.claude/skills/`. `npm run skill:generate` mirrors the canonical
+  `SKILL.md` and its `resources/*` tree into the integration copy, and
+  `npm run skill:check` validates both.
 
 ## Using taskferry as an external worker backend
 
@@ -88,7 +94,7 @@ inside a live Claude Code session. See
 path relies on.
 
 Outside the SDD lifecycle, a live session also benefits from fleet-wide
-visibility into every ferry dispatched with the workspace root as its
-directory — see
+  visibility into every ferry dispatched with the workspace root or one of
+  its linked worktrees as its directory. See
 the bundled skill's "Fleet-Wide Monitoring" section for the `watch
 --summaries --flush-interval` + `Monitor` auto-arm convention.

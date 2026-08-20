@@ -6683,13 +6683,13 @@ function startRunningWatcherFor(task, ctx) {
  *     (taskferry#504); tying the prompt block to outputDir itself instead
  *     of duplicating a separate role check means it can't drift out of
  *     sync with what dispatchTask actually allocated. taskferry#423.
- * @param {{role: "dispatch"|"advisor", noOverlay: boolean, projectConfig: {check: string|null}, prompt: string, outputDir: string|null}} args
+ * @param {{role: "dispatch"|"advisor", noOverlay: boolean, projectConfig: {check: string|null}, prompt: string, outputDir: string|null, noSandbox?: boolean}} args
  * @returns {string}
  */
-function buildDispatchPrompt({ role, noOverlay, projectConfig, prompt, outputDir }) {
+function buildDispatchPrompt({ role, noOverlay, projectConfig, prompt, outputDir, noSandbox = false }) {
   const injected = [
     role === "dispatch" && !noOverlay && projectConfig.check ? verificationPromptBlock(projectConfig.check) : "",
-    outputDir ? outputDirPromptBlock(outputDir) : "",
+    outputDir ? outputDirPromptBlock(outputDir, noSandbox) : "",
   ].join("");
   return `${prompt}${injected}`;
 }
@@ -6732,7 +6732,7 @@ function dispatchTask(params, ctx) {
   // back the same way. taskferry#423.
   const outputDir = resolveTaskOutputDir(ctx.STATE_DIR, id);
   ensureTaskOutputDir(outputDir);
-  const dispatchPrompt = buildDispatchPrompt({ role, noOverlay, projectConfig, prompt, outputDir });
+  const dispatchPrompt = buildDispatchPrompt({ role, noOverlay, projectConfig, prompt, outputDir, noSandbox });
   const task = buildDispatchTask({ id, model, executor, priorSessionTask, variant, sessionId, originSessionId, internal, finalMarker, role, logPath, parentTaskId, env, prompt: dispatchPrompt, originalPrompt: prompt, directory: normalizedDirectory, defaultVariant: ctx.defaultVariant, resolveOpencodeVariants: ctx.resolveOpencodeVariants, class: taskClass, outputDir: outputDir });
   queueDispatchLaunch({ tasks: ctx.tasks, persistTask: ctx.persistTask, pendingLaunches: ctx.pendingLaunches, providerQueues: ctx.providerQueues, launchQueuedTasks: ctx.launchQueuedTasks }, { id, task, sessionId, env, noSandbox, noOverlay, executor, role, prompt: dispatchPrompt, allowedDirs: effectiveRwBind, roBind: dispatchRoBind, outputDir: outputDir });
   const summary = summarize(task);

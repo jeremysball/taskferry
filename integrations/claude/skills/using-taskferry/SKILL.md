@@ -81,8 +81,9 @@ specifically want that.
 **A worker's writes only land somewhere durable inside `--directory`.** The
 sandbox mounts `--directory` as the one copy-on-write overlay and binds the
 rest of the root read-only, plus a small set of explicitly read-write paths
-(the git common dir, `runtimeDir`, any `--rw-bind`/`--allowed-dirs` entries) -- there is
-no second, throwaway overlay for anything else. A symlink out to some other
+(the git common dir, `runtimeDir`, and any `--rw-bind` entries; `--allowed-dirs`
+is a deprecated alias for `--rw-bind`). There is no second, throwaway overlay
+for anything else. A symlink out to some other
 path on the host (e.g. a worktree's scratch directory symlinked to a shared
 location in the main checkout) resolves into the read-only root, so a write
 through it fails with EROFS rather than silently landing anywhere. A write

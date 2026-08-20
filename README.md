@@ -223,6 +223,7 @@ cost, roughly a minute. They are the only tests that exercise the real
 - [docs/daemon.md](docs/daemon.md): process model, socket protocol, recovery
 - [docs/config.md](docs/config.md): config file fields and env var precedence
 - [docs/security.md](docs/security.md): permissions, caller-env forwarding, activity-summary privacy
+- [docs/evolution.md](docs/evolution.md): architecture evolution, reusable patterns, and the complete commit ledger
 - [docs/troubleshooting.md](docs/troubleshooting.md): `doctor` output and common failures
 - [docs/migrating-from-mcp.md](docs/migrating-from-mcp.md): command mapping and cleanup
 - [CONTRIBUTING.md](CONTRIBUTING.md): PR conventions, test file structure, contributor workflow

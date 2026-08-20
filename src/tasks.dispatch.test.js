@@ -928,7 +928,7 @@ describe("dispatch() prompt augmentation from .taskferry.toml", () => {
     assert.match(spawnedPrompt, /npm run check/);
   });
 
-  test("does not inject the verification block for advisor dispatches", () => {
+  test("does not inject the verification block for advisor dispatches, but does inject the output-dir block", () => {
     // Advisor dispatches are sandbox-required by ADR 0001 (the dispatch path's
     // pre-spawn plan refuses to launch an advisor without sandbox+overlay --
     // resolvedSpawnPlan() throws "advisor dispatch requires overlay-gated
@@ -947,16 +947,16 @@ describe("dispatch() prompt augmentation from .taskferry.toml", () => {
     });
     mgr.advisor({ prompt: "Review this", directory: dir, model: SOL_MODEL, executor: "opencode" });
     // Advisor's argv is the bwrap invocation; the trailing positional keeps
-    // the user prompt (no verification block per advisor role, and no
-    // persistent-output-dir block either — advisors are read-only opinion
-    // turns and the "use it for deliverables" framing is misleading for
-    // them). Advisor dispatches DO still get a per-task scratch dir
-    // allocated and TASKFERRY_OUTPUT_DIR set (taskferry#423) so a tool
-    // call that hands back a path resolves, but the worker isn't told
-    // about it in the prompt.
+    // the user prompt with no verification block (advisor role never gates
+    // on projectConfig.check) but WITH the persistent-output-dir block --
+    // advisor dispatches get the exact same outputDir/TASKFERRY_OUTPUT_DIR
+    // allocation as a dispatch (taskferry#423), and the prompt block is now
+    // gated on that allocation existing, not on role (taskferry#504: the
+    // old role-only gate left the allocation silently undiscoverable to the
+    // worker).
     const spawnedPrompt = /** @type {string} */ (captured.at(-1));
     assert.match(spawnedPrompt, /Review this/);
-    assert.ok(!/## Persistent output dir/.test(spawnedPrompt), "advisor prompt must not contain the persistent-output-dir block");
+    assert.ok(/## Persistent output dir/.test(spawnedPrompt), "advisor prompt must contain the persistent-output-dir block");
     assert.ok(!captured.join(" ").includes(VERIFICATION_MARKER));
   });
 

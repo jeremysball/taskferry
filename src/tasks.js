@@ -6625,19 +6625,24 @@ function startRunningWatcherFor(task, ctx) {
  * stored on `task.prompt` and passed via `-p`. The two blocks are:
  *   - verificationPromptBlock: only on dispatch (advisor never gates) and
  *     suppressed by --no-overlay (parity with the rest of the overlay machinery).
- *   - outputDirPromptBlock: only on dispatch. Advisors may still get an
- *     outputDir allocated (and TASKFERRY_OUTPUT_DIR exposed) for the rare
- *     opinion-only advisor that needs a scratch file to pass back, but the
- *     "persist past turn end / use it for deliverables" framing is
- *     misleading for a read-only opinion turn that produces no deliverable.
- *     taskferry#423.
+ *   - outputDirPromptBlock: gated on outputDir being allocated at all, not
+ *     on role. An advisor turn gets the exact same scratch dir and
+ *     TASKFERRY_OUTPUT_DIR as a dispatch (see dispatchTask), so it needs
+ *     the same in-prompt notification to actually discover it -- a worker
+ *     that has a writable dir and an env var pointing at it but no prompt
+ *     text explaining either can't use the "deliverable survives turn end"
+ *     mechanism this exists for. Previously gated on role === "dispatch",
+ *     which left advisor's allocation silently undiscoverable
+ *     (taskferry#504); tying the prompt block to outputDir itself instead
+ *     of duplicating a separate role check means it can't drift out of
+ *     sync with what dispatchTask actually allocated. taskferry#423.
  * @param {{role: "dispatch"|"advisor", noOverlay: boolean, projectConfig: {check: string|null}, prompt: string, outputDir: string|null}} args
  * @returns {string}
  */
 function buildDispatchPrompt({ role, noOverlay, projectConfig, prompt, outputDir }) {
   const injected = [
     role === "dispatch" && !noOverlay && projectConfig.check ? verificationPromptBlock(projectConfig.check) : "",
-    role === "dispatch" ? outputDirPromptBlock(outputDir) : "",
+    outputDir ? outputDirPromptBlock(outputDir) : "",
   ].join("");
   return `${prompt}${injected}`;
 }

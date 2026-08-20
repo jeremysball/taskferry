@@ -158,6 +158,30 @@ describe("scratch output dir (taskferry#423)", () => {
   });
 });
 
+describe("scratch output dir result --fields outputDir (regression: #514)", () => {
+  test("result --fields outputDir returns the correct output dir path", async () => {
+    const child = fakeChild();
+    const mgr = makeManager({ spawnFn: () => child });
+    const dispatched = mgr.dispatch({ prompt: TEST_PROMPT, directory: TEST_DIRECTORY });
+    child.emit("exit", 0, null);
+    await new Promise((resolve) => setImmediate(resolve));
+
+    const result = mgr.result(dispatched.id, { fields: ["outputDir"] });
+    assert.equal(result.outputDir, dispatched.outputDir);
+  });
+
+  test("result without --fields also includes outputDir", async () => {
+    const child = fakeChild();
+    const mgr = makeManager({ spawnFn: () => child });
+    const dispatched = mgr.dispatch({ prompt: TEST_PROMPT, directory: TEST_DIRECTORY });
+    child.emit("exit", 0, null);
+    await new Promise((resolve) => setImmediate(resolve));
+
+    const result = mgr.result(dispatched.id);
+    assert.equal(result.outputDir, dispatched.outputDir);
+  });
+});
+
 describe("scratch output dir retrieval (taskferry#423)", () => {
   test("taskferry output: lists files written under the scratch dir after a clean exit", async () => {
     const child = fakeChild();

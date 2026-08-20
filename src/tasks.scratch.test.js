@@ -26,6 +26,7 @@ const TEST_DIRECTORY = "/tmp";
 const DELIVERABLE_NAME = "deliverable.txt";
 const DELIVERABLE_CONTENT = "the answer";
 const OUTSIDE_FILE_CONTENT = "should not be listed";
+const PROC_SELF_FD = "/proc/self/fd";
 
 const captureSpawn = (overrides = {}) => {
   let captured = null;
@@ -613,6 +614,142 @@ describe("scratch output dir security regressions", () => {
     } finally {
       fs.statSync = originalStatSync;
     }
+  });
+});
+
+describe("output-dir fd leak (taskferry#509)", () => {
+  test("listTaskOutputFiles does not leak a directory fd when readdir throws mid-walk", (t) => {
+    if (process.platform !== "linux") {
+      t.skip("only meaningful on linux where /proc/self/fd is available");
+      return;
+    }
+    const dir = mkdtempTracked(AXI_TASKS_TEST_DIR + "-fd-leak-");
+    fs.mkdirSync(path.join(dir, "subdir"), { recursive: true });
+    fs.writeFileSync(path.join(dir, "keep.txt"), "k");
+    fs.writeFileSync(path.join(dir, "subdir", "inner.txt"), "x");
+
+    const countFds = () => fs.readdirSync(PROC_SELF_FD).length;
+
+    const originalReaddirSync = fs.readdirSync;
+    const originalOpenSync = fs.openSync;
+    const originalCloseSync = fs.closeSync;
+    let opens = 0;
+    let closes = 0;
+    fs.openSync = (...args) => { opens++; return originalOpenSync(...args); };
+    fs.closeSync = (...args) => { closes++; return originalCloseSync(...args); };
+    let walkCalls = 0;
+    fs.readdirSync = new Proxy(originalReaddirSync, {
+      apply(target, thisArg, args) {
+        const [readdirPath] = args;
+        const p = String(readdirPath);
+        if (p === PROC_SELF_FD) return target.apply(thisArg, args);
+        if (/^\/proc\/self\/fd\/\d+$/.test(p)) {
+          walkCalls++;
+          // Let root succeed, subdir throw EACCES — the exact window where
+          // the popped fd would previously have leaked without a try/finally.
+          if (walkCalls === 2) {
+            const err = new Error(`EACCES: permission denied, scandir '${p}'`);
+            err.code = "EACCES";
+            throw err;
+          }
+        }
+        return target.apply(thisArg, args);
+      },
+    });
+
+    const fdsBefore = countFds();
+    try {
+      assert.throws(() => listTaskOutputFiles(dir), (err) => err.code === "EACCES");
+    } finally {
+      fs.readdirSync = originalReaddirSync;
+    }
+    const fdsAfterSingle = countFds();
+    // After one failed listing the fd count must not have grown and every
+    // open must have been paired with a close.
+    assert.equal(fdsAfterSingle, fdsBefore, "a single throwing walk must not leak an fd");
+    assert.equal(opens, closes, `expected balanced open/close but got ${opens} opens vs ${closes} closes`);
+
+    // Re-install the same failing mock to prove the leak does not accumulate
+    // across repeated output listings (the daemon path that would reach EMFILE).
+    walkCalls = 0;
+    opens = 0;
+    closes = 0;
+    fs.readdirSync = new Proxy(originalReaddirSync, {
+      apply(target, thisArg, args) {
+        const [readdirPath] = args;
+        const p = String(readdirPath);
+        if (p === PROC_SELF_FD) return target.apply(thisArg, args);
+        if (/^\/proc\/self\/fd\/\d+$/.test(p)) {
+          walkCalls++;
+          if (walkCalls % 2 === 0) {
+            const err = new Error(`EACCES: permission denied, scandir '${p}'`);
+            err.code = "EACCES";
+            throw err;
+          }
+        }
+        return target.apply(thisArg, args);
+      },
+    });
+    const fdsBeforeLoop = countFds();
+    try {
+      for (let i = 0; i < 10; i++) {
+        assert.throws(() => listTaskOutputFiles(dir), (err) => err.code === "EACCES");
+      }
+    } finally {
+      fs.readdirSync = originalReaddirSync;
+      fs.openSync = originalOpenSync;
+      fs.closeSync = originalCloseSync;
+    }
+    const fdsAfterLoop = countFds();
+    assert.equal(fdsAfterLoop, fdsBeforeLoop, "repeated throwing walks must not accumulate leaked fds");
+  });
+
+  test("listTaskOutputFiles does not leak the popped directory fd when a file-stat throws mid-iteration", (t) => {
+    if (process.platform !== "linux") {
+      t.skip("only meaningful on linux where /proc/self/fd is available");
+      return;
+    }
+    const dir = mkdtempTracked(AXI_TASKS_TEST_DIR + "-fd-leak-stat-");
+    fs.mkdirSync(path.join(dir, "subdir"), { recursive: true });
+    // Throwing file lives under subdir so the walk must pop a non-root fd
+    // (the subdir) before the stat throws — otherwise `current.fd === rootFd`
+    // and the outer `finally` in listTaskOutputFiles would mask the leak.
+    fs.writeFileSync(path.join(dir, "subdir", "keep.txt"), "k");
+
+    const countFds = () => fs.readdirSync(PROC_SELF_FD).length;
+    const originalOpenSync = fs.openSync;
+    const originalCloseSync = fs.closeSync;
+    let opens = 0;
+    let closes = 0;
+    fs.openSync = (...args) => { opens++; return originalOpenSync(...args); };
+    fs.closeSync = (...args) => { closes++; return originalCloseSync(...args); };
+
+    const originalStatSync = fs.statSync;
+    let statCalls = 0;
+    fs.statSync = (...args) => {
+      const p = typeof args[0] === "string" ? String(args[0]) : "";
+      if (p.endsWith("/subdir/keep.txt") || p.endsWith("/keep.txt")) {
+        statCalls++;
+        if (statCalls === 1) {
+          const err = new Error("EACCES: permission denied");
+          err.code = "EACCES";
+          throw err;
+        }
+      }
+      return originalStatSync(...args);
+    };
+
+    const fdsBefore = countFds();
+    try {
+      assert.throws(() => listTaskOutputFiles(dir), (err) => err.code === "EACCES");
+    } finally {
+      fs.statSync = originalStatSync;
+      fs.openSync = originalOpenSync;
+      fs.closeSync = originalCloseSync;
+    }
+    const fdsAfter = countFds();
+    assert.equal(fdsAfter, fdsBefore, "a throwing file stat mid-walk must not leak the popped directory fd");
+    assert.equal(opens, closes, `expected balanced open/close but got ${opens} opens vs ${closes} closes`);
   });
 });
 

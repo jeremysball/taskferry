@@ -122,8 +122,8 @@ export function outputDirPromptBlock(outputDir, noSandbox = false) {
 export function listTaskOutputFiles(dir) {
   const rootFd = openDirectoryNoFollow(dir);
   if (rootFd === null) return emptyListing();
-  const rootPath = pathForDirectoryFd(rootFd, dir);
   try {
+    const rootPath = pathForDirectoryFd(rootFd, dir);
     return collectOutputFiles(rootFd, rootPath);
   } finally {
     fs.closeSync(rootFd);
@@ -171,10 +171,13 @@ function visitStackFrame(stack, state, rootFd) {
     return;
   }
   const current = /** @type {{fd: number, full: string, relative: string, depth: number}} */ (stack.pop());
-  state.visitedDirs++;
-  const entries = readdirSafe(current.full);
-  entries.some((entry) => visitEntry(entry, current, state, stack));
-  if (current.fd !== rootFd) fs.closeSync(current.fd);
+  try {
+    state.visitedDirs++;
+    const entries = readdirSafe(current.full);
+    entries.some((entry) => visitEntry(entry, current, state, stack));
+  } finally {
+    if (current.fd !== rootFd) fs.closeSync(current.fd);
+  }
 }
 
 /**
@@ -210,7 +213,7 @@ function visitEntry(entry, current, state, stack) {
     }
     const childFd = openDirectoryNoFollow(result.full);
     if (childFd !== null) {
-      stack.push({ fd: childFd, full: pathForDirectoryFd(childFd, result.full), relative: result.rel, depth: current.depth + 1 });
+      pushChildStack(stack, childFd, result.full, result.rel, current.depth + 1);
     }
     // else: no longer a real directory by the time we opened it (removed,
     // or swapped for a symlink and rejected by O_NOFOLLOW) -- treat it as
@@ -223,12 +226,36 @@ function visitEntry(entry, current, state, stack) {
 
 /**
  * @param {Array<{fd: number, full: string, relative: string, depth: number}>} stack
+ * @param {number} childFd
+ * @param {string} full
+ * @param {string} rel
+ * @param {number} depth
+ */
+function pushChildStack(stack, childFd, full, rel, depth) {
+  try {
+    stack.push({ fd: childFd, full: pathForDirectoryFd(childFd, full), relative: rel, depth });
+  } catch (err) {
+    fs.closeSync(childFd);
+    throw err;
+  }
+}
+
+/**
+ * @param {Array<{fd: number, full: string, relative: string, depth: number}>} stack
  * @param {number} rootFd
  */
 function closeStackFds(stack, rootFd) {
+  let firstError;
   for (const entry of stack) {
-    if (entry.fd !== rootFd) fs.closeSync(entry.fd);
+    if (entry.fd !== rootFd) {
+      try {
+        fs.closeSync(entry.fd);
+      } catch (err) {
+        firstError ??= err;
+      }
+    }
   }
+  if (firstError) throw firstError;
 }
 
 /**

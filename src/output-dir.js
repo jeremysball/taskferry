@@ -98,11 +98,15 @@ export function ensureTaskOutputDir(dir) {
  * prompt "gets a line naming that path, the same way the check-gate
  * command already gets injected via verificationPromptBlock."
  * @param {string|null|undefined} outputDir
+ * @param {boolean} [noSandbox]
  * @returns {string}
  */
-export function outputDirPromptBlock(outputDir) {
+export function outputDirPromptBlock(outputDir, noSandbox = false) {
   if (!outputDir) return "";
-  return `${PROMPT_BLOCK_SEPARATOR}## Persistent output dir\nThis task has a writable scratch directory at \`${outputDir}\` (also exposed as the \`${TASKFERRY_OUTPUT_DIR_ENV}\` environment variable inside the sandbox). Anything you write here persists past turn end — use it for deliverables that must survive the task settling, getting cancelled, or ending on a tool call instead of a final message. Retrieve its contents with \`taskferry output <id>\` after settlement.`;
+  const envVarNote = noSandbox
+    ? ` (also exposed as the \`${TASKFERRY_OUTPUT_DIR_ENV}\` environment variable)`
+    : ` (also exposed as the \`${TASKFERRY_OUTPUT_DIR_ENV}\` environment variable inside the sandbox)`;
+  return `${PROMPT_BLOCK_SEPARATOR}## Persistent output dir\nThis task has a writable scratch directory at \`${outputDir}\`${envVarNote}. Anything you write here persists past turn end — use it for deliverables that must survive the task settling, getting cancelled, or ending on a tool call instead of a final message. Retrieve its contents with \`taskferry output <id>\` after settlement.`;
 }
 
 /**
@@ -118,8 +122,8 @@ export function outputDirPromptBlock(outputDir) {
 export function listTaskOutputFiles(dir) {
   const rootFd = openDirectoryNoFollow(dir);
   if (rootFd === null) return emptyListing();
-  const rootPath = pathForDirectoryFd(rootFd, dir);
   try {
+    const rootPath = pathForDirectoryFd(rootFd, dir);
     return collectOutputFiles(rootFd, rootPath);
   } finally {
     fs.closeSync(rootFd);
@@ -169,10 +173,13 @@ function visitStackFrame(stack, state, rootFd, realRoot) {
     return;
   }
   const current = /** @type {{fd: number, full: string, relative: string, depth: number}} */ (stack.pop());
-  state.visitedDirs++;
-  const entries = readdirSafe(current.full);
-  entries.some((entry) => visitEntry(entry, current, state, stack, realRoot));
-  if (current.fd !== rootFd) fs.closeSync(current.fd);
+  try {
+    state.visitedDirs++;
+    const entries = readdirSafe(current.full);
+    entries.some((entry) => visitEntry(entry, current, state, stack, realRoot));
+  } finally {
+    if (current.fd !== rootFd) fs.closeSync(current.fd);
+  }
 }
 
 /**
@@ -209,7 +216,7 @@ function visitEntry(entry, current, state, stack, realRoot) {
     }
     const childFd = openDirectoryNoFollow(result.full);
     if (childFd !== null) {
-      stack.push({ fd: childFd, full: pathForDirectoryFd(childFd, result.full), relative: result.rel, depth: current.depth + 1 });
+      pushChildStack(stack, childFd, result.full, result.rel, current.depth + 1);
     }
     // else: no longer a real directory by the time we opened it (removed,
     // or swapped for a symlink and rejected by O_NOFOLLOW) -- treat it as
@@ -222,12 +229,36 @@ function visitEntry(entry, current, state, stack, realRoot) {
 
 /**
  * @param {Array<{fd: number, full: string, relative: string, depth: number}>} stack
+ * @param {number} childFd
+ * @param {string} full
+ * @param {string} rel
+ * @param {number} depth
+ */
+function pushChildStack(stack, childFd, full, rel, depth) {
+  try {
+    stack.push({ fd: childFd, full: pathForDirectoryFd(childFd, full), relative: rel, depth });
+  } catch (err) {
+    fs.closeSync(childFd);
+    throw err;
+  }
+}
+
+/**
+ * @param {Array<{fd: number, full: string, relative: string, depth: number}>} stack
  * @param {number} rootFd
  */
 function closeStackFds(stack, rootFd) {
+  let firstError;
   for (const entry of stack) {
-    if (entry.fd !== rootFd) fs.closeSync(entry.fd);
+    if (entry.fd !== rootFd) {
+      try {
+        fs.closeSync(entry.fd);
+      } catch (err) {
+        firstError ??= err;
+      }
+    }
   }
+  if (firstError) throw firstError;
 }
 
 /**

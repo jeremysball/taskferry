@@ -2467,24 +2467,29 @@ function resolveFailedOutputDirCreated(outputDirCreated, preExists, outputDir) {
  * @param {{persistDirty: boolean, persistTimer: NodeJS.Timeout|null}|null} persistSnapshot
  */
 function rollbackDispatchState(ctx, schedulerSnapshot, persistSnapshot) {
-  if (schedulerSnapshot && ctx.launchScheduler) {
-    restoreDispatchScheduler(ctx.launchScheduler, schedulerSnapshot);
-    // runLaunchQueuedTasks clears any pre-existing launch timer before the
-    // failed launch. The snapshot's handle is already cleared, so re-arming
-    // through the normal scheduler recreates the timer with the correct
-    // remaining delay instead of stranding a queued, rate-limited task.
-    if (ctx.launchQueuedTasks) {
-      try {
-        ctx.launchQueuedTasks();
-      } catch {}
-    }
-  }
+  // Persist must be restored before re-arming: a successful re-arm may
+  // launch a previously-queued task and mark persistDirty/timer for it.
+  // Restoring after would erase that update and leave disk behind memory
+  // (taskferry#510 persistence re-arm).
   if (persistSnapshot && ctx.state) {
     if (ctx.state.persistTimer && ctx.state.persistTimer !== persistSnapshot.persistTimer) {
       clearTimeout(ctx.state.persistTimer);
     }
     ctx.state.persistDirty = persistSnapshot.persistDirty;
     ctx.state.persistTimer = persistSnapshot.persistTimer;
+  }
+  if (schedulerSnapshot && ctx.launchScheduler) {
+    restoreDispatchScheduler(ctx.launchScheduler, schedulerSnapshot);
+    // runLaunchQueuedTasks clears any pre-existing launch timer before the
+    // failed launch. The snapshot's handle is already cleared, so re-arming
+    // through the normal scheduler recreates the timer with the correct
+    // remaining delay instead of stranding a queued, rate-limited task.
+    // Let re-arm failures propagate with the original dispatch error
+    // preserved by the caller; launchOneRoundRobin reverts its own
+    // scheduler mutations on throw so the queue stays coherent.
+    if (ctx.launchQueuedTasks) {
+      ctx.launchQueuedTasks();
+    }
   }
 }
 
@@ -3452,13 +3457,27 @@ function launchOneRoundRobin(sched, ctx, providers) {
     const id = /** @type {string} */ (providerQueue.launchQueue.shift());
     const task = /** @type {Task} */ (ctx.tasks.get(id));
     const launchedAt = Date.now();
+    const prevLastLaunchAt = sched.lastLaunchAt;
+    const prevCursor = sched.cursor;
     sched.launchTimes.push(launchedAt);
     providerQueue.launchTimes.push(launchedAt);
     sched.lastLaunchAt = launchedAt;
     // Advanced before startTask because startTask re-enters the scheduler
     // synchronously; a stale cursor there would replay this same provider.
     sched.cursor = (sched.cursor + i + 1) % providers.length;
-    ctx.startTask(task);
+    try {
+      ctx.startTask(task);
+    } catch (err) {
+      // startTask threw synchronously (e.g. buildSpawnArgs) after we had
+      // already mutated the scheduler. Revert to keep the queue and
+      // window state coherent for the next tick/retry (taskferry#510).
+      providerQueue.launchQueue.unshift(id);
+      sched.launchTimes.pop();
+      providerQueue.launchTimes.pop();
+      sched.lastLaunchAt = prevLastLaunchAt;
+      sched.cursor = prevCursor;
+      throw err;
+    }
     return true;
   }
   return false;
@@ -6916,8 +6935,16 @@ function dispatchTask(params, ctx) {
     queueDispatchLaunch({ tasks: ctx.tasks, persistTask: ctx.persistTask, pendingLaunches: ctx.pendingLaunches, providerQueues: ctx.providerQueues, launchQueuedTasks: ctx.launchQueuedTasks }, { id, task, sessionId, env, noSandbox, noOverlay, executor, role, prompt: dispatchPrompt, allowedDirs: effectiveRwBind, roBind: dispatchRoBind, outputDir: outputDir });
   } catch (err) {
     outputDirCreated = resolveFailedOutputDirCreated(outputDirCreated, preExists, outputDir);
-    rollbackDispatchState(ctx, schedulerSnapshot, persistSnapshot);
+    let rearmError = null;
+    try {
+      rollbackDispatchState(ctx, schedulerSnapshot, persistSnapshot);
+    } catch (rearmErr) {
+      rearmError = rearmErr;
+    }
     cleanupFailedDispatchOutputDir(id, outputDir, outputDirCreated, ctx);
+    if (rearmError) {
+      throw new AggregateError([err, rearmError], `dispatch failed: ${errMessage(err)}; re-arm failed: ${errMessage(rearmError)}`, { cause: err });
+    }
     throw err;
   }
   const summary = summarize(task);

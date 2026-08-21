@@ -7,20 +7,6 @@
 
 * **adr:** correct kilo.md's actual location (PR [#489](https://github.com/jeremysball/taskferry/issues/489) branch, not main) ([f9aaf1f](https://github.com/jeremysball/taskferry/commit/f9aaf1ff62ae6eae5d65c045766623605fb78546))
 * **executor:** resolve symlinked opencode config entries instead of dropping them ([#492](https://github.com/jeremysball/taskferry/issues/492)) ([bd4284a](https://github.com/jeremysball/taskferry/commit/bd4284a8c220d95286d8771d6a93327e94620cf2)), closes [#491](https://github.com/jeremysball/taskferry/issues/491)
-* **output-dir:** close every directory fd on walk failure ([#521](https://github.com/jeremysball/taskferry/issues/521)) ([9f4fd13](https://github.com/jeremysball/taskferry/commit/9f4fd13124959fe8f8b436b572d3cdc3533226df))
-* **output-dir:** close symlink escape and traversal issues in task.output ([#482](https://github.com/jeremysball/taskferry/issues/482)) ([4a0a367](https://github.com/jeremysball/taskferry/commit/4a0a367b57dcf014e75a85562043ee2a8f4aea20))
-* **output-dir:** make sandbox claim conditional on noSandbox flag ([#517](https://github.com/jeremysball/taskferry/issues/517)) ([b55a8e4](https://github.com/jeremysball/taskferry/commit/b55a8e40c0845bd9cd00ade9c89244ec6af0d187))
-* **output-dir:** pin symlink targets before sizing ([#526](https://github.com/jeremysball/taskferry/issues/526)) ([94f82fe](https://github.com/jeremysball/taskferry/commit/94f82fe2a6a94930f5d628ab1eadb0cfccc95c85))
-* reconcile taskferry docs with shipped behavior ([#524](https://github.com/jeremysball/taskferry/issues/524)) ([8fecc92](https://github.com/jeremysball/taskferry/commit/8fecc92c69e87703010eb51441088c07a71d7a41))
-* **tasks:** return typed errors for missing output directories ([#525](https://github.com/jeremysball/taskferry/issues/525)) ([76cac3b](https://github.com/jeremysball/taskferry/commit/76cac3bc343e8d3bd7b9bac96e85f5741da28afa))
-* **tasks:** surface outputDir in taskferry status and result ([#519](https://github.com/jeremysball/taskferry/issues/519)) ([0b7b0ac](https://github.com/jeremysball/taskferry/commit/0b7b0ac07e84ae51ee063e291cff75046797d915))
-* **tests:** stop the tasks.failure watchdog test from racing a fixed sleep ([#516](https://github.com/jeremysball/taskferry/issues/516)) ([077d979](https://github.com/jeremysball/taskferry/commit/077d979ef1679982187d0eb5c68dce553fc10535))
-* **tooling:** pin eslint and typescript in mise ([#523](https://github.com/jeremysball/taskferry/issues/523)) ([095b118](https://github.com/jeremysball/taskferry/commit/095b1185881f8c2662885c502ea2fc7233d5669e))
-
-
-### Performance Improvements
-
-* **tasks:** filter the boot-time output-dir sweep before running lstat/rm per entry ([#518](https://github.com/jeremysball/taskferry/issues/518)) ([55b21fe](https://github.com/jeremysball/taskferry/commit/55b21fe7d374577d163800eba86ea9cd18fbe0d1))
 
 ## [4.1.0](https://github.com/jeremysball/taskferry/compare/taskferry-v4.0.0...taskferry-v4.1.0) (2026-08-16)
 

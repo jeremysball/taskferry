@@ -152,7 +152,7 @@ one:
 `taskferry status <id> --full` (or `result --fields failureDetail`) shows
 the specific log line or error text that triggered the classification.
 Two fallback buckets cover unmatched errors: `opencode_unknownerror` (or
-`pi_error` for pi). This is a provider-side failure outside the three named
+`pi_pi_error` for pi). This is a provider-side failure outside the three named
 buckets.
 
 ## `taskferry output` shows nothing / worker ended on a tool call

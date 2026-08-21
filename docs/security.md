@@ -39,7 +39,8 @@ that, `taskferry dispatch`, `taskferry advisor`, and `taskferry summary`
 (report mode — the default) each forward the *calling* process's own
 environment to the daemon over the same socket, which the daemon unions on
 top of its own ambient environment before spawning — caller wins.
-The report-summary child then removes `OPENCODE_*` variables and clears
+The report-summary child then removes `OPENCODE_CONFIG`,
+`OPENCODE_CONFIG_DIR`, and `OPENCODE_CONFIG_CONTENT`, and clears
 `TASKFERRY_OUTPUT_DIR` before it starts. Dispatch and advisor workers retain
 caller variables subject to the denylist and fixed plumbing exclusions below.
 

@@ -609,10 +609,11 @@ profiling is diagnostic, not on the request's critical path.
 - A legitimate symlinked config entry (`opencode.jsonc` symlinked into a
   dotfiles repo) silently missing from the sandbox after an upgrade —
   expected, and now diagnosed, but the behavior *splits by file kind*.
-  OpenCode config entries (`opencode.jsonc` and `opencode.json` entries
-  inside `~/.config/opencode`) are resolved to their real target via
-  `resolveOpencodeConfigBindSource()` in `src/executor.js` and ro-bound as
-  that target. The drop no longer happens for this kind. All other binds
+  OpenCode config entries inside `~/.config/opencode` are resolved to their
+  real target via `resolveOpencodeConfigBindSource()` in `src/executor.js`
+  and ro-bound as that target. This includes entries such as
+  `opencode.json`, `plugins`, and `agents`; `.gitignore` is skipped. The drop
+  no longer happens for these entries. All other binds
   (Pi extensions, `auth.json`, a resumed OpenCode session file) still fail
   closed: the guard refuses the symlink (bwrap would bind the link's
   *target*, which is the whole vulnerability #392 closes) and warns on

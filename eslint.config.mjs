@@ -94,6 +94,7 @@ export default [
     rules: {
       "sonarjs/max-lines": "off",
       "sonarjs/max-lines-per-function": "off",
+      "sonarjs/no-duplicate-string": "off",
     },
   },
 

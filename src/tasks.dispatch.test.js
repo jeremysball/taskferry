@@ -11,6 +11,7 @@ import { trackManager, makeManager, fakeChild, LUNA_MODEL, MIMIMAX_MODEL, MINIMA
 // Tests assert on it directly to verify the prompt was augmented; one constant
 // keeps the duplicated literal below sonarjs/no-duplicate-string's threshold.
 const PERSISTENT_OUTPUT_DIR_HEADING = "\n\n## Persistent output dir";
+const OPENAI_PROVIDER = "openai";
 
 describe("dispatch() lifecycle, driven through an injected spawnFn (no real opencode process)", () => {
   test("passes the right argv and spawn options through to spawnFn", () => {
@@ -125,7 +126,7 @@ describe("dispatch() lifecycle, driven through an injected spawnFn (no real open
       dispatchWindowMs: 100,
       maxConcurrentTasks: 10,
       lowerdirStaggerMs: 0,
-      providerLimits: new Map([["openai", { maxDispatchesPerWindow: 1, maxConcurrentTasks: 10 }]]),
+      providerLimits: new Map([[OPENAI_PROVIDER, { maxDispatchesPerWindow: 1, maxConcurrentTasks: 10 }]]),
     });
     // First opencode consumes its provider window and launches immediately.
     const first = mgr.dispatch({ prompt: "first", directory: os.tmpdir(), model: LUNA_MODEL });
@@ -153,6 +154,112 @@ describe("dispatch() lifecycle, driven through an injected spawnFn (no real open
     assert.equal(leftover.length, 2, `expected 2 output dirs (first+second), got ${JSON.stringify(leftover)}`);
     assert.ok(fs.existsSync(path.join(outputsRoot, first.id)));
     assert.ok(fs.existsSync(path.join(outputsRoot, second.id)));
+  });
+
+  test("failed dispatch re-arm that immediately launches queued task persists the launched task (taskferry#510 persist order)", (t) => {
+    let mockNow = 1000;
+    t.mock.method(Date, 'now', () => mockNow);
+    const children = [];
+    const mgr = makeManager({
+      spawnFn: () => {
+        const c = fakeChild();
+        children.push(c);
+        return c;
+      },
+      killFn: () => {},
+      defaultExecutor: makeFakeExecutor({
+        buildSpawnArgs: (ctx) => {
+          if (ctx.prompt.includes("third-fail")) {
+            mockNow = 1020;
+            throw new Error("build failed");
+          }
+          return [];
+        },
+      }),
+      maxDispatchesPerWindow: 10,
+      dispatchWindowMs: 10,
+      maxConcurrentTasks: 10,
+      lowerdirStaggerMs: 0,
+      providerLimits: new Map([[OPENAI_PROVIDER, { maxDispatchesPerWindow: 1, maxConcurrentTasks: 10 }]]),
+    });
+    const first = mgr.dispatch({ prompt: "first", directory: os.tmpdir(), model: LUNA_MODEL });
+    assert.equal(mgr.status(first.id).status, "running");
+    mockNow = 1001;
+    const second = mgr.dispatch({ prompt: "second", directory: os.tmpdir(), model: LUNA_MODEL });
+    assert.equal(mgr.status(second.id).status, "queued");
+    mockNow = 1001;
+    assert.throws(() => mgr.dispatch({ prompt: "third-fail", directory: os.tmpdir(), model: "other/bad" }), /build failed/);
+    assert.equal(mgr.status(second.id).status, "running", "queued task should have launched immediately on re-arm");
+    mgr.flushPersist();
+    const onDisk = JSON.parse(fs.readFileSync(mgr.paths.TASKS_FILE, "utf8"));
+    const secondOnDisk = onDisk.find((task) => task.id === second.id);
+    assert.ok(secondOnDisk, "second task should be on disk");
+    assert.equal(secondOnDisk.status, "running", "disk should show running, not queued (persist order)");
+    // Deterministic cleanup: settle every spawned child so no watchdog,
+    // launch timer, or persist timer remains after the test. Avoids the
+    // killFn-not-injected async failure when Date.now mock restores.
+    for (const c of children) c.emit("exit", 0, null);
+    mgr.flushPersist();
+  });
+
+  test("re-arm build failure during rollback surfaces aggregate and keeps scheduler coherent (taskferry#510 re-arm failure)", (t) => {
+    let mockNow = 1000;
+    t.mock.method(Date, 'now', () => mockNow);
+    const children = [];
+    const mgr = makeManager({
+      spawnFn: () => {
+        const c = fakeChild();
+        children.push(c);
+        return c;
+      },
+      killFn: () => {},
+      defaultExecutor: makeFakeExecutor({
+        buildSpawnArgs: (ctx) => {
+          if (ctx.prompt.includes("third-fail")) {
+            // Advance time so the queued second becomes launchable only during
+            // rollback re-arm, not during the original drain. Original drain at
+            // 1001 skips second (provider window) and throws for third; re-arm
+            // at 1020 then attempts second and throws, producing AggregateError.
+            mockNow = 1020;
+            throw new Error("build failed for third");
+          }
+          if (ctx.prompt.includes("second-fail")) throw new Error("build failed for second");
+          return [];
+        },
+      }),
+      maxDispatchesPerWindow: 10,
+      dispatchWindowMs: 10,
+      maxConcurrentTasks: 10,
+      lowerdirStaggerMs: 0,
+      providerLimits: new Map([[OPENAI_PROVIDER, { maxDispatchesPerWindow: 1, maxConcurrentTasks: 10 }]]),
+    });
+    const first = mgr.dispatch({ prompt: "first", directory: os.tmpdir(), model: LUNA_MODEL });
+    assert.equal(mgr.status(first.id).status, "running");
+    mockNow = 1001;
+    const second = mgr.dispatch({ prompt: "second-fail", directory: os.tmpdir(), model: LUNA_MODEL });
+    assert.equal(mgr.status(second.id).status, "queued");
+    // Keep mockNow at 1001 so original drain skips second (window) and throws for third
+    mockNow = 1001;
+    let caught = null;
+    try {
+      mgr.dispatch({ prompt: "third-fail", directory: os.tmpdir(), model: "other/bad" });
+    } catch (e) {
+      caught = e;
+    }
+    assert.ok(caught, "should have thrown");
+    assert.ok(caught instanceof AggregateError, "should be AggregateError");
+    assert.equal(caught.errors.length, 2);
+    assert.match(caught.errors[0].message, /build failed for third/);
+    assert.match(caught.errors[1].message, /build failed for second/);
+    assert.equal(mgr.status(second.id).status, "queued", "second should remain queued after re-arm failure");
+    const fourth = mgr.dispatch({ prompt: "fourth", directory: os.tmpdir(), model: "other/bad" });
+    assert.equal(mgr.status(fourth.id).status, "running", "scheduler should remain coherent after re-arm failure");
+    // Deterministic cleanup: cancel the still-queued second and settle every
+    // spawned running child so no provider-window timer, watchdog, or persist
+    // timer remains after the test. Prevents killFn-not-injected async.
+    mgr.cancel(second.id);
+    for (const c of children) c.emit("exit", 0, null);
+    mgr.flushPersist();
   });
 
   /** @param {string[]} args @param {string} model */

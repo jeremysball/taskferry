@@ -13,8 +13,9 @@ file ends with the tool's invocation, not a final report.
 
 The deliverable is almost certainly on disk in the worker's scratch
 output dir, not in the log — every dispatch gets a per-task writable
-directory at `<stateDir>/outputs/<id>/`, rw-bound into the bwrap sandbox
-at the same path and exposed as `$TASKFERRY_OUTPUT_DIR`. Use it for
+directory at `<stateDir>/outputs/<id>/`, exposed as `$TASKFERRY_OUTPUT_DIR`.
+When bwrap sandboxing is active, taskferry rw-binds that directory at the
+same path. With `--no-sandbox`, it remains a normal host directory. Use it for
 artifacts that must survive turn end (taskferry#423):
 
 ```sh

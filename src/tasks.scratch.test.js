@@ -538,6 +538,7 @@ describe("scratch output dir walk caps (PR #482 review)", () => {
   });
 });
 
+// eslint-disable-next-line sonarjs/max-lines-per-function -- security regression suite bundles related PR #482/#507 cases; splitting would obscure the shared setup
 describe("scratch output dir security regressions", () => {
   test("readTaskOutputFile does not block on a worker-created FIFO with no writer (PR #482 review)", () => {
     const dir = mkdtempTracked(AXI_TASKS_TEST_DIR + "-fifo-read-");
@@ -615,6 +616,147 @@ describe("scratch output dir security regressions", () => {
       assert.equal(result.truncated, false);
     } finally {
       fs.statSync = originalStatSync;
+    }
+  });
+
+  test("listTaskOutputFiles skips a symlink to a file outside the output dir (PR #507)", () => {
+    const dir = mkdtempTracked(AXI_TASKS_TEST_DIR + "-symlink-escape-file-");
+    const outside = mkdtempTracked(AXI_TASKS_TEST_DIR + "-symlink-escape-file-target-");
+    const secret = path.join(outside, "escaped.txt");
+    fs.writeFileSync(secret, OUTSIDE_FILE_CONTENT);
+    fs.symlinkSync(secret, path.join(dir, "leak.txt"));
+    fs.writeFileSync(path.join(dir, "keep.txt"), "k");
+    const result = listTaskOutputFiles(dir);
+    assert.deepEqual(result.files.map((f) => f.path), ["keep.txt"], "a symlink whose real target escapes the output dir must be skipped, not reported with the outside size");
+    assert.equal(result.bytes, 1);
+    assert.equal(result.truncated, false);
+  });
+
+  test("listTaskOutputFiles reports a symlink to a file inside the output dir (PR #507)", () => {
+    const dir = mkdtempTracked(AXI_TASKS_TEST_DIR + "-symlink-inside-");
+    const target = path.join(dir, "real.txt");
+    fs.writeFileSync(target, "inside");
+    fs.symlinkSync(target, path.join(dir, "link.txt"));
+    const result = listTaskOutputFiles(dir);
+    assert.deepEqual(result.files.map((f) => f.path).sort(), ["link.txt", "real.txt"]);
+    const link = result.files.find((f) => f.path === "link.txt");
+    assert.equal(link.size, 6);
+    assert.equal(result.bytes, 12);
+    assert.equal(result.truncated, false);
+  });
+
+  test("listTaskOutputFiles does not leak size via TOCTOU swap after open (PR #507)", () => {
+    const dir = mkdtempTracked(AXI_TASKS_TEST_DIR + "-toctou-list-");
+    const outside = mkdtempTracked(AXI_TASKS_TEST_DIR + "-toctou-list-target-");
+    const safe = path.join(dir, "safe.bin");
+    fs.writeFileSync(safe, "x");
+    const outsideFile = path.join(outside, "outside.bin");
+    fs.writeFileSync(outsideFile, "y".repeat(22));
+    const leak = path.join(dir, "leak.txt");
+    fs.symlinkSync(safe, leak);
+
+    const originalOpen = fs.openSync;
+    const originalStat = fs.statSync;
+    let swapped = false;
+    const swapToOutside = () => {
+      if (!swapped) {
+        fs.unlinkSync(leak);
+        fs.symlinkSync(outsideFile, leak);
+        swapped = true;
+      }
+    };
+    fs.openSync = (p, flags) => {
+      const fd = originalOpen(p, flags);
+      const s = typeof p === "string" ? p : "";
+      if (s.endsWith("leak.txt")) swapToOutside();
+      return fd;
+    };
+    // Fallback for the old stat+realpath path: if classifySymlink still uses statSync, the openSync mock above won't fire.
+    fs.statSync = (p) => {
+      const res = originalStat(p);
+      const s = typeof p === "string" ? p : "";
+      if (s.endsWith("leak.txt")) swapToOutside();
+      return res;
+    };
+    let result;
+    try {
+      result = listTaskOutputFiles(dir);
+    } finally {
+      fs.openSync = originalOpen;
+      fs.statSync = originalStat;
+    }
+    assert.equal(swapped, true, "the TOCTOU swap must have been triggered");
+    const leakEntry = result.files.find((f) => f.path === "leak.txt");
+    assert.ok(leakEntry, "inside-pinned symlink must still be reported, not skipped by an overbroad skip-all");
+    assert.equal(leakEntry.size, 1, "must report the pinned inside size, not the swapped outside size");
+    assert.equal(result.bytes, 2);
+
+    // Opposite direction: initially outside, swapped to inside after open must still be skipped.
+    const dir2 = mkdtempTracked(AXI_TASKS_TEST_DIR + "-toctou-list2-");
+    const safe2 = path.join(dir2, "safe.bin");
+    fs.writeFileSync(safe2, "x");
+    const leak2 = path.join(dir2, "leak.txt");
+    fs.symlinkSync(outsideFile, leak2);
+    let swapped2 = false;
+    const swapToInside = () => {
+      if (!swapped2) {
+        fs.unlinkSync(leak2);
+        fs.symlinkSync(safe2, leak2);
+        swapped2 = true;
+      }
+    };
+    fs.openSync = (p, flags) => {
+      const fd = originalOpen(p, flags);
+      const s = typeof p === "string" ? p : "";
+      if (s.endsWith("leak.txt")) swapToInside();
+      return fd;
+    };
+    fs.statSync = (p) => {
+      const res = originalStat(p);
+      const s = typeof p === "string" ? p : "";
+      if (s.endsWith("leak.txt")) swapToInside();
+      return res;
+    };
+    let result2;
+    try {
+      result2 = listTaskOutputFiles(dir2);
+    } finally {
+      fs.openSync = originalOpen;
+      fs.statSync = originalStat;
+    }
+    assert.equal(swapped2, true);
+    assert.equal(result2.files.some((f) => f.path === "leak.txt"), false, "outside-pinned symlink must be skipped even after it is swapped to inside");
+    assert.deepEqual(result2.files.map((f) => f.path), ["safe.bin"]);
+  });
+
+  test("listTaskOutputFiles surfaces a close failure on the symlink fd (fail-fast, PR #507 follow-up)", () => {
+    const dir = mkdtempTracked(AXI_TASKS_TEST_DIR + "-close-fail-");
+    const target = path.join(dir, "real.txt");
+    fs.writeFileSync(target, "inside");
+    const link = path.join(dir, "link.txt");
+    fs.symlinkSync(target, link);
+    const originalOpen = fs.openSync;
+    const originalClose = fs.closeSync;
+    let symlinkFd = null;
+    fs.openSync = (p, flags) => {
+      const fd = originalOpen(p, flags);
+      const s = typeof p === "string" ? p : "";
+      if (s.endsWith("link.txt")) symlinkFd = fd;
+      return fd;
+    };
+    fs.closeSync = (fd) => {
+      if (fd === symlinkFd) {
+        const err = new Error("close failed");
+        err.code = "EIO";
+        throw err;
+      }
+      return originalClose(fd);
+    };
+    try {
+      assert.throws(() => listTaskOutputFiles(dir), /close failed/);
+    } finally {
+      fs.openSync = originalOpen;
+      fs.closeSync = originalClose;
     }
   });
 });

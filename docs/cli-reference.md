@@ -1,10 +1,9 @@
 # CLI Reference
 
 Every command emits [TOON](https://toonformat.dev/) (Token-Oriented Object
-Notation) on stdout by default: roughly 40% fewer tokens than JSON for the
-same data, and a tabular form for list-shaped results instead of a repeated
-key array. The one exception is `watch --format ndjson`, which emits one
-JSON object per line for scripting — see below. Diagnostics go to stderr.
+Notation) on stdout by default. List-shaped results use a compact table rather
+than a repeated key array. The one exception is `watch --format ndjson`, which
+emits one JSON object per line for scripting. Diagnostics go to stderr.
 Exit codes distinguish three outcomes:
 
 | Exit code | Meaning |
@@ -55,16 +54,17 @@ summary immediately.
 | `--directory <path>` | Defaults to the current workspace; an existing directory (relative paths are resolved against the current working directory) |
 | (no flag — always on) | `dispatch`, `advisor`, and `summary` (report mode) forward the calling shell's own environment to the daemon on every call, with no per-call opt-out; see [security.md](security.md#caller-env-forwarding) |
 | `--model <id>` | `provider/model`, e.g. `opencode-go/minimax-m3`. Run `opencode models` to list installed models. Required unless resuming via `--session-id` with a matching prior task, in which case the model is inherited from that task |
-| `--variant <name>` | Reasoning-effort override. Precedence when omitted: the resumed session's own variant (on a `--session-id` resume) wins, otherwise the configured `defaultVariant` (default `highest`) applies -- see `docs/config.md`. `highest` resolves to `--thinking max` on pi (pi clamps to the model's real ceiling itself) or the model's highest cached opencode variant, sending no flag at all if the model has none. Accepted concrete values: pi takes `off`, `minimal`, `low`, `medium`, `high`, `xhigh`; opencode's depend on the model and are never validated by taskferry -- an unrecognized value is silently ignored by opencode itself |
+| `--variant <name>` | Reasoning-effort override. Precedence when omitted: the resumed session's own variant (on a `--session-id` resume) wins, otherwise the configured `defaultVariant` (default `highest`) applies; see `docs/config.md`. `highest` resolves to `--thinking max` on pi (pi clamps to the model's real ceiling itself) or the model's highest cached opencode variant, sending no flag at all if the model has none. Accepted concrete values: pi takes `off`, `minimal`, `low`, `medium`, `high`, `xhigh`; opencode's depend on the model and are never validated by taskferry. An unrecognized value is silently ignored by opencode itself |
 | `--executor <opencode\|pi>` | Which worker CLI to spawn. Built-in default `pi`, but an omitted flag actually falls back to the daemon's configured default executor (`TASKFERRY_DEFAULT_EXECUTOR` or `config.json`'s `defaultExecutor`) |
 | `--session-id <id>` | Resume an existing session instead of starting fresh (`--continue --session <id>`; both pi and opencode use this syntax). When `--executor` is omitted, inherits whichever executor originally created the session; get session ids from a prior `result` or `status --full` |
-| `--rw-bind <path,path,...>` | Extra directories bound read-write inside the sandbox for this dispatch, on top of the auto-detected git-common-dir for a worktree and any config-level `rwBind`; see [security.md](security.md). **`/tmp` needs this too** — the sandbox mounts a fresh, empty `--tmpfs /tmp`, so any path under `/tmp` that isn't `--directory`, `runtimeDir`, or an `--rw-bind` entry is invisible inside the sandbox even though it exists on the host. All three layers (this flag, `TASKFERRY_RW_BIND`, config `rwBind`) union rather than replace. |
-| `--ro-bind <path,path,...>` | Extra directories bound **read-only** inside the sandbox for this dispatch — a review-only worker that should read several repos but edit none. Resolved through the same protected-mount safety check as `.taskferry.toml`'s `read_only_paths`: an entry that doesn't exist on the host, or that overlaps a protected mount, is skipped and reported. Unions with `TASKFERRY_RO_BIND` and config `roBind`. If a path also appears in the read-write set, read-write wins with a warning. |
+| `--rw-bind <path,path,...>` | Extra directories bound read-write inside the sandbox for this dispatch, on top of the auto-detected git-common-dir for a worktree and any config-level `rwBind`; see [security.md](security.md). **`/tmp` needs this too**: the sandbox mounts a fresh, empty `--tmpfs /tmp`, so any path under `/tmp` that isn't `--directory`, the daemon socket for a dispatch role, or an `--rw-bind` entry is invisible inside the sandbox even though it exists on the host. The per-dispatch flag, `TASKFERRY_RW_BIND`, config `rwBind`, and the manager default union rather than replace one another. |
+| `--ro-bind <path,path,...>` | Extra directories bound **read-only** inside the sandbox for this dispatch, for a review-only worker that should read several repos but edit none. The set unions the per-dispatch flag, the manager default, `TASKFERRY_RO_BIND`, and config `roBind`; project `.taskferry.toml` `read_only_paths`/`roBind` entries add a separate project layer. Missing or protected project paths are skipped with a warning. If a path also appears in the read-write set, read-write wins with a warning. |
 | `--allowed-dirs <path,path,...>` | **Deprecated** alias for `--rw-bind` (same read-write behavior). Emits a deprecation warning when used; will be removed in the next major release. |
-| `--require-final-marker <regex>` | Fail the task if the final message doesn't match this pattern (case-sensitive, standard JS RegExp semantics). Sets `incomplete: true` on the settled task when the final message is empty (after trimming) or doesn't match. Patterns that don't compile as a standard JS RegExp reject the dispatch up front with a usage error. Useful for enforcing a report-format contract like `^Status: (DONE\|DONE_WITH_CONCERNS\|BLOCKED\|NEEDS_CONTEXT)$` on the last line of model output. |
+| `--require-final-marker <regex>` | Mark the settled task `incomplete: true` while retaining status `done` when the final message is empty (after trimming) or doesn't match this pattern. Patterns use standard JavaScript RegExp syntax with multiline matching, so `^` and `$` can match a standalone line in a multi-paragraph message. Patterns that don't compile reject the dispatch up front with a usage error. |
 | `--class <name>` | Optional free-text task-class tag for telemetry aggregation; any non-empty string, no fixed-list validation — taskferry stores whatever is given |
 | `--parent-task <id>` | Tag this dispatch as fixing/retrying an earlier task. Persisted as `parentTaskId` and surfaced on `taskferry status <id> --full` / `taskferry result <id> --fields parentTaskId` (not on plain `taskferry status <id>`). The earlier task's check-gate failure message echoes the link when this dispatch is the suggested fix-forward resume (see `## taskferry accept <id>` below) |
 | `--no-sandbox` | Run this dispatch without the bwrap filesystem sandbox (default: sandboxed on Linux, no-op on macOS); see [security.md](security.md) |
+| `--no-overlay` | Run this dispatch without the copy-on-write overlay: writes land directly in the target directory and no `accept`/`reject` gate applies. The flag is not accepted for `advisor`; the advisor role always requires an overlay (see [security.md](security.md) and [daemon.md](daemon.md)). |
 
 ```
 $ taskferry dispatch --prompt "Fix the failing tests" --directory /workspace/my-repo --executor opencode --model opencode-go/minimax-m3
@@ -77,12 +77,12 @@ next: Run taskferry wait or taskferry status with task id "oc_mrn4ipkp_19450105"
 ```
 
 At most `TASKFERRY_MAX_CONCURRENT_TASKS` tasks (default 4) run at once;
-extra dispatches return `status: "queued"` and start FIFO as running tasks
-finish, are cancelled, fail to spawn, or hit the no-output watchdog. A
-provider hitting its own `TASKFERRY_PROVIDER_LIMITS` entry (per-provider
-concurrency or dispatch-rate cap) also returns `status: "queued"` for that
-provider's tasks, even when the global ceiling has headroom. See
+extra dispatches return `status: "queued"` and start FIFO **within each provider queue** as running tasks finish, are cancelled, fail to spawn, or hit the no-output watchdog. Scheduling across providers is round-robin, so one saturated provider does not starve another.
+At most `TASKFERRY_MAX_DISPATCHES_PER_WINDOW` launches (default 2) are admitted per `TASKFERRY_DISPATCH_WINDOW_MS` (default 5000 ms) window, and optional per-provider caps from `TASKFERRY_PROVIDER_LIMITS` / `config.providerLimits` (`provider:maxConcurrent[:maxDispatchesPerWindow]` comma-separated, or the JSON object form) add a provider-specific ceiling on both axes. A provider hitting its own entry also returns `status: "queued"` for that provider's tasks, even when the global ceiling has headroom. See
 [daemon.md](daemon.md) for queueing, the watchdog, and rate limiting.
+The scheduler also waits `TASKFERRY_LOWERDIR_STAGGER_MS` between launches
+(default `3000` ms; `lowerdirStaggerMs` in config, `0` disables it) to avoid
+overlapping lower-directory setup work.
 
 ## `taskferry wait <id> [options]`
 
@@ -96,7 +96,7 @@ disable the default timeout entirely (old behavior).
 | Flag | Notes |
 |---|---|
 | `--timeout <duration>` | Override the default timeout cap — milliseconds or a duration string (30s, 5m, 1h); omit to use the 15-minute default |
-| `--tail-chars <number>` | Include this many trailing narration characters if the task is still running when the timeout elapses |
+| `--tail-chars <number>` | Include this many trailing narration characters if the task is still running when the timeout elapses. Must be a positive integer, maximum 65,536. |
 | `--full` | Include directory, model, session id, log path, and prompt preview |
 | `--summarize` | Stream periodic live summaries to stdout while waiting; exits and returns the normal result the moment the task settles. Cannot combine with `--timeout` or `--tail-chars`. |
 
@@ -133,12 +133,13 @@ planning or hard-debugging help mid-task, not for open-ended background work
 |---|---|
 | `--prompt <text>` | Optional; auto-attaches caller context (Claude Code session transcript or the calling ferry's own task log) when omitted, and prepends that context ahead of `--prompt` when both are present. Pass `-` to read the prompt from piped stdin instead, same as `dispatch` |
 | `--model <id>` | Required, no default; the caller picks the advisor |
-| `--directory <path>` | Defaults to the current git workspace root (falls back to the literal current directory outside a git repo) |
+| `--directory <path>` | Defaults to the literal current working directory. The advisor uses that directory as its sandbox root rather than redirecting to a git workspace root. |
 | `--variant <name>` | Optional reasoning-effort override. Same omitted-flag resolution chain as `dispatch`'s `--variant` above (resumed session, then `defaultVariant`, default `highest`) |
 | `--executor <opencode\|pi>` | Which worker CLI to spawn. Built-in default `pi`, but an omitted flag actually falls back to the daemon's configured default executor (`TASKFERRY_DEFAULT_EXECUTOR` or `config.json`'s `defaultExecutor`) |
 | `--session-id <id>` | Resume a prior advisor exchange |
+| `--summarize-context` | Condense auto-attached advisor context in a throwaway summary call before the advisor call. Off by default. |
 | `--class <name>` | Optional free-text task-class tag for telemetry aggregation; any non-empty string, no fixed-list validation |
-| `--parent-task <id>` | Same `--parent-task` semantics as `dispatch`: tag the advisor task as fixing/retrying an earlier task, persisted as `parentTaskId`, surfaced by `taskferry status <id>` / `taskferry result <id> --fields parentTaskId`. A review-fix round that uses `advisor` to read the failing task's output and re-prompt a new `dispatch` can thread the lineage through both legs of the chain. |
+| `--parent-task <id>` | Same `--parent-task` semantics as `dispatch`: tag the advisor task as fixing/retrying an earlier task, persisted as `parentTaskId`, surfaced by `taskferry status <id> --full` / `taskferry result <id> --fields parentTaskId`. A review-fix round that uses `advisor` to read the failing task's output and re-prompt a new `dispatch` can thread the lineage through both legs of the chain. |
 | `--timeout <duration>` | Early-return cap — milliseconds or a duration string (30s, 5m, 1h), same semantics as `wait`; omitting it does not block indefinitely — it falls back to a 45-second internal cap, after which the "still running" response below is returned |
 
 If it times out before the advisor answers, the response is `status:
@@ -151,13 +152,16 @@ and `previous_session_id` holds the id that wasn't reused.
 
 ## `taskferry cancel <id> [--grace-ms <number>]`
 
-Stops a running task: sends `SIGTERM` to the task's whole process group
+For a queued task, cancellation removes it from the launch queue and returns
+`note: "queued task cancelled before launch"`. For a running task, it sends
+`SIGTERM` to the task's whole process group
 (not just the `opencode` process, so a subprocess it's mid-way through
 running, like a long bash command, dies too), escalating to `SIGKILL` after
-`--grace-ms` (default 5000) if it hasn't exited. Calling it on a task that
-already finished is a no-op that returns a `note` instead of an error, exit
-code `0`. The task's status becomes `"cancelled"` once its exit event
-lands, distinct from `"crashed"`.
+`--grace-ms` (default 5000) if it hasn't exited. `--grace-ms` accepts a
+non-negative integer. Calling it on a task that already finished is a no-op
+that returns a `note` instead of an error, exit code `0`. A running task's
+status becomes `"cancelled"` once its exit event lands, distinct from
+`"crashed"`.
 
 ## `taskferry status <id> [--full]`
 
@@ -182,6 +186,9 @@ fallback; see [daemon.md](daemon.md#watchdogs)), or a boot failure
 without emitting any parseable event at all (a crash at CLI startup,
 e.g. a malformed extension), and `failureDetail` carries the last
 `Error:` line of its captured output.
+The failure-reason list is not exhaustive. The daemon also emits
+`watchdog_log_read_error`, `overlay_mount_busy`, and executor-prefixed
+structured-error buckets as runtime paths add classifications.
 `failureDetail` (also `--full`-only, or via `result --fields
 failureDetail`) carries the matched log line or timeout detail behind
 whichever `failureReason` fired. `incomplete` is `true` when a `done`
@@ -223,7 +230,7 @@ gets sent to the summary model and how to disable it.
 
 ## `taskferry result <id> [options]`
 
-Once a task is `done` or `crashed`, parses its log (OpenCode's own
+Once a task is settled as `done`, `crashed`, or `cancelled`, parses its log (OpenCode's own
 `--format json` NDJSON event stream) into `message` (the model's final turn
 only) and `narration` (every `text` event across every step, in order).
 A single-step run (no tool calls) has `message === narration`. Also returns
@@ -243,7 +250,7 @@ tripped.
 |---|---|
 | `--full` | Include untruncated narration; only rejected as a usage error when combined with `--fields` that omits `narration` — `--full` alone (no `--fields`) works fine |
 | `--fields <comma-list>` | Project only the fields you need: `message`, `narration`, `tokens`, `cost`, `sessionId`, `exitCode`, `signal`, `spawnError`, `failureReason`, `failureDetail`, `logPath`, `outputDir`, `incomplete`, `finalMarker`, `diff`, `diffStat`, `changesetError`, `finalStatus`, `class`, `checkStatus`, `checkCommand`, `checkExitCode`, `checkOutputTail`, `checkStartedAt`, `checkEndedAt`, `checkOverride`, `parentTaskId`, `projectConfigWarning` |
-| `--diff` | Print the task's pending changeset (read-only; cannot combine with `--fields` or `--full`) |
+| `--diff` | Print the task's extracted changeset diff (read-only; cannot combine with `--fields` or `--full`). A retained diff can still be read after `accept` if its file remains available. |
 
 The payload (the diff included) rides the daemon's response size cap. A
 diff covers the whole target directory against its pre-dispatch `HEAD`,
@@ -268,28 +275,24 @@ next: Run taskferry result --full or --fields narration with task id "oc_mrn4ipk
 
 ## `taskferry accept <id>`
 
-Applies the dispatch task's pending changeset to its target directory.
-Only meaningful for a task with `changesetStatus: "pending"` (visible on
-`taskferry status` / `taskferry wait` without `--full`); a no-op write
-that auto-resolved to `accepted` cannot be re-accepted. Inspect the
-change with `taskferry result <id> --diff` first — note the diff can
+Applies a dispatch task's extracted changeset to its target directory.
+`accept` requires `changesetStatus: "pending"`; a task without a pending
+changeset returns an error. A zero-change task auto-resolves to `accepted`
+and cannot be accepted again. Inspect the
+change with `taskferry result <id> --diff` first. The diff can
 include files the worker never touched: git-target extraction stages the
 overlay's whole merged view, so files already untracked in the dispatch
 directory at dispatch time appear as new-file entries, and the plain
-`git apply` fails outright if they still exist on disk (see
+`git apply --3way` fails if they still exist on disk (see
 [daemon.md](daemon.md)'s "Things that look like bugs but aren't"). For a git target, the
-apply is `git apply` against the real pre-dispatch `HEAD`; for a non-git
+apply is `git -C <directory> apply --3way` against the real pre-dispatch `HEAD`; for a non-git
 target, it runs an in-sandbox `rsync --delay-updates` that needs the
 live overlay, so a non-git changeset left pending across a reboot fails
 loudly and can only be rejected, never applied. A successful apply
 transitions the task to `changesetStatus: "accepted"` and frees the CoW
 overlay. A failed apply leaves the task pending so a retry or reject can
-follow — and makes the CLI exit nonzero. The RPC itself succeeds either
-way, so the response body's `applied` field is the authoritative signal to
-check when scripting (the exit code can't cover every case where the
-request succeeds but the apply does not). Calling it on a task that
-already settled (no pending changeset) is a no-op that returns a `note`
-instead of an error, exit code `0`. The advisor role (`taskferry advisor`)
+follow and makes the CLI exit nonzero. The RPC response still includes
+`applied: false` for script consumers. The advisor role (`taskferry advisor`)
 has no accept path — its changeset is auto-rejected right after
 extraction.
 
@@ -341,22 +344,23 @@ down an in-flight gate before releasing the overlay.
 
 ## `taskferry reject <id>`
 
-Discards the task's pending changeset without applying it. Only
-meaningful for a task with `changesetStatus: "pending"`; an already
-accepted, already rejected, or auto-resolved task is a no-op that
-returns a `note` instead of an error, exit code `0`. Frees the CoW
-overlay.
+Discards a task's pending changeset without applying it. `reject` requires
+`changesetStatus: "pending"`; an accepted, rejected, or zero-change task has
+no pending changeset and returns an error. A successful rejection frees the
+CoW overlay.
 
 ## `taskferry output <id> [--path <relpath>]`
 
 Lists a task's scratch output directory, or reads one file from it.
 Every dispatch reserves a per-task writable directory at
-`<stateDir>/outputs/<id>/`, rw-bound into the bwrap sandbox at the same
-path and exposed to the worker as `$TASKFERRY_OUTPUT_DIR`. Use it for
+`<stateDir>/outputs/<id>/`, exposed to the worker as
+`$TASKFERRY_OUTPUT_DIR`. When bwrap sandboxing is active, taskferry rw-binds
+that directory at the same path. With `--no-sandbox`, it remains a normal
+host directory. Use it for
 deliverables that must survive the task settling, getting cancelled, or
 ending on a tool call instead of a final assistant message (taskferry#423).
 
-- Without `--path`: prints a JSON listing of `{ path, size }` for every
+- Without `--path`: prints a TOON listing of `{ path, size }` for every
   file in the scratch dir, plus `bytes`, `total`, and `truncated`
   (capped at `256` files / `8 MiB`; `node_modules` and `.git` subtrees
   are skipped). Listings are also bounded to the daemon's `1 MiB` response
@@ -374,6 +378,9 @@ ending on a tool call instead of a final assistant message (taskferry#423).
 - Works on every terminal status: `done`, `crashed`, `cancelled`, and
   even an `incomplete` task that the worker never finished — the scratch
   dir is per-task state the worker owns, not parsed-from-log output.
+- Works on every terminal task status: `done`, `crashed`, and `cancelled`,
+  including a `done` task whose `incomplete` flag is true. The scratch dir is
+  per-task state the worker owns, not parsed-from-log output.
 
 Example:
 
@@ -461,8 +468,9 @@ reason), a failure-reason histogram, the unknown-status backlog (capped at
 `crashed`) only — `cancelled` (a deliberate stop) and `unknown` (lost track
 of after a daemon restart) are excluded from the denominator so a backlog
 of unknown tasks doesn't dilute the reported crash rate.
-Recomputed from `task.list` on every call — nothing is cached. Cannot be
-combined with `--full`.
+Recomputed from the daemon's `task.stats` aggregate on every call, with a
+fallback to `task.list` only for an older daemon that does not support
+`task.stats`. Nothing is cached. Cannot be combined with `--full`.
 
 ## `taskferry --version` / `taskferry -V`
 
@@ -645,5 +653,8 @@ cached) on the next dispatch.
 flags from the MCP era (e.g. `--task-id`, `--timeout_ms`) fail with
 exit code `2` and a `help:` line naming the current CLI equivalent —
 except `--task-id` on `watch`, which is a real, current flag (see above),
-not a retired one. See [migrating-from-mcp.md](migrating-from-mcp.md) for
+not a retired one. The sandbox bind rename is also retired with a hint:
+`--rw-dirs` → `--rw-bind` and `--ro-dirs` → `--ro-bind` each fail with
+`help: --rw-dirs was renamed; use --rw-bind` / `help: --ro-dirs was renamed; use --ro-bind`.
+`--style` (task style) is retired to `--mode`. See [migrating-from-mcp.md](migrating-from-mcp.md) for
 the full table.

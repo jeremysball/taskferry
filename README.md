@@ -97,13 +97,13 @@ On Linux, a dispatch runs inside bubblewrap by default. The target directory is 
 
 The changeset overlay and the scratch output directory serve different jobs. The overlay holds candidate filesystem changes for review. `$TASKFERRY_OUTPUT_DIR` holds durable reports and other deliverables, including output from a worker whose final assistant message ended on a tool call. `taskferry output <id>` reads that directory after the task settles.
 
-When a repository declares `check = "..."` in `.taskferry.toml`, taskferry adds the command to the dispatch prompt and runs it inside the same overlay after diff extraction. A failed, timed-out, or interrupted gate blocks `accept` unless the caller uses `--force` after manual verification.
+When a repository declares `check = "..."` in `.taskferry.toml`, taskferry adds the command to the dispatch prompt and runs it in a check sandbox that reuses the task's overlay and persisted overlay binds after diff extraction. The check sandbox does not inherit every worker bind, including executor auth, per-dispatch `--rw-bind` or `--allowed-dirs` entries, and the sandboxed data home. A check that needs one of those mounts can fail even when the worker had access to it. A failed, timed-out, or interrupted gate blocks `accept` unless the caller uses `--force` after manual verification.
 
 ## Review and land a worker changeset
 
 ```bash
 taskferry result <id> --diff      # inspect pending changeset read-only
-taskferry accept <id>             # apply: git apply for git targets, rsync for non-git
+taskferry accept <id>             # apply: git apply --3way for git targets, rsync for non-git
 taskferry reject <id>             # discard overlay and diff
 ```
 

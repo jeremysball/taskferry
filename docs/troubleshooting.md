@@ -151,6 +151,48 @@ one:
 
 `taskferry status <id> --full` (or `result --fields failureDetail`) shows
 the specific log line or error text that triggered the classification.
+Two fallback buckets cover unmatched errors: `opencode_unknownerror` (or
+`pi_pi_error` for pi). This is a provider-side failure outside the three named
+buckets.
+
+## `taskferry output` shows nothing / worker ended on a tool call
+
+A worker can settle with `done` or `crashed` while its last assistant turn was still a tool call. The final `message` is then empty but the worker's deliverable was written to its scratch directory at `$TASKFERRY_OUTPUT_DIR` (`<stateDir>/outputs/<id>/`). Read it with `taskferry output <id>` (or `--path <file>`). This directory survives every terminal task status, including `done`, `crashed`, and `cancelled`, and it remains available for a `done` task whose `incomplete` flag is true. It is never consumed by `accept`/`reject`. See [daemon.md](daemon.md#scratch-output-dir-survives-across-every-terminal-status-taskferry423) and `taskferry output --help`.
+
+## A task reports `overlay_mount_busy`
+
+The daemon saw bubblewrap fail while mounting or remounting the overlay. It
+retries the known mount-busy race during extraction and accept, but a task can
+still settle with `failureReason: "overlay_mount_busy"` when the retries are
+exhausted. Inspect `failureDetail` and retry the dispatch after other overlay
+or worktree operations finish. `taskferry doctor --full` checks the host's
+bubblewrap and overlay prerequisites.
+
+## A changeset stays pending or reports `directory is missing`
+
+Inspect a pending changeset with `taskferry result <id> --diff`. Use
+`taskferry accept <id>` to apply it or `taskferry reject <id>` to discard it.
+An apply conflict leaves the changeset pending so you can resolve the target
+conflict and retry. A non-git changeset whose live overlay disappeared after
+a reboot can only be rejected.
+
+A linked-worktree dispatch can report `directory is missing` when another
+process is changing the repository's `.git/worktrees` administration tree.
+Wait for `git worktree` operations to finish, then retry. Taskferry snapshots
+the private gitdir because live-mounting that tree would expose this race.
+
+## A task has `projectConfigWarning` or a failed check gate
+
+`projectConfigWarning` identifies an invalid `.taskferry.toml` or a project
+read-only path that was missing or overlapped a protected mount. Fix the file
+or path and dispatch again. With sandboxing disabled, project bind and gate
+processing does not run, so a parse warning may not be attached to the task.
+
+For a pending changeset, `checkStatus: "failed"`, `"timeout"`,
+`"interrupted"`, or `"running"` blocks `accept`. Inspect the check output with
+`taskferry status <id> --full`, wait for a rerun when appropriate, or use
+`taskferry accept <id> --force` only after manual verification. `reject` stays
+available regardless of the gate state.
 
 ## A task crashes instantly with `failureReason: "boot_failure"`
 
@@ -165,11 +207,11 @@ names, then re-dispatch. Retrying unchanged will crash the same way.
 
 ## `taskferry result` says the task is still running
 
-`result` only returns a final `message`/`narration` once a task reaches
-`done` or `crashed`. Call `taskferry wait <id>` first (re-running it past
+`result` returns a final `message`/`narration` once a task reaches
+`done`, `crashed`, or `cancelled` (cancelled tasks also parse the log and return whatever the worker wrote before being killed; `unknown` is not a runnable state and has its own message). Call `taskferry wait <id>` first (re-running it past
 its 15-minute default cap for a long task — see
 [cli-reference.md](cli-reference.md#taskferry-wait-id-options)), or check
-`taskferry status <id>` to confirm it has actually settled.
+`taskferry status <id>` to confirm it has actually settled. For a cancelled or `unknown` task, use `result --fields ...` to fetch the partial output explicitly.
 
 ## `unknown task id: <id>`
 
@@ -190,12 +232,13 @@ session list`, to check on the underlying process by hand.
 
 ## Claude Code / Codex hook shows "taskferry is unavailable"
 
-The hook's `command -v taskferry` check failed — the binary isn't on the
+The hook's `command -v taskferry` check failed because the binary isn't on the
 `PATH` the agent's hook subprocess runs with. From inside the taskferry
-checkout, run:
+checkout, run the source entry point on a fresh install. Once the CLI is on
+`PATH`, `taskferry setup` is equivalent:
 
 ```bash
-taskferry setup
+node src/cli.js setup
 ```
 
 `setup` creates the `~/.local/bin/taskferry` symlink and prints the

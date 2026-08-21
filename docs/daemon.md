@@ -28,11 +28,12 @@ between two processes, so a caller that's killed mid-boot never holds
   health check to succeed. The lock means concurrent `taskferry`
   invocations racing to start the daemon converge on a single instance
   rather than each spawning their own. If the booter itself fails (e.g.
-  `loadConfig` throws on a malformed `config.json`), it writes
-  its error message to `<runtime-dir>/daemon-boot.err` and exits with a
-  non-zero code; the caller picks that file up on its next failed
-  connect and folds the contents into the `daemon boot failed: ...`
-  detail of the timeout error it surfaces.
+  `loadConfig` throws on a malformed `config.json`), it writes its error
+  message to `<runtime-dir>/daemon-boot.err` and exits with a non-zero code.
+  An import-time failure can instead write
+  `<runtime-dir>/daemon-boot-stderr.log`. The caller checks both files and
+  folds the available contents into the `daemon boot failed: ...` detail of
+  the timeout error it surfaces.
 
 Because the lock lives entirely in the detached booter rather than in
 `connectClient()`, a caller that's killed mid-boot (a short-timeout
@@ -109,8 +110,8 @@ exists at the target path, it sends that address a `system.health` probe
   file.
 - **Nothing answers** (a stale socket file left by a daemon that crashed or
   was killed without cleanup) → the daemon removes it, but only after
-  re-`stat`ing the path under a file lock and confirming the device/inode it
-  just health-checked is still the same file at that path. This closes the
+  re-`stat`ing the path under a file lock and confirming the device, inode,
+  and ctime it just health-checked are still the same file at that path. This closes the
   race where a second daemon starts between the health check and the
   unlink: whichever one wins the lock removes the stale file it actually
   checked, not whatever now happens to live at that path.
@@ -133,17 +134,17 @@ event }`, pushed to a socket asynchronously after `event.subscribe`
 returns a `subscriptionId`. Requests and events interleave freely on the
 same connection.
 
-The daemon caps a single inbound message at 1 MiB and refuses to buffer
-more (`REQUEST_TOO_LARGE`), and caps in-flight requests per daemon at 256
+The daemon caps each connection's accumulated inbound buffer at 1 MiB and
+refuses to buffer more (`REQUEST_TOO_LARGE`), and caps in-flight requests per daemon at 256
 (`SERVER_BUSY`) — both are abuse/backpressure limits, not something normal
 CLI usage approaches.
 
 ## Concurrency, queueing, and rate limiting
 
 - `TASKFERRY_MAX_CONCURRENT_TASKS` (default `4`): maximum tasks the daemon
-  allows to be `running` at once. Extra dispatches queue and start FIFO as
-  running tasks finish, are cancelled, fail to spawn, or hit the no-output
-  watchdog.
+  allows to be `running` at once. Extra dispatches queue and start FIFO within
+  each provider queue. The scheduler selects providers round-robin, subject
+  to the global and provider-specific limits below.
 - `TASKFERRY_MAX_DISPATCHES_PER_WINDOW` / `TASKFERRY_DISPATCH_WINDOW_MS`
   (defaults `2` per `5000`ms): an independent, optional burst-rate control
   on *launches*, not a concurrency cap.
@@ -154,6 +155,9 @@ CLI usage approaches.
   the global limit. Uses a compact grammar (`provider:maxConcurrentTasks
   [:maxDispatchesPerWindow]`, comma-separated) instead of JSON — see the
   `providerLimits` field in `docs/config.md`.
+- `TASKFERRY_LOWERDIR_STAGGER_MS` (default `3000`): minimum delay between
+  launches while the scheduler sets up lower directories. Set
+  `lowerdirStaggerMs` in config or use `0` to disable it.
 
 ## Watchdogs
 
@@ -197,10 +201,10 @@ CLI usage approaches.
   at most `TAIL_READ_BYTES` (1 MiB) of new growth; a single burst larger
   than that is picked up over however many subsequent ticks it takes,
   rather than allocating one unbounded buffer for the whole burst. A
-  persistent log-read error other than `ENOENT` (a rotated or
-  not-yet-created log, retried next tick) fails the task explicitly with
+  persistent error while opening or reading the log, other than `ENOENT`
+  for a log that does not exist yet, fails the task explicitly with
   `failureReason: "watchdog_log_read_error"` instead of silently freezing
-  the activity clock.
+  the activity clock. Metadata-stat errors are retried by the watcher.
 - **Known limitation:** a running child's stderr is piped straight to the
   raw log file unfiltered — no JSON parsing, no event normalization — so
   any stderr chatter not causally tied to real task progress (a CLI-level
@@ -272,7 +276,8 @@ the top-level process.
 ## Self-restart on source change
 
 The daemon records the newest mtime across the `.js` files in its own source
-directory at startup. After serving each request, it recomputes that value;
+directory at startup. After each request that reaches the normal
+dispatch/finally path, it recomputes that value;
 if it has moved forward (a merge or `git pull` landed while the daemon was
 running), a restart is marked pending.
 
@@ -324,13 +329,15 @@ use; long-lived automation wants an external retention policy.
 ### Scratch output dir survives across every terminal status (taskferry#423)
 
 Every dispatch reserves a per-task writable directory at
-`<stateDir>/outputs/<id>/`, rw-bound into the bwrap sandbox at the same
-path and exposed to the worker as `$TASKFERRY_OUTPUT_DIR`. Unlike the
+`<stateDir>/outputs/<id>/`, exposed to the worker as
+`$TASKFERRY_OUTPUT_DIR`. When bwrap sandboxing is active, taskferry rw-binds
+that directory at the same path. Unlike the
 git-target overlay (which only exists when a dispatch ran with an overlay
 and is consumed by `accept`/`reject`), the scratch dir is per-task state
 the worker owns directly: it persists on every terminal status
-(`done`, `crashed`, `cancelled`, `incomplete`), is never consumed by
-`accept`/`reject`, and is read back via `taskferry output <id>` (or the
+(`done`, `crashed`, and `cancelled`, including a `done` task whose
+`incomplete` flag is true), is never consumed by `accept`/`reject`, and is read
+back via `taskferry output <id>` (or the
 `task.output` RPC). The CLI is the right surface for retrieving anything
 a worker wrote there — including a deliverable the worker produced but
 whose final assistant message ended on a tool call rather than a clean
@@ -458,9 +465,9 @@ profiling is diagnostic, not on the request's critical path.
   extraction stages the overlay's whole merged view (`git add -A && git diff
   --cached <pre-dispatch HEAD>`, `changeset.js`'s `extractGitDiff`) so
   pre-existing untracked files surface as new-file entries alongside the
-  worker's own writes. `accept` runs a plain `git apply`, which fails
-  outright when those paths already exist in the working tree — blocking the
-  worker's real changes too — so commit or shelve untracked files before
+  worker's own writes. `accept` runs `git apply --3way`, which fails
+  outright when those paths already exist in the working tree, blocking the
+  worker's real changes too, so commit or shelve untracked files before
   dispatching against a dirty tree. Non-git targets are unaffected: their
   extraction diffs the directory against the merged view, so untouched files
   never appear. The same root cause means a `taskferry result <id>` (or
@@ -480,7 +487,7 @@ profiling is diagnostic, not on the request's critical path.
   `withFileLockAsync()`/`withFileLock()` lock path (one holding it across an
   `await`, another trying to acquire it concurrently) hanging or timing out
   at exactly the lock's `timeoutMs` — expected, not a bug in the lock.
-  `acquireLock()`'s retry loop blocks the JS thread synchronously via
+  `acquireFileLock()`'s retry loop blocks the JS thread synchronously via
   `Atomics.wait` with zero yield back to the event loop, so a contending
   same-process caller starves the very continuation that would release the
   lock. Real contention is always cross-process (a separate `taskferry`
@@ -520,7 +527,7 @@ profiling is diagnostic, not on the request's critical path.
 - `spawnTaskChild()` calling both `ctx.persistTask(task.id)` *and*
   `ctx.flushPersist()` immediately after `buildSandboxedSpawn()` and before
   `ctx.spawnFn(...)`, on top of the existing post-spawn `persistTask()` call
-  a few lines later — expected, not redundant (taskferry#346).
+  a few lines later. This is expected, not redundant (taskferry#477).
   `buildSandboxedSpawn()` (via `assembleBwrapSpawn()`) has already created
   the on-disk overlay and set `task.overlayDirs`/`changesetStatus` in memory
   by the time it returns, but a daemon crash between that point and the
@@ -552,8 +559,11 @@ profiling is diagnostic, not on the request's critical path.
   error frame ("daemon connection closed", taskferry#342). The daemon now
   caps the shipped rows at the newest `MAX_LIST_ROWS` (500) while keeping
   `counts` computed over the full set (a cheap in-memory tally), so
-  `list --all` always answers. To see an older or scoped slice, narrow with
+  `list --all` always answers. To see a scoped slice, narrow with
   `--directory`; `doctor --stats` summarizes the whole history server-side.
+  Directory-scoped list and context requests filter the cheap in-memory rows
+  before calling per-task status code that reads logs, so a narrow request
+  does not perform work across the entire task history.
 - An error response envelope whose `message` is a single line (detail lines
   collapsed away) or empty — expected, not dropped data. The envelope keeps
   the historical wire shape: `message` is exactly the first `error:` line
@@ -598,12 +608,18 @@ profiling is diagnostic, not on the request's critical path.
   race that requires the attacker to already hold the keys.
 - A legitimate symlinked config entry (`opencode.jsonc` symlinked into a
   dotfiles repo) silently missing from the sandbox after an upgrade —
-  expected, and now diagnosed: the guard deliberately refuses to bind
-  symlinked entries (bwrap would bind the link's *target*, which is the
-  whole vulnerability #392 closes), and warns on stderr naming the skipped
-  path so the drop is visible rather than silent. The fix is to bind the
-  real file (`cp` the config into `~/.config/opencode`), not to weaken the
-  guard.
+  expected, and now diagnosed, but the behavior *splits by file kind*.
+  OpenCode config entries inside `~/.config/opencode` are resolved to their
+  real target via `resolveOpencodeConfigBindSource()` in `src/executor.js`
+  and ro-bound as that target. This includes entries such as
+  `opencode.json`, `plugins`, and `agents`; `.gitignore` is skipped. The drop
+  no longer happens for these entries. All other binds
+  (Pi extensions, `auth.json`, a resumed OpenCode session file) still fail
+  closed: the guard refuses the symlink (bwrap would bind the link's
+  *target*, which is the whole vulnerability #392 closes) and warns on
+  stderr naming the skipped path. If you hit the latter, `cp` the file into
+  `~/.config/opencode` (or the relevant config dir) rather than weakening
+  the guard.
 - A dispatch's private gitDir (`<git-common-dir>/worktrees/<name>` for a
   linked worktree) getting a one-time scratch copy instead of a live overlay
   or live bind, even though it's a directory and overlayfs mounts directories

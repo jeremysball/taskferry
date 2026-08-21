@@ -7,10 +7,10 @@ single JS module OpenCode loads directly through its own plugin config.
 
 ## Install
 
-From the taskferry checkout, run:
+From a fresh checkout, run:
 
 ```bash
-taskferry setup
+node src/cli.js setup
 ```
 
 `taskferry setup` creates (or refreshes) a single file symlink at
@@ -52,18 +52,24 @@ OpenCode so it reloads the freshly linked module.
 
 ## Remove
 
-Delete the symlink (and the daemon's state if you no longer need it):
+Delete the integration symlink. This does not remove daemon state or running
+tasks:
 
 ```bash
-rm "$XDG_CONFIG_HOME/opencode/plugins/taskferry.js"
-# (or: rm ~/.config/opencode/plugins/taskferry.js)
+rm "${XDG_CONFIG_HOME:-$HOME/.config}/opencode/plugins/taskferry.js"
 ```
 
-This does not stop the daemon or affect other integrations sharing it —
-see [daemon.md](../daemon.md#stopping-the-daemon) to stop that
-separately.
+This does not stop the daemon or affect other integrations sharing it. See
+[daemon.md](../daemon.md#stopping-the-daemon) to stop the daemon separately.
 
 ## What it does
+
+When a sandboxed worker reads the user's OpenCode configuration, the config
+directory itself must be a safe, non-symlink path. `.gitignore` is skipped.
+Individual entries may be symlinks: taskferry resolves each target, checks it,
+and binds the target read-only. Dangling or unsafe entries are skipped with a
+warning rather than failing the dispatch. This supports dotfiles repositories
+without exposing an arbitrary symlink target.
 
 On load, the plugin connects to the taskferry daemon (auto-starting it if
 needed) and subscribes to events for the current OpenCode project

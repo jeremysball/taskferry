@@ -138,12 +138,13 @@ export function listTaskOutputFiles(dir) {
 function collectOutputFiles(rootFd, rootPath) {
   /** @type {{files: Array<{path: string, size: number}>, bytes: number, truncated: boolean, visitedDirs: number}} */
   const state = { files: [], bytes: 0, truncated: false, visitedDirs: 0 };
+  const realRoot = realpathForFd(rootFd, rootPath);
   // depth=0 on the root, increments by 1 each time we push a subdirectory.
   /** @type {Array<{fd: number, full: string, relative: string, depth: number}>} */
   const stack = [{ fd: rootFd, full: rootPath, relative: "", depth: 0 }];
   try {
     while (stack.length && !state.truncated) {
-      visitStackFrame(stack, state, rootFd);
+      visitStackFrame(stack, state, rootFd, realRoot);
     }
   } finally {
     // Close any subdirectory fds left on the stack from an early exit
@@ -164,8 +165,9 @@ function collectOutputFiles(rootFd, rootPath) {
  * @param {Array<{fd: number, full: string, relative: string, depth: number}>} stack
  * @param {{files: Array<{path: string, size: number}>, bytes: number, truncated: boolean, visitedDirs: number}} state
  * @param {number} rootFd
+ * @param {string} realRoot
  */
-function visitStackFrame(stack, state, rootFd) {
+function visitStackFrame(stack, state, rootFd, realRoot) {
   if (shouldStopListing(state)) {
     state.truncated = true;
     return;
@@ -174,7 +176,7 @@ function visitStackFrame(stack, state, rootFd) {
   try {
     state.visitedDirs++;
     const entries = readdirSafe(current.full);
-    entries.some((entry) => visitEntry(entry, current, state, stack));
+    entries.some((entry) => visitEntry(entry, current, state, stack, realRoot));
   } finally {
     if (current.fd !== rootFd) fs.closeSync(current.fd);
   }
@@ -185,10 +187,11 @@ function visitStackFrame(stack, state, rootFd) {
  * @param {{full: string, relative: string, depth: number}} current
  * @param {{files: Array<{path: string, size: number}>, bytes: number, truncated: boolean, visitedDirs: number}} state
  * @param {Array<{fd: number, full: string, relative: string, depth: number}>} stack
+ * @param {string} realRoot
  * @returns {boolean} true to stop iterating this directory's entries early
  */
-function visitEntry(entry, current, state, stack) {
-  const result = processEntry(entry, current.full, current.relative, state);
+function visitEntry(entry, current, state, stack, realRoot) {
+  const result = processEntry(entry, current.full, current.relative, state, realRoot);
   if (result === null) return false;
   if (result === "truncated") {
     state.truncated = true;
@@ -270,14 +273,15 @@ function closeStackFds(stack, rootFd) {
  * @param {string} current
  * @param {string} currentRelative
  * @param {{files: Array<{path: string, size: number}>, bytes: number, visitedDirs: number}} state
+ * @param {string} realRoot
  * @returns {null | "truncated" | {kind: "file", rel: string, size: number} | {kind: "directory", full: string, rel: string} | {kind: "skip"}}
  */
-function processEntry(entry, current, currentRelative, state) {
+function processEntry(entry, current, currentRelative, state, realRoot) {
   if (excludedEntry(entry.name)) return null;
   if (shouldStopListing(state)) return "truncated";
   const full = path.join(current, entry.name);
   const rel = path.join(currentRelative, entry.name);
-  const classified = classifyEntry(entry, full);
+  const classified = classifyEntry(entry, full, realRoot);
   if (classified.kind === "file") {
     // Checked here (with this entry's own size), not just via the
     // pre-entry shouldStopListing() cap above -- otherwise a single file
@@ -396,11 +400,12 @@ function excludedEntry(name) {
 /**
  * @param {fs.Dirent} entry
  * @param {string} full
+ * @param {string} realRoot
  * @returns {{kind: "file", size: number} | {kind: "directory"} | {kind: "skip"}}
  */
-function classifyEntry(entry, full) {
+function classifyEntry(entry, full, realRoot) {
   if (entry.isSymbolicLink()) {
-    return classifySymlink(full);
+    return classifySymlink(full, realRoot);
   }
   if (entry.isDirectory()) {
     return { kind: "directory" };
@@ -411,23 +416,38 @@ function classifyEntry(entry, full) {
   return statRegularFile(full);
 }
 
-/** @param {string} full @returns {{kind: "file", size: number} | {kind: "skip"}} */
-function classifySymlink(full) {
-  let target;
+/** @param {string} full @param {string} realRoot @returns {{kind: "file", size: number} | {kind: "skip"}} */
+function classifySymlink(full, realRoot) {
+  let fd;
   try {
-    target = fs.statSync(full);
+    fd = fs.openSync(full, fs.constants.O_RDONLY | fs.constants.O_NONBLOCK);
   } catch (err) {
-    if (errCode(err) === "ENOENT" || errCode(err) === "ELOOP") return { kind: "skip" };
+    if (errCode(err) === "ENOENT" || errCode(err) === "ELOOP" || errCode(err) === "ENXIO") return { kind: "skip" };
     throw err;
   }
-  if (target.isFile()) return { kind: "file", size: target.size };
-  // Deliberately not { kind: "directory" } here: descending into a
-  // symlinked directory has no cycle detection (a self- or
-  // ancestor-referential symlink would re-enter itself via the
-  // traversal stack indefinitely) and can walk arbitrary host
-  // directories the symlink points outside the output dir. Only a
-  // symlink-to-file is reported (as its resolved size, above).
-  return { kind: "skip" };
+  try {
+    const stat = fs.fstatSync(fd);
+    if (!stat.isFile()) {
+      // Deliberately not { kind: "directory" } here: descending into a
+      // symlinked directory has no cycle detection (a self- or
+      // ancestor-referential symlink would re-enter itself via the
+      // traversal stack indefinitely) and can walk arbitrary host
+      // directories the symlink points outside the output dir. Only a
+      // symlink-to-file is reported (as its resolved size, above).
+      return { kind: "skip" };
+    }
+    let realTarget;
+    try {
+      realTarget = realpathForFd(fd, full);
+    } catch (err) {
+      if (errCode(err) === "ENOENT" || errCode(err) === "ELOOP") return { kind: "skip" };
+      throw err;
+    }
+    if (!isInsideDirectory(realRoot, realTarget)) return { kind: "skip" };
+    return { kind: "file", size: stat.size };
+  } finally {
+    fs.closeSync(fd);
+  }
 }
 
 /** @param {string} full @returns {{kind: "file", size: number} | {kind: "skip"}} */

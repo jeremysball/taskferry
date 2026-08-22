@@ -1,5 +1,24 @@
 # Changelog
 
+## [4.2.0](https://github.com/jeremysball/taskferry/compare/taskferry-v4.1.2...taskferry-v4.2.0) (2026-08-22)
+
+
+### Features
+
+* **daemon:** auto-resume in-flight tasks on restart, restart immediately by default ([#502](https://github.com/jeremysball/taskferry/issues/502)) ([8777392](https://github.com/jeremysball/taskferry/commit/87773926b767f6a864f7fd4d1eee4dca6346c81c))
+* **hooks:** enforce worktree commits via pre-commit gate ([7c1f6d6](https://github.com/jeremysball/taskferry/commit/7c1f6d6f2a926c472f87de7b118f34ffafc5250a))
+* **hooks:** enforce worktree commits via pre-commit gate ([7c14397](https://github.com/jeremysball/taskferry/commit/7c14397413bed7662a036c92a452f2b0693c4206))
+* **sandbox:** let --ro-bind override the deny-list with a loud warning ([#503](https://github.com/jeremysball/taskferry/issues/503)) ([a5a63b7](https://github.com/jeremysball/taskferry/commit/a5a63b7f4879c6aa92121527f93095d7d969a63c)), closes [#497](https://github.com/jeremysball/taskferry/issues/497)
+
+
+### Bug Fixes
+
+* **output:** enforce response budget for real request ids ([#527](https://github.com/jeremysball/taskferry/issues/527)) ([5acdc4f](https://github.com/jeremysball/taskferry/commit/5acdc4fea1eaaed4c0754f809db5140ecf094770))
+* **sandbox,daemon,opencode:** per-task isolation for uv cache, daemon singleton, and XDG_DATA_HOME ([ffa5b3a](https://github.com/jeremysball/taskferry/commit/ffa5b3aa0c5b3ff3d7a1de99ed2f65c9f4574f1a))
+* **sandbox,daemon,opencode:** per-task isolation for uv cache, daemon singleton, and XDG_DATA_HOME ([ed9713a](https://github.com/jeremysball/taskferry/commit/ed9713a122a660c3084ffae8a89d26d4e4dee6fb))
+* **summarizer:** use latest session ID from retry logs ([0b845fd](https://github.com/jeremysball/taskferry/commit/0b845fd235eab08dc3d4d193ff4f243ecff18ae1))
+* **tasks:** handle resolver failures and centralize activity-key normalization ([#483](https://github.com/jeremysball/taskferry/issues/483)) ([32ed725](https://github.com/jeremysball/taskferry/commit/32ed725b4b1106816d6251cf5d0c1761ee4fd3f2))
+
 ## [4.1.2](https://github.com/jeremysball/taskferry/compare/taskferry-v4.1.1...taskferry-v4.1.2) (2026-08-21)
 
 

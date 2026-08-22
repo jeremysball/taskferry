@@ -281,47 +281,84 @@ dispatch/finally path, it recomputes that value;
 if it has moved forward (a merge or `git pull` landed while the daemon was
 running), a restart is marked pending.
 
-The restart itself is deferred until idle: it only fires once
-`manager.list().counts` shows zero `running` and zero `queued` tasks, checked
-again on every subsequent request until that's true. This avoids reattaching
-to an in-flight worker child process — deliberately out of scope, per
-[Recovery](#recovery) below — by never tearing the daemon down while one
-exists. When the idle check passes, the daemon closes its socket and server,
-spawns a fresh `daemon.js` process with the same environment, and exits; the
+By default the restart fires immediately on the next request, even with
+`running` or `queued` tasks in flight. Running tasks are auto-resumed on the
+next boot when a resumable worker session can be recovered (a valid
+`sessionId` via `readSessionIdFromLog`); otherwise they are classified with a
+clear `failureReason: "daemon_restarted_session_lost"` instead of a raw bwrap
+spawn error (see [Recovery](#recovery)). The previous "defer until idle"
+behavior — waiting for zero `running` and zero `queued` tasks — is now an
+explicit opt-in via `restartWaitForIdle: true` in `config.json`
+(`TASKFERRY_RESTART_WAIT_FOR_IDLE=1`, `docs/config.md`), which restores the
+old wait-for-idle gate for callers that prefer it.
+
+When the restart fires, the daemon closes its socket and server, spawns a
+fresh `daemon.js` process with the same environment, and exits; the
 replacement binds a new socket the same way any auto-started daemon does.
 
 Existing `watch` subscribers are dropped when the old process exits, same as
 any other daemon restart; a client reconnects and resubscribes on its next
-call. There is no special handoff for in-progress requests beyond the
-existing "wait for idle" gate, and that gate only checks task counts, not a
-general in-flight-RPC counter — a concurrent non-task request (e.g. another
-client's `list` or `status` call) can still be executing at the exact moment
-the restart fires; only running/queued *tasks* are guaranteed absent.
+call. With the default immediate restart there is no guarantee that no
+`running`/`queued` tasks exist at the exact moment the restart fires — only
+with `restartWaitForIdle: true` are they guaranteed absent. In either mode
+a concurrent non-task request (e.g. another client's `list` or `status` call)
+can still be executing at the exact moment the restart fires; the gate, when
+enabled, only checks task counts, not a general in-flight-RPC counter.
 
 ## Recovery
 
-Queued and running task state survives only for the daemon process's own
-lifetime, because the handle a task's `exit` event fires on only exists in
-the process that called `spawn()`. If the daemon restarts while a task is
-still `queued` or `running`, the new process has no such handle for it and
-relabels it `"unknown"` on reload rather than reporting a possibly-stale
-status.
+Task state other than `queued`/`running` survives a daemon restart by being
+reloaded from `tasks.json`. For `queued` and `running` the new daemon
+reconciles each persisted task on boot:
 
-The underlying worker process, if still alive, keeps running, but its log
-stops receiving new events the way it did before the restart: stdout is a
-pipe the old daemon process owned and normalized into the log itself, so
-once that process exits, nothing is left reading that pipe and stdout
-events stop landing in `<state-dir>/logs/<task-id>.ndjson`. Only stderr —
-duplicated directly into the log file descriptor at spawn time,
-independent of the parent process — keeps writing after the restart.
-Inspect the log file directly for whatever made it in before the restart,
-or, for a task dispatched with the `opencode` executor specifically, run
-`opencode session list` — but the daemon does not re-attach a status
-watcher to it. There is no periodic
-recheck of `unknown` tasks' pids or trailing log events: that would
-reintroduce string/heuristic completion detection for exactly the
-crash-recovery edge case this architecture avoids elsewhere, so it's left
-out rather than done half right.
+- `queued` tasks never started — they degrade to `"unknown"` as before (never
+  auto-launched; the original launch spec's caller env / bind dirs are not
+  reconstituted). `unknown` is still the historical "the daemon that owned
+  this task is gone" marker for this case.
+- `running` tasks are checked for a resumable worker session: the daemon
+  reads the log for a valid `sessionId` (`readSessionIdFromLog` — a bounded
+  tail scan of the last 128 KiB, since real logs stamp `sessionID` on
+  essentially every event line; a log whose only session event predates
+  that window falls back to a full scan), checks that
+  the task directory still exists and that the orphaned sandbox pid (if any)
+  is reaped, and where resumable, cleans the stale overlay and re-queues the
+  task with the recovered `sessionId` against a fresh overlay. The scheduler
+  then respawns it normally — the worker continues the same session rather
+  than starting over. The respawn reconstitutes the original launch spec
+  from the task record (`resumeEnv`, `resumeAllowedDirs`, `resumeRoBind`,
+  `resumeNoSandbox`, `resumeNoOverlay` are persisted at dispatch time), so a
+  resumed worker sees the same caller env, sandbox/overlay toggles and
+  per-dispatch binds as the original run.
+- `running` tasks with no resumable session (no `sessionId` in the log, log
+  unreadable, directory gone) are classified as `crashed` with
+  `failureReason: "daemon_restarted_session_lost"` and a detail explaining
+  why resume was not possible, instead of surfacing a raw
+  `bwrap: Can't find source path .../upper/main` spawn error. `failureDetail`
+  distinguishes "no sessionId" (log readable) from "log missing or
+  unreadable" from "directory missing".
+
+The underlying orphaned sandbox process (`bwrap` with `--die-with-parent`,
+when sandboxed) is expected to have already exited when the daemon died; if
+it is still alive it is best-effort `SIGTERM`'d before a resume is attempted
+so a stale overlay mount does not collide with the fresh one. The signal is
+only sent after a `/proc/<pid>/stat` start-time identity check against the
+start time captured at spawn and persisted on the task record — a bare
+liveness probe could otherwise signal an unrelated process that happened to
+reuse the pid. (Legacy records without a start time pass the check open and
+are signalled anyway.) After `SIGTERM` the daemon waits up to `cancelGrace`
+(polling for exit), escalates to `SIGKILL` if the process still lives, and
+polls again briefly before giving up — all synchronously, since boot-time
+resume is not async; the stale overlay record is cleared only when removal
+actually succeeds, so a busy mount is retried as an orphan on the next boot
+rather than silently colliding with the fresh overlay. Log handling
+otherwise matches the previous "unknown" path's observation: stdout was a pipe
+the old daemon owned and normalized into the log, so after the daemon exits
+new stdout events stop landing in `<state-dir>/logs/<task-id>.ndjson` until
+the resumed worker (if any) is respawned; stderr was duplicated directly into
+the log fd at spawn time and would have kept writing even without a resume.
+There is still no periodic recheck of `unknown` tasks' pids — `unknown`
+remains the terminal marker for queued tasks and internal summarizers that are
+never auto-resumed.
 
 No log rotation or cleanup: `logs/` grows unbounded. Fine for interactive
 use; long-lived automation wants an external retention policy.
@@ -412,9 +449,14 @@ profiling is diagnostic, not on the request's critical path.
   expected, not a broken render. `tf-sl` does no width or color rendering of
   its own; it is a data source for a caller's statusline script, which owns
   every presentation decision (mode/width tiers, coloring, id truncation).
-- `status: "unknown"` after a daemon restart — expected; see
-  `docs/daemon.md#recovery`. There is deliberately no re-attachment to
-  already-running child processes.
+- `status: "unknown"` after a daemon restart — expected for `queued` tasks and
+   internal summarizers (see `docs/daemon.md#recovery`). `running` tasks are
+   handled differently: resumable ones are auto-resumed against a fresh overlay
+   (status goes back to `queued` → `running` on the next boot), non-resumable
+   ones become `crashed` with `daemon_restarted_session_lost` instead of
+   `unknown`. There is no re-attachment to the original orphaned bwrap pid
+   itself — resume always uses a fresh overlay and a new spawn with the
+   recovered `sessionId`.
 - `checkStatus: "interrupted"` on a task after a daemon restart that killed
   the previous daemon mid-gate — expected (Task 7); the only way out is to
   re-run the gate (auto re-run if the overlay survived, or accept with
@@ -438,9 +480,37 @@ profiling is diagnostic, not on the request's critical path.
   to the canonical `skills/using-taskferry/SKILL.md`. Edit the canonical file,
   run `npm run skill:generate`, then re-copy to `~/.claude/skills/` by hand.
 - The daemon restarting itself with no `taskferry` command involved — expected
-  when a source `.js` file's mtime moved forward since startup (a merge
-  landed) and no tasks were running/queued; see
-  `docs/daemon.md#self-restart-on-source-change`.
+   when a source `.js` file's mtime moved forward since startup (a merge
+   landed); see `docs/daemon.md#self-restart-on-source-change`. By default
+   it restarts immediately even with `running`/`queued` tasks in flight
+   (those tasks are auto-resumed when a resumable session exists, otherwise
+   classified with `daemon_restarted_session_lost` — see
+   `docs/daemon.md#recovery`). The old "wait until idle" behavior is an
+   explicit opt-in (`restartWaitForIdle: true` in `config.json` /
+   `TASKFERRY_RESTART_WAIT_FOR_IDLE=1`).
+- A `running` task becoming `crashed` with
+   `failureReason: "daemon_restarted_session_lost"` after a daemon restart —
+   expected when the daemon died mid-task and no resumable session could be
+   recovered (no `sessionId` in the log, log unreadable, or directory gone).
+   The previous daemon's bwrap sandbox is gone and there is no session to
+   continue; the classification replaces the former opaque
+   `bwrap: Can't find source path .../upper/main` spawn error. When a
+   `sessionId` is present the task is instead auto-resumed against a fresh
+   overlay — see `docs/daemon.md#recovery`. `queued` tasks and internal
+   summarizers still degrade to `unknown` as before; only `running` dispatch
+   tasks are eligible for resume.
+- An orphaned child from a restarted daemon not being signalled — expected
+   when its pid is still alive but its `/proc/<pid>/stat` start time no
+   longer matches the one captured at spawn. The pid was reused by some
+   unrelated process while the daemon was down; signalling it would kill a
+   stranger. The identity check uses the start time (not a liveness probe,
+   which cannot detect reuse) and passes open for legacy records with no
+   recorded start time, which are signalled anyway. See
+   `docs/daemon.md#recovery`.
+- A resumed worker starting under a different pid than the one recorded for
+   the task — expected; resume is a fresh spawn (fresh overlay, fresh pid),
+   not a re-attachment to the old orphaned process. The pid persisted on the
+   record is replaced by the new spawn's pid.
 - Editing `TASKFERRY_ENV_FILE`'s target file and a spawned worker not seeing
   the new/changed var right away — expected within a short debounce window,
   not a restart. `envFileVars` is loaded once via `env-file.js`'s

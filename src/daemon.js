@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+/* eslint-disable max-lines -- daemon.js is just over the limit after restartWaitForIdle addition; split would be a larger refactor */
 import fs from "node:fs";
 import net from "node:net";
 import path from "node:path";
@@ -209,13 +210,36 @@ function isEnabledFlag(value) {
 }
 
 /**
+ * Resolves an env-var-over-config boolean: a set env var (`1`/`true`) wins,
+ * otherwise the config value applies. Shared by every boolean flag that
+ * follows the same precedence chain (profiling, restartWaitForIdle) so each
+ * caller expresses only its own env var name and config key.
+ * @param {NodeJS.ProcessEnv|undefined} env
+ * @param {string} envVarName
+ * @param {boolean|undefined} configValue
+ * @returns {boolean}
+ */
+function resolveEnvOverrideBoolean(env, envVarName, configValue) {
+  if (env?.[envVarName] !== undefined) return isEnabledFlag(env[envVarName]);
+  return configValue === true;
+}
+
+/**
  * @param {NodeJS.ProcessEnv} [env]
  * @param {ProfilingConfig} [config]
  * @returns {boolean}
  */
 function profilingEnabled(env, config) {
-  if (env?.TASKFERRY_PROFILING_ENABLED !== undefined) return isEnabledFlag(env.TASKFERRY_PROFILING_ENABLED);
-  return config?.profilingEnabled ?? false;
+  return resolveEnvOverrideBoolean(env, "TASKFERRY_PROFILING_ENABLED", config?.profilingEnabled);
+}
+
+/**
+ * @param {NodeJS.ProcessEnv} [env]
+ * @param {{restartWaitForIdle?: boolean}} [config]
+ * @returns {boolean}
+ */
+function restartWaitForIdleEnabled(env, config) {
+  return resolveEnvOverrideBoolean(env, "TASKFERRY_RESTART_WAIT_FOR_IDLE", config?.restartWaitForIdle);
 }
 
 // An unset var is undefined and Number(undefined) is already NaN, but an
@@ -801,7 +825,6 @@ export async function startDaemon(options = {}) {
 
   const close = makeClose({ manager: serverManager, clients, server, socketPath, restart });
   maybeRestartRef.current = makeMaybeRestart({
-    manager: serverManager,
     sourceDir,
     sourceSignature,
     startupSourceSignature,
@@ -811,6 +834,8 @@ export async function startDaemon(options = {}) {
     env,
     exitProcess,
     restart,
+    manager: serverManager,
+    restartWaitForIdle: restartWaitForIdleEnabled(env, taskManagerOptions.config),
   });
 
   return {

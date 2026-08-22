@@ -74,7 +74,10 @@ set, all paths from both contribute. `rwBind` (and `allowedDirs`) also union
 with the per-dispatch `--rw-bind`/`--allowed-dirs` flags and the
 `TASKFERRY_RW_BIND`/`TASKFERRY_ALLOWED_DIRS` env vars rather than any one
 layer replacing another. `allowedDirs` emits a deprecation warning whenever
-it is used and will be removed in the next major release.
+it is used and will be removed in the next major release. A `rwBind` path
+that overlaps the sandbox deny-list (e.g. `~/.ssh`) is still bound
+read-write — overriding the deny-list is the user's explicit call — but a
+loud warning is emitted at dispatch time.
 
 `roBind` is the read-only counterpart: host paths bound **read-only**
 (`--ro-bind`) into the sandbox for every dispatch, resolved through the same
@@ -82,7 +85,13 @@ protected-mount safety check as `.taskferry.toml`'s `read_only_paths`
 (a nonexistent or protected-overlapping entry is skipped and reported, never
 bound). It unions across the config file, `TASKFERRY_RO_BIND`, the manager
 option, and the per-dispatch `--ro-bind` flag. If a path appears in both
-`rwBind` and `roBind`, read-write wins and a warning is emitted.
+`rwBind` and `roBind`, read-write wins and a warning is emitted. A `roBind`
+path that overlaps the sandbox deny-list (e.g. `~/.ssh`) is still bound
+read-only — overriding the deny-list is the user's explicit call, same as
+`rwBind` — but a loud warning is emitted at dispatch time. The structural
+mounts (`stateDir`, `runtimeDir`, the launch directory) are never
+overridable: a `roBind` path overlapping one of those is skipped with a
+warning even when it also overlaps the deny-list.
 
 `sandboxDenylist` uses the same comma-separated grammar as `allowedDirs` —
 extra directories tmpfs-masked inside the bwrap sandbox, merged with the

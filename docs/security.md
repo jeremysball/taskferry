@@ -315,7 +315,12 @@ runs wrapped in
   replacing — the fixed base. Entries are directories only: a file mount
   point (e.g. `~/.npmrc`, `~/.netrc`, `~/.git-credentials`) needs a
   different bwrap mechanism (masking the file, not tmpfs-ing a directory)
-  and isn't covered by this list yet.
+  and isn't covered by this list yet. The deny-list is overridable by the
+  user's own `--rw-bind`/`--ro-bind` (below) — re-exposing a deny-listed
+  path is the user's explicit call, and each override warns loudly at
+  dispatch time — but the structural mounts (`stateDir`, `runtimeDir`, the
+  launch directory) are not: a user bind overlapping one of those is
+  skipped with a warning even when it also overlaps the deny-list.
 - **Git worktrees get a scoped slice of their real gitdir bound read-write
   automatically.** A worktree's `.git` is just a pointer file to its actual
   gitdir under the main checkout's `.git/worktrees/<name>` — outside the
@@ -372,20 +377,30 @@ runs wrapped in
   (flag/env/config key) still works as a deprecated alias, emits a
   deprecation warning when used, and will be removed in the next major
   release. Entries that don't exist on disk are silently skipped, the same
-  as the deny-list.
+  as the deny-list. A `rwBind` path that overlaps the deny-list (e.g.
+  `~/.ssh`) is still bound read-write — overriding the deny-list is the
+  user's explicit call, not something the daemon blocks — but a loud
+  warning is emitted at dispatch time, since re-exposing a deny-listed
+  path as writable deserves more visibility than a docs footnote.
 - **`roBind`** is the read-only counterpart to `rwBind`: extra directories
   bound **read-only** into the sandbox for a review-only worker that should
   be able to read several repos but edit none of them. Resolved through the
   same protected-mount safety check as `.taskferry.toml`'s `read_only_paths`
   — an entry that doesn't exist on the host, or that overlaps a protected
-  mount (deny-list, `stateDir`, `runtimeDir`, or the launch directory), is
-  skipped and reported rather than bound. `roBind` unions across the
+  mount (`stateDir`, `runtimeDir`, or the launch directory), is skipped and
+  reported rather than bound. `roBind` unions across the
   per-dispatch `--ro-bind` flag, `TASKFERRY_RO_BIND`, config `roBind`, and
   the manager option. If the same resolved path appears in both the
   read-write set and the read-only set, it is bound **read-write** and a
   warning is emitted naming the path (read-write wins, never an error) — so
   a `roBind`/`read_only_paths` entry can be promoted to read-write from the
-  command line.
+  command line. A `roBind` path that overlaps the deny-list (e.g. `~/.ssh`)
+  is still bound read-only — overriding the deny-list is the user's
+  explicit call, same as `rwBind` — but a loud warning is emitted at
+  dispatch time. The structural mounts are never overridable: a `roBind`
+  path overlapping `stateDir`/`runtimeDir`/the launch directory is skipped
+  with a warning even when it also overlaps the deny-list (e.g. `stateDir`
+  itself, which is a default deny-list entry).
 - **`XDG_DATA_HOME` is redirected.** OpenCode writes its own logs, session
   database, and snapshots under `XDG_DATA_HOME` (`~/.local/share` by
   default), which is read-only inside the sandbox. Sandboxed dispatches get

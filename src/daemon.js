@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+/* eslint-disable max-lines -- daemon.js is just over the limit after restartWaitForIdle addition; split would be a larger refactor */
 import fs from "node:fs";
 import net from "node:net";
 import path from "node:path";
@@ -216,6 +217,12 @@ function isEnabledFlag(value) {
 function profilingEnabled(env, config) {
   if (env?.TASKFERRY_PROFILING_ENABLED !== undefined) return isEnabledFlag(env.TASKFERRY_PROFILING_ENABLED);
   return config?.profilingEnabled ?? false;
+}
+
+// @ts-ignore -- implicit any params are intentional for JS file without strict JSDoc on this helper
+function restartWaitForIdleEnabled(env, config) {
+  if (env?.TASKFERRY_RESTART_WAIT_FOR_IDLE !== undefined) return isEnabledFlag(env.TASKFERRY_RESTART_WAIT_FOR_IDLE);
+  return config?.restartWaitForIdle === true;
 }
 
 // An unset var is undefined and Number(undefined) is already NaN, but an
@@ -801,7 +808,6 @@ export async function startDaemon(options = {}) {
 
   const close = makeClose({ manager: serverManager, clients, server, socketPath, restart });
   maybeRestartRef.current = makeMaybeRestart({
-    manager: serverManager,
     sourceDir,
     sourceSignature,
     startupSourceSignature,
@@ -811,6 +817,8 @@ export async function startDaemon(options = {}) {
     env,
     exitProcess,
     restart,
+    manager: serverManager,
+    restartWaitForIdle: restartWaitForIdleEnabled(env, taskManagerOptions.config),
   });
 
   return {

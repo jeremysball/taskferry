@@ -2989,9 +2989,13 @@ function loadPersistedTasks(ctx) {
 
 /**
  * Normalizes and registers a single persisted task record. The pre-persistence
- * normalization (realpath the directory, degrade running/queued to unknown,
- * default the executor, backfill legacy tmpRoots) is unchanged from the
- * original `loadPersisted` loop body.
+ * normalization (realpath the directory, default the executor, backfill legacy
+ * tmpRoots) is unchanged from the original loop body, except running/queued
+ * tasks no longer degrade to unknown immediately -- they are kept with their
+ * original status and a `_persistedStatus` marker so the daemon-restart
+ * resume handler (handleDaemonRestartTasks) can decide per-task whether to
+ * auto-resume via a fresh overlay (valid sessionId) or classify as
+ * daemon_restarted_session_lost.
  * @param {{overlayTmpRoot: string, tasks: Map<string, Task>, taskEvents: {emitState: (task: Task, previousStatus?: string) => void}}} ctx
  * @param {Task} t
  */
@@ -3003,7 +3007,6 @@ function loadPersistedTask(ctx, t) {
   } catch {
     // A persisted task may outlive a workspace that has since been removed.
   }
-  if (t.status === "running" || t.status === "queued") t.status = "unknown";
   if (t.executorId === undefined) t.executorId = "opencode";
   // Legacy records predate creation-time tmpRoot persistence. Their overlay
   // actually lives on disk under the *old* default -- plain os.tmpdir() --
@@ -3014,8 +3017,159 @@ function loadPersistedTask(ctx, t) {
   // cleanupOverlay()) and sweepOrphanedOverlays()'s tmpRoots scan key off
   // of -- silently orphaning the real leftover under os.tmpdir() forever.
   if (t.overlayDirs && t.overlayDirs.tmpRoot === undefined) t.overlayDirs.tmpRoot = os.tmpdir();
+  if (previousStatus === "running" || previousStatus === "queued") {
+    /** @type {any} */ (t)._persistedStatus = previousStatus;
+  }
   ctx.tasks.set(t.id, t);
-  if (t.status !== previousStatus) ctx.taskEvents.emitState(t, previousStatus);
+}
+
+/**
+ * Whether a pid is still alive (signal 0 probe). Uses the manager's killFn
+ * (process.kill) directly rather than sendSignalToProcess's group logic,
+ * since this is a liveness check, not a cancellation.
+ * @param {number|null} pid
+ * @param {(pid: number, signal: NodeJS.Signals|number) => void} killFn
+ * @returns {boolean}
+ */
+function isPidAlive(pid, killFn) {
+  if (pid == null) return false;
+  try {
+    killFn(pid, 0);
+    return true;
+  } catch (err) {
+    const code = errCode(err);
+    if (code === "ESRCH") return false;
+    if (code === "EPERM") return true;
+    return false;
+  }
+}
+
+/**
+ * @param {Task} task
+ * @param {ManagerContext} ctx
+ * @param {string} prev
+ */
+// @ts-ignore -- JSDoc types are provided but tsc still flags implicit any in this JS file
+function handleQueuedForRestart(task, ctx, prev) {
+  task.status = "unknown";
+  // @ts-ignore
+  delete task._persistedStatus;
+  ctx.events.taskEvents.emitState(task, prev);
+  try { ctx.helpers.persistTask(task.id); } catch {}
+}
+
+// @ts-ignore
+function handleRunningForRestart(task, ctx, prev) {
+  let sessionId;
+  try { sessionId = /** @type {any} */ (task).logPath ? readSessionIdFromLog(/** @type {any} */ (task).logPath) : null; } catch { sessionId = null; }
+  if (!sessionId && task.sessionId) sessionId = task.sessionId;
+  let dirExists;
+  try { dirExists = fs.existsSync(task.directory) && fs.statSync(task.directory).isDirectory(); } catch { dirExists = false; }
+  const canResume = Boolean(sessionId) && dirExists;
+  if (task.pid != null && isPidAlive(task.pid, ctx.opts.killFn)) {
+    try { ctx.helpers.sendSignal(task.pid, "SIGTERM"); } catch {}
+  }
+  if (!canResume) {
+    failRunningForRestart(task, ctx, prev, sessionId);
+    return;
+  }
+  resumeRunningForRestart(task, ctx, prev, sessionId);
+}
+
+// @ts-ignore
+function failRunningForRestart(task, ctx, prev, sessionId) {
+  task.status = "crashed";
+  task.failureReason = "daemon_restarted_session_lost";
+  task.failureDetail = sessionId
+    ? `daemon restarted while task was running; directory missing (directory: ${task.directory})`
+    : "daemon restarted while task was running; no resumable session found in log (sessionId missing or log unreadable)";
+  task.endedAt = new Date().toISOString();
+  task.exitCode = null;
+  task.signal = null;
+  task.pid = null;
+  delete task._persistedStatus;
+  ctx.events.taskEvents.emitState(task, prev);
+  try { ctx.helpers.persistTask(task.id); } catch {}
+}
+
+// @ts-ignore
+function resumeRunningForRestart(task, ctx, prev, sessionId) {
+  if (task.overlayDirs) {
+    try { ctx.env.releaseOverlay(task); } catch {}
+    task.overlayDirs = null;
+    task.changesetStatus = "none";
+    task.diffPath = null;
+    task.changesetError = null;
+    task.preDispatchHead = null;
+  }
+  task.status = "queued";
+  task.pid = null;
+  task.endedAt = null;
+  task.exitCode = null;
+  task.signal = null;
+  task.spawnError = null;
+  task.failureReason = null;
+  task.failureDetail = null;
+  task.sessionId = sessionId;
+  // @ts-ignore -- see handleQueuedForRestart
+  delete task._persistedStatus;
+  ctx.events.taskEvents.emitState(task, prev);
+  try { ctx.helpers.persistTask(task.id); } catch {}
+  const executor = getExecutorForTask(task);
+  const launchSpec = buildResumeSpec(task, executor, sessionId);
+  ctx.maps.pendingLaunches.set(task.id, launchSpec);
+  const provider = providerOf(task.model);
+  const pq = getOrCreateProviderQueue(ctx.maps.providerQueues, provider);
+  if (!pq.launchQueue.includes(task.id)) pq.launchQueue.push(task.id);
+}
+
+// @ts-ignore
+function getExecutorForTask(task) {
+  try { return resolveExecutor(task.executorId); } catch { return resolveExecutor(undefined); }
+}
+
+// @ts-ignore
+function buildResumeSpec(task, executor, sessionId) {
+  return {
+    executor,
+    sessionId,
+    prompt: task.prompt ?? task.promptPreview ?? "resumed after daemon restart",
+    directory: task.directory,
+    model: task.model,
+    variant: task.variant,
+    role: task.role ?? "dispatch",
+    outputDir: task.outputDir ?? null,
+  };
+}
+
+/**
+ * Reconciles tasks that were `running` or `queued` at daemon shutdown.
+ * Queued degrades to unknown; running with a recoverable sessionId is
+ * resumed via a fresh overlay, otherwise classified as
+ * daemon_restarted_session_lost.
+ * @param {ManagerContext} ctx
+ */
+function handleDaemonRestartTasks(ctx) {
+  const toHandle = Array.from(ctx.maps.tasks.values()).filter((t) => /** @type {any} */ (t)._persistedStatus === "running" || /** @type {any} */ (t)._persistedStatus === "queued");
+  if (!toHandle.length) return;
+  for (const task of toHandle) {
+    const prev = /** @type {any} */ (task)._persistedStatus;
+    if (task.internal) {
+      task.status = "unknown";
+      // @ts-ignore
+      delete task._persistedStatus;
+      ctx.events.taskEvents.emitState(task, prev);
+      try { ctx.helpers.persistTask(task.id); } catch {}
+    } else if (prev === "queued") {
+      handleQueuedForRestart(task, ctx, prev);
+    } else if (prev === "running") {
+      handleRunningForRestart(task, ctx, prev);
+    } else {
+      // @ts-ignore
+      delete task._persistedStatus;
+    }
+  }
+  try { ctx.helpers.launchQueuedTasks(); } catch {}
 }
 
 /**
@@ -4831,6 +4985,11 @@ function bootstrapManagerContext(ctx) {
     taskEvents: ctx.events.taskEvents,
     setStateLoadError: (err) => { ctx.state.stateLoadError = err; },
   });
+  // Auto-resume running/queued tasks that survived a daemon restart.
+  // Must run before sweepOrphanedOverlays() so the resume handler can
+  // decide per-task whether to keep (resumed) or release (lost) the
+  // overlay, rather than the sweep making a generic orphan decision.
+  handleDaemonRestartTasks(ctx);
   // Scrub prompt scratch files left behind by a daemon crash or forced
   // restart. Each oversized dispatch writes its prompt to PROMPT_DIR as
   // `${task.id}.prompt.txt` (mode 0o600) and removes it from the task's

@@ -2885,20 +2885,21 @@ async function runAdvisor(ctx, { prompt, directory, model, variant, sessionId, t
 }
 
 /**
- * Drains complete `\n`-terminated lines out of `carry`, returning the first
+ * Drains complete `\n`-terminated lines out of `carry`, returning the last
  * session id found (with the still-pending remainder) or the remainder alone.
  * @param {string} carry
  * @returns {{sessionId: string|null, remainder: string}}
  */
 function extractSessionId(carry) {
+  let lastSessionId = null;
   let nl;
   while ((nl = carry.indexOf("\n")) !== -1) {
     const line = carry.slice(0, nl);
     carry = carry.slice(nl + 1);
     const sessionId = line.trim() ? sessionIdInJson(line) : null;
-    if (sessionId) return { sessionId, remainder: carry };
+    if (sessionId) lastSessionId = sessionId;
   }
-  return { sessionId: null, remainder: carry };
+  return { sessionId: lastSessionId, remainder: carry };
 }
 
 /**
@@ -4912,16 +4913,17 @@ function readSessionIdFromLog(logPath) {
   }
   try {
     let carry = "";
+    let lastSessionId = null;
     const buf = Buffer.alloc(CHUNK_SIZE);
     for (;;) {
       const bytesRead = fs.readSync(fd, buf, 0, CHUNK_SIZE, null);
       if (bytesRead === 0) break;
       carry += buf.toString("utf8", 0, bytesRead);
       const result = extractSessionId(carry);
-      if (result.sessionId) return result.sessionId;
+      if (result.sessionId) lastSessionId = result.sessionId;
       carry = result.remainder;
     }
-    return carry.trim() ? sessionIdInJson(carry) : null;
+    return (carry.trim() ? sessionIdInJson(carry) : null) || lastSessionId;
   } catch {
     return null;
   } finally {

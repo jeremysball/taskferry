@@ -476,6 +476,10 @@ describe("protocol version, method list, and envelope", () => {
         assert.ok(RESULT_FIELDS.has("diffStat"));
         assert.ok(RESULT_FIELDS.has("changesetError"));
       });
+
+      test("RESULT_FIELDS includes outputDir", () => {
+        assert.ok(RESULT_FIELDS.has("outputDir"));
+      });
     });
 
     test("constructs exact response and event envelopes", () => {

@@ -17,7 +17,7 @@ import { resolveVariant, KNOWN_VARIANT_LEVELS } from "./variants.js";
 import { readVariantsCache, refreshVariantsCache } from "./variants-cache.js";
 import { loadEnvFile, watchEnvFile } from "./env-file.js";
 import { loadProjectConfig, resolveReadOnlyProjectBinds, verificationPromptBlock } from "./project-config.js";
-import { TASKFERRY_OUTPUT_DIR_ENV, ensureTaskOutputDir, listTaskOutputFiles, outputDirPromptBlock, readTaskOutputFile, resolveTaskOutputDir } from "./output-dir.js";
+import { TASKFERRY_OUTPUT_DIR_ENV, ensureTaskOutputDir, listTaskOutputFiles, outputDirPromptBlock, readTaskOutputFile, resolveOutputDirRoot, resolveTaskOutputDir } from "./output-dir.js";
 import { computeDoctorStats } from "./doctor-stats.js";
 
 /**
@@ -187,6 +187,7 @@ import { computeDoctorStats } from "./doctor-stats.js";
  * @property {unknown} [tokens]
  * @property {number|null} [cost]
  * @property {string} [logPath]
+ * @property {string|null} [outputDir]
  * @property {SummaryOf} [summaryOf]
  * @property {string} [next]
  * @property {boolean} [incomplete]
@@ -2104,6 +2105,7 @@ function computeResultDetail(task, { taskId, full, fields }, ctx) {
     narrationTruncated: narration.narrationTruncated,
     ...(next ? { next } : {}),
     logPath: task.logPath,
+    outputDir: task.outputDir ?? null,
   };
 }
 
@@ -2914,20 +2916,21 @@ async function runAdvisor(ctx, { prompt, directory, model, variant, sessionId, t
 }
 
 /**
- * Drains complete `\n`-terminated lines out of `carry`, returning the first
+ * Drains complete `\n`-terminated lines out of `carry`, returning the last
  * session id found (with the still-pending remainder) or the remainder alone.
  * @param {string} carry
  * @returns {{sessionId: string|null, remainder: string}}
  */
 function extractSessionId(carry) {
+  let lastSessionId = null;
   let nl;
   while ((nl = carry.indexOf("\n")) !== -1) {
     const line = carry.slice(0, nl);
     carry = carry.slice(nl + 1);
     const sessionId = line.trim() ? sessionIdInJson(line) : null;
-    if (sessionId) return { sessionId, remainder: carry };
+    if (sessionId) lastSessionId = sessionId;
   }
-  return { sessionId: null, remainder: carry };
+  return { sessionId: lastSessionId, remainder: carry };
 }
 
 /**
@@ -4527,6 +4530,7 @@ function buildManagerInternalHelpers(ctx) {
     /** @param {Task} task */
     hasLiveOverlay: (task) => hasLiveOverlayForTask(task, { existsFn: ctx.opts.existsFn }),
     sweepOrphanedPromptFiles: () => sweepOrphanedPromptFilesFor({ PROMPT_DIR: ctx.paths.PROMPT_DIR, tasks: ctx.maps.tasks }),
+    sweepOrphanedOutputDirs: () => sweepOrphanedOutputDirsFor({ OUTPUT_DIR_ROOT: resolveOutputDirRoot(ctx.opts.stateDir), tasks: ctx.maps.tasks, readdirFn: ctx.opts.readdirFn, lstatFn: ctx.opts.lstatFn }),
     /** @param {string} model @param {NodeJS.ProcessEnv} [env] @returns {string[]} Resolves the
      * opencode variants table for a model: the test-injected
      * `opencodeVariantsTable` seam when set, otherwise the on-disk
@@ -4605,7 +4609,7 @@ function buildManagerInternalHelpers(ctx) {
      */
     reject: (taskId) => rejectTaskChangeset(taskId, { ensureStateLoaded: () => ctx.helpers.ensureStateLoaded(), tasks: ctx.maps.tasks, persistTask: (taskId) => ctx.helpers.persistTask(taskId), releaseOverlay: (task) => ctx.env.releaseOverlay(task), killGateAndWait: (taskId2) => ctx.env.killGateAndWait(taskId2), noSuchTask }),
     /** @param {string} taskId @param {{path?: string}} [options] */
-    output: (taskId, options) => outputFor(taskId, ctx, options),
+    output: (taskId, options) => outputFor(taskId, { ...ctx, noSuchTask, noSuchOutputFile, noOutputDir }, options),
     /** @param {string} taskId */
     stopRunningWatcher: (taskId) => stopRunningWatcherFor(taskId, { runningWatchers: ctx.maps.runningWatchers, runningWatcherState: ctx.maps.runningWatcherState }),
     /** Forces a running task to stop for a reason other than user cancellation
@@ -4817,6 +4821,16 @@ function bootstrapManagerContext(ctx) {
   // own exit/error paths -- but a SIGKILL of the daemon mid-task skips
   // both cleanup paths and orphans the file forever.
   ctx.helpers.sweepOrphanedPromptFiles();
+  // Mirrors sweepOrphanedPromptFiles/sweepOrphanedOverlays above: a
+  // daemon crash after ensureTaskOutputDir ran for a dispatch but
+  // before the task ever landed in tasks.json (or after a task settled
+  // but its scratch dir was never cleared) leaves <stateDir>/outputs/<id>
+  // behind. Output dirs only ever outlive their task when a state-load
+  // failure or boot crash happened mid-dispatch; the normal settled/exit
+  // paths intentionally keep the dir (it's the worker's deliverable
+  // surface for `taskferry output <id>`), so the sweep only removes dirs
+  // whose task id is not present in tasks.json at all.
+  ctx.helpers.sweepOrphanedOutputDirs();
   // Mirrors sweepOrphanedPromptFiles() above: a daemon that crashed after
   // an overlay was created but before its cleanup (reject/accept, or the
   // advisor auto-reject in extractChangesetForTask()) ever ran leaves a
@@ -4930,16 +4944,17 @@ function readSessionIdFromLog(logPath) {
   }
   try {
     let carry = "";
+    let lastSessionId = null;
     const buf = Buffer.alloc(CHUNK_SIZE);
     for (;;) {
       const bytesRead = fs.readSync(fd, buf, 0, CHUNK_SIZE, null);
       if (bytesRead === 0) break;
       carry += buf.toString("utf8", 0, bytesRead);
       const result = extractSessionId(carry);
-      if (result.sessionId) return result.sessionId;
+      if (result.sessionId) lastSessionId = result.sessionId;
       carry = result.remainder;
     }
-    return carry.trim() ? sessionIdInJson(carry) : null;
+    return (carry.trim() ? sessionIdInJson(carry) : null) || lastSessionId;
   } catch {
     return null;
   } finally {
@@ -5054,7 +5069,31 @@ export function modelsCacheFingerprint(env = {}) {
  * @returns {Error}
  */
 function noSuchTask(taskId) {
-  return new Error(`error: unknown task id: ${taskId}\nhelp: run taskferry list to see valid task ids`);
+  const err = new Error(`error: unknown task id: ${taskId}\nhelp: run taskferry list to see valid task ids`);
+  /** @type {any} */ (err).code = "UNKNOWN_TASK";
+  return err;
+}
+
+/**
+ * @param {string} taskId
+ * @param {string} relativePath
+ * @returns {Error}
+ */
+function noSuchOutputFile(taskId, relativePath) {
+  const err = new Error(`error: output file not found: "${relativePath}" for task ${taskId}\nhelp: run taskferry output ${taskId} to see available files`);
+  /** @type {any} */ (err).code = "OUTPUT_NOT_FOUND";
+  return err;
+}
+
+/**
+ * @param {string} taskId
+ * @param {string} relativePath
+ * @returns {Error}
+ */
+function noOutputDir(taskId, relativePath) {
+  const err = new Error(`error: task ${taskId} has no output directory (requested "${relativePath}")\nhelp: run taskferry output ${taskId} without --path to list available outputs`);
+  /** @type {any} */ (err).code = "NO_OUTPUT_DIR";
+  return err;
 }
 
 // Minimal per-row schema for taskferry list: an agent scanning a task list
@@ -6216,19 +6255,20 @@ async function rejectTaskChangeset(taskId, ctx) {
  * because the scratch dir is per-task state the worker owns, not a parsed log
  * result. taskferry#423.
  * @param {string} taskId
- * @param {{maps: {tasks: Map<string, Task>}, opts: {stateDir: string}, helpers: {ensureStateLoaded: () => void}}} ctx
+ * @param {{maps: {tasks: Map<string, Task>}, opts: {stateDir: string}, helpers: {ensureStateLoaded: () => void}, noSuchTask: (taskId: string) => Error, noSuchOutputFile: (taskId: string, relativePath: string) => Error, noOutputDir: (taskId: string, relativePath: string) => Error}} ctx
  * @param {{path?: string}} [options]
  */
 function outputFor(taskId, ctx, options = {}) {
   ctx.helpers.ensureStateLoaded();
   const task = ctx.maps.tasks.get(taskId);
-  if (!task) throw new Error(`unknown task id: ${taskId}\nhelp: run \`taskferry list\` to see active task ids`);
+  if (!task) throw ctx.noSuchTask(taskId);
   const outputDir = task.outputDir ?? null;
   if (typeof options.path === "string" && options.path.length > 0) {
     if (!outputDir) {
-      return { taskId, outputDir: null, files: [], bytes: 0, total: 0, truncated: false, file: { content: null, size: 0, truncated: false, error: "no_output_dir" } };
+      throw ctx.noOutputDir(taskId, options.path);
     }
     const file = readTaskOutputFile(outputDir, options.path);
+    if (file.error === "not_found") throw ctx.noSuchOutputFile(taskId, options.path);
     return { taskId: taskId, outputDir: outputDir, files: [], bytes: 0, total: 0, truncated: false, file };
   }
   if (!outputDir) {
@@ -6476,6 +6516,86 @@ function sweepOrphanedPromptFilesFor(ctx) {
 }
 
 /**
+ * Sweeps orphaned output dirs under <stateDir>/outputs/. Each dispatch
+ * reserves its output dir via ensureTaskOutputDir() before launch --
+ * `bwrap --bind` needs the source path to exist on the host -- so a
+ * daemon that crashed after that mkdir but before the task id was
+ * persisted into tasks.json (or that died before any cleanup ran) leaves
+ * an <id> entry under outputs/ with no matching task. Settled tasks
+ * intentionally keep their output dir (it's the worker's deliverable
+ * surface for `taskferry output <id>`), so the sweep only removes dirs
+ * whose task id is absent from the loaded tasks.json entirely. Mirrors
+ * sweepOrphanedPromptFiles() / sweepOrphanedOverlays() at startup.
+ * @param {{OUTPUT_DIR_ROOT: string, tasks: Map<string, Task>, readdirFn: (path: string) => string[], lstatFn?: (path: string) => fs.Stats, removeDirFn?: (path: string) => void}} ctx
+ */
+export function sweepOrphanedOutputDirsFor(ctx) {
+  let entries;
+  try {
+    entries = ctx.readdirFn(ctx.OUTPUT_DIR_ROOT);
+  } catch {
+    return;
+  }
+  // Always filter, then process (CLAUDE.md, taskferry#513): narrow to the
+  // orphan subset via cheap in-memory tasks.has before any per-entry FS work
+  // (stat/rm). Previously this mixed readdir iteration with immediate
+  // removal, but the expensive per-entry work (lstat + rm -rf) still scaled
+  // with every historical directory even when only a handful are orphans.
+  // Collecting the eligible set first bounds FS work to that set.
+  const orphanEntries = collectOrphanOutputEntries(entries, ctx.tasks);
+  if (orphanEntries.length === 0) return;
+  const lstat = ctx.lstatFn ?? fs.lstatSync;
+  const removeDir = ctx.removeDirFn ?? removeDirIfPresent;
+  for (const entry of orphanEntries) {
+    sweepOrphanOutputEntry(path.join(ctx.OUTPUT_DIR_ROOT, entry), lstat, removeDir);
+  }
+}
+
+/**
+ * Cheap in-memory filter for the sweep: returns only entries whose id has
+ * no matching task. No FS work here, so this scales with the directory
+ * listing size but does no per-entry I/O.
+ * @param {string[]} entries
+ * @param {Map<string, Task>} tasks
+ * @returns {string[]}
+ */
+function collectOrphanOutputEntries(entries, tasks) {
+  const orphans = [];
+  for (const entry of entries) {
+    if (entry && entry !== "." && entry !== ".." && !tasks.has(entry)) orphans.push(entry);
+  }
+  return orphans;
+}
+
+/**
+ * Expensive per-orphan FS work: stat the path then rm it. Called only for
+ * the filtered orphan set, so this scales with the orphan count, not the
+ * all-time directory count. The lstat is intentionally after the has-filter
+ * so it is not run for retained history.
+ * @param {string} full
+ * @param {(path: string) => fs.Stats} lstat
+ * @param {(path: string) => void} removeDir
+ */
+function sweepOrphanOutputEntry(full, lstat, removeDir) {
+  try {
+    lstat(full);
+  } catch (err) {
+    if (errCode(err) === "ENOENT") return;
+    throw err;
+  }
+  removeDir(full);
+}
+
+/** Recursively remove a directory tree, tolerating it already being gone (ENOENT).
+ * @param {string} dirPath */
+function removeDirIfPresent(dirPath) {
+  try {
+    fs.rmSync(dirPath, { recursive: true, force: false });
+  } catch (err) {
+    if (errCode(err) !== "ENOENT") throw err;
+  }
+}
+
+/**
  * Forces a refresh of a task's activity summary via the activity cache and
  * returns the refreshed snapshot. Extracted out of `createTaskManager`'s
  * `activitySummary` closure.
@@ -6612,15 +6732,24 @@ function startRunningWatcherFor(task, ctx) {
  * stored on `task.prompt` and passed via `-p`. The two blocks are:
  *   - verificationPromptBlock: only on dispatch (advisor never gates) and
  *     suppressed by --no-overlay (parity with the rest of the overlay machinery).
- *   - outputDirPromptBlock: always on dispatch, since it's the only surface a
- *     tool-call-ending worker has to leave its deliverable. taskferry#423.
- * @param {{role: "dispatch"|"advisor", noOverlay: boolean, projectConfig: {check: string|null}, prompt: string, outputDir: string|null}} args
+ *   - outputDirPromptBlock: gated on outputDir being allocated at all, not
+ *     on role. An advisor turn gets the exact same scratch dir and
+ *     TASKFERRY_OUTPUT_DIR as a dispatch (see dispatchTask), so it needs
+ *     the same in-prompt notification to actually discover it -- a worker
+ *     that has a writable dir and an env var pointing at it but no prompt
+ *     text explaining either can't use the "deliverable survives turn end"
+ *     mechanism this exists for. Previously gated on role === "dispatch",
+ *     which left advisor's allocation silently undiscoverable
+ *     (taskferry#504); tying the prompt block to outputDir itself instead
+ *     of duplicating a separate role check means it can't drift out of
+ *     sync with what dispatchTask actually allocated. taskferry#423.
+ * @param {{role: "dispatch"|"advisor", noOverlay: boolean, projectConfig: {check: string|null}, prompt: string, outputDir: string|null, noSandbox?: boolean}} args
  * @returns {string}
  */
-function buildDispatchPrompt({ role, noOverlay, projectConfig, prompt, outputDir }) {
+function buildDispatchPrompt({ role, noOverlay, projectConfig, prompt, outputDir, noSandbox = false }) {
   const injected = [
     role === "dispatch" && !noOverlay && projectConfig.check ? verificationPromptBlock(projectConfig.check) : "",
-    outputDirPromptBlock(outputDir),
+    outputDir ? outputDirPromptBlock(outputDir, noSandbox) : "",
   ].join("");
   return `${prompt}${injected}`;
 }
@@ -6655,10 +6784,15 @@ function dispatchTask(params, ctx) {
   // Per-task scratch dir: a writable, rw-bound surface the worker can use to
   // hand back deliverables whose final assistant message ended on a tool call
   // (so `taskferry result` can't parse a result). The same path is exported as
-  // $TASKFERRY_OUTPUT_DIR inside the sandbox. taskferry#423.
-  const outputDir = role === "dispatch" ? resolveTaskOutputDir(ctx.STATE_DIR, id) : null;
-  if (outputDir) ensureTaskOutputDir(outputDir);
-  const dispatchPrompt = buildDispatchPrompt({ role, noOverlay, projectConfig, prompt, outputDir });
+  // $TASKFERRY_OUTPUT_DIR inside the sandbox. Allocated for every dispatch
+  // regardless of role (dispatch + advisor both go through this code path) so
+  // the docs/skill text claiming "every dispatch gets a per-task scratch dir"
+  // stays accurate; the advisor role also has a final-message window where
+  // the answer can end on a tool call and the caller wants the deliverable
+  // back the same way. taskferry#423.
+  const outputDir = resolveTaskOutputDir(ctx.STATE_DIR, id);
+  ensureTaskOutputDir(outputDir);
+  const dispatchPrompt = buildDispatchPrompt({ role, noOverlay, projectConfig, prompt, outputDir, noSandbox });
   const task = buildDispatchTask({ id, model, executor, priorSessionTask, variant, sessionId, originSessionId, internal, finalMarker, role, logPath, parentTaskId, env, prompt: dispatchPrompt, originalPrompt: prompt, directory: normalizedDirectory, defaultVariant: ctx.defaultVariant, resolveOpencodeVariants: ctx.resolveOpencodeVariants, class: taskClass, outputDir: outputDir });
   queueDispatchLaunch({ tasks: ctx.tasks, persistTask: ctx.persistTask, pendingLaunches: ctx.pendingLaunches, providerQueues: ctx.providerQueues, launchQueuedTasks: ctx.launchQueuedTasks }, { id, task, sessionId, env, noSandbox, noOverlay, executor, role, prompt: dispatchPrompt, allowedDirs: effectiveRwBind, roBind: dispatchRoBind, outputDir: outputDir });
   const summary = summarize(task);

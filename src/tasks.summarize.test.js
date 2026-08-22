@@ -5,6 +5,9 @@ import path from "node:path";
 import { createTaskManager } from "./tasks.js";
 import { trackManager, makeManager, fakeChild, baseTask, INVESTIGATED_TEXT, SOURCE_LOG, LUNA_MODEL, MINIMAX_MODEL, READING_CONFIG, CONTINUE_FLAG, SRCA_LOG, SRCB_LOG, DID_A, DID_B, mkdtempTracked, makeFakeExecutor } from "./tasks.test-helpers.js";
 
+const FRESH_RETRY_SESSION_ID = "ses_fresh_retry";
+const FRESH_RETRY_OUTPUT = "fresh retry output";
+
 describe("summarize(): spawn shape, attachment, and snapshot content", () => {
   test("uses --pure and a private attachment", async () => {
     let captured;
@@ -288,6 +291,35 @@ describe("summarize(): multi-call session continuity", () => {
     child.emit("exit", 0, null);
   });
 
+  test("settlement caches the most recent session ID after an internal retry", async () => {
+    const child = fakeChild();
+    const log = JSON.stringify({ type: "text", part: { messageID: "m1", text: "Inspect the daemon" } });
+    const mgr = makeManager({
+      tasksFixture: (logDir) => [baseTask({ id: "source", logPath: path.join(logDir, SOURCE_LOG) })],
+      logs: { [SOURCE_LOG]: log },
+      spawnFn: () => child,
+    });
+
+    const started = await mgr.summarize("source", { maxWords: 150 });
+    mgr.flushPersist();
+    const persisted = JSON.parse(fs.readFileSync(mgr.paths.TASKS_FILE, "utf8"));
+    const summary = persisted.find((task) => task.id === started.summaryTask.id);
+    fs.writeFileSync(
+      summary.logPath,
+      [
+        JSON.stringify({ sessionID: "ses_failed" }),
+        JSON.stringify({ type: "error", message: "retrying" }),
+        JSON.stringify({ sessionID: FRESH_RETRY_SESSION_ID }),
+        JSON.stringify({ type: "text", part: { messageID: "answer", text: FRESH_RETRY_OUTPUT } }),
+        JSON.stringify({ type: "step_finish", part: { messageID: "answer", reason: "stop" } }),
+      ].join("\n")
+    );
+
+    child.emit("exit", 0, null);
+
+    assert.equal(mgr.activityCache.getSummarySessionId("source"), FRESH_RETRY_SESSION_ID);
+  });
+
   test("second summarize call continues the prior session and sends only the narration delta (not the full bounded excerpt)", async () => {
     const children = [];
     const captures = [];
@@ -420,16 +452,16 @@ describe("summarize(): continue-fail-so-fresh retry", () => {
     assert.equal(retries.length, 2, "expected two summary tasks to have been queued");
     fs.writeFileSync(
       retries[1].logPath,
-      JSON.stringify({ sessionID: "ses_fresh_retry", type: "text", part: { messageID: "answer", text: "fresh retry output" } }) + "\n"
+      JSON.stringify({ sessionID: FRESH_RETRY_SESSION_ID, type: "text", part: { messageID: "answer", text: FRESH_RETRY_OUTPUT } }) + "\n"
         + JSON.stringify({ type: "step_finish", part: { messageID: "answer", reason: "stop" } }) + "\n"
     );
     children[1].emit("exit", 0, null);
 
     const result = await refreshP;
-    assert.equal(result.activity, "fresh retry output");
+    assert.equal(result.activity, FRESH_RETRY_OUTPUT);
     // Cache ended up with the retry's session id (recorded by the exit
     // handler), not the stale ses_cached or the mismatched first attempt.
-    assert.equal(mgr.activityCache.getSummarySessionId("source"), "ses_fresh_retry");
+    assert.equal(mgr.activityCache.getSummarySessionId("source"), FRESH_RETRY_SESSION_ID);
     assert.notEqual(mgr.activityCache.getLastSummarizedWatermark("source"), initialSize);
   });
 });

@@ -52,7 +52,7 @@ check("home view reports a workspace", typeof home.workspace === "string" && hom
 check("home view reports task counts", typeof home.counts === "object");
 
 console.log("\n== dispatch ==");
-const dispatched = taskferry(["dispatch", "--prompt", "Reply with the word PONG and nothing else.", DIRECTORY_FLAG, dirArg, "--model", "openrouter/deepseek/deepseek-v4-flash", "--executor", "opencode"]);
+const dispatched = taskferry(["dispatch", "--prompt", "Reply with the word PONG and nothing else.", DIRECTORY_FLAG, dirArg, "--model", "meta/muse-spark-1.2-contributor", "--variant", "low", "--executor", "opencode"]);
 console.log(dispatched);
 const taskId = dispatched.id;
 check("dispatch returned a task id", typeof taskId === "string" && taskId.length > 0);
@@ -92,7 +92,7 @@ const watch = spawn(process.execPath, [cliEntry, "watch", DIRECTORY_FLAG, dirArg
 const rl = readline.createInterface({ input: watch.stdout });
 rl.on("line", (line) => watchLines.push(line));
 await new Promise((resolve) => setTimeout(resolve, 500));
-const secondDispatch = taskferry(["dispatch", "--prompt", "Reply with the word PONG and nothing else.", DIRECTORY_FLAG, dirArg, "--model", "openrouter/deepseek/deepseek-v4-flash", "--executor", "opencode"]);
+const secondDispatch = taskferry(["dispatch", "--prompt", "Reply with the word PONG and nothing else.", DIRECTORY_FLAG, dirArg, "--model", "meta/muse-spark-1.2-contributor", "--variant", "low", "--executor", "opencode"]);
 let watchExitCode = null;
 const watchExited = new Promise((resolve) => watch.once("exit", (code) => {
   watchExitCode = code;

@@ -1,5 +1,19 @@
 # Changelog
 
+## [4.2.0](https://github.com/jeremysball/taskferry/compare/taskferry-v4.1.2...taskferry-v4.2.0) (2026-08-22)
+
+
+### Features
+
+* **sandbox:** let --ro-bind override the deny-list with a loud warning ([#503](https://github.com/jeremysball/taskferry/issues/503)) ([a5a63b7](https://github.com/jeremysball/taskferry/commit/a5a63b7f4879c6aa92121527f93095d7d969a63c)), closes [#497](https://github.com/jeremysball/taskferry/issues/497)
+
+
+### Bug Fixes
+
+* **output:** enforce response budget for real request ids ([#527](https://github.com/jeremysball/taskferry/issues/527)) ([5acdc4f](https://github.com/jeremysball/taskferry/commit/5acdc4fea1eaaed4c0754f809db5140ecf094770))
+* **summarizer:** use latest session ID from retry logs ([0b845fd](https://github.com/jeremysball/taskferry/commit/0b845fd235eab08dc3d4d193ff4f243ecff18ae1))
+* **tasks:** handle resolver failures and centralize activity-key normalization ([#483](https://github.com/jeremysball/taskferry/issues/483)) ([32ed725](https://github.com/jeremysball/taskferry/commit/32ed725b4b1106816d6251cf5d0c1761ee4fd3f2))
+
 ## [4.1.2](https://github.com/jeremysball/taskferry/compare/taskferry-v4.1.1...taskferry-v4.1.2) (2026-08-21)
 
 

@@ -1,5 +1,12 @@
 # Changelog
 
+## [4.1.2](https://github.com/jeremysball/taskferry/compare/taskferry-v4.1.1...taskferry-v4.1.2) (2026-08-21)
+
+
+### Bug Fixes
+
+* **tooling:** glob test discovery and require local quality tools ([#528](https://github.com/jeremysball/taskferry/issues/528)) ([8f21442](https://github.com/jeremysball/taskferry/commit/8f2144238dd9216800ab9d312a955c2e14f9fd75))
+
 ## [4.1.1](https://github.com/jeremysball/taskferry/compare/taskferry-v4.1.0...taskferry-v4.1.1) (2026-08-21)
 
 

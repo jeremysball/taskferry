@@ -830,8 +830,21 @@ function buildLaunchSpawnArgs(executor, { isSummary, summaryLaunch, dispatchLaun
     variant: isSummary ? undefined : dispatchLaunch.variant,
     snapshotPath: isSummary ? summaryLaunch.snapshotPath : undefined,
     prompt: isSummary ? "" : dispatchLaunch.prompt,
-    sessionId: isSummary ? summaryLaunch.summarySessionId ?? null : dispatchLaunch.sessionId ?? null,
+    sessionId: resolveLaunchSessionId(isSummary, summaryLaunch, dispatchLaunch),
   });
+}
+
+/**
+ * The opencode session id a launch continues, if any: a summary child
+ * resumes its source task's cached summary session, a dispatch resumes the
+ * session id it was launched with. `null` means a fresh session.
+ * @param {boolean} isSummary
+ * @param {SummaryLaunch} summaryLaunch
+ * @param {DispatchLaunch} dispatchLaunch
+ * @returns {string|null}
+ */
+function resolveLaunchSessionId(isSummary, summaryLaunch, dispatchLaunch) {
+  return isSummary ? summaryLaunch.summarySessionId ?? null : dispatchLaunch.sessionId ?? null;
 }
 
 /**
@@ -1209,6 +1222,45 @@ function copyGitSnapshot(source, destination) {
 }
 
 /**
+ * Resolves the per-task executor data-home scope for a launch. The scope is
+ * the id whose `opencode-data/<id>` directory the launch's sandboxed data
+ * home points at (taskferry#501): concurrent tasks each get their own sqlite
+ * session db instead of contending on one daemon-wide opencode.db.
+ *
+ * The scope is NOT simply the launching task's own id, because a session
+ * created by one task can be resumed by a different one (`dispatch
+ * --session-id`, an advisor follow-up, a daemon-restart auto-resume), and
+ * `--continue --session <id>` must find the session rows where the session
+ * was originally created. So a launch that resumes a session resolves the
+ * *earliest* task in the daemon's map holding that session id (the session
+ * creator -- resumed tasks stamp the same session id back on their record,
+ * so "latest" would point at a task whose own data home is a different
+ * scope) and inherits that task's scope. A launch that does not resume a
+ * session, or whose session has no known holder (created outside this
+ * daemon, or in an unsandboxed run), scopes to the launching task itself:
+ * its own id, or -- for a summary child -- the source task's id, since
+ * every summary-generation turn of one task reuses the source's data home
+ * so the summary session's `--continue` still resolves.
+ * @param {{tasks: Map<string, Task>}} ctx
+ * @param {import("./executor.js").WorkerExecutor} executor
+ * @param {Task} task
+ * @param {string|null|undefined} resolvedSessionId
+ * @returns {string}
+ */
+function resolveExecutorDataHomeScope(ctx, executor, task, resolvedSessionId) {
+  if (resolvedSessionId) {
+    /** @type {Task|null} */
+    let owner = null;
+    for (const t of ctx.tasks.values()) {
+      if (t.sessionId !== resolvedSessionId || t.executorId !== executor.id) continue;
+      if (!owner || t.startedAt < owner.startedAt) owner = t;
+    }
+    if (owner) return owner.summaryOf ? owner.summaryOf.sourceTaskId : owner.id;
+  }
+  return task.summaryOf ? task.summaryOf.sourceTaskId : task.id;
+}
+
+/**
  * Computes the bwrap bind set for a sandboxed dispatch: the deny-list (with
  * entries the user simply doesn't have dropped, since bwrap --tmpfs fails if
  * the mount point doesn't exist), the executor's ro-bind auth file, the
@@ -1243,6 +1295,7 @@ function buildBwrapBinds(ctx, launchInfo, task, spawnEnv, role) {
   // home (opencode: XDG_DATA_HOME; pi: PI_CODING_AGENT_DIR) and which
   // destination to ro-bind the real auth file into, so each executor's bound
   // auth destination matches its own environment directory.
+  const resumedSessionId = resolveLaunchSessionId(isSummary, /** @type {SummaryLaunch} */ (launchInfo.summaryLaunch), dispatchLaunch);
   const {
     extraRoBinds: executorRoBinds,
     extraRwPairBinds: executorRwPairBinds = [],
@@ -1251,6 +1304,12 @@ function buildBwrapBinds(ctx, launchInfo, task, spawnEnv, role) {
   } = executor.sandboxAuthFile({
     homeDir,
     dataDir: ctx.cacheDir,
+    // The sandboxed data home is scoped per task (taskferry#501), so two
+    // concurrently-running tasks never share one executor data home (opencode
+    // sqlite contention). The scope follows the resumed session's owner when
+    // this launch continues one; otherwise the launching task itself (its own
+    // id, or the source task's id for a summary child).
+    taskId: resolveExecutorDataHomeScope(ctx, executor, task, resumedSessionId),
     spawnEnv,
     existsFn: ctx.existsFn,
     statFn: ctx.statFn,
@@ -1270,6 +1329,22 @@ function buildBwrapBinds(ctx, launchInfo, task, spawnEnv, role) {
   // hence the mkdir here rather than leaving it for the sandboxed process.
   fs.mkdirSync(sandboxedDataHome, { recursive: true, mode: 0o700 });
   extraRwBinds.push(sandboxedDataHome);
+  // The root filesystem is read-only bound by default, so uv/uvx's default
+  // cache and tool dirs (~/.cache/uv, ~/.local/share/uv/tools) are
+  // unwritable inside the sandbox: a first `uvx <tool>` run cannot resolve
+  // or install its environment, and -- worst case (taskferry#426) -- a tool
+  // like ruff silently produced a plausible-looking wrong answer instead of
+  // failing. Redirect both to per-task writable dirs under cacheDir (the
+  // same real-disk storage sandboxedDataHome uses) and rw-bind each dir at
+  // that same path so bwrap sees a real, writable mount. Per-task (not
+  // shared) so one task's cache can't perturb or bloat another's.
+  const uvCacheDir = path.join(ctx.cacheDir, "uv-cache", task.id);
+  const uvToolsDir = path.join(ctx.cacheDir, "uv-tools", task.id);
+  fs.mkdirSync(uvCacheDir, { recursive: true, mode: 0o700 });
+  fs.mkdirSync(uvToolsDir, { recursive: true, mode: 0o700 });
+  extraRwBinds.push(uvCacheDir, uvToolsDir);
+  sandboxEnv.UV_CACHE_DIR = uvCacheDir;
+  sandboxEnv.UV_TOOL_DIR = uvToolsDir;
   // Per-task scratch dir is read-write inside the sandbox at the same path
   // the worker sees via $TASKFERRY_OUTPUT_DIR. Only dispatch (not summary)
   // launches get one -- summaries don't take a deliverable. The dir already
@@ -3333,10 +3408,41 @@ function collectOverlayTmpRoots(tasks, overlayTmpRoot) {
 }
 
 /**
+ * Reads the current on-disk task records into a lightweight map so a sweep
+ * that is about to delete state can double-check the task's id against the
+ * persisted store rather than trusting a possibly-stale in-memory snapshot
+ * (taskferry#515). A stale daemon that booted before newer tasks existed
+ * has no in-memory record of them, and a disk re-read is the only way it
+ * can tell a genuinely orphaned overlay from a live task's working state.
+ * Returns an empty map on any read/parse failure -- including ENOENT, where
+ * there is no persisted state to protect at all.
+ * @param {string|undefined} tasksFile
+ * @returns {Map<string, Record<string, any>>}
+ */
+function readPersistedTasks(tasksFile) {
+  if (!tasksFile) return new Map();
+  try {
+    const raw = fs.readFileSync(tasksFile, "utf8");
+    /** @type {unknown} */
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return new Map();
+    const byId = new Map();
+    for (const record of parsed) {
+      if (record && typeof record === "object" && typeof /** @type {Record<string, unknown>} */ (record).id === "string") {
+        byId.set(/** @type {string} */ (/** @type {Record<string, unknown>} */ (record).id), /** @type {Record<string, any>} */ (record));
+      }
+    }
+    return byId;
+  } catch {
+    return new Map();
+  }
+}
+
+/**
  * Sweeps every orphaned overlay directory under one tmp root. Extracted from
  * `sweepOrphanedOverlays`' inner loop so each nesting level of the original
  * double loop stays its own standalone helper.
- * @param {{tasks: Map<string, Task>, releaseOverlay: (task: {overlayDirs?: {root: string, tmpRoot: string}|null}) => boolean, persistTask: (taskId: string) => void, readdirFn: (path: string) => string[]}} ctx
+ * @param {{tasks: Map<string, Task>, persistedTasks: Map<string, Record<string, any>>, releaseOverlay: (task: {overlayDirs?: {root: string, tmpRoot: string}|null}) => boolean, persistTask: (taskId: string) => void, readdirFn: (path: string) => string[]}} ctx
  * @param {string} tmpRoot
  */
 function sweepOverlayTmpRoot(ctx, tmpRoot) {
@@ -3354,7 +3460,7 @@ function sweepOverlayTmpRoot(ctx, tmpRoot) {
  * it up if so. A task whose changesetStatus is still "pending" owns its
  * overlay and must never be swept; only unknown ids and already-resolved
  * tasks with a leftover overlayDirs are orphans.
- * @param {{tasks: Map<string, Task>, releaseOverlay: (task: {overlayDirs?: {root: string, tmpRoot: string}|null}) => boolean, persistTask: (taskId: string) => void}} ctx
+ * @param {{tasks: Map<string, Task>, persistedTasks: Map<string, Record<string, any>>, releaseOverlay: (task: {overlayDirs?: {root: string, tmpRoot: string}|null}) => boolean, persistTask: (taskId: string) => void}} ctx
  * @param {string} entry
  * @param {string} tmpRoot
  */
@@ -3365,9 +3471,30 @@ function sweepOverlayEntry(ctx, entry, tmpRoot) {
   const ownsThisOverlay = task?.overlayDirs?.root === root;
   const isOwnedPending = ownsThisOverlay && task.changesetStatus === "pending";
   if (!taskId || isOwnedPending) return;
+  // A daemon sweeping against a stale in-memory map (taskferry#515) must not
+  // delete an overlay whose id the on-disk tasks.json records: an id absent
+  // from this daemon's map but present on disk was written by a *different*
+  // (live) daemon after this one booted -- the disk record is the only
+  // state that outlives a daemon's own boot, so it is the authority for
+  // ids this daemon has never seen. An id unknown both in memory and on
+  // disk is genuinely orphaned (crash before the record ever persisted).
+  if (diskStillRecordsOverlay(ctx, task, /** @type {string} */ (taskId))) return;
   const cleanupTarget = ownsThisOverlay ? task : { overlayDirs: { root, tmpRoot } };
   const cleanupFailed = ctx.releaseOverlay(cleanupTarget);
   if (!cleanupFailed && ownsThisOverlay) ctx.persistTask(taskId);
+}
+
+/**
+ * Whether the on-disk task snapshot knows `taskId` as a live task that this
+ * daemon's own in-memory map has never seen. Separated into its own helper
+ * so `sweepOverlayEntry` stays under the cyclomatic-complexity cap.
+ * @param {{persistedTasks: Map<string, Record<string, any>>}} ctx
+ * @param {Task|undefined} task
+ * @param {string} taskId
+ * @returns {boolean}
+ */
+function diskStillRecordsOverlay(ctx, task, taskId) {
+  return task == null && ctx.persistedTasks.has(taskId);
 }
 
 /**
@@ -4607,6 +4734,16 @@ function initManagerState(opts) {
     activitySummarySubscriptions: 0,
     /** @type {Error|null} */
     stateLoadError: null,
+    // Snapshot of the on-disk task records taken at boot, before the orphan
+    // sweeps run. The sweeps are about to delete state, so they re-check a
+    // candidate id against this disk picture rather than trusting the
+    // in-memory map alone (taskferry#515): a stale daemon that booted before
+    // newer tasks existed has no in-memory record of them, and the disk is
+    // the only store that outlives a daemon's own boot. Populated by
+    // bootstrapManagerContext() immediately after loadPersistedTasks(), so
+    // it reflects tasks.json as read this boot.
+    /** @type {Map<string, Record<string, any>>} */
+    persistedTasks: new Map(),
     envFileVars: opts.envFileVars,
     /** @type {ReturnType<typeof import("./env-file.js").watchEnvFile>|null} */
     envFileWatcher: null,
@@ -4778,6 +4915,7 @@ function buildManagerEnvHelpers(ctx) {
       spawnFn: ctx.opts.spawnFn,
       stateDir: ctx.opts.stateDir,
       runtimeDir: ctx.opts.runtimeDir,
+      cacheDir: ctx.opts.cacheDir,
       existsFn: ctx.opts.existsFn,
       sandboxDenylist: ctx.opts.sandboxDenylist,
       persistTask: (taskId) => ctx.helpers.persistTask(taskId),
@@ -4844,8 +4982,8 @@ function buildManagerInternalHelpers(ctx) {
     settleWaiters: (taskId) => settleWaitersFor(taskId, { waiters: ctx.maps.waiters }),
     /** @param {Task} task */
     hasLiveOverlay: (task) => hasLiveOverlayForTask(task, { existsFn: ctx.opts.existsFn }),
-    sweepOrphanedPromptFiles: () => sweepOrphanedPromptFilesFor({ PROMPT_DIR: ctx.paths.PROMPT_DIR, tasks: ctx.maps.tasks }),
-    sweepOrphanedOutputDirs: () => sweepOrphanedOutputDirsFor({ OUTPUT_DIR_ROOT: resolveOutputDirRoot(ctx.opts.stateDir), tasks: ctx.maps.tasks, readdirFn: ctx.opts.readdirFn, lstatFn: ctx.opts.lstatFn }),
+    sweepOrphanedPromptFiles: () => sweepOrphanedPromptFilesFor({ PROMPT_DIR: ctx.paths.PROMPT_DIR, tasks: ctx.maps.tasks, persistedTasks: ctx.state.persistedTasks }),
+    sweepOrphanedOutputDirs: () => sweepOrphanedOutputDirsFor({ OUTPUT_DIR_ROOT: resolveOutputDirRoot(ctx.opts.stateDir), tasks: ctx.maps.tasks, persistedTasks: ctx.state.persistedTasks, readdirFn: ctx.opts.readdirFn, lstatFn: ctx.opts.lstatFn }),
     /** @param {string} model @param {NodeJS.ProcessEnv} [env] @returns {string[]} Resolves the
      * opencode variants table for a model: the test-injected
      * `opencodeVariantsTable` seam when set, otherwise the on-disk
@@ -4862,7 +5000,7 @@ function buildManagerInternalHelpers(ctx) {
       const table = readVariantsCache({ cacheDir: ctx.opts.cacheDir, env: ctx.env.sanitizedEnvironment(env) });
       return table?.get(model) ?? [];
     },
-    sweepOrphanedOverlays: () => sweepOrphanedOverlaysFor({ tasks: ctx.maps.tasks, overlayTmpRoot: ctx.opts.overlayTmpRoot, releaseOverlay: (task) => ctx.env.releaseOverlay(task), persistTask: (taskId) => ctx.helpers.persistTask(taskId), readdirFn: ctx.opts.readdirFn }),
+    sweepOrphanedOverlays: () => sweepOrphanedOverlaysFor({ tasks: ctx.maps.tasks, persistedTasks: ctx.state.persistedTasks, overlayTmpRoot: ctx.opts.overlayTmpRoot, releaseOverlay: (task) => ctx.env.releaseOverlay(task), persistTask: (taskId) => ctx.helpers.persistTask(taskId), readdirFn: ctx.opts.readdirFn }),
     markInterruptedGates: () => markInterruptedGatesFor({ tasks: ctx.maps.tasks, hasLiveOverlay: (task) => ctx.helpers.hasLiveOverlay(task), startCheckGate: (task) => ctx.env.startCheckGate(task), sendSignal: (pid, signal) => ctx.helpers.sendSignal(pid, signal), persistTask: (taskId) => ctx.helpers.persistTask(taskId) }),
     /**
      * Validate `model` against opencode's installed-models list, NOT against
@@ -5130,6 +5268,14 @@ function bootstrapManagerContext(ctx) {
     taskEvents: ctx.events.taskEvents,
     setStateLoadError: (err) => { ctx.state.stateLoadError = err; },
   });
+  // A second read of tasks.json for the sweeps' disk guard, taken *now* so
+  // it is as close to the deletions as a boot-time snapshot can be. This is
+  // cheap (one read of the state file) and gives the sweeps a record of
+  // what a *different* daemon might have written to disk before this one
+  // claimed the state -- the in-memory map only knows this daemon's load.
+  // An unreadable/absent store degrades to an empty map, which makes every
+  // sweep's disk check a no-op, i.e. exactly the pre-existing behavior.
+  ctx.state.persistedTasks = readPersistedTasks(ctx.paths.TASKS_FILE);
   // Auto-resume running/queued tasks that survived a daemon restart.
   // Must run before sweepOrphanedOverlays() so the resume handler can
   // decide per-task whether to keep (resumed) or release (lost) the
@@ -6160,7 +6306,7 @@ function appendBoundedOutput(tail, chunk) {
  * without an overlay, per the design's non-goal "Gating --no-overlay /
  * non-git dispatches."
  * @param {Task} task
- * @param {{spawnFn: typeof import("node:child_process").spawn, stateDir: string, runtimeDir: string, existsFn: (p: string) => boolean, sandboxDenylist: string[], persistTask: (taskId: string) => void, scheduleActivity: (task: Task, options?: {force?: boolean}) => Promise<unknown>, sendSignal: (pid: number, signal: NodeJS.Signals) => void, platform: NodeJS.Platform, gateChildren: Map<string, import("node:child_process").ChildProcess>}} ctx
+ * @param {{spawnFn: typeof import("node:child_process").spawn, stateDir: string, runtimeDir: string, cacheDir: string, existsFn: (p: string) => boolean, sandboxDenylist: string[], persistTask: (taskId: string) => void, scheduleActivity: (task: Task, options?: {force?: boolean}) => Promise<unknown>, sendSignal: (pid: number, signal: NodeJS.Signals) => void, platform: NodeJS.Platform, gateChildren: Map<string, import("node:child_process").ChildProcess>}} ctx
  */
 function startCheckGate(task, ctx) {
   if (!task.overlayDirs || task.role !== "dispatch" || !platformSupportsSandbox(ctx.platform)) return;
@@ -6185,12 +6331,23 @@ function startCheckGate(task, ctx) {
     protectedPaths: [...fullDenyList, ctx.stateDir, ctx.runtimeDir, task.directory],
     existsFn: ctx.existsFn,
   });
+  // taskferry#426: the gate mounts the same read-only root the worker ran
+  // with, so a check command that shells out to uv/uvx hits the same
+  // read-only default UV_CACHE_DIR. Re-bind the worker's deterministic
+  // per-task uv dirs and re-point the env vars at them, exactly as
+  // buildBwrapBinds did for the worker, so the gate verifies the same
+  // environment the worker actually ran in.
+  const uvCacheDir = path.join(ctx.cacheDir, "uv-cache", task.id);
+  const uvToolsDir = path.join(ctx.cacheDir, "uv-tools", task.id);
+  fs.mkdirSync(uvCacheDir, { recursive: true, mode: 0o700 });
+  fs.mkdirSync(uvToolsDir, { recursive: true, mode: 0o700 });
   const spawnArgs = buildBwrapArgs({
     directory: task.directory,
     stateDir: ctx.stateDir,
     runtimeDir: ctx.runtimeDir,
     homeDir: os.homedir(),
     extraRoBinds: readOnlyBinds,
+    extraRwBinds: [uvCacheDir, uvToolsDir],
     overlay: { upperDir: task.overlayDirs.upperDir, workDir: task.overlayDirs.workDir },
     overlayRwBinds: task.overlayDirs.rwBinds ?? [],
     overlayRwFileBinds: task.overlayDirs.rwFileBinds ?? [],
@@ -6234,6 +6391,11 @@ function startCheckGate(task, ctx) {
   // dispatch's payload env; a per-key filter is sufficient and local to this
   // function.
   const gateEnv = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith("TASKFERRY_")));
+  // taskferry#426: same redirection the worker got -- the gate's uv/uvx
+  // invocations must write to the same per-task writable dirs, not the
+  // read-only default cache under the ro-bind root.
+  gateEnv.UV_CACHE_DIR = uvCacheDir;
+  gateEnv.UV_TOOL_DIR = uvToolsDir;
 
   let child;
   try {
@@ -6974,10 +7136,16 @@ function tailTask(taskId, { chars }, ctx) {
  * Scrub prompt scratch files left behind by a daemon crash: anything in
  * PROMPT_DIR not belonging to a running/queued task this process still holds
  * is leftover and is deleted. Extracted out of `createTaskManager`'s
- * `sweepOrphanedPromptFiles` closure.
- * @param {{PROMPT_DIR: string, tasks: Map<string, Task>}} ctx
+ * `sweepOrphanedPromptFiles` closure. The disk guard (taskferry#515): a
+ * stale daemon booting against a live one's state has no in-memory record
+ * of the live tasks, so a prompt file whose *persisted* record is
+ * running/queued is kept even when the in-memory map says the id is
+ * unknown -- deleting it would tear the live task's prompt out from under
+ * it. The sweep is already only reached by a daemon that won the socket
+ * gate, which makes this double-check narrow rather than common.
+ * @param {{PROMPT_DIR: string, tasks: Map<string, Task>, persistedTasks?: Map<string, Record<string, any>>}} ctx
  */
-function sweepOrphanedPromptFilesFor(ctx) {
+export function sweepOrphanedPromptFilesFor(ctx) {
   let entries;
   try {
     entries = fs.readdirSync(ctx.PROMPT_DIR);
@@ -6985,12 +7153,39 @@ function sweepOrphanedPromptFilesFor(ctx) {
     return;
   }
   for (const entry of entries) {
-    if (!entry.endsWith(".prompt.txt")) continue;
-    const taskId = entry.slice(0, -".prompt.txt".length);
-    const task = ctx.tasks.get(taskId);
-    const isActive = task?.status === "running" || task?.status === "queued";
-    if (!isActive) removeFileIfPresent(path.join(ctx.PROMPT_DIR, entry));
+    if (entry.endsWith(".prompt.txt") && promptFileIsOrphan(entry, ctx)) {
+      removeFileIfPresent(path.join(ctx.PROMPT_DIR, entry));
+    }
   }
+}
+
+/**
+ * Whether a prompt scratch file is an orphan: its task is not running/queued
+ * in this daemon's in-memory map, and the disk guard (taskferry#515) does
+ * not protect it. Separated out so the sweep loop keeps a single branch.
+ * @param {string} entry
+ * @param {{tasks: Map<string, Task>, persistedTasks?: Map<string, Record<string, any>>}} ctx
+ * @returns {boolean}
+ */
+function promptFileIsOrphan(entry, ctx) {
+  const taskId = entry.slice(0, -".prompt.txt".length);
+  const task = ctx.tasks.get(taskId);
+  const isActive = task?.status === "running" || task?.status === "queued";
+  if (isActive) return false;
+  // A task this daemon loaded is governed by the in-memory record alone
+  // (its own restart reconciliation already decided the task's fate, and
+  // the disk snapshot may lag it by the persist debounce), so a terminal
+  // in-memory status still means orphan.
+  if (task) return true;
+  // Disk guard (taskferry#515): an id absent from this daemon's in-memory
+  // map but recorded on disk as running/queued belongs to a *different*
+  // (live) daemon that wrote the record after this one booted -- or to a
+  // store this daemon failed to load entirely, which would otherwise make
+  // every file an orphan. Deleting its prompt tears the live task's
+  // prompt out from under it.
+  const persisted = ctx.persistedTasks?.get(taskId);
+  const diskActive = persisted?.status === "running" || persisted?.status === "queued";
+  return !diskActive;
 }
 
 /**
@@ -7004,7 +7199,7 @@ function sweepOrphanedPromptFilesFor(ctx) {
  * surface for `taskferry output <id>`), so the sweep only removes dirs
  * whose task id is absent from the loaded tasks.json entirely. Mirrors
  * sweepOrphanedPromptFiles() / sweepOrphanedOverlays() at startup.
- * @param {{OUTPUT_DIR_ROOT: string, tasks: Map<string, Task>, readdirFn: (path: string) => string[], lstatFn?: (path: string) => fs.Stats, removeDirFn?: (path: string) => void}} ctx
+ * @param {{OUTPUT_DIR_ROOT: string, tasks: Map<string, Task>, persistedTasks?: Map<string, Record<string, any>>, readdirFn: (path: string) => string[], lstatFn?: (path: string) => fs.Stats, removeDirFn?: (path: string) => void}} ctx
  */
 export function sweepOrphanedOutputDirsFor(ctx) {
   let entries;
@@ -7019,7 +7214,7 @@ export function sweepOrphanedOutputDirsFor(ctx) {
   // removal, but the expensive per-entry work (lstat + rm -rf) still scaled
   // with every historical directory even when only a handful are orphans.
   // Collecting the eligible set first bounds FS work to that set.
-  const orphanEntries = collectOrphanOutputEntries(entries, ctx.tasks);
+  const orphanEntries = collectOrphanOutputEntries(entries, ctx.tasks, ctx.persistedTasks);
   if (orphanEntries.length === 0) return;
   const lstat = ctx.lstatFn ?? fs.lstatSync;
   const removeDir = ctx.removeDirFn ?? removeDirIfPresent;
@@ -7030,16 +7225,23 @@ export function sweepOrphanedOutputDirsFor(ctx) {
 
 /**
  * Cheap in-memory filter for the sweep: returns only entries whose id has
- * no matching task. No FS work here, so this scales with the directory
- * listing size but does no per-entry I/O.
+ * no matching task, neither in the live map nor in the boot-time disk
+ * snapshot (taskferry#515 -- a stale daemon's live map has no record of a
+ * different daemon's tasks, but the disk does, and deleting a live task's
+ * output dir would destroy its deliverable; an unreadable store degrades
+ * to an empty snapshot, i.e. exactly the pre-existing behavior). Ids this
+ * daemon loaded are governed by the live map alone. No FS work here, so
+ * this scales with the directory listing size but does no per-entry I/O.
  * @param {string[]} entries
  * @param {Map<string, Task>} tasks
+ * @param {Map<string, Record<string, any>>|undefined} [persistedTasks]
  * @returns {string[]}
  */
-function collectOrphanOutputEntries(entries, tasks) {
+function collectOrphanOutputEntries(entries, tasks, persistedTasks) {
   const orphans = [];
   for (const entry of entries) {
-    if (entry && entry !== "." && entry !== ".." && !tasks.has(entry)) orphans.push(entry);
+    const meaningful = entry && entry !== "." && entry !== "..";
+    if (meaningful && !tasks.has(entry) && !persistedTasks?.has(entry)) orphans.push(entry);
   }
   return orphans;
 }
@@ -7489,12 +7691,12 @@ function applyOutputDirEnv(spawnEnv, isSummary, outputDir) {
  * Sweeps orphaned overlay directories under the live tmp root plus every
  * creation-time tmp root a live task records. Extracted out of
  * `createTaskManager`'s `sweepOrphanedOverlays` closure.
- * @param {{tasks: Map<string, Task>, overlayTmpRoot: string, releaseOverlay: (task: {overlayDirs?: {root:string,tmpRoot:string}|null}) => boolean, persistTask: (taskId: string) => void, readdirFn: (path: string) => string[]}} ctx
+ * @param {{tasks: Map<string, Task>, persistedTasks: Map<string, Record<string, any>>, overlayTmpRoot: string, releaseOverlay: (task: {overlayDirs?: {root:string,tmpRoot:string}|null}) => boolean, persistTask: (taskId: string) => void, readdirFn: (path: string) => string[]}} ctx
  */
-function sweepOrphanedOverlaysFor(ctx) {
+export function sweepOrphanedOverlaysFor(ctx) {
   const tmpRoots = collectOverlayTmpRoots(ctx.tasks, ctx.overlayTmpRoot);
   for (const tmpRoot of tmpRoots) {
-    sweepOverlayTmpRoot({ tasks: ctx.tasks, releaseOverlay: ctx.releaseOverlay, persistTask: ctx.persistTask, readdirFn: ctx.readdirFn }, tmpRoot);
+    sweepOverlayTmpRoot({ tasks: ctx.tasks, persistedTasks: ctx.persistedTasks, releaseOverlay: ctx.releaseOverlay, persistTask: ctx.persistTask, readdirFn: ctx.readdirFn }, tmpRoot);
   }
 }
 

@@ -6,8 +6,9 @@ import path from "node:path";
 import { createTaskEvents } from "./events.js";
 import { createActivityCache, readActivitySnapshot, readDeltaNarration, DEFAULT_SUMMARIZER_TIMEOUT_MS } from "./activity.js";
 import { normalizeActivitySubscriptionKey, resolveStateDir, resolveCacheDir, resolveOverlayTmpRoot, TASKFERRY_PLUMBING_ENV_VARS } from "./paths.js";
-import { RESULT_FIELDS } from "./protocol.js";
+import { RESULT_FIELDS, encodeMessage, successResponse } from "./protocol.js";
 import { formatToolEventForNarration } from "./narration-format.js";
+import { MAX_BUFFER_BYTES } from "./daemon-server.js";
 import { errCode } from "./errors.js";
 import { isNonNegativeInteger, isPositiveInteger } from "./numbers.js";
 import { buildBwrapArgs, checkBwrapAvailable, checkOverlaySupport, defaultDenyList, platformSupportsSandbox, resolveGitCommonDir, resolveGitDir } from "./sandbox.js";
@@ -17,8 +18,10 @@ import { resolveVariant, KNOWN_VARIANT_LEVELS } from "./variants.js";
 import { readVariantsCache, refreshVariantsCache } from "./variants-cache.js";
 import { loadEnvFile, watchEnvFile } from "./env-file.js";
 import { loadProjectConfig, resolveReadOnlyProjectBinds, verificationPromptBlock } from "./project-config.js";
-import { TASKFERRY_OUTPUT_DIR_ENV, ensureTaskOutputDir, listTaskOutputFiles, outputDirPromptBlock, readTaskOutputFile, resolveOutputDirRoot, resolveTaskOutputDir } from "./output-dir.js";
+import { TASKFERRY_OUTPUT_DIR_ENV, DEFAULT_MAX_OUTPUT_FILE_BYTES, MAX_SAFE_OUTPUT_FILE_BYTES, ensureTaskOutputDir, listTaskOutputFiles, outputDirPromptBlock, readTaskOutputFile, resolveOutputDirRoot, resolveTaskOutputDir } from "./output-dir.js";
 import { computeDoctorStats } from "./doctor-stats.js";
+
+export { DEFAULT_MAX_OUTPUT_FILE_BYTES, MAX_SAFE_OUTPUT_FILE_BYTES };
 
 /**
  * @typedef {object} SummaryOf
@@ -3732,6 +3735,7 @@ function watchdogTick(state, ctx) {
  * @param {number} [options.summarizerTimeoutMs]
  * @param {string} [options.activitySummaryModel]
  * @param {number} [options.activityMaxWords]
+ * @param {number} [options.maxOutputFileBytes]
  * @param {NodeJS.Platform} [options.platform]
  * @param {boolean} [options.sandboxEnabled]
  * @param {string[]} [options.envDenylist] - env var names stripped from every spawned child's
@@ -3875,6 +3879,10 @@ function resolveWorkspaceRootFnOption(rawOptions) {
  */
 function resolveTimeoutOptions(rawOptions) {
   const config = rawOptions.config || {};
+  const maxOutputFileBytes = resolvePositiveIntOption(rawOptions.maxOutputFileBytes, process.env.TASKFERRY_MAX_OUTPUT_FILE_BYTES, config.maxOutputFileBytes, DEFAULT_MAX_OUTPUT_FILE_BYTES);
+  if (maxOutputFileBytes > MAX_BUFFER_BYTES) {
+    throw new Error(`error: maxOutputFileBytes ${maxOutputFileBytes} exceeds daemon response limit ${MAX_BUFFER_BYTES} bytes\nhelp: lower TASKFERRY_MAX_OUTPUT_FILE_BYTES, config maxOutputFileBytes, or --max-output-file-bytes to ≤ ${MAX_BUFFER_BYTES} (and ≤ ${MAX_SAFE_OUTPUT_FILE_BYTES} for worst-case JSON escaping)`);
+  }
   return {
     maxDispatchesPerWindow: resolvePositiveIntOption(rawOptions.maxDispatchesPerWindow, process.env.TASKFERRY_MAX_DISPATCHES_PER_WINDOW, config.maxDispatchesPerWindow, DEFAULT_MAX_DISPATCHES_PER_WINDOW),
     dispatchWindowMs: resolvePositiveIntOption(rawOptions.dispatchWindowMs, process.env.TASKFERRY_DISPATCH_WINDOW_MS, config.dispatchWindowMs, DEFAULT_DISPATCH_WINDOW_MS),
@@ -3890,6 +3898,7 @@ function resolveTimeoutOptions(rawOptions) {
     maxWaitMs: rawOptions.maxWaitMs ?? MAX_WAIT_MS,
     summarizerTimeoutMs: resolveNonNegativeIntOption(rawOptions.summarizerTimeoutMs, process.env.TASKFERRY_SUMMARIZER_TIMEOUT_MS, config.summarizerTimeoutMs, DEFAULT_SUMMARIZER_TIMEOUT_MS),
     activityMaxWords: resolvePositiveIntOption(rawOptions.activityMaxWords, process.env.TASKFERRY_ACTIVITY_MAX_WORDS, config.activityMaxWords, 75),
+    maxOutputFileBytes,
   };
 }
 
@@ -4237,6 +4246,13 @@ function initManagerLimits(opts) {
     maxWait: positiveInteger(opts.maxWaitMs, MAX_WAIT_MS),
     summarizerTimeout: nonNegativeInteger(opts.summarizerTimeoutMs, DEFAULT_SUMMARIZER_TIMEOUT_MS),
     activityWords: positiveInteger(opts.activityMaxWords, 75),
+    maxOutputFileBytes: (() => {
+      const v = positiveInteger(opts.maxOutputFileBytes, DEFAULT_MAX_OUTPUT_FILE_BYTES);
+      if (v > MAX_BUFFER_BYTES) {
+        throw new Error(`error: maxOutputFileBytes ${v} exceeds daemon response limit ${MAX_BUFFER_BYTES} bytes\nhelp: lower to ≤ ${MAX_SAFE_OUTPUT_FILE_BYTES} for worst-case JSON escaping`);
+      }
+      return v;
+    })(),
   };
 }
 
@@ -6219,13 +6235,107 @@ async function rejectTaskChangeset(taskId, ctx) {
 }
 
 /**
+ * @param {{maxOutputFileBytes?: number}} options
+ * @param {{limits?: {maxOutputFileBytes?: number}}} ctx
+ * @returns {number}
+ */
+function resolveOutputMaxBytes(options, ctx) {
+  if (options.maxOutputFileBytes !== undefined) {
+    if (!isPositiveInteger(options.maxOutputFileBytes)) {
+      throw new Error(`error: maxOutputFileBytes must be a positive integer (got ${JSON.stringify(options.maxOutputFileBytes)})\nhelp: use --max-output-file-bytes with a positive integer`);
+    }
+    if (options.maxOutputFileBytes > MAX_BUFFER_BYTES) {
+      throw new Error(`error: --max-output-file-bytes ${options.maxOutputFileBytes} exceeds daemon response limit ${MAX_BUFFER_BYTES} bytes\nhelp: lower --max-output-file-bytes to ≤ ${MAX_SAFE_OUTPUT_FILE_BYTES} (safe for worst-case JSON escaping, 6×) or ≤ ${MAX_BUFFER_BYTES} raw, or set TASKFERRY_MAX_OUTPUT_FILE_BYTES / config maxOutputFileBytes accordingly`);
+    }
+    return options.maxOutputFileBytes;
+  }
+  return (ctx.limits && typeof ctx.limits.maxOutputFileBytes === "number") ? ctx.limits.maxOutputFileBytes : DEFAULT_MAX_OUTPUT_FILE_BYTES;
+}
+
+// 36 chars to match real request UUIDs (see src/protocol.js:randomUUID) — keeps the
+// budget check conservative so a listing/file that fits with this placeholder
+// will also fit with any real 36-char id, avoiding a 24-byte window where
+// "budget-check" (12) fits but a real id overflows to generic RESPONSE_TOO_LARGE.
+export const BUDGET_CHECK_ID = "00000000-0000-4000-a000-000000000000";
+
+/**
+ * Response-budget guard for taskferry#508: even a file that fits the raw
+ * maxOutputFileBytes cap can still exceed the daemon's 1 MiB response
+ * ceiling after JSON string escaping (control characters expand 6× to
+ * \uXXXX). Estimate the wire size of the full successResponse envelope
+ * (including taskId/outputDir/file) and surface a clear knob-specific error
+ * instead of letting daemon-server.js's generic RESPONSE_TOO_LARGE fallback
+ * fire with no indication which cap caused it.
+ * @param {string} taskId
+ * @param {string} outputDir
+ * @param {{content: string|null, size: number, truncated: boolean, error?: string}} file
+ * @param {string} relativePath
+ * @param {number} maxBytes
+ */
+export function assertOutputResponseFits(taskId, outputDir, file, relativePath, maxBytes) {
+  if (file.content === null) return;
+  const payload = { taskId, outputDir, file, files: [], bytes: 0, total: 0, truncated: false };
+  const encoded = encodeMessage(successResponse(BUDGET_CHECK_ID, payload));
+  const size = Buffer.byteLength(encoded);
+  if (size > MAX_BUFFER_BYTES) {
+    const encodedContentBytes = Buffer.byteLength(JSON.stringify(file.content));
+    throw new Error(
+      `error: output file "${relativePath}" (raw ${file.size} bytes, JSON-escaped ≈${encodedContentBytes} bytes) would exceed daemon response limit ${MAX_BUFFER_BYTES} bytes (≈${size} bytes on the wire, 6× worst-case for control characters)\n` +
+      `help: lower --max-output-file-bytes (current ${maxBytes}), TASKFERRY_MAX_OUTPUT_FILE_BYTES, or config maxOutputFileBytes to ≤ ${MAX_SAFE_OUTPUT_FILE_BYTES} (provably safe) or retrieve the file directly from ${path.join(outputDir, relativePath)}`
+    );
+  }
+}
+
+/**
+ * Response-budget guard for listing responses (taskferry#508 follow-up):
+ * `assertOutputResponseFits()` only covers the `--path` branch. A plain
+ * `taskferry output <id>` listing with many control-character-heavy
+ * filenames can also exceed the 1 MiB daemon response ceiling after JSON
+ * escaping (6×) even though each filename fits its filesystem limit.
+ * Check the actual success-response envelope and bound the listing to the
+ * response budget without falling through to generic RESPONSE_TOO_LARGE.
+ * When the full listing would overflow, truncate to the largest prefix that
+ * fits (preserving sorted order) and mark `truncated:true`; if even an
+ * empty listing would overflow (outputDir path itself too large), surface
+ * a clear path-specific error.
+ * @param {string} taskId
+ * @param {string} outputDir
+ * @param {{files: Array<{path: string, size: number}>, bytes: number, total: number, truncated: boolean}} listing
+ * @returns {{files: Array<{path: string, size: number}>, bytes: number, total: number, truncated: boolean}}
+ */
+export function assertListingResponseFits(taskId, outputDir, listing) {
+  const basePayload = { taskId, outputDir, files: listing.files, bytes: listing.bytes, total: listing.total, truncated: listing.truncated };
+  if (Buffer.byteLength(encodeMessage(successResponse(BUDGET_CHECK_ID, basePayload))) <= MAX_BUFFER_BYTES) return listing;
+  // Bound by truncating to the largest prefix that fits. Files are already
+  // sorted lexicographically, so dropping from the end is deterministic.
+  let files = [...listing.files];
+  while (files.length > 0) {
+    files.pop();
+    const bytes = files.reduce((sum, f) => sum + f.size, 0);
+    const payload = { taskId, outputDir, files, bytes, total: files.length, truncated: true };
+    if (Buffer.byteLength(encodeMessage(successResponse(BUDGET_CHECK_ID, payload))) <= MAX_BUFFER_BYTES) {
+      return { files, bytes, total: files.length, truncated: true };
+    }
+  }
+  const emptyPayload = { taskId, outputDir, files: [], bytes: 0, total: 0, truncated: true };
+  const emptySize = Buffer.byteLength(encodeMessage(successResponse(BUDGET_CHECK_ID, emptyPayload)));
+  if (emptySize > MAX_BUFFER_BYTES) {
+    throw new Error(
+      `error: output listing for "${taskId}" (outputDir "${outputDir}") would exceed daemon response limit ${MAX_BUFFER_BYTES} bytes even when empty (≈${emptySize} bytes on the wire)\n` +
+      `help: output directory path is too long or contains many control characters; retrieve files directly from ${outputDir} via filesystem access or use --path for individual files`
+    );
+  }
+  return { files: [], bytes: 0, total: 0, truncated: true };
+}
+
+/**
  * Retrieves the scratch output directory (or one file from it) for a task.
  * Works on every terminal status -- done, crashed, cancelled, or incomplete --
  * because the scratch dir is per-task state the worker owns, not a parsed log
  * result. taskferry#423.
  * @param {string} taskId
- * @param {{maps: {tasks: Map<string, Task>}, opts: {stateDir: string}, helpers: {ensureStateLoaded: () => void}, noSuchTask: (taskId: string) => Error, noSuchOutputFile: (taskId: string, relativePath: string) => Error, noOutputDir: (taskId: string, relativePath: string) => Error}} ctx
- * @param {{path?: string}} [options]
+ * @param {{maps: {tasks: Map<string, Task>}, opts: {stateDir: string}, helpers: {ensureStateLoaded: () => void}, limits?: {maxOutputFileBytes?: number}, noSuchTask: (taskId: string) => Error, noSuchOutputFile: (taskId: string, relativePath: string) => Error, noOutputDir: (taskId: string, relativePath: string) => Error}} ctx
+ * @param {{path?: string, maxOutputFileBytes?: number}} [options]
  */
 function outputFor(taskId, ctx, options = {}) {
   ctx.helpers.ensureStateLoaded();
@@ -6236,21 +6346,24 @@ function outputFor(taskId, ctx, options = {}) {
     if (!outputDir) {
       throw ctx.noOutputDir(taskId, options.path);
     }
-    const file = readTaskOutputFile(outputDir, options.path);
+    const maxBytes = resolveOutputMaxBytes(options, ctx);
+    const file = readTaskOutputFile(outputDir, options.path, maxBytes);
     if (file.error === "not_found") throw ctx.noSuchOutputFile(taskId, options.path);
+    assertOutputResponseFits(taskId, outputDir, file, options.path, maxBytes);
     return { taskId: taskId, outputDir: outputDir, files: [], bytes: 0, total: 0, truncated: false, file };
   }
   if (!outputDir) {
     return { taskId, outputDir: null, files: [], bytes: 0, total: 0, truncated: false };
   }
   const listing = listTaskOutputFiles(outputDir);
+  const guarded = assertListingResponseFits(taskId, outputDir, listing);
   return {
     taskId,
     outputDir,
-    files: listing.files,
-    bytes: listing.bytes,
-    total: listing.total,
-    truncated: listing.truncated,
+    files: guarded.files,
+    bytes: guarded.bytes,
+    total: guarded.total,
+    truncated: guarded.truncated,
   };
 }
 

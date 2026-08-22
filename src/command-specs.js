@@ -26,8 +26,8 @@ export const commandSpecs = {
   output: {
     usage: "taskferry output <id> [--path <relpath>]",
     description: "List a task's scratch output directory (or read one file in it). Every dispatch reserves a per-task writable directory at <stateDir>/outputs/<id>/, exposed to the worker as $TASKFERRY_OUTPUT_DIR. When bwrap sandboxing is active, taskferry rw-binds that directory at the same path. With --no-sandbox, it remains a normal host directory. Works on every terminal status (done, crashed, and cancelled, including a done task whose incomplete flag is true).",
-    options: { "--path <relpath>": "read one file relative to the task's output dir instead of listing; rejects any path that would escape the per-task directory (e.g. \"../sibling\", absolute paths)" },
-    examples: ['taskferry output <id>', 'taskferry output <id> --path deliverable.txt'],
+    options: { "--path <relpath>": "read one file relative to the task's output dir instead of listing; rejects any path that would escape the per-task directory (e.g. \"../sibling\", absolute paths)", "--max-output-file-bytes <number>": "maximum bytes to read for a single file when --path is used; default 524288 (512 KiB); capped by daemon response budget 1 MiB (src/daemon-server.js:14) and provably safe ceiling 174080 ((1 MiB-4096)/6, 6× for control chars). Control-heavy files that would exceed wire budget now surface a clear would-exceed-daemon-response-limit error naming the knob, not generic RESPONSE_TOO_LARGE. Precedence: flag > TASKFERRY_MAX_OUTPUT_FILE_BYTES env var > config.json maxOutputFileBytes > built-in default" },
+    examples: ['taskferry output <id>', 'taskferry output <id> --path deliverable.txt', 'taskferry output <id> --path deliverable.txt --max-output-file-bytes 1048576'],
   },
   wait: {
     usage: "taskferry wait <id> [options]",

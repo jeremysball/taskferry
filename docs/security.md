@@ -308,7 +308,7 @@ runs wrapped in
     this entry a worker's context (and therefore its output) silently picks
     up the caller's personal instructions
 - **Read-write access** is then re-granted only for the task's own working
-  directory, the daemon's per-task `sandboxedDataHome` (`<cacheDir>/opencode-data`), and the task's scratch `outputDir`, plus **only the socket file** (`<runtimeDir>/daemon.sock`, not the whole `runtimeDir`) bound so a nested dispatch from inside the sandbox can still reach the daemon. An advisor dispatch gets no runtime-directory or socket bind, so the daemon socket is unreachable without touching the network namespace.
+  directory, the daemon's per-task `sandboxedDataHome` (`<cacheDir>/opencode-data/<taskId>` — one data home per task, so concurrent dispatches never contend on a single opencode sqlite db; see taskferry#501), and the task's scratch `outputDir`, plus **only the socket file** (`<runtimeDir>/daemon.sock`, not the whole `runtimeDir`) bound so a nested dispatch from inside the sandbox can still reach the daemon. An advisor dispatch gets no runtime-directory or socket bind, so the daemon socket is unreachable without touching the network namespace.
 - **Deny-list has a fixed base plus an optional extension.** The paths above
   are always denied; `sandboxDenylist` / `TASKFERRY_SANDBOX_DENYLIST` (see
   `docs/config.md`) adds extra directories on top, merged with — not
@@ -404,15 +404,18 @@ runs wrapped in
 - **`XDG_DATA_HOME` is redirected.** OpenCode writes its own logs, session
   database, and snapshots under `XDG_DATA_HOME` (`~/.local/share` by
   default), which is read-only inside the sandbox. Sandboxed dispatches get
-  `XDG_DATA_HOME` pointed at `<cacheDir>/opencode-data` instead (`cacheDir`
-  is `TASKFERRY_CACHE_DIR` or `$XDG_CACHE_HOME/taskferry`, default
-  `~/.cache/taskferry`) — real disk, not the small `runtimeDir` tmpfs used
-  for the daemon socket, since OpenCode's snapshot store grows unbounded
-  across dispatches and previously filled that tmpfs entirely. This is a
-  separate store from the host's real data home: a
-  session started outside the sandbox can't be resumed inside it (or vice
-  versa), and `--continue`/`--session <id>` resolve against whichever data
-  home the current dispatch is using.
+  `XDG_DATA_HOME` pointed at `<cacheDir>/opencode-data/<taskId>` instead
+  (`cacheDir` is `TASKFERRY_CACHE_DIR` or `$XDG_CACHE_HOME/taskferry`,
+  default `~/.cache/taskferry`) — real disk, not the small `runtimeDir`
+  tmpfs used for the daemon socket, since OpenCode's snapshot store grows
+  unbounded across dispatches and previously filled that tmpfs entirely.
+  The data home is scoped **per task**, so every dispatch (and every one of
+  that task's summary-generation calls) gets its own sqlite session db —
+  concurrent dispatches never contend on one shared `opencode.db`
+  (taskferry#501). This is a separate store from the host's real data
+  home: a session started outside the sandbox can't be resumed inside it
+  (or vice versa), and `--continue`/`--session <id>` resolve against
+  whichever data home the current dispatch is using.
 - **Credential visibility.** Provider credentials normally live in
   `auth.json` under the real `XDG_DATA_HOME`, so redirecting it would
   otherwise hide every stored credential from the sandboxed process. To keep
@@ -422,6 +425,18 @@ runs wrapped in
   are read-only binds. When `--session-id` resumes a prior session, only that
   session file is bound **read-write** (`src/executor.js:483-486`), so pi can
   update its own session state without exposing other sessions.
+- **`UV_CACHE_DIR`/`UV_TOOL_DIR` are redirected per task.** The default uv
+  cache (`~/.cache/uv`) and tool dir (`~/.local/share/uv/tools`) sit under
+  the read-only root bind, so a sandboxed `uvx <tool>` cannot resolve or
+  install its tool environment — and, worst case, a tool like ruff silently
+  produced a plausible-looking wrong answer instead of failing
+  (taskferry#426). Every sandboxed dispatch (and the verification gate,
+  which re-mounts the same overlay for the project's `check` command) gets
+  `UV_CACHE_DIR`/`UV_TOOL_DIR` pointed at per-task dirs
+  `<cacheDir>/uv-cache/<task-id>` and `<cacheDir>/uv-tools/<task-id>`, both
+  created and rw-bound at that same path. Per-task (not shared) so one
+  task's uv cache can't perturb or bloat another's; the dirs are real disk,
+  not the small `runtimeDir` tmpfs, and are never cleaned up automatically.
 - **Fail-fast on Linux.** If sandboxing is enabled (the default) and `bwrap`
   is not installed, dispatch fails immediately with a `crashed` task and a
   matching `spawnError` — there is no silent unsandboxed fallback on the

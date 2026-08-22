@@ -82,6 +82,12 @@ export { DEFAULT_MAX_OUTPUT_FILE_BYTES, MAX_SAFE_OUTPUT_FILE_BYTES };
  * @property {string|null} [headDriftTo]
  * @property {boolean|null} [headDriftRecovered]
  * @property {string|null} [outputDir]
+ * @property {NodeJS.ProcessEnv} [resumeEnv]
+ * @property {string[]} [resumeAllowedDirs]
+ * @property {string[]} [resumeRoBind]
+ * @property {boolean} [resumeNoSandbox]
+ * @property {boolean} [resumeNoOverlay]
+ * @property {string|null} [pidStartTime]
  */
 
 /**
@@ -776,7 +782,7 @@ export function isOutsideDirectory(directory, candidate) {
  * @property {(task: Task, executor: import("./executor.js").WorkerExecutor) => void} classifyTrailingLogFailure
  * @property {(task: Task, executor: import("./executor.js").WorkerExecutor) => void} startRunningWatcher
  * @property {(taskId: string) => void} stopRunningWatcher
- * @property {(taskId: string) => string|null} readSessionIdFromLog
+ * @property {(taskId: string) => {sessionId: string|null, readable: boolean}} readSessionIdFromLog
  * @property {(task: Task, precomputed?: {message: string, hadExplicitStop: boolean}) => void} evaluateOutputCompleteness
  * @property {(task: Task) => {message: string, hadExplicitStop: boolean}|null} attemptCrashRecovery
  * @property {(task: Task) => void} extractChangesetForTask
@@ -787,6 +793,7 @@ export function isOutsideDirectory(directory, candidate) {
  * @property {Map<string, Task>} tasks
  * @property {(task: Task) => void} decRunning
  * @property {(task: Task) => void} incRunning
+ * @property {(pid: number) => string|null} [readProcStartTimeFn]
  */
 
 /**
@@ -1623,7 +1630,7 @@ function onChildExit(ctx, shared, code, signal) {
   task.signal = signal;
   task.endedAt = new Date().toISOString();
   const recoveredState = ctx.attemptCrashRecovery(task);
-  const parsedSessionId = ctx.readSessionIdFromLog(task.logPath);
+  const parsedSessionId = ctx.readSessionIdFromLog(task.logPath).sessionId;
   if (parsedSessionId) task.sessionId = parsedSessionId;
   if (task.status === "done") ctx.evaluateOutputCompleteness(task, recoveredState ?? undefined);
   if (task.status === "done" || task.status === "crashed" || task.status === "cancelled") ctx.extractChangesetForTask(task);
@@ -1803,6 +1810,12 @@ function spawnTaskChild(ctx, launchInfo, task) {
     child.on("error", (err) => onChildError(ctx, shared, err));
     task.status = "running";
     task.pid = child.pid ?? null;
+    // Capture the kernel start time of the spawned pid (Linux /proc) so a
+    // later daemon restart can tell this child apart from an unrelated
+    // process that inherited its pid (taskferry#? -- pid-reuse identity).
+    // Non-Linux and test fakes leave it null, which the restart path treats
+    // as "identity unavailable, signal anyway" (documented risk).
+    if (task.pid != null) task.pidStartTime = readProcStartTime(task.pid, ctx.readProcStartTimeFn);
     ctx.incRunning(task);
     ctx.persistTask(task.id);
     ctx.scheduleActivity(task, { force: true });
@@ -2366,6 +2379,18 @@ function buildDispatchTask({ id, directory, prompt, model, executor, priorSessio
  * @param {{id: string, task: Task, prompt: string, sessionId: string|undefined, env: NodeJS.ProcessEnv|undefined, noSandbox: boolean, noOverlay: boolean, allowedDirs: string[]|undefined, roBind: string[]|undefined, executor: import("./executor.js").WorkerExecutor, role: "dispatch"|"advisor", outputDir?: string|null}} params
  */
 function queueDispatchLaunch(ctx, { id, task, prompt, sessionId, env, noSandbox, noOverlay, allowedDirs, roBind, executor, role, outputDir = null }) {
+  // The resume-relevant launch parameters are stamped onto the persisted
+  // task record at queue time, not just the in-memory pendingLaunch, so a
+  // daemon restart can reconstitute the original launch spec (caller env,
+  // sandbox/overlay toggles, per-dispatch bind dirs) for auto-resume.
+  // Otherwise those values live only in `pendingLaunches`, which a restart
+  // wipes -- a resumed task would silently relaunch with the daemon's
+  // ambient defaults (no caller env, no per-dispatch binds).
+  if (env !== undefined) task.resumeEnv = { ...env };
+  if (allowedDirs?.length) task.resumeAllowedDirs = allowedDirs;
+  if (roBind?.length) task.resumeRoBind = roBind;
+  task.resumeNoSandbox = noSandbox === true;
+  task.resumeNoOverlay = noOverlay === true;
   ctx.tasks.set(id, task);
   ctx.persistTask(task.id);
   const capturedEnv = env === undefined ? undefined : { ...env };
@@ -2765,7 +2790,7 @@ async function runSummarizeActivity(ctx, taskId, maxWords, previousActivity) {
  * @property {(err: unknown) => string} errMessage
  * @property {(taskId: string, options: object) => Promise<{status: string, sessionId?: string|null}>} poll
  * @property {number} maxWait
- * @property {(logPath: string) => string|null} readSessionIdFromLog
+ * @property {(logPath: string) => {sessionId: string|null, readable: boolean}} readSessionIdFromLog
  * @property {(sessionId: string|undefined) => void} touchAdvisorSession
  * @property {(taskId: string, options: object) => {status: string, message?: string, sessionId?: string|null, tokens?: unknown, cost?: number|null, exitCode?: number|null, signal?: NodeJS.Signals|null, spawnError?: string|null}} result
  */
@@ -2855,7 +2880,7 @@ function sessionIdInJson(text) {
  * @returns {object}
  */
 function buildAdvisorActiveResponse(ctx, { settled, dispatched, resolved }) {
-  const logSessionId = settled.sessionId || ctx.readSessionIdFromLog(dispatched.logPath);
+  const logSessionId = settled.sessionId || ctx.readSessionIdFromLog(dispatched.logPath).sessionId;
   if (logSessionId) ctx.touchAdvisorSession(logSessionId);
   const resetFields = resolved.reset ? { previous_session_id: resolved.previousSessionId } : {};
   return {
@@ -3045,6 +3070,58 @@ function isPidAlive(pid, killFn) {
 }
 
 /**
+ * Blocks the current thread for `ms` milliseconds. The daemon-restart
+ * resume path is synchronous (it runs inside boot, before the event loop
+ * owns any per-task timers), so a synchronous sleep is the only way to
+ * poll the orphaned child's death. Same Atomics.wait mechanism as
+ * changeset.js's sleepSync and state-lock.js's stale-lock wait.
+ * @param {number} ms
+ */
+function sleepSync(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+/**
+ * Reads a pid's kernel start time from /proc/<pid>/stat (field 22), the
+ * stable process identity that survives pid reuse. Returns null when the
+ * process is gone or /proc is unavailable (non-Linux).
+ * @param {number} pid
+ * @param {(pid: number) => string|null} [readFn]
+ * @returns {string|null}
+ */
+function readProcStartTime(pid, readFn) {
+  if (process.platform !== "linux") return null;
+  try {
+    const stat = readFn ? readFn(pid) : fs.readFileSync(`/proc/${pid}/stat`, "utf8");
+    // The comm field is parenthesized and may itself contain spaces, so
+    // count from the end: starttime is field 22 of the standard 52, i.e.
+    // the 31st token from the tail.
+    const parts = (stat ?? "").trim().split(/\s+/);
+    return parts.length >= 31 ? parts[parts.length - 31] : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Whether a persisted pid still refers to the same process that was
+ * spawned, by comparing /proc start times. A bare kill(pid,0) liveness
+ * probe cannot tell a live-but-reused pid from the original child, so a
+ * restart must not signal a stranger's process; when the recorded start
+ * time is unavailable (legacy record, non-Linux) the check passes open and
+ * the caller's "signal anyway" fallback applies.
+ * @param {number|null} pid
+ * @param {string|null} recordedStartTime
+ * @param {(pid: number) => string|null} [readFn]
+ * @returns {boolean}
+ */
+function pidIdentityMatches(pid, recordedStartTime, readFn) {
+  if (pid == null) return false;
+  if (recordedStartTime == null) return true;
+  return readProcStartTime(pid, readFn) === recordedStartTime;
+}
+
+/**
  * @param {Task} task
  * @param {ManagerContext} ctx
  * @param {string} prev
@@ -3058,31 +3135,99 @@ function handleQueuedForRestart(task, ctx, prev) {
   try { ctx.helpers.persistTask(task.id); } catch {}
 }
 
+/**
+ * Reads the daemon-restart resume state for a running task: the session id
+ * recoverable from its log and whether that log was actually readable (a
+ * missing/unreadable log is not the same as a readable log that simply
+ * never recorded a session -- the former means the worker's transcript may
+ * be gone entirely, so the recorded sessionId on the task is not trusted
+ * either; the fallback to task.sessionId applies only when the log is
+ * readable but contains no session marker).
+ * @param {Task} task
+ * @returns {{sessionId: string|null, logReadable: boolean}}
+ */
+function resumeSessionState(task) {
+  if (!task.logPath) return { sessionId: null, logReadable: false };
+  let result;
+  try {
+    result = readSessionIdFromLog(task.logPath);
+  } catch {
+    result = { sessionId: null, readable: false };
+  }
+  if (!result.readable) return { sessionId: null, logReadable: false };
+  return { sessionId: result.sessionId ?? task.sessionId ?? null, logReadable: true };
+}
+
 // @ts-ignore
 function handleRunningForRestart(task, ctx, prev) {
-  let sessionId;
-  try { sessionId = /** @type {any} */ (task).logPath ? readSessionIdFromLog(/** @type {any} */ (task).logPath) : null; } catch { sessionId = null; }
-  if (!sessionId && task.sessionId) sessionId = task.sessionId;
+  const { sessionId, logReadable } = resumeSessionState(task);
   let dirExists;
   try { dirExists = fs.existsSync(task.directory) && fs.statSync(task.directory).isDirectory(); } catch { dirExists = false; }
   const canResume = Boolean(sessionId) && dirExists;
-  if (task.pid != null && isPidAlive(task.pid, ctx.opts.killFn)) {
-    try { ctx.helpers.sendSignal(task.pid, "SIGTERM"); } catch {}
+  // The orphaned child from the previous daemon (if any) must be gone before
+  // the overlay is released and the task relaunched: a live child still holds
+  // the stale overlay mount, and a fresh overlay at the same path collides
+  // with it ("Device or resource busy"). `ctx.helpers.sendSignal` signals the
+  // process group first (the worker spawned detached, so its group is just
+  // itself and its own subprocesses) and falls back to the direct pid, only
+  // after the /proc start-time identity check passes -- a bare kill(pid,0)
+  // cannot tell a live-but-reused pid from the original child. SIGTERM is
+  // escalated to SIGKILL after cancelGrace and the process is polled to
+  // death synchronously, since boot-time resume is not async. A pid whose
+  // identity is unavailable (legacy record, non-Linux) is signalled anyway
+  // as a best effort.
+  const pid = /** @type {any} */ (task).pid;
+  const pidAlive = pid != null && isPidAlive(pid, ctx.opts.killFn) && pidIdentityMatches(pid, /** @type {any} */ (task).pidStartTime, ctx.opts.readProcStartTimeFn);
+  if (pidAlive) {
+    try { ctx.helpers.sendSignal(pid, "SIGTERM"); } catch {}
+    waitForPidExit(pid, ctx.limits.cancelGrace, ctx.opts.killFn);
   }
   if (!canResume) {
-    failRunningForRestart(task, ctx, prev, sessionId);
+    failRunningForRestart(task, ctx, prev, sessionId, { logReadable, dirExists });
     return;
   }
   resumeRunningForRestart(task, ctx, prev, sessionId);
 }
 
+/**
+ * Polls a pid until it exits, escalating SIGTERM (already sent by the
+ * caller) to SIGKILL after `graceMs`, using a synchronous sleep so the
+ * boot-time resume path can block. A process that never dies even after
+ * SIGKILL (unkillable D-state) gives up after graceMs + a fixed slack
+ * rather than wedging boot forever.
+ * @param {number} pid
+ * @param {number} graceMs
+ * @param {(pid: number, signal: NodeJS.Signals|number) => void} killFn
+ */
+function waitForPidExit(pid, graceMs, killFn) {
+  const pollMs = Math.min(graceMs, 100);
+  const deadline = Date.now() + graceMs;
+  while (Date.now() < deadline) {
+    if (!isPidAlive(pid, killFn)) return;
+    sleepSync(pollMs);
+  }
+  if (!isPidAlive(pid, killFn)) return;
+  try { killFn(pid, "SIGKILL"); } catch {}
+  const killDeadline = Date.now() + pollMs;
+  while (Date.now() < killDeadline) {
+    if (!isPidAlive(pid, killFn)) return;
+    sleepSync(pollMs);
+  }
+}
+
 // @ts-ignore
-function failRunningForRestart(task, ctx, prev, sessionId) {
+function failRunningForRestart(task, ctx, prev, _sessionId, { logReadable, dirExists }) {
   task.status = "crashed";
   task.failureReason = "daemon_restarted_session_lost";
-  task.failureDetail = sessionId
-    ? `daemon restarted while task was running; directory missing (directory: ${task.directory})`
-    : "daemon restarted while task was running; no resumable session found in log (sessionId missing or log unreadable)";
+  let detail;
+  if (!dirExists) {
+    detail = `daemon restarted while task was running; directory missing (directory: ${task.directory})`;
+  } else {
+    detail = logReadable
+      ? "daemon restarted while task was running; no resumable session found in log"
+      : "daemon restarted while task was running; task log missing or unreadable";
+  }
+  task.failureDetail = detail;
   task.endedAt = new Date().toISOString();
   task.exitCode = null;
   task.signal = null;
@@ -3095,8 +3240,13 @@ function failRunningForRestart(task, ctx, prev, sessionId) {
 // @ts-ignore
 function resumeRunningForRestart(task, ctx, prev, sessionId) {
   if (task.overlayDirs) {
-    try { ctx.env.releaseOverlay(task); } catch {}
-    task.overlayDirs = null;
+    // Only clear the record when release actually confirmed removal: a
+    // failed removal (busy mount, EACCES) must leave overlayDirs intact so
+    // the startup sweep retries it as an orphan instead of silently
+    // clearing it and letting the stale mount collide with the fresh
+    // overlay.
+    const cleanupFailed = ctx.env.releaseOverlay(task);
+    if (!cleanupFailed) task.overlayDirs = null;
     task.changesetStatus = "none";
     task.diffPath = null;
     task.changesetError = null;
@@ -3116,30 +3266,28 @@ function resumeRunningForRestart(task, ctx, prev, sessionId) {
   ctx.events.taskEvents.emitState(task, prev);
   try { ctx.helpers.persistTask(task.id); } catch {}
   const executor = getExecutorForTask(task);
-  const launchSpec = buildResumeSpec(task, executor, sessionId);
-  ctx.maps.pendingLaunches.set(task.id, launchSpec);
-  const provider = providerOf(task.model);
-  const pq = getOrCreateProviderQueue(ctx.maps.providerQueues, provider);
-  if (!pq.launchQueue.includes(task.id)) pq.launchQueue.push(task.id);
+  queueDispatchLaunch(
+    { tasks: ctx.maps.tasks, persistTask: ctx.helpers.persistTask, pendingLaunches: ctx.maps.pendingLaunches, providerQueues: ctx.maps.providerQueues, launchQueuedTasks: ctx.helpers.launchQueuedTasks },
+    {
+      id: task.id,
+      prompt: task.prompt ?? task.promptPreview ?? "resumed after daemon restart",
+      env: task.resumeEnv,
+      noSandbox: task.resumeNoSandbox === true,
+      noOverlay: task.resumeNoOverlay === true,
+      allowedDirs: task.resumeAllowedDirs,
+      roBind: task.resumeRoBind,
+      role: task.role ?? "dispatch",
+      outputDir: task.outputDir ?? null,
+      task,
+      sessionId,
+      executor,
+    }
+  );
 }
 
 // @ts-ignore
 function getExecutorForTask(task) {
   try { return resolveExecutor(task.executorId); } catch { return resolveExecutor(undefined); }
-}
-
-// @ts-ignore
-function buildResumeSpec(task, executor, sessionId) {
-  return {
-    executor,
-    sessionId,
-    prompt: task.prompt ?? task.promptPreview ?? "resumed after daemon restart",
-    directory: task.directory,
-    model: task.model,
-    variant: task.variant,
-    role: task.role ?? "dispatch",
-    outputDir: task.outputDir ?? null,
-  };
 }
 
 /**
@@ -3154,13 +3302,9 @@ function handleDaemonRestartTasks(ctx) {
   if (!toHandle.length) return;
   for (const task of toHandle) {
     const prev = /** @type {any} */ (task)._persistedStatus;
-    if (task.internal) {
-      task.status = "unknown";
-      // @ts-ignore
-      delete task._persistedStatus;
-      ctx.events.taskEvents.emitState(task, prev);
-      try { ctx.helpers.persistTask(task.id); } catch {}
-    } else if (prev === "queued") {
+    if (task.internal || prev === "queued") {
+      // Internal summarizers and never-started queued tasks degrade to
+      // unknown -- identical handling, so one branch serves both.
       handleQueuedForRestart(task, ctx, prev);
     } else if (prev === "running") {
       handleRunningForRestart(task, ctx, prev);
@@ -4144,6 +4288,7 @@ function resolveFilesystemFnSeams(rawOptions) {
     statFn: rawOptions.statFn ?? ((/** @type {string} */ p) => { try { return fs.statSync(p); } catch { return null; } }),
     lstatFn: rawOptions.lstatFn ?? fs.lstatSync,
     readdirFn: rawOptions.readdirFn ?? ((/** @type {string} */ p) => fs.readdirSync(p)),
+    readProcStartTimeFn: rawOptions.readProcStartTimeFn,
   };
 }
 
@@ -4766,7 +4911,7 @@ function buildManagerInternalHelpers(ctx) {
      * delegated to {@link startTaskFor}, which takes every factory closure
      * dependency explicitly via `ctx`.
      * @param {Task} task */
-    startTask: (task) => startTaskFor(task, { pendingLaunches: ctx.maps.pendingLaunches, SUMMARY_DIR: ctx.paths.SUMMARY_DIR, PROMPT_DIR: ctx.paths.PROMPT_DIR, spawnFn: ctx.opts.spawnFn, runOverlayCommandFn: ctx.opts.runOverlayCommandFn, sandboxEnabled: ctx.opts.sandboxEnabled, platform: ctx.opts.platform, overlayEnabled: ctx.opts.overlayEnabled, overlayTmpRoot: ctx.opts.overlayTmpRoot, allowedDirs: ctx.opts.allowedDirs, roBind: ctx.opts.roBind, stateDir: ctx.opts.stateDir, cacheDir: ctx.opts.cacheDir, runtimeDir: ctx.opts.runtimeDir, socketPath: ctx.opts.socketPath, existsFn: ctx.opts.existsFn, statFn: ctx.opts.statFn, lstatFn: ctx.opts.lstatFn, readdirFn: ctx.opts.readdirFn, sandboxDenylist: ctx.opts.sandboxDenylist, resolveGitCommonDirFn: ctx.opts.resolveGitCommonDirFn, resolveGitDirFn: ctx.opts.resolveGitDirFn, requireBwrap: () => ctx.env.requireBwrap(), requireOverlaySupport: () => ctx.env.requireOverlaySupport(), dispatchEnvironment: (env, taskId) => ctx.env.dispatchEnvironment(env, taskId), summaryEnvironment: (env) => ctx.env.summaryEnvironment(env), settleWaiters: (taskId) => ctx.helpers.settleWaiters(taskId), launchQueuedTasks: () => ctx.helpers.launchQueuedTasks(), persistTask: (taskId) => ctx.helpers.persistTask(taskId), flushPersist: () => ctx.helpers.flushPersist(), scheduleActivity: (task, options) => ctx.helpers.scheduleActivity(task, options), classifyTrailingLogFailure: (task, executor) => ctx.helpers.classifyTrailingLogFailure(task, executor), startRunningWatcher: (task, executor) => ctx.helpers.startRunningWatcher(task, executor), stopRunningWatcher: (taskId) => ctx.helpers.stopRunningWatcher(taskId), extractChangesetForTask: (task) => ctx.env.extractChangesetForTask(task), sendSignal: (pid, signal) => ctx.helpers.sendSignal(pid, signal), activityCache: ctx.activity.cache, logHasEventCache: ctx.maps.logHasEventCache, escalationTimers: ctx.maps.escalationTimers, tasks: ctx.maps.tasks, decRunning: (task) => { ctx.state.runningCount--; const q = ctx.maps.providerQueues.get(providerOf(task.model)); if (q) { q.runningCount--; } }, incRunning: (task) => { ctx.state.runningCount++; const q = ctx.maps.providerQueues.get(providerOf(task.model)); if (q) { q.runningCount++; } }, readSessionIdFromLog, evaluateOutputCompleteness, attemptCrashRecovery }),
+    startTask: (task) => startTaskFor(task, { pendingLaunches: ctx.maps.pendingLaunches, SUMMARY_DIR: ctx.paths.SUMMARY_DIR, PROMPT_DIR: ctx.paths.PROMPT_DIR, spawnFn: ctx.opts.spawnFn, runOverlayCommandFn: ctx.opts.runOverlayCommandFn, sandboxEnabled: ctx.opts.sandboxEnabled, platform: ctx.opts.platform, overlayEnabled: ctx.opts.overlayEnabled, overlayTmpRoot: ctx.opts.overlayTmpRoot, allowedDirs: ctx.opts.allowedDirs, roBind: ctx.opts.roBind, stateDir: ctx.opts.stateDir, cacheDir: ctx.opts.cacheDir, runtimeDir: ctx.opts.runtimeDir, socketPath: ctx.opts.socketPath, existsFn: ctx.opts.existsFn, statFn: ctx.opts.statFn, lstatFn: ctx.opts.lstatFn, readdirFn: ctx.opts.readdirFn, readProcStartTimeFn: ctx.opts.readProcStartTimeFn, sandboxDenylist: ctx.opts.sandboxDenylist, resolveGitCommonDirFn: ctx.opts.resolveGitCommonDirFn, resolveGitDirFn: ctx.opts.resolveGitDirFn, requireBwrap: () => ctx.env.requireBwrap(), requireOverlaySupport: () => ctx.env.requireOverlaySupport(), dispatchEnvironment: (env, taskId) => ctx.env.dispatchEnvironment(env, taskId), summaryEnvironment: (env) => ctx.env.summaryEnvironment(env), settleWaiters: (taskId) => ctx.helpers.settleWaiters(taskId), launchQueuedTasks: () => ctx.helpers.launchQueuedTasks(), persistTask: (taskId) => ctx.helpers.persistTask(taskId), flushPersist: () => ctx.helpers.flushPersist(), scheduleActivity: (task, options) => ctx.helpers.scheduleActivity(task, options), classifyTrailingLogFailure: (task, executor) => ctx.helpers.classifyTrailingLogFailure(task, executor), startRunningWatcher: (task, executor) => ctx.helpers.startRunningWatcher(task, executor), stopRunningWatcher: (taskId) => ctx.helpers.stopRunningWatcher(taskId), extractChangesetForTask: (task) => ctx.env.extractChangesetForTask(task), sendSignal: (pid, signal) => ctx.helpers.sendSignal(pid, signal), activityCache: ctx.activity.cache, logHasEventCache: ctx.maps.logHasEventCache, escalationTimers: ctx.maps.escalationTimers, tasks: ctx.maps.tasks, decRunning: (task) => { ctx.state.runningCount--; const q = ctx.maps.providerQueues.get(providerOf(task.model)); if (q) { q.runningCount--; } }, incRunning: (task) => { ctx.state.runningCount++; const q = ctx.maps.providerQueues.get(providerOf(task.model)); if (q) { q.runningCount++; } }, readSessionIdFromLog, evaluateOutputCompleteness, attemptCrashRecovery }),
     /**
      * @param {string} taskId
      * @param {{force?: boolean}} options
@@ -5106,8 +5251,14 @@ function buildTaskManagerWithOptions(opts) {
 
 
 /**
+ * Reads the last session id recorded in a task log. Reads the whole file
+ * in 64 KiB chunks (a session id lands in one of the first event lines,
+ * but also be the last line of a huge log), returning the most recent
+ * session id found. Returns `{ sessionId, readable }` so callers can
+ * distinguish "log had no session" from "log unreadable" -- the two
+ * failure modes of daemon-restart resume are not the same.
  * @param {string} logPath
- * @returns {string|null}
+ * @returns {{sessionId: string|null, readable: boolean}}
  */
 function readSessionIdFromLog(logPath) {
   const CHUNK_SIZE = 64 * 1024;
@@ -5115,7 +5266,7 @@ function readSessionIdFromLog(logPath) {
   try {
     fd = fs.openSync(logPath, "r");
   } catch {
-    return null;
+    return { sessionId: null, readable: false };
   }
   try {
     let carry = "";
@@ -5129,9 +5280,10 @@ function readSessionIdFromLog(logPath) {
       if (result.sessionId) lastSessionId = result.sessionId;
       carry = result.remainder;
     }
-    return (carry.trim() ? sessionIdInJson(carry) : null) || lastSessionId;
+    const tailSessionId = carry.trim() ? sessionIdInJson(carry) : null;
+    return { sessionId: tailSessionId || lastSessionId, readable: true };
   } catch {
-    return null;
+    return { sessionId: null, readable: false };
   } finally {
     fs.closeSync(fd);
   }

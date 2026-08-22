@@ -321,18 +321,33 @@ reconciles each persisted task on boot:
   is reaped, and where resumable, cleans the stale overlay and re-queues the
   task with the recovered `sessionId` against a fresh overlay. The scheduler
   then respawns it normally — the worker continues the same session rather
-  than starting over.
+  than starting over. The respawn reconstitutes the original launch spec
+  from the task record (`resumeEnv`, `resumeAllowedDirs`, `resumeRoBind`,
+  `resumeNoSandbox`, `resumeNoOverlay` are persisted at dispatch time), so a
+  resumed worker sees the same caller env, sandbox/overlay toggles and
+  per-dispatch binds as the original run.
 - `running` tasks with no resumable session (no `sessionId` in the log, log
   unreadable, directory gone) are classified as `crashed` with
   `failureReason: "daemon_restarted_session_lost"` and a detail explaining
   why resume was not possible, instead of surfacing a raw
   `bwrap: Can't find source path .../upper/main` spawn error. `failureDetail`
-  distinguishes "no sessionId" from "directory missing".
+  distinguishes "no sessionId" (log readable) from "log missing or
+  unreadable" from "directory missing".
 
 The underlying orphaned sandbox process (`bwrap` with `--die-with-parent`,
 when sandboxed) is expected to have already exited when the daemon died; if
 it is still alive it is best-effort `SIGTERM`'d before a resume is attempted
-so a stale overlay mount does not collide with the fresh one. Log handling
+so a stale overlay mount does not collide with the fresh one. The signal is
+only sent after a `/proc/<pid>/stat` start-time identity check against the
+start time captured at spawn and persisted on the task record — a bare
+liveness probe could otherwise signal an unrelated process that happened to
+reuse the pid. (Legacy records without a start time pass the check open and
+are signalled anyway.) After `SIGTERM` the daemon waits up to `cancelGrace`
+(polling for exit), escalates to `SIGKILL` if the process still lives, and
+polls again briefly before giving up — all synchronously, since boot-time
+resume is not async; the stale overlay record is cleared only when removal
+actually succeeds, so a busy mount is retried as an orphan on the next boot
+rather than silently colliding with the fresh overlay. Log handling
 otherwise matches the previous "unknown" path's observation: stdout was a pipe
 the old daemon owned and normalized into the log, so after the daemon exits
 new stdout events stop landing in `<state-dir>/logs/<task-id>.ndjson` until
@@ -481,6 +496,18 @@ profiling is diagnostic, not on the request's critical path.
    overlay — see `docs/daemon.md#recovery`. `queued` tasks and internal
    summarizers still degrade to `unknown` as before; only `running` dispatch
    tasks are eligible for resume.
+- An orphaned child from a restarted daemon not being signalled — expected
+   when its pid is still alive but its `/proc/<pid>/stat` start time no
+   longer matches the one captured at spawn. The pid was reused by some
+   unrelated process while the daemon was down; signalling it would kill a
+   stranger. The identity check uses the start time (not a liveness probe,
+   which cannot detect reuse) and passes open for legacy records with no
+   recorded start time, which are signalled anyway. See
+   `docs/daemon.md#recovery`.
+- A resumed worker starting under a different pid than the one recorded for
+   the task — expected; resume is a fresh spawn (fresh overlay, fresh pid),
+   not a re-attachment to the old orphaned process. The pid persisted on the
+   record is replaced by the new spawn's pid.
 - Editing `TASKFERRY_ENV_FILE`'s target file and a spawned worker not seeing
   the new/changed var right away — expected within a short debounce window,
   not a restart. `envFileVars` is loaded once via `env-file.js`'s

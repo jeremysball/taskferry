@@ -30,6 +30,7 @@ const METHOD = Object.freeze({
   context: "task.context",
   accept: "task.accept",
   reject: "task.reject",
+  output: "task.output",
   subscribe: "event.subscribe",
 });
 
@@ -48,6 +49,7 @@ const expectedMethods = [
   METHOD.context,
   METHOD.accept,
   METHOD.reject,
+  METHOD.output,
 ];
 
 function request(method, params = {}, overrides = {}) {
@@ -473,6 +475,10 @@ describe("protocol version, method list, and envelope", () => {
         assert.ok(RESULT_FIELDS.has("diff"));
         assert.ok(RESULT_FIELDS.has("diffStat"));
         assert.ok(RESULT_FIELDS.has("changesetError"));
+      });
+
+      test("RESULT_FIELDS includes outputDir", () => {
+        assert.ok(RESULT_FIELDS.has("outputDir"));
       });
     });
 

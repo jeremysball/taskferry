@@ -15,11 +15,9 @@ hook once you've run `npm install` (`.githooks/pre-commit`, wired via the
 
 ### Adding a new test file
 
-`npm run test:unit` lists every unit test file explicitly in `package.json`
-rather than globbing `src/**/*.test.js`. A new test file is silently skipped
-by CI until you add it to that list by hand — there's no error, no warning,
-the file just never runs. If you add `src/foo.test.js`, add it to the
-`test:unit` script in the same commit.
+`npm run test:unit` discovers every `src/**/*.test.js` file through Node's test
+runner glob. A new test file is included in CI automatically; name it
+`src/foo.test.js` and no `package.json` change is needed.
 
 ### Changed the CLI surface?
 
@@ -46,8 +44,8 @@ asked to restructure.
   file is doing too much (mixing unrelated behavior areas under one file),
   split it into separate files named for the area under test, e.g.
   `tasks.dispatch.test.js`, `tasks.watchdog.test.js`, `tasks.lifecycle.test.js`
-  rather than one undifferentiated `tasks.test.js`. Remember to add the new
-  file to `test:unit` in `package.json` (see above).
+  rather than one undifferentiated `tasks.test.js`. The test-runner glob picks
+  up the new file automatically.
 - **A file split off from a larger one is self-contained.** It keeps its own
   copy of whatever fixtures/helpers it needs rather than reaching back into
   the file it was split from. `src/commands-stream.test.js` is the
@@ -61,6 +59,16 @@ asked to restructure.
   teardown). Because it isn't named `*.test.js`, `node --test` skips it as a
   suite on its own, but it's still ordinary `src/` code subject to the
   normal (non-test) ESLint rules, unlike the test files that import it.
+
+  Adoption is partial, so treat this as the target rather than a description
+  of the whole suite. Eighteen test files import the shared helpers, but
+  `commands.test.js`, `advisor-context.test.js`, `changeset.test.js`,
+  `changeset.integration.test.js`, and `env-file.test.js` still keep local
+  copies of every helper instead of importing them, and `opencode-plugin.test.js`
+  imports only a couple of the shared helpers while still keeping local
+  copies of the rest. Issues #372, #374, and #375 track the remaining work.
+  Import the shared helper in new code; copying a neighbor's local version
+  deepens the duplication those issues describe.
 
 ## Documentation conventions
 

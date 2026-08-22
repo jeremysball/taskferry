@@ -1,5 +1,7 @@
 [tools]
 node = "26.5.1"
+"npm:eslint" = "10.7.0"
+"npm:typescript" = "7.0.2"
 
 # Pulls the same account-wide secrets (provider API keys, etc.) this shell
 # gets interactively via ~/.bashrc -> ~/.config/secrets.sh, but through
@@ -21,5 +23,17 @@ run = "bash scripts/mise-setup-deps.sh"
 # fast no-op once node_modules is already current for the checked-out
 # lockfile (see the stamp-file check at the top of the script), so running
 # it on every `cd` is cheap.
+[tasks.lint]
+run = "npm run lint"
+
+[tasks.typecheck]
+run = "npm run typecheck"
+
+[tasks.test]
+run = "npm test"
+
+[tasks.check]
+run = "npm run check"
+
 [hooks]
 enter = "mise run setup"

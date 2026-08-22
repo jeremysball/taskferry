@@ -56,6 +56,20 @@ describe("activity snapshots", () => {
     );
   });
 
+  test("prefers promptPreview over the raw (possibly augmented) prompt (PR #474 review, taskferry#423)", () => {
+    // `prompt` on a dispatched task is the augmented string the worker
+    // actually sees (## Persistent output dir block etc. appended);
+    // promptPreview is always the clean, user-facing text. Before the
+    // first log event exists, activity display must not leak the
+    // injected wrapper block or the internal state-dir path.
+    const cleanPrompt = "Inspect the server";
+    const augmented = `${cleanPrompt}\n\n## Persistent output dir\nThis task has a writable scratch directory at \`/home/user/.local/state/taskferry/outputs/oc_abc\``;
+    assert.equal(
+      buildLocalActivity({ status: "running", prompt: augmented, promptPreview: cleanPrompt }),
+      cleanPrompt
+    );
+  });
+
   test("readDeltaNarration returns only the narration appended since fromOffset", async () => {
     const logDir = mkdtempTracked("taskferry-delta-snap-");
     const logPath = path.join(logDir, "log.ndjson");
@@ -108,7 +122,11 @@ describe("task activity events", () => {
       [TASK_STATE, "running"],
     ]);
     assert.equal(events[2].type, TASK_ACTIVITY);
-    assert.equal(events[2].activityVariants["false"].activity, "Check the server");
+    // taskferry#423: the augmented prompt carries the scratch-dir tail; the
+    // activity envelope keeps the literal user prompt as the activity text so
+    // the operator UI shows what the user actually asked, not the wrapper.
+    assert.ok(events[2].activityVariants["false"].activity.startsWith("Check the server"),
+      `expected activity text to start with literal prompt, got: ${events[2].activityVariants["false"].activity.slice(0, 64)}`);
 
     child.emit("exit", 0, null);
     await new Promise((resolve) => setImmediate(resolve));

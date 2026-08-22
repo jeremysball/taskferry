@@ -5,6 +5,19 @@ import os from "node:os";
 import { bucketFor } from "./tasks.js";
 import { makeManager, fakeChild, RATE_LIMIT_ERROR, RATE_LIMIT_PLAIN, UNAUTHORIZED_ERROR, UNAUTHORIZED_SHORT, USAGE_LIMIT_ERROR, QUOTA_ERROR, NO_API_KEY_FOUND, EXTENSION_CONFIG_ERROR, MINIMAX_MODEL, makeFakeExecutor } from "./tasks.test-helpers.js";
 
+// Polls a predicate instead of sleeping a fixed duration, so a test that
+// waits on a watchdog/timer effect stays correct under full-suite CPU
+// contention instead of racing an arbitrary sleep window. Mirrors the
+// same pattern already used by src/tf-sl.test.js.
+async function waitFor(predicate, message, timeoutMs = 2000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (predicate()) return undefined;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  return assert.fail(message);
+}
+
 describe("provider-failure classification: rate limits, payment, authentication", () => {
   test("a rate-limit diagnostic in the log stops the child early with failureReason rate_limited and captures failureDetail", async () => {
     const child = fakeChild(7101);
@@ -875,7 +888,13 @@ describe("boot-failure surfacing (exit non-zero with zero parseable events)", ()
     });
     const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), executor: "opencode" });
     fs.writeFileSync(mgr.status(dispatched.id).logPath, 'Error: Extension "/x/y.js" blew up at load\n');
-    await new Promise((r) => setTimeout(r, 60));
+    // Poll for the watchdog kill instead of sleeping a fixed 60ms: under
+    // full-suite CPU/event-loop contention the 20ms noOutputTimeoutMs /
+    // 5ms watchdogPollMs pair can legitimately take longer than a fixed
+    // 60ms window to fire even though the watchdog itself is working
+    // correctly (taskferry#515), so wait for the actual condition with a
+    // generous ceiling instead of asserting after an arbitrary delay.
+    await waitFor(() => killed.some((k) => k.signal === "SIGTERM"), "watchdog must fire on the eventless silence");
     assert.ok(killed.some((k) => k.signal === "SIGTERM"), "watchdog must fire on the eventless silence");
     // Graceful-trap exit: non-zero code after the watchdog already named
     // the failure. The boot gate must leave the existing reason alone.

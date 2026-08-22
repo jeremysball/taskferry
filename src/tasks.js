@@ -17,6 +17,7 @@ import { resolveVariant, KNOWN_VARIANT_LEVELS } from "./variants.js";
 import { readVariantsCache, refreshVariantsCache } from "./variants-cache.js";
 import { loadEnvFile, watchEnvFile } from "./env-file.js";
 import { loadProjectConfig, resolveReadOnlyProjectBinds, verificationPromptBlock } from "./project-config.js";
+import { TASKFERRY_OUTPUT_DIR_ENV, ensureTaskOutputDir, listTaskOutputFiles, outputDirPromptBlock, readTaskOutputFile, resolveOutputDirRoot, resolveTaskOutputDir } from "./output-dir.js";
 import { computeDoctorStats } from "./doctor-stats.js";
 
 /**
@@ -44,6 +45,7 @@ import { computeDoctorStats } from "./doctor-stats.js";
  * @property {number|null} exitCode
  * @property {NodeJS.Signals|null} signal
  * @property {string} logPath
+ * @property {string} prompt
  * @property {string} promptPreview
  * @property {number|null} promptTotalChars
  * @property {string|null} spawnError
@@ -76,6 +78,7 @@ import { computeDoctorStats } from "./doctor-stats.js";
  * @property {string|null} [headDriftFrom]
  * @property {string|null} [headDriftTo]
  * @property {boolean|null} [headDriftRecovered]
+ * @property {string|null} [outputDir]
  */
 
 /**
@@ -122,6 +125,7 @@ import { computeDoctorStats } from "./doctor-stats.js";
  * @property {string|null} [headDriftFrom]
  * @property {string|null} [headDriftTo]
  * @property {boolean|null} [headDriftRecovered]
+ * @property {string|null} [outputDir]
  */
 
 /**
@@ -149,6 +153,7 @@ import { computeDoctorStats } from "./doctor-stats.js";
  * @property {string[]} [allowedDirs]
  * @property {string[]} [roBind]
  * @property {import("./executor.js").WorkerExecutor} executor
+ * @property {string|null} [outputDir]
  * @property {undefined} [kind]
  * @property {undefined} [snapshotPath]
  */
@@ -182,6 +187,7 @@ import { computeDoctorStats } from "./doctor-stats.js";
  * @property {unknown} [tokens]
  * @property {number|null} [cost]
  * @property {string} [logPath]
+ * @property {string|null} [outputDir]
  * @property {SummaryOf} [summaryOf]
  * @property {string} [next]
  * @property {boolean} [incomplete]
@@ -872,6 +878,7 @@ function resolveStartTaskLaunch(task, launch, ctx) {
 function resolveSpawnPlan(ctx, launchInfo, taskId) {
   const { isSummary, summaryLaunch, dispatchLaunch, executor, args } = launchInfo;
   const spawnEnv = isSummary ? ctx.summaryEnvironment(summaryLaunch.env) : ctx.dispatchEnvironment(dispatchLaunch.env, taskId);
+  applyOutputDirEnv(spawnEnv, isSummary, dispatchLaunch.outputDir ?? null);
   const noSandbox = !isSummary && dispatchLaunch.noSandbox === true;
   const spawnCommand = executor.binaryName;
   const spawnArgs = args;
@@ -879,22 +886,29 @@ function resolveSpawnPlan(ctx, launchInfo, taskId) {
   // to the target directory in any sense the changeset model cares
   // about, so the plain v1 bind is correct and unchanged for them.
   const role = isSummary ? null : (dispatchLaunch.role ?? "dispatch");
-  // Review finding #5 (dispatch-launch side): overlay-gating lives inside
-  // the bwrap block below, so when sandboxing is force-disabled
-  // (--no-sandbox / TASKFERRY_DISABLE_SANDBOX=1) or unsupported on this
-  // platform (non-Linux) an advisor would silently launch with a plain
-  // writable bind on the target -- a path to persist a write,
-  // contradicting ADR 0001's "an advisor has no path to persist a write."
-  // Fail closed at dispatch-launch time, mirroring the overlay-disabled
-  // check inside the sandbox block below, instead of degrading to
-  // unsandboxed writes.
-  if (role === "advisor" && !(ctx.sandboxEnabled && !noSandbox && platformSupportsSandbox(ctx.platform))) {
-    throw new Error(
-      "error: advisor dispatch requires overlay-gated writes, but the sandbox is unavailable\n" +
-      "help: advisor writes must be gated by a copy-on-write overlay (docs/adr/0001-cow-overlays-and-diff-gated-writes.md), which requires the bwrap sandbox -- unset TASKFERRY_DISABLE_SANDBOX (or drop --no-sandbox) and run on a supported platform with bubblewrap >= 0.8"
-    );
-  }
+  assertAdvisorSandboxAvailable({ role, noSandbox, sandboxEnabled: ctx.sandboxEnabled, platform: ctx.platform });
   return { noSandbox, spawnCommand, spawnArgs, spawnEnv, role };
+}
+
+/**
+ * Review finding #5 (dispatch-launch side): overlay-gating lives inside the
+ * bwrap block, so when sandboxing is force-disabled (--no-sandbox /
+ * TASKFERRY_DISABLE_SANDBOX=1) or unsupported on this platform (non-Linux)
+ * an advisor would silently launch with a plain writable bind on the target
+ * -- a path to persist a write, contradicting ADR 0001's "an advisor has no
+ * path to persist a write." Fail closed at dispatch-launch time, mirroring
+ * the overlay-disabled check inside the sandbox block, instead of degrading
+ * to unsandboxed writes. Extracted out of `resolveSpawnPlan` to keep its
+ * complexity under the ceiling.
+ * @param {{role: "advisor"|"dispatch"|null, noSandbox: boolean, sandboxEnabled: boolean, platform: NodeJS.Platform}} args
+ */
+function assertAdvisorSandboxAvailable({ role, noSandbox, sandboxEnabled, platform }) {
+  if (role !== "advisor") return;
+  if (sandboxEnabled && !noSandbox && platformSupportsSandbox(platform)) return;
+  throw new Error(
+    "error: advisor dispatch requires overlay-gated writes, but the sandbox is unavailable\n" +
+    "help: advisor writes must be gated by a copy-on-write overlay (docs/adr/0001-cow-overlays-and-diff-gated-writes.md), which requires the bwrap sandbox -- unset TASKFERRY_DISABLE_SANDBOX (or drop --no-sandbox) and run on a supported platform with bubblewrap >= 0.8"
+  );
 }
 
 /**
@@ -1215,6 +1229,15 @@ function buildBwrapBinds(ctx, launchInfo, task, spawnEnv, role) {
   // hence the mkdir here rather than leaving it for the sandboxed process.
   fs.mkdirSync(sandboxedDataHome, { recursive: true, mode: 0o700 });
   extraRwBinds.push(sandboxedDataHome);
+  // Per-task scratch dir is read-write inside the sandbox at the same path
+  // the worker sees via $TASKFERRY_OUTPUT_DIR. Only dispatch (not summary)
+  // launches get one -- summaries don't take a deliverable. The dir already
+  // exists by the time startTask fires (dispatchTask creates it at queue
+  // time so a worker that exits before reading the prompt still has the
+  // path). taskferry#423.
+  if (!isSummary && dispatchLaunch.outputDir) {
+    extraRwBinds.push(dispatchLaunch.outputDir);
+  }
   const overlayInfo = createOverlayIfNeeded(ctx, launchInfo, task, role);
   const gitBinds = buildGitBinds(ctx, launchDirectory, overlayInfo, extraRwBinds, { taskId: task.id, registerScratchCleanup });
   // Read-write/read-only dirs: each resolves as a union of the manager-level
@@ -2051,6 +2074,7 @@ function computeResultDetail(task, { taskId, full, fields }, ctx) {
     narrationTruncated: narration.narrationTruncated,
     ...(next ? { next } : {}),
     logPath: task.logPath,
+    outputDir: task.outputDir ?? null,
   };
 }
 
@@ -2183,6 +2207,23 @@ function validateDispatchFinalMarker(finalMarker) {
 }
 
 /**
+ * Validates that a dispatch names a model, or can inherit one from a resumed
+ * session. Split out of `buildDispatchTask` and run early in `dispatchTask`
+ * (before the per-task output dir is created) so a rejected dispatch --
+ * missing model, unknown session id -- doesn't leave an orphan output
+ * directory on disk with nothing to reference it. taskferry#423 review.
+ * @param {{model: string|undefined, priorSessionTask: Task|null, sessionId: string|undefined}} params
+ */
+function validateDispatchModel({ model, priorSessionTask, sessionId }) {
+  if (!model && !priorSessionTask) {
+    if (sessionId) {
+      throw new Error(`error: no task found for session id "${sessionId}" to inherit a model from\nhelp: pass --model explicitly, or check the session id with taskferry list`);
+    }
+    throw new Error(`error: --model is required\nhelp: name the model, e.g. --model provider/model (opencode models or pi --list-models lists what's available); to resume an existing session and inherit its model, pass --session-id instead`);
+  }
+}
+
+/**
  * Resolves the dispatch target directory to its real path. Runs after the
  * prompt/finalMarker validation (preserving the original throw order) and
  * surfaces the same user-facing guidance when resolution fails.
@@ -2202,17 +2243,14 @@ function resolveDispatchDirectory(directory) {
  * `oc_` prefix for compatibility. A resume with no `--model` inherits the
  * model the session was created under (a different model can mean a different
  * provider, breaking the whole point of resuming that exact session).
- * @param {{id: string, directory: string, prompt: string, model: string|undefined, executor: import("./executor.js").WorkerExecutor, priorSessionTask: Task|null, variant: string|undefined, sessionId: string|undefined, originSessionId: string|undefined, internal: boolean, finalMarker: string|null, role: "dispatch"|"advisor", logPath: string, class?: string|null, parentTaskId?: string|null, defaultVariant: string, resolveOpencodeVariants: (model: string, env: NodeJS.ProcessEnv|undefined) => string[], env?: NodeJS.ProcessEnv}} params
+ * @param {{id: string, directory: string, prompt: string, model: string|undefined, executor: import("./executor.js").WorkerExecutor, priorSessionTask: Task|null, variant: string|undefined, sessionId: string|undefined, originSessionId: string|undefined, internal: boolean, finalMarker: string|null, role: "dispatch"|"advisor", logPath: string, class?: string|null, parentTaskId?: string|null, defaultVariant: string, resolveOpencodeVariants: (model: string, env: NodeJS.ProcessEnv|undefined) => string[], env?: NodeJS.ProcessEnv, outputDir?: string|null, originalPrompt?: string}} params
  * @returns {Task}
  */
 // eslint-disable-next-line sonarjs/cyclomatic-complexity, complexity -- adding `class` field per brief; function was already at the 10-point ceiling
-function buildDispatchTask({ id, directory, prompt, model, executor, priorSessionTask, variant, sessionId, originSessionId, internal, finalMarker, role, logPath, class: taskClass, parentTaskId = null, defaultVariant, resolveOpencodeVariants, env }) {
-  if (!model && !priorSessionTask) {
-    if (sessionId) {
-      throw new Error(`error: no task found for session id "${sessionId}" to inherit a model from\nhelp: pass --model explicitly, or check the session id with taskferry list`);
-    }
-    throw new Error(`error: --model is required\nhelp: name the model, e.g. --model provider/model (opencode models or pi --list-models lists what's available); to resume an existing session and inherit its model, pass --session-id instead`);
-  }
+function buildDispatchTask({ id, directory, prompt, model, executor, priorSessionTask, variant, sessionId, originSessionId, internal, finalMarker, role, logPath, class: taskClass, parentTaskId = null, defaultVariant, resolveOpencodeVariants, env, outputDir = null, originalPrompt = prompt }) {
+  // Model presence is validated earlier by validateDispatchModel(), before
+  // the output dir is created -- by this point model-or-priorSessionTask is
+  // guaranteed.
   const resolvedModel = model || /** @type {Task} */ (priorSessionTask).model;
   // Precedence: explicit --variant > resumed session's own variant > the
   // configured defaultVariant sentinel/level. Only the third case ever
@@ -2234,6 +2272,10 @@ function buildDispatchTask({ id, directory, prompt, model, executor, priorSessio
     directory,
     logPath,
     role,
+    // prompt here is the *augmented* prompt (user prompt + injected blocks),
+    // since this is what the worker actually sees; promptPreview remains the
+    // literal user prompt so display surfaces don't show the injection tail.
+    prompt,
     status: "queued",
     model: resolvedModel,
     executorId: executor.id,
@@ -2245,8 +2287,8 @@ function buildDispatchTask({ id, directory, prompt, model, executor, priorSessio
     endedAt: null,
     exitCode: null,
     signal: null,
-    promptPreview: prompt.length > 200 ? prompt.slice(0, 200) + "…" : prompt,
-    promptTotalChars: prompt.length > 200 ? prompt.length : null,
+    promptPreview: originalPrompt.length > 200 ? originalPrompt.slice(0, 200) + "…" : originalPrompt,
+    promptTotalChars: originalPrompt.length > 200 ? originalPrompt.length : null,
     spawnError: null,
     cancelRequested: false,
     internal: internal === true,
@@ -2271,6 +2313,7 @@ function buildDispatchTask({ id, directory, prompt, model, executor, priorSessio
     checkOverride: false,
     projectConfigWarning: null,
     checkGatePid: null,
+    outputDir: outputDir ?? null,
   };
 }
 
@@ -2286,9 +2329,9 @@ function buildDispatchTask({ id, directory, prompt, model, executor, priorSessio
  * reaches the child. Pinned by tasks.test.js's "dispatch()'s queued env is
  * frozen against later caller mutations" gate.
  * @param {{tasks: Map<string, Task>, persistTask: (taskId: string) => void, pendingLaunches: Map<string, LaunchSpec>, providerQueues: Map<string, ProviderQueue>, launchQueuedTasks: () => void}} ctx
- * @param {{id: string, task: Task, prompt: string, sessionId: string|undefined, env: NodeJS.ProcessEnv|undefined, noSandbox: boolean, noOverlay: boolean, allowedDirs: string[]|undefined, roBind: string[]|undefined, executor: import("./executor.js").WorkerExecutor, role: "dispatch"|"advisor"}} params
+ * @param {{id: string, task: Task, prompt: string, sessionId: string|undefined, env: NodeJS.ProcessEnv|undefined, noSandbox: boolean, noOverlay: boolean, allowedDirs: string[]|undefined, roBind: string[]|undefined, executor: import("./executor.js").WorkerExecutor, role: "dispatch"|"advisor", outputDir?: string|null}} params
  */
-function queueDispatchLaunch(ctx, { id, task, prompt, sessionId, env, noSandbox, noOverlay, allowedDirs, roBind, executor, role }) {
+function queueDispatchLaunch(ctx, { id, task, prompt, sessionId, env, noSandbox, noOverlay, allowedDirs, roBind, executor, role, outputDir = null }) {
   ctx.tasks.set(id, task);
   ctx.persistTask(task.id);
   const capturedEnv = env === undefined ? undefined : { ...env };
@@ -2305,6 +2348,7 @@ function queueDispatchLaunch(ctx, { id, task, prompt, sessionId, env, noSandbox,
     env: capturedEnv,
     noSandbox: noSandbox === true,
     noOverlay: noOverlay === true,
+    outputDir: outputDir ?? null,
   });
   const provider = providerOf(task.model);
   const providerQueue = getOrCreateProviderQueue(ctx.providerQueues, provider);
@@ -2510,6 +2554,7 @@ function launchSummaryTask(ctx, p) {
     endedAt: null,
     exitCode: null,
     signal: null,
+    prompt: "Summarize the attached task transcript.",
     promptPreview: "Summarize the attached task transcript.",
     promptTotalChars: null,
     spawnError: null,
@@ -2840,20 +2885,21 @@ async function runAdvisor(ctx, { prompt, directory, model, variant, sessionId, t
 }
 
 /**
- * Drains complete `\n`-terminated lines out of `carry`, returning the first
+ * Drains complete `\n`-terminated lines out of `carry`, returning the last
  * session id found (with the still-pending remainder) or the remainder alone.
  * @param {string} carry
  * @returns {{sessionId: string|null, remainder: string}}
  */
 function extractSessionId(carry) {
+  let lastSessionId = null;
   let nl;
   while ((nl = carry.indexOf("\n")) !== -1) {
     const line = carry.slice(0, nl);
     carry = carry.slice(nl + 1);
     const sessionId = line.trim() ? sessionIdInJson(line) : null;
-    if (sessionId) return { sessionId, remainder: carry };
+    if (sessionId) lastSessionId = sessionId;
   }
-  return { sessionId: null, remainder: carry };
+  return { sessionId: lastSessionId, remainder: carry };
 }
 
 /**
@@ -4453,6 +4499,7 @@ function buildManagerInternalHelpers(ctx) {
     /** @param {Task} task */
     hasLiveOverlay: (task) => hasLiveOverlayForTask(task, { existsFn: ctx.opts.existsFn }),
     sweepOrphanedPromptFiles: () => sweepOrphanedPromptFilesFor({ PROMPT_DIR: ctx.paths.PROMPT_DIR, tasks: ctx.maps.tasks }),
+    sweepOrphanedOutputDirs: () => sweepOrphanedOutputDirsFor({ OUTPUT_DIR_ROOT: resolveOutputDirRoot(ctx.opts.stateDir), tasks: ctx.maps.tasks, readdirFn: ctx.opts.readdirFn, lstatFn: ctx.opts.lstatFn }),
     /** @param {string} model @param {NodeJS.ProcessEnv} [env] @returns {string[]} Resolves the
      * opencode variants table for a model: the test-injected
      * `opencodeVariantsTable` seam when set, otherwise the on-disk
@@ -4530,6 +4577,8 @@ function buildManagerInternalHelpers(ctx) {
      * @returns {Promise<{taskId: string, changesetStatus: string, cleanupFailed?: boolean}>}
      */
     reject: (taskId) => rejectTaskChangeset(taskId, { ensureStateLoaded: () => ctx.helpers.ensureStateLoaded(), tasks: ctx.maps.tasks, persistTask: (taskId) => ctx.helpers.persistTask(taskId), releaseOverlay: (task) => ctx.env.releaseOverlay(task), killGateAndWait: (taskId2) => ctx.env.killGateAndWait(taskId2), noSuchTask }),
+    /** @param {string} taskId @param {{path?: string}} [options] */
+    output: (taskId, options) => outputFor(taskId, { ...ctx, noSuchTask, noSuchOutputFile, noOutputDir }, options),
     /** @param {string} taskId */
     stopRunningWatcher: (taskId) => stopRunningWatcherFor(taskId, { runningWatchers: ctx.maps.runningWatchers, runningWatcherState: ctx.maps.runningWatcherState }),
     /** Forces a running task to stop for a reason other than user cancellation
@@ -4609,7 +4658,7 @@ function buildTaskManagerApi(ctx) {
      *   misrouted CLI/RPC call fails fast rather than silently picking the default.
      * @returns {TaskSummary & {next: string}}
      */
-    dispatch: (params) => dispatchTask(params, { ensureStateLoaded: () => ctx.helpers.ensureStateLoaded(), tasks: ctx.maps.tasks, defaultExecutor: ctx.opts.defaultExecutor, LOG_DIR: ctx.paths.LOG_DIR, persistTask: (taskId) => ctx.helpers.persistTask(taskId), pendingLaunches: ctx.maps.pendingLaunches, providerQueues: ctx.maps.providerQueues, launchQueuedTasks: () => ctx.helpers.launchQueuedTasks(), defaultVariant: ctx.opts.defaultVariant, resolveOpencodeVariants: ctx.helpers.resolveOpencodeVariants }),
+    dispatch: (params) => dispatchTask(params, { ensureStateLoaded: () => ctx.helpers.ensureStateLoaded(), tasks: ctx.maps.tasks, defaultExecutor: ctx.opts.defaultExecutor, STATE_DIR: ctx.opts.stateDir, LOG_DIR: ctx.paths.LOG_DIR, persistTask: (taskId) => ctx.helpers.persistTask(taskId), pendingLaunches: ctx.maps.pendingLaunches, providerQueues: ctx.maps.providerQueues, launchQueuedTasks: () => ctx.helpers.launchQueuedTasks(), defaultVariant: ctx.opts.defaultVariant, resolveOpencodeVariants: ctx.helpers.resolveOpencodeVariants }),
     /**
      * @param {string} taskId
      * @param {{graceMs?: number}} [options]
@@ -4630,6 +4679,12 @@ function buildTaskManagerApi(ctx) {
     reject: (taskId) => ctx.helpers.reject(taskId),
     /**
      * @param {string} taskId
+     * @param {{path?: string}} [options]
+     * @returns {{taskId: string, outputDir: string|null, files: Array<{path: string, size: number}>, bytes: number, total: number, truncated: boolean, file?: {content: string|null, size: number, truncated: boolean, error?: string}}}
+     */
+    output: (taskId, options) => ctx.helpers.output(taskId, options),
+    /**
+     * @param {string} taskId
      * @returns {TaskStatus}
      */
     status: (taskId) => statusFor(taskId, { ensureStateLoaded: () => ctx.helpers.ensureStateLoaded(), tasks: ctx.maps.tasks, logActivity: (logPath) => ctx.helpers.logActivity(logPath), noSuchTask }),
@@ -4644,7 +4699,10 @@ function buildTaskManagerApi(ctx) {
      * @returns {Promise<TaskStatus>}
      */
     poll: (taskId, options = {}) => pollTask(taskId, options, { ensureStateLoaded: () => ctx.helpers.ensureStateLoaded(), tasks: ctx.maps.tasks, waiters: ctx.maps.waiters, noSuchTask }),
-    list: () => listTasks({ ensureStateLoaded: () => ctx.helpers.ensureStateLoaded(), tasks: ctx.maps.tasks }),
+    /**
+     * @param {{limit?: number}} [options]
+     */
+    list: (options) => listTasks({ ensureStateLoaded: () => ctx.helpers.ensureStateLoaded(), tasks: ctx.maps.tasks }, options),
     stats: () => statsTasks({ ensureStateLoaded: () => ctx.helpers.ensureStateLoaded(), tasks: ctx.maps.tasks }),
     /**
      * @param {string} taskId
@@ -4732,6 +4790,16 @@ function bootstrapManagerContext(ctx) {
   // own exit/error paths -- but a SIGKILL of the daemon mid-task skips
   // both cleanup paths and orphans the file forever.
   ctx.helpers.sweepOrphanedPromptFiles();
+  // Mirrors sweepOrphanedPromptFiles/sweepOrphanedOverlays above: a
+  // daemon crash after ensureTaskOutputDir ran for a dispatch but
+  // before the task ever landed in tasks.json (or after a task settled
+  // but its scratch dir was never cleared) leaves <stateDir>/outputs/<id>
+  // behind. Output dirs only ever outlive their task when a state-load
+  // failure or boot crash happened mid-dispatch; the normal settled/exit
+  // paths intentionally keep the dir (it's the worker's deliverable
+  // surface for `taskferry output <id>`), so the sweep only removes dirs
+  // whose task id is not present in tasks.json at all.
+  ctx.helpers.sweepOrphanedOutputDirs();
   // Mirrors sweepOrphanedPromptFiles() above: a daemon that crashed after
   // an overlay was created but before its cleanup (reject/accept, or the
   // advisor auto-reject in extractChangesetForTask()) ever ran leaves a
@@ -4845,16 +4913,17 @@ function readSessionIdFromLog(logPath) {
   }
   try {
     let carry = "";
+    let lastSessionId = null;
     const buf = Buffer.alloc(CHUNK_SIZE);
     for (;;) {
       const bytesRead = fs.readSync(fd, buf, 0, CHUNK_SIZE, null);
       if (bytesRead === 0) break;
       carry += buf.toString("utf8", 0, bytesRead);
       const result = extractSessionId(carry);
-      if (result.sessionId) return result.sessionId;
+      if (result.sessionId) lastSessionId = result.sessionId;
       carry = result.remainder;
     }
-    return carry.trim() ? sessionIdInJson(carry) : null;
+    return (carry.trim() ? sessionIdInJson(carry) : null) || lastSessionId;
   } catch {
     return null;
   } finally {
@@ -4969,7 +5038,31 @@ export function modelsCacheFingerprint(env = {}) {
  * @returns {Error}
  */
 function noSuchTask(taskId) {
-  return new Error(`error: unknown task id: ${taskId}\nhelp: run taskferry list to see valid task ids`);
+  const err = new Error(`error: unknown task id: ${taskId}\nhelp: run taskferry list to see valid task ids`);
+  /** @type {any} */ (err).code = "UNKNOWN_TASK";
+  return err;
+}
+
+/**
+ * @param {string} taskId
+ * @param {string} relativePath
+ * @returns {Error}
+ */
+function noSuchOutputFile(taskId, relativePath) {
+  const err = new Error(`error: output file not found: "${relativePath}" for task ${taskId}\nhelp: run taskferry output ${taskId} to see available files`);
+  /** @type {any} */ (err).code = "OUTPUT_NOT_FOUND";
+  return err;
+}
+
+/**
+ * @param {string} taskId
+ * @param {string} relativePath
+ * @returns {Error}
+ */
+function noOutputDir(taskId, relativePath) {
+  const err = new Error(`error: task ${taskId} has no output directory (requested "${relativePath}")\nhelp: run taskferry output ${taskId} without --path to list available outputs`);
+  /** @type {any} */ (err).code = "NO_OUTPUT_DIR";
+  return err;
 }
 
 // Minimal per-row schema for taskferry list: an agent scanning a task list
@@ -4997,7 +5090,7 @@ function summarizeRow(task) {
  * @returns {TaskSummary}
  */
 function summarize(task) {
-  const { promptPreview, id, status, directory, model, sessionId, originSessionId, pid, startedAt, endedAt, exitCode, signal, logPath, cancelRequested, spawnError } = task;
+  const { promptPreview, id, status, directory, model, sessionId, originSessionId, pid, startedAt, endedAt, exitCode, signal, logPath, cancelRequested, spawnError, outputDir } = task;
   return {
     id, status, directory, model, sessionId, originSessionId, pid, startedAt, endedAt, exitCode, signal, logPath,
     ...failureFields(task),
@@ -5006,6 +5099,7 @@ function summarize(task) {
     ...summarizeOptionalFields(task),
     ...summarizeChangesetFields(task),
     cancelRequested: !!cancelRequested,
+    outputDir: outputDir ?? null,
   };
 }
 
@@ -6125,6 +6219,42 @@ async function rejectTaskChangeset(taskId, ctx) {
 }
 
 /**
+ * Retrieves the scratch output directory (or one file from it) for a task.
+ * Works on every terminal status -- done, crashed, cancelled, or incomplete --
+ * because the scratch dir is per-task state the worker owns, not a parsed log
+ * result. taskferry#423.
+ * @param {string} taskId
+ * @param {{maps: {tasks: Map<string, Task>}, opts: {stateDir: string}, helpers: {ensureStateLoaded: () => void}, noSuchTask: (taskId: string) => Error, noSuchOutputFile: (taskId: string, relativePath: string) => Error, noOutputDir: (taskId: string, relativePath: string) => Error}} ctx
+ * @param {{path?: string}} [options]
+ */
+function outputFor(taskId, ctx, options = {}) {
+  ctx.helpers.ensureStateLoaded();
+  const task = ctx.maps.tasks.get(taskId);
+  if (!task) throw ctx.noSuchTask(taskId);
+  const outputDir = task.outputDir ?? null;
+  if (typeof options.path === "string" && options.path.length > 0) {
+    if (!outputDir) {
+      throw ctx.noOutputDir(taskId, options.path);
+    }
+    const file = readTaskOutputFile(outputDir, options.path);
+    if (file.error === "not_found") throw ctx.noSuchOutputFile(taskId, options.path);
+    return { taskId: taskId, outputDir: outputDir, files: [], bytes: 0, total: 0, truncated: false, file };
+  }
+  if (!outputDir) {
+    return { taskId, outputDir: null, files: [], bytes: 0, total: 0, truncated: false };
+  }
+  const listing = listTaskOutputFiles(outputDir);
+  return {
+    taskId,
+    outputDir,
+    files: listing.files,
+    bytes: listing.bytes,
+    total: listing.total,
+    truncated: listing.truncated,
+  };
+}
+
+/**
  * Waits for a running/queued task to settle, resolving immediately (or with a
  * timeout) via the shared per-task waiter list. Extracted out of
  * `createTaskManager`'s `poll` closure; `summarize`/`readNarration` are plain
@@ -6237,19 +6367,24 @@ export function emptyStatusCounts() {
 /**
  * Sorts all live tasks newest-first and buckets them by status for the list
  * view. Extracted out of `createTaskManager`'s `list` closure; `summarizeRow`
- * is a module-level helper.
+ * is a module-level helper. `counts` is always tallied over every task, but
+ * `tasks` is sliced down to `limit` (when given) before `summarizeRow` runs,
+ * so a caller that only needs the newest N rows (daemon.js's MAX_LIST_ROWS
+ * cap) doesn't pay per-row summarize work for rows it's about to discard.
  * @param {{ensureStateLoaded: () => void, tasks: Map<string, Task>}} ctx
+ * @param {{limit?: number}} [options]
  */
-function listTasks(ctx) {
+function listTasks(ctx, { limit } = {}) {
   ctx.ensureStateLoaded();
   const all = Array.from(ctx.tasks.values()).sort((a, b) => (a.startedAt < b.startedAt ? 1 : -1));
   const counts = emptyStatusCounts();
   for (const t of all) {
     if (counts[/** @type {keyof Counts} */ (t.status)] != null) counts[/** @type {keyof Counts} */ (t.status)]++;
   }
+  const rows = limit !== undefined ? all.slice(0, limit) : all;
   return {
     counts,
-    tasks: all.length ? all.map(summarizeRow) : "none found (this server process's lifetime)",
+    tasks: rows.length ? rows.map(summarizeRow) : "none found (this server process's lifetime)",
   };
 }
 
@@ -6346,6 +6481,86 @@ function sweepOrphanedPromptFilesFor(ctx) {
     const task = ctx.tasks.get(taskId);
     const isActive = task?.status === "running" || task?.status === "queued";
     if (!isActive) removeFileIfPresent(path.join(ctx.PROMPT_DIR, entry));
+  }
+}
+
+/**
+ * Sweeps orphaned output dirs under <stateDir>/outputs/. Each dispatch
+ * reserves its output dir via ensureTaskOutputDir() before launch --
+ * `bwrap --bind` needs the source path to exist on the host -- so a
+ * daemon that crashed after that mkdir but before the task id was
+ * persisted into tasks.json (or that died before any cleanup ran) leaves
+ * an <id> entry under outputs/ with no matching task. Settled tasks
+ * intentionally keep their output dir (it's the worker's deliverable
+ * surface for `taskferry output <id>`), so the sweep only removes dirs
+ * whose task id is absent from the loaded tasks.json entirely. Mirrors
+ * sweepOrphanedPromptFiles() / sweepOrphanedOverlays() at startup.
+ * @param {{OUTPUT_DIR_ROOT: string, tasks: Map<string, Task>, readdirFn: (path: string) => string[], lstatFn?: (path: string) => fs.Stats, removeDirFn?: (path: string) => void}} ctx
+ */
+export function sweepOrphanedOutputDirsFor(ctx) {
+  let entries;
+  try {
+    entries = ctx.readdirFn(ctx.OUTPUT_DIR_ROOT);
+  } catch {
+    return;
+  }
+  // Always filter, then process (CLAUDE.md, taskferry#513): narrow to the
+  // orphan subset via cheap in-memory tasks.has before any per-entry FS work
+  // (stat/rm). Previously this mixed readdir iteration with immediate
+  // removal, but the expensive per-entry work (lstat + rm -rf) still scaled
+  // with every historical directory even when only a handful are orphans.
+  // Collecting the eligible set first bounds FS work to that set.
+  const orphanEntries = collectOrphanOutputEntries(entries, ctx.tasks);
+  if (orphanEntries.length === 0) return;
+  const lstat = ctx.lstatFn ?? fs.lstatSync;
+  const removeDir = ctx.removeDirFn ?? removeDirIfPresent;
+  for (const entry of orphanEntries) {
+    sweepOrphanOutputEntry(path.join(ctx.OUTPUT_DIR_ROOT, entry), lstat, removeDir);
+  }
+}
+
+/**
+ * Cheap in-memory filter for the sweep: returns only entries whose id has
+ * no matching task. No FS work here, so this scales with the directory
+ * listing size but does no per-entry I/O.
+ * @param {string[]} entries
+ * @param {Map<string, Task>} tasks
+ * @returns {string[]}
+ */
+function collectOrphanOutputEntries(entries, tasks) {
+  const orphans = [];
+  for (const entry of entries) {
+    if (entry && entry !== "." && entry !== ".." && !tasks.has(entry)) orphans.push(entry);
+  }
+  return orphans;
+}
+
+/**
+ * Expensive per-orphan FS work: stat the path then rm it. Called only for
+ * the filtered orphan set, so this scales with the orphan count, not the
+ * all-time directory count. The lstat is intentionally after the has-filter
+ * so it is not run for retained history.
+ * @param {string} full
+ * @param {(path: string) => fs.Stats} lstat
+ * @param {(path: string) => void} removeDir
+ */
+function sweepOrphanOutputEntry(full, lstat, removeDir) {
+  try {
+    lstat(full);
+  } catch (err) {
+    if (errCode(err) === "ENOENT") return;
+    throw err;
+  }
+  removeDir(full);
+}
+
+/** Recursively remove a directory tree, tolerating it already being gone (ENOENT).
+ * @param {string} dirPath */
+function removeDirIfPresent(dirPath) {
+  try {
+    fs.rmSync(dirPath, { recursive: true, force: false });
+  } catch (err) {
+    if (errCode(err) !== "ENOENT") throw err;
   }
 }
 
@@ -6477,7 +6692,46 @@ function startRunningWatcherFor(task, ctx) {
  * helpers are plain module-level functions called directly. The factory
  * bindings are threaded in via `ctx`.
  * @param {{prompt: string, directory: string, model?: string, variant?: string, sessionId?: string, internal?: boolean, finalMarker?: string|null, originSessionId?: string, noSandbox?: boolean, noOverlay?: boolean, allowedDirs?: string[], rwBind?: string[], roBind?: string[], executor?: string, env?: NodeJS.ProcessEnv, role?: "dispatch"|"advisor", class?: string|null, parentTaskId?: string|null}} params
- * @param {{ensureStateLoaded: () => void, tasks: Map<string, Task>, defaultExecutor: import("./executor.js").WorkerExecutor, LOG_DIR: string, persistTask: (taskId: string) => void, pendingLaunches: Map<string, LaunchSpec>, providerQueues: Map<string, ProviderQueue>, launchQueuedTasks: () => void, defaultVariant: string, resolveOpencodeVariants: (model: string, env: NodeJS.ProcessEnv|undefined) => string[]}} ctx
+ * @param {{ensureStateLoaded: () => void, tasks: Map<string, Task>, defaultExecutor: import("./executor.js").WorkerExecutor, STATE_DIR: string, LOG_DIR: string, persistTask: (taskId: string) => void, pendingLaunches: Map<string, LaunchSpec>, providerQueues: Map<string, ProviderQueue>, launchQueuedTasks: () => void, defaultVariant: string, resolveOpencodeVariants: (model: string, env: NodeJS.ProcessEnv|undefined) => string[]}} ctx
+ * @returns {TaskSummary & {next: string}}
+ */
+/**
+ * Composes the augmented prompt the worker actually sees. The user's literal
+ * prompt is preserved verbatim as `originalPrompt`; this string is what gets
+ * stored on `task.prompt` and passed via `-p`. The two blocks are:
+ *   - verificationPromptBlock: only on dispatch (advisor never gates) and
+ *     suppressed by --no-overlay (parity with the rest of the overlay machinery).
+ *   - outputDirPromptBlock: gated on outputDir being allocated at all, not
+ *     on role. An advisor turn gets the exact same scratch dir and
+ *     TASKFERRY_OUTPUT_DIR as a dispatch (see dispatchTask), so it needs
+ *     the same in-prompt notification to actually discover it -- a worker
+ *     that has a writable dir and an env var pointing at it but no prompt
+ *     text explaining either can't use the "deliverable survives turn end"
+ *     mechanism this exists for. Previously gated on role === "dispatch",
+ *     which left advisor's allocation silently undiscoverable
+ *     (taskferry#504); tying the prompt block to outputDir itself instead
+ *     of duplicating a separate role check means it can't drift out of
+ *     sync with what dispatchTask actually allocated. taskferry#423.
+ * @param {{role: "dispatch"|"advisor", noOverlay: boolean, projectConfig: {check: string|null}, prompt: string, outputDir: string|null, noSandbox?: boolean}} args
+ * @returns {string}
+ */
+function buildDispatchPrompt({ role, noOverlay, projectConfig, prompt, outputDir, noSandbox = false }) {
+  const injected = [
+    role === "dispatch" && !noOverlay && projectConfig.check ? verificationPromptBlock(projectConfig.check) : "",
+    outputDir ? outputDirPromptBlock(outputDir, noSandbox) : "",
+  ].join("");
+  return `${prompt}${injected}`;
+}
+
+/**
+ * Dispatches a new task: resolves the prior session/executor, validates and
+ * normalizes the request, builds the task record, queues its launch, and
+ * returns the summary plus a next-step hint. Extracted out of
+ * `createTaskManager`'s `dispatch` closure; all the validation/build/queue
+ * helpers are plain module-level functions called directly. The factory
+ * bindings are threaded in via `ctx`.
+ * @param {{prompt: string, directory: string, model?: string, variant?: string, sessionId?: string, internal?: boolean, finalMarker?: string|null, originSessionId?: string, noSandbox?: boolean, noOverlay?: boolean, allowedDirs?: string[], rwBind?: string[], roBind?: string[], executor?: string, env?: NodeJS.ProcessEnv, role?: "dispatch"|"advisor", class?: string|null, parentTaskId?: string|null}} params
+ * @param {{ensureStateLoaded: () => void, tasks: Map<string, Task>, defaultExecutor: import("./executor.js").WorkerExecutor, STATE_DIR: string, LOG_DIR: string, persistTask: (taskId: string) => void, pendingLaunches: Map<string, LaunchSpec>, providerQueues: Map<string, ProviderQueue>, launchQueuedTasks: () => void, defaultVariant: string, resolveOpencodeVariants: (model: string, env: NodeJS.ProcessEnv|undefined) => string[]}} ctx
  * @returns {TaskSummary & {next: string}}
  */
 function dispatchTask(params, ctx) {
@@ -6490,16 +6744,26 @@ function dispatchTask(params, ctx) {
   const executor = resolveDispatchExecutor(priorSessionTask, executorName, ctx.defaultExecutor);
   validateDispatchParameters({ prompt, directory });
   validateDispatchFinalMarker(finalMarker);
+  validateDispatchModel({ model, priorSessionTask, sessionId });
   const normalizedDirectory = resolveDispatchDirectory(directory);
   const projectConfig = loadProjectConfig(normalizedDirectory);
-  const dispatchPrompt = role === "dispatch" && !noOverlay && projectConfig.check
-    ? `${prompt}${verificationPromptBlock(projectConfig.check)}`
-    : prompt;
   // Task IDs retain the literal "oc_" prefix for compatibility; WorkerExecutor.taskIdPrefix is not wired in this issue.
   const id = `oc_${Date.now().toString(36)}_${randomUUID().slice(0, 8)}`;
   const logPath = path.join(ctx.LOG_DIR, `${id}.ndjson`);
-  const task = buildDispatchTask({ id, model, executor, priorSessionTask, variant, sessionId, originSessionId, internal, finalMarker, role, logPath, parentTaskId, env, class: taskClass, prompt: dispatchPrompt, directory: normalizedDirectory, defaultVariant: ctx.defaultVariant, resolveOpencodeVariants: ctx.resolveOpencodeVariants });
-  queueDispatchLaunch({ tasks: ctx.tasks, persistTask: ctx.persistTask, pendingLaunches: ctx.pendingLaunches, providerQueues: ctx.providerQueues, launchQueuedTasks: ctx.launchQueuedTasks }, { id, task, sessionId, env, noSandbox, noOverlay, executor, role, prompt: dispatchPrompt, allowedDirs: effectiveRwBind, roBind: dispatchRoBind });
+  // Per-task scratch dir: a writable, rw-bound surface the worker can use to
+  // hand back deliverables whose final assistant message ended on a tool call
+  // (so `taskferry result` can't parse a result). The same path is exported as
+  // $TASKFERRY_OUTPUT_DIR inside the sandbox. Allocated for every dispatch
+  // regardless of role (dispatch + advisor both go through this code path) so
+  // the docs/skill text claiming "every dispatch gets a per-task scratch dir"
+  // stays accurate; the advisor role also has a final-message window where
+  // the answer can end on a tool call and the caller wants the deliverable
+  // back the same way. taskferry#423.
+  const outputDir = resolveTaskOutputDir(ctx.STATE_DIR, id);
+  ensureTaskOutputDir(outputDir);
+  const dispatchPrompt = buildDispatchPrompt({ role, noOverlay, projectConfig, prompt, outputDir, noSandbox });
+  const task = buildDispatchTask({ id, model, executor, priorSessionTask, variant, sessionId, originSessionId, internal, finalMarker, role, logPath, parentTaskId, env, prompt: dispatchPrompt, originalPrompt: prompt, directory: normalizedDirectory, defaultVariant: ctx.defaultVariant, resolveOpencodeVariants: ctx.resolveOpencodeVariants, class: taskClass, outputDir: outputDir });
+  queueDispatchLaunch({ tasks: ctx.tasks, persistTask: ctx.persistTask, pendingLaunches: ctx.pendingLaunches, providerQueues: ctx.providerQueues, launchQueuedTasks: ctx.launchQueuedTasks }, { id, task, sessionId, env, noSandbox, noOverlay, executor, role, prompt: dispatchPrompt, allowedDirs: effectiveRwBind, roBind: dispatchRoBind, outputDir: outputDir });
   const summary = summarize(task);
   return {
     ...summary,
@@ -6694,6 +6958,22 @@ function buildSummaryEnvironment(ctx, env) {
   delete result.OPENCODE_CONFIG_CONTENT;
   result.TASKFERRY_CHILD = "1";
   return result;
+}
+
+/**
+ * Sets or clears $TASKFERRY_OUTPUT_DIR on a spawn env. Dispatches get the
+ * scratch dir path so workers can write deliverables there; summaries don't,
+ * because they don't take a deliverable. taskferry#423.
+ * @param {NodeJS.ProcessEnv} spawnEnv
+ * @param {boolean} isSummary
+ * @param {string|null} outputDir
+ */
+function applyOutputDirEnv(spawnEnv, isSummary, outputDir) {
+  if (isSummary || !outputDir) {
+    delete spawnEnv[TASKFERRY_OUTPUT_DIR_ENV];
+    return;
+  }
+  spawnEnv[TASKFERRY_OUTPUT_DIR_ENV] = outputDir;
 }
 
 /**

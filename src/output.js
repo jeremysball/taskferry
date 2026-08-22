@@ -174,6 +174,7 @@ export function writeError(error, io = process) {
  * @property {string|null} [checkEndedAt]
  * @property {boolean} [checkOverride]
  * @property {{root?: string, tmpRoot?: string} | null} [overlayDirs]
+ * @property {string|null} [outputDir]
  */
 
 /**
@@ -215,6 +216,14 @@ function trimOverlayDirs(detail) {
   if (!detail.overlayDirs) return detail;
   const { root, tmpRoot } = detail.overlayDirs;
   return { ...detail, overlayDirs: { root, tmpRoot } };
+}
+
+/**
+ * @param {StatusDetailBase} detail
+ * @returns {Record<string, unknown>}
+ */
+function leanOutputDirField(detail) {
+  return detail.outputDir ? { outputDir: detail.outputDir } : {};
 }
 
 /**
@@ -271,6 +280,7 @@ export function leanStatus(detail, { full = false } = {}) {
   if (detail.changesetError) lean.changesetError = detail.changesetError;
   Object.assign(lean, leanCheckGateFields(detail));
   if (detail.projectConfigWarning) lean.projectConfigWarning = detail.projectConfigWarning;
+  Object.assign(lean, leanOutputDirField(detail));
   if (logBytesWritten !== undefined) {
     lean.logBytesWritten = logBytesWritten;
     lean.logLastWriteAt = logLastWriteAt;
@@ -356,11 +366,20 @@ function listRow(row) {
 
 // Shared by projectList/projectContext: rows the raw task array down to
 // `limit`, reporting whether anything was cut off.
+//
+// `total` is the row count actually shipped by the daemon in this response,
+// not the all-time task count -- the unfiltered `task.list` path caps rows
+// server-side (daemon.js's MAX_LIST_ROWS) while still reporting the true
+// all-time tally in `value.counts`. `serverTotal` sums `value.counts` to
+// recover that true tally, so callers can tell "the CLI's own --limit cut
+// this batch down" (serverTotal === total, raising --limit reveals more)
+// apart from "the daemon already capped what it sent" (serverTotal > total,
+// no --limit value can reveal more; only a narrower --directory query can).
 /**
  * @param {ListValue} value
  * @param {number | undefined} limit
  * @param {number} defaultLimit
- * @returns {{tasks: ListRow[] | string, truncated: boolean, total: number}}
+ * @returns {{tasks: ListRow[] | string, truncated: boolean, total: number, serverTotal: number, serverTruncated: boolean}}
  */
 function limitTasks(value, limit, defaultLimit) {
   let rows;
@@ -370,13 +389,28 @@ function limitTasks(value, limit, defaultLimit) {
     rows = value.tasks;
   }
   const total = Array.isArray(rows) ? rows.length : 0;
+  const serverTotal = value.counts ? Object.values(value.counts).reduce((sum, n) => sum + n, 0) : total;
   const effectiveLimit = limit !== undefined ? limit : defaultLimit;
   const tasks = Array.isArray(rows) ? rows.slice(0, effectiveLimit) : rows;
   const truncated = Array.isArray(tasks) && tasks.length < total;
-  return { tasks, truncated, total };
+  const serverTruncated = serverTotal > total;
+  return { tasks, truncated, total, serverTotal, serverTruncated };
 }
 
 const DEFAULT_LIST_LIMIT = 30;
+
+/**
+ * @param {{truncated: boolean, total: number, serverTotal: number, serverTruncated: boolean}} limited
+ * @returns {string[] | undefined}
+ */
+function listNextHint(limited) {
+  const { truncated, total, serverTotal, serverTruncated } = limited;
+  if (serverTruncated) {
+    return [`Showing the newest ${total} of ${serverTotal} tasks (server-capped); pass --directory to narrow further`];
+  }
+  if (truncated) return [`Run taskferry list --limit ${total} for all ${total} tasks`];
+  return undefined;
+}
 
 /**
  * @param {ListValue} value
@@ -388,12 +422,13 @@ const DEFAULT_LIST_LIMIT = 30;
  * @returns {ListValue & {next?: string[]}}
  */
 export function projectList(value, { limit } = {}) {
-  const { tasks, truncated, total } = limitTasks(value, limit, DEFAULT_LIST_LIMIT);
+  const limited = limitTasks(value, limit, DEFAULT_LIST_LIMIT);
+  const next = listNextHint(limited);
   return {
     ...(value.directory ? { directory: value.directory } : {}),
     counts: value.counts,
-    tasks,
-    ...(truncated ? { next: [`Run taskferry list --limit ${total} for all ${total} tasks`] } : {}),
+    tasks: limited.tasks,
+    ...(next ? { next } : {}),
   };
 }
 
@@ -405,12 +440,13 @@ const DEFAULT_CONTEXT_LIMIT = 10;
  * @returns {Record<string, unknown>}
  */
 export function projectContext(value, { limit } = {}) {
-  const { tasks, truncated, total } = limitTasks(value, limit, DEFAULT_CONTEXT_LIMIT);
+  const limited = limitTasks(value, limit, DEFAULT_CONTEXT_LIMIT);
+  const next = listNextHint(limited);
   return {
     directory: value.directory,
     counts: value.counts,
-    tasks,
-    ...(truncated ? { next: [`Run taskferry list --limit ${total} for all ${total} tasks`] } : {}),
+    tasks: limited.tasks,
+    ...(next ? { next } : {}),
   };
 }
 

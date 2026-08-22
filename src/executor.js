@@ -212,6 +212,50 @@ function isSafeBindSource(fullPath, lstatFn) {
 }
 
 /**
+ * Resolve a single opencode config entry to a safe bind source. Dotfiles
+ * setups commonly symlink individual entries (opencode.json, plugins, etc.)
+ * into a repo, so a symlinked entry is resolved to its real target and that
+ * target is bound read-only at the same sandboxed destination, instead of
+ * being dropped. Dangling links fail closed (ENOENT silent, other errors
+ * warn) and do not crash the dispatch. Other bind sites (auth.json, pi)
+ * keep the strict skip-symlink behavior via isSafeBindSource.
+ * @param {string} fullPath
+ * @param {(file: string) => {isSymbolicLink: () => boolean, isFile?: () => boolean, nlink?: number}} lstatFn
+ * @param {(file: string) => string} realpathFn
+ * @returns {string|null}
+ */
+function resolveOpencodeConfigBindSource(fullPath, lstatFn, realpathFn) {
+  let entryStat;
+  try {
+    entryStat = lstatFn(fullPath);
+  } catch (err) {
+    if (!isEnoentError(err)) {
+      process.stderr.write(`warning: could not verify ${fullPath} is not a symlink (${/** @type {Error} */ (err).message}); skipping the bind\n`);
+    }
+    return null;
+  }
+  if (entryStat == null) return null;
+  if (entryStat.isSymbolicLink()) {
+    let realTarget;
+    try {
+      realTarget = realpathFn(fullPath);
+    } catch (err) {
+      if (!isEnoentError(err)) {
+        process.stderr.write(`warning: could not resolve symlink ${fullPath} (${/** @type {Error} */ (err).message}); skipping the bind\n`);
+      }
+      return null;
+    }
+    if (!isSafeBindSource(realTarget, lstatFn)) return null;
+    return realTarget;
+  }
+  if (typeof entryStat.isFile === "function" && entryStat.isFile() && typeof entryStat.nlink === "number" && entryStat.nlink > 1) {
+    process.stderr.write(`warning: ${fullPath} is hardlinked (${entryStat.nlink} names for one inode); skipping the bind\n`);
+    return null;
+  }
+  return fullPath;
+}
+
+/**
  * @typedef {Object} WorkerExecutor
  * @property {"opencode"|"pi"} id
  * @property {string} taskIdPrefix
@@ -489,8 +533,8 @@ export function opencodeExecutor() {
     // small tmpfs: opencode's snapshot store under here grows unbounded
     // across dispatches (no gc) and previously filled the whole
     // XDG_RUNTIME_DIR tmpfs, starving it of space for sockets/locks too.
-    /** @param {{homeDir: string, dataDir: string, spawnEnv: NodeJS.ProcessEnv, existsFn: (file: string) => boolean, statFn?: (file: string) => {isDirectory: () => boolean}|null, lstatFn?: (file: string) => {isSymbolicLink: () => boolean, isFile?: () => boolean, nlink?: number}, readdirFn: (dir: string) => string[], sessionId?: string|null, launchDirectory?: string|null}} args @returns {{extraRoBinds: [string, string][], extraRwPairBinds?: [string, string][], sandboxedDataHome: string, sandboxEnv: Record<string, string>}} */
-    sandboxAuthFile({ homeDir, dataDir, spawnEnv, existsFn, lstatFn = fs.lstatSync, readdirFn }) {
+    /** @param {{homeDir: string, dataDir: string, spawnEnv: NodeJS.ProcessEnv, existsFn: (file: string) => boolean, statFn?: (file: string) => {isDirectory: () => boolean}|null, lstatFn?: (file: string) => {isSymbolicLink: () => boolean, isFile?: () => boolean, nlink?: number}, readdirFn: (dir: string) => string[], realpathFn?: (file: string) => string, sessionId?: string|null, launchDirectory?: string|null}} args @returns {{extraRoBinds: [string, string][], extraRwPairBinds?: [string, string][], sandboxedDataHome: string, sandboxEnv: Record<string, string>}} */
+    sandboxAuthFile({ homeDir, dataDir, spawnEnv, existsFn, lstatFn = fs.lstatSync, readdirFn, realpathFn = fs.realpathSync }) {
       const realDataHome = spawnEnv.XDG_DATA_HOME || path.join(homeDir, ".local", "share");
       const realAuthFile = path.join(realDataHome, "opencode", "auth.json");
       const sandboxedDataHome = path.join(dataDir, "opencode-data");
@@ -516,13 +560,22 @@ export function opencodeExecutor() {
       // follow a symlink, so a symlinked realConfigDir would let every entry
       // inside pass the per-entry guard while the whole tree points outside.
       // A symlinked dir is treated as absent (fail closed, same as an entry).
+      // Per-entry symlinks are handled differently: dotfiles-managed setups
+      // commonly symlink individual entries (opencode.json, plugins, etc.)
+      // into a dotfiles repo, so a symlinked entry is resolved to its real
+      // target and that target is bound read-only at the same sandboxed
+      // destination, instead of being dropped. Dangling/unresolvable links
+      // fail closed (skip with ENOENT-silent / non-ENOENT warning) and do
+      // not crash the dispatch. Other bind sites (auth.json, pi) keep the
+      // strict skip-symlink behavior -- see isSafeBindSource -- because
+      // those paths include read-write session binds where resolving would
+      // hand the worker write access to the link target.
       if (existsFn(realConfigDir) && isSafeBindSource(realConfigDir, lstatFn)) {
         for (const entry of readdirFn(realConfigDir)) {
           if (entry === ".gitignore") continue;
           const fullPath = path.join(realConfigDir, entry);
-          if (isSafeBindSource(fullPath, lstatFn)) {
-            extraRoBinds.push([fullPath, path.join(sandboxedConfigDir, entry)]);
-          }
+          const bindSource = resolveOpencodeConfigBindSource(fullPath, lstatFn, realpathFn);
+          if (bindSource) extraRoBinds.push([bindSource, path.join(sandboxedConfigDir, entry)]);
         }
       }
       return {

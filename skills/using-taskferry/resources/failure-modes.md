@@ -4,6 +4,32 @@ Ways a dispatch goes wrong that are not what they look like. Each entry
 below is a real incident, not a hypothetical — the symptom is listed first
 because that is what you will actually see.
 
+## Worker ended on a tool call — read the scratch dir, not the log
+
+**Symptom:** A dispatch settles (`done`, `crashed`, `cancelled`, or
+`incomplete`) without a clean final assistant message, and `taskferry
+tail` shows the last assistant turn is still a `tool_use` block. The log
+file ends with the tool's invocation, not a final report.
+
+The deliverable is almost certainly on disk in the worker's scratch
+output dir, not in the log — every dispatch gets a per-task writable
+directory at `<stateDir>/outputs/<id>/`, exposed as `$TASKFERRY_OUTPUT_DIR`.
+When bwrap sandboxing is active, taskferry rw-binds that directory at the
+same path. With `--no-sandbox`, it remains a normal host directory. Use it for
+artifacts that must survive turn end (taskferry#423):
+
+```sh
+taskferry output <id>                       # list every file in the scratch dir
+taskferry output <id> --path deliverable.md # read one specific file
+```
+
+The scratch dir is independent of the changeset overlay: it persists on
+every terminal status, is never consumed by `accept`/`reject`, and is
+read back through its own surface (`taskferry output` / `task.output`
+RPC). If you find the deliverable there, the worker did its job — the
+"missing final message" was just the model's tool turn settling the
+task, not a failure of the work itself.
+
 ## `no_output_timeout` crashes
 
 **Symptom:** `status: crashed`, `failureReason: no_output_timeout_dead_spawn`

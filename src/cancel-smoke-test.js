@@ -60,7 +60,8 @@ const dispatched = taskferry([
   "dispatch",
   "--prompt", "Run 'sleep 60' via bash, then reply SLEEP_DONE. Do not shorten the sleep duration.",
   "--directory", dirArg,
-  "--model", "openrouter/deepseek/deepseek-v4-flash",
+  "--model", "meta/muse-spark-1.2-contributor",
+  "--variant", "low",
   "--executor", "opencode",
 ]);
 console.log(dispatched);

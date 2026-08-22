@@ -487,8 +487,8 @@ test("bundled skill teaches the AXI worker contract without extra plugin surface
   assert.match(skill, /taskferry result/);
   assert.match(skill, /ferries/);
   assert.match(skill, /worker backend/i);
-  assert.match(skill, /fresh sessions/);
-  assert.match(skill, /resume only the implementer session/i);
+  assert.match(skill, /resume the session that already did the work/i);
+  assert.match(skill, /start a fresh session only when/i);
   assert.doesNotMatch(skill, /\bMCP\b/i);
   assert.doesNotMatch(skill, /taskferry setup/);
 });

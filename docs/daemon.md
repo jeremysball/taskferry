@@ -640,3 +640,15 @@ profiling is diagnostic, not on the request's critical path.
   mechanism because they are common to the main checkout, can be large, and
   must track live upstream state (new commits) during a linked-worktree
   dispatch — the tradeoffs don't apply to private git metadata the same way.
+- A user-supplied `--ro-bind` of a deny-listed path (e.g. `~/.ssh`) binding
+  read-only with a loud "overrides the sandbox deny-list" warning, while the
+  same path in a project's `.taskferry.toml` `read_only_paths` is skipped as
+  unsafe — expected, not an inconsistency. The two sources have different
+  trust: `--ro-bind` is the user's own explicit command-line choice (same as
+  `--rw-bind`, which has always overridden the deny-list), while
+  `.taskferry.toml` is project-supplied and daemon-untrusted, so its
+  protected-mount check (which includes the deny-list) stays mandatory. The
+  structural mounts (`stateDir`, `runtimeDir`, the launch directory) are
+  never overridable from either source: a user `--ro-bind` overlapping one of
+  those is skipped with a warning even when it also overlaps the deny-list
+  (e.g. `stateDir` itself, which is a default deny-list entry).

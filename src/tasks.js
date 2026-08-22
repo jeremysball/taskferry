@@ -5250,18 +5250,31 @@ function buildTaskManagerWithOptions(opts) {
 }
 
 
+// A daemon-restart reconciliation only reads this much of a task log from
+// the tail before deciding whether a session id is present. Real logs stamp
+// sessionID on (essentially) every event line -- see executor.js's
+// normalizeLogEvent -- so the most recent session id sits in the newest
+// bytes, and restart cost does not grow with full log history.
+const SESSION_SCAN_TAIL_BYTES = 128 * 1024;
+
 /**
- * Reads the last session id recorded in a task log. Reads the whole file
- * in 64 KiB chunks (a session id lands in one of the first event lines,
- * but also be the last line of a huge log), returning the most recent
- * session id found. Returns `{ sessionId, readable }` so callers can
- * distinguish "log had no session" from "log unreadable" -- the two
- * failure modes of daemon-restart resume are not the same.
+ * Reads the most recent session id recorded in a task log. Reads a bounded
+ * tail window (last 128 KiB) instead of the whole file, so a restart's
+ * per-task reconciliation cost is independent of the task's full historical
+ * log volume; a session id found in the window is the most recent one
+ * because it came after every earlier line. Only when the tail window shows
+ * no session id at all (a log whose only session event predates the last
+ * 128 KiB, or a session stamped on a single line that straddles the window
+ * boundary) does it fall back to a full forward scan of the file -- that
+ * fallback's cost is the one case that still grows with log history, and
+ * it exists so a valid session id anywhere in the log is still recovered.
+ * Returns `{ sessionId, readable }` so callers can distinguish "log had no
+ * session" from "log unreadable" -- the two failure modes of daemon-restart
+ * resume are not the same.
  * @param {string} logPath
  * @returns {{sessionId: string|null, readable: boolean}}
  */
 function readSessionIdFromLog(logPath) {
-  const CHUNK_SIZE = 64 * 1024;
   let fd;
   try {
     fd = fs.openSync(logPath, "r");
@@ -5269,24 +5282,65 @@ function readSessionIdFromLog(logPath) {
     return { sessionId: null, readable: false };
   }
   try {
-    let carry = "";
-    let lastSessionId = null;
-    const buf = Buffer.alloc(CHUNK_SIZE);
-    for (;;) {
-      const bytesRead = fs.readSync(fd, buf, 0, CHUNK_SIZE, null);
-      if (bytesRead === 0) break;
-      carry += buf.toString("utf8", 0, bytesRead);
-      const result = extractSessionId(carry);
-      if (result.sessionId) lastSessionId = result.sessionId;
-      carry = result.remainder;
+    const size = fs.fstatSync(fd).size;
+    if (size > SESSION_SCAN_TAIL_BYTES) {
+      const window = Buffer.alloc(SESSION_SCAN_TAIL_BYTES);
+      const bytesRead = fs.readSync(fd, window, 0, SESSION_SCAN_TAIL_BYTES, size - SESSION_SCAN_TAIL_BYTES);
+      const windowSessionId = sessionIdFromWindowText(window.toString("utf8", 0, bytesRead));
+      if (windowSessionId) return { sessionId: windowSessionId, readable: true };
     }
-    const tailSessionId = carry.trim() ? sessionIdInJson(carry) : null;
-    return { sessionId: tailSessionId || lastSessionId, readable: true };
+    return { sessionId: scanSessionIdForward(fd, null), readable: true };
   } catch {
     return { sessionId: null, readable: false };
   } finally {
     fs.closeSync(fd);
   }
+}
+
+/**
+ * Forward-scans the whole log in 64 KiB chunks, returning the most recent
+ * session id found. `startPosition` is null to read sequentially from the
+ * fd's current position (a fresh open starts at byte 0); the fallback after
+ * a tail-window scan passes an explicit 0 -- positioned reads never advance
+ * the fd's offset, so the fd is still at byte 0 after the window read.
+ * @param {number} fd
+ * @param {number|null} startPosition
+ * @returns {string|null}
+ */
+function scanSessionIdForward(fd, startPosition) {
+  const CHUNK_SIZE = 64 * 1024;
+  let carry = "";
+  let lastSessionId = null;
+  const buf = Buffer.alloc(CHUNK_SIZE);
+  let position = startPosition;
+  for (;;) {
+    const bytesRead = fs.readSync(fd, buf, 0, CHUNK_SIZE, position);
+    if (bytesRead === 0) break;
+    if (position !== null) position += bytesRead;
+    carry += buf.toString("utf8", 0, bytesRead);
+    const result = extractSessionId(carry);
+    if (result.sessionId) lastSessionId = result.sessionId;
+    carry = result.remainder;
+  }
+  const tailSessionId = carry.trim() ? sessionIdInJson(carry) : null;
+  return tailSessionId || lastSessionId;
+}
+
+/**
+ * Returns the last session id inside a tail-window slice, or null. The
+ * window's first line may be a fragment of a longer line that began before
+ * the window; a truncated line cannot parse, so it is skipped by
+ * extractSessionId's complete-line loop. The window always ends at EOF, so
+ * its final line is the file's final line: complete when the file ends with
+ * a newline, otherwise parsed as a tail -- and preferred when it parses,
+ * because it is the newest line.
+ * @param {string} text
+ * @returns {string|null}
+ */
+function sessionIdFromWindowText(text) {
+  const parsed = extractSessionId(text);
+  const tailSessionId = parsed.remainder.trim() ? sessionIdInJson(parsed.remainder) : null;
+  return tailSessionId || parsed.sessionId;
 }
 
 /**

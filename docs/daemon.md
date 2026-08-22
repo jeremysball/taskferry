@@ -316,7 +316,10 @@ reconciles each persisted task on boot:
   reconstituted). `unknown` is still the historical "the daemon that owned
   this task is gone" marker for this case.
 - `running` tasks are checked for a resumable worker session: the daemon
-  reads the log for a valid `sessionId` (`readSessionIdFromLog`), checks that
+  reads the log for a valid `sessionId` (`readSessionIdFromLog` — a bounded
+  tail scan of the last 128 KiB, since real logs stamp `sessionID` on
+  essentially every event line; a log whose only session event predates
+  that window falls back to a full scan), checks that
   the task directory still exists and that the orphaned sandbox pid (if any)
   is reaped, and where resumable, cleans the stale overlay and re-queues the
   task with the recovered `sessionId` against a fresh overlay. The scheduler

@@ -252,3 +252,121 @@ describe("daemon restart auto-resume", () => {
     assert.ok(spawns.length > 0, "resume must proceed after the orphan is reaped");
   });
 });
+
+// The bounded tail-window size readSessionIdFromLog scans (tasks.js's
+// SESSION_SCAN_TAIL_BYTES), hardcoded here so the byte-accounting
+// assertions below prove the bound literally.
+const SESSION_SCAN_TAIL_BYTES = 128 * 1024;
+
+describe("readSessionIdFromLog bounded tail scan", () => {
+  const fillerLine = (n) => JSON.stringify({ type: "text", part: { messageID: `m${n}`, text: "x".repeat(512) } }) + "\n";
+
+  // Builds a log far larger than the tail window: session-id lines planted
+  // at the head and/or tail, padded to `minBytes` with filler (no sessionID).
+  function bigLog({ minBytes, headSessionIds, tailSessionIds }) {
+    let content = "";
+    for (const id of headSessionIds) content += JSON.stringify({ sessionID: id, type: "step_start" }) + "\n";
+    let n = 0;
+    while (Buffer.byteLength(content) < Math.max(minBytes, SESSION_SCAN_TAIL_BYTES + 1)) {
+      content += fillerLine(n);
+      n += 1;
+    }
+    for (const id of tailSessionIds) content += JSON.stringify({ sessionID: id, type: "step_finish" }) + "\n";
+    return content;
+  }
+
+  // Runs the restart reconciliation through makeManager with an
+  // fs.readSync spy that accounts only the bytes read from the seeded task
+  // log (fds are mapped back to their open path, so unrelated reads --
+  // tasks.json, /proc -- don't pollute the accounting). The reconciliation
+  // runs synchronously inside makeManager, so `bootstrapReads` -- captured
+  // the moment makeManager returns -- is exactly what the restart scan
+  // itself read; later reads (child-exit classification etc.) stay out of
+  // the accounting. The resumed spawn itself lands via launchQueuedTasks,
+  // so callers wait a tick before asserting on spawns.
+  function restartWithReadSpy(t, { logName, logContent, taskFixture }) {
+    const reads = [];
+    const pathByFd = new Map();
+    const { spawns, fakeSpawn } = spawnRecorder();
+    const originalOpenSync = fs.openSync;
+    const originalReadSync = fs.readSync;
+    t.mock.method(fs, "openSync", (targetPath, ...rest) => {
+      const fd = originalOpenSync(targetPath, ...rest);
+      if (targetPath.endsWith(logName)) pathByFd.set(fd, targetPath);
+      return fd;
+    });
+    t.mock.method(fs, "readSync", (fd, buffer, offset, length, position) => {
+      if (pathByFd.has(fd)) reads.push({ length, position });
+      return originalReadSync(fd, buffer, offset, length, position);
+    });
+    makeManager({
+      tasksFixture: (logDir) => taskFixture(logDir),
+      logs: { [logName]: logContent },
+      spawnFn: fakeSpawn,
+      killFn: fakeDeadKill(),
+      cancelGraceMs: 0,
+      sandboxEnabled: false,
+      overlayEnabled: false,
+    });
+    const bootstrapReads = reads.slice();
+    return { bootstrapReads, reads, spawns };
+  }
+
+  test("a session id inside the tail window is found after reading only the bounded window, not the whole log", async (t) => {
+    // The log is several times larger than the window; a full forward scan
+    // would read every byte. The scan must return the tail-most session id
+    // while reading at most the window -- restart reconciliation cost must
+    // not grow with full log history.
+    const logContent = bigLog({ minBytes: 3 * SESSION_SCAN_TAIL_BYTES, headSessionIds: ["ses_head"], tailSessionIds: ["ses_tail_most_recent"] });
+    const { bootstrapReads, spawns } = restartWithReadSpy(t, {
+      logContent,
+      taskFixture: (logDir) => [runningFixtureTask({ id: "oc_big_tail", pid: 12350, logDir })],
+      logName: "oc_big_tail.ndjson",
+    });
+    await new Promise((r) => setTimeout(r, 60));
+    const totalRead = bootstrapReads.reduce((sum, r) => sum + r.length, 0);
+    assert.equal(totalRead, SESSION_SCAN_TAIL_BYTES, "the scan must read exactly the bounded window, not the whole log");
+    assert.ok(spawns.length > 0, "expected a resumed spawn from the tail-window scan");
+    assert.ok(
+      spawns.some((s) => s.args.includes("--session") && s.args.includes("ses_tail_most_recent")),
+      "the resumed spawn must carry the tail-most session id"
+    );
+  });
+
+  test("a session id that only exists before the window is still recovered by the fallback full scan", async (t) => {
+    // The window shows no session id (the only one is buried behind several
+    // windows of filler), so the scan falls back to the whole file -- the
+    // one case whose cost grows with log history -- and still recovers it.
+    const logContent = bigLog({ minBytes: 3 * SESSION_SCAN_TAIL_BYTES, headSessionIds: ["ses_only_in_head"], tailSessionIds: [] });
+    const { bootstrapReads, spawns } = restartWithReadSpy(t, {
+      logContent,
+      taskFixture: (logDir) => [runningFixtureTask({ id: "oc_tail_fallback", pid: 12351, logDir })],
+      logName: "oc_tail_fallback.ndjson",
+    });
+    await new Promise((r) => setTimeout(r, 60));
+    const totalRead = bootstrapReads.reduce((sum, r) => sum + r.length, 0);
+    assert.ok(totalRead > SESSION_SCAN_TAIL_BYTES, "the fallback must read past the window to find the head session");
+    assert.ok(
+      spawns.some((s) => s.args.includes("--session") && s.args.includes("ses_only_in_head")),
+      "the fallback scan must still recover the pre-window session id"
+    );
+  });
+
+  test("when several session ids appear, the most recent one wins (not the first found)", async (t) => {
+    // Two sessions inside the window: the tail scan must return the newest,
+    // preserving the docstring's "most recent session id" semantic.
+    const logContent = bigLog({ minBytes: 2 * SESSION_SCAN_TAIL_BYTES, headSessionIds: ["ses_oldest"], tailSessionIds: ["ses_mid", "ses_newest"] });
+    const { bootstrapReads, spawns } = restartWithReadSpy(t, {
+      logContent,
+      taskFixture: (logDir) => [runningFixtureTask({ id: "oc_tail_recent", pid: 12352, logDir })],
+      logName: "oc_tail_recent.ndjson",
+    });
+    await new Promise((r) => setTimeout(r, 60));
+    const totalRead = bootstrapReads.reduce((sum, r) => sum + r.length, 0);
+    assert.equal(totalRead, SESSION_SCAN_TAIL_BYTES, "the most-recent scan stays within the bounded window");
+    assert.ok(
+      spawns.some((s) => s.args.includes("--session") && s.args.includes("ses_newest")),
+      "the newest session id must win, not the first found"
+    );
+  });
+});

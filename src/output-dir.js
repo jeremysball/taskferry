@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { errCode } from "./errors.js";
+import { MAX_BUFFER_BYTES } from "./daemon-server.js";
 
 export const TASKFERRY_OUTPUT_DIR_ENV = "TASKFERRY_OUTPUT_DIR";
 
@@ -11,7 +12,17 @@ const PROMPT_BLOCK_SEPARATOR = "\n\n";
 // response; JSON-string escaping plus the surrounding RPC envelope add
 // overhead on top, so a cap equal to the response ceiling still risks
 // RESPONSE_TOO_LARGE for a file that fits this check.
-const MAX_OUTPUT_FILE_BYTES = 512 * 1024;
+//
+// Worst-case JSON expansion is 6×: every control character U+0000-U+001F
+// becomes \uXXXX (6 bytes) when stringified, so a raw file of N bytes can
+// become ~6N bytes on the wire plus the RPC envelope. The provably safe
+// ceiling is therefore (MAX_BUFFER_BYTES - envelope_reserve) / 6; the
+// response-budget guard in tasks.js enforces this at request time so a
+// control-character-heavy file never falls through to daemon-server.js's
+// generic RESPONSE_TOO_LARGE fallback (taskferry#508).
+export const DEFAULT_MAX_OUTPUT_FILE_BYTES = 512 * 1024;
+export const MAX_OUTPUT_FILE_BYTES = DEFAULT_MAX_OUTPUT_FILE_BYTES;
+export const MAX_SAFE_OUTPUT_FILE_BYTES = Math.floor((MAX_BUFFER_BYTES - 4096) / 6);
 const MAX_OUTPUT_LIST_ENTRIES = 256;
 // Sibling caps on the directory walk: without them a worker that
 // mkmdir's unbounded nested empty directories (or unbounded shallow
@@ -487,9 +498,11 @@ export function resolveInsideDir(baseDir, relativePath) {
  * outside the scratch root.
  * @param {string} dir
  * @param {string} relativePath
+ * @param {number} [maxBytes]
  * @returns {{content: string|null, size: number, truncated: boolean, error?: string}}
  */
-export function readTaskOutputFile(dir, relativePath) {
+export function readTaskOutputFile(dir, relativePath, maxBytes = MAX_OUTPUT_FILE_BYTES) {
+  if (maxBytes > MAX_BUFFER_BYTES) maxBytes = MAX_BUFFER_BYTES;
   const target = resolveInsideDir(dir, relativePath);
   const dirFd = openDirectoryNoFollow(dir);
   if (dirFd === null) return { content: null, size: 0, truncated: false, error: "not_found" };
@@ -523,16 +536,16 @@ export function readTaskOutputFile(dir, relativePath) {
       if (!isInsideDirectory(realDir, realTarget)) {
         throw outputPathEscapeError(relativePath);
       }
-      if (stat.size > MAX_OUTPUT_FILE_BYTES) return { content: null, size: stat.size, truncated: true, error: "too_large" };
+      if (stat.size > maxBytes) return { content: null, size: stat.size, truncated: true, error: "too_large" };
       // Read with a size cap rather than `fs.readFileSync(fd)` (which
       // allocates by stat.size): the file might have grown past the cap
       // between the fstat and the read, and the daemon-server's
       // MAX_BUFFER_BYTES response ceiling plus JSON escaping can't carry
       // more than that cap. Read up to MAX+1 so a single byte over the
       // cap is detectable on the post-read size check.
-      const buffer = Buffer.allocUnsafe(MAX_OUTPUT_FILE_BYTES + 1);
+      const buffer = Buffer.allocUnsafe(maxBytes + 1);
       const totalRead = fs.readSync(fd, buffer, 0, buffer.length, 0);
-      if (totalRead > MAX_OUTPUT_FILE_BYTES) {
+      if (totalRead > maxBytes) {
         return { content: null, size: totalRead, truncated: true, error: "too_large" };
       }
       return { content: buffer.toString("utf8", 0, totalRead), size: totalRead, truncated: false };

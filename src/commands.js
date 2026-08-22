@@ -307,7 +307,7 @@ async function runReject(options, { client }) {
  * @param {ResolvedDeps} deps
  */
 async function runOutput(options, { client }) {
-  return /** @type {unknown} */ (await client.request("task.output", { taskId: options.taskId, ...(typeof options.path === "string" && options.path.length > 0 ? { path: options.path } : {}) }));
+  return /** @type {unknown} */ (await client.request("task.output", { taskId: options.taskId, ...(typeof options.path === "string" && options.path.length > 0 ? { path: options.path } : {}), ...(typeof options.maxOutputFileBytes === "number" ? { maxOutputFileBytes: options.maxOutputFileBytes } : {}) }));
 }
 
 // `wait --summarize` keeps the client open (cli.js's top-level finally owns the

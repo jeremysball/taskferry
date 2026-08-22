@@ -558,7 +558,7 @@ function countTasks(tasks) {
  * @param {unknown} error
  * @param {string|null} requestId
  */
-function responseError(error, requestId) {
+export function responseError(error, requestId) {
   if (error instanceof ProtocolError) {
     return errorResponse(error.requestId, error.code, error.message, error.help, error.message);
   }
@@ -576,7 +576,9 @@ function responseError(error, requestId) {
     messageFallback: "",
     foldDetailLines: false,
   });
-  const code = /unknown task id:/.test(text) ? "UNKNOWN_TASK" : "REQUEST_FAILED";
+  const maybeCode = errCode(error);
+  // eslint-disable-next-line sonarjs/no-nested-conditional, sonarjs/expression-complexity -- typed codes first, then legacy regex for UNKNOWN_TASK; output codes must not fall back to substring matching
+  const code = maybeCode === "OUTPUT_NOT_FOUND" || maybeCode === "NO_OUTPUT_DIR" ? maybeCode : maybeCode === "UNKNOWN_TASK" || /unknown task id:/.test(text) ? "UNKNOWN_TASK" : "REQUEST_FAILED";
   return errorResponse(requestId, code, message, help, text);
 }
 
@@ -611,7 +613,7 @@ const invokeHandlers = {
   },
   "task.accept": (manager, params) => manager.accept(/** @type {string} */ (params.taskId), { force: params.force === true }),
   "task.reject": (manager, params) => manager.reject(/** @type {string} */ (params.taskId)),
-  "task.output": (manager, params) => manager.output(/** @type {string} */ (params.taskId), { path: typeof params.path === "string" ? params.path : undefined }),
+  "task.output": (manager, params) => manager.output(/** @type {string} */ (params.taskId), { path: typeof params.path === "string" ? params.path : undefined, ...(typeof params.maxOutputFileBytes === "number" ? { maxOutputFileBytes: params.maxOutputFileBytes } : {}) }),
 };
 
 /**

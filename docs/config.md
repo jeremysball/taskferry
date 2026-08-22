@@ -48,8 +48,8 @@ message — there is no silent typo tolerance.
 | `envDenylist` | `TASKFERRY_ENV_DENYLIST` | string (comma-separated var names) | (none) |
 | `sandboxEnabled` | `TASKFERRY_DISABLE_SANDBOX` (inverted: `1`/`true` disables) | boolean | `true` |
 | `overlayEnabled` | `TASKFERRY_DISABLE_OVERLAY` (inverted: `1`/`true` disables) | boolean | `true` |
-| `allowedDirs` | `TASKFERRY_ALLOWED_DIRS` | string (comma-separated paths) | (none) |
 | `rwBind` | `TASKFERRY_RW_BIND` | string (comma-separated paths) | (none) |
+| `allowedDirs` | `TASKFERRY_ALLOWED_DIRS` | string (comma-separated paths) | (none), **deprecated alias for `rwBind`** |
 | `roBind` | `TASKFERRY_RO_BIND` | string (comma-separated paths) | (none) |
 | `sandboxDenylist` | `TASKFERRY_SANDBOX_DENYLIST` | string (comma-separated paths) | (none) |
 | `waitDefaultTimeoutMs` | `TASKFERRY_WAIT_DEFAULT_TIMEOUT_MS` | number | `900000` (15 min); `0` disables via the env var only — a config-file value of `0` is ignored and falls back to the 15-minute default |
@@ -61,6 +61,7 @@ message — there is no silent typo tolerance.
 | `lowerdirStaggerMs` | `TASKFERRY_LOWERDIR_STAGGER_MS` | number | `3000`; `0` disables |
 | `providerLimits` | `TASKFERRY_PROVIDER_LIMITS` | object (provider -> `{maxConcurrentTasks?, maxDispatchesPerWindow?}`) | `{}` (no per-provider limit; only the global ceiling applies) |
 | `restartWaitForIdle` | `TASKFERRY_RESTART_WAIT_FOR_IDLE` | boolean | `false` — when `false` (the default) the daemon restarts immediately on source-file change even with tasks in flight (auto-resuming resumable sessions — see `docs/daemon.md#self-restart-on-source-change`); when `true`, restores the old behavior of deferring the restart until zero `running` and zero `queued` tasks |
+| `maxOutputFileBytes` | `TASKFERRY_MAX_OUTPUT_FILE_BYTES` | number | `524288` (512 KiB); must be a positive integer and `≤ 1048576` (raw daemon ceiling). Per-read `--max-output-file-bytes` flag overrides this daemon default for that single `taskferry output --path` call (flag > env var > config file > built-in default). The daemon response budget is `1 MiB` (`src/daemon-server.js:14`); worst-case JSON escaping expands control characters 6× to `\uXXXX`, so the provably safe ceiling is `174080` (`(1 MiB-4096)/6`, `src/output-dir.js:25`). A file that fits the raw cap but would exceed the wire budget no longer fails with generic `RESPONSE_TOO_LARGE` — the daemon now surfaces a clear `would exceed daemon response limit` error naming the knob and the on-disk path (taskferry#508). If you regularly retrieve control-character-heavy files, keep the cap at or below the safe ceiling; ASCII-heavy files can safely use the full `524288`. |
 
 `envDenylist` uses the same comma-separated grammar as `allowedDirs` — a
 flat list of env var names, always stripped from every spawned child
@@ -74,7 +75,10 @@ set, all paths from both contribute. `rwBind` (and `allowedDirs`) also union
 with the per-dispatch `--rw-bind`/`--allowed-dirs` flags and the
 `TASKFERRY_RW_BIND`/`TASKFERRY_ALLOWED_DIRS` env vars rather than any one
 layer replacing another. `allowedDirs` emits a deprecation warning whenever
-it is used and will be removed in the next major release.
+it is used and will be removed in the next major release. A `rwBind` path
+that overlaps the sandbox deny-list (e.g. `~/.ssh`) is still bound
+read-write — overriding the deny-list is the user's explicit call — but a
+loud warning is emitted at dispatch time.
 
 `roBind` is the read-only counterpart: host paths bound **read-only**
 (`--ro-bind`) into the sandbox for every dispatch, resolved through the same
@@ -82,7 +86,13 @@ protected-mount safety check as `.taskferry.toml`'s `read_only_paths`
 (a nonexistent or protected-overlapping entry is skipped and reported, never
 bound). It unions across the config file, `TASKFERRY_RO_BIND`, the manager
 option, and the per-dispatch `--ro-bind` flag. If a path appears in both
-`rwBind` and `roBind`, read-write wins and a warning is emitted.
+`rwBind` and `roBind`, read-write wins and a warning is emitted. A `roBind`
+path that overlaps the sandbox deny-list (e.g. `~/.ssh`) is still bound
+read-only — overriding the deny-list is the user's explicit call, same as
+`rwBind` — but a loud warning is emitted at dispatch time. The structural
+mounts (`stateDir`, `runtimeDir`, the launch directory) are never
+overridable: a `roBind` path overlapping one of those is skipped with a
+warning even when it also overlaps the deny-list.
 
 `sandboxDenylist` uses the same comma-separated grammar as `allowedDirs` —
 extra directories tmpfs-masked inside the bwrap sandbox, merged with the
@@ -100,12 +110,13 @@ only in an interactive shell's rc file and therefore never reach a
 non-interactive caller (cron, systemd, a scheduled job) dispatching
 through the same daemon — see `docs/security.md`. Unlike the other string
 fields above, a configured path that can't be read is a hard error at
-daemon startup, not a silent fallback: a `.env`-shaped file is presumably
-carrying secrets a dispatch actually needs, so a typo'd path should fail
-loudly rather than quietly dispatch without them.
+daemon startup, not a silent fallback: a `.env`-shaped file carries secrets
+a dispatch may need, so a typo'd path fails loudly rather than dispatching
+without them.
 
-The file must be owner-only (`chmod 600`, no group/other read bits) —
-`loadEnvFile()` refuses (also a hard daemon-startup error) a file it's
+The file must have no group or other permission bits (`(mode & 0o077) == 0`).
+Modes such as `0400`, `0600`, and `0700` pass. `loadEnvFile()` refuses (also a
+hard daemon-startup error) a file
 readable by anyone other than the daemon's own user, since this file
 exists specifically to hold secrets rather than ordinary settings.
 
@@ -212,11 +223,13 @@ takes effect on the next dispatch/settle in each of those three slots.
 Plain [TOML](https://toml.io/) with a top-level table of the keys below.
 Unrecognized keys, wrong-typed values, and invalid TOML syntax are all
 "errors" rather than silent fallbacks: the loader returns an
-`EMPTY_CONFIG`-shaped result with `parseError` set, and the caller
-surfaces the message via the task's `projectConfigWarning` (visible on
-`taskferry status <id> --full` and `taskferry result <id> --fields
-projectConfigWarning`) instead of guessing a partial config. Dispatch
-proceeds, but no gate runs and no extra read-only binds are added.
+`EMPTY_CONFIG`-shaped result with `parseError` set. When a sandboxed dispatch
+reaches project-bind processing or gate startup, taskferry surfaces that
+message through `projectConfigWarning` (visible on `taskferry status <id>
+--full` and `taskferry result <id> --fields projectConfigWarning`) instead of
+guessing a partial config. With sandboxing disabled or unavailable, those
+bind and gate paths do not run, so the parse warning is not attached to the
+task. Dispatch proceeds without the project gate or extra read-only binds.
 
 ```toml
 check = "npm run check"
@@ -342,10 +355,10 @@ verbatim so the docs and the implementation cannot drift:
 
 | situation | behavior |
 |---|---|
-| no `.taskferry.toml` / no `check` key | gate skipped, `checkStatus: none`, loud warning in status and doctor context |
+| no `.taskferry.toml` / no `check` key | gate skipped, `checkStatus: none`; an accepted changeset produces the CLI's no-check warning, while lean status/result omit the neutral gate fields |
 | check run exceeds timeout | killed, `checkStatus: timeout`, treated as failure |
 | daemon crashes mid-gate | task settles with `checkStatus: interrupted`; gate re-runnable; never silently passed |
-| `.taskferry.toml` unparseable | dispatch proceeds, gate skipped (`checkStatus: none`), parse error surfaced as a task warning and in doctor (fail loudly, do not guess) |
+| `.taskferry.toml` unparseable | dispatch proceeds, gate skipped (`checkStatus: none`), and the parse error is attached as `projectConfigWarning` when sandbox bind or gate processing runs |
 | `read_only_paths`/`roBind` entry doesn't exist on host | dispatch proceeds without that binding, warning surfaced in `status --full` (paths may legitimately differ between machines) |
 | check command itself not found at runtime | `checkStatus: failed` with the spawn error in `checkOutputTail` |
 

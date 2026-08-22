@@ -50,7 +50,7 @@ jobs:
         run: npm run test:unit
 
       # Fork PRs don't get repo secrets (GitHub withholds them by design), so
-      # OPENROUTER_API_KEY would be empty there and every dispatch would fail on
+      # META_MODEL_API_KEY would be empty there and every dispatch would fail on
       # auth rather than on anything the PR actually changed. Runs only for
       # same-repo pushes/PRs, where the secret is actually available.
       - name: Check integration eligibility
@@ -97,7 +97,7 @@ jobs:
       # session for the TUI's session list. Nothing in a headless CI dispatch
       # ever reads that name: the smoke tests drive `opencode run`, assert on
       # task state, and exit. So every session in the integration leg was
-      # spending an extra billed OPENROUTER_API_KEY call, and taking an extra
+      # spending an extra billed META_MODEL_API_KEY call, and taking an extra
       # chance at a 429 or a provider hiccup, to produce a string no one reads.
       # `agent.title.disable` is opencode's own config key for this
       # (Config.agent.title -> AgentConfig.disable in https://opencode.ai/config.json).
@@ -110,6 +110,6 @@ jobs:
       - name: Run integration (real CLI + daemon + live dispatch, no mocks)
         if: steps.integration_gate.outputs.run == 'true'
         env:
-          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          META_MODEL_API_KEY: ${{ secrets.META_MODEL_API_KEY }}
           OPENCODE_CONFIG_CONTENT: '{"agent":{"title":{"disable":true}}}'
         run: npm run test:integration

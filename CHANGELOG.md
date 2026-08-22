@@ -1,5 +1,20 @@
 # Changelog
 
+## [4.1.2](https://github.com/jeremysball/taskferry/compare/taskferry-v4.1.1...taskferry-v4.1.2) (2026-08-21)
+
+
+### Bug Fixes
+
+* **tooling:** glob test discovery and require local quality tools ([#528](https://github.com/jeremysball/taskferry/issues/528)) ([8f21442](https://github.com/jeremysball/taskferry/commit/8f2144238dd9216800ab9d312a955c2e14f9fd75))
+
+## [4.1.1](https://github.com/jeremysball/taskferry/compare/taskferry-v4.1.0...taskferry-v4.1.1) (2026-08-21)
+
+
+### Bug Fixes
+
+* **adr:** correct kilo.md's actual location (PR [#489](https://github.com/jeremysball/taskferry/issues/489) branch, not main) ([f9aaf1f](https://github.com/jeremysball/taskferry/commit/f9aaf1ff62ae6eae5d65c045766623605fb78546))
+* **executor:** resolve symlinked opencode config entries instead of dropping them ([#492](https://github.com/jeremysball/taskferry/issues/492)) ([bd4284a](https://github.com/jeremysball/taskferry/commit/bd4284a8c220d95286d8771d6a93327e94620cf2)), closes [#491](https://github.com/jeremysball/taskferry/issues/491)
+
 ## [4.1.0](https://github.com/jeremysball/taskferry/compare/taskferry-v4.0.0...taskferry-v4.1.0) (2026-08-16)
 
 

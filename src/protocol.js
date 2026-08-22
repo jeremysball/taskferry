@@ -38,6 +38,7 @@ export const RESULT_FIELDS = new Set([
   "failureReason",
   "failureDetail",
   "logPath",
+  "outputDir",
   "incomplete",
   "finalMarker",
   "finalStatus",
@@ -274,7 +275,7 @@ const METHOD_PARAMS = {
   },
   "task.output": {
     required: [["taskId", isNonEmptyString]],
-    optional: [["path", isNonEmptyString]],
+    optional: [["path", isNonEmptyString], ["maxOutputFileBytes", positiveInteger]],
   },
   [METHOD_SUBSCRIBE]: {
     // Either an explicit directory, a taskId the daemon resolves the

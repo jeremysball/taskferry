@@ -29,10 +29,10 @@ with a rename notice. Every `taskferry_<name>` MCP tool name, if invoked as
 a CLI command by habit, fails with exit code `2` and a `help:` line naming
 its replacement — the CLI recognizes and explains the old names rather than
 just reporting "unknown command." The same applies to renamed flags from
-the MCP tool-call era: `--task-id` (now positional: `taskferry status
+the MCP tool-call era: `--task-id` (now positional for most commands: `taskferry status
 <id>`), `--timeout_ms`/`--tail_chars`/`--max_words`/`--session_id`
 (underscore forms; now `--timeout`/`--tail-chars`/`--max-words`/
-`--session-id`).
+`--session-id`), and `--style` (now `--mode`). `--task-id` is not fully retired: `taskferry watch --task-id <id>` keeps it as a live flag that scopes the stream to one task and exits when that task settles. See `docs/cli-reference.md`.
 
 Argument shapes carry over directly: an MCP call like
 `taskferry_dispatch({ prompt: "...", directory: "/repo", model: "..." })`

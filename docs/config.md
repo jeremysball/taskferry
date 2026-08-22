@@ -48,8 +48,8 @@ message — there is no silent typo tolerance.
 | `envDenylist` | `TASKFERRY_ENV_DENYLIST` | string (comma-separated var names) | (none) |
 | `sandboxEnabled` | `TASKFERRY_DISABLE_SANDBOX` (inverted: `1`/`true` disables) | boolean | `true` |
 | `overlayEnabled` | `TASKFERRY_DISABLE_OVERLAY` (inverted: `1`/`true` disables) | boolean | `true` |
-| `allowedDirs` | `TASKFERRY_ALLOWED_DIRS` | string (comma-separated paths) | (none) |
 | `rwBind` | `TASKFERRY_RW_BIND` | string (comma-separated paths) | (none) |
+| `allowedDirs` | `TASKFERRY_ALLOWED_DIRS` | string (comma-separated paths) | (none), **deprecated alias for `rwBind`** |
 | `roBind` | `TASKFERRY_RO_BIND` | string (comma-separated paths) | (none) |
 | `sandboxDenylist` | `TASKFERRY_SANDBOX_DENYLIST` | string (comma-separated paths) | (none) |
 | `waitDefaultTimeoutMs` | `TASKFERRY_WAIT_DEFAULT_TIMEOUT_MS` | number | `900000` (15 min); `0` disables via the env var only — a config-file value of `0` is ignored and falls back to the 15-minute default |
@@ -99,12 +99,13 @@ only in an interactive shell's rc file and therefore never reach a
 non-interactive caller (cron, systemd, a scheduled job) dispatching
 through the same daemon — see `docs/security.md`. Unlike the other string
 fields above, a configured path that can't be read is a hard error at
-daemon startup, not a silent fallback: a `.env`-shaped file is presumably
-carrying secrets a dispatch actually needs, so a typo'd path should fail
-loudly rather than quietly dispatch without them.
+daemon startup, not a silent fallback: a `.env`-shaped file carries secrets
+a dispatch may need, so a typo'd path fails loudly rather than dispatching
+without them.
 
-The file must be owner-only (`chmod 600`, no group/other read bits) —
-`loadEnvFile()` refuses (also a hard daemon-startup error) a file it's
+The file must have no group or other permission bits (`(mode & 0o077) == 0`).
+Modes such as `0400`, `0600`, and `0700` pass. `loadEnvFile()` refuses (also a
+hard daemon-startup error) a file
 readable by anyone other than the daemon's own user, since this file
 exists specifically to hold secrets rather than ordinary settings.
 
@@ -211,11 +212,13 @@ takes effect on the next dispatch/settle in each of those three slots.
 Plain [TOML](https://toml.io/) with a top-level table of the keys below.
 Unrecognized keys, wrong-typed values, and invalid TOML syntax are all
 "errors" rather than silent fallbacks: the loader returns an
-`EMPTY_CONFIG`-shaped result with `parseError` set, and the caller
-surfaces the message via the task's `projectConfigWarning` (visible on
-`taskferry status <id> --full` and `taskferry result <id> --fields
-projectConfigWarning`) instead of guessing a partial config. Dispatch
-proceeds, but no gate runs and no extra read-only binds are added.
+`EMPTY_CONFIG`-shaped result with `parseError` set. When a sandboxed dispatch
+reaches project-bind processing or gate startup, taskferry surfaces that
+message through `projectConfigWarning` (visible on `taskferry status <id>
+--full` and `taskferry result <id> --fields projectConfigWarning`) instead of
+guessing a partial config. With sandboxing disabled or unavailable, those
+bind and gate paths do not run, so the parse warning is not attached to the
+task. Dispatch proceeds without the project gate or extra read-only binds.
 
 ```toml
 check = "npm run check"
@@ -341,10 +344,10 @@ verbatim so the docs and the implementation cannot drift:
 
 | situation | behavior |
 |---|---|
-| no `.taskferry.toml` / no `check` key | gate skipped, `checkStatus: none`, loud warning in status and doctor context |
+| no `.taskferry.toml` / no `check` key | gate skipped, `checkStatus: none`; an accepted changeset produces the CLI's no-check warning, while lean status/result omit the neutral gate fields |
 | check run exceeds timeout | killed, `checkStatus: timeout`, treated as failure |
 | daemon crashes mid-gate | task settles with `checkStatus: interrupted`; gate re-runnable; never silently passed |
-| `.taskferry.toml` unparseable | dispatch proceeds, gate skipped (`checkStatus: none`), parse error surfaced as a task warning and in doctor (fail loudly, do not guess) |
+| `.taskferry.toml` unparseable | dispatch proceeds, gate skipped (`checkStatus: none`), and the parse error is attached as `projectConfigWarning` when sandbox bind or gate processing runs |
 | `read_only_paths`/`roBind` entry doesn't exist on host | dispatch proceeds without that binding, warning surfaced in `status --full` (paths may legitimately differ between machines) |
 | check command itself not found at runtime | `checkStatus: failed` with the spawn error in `checkOutputTail` |
 

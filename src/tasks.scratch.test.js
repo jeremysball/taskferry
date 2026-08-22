@@ -14,13 +14,19 @@ import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
-import { makeManager, fakeChild, baseTask, AXI_TASKS_TEST_DIR, mkdtempTracked } from "./tasks.test-helpers.js";
+import { execFileSync } from "node:child_process";
+import { makeManager, fakeChild, baseTask, trackManager, AXI_TASKS_TEST_DIR, mkdtempTracked } from "./tasks.test-helpers.js";
 import { TASKFERRY_OUTPUT_DIR_ENV, ensureTaskOutputDir, listTaskOutputFiles, readTaskOutputFile, resolveTaskOutputDir, resolveOutputDirRoot, resolveInsideDir } from "./output-dir.js";
+import { createTaskManager, sweepOrphanedOutputDirsFor } from "./tasks.js";
+import { errCode } from "./errors.js";
+import { responseError } from "./daemon.js";
 
 const TEST_PROMPT = "hi";
 const TEST_DIRECTORY = "/tmp";
 const DELIVERABLE_NAME = "deliverable.txt";
 const DELIVERABLE_CONTENT = "the answer";
+const OUTSIDE_FILE_CONTENT = "should not be listed";
+const PROC_SELF_FD = "/proc/self/fd";
 
 const captureSpawn = (overrides = {}) => {
   let captured = null;
@@ -61,6 +67,19 @@ describe("scratch output dir (taskferry#423)", () => {
     const stat = fs.statSync(out);
     assert.ok(stat.isDirectory());
     assert.equal(stat.mode & 0o777, 0o700);
+  });
+
+  test("ensureTaskOutputDir refuses a symlink in the task-dir position", () => {
+    const parent = mkdtempTracked(AXI_TASKS_TEST_DIR + "-ensure-symlink-");
+    const outside = mkdtempTracked(AXI_TASKS_TEST_DIR + "-ensure-target-");
+    const out = path.join(parent, "task");
+    // eslint-disable-next-line sonarjs/file-permissions -- a non-700 target proves chmod did not follow the symlink
+    fs.chmodSync(outside, 0o755);
+    fs.symlinkSync(outside, out);
+
+    assert.throws(() => ensureTaskOutputDir(out), /symlink/i);
+    assert.equal(fs.lstatSync(out).isSymbolicLink(), true);
+    assert.equal(fs.statSync(outside).mode & 0o777, 0o755, "the symlink target must not be chmod-ed");
   });
 
   test("dispatch creates the per-task outputDir on disk before launch", () => {
@@ -122,8 +141,51 @@ describe("scratch output dir (taskferry#423)", () => {
     assert.ok(trailing.includes(dispatched.outputDir), "prompt block must name the output dir");
     assert.ok(trailing.includes(TASKFERRY_OUTPUT_DIR_ENV), "prompt block must name the env var");
   });
+
+  test("dispatch prompt varies with noSandbox: noSandbox omits 'inside the sandbox'", () => {
+    const { mgr: mgrDefault, captured: capturedDefault } = captureSpawn();
+    mgrDefault.dispatch({ prompt: "test", directory: "/tmp" });
+    const promptDefault = capturedDefault().args.at(-1);
+
+    const { mgr: mgrNoSandbox, captured: capturedNoSandbox } = captureSpawn();
+    mgrNoSandbox.dispatch({ prompt: "test", directory: "/tmp", noSandbox: true });
+    const promptNoSandbox = capturedNoSandbox().args.at(-1);
+
+    assert.ok(typeof promptDefault === "string", "default prompt must be a string");
+    assert.ok(typeof promptNoSandbox === "string", "noSandbox prompt must be a string");
+    assert.ok(promptDefault.includes("inside the sandbox"), "default prompt should contain 'inside the sandbox'");
+    assert.ok(!promptNoSandbox.includes("inside the sandbox"), "noSandbox prompt must not contain 'inside the sandbox'");
+    assert.ok(promptDefault.includes(TASKFERRY_OUTPUT_DIR_ENV), "default prompt must name the env var");
+    assert.ok(promptNoSandbox.includes(TASKFERRY_OUTPUT_DIR_ENV), "noSandbox prompt must name the env var");
+    assert.notEqual(promptDefault, promptNoSandbox, "prompts should differ between sandbox and noSandbox");
+  });
 });
 
+describe("scratch output dir result --fields outputDir (regression: #514)", () => {
+  test("result --fields outputDir returns the correct output dir path", async () => {
+    const child = fakeChild();
+    const mgr = makeManager({ spawnFn: () => child });
+    const dispatched = mgr.dispatch({ prompt: TEST_PROMPT, directory: TEST_DIRECTORY });
+    child.emit("exit", 0, null);
+    await new Promise((resolve) => setImmediate(resolve));
+
+    const result = mgr.result(dispatched.id, { fields: ["outputDir"] });
+    assert.equal(result.outputDir, dispatched.outputDir);
+  });
+
+  test("result without --fields also includes outputDir", async () => {
+    const child = fakeChild();
+    const mgr = makeManager({ spawnFn: () => child });
+    const dispatched = mgr.dispatch({ prompt: TEST_PROMPT, directory: TEST_DIRECTORY });
+    child.emit("exit", 0, null);
+    await new Promise((resolve) => setImmediate(resolve));
+
+    const result = mgr.result(dispatched.id);
+    assert.equal(result.outputDir, dispatched.outputDir);
+  });
+});
+
+// eslint-disable-next-line sonarjs/max-lines-per-function -- retrieval suite bundles many small caps/edge cases; tracked in #30
 describe("scratch output dir retrieval (taskferry#423)", () => {
   test("taskferry output: lists files written under the scratch dir after a clean exit", async () => {
     const child = fakeChild();
@@ -227,6 +289,92 @@ describe("scratch output dir retrieval (taskferry#423)", () => {
     assert.throws(() => mgr.output(dispatched.id, { path: "../../etc/passwd" }), /escapes/i);
   });
 
+  test("taskferry output: --path on nonexistent file throws 'output file not found' instead of silent empty success (taskferry#511)", async () => {
+    const child = fakeChild();
+    const mgr = makeManager({ spawnFn: () => child });
+    const dispatched = mgr.dispatch({ prompt: TEST_PROMPT, directory: TEST_DIRECTORY });
+    fs.writeFileSync(path.join(dispatched.outputDir, "real.txt"), "hi");
+    child.emit("exit", 0, null);
+    await new Promise((resolve) => setImmediate(resolve));
+    try {
+      mgr.output(dispatched.id, { path: "nonexistent.txt" });
+      assert.fail("expected to throw");
+    } catch (error) {
+      assert.match(String(error.message), /output file not found/i);
+      assert.equal(errCode(error), "OUTPUT_NOT_FOUND");
+    }
+  });
+
+  test("taskferry output: --path on a task with no outputDir throws distinct 'has no output directory' error (taskferry#511)", () => {
+    const mgr = makeManager({
+      tasksFixture: (logDir) => [baseTask({ id: "oc_no_dir_511", outputDir: null, logPath: path.join(logDir, "x.ndjson") })],
+    });
+    try {
+      mgr.output("oc_no_dir_511", { path: "any.txt" });
+      assert.fail("expected to throw");
+    } catch (error) {
+      assert.match(String(error.message), /has no output directory/i);
+      assert.equal(errCode(error), "NO_OUTPUT_DIR");
+    }
+  });
+
+  test("taskferry output: --path errors for no-output-dir vs missing file are distinguishable (taskferry#511)", async () => {
+    const child = fakeChild();
+    const mgrWithDir = makeManager({ spawnFn: () => child });
+    const dispatched = mgrWithDir.dispatch({ prompt: TEST_PROMPT, directory: TEST_DIRECTORY });
+    fs.writeFileSync(path.join(dispatched.outputDir, "real.txt"), "hi");
+    child.emit("exit", 0, null);
+    await new Promise((resolve) => setImmediate(resolve));
+    let errMissing;
+    try {
+      mgrWithDir.output(dispatched.id, { path: "missing.txt" });
+    } catch (error) {
+      errMissing = error;
+    }
+    const mgrNoDir = makeManager({
+      tasksFixture: (logDir) => [baseTask({ id: "oc_no_dir_distinct", outputDir: null, logPath: path.join(logDir, "x.ndjson") })],
+    });
+    let errNoDir;
+    try {
+      mgrNoDir.output("oc_no_dir_distinct", { path: "missing.txt" });
+    } catch (error) {
+      errNoDir = error;
+    }
+    assert.ok(errMissing);
+    assert.ok(errNoDir);
+    assert.notEqual(errCode(errMissing), errCode(errNoDir));
+    assert.notEqual(String(errMissing.message), String(errNoDir.message));
+    assert.equal(errCode(errMissing), "OUTPUT_NOT_FOUND");
+    assert.equal(errCode(errNoDir), "NO_OUTPUT_DIR");
+  });
+
+  test("taskferry output: unrelated error containing 'output file not found' substring is not typed as OUTPUT_NOT_FOUND (taskferry#511)", () => {
+    const collision = new Error("output file not found: this is just a substring collision");
+    assert.equal(errCode(collision), undefined);
+    assert.match(String(collision.message), /output file not found/i);
+    assert.notEqual(errCode(collision), "OUTPUT_NOT_FOUND");
+  });
+
+  test("daemon output error codes are typed via error.code, not substring matching -- collision stays REQUEST_FAILED (taskferry#511)", () => {
+    const collision = new Error("output file not found: collision payload");
+    const collisionResp = responseError(collision, "req-collision");
+    assert.equal(collisionResp.error.code, "REQUEST_FAILED");
+    assert.equal(collisionResp.error.detail, "output file not found: collision payload");
+
+    const exact = new Error('error: output file not found: "missing.txt" for task oc_exact\nhelp: run taskferry output oc_exact to see available files');
+    /** @type {any} */ (exact).code = "OUTPUT_NOT_FOUND";
+    const exactResp = responseError(exact, "req-exact");
+    assert.equal(exactResp.error.code, "OUTPUT_NOT_FOUND");
+
+    const noDir = new Error('error: task oc_nodir has no output directory (requested "missing.txt")\nhelp: run taskferry output oc_nodir without --path to list available outputs');
+    /** @type {any} */ (noDir).code = "NO_OUTPUT_DIR";
+    const noDirResp = responseError(noDir, "req-nodir");
+    assert.equal(noDirResp.error.code, "NO_OUTPUT_DIR");
+
+    assert.notEqual(collisionResp.error.code, exactResp.error.code);
+    assert.notEqual(collisionResp.error.code, noDirResp.error.code);
+  });
+
   test("listTaskOutputFiles caps at MAX_OUTPUT_LIST_ENTRIES and reports truncated", () => {
     const dir = mkdtempTracked(AXI_TASKS_TEST_DIR + "-list-");
     for (let i = 0; i < 300; i++) {
@@ -294,7 +442,7 @@ describe("scratch output dir retrieval (taskferry#423)", () => {
   test("listTaskOutputFiles does not descend into a symlinked directory (PR #474 review)", () => {
     const dir = mkdtempTracked(AXI_TASKS_TEST_DIR + "-symlink-list-");
     const outside = mkdtempTracked(AXI_TASKS_TEST_DIR + "-symlink-list-target-");
-    fs.writeFileSync(path.join(outside, "outside.txt"), "should not be listed");
+    fs.writeFileSync(path.join(outside, "outside.txt"), OUTSIDE_FILE_CONTENT);
     fs.symlinkSync(outside, path.join(dir, "linked-dir"));
     fs.writeFileSync(path.join(dir, "keep.txt"), "k");
     const result = listTaskOutputFiles(dir);
@@ -317,5 +465,550 @@ describe("scratch output dir retrieval (taskferry#423)", () => {
     assert.equal(result.files.length, 0, "the oversized entry must not be admitted whole");
     assert.equal(result.truncated, true);
     assert.equal(result.bytes, 0);
+  });
+});
+
+describe("scratch output dir walk caps (PR #482 review)", () => {
+  test("listTaskOutputFiles caps the walk at MAX_OUTPUT_LIST_DIRS and marks truncated", () => {
+    const dir = mkdtempTracked(AXI_TASKS_TEST_DIR + "-dirs-");
+    // More sibling directories than the cap, with one file each.
+    for (let i = 0; i < 300; i++) {
+      fs.mkdirSync(path.join(dir, `d${i}`));
+      fs.writeFileSync(path.join(dir, `d${i}`, "f.txt"), "x");
+    }
+    const result = listTaskOutputFiles(dir);
+    assert.equal(result.truncated, true);
+    assert.ok(result.files.length < 300, `expected at most ${300} files (capped by dir count), got ${result.files.length}`);
+    assert.ok(result.files.length > 0, "the walk should have started before hitting the cap");
+  });
+
+  test("listTaskOutputFiles caps the walk at MAX_OUTPUT_LIST_DEPTH and marks truncated", () => {
+    const dir = mkdtempTracked(AXI_TASKS_TEST_DIR + "-depth-");
+    // Build a deep chain of empty nested directories past the depth cap.
+    let cur = dir;
+    for (let i = 0; i < 50; i++) {
+      cur = path.join(cur, `lvl${i}`);
+      fs.mkdirSync(cur);
+    }
+    fs.writeFileSync(path.join(cur, "deep.txt"), "x");
+    const result = listTaskOutputFiles(dir);
+    assert.equal(result.truncated, true, "deep nested trees must truncate rather than walking the daemon's request thread to exhaustion");
+    assert.equal(result.files.length, 0, "the deep file is past the depth cap and must not be listed");
+  });
+
+  test("readTaskOutputFile caps the read at MAX_OUTPUT_FILE_BYTES when the file grows past the cap between fstat and read", () => {
+    const dir = mkdtempTracked(AXI_TASKS_TEST_DIR + "-grow-read-");
+    const target = path.join(dir, "grow.txt");
+    // Start small so the real fstat would let the read proceed past the
+    // pre-read size check (we then grow the file inside the readSync mock
+    // to simulate the worker extending the file after we already passed
+    // fstat, between fstat and read).
+    fs.writeFileSync(target, "tiny seed");
+
+    const cap = 512 * 1024;
+    const originalFstatSync = fs.fstatSync;
+    const originalReadSync = fs.readSync;
+    let readCalls = 0;
+    fs.fstatSync = (...args) => {
+      const stat = originalFstatSync(...args);
+      // Lie about size so the pre-read check passes. Mirror the real
+      // Stats surface so isFile() keeps reporting true.
+      return Object.assign(Object.create(Object.getPrototypeOf(stat)), stat, { size: 12 });
+    };
+    fs.readSync = (...args) => {
+      readCalls++;
+      // Grow the file on disk past the cap before the read completes, so
+      // the bounded read actually reads past the cap.
+      const oversize = Buffer.alloc(cap + 1, "x");
+      fs.writeFileSync(target, oversize);
+      return originalReadSync(...args);
+    };
+    try {
+      const result = readTaskOutputFile(dir, "grow.txt");
+      assert.equal(readCalls, 1, "the read must happen exactly once (the bounded read, not the open's read)");
+      assert.equal(result.truncated, true, "a file that grew past the cap between fstat and read must surface as too_large");
+      assert.equal(result.error, "too_large");
+      assert.equal(result.content, null);
+    } finally {
+      fs.fstatSync = originalFstatSync;
+      fs.readSync = originalReadSync;
+    }
+  });
+});
+
+// eslint-disable-next-line sonarjs/max-lines-per-function -- security regression suite bundles related PR #482/#507 cases; splitting would obscure the shared setup
+describe("scratch output dir security regressions", () => {
+  test("readTaskOutputFile does not block on a worker-created FIFO with no writer (PR #482 review)", () => {
+    const dir = mkdtempTracked(AXI_TASKS_TEST_DIR + "-fifo-read-");
+    const target = path.join(dir, "wedge.fifo");
+    // node has no mkfifoSync; execFileSync("mkfifo", [target]) creates
+    // a real FIFO on the host. With no writer attached, a plain
+    // fs.openSync(target, "r") would block the daemon's request thread
+    // forever; the O_NONBLOCK open path must surface this as not_a_file
+    // (via ENXIO) instead.
+    execFileSync("mkfifo", [target]);
+    const result = readTaskOutputFile(dir, "wedge.fifo");
+    assert.equal(result.error, "not_a_file");
+    assert.equal(result.truncated, false);
+    assert.equal(result.content, null);
+  });
+
+  test("readTaskOutputFile does not follow a symlink swapped immediately before the read", () => {
+    const dir = mkdtempTracked(AXI_TASKS_TEST_DIR + "-toctou-read-");
+    const outside = mkdtempTracked(AXI_TASKS_TEST_DIR + "-toctou-target-");
+    const target = path.join(dir, DELIVERABLE_NAME);
+    const secret = path.join(outside, "secret.txt");
+    fs.writeFileSync(target, "safe content");
+    fs.writeFileSync(secret, "outside secret");
+
+    const originalReadSync = fs.readSync;
+    let readArgument;
+    fs.readSync = (...args) => {
+      [readArgument] = args;
+      fs.unlinkSync(target);
+      fs.symlinkSync(secret, target);
+      return originalReadSync(...args);
+    };
+    try {
+      const result = readTaskOutputFile(dir, DELIVERABLE_NAME);
+      assert.equal(typeof readArgument, "number", "the read must use the opened file descriptor");
+      assert.equal(result.content, "safe content", "a post-check symlink swap must not redirect the read");
+    } finally {
+      fs.readSync = originalReadSync;
+    }
+  });
+
+  test("listTaskOutputFiles ignores a symlinked root output directory", () => {
+    const parent = mkdtempTracked(AXI_TASKS_TEST_DIR + "-root-symlink-");
+    const outside = mkdtempTracked(AXI_TASKS_TEST_DIR + "-root-target-");
+    const dir = path.join(parent, "task");
+    fs.mkdirSync(path.join(outside, "nested"));
+    fs.writeFileSync(path.join(outside, "outside.txt"), OUTSIDE_FILE_CONTENT);
+    fs.writeFileSync(path.join(outside, "nested", "also-outside.txt"), OUTSIDE_FILE_CONTENT);
+    fs.symlinkSync(outside, dir);
+
+    const result = listTaskOutputFiles(dir);
+    assert.deepEqual(result.files, []);
+    assert.equal(result.bytes, 0);
+    assert.equal(result.truncated, false);
+  });
+
+  test("listTaskOutputFiles skips an entry that vanishes between readdir and stat (PR #482 review)", () => {
+    const dir = mkdtempTracked(AXI_TASKS_TEST_DIR + "-vanish-");
+    fs.writeFileSync(path.join(dir, "keep.txt"), "k");
+    fs.writeFileSync(path.join(dir, "ghost.txt"), "g");
+    const originalStatSync = fs.statSync;
+    fs.statSync = (...args) => {
+      const p = typeof args[0] === "string" ? args[0] : "";
+      if (p.endsWith("/ghost.txt")) {
+        const err = new Error("ENOENT: no such file or directory");
+        err.code = "ENOENT";
+        throw err;
+      }
+      return originalStatSync(...args);
+    };
+    try {
+      const result = listTaskOutputFiles(dir);
+      assert.deepEqual(result.files.map((f) => f.path), ["keep.txt"], "only the surviving entry must be listed");
+      assert.equal(result.bytes, 1);
+      assert.equal(result.truncated, false);
+    } finally {
+      fs.statSync = originalStatSync;
+    }
+  });
+
+  test("listTaskOutputFiles skips a symlink to a file outside the output dir (PR #507)", () => {
+    const dir = mkdtempTracked(AXI_TASKS_TEST_DIR + "-symlink-escape-file-");
+    const outside = mkdtempTracked(AXI_TASKS_TEST_DIR + "-symlink-escape-file-target-");
+    const secret = path.join(outside, "escaped.txt");
+    fs.writeFileSync(secret, OUTSIDE_FILE_CONTENT);
+    fs.symlinkSync(secret, path.join(dir, "leak.txt"));
+    fs.writeFileSync(path.join(dir, "keep.txt"), "k");
+    const result = listTaskOutputFiles(dir);
+    assert.deepEqual(result.files.map((f) => f.path), ["keep.txt"], "a symlink whose real target escapes the output dir must be skipped, not reported with the outside size");
+    assert.equal(result.bytes, 1);
+    assert.equal(result.truncated, false);
+  });
+
+  test("listTaskOutputFiles reports a symlink to a file inside the output dir (PR #507)", () => {
+    const dir = mkdtempTracked(AXI_TASKS_TEST_DIR + "-symlink-inside-");
+    const target = path.join(dir, "real.txt");
+    fs.writeFileSync(target, "inside");
+    fs.symlinkSync(target, path.join(dir, "link.txt"));
+    const result = listTaskOutputFiles(dir);
+    assert.deepEqual(result.files.map((f) => f.path).sort(), ["link.txt", "real.txt"]);
+    const link = result.files.find((f) => f.path === "link.txt");
+    assert.equal(link.size, 6);
+    assert.equal(result.bytes, 12);
+    assert.equal(result.truncated, false);
+  });
+
+  test("listTaskOutputFiles does not leak size via TOCTOU swap after open (PR #507)", () => {
+    const dir = mkdtempTracked(AXI_TASKS_TEST_DIR + "-toctou-list-");
+    const outside = mkdtempTracked(AXI_TASKS_TEST_DIR + "-toctou-list-target-");
+    const safe = path.join(dir, "safe.bin");
+    fs.writeFileSync(safe, "x");
+    const outsideFile = path.join(outside, "outside.bin");
+    fs.writeFileSync(outsideFile, "y".repeat(22));
+    const leak = path.join(dir, "leak.txt");
+    fs.symlinkSync(safe, leak);
+
+    const originalOpen = fs.openSync;
+    const originalStat = fs.statSync;
+    let swapped = false;
+    const swapToOutside = () => {
+      if (!swapped) {
+        fs.unlinkSync(leak);
+        fs.symlinkSync(outsideFile, leak);
+        swapped = true;
+      }
+    };
+    fs.openSync = (p, flags) => {
+      const fd = originalOpen(p, flags);
+      const s = typeof p === "string" ? p : "";
+      if (s.endsWith("leak.txt")) swapToOutside();
+      return fd;
+    };
+    // Fallback for the old stat+realpath path: if classifySymlink still uses statSync, the openSync mock above won't fire.
+    fs.statSync = (p) => {
+      const res = originalStat(p);
+      const s = typeof p === "string" ? p : "";
+      if (s.endsWith("leak.txt")) swapToOutside();
+      return res;
+    };
+    let result;
+    try {
+      result = listTaskOutputFiles(dir);
+    } finally {
+      fs.openSync = originalOpen;
+      fs.statSync = originalStat;
+    }
+    assert.equal(swapped, true, "the TOCTOU swap must have been triggered");
+    const leakEntry = result.files.find((f) => f.path === "leak.txt");
+    assert.ok(leakEntry, "inside-pinned symlink must still be reported, not skipped by an overbroad skip-all");
+    assert.equal(leakEntry.size, 1, "must report the pinned inside size, not the swapped outside size");
+    assert.equal(result.bytes, 2);
+
+    // Opposite direction: initially outside, swapped to inside after open must still be skipped.
+    const dir2 = mkdtempTracked(AXI_TASKS_TEST_DIR + "-toctou-list2-");
+    const safe2 = path.join(dir2, "safe.bin");
+    fs.writeFileSync(safe2, "x");
+    const leak2 = path.join(dir2, "leak.txt");
+    fs.symlinkSync(outsideFile, leak2);
+    let swapped2 = false;
+    const swapToInside = () => {
+      if (!swapped2) {
+        fs.unlinkSync(leak2);
+        fs.symlinkSync(safe2, leak2);
+        swapped2 = true;
+      }
+    };
+    fs.openSync = (p, flags) => {
+      const fd = originalOpen(p, flags);
+      const s = typeof p === "string" ? p : "";
+      if (s.endsWith("leak.txt")) swapToInside();
+      return fd;
+    };
+    fs.statSync = (p) => {
+      const res = originalStat(p);
+      const s = typeof p === "string" ? p : "";
+      if (s.endsWith("leak.txt")) swapToInside();
+      return res;
+    };
+    let result2;
+    try {
+      result2 = listTaskOutputFiles(dir2);
+    } finally {
+      fs.openSync = originalOpen;
+      fs.statSync = originalStat;
+    }
+    assert.equal(swapped2, true);
+    assert.equal(result2.files.some((f) => f.path === "leak.txt"), false, "outside-pinned symlink must be skipped even after it is swapped to inside");
+    assert.deepEqual(result2.files.map((f) => f.path), ["safe.bin"]);
+  });
+
+  test("listTaskOutputFiles surfaces a close failure on the symlink fd (fail-fast, PR #507 follow-up)", () => {
+    const dir = mkdtempTracked(AXI_TASKS_TEST_DIR + "-close-fail-");
+    const target = path.join(dir, "real.txt");
+    fs.writeFileSync(target, "inside");
+    const link = path.join(dir, "link.txt");
+    fs.symlinkSync(target, link);
+    const originalOpen = fs.openSync;
+    const originalClose = fs.closeSync;
+    let symlinkFd = null;
+    fs.openSync = (p, flags) => {
+      const fd = originalOpen(p, flags);
+      const s = typeof p === "string" ? p : "";
+      if (s.endsWith("link.txt")) symlinkFd = fd;
+      return fd;
+    };
+    fs.closeSync = (fd) => {
+      if (fd === symlinkFd) {
+        const err = new Error("close failed");
+        err.code = "EIO";
+        throw err;
+      }
+      return originalClose(fd);
+    };
+    try {
+      assert.throws(() => listTaskOutputFiles(dir), /close failed/);
+    } finally {
+      fs.openSync = originalOpen;
+      fs.closeSync = originalClose;
+    }
+  });
+});
+
+describe("output-dir fd leak (taskferry#509)", () => {
+  test("listTaskOutputFiles does not leak a directory fd when readdir throws mid-walk", (t) => {
+    if (process.platform !== "linux") {
+      t.skip("only meaningful on linux where /proc/self/fd is available");
+      return;
+    }
+    const dir = mkdtempTracked(AXI_TASKS_TEST_DIR + "-fd-leak-");
+    fs.mkdirSync(path.join(dir, "subdir"), { recursive: true });
+    fs.writeFileSync(path.join(dir, "keep.txt"), "k");
+    fs.writeFileSync(path.join(dir, "subdir", "inner.txt"), "x");
+
+    const countFds = () => fs.readdirSync(PROC_SELF_FD).length;
+
+    const originalReaddirSync = fs.readdirSync;
+    const originalOpenSync = fs.openSync;
+    const originalCloseSync = fs.closeSync;
+    let opens = 0;
+    let closes = 0;
+    fs.openSync = (...args) => { opens++; return originalOpenSync(...args); };
+    fs.closeSync = (...args) => { closes++; return originalCloseSync(...args); };
+    let walkCalls = 0;
+    fs.readdirSync = new Proxy(originalReaddirSync, {
+      apply(target, thisArg, args) {
+        const [readdirPath] = args;
+        const p = String(readdirPath);
+        if (p === PROC_SELF_FD) return target.apply(thisArg, args);
+        if (/^\/proc\/self\/fd\/\d+$/.test(p)) {
+          walkCalls++;
+          // Let root succeed, subdir throw EACCES — the exact window where
+          // the popped fd would previously have leaked without a try/finally.
+          if (walkCalls === 2) {
+            const err = new Error(`EACCES: permission denied, scandir '${p}'`);
+            err.code = "EACCES";
+            throw err;
+          }
+        }
+        return target.apply(thisArg, args);
+      },
+    });
+
+    const fdsBefore = countFds();
+    try {
+      assert.throws(() => listTaskOutputFiles(dir), (err) => err.code === "EACCES");
+    } finally {
+      fs.readdirSync = originalReaddirSync;
+    }
+    const fdsAfterSingle = countFds();
+    // After one failed listing the fd count must not have grown and every
+    // open must have been paired with a close.
+    assert.equal(fdsAfterSingle, fdsBefore, "a single throwing walk must not leak an fd");
+    assert.equal(opens, closes, `expected balanced open/close but got ${opens} opens vs ${closes} closes`);
+
+    // Re-install the same failing mock to prove the leak does not accumulate
+    // across repeated output listings (the daemon path that would reach EMFILE).
+    walkCalls = 0;
+    opens = 0;
+    closes = 0;
+    fs.readdirSync = new Proxy(originalReaddirSync, {
+      apply(target, thisArg, args) {
+        const [readdirPath] = args;
+        const p = String(readdirPath);
+        if (p === PROC_SELF_FD) return target.apply(thisArg, args);
+        if (/^\/proc\/self\/fd\/\d+$/.test(p)) {
+          walkCalls++;
+          if (walkCalls % 2 === 0) {
+            const err = new Error(`EACCES: permission denied, scandir '${p}'`);
+            err.code = "EACCES";
+            throw err;
+          }
+        }
+        return target.apply(thisArg, args);
+      },
+    });
+    const fdsBeforeLoop = countFds();
+    try {
+      for (let i = 0; i < 10; i++) {
+        assert.throws(() => listTaskOutputFiles(dir), (err) => err.code === "EACCES");
+      }
+    } finally {
+      fs.readdirSync = originalReaddirSync;
+      fs.openSync = originalOpenSync;
+      fs.closeSync = originalCloseSync;
+    }
+    const fdsAfterLoop = countFds();
+    assert.equal(fdsAfterLoop, fdsBeforeLoop, "repeated throwing walks must not accumulate leaked fds");
+  });
+
+  test("listTaskOutputFiles does not leak the popped directory fd when a file-stat throws mid-iteration", (t) => {
+    if (process.platform !== "linux") {
+      t.skip("only meaningful on linux where /proc/self/fd is available");
+      return;
+    }
+    const dir = mkdtempTracked(AXI_TASKS_TEST_DIR + "-fd-leak-stat-");
+    fs.mkdirSync(path.join(dir, "subdir"), { recursive: true });
+    // Throwing file lives under subdir so the walk must pop a non-root fd
+    // (the subdir) before the stat throws — otherwise `current.fd === rootFd`
+    // and the outer `finally` in listTaskOutputFiles would mask the leak.
+    fs.writeFileSync(path.join(dir, "subdir", "keep.txt"), "k");
+
+    const countFds = () => fs.readdirSync(PROC_SELF_FD).length;
+    const originalOpenSync = fs.openSync;
+    const originalCloseSync = fs.closeSync;
+    let opens = 0;
+    let closes = 0;
+    fs.openSync = (...args) => { opens++; return originalOpenSync(...args); };
+    fs.closeSync = (...args) => { closes++; return originalCloseSync(...args); };
+
+    const originalStatSync = fs.statSync;
+    let statCalls = 0;
+    fs.statSync = (...args) => {
+      const p = typeof args[0] === "string" ? String(args[0]) : "";
+      if (p.endsWith("/subdir/keep.txt") || p.endsWith("/keep.txt")) {
+        statCalls++;
+        if (statCalls === 1) {
+          const err = new Error("EACCES: permission denied");
+          err.code = "EACCES";
+          throw err;
+        }
+      }
+      return originalStatSync(...args);
+    };
+
+    const fdsBefore = countFds();
+    try {
+      assert.throws(() => listTaskOutputFiles(dir), (err) => err.code === "EACCES");
+    } finally {
+      fs.statSync = originalStatSync;
+      fs.openSync = originalOpenSync;
+      fs.closeSync = originalCloseSync;
+    }
+    const fdsAfter = countFds();
+    assert.equal(fdsAfter, fdsBefore, "a throwing file stat mid-walk must not leak the popped directory fd");
+    assert.equal(opens, closes, `expected balanced open/close but got ${opens} opens vs ${closes} closes`);
+  });
+});
+
+describe("boot-time sweep of orphaned output dirs under <stateDir>/outputs (PR #482 review)", () => {
+  let sweepTestCounter = 0;
+  test("deletes an output dir whose task id is not in tasks.json at startup", () => {
+    sweepTestCounter++;
+    const stateDir = mkdtempTracked(AXI_TASKS_TEST_DIR + "-orphan-output-");
+    const orphanId = `oc_orphan_output_${sweepTestCounter}_${process.pid}`;
+    const orphanDir = path.join(stateDir, "outputs", orphanId);
+    fs.mkdirSync(orphanDir, { recursive: true });
+    fs.writeFileSync(path.join(orphanDir, "stale.txt"), "leftover from a prior crash");
+
+    const mgr = trackManager(createTaskManager({
+      stateDir,
+      sandboxEnabled: false,
+      spawnFn: () => fakeChild(),
+      killFn: () => {},
+    }));
+
+    assert.equal(fs.existsSync(orphanDir), false, "the orphan output dir should have been swept at boot");
+    mgr.close();
+  });
+
+  test("keeps an output dir whose task id IS in tasks.json (settled tasks are intentional)", () => {
+    sweepTestCounter++;
+    const stateDir = mkdtempTracked(AXI_TASKS_TEST_DIR + "-keep-output-");
+    const taskId = `oc_kept_output_${sweepTestCounter}_${process.pid}`;
+    const taskDir = path.join(stateDir, "outputs", taskId);
+    fs.mkdirSync(taskDir, { recursive: true });
+    fs.writeFileSync(path.join(taskDir, "deliverable.txt"), "keep this");
+    fs.mkdirSync(stateDir, { recursive: true });
+    fs.writeFileSync(path.join(stateDir, "tasks.json"), JSON.stringify([
+      { id: taskId, status: "done" },
+    ]));
+
+    const mgr = trackManager(createTaskManager({
+      stateDir,
+      sandboxEnabled: false,
+      spawnFn: () => fakeChild(),
+      killFn: () => {},
+    }));
+
+    assert.equal(fs.existsSync(taskDir), true, "a tracked settled task's dir must be preserved by the boot sweep");
+    mgr.close();
+  });
+});
+
+describe("boot-time output sweep scales with orphan set, not all-time count (taskferry#513)", () => {
+  test("expensive per-entry FS work (lstat + rm) scales with eligible orphans, not retained history", () => {
+    // Direct unit test of sweepOrphanedOutputDirsFor with mocked expensive ops.
+    // Simulates all-time history of 50 retained tasks plus 3 orphans; the
+    // sweep should only stat/rm the 3 orphans, not all 53 entries. This is
+    // the filter-then-process ordering mandated by CLAUDE.md ("Always filter,
+    // then process") and fixed alongside #287's filteredTaskDetails.
+    const keptIds = Array.from({ length: 50 }, (_, i) => `oc_kept_513_${i}_${process.pid}`);
+    const orphanIds = [`oc_orphan_513_a_${process.pid}`, `oc_orphan_513_b_${process.pid}`, `oc_orphan_513_c_${process.pid}`];
+    const allEntries = [...keptIds, ...orphanIds, ".", ".."];
+    const tasks = new Map(keptIds.map((id) => [id, { id, status: "done" }]));
+    const statCalls = [];
+    const removeCalls = [];
+    const readdirFn = () => allEntries;
+    const lstatFn = (p) => {
+      statCalls.push(path.basename(p));
+      return { isDirectory: () => true, isSymbolicLink: () => false };
+    };
+    const removeDirFn = (p) => { removeCalls.push(path.basename(p)); };
+
+    sweepOrphanedOutputDirsFor({
+      OUTPUT_DIR_ROOT: "/tmp/fake-outputs-513",
+      tasks,
+      readdirFn,
+      lstatFn,
+      removeDirFn,
+    });
+    assert.equal(removeCalls.length, orphanIds.length, `removeDir should be called only for orphans (${orphanIds.length}), not for all ${keptIds.length} retained entries`);
+    assert.deepEqual(removeCalls.sort(), orphanIds.sort(), "only orphan ids should be removed");
+    assert.equal(statCalls.length, orphanIds.length, `lstat (expensive FS work) should be called only for orphans (${orphanIds.length}), not for all ${keptIds.length} retained entries`);
+    assert.deepEqual(statCalls.sort(), orphanIds.sort(), "only orphan ids should be stated");
+  });
+
+  test("boot sweep via createTaskManager only deletes orphans and leaves many retained dirs intact (integration)", () => {
+    const stateDir = mkdtempTracked(AXI_TASKS_TEST_DIR + "-513-scale-");
+    const outputsRoot = path.join(stateDir, "outputs");
+    fs.mkdirSync(outputsRoot, { recursive: true });
+    const keptIds = Array.from({ length: 20 }, (_, i) => `oc_513_int_kept_${i}_${process.pid}_${Date.now()}`);
+    const orphanIds = [`oc_513_int_orphan_a_${process.pid}`, `oc_513_int_orphan_b_${process.pid}`];
+    for (const id of [...keptIds, ...orphanIds]) {
+      const dir = path.join(outputsRoot, id);
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(path.join(dir, "file.txt"), "data");
+    }
+    // Seed tasks.json with only kept ids; orphans have no record.
+    fs.writeFileSync(path.join(stateDir, "tasks.json"), JSON.stringify(keptIds.map((id) => ({ id, status: "done" }))));
+
+    const statCalls = [];
+    const lstatFn = (p) => {
+      if (typeof p === "string" && p.startsWith(outputsRoot)) statCalls.push(path.basename(p));
+      return fs.lstatSync(p);
+    };
+    const mgr = trackManager(createTaskManager({
+      stateDir,
+      lstatFn,
+      sandboxEnabled: false,
+      spawnFn: () => fakeChild(),
+      killFn: () => {},
+    }));
+    for (const id of keptIds) {
+      assert.equal(fs.existsSync(path.join(outputsRoot, id)), true, `kept dir ${id} must survive boot sweep`);
+    }
+    for (const id of orphanIds) {
+      assert.equal(fs.existsSync(path.join(outputsRoot, id)), false, `orphan dir ${id} must be swept`);
+    }
+    const orphanStats = statCalls.filter((b) => orphanIds.includes(b));
+    const keptStats = statCalls.filter((b) => keptIds.includes(b));
+    assert.equal(orphanStats.length, orphanIds.length, "stat should have run for each orphan");
+    assert.equal(keptStats.length, 0, `expensive lstat must not run for retained history (${keptStats.length} unexpected calls for ${keptIds.length} kept entries); sweep must scale with orphan set, not all-time count`);
+    mgr.close();
   });
 });

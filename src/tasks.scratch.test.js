@@ -17,7 +17,7 @@ import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { makeManager, fakeChild, baseTask, trackManager, AXI_TASKS_TEST_DIR, mkdtempTracked } from "./tasks.test-helpers.js";
 import { TASKFERRY_OUTPUT_DIR_ENV, ensureTaskOutputDir, listTaskOutputFiles, readTaskOutputFile, resolveTaskOutputDir, resolveOutputDirRoot, resolveInsideDir } from "./output-dir.js";
-import { createTaskManager, sweepOrphanedOutputDirsFor } from "./tasks.js";
+import { createTaskManager, sweepOrphanedOutputDirsFor, sweepOrphanedPromptFilesFor } from "./tasks.js";
 import { errCode } from "./errors.js";
 import { responseError } from "./daemon.js";
 
@@ -1010,5 +1010,54 @@ describe("boot-time output sweep scales with orphan set, not all-time count (tas
     assert.equal(orphanStats.length, orphanIds.length, "stat should have run for each orphan");
     assert.equal(keptStats.length, 0, `expensive lstat must not run for retained history (${keptStats.length} unexpected calls for ${keptIds.length} kept entries); sweep must scale with orphan set, not all-time count`);
     mgr.close();
+  });
+
+  test("keeps an output dir whose id is only on disk, not in memory (taskferry#515): a stale daemon must not delete a live daemon's deliverable surface", () => {
+    // Direct unit test: the in-memory map (this daemon's stale boot view)
+    // never loaded the id, but tasks.json (written by the live daemon) does
+    // -- the disk guard must keep the dir.
+    const removeCalls = [];
+    const readdirFn = () => ["oc_live_elsewhere", "oc_truly_gone"];
+    const lstatFn = (_path) => ({ isDirectory: () => true, isSymbolicLink: () => false });
+    const removeDirFn = (p) => { removeCalls.push(path.basename(p)); };
+    sweepOrphanedOutputDirsFor({
+      OUTPUT_DIR_ROOT: "/tmp/fake-outputs-515",
+      tasks: new Map(),
+      persistedTasks: new Map([["oc_live_elsewhere", { id: "oc_live_elsewhere", status: "running" }]]),
+      readdirFn,
+      lstatFn,
+      removeDirFn,
+    });
+    assert.deepEqual(removeCalls, ["oc_truly_gone"], "only the id absent from both memory and disk may be removed");
+  });
+
+  test("keeps a prompt file whose id is on disk as running but not in memory (taskferry#515)", () => {
+    const promptDir = mkdtempTracked("axi-prompt-diskguard-");
+    const liveFile = path.join(promptDir, "oc_live_elsewhere.prompt.txt");
+    const goneFile = path.join(promptDir, "oc_truly_gone.prompt.txt");
+    fs.writeFileSync(liveFile, "live prompt");
+    fs.writeFileSync(goneFile, "orphan prompt");
+    sweepOrphanedPromptFilesFor({
+      PROMPT_DIR: promptDir,
+      tasks: new Map(),
+      persistedTasks: new Map([["oc_live_elsewhere", { id: "oc_live_elsewhere", status: "running" }]]),
+    });
+    assert.equal(fs.existsSync(liveFile), true, "a disk-recorded running task's prompt must survive");
+    assert.equal(fs.existsSync(goneFile), false, "an id unknown on disk too is still orphaned");
+  });
+
+  test("prompt sweep still removes files for ids this daemon loaded as unknown even when the stale disk says running", () => {
+    // The daemon's own boot reconciliation (handleDaemonRestartTasks) is the
+    // authority for ids it loaded; the disk snapshot may lag it (debounced
+    // persist), so the guard must not resurrect files for loaded ids.
+    const promptDir = mkdtempTracked("axi-prompt-loaded-");
+    const file = path.join(promptDir, "oc_loaded_unknown.prompt.txt");
+    fs.writeFileSync(file, "stale prompt");
+    sweepOrphanedPromptFilesFor({
+      PROMPT_DIR: promptDir,
+      tasks: new Map([["oc_loaded_unknown", { id: "oc_loaded_unknown", status: "unknown" }]]),
+      persistedTasks: new Map([["oc_loaded_unknown", { id: "oc_loaded_unknown", status: "running" }]]),
+    });
+    assert.equal(fs.existsSync(file), false, "a loaded-and-reconciled id is governed by the in-memory record");
   });
 });

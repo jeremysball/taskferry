@@ -96,9 +96,10 @@ describe("bwrap sandboxing: dispatch argv shape and gitdir scoping", () => {
 
     const bindCount = captured.args.filter((arg) => arg === "--bind").length;
     // directory + runtimeDir + the sandboxed opencode data home + the per-task
-    // scratch dir (taskferry#423) -- the git-common-dir sits inside `directory`,
+    // scratch dir (taskferry#423) + the per-task uv cache and tool dirs
+    // (taskferry#426) -- the git-common-dir sits inside `directory`,
     // already covered by that one bind.
-    assert.equal(bindCount, 4);
+    assert.equal(bindCount, 6);
   });
 
   test("snapshots the whole common dir for a submodule layout, where gitDir resolves to the same path as gitCommonDir", () => {
@@ -335,7 +336,7 @@ describe("bwrap sandboxing: allowedDirs and denylist", () => {
 });
 
 describe("bwrap sandboxing: opencode auth and data home", () => {
-  test("points XDG_DATA_HOME at a writable spot under cacheDir when sandboxing, so opencode's own log/session db isn't blocked by the read-only root", () => {
+  test("points XDG_DATA_HOME at the task's own writable spot under cacheDir when sandboxing, so opencode's own log/session db isn't blocked by the read-only root and no two tasks share one opencode.db (taskferry#501)", () => {
     let captured = null;
     const cacheDir = mkdtempTracked(AXI_TASKS_CACHE_DIR);
     const mgr = makeManager({
@@ -346,9 +347,11 @@ describe("bwrap sandboxing: opencode auth and data home", () => {
       cacheDir,
     });
 
-    mgr.dispatch({ prompt: "hello", directory: os.tmpdir(), executor: "opencode" });
+    const dispatched = mgr.dispatch({ prompt: "hello", directory: os.tmpdir(), executor: "opencode" });
 
-    assert.equal(captured.opts.env.XDG_DATA_HOME, path.join(cacheDir, OPENCODE_DATA));
+    // Per-task data home (taskferry#501): XDG_DATA_HOME points at
+    // <cacheDir>/opencode-data/<taskId>, not a daemon-wide shared dir.
+    assert.equal(captured.opts.env.XDG_DATA_HOME, path.join(cacheDir, OPENCODE_DATA, dispatched.id));
   });
 
   test("ro-binds the real opencode auth.json into the sandboxed XDG_DATA_HOME when it exists, so credentialed providers still resolve", () => {
@@ -368,12 +371,12 @@ describe("bwrap sandboxing: opencode auth and data home", () => {
       cacheDir,
     });
 
-    mgr.dispatch({ prompt: "hello", directory: os.tmpdir(), executor: "opencode" });
+    const dispatched = mgr.dispatch({ prompt: "hello", directory: os.tmpdir(), executor: "opencode" });
 
     const srcIndex = captured.args.indexOf(realAuthFile);
     assert.notEqual(srcIndex, -1);
     assert.equal(captured.args[srcIndex - 1], "--ro-bind");
-    assert.equal(captured.args[srcIndex + 1], path.join(cacheDir, OPENCODE_DATA, "opencode", "auth.json"));
+    assert.equal(captured.args[srcIndex + 1], path.join(cacheDir, OPENCODE_DATA, dispatched.id, "opencode", "auth.json"));
   });
 
   test("--rw-bind at the real auth.json path promotes the credential bind to read-write instead of dropping it", () => {
@@ -393,7 +396,7 @@ describe("bwrap sandboxing: opencode auth and data home", () => {
       cacheDir,
     });
 
-    mgr.dispatch({ prompt: "hello", directory: os.tmpdir(), executor: "opencode", allowedDirs: [realAuthFile] });
+    const dispatched = mgr.dispatch({ prompt: "hello", directory: os.tmpdir(), executor: "opencode", allowedDirs: [realAuthFile] });
 
     // The pair must still reach the sandbox -- as a --bind (rw) pair with the
     // same source/dest the ro-bind would have used -- not vanish because the
@@ -401,7 +404,7 @@ describe("bwrap sandboxing: opencode auth and data home", () => {
     // (A separate, redundant same-path --bind for realAuthFile also appears,
     // from the plain --rw-bind same-path rw bind -- that's expected and
     // harmless; find the specific promoted pair by its distinct dest.)
-    const expectedDest = path.join(cacheDir, OPENCODE_DATA, "opencode", "auth.json");
+    const expectedDest = path.join(cacheDir, OPENCODE_DATA, dispatched.id, "opencode", "auth.json");
     const pairIndex = captured.args.findIndex(
       (arg, i) => arg === "--bind" && captured.args[i + 1] === realAuthFile && captured.args[i + 2] === expectedDest,
     );
@@ -421,8 +424,9 @@ describe("bwrap sandboxing: opencode auth and data home", () => {
     mgr.dispatch({ prompt: "hello", directory: os.tmpdir() });
 
     // "--ro-bind" still appears once, for the base "/" root bind — the extra
-    // auth.json ro-bind (destination ".../opencode-data/opencode/auth.json")
-    // is absent, even though the data home itself is still read-write bound.
+    // auth.json ro-bind (destination ".../opencode-data/<taskId>/opencode/
+    // auth.json") is absent, even though the data home itself is still
+    // read-write bound.
     assert.equal(captured.args.some((arg) => typeof arg === "string" && arg.includes(path.join(OPENCODE_DATA, "opencode", "auth.json"))), false);
   });
 
@@ -437,6 +441,47 @@ describe("bwrap sandboxing: opencode auth and data home", () => {
     mgr.dispatch({ prompt: "hello", directory: os.tmpdir() });
 
     assert.equal(captured.opts.env.XDG_DATA_HOME, undefined);
+  });
+
+  test("redirects UV_CACHE_DIR and UV_TOOL_DIR to per-task writable dirs under cacheDir (taskferry#426)", () => {
+    let captured = null;
+    const cacheDir = mkdtempTracked(AXI_TASKS_CACHE_DIR);
+    const mgr = makeManager({
+      spawnFn: (cmd, args, opts) => { captured = { cmd, args, opts }; return fakeChild(); },
+      sandboxEnabled: true,
+      checkBwrapAvailableFn: () => ({ checked: true, available: true }),
+      platform: "linux",
+      resolveGitCommonDirFn: () => null,
+      cacheDir,
+    });
+
+    const dispatched = mgr.dispatch({ prompt: "hello", directory: os.tmpdir() });
+
+    const uvCacheDir = path.join(cacheDir, "uv-cache", dispatched.id);
+    const uvToolsDir = path.join(cacheDir, "uv-tools", dispatched.id);
+    assert.equal(captured.opts.env.UV_CACHE_DIR, uvCacheDir);
+    assert.equal(captured.opts.env.UV_TOOL_DIR, uvToolsDir);
+    // Both dirs are rw-bound at the same path (a --bind, not --ro-bind), so
+    // uv/uvx can actually write into them despite the read-only root bind.
+    for (const dir of [uvCacheDir, uvToolsDir]) {
+      const bindIndex = captured.args.indexOf(dir);
+      assert.notEqual(bindIndex, -1, `expected ${dir} to be bound`);
+      assert.equal(captured.args[bindIndex - 1], "--bind");
+    }
+  });
+
+  test("leaves UV_CACHE_DIR and UV_TOOL_DIR untouched when sandboxing is disabled", () => {
+    let captured = null;
+    const mgr = makeManager({
+      spawnFn: (cmd, args, opts) => { captured = { cmd, args, opts }; return fakeChild(); },
+      sandboxEnabled: false,
+      platform: "linux",
+    });
+
+    mgr.dispatch({ prompt: "hello", directory: os.tmpdir() });
+
+    assert.equal(captured.opts.env.UV_CACHE_DIR, undefined);
+    assert.equal(captured.opts.env.UV_TOOL_DIR, undefined);
   });
 });
 

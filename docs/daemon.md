@@ -507,6 +507,21 @@ profiling is diagnostic, not on the request's critical path.
    which cannot detect reuse) and passes open for legacy records with no
    recorded start time, which are signalled anyway. See
    `docs/daemon.md#recovery`.
+- A fresh dispatch's opencode session/db state not being visible to
+   `taskferry dispatch --session-id` on an *earlier* task — expected, by
+   design (taskferry#501). Every sandboxed dispatch gets its own
+   per-task data home (`<cacheDir>/opencode-data/<taskId>`, a separate
+   opencode.sqlite/session store per task) so concurrent dispatches never
+   contend on one shared `opencode.db` — which crashed workers with
+   `opencode_unknownerror`/`"Failed to execute statement"` under
+   concurrent dispatch. The resume surface that actually matters is
+   preserved: a task's own later calls (its summary-generation child, a
+   daemon-restart auto-resume of the same task, an advisor follow-up
+   resuming that same advisor task's session) all reuse the *same* task's
+   data home, so `--continue --session <id>` still resolves. Cross-task
+   session resumption of a sandboxed session was never a supported
+   feature — it only worked as a side effect of the shared data home — so
+   only the accidental sharing is gone.
 - A resumed worker starting under a different pid than the one recorded for
    the task — expected; resume is a fresh spawn (fresh overlay, fresh pid),
    not a re-attachment to the old orphaned process. The pid persisted on the
@@ -722,3 +737,34 @@ profiling is diagnostic, not on the request's critical path.
   never overridable from either source: a user `--ro-bind` overlapping one of
   those is skipped with a warning even when it also overlaps the deny-list
   (e.g. `stateDir` itself, which is a default deny-list entry).
+- A daemon refusing to start with "another taskferry daemon ... is already
+  running" even though `daemon.sock` doesn't exist and nothing answers on the
+  socket path — expected, not a stale-socket bug (taskferry#515). The
+  daemon's boot gate is two-layered: the socket bind wins exclusivity (the
+  OS-level authority), and a `<state-dir>/daemon.pid` record — checked under
+  the socket-bind lock, *before* the task manager is constructed — refuses
+  to reclaim the record of a process that is still genuinely alive (signal-0
+  probe plus `/proc/<pid>/stat` start-time identity, so a recycled pid is
+  not mistaken for the original daemon). A crashed daemon leaves the record
+  behind on purpose; the next boot only reclaims it once the recorded owner
+  provably no longer exists. The manager's constructor runs the destructive
+  boot-time orphan sweeps, so a second daemon must never reach construction
+  while a first one might still be sweeping the same state — refusing to
+  boot only defers a start, while deleting a live task's overlay is
+  unrecoverable. Clean shutdown (including the source-change restart path)
+  unclaims the record; only an unclean death leaves it as a guard.
+- An orphan sweep (overlay/prompt/output) at startup leaving a directory or
+  file alone that "clearly" has no matching task — expected when the id is
+  present in `tasks.json` on disk even though the daemon's in-memory map has
+  never seen it (taskferry#515). The sweeps re-read the persisted store at
+  boot and refuse to delete an id they find there, because a stale daemon
+  booting against a live daemon's state must not tear down the live daemon's
+  in-flight overlays/prompts/output dirs. An id unknown in memory *and* on
+  disk is still swept as a genuine orphan (crash before the record ever
+  persisted), and an id this daemon itself loaded is governed by the
+  in-memory record alone (its own restart reconciliation already decided the
+  task's fate; the on-disk snapshot may lag by the persist debounce).
+- A `daemon.pid` file that briefly survives a clean shutdown — expected if
+  a close raced an unlink; the next boot re-checks it and reclaims it once
+  its recorded owner is provably dead, so a leftover record can never wedge
+  a restart.

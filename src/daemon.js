@@ -168,6 +168,8 @@ import { errorValue } from "./output.js";
  * @property {string} runtimeDir
  * @property {string} socketPath
  * @property {number} healthCheckTimeoutMs
+ * @property {string} stateDir
+ * @property {() => void} exitProcess
  */
 
 const DAEMON_ENTRY = fileURLToPath(import.meta.url);
@@ -461,6 +463,171 @@ export function removeStaleSocketIfUnchanged(socketPath, checkedIdentity, runtim
   });
 }
 
+// A live daemon's pid is recorded at startup as `<state-dir>/daemon.pid` so
+// a second daemon boot can refuse to run -- and a stale one can be reclaimed
+// -- even when the socket gate is not enough on its own. The socket probe
+// only proves "nothing is listening *right now*"; it cannot distinguish a
+// crashed daemon (whose zombie *children* may still be running tasks with
+// live overlays) from a clean state with no daemon at all. Without this
+// check, an ordinary no-daemon boot would reclaim the pidfile left behind by
+// a zombie whose tasks are still executing, and that daemon's startup sweeps
+// would then delete the zombies' in-flight overlays out from under their
+// workers (taskferry#515). The pidfile deliberately lives in the state dir,
+// not the runtime dir, because the socket gate is keyed to the socket path
+// while task state is keyed to the state dir -- a caller can override the
+// socket path (TASKFERRY_SOCKET_PATH) without changing state dir, so scoping
+// the ownership record to the state dir keeps the "one daemon per state"
+// guarantee congruent with where the destructive sweeps operate.
+//
+// Two processes can genuinely disagree about the pid file's owner between
+// the read and the write, so the pid file's contents are only ever used to
+// make a *conservative* decision -- refuse to boot, or overwrite a record
+// that the liveness checks proved dead. The socket gate (which binds
+// atomically, and whose identity is double-checked under a lock) remains
+// the actual exclusivity mechanism; the pid file's mtime makes the record
+// self-reclaiming for the warn-only case, since a fresh boot always stamps
+// it.
+
+/**
+ * Reads a pid's kernel start time from /proc/<pid>/stat (field 22), the
+ * stable process identity that survives pid reuse (same logic as
+ * tasks.js's readProcStartTime, duplicated here so daemon.js need not
+ * import from the manager module).
+ * @param {number} pid
+ * @returns {string|null}
+ */
+function readProcStartTime(pid) {
+  if (process.platform !== "linux") return null;
+  try {
+    const stat = fs.readFileSync(`/proc/${pid}/stat`, "utf8");
+    // The comm field is parenthesized and may itself contain spaces, so
+    // count from the end: starttime is field 22 of the standard 52, i.e.
+    // the 31st token from the tail.
+    const parts = (stat ?? "").trim().split(/\s+/);
+    return parts.length >= 31 ? parts[parts.length - 31] : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Whether a pid is still alive (signal 0 probe). A live but recycled pid is
+ * still "alive" for this check; /proc start-time matching on top of it (see
+ * {@link pidIdentityMatches}) is what distinguishes the original process
+ * from a stranger that reused its pid.
+ * @param {number} pid
+ * @returns {boolean}
+ */
+function pidIsAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return errCode(err) === "EPERM";
+  }
+}
+
+/**
+ * Whether `pid` is the same process that wrote `recordedStartTime`, by
+ * comparing /proc start times. A bare kill(pid,0) probe cannot tell a
+ * live-but-reused pid from the original process; when the recorded start
+ * time is unavailable (non-Linux) the check passes open, so the caller's
+ * "likely live, treat as live" fallback applies (safer than sweeping a
+ * zombie's state: refusing to proceed only defers a boot, deleting is
+ * unrecoverable).
+ * @param {number} pid
+ * @param {string|null} recordedStartTime
+ * @returns {boolean}
+ */
+function pidIdentityMatches(pid, recordedStartTime) {
+  if (recordedStartTime == null) return true;
+  const current = readProcStartTime(pid);
+  return current != null && current === recordedStartTime;
+}
+
+/**
+ * @param {string} stateDir
+ * @returns {string}
+ */
+function daemonPidFilePath(stateDir) {
+  return path.join(stateDir, "daemon.pid");
+}
+
+/**
+ * @param {string} stateDir
+ * @returns {{pid: number|null, startTime: string|null}}
+ */
+function readDaemonPidFile(stateDir) {
+  let raw;
+  try {
+    raw = fs.readFileSync(daemonPidFilePath(stateDir), "utf8");
+  } catch {
+    return { pid: null, startTime: null };
+  }
+  const parts = raw.trim().split(/\s+/);
+  const pid = Number(parts[0]);
+  return { pid: Number.isSafeInteger(pid) && pid > 0 ? pid : null, startTime: parts[1] ?? null };
+}
+
+/**
+ * Whether the daemon that wrote the pid file appears to be genuinely alive:
+ * the recorded pid responds to signal 0 and still has the recorded /proc
+ * start time (so it is the original daemon, not a recycled pid). A pid that
+ * fails either check is treated as dead even if something else now lives at
+ * that pid. Called only when the socket gate has already established that
+ * nothing is listening, which is exactly the zombie-daemon case.
+ * @param {string} stateDir
+ * @returns {boolean}
+ */
+function recordedDaemonIsAlive(stateDir) {
+  const { pid, startTime } = readDaemonPidFile(stateDir);
+  return pid != null && pidIsAlive(pid) && pidIdentityMatches(pid, startTime);
+}
+
+// Runs inside the socket-bind lock, so racing daemon boots serialize their
+// pid-file cleanup/reclaim decisions (two of them can't each conclude "the
+// other's stale file is mine to remove" at the same instant).
+/**
+ * @param {{stateDir: string, exitProcess: () => void}} deps
+ * @returns {void}
+ */
+function enforceDaemonSingleton({ stateDir, exitProcess }) {
+  const pidFilePath = daemonPidFilePath(stateDir);
+  fs.mkdirSync(stateDir, { recursive: true, mode: 0o700 });
+  const previousOwner = readDaemonPidFile(stateDir);
+  if (recordedDaemonIsAlive(stateDir)) {
+    process.stderr.write(
+      `error: another taskferry daemon (pid ${previousOwner.pid}, recorded at ${daemonPidFilePath(stateDir)}) is already running for ${stateDir}\n`
+      + "help: reuse the existing daemon, or stop it first; a second daemon for the same state dir would delete its overlays at startup\n"
+    );
+    exitProcess();
+    return;
+  }
+  fs.writeFileSync(pidFilePath, `${process.pid} ${readProcStartTime(process.pid) ?? ""}\n`, { mode: 0o600 });
+}
+
+/**
+ * Removes the daemon.pid record on clean shutdown, so a fresh boot that
+ * outlives the socket gate (no listener, but the pid file may already be
+ * gone) doesn't see a stale "previous daemon" record from the previous
+ * incarnation.
+ * @param {string} stateDir
+ * @returns {() => void}
+ */
+function makeUnclaimDaemonPid(stateDir) {
+  return () => {
+    const { pid } = readDaemonPidFile(stateDir);
+    if (pid === process.pid) {
+      try {
+        fs.unlinkSync(daemonPidFilePath(stateDir));
+      } catch {
+        // best-effort; a leftover pid file is re-checked (and reclaimed) on
+        // the next boot
+      }
+    }
+  };
+}
+
 /**
  * @param {ReturnType<TaskManager["list"]>["tasks"]} tasks
  * @returns {Task[]}
@@ -728,10 +895,16 @@ function resolveDaemonOptions(options = {}) {
  * @param {BindSocketDeps} deps
  * @returns {Promise<void>}
  */
-async function bindDaemonSocket({ server, runtimeDir, socketPath, healthCheckTimeoutMs }) {
+async function bindDaemonSocket({ server, runtimeDir, socketPath, healthCheckTimeoutMs, stateDir, exitProcess }) {
   const bindLockPath = path.join(runtimeDir, "socket-bind.lock");
   await withFileLockAsync(bindLockPath, async () => {
     await prepareSocket(runtimeDir, socketPath, healthCheckTimeoutMs);
+    // Inside the lock: only one boot holds the bind lock at a time, so the
+    // pid-file liveness decision (refuse / reclaim / write) is serialized
+    // against every other boot's. A refused boot exits without ever
+    // binding; a boot whose recorded predecessor is provably dead stamps
+    // the record for itself.
+    enforceDaemonSingleton({ stateDir, exitProcess });
     /**
      * @type {Promise<void>}
      */
@@ -779,6 +952,22 @@ export async function startDaemon(options = {}) {
   }
   fs.mkdirSync(runtimeDir, { recursive: true, mode: 0o700 });
 
+  // The singleton gate runs *before* the task manager is constructed: the
+  // manager's constructor executes the boot-time orphan sweeps (overlay /
+  // prompt / output dirs) against the shared state, so a second daemon that
+  // was allowed to reach construction would delete the first daemon's
+  // live-state overlays at boot (taskferry#515). The socket bind itself is
+  // the exclusivity authority (OS-level, atomic); the daemon.pid record is
+  // the conservative liveness check that refuses to reclaim a crashed
+  // daemon's record while that daemon's process is still genuinely alive
+  // without a listener. The bind target is a plain server; the app-level
+  // server (createDaemonServer, below) cannot be created before the manager,
+  // and the manager cannot be created before exclusivity is won, so the
+  // bound server forwards connections to it.
+  const boundServer = net.createServer();
+
+  await bindDaemonSocket({ server: boundServer, runtimeDir, socketPath, healthCheckTimeoutMs, stateDir, exitProcess });
+
   /** @type {Set<net.Socket>} */
   const clients = new Set();
   /** @type {Map<string, {socket: net.Socket, directory: string|null, summaries: boolean, originSessionId: string|null}>} */
@@ -803,7 +992,7 @@ export async function startDaemon(options = {}) {
   const restart = { pending: false, restarting: false };
   /** @type {MaybeRestartRef} */
   const maybeRestartRef = { current: null };
-  const server = createDaemonServer({
+  const appServer = createDaemonServer({
     clients,
     subscriptions,
     writeMessage,
@@ -820,27 +1009,40 @@ export async function startDaemon(options = {}) {
     invoke: (targetManager, request) => invoke(targetManager, request, resolveWorkspaceRoot),
     maybeRestart: () => maybeRestartRef.current?.(),
   });
+  // The app server is the one that actually speaks the protocol; forward
+  // connections from the bound server (which holds the socket path) to it.
+  boundServer.on("connection", (socket) => appServer.emit("connection", socket));
 
-  await bindDaemonSocket({ server, runtimeDir, socketPath, healthCheckTimeoutMs });
-
-  const close = makeClose({ manager: serverManager, clients, server, socketPath, restart });
+  const unclaimDaemonPid = makeUnclaimDaemonPid(stateDir);
+  const close = makeClose({ clients, socketPath, restart, manager: serverManager, server: boundServer });
+  // Remove the ownership record on clean shutdown (both the caller's
+  // close() and the source-change restart path): a crashed daemon leaves
+  // it behind deliberately, so the next boot's singleton gate can refuse
+  // to reclaim it while the zombie process is still alive. The restart
+  // path must unclaim too, or the replacement daemon booting against a
+  // still-unreaped zombie (which still passes the signal-0 probe) could
+  // refuse its own incarnation.
+  const closeWithUnclaim = async () => {
+    await close();
+    unclaimDaemonPid();
+  };
   maybeRestartRef.current = makeMaybeRestart({
     sourceDir,
     sourceSignature,
     startupSourceSignature,
-    close,
-    spawnReplacement,
     daemonEntry,
     env,
     exitProcess,
+    spawnReplacement,
     restart,
+    close: closeWithUnclaim,
     manager: serverManager,
     restartWaitForIdle: restartWaitForIdleEnabled(env, taskManagerOptions.config),
   });
 
   return {
     socketPath,
-    close,
+    close: closeWithUnclaim,
     stats: () => ({ connections: clients.size, subscriptions: subscriptions.size }),
   };
 }

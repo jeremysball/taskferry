@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { createTaskManager, DEFAULT_SUMMARY_MODEL } from "./tasks.js";
+import { createTaskManager, DEFAULT_SUMMARY_MODEL, sweepOrphanedOverlaysFor } from "./tasks.js";
 import { trackManager, makeManager, fakeChild, AXI_TASKS_ORPHAN, AXI_TASKS_TEST_DIR, AXI_TASKS_CACHE_DIR, TASKS_STATE_FILE, OVERLAY_DIR_PENDING, DIFF_LINE, SPAWN_BWRAP_TIMEOUT, SOL_MODEL, LUNA_MODEL, baseTask, mkdtempTracked } from "./tasks.test-helpers.js";
 
 const CHECK_GATE_CONFIG = `check = "npm test"\n`;
@@ -964,6 +964,42 @@ describe("sweepOrphanedOverlays()", () => {
     mgr.flushPersist();
     const persisted = JSON.parse(fs.readFileSync(tasksFile, "utf8"));
     assert.equal(persisted[0].overlayDirs, null);
+  });
+
+  test("does not sweep an overlay whose id exists on disk (taskferry#515): a stale daemon with no in-memory record of a live task must not delete its overlay", () => {
+    // Direct unit test of sweepOrphanedOverlaysFor with a deliberately
+    // divergent disk picture: an in-memory map that never loaded the id
+    // (the stale-daemon boot) while tasks.json records it (written by the
+    // live daemon after this one booted). The sweep must re-check the disk
+    // before deleting and refuse.
+    const overlayTmpRoot = mkdtempTracked("axi-orphan-diskguard-tmp-");
+    const overlayRoot = path.join(overlayTmpRoot, "taskferry-cow-oc_live_elsewhere");
+    let released = 0;
+    const releaseOverlay = () => { released += 1; return false; };
+    sweepOrphanedOverlaysFor({
+      tasks: new Map(),
+      persistedTasks: new Map([["oc_live_elsewhere", { id: "oc_live_elsewhere", status: "running", overlayDirs: { root: overlayRoot, tmpRoot: overlayTmpRoot } }]]),
+      persistTask: () => {},
+      readdirFn: (p) => (p === overlayTmpRoot ? ["taskferry-cow-oc_live_elsewhere"] : []),
+      overlayTmpRoot,
+      releaseOverlay,
+    });
+    assert.equal(released, 0, "releaseOverlay must not be called for an id the disk records as live");
+  });
+
+  test("still sweeps an overlay whose id is absent from disk as well as memory", () => {
+    const overlayTmpRoot = mkdtempTracked("axi-orphan-diskabsent-tmp-");
+    let released = 0;
+    const releaseOverlay = () => { released += 1; return false; };
+    sweepOrphanedOverlaysFor({
+      tasks: new Map(),
+      persistedTasks: new Map(),
+      persistTask: () => {},
+      readdirFn: (p) => (p === overlayTmpRoot ? ["taskferry-cow-oc_disk_gone"] : []),
+      overlayTmpRoot,
+      releaseOverlay,
+    });
+    assert.equal(released, 1, "an id unknown in memory AND on disk is genuinely orphaned and must still be released");
   });
 
   test("two managers with distinct runtimeDirs and no explicit overlayTmpRoot never collide on the same overlay namespace (taskferry#286)", () => {

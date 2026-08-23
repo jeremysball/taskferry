@@ -1,5 +1,60 @@
 # Changelog
 
+## [4.2.0](https://github.com/jeremysball/taskferry/compare/taskferry-v4.1.2...taskferry-v4.2.0) (2026-08-22)
+
+
+### Features
+
+* **daemon:** auto-resume in-flight tasks on restart, restart immediately by default ([#502](https://github.com/jeremysball/taskferry/issues/502)) ([8777392](https://github.com/jeremysball/taskferry/commit/87773926b767f6a864f7fd4d1eee4dca6346c81c))
+* **hooks:** enforce worktree commits via pre-commit gate ([7c1f6d6](https://github.com/jeremysball/taskferry/commit/7c1f6d6f2a926c472f87de7b118f34ffafc5250a))
+* **hooks:** enforce worktree commits via pre-commit gate ([7c14397](https://github.com/jeremysball/taskferry/commit/7c14397413bed7662a036c92a452f2b0693c4206))
+* **sandbox:** let --ro-bind override the deny-list with a loud warning ([#503](https://github.com/jeremysball/taskferry/issues/503)) ([a5a63b7](https://github.com/jeremysball/taskferry/commit/a5a63b7f4879c6aa92121527f93095d7d969a63c)), closes [#497](https://github.com/jeremysball/taskferry/issues/497)
+
+
+### Bug Fixes
+
+* **output:** enforce response budget for real request ids ([#527](https://github.com/jeremysball/taskferry/issues/527)) ([5acdc4f](https://github.com/jeremysball/taskferry/commit/5acdc4fea1eaaed4c0754f809db5140ecf094770))
+* **sandbox,daemon,opencode:** per-task isolation for uv cache, daemon singleton, and XDG_DATA_HOME ([ffa5b3a](https://github.com/jeremysball/taskferry/commit/ffa5b3aa0c5b3ff3d7a1de99ed2f65c9f4574f1a))
+* **sandbox,daemon,opencode:** per-task isolation for uv cache, daemon singleton, and XDG_DATA_HOME ([ed9713a](https://github.com/jeremysball/taskferry/commit/ed9713a122a660c3084ffae8a89d26d4e4dee6fb))
+* **summarizer:** use latest session ID from retry logs ([0b845fd](https://github.com/jeremysball/taskferry/commit/0b845fd235eab08dc3d4d193ff4f243ecff18ae1))
+* **tasks:** handle resolver failures and centralize activity-key normalization ([#483](https://github.com/jeremysball/taskferry/issues/483)) ([32ed725](https://github.com/jeremysball/taskferry/commit/32ed725b4b1106816d6251cf5d0c1761ee4fd3f2))
+
+## [4.1.2](https://github.com/jeremysball/taskferry/compare/taskferry-v4.1.1...taskferry-v4.1.2) (2026-08-21)
+
+
+### Bug Fixes
+
+* **tooling:** glob test discovery and require local quality tools ([#528](https://github.com/jeremysball/taskferry/issues/528)) ([8f21442](https://github.com/jeremysball/taskferry/commit/8f2144238dd9216800ab9d312a955c2e14f9fd75))
+
+## [4.1.1](https://github.com/jeremysball/taskferry/compare/taskferry-v4.1.0...taskferry-v4.1.1) (2026-08-21)
+
+
+### Bug Fixes
+
+* **adr:** correct kilo.md's actual location (PR [#489](https://github.com/jeremysball/taskferry/issues/489) branch, not main) ([f9aaf1f](https://github.com/jeremysball/taskferry/commit/f9aaf1ff62ae6eae5d65c045766623605fb78546))
+* **executor:** resolve symlinked opencode config entries instead of dropping them ([#492](https://github.com/jeremysball/taskferry/issues/492)) ([bd4284a](https://github.com/jeremysball/taskferry/commit/bd4284a8c220d95286d8771d6a93327e94620cf2)), closes [#491](https://github.com/jeremysball/taskferry/issues/491)
+
+## [4.1.0](https://github.com/jeremysball/taskferry/compare/taskferry-v4.0.0...taskferry-v4.1.0) (2026-08-16)
+
+
+### Features
+
+* **daemon:** add per-task writable scratch dir for durable deliverables ([#474](https://github.com/jeremysball/taskferry/issues/474)) ([434c075](https://github.com/jeremysball/taskferry/commit/434c075bd21215895029b35cc52c796b9c9ab164))
+
+
+### Bug Fixes
+
+* **cli:** accept exits nonzero on failed apply; result --diff size errors are actionable ([#472](https://github.com/jeremysball/taskferry/issues/472)) ([fdc2f94](https://github.com/jeremysball/taskferry/commit/fdc2f9423b5e839e230e4f512b7e8b290835a8df))
+* **daemon:** cap list --all rows server-side so all-time history can't kill the connection ([#473](https://github.com/jeremysball/taskferry/issues/473)) ([2628f7d](https://github.com/jeremysball/taskferry/commit/2628f7d1d1555c29ccd256d335c8f119dea6b153))
+* **daemon:** extract shared emptyStatusCounts helper ([#466](https://github.com/jeremysball/taskferry/issues/466)) ([4f28cce](https://github.com/jeremysball/taskferry/commit/4f28cce4836d35b8f29f96de7fc7e6203700c762))
+* **daemon:** resolve workspace root before scheduleActivityFor's subscription lookup ([#479](https://github.com/jeremysball/taskferry/issues/479)) ([dd3e382](https://github.com/jeremysball/taskferry/commit/dd3e382835447b0d2ada1f165b1ac95adba6837e))
+* **daemon:** reuse errorValue() in responseError() ([#467](https://github.com/jeremysball/taskferry/issues/467)) ([89b5fc7](https://github.com/jeremysball/taskferry/commit/89b5fc78b648b1d43ff413289e775ee4bb355542))
+* **sandbox:** dedupe bwrap availability check logic ([#468](https://github.com/jeremysball/taskferry/issues/468)) ([84b4706](https://github.com/jeremysball/taskferry/commit/84b4706cc1e9ace6e240fc6e751c4af91dca004a))
+* **sandbox:** persist overlay record before spawning the child ([#477](https://github.com/jeremysball/taskferry/issues/477)) ([8d56d61](https://github.com/jeremysball/taskferry/commit/8d56d61cdce0d763b194ad400bd296ba115f7954))
+* **sandbox:** skip symlinked opencode config entries when ro-binding ([#475](https://github.com/jeremysball/taskferry/issues/475)) ([5a31a7c](https://github.com/jeremysball/taskferry/commit/5a31a7c5ebf4e1936097dd7f1e1c3c2f6088b46f))
+* **sandbox:** snapshot a worktree's private gitDir instead of live-overlaying it ([#476](https://github.com/jeremysball/taskferry/issues/476)) ([df2ccb6](https://github.com/jeremysball/taskferry/commit/df2ccb6d835ad1ea610b9a44e22d57964e34dedd))
+* **skills:** resume the prior ferry's session for follow-up work ([#465](https://github.com/jeremysball/taskferry/issues/465)) ([3a8230a](https://github.com/jeremysball/taskferry/commit/3a8230a9ffe46a0b7cfb07414a8b0b885972797b))
+
 ## [4.0.0](https://github.com/jeremysball/taskferry/compare/taskferry-v3.2.0...taskferry-v4.0.0) (2026-08-12)
 
 

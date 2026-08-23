@@ -114,12 +114,12 @@ describe("task lifecycle events", () => {
     assert.equal(manager.status(first.id).status, "done");
   });
 
-  test("emits unknown when an active persisted task is reloaded", () => {
+  test("emits crashed with daemon_restarted_session_lost when a running persisted task without a resumable session is reloaded", () => {
     const events = [];
     makeManager({ tasks: [persistedTask()], onEvent: (event) => events.push(event) });
 
     assert.equal(events.length, 1);
-    assert.equal(events[0].status, "unknown");
+    assert.equal(events[0].status, "crashed");
     assert.equal(events[0].previousStatus, "running");
     assert.equal(events[0].sequence, 1);
   });

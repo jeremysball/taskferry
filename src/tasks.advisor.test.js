@@ -40,11 +40,19 @@ describe("advisor(): validation, completion, and timeouts", () => {
 
     // Advisor dispatches are overlay-gated under bwrap (ADR 0001), so the
     // captured args are the bwrap invocation; the executor command follows "--".
-    assert.deepEqual(captured.slice(captured.indexOf("--") + 1), [
+    // The trailing positional is the user prompt plus the persistent-output-dir
+    // block: advisor dispatches get the same scratch dir as a regular dispatch
+    // (taskferry#423), and the prompt block is now injected whenever an
+    // outputDir was allocated, not gated by role (taskferry#504).
+    const executorArgs = captured.slice(captured.indexOf("--") + 1);
+    assert.deepEqual(executorArgs.slice(0, -1), [
       "opencode",
       "run", "--dir", os.tmpdir(), "--auto", "--format", "json",
-      "-m", SOL_MODEL, "--variant", "max", "--", SHARD_QUESTION,
+      "-m", SOL_MODEL, "--variant", "max", "--",
     ]);
+    const spawnedPrompt = executorArgs.at(-1);
+    assert.match(spawnedPrompt, new RegExp(`^${SHARD_QUESTION.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
+    assert.match(spawnedPrompt, /## Persistent output dir/);
 
     // Simulate opencode writing its result log, then exiting.
     const row1 = mgr.list().tasks[0];

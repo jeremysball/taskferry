@@ -28,11 +28,12 @@ between two processes, so a caller that's killed mid-boot never holds
   health check to succeed. The lock means concurrent `taskferry`
   invocations racing to start the daemon converge on a single instance
   rather than each spawning their own. If the booter itself fails (e.g.
-  `loadConfig` throws on a malformed `config.json`), it writes
-  its error message to `<runtime-dir>/daemon-boot.err` and exits with a
-  non-zero code; the caller picks that file up on its next failed
-  connect and folds the contents into the `daemon boot failed: ...`
-  detail of the timeout error it surfaces.
+  `loadConfig` throws on a malformed `config.json`), it writes its error
+  message to `<runtime-dir>/daemon-boot.err` and exits with a non-zero code.
+  An import-time failure can instead write
+  `<runtime-dir>/daemon-boot-stderr.log`. The caller checks both files and
+  folds the available contents into the `daemon boot failed: ...` detail of
+  the timeout error it surfaces.
 
 Because the lock lives entirely in the detached booter rather than in
 `connectClient()`, a caller that's killed mid-boot (a short-timeout
@@ -109,8 +110,8 @@ exists at the target path, it sends that address a `system.health` probe
   file.
 - **Nothing answers** (a stale socket file left by a daemon that crashed or
   was killed without cleanup) → the daemon removes it, but only after
-  re-`stat`ing the path under a file lock and confirming the device/inode it
-  just health-checked is still the same file at that path. This closes the
+  re-`stat`ing the path under a file lock and confirming the device, inode,
+  and ctime it just health-checked are still the same file at that path. This closes the
   race where a second daemon starts between the health check and the
   unlink: whichever one wins the lock removes the stale file it actually
   checked, not whatever now happens to live at that path.
@@ -133,17 +134,17 @@ event }`, pushed to a socket asynchronously after `event.subscribe`
 returns a `subscriptionId`. Requests and events interleave freely on the
 same connection.
 
-The daemon caps a single inbound message at 1 MiB and refuses to buffer
-more (`REQUEST_TOO_LARGE`), and caps in-flight requests per daemon at 256
+The daemon caps each connection's accumulated inbound buffer at 1 MiB and
+refuses to buffer more (`REQUEST_TOO_LARGE`), and caps in-flight requests per daemon at 256
 (`SERVER_BUSY`) — both are abuse/backpressure limits, not something normal
 CLI usage approaches.
 
 ## Concurrency, queueing, and rate limiting
 
 - `TASKFERRY_MAX_CONCURRENT_TASKS` (default `4`): maximum tasks the daemon
-  allows to be `running` at once. Extra dispatches queue and start FIFO as
-  running tasks finish, are cancelled, fail to spawn, or hit the no-output
-  watchdog.
+  allows to be `running` at once. Extra dispatches queue and start FIFO within
+  each provider queue. The scheduler selects providers round-robin, subject
+  to the global and provider-specific limits below.
 - `TASKFERRY_MAX_DISPATCHES_PER_WINDOW` / `TASKFERRY_DISPATCH_WINDOW_MS`
   (defaults `2` per `5000`ms): an independent, optional burst-rate control
   on *launches*, not a concurrency cap.
@@ -154,6 +155,9 @@ CLI usage approaches.
   the global limit. Uses a compact grammar (`provider:maxConcurrentTasks
   [:maxDispatchesPerWindow]`, comma-separated) instead of JSON — see the
   `providerLimits` field in `docs/config.md`.
+- `TASKFERRY_LOWERDIR_STAGGER_MS` (default `3000`): minimum delay between
+  launches while the scheduler sets up lower directories. Set
+  `lowerdirStaggerMs` in config or use `0` to disable it.
 
 ## Watchdogs
 
@@ -197,10 +201,10 @@ CLI usage approaches.
   at most `TAIL_READ_BYTES` (1 MiB) of new growth; a single burst larger
   than that is picked up over however many subsequent ticks it takes,
   rather than allocating one unbounded buffer for the whole burst. A
-  persistent log-read error other than `ENOENT` (a rotated or
-  not-yet-created log, retried next tick) fails the task explicitly with
+  persistent error while opening or reading the log, other than `ENOENT`
+  for a log that does not exist yet, fails the task explicitly with
   `failureReason: "watchdog_log_read_error"` instead of silently freezing
-  the activity clock.
+  the activity clock. Metadata-stat errors are retried by the watcher.
 - **Known limitation:** a running child's stderr is piped straight to the
   raw log file unfiltered — no JSON parsing, no event normalization — so
   any stderr chatter not causally tied to real task progress (a CLI-level
@@ -272,51 +276,89 @@ the top-level process.
 ## Self-restart on source change
 
 The daemon records the newest mtime across the `.js` files in its own source
-directory at startup. After serving each request, it recomputes that value;
+directory at startup. After each request that reaches the normal
+dispatch/finally path, it recomputes that value;
 if it has moved forward (a merge or `git pull` landed while the daemon was
 running), a restart is marked pending.
 
-The restart itself is deferred until idle: it only fires once
-`manager.list().counts` shows zero `running` and zero `queued` tasks, checked
-again on every subsequent request until that's true. This avoids reattaching
-to an in-flight worker child process — deliberately out of scope, per
-[Recovery](#recovery) below — by never tearing the daemon down while one
-exists. When the idle check passes, the daemon closes its socket and server,
-spawns a fresh `daemon.js` process with the same environment, and exits; the
+By default the restart fires immediately on the next request, even with
+`running` or `queued` tasks in flight. Running tasks are auto-resumed on the
+next boot when a resumable worker session can be recovered (a valid
+`sessionId` via `readSessionIdFromLog`); otherwise they are classified with a
+clear `failureReason: "daemon_restarted_session_lost"` instead of a raw bwrap
+spawn error (see [Recovery](#recovery)). The previous "defer until idle"
+behavior — waiting for zero `running` and zero `queued` tasks — is now an
+explicit opt-in via `restartWaitForIdle: true` in `config.json`
+(`TASKFERRY_RESTART_WAIT_FOR_IDLE=1`, `docs/config.md`), which restores the
+old wait-for-idle gate for callers that prefer it.
+
+When the restart fires, the daemon closes its socket and server, spawns a
+fresh `daemon.js` process with the same environment, and exits; the
 replacement binds a new socket the same way any auto-started daemon does.
 
 Existing `watch` subscribers are dropped when the old process exits, same as
 any other daemon restart; a client reconnects and resubscribes on its next
-call. There is no special handoff for in-progress requests beyond the
-existing "wait for idle" gate, and that gate only checks task counts, not a
-general in-flight-RPC counter — a concurrent non-task request (e.g. another
-client's `list` or `status` call) can still be executing at the exact moment
-the restart fires; only running/queued *tasks* are guaranteed absent.
+call. With the default immediate restart there is no guarantee that no
+`running`/`queued` tasks exist at the exact moment the restart fires — only
+with `restartWaitForIdle: true` are they guaranteed absent. In either mode
+a concurrent non-task request (e.g. another client's `list` or `status` call)
+can still be executing at the exact moment the restart fires; the gate, when
+enabled, only checks task counts, not a general in-flight-RPC counter.
 
 ## Recovery
 
-Queued and running task state survives only for the daemon process's own
-lifetime, because the handle a task's `exit` event fires on only exists in
-the process that called `spawn()`. If the daemon restarts while a task is
-still `queued` or `running`, the new process has no such handle for it and
-relabels it `"unknown"` on reload rather than reporting a possibly-stale
-status.
+Task state other than `queued`/`running` survives a daemon restart by being
+reloaded from `tasks.json`. For `queued` and `running` the new daemon
+reconciles each persisted task on boot:
 
-The underlying worker process, if still alive, keeps running, but its log
-stops receiving new events the way it did before the restart: stdout is a
-pipe the old daemon process owned and normalized into the log itself, so
-once that process exits, nothing is left reading that pipe and stdout
-events stop landing in `<state-dir>/logs/<task-id>.ndjson`. Only stderr —
-duplicated directly into the log file descriptor at spawn time,
-independent of the parent process — keeps writing after the restart.
-Inspect the log file directly for whatever made it in before the restart,
-or, for a task dispatched with the `opencode` executor specifically, run
-`opencode session list` — but the daemon does not re-attach a status
-watcher to it. There is no periodic
-recheck of `unknown` tasks' pids or trailing log events: that would
-reintroduce string/heuristic completion detection for exactly the
-crash-recovery edge case this architecture avoids elsewhere, so it's left
-out rather than done half right.
+- `queued` tasks never started — they degrade to `"unknown"` as before (never
+  auto-launched; the original launch spec's caller env / bind dirs are not
+  reconstituted). `unknown` is still the historical "the daemon that owned
+  this task is gone" marker for this case.
+- `running` tasks are checked for a resumable worker session: the daemon
+  reads the log for a valid `sessionId` (`readSessionIdFromLog` — a bounded
+  tail scan of the last 128 KiB, since real logs stamp `sessionID` on
+  essentially every event line; a log whose only session event predates
+  that window falls back to a full scan), checks that
+  the task directory still exists and that the orphaned sandbox pid (if any)
+  is reaped, and where resumable, cleans the stale overlay and re-queues the
+  task with the recovered `sessionId` against a fresh overlay. The scheduler
+  then respawns it normally — the worker continues the same session rather
+  than starting over. The respawn reconstitutes the original launch spec
+  from the task record (`resumeEnv`, `resumeAllowedDirs`, `resumeRoBind`,
+  `resumeNoSandbox`, `resumeNoOverlay` are persisted at dispatch time), so a
+  resumed worker sees the same caller env, sandbox/overlay toggles and
+  per-dispatch binds as the original run.
+- `running` tasks with no resumable session (no `sessionId` in the log, log
+  unreadable, directory gone) are classified as `crashed` with
+  `failureReason: "daemon_restarted_session_lost"` and a detail explaining
+  why resume was not possible, instead of surfacing a raw
+  `bwrap: Can't find source path .../upper/main` spawn error. `failureDetail`
+  distinguishes "no sessionId" (log readable) from "log missing or
+  unreadable" from "directory missing".
+
+The underlying orphaned sandbox process (`bwrap` with `--die-with-parent`,
+when sandboxed) is expected to have already exited when the daemon died; if
+it is still alive it is best-effort `SIGTERM`'d before a resume is attempted
+so a stale overlay mount does not collide with the fresh one. The signal is
+only sent after a `/proc/<pid>/stat` start-time identity check against the
+start time captured at spawn and persisted on the task record — a bare
+liveness probe could otherwise signal an unrelated process that happened to
+reuse the pid. (Legacy records without a start time pass the check open and
+are signalled anyway.) After `SIGTERM` the daemon waits up to `cancelGrace`
+(polling for exit), escalates to `SIGKILL` if the process still lives, and
+polls again briefly before giving up — all synchronously, since boot-time
+resume is not async; the stale overlay record is cleared only when removal
+actually succeeds, so a busy mount is retried as an orphan on the next boot
+rather than silently colliding with the fresh overlay. Log handling
+otherwise matches the previous "unknown" path's observation: stdout was a pipe
+the old daemon owned and normalized into the log, so after the daemon exits
+new stdout events stop landing in `<state-dir>/logs/<task-id>.ndjson` until
+the resumed worker (if any) is respawned; stderr was duplicated directly into
+the log fd at spawn time and would have kept writing even without a resume.
+There is still no periodic recheck of `unknown` tasks' pids — `unknown`
+remains the terminal marker for queued tasks and internal summarizers that are
+never auto-resumed.
 
 No log rotation or cleanup: `logs/` grows unbounded. Fine for interactive
 use; long-lived automation wants an external retention policy.
@@ -324,13 +366,15 @@ use; long-lived automation wants an external retention policy.
 ### Scratch output dir survives across every terminal status (taskferry#423)
 
 Every dispatch reserves a per-task writable directory at
-`<stateDir>/outputs/<id>/`, rw-bound into the bwrap sandbox at the same
-path and exposed to the worker as `$TASKFERRY_OUTPUT_DIR`. Unlike the
+`<stateDir>/outputs/<id>/`, exposed to the worker as
+`$TASKFERRY_OUTPUT_DIR`. When bwrap sandboxing is active, taskferry rw-binds
+that directory at the same path. Unlike the
 git-target overlay (which only exists when a dispatch ran with an overlay
 and is consumed by `accept`/`reject`), the scratch dir is per-task state
 the worker owns directly: it persists on every terminal status
-(`done`, `crashed`, `cancelled`, `incomplete`), is never consumed by
-`accept`/`reject`, and is read back via `taskferry output <id>` (or the
+(`done`, `crashed`, and `cancelled`, including a `done` task whose
+`incomplete` flag is true), is never consumed by `accept`/`reject`, and is read
+back via `taskferry output <id>` (or the
 `task.output` RPC). The CLI is the right surface for retrieving anything
 a worker wrote there — including a deliverable the worker produced but
 whose final assistant message ended on a tool call rather than a clean
@@ -405,9 +449,14 @@ profiling is diagnostic, not on the request's critical path.
   expected, not a broken render. `tf-sl` does no width or color rendering of
   its own; it is a data source for a caller's statusline script, which owns
   every presentation decision (mode/width tiers, coloring, id truncation).
-- `status: "unknown"` after a daemon restart — expected; see
-  `docs/daemon.md#recovery`. There is deliberately no re-attachment to
-  already-running child processes.
+- `status: "unknown"` after a daemon restart — expected for `queued` tasks and
+   internal summarizers (see `docs/daemon.md#recovery`). `running` tasks are
+   handled differently: resumable ones are auto-resumed against a fresh overlay
+   (status goes back to `queued` → `running` on the next boot), non-resumable
+   ones become `crashed` with `daemon_restarted_session_lost` instead of
+   `unknown`. There is no re-attachment to the original orphaned bwrap pid
+   itself — resume always uses a fresh overlay and a new spawn with the
+   recovered `sessionId`.
 - `checkStatus: "interrupted"` on a task after a daemon restart that killed
   the previous daemon mid-gate — expected (Task 7); the only way out is to
   re-run the gate (auto re-run if the overlay survived, or accept with
@@ -431,9 +480,52 @@ profiling is diagnostic, not on the request's critical path.
   to the canonical `skills/using-taskferry/SKILL.md`. Edit the canonical file,
   run `npm run skill:generate`, then re-copy to `~/.claude/skills/` by hand.
 - The daemon restarting itself with no `taskferry` command involved — expected
-  when a source `.js` file's mtime moved forward since startup (a merge
-  landed) and no tasks were running/queued; see
-  `docs/daemon.md#self-restart-on-source-change`.
+   when a source `.js` file's mtime moved forward since startup (a merge
+   landed); see `docs/daemon.md#self-restart-on-source-change`. By default
+   it restarts immediately even with `running`/`queued` tasks in flight
+   (those tasks are auto-resumed when a resumable session exists, otherwise
+   classified with `daemon_restarted_session_lost` — see
+   `docs/daemon.md#recovery`). The old "wait until idle" behavior is an
+   explicit opt-in (`restartWaitForIdle: true` in `config.json` /
+   `TASKFERRY_RESTART_WAIT_FOR_IDLE=1`).
+- A `running` task becoming `crashed` with
+   `failureReason: "daemon_restarted_session_lost"` after a daemon restart —
+   expected when the daemon died mid-task and no resumable session could be
+   recovered (no `sessionId` in the log, log unreadable, or directory gone).
+   The previous daemon's bwrap sandbox is gone and there is no session to
+   continue; the classification replaces the former opaque
+   `bwrap: Can't find source path .../upper/main` spawn error. When a
+   `sessionId` is present the task is instead auto-resumed against a fresh
+   overlay — see `docs/daemon.md#recovery`. `queued` tasks and internal
+   summarizers still degrade to `unknown` as before; only `running` dispatch
+   tasks are eligible for resume.
+- An orphaned child from a restarted daemon not being signalled — expected
+   when its pid is still alive but its `/proc/<pid>/stat` start time no
+   longer matches the one captured at spawn. The pid was reused by some
+   unrelated process while the daemon was down; signalling it would kill a
+   stranger. The identity check uses the start time (not a liveness probe,
+   which cannot detect reuse) and passes open for legacy records with no
+   recorded start time, which are signalled anyway. See
+   `docs/daemon.md#recovery`.
+- A fresh dispatch's opencode session/db state not being visible to
+   `taskferry dispatch --session-id` on an *earlier* task — expected, by
+   design (taskferry#501). Every sandboxed dispatch gets its own
+   per-task data home (`<cacheDir>/opencode-data/<taskId>`, a separate
+   opencode.sqlite/session store per task) so concurrent dispatches never
+   contend on one shared `opencode.db` — which crashed workers with
+   `opencode_unknownerror`/`"Failed to execute statement"` under
+   concurrent dispatch. The resume surface that actually matters is
+   preserved: a task's own later calls (its summary-generation child, a
+   daemon-restart auto-resume of the same task, an advisor follow-up
+   resuming that same advisor task's session) all reuse the *same* task's
+   data home, so `--continue --session <id>` still resolves. Cross-task
+   session resumption of a sandboxed session was never a supported
+   feature — it only worked as a side effect of the shared data home — so
+   only the accidental sharing is gone.
+- A resumed worker starting under a different pid than the one recorded for
+   the task — expected; resume is a fresh spawn (fresh overlay, fresh pid),
+   not a re-attachment to the old orphaned process. The pid persisted on the
+   record is replaced by the new spawn's pid.
 - Editing `TASKFERRY_ENV_FILE`'s target file and a spawned worker not seeing
   the new/changed var right away — expected within a short debounce window,
   not a restart. `envFileVars` is loaded once via `env-file.js`'s
@@ -458,9 +550,9 @@ profiling is diagnostic, not on the request's critical path.
   extraction stages the overlay's whole merged view (`git add -A && git diff
   --cached <pre-dispatch HEAD>`, `changeset.js`'s `extractGitDiff`) so
   pre-existing untracked files surface as new-file entries alongside the
-  worker's own writes. `accept` runs a plain `git apply`, which fails
-  outright when those paths already exist in the working tree — blocking the
-  worker's real changes too — so commit or shelve untracked files before
+  worker's own writes. `accept` runs `git apply --3way`, which fails
+  outright when those paths already exist in the working tree, blocking the
+  worker's real changes too, so commit or shelve untracked files before
   dispatching against a dirty tree. Non-git targets are unaffected: their
   extraction diffs the directory against the merged view, so untouched files
   never appear. The same root cause means a `taskferry result <id>` (or
@@ -480,7 +572,7 @@ profiling is diagnostic, not on the request's critical path.
   `withFileLockAsync()`/`withFileLock()` lock path (one holding it across an
   `await`, another trying to acquire it concurrently) hanging or timing out
   at exactly the lock's `timeoutMs` — expected, not a bug in the lock.
-  `acquireLock()`'s retry loop blocks the JS thread synchronously via
+  `acquireFileLock()`'s retry loop blocks the JS thread synchronously via
   `Atomics.wait` with zero yield back to the event loop, so a contending
   same-process caller starves the very continuation that would release the
   lock. Real contention is always cross-process (a separate `taskferry`
@@ -520,7 +612,7 @@ profiling is diagnostic, not on the request's critical path.
 - `spawnTaskChild()` calling both `ctx.persistTask(task.id)` *and*
   `ctx.flushPersist()` immediately after `buildSandboxedSpawn()` and before
   `ctx.spawnFn(...)`, on top of the existing post-spawn `persistTask()` call
-  a few lines later — expected, not redundant (taskferry#346).
+  a few lines later. This is expected, not redundant (taskferry#477).
   `buildSandboxedSpawn()` (via `assembleBwrapSpawn()`) has already created
   the on-disk overlay and set `task.overlayDirs`/`changesetStatus` in memory
   by the time it returns, but a daemon crash between that point and the
@@ -552,8 +644,11 @@ profiling is diagnostic, not on the request's critical path.
   error frame ("daemon connection closed", taskferry#342). The daemon now
   caps the shipped rows at the newest `MAX_LIST_ROWS` (500) while keeping
   `counts` computed over the full set (a cheap in-memory tally), so
-  `list --all` always answers. To see an older or scoped slice, narrow with
+  `list --all` always answers. To see a scoped slice, narrow with
   `--directory`; `doctor --stats` summarizes the whole history server-side.
+  Directory-scoped list and context requests filter the cheap in-memory rows
+  before calling per-task status code that reads logs, so a narrow request
+  does not perform work across the entire task history.
 - An error response envelope whose `message` is a single line (detail lines
   collapsed away) or empty — expected, not dropped data. The envelope keeps
   the historical wire shape: `message` is exactly the first `error:` line
@@ -575,6 +670,11 @@ profiling is diagnostic, not on the request's critical path.
   captured the *calls*, the scratch dir is where the work actually landed.
   This is the whole reason the per-task scratch dir exists separately from
   the changeset overlay.
+- An empty `taskferry output` listing, or a `not_found` file result, after a
+  worker replaces its task output directory with a symlink — expected, not
+  lost deliverables. Output inspection opens the root without following a
+  symlink and reads through a pinned file descriptor; directory permission
+  repair likewise refuses a symlink instead of changing the linked target.
 - A config entry, credential, or session file that passed the lstat symlink
   guard at bind-computation time still resolving through a symlink into the
   sandbox — expected, and tolerated on purpose. The guard's lstat check
@@ -593,12 +693,18 @@ profiling is diagnostic, not on the request's critical path.
   race that requires the attacker to already hold the keys.
 - A legitimate symlinked config entry (`opencode.jsonc` symlinked into a
   dotfiles repo) silently missing from the sandbox after an upgrade —
-  expected, and now diagnosed: the guard deliberately refuses to bind
-  symlinked entries (bwrap would bind the link's *target*, which is the
-  whole vulnerability #392 closes), and warns on stderr naming the skipped
-  path so the drop is visible rather than silent. The fix is to bind the
-  real file (`cp` the config into `~/.config/opencode`), not to weaken the
-  guard.
+  expected, and now diagnosed, but the behavior *splits by file kind*.
+  OpenCode config entries inside `~/.config/opencode` are resolved to their
+  real target via `resolveOpencodeConfigBindSource()` in `src/executor.js`
+  and ro-bound as that target. This includes entries such as
+  `opencode.json`, `plugins`, and `agents`; `.gitignore` is skipped. The drop
+  no longer happens for these entries. All other binds
+  (Pi extensions, `auth.json`, a resumed OpenCode session file) still fail
+  closed: the guard refuses the symlink (bwrap would bind the link's
+  *target*, which is the whole vulnerability #392 closes) and warns on
+  stderr naming the skipped path. If you hit the latter, `cp` the file into
+  `~/.config/opencode` (or the relevant config dir) rather than weakening
+  the guard.
 - A dispatch's private gitDir (`<git-common-dir>/worktrees/<name>` for a
   linked worktree) getting a one-time scratch copy instead of a live overlay
   or live bind, even though it's a directory and overlayfs mounts directories
@@ -619,3 +725,46 @@ profiling is diagnostic, not on the request's critical path.
   mechanism because they are common to the main checkout, can be large, and
   must track live upstream state (new commits) during a linked-worktree
   dispatch — the tradeoffs don't apply to private git metadata the same way.
+- A user-supplied `--ro-bind` of a deny-listed path (e.g. `~/.ssh`) binding
+  read-only with a loud "overrides the sandbox deny-list" warning, while the
+  same path in a project's `.taskferry.toml` `read_only_paths` is skipped as
+  unsafe — expected, not an inconsistency. The two sources have different
+  trust: `--ro-bind` is the user's own explicit command-line choice (same as
+  `--rw-bind`, which has always overridden the deny-list), while
+  `.taskferry.toml` is project-supplied and daemon-untrusted, so its
+  protected-mount check (which includes the deny-list) stays mandatory. The
+  structural mounts (`stateDir`, `runtimeDir`, the launch directory) are
+  never overridable from either source: a user `--ro-bind` overlapping one of
+  those is skipped with a warning even when it also overlaps the deny-list
+  (e.g. `stateDir` itself, which is a default deny-list entry).
+- A daemon refusing to start with "another taskferry daemon ... is already
+  running" even though `daemon.sock` doesn't exist and nothing answers on the
+  socket path — expected, not a stale-socket bug (taskferry#515). The
+  daemon's boot gate is two-layered: the socket bind wins exclusivity (the
+  OS-level authority), and a `<state-dir>/daemon.pid` record — checked under
+  the socket-bind lock, *before* the task manager is constructed — refuses
+  to reclaim the record of a process that is still genuinely alive (signal-0
+  probe plus `/proc/<pid>/stat` start-time identity, so a recycled pid is
+  not mistaken for the original daemon). A crashed daemon leaves the record
+  behind on purpose; the next boot only reclaims it once the recorded owner
+  provably no longer exists. The manager's constructor runs the destructive
+  boot-time orphan sweeps, so a second daemon must never reach construction
+  while a first one might still be sweeping the same state — refusing to
+  boot only defers a start, while deleting a live task's overlay is
+  unrecoverable. Clean shutdown (including the source-change restart path)
+  unclaims the record; only an unclean death leaves it as a guard.
+- An orphan sweep (overlay/prompt/output) at startup leaving a directory or
+  file alone that "clearly" has no matching task — expected when the id is
+  present in `tasks.json` on disk even though the daemon's in-memory map has
+  never seen it (taskferry#515). The sweeps re-read the persisted store at
+  boot and refuse to delete an id they find there, because a stale daemon
+  booting against a live daemon's state must not tear down the live daemon's
+  in-flight overlays/prompts/output dirs. An id unknown in memory *and* on
+  disk is still swept as a genuine orphan (crash before the record ever
+  persisted), and an id this daemon itself loaded is governed by the
+  in-memory record alone (its own restart reconciliation already decided the
+  task's fate; the on-disk snapshot may lag by the persist debounce).
+- A `daemon.pid` file that briefly survives a clean shutdown — expected if
+  a close raced an unlink; the next boot re-checks it and reclaims it once
+  its recorded owner is provably dead, so a leftover record can never wedge
+  a restart.

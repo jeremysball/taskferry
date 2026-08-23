@@ -13,13 +13,21 @@ hook once you've run `npm install` (`.githooks/pre-commit`, wired via the
 `prepare` script) — bypass it in a pinch with `git commit --no-verify`, but
 `npm run check` still has to pass before review.
 
+The hook also enforces the worktree rule: commits must be made from a
+dedicated worktree, not the primary checkout (`git worktree add <path> -b
+<branch>`). The gate compares `git rev-parse --git-dir` vs.
+`--git-common-dir` (equal on primary, different in a linked worktree) and
+blocks otherwise. Bypass the gate on CI or a fresh clone with
+`TASKFERRY_ALLOW_PRIMARY=1 git commit ...` or `git config
+taskferry.allowPrimary true` (local only, not committed); `git commit
+--no-verify` bypasses the gate and the lint checks together. See the
+deterministic-guardrails reorientation, "What to build, in order" #3.
+
 ### Adding a new test file
 
-`npm run test:unit` lists every unit test file explicitly in `package.json`
-rather than globbing `src/**/*.test.js`. A new test file is silently skipped
-by CI until you add it to that list by hand — there's no error, no warning,
-the file just never runs. If you add `src/foo.test.js`, add it to the
-`test:unit` script in the same commit.
+`npm run test:unit` discovers every `src/**/*.test.js` file through Node's test
+runner glob. A new test file is included in CI automatically; name it
+`src/foo.test.js` and no `package.json` change is needed.
 
 ### Changed the CLI surface?
 
@@ -46,8 +54,8 @@ asked to restructure.
   file is doing too much (mixing unrelated behavior areas under one file),
   split it into separate files named for the area under test, e.g.
   `tasks.dispatch.test.js`, `tasks.watchdog.test.js`, `tasks.lifecycle.test.js`
-  rather than one undifferentiated `tasks.test.js`. Remember to add the new
-  file to `test:unit` in `package.json` (see above).
+  rather than one undifferentiated `tasks.test.js`. The test-runner glob picks
+  up the new file automatically.
 - **A file split off from a larger one is self-contained.** It keeps its own
   copy of whatever fixtures/helpers it needs rather than reaching back into
   the file it was split from. `src/commands-stream.test.js` is the

@@ -2,6 +2,16 @@
   "name": "taskferry",
   "version": "4.3.0",
   "description": "AXI CLI and local daemon for dispatching background pi/OpenCode tasks from any frontend harness",
+  "keywords": [
+    "cli",
+    "daemon",
+    "ai-agents",
+    "background-jobs",
+    "opencode",
+    "sandbox",
+    "developer-tools",
+    "task-dispatch"
+  ],
   "license": "MIT",
   "author": "Jeremy Ball",
   "homepage": "https://github.com/jeremysball/taskferry#readme",

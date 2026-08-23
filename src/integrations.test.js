@@ -235,7 +235,7 @@ test("Codex plugin manifests expose native skills and lifecycle hooks", () => {
     source: { source: "local", path: "./integrations/codex" },
     policy: { installation: "AVAILABLE", authentication: "ON_INSTALL" },
     category: "Development & Workflow",
-    description: "Background OpenCode task execution through the Taskferry AXI CLI",
+    description: "Background pi/OpenCode task execution through the Taskferry AXI CLI",
   }]);
 
   assert.match(hooks.description, /workspace context/i);

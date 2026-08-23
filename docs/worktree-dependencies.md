@@ -4,9 +4,11 @@ Dispatches run in a **copy-on-write overlay** over the directory you name (`--di
 
 Dependencies are **not** part of that overlay. A fresh worktree (or overlay) has no `node_modules`, no `uv` venv, no `target/`, until something installs them.
 
-## Current scaffolding (Node)
+## Current scaffolding
 
-The golden scaffolding (`scaffolding-repos/resources/node.md`, from `jeremysball/taskferry@4.3.0`) uses:
+The golden scaffolding (`scaffolding-repos/resources/node.md` from `jeremysball/taskferry@4.3.0` for Node; `resources/python.md` for Python) uses `mise` but **taskferry itself does not create worktrees or install deps** — that stays at the repo/scaffolding layer.
+
+### Node / TypeScript / JavaScript
 
 ```toml
 # .mise.toml
@@ -16,57 +18,60 @@ run = "bash scripts/mise-setup-deps.sh"
 enter = "mise run setup"
 ```
 
-`scripts/mise-setup-deps.sh` symlinks `node_modules` from the main checkout when `package-lock.json` is identical, otherwise runs `npm ci`. It is idempotent via `node_modules/.mise-setup-stamp` (skips when the lock hash hasn't changed).
+`scripts/mise-setup-deps.sh` symlinks `node_modules` from the main checkout when `package-lock.json` is identical, otherwise runs `npm ci`. Idempotent via `node_modules/.mise-setup-stamp`. `[hooks] enter` needs `mise activate` — it fires on interactive `cd` in an activated shell, not inside taskferry's `bwrap`.
 
-**Limitations:**
+The supported flow is **host-side, before dispatch**:
 
-- **Node/npm-only.** Does not handle pnpm/yarn, Python (`uv sync`), Go (`go mod download`), Rust (`cargo fetch`), or any other ecosystem.
-- **`[hooks] enter` needs `mise activate`.** The automatic hook fires only in a shell with `mise activate` in its rc. A daemon-spawned dispatch that has never `cd`'d through mise won't get it — and taskferry's bwrap sandbox doesn't source your rc.
-- **But dispatches are not broken.** `mise run setup` is a direct `mise run` invocation, not a hook — it works without shell activation. The supported flow is to run it **on the host, before dispatch**, so the worker sees `node_modules` via the overlay's lowerdir:
+```bash
+cd <worktree> && mise run setup          # symlink or npm ci, ms in common case
+taskferry dispatch --directory <worktree> --prompt "..." --model ...
+# or: alias tfd='mise run setup && taskferry dispatch'
+```
 
-  ```bash
-  cd <worktree> && mise run setup          # symlink or npm ci, ms in common case
-  taskferry dispatch --directory <worktree> --prompt "..." --model ...
-  # or: alias tfd='mise run setup && taskferry dispatch'
-  ```
+Yes — we **are** using mise for worktree dep management today, via that explicit step. The overlay's `lowerdir` is the worktree you populated; the worker sees `node_modules` without re-running setup inside the sandbox. `mise run setup` is a direct `mise run` invocation and works without shell activation; only the `enter` hook needs it.
 
-  Yes — we **are** using mise for worktree dep management today, via that explicit host-side step. The overlay's lowerdir is the worktree directory you populated; the worker doesn't need to re-run the setup inside the sandbox.
+### Python
 
-Taskferry itself does not auto-run `npm ci`/`uv sync` on worktree creation or inside the overlay.
+Python has no global `node_modules` to symlink — each worktree needs its own venv/deps. Scaffolding uses `uv`:
 
-## Recommendations
+```bash
+uv sync --locked                         # Python
+mise run setup && uv sync --locked        # polyglot Node + Python
+```
 
-1. **Always `mise run setup` before first dispatch into a new worktree.** In practice, `cd <worktree> && mise run setup` populates the tree via symlink or `npm ci` in milliseconds for the common lockfile-identical case.
+Cache the lockfile in CI (`~/.cache/uv` keyed on `uv.lock`), same shape as Node's `~/.npm` cache.
 
-2. **Add a per-repo dispatch alias** so the install is not forgotten:
+## If a worktree has no deps
 
-   ```bash
-   alias tfd='mise run setup && taskferry dispatch'
-   # usage: tfd --directory <worktree> --prompt "..." --model ...
-   ```
+A worktree that has never had its deps installed will fail with `Cannot find module` / `ModuleNotFoundError` before useful work. Fix is host-side:
 
-3. **Python / polyglot repos — use the ecosystem's own install** before dispatch:
+```bash
+git -C <worktree> status --short   # confirm which worktree
+mise run setup                     # Node
+uv sync --locked                   # Python
+taskferry dispatch --directory <worktree> --prompt "..." --model ...
+```
 
-   ```bash
-   uv sync --locked                         # Python
-   mise run setup && uv sync --locked        # polyglot Node + Python
-   ```
+## Does git have a hook that fires on worktree creation?
 
-4. **If a dispatch fails with missing modules**, re-run the install in that worktree and re-dispatch:
+No dedicated `post-worktree` hook. `git worktree add` **does** trigger `post-checkout` in the new worktree (it checks out the branch), so a repo *could* wire:
 
-   ```bash
-   git -C <worktree> status --short   # confirm which worktree
-   mise run setup                     # or uv sync --locked
-   taskferry dispatch --directory <worktree> --prompt "..." --model ...
-   ```
+```bash
+# .githooks/post-checkout  (chmod +x, via core.hooksPath = .githooks)
+#!/bin/sh
+# $1 = previous HEAD, $2 = new HEAD, $3 = 1 if branch checkout
+if [ "$3" = "1" ]; then
+  # symlink or install — keep it fast, idempotent, and scoped
+  if [ -f package-lock.json ]; then mise run setup 2>/dev/null || npm ci; fi
+  if [ -f uv.lock ]; then uv sync --locked 2>/dev/null || true; fi
+fi
+```
 
-## Tracking a first-class hook
-
-A repo-owned hook that taskferry would run automatically after materializing the worktree/overlay (before worker spawn) is tracked in [#551](https://github.com/jeremysball/taskferry/issues/551) as `postWorktreeCreationHook` (aliases `post_worktree_creation_hook` / `postWorktreeHook` for compat). Until that lands, the manual `mise run setup` / `uv sync` steps above are the supported path.
+**But scaffolding deliberately does not ship this.** `post-checkout` fires on *every* `git checkout` / `git switch`, not just `worktree add`, so it would run `npm ci`/`uv sync` on every branch switch. Keep the cost explicit: run `mise run setup` / `uv sync` before first dispatch (or via alias `tfd`), not on every checkout. If you do want auto-install, gate it on `cmp -s` lockfiles and stamp files exactly like `mise-setup-deps.sh` already does — don't run a full install on every checkout.
 
 ## Related docs
 
 - `scaffolding-repos/resources/node.md` — golden Node scaffolding (`.mise.toml` + `mise-setup-deps.sh` + `pre-commit` + `check.yml`)
 - `scaffolding-repos/resources/python.md` — Python port (`uv sync`)
-- `docs/config.md#taskferrytoml` — current `.taskferry.toml` keys (`check`, `check_timeout_seconds`, `read_only_paths`/`roBind`); `postWorktreeCreationHook` will be documented there when implemented
+- `docs/config.md#taskferrytoml` — current `.taskferry.toml` keys (`check`, `check_timeout_seconds`, `read_only_paths`/`roBind`)
 - `docs/troubleshooting.md` — `Cannot find module` / `No module named` → re-run `mise run setup` (or `uv sync`) in that worktree and re-dispatch

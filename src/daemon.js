@@ -9,6 +9,7 @@ import { createTaskManager, emptyStatusCounts } from "./tasks.js";
 import { loadConfig } from "./config.js";
 import { withFileLock, withFileLockAsync } from "./state-lock.js";
 import { isNonNegativeInteger, isPositiveInteger } from "./numbers.js";
+import { parsedEnvNumber, resolveEnvOverrideBoolean } from "./options.js";
 import { normalizeDirectory, resolveRuntimeDir, resolveStateDir, createWorkspaceRootResolver, sameWorkspace } from "./paths.js";
 import {
   PROTOCOL_VERSION,
@@ -204,29 +205,6 @@ const DEFAULT_SLOW_REQUEST_MS = 500;
 const DEFAULT_PERF_LOG_MAX_BYTES = 5 * 1024 * 1024; // 5 MiB
 
 /**
- * @param {string|undefined} value
- * @returns {boolean}
- */
-function isEnabledFlag(value) {
-  return ["1", "true"].includes(/** @type {string} */ (value));
-}
-
-/**
- * Resolves an env-var-over-config boolean: a set env var (`1`/`true`) wins,
- * otherwise the config value applies. Shared by every boolean flag that
- * follows the same precedence chain (profiling, restartWaitForIdle) so each
- * caller expresses only its own env var name and config key.
- * @param {NodeJS.ProcessEnv|undefined} env
- * @param {string} envVarName
- * @param {boolean|undefined} configValue
- * @returns {boolean}
- */
-function resolveEnvOverrideBoolean(env, envVarName, configValue) {
-  if (env?.[envVarName] !== undefined) return isEnabledFlag(env[envVarName]);
-  return configValue === true;
-}
-
-/**
  * @param {NodeJS.ProcessEnv} [env]
  * @param {ProfilingConfig} [config]
  * @returns {boolean}
@@ -242,23 +220,6 @@ function profilingEnabled(env, config) {
  */
 function restartWaitForIdleEnabled(env, config) {
   return resolveEnvOverrideBoolean(env, "TASKFERRY_RESTART_WAIT_FOR_IDLE", config?.restartWaitForIdle);
-}
-
-// An unset var is undefined and Number(undefined) is already NaN, but an
-// empty-string value (a blank .env line, an empty -e in Docker) is
-// Number("") === 0 -- a false "valid, explicit zero" that would otherwise
-// slip past isPositiveInteger/isNonNegativeInteger instead of falling back
-// to the default the same way a genuinely non-numeric value does.
-/**
- * @param {string|undefined} rawValue
- * @param {(value: unknown) => boolean} isValid
- * @param {number} fallback
- * @returns {number}
- */
-function parsedEnvNumber(rawValue, isValid, fallback) {
-  if (!rawValue) return fallback;
-  const parsed = Number(rawValue);
-  return isValid(parsed) ? parsed : fallback;
 }
 
 // Rotates perf.log to perf.log.1 (clobbering any previous perf.log.1) once

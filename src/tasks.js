@@ -11,6 +11,7 @@ import { formatToolEventForNarration } from "./narration-format.js";
 import { MAX_BUFFER_BYTES } from "./daemon-server.js";
 import { errCode } from "./errors.js";
 import { isNonNegativeInteger, isPositiveInteger } from "./numbers.js";
+import { resolveBooleanToggle, resolveNonNegativeIntOption, resolvePositiveIntOption } from "./options.js";
 import { buildBwrapArgs, checkBwrapAvailable, checkOverlaySupport, defaultDenyList, platformSupportsSandbox, resolveGitCommonDir, resolveGitDir } from "./sandbox.js";
 import { applyChangeset, overlayPaths, resolvePreDispatchHead, subOverlayPaths, subFilePaths, cleanupOverlay, defaultRunCommand as defaultOverlayRunCommand, extractGitDiff, extractNonGitDiff, OVERLAY_MOUNT_BUSY_PATTERN } from "./changeset.js";
 import { resolveExecutor, opencodeExecutor } from "./executor.js";
@@ -4227,55 +4228,12 @@ function watchdogTick(state, ctx) {
 // sharing process-wide state with every other test or the real server.
 
 /**
- * Resolves a positiveInteger option from the caller → env-var →
- * config-value → default priority chain. The caller (`rawValue`) wins
- * when defined -- this preserves the original destructured-parameter
- * default behavior, where a caller's `{ maxDispatchesPerWindow: 10 }`
- * override skipped the env/config fallback entirely.
- * @param {number|undefined} rawValue
- * @param {string|undefined} envValue
- * @param {number|undefined} configValue
- * @param {number} defaultValue
- * @returns {number}
+ * Shared numeric/boolean precedence chains now live in `./options.js`
+ * (resolvePositiveIntOption / resolveNonNegativeIntOption /
+ * resolveBooleanToggle) so tasks.js and daemon.js share one flag > env >
+ * config > default path and the same empty-string / invert semantics
+ * instead of duplicating the chain per caller.
  */
-function resolvePositiveIntOption(rawValue, envValue, configValue, defaultValue) {
-  if (rawValue !== undefined) return rawValue;
-  return positiveInteger(Number(envValue), positiveInteger(/** @type {number} */ (configValue), defaultValue));
-}
-
-/**
- * Same caller → env → config → default chain as
- * {@link resolvePositiveIntOption}, but for non-negative budgets (e.g.
- * `summarizerTimeoutMs`, which is allowed to be 0 to disable the
- * throttle).
- * @param {number|undefined} rawValue
- * @param {string|undefined} envValue
- * @param {number|undefined} configValue
- * @param {number} defaultValue
- * @returns {number}
- */
-function resolveNonNegativeIntOption(rawValue, envValue, configValue, defaultValue) {
-  if (rawValue !== undefined) return rawValue;
-  return nonNegativeInteger(Number(envValue), nonNegativeInteger(/** @type {number} */ (configValue), defaultValue));
-}
-
-/**
- * Resolves a boolean toggle from the env-var-or-config-value-or-default
- * triple. `invert=true` matches the `TASKFERRY_DISABLE_*` family (where
- * 1/true DISABLES, anything else enables); `invert=false` matches
- * `TASKFERRY_ACTIVITY_SUMMARIES` (where 0 disables, anything else enables).
- * The env value wins when defined; otherwise `configValue` (or the default
- * if undefined) is used.
- * @param {string|undefined} envValue
- * @param {boolean|undefined} configValue
- * @param {boolean} defaultValue
- * @param {boolean} [invert]
- * @returns {boolean}
- */
-function resolveBooleanToggle(envValue, configValue, defaultValue, invert = false) {
-  if (envValue === undefined) return configValue ?? defaultValue;
-  return invert ? !["1", "true"].includes(envValue) : envValue !== "0";
-}
 
 /**
  * The subset of `createTaskManager`'s options whose resolution doesn't read

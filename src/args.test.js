@@ -197,6 +197,7 @@ test("parses workspace, stream, and result options with their constrained values
     full: true,
     fields: ["message", "narration"],
     diff: false,
+    raw: false,
   });
   assert.ok(parseArgs([
     "result",

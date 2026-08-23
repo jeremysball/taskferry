@@ -296,6 +296,29 @@ settled implementer/fixer dispatch, before treating the task as done:
 taskferry result <id> --diff
 ```
 
+For automation or saving to a file, prefer the raw mode, which writes the
+diff with real newlines and correct UTF-8, bypassing TOON string encoding
+entirely:
+
+```sh
+taskferry result <id> --diff --raw > diff.patch
+```
+
+If you must parse the TOON output yourself (`--diff` without `--raw`),
+decode the quoted `diff:` value with `json.loads`, not
+`unicode_escape` — the latter mangles multi-byte UTF-8 like em-dash `—`
+(`\xe2\x80\x94`) into mojibake `â`:
+
+```python
+import json, re
+text = open("toon-output.txt", encoding="utf-8").read()
+m = re.search(r'diff: "(.*)"', text, re.DOTALL)
+if m:
+    diff = json.loads(f'"{m.group(1)}"')  # correct: JSON-string escaping
+    # NOT: m.group(1).encode("utf-8").decode("unicode_escape")  # mangles UTF-8
+    open("diff.patch", "w", encoding="utf-8").write(diff)
+```
+
 If the diff matches what the worker claims (a `Status: DONE` describing a
 specific change, matched by an actual diff doing that change), accept it:
 

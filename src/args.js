@@ -395,6 +395,7 @@ const FLAGS = {
   "--no-overlay": { allow: ["dispatch"], bool: true, key: "noOverlay" }, // advisor deliberately excluded -- review finding #5
   "--force": { allow: ["accept"], bool: true },
   "--diff": { allow: ["result"], bool: true },
+  "--raw": { allow: ["result"], bool: true },
   "--timeout_ms": { mention: "--timeout_ms was renamed; use --timeout", target: "--timeout" },
   "--timeout-ms": { mention: "--timeout-ms was renamed; use --timeout", target: "--timeout" },
   "--tail_chars": { mention: "--tail_chars was renamed; use --tail-chars" },
@@ -561,6 +562,7 @@ function applyAllFlag({ command, options, seen }) {
  * @param {string} command
  * @param {Record<string, unknown>} options
  */
+// eslint-disable-next-line sonarjs/cyclomatic-complexity -- result validation covers four mutually exclusive flag combinations (full/fields, diff/fields, diff/full, raw/diff); each branch is a distinct usage error with its own message
 function validateResult(command, options) {
   if (command !== "result") return;
   if (options.full && options.fields && !/** @type {string[]} */ (options.fields).includes("narration")) throw usageError("--full requires narration in --fields", command);
@@ -574,6 +576,7 @@ function validateResult(command, options) {
     // Reject at parse time so the failure is loud and early.
     throw usageError("--diff cannot be combined with --full", command);
   }
+  if (options.raw && !options.diff) throw usageError("--raw requires --diff", command);
 }
 
 /**

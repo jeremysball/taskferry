@@ -60,6 +60,7 @@ const CONFIG_FIELD_TYPES = {
   opencodeVersionTtlMs: "number",
   opencodeVersionTimeoutMs: "number",
   uvLegacySweepAgeDays: "number",
+  maxResponseBytes: "number",
 };
 
 /** @type {Record<string, string>} */

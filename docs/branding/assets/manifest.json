@@ -1,0 +1,46 @@
+{
+  "generator": {
+    "model": "stabilityai/sdxl-turbo",
+    "runtime": "Diffusers 0.35.1",
+    "torch": "2.7.1+cu126",
+    "host": "Sisyphus",
+    "device": "NVIDIA GeForce RTX 3060 Laptop GPU, 6144 MiB",
+    "steps": 4,
+    "guidance_scale": 0
+  },
+  "minimax": {
+    "model": "image-01",
+    "api": "MiniMax Image API",
+    "endpoint": "api.minimax.io/v1/image_generation",
+    "response_format": "base64",
+    "prompt_optimizer": true
+  },
+  "assets": [
+    {
+      "file": "taskferry-hero-sdxl.png",
+      "role": "README hero artwork",
+      "source_candidate": "hero-route-3",
+      "seed": 4103,
+      "dimensions": "768x512"
+    },
+    {
+      "file": "taskferry-mark-sdxl.png",
+      "role": "brand mark artwork",
+      "source_candidate": "mark-loop-3",
+      "seed": 4203,
+      "dimensions": "512x512"
+    },
+    {
+      "file": "taskferry-hero-minimax.jpg",
+      "role": "primary README hero artwork",
+      "source_candidate": "hero-1",
+      "dimensions": "1280x720"
+    },
+    {
+      "file": "taskferry-mark-minimax.jpg",
+      "role": "primary brand mark artwork",
+      "source_candidate": "mark-3",
+      "dimensions": "1024x1024"
+    }
+  ]
+}

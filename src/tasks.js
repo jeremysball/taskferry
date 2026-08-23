@@ -962,6 +962,21 @@ function assertAdvisorSandboxAvailable({ role, noSandbox, sandboxEnabled, platfo
 function buildSandboxedSpawn(ctx, launchInfo, plan, task) {
   const { noSandbox, spawnEnv, role, spawnCommand, spawnArgs } = plan;
   if (!(ctx.sandboxEnabled && !noSandbox && platformSupportsSandbox(ctx.platform))) {
+    // Sandboxing disabled: UV dirs are explicitly managed, not ambiently
+    // inherited. buildSanitizedEnvironment already skips ambient UV inheritance,
+    // so only a caller-provided env payload should survive here (the "explicitly
+    // managed when testing" contract). If the dispatch did not explicitly pass
+    // UV vars, ensure none bleed through from envFileVars/process.env layers.
+    // If the caller did pass them, honour that explicit value ("leaves
+    // untouched" means taskferry does not override a caller-provided value
+    // when sandboxing is off).
+    const callerEnv = (!launchInfo.isSummary && launchInfo.dispatchLaunch?.env) || {};
+    if (!Object.prototype.hasOwnProperty.call(callerEnv, "UV_CACHE_DIR")) {
+      delete spawnEnv.UV_CACHE_DIR;
+    }
+    if (!Object.prototype.hasOwnProperty.call(callerEnv, "UV_TOOL_DIR")) {
+      delete spawnEnv.UV_TOOL_DIR;
+    }
     return { spawnCommand, spawnArgs, spawnEnv };
   }
   const binds = buildBwrapBinds(ctx, launchInfo, task, spawnEnv, role);
@@ -6007,6 +6022,16 @@ function buildSanitizedEnvironment(env, ctx) {
   layerEnvInto(result, ctx.envFileVars, denySet);
   for (const key of Object.keys(process.env)) {
     if (!denySet.has(key)) {
+      // Do not implicitly inherit taskferry-managed UV dirs from the outer
+      // ambient. A ferry worker running inside a sandboxed task already has
+      // UV_CACHE_DIR/UV_TOOL_DIR set for its own task; that ambient must not
+      // bleed into a dispatched child's env when sandboxing is disabled.
+      // UV dirs are explicitly managed: only honoured when the caller
+      // explicitly passes them via the dispatch's env payload (layered next),
+      // or when taskferry itself sets them in the sandboxed bwrap path
+      // (buildBwrapBinds). This keeps tests isolated whether they run on a
+      // clean host or inside a ferry's overlay (process.env polluted).
+      if (key === "UV_CACHE_DIR" || key === "UV_TOOL_DIR") continue;
       result[key] = process.env[key];
     }
   }

@@ -7458,8 +7458,7 @@ function dispatchTask(params, ctx) {
   validateDispatchModel({ model, priorSessionTask, sessionId });
   const normalizedDirectory = resolveDispatchDirectory(directory);
   const projectConfig = loadProjectConfig(normalizedDirectory);
-  // Task IDs retain the literal "oc_" prefix for compatibility; WorkerExecutor.taskIdPrefix is not wired in this issue.
-  const id = `oc_${Date.now().toString(36)}_${randomUUID().slice(0, 8)}`;
+  const id = `${executor.taskIdPrefix}_${Date.now().toString(36)}_${randomUUID().slice(0, 8)}`;
   const logPath = path.join(ctx.LOG_DIR, `${id}.ndjson`);
   // Per-task scratch dir: a writable, rw-bound surface the worker can use to
   // hand back deliverables whose final assistant message ended on a tool call

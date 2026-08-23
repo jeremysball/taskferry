@@ -1,8 +1,8 @@
 # Worktree dependencies
 
-Dispatches run in a **copy-on-write overlay** over the directory you name (`--directory`), not in the live checkout. The overlay starts empty — worker writes are gated by `accept`/`reject`.
+Dispatches run in a **copy-on-write overlay** over the directory you name (`--directory`), not in the live checkout. The overlay's `upperdir` starts empty — worker writes are gated by `accept`/`reject` — but its `lowerdir` is the worktree you named, which already has the branch's tracked files.
 
-Dependencies are **not** part of that overlay. A fresh worktree (or overlay) has no `node_modules`, no `uv` venv, no `target/`, until something installs them.
+Untracked deps like `node_modules`, `.venv`, or `target/` are **not** in that checkout. A fresh worktree has the branch contents but no `node_modules`/venv until something installs them.
 
 ## Current scaffolding
 

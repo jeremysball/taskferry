@@ -502,7 +502,11 @@ export function resolveInsideDir(baseDir, relativePath) {
  * @returns {{content: string|null, size: number, truncated: boolean, error?: string}}
  */
 export function readTaskOutputFile(dir, relativePath, maxBytes = MAX_OUTPUT_FILE_BYTES) {
-  if (maxBytes > MAX_BUFFER_BYTES) maxBytes = MAX_BUFFER_BYTES;
+  // No static MAX_BUFFER_BYTES clamp here: the caller (tasks.js) validates
+  // maxBytes against the dynamic daemon response limit (TASKFERRY_MAX_RESPONSE_BYTES
+  // / maxResponseBytes flag/config/env, default 1 MiB). Clamping to the static
+  // 1 MiB here would silently undo a raised cap and break taskferry#506's
+  // configurable ceiling.
   const target = resolveInsideDir(dir, relativePath);
   const dirFd = openDirectoryNoFollow(dir);
   if (dirFd === null) return { content: null, size: 0, truncated: false, error: "not_found" };

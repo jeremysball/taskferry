@@ -78,6 +78,35 @@ accept/reject loop, assumes the default overlayed dispatch. Under
 dispatch has already written to your tree. Reach for either flag only when you
 specifically want that.
 
+**Link dependency directories into the new worktree — don't reinstall.** A
+fresh `git worktree add` copies tracked files only — `node_modules`, `.venv`,
+and other gitignored caches are absent, so a ferry that needs to run `npm
+test` or `uv run pytest` would have to reinstall from scratch. Since you
+already created the worktree, link its deps from the source checkout that
+already has them:
+
+```sh
+MAIN="/path/to/source-checkout"   # the directory that already has deps installed
+WT=".worktrees/<branch>"          # the new worktree you just created
+git worktree add "$WT" -b <branch>
+
+for d in node_modules .venv; do
+  if [ -d "$MAIN/$d" ] && [ ! -e "$WT/$d" ]; then
+    ln -s "$MAIN/$d" "$WT/$d"
+  fi
+done
+# If <branch> changes lockfiles (package-lock.json, uv.lock, etc.), run the
+# install in WT afterwards instead of relying solely on the symlink.
+```
+
+Use an absolute symlink target (`$MAIN/$d` as above) so it resolves inside
+the sandbox — the rest of the root is bind-mounted read-only, so the ferry
+can read but not mutate the source checkout's deps. Gitignored targets never
+enter `taskferry result --diff` (see "accept requires a clean target tree"
+below), so the link doesn't pollute the changeset. Extend the loop with other
+heavy, gitignored dirs your stack uses (`.next`, `.turbo`, `target`) when they
+apply; keep it to gitignored caches — never symlink tracked files.
+
 **A worker's writes only land somewhere durable inside `--directory`.** The
 sandbox mounts `--directory` as the one copy-on-write overlay and binds the
 rest of the root read-only, plus a small set of explicitly read-write paths

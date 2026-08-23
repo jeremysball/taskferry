@@ -54,6 +54,8 @@ const CONFIG_FIELD_TYPES = {
   envFile: "string",
   profilingEnabled: "boolean",
   providerLimits: "object",
+  restartWaitForIdle: "boolean",
+  maxOutputFileBytes: "number",
 };
 
 /** @type {Record<string, string>} */

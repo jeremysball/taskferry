@@ -18,9 +18,13 @@ function fakeGateChild(pid = 9000) {
   return child;
 }
 
-function dispatchAndSettleWithChanges({ directory, spawns, sandboxEnabled = true }) {
+function dispatchAndSettleWithChanges({ directory, spawns, cacheDir, sandboxEnabled = true }) {
   const mgr = makeManager({
-    spawnFn: (cmd, args, opts) => { const child = spawns.length === 0 ? fakeChild() : fakeGateChild(); spawns.push({ cmd, args, opts, child }); return child; },
+    spawnFn: (cmd, args, opts) => {
+      const child = spawns.length === 0 ? fakeChild() : fakeGateChild();
+      spawns.push({ cmd, args, opts, child });
+      return child;
+    },
     // buildManagerOptions() defaults overlayEnabled to false -- without this,
     // task.overlayDirs never gets set, startCheckGate's `!task.overlayDirs`
     // guard always no-ops, and every test below would see only one spawn.
@@ -47,6 +51,7 @@ function dispatchAndSettleWithChanges({ directory, spawns, sandboxEnabled = true
       if (args?.[0] === "-C") return { status: 0, stdout: FAKE_PRE_DISPATCH_HEAD, stderr: "" };
       return { status: 0, stdout: "", stderr: "" };
     },
+    cacheDir,
     sandboxEnabled,
   });
   const dispatched = mgr.dispatch({ model: FAKE_GATE_MODEL, executor: "opencode", prompt: "hello", directory });
@@ -77,6 +82,28 @@ describe("startCheckGate", () => {
     assert.equal(spawns[1].cmd, "bwrap");
     assert.ok(spawns[1].args.includes("npm test"));
     assert.equal(mgr.status(dispatched.id).checkStatus, "running");
+  });
+
+  test("the gate's bwrap re-binds the worker's per-task uv cache/tool dirs and re-points the env at them (taskferry#426)", () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "axi-gate-uv-"));
+    fs.writeFileSync(path.join(directory, TASKFERRY_CONFIG_FILENAME), "check = \"uv run pytest\"\n");
+    const cacheDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-gate-uv-cache-"));
+    const spawns = [];
+    const { dispatched } = dispatchAndSettleWithChanges({ spawns, directory, cacheDir });
+    const uvCacheDir = path.join(cacheDir, "uv-cache", dispatched.id);
+    const uvToolsDir = path.join(cacheDir, "uv-tools", dispatched.id);
+    // The worker's bwrap argv carried the same dirs (assessed on spawn[0]).
+    const [worker, gate] = spawns;
+    for (const dir of [uvCacheDir, uvToolsDir]) {
+      const gateBind = gate.args.indexOf(dir);
+      assert.notEqual(gateBind, -1, `expected gate bwrap to bind ${dir}`);
+      assert.equal(gate.args[gateBind - 1], "--bind");
+      const workerBind = worker.args.indexOf(dir);
+      assert.notEqual(workerBind, -1, `expected worker bwrap to bind ${dir}`);
+      assert.equal(worker.args[workerBind - 1], "--bind");
+    }
+    assert.equal(gate.opts.env.UV_CACHE_DIR, uvCacheDir);
+    assert.equal(gate.opts.env.UV_TOOL_DIR, uvToolsDir);
   });
 
   test("exit 0 settles checkStatus 'passed' with exit code recorded", () => {

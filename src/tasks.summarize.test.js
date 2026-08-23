@@ -5,6 +5,10 @@ import path from "node:path";
 import { createTaskManager } from "./tasks.js";
 import { trackManager, makeManager, fakeChild, baseTask, INVESTIGATED_TEXT, SOURCE_LOG, LUNA_MODEL, MINIMAX_MODEL, READING_CONFIG, CONTINUE_FLAG, SRCA_LOG, SRCB_LOG, DID_A, DID_B, mkdtempTracked, makeFakeExecutor } from "./tasks.test-helpers.js";
 
+const FRESH_RETRY_SESSION_ID = "ses_fresh_retry";
+const FRESH_RETRY_OUTPUT = "fresh retry output";
+const DAEMON_INSPECT_TEXT = "Inspect the daemon";
+
 describe("summarize(): spawn shape, attachment, and snapshot content", () => {
   test("uses --pure and a private attachment", async () => {
     let captured;
@@ -265,7 +269,7 @@ describe("summarize(): multi-call session continuity", () => {
     let firstArgs;
     let firstSnapshot;
     const child = fakeChild();
-    const log = JSON.stringify({ type: "text", part: { messageID: "m1", text: "Inspect the daemon" } });
+    const log = JSON.stringify({ type: "text", part: { messageID: "m1", text: DAEMON_INSPECT_TEXT } });
     const mgr = makeManager({
       tasksFixture: (logDir) => [baseTask({ id: "source", logPath: path.join(logDir, SOURCE_LOG) })],
       logs: { [SOURCE_LOG]: log },
@@ -281,11 +285,40 @@ describe("summarize(): multi-call session continuity", () => {
 
     assert.equal(firstArgs.includes(CONTINUE_FLAG), false);
     assert.equal(firstArgs.includes("--session"), false);
-    assert.match(firstSnapshot.narration, /Inspect the daemon/);
+    assert.match(firstSnapshot.narration, new RegExp(DAEMON_INSPECT_TEXT));
     assert.equal(firstSnapshot.narration_is_delta, undefined);
 
     await settleSummaryChildWithSessionId(mgr, started.summaryTask.id, "ses_first");
     child.emit("exit", 0, null);
+  });
+
+  test("settlement caches the most recent session ID after an internal retry", async () => {
+    const child = fakeChild();
+    const log = JSON.stringify({ type: "text", part: { messageID: "m1", text: DAEMON_INSPECT_TEXT } });
+    const mgr = makeManager({
+      tasksFixture: (logDir) => [baseTask({ id: "source", logPath: path.join(logDir, SOURCE_LOG) })],
+      logs: { [SOURCE_LOG]: log },
+      spawnFn: () => child,
+    });
+
+    const started = await mgr.summarize("source", { maxWords: 150 });
+    mgr.flushPersist();
+    const persisted = JSON.parse(fs.readFileSync(mgr.paths.TASKS_FILE, "utf8"));
+    const summary = persisted.find((task) => task.id === started.summaryTask.id);
+    fs.writeFileSync(
+      summary.logPath,
+      [
+        JSON.stringify({ sessionID: "ses_failed" }),
+        JSON.stringify({ type: "error", message: "retrying" }),
+        JSON.stringify({ sessionID: FRESH_RETRY_SESSION_ID }),
+        JSON.stringify({ type: "text", part: { messageID: "answer", text: FRESH_RETRY_OUTPUT } }),
+        JSON.stringify({ type: "step_finish", part: { messageID: "answer", reason: "stop" } }),
+      ].join("\n")
+    );
+
+    child.emit("exit", 0, null);
+
+    assert.equal(mgr.activityCache.getSummarySessionId("source"), FRESH_RETRY_SESSION_ID);
   });
 
   test("second summarize call continues the prior session and sends only the narration delta (not the full bounded excerpt)", async () => {
@@ -346,6 +379,37 @@ describe("summarize(): multi-call session continuity", () => {
     // Clean up the spawned summary children.
     await settleSummaryChildWithSessionId(mgr, secondStarted.summaryTask.id, "ses_second", "delta-only result");
     children[1].emit("exit", 0, null);
+  });
+});
+
+describe("summarize(): per-task sandboxed data home (taskferry#501)", () => {
+  test("a summary child's sandboxed data home is scoped to the source task's id, so it shares the source's XDG_DATA_HOME and its --continue session still resolves", async () => {
+    let captured = null;
+    const cacheDir = mkdtempTracked("axi-tasks-cache-oc-sum-");
+    const child = fakeChild();
+    const log = JSON.stringify({ type: "text", part: { messageID: "m1", text: DAEMON_INSPECT_TEXT } }) + "\n";
+    const mgr = makeManager({
+      tasksFixture: (logDir) => [baseTask({ id: "source", logPath: path.join(logDir, SOURCE_LOG) })],
+      logs: { [SOURCE_LOG]: log },
+      spawnFn: (command, args, options) => {
+        captured = { command, args, options };
+        return child;
+      },
+      sandboxEnabled: true,
+      checkBwrapAvailableFn: () => ({ checked: true, available: true }),
+      platform: "linux",
+      cacheDir,
+    });
+
+    await mgr.summarize("source", { maxWords: 150 });
+    assert.equal(captured.command, "bwrap");
+    // The summary child continues the source task's session, so its
+    // XDG_DATA_HOME must land in the source task's per-task data home --
+    // not a fresh summary-task-scoped one, which would strand the cached
+    // --continue session (the next turn would find no session rows).
+    assert.equal(captured.options.env.XDG_DATA_HOME, path.join(cacheDir, "opencode-data", "source"));
+
+    child.emit("exit", 0, null);
   });
 });
 
@@ -420,16 +484,16 @@ describe("summarize(): continue-fail-so-fresh retry", () => {
     assert.equal(retries.length, 2, "expected two summary tasks to have been queued");
     fs.writeFileSync(
       retries[1].logPath,
-      JSON.stringify({ sessionID: "ses_fresh_retry", type: "text", part: { messageID: "answer", text: "fresh retry output" } }) + "\n"
+      JSON.stringify({ sessionID: FRESH_RETRY_SESSION_ID, type: "text", part: { messageID: "answer", text: FRESH_RETRY_OUTPUT } }) + "\n"
         + JSON.stringify({ type: "step_finish", part: { messageID: "answer", reason: "stop" } }) + "\n"
     );
     children[1].emit("exit", 0, null);
 
     const result = await refreshP;
-    assert.equal(result.activity, "fresh retry output");
+    assert.equal(result.activity, FRESH_RETRY_OUTPUT);
     // Cache ended up with the retry's session id (recorded by the exit
     // handler), not the stale ses_cached or the mismatched first attempt.
-    assert.equal(mgr.activityCache.getSummarySessionId("source"), "ses_fresh_retry");
+    assert.equal(mgr.activityCache.getSummarySessionId("source"), FRESH_RETRY_SESSION_ID);
     assert.notEqual(mgr.activityCache.getLastSummarizedWatermark("source"), initialSize);
   });
 });

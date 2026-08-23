@@ -9,7 +9,7 @@
     {
       "name": "taskferry",
       "description": "Background OpenCode task execution through the Taskferry AXI CLI",
-      "version": "4.1.0",
+      "version": "4.2.0",
       "source": "./integrations/claude",
       "author": {
         "name": "Taskferry"

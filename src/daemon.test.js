@@ -1049,7 +1049,7 @@ describe("Unix socket daemon: stale sockets", () => {
 });
 
 describe("Unix socket daemon: rehydration and self-restart", () => {
-  test("rehydrates persisted queued/running tasks as unknown through createTaskManager", async (t) => {
+  test("rehydrates persisted queued/running tasks: queued -> unknown, running without resumable session -> crashed daemon_restarted_session_lost", async (t) => {
     const paths = temporaryPaths(t);
     fs.mkdirSync(paths.stateDir, { recursive: true });
     const persisted = ["queued", "running"].map((status, index) => ({
@@ -1065,10 +1065,13 @@ describe("Unix socket daemon: rehydration and self-restart", () => {
       exitCode: null,
       signal: null,
       logPath: path.join(paths.stateDir, `old-${index}.ndjson`),
+      prompt: "old prompt",
       promptPreview: "old",
       spawnError: null,
       cancelRequested: false,
       internal: false,
+      failureReason: null,
+      failureDetail: null,
     }));
     fs.writeFileSync(path.join(paths.stateDir, "tasks.json"), JSON.stringify(persisted));
     const daemon = await startDaemon(paths);
@@ -1077,7 +1080,9 @@ describe("Unix socket daemon: rehydration and self-restart", () => {
     t.after(() => peer.close());
 
     const statuses = await Promise.all(persisted.map((task, index) => peer.request(`status-${index}`, TASK_STATUS, { taskId: task.id })));
-    assert.deepEqual(statuses.map((response) => response.result.status), ["unknown", "unknown"]);
+    assert.deepEqual(statuses.map((response) => response.result.status), ["unknown", "crashed"]);
+    const runningDetail = statuses[1].result;
+    assert.equal(runningDetail.failureReason, "daemon_restarted_session_lost");
   });
 
   describe("self-restart on source change", () => {
@@ -1144,7 +1149,7 @@ describe("Unix socket daemon: rehydration and self-restart", () => {
       peer.close();
     });
 
-    test("defers restart until no tasks are running or queued", async (t) => {
+    test("defers restart only when restartWaitForIdle is enabled", async (t) => {
       const paths = temporaryPaths(t);
       const { dir, entry } = sourceFixture(t);
       const busyManagerFactory = () => ({
@@ -1156,6 +1161,7 @@ describe("Unix socket daemon: rehydration and self-restart", () => {
       const daemon = await startDaemon({
         ...paths,
         taskManagerFactory: busyManagerFactory,
+        taskManagerOptions: { config: { restartWaitForIdle: true } },
         sourceDir: dir,
         daemonEntry: entry,
         spawnReplacement: (args) => spawnCalls.push(args),
@@ -1171,7 +1177,7 @@ describe("Unix socket daemon: rehydration and self-restart", () => {
       await peer.request("health", SYSTEM_HEALTH);
       await new Promise((resolve) => setTimeout(resolve, 20));
 
-      assert.equal(spawnCalls.length, 0, "must not restart while a task is still running");
+      assert.equal(spawnCalls.length, 0, "must not restart while a task is still running when restartWaitForIdle:true");
       assert.equal(exitCalls, 0);
       assert.equal(fs.existsSync(paths.socketPath), true);
     });

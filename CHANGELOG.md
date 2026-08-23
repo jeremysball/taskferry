@@ -1,5 +1,17 @@
 # Changelog
 
+## [4.3.0](https://github.com/jeremysball/taskferry/compare/taskferry-v4.2.0...taskferry-v4.3.0) (2026-08-23)
+
+
+### Features
+
+* **kilo:** add first-class Kilo Code integration with live monitoring ([a554780](https://github.com/jeremysball/taskferry/commit/a554780501496f87e8591b4f61ad583ea17cdc3e))
+
+
+### Bug Fixes
+
+* **skill:** regenerate kilo skill after main merge ([56d2a69](https://github.com/jeremysball/taskferry/commit/56d2a69ee67f67133d4c4c9fb8ad9811cf51ebb1))
+
 ## [4.2.0](https://github.com/jeremysball/taskferry/compare/taskferry-v4.1.2...taskferry-v4.2.0) (2026-08-22)
 
 

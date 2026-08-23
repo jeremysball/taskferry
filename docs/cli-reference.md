@@ -24,7 +24,7 @@ list, and contextual next-step suggestions.
 $ taskferry
 workspace: /workspace/my-repo
 bin: ~/.local/bin/taskferry
-description: Manage background OpenCode tasks in the current workspace.
+description: Manage background pi/OpenCode tasks in the current workspace.
 counts:
   queued: 0
   running: 1

@@ -471,7 +471,7 @@ export function homeView(value, { executablePath, workspace }) {
   return {
     workspace,
     bin: displayPath,
-    description: "Manage background OpenCode tasks in the current workspace.",
+    description: "Manage background pi/OpenCode tasks in the current workspace.",
     counts: value.counts,
     tasks: Array.isArray(value.tasks) ? rows : value.tasks,
     next: truncated ? [...next, `Run taskferry list --limit ${total} for all ${total} tasks`] : next,

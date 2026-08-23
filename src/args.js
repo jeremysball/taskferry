@@ -83,7 +83,7 @@ export function helpText(command) {
     return {
       command: "taskferry",
       usage: "taskferry <command> [options]",
-      description: "Manage background OpenCode tasks in the current workspace.",
+      description: "Manage background pi/OpenCode tasks in the current workspace.",
       commands: Object.keys(COMMAND_SPECS),
       options: ["--help", "--version"],
       examples: ["taskferry", "taskferry dispatch --prompt \"Fix the failing tests\"", "taskferry list"],

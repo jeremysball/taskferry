@@ -344,7 +344,7 @@ test("no arguments show executable, description, workspace tasks, counts, and ne
   const value = capture.output().value;
   assert.equal(result.exitCode, 0);
   assert.equal(value.bin, "~/.local/bin/taskferry");
-  assert.match(value.description, /background OpenCode tasks/);
+  assert.match(value.description, /background pi\/OpenCode tasks/);
   assert.deepEqual(value.counts, counts);
   assert.deepEqual(value.tasks, [{ id: taskId, status: "running", model: testModel, startedAt }]);
   assert.ok(value.next.some((line) => line.includes("taskferry wait <id>")));

@@ -12,7 +12,7 @@ sandboxed copy-on-write view by default. When it produces changes, taskferry
 holds the changeset for inspection before `accept` or `reject` decides what
 reaches the target tree.
 
-The worker backend is `pi` or OpenCode. Claude Code, OpenCode, and Codex have
+The worker backend is `pi` or OpenCode. Claude Code, OpenCode, Kilo Code, and Codex have
 native integrations, and any frontend that runs a shell command dispatches.
 The daemon owns task state and child processes after the calling
 terminal is gone.
@@ -183,6 +183,7 @@ every frontend:
   context and the bundled worker-backend skill.
 - [OpenCode](docs/integrations/opencode.md) receives task toasts and bounded
   task context in the system prompt.
+- [Kilo Code](docs/integrations/kilo.md) receives task toasts, bounded context, and live monitoring (parity with OpenCode, beyond Claude/Codex).
 - [Codex](docs/integrations/codex.md) receives task context through its hooks.
 
 These integrations provide context and presentation. The CLI remains the
@@ -190,8 +191,8 @@ dispatch surface.
 
 ## As a subagent-driven-development worker backend
 
-The bundled `using-taskferry` skill (shipped inside the Claude Code and
-OpenCode plugins, or copyable to `~/.claude/skills/`) makes taskferry the
+The bundled `using-taskferry` skill (shipped inside the Claude Code,
+OpenCode, Kilo Code, and Codex plugins, or copyable to `~/.claude/skills/`) makes taskferry the
 external-worker execution layer for a
 `subagent-driven-development`-style lifecycle: that lifecycle owns task
 briefs, worktrees, and the review loop, while taskferry owns model selection,

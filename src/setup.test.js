@@ -14,6 +14,7 @@ import {
 
 const STUB_MODULE_CONTENT = "export {};\n";
 const OPENCODE_PLUGIN_JS = "opencode-plugin.js";
+const KILO_PLUGIN_JS = "kilo-plugin.js";
 const INSTALLED_PLUGIN_LIST = JSON.stringify([{ id: "taskferry@taskferry" }]);
 const PATH_INSTRUCTION = 'export PATH="$HOME/.local/bin:$PATH"';
 const MCP_HOME_PREFIX = "taskferry-mcp-home-";
@@ -45,6 +46,7 @@ const configuredRoutes = new Map([
   [routeKey("claude", "plugin", "install"), okResponse()],
   [routeKey("claude", "plugin", "update"), okResponse()],
   [routeKey("codex", "plugin", "marketplace"), okResponse()],
+  [routeKey("kilo", "plugin", "--help"), okResponse()],
 ]);
 
 const matchingHashRoutes = new Map([
@@ -52,6 +54,7 @@ const matchingHashRoutes = new Map([
   [routeKey("claude", "plugin", "marketplace"), okResponse()],
   [routeKey("claude", "plugin", "list"), textResponse(INSTALLED_PLUGIN_LIST)],
   [routeKey("codex", "plugin", "marketplace"), okResponse()],
+  [routeKey("kilo", "plugin", "--help"), okResponse()],
 ]);
 
 const differentHashRoutes = new Map([
@@ -61,6 +64,7 @@ const differentHashRoutes = new Map([
   [routeKey("claude", "plugin", "uninstall"), okResponse()],
   [routeKey("claude", "plugin", "install"), okResponse()],
   [routeKey("codex", "plugin", "marketplace"), okResponse()],
+  [routeKey("kilo", "plugin", "--help"), okResponse()],
 ]);
 
 const gitFailsRoutes = new Map([
@@ -69,6 +73,7 @@ const gitFailsRoutes = new Map([
   [routeKey("claude", "plugin", "list"), textResponse(INSTALLED_PLUGIN_LIST)],
   [routeKey("claude", "plugin", "update"), okResponse()],
   [routeKey("codex", "plugin", "marketplace"), okResponse()],
+  [routeKey("kilo", "plugin", "--help"), okResponse()],
 ]);
 
 function makeFixture(t) {
@@ -79,6 +84,7 @@ function makeFixture(t) {
   fs.writeFileSync(path.join(checkout, "package.json"), JSON.stringify({ name: "taskferry" }));
   fs.writeFileSync(path.join(src, "cli.js"), STUB_MODULE_CONTENT);
   fs.writeFileSync(path.join(src, OPENCODE_PLUGIN_JS), STUB_MODULE_CONTENT);
+  fs.writeFileSync(path.join(src, KILO_PLUGIN_JS), STUB_MODULE_CONTENT);
   fs.writeFileSync(path.join(src, "tf-sl.sh"), "#!/usr/bin/env bash\n");
   t.after(() => {
     fs.rmSync(home, { recursive: true, force: true });
@@ -88,6 +94,7 @@ function makeFixture(t) {
     checkoutDirectory: checkout,
     cliPath: path.join(src, "cli.js"),
     opencodeSourcePath: path.join(src, OPENCODE_PLUGIN_JS),
+    kiloSourcePath: path.join(src, KILO_PLUGIN_JS),
     tfSlSourcePath: path.join(src, "tf-sl.sh"),
     homeDirectory: home,
     env: {
@@ -147,11 +154,13 @@ test("installs dependencies, the CLI, the OpenCode plugin, and the statusline sc
   assert.deepEqual(npmCalls, [fixture.checkoutDirectory]);
   assert.equal(fs.realpathSync(result.cli.path), fixture.cliPath);
   assert.equal(fs.realpathSync(result.opencode.path), fixture.opencodeSourcePath);
+  assert.equal(fs.realpathSync(result.kilo.path), fixture.kiloSourcePath);
   assert.equal(fs.realpathSync(result.statusline.path), fixture.tfSlSourcePath);
   assert.equal(result.path, "available");
   assert.deepEqual(result.integrations, {
     claude: { status: "unavailable" },
     codex: { status: "unavailable" },
+    kilo: { status: "unavailable" },
   });
 });
 
@@ -179,6 +188,7 @@ test("installs Claude and reports the Codex desktop step", (t) => {
   });
   assert.equal(result.integrations.claude.status, "installed");
   assert.equal(result.integrations.codex.status, "desktop-install-required");
+  assert.equal(result.integrations.kilo.status, "installed");
   assert.match(result.integrations.codex.next, /Codex desktop/);
 });
 
@@ -207,9 +217,11 @@ test("rerun replaces the existing managed symlinks without throwing", (t) => {
 
   assert.equal(fs.realpathSync(second.cli.path), fixture.cliPath);
   assert.equal(fs.realpathSync(second.opencode.path), fixture.opencodeSourcePath);
+  assert.equal(fs.realpathSync(second.kilo.path), fixture.kiloSourcePath);
   assert.equal(fs.realpathSync(second.statusline.path), fixture.tfSlSourcePath);
   assert.equal(second.cli.path, first.cli.path);
   assert.equal(second.opencode.path, first.opencode.path);
+  assert.equal(second.kilo.path, first.kilo.path);
   assert.equal(second.statusline.path, first.statusline.path);
 });
 
@@ -227,6 +239,7 @@ test("refuses to re-point a symlink already managed by a different taskferry che
   fs.writeFileSync(path.join(otherCheckout, "package.json"), JSON.stringify({ name: "taskferry" }));
   fs.writeFileSync(path.join(otherSrc, "cli.js"), STUB_MODULE_CONTENT);
   fs.writeFileSync(path.join(otherSrc, OPENCODE_PLUGIN_JS), STUB_MODULE_CONTENT);
+  fs.writeFileSync(path.join(otherSrc, KILO_PLUGIN_JS), STUB_MODULE_CONTENT);
   fs.writeFileSync(path.join(otherSrc, "tf-sl.sh"), "#!/usr/bin/env bash\n");
   t.after(() => fs.rmSync(otherCheckout, { recursive: true, force: true }));
 

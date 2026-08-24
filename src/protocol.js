@@ -193,6 +193,7 @@ const METHOD_PARAMS = {
       ["executor", isKnownExecutor],
       ["class", isNonEmptyString],
       ["parentTaskId", isNonEmptyString],
+      ["executorArgs", isNonEmptyStringArray],
     ],
   },
   "task.cancel": {
@@ -259,6 +260,7 @@ const METHOD_PARAMS = {
       ["executor", isKnownExecutor],
       ["class", isNonEmptyString],
       ["parentTaskId", isNonEmptyString],
+      ["executorArgs", isNonEmptyStringArray],
     ],
   },
   "task.context": {

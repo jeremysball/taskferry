@@ -280,6 +280,7 @@ function resolveOpencodeConfigBindSource(fullPath, lstatFn, realpathFn) {
  * @property {string|null} sessionId
  * @property {string} [snapshotPath]
  * @property {string|null} [variant]
+ * @property {string[]} [executorArgs]
  */
 
 /**
@@ -404,6 +405,7 @@ export function piExecutor({ execFileFn = execFileAsync } = {}) {
       return normalizeTable(stderr) || normalizeTable(stdout);
     },
     /** @param {SpawnLaunchContext} ctx @returns {string[]} */
+    // eslint-disable-next-line sonarjs/cyclomatic-complexity -- executorArgs passthrough adds one branch alongside existing provider/mode/session handling
     buildSpawnArgs(ctx) {
       const slash = ctx.model.indexOf("/");
       // Deliberately NOT providerOf()'s whole-string fallback: that value is a
@@ -417,6 +419,7 @@ export function piExecutor({ execFileFn = execFileAsync } = {}) {
       args.push("--mode", "json");
       if (ctx.sessionId) args.push("--continue", "--session", ctx.sessionId);
       if (!ctx.isSummary && ctx.variant) args.push("--thinking", ctx.variant);
+      if (!ctx.isSummary && ctx.executorArgs?.length) args.push(...ctx.executorArgs);
       if (ctx.isSummary) args.push("-p", this.buildSummaryPrompt(), `@${ctx.snapshotPath}`);
       else if (ctx.promptFilePath) args.push("-p", "Follow the instructions in the attached prompt file exactly.", `@${ctx.promptFilePath}`);
       else args.push("-p", ctx.prompt);
@@ -519,6 +522,7 @@ export function opencodeExecutor() {
         : ["run", "--dir", ctx.launchDirectory, "--auto", "--format", "json", "-m", ctx.model];
       if (ctx.sessionId) args.push("--continue", "--session", ctx.sessionId);
       if (!ctx.isSummary && ctx.variant) args.push("--variant", ctx.variant);
+      if (!ctx.isSummary && ctx.executorArgs?.length) args.push(...ctx.executorArgs);
       if (ctx.promptFilePath) args.push("-f", ctx.promptFilePath);
       if (ctx.isSummary) args.push("--", SUMMARY_ISOLATION_PROMPT);
       else if (ctx.promptFilePath) args.push("--", "Follow the instructions in the attached prompt file exactly.");

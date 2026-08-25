@@ -1304,6 +1304,9 @@ function buildBwrapBinds(ctx, launchInfo, task, spawnEnv, role) {
     extraRoBinds: executorRoBinds,
     extraRwPairBinds: executorRwPairBinds = [],
     sandboxedDataHome,
+    sandboxedConfigHome,
+    sandboxedStateHome,
+    sandboxedCacheHome,
     sandboxEnv,
   } = executor.sandboxAuthFile({
     homeDir,
@@ -1333,6 +1336,21 @@ function buildBwrapBinds(ctx, launchInfo, task, spawnEnv, role) {
   // hence the mkdir here rather than leaving it for the sandboxed process.
   fs.mkdirSync(sandboxedDataHome, { recursive: true, mode: 0o700 });
   extraRwBinds.push(sandboxedDataHome);
+  // Per-task XDG config/state/cache homes (taskferry#536): opencode also
+  // writes under XDG_CONFIG_HOME, XDG_STATE_HOME and XDG_CACHE_HOME
+  // (default ~/.config, ~/.local/state, ~/.cache) which are read-only
+  // inside the sandbox. Like the data home, each is scoped per task
+  // (owner-scoped when resuming a session) under <cacheDir> and rw-bound
+  // so concurrent dispatches never race on one shared file. The executor
+  // returns the per-task paths and the env overrides; this site is
+  // responsible for the mkdir+rw-bind side effects mirroring the data
+  // home and UV cache handling above. Pi's executor does not set these
+  // (it uses PI_CODING_AGENT_DIR), so the guard is falsy and skipped.
+  for (const dir of [sandboxedConfigHome, sandboxedStateHome, sandboxedCacheHome]) {
+    if (!dir) continue;
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    extraRwBinds.push(dir);
+  }
   // The root filesystem is read-only bound by default, so uv/uvx's default
   // cache and tool dirs (~/.cache/uv, ~/.local/share/uv/tools) are
   // unwritable inside the sandbox: a first `uvx <tool>` run cannot resolve

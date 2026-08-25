@@ -278,10 +278,11 @@ describe("startTask(): data home scope follows the resumed session's owner task 
 // opencode.jsonc into it). The sandbox binds the whole root read-only, so
 // leaving XDG_CONFIG_HOME pointed at the real ~/.config made that boot write
 // fail EROFS on any machine where opencode had never run before -- a fresh
-// CI runner, or a new user's first dispatch. Redirect it into the sandboxed
-// data home (already bound read-write) so the boot write has somewhere to go.
+// CI runner, or a new user's first dispatch. Redirect it into a per-task
+// writeable dir under cacheDir (taskferry#536) so the boot write has
+// somewhere to go.
 describe("startTask() merges executor.sandboxAuthFile().sandboxEnv into spawnEnv (Task 7: per-executor env overrides)", () => {
-  test("opencode's sandboxEnv redirects XDG_CONFIG_HOME under the read-write sandboxed data home", () => {
+  test("opencode's sandboxEnv redirects XDG_CONFIG_HOME to a per-task sibling of the data home (taskferry#536)", () => {
     let captured = null;
     const cacheDir = mkdtempTracked("axi-tasks-cache-oc-cfg-");
     const mgr = makeManager({
@@ -292,13 +293,17 @@ describe("startTask() merges executor.sandboxAuthFile().sandboxEnv into spawnEnv
       cacheDir,
     });
     const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), executor: "opencode" });
-    const sandboxedDataHome = path.join(cacheDir, OPENCODE_DATA, dispatched.id);
     const configHome = captured.opts.env.XDG_CONFIG_HOME;
-    assert.equal(configHome, path.join(sandboxedDataHome, "config"));
-    // It must sit *under* the data home, because that is the only path
-    // startTask() mkdirs and pushes onto extraRwBinds. A sibling path would
-    // land back on the read-only root bind and reintroduce the EROFS.
-    assert.ok(configHome.startsWith(sandboxedDataHome + path.sep));
+    assert.equal(configHome, path.join(cacheDir, "opencode-config", dispatched.id));
+    // Sibling of the data home, not nested: each has its own rw bind and
+    // doesn't rely on the other's mount. And it must be under cacheDir
+    // (real disk), not the tmpfs runtimeDir.
+    const sandboxedDataHome = path.join(cacheDir, OPENCODE_DATA, dispatched.id);
+    assert.notEqual(configHome, sandboxedDataHome);
+    assert.ok(configHome.startsWith(cacheDir + path.sep));
+    // XDG_STATE_HOME and XDG_CACHE_HOME are likewise per-task (taskferry#536)
+    assert.equal(captured.opts.env.XDG_STATE_HOME, path.join(cacheDir, "opencode-state", dispatched.id));
+    assert.equal(captured.opts.env.XDG_CACHE_HOME, path.join(cacheDir, "opencode-cache", dispatched.id));
   });
 
   test("opencode's real config entries are ro-bound into the sandboxed config home, except .gitignore", () => {
@@ -319,7 +324,7 @@ describe("startTask() merges executor.sandboxAuthFile().sandboxEnv into spawnEnv
       cacheDir,
     });
     const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), executor: "opencode" });
-    const sandboxedConfigDir = path.join(cacheDir, OPENCODE_DATA, dispatched.id, "config", "opencode");
+    const sandboxedConfigDir = path.join(cacheDir, "opencode-config", dispatched.id, "opencode");
     // The user's real config (custom providers live here) is still visible.
     const destIdx = captured.args.indexOf(path.join(sandboxedConfigDir, OPENCODE_JSONC));
     assert.notEqual(destIdx, -1, "expected the real opencode.jsonc to be ro-bound into the sandboxed config dir");

@@ -310,7 +310,7 @@ function resolveOpencodeConfigBindSource(fullPath, lstatFn, realpathFn) {
  * @property {(ctx: SpawnLaunchContext) => string[]} buildSpawnArgs
  * @property {() => string} buildSummaryPrompt
  * @property {(parsed: unknown) => unknown} normalizeLogEvent
- * @property {(args: {homeDir: string, dataDir: string, taskId: string, spawnEnv: NodeJS.ProcessEnv, existsFn: (file: string) => boolean, statFn?: (file: string) => {isDirectory: () => boolean}|null, lstatFn?: (file: string) => {isSymbolicLink: () => boolean, isFile?: () => boolean, nlink?: number}, readdirFn: (dir: string) => string[], sessionId?: string|null, launchDirectory?: string|null}) => {extraRoBinds: [string, string][], extraRwPairBinds?: [string, string][], sandboxedDataHome: string, sandboxEnv: Record<string, string>}} sandboxAuthFile
+ * @property {(args: {homeDir: string, dataDir: string, taskId: string, spawnEnv: NodeJS.ProcessEnv, existsFn: (file: string) => boolean, statFn?: (file: string) => {isDirectory: () => boolean}|null, lstatFn?: (file: string) => {isSymbolicLink: () => boolean, isFile?: () => boolean, nlink?: number}, readdirFn: (dir: string) => string[], realpathFn?: (file: string) => string, sessionId?: string|null, launchDirectory?: string|null}) => {extraRoBinds: [string, string][], extraRwPairBinds?: [string, string][], sandboxedDataHome: string, sandboxedConfigHome?: string, sandboxedStateHome?: string, sandboxedCacheHome?: string, sandboxEnv: Record<string, string>}} sandboxAuthFile
  */
 
 /**
@@ -543,23 +543,29 @@ export function opencodeExecutor() {
     // small tmpfs: opencode's snapshot store under here grows unbounded
     // across dispatches (no gc) and previously filled the whole
     // XDG_RUNTIME_DIR tmpfs, starving it of space for sockets/locks too.
-    /** @param {{homeDir: string, dataDir: string, taskId: string, spawnEnv: NodeJS.ProcessEnv, existsFn: (file: string) => boolean, statFn?: (file: string) => {isDirectory: () => boolean}|null, lstatFn?: (file: string) => {isSymbolicLink: () => boolean, isFile?: () => boolean, nlink?: number}, readdirFn: (dir: string) => string[], realpathFn?: (file: string) => string, sessionId?: string|null, launchDirectory?: string|null}} args @returns {{extraRoBinds: [string, string][], extraRwPairBinds?: [string, string][], sandboxedDataHome: string, sandboxEnv: Record<string, string>}} */
+    /** @param {{homeDir: string, dataDir: string, taskId: string, spawnEnv: NodeJS.ProcessEnv, existsFn: (file: string) => boolean, statFn?: (file: string) => {isDirectory: () => boolean}|null, lstatFn?: (file: string) => {isSymbolicLink: () => boolean, isFile?: () => boolean, nlink?: number}, readdirFn: (dir: string) => string[], realpathFn?: (file: string) => string, sessionId?: string|null, launchDirectory?: string|null}} args @returns {{extraRoBinds: [string, string][], extraRwPairBinds?: [string, string][], sandboxedDataHome: string, sandboxedConfigHome: string, sandboxedStateHome: string, sandboxedCacheHome: string, sandboxEnv: Record<string, string>}} */
     sandboxAuthFile({ homeDir, dataDir, taskId, spawnEnv, existsFn, lstatFn = fs.lstatSync, readdirFn, realpathFn = fs.realpathSync }) {
       const realDataHome = spawnEnv.XDG_DATA_HOME || path.join(homeDir, ".local", "share");
       const realAuthFile = path.join(realDataHome, "opencode", "auth.json");
-      // Per-task data home: every dispatch's opencode session state (its
-      // sqlite db, logs, snapshots) lands in its own directory, so concurrent
-      // dispatches never contend on one shared opencode.db (issue #501).
+      // Per-task homes: every dispatch's opencode state (sqlite db, logs,
+      // snapshots, config, cache, state) lands in its own directory, so
+      // concurrent dispatches never contend on one shared store (issues
+      // #501 and #536). All four XDG homes are scoped under the same
+      // <cacheDir> owner (the task's own id, or the session owner's id
+      // when resuming) and are rw-bound in the sandbox. The config home
+      // is a sibling of the data home, not nested, so each has its own
+      // rw bind and doesn't rely on the other's mount.
       const sandboxedDataHome = path.join(dataDir, "opencode-data", taskId);
+      const sandboxedConfigHome = path.join(dataDir, "opencode-config", taskId);
+      const sandboxedStateHome = path.join(dataDir, "opencode-state", taskId);
+      const sandboxedCacheHome = path.join(dataDir, "opencode-cache", taskId);
       // opencode writes into its config dir on boot (a .gitignore, and a
       // default opencode.jsonc when none exists). The sandbox binds the root
       // read-only, so pointing XDG_CONFIG_HOME at the real ~/.config made that
       // boot write fail EROFS on any machine where opencode had not already
-      // run -- a fresh CI runner, or a new user's very first dispatch. Nest
-      // the sandboxed config home under sandboxedDataHome, which startTask()
-      // already mkdirs and binds read-write, so the boot write has somewhere
-      // to land without widening the sandbox.
-      const sandboxedConfigHome = path.join(sandboxedDataHome, "config");
+      // run -- a fresh CI runner, or a new user's very first dispatch.
+      // Each sandboxed XDG home is mkdir'd and rw-bound by buildBwrapBinds(),
+      // so the boot write has somewhere to land without widening the sandbox.
       const sandboxedConfigDir = path.join(sandboxedConfigHome, "opencode");
       /** @type {[string, string][]} */
       const extraRoBinds = existsFn(realAuthFile) && isSafeBindSource(realAuthFile, lstatFn) ? [[realAuthFile, path.join(sandboxedDataHome, "opencode", "auth.json")]] : [];
@@ -593,8 +599,16 @@ export function opencodeExecutor() {
       }
       return {
         sandboxedDataHome,
+        sandboxedConfigHome,
+        sandboxedStateHome,
+        sandboxedCacheHome,
         extraRoBinds,
-        sandboxEnv: { XDG_DATA_HOME: sandboxedDataHome, XDG_CONFIG_HOME: sandboxedConfigHome },
+        sandboxEnv: {
+          XDG_DATA_HOME: sandboxedDataHome,
+          XDG_CONFIG_HOME: sandboxedConfigHome,
+          XDG_STATE_HOME: sandboxedStateHome,
+          XDG_CACHE_HOME: sandboxedCacheHome,
+        },
       };
     },
   };

@@ -1,6 +1,8 @@
 node_modules/
 .state-smoketest/
 .worktrees/
+.lavish/
+.playwright-mcp/
 !.superpowers/**
 # Ephemeral local brainstorm-server state (render output keyed to a live
 # port, plus a session token) — re-ignored after the blanket .superpowers/

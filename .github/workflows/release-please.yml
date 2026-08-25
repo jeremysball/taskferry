@@ -38,4 +38,4 @@ jobs:
       # bundled npm may be older, so pin it explicitly rather than trust
       # whatever setup-node's default Node 22 ships with.
       - run: npm install -g npm@latest
-      - run: npm publish
+      - run: npm publish --provenance

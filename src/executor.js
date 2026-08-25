@@ -212,6 +212,49 @@ function isSafeBindSource(fullPath, lstatFn) {
 }
 
 /**
+ * @param {[string, string][]} list
+ * @param {string} src
+ * @param {string} dest
+ * @param {(file: string) => boolean} existsFn
+ * @param {(file: string) => {isSymbolicLink: () => boolean, isFile?: () => boolean, nlink?: number}} lstatFn
+ */
+function pushSafeRoBind(list, src, dest, existsFn, lstatFn) {
+  if (existsFn(src) && isSafeBindSource(src, lstatFn)) list.push([src, dest]);
+}
+
+/**
+ * @param {[string, string][]} list
+ * @param {string} realAgentDir
+ * @param {string} sandboxedDataHome
+ * @param {(file: string) => boolean} existsFn
+ * @param {(file: string) => {isSymbolicLink: () => boolean, isFile?: () => boolean, nlink?: number}} lstatFn
+ */
+function pushPiCatalogBinds(list, realAgentDir, sandboxedDataHome, existsFn, lstatFn) {
+  for (const fname of ["models.json", "models-store.json", "settings.json"]) {
+    pushSafeRoBind(list, path.join(realAgentDir, fname), path.join(sandboxedDataHome, fname), existsFn, lstatFn);
+  }
+}
+
+/**
+ * @param {{realSessionsDir: string, sandboxedSessionsHome: string, sessionId: string|null|undefined, launchDirectory: string|null|undefined, statFn: (file: string) => {isDirectory: () => boolean}|null, readdirFn?: (dir: string) => string[], lstatFn: (file: string) => {isSymbolicLink: () => boolean, isFile?: () => boolean, nlink?: number}}} args
+ * @returns {[string, string]|null}
+ */
+function resolvePiSessionRwBind({ realSessionsDir, sandboxedSessionsHome, sessionId, launchDirectory, statFn, readdirFn, lstatFn }) {
+  if (!sessionId || !launchDirectory) return null;
+  let sessionsDirStat;
+  try {
+    sessionsDirStat = statFn(realSessionsDir);
+  } catch {
+    return null;
+  }
+  if (!sessionsDirStat?.isDirectory()) return null;
+  const safePath = piSafePathForCwd(launchDirectory);
+  const realSessionFile = resolvePiSessionFile(path.join(realSessionsDir, safePath), sessionId, { readdirFn, lstatFn });
+  if (!realSessionFile) return null;
+  return [realSessionFile, path.join(sandboxedSessionsHome, safePath, path.basename(realSessionFile))];
+}
+
+/**
  * Resolve a single opencode config entry to a safe bind source. Dotfiles
  * setups commonly symlink individual entries (opencode.json, plugins, etc.)
  * into a repo, so a symlinked entry is resolved to its real target and that
@@ -437,59 +480,22 @@ export function piExecutor({ execFileFn = execFileAsync } = {}) {
     sandboxAuthFile({ homeDir, dataDir, taskId: _taskId, spawnEnv, existsFn, statFn = fs.statSync, lstatFn = fs.lstatSync, readdirFn, sessionId, launchDirectory }) {
       const realAgentDir = spawnEnv.PI_CODING_AGENT_DIR || path.join(homeDir, ".pi", "agent");
       const realAuthFile = path.join(realAgentDir, "auth.json");
-      // Pi roots both state (auth, sessions) and config (custom-provider
-      // extensions) under the same PI_CODING_AGENT_DIR. Redirecting that
-      // root for sandbox state isolation also hides the user's real
-      // extensions/ dir, so a custom-registered provider (e.g.
-      // cheapestinference) silently disappears inside the sandbox even
-      // though auth.json alone would otherwise work fine.
       const realExtensionsDir = path.join(realAgentDir, "extensions");
-      // pi's session files live under PI_CODING_AGENT_DIR/sessions/ (see pi's
-      // own getSessionsDir()), organized further by per-cwd encoded
-      // subdirectories, and pi writes to the resumed session file in place
-      // (appendFileSync/writeFileSync on the existing file, not a fresh copy).
-      // Mounting the WHOLE sessions dir read-write (as round-2 review
-      // surfaced) gave a prompt-injectable sandboxed worker write/delete
-      // access to every other session in the user's pi history, not just
-      // the one being resumed -- narrowing this to a single file bind is
-      // the difference between a safe resume and a history wipe.
       const realSessionsDir = path.join(realAgentDir, "sessions");
       const sandboxedDataHome = path.join(dataDir, "pi-data");
       const sandboxedSessionsHome = path.join(sandboxedDataHome, "sessions");
       /** @type {[string, string][]} */
       const extraRoBinds = [];
-      // existsFn gates the cheap no-file case; isSafeBindSource then lstat-
-      // rejects a symlinked auth.json/extensions dir (a planted link would
-      // ro-bind its target into the sandbox) the same way config entries are
-      // guarded, and warns when it skips one.
-      if (existsFn(realAuthFile) && isSafeBindSource(realAuthFile, lstatFn)) extraRoBinds.push([realAuthFile, path.join(sandboxedDataHome, "auth.json")]);
-      if (existsFn(realExtensionsDir) && isSafeBindSource(realExtensionsDir, lstatFn)) extraRoBinds.push([realExtensionsDir, path.join(sandboxedDataHome, "extensions")]);
+      // auth + extensions: custom providers live under PI_CODING_AGENT_DIR/extensions
+      pushSafeRoBind(extraRoBinds, realAuthFile, path.join(sandboxedDataHome, "auth.json"), existsFn, lstatFn);
+      pushSafeRoBind(extraRoBinds, realExtensionsDir, path.join(sandboxedDataHome, "extensions"), existsFn, lstatFn);
+      // catalog: redirecting PI_CODING_AGENT_DIR hides models.json* -> Unknown provider
+      pushPiCatalogBinds(extraRoBinds, realAgentDir, sandboxedDataHome, existsFn, lstatFn);
       /** @type {[string, string][]} */
       const extraRwPairBinds = [];
-      // Only bind a single resumed session file, and only when a resume was
-      // actually requested (sessionId). A fresh dispatch has no need for
-      // any read-write sessions bind, and a resumed dispatch only needs
-      // *its* session file -- not the rest of the directory.
-      if (sessionId && launchDirectory) {
-        // `isDirectory` guard: `existsFn(realSessionsDir)` could be true for
-        // a stray non-directory `sessions` entry on the host; bind-mounting
-        // such a file as a directory would make bwrap fail or behave oddly.
-        const sessionsDirStat = (() => {
-          try {
-            return statFn(realSessionsDir);
-          } catch {
-            return null;
-          }
-        })();
-        if (sessionsDirStat?.isDirectory()) {
-          const safePath = piSafePathForCwd(launchDirectory);
-          const realSessionFile = resolvePiSessionFile(path.join(realSessionsDir, safePath), sessionId, { readdirFn, lstatFn });
-          if (realSessionFile) {
-            const sandboxedSessionFile = path.join(sandboxedSessionsHome, safePath, path.basename(realSessionFile));
-            extraRwPairBinds.push([realSessionFile, sandboxedSessionFile]);
-          }
-        }
-      }
+      // single-file rw bind for resume only – whole-dir rw would expose session history
+      const sessionBind = resolvePiSessionRwBind({ realSessionsDir, sandboxedSessionsHome, sessionId, launchDirectory, statFn, readdirFn, lstatFn });
+      if (sessionBind) extraRwPairBinds.push(/** @type {[string, string]} */ (sessionBind));
       return {
         extraRoBinds,
         extraRwPairBinds,

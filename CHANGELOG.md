@@ -1,5 +1,20 @@
 # Changelog
 
+## [4.4.0](https://github.com/jeremysball/taskferry/compare/taskferry-v4.3.0...taskferry-v4.4.0) (2026-08-25)
+
+
+### Features
+
+* **ci:** publish to npm via trusted publishing (OIDC) on release ([408f692](https://github.com/jeremysball/taskferry/commit/408f692adbe78fafbaf87a8e48755926f3e946ae))
+* **ci:** publish to npm via trusted publishing (OIDC) on release ([70c362f](https://github.com/jeremysball/taskferry/commit/70c362f47d918bdb59ed8790d6b2c01d680750bf))
+* **dispatch:** passthrough executor-native flags via --executor-arg ([78f58d7](https://github.com/jeremysball/taskferry/commit/78f58d782552ee19866fd1d295b31a0fefb2352b))
+* **dispatch:** passthrough executor-native flags via --executor-arg ([0dd6c06](https://github.com/jeremysball/taskferry/commit/0dd6c06cabdc012922665ef75283c2d60fdfb8f8))
+
+
+### Bug Fixes
+
+* **ci:** publish with --provenance for OIDC trusted publishing ([bf59115](https://github.com/jeremysball/taskferry/commit/bf59115fb6dd63a4b703d850560948f29aa2cf7c))
+
 ## [4.3.0](https://github.com/jeremysball/taskferry/compare/taskferry-v4.2.0...taskferry-v4.3.0) (2026-08-23)
 
 

@@ -43,6 +43,7 @@ test("parses dispatch and applies its argument defaults", () => {
       executor: void 0,
       class: void 0,
       parentTaskId: void 0,
+      executorArgs: void 0,
     },
     help: false,
   });

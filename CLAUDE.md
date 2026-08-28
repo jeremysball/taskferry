@@ -69,17 +69,17 @@ visible. `--rw-bind /tmp` is the sandboxed alternative.
 
 Provider limits: a controller and its leaves share the same provider limit
 (`providerLimits` in `~/.config/taskferry/config.json`, e.g.
-`alibaba-tknplan: {maxConcurrentTasks: 2}`). `1` controller `running` + `1`
+`your-provider: {maxConcurrentTasks: 2}`). `1` controller `running` + `1`
 leaf `running` exhausts `2`, leaving `2` leaves `queued` forever while the
 controller's `taskferry wait` holds its slot — a deadlock. For `1` controller
-+ `3` leaves, set `alibaba-tknplan: {maxConcurrentTasks: 4}` (or split
++ `3` leaves, raise that provider to `{maxConcurrentTasks: 4}` (or split
 providers) for the group.
 
-Daemon `ENOSPC`: overlays live on `tmpfs` `/run/user/1000` (`1.6G`). With
-`~250` stale `taskferry-cow-oc_*` overlays the mount fills (`100%`, `ENOSPC:
+Daemon `ENOSPC`: overlays live on `tmpfs` `/run/user/<uid>` (often `1-2G`).
+With many stale `taskferry-cow-oc_*` overlays the mount fills (`100%`, `ENOSPC:
 no space left on device, write`, `connect ENOENT
-/run/user/1000/taskferry/daemon.sock`), so prune old
-`/run/user/1000/taskferry/overlay/taskferry-cow-oc_*` and keep only the live
+/run/user/<uid>/taskferry/daemon.sock`), so prune old
+`/run/user/<uid>/taskferry/overlay/taskferry-cow-oc_*` and keep only the live
 few (`ls -1t | tail -n +10 | xargs rm -rf`).
 
 ## Harness env vars and `postOutputNoOutputTimeoutMs` that look like bugs but aren't
@@ -89,17 +89,17 @@ The daemon injects `TASKFERRY_STATE_DIR`/`TASKFERRY_RUNTIME_DIR`/
 `XDG_*` redirected to `~/.cache/taskferry/...` and `UV_CACHE_DIR`/`UV_TOOL_DIR`)
 into every sandbox — see `src/paths.js:resolveStateDir`. `npm run check` in
 this repo only strips `TASKFERRY_CHILD` (`package.json: env -u
-TASKFERRY_CHILD node --test`), so `src/tasks.sandbox.test.js:473` and `9`
-`bwrap` sandbox tests fail inside a ferry even with no code change (e.g.
-`oc_mtajjmuk_b063fb3f: 1397/1406 pass, 9 pre-existing`). Re-running with `env
--u TASKFERRY_* -u XDG_* -u UV_*` gives `1406/1406`. Don't trim this from a
+TASKFERRY_CHILD node --test`), so `src/tasks.sandbox.test.js:473` and the
+`bwrap` sandbox tests can fail inside a ferry even with no code change (e.g.
+`9` pre-existing failures, `1397/1406` pass). Re-running with `env -u
+TASKFERRY_* -u XDG_* -u UV_*` gives a clean pass. Don't trim this from a
 generic skill — it is taskferry-repo-specific; note it in `docs/daemon.md`
 instead if needed.
 
 `postOutputNoOutputTimeoutMs: 900000` (`15m`, `~/.config/taskferry/config.json`)
 is the daemon's `no_output_timeout_stalled` — a task with no `tool_use` for
-`900s` is marked `crashed` (`failureReason: no_output_timeout_stalled`,
-`oc_mtajrkjg_c528b2c0`). That is the intended keepalive, not a dispatch bug.
+`900s` is marked `crashed` (`failureReason: no_output_timeout_stalled`).
+That is the intended keepalive, not a dispatch bug.
 
 ## Check GitHub issues after merging a PR
 

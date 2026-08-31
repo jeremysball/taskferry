@@ -230,6 +230,10 @@ function pushSafeRoBind(list, src, dest, existsFn, lstatFn) {
  * @param {{existsFn: (file: string) => boolean, lstatFn: (file: string) => {isSymbolicLink: () => boolean, isFile?: () => boolean, nlink?: number}, realpathFn: (file: string) => string}} fns
  */
 function pushResolvedRoBind(list, src, dest, { existsFn, lstatFn, realpathFn }) {
+  // existsFn here is an optimization, not the safety check: production
+  // existence-follows-symlink drops a dangling link at this gate, while the
+  // resolver owns the silent-ENOENT / warn classification for anything that
+  // gets through (including a link deleted between this check and realpath).
   if (!existsFn(src)) return;
   const bindSource = resolveConfigEntryBindSource(src, lstatFn, realpathFn);
   if (bindSource) list.push([bindSource, dest]);

@@ -176,10 +176,10 @@ function isEnoentError(err) {
  * (default-on since 2012, but absent on some older/embedded/NFS setups) a
  * plugin with config-dir write access could otherwise hardlink a sensitive
  * host file into the tree and leak it into the next dispatch. The false
-  * positive is a dropped entry plus a warning -- acceptable for a setup as
-  * rare as a hardlinked config entry (dotfiles repos use symlinks; strict
-  * bind sites reject them on purpose, and the resolving sites call this on
-  * the realpath they resolved to) -- and directories are
+ * positive is a dropped entry plus a warning -- acceptable for a setup as
+ * rare as a hardlinked config entry (dotfiles repos use symlinks; strict
+ * bind sites reject them on purpose, and the resolving sites call this on
+ * the realpath they resolved to) -- and directories are
  * exempt because they cannot be hardlinked and their nlink counts
  * subdirectories.
  * @param {string} fullPath

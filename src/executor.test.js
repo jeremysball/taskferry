@@ -153,6 +153,47 @@ describe("piExecutor().sandboxAuthFile (auth and extension binds)", () => {
   });
 });
 
+describe("piExecutor().sandboxAuthFile (catalog binds)", () => {
+
+  test("sandboxAuthFile resolves a symlinked models.json to its real target instead of dropping it", () => {
+    const ex = piExecutor();
+    const PI_MODELS = "/custom/pi/models.json";
+    const PI_MODELS_REAL = "/dotfiles/pi/agent/models.json";
+    const result = ex.sandboxAuthFile({
+      homeDir: HOME_DIR,
+      dataDir: DATA_DIR,
+      taskId: TASK_ID,
+      spawnEnv: { PI_CODING_AGENT_DIR: PI_AGENT_DIR },
+      existsFn: (p) => p === PI_MODELS,
+      lstatFn: (p) => ({ isSymbolicLink: () => p === PI_MODELS }),
+      realpathFn: () => PI_MODELS_REAL,
+    });
+    // A dotfiles-managed models.json is a symlink; issue #563: the old
+    // strict skip-symlink behavior dropped it, so every catalog-backed
+    // provider (ollama, meta, colab, nanogpt) was "Unknown provider".
+    assert.deepEqual(result.extraRoBinds, [
+      [PI_MODELS_REAL, "/state/run/pi-data/models.json"],
+    ]);
+  });
+
+  test("sandboxAuthFile binds a regular (non-symlink) models.json as-is", () => {
+    const ex = piExecutor();
+    const PI_MODELS = "/custom/pi/models.json";
+    const result = ex.sandboxAuthFile({
+      homeDir: HOME_DIR,
+      dataDir: DATA_DIR,
+      taskId: TASK_ID,
+      spawnEnv: { PI_CODING_AGENT_DIR: PI_AGENT_DIR },
+      existsFn: (p) => p === PI_MODELS,
+      lstatFn: () => ({ isSymbolicLink: () => false }),
+      realpathFn: (p) => p,
+    });
+    assert.deepEqual(result.extraRoBinds, [
+      [PI_MODELS, "/state/run/pi-data/models.json"],
+    ]);
+  });
+});
+
 describe("piExecutor().sandboxAuthFile (single session bind)", () => {
 
   test("sandboxAuthFile binds the single resumed session file read-write (not the whole sessions directory), scoping pi writes to that one session only", () => {

@@ -229,7 +229,7 @@ function pushSafeRoBind(list, src, dest, existsFn, lstatFn) {
  * @param {{existsFn: (file: string) => boolean, lstatFn: (file: string) => {isSymbolicLink: () => boolean, isFile?: () => boolean, nlink?: number}, realpathFn: (file: string) => string}} fsFns
  */
 function pushPiCatalogBinds(list, realAgentDir, sandboxedDataHome, fsFns) {
-  const { existsFn, lstatFn, realpathFn } = fsFns;
+  const { existsFn, lstatFn, realpathFn = fs.realpathSync } = fsFns;
   for (const fname of ["models.json", "models-store.json", "settings.json"]) {
     const src = path.join(realAgentDir, fname);
     // The catalog is read-only, so unlike auth.json/extensions a symlinked
@@ -268,9 +268,12 @@ function resolvePiSessionRwBind({ realSessionsDir, sandboxedSessionsHome, sessio
  * a repo, so a symlinked entry is resolved to its real target and that
  * target is bound read-only at the same sandboxed destination, instead of
  * being dropped. Dangling links fail closed (ENOENT silent, other errors
- * warn) and do not crash the dispatch. Auth files and session binds keep
- * the strict skip-symlink behavior via isSafeBindSource, because those
- * read-write paths must not hand the worker access to a link target.
+ * warn) and do not crash the dispatch. Auth files and the extensions dir
+ * keep strict skip-symlink (via isSafeBindSource) as a conservative
+ * default for credential and code paths, where following an unexpected
+ * symlink would expose a different file's contents to the worker; the
+ * read-write session bind also stays strict because resolving it would
+ * hand the worker write access to the link target.
  * @param {string} fullPath
  * @param {(file: string) => {isSymbolicLink: () => boolean, isFile?: () => boolean, nlink?: number}} lstatFn
  * @param {(file: string) => string} realpathFn
@@ -287,7 +290,7 @@ function resolveConfigBindSource(fullPath, lstatFn, realpathFn) {
     return null;
   }
   if (entryStat == null) return null;
-  if (entryStat.isSymbolicLink()) {
+  if (entryStat.isSymbolicLink?.()) {
     let realTarget;
     try {
       realTarget = realpathFn(fullPath);
@@ -589,10 +592,11 @@ export function opencodeExecutor() {
       // destination, instead of being dropped. Dangling/unresolvable links
       // fail closed (skip with ENOENT-silent / non-ENOENT warning) and do
       // not crash the dispatch. Other bind sites (auth.json, pi session
-      // binds) keep the strict skip-symlink behavior -- see
-      // isSafeBindSource -- because those paths include read-write session
-      // binds where resolving would hand the worker write access to the
-      // link target.
+      // binds) keep strict skip-symlink -- see isSafeBindSource -- for
+      // different reasons: auth files are credential paths, where following
+      // an unexpected symlink would expose a different file's contents, and
+      // the pi session bind is read-write, where resolving would hand the
+      // worker write access to the link target.
       if (existsFn(realConfigDir) && isSafeBindSource(realConfigDir, lstatFn)) {
         for (const entry of readdirFn(realConfigDir)) {
           if (entry === ".gitignore") continue;

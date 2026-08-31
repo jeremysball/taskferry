@@ -176,9 +176,10 @@ function isEnoentError(err) {
  * (default-on since 2012, but absent on some older/embedded/NFS setups) a
  * plugin with config-dir write access could otherwise hardlink a sensitive
  * host file into the tree and leak it into the next dispatch. The false
- * positive is a dropped entry plus a warning -- acceptable for a setup as
- * rare as a hardlinked config entry (dotfiles repos use symlinks, which the
- * isSymbolicLink() check already rejects on purpose) -- and directories are
+  * positive is a dropped entry plus a warning -- acceptable for a setup as
+  * rare as a hardlinked config entry (dotfiles repos use symlinks; strict
+  * bind sites reject them on purpose, and the resolving sites call this on
+  * the realpath they resolved to) -- and directories are
  * exempt because they cannot be hardlinked and their nlink counts
  * subdirectories.
  * @param {string} fullPath
@@ -224,14 +225,30 @@ function pushSafeRoBind(list, src, dest, existsFn, lstatFn) {
 
 /**
  * @param {[string, string][]} list
+ * @param {string} src
+ * @param {string} dest
+ * @param {{existsFn: (file: string) => boolean, lstatFn: (file: string) => {isSymbolicLink: () => boolean, isFile?: () => boolean, nlink?: number}, realpathFn: (file: string) => string}} fns
+ */
+function pushResolvedRoBind(list, src, dest, { existsFn, lstatFn, realpathFn }) {
+  if (!existsFn(src)) return;
+  const bindSource = resolveConfigEntryBindSource(src, lstatFn, realpathFn);
+  if (bindSource) list.push([bindSource, dest]);
+}
+
+/**
+ * @param {[string, string][]} list
  * @param {string} realAgentDir
  * @param {string} sandboxedDataHome
- * @param {(file: string) => boolean} existsFn
- * @param {(file: string) => {isSymbolicLink: () => boolean, isFile?: () => boolean, nlink?: number}} lstatFn
+ * @param {{existsFn: (file: string) => boolean, lstatFn: (file: string) => {isSymbolicLink: () => boolean, isFile?: () => boolean, nlink?: number}, realpathFn: (file: string) => string}} fns
  */
-function pushPiCatalogBinds(list, realAgentDir, sandboxedDataHome, existsFn, lstatFn) {
+function pushPiCatalogBinds(list, realAgentDir, sandboxedDataHome, fns) {
+  // Dotfiles setups commonly symlink these catalog files into a repo (the same
+  // pattern as opencode config entries), so a symlinked catalog resolves to
+  // its real target and the target is bound -- dropping it would leave pi with
+  // only its built-in providers and crash the dispatch at startup with
+  // "Unknown provider" for any models.json-registered name.
   for (const fname of ["models.json", "models-store.json", "settings.json"]) {
-    pushSafeRoBind(list, path.join(realAgentDir, fname), path.join(sandboxedDataHome, fname), existsFn, lstatFn);
+    pushResolvedRoBind(list, path.join(realAgentDir, fname), path.join(sandboxedDataHome, fname), fns);
   }
 }
 
@@ -255,19 +272,21 @@ function resolvePiSessionRwBind({ realSessionsDir, sandboxedSessionsHome, sessio
 }
 
 /**
- * Resolve a single opencode config entry to a safe bind source. Dotfiles
- * setups commonly symlink individual entries (opencode.json, plugins, etc.)
- * into a repo, so a symlinked entry is resolved to its real target and that
- * target is bound read-only at the same sandboxed destination, instead of
- * being dropped. Dangling links fail closed (ENOENT silent, other errors
- * warn) and do not crash the dispatch. Other bind sites (auth.json, pi)
- * keep the strict skip-symlink behavior via isSafeBindSource.
+ * Resolve a single config-tree entry (opencode config files, pi's models.json
+ * / models-store.json / settings.json catalog) to a safe bind source. Dotfiles
+ * setups commonly symlink individual entries (opencode.json, plugins, pi's
+ * catalog, etc.) into a repo, so a symlinked entry is resolved to its real
+ * target and that target is bound read-only at the same sandboxed
+ * destination, instead of being dropped. Dangling links fail closed (ENOENT
+ * silent, other errors warn) and do not crash the dispatch. The pi auth.json
+ * and extensions binds keep the strict skip-symlink behavior via
+ * isSafeBindSource, since those are the entries a rogue plugin could plant.
  * @param {string} fullPath
  * @param {(file: string) => {isSymbolicLink: () => boolean, isFile?: () => boolean, nlink?: number}} lstatFn
  * @param {(file: string) => string} realpathFn
  * @returns {string|null}
  */
-function resolveOpencodeConfigBindSource(fullPath, lstatFn, realpathFn) {
+function resolveConfigEntryBindSource(fullPath, lstatFn, realpathFn) {
   let entryStat;
   try {
     entryStat = lstatFn(fullPath);
@@ -476,8 +495,8 @@ export function piExecutor({ execFileFn = execFileAsync } = {}) {
     // small tmpfs: pi's sandboxed data home grows with every dispatch and an
     // unbounded tmpfs directory eventually starves the whole XDG_RUNTIME_DIR
     // (sockets, locks) of space.
-    /** @param {{homeDir: string, dataDir: string, taskId: string, spawnEnv: NodeJS.ProcessEnv, existsFn: (file: string) => boolean, statFn?: (file: string) => {isDirectory: () => boolean}|null, lstatFn?: (file: string) => {isSymbolicLink: () => boolean, isFile?: () => boolean, nlink?: number}, readdirFn?: (dir: string) => string[], sessionId?: string|null, launchDirectory?: string|null}} args @returns {{extraRoBinds: [string, string][], extraRwPairBinds?: [string, string][], sandboxedDataHome: string, sandboxEnv: Record<string, string>}} */
-    sandboxAuthFile({ homeDir, dataDir, taskId: _taskId, spawnEnv, existsFn, statFn = fs.statSync, lstatFn = fs.lstatSync, readdirFn, sessionId, launchDirectory }) {
+    /** @param {{homeDir: string, dataDir: string, taskId: string, spawnEnv: NodeJS.ProcessEnv, existsFn: (file: string) => boolean, statFn?: (file: string) => {isDirectory: () => boolean}|null, lstatFn?: (file: string) => {isSymbolicLink: () => boolean, isFile?: () => boolean, nlink?: number}, readdirFn?: (dir: string) => string[], realpathFn?: (file: string) => string, sessionId?: string|null, launchDirectory?: string|null}} args @returns {{extraRoBinds: [string, string][], extraRwPairBinds?: [string, string][], sandboxedDataHome: string, sandboxEnv: Record<string, string>}} */
+    sandboxAuthFile({ homeDir, dataDir, taskId: _taskId, spawnEnv, existsFn, statFn = fs.statSync, lstatFn = fs.lstatSync, readdirFn, realpathFn = fs.realpathSync, sessionId, launchDirectory }) {
       const realAgentDir = spawnEnv.PI_CODING_AGENT_DIR || path.join(homeDir, ".pi", "agent");
       const realAuthFile = path.join(realAgentDir, "auth.json");
       const realExtensionsDir = path.join(realAgentDir, "extensions");
@@ -490,7 +509,7 @@ export function piExecutor({ execFileFn = execFileAsync } = {}) {
       pushSafeRoBind(extraRoBinds, realAuthFile, path.join(sandboxedDataHome, "auth.json"), existsFn, lstatFn);
       pushSafeRoBind(extraRoBinds, realExtensionsDir, path.join(sandboxedDataHome, "extensions"), existsFn, lstatFn);
       // catalog: redirecting PI_CODING_AGENT_DIR hides models.json* -> Unknown provider
-      pushPiCatalogBinds(extraRoBinds, realAgentDir, sandboxedDataHome, existsFn, lstatFn);
+      pushPiCatalogBinds(extraRoBinds, realAgentDir, sandboxedDataHome, { existsFn, lstatFn, realpathFn });
       /** @type {[string, string][]} */
       const extraRwPairBinds = [];
       // single-file rw bind for resume only – whole-dir rw would expose session history
@@ -587,7 +606,7 @@ export function opencodeExecutor() {
         for (const entry of readdirFn(realConfigDir)) {
           if (entry === ".gitignore") continue;
           const fullPath = path.join(realConfigDir, entry);
-          const bindSource = resolveOpencodeConfigBindSource(fullPath, lstatFn, realpathFn);
+          const bindSource = resolveConfigEntryBindSource(fullPath, lstatFn, realpathFn);
           if (bindSource) extraRoBinds.push([bindSource, path.join(sandboxedConfigDir, entry)]);
         }
       }

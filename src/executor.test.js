@@ -151,6 +151,58 @@ describe("piExecutor().sandboxAuthFile (auth and extension binds)", () => {
       [PI_AUTH, PI_DATA_AUTH],
     ]);
   });
+
+  test("sandboxAuthFile binds the plain (non-symlinked) catalog files so models.json providers register inside the sandbox", () => {
+    const ex = piExecutor();
+    const result = ex.sandboxAuthFile({
+      homeDir: HOME_DIR,
+      dataDir: DATA_DIR,
+      spawnEnv: { PI_CODING_AGENT_DIR: PI_AGENT_DIR },
+      existsFn: (p) => p === `${PI_AGENT_DIR}/models.json` || p === `${PI_AGENT_DIR}/models-store.json` || p === `${PI_AGENT_DIR}/settings.json`,
+      lstatFn: () => ({ isSymbolicLink: () => false }),
+    });
+    assert.deepEqual(result.extraRoBinds, [
+      [`${PI_AGENT_DIR}/models.json`, "/state/run/pi-data/models.json"],
+      [`${PI_AGENT_DIR}/models-store.json`, "/state/run/pi-data/models-store.json"],
+      [`${PI_AGENT_DIR}/settings.json`, "/state/run/pi-data/settings.json"],
+    ]);
+  });
+
+  test("sandboxAuthFile resolves a symlinked catalog entry (dotfiles layout) to its real target instead of dropping it", () => {
+    const ex = piExecutor();
+    const linked = `${PI_AGENT_DIR}/models.json`;
+    const realTarget = "/repo/.pi/agent/models.json";
+    const result = ex.sandboxAuthFile({
+      homeDir: HOME_DIR,
+      dataDir: DATA_DIR,
+      spawnEnv: { PI_CODING_AGENT_DIR: PI_AGENT_DIR },
+      existsFn: (p) => p === linked,
+      lstatFn: (p) => ({ isSymbolicLink: () => p === linked, isFile: () => true, nlink: 1 }),
+      realpathFn: (p) => (p === linked ? realTarget : p),
+    });
+    assert.deepEqual(result.extraRoBinds, [
+      [realTarget, "/state/run/pi-data/models.json"],
+    ]);
+  });
+
+  test("sandboxAuthFile fails closed on a dangling symlinked catalog entry", () => {
+    const ex = piExecutor();
+    const linked = `${PI_AGENT_DIR}/models.json`;
+    const enoent = Object.assign(new Error("no such file"), { code: "ENOENT" });
+    const result = ex.sandboxAuthFile({
+      homeDir: HOME_DIR,
+      dataDir: DATA_DIR,
+      spawnEnv: { PI_CODING_AGENT_DIR: PI_AGENT_DIR },
+      existsFn: (p) => p === PI_AUTH || p === linked,
+      lstatFn: (p) => ({ isSymbolicLink: () => p === linked, isFile: () => p === PI_AUTH, nlink: 1 }),
+      realpathFn: () => {
+        throw enoent;
+      },
+    });
+    assert.deepEqual(result.extraRoBinds, [
+      [PI_AUTH, PI_DATA_AUTH],
+    ]);
+  });
 });
 
 describe("piExecutor().sandboxAuthFile (single session bind)", () => {

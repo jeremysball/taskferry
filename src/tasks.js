@@ -51,6 +51,7 @@ export { DEFAULT_MAX_OUTPUT_FILE_BYTES, MAX_SAFE_OUTPUT_FILE_BYTES };
  * @property {string} prompt
  * @property {string} promptPreview
  * @property {number|null} promptTotalChars
+ * @property {string} [originalPrompt]
  * @property {string|null} spawnError
  * @property {boolean} cancelRequested
  * @property {boolean} internal
@@ -221,6 +222,8 @@ export { DEFAULT_MAX_OUTPUT_FILE_BYTES, MAX_SAFE_OUTPUT_FILE_BYTES };
  * @property {string|null} [headDriftFrom]
  * @property {string|null} [headDriftTo]
  * @property {boolean|null} [headDriftRecovered]
+ * @property {string} [prompt]
+ * @property {string} [promptAugmented]
  */
 
 const DEFAULT_STATE_DIR = resolveStateDir(process.env);
@@ -241,6 +244,7 @@ const SUMMARY_INPUT_BYTES = 96 * 1024;
 // riding the exact limit.
 const PROMPT_ARGV_SAFE_BYTES = 96 * 1024;
 export const DEFAULT_SUMMARY_MODEL = "opencode/mimo-v2.5-free";
+const SUMMARY_TRANSCRIPT_PROMPT = "Summarize the attached task transcript.";
 
 // Ordered most-specific-first: real provider error text often combines
 // more than one signal (e.g. "Rate limit exceeded, check your quota"), so
@@ -2201,6 +2205,7 @@ function computeResultDetail(task, { taskId, full, fields }, ctx) {
     ...(next ? { next } : {}),
     logPath: task.logPath,
     outputDir: task.outputDir ?? null,
+    ...resultPromptFields(task),
   };
 }
 
@@ -2402,6 +2407,7 @@ function buildDispatchTask({ id, directory, prompt, model, executor, priorSessio
     // since this is what the worker actually sees; promptPreview remains the
     // literal user prompt so display surfaces don't show the injection tail.
     prompt,
+    originalPrompt,
     status: "queued",
     model: resolvedModel,
     executorId: executor.id,
@@ -2695,8 +2701,9 @@ function launchSummaryTask(ctx, p) {
     endedAt: null,
     exitCode: null,
     signal: null,
-    prompt: "Summarize the attached task transcript.",
-    promptPreview: "Summarize the attached task transcript.",
+    prompt: SUMMARY_TRANSCRIPT_PROMPT,
+    originalPrompt: SUMMARY_TRANSCRIPT_PROMPT,
+    promptPreview: SUMMARY_TRANSCRIPT_PROMPT,
     promptTotalChars: null,
     spawnError: null,
     cancelRequested: false,
@@ -3124,6 +3131,15 @@ function loadPersistedTask(ctx, t) {
   // cleanupOverlay()) and sweepOrphanedOverlays()'s tmpRoots scan key off
   // of -- silently orphaning the real leftover under os.tmpdir() forever.
   if (t.overlayDirs && t.overlayDirs.tmpRoot === undefined) t.overlayDirs.tmpRoot = os.tmpdir();
+  if (t.originalPrompt === undefined) {
+    // Backfill for tasks persisted before originalPrompt was stored: promptPreview
+    // is the clean user text (truncated to 200 chars), while prompt is the
+    // augmented string with verification/output-dir blocks. Prefer the clean
+    // truncated preview over the augmented prompt to avoid leaking injected
+    // blocks into the exposed `prompt` field for legacy records whose full
+    // original is irrecoverable.
+    t.originalPrompt = t.promptPreview ?? t.prompt ?? "";
+  }
   if (previousStatus === "running" || previousStatus === "queued") {
     /** @type {any} */ (t)._persistedStatus = previousStatus;
   }
@@ -7851,6 +7867,14 @@ function startTaskFor(task, ctx) {
   spawnTaskChild(ctx, launchInfo, task);
 }
 
+/** @param {Task} task @returns {{prompt: string, promptAugmented: string}} */
+function resultPromptFields(task) {
+  return {
+    prompt: task.originalPrompt ?? task.promptPreview ?? task.prompt ?? "",
+    promptAugmented: task.prompt ?? "",
+  };
+}
+
 /**
  * Builds a task's detailed result view (full detail, optional field
  * projection, and the running/queued/unknown short-circuit messages).
@@ -7868,13 +7892,19 @@ function resultFor(taskId, { full, fields }, ctx) {
   if (!task) throw ctx.noSuchTask(taskId);
   validateResultFields(full, fields);
   if (task.status === "running" || task.status === "queued") {
-    return projectResult({ taskId, status: task.status, message: `task is still ${task.status}; poll taskferry status first` }, fields);
+    return projectResult({
+      taskId,
+      status: task.status,
+      message: `task is still ${task.status}; poll taskferry status first`,
+      ...resultPromptFields(task),
+    }, fields);
   }
   if (task.status === "unknown" && task.summaryOf) {
     return projectResult({
       taskId,
       status: task.status,
       message: "summary task became unknown after the server restarted; its partial output is unavailable",
+      ...resultPromptFields(task),
     }, fields);
   }
   // opencode's steps are text (narration) -> tool_use -> step_finish per

@@ -433,6 +433,20 @@ profiling is diagnostic, not on the request's critical path.
 
 ## Things that look like bugs but aren't
 
+- The integration smoke tests never touching a real model provider — since
+  PR #547 CI dispatches against `src/mock-llm.js`, a local keyless
+  OpenAI-compatible endpoint wired in as a `mockllm` provider via
+  `OPENCODE_CONFIG_CONTENT`. Deliberate: the leg's subject is taskferry's own
+  pipeline (real daemon, real bwrap sandbox, real `opencode` spawn, NDJSON
+  parse, settlement, cancel's process-group kill), and a live provider made
+  every open PR red on a provider billing-state change with zero code
+  regressions (`opencode_apierror: "The requested model was not found."`,
+  2026-09-01). Related trap: the mock's long-running behavior is driven by
+  the prompt text — a `sleep <n>` substring makes it withhold its streamed
+  reply for n seconds so the task is genuinely in-flight when cancel or the
+  wait cap fires. Rewording those prompts to drop "sleep" silently turns the
+  cancel/poll cases into instant completions and the assertions fail for a
+  reason that looks like a cancel regression.
 - The Claude statusline showing no Taskferry segment on its first poll, or
   lagging a task transition by one poll — expected. `tf-sl` never runs the CLI
   in its foreground render path: it reads a per-workspace snapshot under

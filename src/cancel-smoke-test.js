@@ -4,16 +4,19 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { rmRoot, scratchGitRepo, stopDaemonAndWait } from "./smoke-test-support.js";
+import { mockLlmConfigContent } from "./mock-llm.js";
+import { rmRoot, scratchGitRepo, startMockLlmProcess, stopDaemonAndWait } from "./smoke-test-support.js";
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const cliEntry = path.join(scriptDir, "cli.js");
 
+const mock = await startMockLlmProcess();
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-cancel-smoke-"));
 const env = {
   ...process.env,
   TASKFERRY_STATE_DIR: path.join(root, "state"),
   TASKFERRY_RUNTIME_DIR: path.join(root, "run"),
+  OPENCODE_CONFIG_CONTENT: mockLlmConfigContent(mock.port),
 };
 const dirArg = process.argv[2] || scratchGitRepo(root);
 
@@ -60,8 +63,7 @@ const dispatched = taskferry([
   "dispatch",
   "--prompt", "Run 'sleep 60' via bash, then reply SLEEP_DONE. Do not shorten the sleep duration.",
   "--directory", dirArg,
-  "--model", "meta/muse-spark-1.2-contributor",
-  "--variant", "low",
+  "--model", "mockllm/pong",
   "--executor", "opencode",
 ]);
 console.log(dispatched);
@@ -97,6 +99,7 @@ check("the complete process group was killed", groupGone);
 
 stopDaemon();
 rmRoot(root);
+mock.kill();
 
 if (ok) {
   console.log("\nCANCEL SMOKE TEST PASSED");

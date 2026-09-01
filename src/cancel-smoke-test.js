@@ -58,12 +58,12 @@ function check(label, condition) {
   if (!condition) ok = false;
 }
 
-console.log("== dispatch (long-running: sleep 60 via bash) ==");
+console.log("== dispatch (long-running: mockllm/delay60 withholds its reply for 60s) ==");
 const dispatched = taskferry([
   "dispatch",
-  "--prompt", "Run 'sleep 60' via bash, then reply SLEEP_DONE. Do not shorten the sleep duration.",
+  "--prompt", "Reply with the word PONG and nothing else.",
   "--directory", dirArg,
-  "--model", "mockllm/pong",
+  "--model", "mockllm/delay60",
   "--executor", "opencode",
 ]);
 console.log(dispatched);

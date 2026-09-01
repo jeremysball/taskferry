@@ -83,6 +83,8 @@ console.log("\n== result ==");
 const result = taskferry(["result", taskId]);
 console.log(result);
 check("result message is PONG", result.message?.trim() === "PONG");
+check("result reports nonzero input tokens", result.tokens?.input > 0);
+check("result reports nonzero output tokens", result.tokens?.output > 0);
 
 console.log("\n== list ==");
 const list = taskferry(["list", DIRECTORY_FLAG, dirArg]);

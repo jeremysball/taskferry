@@ -6,11 +6,17 @@
 // renames); everything taskferry itself owns (dispatch, daemon, sandbox,
 // spawn, NDJSON parse, settlement, kill-group teardown) still runs for real.
 //
-// The delay contract keeps the long-running cases genuinely long-running
-// without asking a model to cooperate: the smoke-test prompts contain
-// `sleep <n>`, and the mock withholds its streamed response for n seconds,
-// so the worker sits in-flight (blocked on the HTTP response) while
-// `taskferry cancel` / `wait`-timeout race against a real process group.
+// The delay contract is the model id, not the prompt text: `mockllm/pong`
+// replies immediately; `mockllm/delay<n>` withholds its streamed response
+// for n seconds, so the worker sits blocked on the HTTP response while
+// `taskferry cancel` / `wait`-timeout race a genuinely running process.
+// Encoding it in the id (rather than sniffing the prompt for `sleep <n>`)
+// keeps the coupling visible in the dispatch command that depends on it.
+//
+// The mock reports deterministic token usage (and the provider config
+// carries a nonzero cost table) so the real token/cost accounting path --
+// opencode's usage parse -> NDJSON step_finish -> taskferry's tokens/cost
+// fields -- is exercised end-to-end, and `smoke-test.js` asserts it.
 //
 // Wire it in via `mockLlmConfigContent(port)`: an `OPENCODE_CONFIG_CONTENT`
 // value declaring a `mockllm` provider whose baseURL targets the ephemeral
@@ -20,7 +26,43 @@
 // worker with no extra plumbing.
 import http from "node:http";
 
-const SLEEP_PATTERN = /sleep\s+(\d+)/i;
+const SLEEP_MODEL_PATTERN = /^delay(\d{1,3})$/;
+const CHAT_COMPLETION_CHUNK = "chat.completion.chunk";
+
+/**
+ * Parse the delay out of a mock model id: "pong" -> 0, "delay60" -> 60000.
+ * Out-of-range n is clamped to [0, 300] seconds so a typo can't park a CI
+ * job longer than the run timeout it would blow anyway.
+ * @param {unknown} modelId
+ * @returns {number} milliseconds
+ */
+export function delayMsForModel(modelId) {
+  if (typeof modelId !== "string") return 0;
+  const m = SLEEP_MODEL_PATTERN.exec(modelId);
+  if (!m) return 0;
+  return Math.min(Math.max(Number(m[1]), 0), 300) * 1000;
+}
+
+/**
+ * Deterministic stand-in for a provider's token accounting: input tokens
+ * scale with the request size, output is fixed, and a reasoning channel is
+ * reported so `reasoning`-capable parsing sees a realistic shape. Must match
+ * what opencode's ai-sdk openai-compatible usage parse expects (the
+ * prompt_tokens_details / completion_tokens_details nesting).
+ * @param {number} requestBytes
+ */
+function usageFor(requestBytes) {
+  const promptTokens = Math.max(1, Math.ceil(requestBytes / 4));
+  const completionTokens = 9;
+  const reasoningTokens = 6;
+  return {
+    prompt_tokens: promptTokens,
+    completion_tokens: completionTokens,
+    total_tokens: promptTokens + completionTokens,
+    prompt_tokens_details: { cached_tokens: 0 },
+    completion_tokens_details: { reasoning_tokens: reasoningTokens },
+  };
+}
 
 /**
  * @param {import("node:http").IncomingMessage} req
@@ -35,47 +77,28 @@ function readBody(req) {
   });
 }
 
-function contentText(content) {
-  if (typeof content === "string") return content;
-  let last;
-  if (Array.isArray(content)) {
-    for (const part of content) {
-      const text = /** @type {{text?: unknown}} */ (part)?.text;
-      if (typeof text === "string") last = text;
-    }
-  }
-  return last;
-}
-
-/**
- * Decide how long to withhold the response and what to say, from the last
- * message text in the chat-completions body.
- * @param {unknown} body parsed JSON request body
- * @returns {{delayMs: number, content: string}}
- */
-export function replyForRequest(body) {
-  const messages = Array.isArray(/** @type {{messages?: unknown}} */ (body).messages)
-    ? /** @type {Array<{content?: unknown}>} */ (/** @type {{messages: unknown[]}} */ (body).messages)
-    : [];
-  let prompt = "";
-  for (const msg of messages) {
-    const text = contentText(msg?.content);
-    if (text !== undefined) prompt = text;
-  }
-  const sleep = SLEEP_PATTERN.exec(prompt);
-  if (sleep) {
-    const seconds = Math.min(Math.max(Number(sleep[1]), 0), 300);
-    return { delayMs: seconds * 1000, content: "SLEEP_DONE" };
-  }
-  return { delayMs: 0, content: "PONG" };
-}
-
-function streamChunks(model, content, created = Math.floor(Date.now() / 1000)) {
+function streamChunks(model, usage, created = Math.floor(Date.now() / 1000)) {
   const base = { id: `chatcmpl-mock-${created}`, created, model };
   return [
-    { ...base, object: "chat.completion.chunk", choices: [{ index: 0, delta: { role: "assistant", content }, finish_reason: null }] },
-    { ...base, object: "chat.completion.chunk", choices: [{ index: 0, delta: {}, finish_reason: "stop" }] },
+    { ...base, object: CHAT_COMPLETION_CHUNK, choices: [{ index: 0, delta: { role: "assistant", reasoning_content: "mock reasoning trace" }, finish_reason: null }] },
+    { ...base, object: CHAT_COMPLETION_CHUNK, choices: [{ index: 0, delta: { content: "PONG" }, finish_reason: null }] },
+    { ...base, object: CHAT_COMPLETION_CHUNK, choices: [{ index: 0, delta: {}, finish_reason: "stop" }] },
+    // OpenAI's stream usage convention: a final chunk carrying usage with no
+    // choices, requested via stream_options.include_usage (which the AI SDK
+    // sets). Emitted unconditionally -- harmless to parsers that ignore it.
+    { ...base, object: CHAT_COMPLETION_CHUNK, choices: [], usage },
   ];
+}
+
+function completionBody(model, usage, created = Math.floor(Date.now() / 1000)) {
+  return {
+    id: `chatcmpl-mock-${created}`,
+    object: "chat.completion",
+    choices: [{ index: 0, message: { role: "assistant", content: "PONG" }, finish_reason: "stop" }],
+    created,
+    model,
+    usage,
+  };
 }
 
 function sendJson(res, status, payload) {
@@ -83,9 +106,9 @@ function sendJson(res, status, payload) {
   res.end(JSON.stringify(payload));
 }
 
-function streamCompletion(res, model, content) {
+function streamCompletion(res, model, usage) {
   res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache" });
-  for (const chunk of streamChunks(model, content)) {
+  for (const chunk of streamChunks(model, usage)) {
     res.write(`data: ${JSON.stringify(chunk)}\n\n`);
   }
   res.write("data: [DONE]\n\n");
@@ -114,12 +137,14 @@ async function handleRequest(req, res, pending) {
     sendJson(res, 400, { error: { message: "mock-llm: malformed JSON body" } });
     return;
   }
-  const { delayMs, content } = replyForRequest(body);
   const model = typeof body.model === "string" ? body.model : "pong";
+  const usage = usageFor(Buffer.byteLength(text));
   const timer = setTimeout(() => {
     pending.delete(timer);
-    if (!res.writableEnded && !res.destroyed) streamCompletion(res, model, content);
-  }, delayMs);
+    if (res.writableEnded || res.destroyed) return;
+    if (body.stream) streamCompletion(res, model, usage);
+    else sendJson(res, 200, completionBody(model, usage));
+  }, delayMsForModel(model));
   pending.add(timer);
 }
 
@@ -164,11 +189,23 @@ async function closeServer(server, pending) {
   await new Promise((r) => server.close(r));
 }
 
+// Every model id a smoke test dispatches must be declared here: opencode
+// resolves `-m mockllm/<id>` against the config's model map, and an
+// undeclared id fails before any request leaves the CLI. The mock's delay
+// parse accepts any `delay<n>`; this roster only covers what the suite uses.
+const MOCK_MODELS = {
+  pong: { name: "Mock Pong" },
+  delay30: { name: "Mock Delay 30" },
+  delay60: { name: "Mock Delay 60" },
+};
+
 /**
  * The `OPENCODE_CONFIG_CONTENT` value pointing a `mockllm` provider at
  * `port`. `agent.title.disable` is kept from the pre-existing workflow
  * setting: the session-naming agent would otherwise fire a second request
- * per session that nothing in a headless smoke test ever reads.
+ * per session that nothing in a headless smoke test ever reads. The nonzero
+ * cost table is what lets the integration leg assert real cost arithmetic,
+ * not just token counts.
  * @param {number} port
  * @returns {string}
  */
@@ -179,7 +216,16 @@ export function mockLlmConfigContent(port) {
         npm: "@ai-sdk/openai-compatible",
         name: "Mock LLM",
         options: { baseURL: `http://127.0.0.1:${port}/v1`, apiKey: "mock-key" },
-        models: { pong: { name: "Mock Pong", limit: { context: 32000, output: 4096 } } },
+        models: Object.fromEntries(
+          Object.entries(MOCK_MODELS).map(([id, info]) => [
+            id,
+            {
+              ...info,
+              limit: { context: 32000, output: 4096 },
+              cost: { input: 0.1, output: 0.2, cache: { read: 0, write: 0 } },
+            },
+          ]),
+        ),
       },
     },
     agent: { title: { disable: true } },

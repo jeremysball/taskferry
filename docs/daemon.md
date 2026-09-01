@@ -441,12 +441,20 @@ profiling is diagnostic, not on the request's critical path.
   parse, settlement, cancel's process-group kill), and a live provider made
   every open PR red on a provider billing-state change with zero code
   regressions (`opencode_apierror: "The requested model was not found."`,
-  2026-09-01). Related trap: the mock's long-running behavior is driven by
-  the prompt text — a `sleep <n>` substring makes it withhold its streamed
-  reply for n seconds so the task is genuinely in-flight when cancel or the
-  wait cap fires. Rewording those prompts to drop "sleep" silently turns the
-  cancel/poll cases into instant completions and the assertions fail for a
-  reason that looks like a cancel regression.
+  2026-09-01). Two contracts make the fake behave like a real provider, and
+  both fail silently if broken. (1) The delay lives in the model id:
+  `mockllm/delay<n>` withholds its reply for n seconds so cancel/poll race a
+  genuinely in-flight worker; if a delayed case is dispatched against
+  `pong` instead, the task settles instantly and the assertions fail looking
+  like cancel regressions. (2) The mock reports deterministic token usage and
+  the provider config carries a nonzero cost table, so the usage-parse ->
+  step_finish -> `tokens`/`cost` path is exercised end to end --
+  `smoke-test.js` asserts nonzero input/output tokens so that can't decay
+  back into synthetic zeros. Also non-obvious: the mock runs as its own
+  process, not inside the smoke script. The scripts drive the CLI with
+  `execFileSync`, which blocks the event loop for exactly as long as a worker
+  waits for its reply -- an in-process server would be frozen when the
+  response is due, and the task would hang looking like a sandbox bug.
 - The Claude statusline showing no Taskferry segment on its first poll, or
   lagging a task transition by one poll — expected. `tf-sl` never runs the CLI
   in its foreground render path: it reads a per-workspace snapshot under

@@ -46,12 +46,12 @@ const w1 = taskferry(["wait", d1.id, "--timeout", "30000"]);
 const t1Elapsed = Date.now() - t1Start;
 console.log(`resolved after ${t1Elapsed}ms:`, w1.status, w1.exitCode);
 
-console.log("\n== case 2: taskferry wait hits its cap and returns 'running' (long task, short cap) ==");
+console.log("\n== case 2: taskferry wait hits its cap and returns 'running' (mockllm/delay30 task, short cap) ==");
 const d2 = taskferry([
   "dispatch",
-  "--prompt", "Run 'sleep 30' via bash, then reply SLEEP_DONE. Do not shorten the sleep duration.",
+  "--prompt", "Reply with the word PONG and nothing else.",
   "--directory", dirArg,
-  "--model", "mockllm/pong",
+  "--model", "mockllm/delay30",
   "--executor", "opencode",
 ]);
 const t2Start = Date.now();

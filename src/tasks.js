@@ -20,6 +20,7 @@ import { loadEnvFile, watchEnvFile } from "./env-file.js";
 import { loadProjectConfig, resolveReadOnlyProjectBinds, verificationPromptBlock } from "./project-config.js";
 import { TASKFERRY_OUTPUT_DIR_ENV, DEFAULT_MAX_OUTPUT_FILE_BYTES, MAX_SAFE_OUTPUT_FILE_BYTES, ensureTaskOutputDir, listTaskOutputFiles, outputDirPromptBlock, readTaskOutputFile, resolveOutputDirRoot, resolveTaskOutputDir } from "./output-dir.js";
 import { computeDoctorStats } from "./doctor-stats.js";
+import { DEFAULT_TASK_RETENTION_DAYS, archiveEvictedTasks, partitionByRetention } from "./retention.js";
 
 export { DEFAULT_MAX_OUTPUT_FILE_BYTES, MAX_SAFE_OUTPUT_FILE_BYTES };
 
@@ -3147,6 +3148,39 @@ function loadPersistedTask(ctx, t) {
 }
 
 /**
+ * Evicts aged-out terminal tasks from the live map and rewrites tasks.json.
+ *
+ * Runs once at boot (see {@link bootstrapManagerContext}) and on demand via
+ * the `task.prune` RPC. Going through the manager rather than editing
+ * tasks.json directly is the point: the daemon holds the authoritative map in
+ * memory and flushes it on a coalesced timer, so an external edit to the file
+ * is overwritten by the next flush.
+ *
+ * Evicted records are archived under `<stateDir>/archive/`, never deleted.
+ * Archiving happens before the map is touched, so a failed write leaves the
+ * store exactly as it was.
+ *
+ * @param {ManagerContext} ctx
+ * @param {{keepDays?: number, dryRun?: boolean, now?: number}} [options]
+ * @returns {{keepDays: number, dryRun: boolean, scanned: number, kept: number, evicted: number, archivePath?: string}}
+ */
+function applyTaskRetention(ctx, options = {}) {
+  const keepDays = options.keepDays ?? ctx.limits.taskRetentionDays;
+  const all = Array.from(ctx.maps.tasks.values());
+  const { kept, evicted } = partitionByRetention(all, { keepDays, ...(options.now === undefined ? {} : { now: options.now }) });
+  const dryRun = options.dryRun === true;
+  /** @type {{keepDays: number, dryRun: boolean, scanned: number, kept: number, evicted: number, archivePath?: string}} */
+  const summary = { keepDays, dryRun, scanned: all.length, kept: kept.length, evicted: evicted.length };
+  if (dryRun || evicted.length === 0) return summary;
+  const archivePath = archiveEvictedTasks(ctx.opts.stateDir, evicted);
+  if (archivePath !== undefined) summary.archivePath = archivePath;
+  for (const task of evicted) ctx.maps.tasks.delete(task.id);
+  ctx.state.persistDirty = true;
+  flushPersistRecords({ TASKS_FILE: ctx.paths.TASKS_FILE, stateDir: ctx.opts.stateDir, tasks: ctx.maps.tasks, state: ctx.state });
+  return summary;
+}
+
+/**
  * Whether a pid is still alive (signal 0 probe). Uses the manager's killFn
  * (process.kill) directly rather than sendSignalToProcess's group logic,
  * since this is a liveness check, not a cancellation.
@@ -4377,6 +4411,7 @@ function resolveTimeoutOptions(rawOptions) {
     maxWaitMs: rawOptions.maxWaitMs ?? MAX_WAIT_MS,
     summarizerTimeoutMs: resolveNonNegativeIntOption(rawOptions.summarizerTimeoutMs, process.env.TASKFERRY_SUMMARIZER_TIMEOUT_MS, config.summarizerTimeoutMs, DEFAULT_SUMMARIZER_TIMEOUT_MS),
     activityMaxWords: resolvePositiveIntOption(rawOptions.activityMaxWords, process.env.TASKFERRY_ACTIVITY_MAX_WORDS, config.activityMaxWords, 75),
+    taskRetentionDays: resolveNonNegativeIntOption(rawOptions.taskRetentionDays, process.env.TASKFERRY_TASK_RETENTION_DAYS, config.taskRetentionDays, DEFAULT_TASK_RETENTION_DAYS),
     maxOutputFileBytes,
   };
 }
@@ -4726,6 +4761,7 @@ function initManagerLimits(opts) {
     maxWait: positiveInteger(opts.maxWaitMs, MAX_WAIT_MS),
     summarizerTimeout: nonNegativeInteger(opts.summarizerTimeoutMs, DEFAULT_SUMMARIZER_TIMEOUT_MS),
     activityWords: positiveInteger(opts.activityMaxWords, 75),
+    taskRetentionDays: nonNegativeInteger(opts.taskRetentionDays, DEFAULT_TASK_RETENTION_DAYS),
     maxOutputFileBytes: (() => {
       const v = positiveInteger(opts.maxOutputFileBytes, DEFAULT_MAX_OUTPUT_FILE_BYTES);
       if (v > MAX_BUFFER_BYTES) {
@@ -5211,6 +5247,10 @@ function buildTaskManagerApi(ctx) {
      */
     list: (options) => listTasks({ ensureStateLoaded: () => ctx.helpers.ensureStateLoaded(), tasks: ctx.maps.tasks }, options),
     stats: () => statsTasks({ ensureStateLoaded: () => ctx.helpers.ensureStateLoaded(), tasks: ctx.maps.tasks }),
+    prune: (options = {}) => {
+      ctx.helpers.ensureStateLoaded();
+      return applyTaskRetention(ctx, options);
+    },
     /**
      * @param {string} taskId
      * @param {{full?: boolean, fields?: string[]}} [options]
@@ -5291,6 +5331,11 @@ function bootstrapManagerContext(ctx) {
     taskEvents: ctx.events.taskEvents,
     setStateLoadError: (err) => { ctx.state.stateLoadError = err; },
   });
+  // Retention sweep, before the disk snapshot below so that snapshot reflects
+  // the pruned store. Skipped when the load itself failed: the map is empty in
+  // that case, and flushing it would write [] over a tasks.json that is merely
+  // unreadable by this build, not actually empty.
+  if (!ctx.state.stateLoadError) applyTaskRetention(ctx);
   // A second read of tasks.json for the sweeps' disk guard, taken *now* so
   // it is as close to the deletions as a boot-time snapshot can be. This is
   // cheap (one read of the state file) and gives the sweeps a record of

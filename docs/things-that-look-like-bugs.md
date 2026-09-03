@@ -350,3 +350,31 @@ belongs here.
   a close raced an unlink; the next boot re-checks it and reclaims it once
   its recorded owner is provably dead, so a leftover record can never wedge
   a restart.
+- Editing or truncating `tasks.json` by hand and watching the removed tasks
+  come back — expected. The daemon loads the whole store into memory at boot
+  and rewrites it wholesale on a coalesced flush timer, so any external edit is
+  overwritten the next time a task changes state. This is why `taskferry prune`
+  is an RPC to the daemon rather than a file rewrite in the CLI. It becomes a
+  real bug only if a prune through the daemon fails to survive a subsequent
+  flush, which would mean the eviction never reached the in-memory map.
+- Task history getting shorter over time, and `taskferry doctor --stats`
+  reporting a smaller `overall` sample than it used to — expected once
+  `taskRetentionDays` is non-zero. The boot sweep evicts terminal tasks past
+  the window so the store cannot grow without bound (a 117 MB, 31k-task
+  `tasks.json` is what motivated this: it pushed an unscoped `taskferry
+  context` past the daemon's 1 MiB response cap). Nothing is lost, the records
+  move to `<stateDir>/archive/tasks-pruned-<stamp>.ndjson`. Set
+  `taskRetentionDays` to `0` to keep everything in the hot store. It would be a
+  real bug if a `queued` or `running` task were evicted, or if an archive file
+  were missing records the store no longer has.
+- A stale overlay directory under plain `os.tmpdir()` surviving forever after a
+  prune — expected, and the reason is worth knowing before "fixing" it.
+  `collectOverlayTmpRoots` (`src/tasks.js:3459`) always scans the *current*
+  `overlayTmpRoot`, but discovers any additional root only from live task
+  records' `overlayDirs.tmpRoot`. Legacy records predating taskferry#286 are
+  the only thing pointing at the old `os.tmpdir()` default, so evicting all of
+  them also removes the sweep's only pointer to that directory. The tradeoff is
+  deliberate: the alternative is scanning `os.tmpdir()` unconditionally, which
+  is exactly the cross-daemon over-broad sweep taskferry#286 removed. Clean
+  those up by hand. It would be a real bug if a prune orphaned an overlay under
+  the *current* `overlayTmpRoot`, which is always scanned.

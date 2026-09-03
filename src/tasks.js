@@ -2370,8 +2370,9 @@ function resolveDispatchDirectory(directory) {
 }
 
 /**
- * Builds the queued `Task` record for a dispatch. Task IDs retain the literal
- * `oc_` prefix for compatibility. A resume with no `--model` inherits the
+ * Builds the queued `Task` record for a dispatch. Task IDs carry the
+ * executor's own `taskIdPrefix` (`oc_` for opencode, `pi_` for pi), so the id
+ * identifies which worker CLI ran it. A resume with no `--model` inherits the
  * model the session was created under (a different model can mean a different
  * provider, breaking the whole point of resuming that exact session).
  * @param {{id: string, directory: string, prompt: string, model: string|undefined, executor: import("./executor.js").WorkerExecutor, priorSessionTask: Task|null, variant: string|undefined, sessionId: string|undefined, originSessionId: string|undefined, internal: boolean, finalMarker: string|null, role: "dispatch"|"advisor", logPath: string, class?: string|null, parentTaskId?: string|null, defaultVariant: string, resolveOpencodeVariants: (model: string, env: NodeJS.ProcessEnv|undefined) => string[], env?: NodeJS.ProcessEnv, outputDir?: string|null, originalPrompt?: string, executorArgs?: string[]}} params
@@ -2662,6 +2663,11 @@ function buildSummarySnapshot(ctx, source, taskId, { resolvedSummarySessionId, r
  */
 function launchSummaryTask(ctx, p) {
   const { taskId, source, snapshot, isDelta, capturedAt, sourceStatus, maxWords, previousActivity, resolvedSummarySessionId, queuedCallerEnv } = p;
+  // Literal `oc_`, not executor.taskIdPrefix: this is not a missed case of the
+  // dispatch-id change above. Summary children are pinned to opencode
+  // (`executorId: "opencode"` below), so the prefix is fixed for the same
+  // reason the executor is. Derive both from one source if summaries ever
+  // gain a second executor, so the two cannot drift apart silently.
   const id = `oc_${Date.now().toString(36)}_${randomUUID().slice(0, 8)}`;
   const logPath = path.join(ctx.LOG_DIR, `${id}.ndjson`);
   const snapshotPath = path.join(ctx.SUMMARY_DIR, `${id}.json`);
@@ -7481,8 +7487,7 @@ function dispatchTask(params, ctx) {
   validateDispatchModel({ model, priorSessionTask, sessionId });
   const normalizedDirectory = resolveDispatchDirectory(directory);
   const projectConfig = loadProjectConfig(normalizedDirectory);
-  // Task IDs retain the literal "oc_" prefix for compatibility; WorkerExecutor.taskIdPrefix is not wired in this issue.
-  const id = `oc_${Date.now().toString(36)}_${randomUUID().slice(0, 8)}`;
+  const id = `${executor.taskIdPrefix}_${Date.now().toString(36)}_${randomUUID().slice(0, 8)}`;
   const logPath = path.join(ctx.LOG_DIR, `${id}.ndjson`);
   // Per-task scratch dir: a writable, rw-bound surface the worker can use to
   // hand back deliverables whose final assistant message ended on a tool call

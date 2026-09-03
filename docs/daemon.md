@@ -433,6 +433,15 @@ profiling is diagnostic, not on the request's critical path.
 
 ## Things that look like bugs but aren't
 
+- Summary child tasks get a hardcoded `oc_` id prefix while dispatch tasks
+  derive theirs from `executor.taskIdPrefix` (`oc_` for opencode, `pi_` for
+  pi). That asymmetry is deliberate, not a case the prefix change missed:
+  summary children are pinned to opencode (`executorId: "opencode"` in
+  `launchSummaryTask`, `src/tasks.js`), so their prefix is fixed for exactly
+  the same reason their executor is. If summaries ever gain a second executor,
+  derive both from one source rather than fixing only the prefix, since the
+  two hardcodings would otherwise drift apart with nothing to catch it.
+
 - The Claude statusline showing no Taskferry segment on its first poll, or
   lagging a task transition by one poll — expected. `tf-sl` never runs the CLI
   in its foreground render path: it reads a per-workspace snapshot under

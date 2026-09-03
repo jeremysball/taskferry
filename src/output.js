@@ -174,6 +174,7 @@ export function writeError(error, io = process) {
  * @property {string|null} [checkEndedAt]
  * @property {boolean} [checkOverride]
  * @property {{root?: string, tmpRoot?: string} | null} [overlayDirs]
+ * @property {string|null} [outputDir]
  */
 
 /**
@@ -215,6 +216,14 @@ function trimOverlayDirs(detail) {
   if (!detail.overlayDirs) return detail;
   const { root, tmpRoot } = detail.overlayDirs;
   return { ...detail, overlayDirs: { root, tmpRoot } };
+}
+
+/**
+ * @param {StatusDetailBase} detail
+ * @returns {Record<string, unknown>}
+ */
+function leanOutputDirField(detail) {
+  return detail.outputDir ? { outputDir: detail.outputDir } : {};
 }
 
 /**
@@ -271,6 +280,7 @@ export function leanStatus(detail, { full = false } = {}) {
   if (detail.changesetError) lean.changesetError = detail.changesetError;
   Object.assign(lean, leanCheckGateFields(detail));
   if (detail.projectConfigWarning) lean.projectConfigWarning = detail.projectConfigWarning;
+  Object.assign(lean, leanOutputDirField(detail));
   if (logBytesWritten !== undefined) {
     lean.logBytesWritten = logBytesWritten;
     lean.logLastWriteAt = logLastWriteAt;
@@ -630,6 +640,16 @@ export function contextForHook(context, format) {
   const additionalContext = encode(context);
   if (format === "claude-hook") {
     return { hookSpecificOutput: { hookEventName: "SessionStart", additionalContext } };
+  }
+  if (format === "kilo-hook") {
+    // Kilo's hook envelope mirrors Claude's SessionStart shape but the
+    // UserPromptSubmit path also accepts plain {additionalContext}.
+    // Returning hookSpecificOutput here keeps SessionStart compatible; the
+    // UserPromptSubmit shell hook unwraps whichever shape the daemon returned.
+    return { hookSpecificOutput: { hookEventName: "SessionStart", additionalContext } };
+  }
+  if (format === "codex-hook") {
+    return { additionalContext };
   }
   return { additionalContext };
 }

@@ -8,17 +8,19 @@ taskferry tasks by refreshing context at two points in the conversation.
 
 Like the Claude Code integration, both hook commands start with `command -v
 taskferry >/dev/null 2>&1` and fall back to a plain-text notice if the
-binary isn't found. Running `taskferry setup` once from the taskferry
-checkout puts the CLI on `PATH` and registers the Codex marketplace in
-the same step — see the [Quickstart section in the README](../../README.md#quickstart)
-for the full bootstrap.
+binary isn't found. For a fresh checkout, run `node src/cli.js setup`, then
+add `~/.local/bin` to `PATH` with `export PATH="$HOME/.local/bin:$PATH"`.
+Once `taskferry` already resolves on `PATH`, rerun `taskferry setup` to
+refresh the symlinks and register the Codex marketplace. See the
+[Quickstart section in the README](../../README.md#quickstart) for the full
+bootstrap.
 
 ## Install
 
-From the taskferry checkout, run:
+From a fresh checkout, run:
 
 ```bash
-taskferry setup
+node src/cli.js setup
 ```
 
 When the `codex` CLI is on `PATH`, `taskferry setup` adds the checkout
@@ -108,7 +110,8 @@ monitoring — it doesn't.
 
 The plugin bundles the canonical taskferry skill at
 `integrations/codex/skills/using-taskferry/SKILL.md` (generated from
-`skills/using-taskferry/SKILL.md` via `npm run skill:generate`), so a
+`skills/using-taskferry/SKILL.md` and its `resources/*` tree via
+`npm run skill:generate`; `npm run skill:check` validates both), so a
 Codex-driven `subagent-driven-development` lifecycle can dispatch
 implementer, fixer, and reviewer work through `taskferry dispatch` / `wait`
 / `result` the same way Claude Code does. The hooks above only provide

@@ -1,0 +1,10 @@
+{
+  "name": "taskferry",
+  "description": "Background task execution through the Taskferry AXI CLI — dispatch, monitor, and retrieve Kilo worker tasks",
+  "version": "4.0.0",
+  "author": {
+    "name": "Taskferry"
+  },
+  "skills": "./skills/",
+  "hooks": "./hooks/hooks.json"
+}

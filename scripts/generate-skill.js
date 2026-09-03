@@ -14,6 +14,7 @@ const resourcesRelativePath = path.join("skills", skillDirName, "resources");
 const generatedRelativePaths = [
   path.join("integrations", "claude", "skills", skillDirName, skillFileName),
   path.join("integrations", "codex", "skills", skillDirName, skillFileName),
+  path.join("integrations", "kilo", "skills", skillDirName, skillFileName),
 ];
 // Resource files under the canonical skill dir are copied to each integration
 // copy so a SKILL.md that references them (e.g. resources/deciding-to-dispatch.md)
@@ -21,6 +22,7 @@ const generatedRelativePaths = [
 const generatedResourcesRelativePaths = [
   path.join("integrations", "claude", "skills", skillDirName, "resources"),
   path.join("integrations", "codex", "skills", skillDirName, "resources"),
+  path.join("integrations", "kilo", "skills", skillDirName, "resources"),
 ];
 
 function canonicalSkill(root) {

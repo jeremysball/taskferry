@@ -55,6 +55,8 @@ export const RESULT_FIELDS = new Set([
   "checkOverride",
   "parentTaskId",
   "projectConfigWarning",
+  "prompt",
+  "promptAugmented",
 ]);
 export class ProtocolError extends Error {
   /**
@@ -193,6 +195,7 @@ const METHOD_PARAMS = {
       ["executor", isKnownExecutor],
       ["class", isNonEmptyString],
       ["parentTaskId", isNonEmptyString],
+      ["executorArgs", isNonEmptyStringArray],
     ],
   },
   "task.cancel": {
@@ -259,6 +262,7 @@ const METHOD_PARAMS = {
       ["executor", isKnownExecutor],
       ["class", isNonEmptyString],
       ["parentTaskId", isNonEmptyString],
+      ["executorArgs", isNonEmptyStringArray],
     ],
   },
   "task.context": {

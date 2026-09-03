@@ -39,6 +39,10 @@ that, `taskferry dispatch`, `taskferry advisor`, and `taskferry summary`
 (report mode — the default) each forward the *calling* process's own
 environment to the daemon over the same socket, which the daemon unions on
 top of its own ambient environment before spawning — caller wins.
+The report-summary child then removes `OPENCODE_CONFIG`,
+`OPENCODE_CONFIG_DIR`, and `OPENCODE_CONFIG_CONTENT`, and clears
+`TASKFERRY_OUTPUT_DIR` before it starts. Dispatch and advisor workers retain
+caller variables subject to the denylist and fixed plumbing exclusions below.
 
 There are three layers, unioned low-to-high priority: `envFile` (see
 below), the daemon's own ambient `process.env`, then the caller's
@@ -88,7 +92,8 @@ is likewise logged and non-fatal: the mandatory initial load has already
 succeeded by that point, so the daemon still starts, it just falls back to
 the old restart-required behavior for that one field.
 
-- The file itself must be owner-only (`chmod 600`) — `loadEnvFile()` fails
+- The file itself must have no group or other permission bits (`(mode & 0o077) == 0`).
+  Modes such as `0400`, `0600`, and `0700` pass. `loadEnvFile()` fails
   daemon startup on any file readable by group or other, the same
   fail-loud stance as a missing/malformed file (see `docs/config.md`).
 - The fixed set of daemon-controlled plumbing variables below (`PATH`,
@@ -156,15 +161,15 @@ tail), or a smaller delta excerpt when continuing a prior summary session.
 This is a real, secondary call to a model provider — do not summarize a
 task whose log contains secrets you don't want sent there. Specifics:
 
-- **Bounded.** The snapshot cache reads at most 96 KiB of the log (head and
+- **Bounded.** The activity snapshot cache reads at most 96 KiB of the log (head and
   tail, `DEFAULT_ACTIVITY_SNAPSHOT_BYTES` in `src/activity.js`), never the
   whole file, and the resulting narration is capped at 4000 characters
-  before it's sent for summarization.
-- **Cached.** A snapshot is reused rather than resummarized until the log
+  before it's sent for summarization. `taskferry summary --mode report` does **not** use this cache. It reads via `readNarrationExcerpt()` with the same 96 KiB head/tail bound but no 4 KiB / 360 s cache gate and no 4000-char cap, since it produces a full report as a separate async OpenCode subtask rather than a cached inline snapshot.
+- **Cached (activity path only).** An activity snapshot is reused rather than resummarized until the log
   has grown by at least 4 KiB (`ACTIVITY_REFRESH_BYTES`) *and* at least
   `TASKFERRY_SUMMARIZER_TIMEOUT_MS` (default 360000ms) has passed since
   the last refresh for that task — bounding both the token cost and the
-  request rate of watching a busy task.
+  request rate of watching a busy task. The direct `summary --mode report` path bypasses this cache entirely.
 - **Isolated, but not tool-denied.** The report-style summary child runs
   with `--pure` (disables plugins) against a private attachment outside the
   source workspace, and its prompt instructs the model to use only that
@@ -286,7 +291,7 @@ runs wrapped in
   /tmp`, `src/sandbox.js`), applied before any read-write binds — a path a
   caller saved under `/tmp` for a dispatch to read (a diff file, a scratch
   input) is invisible inside the sandbox unless it's also the dispatch's
-  own `directory`, `runtimeDir`, or an explicit `--rw-bind`/`--allowed-dirs`
+  own `directory`, the daemon socket for a dispatch role, `sandboxedDataHome`, `outputDir`, or an explicit `--rw-bind`/`--allowed-dirs`
   entry, even
   though the file exists on the host. Hitting this looks like a plain
   missing-file error from inside the sandbox, not a sandbox-specific one,
@@ -303,16 +308,19 @@ runs wrapped in
     this entry a worker's context (and therefore its output) silently picks
     up the caller's personal instructions
 - **Read-write access** is then re-granted only for the task's own working
-  directory and `TASKFERRY_RUNTIME_DIR` (needed so a nested/recursive
-  dispatch from inside the sandbox can still reach the daemon socket at
-  `<runtimeDir>/daemon.sock`).
+  directory, the daemon's per-task `sandboxedDataHome` (`<cacheDir>/opencode-data/<taskId>` — one data home per task, so concurrent dispatches never contend on a single opencode sqlite db; see taskferry#501), and the task's scratch `outputDir`, plus **only the socket file** (`<runtimeDir>/daemon.sock`, not the whole `runtimeDir`) bound so a nested dispatch from inside the sandbox can still reach the daemon. An advisor dispatch gets no runtime-directory or socket bind, so the daemon socket is unreachable without touching the network namespace.
 - **Deny-list has a fixed base plus an optional extension.** The paths above
   are always denied; `sandboxDenylist` / `TASKFERRY_SANDBOX_DENYLIST` (see
   `docs/config.md`) adds extra directories on top, merged with — not
   replacing — the fixed base. Entries are directories only: a file mount
   point (e.g. `~/.npmrc`, `~/.netrc`, `~/.git-credentials`) needs a
   different bwrap mechanism (masking the file, not tmpfs-ing a directory)
-  and isn't covered by this list yet.
+  and isn't covered by this list yet. The deny-list is overridable by the
+  user's own `--rw-bind`/`--ro-bind` (below) — re-exposing a deny-listed
+  path is the user's explicit call, and each override warns loudly at
+  dispatch time — but the structural mounts (`stateDir`, `runtimeDir`, the
+  launch directory) are not: a user bind overlapping one of those is
+  skipped with a warning even when it also overlaps the deny-list.
 - **Git worktrees get a scoped slice of their real gitdir bound read-write
   automatically.** A worktree's `.git` is just a pointer file to its actual
   gitdir under the main checkout's `.git/worktrees/<name>` — outside the
@@ -369,38 +377,66 @@ runs wrapped in
   (flag/env/config key) still works as a deprecated alias, emits a
   deprecation warning when used, and will be removed in the next major
   release. Entries that don't exist on disk are silently skipped, the same
-  as the deny-list.
+  as the deny-list. A `rwBind` path that overlaps the deny-list (e.g.
+  `~/.ssh`) is still bound read-write — overriding the deny-list is the
+  user's explicit call, not something the daemon blocks — but a loud
+  warning is emitted at dispatch time, since re-exposing a deny-listed
+  path as writable deserves more visibility than a docs footnote.
 - **`roBind`** is the read-only counterpart to `rwBind`: extra directories
   bound **read-only** into the sandbox for a review-only worker that should
   be able to read several repos but edit none of them. Resolved through the
   same protected-mount safety check as `.taskferry.toml`'s `read_only_paths`
   — an entry that doesn't exist on the host, or that overlaps a protected
-  mount (deny-list, `stateDir`, `runtimeDir`, or the launch directory), is
-  skipped and reported rather than bound. `roBind` unions across the
+  mount (`stateDir`, `runtimeDir`, or the launch directory), is skipped and
+  reported rather than bound. `roBind` unions across the
   per-dispatch `--ro-bind` flag, `TASKFERRY_RO_BIND`, config `roBind`, and
   the manager option. If the same resolved path appears in both the
   read-write set and the read-only set, it is bound **read-write** and a
   warning is emitted naming the path (read-write wins, never an error) — so
   a `roBind`/`read_only_paths` entry can be promoted to read-write from the
-  command line.
+  command line. A `roBind` path that overlaps the deny-list (e.g. `~/.ssh`)
+  is still bound read-only — overriding the deny-list is the user's
+  explicit call, same as `rwBind` — but a loud warning is emitted at
+  dispatch time. The structural mounts are never overridable: a `roBind`
+  path overlapping `stateDir`/`runtimeDir`/the launch directory is skipped
+  with a warning even when it also overlaps the deny-list (e.g. `stateDir`
+  itself, which is a default deny-list entry).
 - **`XDG_DATA_HOME` is redirected.** OpenCode writes its own logs, session
   database, and snapshots under `XDG_DATA_HOME` (`~/.local/share` by
   default), which is read-only inside the sandbox. Sandboxed dispatches get
-  `XDG_DATA_HOME` pointed at `<cacheDir>/opencode-data` instead (`cacheDir`
-  is `TASKFERRY_CACHE_DIR` or `$XDG_CACHE_HOME/taskferry`, default
-  `~/.cache/taskferry`) — real disk, not the small `runtimeDir` tmpfs used
-  for the daemon socket, since OpenCode's snapshot store grows unbounded
-  across dispatches and previously filled that tmpfs entirely. This is a
-  separate store from the host's real data home: a
-  session started outside the sandbox can't be resumed inside it (or vice
-  versa), and `--continue`/`--session <id>` resolve against whichever data
-  home the current dispatch is using.
+  `XDG_DATA_HOME` pointed at `<cacheDir>/opencode-data/<taskId>` instead
+  (`cacheDir` is `TASKFERRY_CACHE_DIR` or `$XDG_CACHE_HOME/taskferry`,
+  default `~/.cache/taskferry`) — real disk, not the small `runtimeDir`
+  tmpfs used for the daemon socket, since OpenCode's snapshot store grows
+  unbounded across dispatches and previously filled that tmpfs entirely.
+  The data home is scoped **per task**, so every dispatch (and every one of
+  that task's summary-generation calls) gets its own sqlite session db —
+  concurrent dispatches never contend on one shared `opencode.db`
+  (taskferry#501). This is a separate store from the host's real data
+  home: a session started outside the sandbox can't be resumed inside it
+  (or vice versa), and `--continue`/`--session <id>` resolve against
+  whichever data home the current dispatch is using.
 - **Credential visibility.** Provider credentials normally live in
   `auth.json` under the real `XDG_DATA_HOME`, so redirecting it would
   otherwise hide every stored credential from the sandboxed process. To keep
   credentialed providers working, the real `auth.json` (and only that file,
   not the rest of the real data home) is ro-bound read-only into the
-  sandboxed data home when it exists on disk.
+  sandboxed data home when it exists on disk. For `pi`, auth and extensions
+  are read-only binds. When `--session-id` resumes a prior session, only that
+  session file is bound **read-write** (`src/executor.js:483-486`), so pi can
+  update its own session state without exposing other sessions.
+- **`UV_CACHE_DIR`/`UV_TOOL_DIR` are redirected per task.** The default uv
+  cache (`~/.cache/uv`) and tool dir (`~/.local/share/uv/tools`) sit under
+  the read-only root bind, so a sandboxed `uvx <tool>` cannot resolve or
+  install its tool environment — and, worst case, a tool like ruff silently
+  produced a plausible-looking wrong answer instead of failing
+  (taskferry#426). Every sandboxed dispatch (and the verification gate,
+  which re-mounts the same overlay for the project's `check` command) gets
+  `UV_CACHE_DIR`/`UV_TOOL_DIR` pointed at per-task dirs
+  `<cacheDir>/uv-cache/<task-id>` and `<cacheDir>/uv-tools/<task-id>`, both
+  created and rw-bound at that same path. Per-task (not shared) so one
+  task's uv cache can't perturb or bloat another's; the dirs are real disk,
+  not the small `runtimeDir` tmpfs, and are never cleaned up automatically.
 - **Fail-fast on Linux.** If sandboxing is enabled (the default) and `bwrap`
   is not installed, dispatch fails immediately with a `crashed` task and a
   matching `spawnError` — there is no silent unsandboxed fallback on the
@@ -439,16 +475,16 @@ runs wrapped in
   at all. An advisor's sandbox keeps `--share-net` like every other
   role — the worker CLI still needs outbound network to reach its model
   provider, so `--unshare-net` was tried for advisor and reverted when it
-  blocked that. The advisor-specific guardrail is narrower: its `runtimeDir`
-  is bound read-only instead of read-write, so the daemon's Unix socket
-  (which lives there) is unreachable from inside the sandbox, without
+  blocked that. The advisor-specific guardrail is narrower: it receives no
+  `runtimeDir` or socket bind, so the daemon's Unix socket is unreachable from
+  inside the sandbox, without
   touching the network namespace at all.
   A worker's `git commit` inside the sandbox is never
-  replayed as a commit -- only a working-tree-style diff, computed against
+  replayed as a commit. Only a working-tree-style diff, computed against
   the real pre-dispatch `HEAD`, survives into `accept`.
 - **Diff-gated writes.** A dispatch's changeset is extracted once at
   process exit and held as `changesetStatus: "pending"` until
-  `taskferry accept <id>` (applies it: `git apply` for a git target, an
+  `taskferry accept <id>` (applies it: `git apply --3way` for a git target, an
   in-sandbox `rsync` for a non-git one) or `taskferry reject <id>`
   (discards it). A dispatch whose extraction finds zero changes
   auto-resolves to `accepted` immediately (a no-op needs no gate).
@@ -462,7 +498,7 @@ runs wrapped in
   only be rejected, never applied. Cleanup has the same persistence
   boundary: each overlay records the tmp root in effect at creation, so
   removal keeps working across daemon restarts even when `TMPDIR` changes,
-  but records persisted before that field existed get the live
-  `overlayTmpRoot` backfilled at load as a best-effort guess. A legacy
-  overlay whose effective `TMPDIR` has since changed can't be recovered
-  retroactively and sits until reboot.
+  but records persisted before that field existed get the old plain
+  `os.tmpdir()` default backfilled at load. A legacy overlay whose effective
+  temporary root has since changed cannot be recovered retroactively and sits
+  until reboot.

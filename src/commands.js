@@ -186,7 +186,7 @@ function runVersion() {
 // when the caller set them. The daemon's allowed-params spec rejects unknown
 // keys, so an explicitly-undefined value (the args.js default for an omitted
 // flag) must be omitted entirely -- see isSet() above.
-const DISPATCH_PASSTHROUGH_KEYS = ["model", "variant", "sessionId", "finalMarker", "noSandbox", "noOverlay", "allowedDirs", "rwBind", "roBind", "executor", "class", "parentTaskId"];
+const DISPATCH_PASSTHROUGH_KEYS = ["model", "variant", "sessionId", "finalMarker", "noSandbox", "noOverlay", "allowedDirs", "rwBind", "roBind", "executor", "class", "parentTaskId", "executorArgs"];
 
 /**
  * @param {Record<string, unknown>} options
@@ -307,7 +307,7 @@ async function runReject(options, { client }) {
  * @param {ResolvedDeps} deps
  */
 async function runOutput(options, { client }) {
-  return /** @type {unknown} */ (await client.request("task.output", { taskId: options.taskId, ...(typeof options.path === "string" && options.path.length > 0 ? { path: options.path } : {}) }));
+  return /** @type {unknown} */ (await client.request("task.output", { taskId: options.taskId, ...(typeof options.path === "string" && options.path.length > 0 ? { path: options.path } : {}), ...(typeof options.maxOutputFileBytes === "number" ? { maxOutputFileBytes: options.maxOutputFileBytes } : {}) }));
 }
 
 // `wait --summarize` keeps the client open (cli.js's top-level finally owns the
@@ -425,9 +425,11 @@ async function maybeCondenseContext(client, gathered, options, { env, directory 
  * @param {string} [options.executor]
  * @param {string} [options.class]
  * @param {string} [options.parentTaskId]
+ * @param {string[]} [options.executorArgs]
  * @param {boolean} [options.summarizeContext]
  * @param {ResolvedDeps} deps
  */
+// eslint-disable-next-line sonarjs/cyclomatic-complexity -- passthrough of optional dispatch keys dominates complexity
 async function runAdvisor(options, { client, env, cwd, homeDirectory }) {
   // advisor is grouped with dispatch (literal cwd), not with the
   // observation commands: tasks.js's advisor() forwards its directory
@@ -456,6 +458,7 @@ async function runAdvisor(options, { client, env, cwd, homeDirectory }) {
     ...(isSet(options.executor) && { executor: options.executor }),
     ...(isSet(options.class) && { class: options.class }),
     ...(isSet(options.parentTaskId) && { parentTaskId: options.parentTaskId }),
+    ...(isSet(options.executorArgs) && { executorArgs: options.executorArgs }),
   });
 }
 

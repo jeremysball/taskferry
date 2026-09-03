@@ -1,3 +1,4 @@
+/* eslint-disable sonarjs/no-duplicate-string -- test fixtures repeat taskferry/integration paths intentionally */
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
@@ -19,6 +20,7 @@ const GENERATE_SCRIPT = "generate-skill.js";
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const claudeRoot = path.join(root, "integrations", "claude");
 const codexRoot = path.join(root, "integrations", "codex");
+const kiloRoot = path.join(root, "integrations", "kilo");
 
 function readJson(...parts) {
   return JSON.parse(fs.readFileSync(path.join(root, ...parts), ENCODING));
@@ -295,6 +297,7 @@ test("distributed skills are generated from the canonical source", () => {
   const canonical = fs.readFileSync(path.join(root, "skills", SKILL_DIR, SKILL_FILE), ENCODING);
   assert.equal(fs.readFileSync(path.join(claudeRoot, "skills", SKILL_DIR, SKILL_FILE), ENCODING), canonical);
   assert.equal(fs.readFileSync(path.join(codexRoot, "skills", SKILL_DIR, SKILL_FILE), ENCODING), canonical);
+  assert.equal(fs.readFileSync(path.join(kiloRoot, "skills", SKILL_DIR, SKILL_FILE), ENCODING), canonical);
 
   const result = spawnSync(process.execPath, ["scripts/generate-skill.js", "--check"], {
     cwd: root,
@@ -318,7 +321,7 @@ test("skill resources are distributed alongside SKILL.md", () => {
   for (const name of names) {
     assert.match(skill, new RegExp(`${RESOURCES_DIR}/${name.replace(/\./gu, "\\.")}`));
     const canonical = fs.readFileSync(path.join(canonicalResources, name), ENCODING);
-    for (const integrationRoot of [claudeRoot, codexRoot]) {
+    for (const integrationRoot of [claudeRoot, codexRoot, kiloRoot]) {
       const copy = path.join(integrationRoot, "skills", SKILL_DIR, RESOURCES_DIR, name);
       assert.equal(fs.readFileSync(copy, ENCODING), canonical, `stale copy: ${copy}`);
     }
@@ -375,6 +378,7 @@ test("skill check does not false-flag a nested canonical resource as stale", () 
     path.join("skills", SKILL_DIR, SKILL_FILE),
     path.join("integrations", "claude", "skills", SKILL_DIR, SKILL_FILE),
     path.join("integrations", "codex", "skills", SKILL_DIR, SKILL_FILE),
+    path.join("integrations", "kilo", "skills", SKILL_DIR, SKILL_FILE),
   ];
   try {
     for (const relativePath of files) {
@@ -387,6 +391,7 @@ test("skill check does not false-flag a nested canonical resource as stale", () 
       path.join("skills", SKILL_DIR),
       path.join("integrations", "claude", "skills", SKILL_DIR),
       path.join("integrations", "codex", "skills", SKILL_DIR),
+      path.join("integrations", "kilo", "skills", SKILL_DIR),
     ]) {
       const destination = path.join(sandbox, base, RESOURCES_DIR, "guides", "nested.md");
       fs.mkdirSync(path.dirname(destination), { recursive: true });
@@ -450,6 +455,7 @@ test("skill check detects a stale generated copy", () => {
     path.join("skills", SKILL_DIR, SKILL_FILE),
     path.join("integrations", "claude", "skills", SKILL_DIR, SKILL_FILE),
     path.join("integrations", "codex", "skills", SKILL_DIR, SKILL_FILE),
+    path.join("integrations", "kilo", "skills", SKILL_DIR, SKILL_FILE),
   ];
   try {
     for (const relativePath of skillFiles) {
@@ -491,4 +497,50 @@ test("bundled skill teaches the AXI worker contract without extra plugin surface
   assert.match(skill, /start a fresh session only when/i);
   assert.doesNotMatch(skill, /\bMCP\b/i);
   assert.doesNotMatch(skill, /taskferry setup/);
+});
+
+test("Kilo plugin manifests expose hooks and skill parity with Claude/Codex", () => {
+  const plugin = readJson("integrations", "kilo", ".kilo-plugin", "plugin.json");
+  const hooks = readJson("integrations", "kilo", "hooks", HOOKS_FILE);
+
+  assert.equal(plugin.name, "taskferry");
+  assert.equal(plugin.hooks, "./hooks/hooks.json");
+  assert.equal(plugin.skills, "./skills/");
+  assert.equal(typeof plugin.description, "string");
+  assert.equal(typeof plugin.version, "string");
+
+  assert.match(hooks.description, /kilo/i);
+  assert.deepEqual(Object.keys(hooks.hooks).sort(), ["SessionStart", "UserPromptSubmit"]);
+  for (const event of ["SessionStart", "UserPromptSubmit"]) {
+    assert.equal(hooks.hooks[event].length, 1);
+    const hook = hooks.hooks[event][0].hooks[0];
+    assert.equal(hook.type, "command");
+    assert.match(hook.command, /taskferry context/);
+    assert.match(hook.command, /kilo-hook/);
+  }
+});
+
+test("Kilo context uses the kilo-hook envelope (claude-compatible)", () => {
+  const context = {
+    directory: "/workspace/project",
+    counts: { total: 1, running: 1, queued: 0, terminal: 0 },
+    tasks: [{ id: "oc_ab12", status: "running", model: "openai/gpt-5.6-sol", startedAt: "2026-07-15T00:00:00Z" }],
+  };
+
+  assert.deepEqual(contextForHook(context, "kilo-hook"), {
+    hookSpecificOutput: {
+      hookEventName: "SessionStart",
+      additionalContext: "directory: /workspace/project\ncounts:\n  total: 1\n  running: 1\n  queued: 0\n  terminal: 0\ntasks[1]{id,status,model,startedAt}:\n  oc_ab12,running,openai/gpt-5.6-sol,\"2026-07-15T00:00:00Z\"",
+    },
+  });
+});
+
+test("Kilo hooks degrade gracefully when taskferry is missing or fails", () => {
+  const hooks = readJson("integrations", "kilo", "hooks", HOOKS_FILE);
+  for (const event of ["SessionStart", "UserPromptSubmit"]) {
+    const command = hooks.hooks[event][0].hooks[0].command;
+    assert.match(command, /command -v taskferry/);
+    assert.match(command, /taskferry is unavailable/);
+    assert.match(command, /taskferry context failed/);
+  }
 });

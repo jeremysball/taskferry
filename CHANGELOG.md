@@ -1,5 +1,66 @@
 # Changelog
 
+## [4.4.0](https://github.com/jeremysball/taskferry/compare/taskferry-v4.3.0...taskferry-v4.4.0) (2026-08-25)
+
+
+### Features
+
+* **ci:** publish to npm via trusted publishing (OIDC) on release ([408f692](https://github.com/jeremysball/taskferry/commit/408f692adbe78fafbaf87a8e48755926f3e946ae))
+* **ci:** publish to npm via trusted publishing (OIDC) on release ([70c362f](https://github.com/jeremysball/taskferry/commit/70c362f47d918bdb59ed8790d6b2c01d680750bf))
+* **dispatch:** passthrough executor-native flags via --executor-arg ([78f58d7](https://github.com/jeremysball/taskferry/commit/78f58d782552ee19866fd1d295b31a0fefb2352b))
+* **dispatch:** passthrough executor-native flags via --executor-arg ([0dd6c06](https://github.com/jeremysball/taskferry/commit/0dd6c06cabdc012922665ef75283c2d60fdfb8f8))
+
+
+### Bug Fixes
+
+* **ci:** publish with --provenance for OIDC trusted publishing ([bf59115](https://github.com/jeremysball/taskferry/commit/bf59115fb6dd63a4b703d850560948f29aa2cf7c))
+
+## [4.3.0](https://github.com/jeremysball/taskferry/compare/taskferry-v4.2.0...taskferry-v4.3.0) (2026-08-23)
+
+
+### Features
+
+* **kilo:** add first-class Kilo Code integration with live monitoring ([a554780](https://github.com/jeremysball/taskferry/commit/a554780501496f87e8591b4f61ad583ea17cdc3e))
+
+
+### Bug Fixes
+
+* **skill:** regenerate kilo skill after main merge ([56d2a69](https://github.com/jeremysball/taskferry/commit/56d2a69ee67f67133d4c4c9fb8ad9811cf51ebb1))
+
+## [4.2.0](https://github.com/jeremysball/taskferry/compare/taskferry-v4.1.2...taskferry-v4.2.0) (2026-08-22)
+
+
+### Features
+
+* **daemon:** auto-resume in-flight tasks on restart, restart immediately by default ([#502](https://github.com/jeremysball/taskferry/issues/502)) ([8777392](https://github.com/jeremysball/taskferry/commit/87773926b767f6a864f7fd4d1eee4dca6346c81c))
+* **hooks:** enforce worktree commits via pre-commit gate ([7c1f6d6](https://github.com/jeremysball/taskferry/commit/7c1f6d6f2a926c472f87de7b118f34ffafc5250a))
+* **hooks:** enforce worktree commits via pre-commit gate ([7c14397](https://github.com/jeremysball/taskferry/commit/7c14397413bed7662a036c92a452f2b0693c4206))
+* **sandbox:** let --ro-bind override the deny-list with a loud warning ([#503](https://github.com/jeremysball/taskferry/issues/503)) ([a5a63b7](https://github.com/jeremysball/taskferry/commit/a5a63b7f4879c6aa92121527f93095d7d969a63c)), closes [#497](https://github.com/jeremysball/taskferry/issues/497)
+
+
+### Bug Fixes
+
+* **output:** enforce response budget for real request ids ([#527](https://github.com/jeremysball/taskferry/issues/527)) ([5acdc4f](https://github.com/jeremysball/taskferry/commit/5acdc4fea1eaaed4c0754f809db5140ecf094770))
+* **sandbox,daemon,opencode:** per-task isolation for uv cache, daemon singleton, and XDG_DATA_HOME ([ffa5b3a](https://github.com/jeremysball/taskferry/commit/ffa5b3aa0c5b3ff3d7a1de99ed2f65c9f4574f1a))
+* **sandbox,daemon,opencode:** per-task isolation for uv cache, daemon singleton, and XDG_DATA_HOME ([ed9713a](https://github.com/jeremysball/taskferry/commit/ed9713a122a660c3084ffae8a89d26d4e4dee6fb))
+* **summarizer:** use latest session ID from retry logs ([0b845fd](https://github.com/jeremysball/taskferry/commit/0b845fd235eab08dc3d4d193ff4f243ecff18ae1))
+* **tasks:** handle resolver failures and centralize activity-key normalization ([#483](https://github.com/jeremysball/taskferry/issues/483)) ([32ed725](https://github.com/jeremysball/taskferry/commit/32ed725b4b1106816d6251cf5d0c1761ee4fd3f2))
+
+## [4.1.2](https://github.com/jeremysball/taskferry/compare/taskferry-v4.1.1...taskferry-v4.1.2) (2026-08-21)
+
+
+### Bug Fixes
+
+* **tooling:** glob test discovery and require local quality tools ([#528](https://github.com/jeremysball/taskferry/issues/528)) ([8f21442](https://github.com/jeremysball/taskferry/commit/8f2144238dd9216800ab9d312a955c2e14f9fd75))
+
+## [4.1.1](https://github.com/jeremysball/taskferry/compare/taskferry-v4.1.0...taskferry-v4.1.1) (2026-08-21)
+
+
+### Bug Fixes
+
+* **adr:** correct kilo.md's actual location (PR [#489](https://github.com/jeremysball/taskferry/issues/489) branch, not main) ([f9aaf1f](https://github.com/jeremysball/taskferry/commit/f9aaf1ff62ae6eae5d65c045766623605fb78546))
+* **executor:** resolve symlinked opencode config entries instead of dropping them ([#492](https://github.com/jeremysball/taskferry/issues/492)) ([bd4284a](https://github.com/jeremysball/taskferry/commit/bd4284a8c220d95286d8771d6a93327e94620cf2)), closes [#491](https://github.com/jeremysball/taskferry/issues/491)
+
 ## [4.1.0](https://github.com/jeremysball/taskferry/compare/taskferry-v4.0.0...taskferry-v4.1.0) (2026-08-16)
 
 

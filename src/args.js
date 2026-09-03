@@ -278,7 +278,7 @@ const DEFAULT_OPTIONS = {
   result: () => ({ taskId: void 0, ...flagDefaultsFor("result") }),
   accept: () => ({ taskId: void 0, ...flagDefaultsFor("accept") }),
   reject: () => ({ taskId: void 0 }),
-  output: () => ({ taskId: void 0, path: void 0 }),
+  output: () => ({ taskId: void 0, path: void 0, ...flagDefaultsFor("output") }),
   list: () => flagDefaultsFor("list"),
   watch: () => ({ ...flagDefaultsFor("watch"), format: "toon", taskId: void 0 }),
   context: () => ({ ...flagDefaultsFor("context"), format: "toon" }),
@@ -315,7 +315,7 @@ function coerceDirList(value, name) {
  * @returns {string}
  */
 function coerceFormat(value, name, command) {
-  const allowed = command === "watch" ? ["toon", "ndjson"] : ["toon", "claude-hook", "codex-hook"];
+  const allowed = command === "watch" ? ["toon", "ndjson"] : ["toon", "claude-hook", "codex-hook", "kilo-hook"];
   if (!allowed.includes(value)) throw new UsageError(`${name} must be one of ${allowed.join(", ")}`, `Use ${name} with one of: ${allowed.join(", ")}`);
   return value;
 }
@@ -354,6 +354,63 @@ function coerceFinalMarker(value, name) {
   return value;
 }
 
+/**
+ * Single quoted-string passthrough for executor-native flags. The flag takes
+ * one shell-quoted string (e.g. `--executor-args "--no-tools --system-prompt \" \""`) that is split
+ * respecting single/double quotes and escapes into the verbatim argv array
+ * forwarded to the executor binary before the prompt.
+ * @param {string} value
+ * @param {string} name
+ * @returns {string[]}
+ */
+// eslint-disable-next-line sonarjs/cognitive-complexity, sonarjs/cyclomatic-complexity, complexity -- shell split for quoted string is inherently branchy; covered by tests
+function coerceExecutorArgs(value, name) {
+  if (!value.trim()) throw new UsageError(`${name} requires a non-empty value`, `Run ${name} with a quoted string like "--no-tools --system-prompt \\" \\""`);
+  const args = [];
+  let cur = "";
+  let inSingle = false;
+  let inDouble = false;
+  let escaped = false;
+  let tokenQuoted = false;
+  // eslint-disable-next-line sonarjs/too-many-break-or-continue-in-loop -- manual shell tokenization needs continue per branch
+  for (let i = 0; i < value.length; i++) {
+    const ch = value[i];
+    if (escaped) {
+      cur += ch;
+      escaped = false;
+      continue;
+    }
+    if (ch === "\\" && !inSingle) {
+      escaped = true;
+      continue;
+    }
+    if (ch === "'" && !inDouble) {
+      inSingle = !inSingle;
+      tokenQuoted = true;
+      continue;
+    }
+    if (ch === '"' && !inSingle) {
+      inDouble = !inDouble;
+      tokenQuoted = true;
+      continue;
+    }
+    if (ch === " " && !inSingle && !inDouble) {
+      if (cur !== "" || tokenQuoted) {
+        args.push(cur);
+        cur = "";
+        tokenQuoted = false;
+      }
+      continue;
+    }
+    cur += ch;
+  }
+  if (escaped) throw new UsageError(`${name} has a trailing escape`, `Run ${name} with a quoted string`);
+  if (inSingle || inDouble) throw new UsageError(`${name} has an unclosed quote`, `Run ${name} with a quoted string`);
+  if (cur !== "" || tokenQuoted) args.push(cur);
+  if (!args.length) throw new UsageError(`${name} requires a non-empty value`, `Run ${name} with a quoted string`);
+  return args;
+}
+
 // Every flag in one table: the commands that allow it, whether it is a bare
 // boolean, the option key it writes, an optional value coercer, and (for
 // retired MCP-era names) a rename hint plus the flag the hint points at.
@@ -371,11 +428,13 @@ const FLAGS = {
   "--executor": { allow: ["dispatch", "advisor"], key: "executor", coerce: coerceExecutor },
   "--class": { allow: ["dispatch", "advisor"], key: "class" },
   "--parent-task": { allow: ["dispatch", "advisor"], key: "parentTaskId" },
+  "--executor-arg": { allow: ["dispatch", "advisor"], key: "executorArgs", coerce: coerceExecutorArgs },
   "--grace-ms": { allow: ["cancel"], key: "graceMs", coerce: (v, n) => parseNumber(v, n, { min: 0 }) },
   "--timeout": { allow: ["wait", "advisor"], key: "timeoutMs", coerce: (v, n) => parseDuration(v, n) },
   "--tail-chars": { allow: ["wait"], key: "tailChars", coerce: (v, n) => parseNumber(v, n, { min: 1, max: 65536 }) },
   "--chars": { allow: ["tail"], key: "chars", coerce: (v, n) => parseNumber(v, n, { min: 1, max: 131072 }) },
   "--path": { allow: ["output"], key: "path" },
+  "--max-output-file-bytes": { allow: ["output"], key: "maxOutputFileBytes", coerce: (v, n) => parseNumber(v, n, { min: 1 }) },
   "--mode": { allow: ["summary"], key: "mode", coerce: coerceMode },
   "--max-words": { allow: ["summary"], key: "maxWords", coerce: (v, n) => parseNumber(v, n, { min: 75, max: 300 }) },
   "--fields": { allow: ["result"], key: "fields", coerce: parseFields },
@@ -482,6 +541,7 @@ function handleValueFlag(ctx, name, def, required) {
  * @param {string} token
  * @returns {number}
  */
+// eslint-disable-next-line sonarjs/cognitive-complexity, sonarjs/cyclomatic-complexity -- extra branch for single quoted-string executorArgs passthrough
 function consumeFlag(ctx, rest, index, token) {
   const { name, inlineValue } = parseLongFlag(token);
   const def = FLAGS[name];
@@ -489,6 +549,23 @@ function consumeFlag(ctx, rest, index, token) {
   if (isMigration(ctx, name, def)) return handleMigrationFlag(ctx, name, def);
   if (!def.allow?.includes(ctx.command)) throwUnknown(ctx, name);
   if (def.bool) return handleBooleanFlag(ctx, name, def, inlineValue, index);
+  if (def.key === "executorArgs") {
+    let value;
+    let nextIndex;
+    if (inlineValue !== undefined) {
+      if (!inlineValue) throw new UsageError(`${name} requires a non-empty value`, `Run ${name} with a value`);
+      value = inlineValue;
+      nextIndex = index;
+    } else {
+      const next = rest[index + 1];
+      if (next === undefined) throw new UsageError(`${name} requires a value`, `Run ${name} with a value`);
+      // Allow values starting with -- (the raw executor string starts with --no-tools)
+      if (!next && next !== " ") throw new UsageError(`${name} requires a non-empty value`, `Run ${name} with a value`);
+      value = next;
+      nextIndex = index + 1;
+    }
+    return handleValueFlag(ctx, name, def, { value, nextIndex });
+  }
   const required = requireValue(rest, index, name, inlineValue);
   return handleValueFlag(ctx, name, def, required);
 }

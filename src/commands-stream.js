@@ -1,6 +1,6 @@
 import { normalizeDirectory, resolveWorkspaceRoot } from "./paths.js";
 import { formatWatchEvent } from "./output.js";
-import { TERMINAL_STATUSES as CORE_TERMINAL_STATUSES } from "./opencode-plugin.js";
+import { TERMINAL_STATUSES as CORE_TERMINAL_STATUSES } from "./statuses.js";
 
 const TASK_STATUS_METHOD = "task.status";
 const TASK_STATE_EVENT_TYPE = "task.state";

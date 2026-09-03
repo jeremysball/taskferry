@@ -2,7 +2,7 @@ export const commandSpecs = {
   dispatch: {
     usage: "taskferry dispatch --prompt <text> [options]",
     description: "Queue a background OpenCode run.",
-    options: { "--prompt <text>": "required", "--directory <path>": "defaults to the current workspace", "--model <id>": "required unless resuming via --session-id with a matching prior task", "--variant <name>": "optional; defaults to the model's highest supported thinking level (see defaultVariant in docs/config.md)", "--session-id <id>": "resume an existing OpenCode session", "--require-final-marker <regex>": "flag the task as incomplete if the final message doesn't match this pattern (case-sensitive, standard JS RegExp semantics)", "--no-sandbox": "run this dispatch without the bwrap filesystem sandbox (default: sandboxed on Linux)", "--no-overlay": "run this dispatch without the copy-on-write overlay (writes land directly, not gated by accept/reject)", "--rw-bind <path,path,...>": "extra directories bound read-write inside the sandbox, in addition to the auto-detected git-common-dir for a worktree; required for anything under /tmp — the sandbox mounts it empty by default, hiding paths that exist on the host; unions with TASKFERRY_RW_BIND and config rwBind", "--ro-bind <path,path,...>": "extra directories bound read-only inside the sandbox; a path is skipped and reported if it is missing on this host or overlaps a protected sandbox mount; a path also listed in --rw-bind binds read-write (read-write always wins, never an error); unions with TASKFERRY_RO_BIND and config roBind", "--allowed-dirs <path,path,...>": "deprecated alias for --rw-bind (same behavior, still unions with it); will be removed in the next major release", "--executor <opencode|pi>": "worker backend to dispatch through, default pi", "--class <name>": "optional free-text task-class tag for external telemetry consumers; taskferry does not validate against a fixed list", "--parent-task <id>": "tag this dispatch as fixing/retrying an earlier task; persisted as parentTaskId, and echoed by that task's check-gate failure message" },
+    options: { "--prompt <text>": "required", "--directory <path>": "defaults to the current workspace", "--model <id>": "required unless resuming via --session-id with a matching prior task", "--variant <name>": "optional; defaults to the model's highest supported thinking level (see defaultVariant in docs/config.md)", "--session-id <id>": "resume an existing OpenCode session", "--require-final-marker <regex>": "flag the task as incomplete if the final message doesn't match this pattern (case-sensitive; standard JS RegExp syntax with multiline matching, so ^ and $ can match standalone lines)", "--no-sandbox": "run this dispatch without the bwrap filesystem sandbox (default: sandboxed on Linux)", "--no-overlay": "run this dispatch without the copy-on-write overlay (writes land directly, not gated by accept/reject)", "--rw-bind <path,path,...>": "extra directories bound read-write inside the sandbox, in addition to the auto-detected git-common-dir for a worktree; required for anything under /tmp — the sandbox mounts it empty by default, hiding paths that exist on the host; unions with TASKFERRY_RW_BIND and config rwBind", "--ro-bind <path,path,...>": "extra directories bound read-only inside the sandbox; a path is skipped and reported if it is missing on this host or overlaps a protected sandbox mount; a path also listed in --rw-bind binds read-write (read-write always wins, never an error); unions with TASKFERRY_RO_BIND and config roBind", "--allowed-dirs <path,path,...>": "deprecated alias for --rw-bind (same behavior, still unions with it); will be removed in the next major release", "--executor <opencode|pi>": "worker backend to dispatch through, default pi", "--class <name>": "optional free-text task-class tag for external telemetry consumers; taskferry does not validate against a fixed list", "--parent-task <id>": "tag this dispatch as fixing/retrying an earlier task; persisted as parentTaskId, and echoed by that task's check-gate failure message", "--executor-arg <string>": "single quoted string of verbatim extra args passed to the executor binary, shell-split and inserted before the prompt; e.g. --executor-arg \"--no-tools --system-prompt \" \"\"" },
     examples: ['taskferry dispatch --prompt "Fix the failing tests"', 'taskferry dispatch --prompt "Review this change" --model openai/gpt-5.6-sol', 'taskferry dispatch --prompt "Investigate" --require-final-marker "^Status: (DONE|DONE_WITH_CONCERNS)$"', 'taskferry dispatch --prompt "Run one-off shell tooling" --no-sandbox', 'taskferry dispatch --prompt "Update the shared cache dir" --rw-bind /home/user/.cache/myapp', 'taskferry dispatch --prompt "Review the vendored deps" --ro-bind /home/user/reference-repo', 'taskferry dispatch --prompt "Fix the failing tests" --class implementer', 'taskferry dispatch --prompt "Fix: check gate failed" --parent-task oc_msgabc12'],
   },
   cancel: {
@@ -25,9 +25,9 @@ export const commandSpecs = {
   },
   output: {
     usage: "taskferry output <id> [--path <relpath>]",
-    description: "List a task's scratch output directory (or read one file in it). Every dispatch reserves a per-task writable directory at <stateDir>/outputs/<id>/, rw-bound into the bwrap sandbox at the same path and exposed to the worker as $TASKFERRY_OUTPUT_DIR. Works on every terminal status (done, crashed, cancelled, and incomplete).",
-    options: { "--path <relpath>": "read one file relative to the task's output dir instead of listing; rejects any path that would escape the per-task directory (e.g. \"../sibling\", absolute paths)" },
-    examples: ['taskferry output <id>', 'taskferry output <id> --path deliverable.txt'],
+    description: "List a task's scratch output directory (or read one file in it). Every dispatch reserves a per-task writable directory at <stateDir>/outputs/<id>/, exposed to the worker as $TASKFERRY_OUTPUT_DIR. When bwrap sandboxing is active, taskferry rw-binds that directory at the same path. With --no-sandbox, it remains a normal host directory. Works on every terminal status (done, crashed, and cancelled, including a done task whose incomplete flag is true).",
+    options: { "--path <relpath>": "read one file relative to the task's output dir instead of listing; rejects any path that would escape the per-task directory (e.g. \"../sibling\", absolute paths)", "--max-output-file-bytes <number>": "maximum bytes to read for a single file when --path is used; default 524288 (512 KiB); capped by daemon response budget 1 MiB (src/daemon-server.js:14) and provably safe ceiling 174080 ((1 MiB-4096)/6, 6× for control chars). Control-heavy files that would exceed wire budget now surface a clear would-exceed-daemon-response-limit error naming the knob, not generic RESPONSE_TOO_LARGE. Precedence: flag > TASKFERRY_MAX_OUTPUT_FILE_BYTES env var > config.json maxOutputFileBytes > built-in default" },
+    examples: ['taskferry output <id>', 'taskferry output <id> --path deliverable.txt', 'taskferry output <id> --path deliverable.txt --max-output-file-bytes 1048576'],
   },
   wait: {
     usage: "taskferry wait <id> [options]",
@@ -48,6 +48,7 @@ export const commandSpecs = {
       "--executor <opencode|pi>": "worker backend to dispatch through, default pi",
       "--class <name>": "optional free-text task-class tag for external telemetry consumers; taskferry does not validate against a fixed list",
       "--parent-task <id>": "tag this dispatch as fixing/retrying an earlier task; persisted as parentTaskId, and echoed by that task's check-gate failure message",
+      "--executor-arg <string>": "single quoted string of verbatim extra args passed to the executor binary, shell-split and inserted before the prompt",
       "--summarize-context": "condense the auto-attached context through a throwaway model call before sending it (off by default)",
     },
     examples: [
@@ -95,8 +96,8 @@ export const commandSpecs = {
   context: {
     usage: "taskferry context [options]",
     description: "Print compact current-workspace context for an agent hook.",
-    options: { "--directory <path>": "workspace to inspect, defaults to the current workspace; also matches tasks dispatched into any git worktree of the same repo", "--format toon|claude-hook|codex-hook": "context format, default toon" },
-    examples: ['taskferry context', 'taskferry context --format claude-hook', 'taskferry context --format codex-hook'],
+    options: { "--directory <path>": "workspace to inspect, defaults to the current workspace; also matches tasks dispatched into any git worktree of the same repo", "--format toon|claude-hook|codex-hook|kilo-hook": "context format, default toon (kilo-hook is alias for claude-hook)" },
+    examples: ['taskferry context', 'taskferry context --format claude-hook', 'taskferry context --format codex-hook', 'taskferry context --format kilo-hook'],
   },
   doctor: {
     usage: "taskferry doctor [--full] [--stats]",
@@ -109,7 +110,7 @@ export const commandSpecs = {
   },
   setup: {
     usage: "taskferry setup",
-    description: "Install dependencies and create the CLI and OpenCode plugin symlinks without contacting the daemon.",
+    description: "Install dependencies and create the CLI, OpenCode, and Kilo Code plugin symlinks without contacting the daemon.",
     options: {},
     examples: ['taskferry setup', 'node src/cli.js setup'],
   },

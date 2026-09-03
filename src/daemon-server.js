@@ -416,10 +416,13 @@ export function makeClose({ manager, clients, server, socketPath, restart }) {
   };
 }
 
-// Deferred-until-idle restart: a source change is detected any time after
-// startup, but the actual restart waits for zero running/queued tasks so an
-// in-flight opencode child is never orphaned mid-task by the daemon
-// swapping itself out from under it.
+// Source-change restart: by default the daemon restarts immediately on a
+// source-file mtime change (tasks in flight are auto-resumed on the next
+// boot via tasks.js's daemon-restart handler). When `restartWaitForIdle` is
+// true (opt-in via TASKFERRY_RESTART_WAIT_FOR_IDLE or config
+// restartWaitForIdle), the restart defers until zero running/queued tasks,
+// preserving the old "never orphan a child" behavior for callers that
+// explicitly want it.
 /**
  * @param {object} opts
  * @param {TaskManager} opts.manager
@@ -432,15 +435,18 @@ export function makeClose({ manager, clients, server, socketPath, restart }) {
  * @param {NodeJS.ProcessEnv} opts.env
  * @param {() => void} opts.exitProcess
  * @param {{pending: boolean, restarting: boolean}} opts.restart
+ * @param {boolean} [opts.restartWaitForIdle]
  * @returns {() => void}
  */
-export function makeMaybeRestart({ manager, sourceDir, sourceSignature, startupSourceSignature, close, spawnReplacement, daemonEntry, env, exitProcess, restart }) {
+export function makeMaybeRestart({ manager, sourceDir, sourceSignature, startupSourceSignature, close, spawnReplacement, daemonEntry, env, exitProcess, restart, restartWaitForIdle = false }) {
   return function maybeRestart() {
     if (restart.restarting) return;
     if (!restart.pending && sourceSignature(sourceDir) !== startupSourceSignature) restart.pending = true;
     if (!restart.pending) return;
-    const { counts } = manager.list();
-    if (counts.running > 0 || counts.queued > 0) return;
+    if (restartWaitForIdle) {
+      const { counts } = manager.list();
+      if (counts.running > 0 || counts.queued > 0) return;
+    }
     restart.restarting = true;
     void (async () => {
       await close();

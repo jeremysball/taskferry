@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+# install-githooks-shim: v1
+# Managed by `mise run install-githooks`. Do not edit.
+# Repo-specific checks belong in the .local file this dispatches to.
+set -euo pipefail
+
+hook_name="$(basename "$0")"
+# Fail open on the lookup, the way every hook in ~/.config/git/hooks already
+# does (pre-commit:94, pre-push:190, post-checkout:17). Under `set -e` the
+# bare form aborts the shim, so a context where --show-toplevel legitimately
+# fails turns a gate into a hard block: verified 2026-09-03 by pushing from a
+# bare repo, where the bare form died `fatal: this operation must be run in a
+# work tree` and refused the push while the global pre-push exited 0.
+repo_root="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+global_hook="${XDG_CONFIG_HOME:-$HOME/.config}/git/hooks/$hook_name"
+self_path="$(realpath "$0" 2>/dev/null || echo "$0")"
+
+# 1. global gates (em dash, worktree budget, ...), when dotfiles are applied.
+#    Skipped when the global hook is what invoked us, so we do not loop.
+if [ -z "${GIT_HOOKS_CHAINED:-}" ] && [ -x "$global_hook" ]; then
+  GIT_HOOKS_CHAINED=1 "$global_hook" "$@"
+fi
+
+# 2. this repo's own checks, if it has any.
+#
+# The realpath self-check matches the one in the global hooks, and for the
+# same reason: a candidate that resolves back to this file re-enters the shim
+# with the same $0 basename, so nothing ever terminates. Verified 2026-09-03
+# on a scratch repo whose `hooks/pre-commit` symlinked to `.githooks/pre-commit`
+# the commit hung until a 15s timeout killed it. (The `.local` name is
+# self-limiting by accident, since re-entry through it changes the basename to
+# `pre-commit.local` and the second pass finds nothing; the `hooks/` path has
+# no such accident, and relying on one either way is not a guard.)
+local_hook="$repo_root/.githooks/$hook_name.local"
+alt_hook="$repo_root/hooks/$hook_name"
+for candidate in "$local_hook" "$alt_hook"; do
+  [ -f "$candidate" ] || continue
+  candidate_real="$(realpath "$candidate" 2>/dev/null || echo "")"
+  [ -n "$candidate_real" ] && [ "$candidate_real" != "$self_path" ] || continue
+  # GIT_HOOKS_CHAINED propagates down, matching pre-commit:138-144 and
+  # pre-push:198. Not a bug fix: measured 2026-09-03, a .local that is itself
+  # a shim copy already runs the global gates once either way, because
+  # re-entry changes the basename to pre-commit.local and the global lookup
+  # misses. That is the same accident the realpath check above refuses to
+  # rely on, so state the invariant instead: once the gates have run, nothing
+  # downstream runs them again.
+  if [ -x "$candidate" ]; then
+    exec env GIT_HOOKS_CHAINED=1 "$candidate" "$@"
+  else
+    exec env GIT_HOOKS_CHAINED=1 bash "$candidate" "$@"
+  fi
+done

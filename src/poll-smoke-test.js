@@ -4,16 +4,19 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { rmRoot, scratchGitRepo, stopDaemonAndWait } from "./smoke-test-support.js";
+import { mockLlmConfigContent } from "./mock-llm.js";
+import { rmRoot, scratchGitRepo, startMockLlmProcess, stopDaemonAndWait } from "./smoke-test-support.js";
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const cliEntry = path.join(scriptDir, "cli.js");
 
+const mock = await startMockLlmProcess();
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-poll-smoke-"));
 const env = {
   ...process.env,
   TASKFERRY_STATE_DIR: path.join(root, "state"),
   TASKFERRY_RUNTIME_DIR: path.join(root, "run"),
+  OPENCODE_CONFIG_CONTENT: mockLlmConfigContent(mock.port),
 };
 const dirArg = process.argv[2] || scratchGitRepo(root);
 
@@ -37,19 +40,18 @@ function stopDaemon() {
 }
 
 console.log("== case 1: taskferry wait resolves on real completion (short task, long-ish cap) ==");
-const d1 = taskferry(["dispatch", "--prompt", "Reply with the word PONG and nothing else.", "--directory", dirArg, "--model", "meta/muse-spark-1.2-contributor", "--variant", "low", "--executor", "opencode"]);
+const d1 = taskferry(["dispatch", "--prompt", "Reply with the word PONG and nothing else.", "--directory", dirArg, "--model", "mockllm/pong", "--executor", "opencode"]);
 const t1Start = Date.now();
 const w1 = taskferry(["wait", d1.id, "--timeout", "30000"]);
 const t1Elapsed = Date.now() - t1Start;
 console.log(`resolved after ${t1Elapsed}ms:`, w1.status, w1.exitCode);
 
-console.log("\n== case 2: taskferry wait hits its cap and returns 'running' (long task, short cap) ==");
+console.log("\n== case 2: taskferry wait hits its cap and returns 'running' (mockllm/delay30 task, short cap) ==");
 const d2 = taskferry([
   "dispatch",
-  "--prompt", "Run 'sleep 30' via bash, then reply SLEEP_DONE. Do not shorten the sleep duration.",
+  "--prompt", "Reply with the word PONG and nothing else.",
   "--directory", dirArg,
-  "--model", "meta/muse-spark-1.2-contributor",
-  "--variant", "low",
+  "--model", "mockllm/delay30",
   "--executor", "opencode",
 ]);
 const t2Start = Date.now();
@@ -66,6 +68,7 @@ console.log("final status:", finalStatus.status);
 
 stopDaemon();
 rmRoot(root);
+mock.kill();
 
 const case1Ok = w1.status === "done" && t1Elapsed < 30000;
 const case2Ok = w2.status === "running" && t2Elapsed >= 2900 && t2Elapsed < 5000;

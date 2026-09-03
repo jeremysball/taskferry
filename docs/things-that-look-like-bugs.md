@@ -367,14 +367,14 @@ belongs here.
   `taskRetentionDays` to `0` to keep everything in the hot store. It would be a
   real bug if a `queued` or `running` task were evicted, or if an archive file
   were missing records the store no longer has.
-- A stale overlay directory under plain `os.tmpdir()` surviving forever after a
-  prune — expected, and the reason is worth knowing before "fixing" it.
-  `collectOverlayTmpRoots` (`src/tasks.js:3459`) always scans the *current*
-  `overlayTmpRoot`, but discovers any additional root only from live task
-  records' `overlayDirs.tmpRoot`. Legacy records predating taskferry#286 are
-  the only thing pointing at the old `os.tmpdir()` default, so evicting all of
-  them also removes the sweep's only pointer to that directory. The tradeoff is
-  deliberate: the alternative is scanning `os.tmpdir()` unconditionally, which
-  is exactly the cross-daemon over-broad sweep taskferry#286 removed. Clean
-  those up by hand. It would be a real bug if a prune orphaned an overlay under
-  the *current* `overlayTmpRoot`, which is always scanned.
+- An evicted task's `<stateDir>/outputs/<id>` directory staying on disk forever
+  once retention has pruned the record. Deliberate. The boot orphan sweep
+  removes an output dir whose id is absent from `tasks.json`, which is exactly
+  what a pruned task looks like, so the sweep would otherwise delete the whole
+  archived deliverable history the first time retention ran. It is bounded to
+  entries younger than `taskRetentionDays`
+  (`sweepOrphanedOutputDirsFor`, `src/tasks.js`): crash debris is by definition
+  from the boot that just crashed, so the guard costs nothing real and keeps
+  `outputs/` archival. Reclaim that space by hand, deliberately. It would be a
+  real bug if a dir created during *this* boot's crashed dispatch survived the
+  sweep, or if the guard applied while `taskRetentionDays` is `0`.

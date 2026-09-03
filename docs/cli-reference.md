@@ -491,7 +491,7 @@ Nothing is deleted.
 
 `--keep-days` overrides `taskRetentionDays` for this call only; `0` keeps
 everything. Precedence is flag > `TASKFERRY_TASK_RETENTION_DAYS` >
-`config.json` `taskRetentionDays` > the built-in default of 90 days.
+`config.json` `taskRetentionDays` > the built-in default of 30 days.
 
 This runs through the daemon rather than editing `tasks.json` directly, which
 is the only thing that works: the daemon holds the authoritative task map in

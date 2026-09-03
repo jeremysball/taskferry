@@ -5,9 +5,14 @@ import { TERMINAL_STATUSES } from "./statuses.js";
 
 /**
  * Default retention window in days. 0 disables the sweep entirely.
+ *
+ * 30 rather than a rounder 90 because 90 measured as a no-op: on a real
+ * 31,125-task store every record was younger than 90 days, so the sweep
+ * evicted nothing. At the observed dispatch rate (~350/day) a 30-day window
+ * is the widest one that actually bounds the store.
  * @type {number}
  */
-export const DEFAULT_TASK_RETENTION_DAYS = 90;
+export const DEFAULT_TASK_RETENTION_DAYS = 30;
 
 const MS_PER_DAY = 86_400_000;
 

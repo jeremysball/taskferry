@@ -953,6 +953,10 @@ describe("sweepOrphanedOverlays()", () => {
       stateDir,
       overlayTmpRoot: liveOverlayTmpRoot,
       sandboxEnabled: false,
+      // baseTask() pins startedAt to a fixed date, so the boot retention sweep
+      // would evict t_resolved and the assertions below would read a task that
+      // no longer exists. The overlay sweep, not retention, is the subject.
+      taskRetentionDays: 0,
       cacheDir: mkdtempTracked(AXI_TASKS_CACHE_DIR),
       spawnFn: () => { throw new Error("not used"); },
       killFn: () => {},

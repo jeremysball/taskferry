@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { createTaskManager } from "./tasks.js";
+import { createTaskManager, sweepOrphanedOutputDirsFor } from "./tasks.js";
 import { trackManager, fakeChild, AXI_TASKS_TEST_DIR, TASKS_STATE_FILE, mkdtempTracked } from "./tasks.test-helpers.js";
 
 const DAY = 86_400_000;
@@ -131,5 +131,40 @@ describe("prune()", () => {
     mgr.close();
 
     assert.deepEqual(readStore(stateDir).map((t) => t.id), ["fresh"]);
+  });
+
+  describe("output dir sweep guard", () => {
+    /**
+     * @param {number} ageDays
+     * @param {number} retentionDays
+     */
+    function sweep(ageDays, retentionDays) {
+      const removed = [];
+      sweepOrphanedOutputDirsFor({
+        OUTPUT_DIR_ROOT: "/outputs",
+        tasks: new Map(),
+        readdirFn: () => ["gone"],
+        lstatFn: () => ({ mtimeMs: Date.now() - ageDays * DAY }),
+        removeDirFn: (full) => removed.push(full),
+        retentionDays,
+      });
+      return removed;
+    }
+
+    test("keeps an output dir older than the retention window", () => {
+      // The dir of a task retention already evicted. Its id is absent from
+      // tasks.json, which is exactly what an orphan looks like, so without
+      // the guard every evicted task's deliverable would be rm -rf'd on the
+      // next boot.
+      assert.deepEqual(sweep(60, 30), []);
+    });
+
+    test("still removes recent crash debris", () => {
+      assert.deepEqual(sweep(0, 30), ["/outputs/gone"]);
+    });
+
+    test("removes regardless of age when retention is disabled", () => {
+      assert.deepEqual(sweep(600, 0), ["/outputs/gone"]);
+    });
   });
 });

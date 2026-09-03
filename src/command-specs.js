@@ -112,7 +112,7 @@ export const commandSpecs = {
     usage: "taskferry prune [--keep-days <n>] [--dry-run]",
     description: "Archive terminal tasks older than the retention window out of tasks.json.",
     options: {
-      "--keep-days <n>": "retention window in days; 0 keeps everything. Precedence: flag > TASKFERRY_TASK_RETENTION_DAYS env var > config.json taskRetentionDays > built-in default 90",
+      "--keep-days <n>": "retention window in days; 0 keeps everything. Precedence: flag > TASKFERRY_TASK_RETENTION_DAYS env var > config.json taskRetentionDays > built-in default 30",
       "--dry-run": "report what would be archived without touching the store",
     },
     examples: ['taskferry prune --dry-run', 'taskferry prune --keep-days 30'],

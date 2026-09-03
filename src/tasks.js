@@ -3174,7 +3174,15 @@ function applyTaskRetention(ctx, options = {}) {
   if (dryRun || evicted.length === 0) return summary;
   const archivePath = archiveEvictedTasks(ctx.opts.stateDir, evicted);
   if (archivePath !== undefined) summary.archivePath = archivePath;
-  for (const task of evicted) ctx.maps.tasks.delete(task.id);
+  for (const task of evicted) {
+    // Release before the delete. The orphan sweep discovers a non-current
+    // overlay root only through a live record's overlayDirs.tmpRoot, so
+    // dropping the record first would strand the directory with nothing left
+    // pointing at it. Release failures are already logged by releaseOverlay
+    // and must not block the eviction: the record is archived either way.
+    if (task.overlayDirs) ctx.env.releaseOverlay(task);
+    ctx.maps.tasks.delete(task.id);
+  }
   ctx.state.persistDirty = true;
   flushPersistRecords({ TASKS_FILE: ctx.paths.TASKS_FILE, stateDir: ctx.opts.stateDir, tasks: ctx.maps.tasks, state: ctx.state });
   return summary;
@@ -5042,7 +5050,7 @@ function buildManagerInternalHelpers(ctx) {
     /** @param {Task} task */
     hasLiveOverlay: (task) => hasLiveOverlayForTask(task, { existsFn: ctx.opts.existsFn }),
     sweepOrphanedPromptFiles: () => sweepOrphanedPromptFilesFor({ PROMPT_DIR: ctx.paths.PROMPT_DIR, tasks: ctx.maps.tasks, persistedTasks: ctx.state.persistedTasks }),
-    sweepOrphanedOutputDirs: () => sweepOrphanedOutputDirsFor({ OUTPUT_DIR_ROOT: resolveOutputDirRoot(ctx.opts.stateDir), tasks: ctx.maps.tasks, persistedTasks: ctx.state.persistedTasks, readdirFn: ctx.opts.readdirFn, lstatFn: ctx.opts.lstatFn }),
+    sweepOrphanedOutputDirs: () => sweepOrphanedOutputDirsFor({ OUTPUT_DIR_ROOT: resolveOutputDirRoot(ctx.opts.stateDir), tasks: ctx.maps.tasks, persistedTasks: ctx.state.persistedTasks, readdirFn: ctx.opts.readdirFn, lstatFn: ctx.opts.lstatFn, retentionDays: ctx.limits.taskRetentionDays }),
     /** @param {string} model @param {NodeJS.ProcessEnv} [env] @returns {string[]} Resolves the
      * opencode variants table for a model: the test-injected
      * `opencodeVariantsTable` seam when set, otherwise the on-disk
@@ -5331,11 +5339,6 @@ function bootstrapManagerContext(ctx) {
     taskEvents: ctx.events.taskEvents,
     setStateLoadError: (err) => { ctx.state.stateLoadError = err; },
   });
-  // Retention sweep, before the disk snapshot below so that snapshot reflects
-  // the pruned store. Skipped when the load itself failed: the map is empty in
-  // that case, and flushing it would write [] over a tasks.json that is merely
-  // unreadable by this build, not actually empty.
-  if (!ctx.state.stateLoadError) applyTaskRetention(ctx);
   // A second read of tasks.json for the sweeps' disk guard, taken *now* so
   // it is as close to the deletions as a boot-time snapshot can be. This is
   // cheap (one read of the state file) and gives the sweeps a record of
@@ -5372,6 +5375,13 @@ function bootstrapManagerContext(ctx) {
   // these on a real reboot for free; this only matters for a same-boot
   // daemon restart.
   ctx.helpers.sweepOrphanedOverlays();
+  // Retention sweep, deliberately *after* every companion sweep above. Those
+  // sweeps discover what to clean from live task records (an overlay's
+  // recorded tmpRoot, a prompt file's id), so evicting a record first would
+  // strand its artifacts permanently. Skipped when the load itself failed:
+  // the map is empty in that case, and flushing it would write [] over a
+  // tasks.json that is merely unreadable by this build, not actually empty.
+  if (!ctx.state.stateLoadError) applyTaskRetention(ctx);
   // A daemon that died with a check gate mid-flight (checkStatus: "running")
   // leaves that status stuck forever -- nothing will ever call
   // startCheckGate()'s settle handlers again for that task. Reclassify as
@@ -7267,7 +7277,15 @@ function promptFileIsOrphan(entry, ctx) {
  * surface for `taskferry output <id>`), so the sweep only removes dirs
  * whose task id is absent from the loaded tasks.json entirely. Mirrors
  * sweepOrphanedPromptFiles() / sweepOrphanedOverlays() at startup.
- * @param {{OUTPUT_DIR_ROOT: string, tasks: Map<string, Task>, persistedTasks?: Map<string, Record<string, any>>, readdirFn: (path: string) => string[], lstatFn?: (path: string) => fs.Stats, removeDirFn?: (path: string) => void}} ctx
+ *
+ * `retentionDays`, when set above 0, additionally guards anything older than
+ * that window. Retention evicts old terminal tasks out of tasks.json, which
+ * would otherwise make every one of their output dirs look like an orphan on
+ * the next boot and hand a worker's whole deliverable history to the rm below.
+ * This sweep exists for crash debris, and crash debris is by definition from
+ * the boot that just crashed, so bounding it to the retention window costs
+ * nothing real and keeps `<stateDir>/outputs/` archival.
+ * @param {{OUTPUT_DIR_ROOT: string, tasks: Map<string, Task>, persistedTasks?: Map<string, Record<string, any>>, readdirFn: (path: string) => string[], lstatFn?: (path: string) => fs.Stats, removeDirFn?: (path: string) => void, retentionDays?: number}} ctx
  */
 export function sweepOrphanedOutputDirsFor(ctx) {
   let entries;
@@ -7286,8 +7304,10 @@ export function sweepOrphanedOutputDirsFor(ctx) {
   if (orphanEntries.length === 0) return;
   const lstat = ctx.lstatFn ?? fs.lstatSync;
   const removeDir = ctx.removeDirFn ?? removeDirIfPresent;
+  const retentionDays = ctx.retentionDays ?? 0;
+  const olderThan = retentionDays > 0 ? Date.now() - retentionDays * 86_400_000 : undefined;
   for (const entry of orphanEntries) {
-    sweepOrphanOutputEntry(path.join(ctx.OUTPUT_DIR_ROOT, entry), lstat, removeDir);
+    sweepOrphanOutputEntry(path.join(ctx.OUTPUT_DIR_ROOT, entry), lstat, removeDir, olderThan);
   }
 }
 
@@ -7322,14 +7342,17 @@ function collectOrphanOutputEntries(entries, tasks, persistedTasks) {
  * @param {string} full
  * @param {(path: string) => fs.Stats} lstat
  * @param {(path: string) => void} removeDir
+ * @param {number} [olderThan] epoch ms; entries last modified before this are kept
  */
-function sweepOrphanOutputEntry(full, lstat, removeDir) {
+function sweepOrphanOutputEntry(full, lstat, removeDir, olderThan) {
+  let stats;
   try {
-    lstat(full);
+    stats = lstat(full);
   } catch (err) {
     if (errCode(err) === "ENOENT") return;
     throw err;
   }
+  if (olderThan !== undefined && stats.mtimeMs < olderThan) return;
   removeDir(full);
 }
 

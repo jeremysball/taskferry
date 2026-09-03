@@ -55,6 +55,8 @@ export const RESULT_FIELDS = new Set([
   "checkOverride",
   "parentTaskId",
   "projectConfigWarning",
+  "prompt",
+  "promptAugmented",
 ]);
 export class ProtocolError extends Error {
   /**

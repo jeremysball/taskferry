@@ -226,12 +226,19 @@ function pushSafeRoBind(list, src, dest, existsFn, lstatFn) {
  * @param {[string, string][]} list
  * @param {string} realAgentDir
  * @param {string} sandboxedDataHome
- * @param {(file: string) => boolean} existsFn
- * @param {(file: string) => {isSymbolicLink: () => boolean, isFile?: () => boolean, nlink?: number}} lstatFn
+ * @param {{existsFn: (file: string) => boolean, lstatFn: (file: string) => {isSymbolicLink: () => boolean, isFile?: () => boolean, nlink?: number}, realpathFn: (file: string) => string}} fsFns
  */
-function pushPiCatalogBinds(list, realAgentDir, sandboxedDataHome, existsFn, lstatFn) {
+function pushPiCatalogBinds(list, realAgentDir, sandboxedDataHome, fsFns) {
+  const { existsFn, lstatFn, realpathFn = fs.realpathSync } = fsFns;
   for (const fname of ["models.json", "models-store.json", "settings.json"]) {
-    pushSafeRoBind(list, path.join(realAgentDir, fname), path.join(sandboxedDataHome, fname), existsFn, lstatFn);
+    const src = path.join(realAgentDir, fname);
+    // The catalog is read-only, so unlike auth.json/extensions a symlinked
+    // entry is safe to resolve and bind at its real target (issue #563): a
+    // dotfiles-managed models.json is a symlink, and dropping it silently
+    // makes every catalog-backed provider "Unknown provider".
+    if (!existsFn(src)) continue;
+    const bindSource = resolveConfigBindSource(src, lstatFn, realpathFn);
+    if (bindSource) list.push([bindSource, path.join(sandboxedDataHome, fname)]);
   }
 }
 
@@ -255,19 +262,24 @@ function resolvePiSessionRwBind({ realSessionsDir, sandboxedSessionsHome, sessio
 }
 
 /**
- * Resolve a single opencode config entry to a safe bind source. Dotfiles
- * setups commonly symlink individual entries (opencode.json, plugins, etc.)
- * into a repo, so a symlinked entry is resolved to its real target and that
+ * Resolve a single config entry (an opencode config file, or a pi catalog
+ * file such as models.json) to a safe bind source. Dotfiles setups commonly
+ * symlink individual entries (opencode.json, plugins, pi models.json) into
+ * a repo, so a symlinked entry is resolved to its real target and that
  * target is bound read-only at the same sandboxed destination, instead of
  * being dropped. Dangling links fail closed (ENOENT silent, other errors
- * warn) and do not crash the dispatch. Other bind sites (auth.json, pi)
- * keep the strict skip-symlink behavior via isSafeBindSource.
+ * warn) and do not crash the dispatch. Auth files and the extensions dir
+ * keep strict skip-symlink (via isSafeBindSource) as a conservative
+ * default for credential and code paths, where following an unexpected
+ * symlink would expose a different file's contents to the worker; the
+ * read-write session bind also stays strict because resolving it would
+ * hand the worker write access to the link target.
  * @param {string} fullPath
  * @param {(file: string) => {isSymbolicLink: () => boolean, isFile?: () => boolean, nlink?: number}} lstatFn
  * @param {(file: string) => string} realpathFn
  * @returns {string|null}
  */
-function resolveOpencodeConfigBindSource(fullPath, lstatFn, realpathFn) {
+function resolveConfigBindSource(fullPath, lstatFn, realpathFn) {
   let entryStat;
   try {
     entryStat = lstatFn(fullPath);
@@ -278,7 +290,7 @@ function resolveOpencodeConfigBindSource(fullPath, lstatFn, realpathFn) {
     return null;
   }
   if (entryStat == null) return null;
-  if (entryStat.isSymbolicLink()) {
+  if (entryStat.isSymbolicLink?.()) {
     let realTarget;
     try {
       realTarget = realpathFn(fullPath);
@@ -310,7 +322,7 @@ function resolveOpencodeConfigBindSource(fullPath, lstatFn, realpathFn) {
  * @property {(ctx: SpawnLaunchContext) => string[]} buildSpawnArgs
  * @property {() => string} buildSummaryPrompt
  * @property {(parsed: unknown) => unknown} normalizeLogEvent
- * @property {(args: {homeDir: string, dataDir: string, taskId: string, spawnEnv: NodeJS.ProcessEnv, existsFn: (file: string) => boolean, statFn?: (file: string) => {isDirectory: () => boolean}|null, lstatFn?: (file: string) => {isSymbolicLink: () => boolean, isFile?: () => boolean, nlink?: number}, readdirFn: (dir: string) => string[], sessionId?: string|null, launchDirectory?: string|null}) => {extraRoBinds: [string, string][], extraRwPairBinds?: [string, string][], sandboxedDataHome: string, sandboxEnv: Record<string, string>}} sandboxAuthFile
+ * @property {(args: {homeDir: string, dataDir: string, taskId: string, spawnEnv: NodeJS.ProcessEnv, existsFn: (file: string) => boolean, statFn?: (file: string) => {isDirectory: () => boolean}|null, lstatFn?: (file: string) => {isSymbolicLink: () => boolean, isFile?: () => boolean, nlink?: number}, readdirFn: (dir: string) => string[], realpathFn?: (file: string) => string, sessionId?: string|null, launchDirectory?: string|null}) => {extraRoBinds: [string, string][], extraRwPairBinds?: [string, string][], sandboxedDataHome: string, sandboxEnv: Record<string, string>}} sandboxAuthFile
  */
 
 /**
@@ -476,8 +488,8 @@ export function piExecutor({ execFileFn = execFileAsync } = {}) {
     // small tmpfs: pi's sandboxed data home grows with every dispatch and an
     // unbounded tmpfs directory eventually starves the whole XDG_RUNTIME_DIR
     // (sockets, locks) of space.
-    /** @param {{homeDir: string, dataDir: string, taskId: string, spawnEnv: NodeJS.ProcessEnv, existsFn: (file: string) => boolean, statFn?: (file: string) => {isDirectory: () => boolean}|null, lstatFn?: (file: string) => {isSymbolicLink: () => boolean, isFile?: () => boolean, nlink?: number}, readdirFn?: (dir: string) => string[], sessionId?: string|null, launchDirectory?: string|null}} args @returns {{extraRoBinds: [string, string][], extraRwPairBinds?: [string, string][], sandboxedDataHome: string, sandboxEnv: Record<string, string>}} */
-    sandboxAuthFile({ homeDir, dataDir, taskId: _taskId, spawnEnv, existsFn, statFn = fs.statSync, lstatFn = fs.lstatSync, readdirFn, sessionId, launchDirectory }) {
+    /** @param {{homeDir: string, dataDir: string, taskId: string, spawnEnv: NodeJS.ProcessEnv, existsFn: (file: string) => boolean, statFn?: (file: string) => {isDirectory: () => boolean}|null, lstatFn?: (file: string) => {isSymbolicLink: () => boolean, isFile?: () => boolean, nlink?: number}, readdirFn?: (dir: string) => string[], realpathFn?: (file: string) => string, sessionId?: string|null, launchDirectory?: string|null}} args @returns {{extraRoBinds: [string, string][], extraRwPairBinds?: [string, string][], sandboxedDataHome: string, sandboxEnv: Record<string, string>}} */
+    sandboxAuthFile({ homeDir, dataDir, taskId: _taskId, spawnEnv, existsFn, statFn = fs.statSync, lstatFn = fs.lstatSync, readdirFn, realpathFn = fs.realpathSync, sessionId, launchDirectory }) {
       const realAgentDir = spawnEnv.PI_CODING_AGENT_DIR || path.join(homeDir, ".pi", "agent");
       const realAuthFile = path.join(realAgentDir, "auth.json");
       const realExtensionsDir = path.join(realAgentDir, "extensions");
@@ -490,7 +502,7 @@ export function piExecutor({ execFileFn = execFileAsync } = {}) {
       pushSafeRoBind(extraRoBinds, realAuthFile, path.join(sandboxedDataHome, "auth.json"), existsFn, lstatFn);
       pushSafeRoBind(extraRoBinds, realExtensionsDir, path.join(sandboxedDataHome, "extensions"), existsFn, lstatFn);
       // catalog: redirecting PI_CODING_AGENT_DIR hides models.json* -> Unknown provider
-      pushPiCatalogBinds(extraRoBinds, realAgentDir, sandboxedDataHome, existsFn, lstatFn);
+      pushPiCatalogBinds(extraRoBinds, realAgentDir, sandboxedDataHome, { existsFn, lstatFn, realpathFn });
       /** @type {[string, string][]} */
       const extraRwPairBinds = [];
       // single-file rw bind for resume only – whole-dir rw would expose session history
@@ -579,15 +591,17 @@ export function opencodeExecutor() {
       // target and that target is bound read-only at the same sandboxed
       // destination, instead of being dropped. Dangling/unresolvable links
       // fail closed (skip with ENOENT-silent / non-ENOENT warning) and do
-      // not crash the dispatch. Other bind sites (auth.json, pi) keep the
-      // strict skip-symlink behavior -- see isSafeBindSource -- because
-      // those paths include read-write session binds where resolving would
-      // hand the worker write access to the link target.
+      // not crash the dispatch. Other bind sites (auth.json, pi session
+      // binds) keep strict skip-symlink -- see isSafeBindSource -- for
+      // different reasons: auth files are credential paths, where following
+      // an unexpected symlink would expose a different file's contents, and
+      // the pi session bind is read-write, where resolving would hand the
+      // worker write access to the link target.
       if (existsFn(realConfigDir) && isSafeBindSource(realConfigDir, lstatFn)) {
         for (const entry of readdirFn(realConfigDir)) {
           if (entry === ".gitignore") continue;
           const fullPath = path.join(realConfigDir, entry);
-          const bindSource = resolveOpencodeConfigBindSource(fullPath, lstatFn, realpathFn);
+          const bindSource = resolveConfigBindSource(fullPath, lstatFn, realpathFn);
           if (bindSource) extraRoBinds.push([bindSource, path.join(sandboxedConfigDir, entry)]);
         }
       }

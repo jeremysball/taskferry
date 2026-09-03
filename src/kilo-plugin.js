@@ -1,10 +1,9 @@
 import fs from "node:fs";
 import { connectClient } from "./client.js";
+import { TERMINAL_STATUSES } from "./statuses.js";
 
 /** @type {Set<string>} */
 const ACTIVE_STATUSES = new Set(["queued", "running"]);
-/** @type {Set<string>} */
-export const TERMINAL_STATUSES = new Set(["done", "crashed", "cancelled"]);
 
 /**
  * @typedef {object} TaskRow

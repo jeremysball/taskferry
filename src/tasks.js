@@ -51,6 +51,7 @@ export { DEFAULT_MAX_OUTPUT_FILE_BYTES, MAX_SAFE_OUTPUT_FILE_BYTES };
  * @property {string} prompt
  * @property {string} promptPreview
  * @property {number|null} promptTotalChars
+ * @property {string} [originalPrompt]
  * @property {string|null} spawnError
  * @property {boolean} cancelRequested
  * @property {boolean} internal
@@ -87,6 +88,8 @@ export { DEFAULT_MAX_OUTPUT_FILE_BYTES, MAX_SAFE_OUTPUT_FILE_BYTES };
  * @property {string[]} [resumeRoBind]
  * @property {boolean} [resumeNoSandbox]
  * @property {boolean} [resumeNoOverlay]
+ * @property {string[]} [resumeExecutorArgs]
+ * @property {string[]} [executorArgs]
  * @property {string|null} [pidStartTime]
  */
 
@@ -163,6 +166,7 @@ export { DEFAULT_MAX_OUTPUT_FILE_BYTES, MAX_SAFE_OUTPUT_FILE_BYTES };
  * @property {string[]} [roBind]
  * @property {import("./executor.js").WorkerExecutor} executor
  * @property {string|null} [outputDir]
+ * @property {string[]} [executorArgs]
  * @property {undefined} [kind]
  * @property {undefined} [snapshotPath]
  */
@@ -218,6 +222,8 @@ export { DEFAULT_MAX_OUTPUT_FILE_BYTES, MAX_SAFE_OUTPUT_FILE_BYTES };
  * @property {string|null} [headDriftFrom]
  * @property {string|null} [headDriftTo]
  * @property {boolean|null} [headDriftRecovered]
+ * @property {string} [prompt]
+ * @property {string} [promptAugmented]
  */
 
 const DEFAULT_STATE_DIR = resolveStateDir(process.env);
@@ -238,6 +244,7 @@ const SUMMARY_INPUT_BYTES = 96 * 1024;
 // riding the exact limit.
 const PROMPT_ARGV_SAFE_BYTES = 96 * 1024;
 export const DEFAULT_SUMMARY_MODEL = "opencode/mimo-v2.5-free";
+const SUMMARY_TRANSCRIPT_PROMPT = "Summarize the attached task transcript.";
 
 // Ordered most-specific-first: real provider error text often combines
 // more than one signal (e.g. "Rate limit exceeded, check your quota"), so
@@ -831,6 +838,7 @@ function buildLaunchSpawnArgs(executor, { isSummary, summaryLaunch, dispatchLaun
     snapshotPath: isSummary ? summaryLaunch.snapshotPath : undefined,
     prompt: isSummary ? "" : dispatchLaunch.prompt,
     sessionId: resolveLaunchSessionId(isSummary, summaryLaunch, dispatchLaunch),
+    executorArgs: isSummary ? undefined : dispatchLaunch.executorArgs,
   });
 }
 
@@ -2197,6 +2205,7 @@ function computeResultDetail(task, { taskId, full, fields }, ctx) {
     ...(next ? { next } : {}),
     logPath: task.logPath,
     outputDir: task.outputDir ?? null,
+    ...resultPromptFields(task),
   };
 }
 
@@ -2365,11 +2374,11 @@ function resolveDispatchDirectory(directory) {
  * `oc_` prefix for compatibility. A resume with no `--model` inherits the
  * model the session was created under (a different model can mean a different
  * provider, breaking the whole point of resuming that exact session).
- * @param {{id: string, directory: string, prompt: string, model: string|undefined, executor: import("./executor.js").WorkerExecutor, priorSessionTask: Task|null, variant: string|undefined, sessionId: string|undefined, originSessionId: string|undefined, internal: boolean, finalMarker: string|null, role: "dispatch"|"advisor", logPath: string, class?: string|null, parentTaskId?: string|null, defaultVariant: string, resolveOpencodeVariants: (model: string, env: NodeJS.ProcessEnv|undefined) => string[], env?: NodeJS.ProcessEnv, outputDir?: string|null, originalPrompt?: string}} params
+ * @param {{id: string, directory: string, prompt: string, model: string|undefined, executor: import("./executor.js").WorkerExecutor, priorSessionTask: Task|null, variant: string|undefined, sessionId: string|undefined, originSessionId: string|undefined, internal: boolean, finalMarker: string|null, role: "dispatch"|"advisor", logPath: string, class?: string|null, parentTaskId?: string|null, defaultVariant: string, resolveOpencodeVariants: (model: string, env: NodeJS.ProcessEnv|undefined) => string[], env?: NodeJS.ProcessEnv, outputDir?: string|null, originalPrompt?: string, executorArgs?: string[]}} params
  * @returns {Task}
  */
 // eslint-disable-next-line sonarjs/cyclomatic-complexity, complexity -- adding `class` field per brief; function was already at the 10-point ceiling
-function buildDispatchTask({ id, directory, prompt, model, executor, priorSessionTask, variant, sessionId, originSessionId, internal, finalMarker, role, logPath, class: taskClass, parentTaskId = null, defaultVariant, resolveOpencodeVariants, env, outputDir = null, originalPrompt = prompt }) {
+function buildDispatchTask({ id, directory, prompt, model, executor, priorSessionTask, variant, sessionId, originSessionId, internal, finalMarker, role, logPath, class: taskClass, parentTaskId = null, defaultVariant, resolveOpencodeVariants, env, outputDir = null, originalPrompt = prompt, executorArgs }) {
   // Model presence is validated earlier by validateDispatchModel(), before
   // the output dir is created -- by this point model-or-priorSessionTask is
   // guaranteed.
@@ -2398,6 +2407,7 @@ function buildDispatchTask({ id, directory, prompt, model, executor, priorSessio
     // since this is what the worker actually sees; promptPreview remains the
     // literal user prompt so display surfaces don't show the injection tail.
     prompt,
+    originalPrompt,
     status: "queued",
     model: resolvedModel,
     executorId: executor.id,
@@ -2436,6 +2446,7 @@ function buildDispatchTask({ id, directory, prompt, model, executor, priorSessio
     projectConfigWarning: null,
     checkGatePid: null,
     outputDir: outputDir ?? null,
+    ...(executorArgs?.length ? { executorArgs: [...executorArgs] } : {}),
   };
 }
 
@@ -2451,9 +2462,9 @@ function buildDispatchTask({ id, directory, prompt, model, executor, priorSessio
  * reaches the child. Pinned by tasks.test.js's "dispatch()'s queued env is
  * frozen against later caller mutations" gate.
  * @param {{tasks: Map<string, Task>, persistTask: (taskId: string) => void, pendingLaunches: Map<string, LaunchSpec>, providerQueues: Map<string, ProviderQueue>, launchQueuedTasks: () => void}} ctx
- * @param {{id: string, task: Task, prompt: string, sessionId: string|undefined, env: NodeJS.ProcessEnv|undefined, noSandbox: boolean, noOverlay: boolean, allowedDirs: string[]|undefined, roBind: string[]|undefined, executor: import("./executor.js").WorkerExecutor, role: "dispatch"|"advisor", outputDir?: string|null}} params
+ * @param {{id: string, task: Task, prompt: string, sessionId: string|undefined, env: NodeJS.ProcessEnv|undefined, noSandbox: boolean, noOverlay: boolean, allowedDirs: string[]|undefined, roBind: string[]|undefined, executor: import("./executor.js").WorkerExecutor, role: "dispatch"|"advisor", outputDir?: string|null, executorArgs?: string[]}} params
  */
-function queueDispatchLaunch(ctx, { id, task, prompt, sessionId, env, noSandbox, noOverlay, allowedDirs, roBind, executor, role, outputDir = null }) {
+function queueDispatchLaunch(ctx, { id, task, prompt, sessionId, env, noSandbox, noOverlay, allowedDirs, roBind, executor, role, outputDir = null, executorArgs }) {
   // The resume-relevant launch parameters are stamped onto the persisted
   // task record at queue time, not just the in-memory pendingLaunch, so a
   // daemon restart can reconstitute the original launch spec (caller env,
@@ -2464,6 +2475,7 @@ function queueDispatchLaunch(ctx, { id, task, prompt, sessionId, env, noSandbox,
   if (env !== undefined) task.resumeEnv = { ...env };
   if (allowedDirs?.length) task.resumeAllowedDirs = allowedDirs;
   if (roBind?.length) task.resumeRoBind = roBind;
+  if (executorArgs?.length) { task.resumeExecutorArgs = [...executorArgs]; task.executorArgs = [...executorArgs]; }
   task.resumeNoSandbox = noSandbox === true;
   task.resumeNoOverlay = noOverlay === true;
   ctx.tasks.set(id, task);
@@ -2483,6 +2495,7 @@ function queueDispatchLaunch(ctx, { id, task, prompt, sessionId, env, noSandbox,
     noSandbox: noSandbox === true,
     noOverlay: noOverlay === true,
     outputDir: outputDir ?? null,
+    ...(executorArgs?.length ? { executorArgs: [...executorArgs] } : {}),
   });
   const provider = providerOf(task.model);
   const providerQueue = getOrCreateProviderQueue(ctx.providerQueues, provider);
@@ -2688,8 +2701,9 @@ function launchSummaryTask(ctx, p) {
     endedAt: null,
     exitCode: null,
     signal: null,
-    prompt: "Summarize the attached task transcript.",
-    promptPreview: "Summarize the attached task transcript.",
+    prompt: SUMMARY_TRANSCRIPT_PROMPT,
+    originalPrompt: SUMMARY_TRANSCRIPT_PROMPT,
+    promptPreview: SUMMARY_TRANSCRIPT_PROMPT,
     promptTotalChars: null,
     spawnError: null,
     cancelRequested: false,
@@ -2861,7 +2875,7 @@ async function runSummarizeActivity(ctx, taskId, maxWords, previousActivity) {
  * @typedef {object} AdvisorContext
  * @property {() => void} ensureStateLoaded
  * @property {(sessionId: string|undefined) => {sessionId: string|undefined, reset: boolean, previousSessionId: string|undefined}} resolveAdvisorSession
- * @property {(params: {prompt: string, directory: string, model?: string, variant?: string, sessionId?: string|undefined, executor?: string, env?: NodeJS.ProcessEnv, role: "advisor", class?: string|null, parentTaskId?: string|null}) => TaskSummary & {next: string}} dispatch
+ * @property {(params: {prompt: string, directory: string, model?: string, variant?: string, sessionId?: string|undefined, executor?: string, env?: NodeJS.ProcessEnv, role: "advisor", class?: string|null, parentTaskId?: string|null, executorArgs?: string[]}) => TaskSummary & {next: string}} dispatch
  * @property {(err: unknown) => string} errMessage
  * @property {(taskId: string, options: object) => Promise<{status: string, sessionId?: string|null}>} poll
  * @property {number} maxWait
@@ -2876,13 +2890,13 @@ async function runSummarizeActivity(ctx, taskId, maxWords, previousActivity) {
  * dispatch`. Overlay is mandatory for the advisor role, so it is not a
  * parameter here -- the role itself carries that guarantee.
  * @param {AdvisorContext} ctx
- * @param {{prompt?: string, directory?: string, model?: string, variant?: string, sessionId?: string|undefined, executor?: string, env?: NodeJS.ProcessEnv, class?: string|null, parentTaskId?: string|null}} params
+ * @param {{prompt?: string, directory?: string, model?: string, variant?: string, sessionId?: string|undefined, executor?: string, env?: NodeJS.ProcessEnv, class?: string|null, parentTaskId?: string|null, executorArgs?: string[]}} params
  * @returns {TaskSummary & {next: string}}
  */
 function dispatchAdvisorTask(ctx, params) {
-  const { prompt, directory, model, variant, sessionId, executor, env, class: taskClass, parentTaskId } = params;
+  const { prompt, directory, model, variant, sessionId, executor, env, class: taskClass, parentTaskId, executorArgs } = params;
   try {
-    return ctx.dispatch({ model, variant, sessionId, executor, env, parentTaskId, class: taskClass, prompt: /** @type {string} */ (prompt), directory: /** @type {string} */ (directory), role: "advisor" });
+    return ctx.dispatch({ model, variant, sessionId, executor, env, parentTaskId, executorArgs, class: taskClass, prompt: /** @type {string} */ (prompt), directory: /** @type {string} */ (directory), role: "advisor" });
   } catch (err) {
     throw new Error(ctx.errMessage(err).replaceAll("taskferry dispatch", "taskferry advisor"), { cause: err });
   }
@@ -3001,16 +3015,16 @@ function buildAdvisorSettledResponse(ctx, { dispatched, resolved }) {
  * the advisor-role task, poll it to settlement, and shape either the
  * still-active or settled response.
  * @param {AdvisorContext} ctx
- * @param {{prompt?: string, directory?: string, model?: string, variant?: string, sessionId?: string, timeoutMs?: number, executor?: string, env?: NodeJS.ProcessEnv, class?: string|null, parentTaskId?: string|null}} params
+ * @param {{prompt?: string, directory?: string, model?: string, variant?: string, sessionId?: string, timeoutMs?: number, executor?: string, env?: NodeJS.ProcessEnv, class?: string|null, parentTaskId?: string|null, executorArgs?: string[]}} params
  * @returns {Promise<object>}
  */
-async function runAdvisor(ctx, { prompt, directory, model, variant, sessionId, timeoutMs, executor, env, class: taskClass, parentTaskId } = {}) {
+async function runAdvisor(ctx, { prompt, directory, model, variant, sessionId, timeoutMs, executor, env, class: taskClass, parentTaskId, executorArgs } = {}) {
   ctx.ensureStateLoaded();
   if (!model || typeof model !== "string") {
     throw new Error("error: model is required\nhelp: taskferry advisor requires a provider/model string, e.g. \"openai/gpt-5.6-sol\"");
   }
   const resolved = ctx.resolveAdvisorSession(sessionId);
-  const dispatched = dispatchAdvisorTask(ctx, { prompt, directory, model, variant, executor, env, parentTaskId, class: taskClass, sessionId: resolved.sessionId });
+  const dispatched = dispatchAdvisorTask(ctx, { prompt, directory, model, variant, executor, env, parentTaskId, executorArgs, class: taskClass, sessionId: resolved.sessionId });
   const settled = await ctx.poll(dispatched.id, { timeoutMs: timeoutMs ?? ctx.maxWait });
   if (settled.status === "running" || settled.status === "queued") {
     return buildAdvisorActiveResponse(ctx, { settled, dispatched, resolved });
@@ -3117,6 +3131,15 @@ function loadPersistedTask(ctx, t) {
   // cleanupOverlay()) and sweepOrphanedOverlays()'s tmpRoots scan key off
   // of -- silently orphaning the real leftover under os.tmpdir() forever.
   if (t.overlayDirs && t.overlayDirs.tmpRoot === undefined) t.overlayDirs.tmpRoot = os.tmpdir();
+  if (t.originalPrompt === undefined) {
+    // Backfill for tasks persisted before originalPrompt was stored: promptPreview
+    // is the clean user text (truncated to 200 chars), while prompt is the
+    // augmented string with verification/output-dir blocks. Prefer the clean
+    // truncated preview over the augmented prompt to avoid leaking injected
+    // blocks into the exposed `prompt` field for legacy records whose full
+    // original is irrecoverable.
+    t.originalPrompt = t.promptPreview ?? t.prompt ?? "";
+  }
   if (previousStatus === "running" || previousStatus === "queued") {
     /** @type {any} */ (t)._persistedStatus = previousStatus;
   }
@@ -7441,12 +7464,12 @@ function buildDispatchPrompt({ role, noOverlay, projectConfig, prompt, outputDir
  * `createTaskManager`'s `dispatch` closure; all the validation/build/queue
  * helpers are plain module-level functions called directly. The factory
  * bindings are threaded in via `ctx`.
- * @param {{prompt: string, directory: string, model?: string, variant?: string, sessionId?: string, internal?: boolean, finalMarker?: string|null, originSessionId?: string, noSandbox?: boolean, noOverlay?: boolean, allowedDirs?: string[], rwBind?: string[], roBind?: string[], executor?: string, env?: NodeJS.ProcessEnv, role?: "dispatch"|"advisor", class?: string|null, parentTaskId?: string|null}} params
+ * @param {{prompt: string, directory: string, model?: string, variant?: string, sessionId?: string, internal?: boolean, finalMarker?: string|null, originSessionId?: string, noSandbox?: boolean, noOverlay?: boolean, allowedDirs?: string[], rwBind?: string[], roBind?: string[], executor?: string, env?: NodeJS.ProcessEnv, role?: "dispatch"|"advisor", class?: string|null, parentTaskId?: string|null, executorArgs?: string[]}} params
  * @param {{ensureStateLoaded: () => void, tasks: Map<string, Task>, defaultExecutor: import("./executor.js").WorkerExecutor, STATE_DIR: string, LOG_DIR: string, persistTask: (taskId: string) => void, pendingLaunches: Map<string, LaunchSpec>, providerQueues: Map<string, ProviderQueue>, launchQueuedTasks: () => void, defaultVariant: string, resolveOpencodeVariants: (model: string, env: NodeJS.ProcessEnv|undefined) => string[]}} ctx
  * @returns {TaskSummary & {next: string}}
  */
 function dispatchTask(params, ctx) {
-  const { prompt, directory, model, variant, sessionId, internal = false, finalMarker = null, originSessionId, noSandbox = false, noOverlay = false, allowedDirs: dispatchAllowedDirs, rwBind: dispatchRwBind, roBind: dispatchRoBind, executor: executorName, env, role = "dispatch", class: taskClass = null, parentTaskId = null } = params;
+  const { prompt, directory, model, variant, sessionId, internal = false, finalMarker = null, originSessionId, noSandbox = false, noOverlay = false, allowedDirs: dispatchAllowedDirs, rwBind: dispatchRwBind, roBind: dispatchRoBind, executor: executorName, env, role = "dispatch", class: taskClass = null, parentTaskId = null, executorArgs } = params;
   // `allowedDirs` is the deprecated per-dispatch alias for `rwBind`; fold it
   // into the modern name so the launch carries one concept.
   const effectiveRwBind = [...new Set([...(dispatchRwBind ?? []), ...(dispatchAllowedDirs ?? [])])];
@@ -7473,8 +7496,10 @@ function dispatchTask(params, ctx) {
   const outputDir = resolveTaskOutputDir(ctx.STATE_DIR, id);
   ensureTaskOutputDir(outputDir);
   const dispatchPrompt = buildDispatchPrompt({ role, noOverlay, projectConfig, prompt, outputDir, noSandbox });
-  const task = buildDispatchTask({ id, model, executor, priorSessionTask, variant, sessionId, originSessionId, internal, finalMarker, role, logPath, parentTaskId, env, prompt: dispatchPrompt, originalPrompt: prompt, directory: normalizedDirectory, defaultVariant: ctx.defaultVariant, resolveOpencodeVariants: ctx.resolveOpencodeVariants, class: taskClass, outputDir: outputDir });
-  queueDispatchLaunch({ tasks: ctx.tasks, persistTask: ctx.persistTask, pendingLaunches: ctx.pendingLaunches, providerQueues: ctx.providerQueues, launchQueuedTasks: ctx.launchQueuedTasks }, { id, task, sessionId, env, noSandbox, noOverlay, executor, role, prompt: dispatchPrompt, allowedDirs: effectiveRwBind, roBind: dispatchRoBind, outputDir: outputDir });
+  // eslint-disable-next-line sonarjs/shorthand-property-grouping -- dispatch objects mix renamed keys (prompt: dispatchPrompt, class: taskClass) with shorthand passthrough; reordering hurts readability
+  const task = buildDispatchTask({ id, model, executor, priorSessionTask, variant, sessionId, originSessionId, internal, finalMarker, role, logPath, parentTaskId, env, prompt: dispatchPrompt, originalPrompt: prompt, directory: normalizedDirectory, defaultVariant: ctx.defaultVariant, resolveOpencodeVariants: ctx.resolveOpencodeVariants, class: taskClass, outputDir, executorArgs });
+  // eslint-disable-next-line sonarjs/shorthand-property-grouping -- same mixed shorthand/renamed grouping as above
+  queueDispatchLaunch({ tasks: ctx.tasks, persistTask: ctx.persistTask, pendingLaunches: ctx.pendingLaunches, providerQueues: ctx.providerQueues, launchQueuedTasks: ctx.launchQueuedTasks }, { id, task, sessionId, env, noSandbox, noOverlay, executor, role, prompt: dispatchPrompt, allowedDirs: effectiveRwBind, roBind: dispatchRoBind, outputDir, executorArgs });
   const summary = summarize(task);
   return {
     ...summary,
@@ -7842,6 +7867,14 @@ function startTaskFor(task, ctx) {
   spawnTaskChild(ctx, launchInfo, task);
 }
 
+/** @param {Task} task @returns {{prompt: string, promptAugmented: string}} */
+function resultPromptFields(task) {
+  return {
+    prompt: task.originalPrompt ?? task.promptPreview ?? task.prompt ?? "",
+    promptAugmented: task.prompt ?? "",
+  };
+}
+
 /**
  * Builds a task's detailed result view (full detail, optional field
  * projection, and the running/queued/unknown short-circuit messages).
@@ -7859,13 +7892,19 @@ function resultFor(taskId, { full, fields }, ctx) {
   if (!task) throw ctx.noSuchTask(taskId);
   validateResultFields(full, fields);
   if (task.status === "running" || task.status === "queued") {
-    return projectResult({ taskId, status: task.status, message: `task is still ${task.status}; poll taskferry status first` }, fields);
+    return projectResult({
+      taskId,
+      status: task.status,
+      message: `task is still ${task.status}; poll taskferry status first`,
+      ...resultPromptFields(task),
+    }, fields);
   }
   if (task.status === "unknown" && task.summaryOf) {
     return projectResult({
       taskId,
       status: task.status,
       message: "summary task became unknown after the server restarted; its partial output is unavailable",
+      ...resultPromptFields(task),
     }, fields);
   }
   // opencode's steps are text (narration) -> tool_use -> step_finish per

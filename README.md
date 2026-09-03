@@ -236,6 +236,7 @@ TOON over the real socket.
 
 - [docs/cli-reference.md](docs/cli-reference.md): every command, flag, and TOON example
 - [docs/daemon.md](docs/daemon.md): process model, socket protocol, recovery
+- [docs/things-that-look-like-bugs.md](docs/things-that-look-like-bugs.md): deliberate behavior that reads as broken
 - [docs/config.md](docs/config.md): config file fields and env var precedence
 - [docs/security.md](docs/security.md): permissions, caller-env forwarding, activity-summary privacy
 - [docs/branding/positioning.md](docs/branding/positioning.md): positioning, Brand Core, and exclusions

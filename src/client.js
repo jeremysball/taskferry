@@ -658,7 +658,13 @@ async function connectClientCore({
     if (!autoStart) throw error;
   }
 
-  await ensureDaemonFn({ env, stateDir, runtimeDir, socketPath, startupTimeoutMs, retryDelayMs, ...startupOptions });
+  // Forward a programmatic raise to the auto-started daemon: the child boots
+  // via env/config (no argv flags), so without this a raised client ceiling
+  // hits the default daemon ceiling. Copy-on-write — never mutate caller env.
+  const bootEnv = env.TASKFERRY_MAX_RESPONSE_BYTES !== undefined || maxBufferBytes === MAX_BUFFER_BYTES
+    ? env
+    : { ...env, TASKFERRY_MAX_RESPONSE_BYTES: String(maxBufferBytes) };
+  await ensureDaemonFn({ env: bootEnv, stateDir, runtimeDir, socketPath, startupTimeoutMs, retryDelayMs, ...startupOptions });
   const deadline = Date.now() + startupTimeoutMs;
   const { client, lastError } = await retryOpenClient(socketPath, clientOptions, retryDelayMs, deadline);
   if (client) return client;

@@ -11,7 +11,7 @@ import { formatToolEventForNarration } from "./narration-format.js";
 import { MAX_BUFFER_BYTES, DEFAULT_MAX_BUFFER_BYTES } from "./daemon-server.js";
 import { errCode } from "./errors.js";
 import { isNonNegativeInteger, isPositiveInteger } from "./numbers.js";
-import { resolveBooleanToggle, resolveNonNegativeIntOption, resolvePositiveIntOption } from "./options.js";
+import { resolveBooleanToggle, resolveNonNegativeIntOption, resolvePositiveIntOption, resolveResponseCapRaw } from "./options.js";
 import { buildBwrapArgs, checkBwrapAvailable, checkOverlaySupport, defaultDenyList, platformSupportsSandbox, resolveGitCommonDir, resolveGitDir } from "./sandbox.js";
 import { applyChangeset, overlayPaths, resolvePreDispatchHead, subOverlayPaths, subFilePaths, cleanupOverlay, defaultRunCommand as defaultOverlayRunCommand, extractGitDiff, extractNonGitDiff, OVERLAY_MOUNT_BUSY_PATTERN } from "./changeset.js";
 import { resolveExecutor, opencodeExecutor } from "./executor.js";
@@ -4285,6 +4285,43 @@ function resolveWorkspaceRootFnOption(rawOptions) {
 }
 
 /**
+ * Provably-safe output-file ceiling for a response cap: the 4096-byte
+ * envelope reserve over the 6x worst-case JSON-escape factor documented at
+ * output-dir.js, clamped at 0 so tiny caps produce a usable (if zero) hint
+ * instead of a negative one. Single home for the formula previously
+ * copy-pasted across resolveTimeoutOptions, initManagerLimits, and
+ * assertOutputResponseFits.
+ * @param {number} cap
+ * @returns {number}
+ */
+function maxSafeResponseBytes(cap) {
+  return Math.max(0, Math.floor((cap - 4096) / 6));
+}
+
+/**
+ * Output-file budget against a response cap: an explicitly set
+ * maxOutputFileBytes (flag/env/config) that exceeds the cap throws, as
+ * before; an unset one clamps to the safe ceiling instead of throwing, so
+ * lowering maxResponseBytes below the 512 KiB default keeps construction
+ * working (taskferry#506 review).
+ * @param {Record<string, any>} rawOptions
+ * @param {Record<string, any>} config
+ * @param {number} cap
+ * @param {number} safe
+ * @returns {number}
+ */
+function resolveOutputFileBytesOption(rawOptions, config, cap, safe) {
+  const envValue = process.env.TASKFERRY_MAX_OUTPUT_FILE_BYTES;
+  const v = resolvePositiveIntOption(rawOptions.maxOutputFileBytes, envValue, config.maxOutputFileBytes, DEFAULT_MAX_OUTPUT_FILE_BYTES);
+  if (v <= cap) return v;
+  const explicit = rawOptions.maxOutputFileBytes ?? (envValue === "" ? undefined : envValue) ?? config.maxOutputFileBytes;
+  if (explicit !== undefined) {
+    throw new Error(`error: maxOutputFileBytes ${v} exceeds daemon response limit ${cap} bytes\nhelp: lower TASKFERRY_MAX_OUTPUT_FILE_BYTES, config maxOutputFileBytes, or --max-output-file-bytes to ≤ ${cap} (and ≤ ${safe} for worst-case JSON escaping)`);
+  }
+  return safe;
+}
+
+/**
  * The numeric-budget options: the dispatch rate/concurrency caps, the
  * watchdog timeouts, the advisor session TTL, the activity cache budgets.
  * All follow the env → config → default chain via
@@ -4294,16 +4331,13 @@ function resolveWorkspaceRootFnOption(rawOptions) {
 function resolveTimeoutOptions(rawOptions) {
   const config = rawOptions.config || {};
   const maxResponseBytes = resolvePositiveIntOption(
-    rawOptions.maxResponseBytes ?? rawOptions.maxBufferBytes ?? rawOptions.maxOutboundBytes,
+    resolveResponseCapRaw(rawOptions),
     process.env.TASKFERRY_MAX_RESPONSE_BYTES,
     config.maxResponseBytes,
     DEFAULT_MAX_BUFFER_BYTES,
   );
-  const maxSafeForResponse = Math.floor((maxResponseBytes - 4096) / 6);
-  const maxOutputFileBytes = resolvePositiveIntOption(rawOptions.maxOutputFileBytes, process.env.TASKFERRY_MAX_OUTPUT_FILE_BYTES, config.maxOutputFileBytes, DEFAULT_MAX_OUTPUT_FILE_BYTES);
-  if (maxOutputFileBytes > maxResponseBytes) {
-    throw new Error(`error: maxOutputFileBytes ${maxOutputFileBytes} exceeds daemon response limit ${maxResponseBytes} bytes\nhelp: lower TASKFERRY_MAX_OUTPUT_FILE_BYTES, config maxOutputFileBytes, or --max-output-file-bytes to ≤ ${maxResponseBytes} (and ≤ ${maxSafeForResponse} for worst-case JSON escaping)`);
-  }
+  const maxSafeForResponse = maxSafeResponseBytes(maxResponseBytes);
+  const maxOutputFileBytes = resolveOutputFileBytesOption(rawOptions, config, maxResponseBytes, maxSafeForResponse);
   return {
     maxDispatchesPerWindow: resolvePositiveIntOption(rawOptions.maxDispatchesPerWindow, process.env.TASKFERRY_MAX_DISPATCHES_PER_WINDOW, config.maxDispatchesPerWindow, DEFAULT_MAX_DISPATCHES_PER_WINDOW),
     dispatchWindowMs: resolvePositiveIntOption(rawOptions.dispatchWindowMs, process.env.TASKFERRY_DISPATCH_WINDOW_MS, config.dispatchWindowMs, DEFAULT_DISPATCH_WINDOW_MS),
@@ -4670,11 +4704,14 @@ function initManagerLimits(opts) {
     summarizerTimeout: nonNegativeInteger(opts.summarizerTimeoutMs, DEFAULT_SUMMARIZER_TIMEOUT_MS),
     activityWords: positiveInteger(opts.activityMaxWords, 75),
     maxResponseBytes: positiveInteger(opts.maxResponseBytes, DEFAULT_MAX_BUFFER_BYTES),
-    maxSafeOutputFileBytes: Math.floor((positiveInteger(opts.maxResponseBytes, DEFAULT_MAX_BUFFER_BYTES) - 4096) / 6),
+    maxSafeOutputFileBytes: maxSafeResponseBytes(positiveInteger(opts.maxResponseBytes, DEFAULT_MAX_BUFFER_BYTES)),
     maxOutputFileBytes: (() => {
       const cap = positiveInteger(opts.maxResponseBytes, DEFAULT_MAX_BUFFER_BYTES);
-      const safe = Math.floor((cap - 4096) / 6);
-      const v = positiveInteger(opts.maxOutputFileBytes, DEFAULT_MAX_OUTPUT_FILE_BYTES);
+      const safe = maxSafeResponseBytes(cap);
+      // Already validated/clamped upstream by resolveTimeoutOptions; this is
+      // a safety net for direct callers. A clamped-to-safe default (e.g. 0
+      // under a tiny cap) passes through instead of throwing.
+      const v = opts.maxOutputFileBytes ?? DEFAULT_MAX_OUTPUT_FILE_BYTES;
       if (v > cap) {
         throw new Error(`error: maxOutputFileBytes ${v} exceeds daemon response limit ${cap} bytes\nhelp: lower to ≤ ${safe} for worst-case JSON escaping`);
       }
@@ -6811,7 +6848,7 @@ export function assertOutputResponseFits(taskId, outputDir, file, relativePath, 
   const size = Buffer.byteLength(encoded);
   if (size > maxResponseBytes) {
     const encodedContentBytes = Buffer.byteLength(JSON.stringify(file.content));
-    const safeCap = Math.floor((maxResponseBytes - 4096) / 6);
+    const safeCap = maxSafeResponseBytes(maxResponseBytes);
     throw new Error(
       `error: output file "${relativePath}" (raw ${file.size} bytes, JSON-escaped ≈${encodedContentBytes} bytes) would exceed daemon response limit ${maxResponseBytes} bytes (≈${size} bytes on the wire, 6× worst-case for control characters)\n` +
       `help: lower --max-output-file-bytes (current ${maxBytes}), TASKFERRY_MAX_OUTPUT_FILE_BYTES, or config maxOutputFileBytes to ≤ ${safeCap} (provably safe) or retrieve the file directly from ${path.join(outputDir, relativePath)}`

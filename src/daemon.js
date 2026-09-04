@@ -9,7 +9,7 @@ import { createTaskManager, emptyStatusCounts } from "./tasks.js";
 import { loadConfig } from "./config.js";
 import { withFileLock, withFileLockAsync } from "./state-lock.js";
 import { isNonNegativeInteger, isPositiveInteger } from "./numbers.js";
-import { parsePositiveIntFlag, parsedEnvNumber, resolveEnvOverrideBoolean, resolvePositiveIntOption } from "./options.js";
+import { parsePositiveIntFlag, parsedEnvNumber, resolveEnvOverrideBoolean, resolvePositiveIntOption, resolveResponseCapRaw } from "./options.js";
 import { normalizeDirectory, resolveRuntimeDir, resolveStateDir, createWorkspaceRootResolver, sameWorkspace } from "./paths.js";
 import {
   PROTOCOL_VERSION,
@@ -816,8 +816,10 @@ function resolveDaemonOptions(options = {}) {
   // comes from any explicit maxResponseBytes/maxOutboundBytes/maxBufferBytes
   // option (startDaemon caller or --max-response-bytes CLI flag); env and
   // config follow the same precedence as tasks.js's numeric options.
-  const rawFlagValue = /** @type {number|undefined} */ (
-    /** @type {any} */ (merged).maxResponseBytes ?? /** @type {any} */ (merged).maxOutboundBytes ?? /** @type {any} */ (merged).maxBufferBytes
+  // NOTE: read from the raw (unmerged) input — merged carries the 1MiB
+  // default maxOutboundBytes which would shadow env/config raises.
+  const rawFlagValue = resolveResponseCapRaw(
+    /** @type {{maxResponseBytes?: number, maxOutboundBytes?: number, maxBufferBytes?: number}} */ (options),
   );
   const configForMax = /** @type {Record<string, unknown>|undefined} */ (
     /** @type {any} */ (merged.taskManagerOptions)?.config ?? /** @type {any} */ (merged).config
@@ -836,10 +838,14 @@ function resolveDaemonOptions(options = {}) {
   // otherwise make the manager's own maxOutputFileBytes validation fail at
   // construction (512 KiB > 1 byte would throw). A raised production cap
   // (>=1 MiB) is the only case where the manager needs to know the wire cap.
-  const taskManagerOptions = /** @type {Record<string, any>} */ (merged.taskManagerOptions);
+  // Clone: merged.taskManagerOptions may alias DAEMON_DEFAULTS.taskManagerOptions
+  // (shallow spread shares the object) — mutating it would leak a raised cap
+  // into later in-process daemons.
+  const taskManagerOptions = { /** @type {Record<string, any>} */ .../** @type {any} */ (merged.taskManagerOptions) };
   if (maxOutboundBytes >= MAX_BUFFER_BYTES && taskManagerOptions.maxResponseBytes === undefined && taskManagerOptions.maxBufferBytes === undefined && taskManagerOptions.maxOutboundBytes === undefined) {
     taskManagerOptions.maxResponseBytes = maxOutboundBytes;
   }
+  merged.taskManagerOptions = /** @type {any} */ (taskManagerOptions);
   // eslint-disable-next-line sonarjs/shorthand-property-grouping -- mixed shorthand/longhand is idiomatic for merged defaults vs explicit casts
   return {
     env,
@@ -1026,12 +1032,19 @@ export async function startDaemon(options = {}) {
     await close();
     unclaimDaemonPid();
   };
+  // Restart env carries an explicitly-resolved cap: the replacement boots via
+  // main() with no argv flags, so a flag-only raise would otherwise be dropped
+  // on self-restart. Copy-on-write — never mutate caller env.
+  const restartEnv = env.TASKFERRY_MAX_RESPONSE_BYTES !== undefined || maxOutboundBytes === MAX_BUFFER_BYTES
+    ? env
+    : { ...env, TASKFERRY_MAX_RESPONSE_BYTES: String(maxOutboundBytes) };
+  // eslint-disable-next-line sonarjs/shorthand-property-grouping -- restartEnv is computed above; longhand env must sit with the other explicit wirings
   maybeRestartRef.current = makeMaybeRestart({
     sourceDir,
     sourceSignature,
     startupSourceSignature,
     daemonEntry,
-    env,
+    env: restartEnv,
     exitProcess,
     spawnReplacement,
     restart,

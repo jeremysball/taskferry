@@ -64,6 +64,20 @@ export function resolveNonNegativeIntOption(rawValue, envValue, configValue, def
 }
 
 /**
+ * Canonical raw-value pick for the response-cap aliases, shared by the
+ * daemon and task-manager chains so both resolve the same winner when
+ * several aliases are set (flag > outbound > buffer). Takes the raw
+ * (pre-defaults) options object — callers must pass the unmerged input,
+ * never a defaults-merged copy, or a default maxOutboundBytes shadows
+ * env/config (taskferry#506 review).
+ * @param {{maxResponseBytes?: number, maxOutboundBytes?: number, maxBufferBytes?: number}} rawOptions
+ * @returns {number|undefined}
+ */
+export function resolveResponseCapRaw(rawOptions) {
+  return rawOptions.maxResponseBytes ?? rawOptions.maxOutboundBytes ?? rawOptions.maxBufferBytes;
+}
+
+/**
  * Whether a string env value counts as enabled (1/true).
  * @param {string|undefined} value
  * @returns {boolean}

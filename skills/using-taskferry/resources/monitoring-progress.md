@@ -290,3 +290,50 @@ session's already-running watcher instead of starting a colliding second
 one. A session that genuinely dispatches into more than one unrelated repo
 still needs one watch per repo (or a single `watch --all`, at the cost of
 mixing every workspace's events into one stream).
+
+## Reading the diff in automation
+
+`taskferry result <id> --diff` prints the changeset as a TOON document
+with the diff in a quoted string (`diff: "…"`). That string uses JSON
+escaping (`\n`, `\"`, `\\`, `\uXXXX`) and preserves literal UTF-8 bytes,
+so the correct way to recover real newlines is JSON decoding, not
+`unicode_escape`.
+
+**Preferred — no manual decode needed:** use the raw mode, which writes
+the diff with real newlines and intact UTF-8 directly:
+
+```sh
+taskferry result <id> --diff --raw > diff.patch
+git apply --check diff.patch   # or inspect, then taskferry accept <id>
+```
+
+**If you must parse the TOON output yourself** (`--diff` without `--raw`),
+extract the quoted value and decode it with `json.loads`:
+
+```python
+import json, re
+
+text = open("toon-output.txt", encoding="utf-8").read()
+m = re.search(r'diff: "(.*)"', text, re.DOTALL)
+if not m:
+    raise SystemExit("no diff found in TOON output")
+# JSON-string decoding: handles \n, \", \\, \uXXXX and leaves UTF-8 intact
+diff = json.loads(f'"{m.group(1)}"')
+open("diff.patch", "w", encoding="utf-8").write(diff)
+```
+
+Do **not** use `codecs.decode(span, "unicode_escape")` or
+`span.encode("utf-8").decode("unicode_escape")`. That codec reinterprets
+each UTF-8 byte of a multi-byte character separately, so an em-dash `—`
+(`\xe2\x80\x94` in UTF-8) becomes mojibake `â` (`\xe2` → `â`, plus two
+control characters `\x80\x94`):
+
+```python
+# WRONG — mangles UTF-8:
+bad = m.group(1).encode("utf-8").decode("unicode_escape")
+assert "—" not in bad and "â" in bad  # em-dash lost, mojibake appears
+```
+
+The raw `--raw` path avoids this class of bug entirely, and
+`taskferry accept` itself is not affected (it applies the stored patch
+file directly via `git apply`, never through TOON decoding).

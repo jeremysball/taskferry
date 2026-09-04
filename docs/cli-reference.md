@@ -251,6 +251,7 @@ tripped.
 | `--full` | Include untruncated narration; only rejected as a usage error when combined with `--fields` that omits `narration` — `--full` alone (no `--fields`) works fine |
 | `--fields <comma-list>` | Project only the fields you need: `message`, `narration`, `tokens`, `cost`, `sessionId`, `exitCode`, `signal`, `spawnError`, `failureReason`, `failureDetail`, `logPath`, `outputDir`, `incomplete`, `finalMarker`, `diff`, `diffStat`, `changesetError`, `finalStatus`, `class`, `checkStatus`, `checkCommand`, `checkExitCode`, `checkOutputTail`, `checkStartedAt`, `checkEndedAt`, `checkOverride`, `parentTaskId`, `projectConfigWarning` |
 | `--diff` | Print the task's extracted changeset diff (read-only; cannot combine with `--fields` or `--full`). A retained diff can still be read after `accept` if its file remains available. |
+| `--raw` | Print the diff as raw text with real newlines, bypassing TOON encoding (requires `--diff`; use with shell redirect, e.g. `taskferry result <id> --diff --raw > diff.patch`). Without `--raw`, the diff is a TOON-quoted string; decode it with `json.loads(f'"{span}"')`, not `unicode_escape`, which mangles multi-byte UTF-8 like em-dash `—` (`\xe2\x80\x94` → `â`) |
 
 The payload (the diff included) rides the daemon's response size cap. A
 diff covers the whole target directory against its pre-dispatch `HEAD`,
@@ -260,6 +261,14 @@ then fails with an error naming the cause: commit or shelve the unrelated
 working-tree changes and retry, or fetch a narrower `--fields` set when
 you don't need the diff (see
 [things-that-look-like-bugs.md](things-that-look-like-bugs.md)).
+
+For automation, prefer `taskferry result <id> --diff --raw` which streams
+the diff with real newlines and intact UTF-8, bypassing TOON string
+encoding entirely. If you must parse the TOON output without `--raw`,
+extract the quoted `diff:` value and decode it with
+`json.loads(f'"{span}"')`; the commonly suggested
+`decode('unicode_escape')` path mangles multi-byte UTF-8 — e.g. an em-dash
+`—` (`\xe2\x80\x94`) becomes mojibake `â`.
 
 ```
 $ taskferry result oc_mrn4ipkp_19450105

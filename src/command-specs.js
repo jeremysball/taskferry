@@ -78,8 +78,8 @@ export const commandSpecs = {
   result: {
     usage: "taskferry result <id> [options]",
     description: "Read the final model result for a task.",
-    options: { "--full": "include untruncated narration", "--fields <comma-list>": "request selected result fields", "--diff": "print the task's changeset diff (read-only; cannot combine with --fields or --full)" },
-    examples: ['taskferry result <id>', 'taskferry result <id> --full', 'taskferry result <id> --fields message,tokens', 'taskferry result <id> --diff'],
+    options: { "--full": "include untruncated narration", "--fields <comma-list>": "request selected result fields", "--diff": "print the task's changeset diff (read-only; cannot combine with --fields or --full)", "--raw": "print the diff as raw text with real newlines, bypassing TOON encoding (requires --diff; use with shell redirect to save to file, e.g. taskferry result <id> --diff --raw > diff.patch)" },
+    examples: ['taskferry result <id>', 'taskferry result <id> --full', 'taskferry result <id> --fields message,tokens', 'taskferry result <id> --diff', 'taskferry result <id> --diff --raw > diff.patch'],
   },
   list: {
     usage: "taskferry list [options]",

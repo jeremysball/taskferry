@@ -56,6 +56,7 @@ const CONFIG_FIELD_TYPES = {
   providerLimits: "object",
   restartWaitForIdle: "boolean",
   maxOutputFileBytes: "number",
+  maxResponseBytes: "number",
 };
 
 /** @type {Record<string, string>} */

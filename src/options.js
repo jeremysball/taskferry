@@ -10,7 +10,10 @@ import { isNonNegativeInteger, isPositiveInteger } from "./numbers.js";
 export function parsePositiveIntFlag(argv, flagName) {
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
-    if (arg === flagName && i + 1 < argv.length) {
+    if (arg === flagName) {
+      if (i + 1 >= argv.length) {
+        throw new Error(`error: ${flagName} needs a value (got end of command line)\nhelp: pass a byte count like 2097152`);
+      }
       const raw = argv[i + 1];
       const parsed = Number(raw);
       if (isPositiveInteger(parsed)) return parsed;
@@ -76,6 +79,20 @@ export function resolveNonNegativeIntOption(rawValue, envValue, configValue, def
   }
   if (isNonNegativeInteger(configValue)) return configValue;
   return defaultValue;
+}
+
+/**
+ * Canonical raw-value pick for the response-cap aliases, shared by the
+ * daemon and task-manager chains so both resolve the same winner when
+ * several aliases are set (flag > outbound > buffer). Takes the raw
+ * (pre-defaults) options object — callers must pass the unmerged input,
+ * never a defaults-merged copy, or a default maxOutboundBytes shadows
+ * env/config (taskferry#506 review).
+ * @param {{maxResponseBytes?: number, maxOutboundBytes?: number, maxBufferBytes?: number}} rawOptions
+ * @returns {number|undefined}
+ */
+export function resolveResponseCapRaw(rawOptions) {
+  return rawOptions.maxResponseBytes ?? rawOptions.maxOutboundBytes ?? rawOptions.maxBufferBytes;
 }
 
 /**

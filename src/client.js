@@ -1,3 +1,4 @@
+/* eslint-disable max-lines -- client.js is over the 400-line soft cap after configurable maxResponseBytes; split would be a larger refactor */
 import { spawn, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
@@ -8,7 +9,7 @@ import { withFileLock } from "./state-lock.js";
 import { PROTOCOL_VERSION, encodeMessage } from "./protocol.js";
 import { MAX_BUFFER_BYTES } from "./daemon-server.js";
 import { loadConfig } from "./config.js";
-import { isObject } from "./numbers.js";
+import { isObject, isPositiveInteger } from "./numbers.js";
 import { resolveRuntimeDir, resolveStateDir, resolveInvokedPath } from "./paths.js";
 import { errCode } from "./errors.js";
 
@@ -586,6 +587,33 @@ async function retryOpenClient(socketPath, clientOptions, retryDelayMs, deadline
  */
 
 /**
+ * Resolve client-side max buffer via flag > env > config > default.
+ * Extracted to keep `connectClient`'s cyclomatic/complexity under the lint
+ * ceiling (the env/config/default chain is branched by nature).
+ * @param {NodeJS.ProcessEnv} env
+ * @param {number|undefined} rawMaxBufferBytes
+ * @returns {number}
+ */
+function resolveClientMaxBufferBytes(env, rawMaxBufferBytes) {
+  if (rawMaxBufferBytes !== undefined) return rawMaxBufferBytes;
+  const envVal = env.TASKFERRY_MAX_RESPONSE_BYTES;
+  if (envVal !== undefined) {
+    const parsed = Number(envVal);
+    if (isPositiveInteger(parsed)) return parsed;
+    if (envVal !== "") {
+      throw new Error(`error: TASKFERRY_MAX_RESPONSE_BYTES must be a positive integer (got ${JSON.stringify(envVal)})\nhelp: set a byte count like 2097152`);
+    }
+  }
+  try {
+    const cfg = loadConfig({ env });
+    if (isPositiveInteger(cfg.maxResponseBytes)) return cfg.maxResponseBytes;
+  } catch {
+    // malformed config: fall through to default; daemon boot will surface via daemon-boot.err
+  }
+  return MAX_BUFFER_BYTES;
+}
+
+/**
  * @param {ConnectClientOptions} [options]
  * @returns {Promise<DaemonClient>}
  */
@@ -603,11 +631,12 @@ export async function connectClient({
   autoStart = env.TASKFERRY_AUTO_START !== "0",
   startupTimeoutMs = 5000,
   retryDelayMs = 25,
-  maxBufferBytes = MAX_BUFFER_BYTES,
+  maxBufferBytes: rawMaxBufferBytes = undefined,
   maxQueuedEvents = 1000,
   ensureDaemonFn = startDaemonBooter,
   ...startupOptions
 } = {}) {
+  const maxBufferBytes = resolveClientMaxBufferBytes(env, rawMaxBufferBytes);
   return connectClientCore({
     env, stateDir, runtimeDir, socketPath, autoStart, startupTimeoutMs,
     retryDelayMs, maxBufferBytes, maxQueuedEvents, ensureDaemonFn, startupOptions,
@@ -629,7 +658,13 @@ async function connectClientCore({
     if (!autoStart) throw error;
   }
 
-  await ensureDaemonFn({ env, stateDir, runtimeDir, socketPath, startupTimeoutMs, retryDelayMs, ...startupOptions });
+  // Forward a programmatic raise to the auto-started daemon: the child boots
+  // via env/config (no argv flags), so without this a raised client ceiling
+  // hits the default daemon ceiling. Copy-on-write — never mutate caller env.
+  const bootEnv = env.TASKFERRY_MAX_RESPONSE_BYTES !== undefined || maxBufferBytes === MAX_BUFFER_BYTES
+    ? env
+    : { ...env, TASKFERRY_MAX_RESPONSE_BYTES: String(maxBufferBytes) };
+  await ensureDaemonFn({ env: bootEnv, stateDir, runtimeDir, socketPath, startupTimeoutMs, retryDelayMs, ...startupOptions });
   const deadline = Date.now() + startupTimeoutMs;
   const { client, lastError } = await retryOpenClient(socketPath, clientOptions, retryDelayMs, deadline);
   if (client) return client;

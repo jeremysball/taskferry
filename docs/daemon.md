@@ -134,10 +134,17 @@ event }`, pushed to a socket asynchronously after `event.subscribe`
 returns a `subscriptionId`. Requests and events interleave freely on the
 same connection.
 
-The daemon caps each connection's accumulated inbound buffer at 1 MiB and
-refuses to buffer more (`REQUEST_TOO_LARGE`), and caps in-flight requests per daemon at 256
+The daemon caps each connection's accumulated inbound buffer at `maxResponseBytes` (default 1 MiB,
+`TASKFERRY_MAX_RESPONSE_BYTES` / `maxResponseBytes` / `--max-response-bytes`, see `docs/config.md`)
+and refuses to buffer more (`REQUEST_TOO_LARGE`), and caps in-flight requests per daemon at 256
 (`SERVER_BUSY`) — both are abuse/backpressure limits, not something normal
-CLI usage approaches.
+CLI usage approaches. The same `maxResponseBytes` also caps outbound responses
+(`RESPONSE_TOO_LARGE` / `REQUEST_TOO_LARGE` in `src/daemon-server.js:14`);
+Unix sockets have no 1 MiB transport limit — the cap is a sanity ceiling on
+per-connection memory. Raising it lets a bare `taskferry result <id>` carry a
+larger narration/diff in one call; keep the default if most responses fit, and
+use `taskferry result <id> --fields message,tokens` (or any narrowed field set)
+to stay under the cap for large tasks.
 
 ## Concurrency, queueing, and rate limiting
 

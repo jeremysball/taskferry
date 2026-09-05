@@ -1,5 +1,17 @@
 # Changelog
 
+## [4.4.1](https://github.com/jeremysball/taskferry/compare/taskferry-v4.4.0...taskferry-v4.4.1) (2026-09-05)
+
+
+### Bug Fixes
+
+* **opencode:** move TERMINAL_STATUSES out of plugin entrypoint ([#562](https://github.com/jeremysball/taskferry/issues/562)) ([a199478](https://github.com/jeremysball/taskferry/commit/a1994780a37ab81f915ef4bbd2c2feb0fd6576ca))
+* **pi:** resolve symlinked catalog files so catalog providers bind ([#564](https://github.com/jeremysball/taskferry/issues/564)) ([6661b55](https://github.com/jeremysball/taskferry/commit/6661b55a281566892a8f66e2d2033181b8a1247f))
+* **pi:** ro-bind model catalog in sandbox for provider lookup ([#556](https://github.com/jeremysball/taskferry/issues/556)) ([999adb3](https://github.com/jeremysball/taskferry/commit/999adb358a093fde102e38f274abe75162906495))
+* **skills:** link deps into new worktree instead of reinstalling ([#575](https://github.com/jeremysball/taskferry/issues/575)) ([c408a05](https://github.com/jeremysball/taskferry/commit/c408a05e27821ad9028c524dac5e799cac62e1bb))
+* **skills:** require settling every task to release its overlay ([#574](https://github.com/jeremysball/taskferry/issues/574)) ([5167eb0](https://github.com/jeremysball/taskferry/commit/5167eb03eb3cb6d41c3c9502659b4fddad4a7728))
+* **taskferry:** expose full prompt via result fields ([#488](https://github.com/jeremysball/taskferry/issues/488)) ([#538](https://github.com/jeremysball/taskferry/issues/538)) ([e5f02ab](https://github.com/jeremysball/taskferry/commit/e5f02ab650c7871a55598cae37ed3fa8cf56ccc6))
+
 ## [4.4.0](https://github.com/jeremysball/taskferry/compare/taskferry-v4.3.0...taskferry-v4.4.0) (2026-08-25)
 
 

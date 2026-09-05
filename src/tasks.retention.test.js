@@ -133,6 +133,42 @@ describe("prune()", () => {
     assert.deepEqual(readStore(stateDir).map((t) => t.id), ["fresh"]);
   });
 
+  test("removes the output dirs of evicted tasks, keeps the rest", () => {
+    // Companion cleanup for the eviction decision: without this the evicted
+    // tasks' output dirs dangle until a restart, when the boot orphan sweep
+    // deletes the younger ones by the configured window instead of this
+    // prune's keepDays. Output dirs are created after the manager boots so
+    // the boot sweep (retention disabled here) does not clear them first.
+    const stateDir = mkdtempTracked(AXI_TASKS_TEST_DIR);
+    seed(stateDir, [record("old", "done", 90), record("new", "done", 1)]);
+
+    const mgr = manager({ stateDir, taskRetentionDays: 0 });
+    const outputs = path.join(stateDir, "outputs");
+    fs.mkdirSync(path.join(outputs, "old"), { recursive: true });
+    fs.mkdirSync(path.join(outputs, "new"), { recursive: true });
+
+    const summary = mgr.prune({ keepDays: 30 });
+    assert.equal(summary.evicted, 1);
+    mgr.close();
+
+    assert.equal(fs.existsSync(path.join(outputs, "old")), false, "evicted task's output dir is removed with the eviction");
+    assert.equal(fs.existsSync(path.join(outputs, "new")), true, "kept task's output dir is untouched");
+  });
+
+  test("dry-run removes no output dirs", () => {
+    const stateDir = mkdtempTracked(AXI_TASKS_TEST_DIR);
+    seed(stateDir, [record("old", "done", 90)]);
+
+    const mgr = manager({ stateDir, taskRetentionDays: 0 });
+    const outputs = path.join(stateDir, "outputs");
+    fs.mkdirSync(path.join(outputs, "old"), { recursive: true });
+
+    mgr.prune({ keepDays: 30, dryRun: true });
+    mgr.close();
+
+    assert.equal(fs.existsSync(path.join(outputs, "old")), true, "dry-run touches nothing on disk");
+  });
+
   describe("output dir sweep guard", () => {
     /**
      * @param {number} ageDays

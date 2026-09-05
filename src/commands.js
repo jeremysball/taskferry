@@ -22,6 +22,7 @@ import { loadConfig } from "./config.js";
 import { computeDoctorStats } from "./doctor-stats.js";
 import { streamTaskEvents, watchCommand } from "./commands-stream.js";
 import { ADVISOR_CANNED_PROMPT, gatherAdvisorContext } from "./advisor-context.js";
+import { validatePruneOptions } from "./retention.js";
 
 // Default timeout for the CLI `wait` command (and `summary --wait`) when no
 // explicit --timeout is given. Kept generous (15 min) so real tasks aren't
@@ -792,9 +793,9 @@ async function runDoctor(options, deps) {
  * @param {ResolvedDeps} deps
  */
 async function runPrune(options, deps) {
+  validatePruneOptions(options);
   return /** @type {unknown} */ (await deps.client.request(TASK_PRUNE_METHOD, {
-    ...(typeof options.keepDays === "number" ? { keepDays: options.keepDays } : {}),
-    dryRun: options.dryRun === true,
+    ...(typeof options.keepDays === "number" ? { keepDays: options.keepDays } : {}), dryRun: options.dryRun === true,
   }));
 }
 

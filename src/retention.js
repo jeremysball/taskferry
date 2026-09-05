@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { TERMINAL_STATUSES } from "./statuses.js";
+import { UsageError } from "./errors.js";
 
 /**
  * Default retention window in days. 0 disables the sweep entirely.
@@ -24,6 +25,31 @@ const MS_PER_DAY = 86_400_000;
  * status (`queued`, `running`) is live work and is kept regardless of age.
  */
 export const EVICTABLE_STATUSES = new Set([...TERMINAL_STATUSES, "unknown"]);
+
+/**
+ * Validates `prune` options at the boundary instead of coercing them: the CLI
+ * parser already delivers typed values, so anything else-typed arriving here
+ * is a programmatic caller whose intent would otherwise be silently rewritten
+ * (`dryRun: 1` becoming a real eviction, `keepDays: "7"` becoming the
+ * configured window while reporting success for the wrong one).
+ *
+ * @param {{keepDays?: unknown, dryRun?: unknown}} options
+ * @throws {UsageError} when either option is present but the wrong type
+ */
+export function validatePruneOptions(options) {
+  if (options.keepDays !== undefined && (typeof options.keepDays !== "number" || !Number.isFinite(options.keepDays) || options.keepDays < 0)) {
+    throw new UsageError(
+      `prune --keep-days must be a non-negative number, got: ${String(options.keepDays)}`,
+      "Pass keepDays as a number of days (e.g. { keepDays: 7 })",
+    );
+  }
+  if (options.dryRun !== undefined && typeof options.dryRun !== "boolean") {
+    throw new UsageError(
+      `prune --dry-run must be a boolean, got: ${String(options.dryRun)}`,
+      "Pass dryRun: true for a report, or omit it for a real eviction",
+    );
+  }
+}
 
 /**
  * The task's most recent known timestamp, as epoch ms, or `undefined` when the
@@ -101,10 +127,14 @@ export function archiveDir(stateDir) {
 export function archiveEvictedTasks(stateDir, evicted, options = {}) {
   if (evicted.length === 0) return undefined;
   const stamp = (options.now ?? new Date()).toISOString().replace(/[:.]/g, "-");
+  // The uuid suffix is load-bearing, not decoration: two non-empty prunes in
+  // the same millisecond would otherwise rename onto the same target and the
+  // second archive would silently overwrite the first.
+  const runId = randomUUID();
   const dir = archiveDir(stateDir);
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-  const target = path.join(dir, `tasks-pruned-${stamp}.ndjson`);
-  const temporary = path.join(dir, `.tasks-pruned-${randomUUID()}.ndjson`);
+  const target = path.join(dir, `tasks-pruned-${stamp}-${runId.slice(0, 8)}.ndjson`);
+  const temporary = path.join(dir, `.tasks-pruned-${runId}.ndjson`);
   const body = evicted.map((task) => JSON.stringify(task)).join("\n") + "\n";
   try {
     fs.writeFileSync(temporary, body, { mode: 0o600 });

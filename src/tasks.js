@@ -3168,13 +3168,40 @@ function applyTaskRetention(ctx, options = {}) {
   const keepDays = options.keepDays ?? ctx.limits.taskRetentionDays;
   const all = Array.from(ctx.maps.tasks.values());
   const { kept, evicted } = partitionByRetention(all, { keepDays, ...(options.now === undefined ? {} : { now: options.now }) });
+  // Awaiting-review work is not evictable, however old: a done task with a
+  // live overlay or a pending changeset still has its diff unaccepted, and
+  // evicting it would archive the record while destroying the overlay its
+  // accept() needs. Kept, not evicted.
+  const evictable = [];
+  for (const task of evicted) {
+    if (task.changesetStatus === "pending" || ctx.helpers.hasLiveOverlay(task)) kept.push(task);
+    else evictable.push(task);
+  }
   const dryRun = options.dryRun === true;
   /** @type {{keepDays: number, dryRun: boolean, scanned: number, kept: number, evicted: number, archivePath?: string}} */
-  const summary = { keepDays, dryRun, scanned: all.length, kept: kept.length, evicted: evicted.length };
-  if (dryRun || evicted.length === 0) return summary;
-  const archivePath = archiveEvictedTasks(ctx.opts.stateDir, evicted);
+  const summary = { keepDays, dryRun, scanned: all.length, kept: kept.length, evicted: evictable.length };
+  if (dryRun || evictable.length === 0) return summary;
+  const archivePath = archiveEvictedTasks(ctx.opts.stateDir, evictable);
   if (archivePath !== undefined) summary.archivePath = archivePath;
-  for (const task of evicted) {
+  evictTasksFromStore(ctx, evictable);
+  ctx.state.persistDirty = true;
+  flushPersistRecords({ TASKS_FILE: ctx.paths.TASKS_FILE, stateDir: ctx.opts.stateDir, tasks: ctx.maps.tasks, state: ctx.state });
+  return summary;
+}
+
+/**
+ * Releases each evicted task's overlay, drops it from the live map, and
+ * removes its output dir. Split out of {@link applyTaskRetention} to keep that
+ * function's complexity down; the two loops below are one unit of work (the
+ * store-side half of an eviction already archived by the caller), not two
+ * independent behaviors, so they stay together here rather than splitting
+ * further.
+ *
+ * @param {ManagerContext} ctx
+ * @param {Array<any>} evictable
+ */
+function evictTasksFromStore(ctx, evictable) {
+  for (const task of evictable) {
     // Release before the delete. The orphan sweep discovers a non-current
     // overlay root only through a live record's overlayDirs.tmpRoot, so
     // dropping the record first would strand the directory with nothing left
@@ -3183,9 +3210,20 @@ function applyTaskRetention(ctx, options = {}) {
     if (task.overlayDirs) ctx.env.releaseOverlay(task);
     ctx.maps.tasks.delete(task.id);
   }
-  ctx.state.persistDirty = true;
-  flushPersistRecords({ TASKS_FILE: ctx.paths.TASKS_FILE, stateDir: ctx.opts.stateDir, tasks: ctx.maps.tasks, state: ctx.state });
-  return summary;
+  // Companion cleanup for the eviction above. The boot orphan-output sweep
+  // runs on the configured window, not this prune's keepDays, so without
+  // this the evicted tasks' output dirs dangle until a restart deletes the
+  // younger ones by the wrong clock while the archive keeps only the
+  // records. Removing them here ties the cleanup to the eviction decision
+  // itself. Best-effort like the overlay release above: a failure leaves the
+  // dir for the boot guard rather than blocking the eviction.
+  for (const task of evictable) {
+    try {
+      removeDirIfPresent(resolveTaskOutputDir(ctx.opts.stateDir, task.id));
+    } catch {
+      // Backstop: the boot orphan sweep still applies its own window.
+    }
+  }
 }
 
 /**

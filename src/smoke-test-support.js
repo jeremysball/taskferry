@@ -80,6 +80,6 @@ export function scratchGitRepo(root) {
   git("config", "user.name", "smoke test");
   fs.writeFileSync(path.join(dir, "README.md"), "taskferry smoke-test scratch repo\n");
   git("add", "-A");
-  git("commit", "-q", "-m", "init");
+  git("commit", "-q", "-m", "init", "--no-verify");
   return dir;
 }

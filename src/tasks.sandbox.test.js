@@ -187,7 +187,7 @@ describe("bwrap sandboxing: dispatch argv shape and gitdir scoping", () => {
     git(["config", "user.name", "test"]);
     fs.writeFileSync(path.join(mainCheckout, "f.txt"), "hi\n");
     git(["add", "f.txt"]);
-    git(["commit", "-q", "-m", "init"]);
+    git(["commit", "-q", "-m", "init", "--no-verify"]);
     git(["branch", "feature"]);
     const worktreeDir = path.join(root, "wt");
     git(["worktree", "add", "-q", worktreeDir, "feature"]);

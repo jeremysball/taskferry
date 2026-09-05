@@ -166,7 +166,7 @@ describe("changeset extraction at settlement", () => {
     execFileSync("git", ["init", "-q", directory]);
     fs.writeFileSync(path.join(directory, "f.txt"), "base\n");
     execFileSync("git", ["-C", directory, "add", "-A"]);
-    execFileSync("git", ["-C", directory, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "base"]);
+    execFileSync("git", ["-C", directory, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "base", "--no-verify"]);
     const gitCommonDir = mkdtempTracked("axi-extract-common-");
     const gitWorktreeAdminDir = mkdtempTracked("axi-extract-gitdir-");
     let extractArgs = null;

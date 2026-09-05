@@ -5419,7 +5419,19 @@ function bootstrapManagerContext(ctx) {
   // strand its artifacts permanently. Skipped when the load itself failed:
   // the map is empty in that case, and flushing it would write [] over a
   // tasks.json that is merely unreadable by this build, not actually empty.
-  if (!ctx.state.stateLoadError) applyTaskRetention(ctx);
+  //
+  // Wrapped: an I/O error here (ENOSPC writing the archive or tasks.json, a
+  // non-ENOENT lstat failure in the output-dir sweep) must not abort
+  // bootstrapManagerContext. The task store itself is intact either way;
+  // losing the whole daemon over a failed housekeeping sweep would trade a
+  // disk-bound cleanup for total unavailability.
+  if (!ctx.state.stateLoadError) {
+    try {
+      applyTaskRetention(ctx);
+    } catch (err) {
+      console.error(`taskferry: retention sweep failed at boot, continuing without it: ${errMessage(err)}`);
+    }
+  }
   // A daemon that died with a check gate mid-flight (checkStatus: "running")
   // leaves that status stuck forever -- nothing will ever call
   // startCheckGate()'s settle handlers again for that task. Reclassify as

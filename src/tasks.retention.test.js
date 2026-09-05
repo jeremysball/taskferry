@@ -90,6 +90,32 @@ describe("boot-time retention sweep", () => {
     assert.equal(fs.readFileSync(storePath, "utf8"), "{ not valid json");
     assert.equal(fs.existsSync(path.join(stateDir, "archive")), false);
   });
+
+  test("a sweep failure at boot is logged and does not abort manager creation", () => {
+    const stateDir = mkdtempTracked(AXI_TASKS_TEST_DIR);
+    seed(stateDir, [record("old-done", "done", 120)]);
+    // Force archiveEvictedTasks' mkdirSync to fail: a plain file sitting where
+    // the archive directory needs to go raises ENOTDIR/EEXIST, standing in
+    // for any real boot-time I/O fault (ENOSPC, a permissions change) the
+    // sweep can hit.
+    fs.writeFileSync(path.join(stateDir, "archive"), "not a directory");
+
+    const errors = [];
+    const restoreConsoleError = console.error;
+    console.error = (msg) => errors.push(msg);
+    let mgr;
+    try {
+      mgr = manager({ stateDir, taskRetentionDays: 30 });
+    } finally {
+      console.error = restoreConsoleError;
+    }
+    mgr.close();
+
+    assert.ok(errors.some((msg) => msg.includes("retention sweep failed at boot")), "the failure is logged, not silent");
+    // The eviction never completed, so the record it would have archived is
+    // still exactly where it started rather than lost mid-sweep.
+    assert.deepEqual(readStore(stateDir).map((t) => t.id), ["old-done"]);
+  });
 });
 
 describe("prune()", () => {
@@ -167,6 +193,36 @@ describe("prune()", () => {
     mgr.close();
 
     assert.equal(fs.existsSync(path.join(outputs, "old")), true, "dry-run touches nothing on disk");
+  });
+
+  test("a keepDays shorter than the configured window leaves no orphan for the next boot's sweep to mishandle", () => {
+    // The output-dir sweep at boot judges an orphan's age against the
+    // *configured* retention window (see the sweep guard tests below), not
+    // whatever keepDays a prune ran with. Before evictTasksFromStore tied
+    // output-dir cleanup to the eviction itself, a task evicted by a
+    // shorter-than-configured keepDays left its output dir behind for that
+    // next boot, which would then judge it against the wrong (longer)
+    // window. Evicting here removes the dir immediately, so there is
+    // nothing left for a later, differently-windowed boot to get wrong.
+    const stateDir = mkdtempTracked(AXI_TASKS_TEST_DIR);
+    seed(stateDir, [record("mid", "done", 5)]);
+
+    const mgr = manager({ stateDir, taskRetentionDays: 0 });
+    const outputs = path.join(stateDir, "outputs");
+    fs.mkdirSync(path.join(outputs, "mid"), { recursive: true });
+
+    // keepDays: 1 evicts the 5-day-old task even though the configured
+    // 30-day window (used below) would not have.
+    const summary = mgr.prune({ keepDays: 1 });
+    assert.equal(summary.evicted, 1);
+    mgr.close();
+    assert.equal(fs.existsSync(path.join(outputs, "mid")), false, "the evicted task's output dir is already gone");
+
+    // A later boot at the normal configured window finds nothing left to
+    // sweep for this task; nothing resurrects the directory or crashes.
+    const rebooted = manager({ stateDir, taskRetentionDays: 30 });
+    rebooted.close();
+    assert.equal(fs.existsSync(path.join(outputs, "mid")), false);
   });
 
   describe("output dir sweep guard", () => {

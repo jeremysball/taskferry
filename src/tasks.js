@@ -20,6 +20,7 @@ import { loadEnvFile, watchEnvFile } from "./env-file.js";
 import { loadProjectConfig, resolveReadOnlyProjectBinds, verificationPromptBlock } from "./project-config.js";
 import { TASKFERRY_OUTPUT_DIR_ENV, DEFAULT_MAX_OUTPUT_FILE_BYTES, MAX_SAFE_OUTPUT_FILE_BYTES, ensureTaskOutputDir, listTaskOutputFiles, outputDirPromptBlock, readTaskOutputFile, resolveOutputDirRoot, resolveTaskOutputDir } from "./output-dir.js";
 import { computeDoctorStats } from "./doctor-stats.js";
+import { DEFAULT_TASK_RETENTION_DAYS, archiveEvictedTasks, partitionByRetention } from "./retention.js";
 
 export { DEFAULT_MAX_OUTPUT_FILE_BYTES, MAX_SAFE_OUTPUT_FILE_BYTES };
 
@@ -3147,6 +3148,85 @@ function loadPersistedTask(ctx, t) {
 }
 
 /**
+ * Evicts aged-out terminal tasks from the live map and rewrites tasks.json.
+ *
+ * Runs once at boot (see {@link bootstrapManagerContext}) and on demand via
+ * the `task.prune` RPC. Going through the manager rather than editing
+ * tasks.json directly is the point: the daemon holds the authoritative map in
+ * memory and flushes it on a coalesced timer, so an external edit to the file
+ * is overwritten by the next flush.
+ *
+ * Evicted records are archived under `<stateDir>/archive/`, never deleted.
+ * Archiving happens before the map is touched, so a failed write leaves the
+ * store exactly as it was.
+ *
+ * @param {ManagerContext} ctx
+ * @param {{keepDays?: number, dryRun?: boolean, now?: number}} [options]
+ * @returns {{keepDays: number, dryRun: boolean, scanned: number, kept: number, evicted: number, archivePath?: string}}
+ */
+function applyTaskRetention(ctx, options = {}) {
+  const keepDays = options.keepDays ?? ctx.limits.taskRetentionDays;
+  const all = Array.from(ctx.maps.tasks.values());
+  const { kept, evicted } = partitionByRetention(all, { keepDays, ...(options.now === undefined ? {} : { now: options.now }) });
+  // Awaiting-review work is not evictable, however old: a done task with a
+  // live overlay or a pending changeset still has its diff unaccepted, and
+  // evicting it would archive the record while destroying the overlay its
+  // accept() needs. Kept, not evicted.
+  const evictable = [];
+  for (const task of evicted) {
+    if (task.changesetStatus === "pending" || ctx.helpers.hasLiveOverlay(task)) kept.push(task);
+    else evictable.push(task);
+  }
+  const dryRun = options.dryRun === true;
+  /** @type {{keepDays: number, dryRun: boolean, scanned: number, kept: number, evicted: number, archivePath?: string}} */
+  const summary = { keepDays, dryRun, scanned: all.length, kept: kept.length, evicted: evictable.length };
+  if (dryRun || evictable.length === 0) return summary;
+  const archivePath = archiveEvictedTasks(ctx.opts.stateDir, evictable);
+  if (archivePath !== undefined) summary.archivePath = archivePath;
+  evictTasksFromStore(ctx, evictable);
+  ctx.state.persistDirty = true;
+  flushPersistRecords({ TASKS_FILE: ctx.paths.TASKS_FILE, stateDir: ctx.opts.stateDir, tasks: ctx.maps.tasks, state: ctx.state });
+  return summary;
+}
+
+/**
+ * Releases each evicted task's overlay, drops it from the live map, and
+ * removes its output dir. Split out of {@link applyTaskRetention} to keep that
+ * function's complexity down; the two loops below are one unit of work (the
+ * store-side half of an eviction already archived by the caller), not two
+ * independent behaviors, so they stay together here rather than splitting
+ * further.
+ *
+ * @param {ManagerContext} ctx
+ * @param {Array<any>} evictable
+ */
+function evictTasksFromStore(ctx, evictable) {
+  for (const task of evictable) {
+    // Release before the delete. The orphan sweep discovers a non-current
+    // overlay root only through a live record's overlayDirs.tmpRoot, so
+    // dropping the record first would strand the directory with nothing left
+    // pointing at it. Release failures are already logged by releaseOverlay
+    // and must not block the eviction: the record is archived either way.
+    if (task.overlayDirs) ctx.env.releaseOverlay(task);
+    ctx.maps.tasks.delete(task.id);
+  }
+  // Companion cleanup for the eviction above. The boot orphan-output sweep
+  // runs on the configured window, not this prune's keepDays, so without
+  // this the evicted tasks' output dirs dangle until a restart deletes the
+  // younger ones by the wrong clock while the archive keeps only the
+  // records. Removing them here ties the cleanup to the eviction decision
+  // itself. Best-effort like the overlay release above: a failure leaves the
+  // dir for the boot guard rather than blocking the eviction.
+  for (const task of evictable) {
+    try {
+      removeDirIfPresent(resolveTaskOutputDir(ctx.opts.stateDir, task.id));
+    } catch {
+      // Backstop: the boot orphan sweep still applies its own window.
+    }
+  }
+}
+
+/**
  * Whether a pid is still alive (signal 0 probe). Uses the manager's killFn
  * (process.kill) directly rather than sendSignalToProcess's group logic,
  * since this is a liveness check, not a cancellation.
@@ -4377,6 +4457,7 @@ function resolveTimeoutOptions(rawOptions) {
     maxWaitMs: rawOptions.maxWaitMs ?? MAX_WAIT_MS,
     summarizerTimeoutMs: resolveNonNegativeIntOption(rawOptions.summarizerTimeoutMs, process.env.TASKFERRY_SUMMARIZER_TIMEOUT_MS, config.summarizerTimeoutMs, DEFAULT_SUMMARIZER_TIMEOUT_MS),
     activityMaxWords: resolvePositiveIntOption(rawOptions.activityMaxWords, process.env.TASKFERRY_ACTIVITY_MAX_WORDS, config.activityMaxWords, 75),
+    taskRetentionDays: resolveNonNegativeIntOption(rawOptions.taskRetentionDays, process.env.TASKFERRY_TASK_RETENTION_DAYS, config.taskRetentionDays, DEFAULT_TASK_RETENTION_DAYS),
     maxOutputFileBytes,
   };
 }
@@ -4726,6 +4807,7 @@ function initManagerLimits(opts) {
     maxWait: positiveInteger(opts.maxWaitMs, MAX_WAIT_MS),
     summarizerTimeout: nonNegativeInteger(opts.summarizerTimeoutMs, DEFAULT_SUMMARIZER_TIMEOUT_MS),
     activityWords: positiveInteger(opts.activityMaxWords, 75),
+    taskRetentionDays: nonNegativeInteger(opts.taskRetentionDays, DEFAULT_TASK_RETENTION_DAYS),
     maxOutputFileBytes: (() => {
       const v = positiveInteger(opts.maxOutputFileBytes, DEFAULT_MAX_OUTPUT_FILE_BYTES);
       if (v > MAX_BUFFER_BYTES) {
@@ -5006,7 +5088,7 @@ function buildManagerInternalHelpers(ctx) {
     /** @param {Task} task */
     hasLiveOverlay: (task) => hasLiveOverlayForTask(task, { existsFn: ctx.opts.existsFn }),
     sweepOrphanedPromptFiles: () => sweepOrphanedPromptFilesFor({ PROMPT_DIR: ctx.paths.PROMPT_DIR, tasks: ctx.maps.tasks, persistedTasks: ctx.state.persistedTasks }),
-    sweepOrphanedOutputDirs: () => sweepOrphanedOutputDirsFor({ OUTPUT_DIR_ROOT: resolveOutputDirRoot(ctx.opts.stateDir), tasks: ctx.maps.tasks, persistedTasks: ctx.state.persistedTasks, readdirFn: ctx.opts.readdirFn, lstatFn: ctx.opts.lstatFn }),
+    sweepOrphanedOutputDirs: () => sweepOrphanedOutputDirsFor({ OUTPUT_DIR_ROOT: resolveOutputDirRoot(ctx.opts.stateDir), tasks: ctx.maps.tasks, persistedTasks: ctx.state.persistedTasks, readdirFn: ctx.opts.readdirFn, lstatFn: ctx.opts.lstatFn, retentionDays: ctx.limits.taskRetentionDays }),
     /** @param {string} model @param {NodeJS.ProcessEnv} [env] @returns {string[]} Resolves the
      * opencode variants table for a model: the test-injected
      * `opencodeVariantsTable` seam when set, otherwise the on-disk
@@ -5211,6 +5293,10 @@ function buildTaskManagerApi(ctx) {
      */
     list: (options) => listTasks({ ensureStateLoaded: () => ctx.helpers.ensureStateLoaded(), tasks: ctx.maps.tasks }, options),
     stats: () => statsTasks({ ensureStateLoaded: () => ctx.helpers.ensureStateLoaded(), tasks: ctx.maps.tasks }),
+    prune: (options = {}) => {
+      ctx.helpers.ensureStateLoaded();
+      return applyTaskRetention(ctx, options);
+    },
     /**
      * @param {string} taskId
      * @param {{full?: boolean, fields?: string[]}} [options]
@@ -5327,6 +5413,13 @@ function bootstrapManagerContext(ctx) {
   // these on a real reboot for free; this only matters for a same-boot
   // daemon restart.
   ctx.helpers.sweepOrphanedOverlays();
+  // Retention sweep, deliberately *after* every companion sweep above. Those
+  // sweeps discover what to clean from live task records (an overlay's
+  // recorded tmpRoot, a prompt file's id), so evicting a record first would
+  // strand its artifacts permanently. Skipped when the load itself failed:
+  // the map is empty in that case, and flushing it would write [] over a
+  // tasks.json that is merely unreadable by this build, not actually empty.
+  if (!ctx.state.stateLoadError) applyTaskRetention(ctx);
   // A daemon that died with a check gate mid-flight (checkStatus: "running")
   // leaves that status stuck forever -- nothing will ever call
   // startCheckGate()'s settle handlers again for that task. Reclassify as
@@ -7222,7 +7315,15 @@ function promptFileIsOrphan(entry, ctx) {
  * surface for `taskferry output <id>`), so the sweep only removes dirs
  * whose task id is absent from the loaded tasks.json entirely. Mirrors
  * sweepOrphanedPromptFiles() / sweepOrphanedOverlays() at startup.
- * @param {{OUTPUT_DIR_ROOT: string, tasks: Map<string, Task>, persistedTasks?: Map<string, Record<string, any>>, readdirFn: (path: string) => string[], lstatFn?: (path: string) => fs.Stats, removeDirFn?: (path: string) => void}} ctx
+ *
+ * `retentionDays`, when set above 0, additionally guards anything older than
+ * that window. Retention evicts old terminal tasks out of tasks.json, which
+ * would otherwise make every one of their output dirs look like an orphan on
+ * the next boot and hand a worker's whole deliverable history to the rm below.
+ * This sweep exists for crash debris, and crash debris is by definition from
+ * the boot that just crashed, so bounding it to the retention window costs
+ * nothing real and keeps `<stateDir>/outputs/` archival.
+ * @param {{OUTPUT_DIR_ROOT: string, tasks: Map<string, Task>, persistedTasks?: Map<string, Record<string, any>>, readdirFn: (path: string) => string[], lstatFn?: (path: string) => fs.Stats, removeDirFn?: (path: string) => void, retentionDays?: number}} ctx
  */
 export function sweepOrphanedOutputDirsFor(ctx) {
   let entries;
@@ -7241,8 +7342,10 @@ export function sweepOrphanedOutputDirsFor(ctx) {
   if (orphanEntries.length === 0) return;
   const lstat = ctx.lstatFn ?? fs.lstatSync;
   const removeDir = ctx.removeDirFn ?? removeDirIfPresent;
+  const retentionDays = ctx.retentionDays ?? 0;
+  const olderThan = retentionDays > 0 ? Date.now() - retentionDays * 86_400_000 : undefined;
   for (const entry of orphanEntries) {
-    sweepOrphanOutputEntry(path.join(ctx.OUTPUT_DIR_ROOT, entry), lstat, removeDir);
+    sweepOrphanOutputEntry(path.join(ctx.OUTPUT_DIR_ROOT, entry), lstat, removeDir, olderThan);
   }
 }
 
@@ -7277,14 +7380,17 @@ function collectOrphanOutputEntries(entries, tasks, persistedTasks) {
  * @param {string} full
  * @param {(path: string) => fs.Stats} lstat
  * @param {(path: string) => void} removeDir
+ * @param {number} [olderThan] epoch ms; entries last modified before this are kept
  */
-function sweepOrphanOutputEntry(full, lstat, removeDir) {
+function sweepOrphanOutputEntry(full, lstat, removeDir, olderThan) {
+  let stats;
   try {
-    lstat(full);
+    stats = lstat(full);
   } catch (err) {
     if (errCode(err) === "ENOENT") return;
     throw err;
   }
+  if (olderThan !== undefined && stats.mtimeMs < olderThan) return;
   removeDir(full);
 }
 

@@ -350,3 +350,31 @@ belongs here.
   a close raced an unlink; the next boot re-checks it and reclaims it once
   its recorded owner is provably dead, so a leftover record can never wedge
   a restart.
+- Editing or truncating `tasks.json` by hand and watching the removed tasks
+  come back — expected. The daemon loads the whole store into memory at boot
+  and rewrites it wholesale on a coalesced flush timer, so any external edit is
+  overwritten the next time a task changes state. This is why `taskferry prune`
+  is an RPC to the daemon rather than a file rewrite in the CLI. It becomes a
+  real bug only if a prune through the daemon fails to survive a subsequent
+  flush, which would mean the eviction never reached the in-memory map.
+- Task history getting shorter over time, and `taskferry doctor --stats`
+  reporting a smaller `overall` sample than it used to — expected once
+  `taskRetentionDays` is non-zero. The boot sweep evicts terminal tasks past
+  the window so the store cannot grow without bound (a 117 MB, 31k-task
+  `tasks.json` is what motivated this: it pushed an unscoped `taskferry
+  context` past the daemon's 1 MiB response cap). Nothing is lost, the records
+  move to `<stateDir>/archive/tasks-pruned-<stamp>.ndjson`. Set
+  `taskRetentionDays` to `0` to keep everything in the hot store. It would be a
+  real bug if a `queued` or `running` task were evicted, or if an archive file
+  were missing records the store no longer has.
+- An evicted task's `<stateDir>/outputs/<id>` directory staying on disk forever
+  once retention has pruned the record. Deliberate. The boot orphan sweep
+  removes an output dir whose id is absent from `tasks.json`, which is exactly
+  what a pruned task looks like, so the sweep would otherwise delete the whole
+  archived deliverable history the first time retention ran. It is bounded to
+  entries younger than `taskRetentionDays`
+  (`sweepOrphanedOutputDirsFor`, `src/tasks.js`): crash debris is by definition
+  from the boot that just crashed, so the guard costs nothing real and keeps
+  `outputs/` archival. Reclaim that space by hand, deliberately. It would be a
+  real bug if a dir created during *this* boot's crashed dispatch survived the
+  sweep, or if the guard applied while `taskRetentionDays` is `0`.

@@ -787,6 +787,7 @@ const invokeHandlers = {
   "task.wait": (manager, params) => manager.poll(/** @type {string} */ (params.taskId), /** @type {any} */ (params)),
   "task.list": (manager, params, resolveWorkspaceRootFn) => filteredList(manager, /** @type {string|undefined} */ (params.directory), resolveWorkspaceRootFn),
   "task.stats": (manager) => manager.stats(),
+  "task.prune": (manager, params) => manager.prune({ ...(typeof params.keepDays === "number" ? { keepDays: params.keepDays } : {}), dryRun: params.dryRun === true }),
   "task.result": (manager, params) => manager.result(/** @type {string} */ (params.taskId), /** @type {any} */ (params)),
   "task.tail": (manager, params) => manager.tail(/** @type {string} */ (params.taskId), params.chars === undefined ? undefined : { chars: /** @type {number} */ (params.chars) }),
   "task.summary": (manager, params) => manager.summarize(/** @type {string} */ (params.taskId), /** @type {any} */ (params)),

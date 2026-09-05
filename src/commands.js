@@ -22,6 +22,7 @@ import { loadConfig } from "./config.js";
 import { computeDoctorStats } from "./doctor-stats.js";
 import { streamTaskEvents, watchCommand } from "./commands-stream.js";
 import { ADVISOR_CANNED_PROMPT, gatherAdvisorContext } from "./advisor-context.js";
+import { validatePruneOptions } from "./retention.js";
 
 // Default timeout for the CLI `wait` command (and `summary --wait`) when no
 // explicit --timeout is given. Kept generous (15 min) so real tasks aren't
@@ -156,6 +157,7 @@ const SYSTEM_HEALTH_METHOD = "system.health";
 const TASK_STATUS_METHOD = "task.status";
 const TASK_LIST_METHOD = "task.list";
 const TASK_STATS_METHOD = "task.stats";
+const TASK_PRUNE_METHOD = "task.prune";
 
 // Whether an option was set to anything other than `undefined`. The dispatch
 // helpers use this to decide whether to include a key in the RPC payload --
@@ -777,6 +779,26 @@ async function runDoctor(options, deps) {
   return shapeDoctorResult(options, checked, diagnostics);
 }
 
+/**
+ * Prunes aged-out terminal tasks from the daemon's store.
+ *
+ * Deliberately routed through the daemon rather than editing tasks.json here:
+ * the daemon holds the authoritative task map in memory and flushes it on a
+ * coalesced timer, so a CLI-side rewrite of the file is silently overwritten
+ * the next time any task changes state.
+ *
+ * @param {object} options
+ * @param {number} [options.keepDays]
+ * @param {boolean} [options.dryRun]
+ * @param {ResolvedDeps} deps
+ */
+async function runPrune(options, deps) {
+  validatePruneOptions(options);
+  return /** @type {unknown} */ (await deps.client.request(TASK_PRUNE_METHOD, {
+    ...(typeof options.keepDays === "number" ? { keepDays: options.keepDays } : {}), dryRun: options.dryRun === true,
+  }));
+}
+
 // Per-command dispatch table. Adding a new command means writing one handler
 // here and registering it below -- the top-level switch is gone. Each handler
 // has its own per-command options shape, so the table is typed loosely and
@@ -800,6 +822,7 @@ const HANDLERS = {
   watch: /** @type {(options: Record<string, unknown>, deps: ResolvedDeps) => unknown} */ (runWatch),
   context: /** @type {(options: Record<string, unknown>, deps: ResolvedDeps) => unknown} */ (runContext),
   doctor: /** @type {(options: Record<string, unknown>, deps: ResolvedDeps) => unknown} */ (runDoctor),
+  prune: /** @type {(options: Record<string, unknown>, deps: ResolvedDeps) => unknown} */ (runPrune),
 };
 
 // Resolve the default values for the per-command deps once so every handler

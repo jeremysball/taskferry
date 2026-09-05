@@ -1174,3 +1174,19 @@ test("advisor forwards class to the RPC payload when set", async () => {
   await runCommand("advisor", { prompt: "hi", directory: root, model: "m", class: "advisor-design" }, { client, cwd: root, env: {} });
   assert.equal(captured.params.class, "advisor-design");
 });
+
+test("prune forwards typed options to the RPC payload", async () => {
+  let captured;
+  const client = { request: async (method, params) => { captured = { method, params }; return { evicted: 0 }; } };
+  await runCommand("prune", { keepDays: 7, dryRun: true }, { client });
+  assert.equal(captured.method, "task.prune");
+  assert.deepEqual(captured.params, { keepDays: 7, dryRun: true });
+});
+
+test("prune rejects mistyped options at the boundary instead of coercing them", async () => {
+  const client = { request: async () => { throw new Error(MUST_NOT_REACH_DAEMON_MESSAGE); } };
+  await assert.rejects(runCommand("prune", { keepDays: "7" }, { client }), UsageError);
+  await assert.rejects(runCommand("prune", { dryRun: 1 }, { client }), UsageError);
+  await assert.rejects(runCommand("prune", { keepDays: -1 }, { client }), UsageError);
+  await assert.rejects(runCommand("prune", { keepDays: NaN }, { client }), UsageError);
+});

@@ -472,6 +472,32 @@ Recomputed from the daemon's `task.stats` aggregate on every call, with a
 fallback to `task.list` only for an older daemon that does not support
 `task.stats`. Nothing is cached. Cannot be combined with `--full`.
 
+## `taskferry prune [--keep-days <n>] [--dry-run]`
+
+Archives terminal tasks older than the retention window out of `tasks.json`,
+the same sweep the daemon runs at boot. Reports `{ keepDays, dryRun, scanned,
+kept, evicted, archivePath }`; `archivePath` is absent when nothing was
+evicted or when `--dry-run` was passed.
+
+A task is evicted only when it is both terminal (`done`, `crashed`,
+`cancelled`, `unknown`) and older than the window, measured from `endedAt`
+when present and `startedAt` otherwise. `queued` and `running` tasks survive
+at any age, as does a record with no parseable timestamp.
+
+Evicted records are written as NDJSON to
+`<stateDir>/archive/tasks-pruned-<stamp>.ndjson` before anything is removed
+from the store, so a failed archive write leaves `tasks.json` untouched.
+Nothing is deleted.
+
+`--keep-days` overrides `taskRetentionDays` for this call only; `0` keeps
+everything. Precedence is flag > `TASKFERRY_TASK_RETENTION_DAYS` >
+`config.json` `taskRetentionDays` > the built-in default of 30 days.
+
+This runs through the daemon rather than editing `tasks.json` directly, which
+is the only thing that works: the daemon holds the authoritative task map in
+memory and flushes it on a coalesced timer, so an external rewrite of the file
+is overwritten the next time any task changes state.
+
 ## `taskferry --version` / `taskferry -V`
 
 Prints `{ name: "taskferry", version, protocolVersion }`.

@@ -309,25 +309,36 @@ function passthroughIfSet(options, inputKey, outputKey, transform) {
 // `tasksFixture` may be an array or `(logDir) => array` for fixtures whose
 // logPath needs to point inside the real log dir.
 //
-// The boolean toggles (sandboxEnabled, overlayEnabled) are defaulted to
-// `false` rather than left as `undefined` so they override the manager's
-// own env-driven defaults (`resolveBooleanToggle` falls back to a
-// default of `true` for overlayEnabled when its input is `undefined` --
-// the original makeManager()'s `= false` default param kept that
-// override honest, and we need to preserve it for the bwrap argv-shape
-// tests in tasks.sandbox.test.js, which assume the dispatch directory
-// is a plain --bind, not a copy-on-write --overlay).
+// Settings that must be pinned rather than left `undefined`, because the
+// manager's own default would otherwise change behavior under tests that
+// never mention the setting. Any test exercising one of these as its
+// subject passes it explicitly and overrides the pin.
+//
+// - sandboxEnabled / overlayEnabled: `resolveBooleanToggle` defaults
+//   overlayEnabled to `true` on `undefined`. The original makeManager()'s
+//   `= false` default param kept that override honest, and the bwrap
+//   argv-shape tests in tasks.sandbox.test.js depend on it: they assume the
+//   dispatch directory is a plain --bind, not a copy-on-write --overlay.
+// - lowerdirStaggerMs: DEFAULT_LOWERDIR_STAGGER_MS (3000ms) would serialize
+//   every dispatch test that assumes synchronous, immediate, concurrent
+//   launches.
+// - taskRetentionDays: the boot retention sweep would evict shared fixtures
+//   out from under tests that have nothing to do with retention. baseTask()
+//   pins startedAt to a fixed date, so the real default would also make the
+//   suite start failing on its own once that date aged past the window.
+function pinnedManagerDefaults(options) {
+  return {
+    sandboxEnabled: options.sandboxEnabled ?? false,
+    overlayEnabled: options.overlayEnabled ?? false,
+    lowerdirStaggerMs: options.lowerdirStaggerMs ?? 0,
+    taskRetentionDays: options.taskRetentionDays ?? 0,
+  };
+}
+
 function buildManagerOptions(options, stateDir, defaultCacheDir, defaultOverlayTmpRoot) {
   return {
     stateDir,
-    sandboxEnabled: options.sandboxEnabled ?? false,
-    overlayEnabled: options.overlayEnabled ?? false,
-    // Defaulted to 0 (disabled) rather than left undefined: the manager's
-    // own DEFAULT_LOWERDIR_STAGGER_MS (3000ms) would otherwise silently
-    // serialize every dispatch test that assumes synchronous, immediate,
-    // concurrent launches. Tests exercising the stagger itself override
-    // this explicitly via options.lowerdirStaggerMs.
-    lowerdirStaggerMs: options.lowerdirStaggerMs ?? 0,
+    ...pinnedManagerDefaults(options),
     cacheDir: options.cacheDir ?? defaultCacheDir,
     overlayTmpRoot: options.overlayTmpRoot ?? defaultOverlayTmpRoot,
     spawnFn: options.spawnFn ?? defaultSpawnFn(),

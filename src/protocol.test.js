@@ -31,6 +31,7 @@ const METHOD = Object.freeze({
   accept: "task.accept",
   reject: "task.reject",
   output: "task.output",
+  prune: "task.prune",
   subscribe: "event.subscribe",
 });
 
@@ -50,6 +51,7 @@ const expectedMethods = [
   METHOD.accept,
   METHOD.reject,
   METHOD.output,
+  METHOD.prune,
 ];
 
 function request(method, params = {}, overrides = {}) {

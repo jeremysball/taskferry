@@ -32,7 +32,7 @@ function gitWorktreeFixture(t) {
   spawnSync("git", ["init", "-q", mainRepo]);
   fs.writeFileSync(path.join(mainRepo, "tracked.txt"), "base\n");
   spawnSync("git", ["-C", mainRepo, "add", "-A"]);
-  spawnSync("git", ["-C", mainRepo, "-c", GIT_EMAIL, "-c", GIT_NAME, "commit", "-qm", "base"]);
+  spawnSync("git", ["-C", mainRepo, "-c", GIT_EMAIL, "-c", GIT_NAME, "commit", "-qm", "base", "--no-verify"]);
   spawnSync("git", ["-C", mainRepo, "worktree", "add", "-q", worktree, "-b", "feat"]);
   return { mainRepo: fs.realpathSync(mainRepo), worktree: fs.realpathSync(worktree) };
 }

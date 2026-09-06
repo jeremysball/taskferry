@@ -378,3 +378,19 @@ belongs here.
   `outputs/` archival. Reclaim that space by hand, deliberately. It would be a
   real bug if a dir created during *this* boot's crashed dispatch survived the
   sweep, or if the guard applied while `taskRetentionDays` is `0`.
+- Every sandbox running with `GIT_DISCOVERY_ACROSS_FILESYSTEM=1`, which reads
+  like a loosened guard. Deliberate. A CoW overlay mounted at `directory`
+  makes that directory its own filesystem, so when `directory` is a
+  subdirectory of a repo rather than its root, the mount lands between the
+  subdirectory and the `.git` above it and git's discovery stops there:
+  `git -C <subdir> add -A` exits 128 with `fatal: not a git repository ...
+  Stopping at filesystem boundary`. That killed the worker's own git commands
+  during dispatch and changeset extraction afterwards, leaving 23 real tasks
+  stuck `pending` with no diff and no way to accept them (#589). The boundary
+  is an artifact of how the sandbox is assembled, not a real one: every path
+  inside comes from the same host filesystem, and `resolvePreDispatchHead`
+  already classifies the task as a git target on the host, where nothing
+  interposes a mount. The setenv makes the sandbox agree with the
+  classification the host already made. It would be a real bug if a sandbox
+  ever bound two genuinely different filesystems where an unrelated `.git`
+  above the dispatch directory could be discovered.

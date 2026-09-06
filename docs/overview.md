@@ -175,3 +175,4 @@ Pointers that lived in the README's former 12-link "Further reading" list:
 - [troubleshooting.md](troubleshooting.md): `doctor` output and common failures
 - [migrating-from-mcp.md](migrating-from-mcp.md): command mapping and cleanup
 - [../CONTRIBUTING.md](../CONTRIBUTING.md): PR conventions, test file structure, contributor workflow
+- [todo.md](todo.md): prioritized work list

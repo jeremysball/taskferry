@@ -148,6 +148,11 @@ describe("accept()/reject()", () => {
     const diffPath = path.join(os.tmpdir(), `taskferry-accept-diff-${process.pid}-${Math.random().toString(36).slice(2)}.patch`); // eslint-disable-line sonarjs/pseudo-random -- test fixture randomness, not security-sensitive
     fs.writeFileSync(diffPath, DIFF_LINE);
     createdDiffPaths.push(diffPath);
+    // Re-created per fixture, not once per block: the boot reconcile
+    // (sweepStaleOverlayRecordsFor) nulls a settled task's overlayDirs when
+    // the directory it names is gone, and the accept/reject tests here delete
+    // this shared root as part of what they assert.
+    fs.mkdirSync(fixtureRoot, { recursive: true });
     return {
       ...baseTask({ id: "t_pending", status: "done" }),
       role: "dispatch",
@@ -417,11 +422,18 @@ describe("accept(): overlaySleepFn threading (taskferry#328)", () => {
 
 describe("summarize() changeset exposure", () => {
   test("exposes changeset fields only when they are meaningful", () => {
+    // The overlay root has to exist on disk: the boot reconcile
+    // (sweepStaleOverlayRecordsFor) clears a settled task's pointer to a
+    // directory that is gone, which would otherwise null out the very field
+    // this test is checking status() exposes.
+    const overlayTmpRoot = mkdtempTracked("axi-summarize-exposure-");
+    const overlayRoot = path.join(overlayTmpRoot, OVERLAY_DIR_PENDING);
+    fs.mkdirSync(overlayRoot, { recursive: true });
     const overlayDirs = {
-      root: path.join(os.tmpdir(), OVERLAY_DIR_PENDING),
-      tmpRoot: os.tmpdir(),
-      upperDir: path.join(os.tmpdir(), OVERLAY_DIR_PENDING, "upper", "main"),
-      workDir: path.join(os.tmpdir(), OVERLAY_DIR_PENDING, "work", "main"),
+      root: overlayRoot,
+      tmpRoot: overlayTmpRoot,
+      upperDir: path.join(overlayRoot, "upper", "main"),
+      workDir: path.join(overlayRoot, "work", "main"),
       rwBinds: [],
     };
     const mgr = makeManager({

@@ -378,3 +378,27 @@ belongs here.
   `outputs/` archival. Reclaim that space by hand, deliberately. It would be a
   real bug if a dir created during *this* boot's crashed dispatch survived the
   sweep, or if the guard applied while `taskRetentionDays` is `0`.
+- `doctor` reporting a large `changesets.unresolvable` count and never doing
+  anything about it. Deliberate. The boot reconcile
+  (`sweepStaleOverlayRecordsFor`, `src/tasks.js`) clears a settled task's
+  `overlayDirs` pointer once the directory it names is gone, and stops there.
+  It does not flip `changesetStatus` to `rejected`, even for a pending
+  changeset with no surviving `.patch` and no surviving overlay, which is
+  provably unacceptable forever. A pending changeset in that state is the
+  record of a ferry whose diff extraction failed, and the accompanying
+  `changesetError` is the only evidence of why. Mass-rejecting them would
+  clear a number on a dashboard and destroy the diagnosis: on the daemon this
+  was first measured against, 1,107 of the 1,811 unresolvable changesets
+  carried the same `non-git diff extraction failed` error, which is what
+  identified taskferry#589 in the first place. `doctor` reports the two
+  buckets separately (`applicable` vs `unresolvable`) so the split stays
+  visible without anything being thrown away. It would be a real bug if the
+  reconcile cleared a pointer on a `running` or `queued` task (the overlay
+  record is persisted before the child spawns, taskferry#346), or if it
+  cleared a pointer to a directory that still exists.
+- A stale overlay warning from `doctor` that does not go away until the daemon
+  restarts. Deliberate, and the same shape as every other boot sweep here: the
+  reconcile runs once at boot rather than on a timer, because that is the only
+  moment the daemon knows nothing else is mid-dispatch against those records.
+  `taskferry daemon restart` clears it. It would be a real bug if the warning
+  persisted across a restart with the overlay root intact.

@@ -6,6 +6,7 @@ export const PROTOCOL_VERSION = 1;
 
 export const RPC_METHODS = Object.freeze([
   "system.health",
+  "system.storage",
   "task.dispatch",
   "task.cancel",
   "task.status",
@@ -173,6 +174,10 @@ function isSummaryEnvActivity(method, params) {
 /** @type {Record<string, MethodSpec>} */
 const METHOD_PARAMS = {
   "system.health": {
+    required: [],
+    optional: [],
+  },
+  "system.storage": {
     required: [],
     optional: [],
   },

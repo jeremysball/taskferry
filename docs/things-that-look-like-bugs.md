@@ -378,3 +378,18 @@ belongs here.
   `outputs/` archival. Reclaim that space by hand, deliberately. It would be a
   real bug if a dir created during *this* boot's crashed dispatch survived the
   sweep, or if the guard applied while `taskRetentionDays` is `0`.
+- `sonarjs/no-os-command-from-path` being enabled project-wide while
+  `src/sandbox.js` — the file that literally spawns `bwrap` — reports no
+  violations. Not a misconfiguration, and not a sign the rule is off. The
+  rule only recognizes a command passed as a string literal, and
+  `sandbox.js:20` spawns through a variable (`spawnSync(command, args, ...)`)
+  whose value is chosen by the caller. Nothing static is there to flag. The
+  practical consequence is that turning this rule on buys coverage of
+  incidental literal spawns (`spawnSync("npm", ...)` in `setup.js`) and buys
+  nothing at all on the sandbox path, so it must not be read as evidence
+  that taskferry's own `bwrap`/`git`/executor invocations have been checked
+  for PATH safety. Those are argued safe by design and by the sandbox tests,
+  not by this lint rule. It becomes a real bug only if someone adds a
+  literal-command spawn to production code and the rule stays quiet — check
+  `eslint.config.mjs`'s `TEST_SURFACE` list first, since a new production
+  file matching one of those globs would be silently exempted.

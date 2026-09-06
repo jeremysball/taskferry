@@ -18,6 +18,9 @@ const HOME_DIR = "/home/user";
 const UNSHARE_ALL = "--unshare-all";
 const SHARE_NET = "--share-net";
 const DIE_WITH_PARENT = "--die-with-parent";
+// Emitted by buildBwrapBaseArgs() for every sandbox -- see the
+// GIT_DISCOVERY_SETENV comment in sandbox.js.
+const GIT_DISCOVERY_ARGS = ["--setenv", "GIT_DISCOVERY_ACROSS_FILESYSTEM", "1"];
 const STATE_RUN_DIR = "/state/run";
 const SSH_DIR = "/home/user/.ssh";
 const MAIN_WORKTREE_GITDIR = "/workspace/main-repo/.git/worktrees/my-repo";
@@ -442,12 +445,13 @@ describe("buildBwrapBaseArgs() (Task 5: shared scaffolding)", () => {
       "--ro-bind", "/", "/",
       "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp",
       "--tmpfs", "/a", "--tmpfs", "/b",
+      ...GIT_DISCOVERY_ARGS,
     ]);
   });
 
   test("emits no --tmpfs for the deny-list entries when denyList is empty", () => {
     const args = buildBwrapBaseArgs({ denyList: [] });
-    assert.deepEqual(args, ["--ro-bind", "/", "/", "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp"]);
+    assert.deepEqual(args, ["--ro-bind", "/", "/", "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp", ...GIT_DISCOVERY_ARGS]);
   });
 });
 
@@ -480,6 +484,7 @@ describe("buildBwrapArgs() byte-identical output (Task 5: post-refactor regressi
       "--tmpfs", OPENCODE_DATA_DIR,
       "--tmpfs", KILO_DATA_DIR,
       "--tmpfs", PI_SESSIONS_DIR,
+      ...GIT_DISCOVERY_ARGS,
       "--bind", MY_REPO_DIR, MY_REPO_DIR,
       "--bind", SOCKET_PATH, SOCKET_PATH,
       UNSHARE_ALL, SHARE_NET, DIE_WITH_PARENT,
@@ -509,6 +514,7 @@ describe("buildBwrapArgs() byte-identical output (Task 5: post-refactor regressi
       "--tmpfs", OPENCODE_DATA_DIR,
       "--tmpfs", KILO_DATA_DIR,
       "--tmpfs", PI_SESSIONS_DIR,
+      ...GIT_DISCOVERY_ARGS,
       OVERLAY_SRC, MY_REPO_DIR,
       "--overlay", COW_UPPER_MAIN, COW_WORK_MAIN, MY_REPO_DIR,
       "--bind", SOCKET_PATH, SOCKET_PATH,

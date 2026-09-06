@@ -20,6 +20,7 @@ import { checkBwrapAvailableAsync } from "./sandbox.js";
 import { normalizeDirectory, resolveWorkspaceRoot } from "./paths.js";
 import { loadConfig } from "./config.js";
 import { computeDoctorStats } from "./doctor-stats.js";
+import { asDoctorStorage, collectDoctorDiagnostics } from "./doctor-warnings.js";
 import { streamTaskEvents, watchCommand } from "./commands-stream.js";
 import { ADVISOR_CANNED_PROMPT, gatherAdvisorContext } from "./advisor-context.js";
 import { validatePruneOptions } from "./retention.js";
@@ -154,6 +155,7 @@ async function checkClaudeIntegration(runShellCommand) {
 }
 
 const SYSTEM_HEALTH_METHOD = "system.health";
+const SYSTEM_STORAGE_METHOD = "system.storage";
 const TASK_STATUS_METHOD = "task.status";
 const TASK_LIST_METHOD = "task.list";
 const TASK_STATS_METHOD = "task.stats";
@@ -640,6 +642,7 @@ async function runDoctorChecks({ client, homeDirectory, env, runShellCommand, pl
     checkOpencodePlaywrightIsolation(homeDirectory, env),
     checkClaudeCodePlaywrightIsolation(homeDirectory),
     platform === "linux" ? checkBwrapAvailableAsync(runShellCommand) : Promise.resolve(null),
+    client.request(SYSTEM_STORAGE_METHOD, {}),
   ]);
   return {
     health: checks[0].status === "fulfilled" ? /** @type {object} */ (checks[0].value) : {},
@@ -647,6 +650,11 @@ async function runDoctorChecks({ client, homeDirectory, env, runShellCommand, pl
     opencodeMCP: checks[2].status === "fulfilled" ? checks[2].value : failedCheck(),
     claudeCodeMCP: checks[3].status === "fulfilled" ? checks[3].value : failedCheck(),
     bwrap: checks[4].status === "fulfilled" ? checks[4].value : bwrapFailureForPlatform(platform),
+    // A rejection here is the version-skew case: a pre-upgrade daemon whose
+    // self-restart is deferred while tasks run answers UNKNOWN_METHOD. Report
+    // no storage section rather than failing the whole doctor run over an
+    // accounting extra.
+    storage: checks[5].status === "fulfilled" ? asDoctorStorage(checks[5].value) : null,
   };
 }
 
@@ -658,61 +666,6 @@ function bwrapFailureForPlatform(platform) {
   return platform === "linux" ? failedCheck() : null;
 }
 
-// Each check kind produces at most one warning; the shared phrase anchors the
-// three messages to the same root cause ("shared browser profile crashes
-// dispatch / bwrap missing breaks sandbox") so adding a new check only needs
-// to slot in another helper here.
-const SHARED_BROWSER_CRASH_PHRASE = "concurrent dispatches sharing one browser profile crash with SIGKILL";
-
-/**
- * @param {{checked: boolean, isolated?: boolean, path?: string}} opencodeMCP
- * @returns {string|null}
- */
-function opencodeMcpWarning(opencodeMCP) {
-  if (!opencodeMCP.checked || opencodeMCP.isolated) return null;
-  return `Playwright MCP for opencode is not isolated (${opencodeMCP.path}): ${SHARED_BROWSER_CRASH_PHRASE}. Run taskferry setup to fix, or add --isolated to its command manually.`;
-}
-
-/**
- * @param {{checked: boolean, isolated?: boolean, path?: string, reason?: string}} claudeCodeMCP
- * @returns {string|null}
- */
-function claudeCodeMcpWarning(claudeCodeMCP) {
-  if (!claudeCodeMCP.checked || claudeCodeMCP.isolated) return null;
-  const pathFragment = claudeCodeMCP.path ? ` (${claudeCodeMCP.path})` : "";
-  const reasonFragment = claudeCodeMCP.reason && !claudeCodeMCP.path ? `, or ${claudeCodeMCP.reason.toLowerCase()}` : "";
-  return `Playwright MCP for Claude Code is not isolated${pathFragment}: ${SHARED_BROWSER_CRASH_PHRASE}. Run taskferry setup to fix${reasonFragment}.`;
-}
-
-/**
- * @param {{available?: boolean, reason?: string}|null} bwrap
- * @returns {string|null}
- */
-function bwrapWarning(bwrap) {
-  if (!bwrap || bwrap.available) return null;
-  return `Filesystem sandboxing is unavailable: bwrap is not installed (${bwrap.reason}). Dispatches will fail with a spawnError instead of running unconfined. Install bubblewrap (e.g. apt install bubblewrap), or opt out explicitly with TASKFERRY_DISABLE_SANDBOX=1.`;
-}
-
-/**
- * @param {object} checked
- * @param {{checked: boolean, isolated?: boolean, path?: string}} checked.opencodeMCP
- * @param {{checked: boolean, isolated?: boolean, path?: string, reason?: string}} checked.claudeCodeMCP
- * @param {{available?: boolean, reason?: string}|null} checked.bwrap
- * @param {NodeJS.Platform} platform
- * @returns {{warnings: string[], info: string[]}}
- */
-function collectDoctorDiagnostics(checked, platform) {
-  const warnings = [
-    opencodeMcpWarning(checked.opencodeMCP),
-    claudeCodeMcpWarning(checked.claudeCodeMCP),
-    bwrapWarning(checked.bwrap),
-  ].filter((message) => message !== null);
-  const info = platform !== "linux"
-    ? ["Filesystem sandboxing (bwrap) is only available on Linux; dispatched tasks on this platform run unconfined."]
-    : [];
-  return { warnings, info };
-}
-
 /**
  * @typedef {object} DoctorChecks
  * @property {object} health
@@ -720,6 +673,7 @@ function collectDoctorDiagnostics(checked, platform) {
  * @property {{checked: boolean, isolated?: boolean, path?: string, reason?: string}} opencodeMCP
  * @property {{checked: boolean, isolated?: boolean, path?: string, reason?: string}} claudeCodeMCP
  * @property {{checked: boolean, available?: boolean, reason?: string}|null} bwrap
+ * @property {import("./doctor-warnings.js").DoctorStorage|null} storage
  */
 
 /**
@@ -731,11 +685,12 @@ function collectDoctorDiagnostics(checked, platform) {
  * @param {string[]} diagnostics.info
  */
 function shapeDoctorResult(options, checked, diagnostics) {
-  const { health, claude, opencodeMCP, claudeCodeMCP } = checked;
+  const { health, claude, opencodeMCP, claudeCodeMCP, storage } = checked;
   return {
     ...health,
     ...(options.full && { cliVersion: "2.0.0", protocolVersion: 1 }),
     integrations: { claude, playwrightMcpIsolation: { opencode: opencodeMCP, claudeCode: claudeCodeMCP } },
+    ...(storage && { storage }),
     ...(diagnostics.warnings.length > 0 && { warnings: diagnostics.warnings }),
     ...(diagnostics.info.length > 0 && { info: diagnostics.info }),
   };

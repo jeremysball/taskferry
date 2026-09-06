@@ -41,9 +41,18 @@ const c = pc.createColors(true);
  */
 
 /**
+ * @typedef {object} DoctorStorageReport
+ * @property {{records: number, bytes: number|null}} taskStore
+ * @property {{recorded: number, stale: number, live: number}} overlays
+ * @property {{pending: number, applicable: number, unresolvable: number}} changesets
+ * @property {Record<string, number>} perTaskCacheDirs
+ */
+
+/**
  * @typedef {object} DoctorReport
  * @property {boolean} [healthy]
  * @property {Integrations} [integrations]
+ * @property {DoctorStorageReport} [storage]
  * @property {string[]} [warnings]
  * @property {string[]} [info]
  * @property {unknown} [pid]
@@ -310,13 +319,45 @@ function renderMcpIsolationSection(mcp) {
   return lines;
 }
 
+const BYTE_UNITS = ["B", "KB", "MB", "GB", "TB"];
+
+/**
+ * @param {number|null|undefined} bytes
+ * @returns {string}
+ */
+function formatBytes(bytes) {
+  if (typeof bytes !== "number" || !Number.isFinite(bytes)) return "n/a";
+  let value = bytes;
+  let unit = 0;
+  while (value >= 1024 && unit < BYTE_UNITS.length - 1) {
+    value /= 1024;
+    unit++;
+  }
+  return `${unit === 0 ? value : value.toFixed(1)} ${BYTE_UNITS[unit]}`;
+}
+
+/**
+ * @param {DoctorStorageReport|undefined|null} storage
+ * @returns {string[]}
+ */
+function renderStorageSection(storage) {
+  if (!storage) return [];
+  const cacheDirs = Object.entries(storage.perTaskCacheDirs).map(([bucket, count]) => `${count} ${bucket}`).join(" \u00b7 ");
+  const lines = ["", c.bold("Storage")];
+  lines.push(c.dim(`task store: ${storage.taskStore.records} records, ${formatBytes(storage.taskStore.bytes)}`));
+  lines.push(c.dim(`overlays: ${storage.overlays.live} live, ${storage.overlays.stale} stale of ${storage.overlays.recorded} recorded`));
+  lines.push(c.dim(`pending changesets: ${storage.changesets.applicable} applicable, ${storage.changesets.unresolvable} unresolvable of ${storage.changesets.pending}`));
+  if (cacheDirs) lines.push(c.dim(`per-task cache dirs: ${cacheDirs}`));
+  return lines;
+}
+
 /**
  * @param {Record<string, unknown>} value
  * @param {string[]} lines
  * @returns {void}
  */
 function renderDoctorExtras(value, lines) {
-  const covered = new Set(["healthy", "integrations", "warnings", "info"]);
+  const covered = new Set(["healthy", "integrations", "storage", "warnings", "info"]);
   for (const key of Object.keys(value)) {
     if (covered.has(key)) continue;
     const rendered = renderScalarField(key, value[key]);
@@ -338,6 +379,7 @@ function renderDoctorReport(value) {
     lines.push("", c.bold("Claude integration"), checkLine("installed", checkState(claude.installed), claude.reason));
   }
   lines.push(...renderMcpIsolationSection(value.integrations?.playwrightMcpIsolation));
+  lines.push(...renderStorageSection(value.storage));
   if (Array.isArray(value.warnings) && value.warnings.length) lines.push(...renderBulletBlock("warnings", c.yellow, value.warnings));
   if (Array.isArray(value.info) && value.info.length) lines.push(...renderBulletBlock("info", c.dim, value.info));
   renderDoctorExtras(/** @type {Record<string, unknown>} */ (value), lines);

@@ -20,6 +20,7 @@ import { loadEnvFile, watchEnvFile } from "./env-file.js";
 import { loadProjectConfig, resolveReadOnlyProjectBinds, verificationPromptBlock } from "./project-config.js";
 import { TASKFERRY_OUTPUT_DIR_ENV, DEFAULT_MAX_OUTPUT_FILE_BYTES, MAX_SAFE_OUTPUT_FILE_BYTES, ensureTaskOutputDir, listTaskOutputFiles, outputDirPromptBlock, readTaskOutputFile, resolveOutputDirRoot, resolveTaskOutputDir } from "./output-dir.js";
 import { computeDoctorStats } from "./doctor-stats.js";
+import { computeHousekeeping, overlayPointerIsStale } from "./housekeeping.js";
 import { DEFAULT_TASK_RETENTION_DAYS, archiveEvictedTasks, partitionByRetention } from "./retention.js";
 
 export { DEFAULT_MAX_OUTPUT_FILE_BYTES, MAX_SAFE_OUTPUT_FILE_BYTES };
@@ -5106,6 +5107,7 @@ function buildManagerInternalHelpers(ctx) {
       return table?.get(model) ?? [];
     },
     sweepOrphanedOverlays: () => sweepOrphanedOverlaysFor({ tasks: ctx.maps.tasks, persistedTasks: ctx.state.persistedTasks, overlayTmpRoot: ctx.opts.overlayTmpRoot, releaseOverlay: (task) => ctx.env.releaseOverlay(task), persistTask: (taskId) => ctx.helpers.persistTask(taskId), readdirFn: ctx.opts.readdirFn }),
+    sweepStaleOverlayRecords: () => sweepStaleOverlayRecordsFor({ tasks: ctx.maps.tasks, existsFn: ctx.opts.existsFn, persistTask: (taskId) => ctx.helpers.persistTask(taskId) }),
     markInterruptedGates: () => markInterruptedGatesFor({ tasks: ctx.maps.tasks, hasLiveOverlay: (task) => ctx.helpers.hasLiveOverlay(task), startCheckGate: (task) => ctx.env.startCheckGate(task), sendSignal: (pid, signal) => ctx.helpers.sendSignal(pid, signal), persistTask: (taskId) => ctx.helpers.persistTask(taskId) }),
     /**
      * Validate `model` against opencode's installed-models list, NOT against
@@ -5293,6 +5295,7 @@ function buildTaskManagerApi(ctx) {
      */
     list: (options) => listTasks({ ensureStateLoaded: () => ctx.helpers.ensureStateLoaded(), tasks: ctx.maps.tasks }, options),
     stats: () => statsTasks({ ensureStateLoaded: () => ctx.helpers.ensureStateLoaded(), tasks: ctx.maps.tasks }),
+    storage: () => storageTasks({ ensureStateLoaded: () => ctx.helpers.ensureStateLoaded(), tasks: ctx.maps.tasks, cacheDir: ctx.opts.cacheDir, tasksFile: ctx.paths.TASKS_FILE }),
     prune: (options = {}) => {
       ctx.helpers.ensureStateLoaded();
       return applyTaskRetention(ctx, options);
@@ -5413,6 +5416,13 @@ function bootstrapManagerContext(ctx) {
   // these on a real reboot for free; this only matters for a same-boot
   // daemon restart.
   ctx.helpers.sweepOrphanedOverlays();
+  // The other direction of the same reconciliation: sweepOrphanedOverlays()
+  // above walks the disk for directories no task claims, this walks the task
+  // records for pointers no directory backs. A reboot clears the tmpfs the
+  // overlays live on without touching tasks.json, so without this the store
+  // accumulates dead pointers indefinitely -- 4,761 of them on the first real
+  // daemon this was measured against.
+  ctx.helpers.sweepStaleOverlayRecords();
   // Retention sweep, deliberately *after* every companion sweep above. Those
   // sweeps discover what to clean from live task records (an overlay's
   // recorded tmpRoot, a prompt file's id), so evicting a record first would
@@ -7211,6 +7221,51 @@ function statsTasks(ctx) {
     rows.push(summarizeRow(task));
   }
   return computeDoctorStats(rows);
+}
+
+/**
+ * Storage accounting for `doctor`: how much the task store has accumulated,
+ * how many overlay pointers have outlived the directory they name, how many
+ * pending changesets can still be applied, and how many per-task cache dirs
+ * are sitting under the cache root. None of it is reachable from `stats()`,
+ * which reports dispatch outcomes rather than what those dispatches left on
+ * disk.
+ * @param {{ensureStateLoaded: () => void, tasks: Map<string, Task>, cacheDir: string, tasksFile: string}} ctx
+ */
+function storageTasks(ctx) {
+  ctx.ensureStateLoaded();
+  return computeHousekeeping({
+    tasks: ctx.tasks.values(),
+    cacheDir: ctx.cacheDir,
+    tasksFile: ctx.tasksFile,
+    existsFn: (p) => fs.existsSync(p),
+    readdirFn: (p) => fs.readdirSync(p),
+    statFn: (p) => fs.statSync(p),
+  });
+}
+
+/**
+ * Clears `overlayDirs` on settled tasks whose recorded overlay directory is
+ * gone. `sweepOrphanedOverlays` above walks the *disk* and removes
+ * directories no live task claims; nothing walked the other direction, so a
+ * task record kept pointing at an overlay long after a reboot cleared the
+ * tmpfs under it. Those pointers are what make `hasLiveOverlay` and the
+ * accept path do filesystem work for a directory that cannot come back.
+ *
+ * Deliberately leaves `changesetStatus` alone. A pending changeset whose
+ * overlay is gone is still acceptable when its `.patch` survived, and one
+ * whose extraction failed is a diagnostic signal about *why* a ferry never
+ * settled -- mass-flipping either to `rejected` would erase the evidence
+ * rather than clean up after it.
+ * @param {{tasks: Map<string, Task>, existsFn: (p: string) => boolean, persistTask: (taskId: string) => void}} ctx
+ */
+export function sweepStaleOverlayRecordsFor(ctx) {
+  const stale = [...ctx.tasks.values()].filter((task) => overlayPointerIsStale(task, ctx.existsFn));
+  for (const task of stale) {
+    task.overlayDirs = null;
+    ctx.persistTask(task.id);
+  }
+  return stale.length;
 }
 
 /**

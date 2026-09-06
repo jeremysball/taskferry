@@ -103,20 +103,53 @@ since `/workspace` is bound read-only. Pre-create the leaf worktrees on the host
 before dispatching, or run the controller with `--no-sandbox`, or pass
 `--rw-bind /tmp`. See the controller section in the repo's `CLAUDE.md`.
 
-**Overlays live on a small tmpfs.** Upper and work dirs go under
-`<runtimeDir>/overlay/taskferry-cow-<task-id>/{upper,work}/main`
+**Overlays live on a small tmpfs.** Each task gets one root,
+`<runtimeDir>/overlay/taskferry-cow-<task-id>/`
 (`src/paths.js:95`, overridable with `TASKFERRY_OVERLAY_TMP_DIR`). On a typical
 box that is `/run/user/<uid>`, often 1-2G. Every unsettled task holds its overlay
 indefinitely, because the daemon's startup sweep deliberately skips a `pending`
-changeset (`sweepOverlayEntry`, `src/tasks.js:3495`). Enough of them fill the
+changeset (`sweepOverlayEntry`, `src/tasks.js:3570`). Enough of them fill the
 tmpfs and the daemon dies with `ENOSPC`, taking every in-flight ferry with it.
 Settle each task with `accept` or `reject`.
 
-**Only `--directory` produces a diff.** There is one overlay, over
-`--directory`. Other read-write paths (the git common dir, `runtimeDir`,
-`--rw-bind` entries) are ordinary binds: writes there land on the host
-immediately and never appear in `taskferry result --diff`, which extracts
-relative to `--directory` alone.
+## Overlay root layout
+
+There is no `lower/` on disk. The lower layer is the host checkout itself
+(`--overlay-src <directory>`, `src/sandbox.js:302`); only `upper` and `work`
+are stored. A live root looks like this:
+
+```
+taskferry-cow-<task-id>/
+  upper/main/             # worker's writes to --directory (the diff source)
+  work/main/              # kernel scratch paired with upper/main
+  upper/extra/<slug>/     # one sub-overlay per git dir outside --directory
+  work/extra/<slug>/      # kernel scratch paired with each sub-overlay
+  files/<slug>/           # scratch copies of single files overlayfs can't mount
+```
+
+* `upper/main` + `work/main` is the main mount over `--directory`
+  (`overlayPaths`, `src/changeset.js:309`).
+* `upper/extra/<slug>` + `work/extra/<slug>` are sub-overlays for git
+  plumbing that lives outside `--directory` (a worktree's git-common-dir
+  slices such as `objects-<hash>`, `refs-<hash>`). Slug is
+  `basename + sha1(path)[0:8]` (`subOverlayPaths`, `src/changeset.js:431`;
+  slug in `src/changeset.js:322`). Wired up in `buildGitBinds`
+  (`src/tasks.js:1423`); extraction re-mounts the same sub-overlays, so
+  commits made inside the sandbox are visible to `result --diff`.
+* `files/<slug>/` holds scratch copies of single writable files outside
+  `--directory` (e.g. a worktree gitdir's `packed-refs`: `HEAD`, `index`,
+  `refs/`, `logs/`). Overlayfs mounts directories only, so files get a
+  copy bound rw onto the host path instead (`subFilePaths`,
+  `src/changeset.js:446`).
+* `work/main/work` (and each `work/extra/<slug>/work`) is overlayfs-internal,
+  owned by the kernel. Listing it after teardown fails with
+  `Permission denied`; that is expected, not data loss.
+* `merged/` appears only transiently during non-git diff extraction
+  (`src/changeset.js:402`) and is not stored.
+
+Plain `--rw-bind`/`--ro-bind` entries (`runtimeDir`, user `--rw-bind` paths)
+stay ordinary binds outside this root: writes there land on the host
+immediately and never appear in the diff.
 
 ## Rules of thumb
 

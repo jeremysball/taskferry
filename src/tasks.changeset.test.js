@@ -108,6 +108,11 @@ describe("changeset extraction at settlement", () => {
 
   test("persists task.overlayDirs to disk synchronously before spawning the child (taskferry#346): a daemon crash right after dispatch() returns must not orphan the overlay", () => {
     const directory = mkdtempTracked("axi-persist-race-dir-");
+    // A plain mkdtemp dir is a non-git target and now binds directly with no
+    // overlay (taskferry#583) -- this test pins overlay persistence, so it
+    // needs a git target. An unborn repo (init, no commit) suffices:
+    // resolvePreDispatchHead anchors it on the empty tree.
+    execFileSync("git", ["init", "-q", directory]);
     const overlayTmpRoot = mkdtempTracked("axi-persist-race-tmp-");
     const mgr = makeManager({
       spawnFn: (_cmd, _args) => fakeChild(),
@@ -257,7 +262,15 @@ describe("changeset extraction at settlement", () => {
       overlayEnabled: true,
       checkOverlaySupportFn: () => ({ supported: true }),
       platform: "linux",
-      runOverlayCommandFn: () => ({ status: null, stdout: "", stderr: "", error: Object.assign(new Error(SPAWN_BWRAP_TIMEOUT), { code: "ETIMEDOUT" }) }),
+      // The dispatch-time git-ness probe shares this fn: answer rev-parse
+      // with a HEAD so the dispatch stays on the overlay path (a plain
+      // mkdtemp dir would bind directly with no overlay since taskferry#583
+      // and never reach extraction). Drift detection sees the same HEAD, so
+      // no drift -- this test pins the error path, not drift.
+      runOverlayCommandFn: (command, _args) => {
+        if (command === "git") return { status: 0, stdout: "abc123\n", stderr: "" };
+        return { status: null, stdout: "", stderr: "", error: Object.assign(new Error(SPAWN_BWRAP_TIMEOUT), { code: "ETIMEDOUT" }) };
+      },
       rmOverlayTreeFn: () => { cleanedAny = true; },
       overlayTmpRoot,
     });
@@ -575,7 +588,14 @@ describe("changeset extraction at settlement: overlay-mount-busy reclassificatio
       overlayEnabled: true,
       checkOverlaySupportFn: () => ({ supported: true }),
       platform: "linux",
-      runOverlayCommandFn: () => ({ status: null, stdout: "", stderr: "", error: new Error(bwrapMessage) }),
+      // The dispatch-time git-ness probe shares this fn: answer rev-parse
+      // with a HEAD so the dispatch stays on the overlay path (a plain
+      // mkdtemp dir would bind directly with no overlay since taskferry#583
+      // and take the directWrites path instead of this extraction).
+      runOverlayCommandFn: (command, _args) => {
+        if (command === "git") return { status: 0, stdout: "abc123\n", stderr: "" };
+        return { status: null, stdout: "", stderr: "", error: new Error(bwrapMessage) };
+      },
       rmOverlayTreeFn: () => {},
       overlaySleepFn: (ms) => sleeps.push(ms),
     });
@@ -597,16 +617,20 @@ describe("changeset extraction at settlement: overlay-mount-busy reclassificatio
     assert.deepEqual(sleeps, [100, 300, 900], "must exhaust the full retry backoff, injected through the manager API, before giving up");
   });
 
-  // Regression (taskferry#327 review finding): a non-git target's extraction
-  // bwrap fails with the exact status shape bwrap itself produces on a real
-  // overlay-mount-busy setup failure -- status: 1, no `error`, the busy text
-  // in stderr -- which collides with `diff -ruN`'s own exit-1-for-
-  // differences-found convention. The prior fix (mocked with {status: null,
-  // error: ...}, an ETIMEDOUT shape, not a real bwrap die()) never exercised
-  // this exact collision and would have silently accepted an empty diff.
-  test("a real bwrap status-1 overlay-busy failure on a non-git target still reclassifies as overlay_mount_busy (does not fail open as a zero-change accept)", async () => {
-    const directory = mkdtempTracked("axi-overlay-busy-nongit-dir-");
-    const overlayTmpRoot = mkdtempTracked("axi-overlay-busy-nongit-tmp-");
+  // Regression (taskferry#327 review finding): extraction bwrap fails with
+  // the exact status shape bwrap itself produces on a real overlay-mount-busy
+  // setup failure -- status: 1, no `error`, the busy text in stderr -- which
+  // collides with `diff -ruN`'s own exit-1-for-differences-found convention.
+  // The prior fix (mocked with {status: null, error: ...}, an ETIMEDOUT
+  // shape, not a real bwrap die()) never exercised this exact collision and
+  // would have silently accepted an empty diff. Repurposed under
+  // taskferry#583: the non-git-target variant of this test retired with the
+  // non-git apply path -- a plain mkdtemp dir now binds directly with no
+  // overlay and never reaches extraction -- so this pins the same collision
+  // on a git target, where the overlay (and its mount failure) still exist.
+  test("a real bwrap status-1 overlay-busy failure on a git target still reclassifies as overlay_mount_busy (does not fail open as a zero-change accept)", async () => {
+    const directory = mkdtempTracked("axi-overlay-busy-git-dir-");
+    const overlayTmpRoot = mkdtempTracked("axi-overlay-busy-git-tmp-");
     const bwrapMessage =
       "bwrap: Can't make overlay mount on /newroot/workspace with options " +
       "upperdir=/tmp/upper,workdir=/tmp/work,lowerdir=/oldroot/workspace,userxattr: Device or resource busy";
@@ -625,7 +649,14 @@ describe("changeset extraction at settlement: overlay-mount-busy reclassificatio
       overlayEnabled: true,
       checkOverlaySupportFn: () => ({ supported: true }),
       platform: "linux",
-      runOverlayCommandFn: () => ({ status: 1, stdout: "", stderr: bwrapMessage, error: null }),
+      // The dispatch-time git-ness probe shares this fn: answer rev-parse
+      // with a HEAD so the dispatch stays on the overlay path (a plain
+      // mkdtemp dir would bind directly with no overlay since taskferry#583
+      // and never reach extraction).
+      runOverlayCommandFn: (command, _args) => {
+        if (command === "git") return { status: 0, stdout: "abc123\n", stderr: "" };
+        return { status: 1, stdout: "", stderr: bwrapMessage, error: null };
+      },
       rmOverlayTreeFn: () => {},
       overlaySleepFn: (ms) => sleeps.push(ms),
     });
@@ -653,7 +684,14 @@ describe("changeset extraction at settlement: overlay-mount-busy reclassificatio
       overlayEnabled: true,
       checkOverlaySupportFn: () => ({ supported: true }),
       platform: "linux",
-      runOverlayCommandFn: () => ({ status: null, stdout: "", stderr: "", error: Object.assign(new Error(SPAWN_BWRAP_TIMEOUT), { code: "ETIMEDOUT" }) }),
+      // The dispatch-time git-ness probe shares this fn: answer rev-parse
+      // with a HEAD so the dispatch stays on the overlay path (a plain
+      // mkdtemp dir would bind directly with no overlay since taskferry#583
+      // and never reach extraction).
+      runOverlayCommandFn: (command, _args) => {
+        if (command === "git") return { status: 0, stdout: "abc123\n", stderr: "" };
+        return { status: null, stdout: "", stderr: "", error: Object.assign(new Error(SPAWN_BWRAP_TIMEOUT), { code: "ETIMEDOUT" }) };
+      },
       rmOverlayTreeFn: () => {},
     });
 
@@ -1037,5 +1075,89 @@ describe("sweepOrphanedOverlays()", () => {
     assert.notEqual(mgrA.paths.OVERLAY_TMP_ROOT, mgrB.paths.OVERLAY_TMP_ROOT);
     assert.ok(mgrA.paths.OVERLAY_TMP_ROOT.startsWith(runtimeDirA));
     assert.ok(mgrB.paths.OVERLAY_TMP_ROOT.startsWith(runtimeDirB));
+  });
+});
+
+// taskferry#583: a dispatch into a non-git directory binds the target
+// read-write (no overlay, nothing to gate) and settles straight to
+// "accepted". Advisors into non-git targets fail closed -- advisor writes
+// must be gated (review finding #5) and a direct bind is a path to persist
+// writes. There is no non-git apply path anymore (taskferry#590 retired the
+// rsync mirror), so the old taskferry#328 sleep-threading accept tests for
+// applyNonGitChangeset retired with it.
+describe("direct-writes targets (non-git dispatch, taskferry#583)", () => {
+  function directWritesManager(spawnFn) {
+    return makeManager({
+      spawnFn,
+      sandboxEnabled: true,
+      checkBwrapAvailableFn: () => ({ checked: true, available: true }),
+      overlayEnabled: true,
+      checkOverlaySupportFn: () => ({ supported: true }),
+      platform: "linux",
+    });
+  }
+
+  test("dispatch into a non-git directory binds read-write and settles accepted with no extraction", () => {
+    // A plain mkdtemp dir is a non-git target (real git probe, no fake).
+    const directory = mkdtempTracked("axi-direct-writes-dir-");
+    let captured = null;
+    let child;
+    const mgr = directWritesManager((_cmd, args) => { captured = args; child = fakeChild(); return child; });
+
+    const result = mgr.dispatch({ prompt: "hello", directory });
+    child.emit("exit", 0, null);
+
+    const status = mgr.status(result.id);
+    assert.equal(status.status, "done");
+    assert.equal(status.changesetStatus, "accepted", "nothing is gated, so settlement marks the changeset accepted directly");
+    assert.equal(status.directWrites, true, "the record must say writes landed directly");
+    assert.ok(!status.overlayDirs, "no overlay is ever created for a non-git target");
+    assert.equal(mgr.result(result.id, { fields: ["diff"] }).diff, null, "there is no diff because nothing was extracted");
+    assert.ok(!captured.includes("--overlay"), "the spawn must not mount an overlay");
+    const bindIndex = captured.indexOf("--bind");
+    // Plain read-write bind of the live directory: the worker's writes land
+    // directly, so no merged view exists to rsync and nothing can be clobbered (taskferry#590).
+    assert.deepEqual(captured.slice(bindIndex, bindIndex + 3), ["--bind", directory, directory]);
+  });
+
+  test("accept() on a direct-writes task throws no-pending-changeset", async () => {
+    const directory = mkdtempTracked("axi-direct-writes-accept-dir-");
+    let child;
+    const mgr = directWritesManager(() => { child = fakeChild(); return child; });
+
+    const result = mgr.dispatch({ prompt: "hello", directory });
+    child.emit("exit", 0, null);
+
+    await assert.rejects(() => mgr.accept(result.id), /no pending changeset/);
+  });
+
+  test("reject() on a direct-writes task throws no-pending-changeset", async () => {
+    const directory = mkdtempTracked("axi-direct-writes-reject-dir-");
+    let child;
+    const mgr = directWritesManager(() => { child = fakeChild(); return child; });
+
+    const result = mgr.dispatch({ prompt: "hello", directory });
+    child.emit("exit", 0, null);
+
+    await assert.rejects(() => mgr.reject(result.id), /no pending changeset/);
+  });
+
+  test("advisor into a non-git directory stays overlaid and auto-rejects with no extraction", async () => {
+    // Advisors never get the direct bind (their writes must stay gated), so
+    // a non-git advisor keeps the old behavior: overlay, run, auto-reject.
+    const directory = mkdtempTracked("axi-direct-writes-advisor-dir-");
+    let captured = null;
+    let child;
+    const mgr = directWritesManager((_cmd, args) => { captured = args; child = fakeChild(); return child; });
+
+    const advised = await mgr.advisor({ directory, prompt: "hello", model: "test-model" });
+    child.emit("exit", 0, null);
+
+    const status = mgr.status(advised.task_id);
+    assert.equal(status.changesetStatus, "rejected", "advisors never produce an applicable changeset");
+    assert.equal(status.directWrites ?? null, null, "no direct-writes marker: the run was overlaid");
+    assert.ok(!status.overlayDirs, "the overlay is released at settlement");
+    assert.ok(captured.includes("--overlay"), "the advisor ran overlaid, not directly bound");
+    assert.match(status.changesetError ?? "", /no git baseline/);
   });
 });

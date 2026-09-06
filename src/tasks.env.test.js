@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { execFileSync } from "node:child_process";
 import { createTaskManager } from "./tasks.js";
 import { trackManager, makeManager, fakeChild, baseTask, AMBIENT_VALUE, FAKE_SECRETS_ENV_PATH, AXI_TASKS_TEST_DIR, AXI_TASKS_CACHE_DIR, AXI_TASKS_OVERLAY_DIR, TASKS_STATE_FILE, FROM_CALLER, OCCUPYING_TASK, CAPTURED_DISPATCH, SRC1_LOG, DID_THING, SOL_MODEL, mkdtempTracked, preserveEnvVars } from "./tasks.test-helpers.js";
 import { DEFAULT_SUMMARY_MODEL } from "./tasks.js";
@@ -80,10 +81,17 @@ describe("caller-env union: basic dispatch and TASKFERRY_TASK_ID", () => {
       platform: "linux",
     });
 
-    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+    // Both roles need git targets: non-git dispatches bind directly with no
+    // overlay, and advisors into non-git targets fail closed (taskferry#583).
+    const dispatchDir = mkdtempTracked("axi-taskid-dispatch-dir-");
+    execFileSync("git", ["init", "-q", dispatchDir]);
+    const advisorDir = mkdtempTracked("axi-taskid-advisor-dir-");
+    execFileSync("git", ["init", "-q", advisorDir]);
+
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: dispatchDir });
     assert.equal(dispatchOpts.env.TASKFERRY_TASK_ID, dispatched.id);
 
-    const advised = await mgr.advisor({ prompt: "hello", directory: os.tmpdir(), model: SOL_MODEL });
+    const advised = await mgr.advisor({ prompt: "hello", directory: advisorDir, model: SOL_MODEL });
     assert.equal(advisorOpts.env.TASKFERRY_TASK_ID, advised.task_id);
   });
 
@@ -512,9 +520,12 @@ describe("caller-env union: summary/advisor/report env forwarding", () => {
       platform: "linux",
     });
 
+    // Advisors into non-git targets fail closed (taskferry#583): use a git target.
+    const advisorDir = mkdtempTracked("axi-advisor-env-dir-");
+    execFileSync("git", ["init", "-q", advisorDir]);
     const advisorPromise = mgr.advisor({
       prompt: "hi",
-      directory: os.tmpdir(),
+      directory: advisorDir,
       model: SOL_MODEL,
       env: { AXI_TEST_ADVISOR_CALLER_VAR: "from-advisor-caller" },
     });

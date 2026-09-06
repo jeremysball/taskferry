@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { execFileSync } from "node:child_process";
 import { makeManager, fakeChild, MINIMAX_MODEL, TEST_DEFAULT_MODEL, SOL_MODEL, OPENCODE_DATA, AXI_TASKS_CACHE_PI, NO_API_KEY_FOUND, mkdtempTracked, makeFakeExecutor, makeFakeOpencodeExecutor } from "./tasks.test-helpers.js";
 
 const OPENCODE_JSONC = "opencode.jsonc";
@@ -229,8 +230,11 @@ describe("startTask(): data home scope follows the resumed session's owner task 
     });
 
     // First advisor call establishes ses_live in the advisor-session
-    // registry via its own settled result.
-    const firstPromise = mgr.advisor({ prompt: "q1", directory: os.tmpdir(), executor: "opencode", model: SOL_MODEL });
+    // registry via its own settled result. Advisors into non-git targets fail
+    // closed (taskferry#583), so both calls share one git target.
+    const advisorDir = mkdtempTracked("axi-adv-datahome-dir-");
+    execFileSync("git", ["init", "-q", advisorDir]);
+    const firstPromise = mgr.advisor({ prompt: "q1", directory: advisorDir, executor: "opencode", model: SOL_MODEL });
     const firstRow = mgr.list().tasks[0];
     const firstTask = { id: firstRow.id, logPath: path.join(mgr.paths.LOG_DIR, `${firstRow.id}.ndjson`) };
     fs.writeFileSync(
@@ -251,7 +255,7 @@ describe("startTask(): data home scope follows the resumed session's owner task 
     // or opencode's --continue fails with "Session not found".
     const secondPromise = mgr.advisor({
       prompt: "q2 follow-up",
-      directory: os.tmpdir(),
+      directory: advisorDir,
       executor: "opencode",
       model: SOL_MODEL,
       sessionId: "ses_live",

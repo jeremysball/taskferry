@@ -378,3 +378,20 @@ belongs here.
   `outputs/` archival. Reclaim that space by hand, deliberately. It would be a
   real bug if a dir created during *this* boot's crashed dispatch survived the
   sweep, or if the guard applied while `taskRetentionDays` is `0`.
+- A settled task's `~/.cache/taskferry/uv-{cache,tools}/<task-id>` directories
+  sticking around while its changeset is still `pending`, sometimes for days,
+  and a `uvx` run in a *later* task re-downloading everything the earlier one
+  already fetched. Both deliberate. The dirs are per-task on purpose (#426: one
+  task's cache must not perturb another's), and they are reaped when the ferry
+  settles, not when its child exits, because the check gate spawns after the
+  child is gone and re-runs against those exact paths. A `pending` changeset
+  still owns a live overlay and a re-runnable gate, so its dirs are excluded
+  from every drain and every boot sweep until someone accepts or rejects it.
+  The mechanism is `src/deferred-cleanup.js`: a persisted `deferredCleanup`
+  path list on the task record, drained by `releaseOverlayForTask`, by child
+  settlement for tasks that never had an overlay, and by two boot sweeps
+  (`sweepDeferredCleanupFor` for lists a killed daemon never drained,
+  `sweepOrphanedUvDirsFor` for dirs whose owning record is gone or predates the
+  list). Accepting or rejecting the changeset reclaims the space. It would be a
+  real bug if the dirs outlived a task whose changeset had resolved, or if a
+  `pending` task's dirs vanished out from under a re-running gate.

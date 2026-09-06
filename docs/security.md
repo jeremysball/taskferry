@@ -489,17 +489,20 @@ runs wrapped in
 - **Diff-gated writes.** A dispatch's changeset is extracted once at
   process exit and held as `changesetStatus: "pending"` until
   `taskferry accept <id>` (applies it: `git apply --3way` for a git target, an
-  in-sandbox `rsync` for a non-git one) or `taskferry reject <id>`
+  in-sandbox `rsync` for a non-git one left pending by an older version) or
+  `taskferry reject <id>`
   (discards it). A dispatch whose extraction finds zero changes
-  auto-resolves to `accepted` immediately (a no-op needs no gate).
-  `taskferry result <id> --diff` inspects the pending
+  auto-resolves to `accepted` immediately (a no-op needs no gate), as does
+  every dispatch into a non-git directory: the target is bound read-write
+  instead of overlaid, the worker's edits land directly, and there is no
+  changeset to gate. `taskferry result <id> --diff` inspects the pending
   changeset read-only. An advisor-role dispatch (`taskferry advisor`)
   never gets an accept path -- its changeset is always auto-rejected right
-  after extraction. Note the reboot asymmetry for non-git targets: a git
-  changeset's patch is persisted under the state dir and survives a reboot,
-  but a non-git `accept` needs the live overlay to rebuild its merged view,
+  after extraction. A non-git `accept` from an older version needs the live
+  overlay to rebuild its merged view,
   so a non-git changeset left pending across a reboot fails loudly and can
-  only be rejected, never applied. Cleanup has the same persistence
+  only be rejected, never applied. New non-git dispatches never reach this
+  state: they settle `accepted` with the edits already live. Cleanup has the same persistence
   boundary: each overlay records the tmp root in effect at creation, so
   removal keeps working across daemon restarts even when `TMPDIR` changes,
   but records persisted before that field existed get the old plain

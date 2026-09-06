@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { execFileSync } from "node:child_process";
 import { createTaskManager } from "./tasks.js";
 import { hashFingerprint, VARIANTS_CACHE_SCHEMA } from "./variants-cache.js";
 import { trackManager, makeManager, fakeChild, LUNA_MODEL, MIMIMAX_MODEL, MINIMAX_MODEL, SOL_MODEL, SPAWN_OPENCODE_ENOENT, preserveEnvVars, mkdtempTracked, AXI_TASKS_TEST_DIR, AXI_TASKS_CACHE_DIR, AXI_TASKS_OVERLAY_DIR, makeFakeExecutor } from "./tasks.test-helpers.js";
@@ -936,6 +937,8 @@ describe("dispatch() prompt augmentation from .taskferry.toml", () => {
     // so the spawnFn actually fires and the trailing prompt is observable.
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-advisor-checkcmd-"));
     fs.writeFileSync(path.join(dir, TOML_FILENAME), TOML_CHECK_BODY);
+    // Advisors into non-git targets fail closed (taskferry#583): use a git target.
+    execFileSync("git", ["init", "-q", dir]);
     let captured = null;
     const mgr = makeManager({
       spawnFn: (_cmd, args) => { captured = args; return fakeChild(); },

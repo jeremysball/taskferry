@@ -378,3 +378,11 @@ belongs here.
   `outputs/` archival. Reclaim that space by hand, deliberately. It would be a
   real bug if a dir created during *this* boot's crashed dispatch survived the
   sweep, or if the guard applied while `taskRetentionDays` is `0`.
+- A dispatch into a non-git directory settling `accepted` with no diff and
+  `accept` refusing with "no pending changeset". Deliberate (taskferry#583/
+  #590). The target is bound read-write instead of overlaid, so the worker's
+  edits are already live in the directory and there is nothing to gate, apply,
+  or inspect -- `result --diff` is `null` by design. Marked on the record as
+  `directWrites: true`. It would be a real bug if a git-target dispatch
+  settled `accepted` without an extraction, or if a non-git dispatch built an
+  overlay or left a pending changeset behind.

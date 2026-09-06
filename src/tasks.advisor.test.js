@@ -3,7 +3,18 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { makeManager, fakeChild, SOL_MODEL, MINIMAX_MODEL, SHARD_QUESTION, SHARD_ANSWER, LONG_QUESTION, OCCUPYING_TASK, CONTINUE_FLAG } from "./tasks.test-helpers.js";
+import { execFileSync } from "node:child_process";
+import { makeManager, fakeChild, mkdtempTracked, SOL_MODEL, MINIMAX_MODEL, SHARD_QUESTION, SHARD_ANSWER, LONG_QUESTION, OCCUPYING_TASK, CONTINUE_FLAG } from "./tasks.test-helpers.js";
+
+
+// Advisors into non-git targets fail closed since taskferry#583, and every
+// advisor test here runs overlay-gated: dispatch into a fresh git target
+// (unborn repo -- init, no commit -- is enough for the dispatch probe).
+function gitTargetDir() {
+  const dir = mkdtempTracked("axi-advisor-dir-");
+  execFileSync("git", ["init", "-q", dir]);
+  return dir;
+}
 
 describe("advisor(): validation, completion, and timeouts", () => {
   test("requires a model", async () => {
@@ -29,9 +40,10 @@ describe("advisor(): validation, completion, and timeouts", () => {
       platform: "linux",
     });
 
+    const directory = gitTargetDir();
     const advisorPromise = mgr.advisor({
+      directory,
       prompt: SHARD_QUESTION,
-      directory: os.tmpdir(),
       model: SOL_MODEL,
       variant: "max",
       timeoutMs: 5000,
@@ -47,7 +59,7 @@ describe("advisor(): validation, completion, and timeouts", () => {
     const executorArgs = captured.slice(captured.indexOf("--") + 1);
     assert.deepEqual(executorArgs.slice(0, -1), [
       "opencode",
-      "run", "--dir", os.tmpdir(), "--auto", "--format", "json",
+      "run", "--dir", directory, "--auto", "--format", "json",
       "-m", SOL_MODEL, "--variant", "max", "--",
     ]);
     const spawnedPrompt = executorArgs.at(-1);
@@ -94,7 +106,7 @@ describe("advisor(): validation, completion, and timeouts", () => {
 
     const advisorPromise = mgr.advisor({
       prompt: SHARD_QUESTION,
-      directory: os.tmpdir(),
+      directory: gitTargetDir(),
       model: MINIMAX_MODEL,
       executor: "pi",
       timeoutMs: 5000,
@@ -140,7 +152,7 @@ describe("advisor(): validation, completion, and timeouts", () => {
 
     const advisorPromise = mgr.advisor({
       prompt: LONG_QUESTION,
-      directory: os.tmpdir(),
+      directory: gitTargetDir(),
       model: SOL_MODEL,
       timeoutMs: 20,
     });
@@ -169,11 +181,11 @@ describe("advisor(): validation, completion, and timeouts", () => {
 
     // Occupy the only concurrency slot so the advisor dispatch below queues
     // instead of running.
-    mgr.dispatch({ prompt: OCCUPYING_TASK, directory: os.tmpdir(), model: SOL_MODEL });
+    mgr.dispatch({ prompt: OCCUPYING_TASK, directory: gitTargetDir(), model: SOL_MODEL });
 
     const advisorPromise = mgr.advisor({
       prompt: LONG_QUESTION,
-      directory: os.tmpdir(),
+      directory: gitTargetDir(),
       model: SOL_MODEL,
       timeoutMs: 20,
     });
@@ -199,7 +211,7 @@ describe("advisor(): validation, completion, and timeouts", () => {
 
     const advisorPromise = mgr.advisor({
       prompt: LONG_QUESTION,
-      directory: os.tmpdir(),
+      directory: gitTargetDir(),
       model: SOL_MODEL,
       timeoutMs: 20,
     });
@@ -215,7 +227,7 @@ describe("advisor(): validation, completion, and timeouts", () => {
   test("a dispatch validation error is reported under taskferry advisor, not taskferry dispatch", async () => {
     const mgr = makeManager();
     await assert.rejects(
-      () => mgr.advisor({ prompt: "", directory: os.tmpdir(), model: SOL_MODEL }),
+      () => mgr.advisor({ prompt: "", directory: gitTargetDir(), model: SOL_MODEL }),
       (err) => {
         assert.match(err.message, /taskferry advisor requires a non-empty prompt string/);
         assert.equal(err.message.includes("taskferry dispatch"), false);
@@ -240,7 +252,7 @@ describe("advisor(): timeout, queueing, and no-timeout shape", () => {
 
     const advisorPromise = mgr.advisor({
       prompt: LONG_QUESTION,
-      directory: os.tmpdir(),
+      directory: gitTargetDir(),
       model: SOL_MODEL,
     });
     const row = mgr.list().tasks[0];
@@ -273,7 +285,7 @@ describe("advisor(): session resume, expiry, and crash surfacing", () => {
     });
 
     // First call establishes ses_live in the registry via its own result.
-    const firstPromise = mgr.advisor({ prompt: "q1", directory: os.tmpdir(), model: SOL_MODEL });
+    const firstPromise = mgr.advisor({ prompt: "q1", directory: gitTargetDir(), model: SOL_MODEL });
     const firstRow = mgr.list().tasks[0];
     const firstTask = { id: firstRow.id, logPath: path.join(mgr.paths.LOG_DIR, `${firstRow.id}.ndjson`) };
     fs.writeFileSync(
@@ -291,7 +303,7 @@ describe("advisor(): session resume, expiry, and crash surfacing", () => {
     // Second call resumes ses_live -- still fresh, no reset.
     const secondPromise = mgr.advisor({
       prompt: "q2 follow-up",
-      directory: os.tmpdir(),
+      directory: gitTargetDir(),
       model: SOL_MODEL,
       sessionId: "ses_live",
     });
@@ -332,7 +344,7 @@ describe("advisor(): session resume, expiry, and crash surfacing", () => {
 
     const advisorPromise = mgr.advisor({
       prompt: "resuming after a nap",
-      directory: os.tmpdir(),
+      directory: gitTargetDir(),
       model: SOL_MODEL,
       sessionId: "ses_long_gone",
     });
@@ -368,7 +380,7 @@ describe("advisor(): session resume, expiry, and crash surfacing", () => {
       platform: "linux",
     });
 
-    const advisorPromise = mgr.advisor({ prompt: "hi", directory: os.tmpdir(), model: SOL_MODEL });
+    const advisorPromise = mgr.advisor({ prompt: "hi", directory: gitTargetDir(), model: SOL_MODEL });
     child.emit("exit", 1, null);
 
     const advised = await advisorPromise;

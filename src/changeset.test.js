@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { overlayPaths, subOverlayPaths, subOverlaySlug, extractGitDiff, resolvePreDispatchHead, buildMergedViewBwrapArgs, extractNonGitDiff, applyChangeset, cleanupOverlay, detectHeadDrift, resolveHeadDrift, defaultRunCommand } from "./changeset.js";
+import { overlayPaths, subOverlayPaths, subOverlaySlug, extractGitDiff, resolvePreDispatchHead, applyChangeset, cleanupOverlay, detectHeadDrift, resolveHeadDrift, defaultRunCommand } from "./changeset.js";
 
 const trackedTmpDirs = [];
 after(() => {
@@ -22,7 +22,6 @@ after(() => {
 // no-duplicate-string rule stays quiet (each literal now appears once, in
 // its constant definition) and so every test case points at the same paths.
 const REPO_DIR = "/workspace/repo";
-const SCRATCH_DIR = "/workspace/scratch";
 const STATE_DIR = "/state";
 const RUNTIME_DIR = "/state/run";
 const HOME_DIR = "/home/user";
@@ -30,7 +29,6 @@ const DIFF_PATCH = "/state/diffs/t1.patch";
 const T1_ROOT = "/tmp/taskferry-cow-t1";
 const T1_UPPER = "/tmp/taskferry-cow-t1/upper/main";
 const T1_WORK = "/tmp/taskferry-cow-t1/work/main";
-const T1_MERGED = "/tmp/taskferry-cow-t1/merged";
 const TMP_DIR = "/tmp";
 const UPPER_DIR = "/tmp/u";
 const WORK_DIR = "/tmp/w";
@@ -40,16 +38,11 @@ const GIT_NOT_A_REPO_STDERR_NL = "fatal: not a git repository\n";
 const MY_REPO_WT = "/workspace/main-repo/.git/worktrees/my-repo";
 const GIT_CMD = "git";
 const BWRAP_CMD = "bwrap";
-const DIR_FLAG = "--dir";
 const OVERLAY_SRC_FLAG = "--overlay-src";
-const OVERLAY_FLAG = "--overlay";
 const SAMPLE_DIFF_X = "diff --git a/x b/x\n";
 const BIND_FLAG = "--bind";
-const RO_BIND_FLAG = "--ro-bind";
-const ROOT_BIND = "/";
 const SH_CMD = "sh";
-// Shared by both the extraction and non-git-apply overlay-mount-busy retry
-// tests (taskferry#326/#327) -- hoisted to module scope, like the fixtures
+// Shared by the extraction overlay-mount-busy retry tests (taskferry#326) -- hoisted to module scope, like the fixtures
 // above, so both describe blocks pin the exact same bwrap wording.
 const OVERLAY_BUSY_STDERR =
   "bwrap: Can't make overlay mount on /newroot/repo with options " +
@@ -105,143 +98,6 @@ describe("subOverlayPaths()", () => {
     assert.equal(result.path, targetPath);
     assert.equal(result.upperDir, path.join(root, "upper", "extra", slug));
     assert.equal(result.workDir, path.join(root, "work", "extra", slug));
-  });
-});
-
-describe("buildMergedViewBwrapArgs()", () => {
-  test("creates the merged mountpoint and overlays directory's content onto it, leaving directory itself read-only", () => {
-    const args = buildMergedViewBwrapArgs({
-      directory: REPO_DIR,
-      overlay: { upperDir: T1_UPPER, workDir: T1_WORK },
-      stateDir: STATE_DIR,
-      runtimeDir: RUNTIME_DIR,
-      homeDir: HOME_DIR,
-      denyList: [],
-      mergedMountPoint: T1_MERGED,
-    });
-    const dirIndex = args.indexOf(DIR_FLAG);
-    assert.equal(args[dirIndex + 1], T1_MERGED);
-    const overlayIndex = args.indexOf(OVERLAY_SRC_FLAG);
-    assert.deepEqual(args.slice(overlayIndex, overlayIndex + 6), [
-      OVERLAY_SRC_FLAG, REPO_DIR,
-      OVERLAY_FLAG, T1_UPPER, T1_WORK, T1_MERGED,
-    ]);
-    assert.ok(dirIndex < overlayIndex, "--dir must come before the --overlay line that mounts onto it");
-    // runtimeDir still needs --bind, but directory itself must NOT be rw-bound
-    const bindForDir = args.filter((_, i) => args[i] === BIND_FLAG && args[i + 1] === REPO_DIR).length;
-    assert.equal(bindForDir, 0, "directory stays read-only (part of the root ro-bind) when writable is not set");
-  });
-
-  test("also rw-binds directory itself when writable: true", () => {
-    const args = buildMergedViewBwrapArgs({
-      directory: REPO_DIR,
-      overlay: { upperDir: UPPER_DIR, workDir: WORK_DIR },
-      stateDir: STATE_DIR,
-      runtimeDir: RUNTIME_DIR,
-      homeDir: HOME_DIR,
-      denyList: [],
-      mergedMountPoint: "/tmp/merged",
-      writable: true,
-    });
-    const bindIndex = args.indexOf(BIND_FLAG);
-    assert.equal(args[bindIndex + 1], REPO_DIR);
-    assert.equal(args[bindIndex + 2], REPO_DIR);
-  });
-});
-
-describe("buildMergedViewBwrapArgs() byte-identical output (Task 5: post-refactor regression)", () => {
-  // The two baseline arrays below were captured from the pre-refactor
-  // buildMergedViewBwrapArgs() against the inputs shown. Refactoring it to
-  // share buildBwrapBaseArgs() with buildBwrapArgs() must not change any
-  // element of these arrays -- this is the safety net. The overlay paths
-  // themselves (upperDir/workDir/mergedMountPoint, all under /tmp by
-  // construction) need no shadowing protection: upper/work are consumed
-  // by the kernel overlay mount(2) on host paths, and mergedMountPoint is
-  // the overlayfs mount point in the new namespace -- see the JSDoc on
-  // buildMergedViewBwrapArgs().
-  test("writable: false (extraction) case is byte-identical to the pre-refactor output", () => {
-    const args = buildMergedViewBwrapArgs({
-      directory: REPO_DIR,
-      overlay: { upperDir: T1_UPPER, workDir: T1_WORK },
-      stateDir: STATE_DIR,
-      runtimeDir: RUNTIME_DIR,
-      homeDir: HOME_DIR,
-      denyList: [],
-      mergedMountPoint: T1_MERGED,
-    });
-    assert.deepEqual(args, [
-      RO_BIND_FLAG, ROOT_BIND, ROOT_BIND,
-      "--proc", "/proc", "--dev", "/dev", "--tmpfs", TMP_DIR,
-      DIR_FLAG, T1_MERGED,
-      OVERLAY_SRC_FLAG, REPO_DIR,
-      OVERLAY_FLAG, T1_UPPER, T1_WORK, T1_MERGED,
-      RO_BIND_FLAG, REPO_DIR, REPO_DIR,
-      BIND_FLAG, RUNTIME_DIR, RUNTIME_DIR,
-      "--unshare-all", "--unshare-net", "--die-with-parent",
-    ]);
-  });
-
-  test("writable: true (apply) case is byte-identical to the pre-refactor output", () => {
-    const args = buildMergedViewBwrapArgs({
-      directory: REPO_DIR,
-      overlay: { upperDir: T1_UPPER, workDir: T1_WORK },
-      stateDir: STATE_DIR,
-      runtimeDir: RUNTIME_DIR,
-      homeDir: HOME_DIR,
-      denyList: [],
-      mergedMountPoint: T1_MERGED,
-      writable: true,
-    });
-    assert.deepEqual(args, [
-      RO_BIND_FLAG, ROOT_BIND, ROOT_BIND,
-      "--proc", "/proc", "--dev", "/dev", "--tmpfs", TMP_DIR,
-      DIR_FLAG, T1_MERGED,
-      OVERLAY_SRC_FLAG, REPO_DIR,
-      OVERLAY_FLAG, T1_UPPER, T1_WORK, T1_MERGED,
-      BIND_FLAG, REPO_DIR, REPO_DIR,
-      BIND_FLAG, RUNTIME_DIR, RUNTIME_DIR,
-      "--unshare-all", "--unshare-net", "--die-with-parent",
-    ]);
-  });
-});
-
-describe("extractNonGitDiff()", () => {
-  test("runs diff -ruN between the real directory and the merged view, writing stdout to diffPath", () => {
-    let capturedArgs = null;
-    const written = {};
-    const runCommand = (_command, args) => {
-      capturedArgs = args;
-      return { status: 1, stdout: "Only in /tmp/taskferry-cow-t1/merged: newfile.txt\n", stderr: "", error: null };
-    };
-    const result = extractNonGitDiff({
-      runCommand,
-      directory: REPO_DIR,
-      overlay: { root: T1_ROOT, upperDir: T1_UPPER, workDir: T1_WORK },
-      stateDir: STATE_DIR,
-      runtimeDir: RUNTIME_DIR,
-      homeDir: HOME_DIR,
-      denyList: [],
-      diffPath: DIFF_PATCH,
-      writeFileFn: (filePath, content) => { written[filePath] = content; },
-      mkdirFn: () => {},
-    });
-    // diff -ruN takes directory then mergedMountPoint positionally, so mergedMountPoint is last
-    assert.deepEqual(capturedArgs.slice(-4), ["diff", "-ruN", REPO_DIR, T1_MERGED]);
-    assert.equal(capturedArgs.at(-1), T1_MERGED);
-    assert.equal(result.hasChanges, true);
-    assert.equal(written[DIFF_PATCH], "Only in /tmp/taskferry-cow-t1/merged: newfile.txt\n");
-  });
-
-  test("diff -ruN exit status 0 or 1 are both success (0 = no diff, 1 = differences found)", () => {
-    const runCommand = () => ({ status: 0, stdout: "", stderr: "", error: null });
-    const result = extractNonGitDiff({
-      runCommand,
-      directory: REPO_DIR,
-      overlay: { root: T1_ROOT, upperDir: UPPER_DIR, workDir: WORK_DIR },
-      stateDir: STATE_DIR, runtimeDir: RUNTIME_DIR, homeDir: HOME_DIR, denyList: [],
-      diffPath: DIFF_PATCH, writeFileFn: () => {}, mkdirFn: () => {},
-    });
-    assert.equal(result.hasChanges, false);
   });
 });
 
@@ -594,73 +450,6 @@ describe("extraction fail-closed behavior", () => {
     assert.equal(slept, false);
   });
 
-  const baseNonGitParams = {
-    directory: SCRATCH_DIR,
-    overlay: { root: T1_ROOT, upperDir: T1_UPPER, workDir: T1_WORK },
-    stateDir: STATE_DIR,
-    runtimeDir: RUNTIME_DIR,
-    homeDir: HOME_DIR,
-    denyList: [],
-    diffPath: DIFF_PATCH,
-  };
-
-  test("extractNonGitDiff throws on a bwrap execution error", () => {
-    const runCommand = () => ({ status: null, stdout: "", stderr: "", error: new Error("spawn bwrap ENOENT") });
-    assert.throws(() => extractNonGitDiff({ ...baseNonGitParams, runCommand }), /non-git diff extraction failed/);
-  });
-
-  test("extractNonGitDiff throws on diff exit status >= 2 (real failure)", () => {
-    const runCommand = () => ({ status: 2, stdout: "", stderr: "diff: error reading foo\n", error: null });
-    assert.throws(() => extractNonGitDiff({ ...baseNonGitParams, runCommand }), /non-git diff extraction failed.*exit 2/);
-  });
-
-  test("extractNonGitDiff treats diff exit status 1 (differences found) as success", () => {
-    const runCommand = () => ({ status: 1, stdout: "diff -ru a/x b/x\n", stderr: "", error: null });
-    const result = extractNonGitDiff({ ...baseNonGitParams, runCommand, writeFileFn: () => {}, mkdirFn: () => {} });
-    assert.equal(result.hasChanges, true);
-  });
-
-  test("extractNonGitDiff retries a transient overlay-mount-busy bwrap failure and succeeds once it clears", () => {
-    let attempts = 0;
-    const sleeps = [];
-    const runCommand = () => {
-      attempts += 1;
-      if (attempts < 2) return { status: 1, stdout: "", stderr: OVERLAY_BUSY_STDERR, error: null };
-      return { status: 1, stdout: "diff -ru a/x b/x\n", stderr: "", error: null };
-    };
-    const result = extractNonGitDiff({
-      ...baseNonGitParams,
-      runCommand,
-      writeFileFn: () => {},
-      mkdirFn: () => {},
-      sleepFn: (ms) => sleeps.push(ms),
-    });
-    assert.equal(attempts, 2);
-    assert.deepEqual(sleeps, [100]);
-    assert.equal(result.hasChanges, true);
-  });
-
-  // Regression: bwrap's own die()-on-setup-failure convention exits 1, the
-  // exact same code diff -ruN uses for "differences found" -- an
-  // overlay-mount-busy failure that survives every retry still carries
-  // status 1, which extractNonGitDiff's exit-code check alone cannot tell
-  // apart from a genuine successful diff. Without an explicit busy-pattern
-  // check the worker's real edits would be silently discarded as "no
-  // changes" instead of surfacing as a recoverable failure.
-  test("extractNonGitDiff still throws when retries exhaust with a bwrap status-1 overlay-busy failure (does not fail open)", () => {
-    let attempts = 0;
-    let written = null;
-    const runCommand = () => {
-      attempts += 1;
-      return { status: 1, stdout: "", stderr: OVERLAY_BUSY_STDERR, error: null };
-    };
-    assert.throws(
-      () => extractNonGitDiff({ ...baseNonGitParams, runCommand, writeFileFn: (p) => { written = p; }, mkdirFn: () => {}, sleepFn: () => {} }),
-      /Device or resource busy/
-    );
-    assert.equal(attempts, 4, RETRIES_EXHAUSTED_MSG);
-    assert.equal(written, null, "a bwrap failure disguised as diff's exit-1 must never be written out as a successful (empty) diff");
-  });
 });
 
 describe("extractGitDiff() head-drift resolution", () => {
@@ -752,7 +541,6 @@ describe("applyChangeset()", () => {
     const result = applyChangeset({
       directory: REPO_DIR,
       diffPath: DIFF_PATCH,
-      isGitTarget: true,
       runCommand,
     });
     assert.equal(capturedCommand, GIT_CMD);
@@ -762,98 +550,11 @@ describe("applyChangeset()", () => {
 
   test("git target: surfaces git apply's stderr as the failure reason on conflict", () => {
     const runCommand = () => ({ status: 1, stdout: "", stderr: "error: patch does not apply\n", error: null });
-    const result = applyChangeset({ directory: REPO_DIR, diffPath: DIFF_PATCH, isGitTarget: true, runCommand });
+    const result = applyChangeset({ directory: REPO_DIR, diffPath: DIFF_PATCH, runCommand });
     assert.equal(result.applied, false);
     assert.match(result.reason, /patch does not apply/);
   });
 
-  test("non-git target: rsyncs the merged overlay view onto directory inside one writable remount", () => {
-    let capturedArgs = null;
-    const runCommand = (_command, args) => {
-      capturedArgs = args;
-      return { status: 0, stdout: "", stderr: "", error: null };
-    };
-    const result = applyChangeset({
-      directory: SCRATCH_DIR,
-      diffPath: DIFF_PATCH,
-      isGitTarget: false,
-      overlay: { root: T1_ROOT, upperDir: T1_UPPER, workDir: T1_WORK },
-      stateDir: STATE_DIR,
-      runtimeDir: RUNTIME_DIR,
-      homeDir: HOME_DIR,
-      denyList: [],
-      runCommand,
-    });
-    assert.ok(capturedArgs.includes(DIR_FLAG));
-    assert.ok(capturedArgs.includes(SCRATCH_DIR), "directory must be rw-bound for the apply's writable remount");
-    const shIndex = capturedArgs.indexOf(SH_CMD);
-    const script = capturedArgs[shIndex + 2];
-    assert.match(script, /rsync -a --delete --delay-updates '\/tmp\/taskferry-cow-t1\/merged'\/ '\/workspace\/scratch'\//);
-    assert.deepEqual(result, { applied: true, reason: null });
-  });
-
-  test("non-git target: errors usefully when required overlay inputs are missing", () => {
-    assert.throws(
-      () => applyChangeset({ directory: SCRATCH_DIR, diffPath: DIFF_PATCH, isGitTarget: false }),
-      /non-git changeset apply requires a live overlay, stateDir, runtimeDir, homeDir, and denyList/
-    );
-  });
-
-  // Regression (taskferry#327 review finding): applyNonGitChangeset mounts
-  // its own overlay merged view via bwrap, the same race extraction hits
-  // (taskferry#326) -- a bwrap that just exited from a prior dispatch/accept
-  // can still be tearing down its mount namespace when this one starts.
-  // Unlike extraction, no fail-open guard is needed: rsync's exit codes
-  // don't share diff's "non-zero can mean success" convention, so a
-  // persistent busy failure already falls through to the existing
-  // `status !== 0` branch as a real failure -- these two just pin the retry.
-  test("non-git target: retries a transient overlay-mount-busy bwrap failure and succeeds once it clears", () => {
-    let attempts = 0;
-    const sleeps = [];
-    const runCommand = () => {
-      attempts += 1;
-      if (attempts < 2) return { status: 1, stdout: "", stderr: OVERLAY_BUSY_STDERR, error: null };
-      return { status: 0, stdout: "", stderr: "", error: null };
-    };
-    const result = applyChangeset({
-      directory: SCRATCH_DIR,
-      diffPath: DIFF_PATCH,
-      isGitTarget: false,
-      overlay: { root: T1_ROOT, upperDir: T1_UPPER, workDir: T1_WORK },
-      stateDir: STATE_DIR,
-      runtimeDir: RUNTIME_DIR,
-      homeDir: HOME_DIR,
-      denyList: [],
-      sleepFn: (ms) => sleeps.push(ms),
-      runCommand,
-    });
-    assert.equal(attempts, 2, "must retry until the overlay-busy race clears");
-    assert.deepEqual(sleeps, [100]);
-    assert.deepEqual(result, { applied: true, reason: null });
-  });
-
-  test("non-git target: gives up after exhausting retries and surfaces the last overlay-busy error as the failure reason", () => {
-    let attempts = 0;
-    const runCommand = () => {
-      attempts += 1;
-      return { status: 1, stdout: "", stderr: OVERLAY_BUSY_STDERR, error: null };
-    };
-    const result = applyChangeset({
-      directory: SCRATCH_DIR,
-      diffPath: DIFF_PATCH,
-      isGitTarget: false,
-      overlay: { root: T1_ROOT, upperDir: T1_UPPER, workDir: T1_WORK },
-      stateDir: STATE_DIR,
-      runtimeDir: RUNTIME_DIR,
-      homeDir: HOME_DIR,
-      denyList: [],
-      sleepFn: () => {},
-      runCommand,
-    });
-    assert.equal(attempts, 4, RETRIES_EXHAUSTED_MSG);
-    assert.equal(result.applied, false);
-    assert.match(result.reason, /Device or resource busy/);
-  });
 });
 
 describe("cleanupOverlay()", () => {

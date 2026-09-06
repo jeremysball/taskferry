@@ -288,7 +288,12 @@ directory at dispatch time appear as new-file entries, and the plain
 apply is `git -C <directory> apply --3way` against the real pre-dispatch `HEAD`; for a non-git
 target, it runs an in-sandbox `rsync --delay-updates` that needs the
 live overlay, so a non-git changeset left pending across a reboot fails
-loudly and can only be rejected, never applied. A successful apply
+loudly and can only be rejected, never applied. (New dispatches into a
+non-git directory no longer produce a pending changeset at all: the target
+is bound read-write, the worker's edits land directly, and the task settles
+`accepted` with nothing to inspect -- `accept` and `reject` both refuse with
+"no pending changeset". Only changesets left pending by an older version can
+still hit the reboot failure.) A successful apply
 transitions the task to `changesetStatus: "accepted"` and frees the CoW
 overlay. A failed apply leaves the task pending so a retry or reject can
 follow and makes the CLI exit nonzero. The RPC response still includes

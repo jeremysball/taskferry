@@ -12,7 +12,7 @@ import { MAX_BUFFER_BYTES } from "./daemon-server.js";
 import { errCode } from "./errors.js";
 import { isNonNegativeInteger, isPositiveInteger } from "./numbers.js";
 import { buildBwrapArgs, checkBwrapAvailable, checkOverlaySupport, defaultDenyList, platformSupportsSandbox, resolveGitCommonDir, resolveGitDir } from "./sandbox.js";
-import { applyChangeset, overlayPaths, resolvePreDispatchHead, subOverlayPaths, subFilePaths, cleanupOverlay, defaultRunCommand as defaultOverlayRunCommand, extractGitDiff, extractNonGitDiff, OVERLAY_MOUNT_BUSY_PATTERN } from "./changeset.js";
+import { applyChangeset, overlayPaths, resolvePreDispatchHead, subOverlayPaths, subFilePaths, cleanupOverlay, defaultRunCommand as defaultOverlayRunCommand, extractGitDiff, OVERLAY_MOUNT_BUSY_PATTERN } from "./changeset.js";
 import { resolveExecutor, opencodeExecutor } from "./executor.js";
 import { resolveVariant, KNOWN_VARIANT_LEVELS } from "./variants.js";
 import { readVariantsCache, refreshVariantsCache } from "./variants-cache.js";
@@ -66,6 +66,7 @@ export { DEFAULT_MAX_OUTPUT_FILE_BYTES, MAX_SAFE_OUTPUT_FILE_BYTES };
  * @property {"opencode"|"pi"} [executorId]
  * @property {"dispatch"|"advisor"} [role]
  * @property {"none"|"pending"|"accepted"|"rejected"} [changesetStatus]
+ * @property {boolean} [directWrites] - non-git dispatch: the directory was bound read-write instead of overlaid, so the worker's writes landed directly and there is no changeset to accept or reject (taskferry#583/#590)
  * @property {string|null} [diffPath]
  * @property {{root:string,tmpRoot:string,upperDir:string,workDir:string,rwBinds:Array<{path:string,upperDir:string,workDir:string}>,rwFileBinds:Array<{path:string,bindSrc:string}>}|null} [overlayDirs]
  * @property {string|null} [preDispatchHead]
@@ -122,6 +123,7 @@ export { DEFAULT_MAX_OUTPUT_FILE_BYTES, MAX_SAFE_OUTPUT_FILE_BYTES };
  * @property {"opencode"|"pi"} [executorId]
  * @property {"dispatch"|"advisor"} [role]
  * @property {"none"|"pending"|"accepted"|"rejected"} [changesetStatus]
+ * @property {boolean} [directWrites]
  * @property {string|null} [diffPath]
  * @property {{root:string,tmpRoot:string,upperDir:string,workDir:string,rwBinds:Array<{path:string,upperDir:string,workDir:string}>,rwFileBinds:Array<{path:string,bindSrc:string}>}|null} [overlayDirs]
  * @property {string|null} [preDispatchHead]
@@ -981,6 +983,19 @@ function buildSandboxedSpawn(ctx, launchInfo, plan, task) {
  * wanted. An advisor dispatched with overlay globally disabled fails closed
  * here (review finding #5); a regular dispatch without an overlay gets a
  * warning that its writes land ungated.
+ *
+ * A dispatch into a directory that is not a git repo never gets an overlay
+ * at all (taskferry#583): the directory is bound read-write and the worker's
+ * writes land directly, recorded on the task as `directWrites`. The overlay
+ * exists to gate writes behind a reviewable git diff, and there is no git
+ * here to diff against -- what shipped instead was a whole-tree rsync mirror
+ * whose `--delete` could silently discard edits made to the target after
+ * dispatch (taskferry#590). An advisor into a non-git directory keeps the
+ * old behavior: advisors never get the direct bind (their writes must stay
+ * gated per review finding #5), so the overlay is built over the non-git
+ * target exactly as before, the run proceeds, and settlement auto-rejects
+ * with no git baseline to diff against -- the advisor's findings live in its
+ * output, not in a changeset.
  * @param {StartTaskContext} ctx
  * @param {ReturnType<typeof resolveStartTaskLaunch>} launchInfo
  * @param {Task} task
@@ -991,7 +1006,24 @@ function createOverlayIfNeeded(ctx, launchInfo, task, role) {
   const { isSummary, dispatchLaunch, launchDirectory } = launchInfo;
   const wantsOverlay = !isSummary && ctx.overlayEnabled && dispatchLaunch.noOverlay !== true;
   if (wantsOverlay) {
+    // One probe, threaded forward: the git-ness answer recorded here is
+    // reused by assembleBwrapSpawn below instead of re-probed, so a dispatch
+    // issues exactly one `git rev-parse` pair like before this check existed.
+    const preDispatchHead = resolvePreDispatchHead(launchDirectory, ctx.runOverlayCommandFn);
+    if (preDispatchHead == null && role !== "advisor") {
+      task.directWrites = true;
+      process.stderr.write(`warning: ${launchDirectory} is not a git repo -- binding read-write instead of overlaying; writes land directly and are not gated by accept/reject\n`);
+      return null;
+    }
     ctx.requireOverlaySupport();
+    // The git-ness probe already ran in createOverlayIfNeeded above and its
+    // answer is threaded forward here, so this second site never re-probes.
+    // (An advisor over a non-git target also reaches this overlay build --
+    // advisors never get the direct bind -- with preDispatchHead left null.)
+    // Clear a stale directWrites marker: a restart-requeued task keeps its
+    // old record, and the directory may have become a git repo since.
+    delete task.directWrites;
+    task.preDispatchHead = preDispatchHead;
     const overlayInfo = overlayPaths(task.id, ctx.overlayTmpRoot);
     fs.mkdirSync(ctx.overlayTmpRoot, { recursive: true, mode: 0o700 });
     fs.mkdirSync(overlayInfo.root, { mode: 0o700 });
@@ -1541,9 +1573,12 @@ function assembleBwrapSpawn(ctx, launchInfo, binds, task) {
     // rwBinds persisted onto the task (review finding #1): settlement-time
     // extraction (Task 10) must re-mount the exact git-common-dir sub-overlays
     // the worker ran with, so the diff sees the worker's writes.
+    // preDispatchHead is NOT re-probed here: createOverlayIfNeeded already
+    // probed it, so the value it recorded on the task stands. (An advisor
+    // over a non-git target carries an overlay with preDispatchHead null --
+    // see the settlement-time skip in extractChangesetForTaskRecord.)
     task.overlayDirs = { ...binds.overlayInfo, tmpRoot: ctx.overlayTmpRoot, rwBinds: binds.overlayRwBinds, rwFileBinds: binds.overlayRwFileBinds };
     task.changesetStatus = "pending";
-    task.preDispatchHead = resolvePreDispatchHead(launchDirectory, ctx.runOverlayCommandFn);
   }
   return { spawnArgs, spawnEnv };
 }
@@ -3751,7 +3786,12 @@ function summarizeChangesetFields(task) {
   const base = changesetStatus != null && (changesetStatus !== "none" || role === "advisor")
     ? { role, changesetStatus }
     : {};
-  return headDriftFrom != null ? { ...base, headDriftFrom, headDriftTo, headDriftRecovered } : base;
+  // A direct-writes task settles "accepted" with no diff and no overlay, so
+  // without the marker its summary reads exactly like an accepted git
+  // changeset -- the marker is what tells the operator the writes landed
+  // immediately and were never gated (taskferry#583).
+  const direct = task.directWrites ? { directWrites: true } : {};
+  return headDriftFrom != null ? { ...base, ...direct, headDriftFrom, headDriftTo, headDriftRecovered } : { ...base, ...direct };
 }
 
 /**
@@ -4000,25 +4040,16 @@ const BLOCKING_CHECK_STATUSES = new Set(["running", "failed", "timeout", "interr
 /**
  * @param {Task} task
  * @param {boolean} _force
- * @param {{stateDir: string, runtimeDir: string, sandboxDenylist: string[], runOverlayCommandFn: (command: string, args: string[]) => {status: number|null, stdout: string, stderr: string, error?: Error}, overlaySleepFn?: (ms: number) => void, existsFn: (path: string) => boolean}} ctx
+ * @param {{runOverlayCommandFn: (command: string, args: string[]) => {status: number|null, stdout: string, stderr: string, error?: Error}}} ctx
  * @returns {{applied: boolean, reason?: string|null}}
  */
 function applyAcceptedChangeset(task, _force, ctx) {
-  const isGitTarget = task.preDispatchHead != null;
-  const denyList = [...defaultDenyList(os.homedir(), ctx.stateDir), ...ctx.sandboxDenylist].filter(ctx.existsFn);
   return applyChangeset({
-    isGitTarget,
-    denyList,
-    stateDir: ctx.stateDir,
-    runtimeDir: ctx.runtimeDir,
     directory: task.directory,
     // validateAcceptable() threw above if diffPath were null, but that
     // narrowing lives inside the helper, so assert the invariant here.
     diffPath: /** @type {string} */ (task.diffPath),
-    overlay: task.overlayDirs ?? undefined,
-    homeDir: os.homedir(),
     runCommand: ctx.runOverlayCommandFn,
-    sleepFn: ctx.overlaySleepFn,
   });
 }
 
@@ -4069,13 +4100,40 @@ function validateCheckGateAcceptable(task, _force) {
 }
 
 /**
+ * Refuses accept for a task whose target is not a git repo. Extracted out of
+ * validateAcceptable() to keep that function's complexity under the lint
+ * ceiling -- the two failure modes (vanished overlay vs. live direct-writes
+ * target) need distinct errors.
+ *
+ * A pre-upgrade leftover pending non-git changeset still carries an overlay
+ * (or a record of one): check the overlay first so a reboot-cleared tmpfs
+ * still fails with the "overlay is gone" error (#7) rather than the generic
+ * refusal. Otherwise accepting would rsync a stale merged view over edits
+ * made to the target after dispatch, silently discarding them
+ * (taskferry#590) -- so accept is refused outright instead of repaired.
+ * @param {Task} task
+ * @param {(task: Task) => boolean} hasLiveOverlay
+ */
+function throwForNonGitTarget(task, hasLiveOverlay) {
+  if (task.overlayDirs && !hasLiveOverlay(task)) {
+    throw new Error(
+      `error: task ${task.id}'s overlay is gone (expected at ${task.overlayDirs.root})\n` +
+      `help: a reboot clears the tmpfs overlay, so the pending changeset can never be re-applied. The worker's edits are lost with it -- "taskferry reject ${task.id}" to discard the pending state.`
+    );
+  }
+  const overlayLocation = task.overlayDirs ? ` The worker's unreviewed edits are still visible in its preserved overlay at ${task.overlayDirs.root}; use "taskferry result ${task.id} --diff" for the informational diff.` : "";
+  throw new Error(
+    `error: task ${task.id} targets a non-git directory, whose writes land directly and are never gated by accept\n` +
+    `help: there is nothing to apply -- the worker wrote straight to ${task.directory}.${overlayLocation} Use "taskferry reject ${task.id}" to clear a leftover pending state.`
+  );
+}
+
+/**
  * Validates that a task is in a state where its pending changeset can be
  * accepted, throwing the same user-facing errors the original `accept` raised
- * inline for each guard. Returns whether the target is a git target (i.e. has
- * a persisted pre-dispatch head) so the caller can route the apply.
+ * inline for each guard.
  * @param {Task} task
  * @param {{force?: boolean, existsFn: (path: string) => boolean, hasLiveOverlay: (task: Task) => boolean}} ctx
- * @returns {boolean}
  */
 function validateAcceptable(task, { force = false, ...ctx }) {
   if (task.role === "advisor") {
@@ -4083,6 +4141,9 @@ function validateAcceptable(task, { force = false, ...ctx }) {
   }
   if (task.changesetStatus !== "pending") {
     throw new Error(`error: task ${task.id} has no pending changeset (changesetStatus: ${task.changesetStatus ?? "none"})\nhelp: only a task with changesetStatus "pending" can be accepted`);
+  }
+  if (task.preDispatchHead == null) {
+    throwForNonGitTarget(task, ctx.hasLiveOverlay);
   }
   if (task.diffPath == null) {
     const overlayLocation = task.overlayDirs ? ` at ${task.overlayDirs.root}` : "";
@@ -4097,14 +4158,7 @@ function validateAcceptable(task, { force = false, ...ctx }) {
       `help: the state directory may have been partially cleaned; a pending changeset cannot be applied without its diff. Use "taskferry reject ${task.id}" to discard the pending state, or restore the diff file at the recorded path before retrying.`
     );
   }
-  if (task.preDispatchHead == null && !ctx.hasLiveOverlay(task)) {
-    throw new Error(
-      `error: task ${task.id}'s overlay is gone (likely cleared by a reboot -- /tmp is a tmpfs)\n` +
-      `help: a non-git changeset cannot be re-applied without its overlay; use "taskferry result ${task.id} --diff" for the informational diff, then "taskferry reject ${task.id}" to clear the pending state`
-    );
-  }
   validateCheckGateAcceptable(task, force);
-  return task.preDispatchHead != null;
 }
 
 /**
@@ -4536,7 +4590,7 @@ function resolveFilesystemSimpleOptions(rawOptions) {
     runOverlayCommandFn: rawOptions.runOverlayCommandFn ?? defaultOverlayRunCommand,
     rmOverlayTreeFn: rawOptions.rmOverlayTreeFn,
     // No default: undefined here means changeset.js's own extractGitDiff/
-    // extractNonGitDiff/applyChangeset default (the real blocking sleepSync)
+    // applyChangeset default (the real blocking sleepSync)
     // applies, same as before this option existed. Only a caller that sets
     // this explicitly (tests injecting a fast/no-op sleep to avoid eating
     // the real ~1.3s overlay-mount-busy backoff, taskferry#328) overrides it.
@@ -6317,38 +6371,53 @@ function settleChangesetAfterExtraction(finishedTask, extracted, ctx, isGitTarge
  * @param {{stateDir: string, runtimeDir: string, existsFn: (path: string) => boolean, sandboxDenylist: string[], runOverlayCommandFn: (command: string, args: string[]) => {status: number|null, stdout: string, stderr: string, error?: Error}, overlaySleepFn?: (ms: number) => void, persistTask: (taskId: string) => void, releaseOverlay: (task: {overlayDirs?: {root:string,tmpRoot:string}|null}) => boolean, startCheckGate: (task: Task) => void}} ctx
  */
 function extractChangesetForTaskRecord(finishedTask, ctx) {
+  if (finishedTask.directWrites) {
+    // A non-git dispatch binds its directory read-write (taskferry#583), so
+    // the worker's writes are already live in the target: there is nothing
+    // to extract and no changeset to gate. Settle terminal without ever
+    // offering accept, which is what used to rsync a stale merged view over
+    // post-dispatch edits (taskferry#590). Persist here like the extraction-
+    // error path below, since callers only persist on their own after a
+    // successful extraction.
+    finishedTask.changesetStatus = "accepted";
+    ctx.persistTask(finishedTask.id);
+    return;
+  }
   if (!finishedTask.overlayDirs) return;
+  if (finishedTask.preDispatchHead == null) {
+    // Overlaid run with no git baseline: only an advisor over a non-git
+    // target reaches here (a dispatch either binds directly or records a
+    // HEAD). There is nothing to diff against, so skip extraction -- the
+    // advisor's findings live in its output -- and settle terminal.
+    finishedTask.changesetError = "no git baseline: target is not a git repo, so no changeset was extracted";
+    if (finishedTask.role === "advisor") {
+      finishedTask.changesetStatus = "rejected";
+    } else {
+      finishedTask.changesetStatus = "pending";
+    }
+    ctx.releaseOverlay(finishedTask);
+    ctx.persistTask(finishedTask.id);
+    return;
+  }
   const denyList = [...defaultDenyList(os.homedir(), ctx.stateDir), ...ctx.sandboxDenylist].filter(ctx.existsFn);
   const diffPath = path.join(ctx.stateDir, "diffs", `${finishedTask.id}.patch`);
   const isGitTarget = finishedTask.preDispatchHead != null;
   let extracted;
   try {
-    extracted = isGitTarget
-      ? extractGitDiff({
-          denyList,
-          diffPath,
-          stateDir: ctx.stateDir,
-          runtimeDir: ctx.runtimeDir,
-          directory: finishedTask.directory,
-          overlay: { upperDir: finishedTask.overlayDirs.upperDir, workDir: finishedTask.overlayDirs.workDir },
-          overlayRwBinds: finishedTask.overlayDirs.rwBinds ?? [],
-          overlayRwFileBinds: finishedTask.overlayDirs.rwFileBinds ?? [],
-          preDispatchHead: /** @type {string} */ (finishedTask.preDispatchHead),
-          homeDir: os.homedir(),
-          runCommand: ctx.runOverlayCommandFn,
-          sleepFn: ctx.overlaySleepFn,
-        })
-      : extractNonGitDiff({
-          denyList,
-          diffPath,
-          stateDir: ctx.stateDir,
-          runtimeDir: ctx.runtimeDir,
-          directory: finishedTask.directory,
-          overlay: finishedTask.overlayDirs,
-          homeDir: os.homedir(),
-          runCommand: ctx.runOverlayCommandFn,
-          sleepFn: ctx.overlaySleepFn,
-        });
+    extracted = extractGitDiff({
+      denyList,
+      diffPath,
+      stateDir: ctx.stateDir,
+      runtimeDir: ctx.runtimeDir,
+      directory: finishedTask.directory,
+      overlay: { upperDir: finishedTask.overlayDirs.upperDir, workDir: finishedTask.overlayDirs.workDir },
+      overlayRwBinds: finishedTask.overlayDirs.rwBinds ?? [],
+      overlayRwFileBinds: finishedTask.overlayDirs.rwFileBinds ?? [],
+      preDispatchHead: /** @type {string} */ (finishedTask.preDispatchHead),
+      homeDir: os.homedir(),
+      runCommand: ctx.runOverlayCommandFn,
+      sleepFn: ctx.overlaySleepFn,
+    });
   } catch (err) {
     finishedTask.changesetError = err instanceof Error ? err.message : String(err);
     if (OVERLAY_MOUNT_BUSY_PATTERN.test(finishedTask.changesetError)) {
@@ -6897,6 +6966,12 @@ async function rejectTaskChangeset(taskId, ctx) {
   ctx.ensureStateLoaded();
   const task = ctx.tasks.get(taskId);
   if (!task) throw ctx.noSuchTask(taskId);
+  // No non-git branch here: a direct-writes task settles "accepted" with no
+  // overlay, so the pending guard below already refuses it, while a leftover
+  // pre-upgrade pending non-git changeset still needs reject to release its
+  // overlay. Note reject cannot roll a non-git target back -- the worker's
+  // writes are either already live (direct bind) or stranded in the overlay
+  // being released -- it only clears the pending state.
   if (task.changesetStatus !== "pending") {
     throw new Error(`error: task ${taskId} has no pending changeset (changesetStatus: ${task.changesetStatus ?? "none"})\nhelp: only a task with changesetStatus "pending" can be rejected`);
   }

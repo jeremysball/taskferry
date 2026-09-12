@@ -108,8 +108,10 @@ function extractErrorParts(lines) {
   for (const line of lines) {
     const isErrorLine = line.startsWith("error:");
     const isHelpLine = line.startsWith("help:");
-    if (errorLine === undefined && isErrorLine) errorLine = stripPrefix(line, "error:") || errorLine;
-    if (helpLine === undefined && isHelpLine) helpLine = stripPrefix(line, "help:") || helpLine;
+    // Use nullish coalescing so an empty body after the prefix (e.g. "error:")
+    // is kept as "" instead of falling through to the raw "error:" line later.
+    if (errorLine === undefined && isErrorLine) errorLine = stripPrefix(line, "error:") ?? errorLine;
+    if (helpLine === undefined && isHelpLine) helpLine = stripPrefix(line, "help:") ?? helpLine;
     if (!isErrorLine && !isHelpLine) detailLines.push(line);
   }
   return { errorLine, helpLine, detailLines };
@@ -130,7 +132,7 @@ export function errorValue(error, { helpFallback = "Retry the command or run `ta
   const text = error instanceof Error ? error.message : String(error);
   const lines = text.split("\n");
   const { errorLine, helpLine, detailLines } = extractErrorParts(lines);
-  const primary = errorLine || lines[0] || messageFallback;
+  const primary = errorLine !== undefined ? errorLine : (lines[0] || messageFallback);
   // Detail lines only fold in when we found an `error:` line as the primary,
   // so the plain single-line fallback (no recognized prefixes) keeps
   // returning `lines[0]` unchanged.

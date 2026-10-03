@@ -6,7 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { buildBwrapArgs, checkOverlaySupport } from "./sandbox.js";
-import { applyChangeset, cleanupOverlay, extractGitDiff, extractNonGitDiff, overlayPaths, resolveHeadDrift, resolvePreDispatchHead, subFilePaths, subOverlayPaths } from "./changeset.js";
+import { applyChangeset, cleanupOverlay, extractGitDiff, overlayPaths, resolveHeadDrift, resolvePreDispatchHead, subFilePaths, subOverlayPaths } from "./changeset.js";
 
 const trackedTmpDirs = [];
 after(() => {
@@ -31,16 +31,12 @@ const DRIFT_WORKER_BRANCH = "worker-sim";
 // bearing on real commits made elsewhere.
 const NO_VERIFY = "--no-verify";
 
-// Skip the whole suite unless this host can actually run overlays: Linux,
-// bwrap >= 0.8, and (for the non-git round trip) a real rsync. A missing
-// capability is an environment fact, not a test failure.
+// Skip the whole suite unless this host can actually run overlays: Linux
+// and bwrap >= 0.8. A missing capability is an environment fact, not a test
+// failure. (The suite used to also gate on rsync for a non-git round trip;
+// that path retired with the non-git apply path under taskferry#583.)
 const support = process.platform === "linux" ? checkOverlaySupport() : { supported: false, reason: "not linux" };
-const rsyncAvailable = spawnSync("rsync", ["--version"], { encoding: "utf8" }).status === 0;
-let skipReason = support.reason;
-if (support.supported) {
-  skipReason = rsyncAvailable ? null : "rsync not installed";
-}
-const skip = skipReason ? { skip: `overlay integration skipped: ${skipReason}` } : undefined;
+const skip = support.reason ? { skip: `overlay integration skipped: ${support.reason}` } : undefined;
 
 // Runs one real bwrap invocation against a directory mounted as a CoW
 // overlay (plus any sub-overlays), executing `script` inside.
@@ -87,7 +83,7 @@ describe("overlay round trips (real bwrap)", () => {
     assert.match(fs.readFileSync(diffPath, "utf8"), /\+changed/);
     assert.match(fs.readFileSync(diffPath, "utf8"), /added\.txt/);
 
-    const applied = applyChangeset({ directory, diffPath, isGitTarget: true });
+    const applied = applyChangeset({ directory, diffPath });
     assert.deepEqual(applied, { applied: true, reason: null });
     assert.equal(fs.readFileSync(path.join(directory, TRACKED_FILE), "utf8"), "base\nchanged\n");
     assert.equal(fs.existsSync(path.join(directory, "added.txt")), true);
@@ -207,40 +203,6 @@ describe("overlay round trips (real bwrap)", () => {
     cleanupOverlay({ root: overlay.root, tmpRoot });
   });
 
-  test("non-git target: sandboxed write extracts a diff -ru, rsync-applies, cleans up", skip ? undefined : () => {
-    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "axi-int-nongit-"));
-    trackedTmpDirs.push(directory);
-    const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), TMP_ROOT_PREFIX));
-    trackedTmpDirs.push(tmpRoot);
-    const runtimeDir = fs.mkdtempSync(path.join(os.tmpdir(), RUN_ROOT_PREFIX));
-    trackedTmpDirs.push(runtimeDir);
-    fs.writeFileSync(path.join(directory, "keep.txt"), "stays\n");
-    fs.writeFileSync(path.join(directory, "edit.txt"), "before\n");
-
-    const overlay = overlayPaths("int_nongit", tmpRoot);
-    fs.mkdirSync(overlay.upperDir, { recursive: true, mode: 0o700 });
-    fs.mkdirSync(overlay.workDir, { recursive: true, mode: 0o700 });
-    const ran = runInOverlay({
-      directory, overlay, runtimeDir, homeDir: os.homedir(),
-      script: `echo after > ${directory}/edit.txt && echo brand-new > ${directory}/new.txt && rm ${directory}/keep.txt`,
-    });
-    assert.equal(ran.status, 0, `sandboxed worker script failed: ${ran.stderr}`);
-    assert.equal(fs.readFileSync(path.join(directory, "edit.txt"), "utf8"), "before\n");
-
-    const diffPath = path.join(tmpRoot, "int_nongit.patch");
-    const extracted = extractNonGitDiff({ directory, overlay, runtimeDir, diffPath, stateDir: tmpRoot, homeDir: os.homedir(), denyList: [] });
-    assert.equal(extracted.hasChanges, true);
-    const patch = fs.readFileSync(diffPath, "utf8");
-    assert.match(patch, /brand-new/);
-    assert.match(patch, /Only in|keep\.txt/); // the deletion surfaces one way or the other
-
-    const applied = applyChangeset({ directory, diffPath, overlay, runtimeDir, isGitTarget: false, stateDir: tmpRoot, homeDir: os.homedir(), denyList: [] });
-    assert.deepEqual(applied, { applied: true, reason: null });
-    assert.equal(fs.readFileSync(path.join(directory, "edit.txt"), "utf8"), "after\n");
-    assert.equal(fs.readFileSync(path.join(directory, "new.txt"), "utf8"), "brand-new\n");
-    assert.equal(fs.existsSync(path.join(directory, "keep.txt")), false, "whiteout-implied deletions must land");
-    cleanupOverlay({ root: overlay.root, tmpRoot });
-  });
 });
 
 // resolveHeadDrift needs no bwrap at all (it operates on the live directory

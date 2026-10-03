@@ -173,8 +173,12 @@ bubblewrap and overlay prerequisites.
 Inspect a pending changeset with `taskferry result <id> --diff`. Use
 `taskferry accept <id>` to apply it or `taskferry reject <id>` to discard it.
 An apply conflict leaves the changeset pending so you can resolve the target
-conflict and retry. A non-git changeset whose live overlay disappeared after
-a reboot can only be rejected.
+conflict and retry. A non-git changeset left pending by an older version
+whose live overlay disappeared after
+a reboot can only be rejected. (New non-git dispatches settle `accepted`
+with the worker's edits already live in the target, so there is no pending
+changeset to inspect -- if `accept` says "no pending changeset" on a
+non-git target, that is the expected outcome, not a lost diff.)
 
 A linked-worktree dispatch can report `directory is missing` when another
 process is changing the repository's `.git/worktrees` administration tree.

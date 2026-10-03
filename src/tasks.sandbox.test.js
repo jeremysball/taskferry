@@ -643,6 +643,10 @@ describe("bwrap sandboxing: overlay mount and probe gating", () => {
   test("mounts an overlay on the target directory when overlayEnabled and the host supports it", () => {
     let captured = null;
     const directory = mkdtempTracked("axi-overlay-dir-");
+    // A plain mkdtemp dir is a non-git target and now binds directly with no
+    // overlay (taskferry#583) -- this test pins overlay mounting, so it needs
+    // a git target. An unborn repo (init, no commit) suffices.
+    execFileSync("git", ["init", "-q", directory]);
     const overlayTmpRoot = mkdtempTracked("axi-overlay-tmp-");
     const mgr = makeManager({
       spawnFn: (cmd, args, opts) => { captured = { cmd, args, opts }; return fakeChild(); },
@@ -740,6 +744,9 @@ describe("bwrap sandboxing: overlay mount and probe gating", () => {
 
   test("crashes the task with a spawnError instead of dispatching unguarded when overlay is required but unsupported", () => {
     const directory = mkdtempTracked("axi-unsupported-dir-");
+    // Must be a git target: a non-git target now binds directly with no
+    // overlay (taskferry#583) and never reaches the support check this test pins.
+    execFileSync("git", ["init", "-q", directory]);
     const mgr = makeManager({
       spawnFn: () => fakeChild(),
       sandboxEnabled: true,
@@ -765,6 +772,10 @@ describe("bwrap sandboxing: overlay mount and probe gating", () => {
     Date.now = () => now;
     const restore = () => { Date.now = realNow; };
     try {
+      // Dispatches must land on git targets: a non-git target binds directly
+      // with no overlay (taskferry#583) and never reaches requireOverlaySupport.
+      const supportedDir = mkdtempTracked("axi-probe-cache-dir-");
+      execFileSync("git", ["init", "-q", supportedDir]);
       const mgr = makeManager({
         spawnFn: () => fakeChild(),
         sandboxEnabled: true,
@@ -775,21 +786,21 @@ describe("bwrap sandboxing: overlay mount and probe gating", () => {
       });
 
       // First dispatch: probe runs, cached as negative.
-      mgr.dispatch({ prompt: "one", directory: os.tmpdir() });
+      mgr.dispatch({ prompt: "one", directory: supportedDir });
       assert.equal(calls, 1);
 
       // Second dispatch immediately: cache is negative and recent, no re-probe.
-      mgr.dispatch({ prompt: "two", directory: os.tmpdir() });
+      mgr.dispatch({ prompt: "two", directory: supportedDir });
       assert.equal(calls, 1);
 
       // Just under the TTL: still cached.
       now += 59_999;
-      mgr.dispatch({ prompt: "three", directory: os.tmpdir() });
+      mgr.dispatch({ prompt: "three", directory: supportedDir });
       assert.equal(calls, 1);
 
       // At/past the TTL: re-probe.
       now += 1;
-      mgr.dispatch({ prompt: "four", directory: os.tmpdir() });
+      mgr.dispatch({ prompt: "four", directory: supportedDir });
       assert.equal(calls, 2);
     } finally {
       restore();
@@ -800,6 +811,9 @@ describe("bwrap sandboxing: overlay mount and probe gating", () => {
     // Companion to the negative-TTL test: once supported, the host stays
     // supported (bwrap doesn't get uninstalled through a transient issue).
     // A TTL here would be wasted work on every dispatch.
+    // Dispatches must land on git targets (see the TTL test above).
+    const supportedDir = mkdtempTracked("axi-probe-cache-pos-dir-");
+    execFileSync("git", ["init", "-q", supportedDir]);
     let calls = 0;
     const mgr = makeManager({
       spawnFn: () => fakeChild(),
@@ -810,9 +824,9 @@ describe("bwrap sandboxing: overlay mount and probe gating", () => {
       platform: "linux",
     });
 
-    mgr.dispatch({ prompt: "one", directory: os.tmpdir() });
-    mgr.dispatch({ prompt: "two", directory: os.tmpdir() });
-    mgr.dispatch({ prompt: "three", directory: os.tmpdir() });
+    mgr.dispatch({ prompt: "one", directory: supportedDir });
+    mgr.dispatch({ prompt: "two", directory: supportedDir });
+    mgr.dispatch({ prompt: "three", directory: supportedDir });
 
     assert.equal(calls, 1);
   });
@@ -831,6 +845,14 @@ describe("bwrap sandboxing: overlay rwBinds and shareNet", () => {
       checkOverlaySupportFn: () => ({ supported: true }),
       platform: "linux",
       resolveGitCommonDirFn: () => gitCommonDir,
+      // Only the dispatch HEAD probe answers as git: the directory itself is
+      // non-git, so the real gitDir resolution still fails and the test stays
+      // on the whole-common-dir fallback path (a git init would resolve
+      // gitDir and leave the fallback path entirely).
+      runOverlayCommandFn: (command, args) => {
+        if (command === "git" && args.includes("HEAD")) return { status: 0, stdout: "abc123\n", stderr: "" };
+        return { status: 128, stdout: "", stderr: "fatal: not a git repository\n" };
+      },
     });
 
     mgr.dispatch({ prompt: "hello", directory });
@@ -858,6 +880,7 @@ describe("bwrap sandboxing: overlay rwBinds and shareNet", () => {
     });
 
     const directory = mkdtempTracked("axi-snapshot-retry-dir-");
+    execFileSync("git", ["init", "-q", directory]);
     const gitCommonDir = mkdtempTracked("axi-snapshot-retry-common-");
     const gitDir = path.join(gitCommonDir, "worktrees", "wt");
     fs.mkdirSync(gitDir, { recursive: true });
@@ -905,11 +928,17 @@ describe("bwrap sandboxing: overlay rwBinds and shareNet", () => {
       checkOverlaySupportFn: () => ({ supported: true }),
       platform: "linux",
     });
-    mgr.dispatch({ prompt: "hello", directory: os.tmpdir() });
+    // Both roles need git targets: non-git dispatches bind directly with no
+    // overlay, and advisors into non-git targets fail closed (taskferry#583).
+    const dispatchDir = mkdtempTracked("axi-sharenet-dispatch-dir-");
+    execFileSync("git", ["init", "-q", dispatchDir]);
+    const advisorDir = mkdtempTracked("axi-sharenet-advisor-dir-");
+    execFileSync("git", ["init", "-q", advisorDir]);
+    mgr.dispatch({ prompt: "hello", directory: dispatchDir });
     assert.ok(dispatchArgs.includes("--share-net"));
     assert.ok(!dispatchArgs.includes("--unshare-net"));
 
-    await mgr.advisor({ prompt: "hello", directory: os.tmpdir(), model: SOL_MODEL });
+    await mgr.advisor({ prompt: "hello", directory: advisorDir, model: SOL_MODEL });
     assert.ok(advisorArgs.includes("--share-net"));
     assert.ok(!advisorArgs.includes("--unshare-net"));
   });
@@ -925,6 +954,12 @@ describe("bwrap sandboxing: overlay rwBinds and shareNet", () => {
       checkOverlaySupportFn: () => ({ supported: true }),
       platform: "linux",
       resolveGitCommonDirFn: () => gitCommonDir,
+      // Same shape as the fallback test above: only the HEAD probe answers
+      // as git, so gitDir resolution still fails into the fallback path.
+      runOverlayCommandFn: (command, args) => {
+        if (command === "git" && args.includes("HEAD")) return { status: 0, stdout: "abc123\n", stderr: "" };
+        return { status: 128, stdout: "", stderr: "fatal: not a git repository\n" };
+      },
     });
 
     const result = mgr.dispatch({ prompt: "hello", directory });
@@ -946,6 +981,7 @@ describe("bwrap sandboxing: packed-refs file binds (overlayfs mounts are directo
     // spawn with "Can't mkdir <...>/packed-refs: Not a directory".
     let captured = null;
     const directory = mkdtempTracked("axi-filebind-dir-");
+    execFileSync("git", ["init", "-q", directory]);
     const gitCommonDir = mkdtempTracked("axi-filebind-common-");
     const gitDir = path.join(gitCommonDir, "worktrees", "wt");
     fs.mkdirSync(gitDir, { recursive: true });
@@ -1001,6 +1037,7 @@ describe("bwrap sandboxing: packed-refs file binds (overlayfs mounts are directo
     // (taskferry#304).
     let captured = null;
     const directory = mkdtempTracked("axi-nofilebind-dir-");
+    execFileSync("git", ["init", "-q", directory]);
     const gitCommonDir = mkdtempTracked("axi-nofilebind-common-");
     const gitDir = path.join(gitCommonDir, "worktrees", "wt");
     fs.mkdirSync(gitDir, { recursive: true });
@@ -1056,8 +1093,12 @@ describe("bwrap sandboxing: advisor guardrails", () => {
     });
     const runtimeDir = path.join(mgr.paths.STATE_DIR, "run");
     const socketPath = path.join(runtimeDir, "daemon.sock");
+    const dispatchDir = mkdtempTracked("axi-socket-dispatch-dir-");
+    execFileSync("git", ["init", "-q", dispatchDir]);
+    const advisorDir = mkdtempTracked("axi-socket-advisor-dir-");
+    execFileSync("git", ["init", "-q", advisorDir]);
 
-    mgr.dispatch({ prompt: "hello", directory: os.tmpdir() });
+    mgr.dispatch({ prompt: "hello", directory: dispatchDir });
     const flagPairs = (args) => {
       const pairs = [];
       for (let i = 0; i < args.length; i++) {
@@ -1068,7 +1109,7 @@ describe("bwrap sandboxing: advisor guardrails", () => {
     assert.ok(flagPairs(dispatchArgs).some(([flag, p]) => flag === "--bind" && p === socketPath), "dispatch binds the daemon socket");
     assert.ok(!flagPairs(dispatchArgs).some(([_flag, p]) => p === runtimeDir), "dispatch must not bind the whole runtimeDir");
 
-    await mgr.advisor({ prompt: "hello", directory: os.tmpdir(), model: SOL_MODEL });
+    await mgr.advisor({ prompt: "hello", directory: advisorDir, model: SOL_MODEL });
     assert.ok(!flagPairs(advisorArgs).some(([_flag, p]) => p === socketPath), "advisor must not get any bind onto the daemon socket");
     assert.ok(!flagPairs(advisorArgs).some(([_flag, p]) => p === runtimeDir), "advisor must not get any bind onto the whole runtimeDir");
   });

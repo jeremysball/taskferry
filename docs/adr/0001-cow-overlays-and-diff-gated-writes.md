@@ -66,3 +66,19 @@ Costs and hazards:
 - Adversarial test: inside the sandbox, creating a file and deleting `package.json` at the real repo path both succeeded; on the host neither change was ever visible; git history read intact from both views; `<upper>` afterwards contained exactly the new file and a whiteout entry for the deletion.
 - Incident artifacts: task `oc_ms6oy1e6_4f37e34d`, log at `~/.local/state/taskferry/logs/oc_ms6oy1e6_4f37e34d.ndjson`. Note: the pi executor log records command outputs but not inputs, an audit gap worth its own issue.
 - Cleanup ownership re-verified 2026-07-29 during implementation planning, against the exact flag set `buildBwrapArgs()` emits (`--ro-bind / / --proc /proc --dev /dev --tmpfs /tmp --overlay-src <lower> --overlay <upper> <work> <lower> --unshare-all --share-net --die-with-parent`): `stat` on every file under `<upper>` and `<work>` (including `<work>/work`, overlayfs's internal scratch subdir, mode `000`) showed the invoking uid, not an unmapped one. `rm -rf` on the whole tree from that same uid, no bwrap wrapper, exited 0. This contradicts the "Namespace-owned leftovers" bullet above as originally written; see its correction.
+
+## Amendment (2026-09-06, taskferry#583/#590): non-git targets are direct-writes, not gated
+
+The "write path is the same in every configuration" paragraph in decision 3
+no longer holds for targets outside any git repo. A non-git dispatch now
+binds the target read-write instead of building an overlay, the worker's
+edits land directly, and the task settles `accepted` with no changeset to
+gate. Motivation: the old rsync-apply path could silently discard edits made
+to the target after dispatch (a stale merged view applied over a live
+directory), and the non-git changeset offered no real review value since the
+worker was already staring at the live tree. `taskferry accept` / `reject`
+on such a task refuse with "no pending changeset"; dispatches left pending
+by older versions keep the old rsync path and its reboot limitation. An
+advisor into a non-git directory keeps the overlay (advisors never get the
+direct bind), runs as before, and auto-rejects with no changeset -- its
+findings live in its output.

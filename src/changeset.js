@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
-import { buildBwrapArgs, buildBwrapBaseArgs } from "./sandbox.js";
+import { buildBwrapArgs } from "./sandbox.js";
 
 /** @typedef {{status: number|null, stdout: string, stderr: string, error?: Error}} CommandResult */
 
@@ -325,105 +325,6 @@ export function subOverlaySlug(targetPath) {
 }
 
 /**
- * Mounts directory's merged (overlay) view at a *separate* synthetic
- * mountpoint instead of at directory itself, so directory can be diffed
- * against its own merged view in the same sandbox (git targets don't need
- * this -- git diff only needs the merged tree at the real path -- this is
- * only for the non-git diff -ru / non-git apply cases).
- *
- * The /tmp-shadowing question (review finding folded in here): the
- * overlay paths themselves (`overlay.upperDir`, `overlay.workDir`, and
- * the synthetic `mergedMountPoint` -- all of which live under /tmp by
- * construction) do NOT need the same explicit bind protection that
- * `directory` gets below. `upperDir`/`workDir` are host-namespace paths
- * consumed directly by the kernel's overlay mount(2) call, not by
- * user-space lookups that go through the bwrap namespace's mounts, so
- * the fresh --tmpfs /tmp never shadows them. `mergedMountPoint` is a
- * path in the new namespace (created via `--dir` *after* the `--tmpfs
- * /tmp`, so it lands on the empty tmpfs), then immediately consumed as
- * the mount point for `--overlay` -- it's intentionally empty before the
- * mount and never needs to persist on the host.
- *
- * @param {object} params
- * @param {string} params.directory
- * @param {{upperDir: string, workDir: string}} params.overlay
- * @param {string} params.stateDir - unused by this function; kept in the options object so the
- *   shared buildMergedViewBwrapArgs() scaffolding stays symmetric with buildBwrapArgs().
- * @param {string} params.runtimeDir
- * @param {string} params.homeDir - unused by this function; kept for scaffolding symmetry with buildBwrapArgs().
- * @param {string[]} params.denyList
- * @param {string} params.mergedMountPoint
- * @param {boolean} [params.writable] - also rw-bind directory itself, for the apply step (Task 7); omit for
- *   pure extraction, where directory is bound read-only. The explicit bind (read-only or read-write)
- *   is always needed because the earlier --tmpfs /tmp can shadow directory when directory (or an
- *   ancestor) is under /tmp.
- * @returns {string[]}
- */
-export function buildMergedViewBwrapArgs({ directory, overlay, runtimeDir, denyList, mergedMountPoint, writable = false, stateDir: _stateDir, homeDir: _homeDir }) {
-  const args = buildBwrapBaseArgs({ denyList });
-  args.push("--dir", mergedMountPoint);
-  args.push("--overlay-src", directory, "--overlay", overlay.upperDir, overlay.workDir, mergedMountPoint);
-  if (writable) args.push("--bind", directory, directory);
-  else args.push("--ro-bind", directory, directory);
-  args.push("--bind", runtimeDir, runtimeDir);
-  args.push("--unshare-all", "--unshare-net", "--die-with-parent");
-  return args;
-}
-
-/**
- * @param {object} params
- * @param {string} params.directory
- * @param {{root: string, upperDir: string, workDir: string}} params.overlay
- * @param {string} params.stateDir
- * @param {string} params.runtimeDir
- * @param {string} params.homeDir
- * @param {string[]} params.denyList
- * @param {string} params.diffPath
- * @param {typeof defaultRunCommand} [params.runCommand]
- * @param {(filePath: string, content: string) => void} [params.writeFileFn]
- * @param {(dirPath: string) => void} [params.mkdirFn]
- * @param {(ms: number) => void} [params.sleepFn] - injectable for tests; real callers get a blocking sleep between retries
- * @returns {{diffPath: string, hasChanges: boolean, headDrift: null}}
- * @throws {Error} when the bwrap extraction fails to start or exits non-zero
- */
-export function extractNonGitDiff({
-  directory,
-  overlay,
-  stateDir,
-  runtimeDir,
-  homeDir,
-  denyList,
-  diffPath,
-  runCommand = defaultRunCommand,
-  writeFileFn = (filePath, content) => fs.writeFileSync(filePath, content, { mode: 0o600 }),
-  mkdirFn = (dirPath) => fs.mkdirSync(dirPath, { recursive: true, mode: 0o700 }),
-  sleepFn = sleepSync,
-}) {
-  const mergedMountPoint = path.join(overlay.root, "merged");
-  const bwrapArgs = buildMergedViewBwrapArgs({ directory, overlay, stateDir, runtimeDir, homeDir, denyList, mergedMountPoint, writable: false });
-  // -N (--new-file) treats files missing from one side as empty, so a file
-  // created inside the overlay shows its full content (a plain -ru would
-  // collapse it to a bare "Only in ... merged" line with no content, and
-  // the apply step would then lose the new file entirely).
-  const result = runExtractionBwrap(runCommand, [...bwrapArgs, "--", "diff", "-ruN", directory, mergedMountPoint], sleepFn);
-  // diff exits 0 = identical, 1 = differences found (success for us), >=2 =
-  // real trouble. A bwrap failure (bad mount, timeout, killed) must not be
-  // indistinguishable from "no changes" -- throw on anything but 0/1 so the
-  // caller can record the failure and keep the overlay for recovery. bwrap
-  // itself also exits 1 on a setup failure (its own die() convention), which
-  // collides with diff's own exit-1-for-differences-found on this exact
-  // status code -- an overlay-mount-busy failure that survives every retry
-  // must still throw even though its exit code alone looks like success, or
-  // the worker's real edits get silently discarded as "no changes".
-  if (result.error || isOverlayMountBusy(result) || (result.status !== 0 && result.status !== 1)) {
-    throw new Error(`error: non-git diff extraction failed for ${directory} (exit ${result.status ?? "null"}): ${(result.stderr || result.error?.message || "unknown error").trim()}`);
-  }
-  mkdirFn(pathDirname(diffPath));
-  writeFileFn(diffPath, result.stdout);
-  return { diffPath, hasChanges: result.stdout.trim().length > 0, headDrift: null };
-}
-
-/**
  * @param {string} root
  * @param {string} targetPath
  * @returns {{path: string, upperDir: string, workDir: string}}
@@ -448,43 +349,20 @@ export function subFilePaths(root, targetPath) {
 }
 
 /**
+ * Applies a git-target changeset via `git apply --3way`. The overlay is
+ * git-only since taskferry#583/#590: a non-git dispatch binds its directory
+ * read-write instead of overlaying it, so the worker's writes land directly
+ * and there is no merged view to rsync back. The old rsync-the-merged-view
+ * apply is retired rather than repaired because it could not see edits made
+ * to the target after dispatch: where worker and human changed the same
+ * file, the upper layer won silently (taskferry#590).
  * @param {object} params
  * @param {string} params.directory
  * @param {string} params.diffPath
- * @param {boolean} params.isGitTarget
- * @param {{root: string, upperDir: string, workDir: string}} [params.overlay] - required when isGitTarget is false
- * @param {string} [params.stateDir]
- * @param {string} [params.runtimeDir]
- * @param {string} [params.homeDir]
- * @param {string[]} [params.denyList]
  * @param {typeof defaultRunCommand} [params.runCommand]
- * @param {(ms: number) => void} [params.sleepFn] - injectable for tests; real callers get a blocking sleep between retries (non-git apply only -- applyGitChangeset uses `git apply`, not bwrap, so it never hits the overlay-mount race)
  * @returns {{applied: boolean, reason: string|null}}
  */
-export function applyChangeset({ directory, diffPath, isGitTarget, overlay, stateDir, runtimeDir, homeDir, denyList, runCommand = defaultRunCommand, sleepFn = sleepSync }) {
-  if (isGitTarget) {
-    return applyGitChangeset({ directory, diffPath, runCommand });
-  }
-  return applyNonGitChangeset({ directory, overlay, stateDir, runtimeDir, homeDir, denyList, runCommand, sleepFn });
-}
-
-// Shared by the two live-overlay-input guard clauses below (thrown from two
-// places, so lifted to one module constant to keep no-duplicate-string quiet).
-const NON_GIT_APPLY_ERROR =
-  "error: non-git changeset apply requires a live overlay, stateDir, runtimeDir, homeDir, and denyList\n" +
-  "help: preserve the pending overlay and retry through taskferry accept with a complete task record";
-
-/**
- * Applies a git-target changeset via `git apply`. Mirrors the original
- * in-place logic; split out so applyChangeset stays under the complexity
- * budget.
- * @param {object} params
- * @param {string} params.directory
- * @param {string} params.diffPath
- * @param {typeof defaultRunCommand} params.runCommand
- * @returns {{applied: boolean, reason: string|null}}
- */
-function applyGitChangeset({ directory, diffPath, runCommand }) {
+export function applyChangeset({ directory, diffPath, runCommand = defaultRunCommand }) {
   const result = runCommand("git", ["-C", directory, "apply", "--3way", diffPath]);
   if (result.status !== 0) {
     return { applied: false, reason: gitApplyFailureReason(result) };
@@ -497,62 +375,6 @@ function gitApplyFailureReason(result) {
   if (result.stderr.trim()) return result.stderr.trim();
   if (result.error?.message) return result.error.message;
   return `git apply exited with status ${result.status}`;
-}
-
-/**
- * Applies a non-git-target changeset by rsyncing the merged overlay view
- * onto directory inside one writable remount. Split out of applyChangeset
- * (which routes to this or applyGitChangeset) to keep branching shallow.
- * @param {object} params
- * @param {string} params.directory
- * @param {{root: string, upperDir: string, workDir: string}} [params.overlay]
- * @param {string} [params.stateDir]
- * @param {string} [params.runtimeDir]
- * @param {string} [params.homeDir]
- * @param {string[]} [params.denyList]
- * @param {typeof defaultRunCommand} params.runCommand
- * @param {(ms: number) => void} [params.sleepFn]
- * @returns {{applied: boolean, reason: string|null}}
- */
-function applyNonGitChangeset({ directory, overlay, stateDir, runtimeDir, homeDir, denyList, runCommand, sleepFn = sleepSync }) {
-  // Guard clauses (split so each stays under the expression-complexity cap)
-  // double as the TS narrowing the rsync remount below needs: a missing input
-  // means a partial/tampered task record, which must surface as a hard error
-  // rather than a silent mis-apply.
-  if (stateDir == null || runtimeDir == null || homeDir == null || denyList == null) {
-    throw new Error(NON_GIT_APPLY_ERROR);
-  }
-  if (overlay == null) {
-    throw new Error(NON_GIT_APPLY_ERROR);
-  }
-  const mergedMountPoint = path.join(overlay.root, "merged");
-  const bwrapArgs = buildMergedViewBwrapArgs({ directory, overlay, stateDir, runtimeDir, homeDir, denyList, mergedMountPoint, writable: true });
-  // --delay-updates (review finding #9): rsync stages each updated file and
-  // renames them all into place in the final update phase, so an interrupted
-  // apply leaves old files intact rather than a half-mutated tree. Not fully
-  // transactional (deletions still apply incrementally), but retryable: a
-  // failed apply leaves changesetStatus "pending" and never runs cleanup
-  // (spec §5.4), so the overlay survives for a second attempt.
-  const script = `rsync -a --delete --delay-updates ${shQuote(mergedMountPoint)}/ ${shQuote(directory)}/`;
-  // Same overlay-mount-busy race as extraction (taskferry#326): this bwrap
-  // call mounts its own overlay merged view, which can race the async
-  // mount-namespace teardown of whatever bwrap just exited before this
-  // accept() ran. Routed through the same bounded retry-with-backoff rather
-  // than a bespoke copy -- unlike extractNonGitDiff, no fail-open guard is
-  // needed here: rsync doesn't share diff's "non-zero exit can mean success"
-  // convention, so a persistent busy failure (exit 1) already falls through
-  // to the existing `status !== 0` branch as a real failure.
-  const result = runExtractionBwrap(runCommand, [...bwrapArgs, "--", "sh", "-c", script], sleepFn);
-  if (result.status !== 0) {
-    return { applied: false, reason: copyApplyFailureReason(result) };
-  }
-  return { applied: true, reason: null };
-}
-
-/** @param {{status: number|null, stderr: string}} result */
-function copyApplyFailureReason(result) {
-  if (result.stderr.trim()) return result.stderr.trim();
-  return `apply copy exited with status ${result.status}`;
 }
 
 /**

@@ -17,7 +17,7 @@ no handle, no wait, no clean read-back of what happened.
 
 **Loop:** `dispatch` returns a task id; `wait` blocks to settlement;
 `result` reads the final answer; `accept` or `reject` settles the changeset.
-Settlement is the point — a task is `done`, `crashed`, or `cancelled` by
+Settlement is the point: a task is `done`, `crashed`, or `cancelled` by
 process event, and every later step keys off that state.
 
 ```bash
@@ -63,29 +63,35 @@ macOS runs without the bubblewrap layer (`docs/overview.md:18-20`).
 guesswork. The work itself should survive the crash.
 
 **Answer:** on Linux, worker writes land in the task's overlay
-(`upper/main`, plus git-plumbing sub-overlays — see
-`docs/bwrap-mechanics.md`). If the worker crashes or the
-daemon restarts, the pending changeset is retained: the startup sweep
-deliberately skips `pending` changesets, the diff is extracted to the task's
-diff file, and `accept`/`reject` still apply (`docs/daemon.md:318-361`,
-`docs/bwrap-mechanics.md:106-113`). Session resume (`--session-id`) is the
-separate continuity mechanism for continuing a conversation; the changeset is
-the continuity mechanism for the files (`docs/overview.md:71-72`).
+(`upper/main`, plus git-plumbing sub-overlays; see
+`docs/bwrap-mechanics.md`). When the worker crashes, the daemon extracts the
+overlay into a pending changeset just as it does for a clean exit, so
+`result --diff`, `accept`, and `reject` still apply (`src/tasks.js:1720`). A
+pending changeset also survives a daemon restart, because the startup sweep
+deliberately skips it (`docs/bwrap-mechanics.md:106-113`).
 
-## 5. User-created tags for model management — Direction
+The exception is a task still running when the daemon itself dies. If its
+session is resumable, the daemon cleans the stale overlay and resumes the
+worker against a fresh one, so writes made before the restart are not kept as
+a changeset; if not, the task is marked `crashed` with `failureReason:
+"daemon_restarted_session_lost"` (`docs/daemon.md:318-338`). Session resume (`--session-id`) is the continuity mechanism for
+the conversation; the changeset is the continuity mechanism for the files
+(`docs/overview.md:71-72`).
+
+## 5. User-created tags for model management (Direction)
 
 **Problem:** every dispatch re-states model, executor, and effort level.
 What matters (which model class does review, which does cheap edits) should
 be codified once and dispatched by tag.
 
 **Today (primitives, not presets):** `--class <name>` is a free-text tag
-stored on the task for telemetry aggregation — any string, no fixed-list
+stored on the task for telemetry aggregation, any string, no fixed-list
 validation (`docs/cli-reference.md:64`, `src/command-specs.js:5`).
 Reasoning effort is `--variant` with the `defaultVariant` chain
 (`docs/cli-reference.md:57`, `docs/config.md`); concurrency is
 `providerLimits` (`src/config.js:105-114`).
 
-**Direction:** named tag presets — codify model + executor + variant once
+**Direction:** named tag presets. Codify model + executor + variant once
 under a user-chosen tag, dispatch with the tag alone. A README written from
 this case must not claim presets exist until the config schema and
 `dispatch` resolution chain land.

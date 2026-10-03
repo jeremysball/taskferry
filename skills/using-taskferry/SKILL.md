@@ -11,7 +11,7 @@ Each dispatch runs in a copy-on-write overlay over a directory you name, and
 settles into a changeset you accept or reject, so a ferry always produces a
 verifiable diff before anything lands.
 
-This file is the core loop: decide, dispatch, wait, verify, accept. Four
+This file is the core loop: decide, dispatch, wait, verify, settle. Four
 resources hold the detail:
 
 | Resource | Read it when |
@@ -77,6 +77,35 @@ accept/reject loop, assumes the default overlayed dispatch. Under
 `git status` in the directory becomes the way to see what happened, and a bad
 dispatch has already written to your tree. Reach for either flag only when you
 specifically want that.
+
+**Link dependency directories into the new worktree — don't reinstall.** A
+fresh `git worktree add` copies tracked files only — `node_modules`, `.venv`,
+and other gitignored caches are absent, so a ferry that needs to run `npm
+test` or `uv run pytest` would have to reinstall from scratch. Since you
+already created the worktree, link its deps from the source checkout that
+already has them:
+
+```sh
+MAIN="/path/to/source-checkout"   # the directory that already has deps installed
+WT=".worktrees/<branch>"          # the new worktree you just created
+git worktree add "$WT" -b <branch>
+
+for d in node_modules .venv; do
+  if [ -d "$MAIN/$d" ] && [ ! -e "$WT/$d" ]; then
+    ln -s "$MAIN/$d" "$WT/$d"
+  fi
+done
+# If <branch> changes lockfiles (package-lock.json, uv.lock, etc.), run the
+# install in WT afterwards instead of relying solely on the symlink.
+```
+
+Use an absolute symlink target (`$MAIN/$d` as above) so it resolves inside
+the sandbox — the rest of the root is bind-mounted read-only, so the ferry
+can read but not mutate the source checkout's deps. Gitignored targets never
+enter `taskferry result --diff` (see "accept requires a clean target tree"
+below), so the link doesn't pollute the changeset. Extend the loop with other
+heavy, gitignored dirs your stack uses (`.next`, `.turbo`, `target`) when they
+apply; keep it to gitignored caches — never symlink tracked files.
 
 **A worker's writes only land somewhere durable inside `--directory`.** The
 sandbox mounts `--directory` as the one copy-on-write overlay and binds the
@@ -316,6 +345,38 @@ taskferry reject <id>
 
 `reject` is always allowed regardless of `checkStatus`, and tears down any
 in-flight gate before releasing the overlay.
+
+### Settle every task -- a `pending` changeset holds its overlay forever
+
+`accept` and `reject` are not only verdicts on a diff. They are the only two
+ways an overlay is ever released. The daemon's startup orphan sweep skips
+any task still `pending` on purpose -- `sweepOverlayEntry` in `src/tasks.js`
+treats a pending changeset as owning its overlay -- and nothing else
+reclaims one: not age, not the task finishing, not deleting the directory it
+was dispatched against.
+
+Overlays live under `/run/user/<uid>`, a tmpfs often only 1-2G. Fill it and
+the daemon dies with `ENOSPC: no space left on device`, taking every
+in-flight ferry on the box with it.
+
+So there is a third branch, and it is the common one: **you got the work out
+some other way, and the task still has to be settled.** You read the diff and
+hand-applied it; the ferry was a reviewer whose incidental diff you never
+wanted; the run answered a question and touched a scratch file. Each of
+those ends the same way:
+
+```sh
+taskferry reject <id>
+```
+
+`reject` discards nothing you need. It frees the overlay and stops there:
+the extracted diff stays on disk under the state dir, and `taskferry result
+<id> --diff` keeps working on a rejected task indefinitely. The only thing
+you give up is the option to `accept` that task later.
+
+Settle each task as you finish reading it rather than sweeping at session
+end, and hold unattended dispatch to the same rule -- a job on a timer that
+never settles adds one permanently-retained overlay per run, forever.
 
 ### `accept` requires a clean target tree
 

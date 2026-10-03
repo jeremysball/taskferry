@@ -20,6 +20,7 @@ export const RPC_METHODS = Object.freeze([
   "task.accept",
   "task.reject",
   "task.output",
+  "task.prune",
 ]);
 
 const METHOD_SUMMARY = "task.summary";
@@ -220,6 +221,13 @@ const METHOD_PARAMS = {
   "task.stats": {
     required: [],
     optional: [],
+  },
+  "task.prune": {
+    required: [],
+    optional: [
+      ["keepDays", nonNegativeInteger],
+      ["dryRun", isBoolean],
+    ],
   },
   "task.result": {
     required: [["taskId", isNonEmptyString]],

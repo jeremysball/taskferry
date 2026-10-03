@@ -166,7 +166,7 @@ describe("changeset extraction at settlement", () => {
     execFileSync("git", ["init", "-q", directory]);
     fs.writeFileSync(path.join(directory, "f.txt"), "base\n");
     execFileSync("git", ["-C", directory, "add", "-A"]);
-    execFileSync("git", ["-C", directory, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "base"]);
+    execFileSync("git", ["-C", directory, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "base", "--no-verify"]);
     const gitCommonDir = mkdtempTracked("axi-extract-common-");
     const gitWorktreeAdminDir = mkdtempTracked("axi-extract-gitdir-");
     let extractArgs = null;
@@ -953,6 +953,10 @@ describe("sweepOrphanedOverlays()", () => {
       stateDir,
       overlayTmpRoot: liveOverlayTmpRoot,
       sandboxEnabled: false,
+      // baseTask() pins startedAt to a fixed date, so the boot retention sweep
+      // would evict t_resolved and the assertions below would read a task that
+      // no longer exists. The overlay sweep, not retention, is the subject.
+      taskRetentionDays: 0,
       cacheDir: mkdtempTracked(AXI_TASKS_CACHE_DIR),
       spawnFn: () => { throw new Error("not used"); },
       killFn: () => {},

@@ -24,6 +24,12 @@ const GIT_EMAIL = "user.email=t@t";
 const GIT_NAME = "user.name=t";
 const DRIFT_TEST_FILE = "line2.txt";
 const DRIFT_WORKER_BRANCH = "worker-sim";
+// These fixtures are throwaway git repos under a tmp dir, so they trivially
+// satisfy the global pre-commit hook's primary-checkout check (toplevel ==
+// the repo's own first worktree-list entry). --no-verify skips that (and
+// every other global hook gate) for these scratch commits only; it has no
+// bearing on real commits made elsewhere.
+const NO_VERIFY = "--no-verify";
 
 // Skip the whole suite unless this host can actually run overlays: Linux,
 // bwrap >= 0.8, and (for the non-git round trip) a real rsync. A missing
@@ -57,7 +63,7 @@ describe("overlay round trips (real bwrap)", () => {
     spawnSync("git", ["init", "-q", directory]);
     fs.writeFileSync(path.join(directory, TRACKED_FILE), "base\n");
     spawnSync("git", ["-C", directory, "add", "-A"]);
-    spawnSync("git", ["-C", directory, "-c", GIT_EMAIL, "-c", GIT_NAME, "commit", "-qm", "base"]);
+    spawnSync("git", ["-C", directory, "-c", GIT_EMAIL, "-c", GIT_NAME, "commit", "-qm", "base", NO_VERIFY]);
     const preDispatchHead = resolvePreDispatchHead(directory);
     assert.ok(preDispatchHead, "fixture repo must have a HEAD");
 
@@ -68,7 +74,7 @@ describe("overlay round trips (real bwrap)", () => {
     // same working-tree-style diff (spec §2), anchored on preDispatchHead.
     const ran = runInOverlay({
       directory, overlay, runtimeDir, homeDir: os.homedir(),
-      script: `echo changed >> ${directory}/tracked.txt && echo new > ${directory}/added.txt && git -C ${directory} add -A && git -C ${directory} -c user.email=t@t -c user.name=t commit -qm worker`,
+      script: `echo changed >> ${directory}/tracked.txt && echo new > ${directory}/added.txt && git -C ${directory} add -A && git -C ${directory} -c user.email=t@t -c user.name=t commit -qm worker --no-verify`,
     });
     assert.equal(ran.status, 0, `sandboxed worker script failed: ${ran.stderr}`);
     // The real directory must be untouched before accept -- the whole point.
@@ -104,7 +110,7 @@ describe("overlay round trips (real bwrap)", () => {
     spawnSync("git", ["init", "-q", mainRepo]);
     fs.writeFileSync(path.join(mainRepo, "f.txt"), "one\n");
     spawnSync("git", ["-C", mainRepo, "add", "-A"]);
-    spawnSync("git", ["-C", mainRepo, "-c", GIT_EMAIL, "-c", GIT_NAME, "commit", "-qm", "base"]);
+    spawnSync("git", ["-C", mainRepo, "-c", GIT_EMAIL, "-c", GIT_NAME, "commit", "-qm", "base", NO_VERIFY]);
     const worktree = path.join((() => { const p = fs.mkdtempSync(path.join(os.tmpdir(), "axi-int-wt-")); trackedTmpDirs.push(p); return p; })(), "wt");
     spawnSync("git", ["-C", mainRepo, "worktree", "add", "-q", worktree, "-b", "wt-branch"]);
 
@@ -125,7 +131,7 @@ describe("overlay round trips (real bwrap)", () => {
     const ran = runInOverlay({
       overlay, overlayRwBinds, runtimeDir,
       directory: worktree, homeDir: os.homedir(),
-      script: `echo two >> ${worktree}/f.txt && git -C ${worktree} add -A && git -C ${worktree} -c user.email=t@t -c user.name=t commit -qm wt-worker`,
+      script: `echo two >> ${worktree}/f.txt && git -C ${worktree} add -A && git -C ${worktree} -c user.email=t@t -c user.name=t commit -qm wt-worker --no-verify`,
     });
     assert.equal(ran.status, 0, `sandboxed worktree commit failed: ${ran.stderr}`);
     // The shared object store must NOT have gained the worker's commit yet.
@@ -150,7 +156,7 @@ describe("overlay round trips (real bwrap)", () => {
     spawnSync("git", ["init", "-q", mainRepo]);
     fs.writeFileSync(path.join(mainRepo, "f.txt"), "one\n");
     spawnSync("git", ["-C", mainRepo, "add", "-A"]);
-    spawnSync("git", ["-C", mainRepo, "-c", GIT_EMAIL, "-c", GIT_NAME, "commit", "-qm", "base"]);
+    spawnSync("git", ["-C", mainRepo, "-c", GIT_EMAIL, "-c", GIT_NAME, "commit", "-qm", "base", NO_VERIFY]);
     const worktree = path.join((() => { const p = fs.mkdtempSync(path.join(os.tmpdir(), "axi-int-filebind-wt-")); trackedTmpDirs.push(p); return p; })(), "wt");
     spawnSync("git", ["-C", mainRepo, "worktree", "add", "-q", worktree, "-b", "wt-filebind-branch"]);
     // pack-refs forces packed-refs into existence so it's the writable file
@@ -184,7 +190,7 @@ describe("overlay round trips (real bwrap)", () => {
       // Proves the bind is visible at the real host path from inside the
       // sandbox, then mutates it -- the write must land on the scratch copy,
       // never the real host file (checked below, outside the sandbox).
-      script: `test -f ${packedRefs} && echo aaaa2222aaaa2222aaaa2222aaaa2222aaaa2222 refs/heads/wt-filebind-branch >> ${packedRefs} && echo two >> ${worktree}/f.txt && git -C ${worktree} add -A && git -C ${worktree} -c user.email=t@t -c user.name=t commit -qm wt-worker`,
+      script: `test -f ${packedRefs} && echo aaaa2222aaaa2222aaaa2222aaaa2222aaaa2222 refs/heads/wt-filebind-branch >> ${packedRefs} && echo two >> ${worktree}/f.txt && git -C ${worktree} add -A && git -C ${worktree} -c user.email=t@t -c user.name=t commit -qm wt-worker --no-verify`,
     });
     assert.equal(ran.status, 0, `sandboxed worktree commit failed: ${ran.stderr}`);
     // The real host packed-refs must be untouched -- the whole point of the
@@ -251,7 +257,7 @@ describe("resolveHeadDrift() (real git, no bwrap required)", () => {
     spawnSync("git", ["init", "-q", dir]);
     fs.writeFileSync(path.join(dir, DRIFT_TEST_FILE), "line1\nline2\nline3\n");
     spawnSync("git", ["-C", dir, "add", "-A"]);
-    spawnSync("git", ["-C", dir, "-c", GIT_EMAIL, "-c", GIT_NAME, "commit", "-qm", "base"]);
+    spawnSync("git", ["-C", dir, "-c", GIT_EMAIL, "-c", GIT_NAME, "commit", "-qm", "base", NO_VERIFY]);
     return dir;
   }
 
@@ -264,7 +270,7 @@ describe("resolveHeadDrift() (real git, no bwrap required)", () => {
     spawnSync("git", ["-C", dir, "checkout", "-q", "-b", DRIFT_WORKER_BRANCH]);
     fs.writeFileSync(path.join(dir, DRIFT_TEST_FILE), "line1\nWORKER-CHANGED\nline3\n");
     spawnSync("git", ["-C", dir, "add", "-A"]);
-    spawnSync("git", ["-C", dir, "-c", GIT_EMAIL, "-c", GIT_NAME, "commit", "-qm", "worker"]);
+    spawnSync("git", ["-C", dir, "-c", GIT_EMAIL, "-c", GIT_NAME, "commit", "-qm", "worker", NO_VERIFY]);
     const diff = spawnSync("git", ["-C", dir, "diff", base, DRIFT_WORKER_BRANCH], { encoding: "utf8" }).stdout;
     const diffPath = path.join(dir, "..", "worker.patch");
     fs.writeFileSync(diffPath, diff);
@@ -274,7 +280,7 @@ describe("resolveHeadDrift() (real git, no bwrap required)", () => {
     // Directory independently advances on a DIFFERENT file.
     fs.writeFileSync(path.join(dir, "other.txt"), "unrelated\n");
     spawnSync("git", ["-C", dir, "add", "-A"]);
-    spawnSync("git", ["-C", dir, "-c", GIT_EMAIL, "-c", GIT_NAME, "commit", "-qm", "unrelated"]);
+    spawnSync("git", ["-C", dir, "-c", GIT_EMAIL, "-c", GIT_NAME, "commit", "-qm", "unrelated", NO_VERIFY]);
     const currentHead = resolvePreDispatchHead(dir);
 
     const scratchDir = path.join((() => { const p = fs.mkdtempSync(path.join(os.tmpdir(), "axi-drift-scratch-")); trackedTmpDirs.push(p); return p; })(), "wt");
@@ -289,7 +295,7 @@ describe("resolveHeadDrift() (real git, no bwrap required)", () => {
     spawnSync("git", ["-C", dir, "checkout", "-q", "-b", DRIFT_WORKER_BRANCH]);
     fs.writeFileSync(path.join(dir, DRIFT_TEST_FILE), "line1\nWORKER-CHANGED\nline3\n");
     spawnSync("git", ["-C", dir, "add", "-A"]);
-    spawnSync("git", ["-C", dir, "-c", GIT_EMAIL, "-c", GIT_NAME, "commit", "-qm", "worker"]);
+    spawnSync("git", ["-C", dir, "-c", GIT_EMAIL, "-c", GIT_NAME, "commit", "-qm", "worker", NO_VERIFY]);
     const diff = spawnSync("git", ["-C", dir, "diff", base, DRIFT_WORKER_BRANCH], { encoding: "utf8" }).stdout;
     const diffPath = path.join(dir, "..", "worker-conflict.patch");
     fs.writeFileSync(diffPath, diff);
@@ -299,7 +305,7 @@ describe("resolveHeadDrift() (real git, no bwrap required)", () => {
     // Directory independently changes the SAME line -- a real conflict.
     fs.writeFileSync(path.join(dir, DRIFT_TEST_FILE), "line1\nTARGET-CHANGED\nline3\n");
     spawnSync("git", ["-C", dir, "add", "-A"]);
-    spawnSync("git", ["-C", dir, "-c", GIT_EMAIL, "-c", GIT_NAME, "commit", "-qm", "conflicting"]);
+    spawnSync("git", ["-C", dir, "-c", GIT_EMAIL, "-c", GIT_NAME, "commit", "-qm", "conflicting", NO_VERIFY]);
     const currentHead = resolvePreDispatchHead(dir);
 
     const scratchDir = path.join((() => { const p = fs.mkdtempSync(path.join(os.tmpdir(), "axi-drift-scratch-")); trackedTmpDirs.push(p); return p; })(), "wt");

@@ -1074,7 +1074,10 @@ describe("Unix socket daemon: rehydration and self-restart", () => {
       failureDetail: null,
     }));
     fs.writeFileSync(path.join(paths.stateDir, "tasks.json"), JSON.stringify(persisted));
-    const daemon = await startDaemon(paths);
+    // Retention off: TEST_STARTED_AT is a pinned date, so the boot sweep would
+    // evict these fixtures before rehydration could be observed. Rehydration,
+    // not retention, is the subject here.
+    const daemon = await startDaemon({ ...paths, taskManagerOptions: { taskRetentionDays: 0 } });
     t.after(() => daemon.close());
     const peer = await openPeer(paths.socketPath);
     t.after(() => peer.close());

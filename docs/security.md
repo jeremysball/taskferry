@@ -279,6 +279,10 @@ the variable.
 
 ## Filesystem sandboxing (bubblewrap)
 
+For the underlying overlay mount semantics (why a lower-layer edit is visible
+live, and why a moved worktree strands a running ferry), see
+[bwrap-mechanics.md](bwrap-mechanics.md).
+
 Every dispatched worker child (OpenCode or pi), and every summary child,
 runs wrapped in
 [`bwrap`](https://github.com/containers/bubblewrap) by default on Linux:

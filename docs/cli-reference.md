@@ -258,8 +258,8 @@ so unrelated uncommitted changes in the directory count toward the cap —
 a dirty tree can make even a one-file task's result exceed it. The CLI
 then fails with an error naming the cause: commit or shelve the unrelated
 working-tree changes and retry, or fetch a narrower `--fields` set when
-you don't need the diff (see [daemon.md](daemon.md)'s "Things that look
-like bugs but aren't").
+you don't need the diff (see
+[things-that-look-like-bugs.md](things-that-look-like-bugs.md)).
 
 ```
 $ taskferry result oc_mrn4ipkp_19450105
@@ -284,7 +284,7 @@ include files the worker never touched: git-target extraction stages the
 overlay's whole merged view, so files already untracked in the dispatch
 directory at dispatch time appear as new-file entries, and the plain
 `git apply --3way` fails if they still exist on disk (see
-[daemon.md](daemon.md)'s "Things that look like bugs but aren't"). For a git target, the
+[things-that-look-like-bugs.md](things-that-look-like-bugs.md)). For a git target, the
 apply is `git -C <directory> apply --3way` against the real pre-dispatch `HEAD`; for a non-git
 target, it runs an in-sandbox `rsync --delay-updates` that needs the
 live overlay, so a non-git changeset left pending across a reboot fails
@@ -471,6 +471,32 @@ of unknown tasks doesn't dilute the reported crash rate.
 Recomputed from the daemon's `task.stats` aggregate on every call, with a
 fallback to `task.list` only for an older daemon that does not support
 `task.stats`. Nothing is cached. Cannot be combined with `--full`.
+
+## `taskferry prune [--keep-days <n>] [--dry-run]`
+
+Archives terminal tasks older than the retention window out of `tasks.json`,
+the same sweep the daemon runs at boot. Reports `{ keepDays, dryRun, scanned,
+kept, evicted, archivePath }`; `archivePath` is absent when nothing was
+evicted or when `--dry-run` was passed.
+
+A task is evicted only when it is both terminal (`done`, `crashed`,
+`cancelled`, `unknown`) and older than the window, measured from `endedAt`
+when present and `startedAt` otherwise. `queued` and `running` tasks survive
+at any age, as does a record with no parseable timestamp.
+
+Evicted records are written as NDJSON to
+`<stateDir>/archive/tasks-pruned-<stamp>.ndjson` before anything is removed
+from the store, so a failed archive write leaves `tasks.json` untouched.
+Nothing is deleted.
+
+`--keep-days` overrides `taskRetentionDays` for this call only; `0` keeps
+everything. Precedence is flag > `TASKFERRY_TASK_RETENTION_DAYS` >
+`config.json` `taskRetentionDays` > the built-in default of 30 days.
+
+This runs through the daemon rather than editing `tasks.json` directly, which
+is the only thing that works: the daemon holds the authoritative task map in
+memory and flushes it on a coalesced timer, so an external rewrite of the file
+is overwritten the next time any task changes state.
 
 ## `taskferry --version` / `taskferry -V`
 

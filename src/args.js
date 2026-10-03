@@ -283,6 +283,7 @@ const DEFAULT_OPTIONS = {
   watch: () => ({ ...flagDefaultsFor("watch"), format: "toon", taskId: void 0 }),
   context: () => ({ ...flagDefaultsFor("context"), format: "toon" }),
   doctor: () => flagDefaultsFor("doctor"),
+  prune: () => flagDefaultsFor("prune"),
   setup: () => ({}),
   init: () => ({}),
 };
@@ -449,6 +450,8 @@ const FLAGS = {
   "--summarize": { allow: ["wait"], bool: true },
   "--summarize-context": { allow: ["advisor"], bool: true, key: "summarizeContext" },
   "--stats": { allow: ["doctor"], bool: true },
+  "--keep-days": { allow: ["prune"], key: "keepDays", coerce: (v, n) => parseNumber(v, n, { min: 0 }) },
+  "--dry-run": { allow: ["prune"], key: "dryRun", bool: true },
   "--no-sandbox": { allow: ["dispatch"], bool: true, key: "noSandbox" },
   "--no-overlay": { allow: ["dispatch"], bool: true, key: "noOverlay" }, // advisor deliberately excluded -- review finding #5
   "--force": { allow: ["accept"], bool: true },

@@ -4,12 +4,12 @@
 
 When a change introduces behavior a future reader would reasonably file as a
 bug — a deliberate non-obvious default, a race the design tolerates on
-purpose, a "why doesn't this take effect immediately" — add it to the
-"Things that look like bugs but aren't" section in `docs/daemon.md` in the
-same PR. That section exists so the same thing doesn't get re-diagnosed from
-scratch every time; it is the one piece of orientation documentation worth
-maintaining by hand, because nothing about it can be derived by reading the
-code.
+purpose, a "why doesn't this take effect immediately" — add it to
+`docs/things-that-look-like-bugs.md` in the same PR. That file exists so the
+same thing doesn't get re-diagnosed from scratch every time; it is the one
+piece of orientation documentation worth maintaining by hand, because
+nothing about it can be derived by reading the code. It lived in
+`docs/daemon.md` until the entries outgrew the daemon.
 
 Do not reintroduce a file-by-file index of the codebase (line counts,
 per-file responsibility summaries). The previous `docs/sourcemap.md` went

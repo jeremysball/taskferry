@@ -470,7 +470,23 @@ describe("bwrap sandboxing: opencode auth and data home", () => {
     }
   });
 
-  test("leaves UV_CACHE_DIR and UV_TOOL_DIR untouched when sandboxing is disabled", () => {
+  test("leaves UV_CACHE_DIR and UV_TOOL_DIR untouched when sandboxing is disabled", (t) => {
+    // Explicitly managed env: pollute the ambient with the same values a
+    // ferry's sandboxed worker would carry, then verify they do not bleed
+    // into the child's env when sandboxing is off. This keeps the test
+    // isolated whether it runs on a clean host or inside a ferry's overlay
+    // (process.env polluted), and proves inheritance is disabled.
+    const priorCache = process.env.UV_CACHE_DIR;
+    const priorTools = process.env.UV_TOOL_DIR;
+    t.after(() => {
+      if (priorCache !== undefined) process.env.UV_CACHE_DIR = priorCache;
+      else delete process.env.UV_CACHE_DIR;
+      if (priorTools !== undefined) process.env.UV_TOOL_DIR = priorTools;
+      else delete process.env.UV_TOOL_DIR;
+    });
+    process.env.UV_CACHE_DIR = "/tmp/polluted-uv-cache-ambient";
+    process.env.UV_TOOL_DIR = "/tmp/polluted-uv-tools-ambient";
+
     let captured = null;
     const mgr = makeManager({
       spawnFn: (cmd, args, opts) => { captured = { cmd, args, opts }; return fakeChild(); },
@@ -482,6 +498,20 @@ describe("bwrap sandboxing: opencode auth and data home", () => {
 
     assert.equal(captured.opts.env.UV_CACHE_DIR, undefined);
     assert.equal(captured.opts.env.UV_TOOL_DIR, undefined);
+  });
+
+  test("honours caller-provided UV dirs when sandboxing is disabled (explicitly managed)", () => {
+    let captured = null;
+    const mgr = makeManager({
+      spawnFn: (cmd, args, opts) => { captured = { cmd, args, opts }; return fakeChild(); },
+      sandboxEnabled: false,
+      platform: "linux",
+    });
+
+    mgr.dispatch({ prompt: "hello", directory: os.tmpdir(), env: { UV_CACHE_DIR: "/explicit/cache", UV_TOOL_DIR: "/explicit/tools" } });
+
+    assert.equal(captured.opts.env.UV_CACHE_DIR, "/explicit/cache");
+    assert.equal(captured.opts.env.UV_TOOL_DIR, "/explicit/tools");
   });
 });
 

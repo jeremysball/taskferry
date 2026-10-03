@@ -49,15 +49,6 @@ jobs:
       - name: Run unit tests
         run: npm run test:unit
 
-      # Fork PRs don't get repo secrets (GitHub withholds them by design), so
-      # META_MODEL_API_KEY would be empty there and every dispatch would fail on
-      # auth rather than on anything the PR actually changed. Runs only for
-      # same-repo pushes/PRs, where the secret is actually available.
-      - name: Check integration eligibility
-        id: integration_gate
-        if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
-        run: echo "run=true" >> "$GITHUB_OUTPUT"
-
       # Ubuntu's apt bubblewrap package reports a version >= 0.8 (the floor
       # sandbox.js's checkOverlaySupport() trusts) but is built with overlay
       # support (--overlay-src/--overlay) compiled out, so every sandboxed
@@ -72,11 +63,9 @@ jobs:
       # So relax the AppArmor restriction instead and keep bwrap unprivileged
       # -- safe here since this is a fresh, throwaway CI VM, not a shared host.
       - name: Allow unprivileged user namespaces (Ubuntu 24.04 AppArmor restriction)
-        if: steps.integration_gate.outputs.run == 'true'
         run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
 
       - name: Build bubblewrap (with overlay support) from source
-        if: steps.integration_gate.outputs.run == 'true'
         run: |
           sudo apt-get update
           sudo apt-get install -y meson ninja-build libcap-dev pkg-config
@@ -88,28 +77,25 @@ jobs:
           bwrap --help | grep -q -- --overlay-src
 
       - name: Install opencode CLI
-        if: steps.integration_gate.outputs.run == 'true'
         run: npm install -g opencode-ai
 
-      # A fresh runner has no ~/.config/opencode, so opencode boots on its
-      # stock defaults -- which include the built-in `title` agent. That agent
-      # fires a second, separate model request per session purely to name the
-      # session for the TUI's session list. Nothing in a headless CI dispatch
-      # ever reads that name: the smoke tests drive `opencode run`, assert on
-      # task state, and exit. So every session in the integration leg was
-      # spending an extra billed META_MODEL_API_KEY call, and taking an extra
-      # chance at a 429 or a provider hiccup, to produce a string no one reads.
-      # `agent.title.disable` is opencode's own config key for this
-      # (Config.agent.title -> AgentConfig.disable in https://opencode.ai/config.json).
+      # The integration smoke tests dispatch against a local, keyless
+      # OpenAI-compatible mock (`src/mock-llm.js`) that each script starts on
+      # an ephemeral port and wires in through OPENCODE_CONFIG_CONTENT as a
+      # custom `mockllm` provider. Everything upstream of the model's reply is
+      # still real: the CLI, the daemon, the bwrap sandbox, the `opencode`
+      # spawn, NDJSON parsing, settlement, and cancel's process-group kill.
+      # Only the provider HTTP is faked -- deliberately, because provider
+      # availability is not what this leg is for. It used to ride a live
+      # META_MODEL_API_KEY model, and a billing-state change on that route
+      # (`opencode_apierror: "The requested model was not found."`, 2026-09-01
+      # run on PR #547) turned every open PR red without any code regressing.
       #
-      # Inline config via OPENCODE_CONFIG_CONTENT, not a checked-in file: the
-      # SDK injects this env var as the config JSON (server.js:15), and the
-      # daemon passes the parent's full env through to each sandboxed dispatch
-      # (src/tasks.js:1307), so it reaches the worker without a repo-local file
-      # to ship or keep in sync.
-      - name: Run integration (real CLI + daemon + live dispatch, no mocks)
-        if: steps.integration_gate.outputs.run == 'true'
-        env:
-          META_MODEL_API_KEY: ${{ secrets.META_MODEL_API_KEY }}
-          OPENCODE_CONFIG_CONTENT: '{"agent":{"title":{"disable":true}}}'
+      # The config travels because the daemon passes the parent's full env
+      # into each sandboxed dispatch -- the same path the
+      # `agent.title.disable` key uses to opt out of opencode's session-naming
+      # agent (Config.agent.title -> AgentConfig.disable in
+      # https://opencode.ai/config.json), which would otherwise fire a second
+      # request per session for a string no headless smoke test reads.
+      - name: Run integration (real CLI + daemon + dispatch to local mock LLM)
         run: npm run test:integration

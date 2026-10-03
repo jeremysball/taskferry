@@ -42,6 +42,19 @@ if (support.supported) {
 }
 const skip = skipReason ? { skip: `overlay integration skipped: ${skipReason}` } : undefined;
 
+// The subdirectory case below needs its fixture repo *outside* the sandbox's
+// `--tmpfs /tmp`. A subdirectory dispatch only re-mounts the subdirectory
+// itself, so a fixture under /tmp would present an empty repo root inside the
+// sandbox and `git add -A` would stage a deletion of every sibling file --
+// an artifact of the fixture's location, not a behaviour production has
+// (real repos stay readable through the read-only root bind).
+const outsideTmpRoot = process.env.XDG_CACHE_HOME || path.join(os.homedir(), ".cache");
+let subdirSkip = skipReason ? `overlay integration skipped: ${skipReason}` : null;
+if (!subdirSkip && (outsideTmpRoot === os.tmpdir() || outsideTmpRoot.startsWith(`${os.tmpdir()}/`))) {
+  subdirSkip = `subdirectory fixture root ${outsideTmpRoot} is under ${os.tmpdir()}, which the sandbox masks`;
+}
+if (!subdirSkip) fs.mkdirSync(outsideTmpRoot, { recursive: true });
+
 // Runs one real bwrap invocation against a directory mounted as a CoW
 // overlay (plus any sub-overlays), executing `script` inside.
 function runInOverlay({ directory, overlay, overlayRwBinds = [], overlayRwFileBinds = [], script, runtimeDir, homeDir }) {
@@ -98,6 +111,69 @@ describe("overlay round trips (real bwrap)", () => {
     const removal = cleanupOverlay({ root: overlay.root, tmpRoot });
     assert.equal(removal.removed, true);
     assert.equal(fs.existsSync(overlay.root), false);
+  });
+
+  test("subdirectory of a repo root: the overlay's filesystem boundary does not hide .git from the worker or from extraction (#589)", subdirSkip ? { skip: subdirSkip } : () => {
+    // Dispatching at a subdirectory rather than the repo root puts the CoW
+    // overlay mount *between* that subdirectory and the .git above it. Git's
+    // repo discovery stops at a filesystem boundary unless
+    // GIT_DISCOVERY_ACROSS_FILESYSTEM is set, so before #589 both the
+    // worker's own git commands and the later extraction died with
+    // "fatal: not a git repository", leaving the task pending with no diff.
+    const repoRoot = fs.mkdtempSync(path.join(outsideTmpRoot, "axi-int-subdir-"));
+    trackedTmpDirs.push(repoRoot);
+    const directory = path.join(repoRoot, "pkg");
+    fs.mkdirSync(directory);
+    spawnSync("git", ["init", "-q", repoRoot]);
+    fs.writeFileSync(path.join(repoRoot, "top.txt"), "top\n");
+    fs.writeFileSync(path.join(directory, "nested.txt"), "base\n");
+    spawnSync("git", ["-C", repoRoot, "add", "-A"]);
+    spawnSync("git", ["-C", repoRoot, "-c", GIT_EMAIL, "-c", GIT_NAME, "commit", "-qm", "base", NO_VERIFY]);
+
+    // Host-side discovery walks up freely (nothing interposes a mount), so
+    // the task is classified as a git target even though `directory` is not
+    // the repo root. The sandbox has to agree with that classification.
+    const preDispatchHead = resolvePreDispatchHead(directory);
+    assert.ok(preDispatchHead, "a subdirectory of a repo must resolve to the repo's HEAD");
+
+    const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), TMP_ROOT_PREFIX));
+    trackedTmpDirs.push(tmpRoot);
+    const runtimeDir = fs.mkdtempSync(path.join(os.tmpdir(), RUN_ROOT_PREFIX));
+    trackedTmpDirs.push(runtimeDir);
+    const overlay = overlayPaths("int_subdir", tmpRoot);
+    fs.mkdirSync(overlay.upperDir, { recursive: true, mode: 0o700 });
+    fs.mkdirSync(overlay.workDir, { recursive: true, mode: 0o700 });
+    // Mirrors buildGitBinds()' snapshotWritable(gitCommonDir) for a plain
+    // (non-worktree) checkout: the whole .git is copied to scratch and bound
+    // read-write back at its host path, so the worker can commit without
+    // touching the real repo.
+    const gitCommonDir = path.join(repoRoot, ".git");
+    const gitBind = subFilePaths(overlay.root, gitCommonDir);
+    fs.mkdirSync(path.dirname(gitBind.bindSrc), { recursive: true, mode: 0o700 });
+    fs.cpSync(gitCommonDir, gitBind.bindSrc, { recursive: true });
+    const overlayRwFileBinds = [gitBind];
+
+    const ran = runInOverlay({
+      overlay, overlayRwFileBinds, runtimeDir,
+      directory, homeDir: os.homedir(),
+      script: `git -C ${directory} rev-parse --show-toplevel && echo changed >> ${directory}/nested.txt`,
+    });
+    assert.equal(ran.status, 0, `sandboxed git in a subdirectory failed: ${ran.stderr}`);
+    assert.equal(ran.stdout.trim(), repoRoot, "git must discover the repo root across the overlay boundary");
+    assert.equal(fs.readFileSync(path.join(directory, "nested.txt"), "utf8"), "base\n");
+
+    const diffPath = path.join(tmpRoot, "int_subdir.patch");
+    const extracted = extractGitDiff({ directory, overlay, overlayRwFileBinds, preDispatchHead, runtimeDir, diffPath, overlayRwBinds: [], stateDir: tmpRoot, homeDir: os.homedir(), denyList: [] });
+    assert.equal(extracted.hasChanges, true);
+    const diff = fs.readFileSync(diffPath, "utf8");
+    assert.match(diff, /pkg\/nested\.txt/);
+    assert.match(diff, /\+changed/);
+    // The sibling file the worker never saw must not show up as a deletion:
+    // the repo root outside the overlay is still readable through the
+    // read-only root bind, so `git add -A` sees it unchanged.
+    assert.ok(!diff.includes("top.txt"), `unrelated sibling file leaked into the diff:\n${diff}`);
+
+    cleanupOverlay({ root: overlay.root, tmpRoot });
   });
 
   test("worktree-shaped target: git-common-dir sub-overlays capture .git-metadata writes (regression: review finding #1)", skip ? undefined : () => {

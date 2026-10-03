@@ -32,6 +32,9 @@ const T1_UPPER = "/tmp/taskferry-cow-t1/upper/main";
 const T1_WORK = "/tmp/taskferry-cow-t1/work/main";
 const T1_MERGED = "/tmp/taskferry-cow-t1/merged";
 const TMP_DIR = "/tmp";
+// Emitted by buildBwrapBaseArgs() for every sandbox -- see the
+// GIT_DISCOVERY_SETENV comment in sandbox.js.
+const GIT_DISCOVERY_ARGS = ["--setenv", "GIT_DISCOVERY_ACROSS_FILESYSTEM", "1"];
 const UPPER_DIR = "/tmp/u";
 const WORK_DIR = "/tmp/w";
 const PRE_DISPATCH_HEAD = "abc123";
@@ -172,6 +175,7 @@ describe("buildMergedViewBwrapArgs() byte-identical output (Task 5: post-refacto
     assert.deepEqual(args, [
       RO_BIND_FLAG, ROOT_BIND, ROOT_BIND,
       "--proc", "/proc", "--dev", "/dev", "--tmpfs", TMP_DIR,
+      ...GIT_DISCOVERY_ARGS,
       DIR_FLAG, T1_MERGED,
       OVERLAY_SRC_FLAG, REPO_DIR,
       OVERLAY_FLAG, T1_UPPER, T1_WORK, T1_MERGED,
@@ -195,6 +199,7 @@ describe("buildMergedViewBwrapArgs() byte-identical output (Task 5: post-refacto
     assert.deepEqual(args, [
       RO_BIND_FLAG, ROOT_BIND, ROOT_BIND,
       "--proc", "/proc", "--dev", "/dev", "--tmpfs", TMP_DIR,
+      ...GIT_DISCOVERY_ARGS,
       DIR_FLAG, T1_MERGED,
       OVERLAY_SRC_FLAG, REPO_DIR,
       OVERLAY_FLAG, T1_UPPER, T1_WORK, T1_MERGED,

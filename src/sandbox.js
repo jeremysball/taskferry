@@ -183,6 +183,26 @@ export function resolveGitDir(directory, runCommand = defaultRunCommand) {
 }
 
 /**
+ * Mounting a CoW overlay at `directory` makes that directory its own
+ * filesystem inside the sandbox. When `directory` is a subdirectory of a
+ * git repo rather than its root, the overlay mount lands *between* the
+ * subdirectory and the `.git` above it, and git's repo discovery refuses to
+ * walk across a filesystem boundary: `git -C <subdir> add -A` exits 128 with
+ * "fatal: not a git repository ... Stopping at filesystem boundary
+ * (GIT_DISCOVERY_ACROSS_FILESYSTEM not set)". That killed the worker's own
+ * git commands during dispatch and, worse, killed changeset extraction
+ * afterwards, leaving the task permanently `pending` with no diff (#589).
+ *
+ * The boundary is an artifact of how the sandbox is assembled, not a real
+ * one: every path in here comes from the same host filesystem, and
+ * taskferry's own host-side git-target classification
+ * (`resolvePreDispatchHead`) already walks up freely because nothing on the
+ * host interposes a mount. Setting this makes the sandbox agree with the
+ * classification the host already made.
+ */
+const GIT_DISCOVERY_SETENV = ["--setenv", "GIT_DISCOVERY_ACROSS_FILESYSTEM", "1"];
+
+/**
  * Shared prefix both `buildBwrapArgs()` (sandboxed dispatch) and
  * `buildMergedViewBwrapArgs()` (changeset extraction/apply over a CoW
  * overlay) start from: the read-only root bind, the standard
@@ -193,6 +213,9 @@ export function resolveGitDir(directory, runCommand = defaultRunCommand) {
  * deny-list entry or bind path that happens to live under /tmp (a
  * plausible scratch/CI/worktree path) must not be silently hidden by a
  * /tmp mount that comes after it.
+ *
+ * Every sandbox also sets GIT_DISCOVERY_ACROSS_FILESYSTEM=1 — see
+ * `GIT_DISCOVERY_SETENV` above for why.
  * @param {object} options
  * @param {string[]} options.denyList
  * @returns {string[]}
@@ -203,6 +226,7 @@ export function buildBwrapBaseArgs({ denyList }) {
   for (const denied of denyList) {
     args.push("--tmpfs", denied);
   }
+  args.push(...GIT_DISCOVERY_SETENV);
   return args;
 }
 

@@ -7,6 +7,20 @@ import sonarjs from "eslint-plugin-sonarjs";
 // (src/tasks.js), node:test test files, and standalone smoke-test
 // scripts run directly with `node`. Everything runs under Node, so one
 // language-options block covers the whole tree.
+
+// The test/harness surface: node:test files plus the non-`.test.js`
+// scaffolding they share (fixture builders, the smoke-test runners invoked
+// directly with `node`, the eval harness). Named once because two separate
+// blocks below carve it out, and the two lists drifting apart is how a rule
+// silently stops covering production code.
+const TEST_SURFACE = [
+  "**/*.test.js",
+  "**/*-test.js",
+  "**/*.test-helpers.js",
+  "src/smoke-test-support.js",
+  "evals/**",
+];
+
 export default [
   { ignores: ["node_modules/**", ".claude/**", ".worktrees/**"] },
 
@@ -14,11 +28,17 @@ export default [
 
   // Project-wide rule tuning: keep the high-signal bug catchers as errors
   // (no-undef, no-redeclare, no-const-assign, no-dupe-keys, no-unreachable…
-  // — these block the commit), demote stylistic noise to warnings so it
-  // informs without halting work.
+  // — these block the commit).
+  //
+  // `no-unused-vars` sat at "warn" here on the theory that it was stylistic
+  // noise. It isn't: an unused binding is usually a half-finished rename or
+  // a dropped call, and the `^_` escape hatches below already cover the
+  // deliberate cases. The tree has been clean of it for long enough that
+  // promoting it to "error" cost zero fixes -- it now blocks the commit
+  // instead of scrolling past in a warning list nobody reads.
   {
     rules: {
-      "no-unused-vars": ["warn", { caughtErrors: "none", argsIgnorePattern: "^_", varsIgnorePattern: "^_" }],
+      "no-unused-vars": ["error", { caughtErrors: "none", argsIgnorePattern: "^_", varsIgnorePattern: "^_" }],
       "no-empty": ["error", { allowEmptyCatch: true }],
     },
   },
@@ -58,10 +78,29 @@ export default [
       // Wants a license header block on every file; this project doesn't
       // use one.
       "sonarjs/file-header": "off",
-      // Taskferry's whole job is sandboxing: os.tmpdir()/`/tmp` use and
-      // PATH-resolved spawns of bwrap/git/opencode/pi are expected,
-      // reviewed patterns here, not accidental exposure -- disabled rather
-      // than generating permanent noise no fix can resolve.
+    },
+  },
+
+  // `sonarjs/publicly-writable-directories` and `sonarjs/no-os-command-from-path`
+  // used to be off across the whole tree, justified as "taskferry's whole
+  // job is sandboxing, so os.tmpdir() use and PATH-resolved spawns of
+  // bwrap/git/opencode are expected here." Measured, that justification did
+  // not describe the actual hits. Enabling both project-wide flags 23 files,
+  // and the production sandbox path is not among them: src/sandbox.js,
+  // src/executor.js and src/tasks.js trigger neither rule, because sandbox.js
+  // spawns through a variable (`spawnSync(command, ...)`) that the rule
+  // cannot resolve statically. What the rules actually catch is fixture
+  // scaffolding -- tmpdir scratch directories and literal `git`/`npm` spawns
+  // in tests and smoke-test harnesses.
+  //
+  // So the exemption is scoped to that surface instead of the whole tree,
+  // which leaves both rules live on every production file. The single
+  // production hit (`spawnSync("npm", ...)` in src/setup.js) carries its own
+  // inline disable, where the reason is visible at the call site rather than
+  // buried in this config.
+  {
+    files: TEST_SURFACE,
+    rules: {
       "sonarjs/publicly-writable-directories": "off",
       "sonarjs/no-os-command-from-path": "off",
     },

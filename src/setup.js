@@ -114,6 +114,7 @@ export function replaceManagedSymlink(destination, source) {
  * @returns {ReturnType<typeof import("node:child_process").spawnSync>}
  */
 export function defaultNpmInstall(checkoutDirectory) {
+  // eslint-disable-next-line sonarjs/no-os-command-from-path -- `npm` must come from the caller's PATH: setup runs against whatever node/npm the user's mise or nvm has active, and hardcoding a path would pin it to one install
   const result = spawnSync("npm", ["install"], { cwd: checkoutDirectory, encoding: "utf8" });
   if (result.error || result.status !== 0) {
     const stderr = (result.stderr || "").trim();

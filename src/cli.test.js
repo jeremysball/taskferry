@@ -589,8 +589,15 @@ test("doctor is a structured health check and --full preserves extra daemon fiel
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-cli-doctor-"));
   t.after(() => fs.rmSync(home, { recursive: true, force: true }));
   const capture = capturedIo();
+  const storage = {
+    taskStore: { records: 12, bytes: 4096 },
+    overlays: { recorded: 3, stale: 1, live: 2 },
+    changesets: { pending: 2, applicable: 1, unresolvable: 1 },
+    perTaskCacheDirs: { "uv-cache": 4, "uv-tools": 0 },
+  };
   const { client, calls } = fakeClient({
     "system.health": { healthy: true, pid: 123, version: 1, socketPath: "/tmp/taskferry.sock" },
+    "system.storage": storage,
   });
   const runShellCommand = () => ({
     status: 0,
@@ -606,8 +613,11 @@ test("doctor is a structured health check and --full preserves extra daemon fiel
     claude: { installed: true },
     playwrightMcpIsolation: { opencode: { checked: false, reason: "no opencode config with a playwright MCP entry found" }, claudeCode: { checked: false, reason: "~/.claude.json not found" } },
   });
-  assert.equal(capture.output().value.warnings, undefined);
-  assert.deepEqual(calls, [{ method: "system.health", params: {} }]);
+  assert.deepEqual(capture.output().value.storage, storage);
+  assert.deepEqual(capture.output().value.warnings, [
+    "1 of 3 task records point at an overlay directory that no longer exists. Restart the daemon to reconcile them (taskferry daemon restart); until then every accept/status touch on those tasks stats a directory that cannot come back.",
+  ], "a dead overlay pointer is a warning; the unresolvable changeset beside it stays an informational count");
+  assert.deepEqual(calls, [{ method: "system.health", params: {} }, { method: "system.storage", params: {} }]);
 });
 
 test("summary --wait reports a not-settled note instead of summarizing when the task is still active", async () => {

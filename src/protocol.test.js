@@ -17,6 +17,7 @@ const ERROR_MESSAGE_UNKNOWN_TASK = "unknown task id: oc_123";
 
 const METHOD = Object.freeze({
   health: "system.health",
+  storage: "system.storage",
   dispatch: "task.dispatch",
   cancel: "task.cancel",
   status: "task.status",
@@ -37,6 +38,7 @@ const METHOD = Object.freeze({
 
 const expectedMethods = [
   METHOD.health,
+  METHOD.storage,
   METHOD.dispatch,
   METHOD.cancel,
   METHOD.status,

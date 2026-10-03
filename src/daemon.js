@@ -781,6 +781,7 @@ export function responseError(error, requestId) {
 /** @type {Record<string, InvokeHandler>} */
 const invokeHandlers = {
   "system.health": () => ({ healthy: true, pid: process.pid, version: PROTOCOL_VERSION }),
+  "system.storage": (manager) => manager.storage(),
   "task.dispatch": (manager, params) => manager.dispatch(/** @type {any} */ (params)),
   "task.cancel": (manager, params) => manager.cancel(/** @type {string} */ (params.taskId), params.graceMs === undefined ? undefined : { graceMs: /** @type {number} */ (params.graceMs) }),
   "task.status": (manager, params) => manager.status(/** @type {string} */ (params.taskId)),

@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { createTaskManager, DEFAULT_SUMMARY_MODEL, sweepOrphanedOverlaysFor } from "./tasks.js";
+import { createTaskManager, DEFAULT_SUMMARY_MODEL, sweepOrphanedOverlaysFor, sweepStaleOverlayRecordsFor } from "./tasks.js";
 import { trackManager, makeManager, fakeChild, AXI_TASKS_ORPHAN, AXI_TASKS_TEST_DIR, AXI_TASKS_CACHE_DIR, TASKS_STATE_FILE, OVERLAY_DIR_PENDING, DIFF_LINE, SPAWN_BWRAP_TIMEOUT, SOL_MODEL, LUNA_MODEL, baseTask, mkdtempTracked } from "./tasks.test-helpers.js";
 
 const CHECK_GATE_CONFIG = `check = "npm test"\n`;
@@ -1004,6 +1004,38 @@ describe("sweepOrphanedOverlays()", () => {
       releaseOverlay,
     });
     assert.equal(released, 1, "an id unknown in memory AND on disk is genuinely orphaned and must still be released");
+  });
+
+  test("sweepStaleOverlayRecordsFor clears a settled task's pointer to an overlay directory that is gone", () => {
+    const settled = { id: "oc_settled", status: "done", changesetStatus: "pending", diffPath: "/diffs/oc_settled.patch", overlayDirs: { root: "/gone/taskferry-cow-oc_settled", tmpRoot: "/gone" } };
+    const persisted = [];
+    const cleared = sweepStaleOverlayRecordsFor({
+      tasks: new Map([[settled.id, settled]]),
+      existsFn: () => false,
+      persistTask: (taskId) => persisted.push(taskId),
+    });
+    assert.equal(cleared, 1);
+    assert.equal(settled.overlayDirs, null);
+    assert.deepEqual(persisted, ["oc_settled"]);
+    assert.equal(settled.changesetStatus, "pending", "the reconcile clears the dead pointer only, it never resolves the changeset");
+    assert.equal(settled.diffPath, "/diffs/oc_settled.patch", "a surviving patch keeps the task acceptable without its overlay");
+  });
+
+  test("sweepStaleOverlayRecordsFor leaves live pointers and unsettled tasks alone", () => {
+    const live = { id: "oc_live", status: "done", overlayDirs: { root: "/here/taskferry-cow-oc_live", tmpRoot: "/here" } };
+    // Persisted before spawnFn (taskferry#346), so a running task can legitimately
+    // record an overlay a moment before the directory appears.
+    const running = { id: "oc_running", status: "running", overlayDirs: { root: "/gone/taskferry-cow-oc_running", tmpRoot: "/gone" } };
+    const persisted = [];
+    const cleared = sweepStaleOverlayRecordsFor({
+      tasks: new Map([[live.id, live], [running.id, running]]),
+      existsFn: (p) => p.startsWith("/here"),
+      persistTask: (taskId) => persisted.push(taskId),
+    });
+    assert.equal(cleared, 0);
+    assert.notEqual(live.overlayDirs, null);
+    assert.notEqual(running.overlayDirs, null);
+    assert.deepEqual(persisted, []);
   });
 
   test("two managers with distinct runtimeDirs and no explicit overlayTmpRoot never collide on the same overlay namespace (taskferry#286)", () => {

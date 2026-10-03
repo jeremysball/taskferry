@@ -176,3 +176,4 @@ Pointers that lived in the README's former 12-link "Further reading" list:
 - [migrating-from-mcp.md](migrating-from-mcp.md): command mapping and cleanup
 - [use-cases.md](use-cases.md): use cases that inform future READMEs
 - [../CONTRIBUTING.md](../CONTRIBUTING.md): PR conventions, test file structure, contributor workflow
+- [todo.md](todo.md): prioritized work list

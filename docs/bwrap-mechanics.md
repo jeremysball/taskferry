@@ -124,7 +124,7 @@ taskferry-cow-<task-id>/
   work/main/              # kernel scratch paired with upper/main
   upper/extra/<slug>/     # one sub-overlay per git dir outside --directory
   work/extra/<slug>/      # kernel scratch paired with each sub-overlay
-  files/<slug>/           # scratch copies of single files overlayfs can't mount
+  files/<slug>/           # scratch copies: single files, and the worktree gitDir
 ```
 
 * `upper/main` + `work/main` is the main mount over `--directory`
@@ -136,11 +136,15 @@ taskferry-cow-<task-id>/
   slug in `src/changeset.js:322`). Wired up in `buildGitBinds`
   (`src/tasks.js:1423`); extraction re-mounts the same sub-overlays, so
   commits made inside the sandbox are visible to `result --diff`.
-* `files/<slug>/` holds scratch copies of single writable files outside
-  `--directory` (e.g. a worktree gitdir's `packed-refs`: `HEAD`, `index`,
-  `refs/`, `logs/`). Overlayfs mounts directories only, so files get a
-  copy bound rw onto the host path instead (`subFilePaths`,
-  `src/changeset.js:446`).
+* `files/<slug>/` holds scratch copies bound rw onto host paths outside
+  `--directory`, for two cases. A single writable file (e.g. the
+  git-common-dir's `packed-refs`) gets one because overlayfs mounts
+  directories only. A worktree's private gitDir
+  (`<git-common-dir>/worktrees/<name>`: `HEAD`, `index`, `refs/`, `logs/`)
+  gets a one-time recursive copy, so a concurrent `git worktree add` for a
+  sibling can't perturb a live mount (taskferry#304); writes to it are
+  discarded when the task settles. Both use `subFilePaths`
+  (`src/changeset.js:446`), wired up in `buildGitBinds`.
 * `work/main/work` (and each `work/extra/<slug>/work`) is overlayfs-internal,
   owned by the kernel. Listing it after teardown fails with
   `Permission denied`; that is expected, not data loss.

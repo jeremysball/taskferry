@@ -139,12 +139,16 @@ export function loadProjectConfig(directory, { statFn = fs.statSync, readFileFn 
 
 /**
  * The always-on prompt block appended to a dispatch's prompt when the
- * project declares a check command, verbatim per the design's §3.
+ * project declares a check command. The worker is told to skip the check
+ * when it changed no files, matching the settle-time gate, which only runs
+ * on a non-empty changeset (extracted.hasChanges in tasks.js). Without that
+ * carve-out every read-only review/research ferry ran the full check, and a
+ * wide review fan-out drove the host into the OOM killer.
  * @param {string} checkCommand
  * @returns {string}
  */
 export function verificationPromptBlock(checkCommand) {
-  return `\n\n## Verification (required)\nThis repo declares a check command in .taskferry.toml:\n    ${checkCommand}\nRun it before declaring the task done. If it fails, fix the failures and\nre-run until it passes. State the final result in your summary.\n`;
+  return `\n\n## Verification (required)\nThis repo declares a check command in .taskferry.toml:\n    ${checkCommand}\nIf you changed any files, run it before declaring the task done. If it fails,\nfix the failures and re-run until it passes. State the final result in your\nsummary. If you changed no files (a read-only review or research task), skip\nit and say so in your summary.\n`;
 }
 
 /**

@@ -266,9 +266,16 @@ prompt block appended right before the worker runs:
 ## Verification (required)
 This repo declares a check command in .taskferry.toml:
     <check command>
-Run it before declaring the task done. If it fails, fix the failures and
-re-run until it passes. State the final result in your summary.
+If you changed any files, run it before declaring the task done. If it fails,
+fix the failures and re-run until it passes. State the final result in your
+summary. If you changed no files (a read-only review or research task), skip
+it and say so in your summary.
 ```
+
+The "changed no files" carve-out mirrors the settle-time gate, which
+only starts when the extracted changeset is non-empty. Without it, a
+fan-out of read-only reviewers each runs the full check against a tree
+it never touched.
 
 The block is injected purely on the condition `role === "dispatch" &&
 !noOverlay && projectConfig.check` (see `dispatchTask()` in

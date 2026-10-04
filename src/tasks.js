@@ -5147,8 +5147,8 @@ function buildManagerInternalHelpers(ctx) {
     settleWaiters: (taskId) => settleWaitersFor(taskId, { waiters: ctx.maps.waiters }),
     /** @param {Task} task */
     hasLiveOverlay: (task) => hasLiveOverlayForTask(task, { existsFn: ctx.opts.existsFn }),
-    sweepOrphanedPromptFiles: () => sweepOrphanedPromptFilesFor({ PROMPT_DIR: ctx.paths.PROMPT_DIR, tasks: ctx.maps.tasks, persistedTasks: ctx.state.persistedTasks }),
-    sweepOrphanedOutputDirs: () => sweepOrphanedOutputDirsFor({ OUTPUT_DIR_ROOT: resolveOutputDirRoot(ctx.opts.stateDir), tasks: ctx.maps.tasks, persistedTasks: ctx.state.persistedTasks, readdirFn: ctx.opts.readdirFn, lstatFn: ctx.opts.lstatFn, retentionDays: ctx.limits.taskRetentionDays }),
+    sweepOrphanedPromptFiles: () => sweepOrphanedPromptFilesFor({ PROMPT_DIR: ctx.paths.PROMPT_DIR, tasks: ctx.maps.tasks, persistedTasks: ctx.state.persistedTasks, failClosed: ctx.state.stateLoadError != null }),
+    sweepOrphanedOutputDirs: () => sweepOrphanedOutputDirsFor({ OUTPUT_DIR_ROOT: resolveOutputDirRoot(ctx.opts.stateDir), tasks: ctx.maps.tasks, persistedTasks: ctx.state.persistedTasks, readdirFn: ctx.opts.readdirFn, lstatFn: ctx.opts.lstatFn, retentionDays: ctx.limits.taskRetentionDays, failClosed: ctx.state.stateLoadError != null }),
     sweepDeferredCleanup: () => sweepDeferredCleanupFor({
       tasks: ctx.maps.tasks,
       persistedTasks: ctx.state.persistedTasks,
@@ -5190,7 +5190,7 @@ function buildManagerInternalHelpers(ctx) {
       const table = readVariantsCache({ cacheDir: ctx.opts.cacheDir, env: ctx.env.sanitizedEnvironment(env) });
       return table?.get(model) ?? [];
     },
-    sweepOrphanedOverlays: () => sweepOrphanedOverlaysFor({ tasks: ctx.maps.tasks, persistedTasks: ctx.state.persistedTasks, overlayTmpRoot: ctx.opts.overlayTmpRoot, releaseOverlay: (task) => ctx.env.releaseOverlay(task), persistTask: (taskId) => ctx.helpers.persistTask(taskId), readdirFn: ctx.opts.readdirFn }),
+    sweepOrphanedOverlays: () => sweepOrphanedOverlaysFor({ tasks: ctx.maps.tasks, persistedTasks: ctx.state.persistedTasks, overlayTmpRoot: ctx.opts.overlayTmpRoot, releaseOverlay: (task) => ctx.env.releaseOverlay(task), persistTask: (taskId) => ctx.helpers.persistTask(taskId), readdirFn: ctx.opts.readdirFn, failClosed: ctx.state.stateLoadError != null }),
     markInterruptedGates: () => markInterruptedGatesFor({ tasks: ctx.maps.tasks, hasLiveOverlay: (task) => ctx.helpers.hasLiveOverlay(task), startCheckGate: (task) => ctx.env.startCheckGate(task), sendSignal: (pid, signal) => ctx.helpers.sendSignal(pid, signal), persistTask: (taskId) => ctx.helpers.persistTask(taskId) }),
     /**
      * Validate `model` against opencode's installed-models list, NOT against
@@ -5467,8 +5467,10 @@ function bootstrapManagerContext(ctx) {
   // cheap (one read of the state file) and gives the sweeps a record of
   // what a *different* daemon might have written to disk before this one
   // claimed the state -- the in-memory map only knows this daemon's load.
-  // An unreadable/absent store degrades to an empty map, which makes every
-  // sweep's disk check a no-op, i.e. exactly the pre-existing behavior.
+  // An absent store degrades to an empty map, so the disk check adds no
+  // protection beyond the in-memory map. An unreadable one (stateLoadError) leaves the
+  // in-memory map empty too, so every record-guarded sweep below takes
+  // `failClosed` and skips rather than reading every entry as an orphan.
   ctx.state.persistedTasks = readPersistedTasks(ctx.paths.TASKS_FILE);
   // Auto-resume running/queued tasks that survived a daemon restart.
   // Must run before sweepOrphanedOverlays() so the resume handler can
@@ -7455,9 +7457,13 @@ function tailTask(taskId, { chars }, ctx) {
  * unknown -- deleting it would tear the live task's prompt out from under
  * it. The sweep is already only reached by a daemon that won the socket
  * gate, which makes this double-check narrow rather than common.
- * @param {{PROMPT_DIR: string, tasks: Map<string, Task>, persistedTasks?: Map<string, Record<string, any>>}} ctx
+ *
+ * `failClosed` skips the sweep entirely: when tasks.json could not be read,
+ * both maps are empty and every file would look orphaned.
+ * @param {{PROMPT_DIR: string, tasks: Map<string, Task>, persistedTasks?: Map<string, Record<string, any>>, failClosed?: boolean}} ctx
  */
 export function sweepOrphanedPromptFilesFor(ctx) {
+  if (ctx.failClosed === true) return;
   let entries;
   try {
     entries = fs.readdirSync(ctx.PROMPT_DIR);
@@ -7615,7 +7621,10 @@ function removeEntryLogging(full, ctx) {
  * This sweep exists for crash debris, and crash debris is by definition from
  * the boot that just crashed, so bounding it to the retention window costs
  * nothing real and keeps `<stateDir>/outputs/` archival.
- * @param {{OUTPUT_DIR_ROOT: string, tasks: Map<string, Task>, persistedTasks?: Map<string, Record<string, any>>|null, readdirFn: (path: string) => string[], lstatFn?: (path: string) => fs.Stats, removeDirFn?: (path: string) => void, retentionDays?: number}} ctx
+ *
+ * `failClosed` skips the sweep entirely: when tasks.json could not be read,
+ * every output dir would look orphaned, and these are worker deliverables.
+ * @param {{OUTPUT_DIR_ROOT: string, tasks: Map<string, Task>, persistedTasks?: Map<string, Record<string, any>>|null, readdirFn: (path: string) => string[], lstatFn?: (path: string) => fs.Stats, removeDirFn?: (path: string) => void, retentionDays?: number, failClosed?: boolean}} ctx
  */
 /** Cheap in-memory filter extracted to keep {@link sweepOrphanedOutputDirsFor}'s
  * candidate predicate under the lint complexity budget.
@@ -7630,7 +7639,8 @@ function isOrphanOutputEntry(entry, tasks, persistedTasks) {
   return !(persistedTasks && persistedTasks.has(entry));
 }
 
-export function sweepOrphanedOutputDirsFor(/** @type {{OUTPUT_DIR_ROOT: string, tasks: Map<string, Task>, persistedTasks?: Map<string, Record<string, any>>|null, readdirFn: (path: string) => string[], lstatFn?: (path: string) => fs.Stats, removeDirFn?: (path: string) => void, retentionDays?: number}} */ ctx) {
+export function sweepOrphanedOutputDirsFor(/** @type {{OUTPUT_DIR_ROOT: string, tasks: Map<string, Task>, persistedTasks?: Map<string, Record<string, any>>|null, readdirFn: (path: string) => string[], lstatFn?: (path: string) => fs.Stats, removeDirFn?: (path: string) => void, retentionDays?: number, failClosed?: boolean}} */ ctx) {
+  if (ctx.failClosed === true) return;
   const tasks = ctx.tasks;
   const persistedTasks = ctx.persistedTasks ?? null;
   const retentionMs = ctx.retentionDays && ctx.retentionDays > 0 ? ctx.retentionDays * MS_PER_DAY : 0;
@@ -8220,9 +8230,13 @@ function applyOutputDirEnv(spawnEnv, isSummary, outputDir) {
  * Sweeps orphaned overlay directories under the live tmp root plus every
  * creation-time tmp root a live task records. Extracted out of
  * `createTaskManager`'s `sweepOrphanedOverlays` closure.
- * @param {{tasks: Map<string, Task>, persistedTasks: Map<string, Record<string, any>>, overlayTmpRoot: string, releaseOverlay: (task: {overlayDirs?: {root:string,tmpRoot:string}|null}) => boolean, persistTask: (taskId: string) => void, readdirFn: (path: string) => string[]}} ctx
+ *
+ * `failClosed` skips the sweep entirely: when tasks.json could not be read,
+ * a pending changeset's overlay is indistinguishable from an orphan.
+ * @param {{tasks: Map<string, Task>, persistedTasks: Map<string, Record<string, any>>, overlayTmpRoot: string, releaseOverlay: (task: {overlayDirs?: {root:string,tmpRoot:string}|null}) => boolean, persistTask: (taskId: string) => void, readdirFn: (path: string) => string[], failClosed?: boolean}} ctx
  */
 export function sweepOrphanedOverlaysFor(ctx) {
+  if (ctx.failClosed === true) return;
   const tmpRoots = collectOverlayTmpRoots(ctx.tasks, ctx.overlayTmpRoot);
   for (const tmpRoot of tmpRoots) {
     sweepOverlayTmpRoot({ tasks: ctx.tasks, persistedTasks: ctx.persistedTasks, releaseOverlay: ctx.releaseOverlay, persistTask: ctx.persistTask, readdirFn: ctx.readdirFn }, tmpRoot);

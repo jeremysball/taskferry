@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { EventEmitter } from "node:events";
 import { makeManager, fakeChild } from "./tasks.test-helpers.js";
+import { uvDirPath } from "./tasks.js";
 
 // A bwrap-shaped fake child with separate stdout/stderr streams and a real
 // pid, distinct from fakeChild() (which only wires stdout) -- the gate reads
@@ -89,9 +90,9 @@ describe("startCheckGate", () => {
     fs.writeFileSync(path.join(directory, TASKFERRY_CONFIG_FILENAME), "check = \"uv run pytest\"\n");
     const cacheDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-gate-uv-cache-"));
     const spawns = [];
-    const { dispatched } = dispatchAndSettleWithChanges({ spawns, directory, cacheDir });
-    const uvCacheDir = path.join(cacheDir, "uv-cache", dispatched.id);
-    const uvToolsDir = path.join(cacheDir, "uv-tools", dispatched.id);
+    const { mgr, dispatched } = dispatchAndSettleWithChanges({ spawns, directory, cacheDir });
+    const uvCacheDir = uvDirPath(cacheDir, mgr._stateDir, dispatched.id, "uv-cache");
+    const uvToolsDir = uvDirPath(cacheDir, mgr._stateDir, dispatched.id, "uv-tools");
     // The worker's bwrap argv carried the same dirs (assessed on spawn[0]).
     const [worker, gate] = spawns;
     for (const dir of [uvCacheDir, uvToolsDir]) {

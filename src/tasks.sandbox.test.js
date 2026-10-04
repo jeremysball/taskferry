@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { makeManager, fakeChild, baseTask, AXI_GIT_COMMON_DIR, AXI_ALLOWED_DIR, AXI_TASKS_CACHE_DIR, OPENCODE_DATA, INVESTIGATED_TEXT, SOURCE_LOG, OVERLAY_SRC, SOL_MODEL, MIMIMAX_MODEL, mkdtempTracked } from "./tasks.test-helpers.js";
+import { uvDirPath } from "./tasks.js";
 
 describe("bwrap sandboxing: dispatch argv shape and gitdir scoping", () => {
   test("wraps the spawn command in bwrap when sandboxing is enabled and available", () => {
@@ -457,8 +458,8 @@ describe("bwrap sandboxing: opencode auth and data home", () => {
 
     const dispatched = mgr.dispatch({ prompt: "hello", directory: os.tmpdir() });
 
-    const uvCacheDir = path.join(cacheDir, "uv-cache", dispatched.id);
-    const uvToolsDir = path.join(cacheDir, "uv-tools", dispatched.id);
+    const uvCacheDir = uvDirPath(cacheDir, mgr._stateDir, dispatched.id, "uv-cache");
+    const uvToolsDir = uvDirPath(cacheDir, mgr._stateDir, dispatched.id, "uv-tools");
     assert.equal(captured.opts.env.UV_CACHE_DIR, uvCacheDir);
     assert.equal(captured.opts.env.UV_TOOL_DIR, uvToolsDir);
     // Both dirs are rw-bound at the same path (a --bind, not --ro-bind), so

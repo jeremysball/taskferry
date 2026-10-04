@@ -439,10 +439,17 @@ runs wrapped in
   (taskferry#426). Every sandboxed dispatch (and the verification gate,
   which re-mounts the same overlay for the project's `check` command) gets
   `UV_CACHE_DIR`/`UV_TOOL_DIR` pointed at per-task dirs
-  `<cacheDir>/uv-cache/<task-id>` and `<cacheDir>/uv-tools/<task-id>`, both
+  `<cacheDir>/uv-cache/<ns>/<task-id>` and `<cacheDir>/uv-tools/<ns>/<task-id>`,
+  where `<ns>` is a short hash of the daemon's `stateDir`. Both are
   created and rw-bound at that same path. Per-task (not shared) so one
   task's uv cache can't perturb or bloat another's; the dirs are real disk,
-  not the small `runtimeDir` tmpfs, and are never cleaned up automatically.
+  not the small `runtimeDir` tmpfs. They are reaped at real settlement
+  (`accept`/`reject`/`--no-changes` auto-accept/extraction failure, plus
+  the `releaseOverlayForTask` synthetic-step path) and at child exit for
+  `--no-overlay` runs, persisted on the task's `deferredCleanup` list so
+  a daemon killed mid-flight resumes the drain on next boot. See
+  `docs/things-that-look-like-bugs.md` for why `pending` changesets never
+  have their uv dirs reaped.
 - **Fail-fast on Linux.** If sandboxing is enabled (the default) and `bwrap`
   is not installed, dispatch fails immediately with a `crashed` task and a
   matching `spawnError` — there is no silent unsandboxed fallback on the

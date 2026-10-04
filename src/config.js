@@ -59,6 +59,7 @@ const CONFIG_FIELD_TYPES = {
   taskRetentionDays: "number",
   opencodeVersionTtlMs: "number",
   opencodeVersionTimeoutMs: "number",
+  uvLegacySweepAgeDays: "number",
 };
 
 /** @type {Record<string, string>} */

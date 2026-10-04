@@ -439,3 +439,55 @@ belongs here.
   `outputs/` archival. Reclaim that space by hand, deliberately. It would be a
   real bug if a dir created during *this* boot's crashed dispatch survived the
   sweep, or if the guard applied while `taskRetentionDays` is `0`.
+- A pending ferry's `<cacheDir>/uv-cache/<ns>/<id>` and `<cacheDir>/uv-tools/<ns>/<id>`
+  dirs surviving `taskferry accept`/`reject`/auto-accept until the daemon sees
+  the actual settlement event (and, for overlayed tasks, *not* at child exit)
+  — expected. Per-task uv dirs (`src/deferred-cleanup.js`) are deferred-cleanup
+  data, not scratch-cleanup closures: a `pending` changeset still owns a live
+  overlay and a re-runnable check gate, and the gate re-runs against the very
+  same uv dirs the worker ran with — reaping them at child exit would corrupt
+  an in-flight verification run. The drain fires at real settlement
+  (`releaseOverlayForTask`, which is invoked on accept, reject, no-changes
+  auto-accept, and extraction failure, plus the synthetic-step path used by
+  the orphan sweep). A `--no-overlay` dispatch has no overlay, so nothing
+  on the accept/reject path ever fires for it; the child-settlement drain
+  runs in that case instead (and a synchronous throw from `spawnFn` drains
+  too). The list is persisted on the task record, so a daemon killed
+  between child exit and the settlement handler resumes the drain on next
+  boot via `sweepDeferredCleanupFor`. It would be a real bug if a settled
+  (accepted or rejected) task's uv dirs survived a daemon restart, or if a
+  `pending` task's dirs disappeared before it settled.
+- A flat `<cacheDir>/uv-cache/oc_*` (or `uv-tools/oc_*`) dir from before the
+  namespaced layout surviving the boot sweep — expected until the
+  `uvLegacySweepAgeDays` age floor elapses, default 7 days. The legacy pass
+  has no per-id ownership record on disk (the original daemon did not namespace
+  by state dir, so there is nothing on the new layout's `tasks.json` to key
+  against), and the namespaced pass does not look at flat entries at all.
+  Without an age floor, the sweep would happily reap a still-active
+  developer task that just upgraded. 7 days is long enough that an upgrade
+  is unaffected, short enough that the existing accumulated dirs are gone
+  within a week. Set `uvLegacySweepAgeDays: 0` (or
+  `TASKFERRY_UV_LEGACY_SWEEP_AGE_DAYS=0`) to skip the legacy pass entirely;
+  the namespaced path is unaffected. It would be a real bug if a flat dir
+  younger than the floor were removed, or if the sweep touched another state
+  dir's namespace dir or anything under it. Only task-id-shaped `oc_*`
+  entries are legacy candidates; an idle daemon's namespace dir ages past
+  the floor too, which is why the pass matches by name, not by age alone.
+- A boot sweep entry (an orphaned output dir or a legacy flat uv dir) that
+  `lstat` cannot read surviving every sweep, with a `failed to stat ...;
+  leaving it in place` line on stderr — expected. Both sweeps decide by mtime,
+  and an entry with an unreadable mtime has an unknown age, so neither the
+  output-dir retention window nor the legacy age floor can clear it
+  (`passesRetention`, `src/tasks.js`). Fix the permissions and the next boot
+  reaps it. It would be a real bug if an entry the sweep *could* stat were
+  kept for this reason, or if a stat failure ever led to a removal.
+- A deferred-cleanup path refused with `realpath failed: EACCES ...` and
+  dropped from the task's list, leaving the dir on disk — expected.
+  Confinement (`confinePath`, `src/deferred-cleanup.js`) proves a path stays
+  inside the daemon's uv roots by resolving its symlinks; a path whose
+  realpath fails for any reason but ENOENT cannot be proven safe, and lexical
+  resolution would not follow a symlink out of the root. Refusing leaks one
+  dir; guessing could `rm -rf` outside the cache. A missing path (ENOENT) is
+  still checked lexically, because the rm finds nothing there either way. It
+  would be a real bug if a path that resolves cleanly inside a root were
+  refused, or if a refused path were ever removed.

@@ -38,7 +38,7 @@ export function readVariantsCache({ cacheDir, env, ttlMs = DEFAULT_VARIANT_CACHE
   }
   if (Date.now() - mtimeMs > ttlMs) return null;
   const cached = _memo.get(filePath);
-  if (cached && cached.mtimeMs === mtimeMs) return checkFingerprint(cached.result, env);
+  if (cached && cached.mtimeMs === mtimeMs) return builtForCurrentMajor(cached.builtMajor) ? checkFingerprint(cached.result, env) : null;
   let parsed;
   try {
     parsed = JSON.parse(readFileFn(filePath));
@@ -46,13 +46,27 @@ export function readVariantsCache({ cacheDir, env, ttlMs = DEFAULT_VARIANT_CACHE
     return null;
   }
   if (parsed.schema !== VARIANTS_CACHE_SCHEMA || typeof parsed.models !== "object" || parsed.models === null) return null;
-  // Check that the cache was built for the same opencode major version.
-  // opencode 2.x doesn't support --verbose, so a 1.x cache must not be used on 2.x and vice versa.
-  const currentMajor = detectOpencodeCliMajor();
-  if (parsed.opencodeMajor !== undefined && parsed.opencodeMajor !== currentMajor) return null;
+  // A cache file written before the field existed was necessarily built on
+  // 1.x: 2.x has no `models --verbose` to build one from.
+  const builtMajor = typeof parsed.opencodeMajor === "number" ? parsed.opencodeMajor : 1;
   const result = { fingerprint: parsed.fingerprint, models: new Map(Object.entries(parsed.models)) };
-  _memo.set(filePath, { mtimeMs, result });
-  return checkFingerprint(result, env);
+  _memo.set(filePath, { mtimeMs, result, builtMajor });
+  return builtForCurrentMajor(builtMajor) ? checkFingerprint(result, env) : null;
+}
+
+/**
+ * A cache built under one opencode major must not be read under another:
+ * 2.x has no per-model variants listing, so a 1.x cache would hand 2.x
+ * dispatches variant names nothing on 2.x vouched for. Checked on the memo
+ * path too, since the memo outlives an opencode upgrade. An unknown current
+ * major (no probe has succeeded yet) does not reject; `prepareLaunch` fails
+ * the dispatch on that case before anything spawns.
+ * @param {number} builtMajor
+ * @returns {boolean}
+ */
+function builtForCurrentMajor(builtMajor) {
+  const currentMajor = detectOpencodeCliMajor();
+  return currentMajor === null || currentMajor === builtMajor;
 }
 
 /**
@@ -102,12 +116,12 @@ export async function refreshVariantsCache({ cacheDir, env, listModelVariantsFn,
   if (!inFlight) {
     inFlight = (async () => {
       try {
-        const models = await listModelVariantsFn(env);
         const currentMajor = detectOpencodeCliMajor();
-        // opencode 2.x doesn't support --verbose, so skip refresh on 2.x
+        // opencode 2.x has no `models --verbose`, so there is nothing to list.
         if (currentMajor !== null && currentMajor >= 2) {
           return;
         }
+        const models = await listModelVariantsFn(env);
         const body = {
           fingerprint,
           schema: VARIANTS_CACHE_SCHEMA,

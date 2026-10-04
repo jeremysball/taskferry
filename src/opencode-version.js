@@ -4,7 +4,7 @@ import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
 
-export const OPENCODE_VERSION_TIMEOUT_MS = 10000;
+export const DEFAULT_OPENCODE_VERSION_TIMEOUT_MS = 10000;
 // How long a detected opencode CLI major version is trusted before the next
 // launch re-probes it. The daemon outlives package upgrades, so a permanent
 // memo would keep building the old argv after `opencode` moves to a new
@@ -79,11 +79,11 @@ function probeErrorDetail(err) {
  */
 async function probeOpencodeCliMajor(execFileFn) {
   try {
-    const { stdout } = await execFileFn("opencode", ["--version"], { encoding: "utf8", timeout: OPENCODE_VERSION_TIMEOUT_MS });
+    const { stdout } = await execFileFn("opencode", ["--version"], { encoding: "utf8", timeout: opencodeVersionTimeoutOverride });
     const trimmed = String(stdout).trim();
     const match = OPENCODE_VERSION_PARSE_RE.exec(trimmed);
     if (!match) {
-      process.stderr.write(`warning: could not parse \`opencode --version\` output as a version (got ${JSON.stringify(trimmed)}); opencode argv defaults to 1.x but taskferry will fail dispatches until this is fixed\n`);
+      process.stderr.write(`warning: could not parse \`opencode --version\` output as a version (got ${JSON.stringify(trimmed)}); opencode dispatches fail until it parses\n`);
       return null;
     }
     const major = Number(match[1]);
@@ -122,6 +122,24 @@ function defaultTtlMs() {
  */
 export function setOpencodeVersionTtlMs(ttlMs) {
   opencodeVersionTtlOverride = ttlMs;
+}
+
+/**
+ * Mutable override for the `opencode --version` subprocess timeout. Set once
+ * at daemon boot from the configured `opencodeVersionTimeoutMs`, same
+ * lifecycle as the TTL override above.
+ * @type {number}
+ */
+let opencodeVersionTimeoutOverride = DEFAULT_OPENCODE_VERSION_TIMEOUT_MS;
+
+/**
+ * Set the `opencode --version` probe timeout. Called by `tasks.js` at daemon
+ * boot once `opencodeVersionTimeoutMs` has been resolved through the
+ * option/env/config/default chain.
+ * @param {number} timeoutMs
+ */
+export function setOpencodeVersionTimeoutMs(timeoutMs) {
+  opencodeVersionTimeoutOverride = timeoutMs;
 }
 
 /**

@@ -209,9 +209,9 @@ belongs here.
   dispatches can still use the old version's argv and crash with
   `boot_failure` on an unknown flag. Expected: the installed major version
   is probed asynchronously with `opencode --version` and memoized for 5 minutes
-  (`OPENCODE_VERSION_TTL_MS` / `opencodeVersionTtlMs` config, `src/opencode-version.js`),
-  warmed at daemon start and refreshed in the background when the TTL lapses.
-  The probe is async and never blocks the daemon thread. If crashes outlast
+  (`TASKFERRY_OPENCODE_VERSION_TTL_MS` / `opencodeVersionTtlMs` config, `src/opencode-version.js`),
+  warmed at daemon start and re-probed by the next opencode launch once the
+  TTL lapses. The probe is async and never blocks the daemon thread. If crashes outlast
   the TTL, the detection is broken.
 - An opencode 2.x summary child loads opencode plugins, while a 1.x one
   didn't. Expected: 2.0 removed `--pure`, and there is no replacement flag.

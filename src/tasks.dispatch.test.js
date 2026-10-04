@@ -1131,7 +1131,6 @@ describe("opencode variants cache lookup uses the per-dispatch caller env, not t
       lowerdirStaggerMs: 0,
       spawnFn: (_cmd, args) => { captured = args; return fakeChild(); },
       killFn: () => {},
-      opencodeCliMajorFn: () => 1,
     }));
     mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), model: LUNA_MODEL, executor: "opencode", env: dispatchEnv });
     assert.equal(captured[captured.indexOf("--variant") + 1], "max");
@@ -1204,7 +1203,6 @@ describe("opencode variants cache warm-up", () => {
       lowerdirStaggerMs: 0,
       spawnFn: (_cmd, args) => { captured = args; return fakeChild(); },
       killFn: () => {},
-      opencodeCliMajorFn: () => 1,
       // envFile config whose contents override a credential var the
       // fingerprint reads (the effective spawn env for every dispatch).
       envFileVars: { [FAKE_KEY_NAME]: "from-env-file" },

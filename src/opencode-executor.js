@@ -135,10 +135,17 @@ function appendOpencodePromptArgs(args, ctx) {
 }
 
 /**
+ * The generic executor contract plus the opencode-only version probe, which
+ * the daemon's boot warm-up reaches through the executor so a test's pinned
+ * version is the one it sees.
+ * @typedef {import("./executor.js").WorkerExecutor & {ensureCliMajor: () => Promise<number|null>}} OpencodeWorkerExecutor
+ */
+
+/**
  * @param {object} [options]
  * @param {() => number|null} [options.detectCliMajorFn] - synchronous cache read; defaults to detectOpencodeCliMajor() (uses the module-level memo + performance.now()). Returns null when no probe has succeeded yet or the cache is stale.
  * @param {() => Promise<number|null>} [options.ensureCliMajorFn] - async cache-or-probe; defaults to ensureOpencodeCliMajor({ execFileFn }). Returns null only when the probe failed (then `prepareLaunch` rejects with a clear error naming the failure).
- * @returns {import("./executor.js").WorkerExecutor}
+ * @returns {OpencodeWorkerExecutor}
  */
 export function opencodeExecutor({ detectCliMajorFn = () => detectOpencodeCliMajor(), ensureCliMajorFn = () => ensureOpencodeCliMajor() } = {}) {
   return {
@@ -186,10 +193,19 @@ export function opencodeExecutor({ detectCliMajorFn = () => detectOpencodeCliMaj
       if (cached !== null) return undefined;
       return ensureCliMajorFn().then((major) => {
         if (major === null) {
-          throw new Error("opencode CLI major version could not be detected (probe failed or output unparseable); install opencode or set TASKFERRY_OPENCODE_VERSION_TTL_MS=0 to retry, then re-dispatch");
+          throw new Error("opencode CLI major version could not be detected (`opencode --version` failed or its output did not parse; the cause is on the daemon's stderr); fix the opencode install, then re-dispatch (failed probes are not cached)");
         }
         return undefined;
       });
+    },
+    /**
+     * The override-aware cache-or-probe, for callers outside the launch path
+     * (the daemon's boot warm-up and variants refresh) that must see the
+     * same pinned version a test injected.
+     * @returns {Promise<number|null>}
+     */
+    ensureCliMajor() {
+      return ensureCliMajorFn();
     },
     buildSummaryPrompt() {
       return SUMMARY_ISOLATION_PROMPT;
@@ -406,7 +422,7 @@ export function resetOpencodeExecutorOverride() {
  * executor. The shared `resolveExecutor()` helper calls this so production
  * code (and tests that don't go through `makeManager`) see the same
  * factory args the helpers injected.
- * @returns {import("./executor.js").WorkerExecutor}
+ * @returns {OpencodeWorkerExecutor}
  */
 export function resolveOpencodeExecutor() {
   return opencodeExecutor(opencodeExecutorOverride);

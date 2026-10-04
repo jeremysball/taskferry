@@ -15,7 +15,7 @@ import { buildBwrapArgs, checkBwrapAvailable, checkOverlaySupport, defaultDenyLi
 import { applyChangeset, overlayPaths, resolvePreDispatchHead, subOverlayPaths, subFilePaths, cleanupOverlay, defaultRunCommand as defaultOverlayRunCommand, extractGitDiff, extractNonGitDiff, OVERLAY_MOUNT_BUSY_PATTERN } from "./changeset.js";
 import { resolveExecutor } from "./executor.js";
 import { resolveOpencodeExecutor } from "./opencode-executor.js";
-import { ensureOpencodeCliMajor, detectOpencodeCliMajor, DEFAULT_OPENCODE_VERSION_TTL_MS, setOpencodeVersionTtlMs } from "./opencode-version.js";
+import { DEFAULT_OPENCODE_VERSION_TTL_MS, DEFAULT_OPENCODE_VERSION_TIMEOUT_MS, setOpencodeVersionTtlMs, setOpencodeVersionTimeoutMs } from "./opencode-version.js";
 import { resolveVariant, KNOWN_VARIANT_LEVELS } from "./variants.js";
 import { readVariantsCache, refreshVariantsCache } from "./variants-cache.js";
 import { loadEnvFile, watchEnvFile } from "./env-file.js";
@@ -4479,10 +4479,11 @@ function resolveTimeoutOptions(rawOptions) {
     taskRetentionDays: resolveNonNegativeIntOption(rawOptions.taskRetentionDays, process.env.TASKFERRY_TASK_RETENTION_DAYS, config.taskRetentionDays, DEFAULT_TASK_RETENTION_DAYS),
     // How long a successful `opencode --version` probe is trusted before
     // re-shelling-out. Same caller > env > config > default chain as the
-    // sibling numeric options above; the executor's ensureOpencodeCliMajor()
+    // sibling numeric options above; opencode-version.js
     // takes the value through its own `ttlMs` seam so tests can inject a
     // fast-forward clock.
     opencodeVersionTtlMs: resolvePositiveIntOption(rawOptions.opencodeVersionTtlMs, process.env.TASKFERRY_OPENCODE_VERSION_TTL_MS, config.opencodeVersionTtlMs, DEFAULT_OPENCODE_VERSION_TTL_MS),
+    opencodeVersionTimeoutMs: resolvePositiveIntOption(rawOptions.opencodeVersionTimeoutMs, process.env.TASKFERRY_OPENCODE_VERSION_TIMEOUT_MS, config.opencodeVersionTimeoutMs, DEFAULT_OPENCODE_VERSION_TIMEOUT_MS),
     maxOutputFileBytes,
   };
 }
@@ -5470,15 +5471,18 @@ function bootstrapManagerContext(ctx) {
   // lands, never a blocked or failed dispatch. Skipped entirely when a
   // test has injected opencodeVariantsTable directly (Task 6), since that
   // seam bypasses the cache file altogether.
+  //
+  // The opencode CLI major-version probe warms alongside it, through the
+  // executor so a test's pinned version is the one consulted. A missing
+  // probe just means the first dispatch waits for it to land (the in-flight
+  // Promise is shared, so only one subprocess runs however many dispatches
+  // race it).
+  const opencode = resolveOpencodeExecutor();
   if (!ctx.opts.opencodeVariantsTable) {
-    warmAndScheduleVariantsCacheRefresh(ctx.opts, ctx.env.sanitizedEnvironment);
+    warmAndScheduleVariantsCacheRefresh(ctx.opts, ctx.env.sanitizedEnvironment, () => opencode.ensureCliMajor());
+  } else {
+    void opencode.ensureCliMajor();
   }
-  // Warm the opencode CLI major-version probe in the background. Same
-  // fire-and-forget rationale: a missing probe just means the first
-  // dispatch has to wait for ensureOpencodeCliMajor() to land (the
-  // in-flight Promise is shared across that stampede, so only one
-  // subprocess runs regardless of how many dispatches race it).
-  void ensureOpencodeCliMajor().catch(() => { /* stderr already logged inside probeOpencodeCliMajor */ });
 }
 
 /**
@@ -5494,19 +5498,23 @@ function bootstrapManagerContext(ctx) {
  * process.env while dispatch reads under the sanitized merge meant any
  * envFile/denylist change to a credential var made the cache a permanent
  * miss -- the highest-thinking default silently never applied.
+ * @param {() => Promise<number|null>} ensureCliMajor The opencode executor's
+ * version probe; the refresh runs only once it reports 1.x.
  */
-function warmAndScheduleVariantsCacheRefresh(opts, sanitizeEnvironment) {
-  const maybeRefresh = () => {
+function warmAndScheduleVariantsCacheRefresh(opts, sanitizeEnvironment, ensureCliMajor) {
+  const maybeRefresh = async () => {
+    // Wait for the version probe first: 2.x has no `models --verbose`, and
+    // an unknown version (failed probe, already logged) can't say which
+    // major the cache would be built for. The next hourly tick re-probes.
+    const major = await ensureCliMajor();
+    if (major === null || major >= 2) return;
     const env = sanitizeEnvironment(process.env);
     if (readVariantsCache({ cacheDir: opts.cacheDir, env: env }) !== null) return;
-    // opencode 2.x doesn't support --verbose, so skip the refresh entirely
-    const major = detectOpencodeCliMajor();
-    if (major !== null && major >= 2) return;
-    refreshVariantsCache({ cacheDir: opts.cacheDir, env: env, listModelVariantsFn: opts.opencodeListModelVariantsFn })
-      .catch((err) => process.stderr.write(`warning: opencode variants cache refresh failed: ${errMessage(err)}\n`));
+    await refreshVariantsCache({ cacheDir: opts.cacheDir, env: env, listModelVariantsFn: opts.opencodeListModelVariantsFn });
   };
-  maybeRefresh();
-  setInterval(maybeRefresh, 60 * 60 * 1000).unref();
+  const tick = () => maybeRefresh().catch((err) => process.stderr.write(`warning: opencode variants cache refresh failed: ${errMessage(err)}\n`));
+  tick();
+  setInterval(tick, 60 * 60 * 1000).unref();
 }
 
 /**
@@ -5552,7 +5560,7 @@ function createManagerContext(opts) {
  * @param {ResolvedTaskManagerOptions} opts
  */
 function buildTaskManagerWithOptions(opts) {
-  // Sync the configured opencode CLI major-version probe TTL into the
+  // Sync the configured opencode CLI major-version probe TTL and timeout into the
   // module-level default that executor.js's ensureOpencodeCliMajor() reads
   // when no ttlMs is supplied. Must happen *after* resolveTimeoutOptions has
   // produced opts.opencodeVersionTtlMs and *before* any worker launch (or
@@ -5560,6 +5568,7 @@ function buildTaskManagerWithOptions(opts) {
   // and bootstrapManagerContext run after this setter, so any code path
   // they take sees the configured value.
   setOpencodeVersionTtlMs(opts.opencodeVersionTtlMs);
+  setOpencodeVersionTimeoutMs(opts.opencodeVersionTimeoutMs);
   const ctx = createManagerContext(opts);
   bootstrapManagerContext(ctx);
   return ctx.api;

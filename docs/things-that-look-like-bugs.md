@@ -122,7 +122,7 @@ belongs here.
    preserved: a task's own later calls (its summary-generation child, a
    daemon-restart auto-resume of the same task, an advisor follow-up
    resuming that same advisor task's session) all reuse the *same* task's
-   data home, so `--continue --session <id>` still resolves. Cross-task
+   data home, so the `--session <id>` resume still resolves. Cross-task
    session resumption of a sandboxed session was never a supported
    feature — it only worked as a side effect of the shared data home — so
    only the accidental sharing is gone.
@@ -196,6 +196,45 @@ belongs here.
   fresh `opencode models --verbose` shell-out costs ~3-4s, which would
   otherwise block the daemon's single thread on every affected dispatch).
   A model absent from the cache resolves to no variant flag, not an error.
+- On opencode 2.x, a dispatch that omits `--variant` runs at the model's
+  default effort, not its highest. Expected: 2.0's `opencode
+  models` has no `--verbose` and prints no per-model variant list, so the
+  cache can't be built and `highest` resolves to no variant, the same as a
+  model missing from the cache. A concrete `--variant xhigh` still works;
+  it is sent as `-m <model>#xhigh`. This becomes a bug once opencode 2.x
+  exposes per-model variants again and taskferry doesn't read them.
+  The variants cache refresh is skipped entirely on 2.x (since `opencode models --verbose`
+  is unavailable), so no warning is logged at startup.
+- After upgrading or downgrading opencode, the next few minutes of opencode
+  dispatches can still use the old version's argv and crash with
+  `boot_failure` on an unknown flag. Expected: the installed major version
+  is probed asynchronously with `opencode --version` and memoized for 5 minutes
+  (`TASKFERRY_OPENCODE_VERSION_TTL_MS` / `opencodeVersionTtlMs` config, `src/opencode-version.js`),
+  warmed at daemon start and re-probed by the next opencode launch once the
+  TTL lapses. The probe is async and never blocks the daemon thread. If crashes outlast
+  the TTL, the detection is broken.
+- An opencode 2.x summary child loads opencode plugins, while a 1.x one
+  didn't. Expected: 2.0 removed `--pure`, and there is no replacement flag.
+  The child still runs inside the sandbox against its private snapshot.
+  Plugins load regardless of `--no-sandbox`; the sandbox only affects
+  filesystem isolation, not plugin loading. Every 2.x run, summaries
+  included, passes `--auto` so a plugin's permission prompt is approved
+  instead of waiting on a terminal nobody is watching. A 2.x summary that
+  stalls on a permission prompt is a real bug: it means `--auto` was
+  dropped from the argv.
+- An opencode dispatch crashes before anything spawns with "opencode CLI
+  major version could not be detected" instead of falling back to the 1.x
+  argv. Expected: the 1.x and 2.x `run` flags are incompatible, so a wrong
+  guess boot-fails anyway, later and with a less useful error. The cause (missing binary,
+  timeout, unparseable `opencode --version`) is on the daemon's stderr, and
+  failed probes are not cached, so the next dispatch re-probes. It is a
+  real bug if `opencode --version` prints a parseable version and
+  dispatches still fail this way.
+- An opencode 2.x dispatch passes `--standalone`, a flag none of the 1.x
+  runs had. Expected: without it, 2.x `run` attaches to a shared background
+  opencode service that runs outside the bwrap sandbox and the overlay, so
+  the worker's writes would land on the host directly. Dropping the flag is
+  the bug, not having it.
 - A CLI connecting to the daemon being torn down hard when the socket hands
   back a `Buffer` instead of a string — expected, not a crash bug. The client
   socket runs in utf8 mode (`setEncoding("utf8")` in `DaemonClient`'s

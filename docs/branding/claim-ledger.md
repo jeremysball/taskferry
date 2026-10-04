@@ -24,7 +24,7 @@ states the platform/provider limits instead of claiming a verified demo.
 |---|---|---|---|---|---|
 | Dispatch queues a task and returns a next-step hint | `src/tasks.js:6710-6746` | source-supported | support | core | included |
 | The daemon outlives the client call | `src/client.js:592-632`, `src/daemon.js:732-818` | source-supported | support | core | included |
-| Linux uses sandbox and copy-on-write mounts by default when enabled | `src/sandbox.js:285-318`, `docs/security.md:275-452` | source-supported | support | core | qualified by platform and host capability |
+| Linux uses sandbox and copy-on-write mounts by default when enabled | `src/sandbox.js:285-318`, `docs/security.md:282-510` | source-supported | support | core | qualified by platform and host capability |
 | Changes are held as a pending changeset | `src/tasks.js:5572-5595` | source-supported | support | core | included |
 | `accept` and `reject` decide the pending changeset outcome | `src/tasks.js:6142-6192` | source-supported | support | core | included |
 | Project checks gate acceptance | `src/tasks.js:5727-5819`, `src/init.js:35-110` | source-supported | support | core | qualified by overlay/platform conditions |

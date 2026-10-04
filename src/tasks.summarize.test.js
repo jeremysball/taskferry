@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { createTaskManager } from "./tasks.js";
-import { trackManager, makeManager, fakeChild, baseTask, INVESTIGATED_TEXT, SOURCE_LOG, LUNA_MODEL, MINIMAX_MODEL, READING_CONFIG, CONTINUE_FLAG, SRCA_LOG, SRCB_LOG, DID_A, DID_B, mkdtempTracked, makeFakeExecutor } from "./tasks.test-helpers.js";
+import { trackManager, makeManager, fakeChild, baseTask, INVESTIGATED_TEXT, SOURCE_LOG, LUNA_MODEL, MINIMAX_MODEL, READING_CONFIG, CONTINUE_FLAG, SRCA_LOG, SRCB_LOG, DID_A, DID_B, mkdtempTracked, makeFakeExecutor, waitForCaptured } from "./tasks.test-helpers.js";
 
 const FRESH_RETRY_SESSION_ID = "ses_fresh_retry";
 const FRESH_RETRY_OUTPUT = "fresh retry output";
@@ -24,6 +24,7 @@ describe("summarize(): spawn shape, attachment, and snapshot content", () => {
     });
 
     const summary = await mgr.summarize("source", { maxWords: 150 });
+    await mgr.poll(summary.summaryTask.id, { timeoutMs: 2000 });
     assert.equal(captured.command, "opencode");
     assert.ok(captured.args.includes("--pure"));
     assert.equal(captured.args.includes("--auto"), false);
@@ -52,7 +53,7 @@ describe("summarize(): spawn shape, attachment, and snapshot content", () => {
     });
 
     await mgr.summarize("source", { maxWords: 150, previousActivity: "Read the config file." });
-
+    await waitForCaptured(() => capturedSnapshot);
     assert.equal(capturedSnapshot.previous_summary, "Read the config file.");
     child.emit("exit", 0, null);
   });
@@ -72,6 +73,7 @@ describe("summarize(): spawn shape, attachment, and snapshot content", () => {
     });
 
     await mgr.summarize("source", { maxWords: 150 });
+    await waitForCaptured(() => capturedSnapshot);
 
     assert.equal("previous_summary" in capturedSnapshot, false);
     child.emit("exit", 0, null);
@@ -99,6 +101,7 @@ describe("summarize(): spawn shape, attachment, and snapshot content", () => {
     });
 
     await mgr.summarize("source", { maxWords: 150 });
+    await waitForCaptured(() => capturedSnapshot);
 
     assert.match(capturedSnapshot.narration, /Checking repo state/);
     assert.match(capturedSnapshot.narration, /\[tool:bash] \{"command":"git status"} -> x+…\[truncated]/);

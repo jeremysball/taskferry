@@ -55,9 +55,11 @@ message — there is no silent typo tolerance.
 | `waitDefaultTimeoutMs` | `TASKFERRY_WAIT_DEFAULT_TIMEOUT_MS` | number | `900000` (15 min); `0` disables via the env var only — a config-file value of `0` is ignored and falls back to the 15-minute default |
 | `cancelGraceMs` | `TASKFERRY_CANCEL_GRACE_MS` | number | `5000`; overridden per-call by `cancel --grace-ms` |
 | `defaultExecutor` | `TASKFERRY_DEFAULT_EXECUTOR` | string (`opencode` or `pi`) | `pi` |
-| `defaultVariant` | `TASKFERRY_DEFAULT_VARIANT` | string (`highest`, or one of `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`) | `highest` |
+| `defaultVariant` | `TASKFERRY_DEFAULT_VARIANT` | string (`highest`, or one of `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`) | `highest`. On opencode 2.x, `highest` resolves to no variant flag because 2.x has no variants listing; pass `--variant` explicitly |
 | `envFile` | `TASKFERRY_ENV_FILE` | string (path to a `.env`-style file) | (none) |
 | `profilingEnabled` | `TASKFERRY_PROFILING_ENABLED` | boolean | `false`; see `docs/daemon.md#request-latency-profiling` |
+| `opencodeVersionTtlMs` | `TASKFERRY_OPENCODE_VERSION_TTL_MS` | number | `300000` (5 min); how long a successful `opencode --version` probe picks the run argv before re-probing |
+| `opencodeVersionTimeoutMs` | `TASKFERRY_OPENCODE_VERSION_TIMEOUT_MS` | number | `10000`; timeout for the `opencode --version` probe |
 | `lowerdirStaggerMs` | `TASKFERRY_LOWERDIR_STAGGER_MS` | number | `3000`; `0` disables |
 | `providerLimits` | `TASKFERRY_PROVIDER_LIMITS` | object (provider -> `{maxConcurrentTasks?, maxDispatchesPerWindow?}`) | `{}` (no per-provider limit; only the global ceiling applies) |
 | `restartWaitForIdle` | `TASKFERRY_RESTART_WAIT_FOR_IDLE` | boolean | `false` — when `false` (the default) the daemon restarts immediately on source-file change even with tasks in flight (auto-resuming resumable sessions — see `docs/daemon.md#self-restart-on-source-change`); when `true`, restores the old behavior of deferring the restart until zero `running` and zero `queued` tasks |

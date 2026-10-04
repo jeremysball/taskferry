@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { createTaskManager } from "./tasks.js";
-import { trackManager, makeManager, fakeChild, baseTask, AMBIENT_VALUE, FAKE_SECRETS_ENV_PATH, AXI_TASKS_TEST_DIR, AXI_TASKS_CACHE_DIR, AXI_TASKS_OVERLAY_DIR, TASKS_STATE_FILE, FROM_CALLER, OCCUPYING_TASK, CAPTURED_DISPATCH, SRC1_LOG, DID_THING, SOL_MODEL, mkdtempTracked, preserveEnvVars } from "./tasks.test-helpers.js";
+import { trackManager, makeManager, fakeChild, baseTask, AMBIENT_VALUE, FAKE_SECRETS_ENV_PATH, AXI_TASKS_TEST_DIR, AXI_TASKS_CACHE_DIR, AXI_TASKS_OVERLAY_DIR, TASKS_STATE_FILE, FROM_CALLER, OCCUPYING_TASK, CAPTURED_DISPATCH, SRC1_LOG, DID_THING, SOL_MODEL, mkdtempTracked, preserveEnvVars, waitForCaptured } from "./tasks.test-helpers.js";
 import { DEFAULT_SUMMARY_MODEL } from "./tasks.js";
 import { TASKFERRY_PLUMBING_ENV_VARS } from "./paths.js";
 
@@ -97,6 +97,7 @@ describe("caller-env union: basic dispatch and TASKFERRY_TASK_ID", () => {
     });
 
     await mgr.summarize("source", { maxWords: 150 });
+    await waitForCaptured(() => capturedOpts);
 
     assert.equal("TASKFERRY_TASK_ID" in capturedOpts.env, false);
   });

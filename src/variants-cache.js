@@ -2,8 +2,9 @@ import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { modelsCacheFingerprint } from "./tasks.js";
+import { detectOpencodeCliMajor } from "./opencode-version.js";
 
-export const VARIANTS_CACHE_SCHEMA = 1;
+export const VARIANTS_CACHE_SCHEMA = 2;
 export const DEFAULT_VARIANT_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 const CACHE_FILENAME = "opencode-variants.json";
 
@@ -37,7 +38,7 @@ export function readVariantsCache({ cacheDir, env, ttlMs = DEFAULT_VARIANT_CACHE
   }
   if (Date.now() - mtimeMs > ttlMs) return null;
   const cached = _memo.get(filePath);
-  if (cached && cached.mtimeMs === mtimeMs) return checkFingerprint(cached.result, env);
+  if (cached && cached.mtimeMs === mtimeMs) return builtForCurrentMajor(cached.builtMajor) ? checkFingerprint(cached.result, env) : null;
   let parsed;
   try {
     parsed = JSON.parse(readFileFn(filePath));
@@ -45,9 +46,27 @@ export function readVariantsCache({ cacheDir, env, ttlMs = DEFAULT_VARIANT_CACHE
     return null;
   }
   if (parsed.schema !== VARIANTS_CACHE_SCHEMA || typeof parsed.models !== "object" || parsed.models === null) return null;
+  // A cache file written before the field existed was necessarily built on
+  // 1.x: 2.x has no `models --verbose` to build one from.
+  const builtMajor = typeof parsed.opencodeMajor === "number" ? parsed.opencodeMajor : 1;
   const result = { fingerprint: parsed.fingerprint, models: new Map(Object.entries(parsed.models)) };
-  _memo.set(filePath, { mtimeMs, result });
-  return checkFingerprint(result, env);
+  _memo.set(filePath, { mtimeMs, result, builtMajor });
+  return builtForCurrentMajor(builtMajor) ? checkFingerprint(result, env) : null;
+}
+
+/**
+ * A cache built under one opencode major must not be read under another:
+ * 2.x has no per-model variants listing, so a 1.x cache would hand 2.x
+ * dispatches variant names nothing on 2.x vouched for. Checked on the memo
+ * path too, since the memo outlives an opencode upgrade. An unknown current
+ * major (no probe has succeeded yet) does not reject; `prepareLaunch` fails
+ * the dispatch on that case before anything spawns.
+ * @param {number} builtMajor
+ * @returns {boolean}
+ */
+function builtForCurrentMajor(builtMajor) {
+  const currentMajor = detectOpencodeCliMajor();
+  return currentMajor === null || currentMajor === builtMajor;
 }
 
 /**
@@ -86,10 +105,17 @@ const _inFlight = new Map();
  * `readVariantsCache()` never observes a half-written file). Never throws:
  * a failed refresh logs nothing itself (the caller decides how to log) and
  * simply leaves whatever file was already on disk in place.
- * @param {{cacheDir: string, env: NodeJS.ProcessEnv, listModelVariantsFn: (env: NodeJS.ProcessEnv) => Promise<Map<string, string[]>>, writeFileFn?: (p: string, data: string) => void, renameFn?: (from: string, to: string) => void, mkdirFn?: (p: string) => void}} params
+ *
+ * `opencodeMajor` is the CLI major the caller already confirmed with a
+ * successful version probe; it is stamped into the file so a later read
+ * under a different major rejects it. Anything but a known 1.x (or a 0.x
+ * dev build) writes nothing: 2.x has no `models --verbose`, and an unknown
+ * major would stamp a file nothing vouched for.
+ * @param {{cacheDir: string, env: NodeJS.ProcessEnv, opencodeMajor: number|null, listModelVariantsFn: (env: NodeJS.ProcessEnv) => Promise<Map<string, string[]>>, writeFileFn?: (p: string, data: string) => void, renameFn?: (from: string, to: string) => void, mkdirFn?: (p: string) => void}} params
  * @returns {Promise<void>}
  */
-export async function refreshVariantsCache({ cacheDir, env, listModelVariantsFn, writeFileFn = fs.writeFileSync, renameFn = fs.renameSync, mkdirFn = (p) => fs.mkdirSync(p, { recursive: true }) }) {
+export async function refreshVariantsCache({ cacheDir, env, opencodeMajor, listModelVariantsFn, writeFileFn = fs.writeFileSync, renameFn = fs.renameSync, mkdirFn = (p) => fs.mkdirSync(p, { recursive: true }) }) {
+  if (typeof opencodeMajor !== "number" || opencodeMajor >= 2) return;
   const filePath = cacheFilePath(cacheDir);
   const fingerprint = hashFingerprint(env);
   const inFlightKey = `${filePath}::${fingerprint}`;
@@ -100,6 +126,7 @@ export async function refreshVariantsCache({ cacheDir, env, listModelVariantsFn,
         const models = await listModelVariantsFn(env);
         const body = {
           fingerprint,
+          opencodeMajor,
           schema: VARIANTS_CACHE_SCHEMA,
           generatedAt: new Date().toISOString(),
           models: Object.fromEntries(models),

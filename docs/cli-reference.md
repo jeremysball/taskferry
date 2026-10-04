@@ -43,10 +43,18 @@ workspace"` and `next` suggests `dispatch` instead.
 ## `taskferry dispatch --prompt <text> [options]`
 
 Queues a `pi --model <model> --mode json -p <prompt>` invocation (the
-built-in default executor), or the equivalent `opencode run --dir
-<directory> --auto --format json -m <model> -- <prompt>` when `--executor
-opencode` is given, as a background child process and returns a task
-summary immediately.
+built-in default executor), or the equivalent `opencode run` when
+`--executor opencode` is given, as a background child process and returns a
+task summary immediately. The opencode argv depends on the installed CLI's
+major version (`opencode --version`, re-probed every 5 minutes):
+
+- 1.x: `opencode run --dir <directory> --auto --format json -m <model>
+  [--variant <variant>] -- <prompt>`
+- 2.x: `opencode run --standalone --auto --format json -m
+  <model>[#<variant>] -- <prompt>`, spawned with `<directory>` as its cwd.
+  2.0 removed `--dir` and `--variant`, and `--standalone` keeps the run in
+  a private server inside the sandbox instead of the shared background
+  service.
 
 | Flag | Notes |
 |---|---|
@@ -54,9 +62,9 @@ summary immediately.
 | `--directory <path>` | Defaults to the current workspace; an existing directory (relative paths are resolved against the current working directory) |
 | (no flag — always on) | `dispatch`, `advisor`, and `summary` (report mode) forward the calling shell's own environment to the daemon on every call, with no per-call opt-out; see [security.md](security.md#caller-env-forwarding) |
 | `--model <id>` | `provider/model`, e.g. `opencode-go/minimax-m3`. Run `opencode models` to list installed models. Required unless resuming via `--session-id` with a matching prior task, in which case the model is inherited from that task |
-| `--variant <name>` | Reasoning-effort override. Precedence when omitted: the resumed session's own variant (on a `--session-id` resume) wins, otherwise the configured `defaultVariant` (default `highest`) applies; see `docs/config.md`. `highest` resolves to `--thinking max` on pi (pi clamps to the model's real ceiling itself) or the model's highest cached opencode variant, sending no flag at all if the model has none. Accepted concrete values: pi takes `off`, `minimal`, `low`, `medium`, `high`, `xhigh`; opencode's depend on the model and are never validated by taskferry. An unrecognized value is silently ignored by opencode itself |
+| `--variant <name>` | Reasoning-effort override. Precedence when omitted: the resumed session's own variant (on a `--session-id` resume) wins, otherwise the configured `defaultVariant` (default `highest`) applies; see `docs/config.md`. `highest` resolves to `--thinking max` on pi (pi clamps to the model's real ceiling itself) or the model's highest cached opencode variant, sending no flag at all if the model has none. **On opencode 2.x, the variants cache cannot be built (no `--verbose` flag), so `highest` resolves to no variant flag.** Accepted concrete values: pi takes `off`, `minimal`, `low`, `medium`, `high`, `xhigh`; opencode's depend on the model and are never validated by taskferry. An unrecognized value is silently ignored by opencode itself |
 | `--executor <opencode\|pi>` | Which worker CLI to spawn. Built-in default `pi`, but an omitted flag actually falls back to the daemon's configured default executor (`TASKFERRY_DEFAULT_EXECUTOR` or `config.json`'s `defaultExecutor`) |
-| `--session-id <id>` | Resume an existing session instead of starting fresh (`--continue --session <id>`; both pi and opencode use this syntax). When `--executor` is omitted, inherits whichever executor originally created the session; get session ids from a prior `result` or `status --full` |
+| `--session-id <id>` | Resume an existing session instead of starting fresh. **On opencode 1.x: `--continue --session <id>`; on opencode 2.x: `--session <id>` (no `--continue`).** Pi uses `--continue --session <id>`. When `--executor` is omitted, inherits whichever executor originally created the session; get session ids from a prior `result` or `status --full` |
 | `--rw-bind <path,path,...>` | Extra directories bound read-write inside the sandbox for this dispatch, on top of the auto-detected git-common-dir for a worktree and any config-level `rwBind`; see [security.md](security.md). **`/tmp` needs this too**: the sandbox mounts a fresh, empty `--tmpfs /tmp`, so any path under `/tmp` that isn't `--directory`, the daemon socket for a dispatch role, or an `--rw-bind` entry is invisible inside the sandbox even though it exists on the host. The per-dispatch flag, `TASKFERRY_RW_BIND`, config `rwBind`, and the manager default union rather than replace one another. |
 | `--ro-bind <path,path,...>` | Extra directories bound **read-only** inside the sandbox for this dispatch, for a review-only worker that should read several repos but edit none. The set unions the per-dispatch flag, the manager default, `TASKFERRY_RO_BIND`, and config `roBind`; project `.taskferry.toml` `read_only_paths`/`roBind` entries add a separate project layer. Missing or protected project paths are skipped with a warning. If a path also appears in the read-write set, read-write wins with a warning. |
 | `--allowed-dirs <path,path,...>` | **Deprecated** alias for `--rw-bind` (same read-write behavior). Emits a deprecation warning when used; will be removed in the next major release. |

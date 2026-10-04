@@ -73,7 +73,7 @@ paste cleanly onto a generic hosted queue because the defining behavior is a
 local copy-on-write view plus an explicit decision about landing the diff.
 
 Evidence for the alternatives and exclusions: `README.md:38-72`,
-`docs/security.md:275-452`, and `docs/daemon.md:3-6`.
+`docs/security.md:282-510`, and `docs/daemon.md:3-6`.
 
 ## Copy constraints
 

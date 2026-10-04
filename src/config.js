@@ -57,6 +57,8 @@ const CONFIG_FIELD_TYPES = {
   restartWaitForIdle: "boolean",
   maxOutputFileBytes: "number",
   taskRetentionDays: "number",
+  opencodeVersionTtlMs: "number",
+  opencodeVersionTimeoutMs: "number",
 };
 
 /** @type {Record<string, string>} */

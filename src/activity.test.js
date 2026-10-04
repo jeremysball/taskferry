@@ -10,6 +10,7 @@ import { createTaskManager, DEFAULT_SUMMARY_MODEL } from "./tasks.js";
 import { createWorkspaceRootResolver, resolveWorkspaceRoot } from "./paths.js";
 import { syncActivitySubscriptions } from "./daemon-server.js";
 import { trackManager, fakeChild, mkdtempTracked } from "./tasks.test-helpers.js";
+import { setOpencodeExecutorOverride } from "./executor.js";
 
 const TASK_ACTIVITY = "task.activity";
 const TASK_STATE = "task.state";
@@ -245,6 +246,7 @@ describe("task activity events", () => {
 
   test("publishes one internal summary result without exposing the summary job", async (t) => {
     const stateDir = mkdtempTracked(ACTIVITY_DIR_PREFIX);
+    setOpencodeExecutorOverride({ detectCliMajorFn: () => 1, ensureCliMajorFn: async () => 1 });
     const children = [];
     const events = [];
     const manager = trackManager(createTaskManager({

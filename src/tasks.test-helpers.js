@@ -18,6 +18,7 @@ import path from "node:path";
 import { EventEmitter } from "node:events";
 import { after } from "node:test";
 import { createTaskManager, DEFAULT_SUMMARY_MODEL, parseEnvDenylist } from "./tasks.js";
+import { setOpencodeExecutorOverride } from "./executor.js";
 
 const trackedTempDirs = [];
 const trackedManagers = [];
@@ -92,7 +93,46 @@ after(() => {
       // behind). Don't let one unremovable dir abort cleanup for the rest.
     }
   }
+  // Back to the file-wide 1.x pin (not an empty override): a manager's
+  // background warm-up can still fire after this hook, and an empty
+  // override would let it shell out to the host's real `opencode --version`.
+  pinOpencodeCliMajor();
 });
+
+/**
+ * Polls until `get()` returns something other than `null`/`undefined`. A
+ * launch spawns only after the async `prepareLaunch()` settles, so a test
+ * that captures spawn state has to wait for it rather than sleep a fixed
+ * time that a loaded CI runner can outlast.
+ * @template T
+ * @param {() => T} get
+ * @param {number} [timeoutMs]
+ * @returns {Promise<NonNullable<T>>}
+ */
+export async function waitForCaptured(get, timeoutMs = 2000) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const value = get();
+    if (value !== null && value !== undefined) return value;
+    if (Date.now() >= deadline) throw new Error(`spawn was never captured within ${timeoutMs}ms`);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+}
+
+/**
+ * Pin the opencode CLI major every opencode executor reports, so no test
+ * shells out to the host's real `opencode --version`. Applied at import
+ * time below, which covers managers built with createTaskManager() directly
+ * as well as through makeManager().
+ * @param {() => number|null} [cliMajor]
+ */
+export function pinOpencodeCliMajor(cliMajor = () => 1) {
+  setOpencodeExecutorOverride({
+    detectCliMajorFn: cliMajor,
+    ensureCliMajorFn: async () => cliMajor(),
+  });
+}
+pinOpencodeCliMajor();
 
 export { DEFAULT_SUMMARY_MODEL };
 export const EXTENSION_CONFIG_ERROR = 'Error: Extension "/x/y.js" error: Provider y: "baseUrl" is required when defining models.';
@@ -336,6 +376,14 @@ function pinnedManagerDefaults(options) {
 }
 
 function buildManagerOptions(options, stateDir, defaultCacheDir, defaultOverlayTmpRoot) {
+  // Pin the opencode CLI major version that any opencode executor returned
+  // by resolveExecutor() reports, so a test never shells out to a real
+  // `opencode --version` (and a test that dispatches with
+  // `executor: "opencode"` never depends on whatever opencode the host has
+  // installed). The default of 1 matches the original test-only pin; tests
+  // that want the 2.x argv pass `opencodeCliMajorFn: () => 2` (or inject
+  // their own detect/ensure via setOpencodeExecutorOverride()).
+  pinOpencodeCliMajor(options.opencodeCliMajorFn);
   return {
     stateDir,
     ...pinnedManagerDefaults(options),

@@ -7,6 +7,11 @@ import os from "node:os";
 import path from "node:path";
 import { MAX_LIST_ROWS, prepareSocket, removeStaleSocketIfUnchanged, startDaemon } from "./daemon.js";
 import { resolveRuntimeDir } from "./paths.js";
+import { setOpencodeExecutorOverride } from "./executor.js";
+
+// A few tests below boot a real task manager; pin the opencode CLI major so
+// its background warm-up never runs the host's real `opencode --version`.
+setOpencodeExecutorOverride({ detectCliMajorFn: () => 1, ensureCliMajorFn: async () => 1 });
 
 const TEST_MODEL = "test/model";
 const TASK_ADVISOR = "task.advisor";

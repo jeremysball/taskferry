@@ -377,7 +377,7 @@ export function createActivityCache({
   summariesEnabled = true,
   summarizerTimeoutMs = DEFAULT_SUMMARIZER_TIMEOUT_MS,
   refreshBytes = ACTIVITY_REFRESH_BYTES,
-  summaryModel = "opencode/mimo-v2.5-free",
+  summaryModel = "opencode/muse-spark-1.3-contributor-free",
   maxWords = 200,
   snapshot = (task) => readActivitySnapshot(task.logPath || ""),
   summarize = async ({ snapshot: current }) => ({ text: current.text, sessionId: null }),

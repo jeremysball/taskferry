@@ -41,7 +41,7 @@ const CHECK_FAILED = "check failed";
 // (DEFAULT_SUMMARY_MODEL) -- commands.js is the CLI process and doesn't
 // import daemon-internal tasks.js, so this is an independent constant that
 // happens to share the same value.
-const ADVISOR_SUMMARIZE_MODEL = "opencode/mimo-v2.5-free";
+const ADVISOR_SUMMARIZE_MODEL = "opencode/muse-spark-1.3-contributor-free";
 const ADVISOR_SUMMARIZE_TIMEOUT_MS = 120000;
 
 /**

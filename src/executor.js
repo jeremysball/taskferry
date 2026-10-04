@@ -524,7 +524,7 @@ export function opencodeExecutor() {
     id: "opencode",
     taskIdPrefix: "oc",
     errorBucketPrefix: "opencode",
-    defaultSummaryModel: "opencode/mimo-v2.5-free",
+    defaultSummaryModel: "opencode/muse-spark-1.3-contributor-free",
     binaryName: "opencode",
     listModelsFn: async (env) =>
       (await execFileAsync("opencode", ["models"], { encoding: "utf8", timeout: SUMMARY_PREFLIGHT_TIMEOUT_MS, env })).stdout,

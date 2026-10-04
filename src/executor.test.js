@@ -597,11 +597,11 @@ describe("opencodeExecutor()", () => {
   test("buildSpawnArgs: summary launch", () => {
     const ex = opencodeExecutor();
     const args = ex.buildSpawnArgs({
-      isSummary: true, model: "opencode/mimo-v2.5-free", launchDirectory: "/state/summaries",
+      isSummary: true, model: "opencode/muse-spark-1.3-contributor-free", launchDirectory: "/state/summaries",
       snapshotPath: "/state/summaries/oc_1.json", prompt: "", sessionId: null,
     });
     assert.deepEqual(args, [
-      "run", "--dir", "/state/summaries", "--pure", "--format", "json", "-m", "opencode/mimo-v2.5-free",
+      "run", "--dir", "/state/summaries", "--pure", "--format", "json", "-m", "opencode/muse-spark-1.3-contributor-free",
       "-f", "/state/summaries/oc_1.json", "--", ex.buildSummaryPrompt(),
     ]);
   });

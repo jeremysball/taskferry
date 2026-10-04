@@ -136,7 +136,7 @@ describe("formatWatchEvent toon format for activity/state events", () => {
       status: "running",
       occurredAt: OCCURRED_AT_MID,
       summaryFailed: true,
-      summaryError: "summary model is unavailable: opencode/mimo-v2.5-free",
+      summaryError: "summary model is unavailable: opencode/muse-spark-1.3-contributor-free",
     }, "toon");
 
     assert.match(line, /oc_1/);

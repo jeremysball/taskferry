@@ -244,7 +244,7 @@ const SUMMARY_INPUT_BYTES = 96 * 1024;
 // #78). Kept a safety margin under the hard 131072-byte cap rather than
 // riding the exact limit.
 const PROMPT_ARGV_SAFE_BYTES = 96 * 1024;
-export const DEFAULT_SUMMARY_MODEL = "opencode/mimo-v2.5-free";
+export const DEFAULT_SUMMARY_MODEL = "opencode/muse-spark-1.3-contributor-free";
 const SUMMARY_TRANSCRIPT_PROMPT = "Summarize the attached task transcript.";
 
 // Ordered most-specific-first: real provider error text often combines
@@ -5128,7 +5128,7 @@ function buildManagerInternalHelpers(ctx) {
      * hardcodes `opencodeExecutor()` for the actual summary work -- a separate
      * scope boundary from the dispatch-default executor flip -- so a model
      * available in pi but not in opencode (e.g. an opencode-only Zen model
-     * like the default `opencode/mimo-v2.5-free`) would silently fail the
+     * like the default `opencode/muse-spark-1.3-contributor-free`) would silently fail the
      * check on a default pi install. The cached `modelsCache` is shared with
      * the check, so a follow-up dispatch doesn't re-shell-out for the list
      * within the 5-minute TTL.

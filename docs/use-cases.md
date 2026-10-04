@@ -52,7 +52,7 @@ output and one command to take it or leave it.
 `reject`. On Linux the worker runs sandboxed in a copy-on-write overlay by
 default, so nothing lands until `accept` applies it; a `.taskferry.toml`
 check gate can refuse acceptance until the project's own verification passes
-(`README.md:32-34`, `docs/cli-reference.md:276-304`, `docs/overview.md:39-41`).
+(`README.md:32-34`, `docs/cli-reference.md:284-312`, `docs/overview.md:39-41`).
 `output` retrieves files from the per-task scratch directory even when the
 task ends on a tool call or is cancelled (`docs/overview.md:64-66`).
 macOS runs without the bubblewrap layer (`docs/overview.md:18-20`).
@@ -86,7 +86,7 @@ be codified once and dispatched by tag.
 
 **Today (primitives, not presets):** `--class <name>` is a free-text tag
 stored on the task for telemetry aggregation, any string, no fixed-list
-validation (`docs/cli-reference.md:64`, `src/command-specs.js:5`).
+validation (`docs/cli-reference.md:72`, `src/command-specs.js:5`).
 Reasoning effort is `--variant` with the `defaultVariant` chain
 (`docs/cli-reference.md:65`, `docs/config.md`); concurrency is
 `providerLimits` (`src/config.js:105-114`).

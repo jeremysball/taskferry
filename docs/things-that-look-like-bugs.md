@@ -122,7 +122,7 @@ belongs here.
    preserved: a task's own later calls (its summary-generation child, a
    daemon-restart auto-resume of the same task, an advisor follow-up
    resuming that same advisor task's session) all reuse the *same* task's
-   data home, so `--continue --session <id>` still resolves. Cross-task
+   data home, so the `--session <id>` resume still resolves. Cross-task
    session resumption of a sandboxed session was never a supported
    feature — it only worked as a side effect of the shared data home — so
    only the accidental sharing is gone.

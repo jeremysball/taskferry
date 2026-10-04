@@ -24,6 +24,7 @@ describe("summarize(): spawn shape, attachment, and snapshot content", () => {
     });
 
     const summary = await mgr.summarize("source", { maxWords: 150 });
+    await mgr.poll(summary.summaryTask.id, { timeoutMs: 2000 });
     assert.equal(captured.command, "opencode");
     assert.ok(captured.args.includes("--pure"));
     assert.equal(captured.args.includes("--auto"), false);
@@ -52,7 +53,8 @@ describe("summarize(): spawn shape, attachment, and snapshot content", () => {
     });
 
     await mgr.summarize("source", { maxWords: 150, previousActivity: "Read the config file." });
-
+    // Wait for the summary task to start (spawn happens after async version probe)
+    await new Promise((r) => setTimeout(r, 100));
     assert.equal(capturedSnapshot.previous_summary, "Read the config file.");
     child.emit("exit", 0, null);
   });
@@ -72,6 +74,8 @@ describe("summarize(): spawn shape, attachment, and snapshot content", () => {
     });
 
     await mgr.summarize("source", { maxWords: 150 });
+    // Wait for summary task to start (spawn happens after async version probe)
+    await new Promise((r) => setTimeout(r, 100));
 
     assert.equal("previous_summary" in capturedSnapshot, false);
     child.emit("exit", 0, null);
@@ -99,6 +103,8 @@ describe("summarize(): spawn shape, attachment, and snapshot content", () => {
     });
 
     await mgr.summarize("source", { maxWords: 150 });
+    // Wait for summary task to start (spawn happens after async version probe)
+    await new Promise((r) => setTimeout(r, 100));
 
     assert.match(capturedSnapshot.narration, /Checking repo state/);
     assert.match(capturedSnapshot.narration, /\[tool:bash] \{"command":"git status"} -> x+…\[truncated]/);

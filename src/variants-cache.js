@@ -2,8 +2,9 @@ import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { modelsCacheFingerprint } from "./tasks.js";
+import { detectOpencodeCliMajor } from "./opencode-version.js";
 
-export const VARIANTS_CACHE_SCHEMA = 1;
+export const VARIANTS_CACHE_SCHEMA = 2;
 export const DEFAULT_VARIANT_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 const CACHE_FILENAME = "opencode-variants.json";
 
@@ -45,6 +46,10 @@ export function readVariantsCache({ cacheDir, env, ttlMs = DEFAULT_VARIANT_CACHE
     return null;
   }
   if (parsed.schema !== VARIANTS_CACHE_SCHEMA || typeof parsed.models !== "object" || parsed.models === null) return null;
+  // Check that the cache was built for the same opencode major version.
+  // opencode 2.x doesn't support --verbose, so a 1.x cache must not be used on 2.x and vice versa.
+  const currentMajor = detectOpencodeCliMajor();
+  if (parsed.opencodeMajor !== undefined && parsed.opencodeMajor !== currentMajor) return null;
   const result = { fingerprint: parsed.fingerprint, models: new Map(Object.entries(parsed.models)) };
   _memo.set(filePath, { mtimeMs, result });
   return checkFingerprint(result, env);
@@ -98,10 +103,16 @@ export async function refreshVariantsCache({ cacheDir, env, listModelVariantsFn,
     inFlight = (async () => {
       try {
         const models = await listModelVariantsFn(env);
+        const currentMajor = detectOpencodeCliMajor();
+        // opencode 2.x doesn't support --verbose, so skip refresh on 2.x
+        if (currentMajor !== null && currentMajor >= 2) {
+          return;
+        }
         const body = {
           fingerprint,
           schema: VARIANTS_CACHE_SCHEMA,
           generatedAt: new Date().toISOString(),
+          opencodeMajor: currentMajor,
           models: Object.fromEntries(models),
         };
         mkdirFn(cacheDir);

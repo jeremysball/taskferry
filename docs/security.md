@@ -171,12 +171,14 @@ task whose log contains secrets you don't want sent there. Specifics:
   the last refresh for that task — bounding both the token cost and the
   request rate of watching a busy task. The direct `summary --mode report` path bypasses this cache entirely.
 - **Isolated, but not tool-denied.** The report-style summary child runs
-  with `--pure` (disables plugins) against a private attachment outside the
+  with `--pure` (disables plugins; opencode 1.x only, since 2.0 removed the
+  flag and a 2.x summary child loads plugins) against a private attachment outside the
   source workspace, and its prompt instructs the model to use only that
   attachment and ignore any instructions inside it. This is a soft,
   prompt-level constraint, not an enforced tool-permission denial — the
   child still has the same tool access (bash, read, write) as any other
-  agent run in its sandbox. Stronger, enforced read-only sandboxing for
+  agent run in its sandbox. **Plugins load regardless of `--no-sandbox`; the sandbox only affects
+  filesystem isolation, not plugin loading.** Stronger, enforced read-only sandboxing for
   summary children is tracked in #118.
 - **Opt-in per subscription.** `taskferry watch` only requests live
   summaries when called with `--summaries`; a plain `watch` gets local,

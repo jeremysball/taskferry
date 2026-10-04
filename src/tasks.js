@@ -13,7 +13,9 @@ import { errCode } from "./errors.js";
 import { isNonNegativeInteger, isPositiveInteger } from "./numbers.js";
 import { buildBwrapArgs, checkBwrapAvailable, checkOverlaySupport, defaultDenyList, platformSupportsSandbox, resolveGitCommonDir, resolveGitDir } from "./sandbox.js";
 import { applyChangeset, overlayPaths, resolvePreDispatchHead, subOverlayPaths, subFilePaths, cleanupOverlay, defaultRunCommand as defaultOverlayRunCommand, extractGitDiff, extractNonGitDiff, OVERLAY_MOUNT_BUSY_PATTERN } from "./changeset.js";
-import { resolveExecutor, opencodeExecutor } from "./executor.js";
+import { resolveExecutor } from "./executor.js";
+import { resolveOpencodeExecutor } from "./opencode-executor.js";
+import { ensureOpencodeCliMajor, detectOpencodeCliMajor, DEFAULT_OPENCODE_VERSION_TTL_MS, setOpencodeVersionTtlMs } from "./opencode-version.js";
 import { resolveVariant, KNOWN_VARIANT_LEVELS } from "./variants.js";
 import { readVariantsCache, refreshVariantsCache } from "./variants-cache.js";
 import { loadEnvFile, watchEnvFile } from "./env-file.js";
@@ -824,7 +826,9 @@ export function isOutsideDirectory(directory, candidate) {
  * ternary mirrors the monolithic launch-wiring exactly: summary launches
  * carry a snapshot path and no prompt file; dispatch launches carry a prompt
  * and a variant, and thread the session id (falling back to null when the
- * caller supplied none).
+ * caller supplied none). The executor owns its own pre-spawn preparation
+ * (e.g. opencode's CLI major-version probe) via `prepareLaunch`; we never
+ * reach for an `executor.id` switch in this generic code.
  * @param {import("./executor.js").WorkerExecutor} executor
  * @param {{isSummary: boolean, summaryLaunch: SummaryLaunch, dispatchLaunch: DispatchLaunch, launchDirectory: string, promptFilePath: string|null}} p
  * @returns {string[]}
@@ -2734,7 +2738,7 @@ function launchSummaryTask(ctx, p) {
     model: ctx.activitySummaryModel,
     snapshotPath,
     env: queuedCallerEnv,
-    executor: ctx.opencodeExecutor(),
+    executor: resolveOpencodeExecutor(),
     ...(resolvedSummarySessionId ? { summarySessionId: resolvedSummarySessionId } : {}),
   });
   const provider = providerOf(task.model);
@@ -4282,8 +4286,8 @@ function watchdogTick(state, ctx) {
  * @param {(pid: number, signal: NodeJS.Signals) => void} [options.killFn]
  * @param {(env: NodeJS.ProcessEnv) => Promise<string>} [options.listModelsFn] - shell-out for the
  *   installed-models list used to validate `TASKFERRY_SUMMARY_MODEL` is available before any summary
- *   call. Defaults to `opencodeExecutor().listModelsFn` -- not `defaultExecutor.listModelsFn` --
- *   because `summarizeTask()` deliberately hardcodes `opencodeExecutor()` for the actual summary
+ *   call. Defaults to `resolveOpencodeExecutor().listModelsFn` -- not `defaultExecutor.listModelsFn` --
+ *   because `summarizeTask()` deliberately hardcodes `resolveOpencodeExecutor()` for the actual summary
  *   work (separately tracked scope boundary from the dispatch-default executor flip). A default-config
  *   pi install must validate the configured summary model against opencode's list, since that's the
  *   CLI summaries actually run through regardless of which executor dispatches use.
@@ -4416,8 +4420,8 @@ function resolveCoreOptions(rawOptions) {
     // override (e.g. a test-injected fake executor object), which would
     // throw because `resolveExecutor` expects a name string.
     defaultExecutor: rawOptions.defaultExecutor ?? resolveExecutor(process.env.TASKFERRY_DEFAULT_EXECUTOR || config.defaultExecutor),
-    listModelsFn: rawOptions.listModelsFn ?? opencodeExecutor().listModelsFn,
-    opencodeListModelVariantsFn: rawOptions.opencodeListModelVariantsFn ?? opencodeExecutor().listModelVariantsFn,
+    listModelsFn: rawOptions.listModelsFn ?? resolveOpencodeExecutor().listModelsFn,
+    opencodeListModelVariantsFn: rawOptions.opencodeListModelVariantsFn ?? resolveOpencodeExecutor().listModelVariantsFn,
     // Test-only direct injection of the resolved opencode variants table,
     // bypassing readVariantsCache()/the cache file entirely. A real
     // manager passes undefined here and resolves the table per-dispatch
@@ -4473,6 +4477,12 @@ function resolveTimeoutOptions(rawOptions) {
     summarizerTimeoutMs: resolveNonNegativeIntOption(rawOptions.summarizerTimeoutMs, process.env.TASKFERRY_SUMMARIZER_TIMEOUT_MS, config.summarizerTimeoutMs, DEFAULT_SUMMARIZER_TIMEOUT_MS),
     activityMaxWords: resolvePositiveIntOption(rawOptions.activityMaxWords, process.env.TASKFERRY_ACTIVITY_MAX_WORDS, config.activityMaxWords, 75),
     taskRetentionDays: resolveNonNegativeIntOption(rawOptions.taskRetentionDays, process.env.TASKFERRY_TASK_RETENTION_DAYS, config.taskRetentionDays, DEFAULT_TASK_RETENTION_DAYS),
+    // How long a successful `opencode --version` probe is trusted before
+    // re-shelling-out. Same caller > env > config > default chain as the
+    // sibling numeric options above; the executor's ensureOpencodeCliMajor()
+    // takes the value through its own `ttlMs` seam so tests can inject a
+    // fast-forward clock.
+    opencodeVersionTtlMs: resolvePositiveIntOption(rawOptions.opencodeVersionTtlMs, process.env.TASKFERRY_OPENCODE_VERSION_TTL_MS, config.opencodeVersionTtlMs, DEFAULT_OPENCODE_VERSION_TTL_MS),
     maxOutputFileBytes,
   };
 }
@@ -5125,7 +5135,7 @@ function buildManagerInternalHelpers(ctx) {
     /**
      * Validate `model` against opencode's installed-models list, NOT against
      * the dispatch-default executor's list. `summarizeTask()` deliberately
-     * hardcodes `opencodeExecutor()` for the actual summary work -- a separate
+     * hardcodes `resolveOpencodeExecutor()` for the actual summary work -- a separate
      * scope boundary from the dispatch-default executor flip -- so a model
      * available in pi but not in opencode (e.g. an opencode-only Zen model
      * like the default `opencode/muse-spark-1.3-contributor-free`) would silently fail the
@@ -5160,7 +5170,7 @@ function buildManagerInternalHelpers(ctx) {
      * @param {{maxWords?: number, allowPromptFallback?: boolean, previousActivity?: string|null, summarySessionId?: string|null, lastSummarizedWatermark?: number|null, respectConcurrencyReserve?: boolean, env?: NodeJS.ProcessEnv}} [options]
      * @returns {Promise<{sourceTaskId: string, sourceStatus: string, summary?: string, help?: string, capturedAt?: string, sourceLogBytes?: number, summaryInputBytes?: number, next?: string, summaryTask?: {id: string, status: string, model: string}}>}
      */
-    summarizeTask: (taskId, options = {}) => summarizeTaskFor(taskId, options, { ensureStateLoaded: () => ctx.helpers.ensureStateLoaded(), tasks: ctx.maps.tasks, summaryConcurrencyLimit: ctx.limits.summaryConcurrencyLimit, activityCache: ctx.activity.cache, activitySummaryModel: ctx.opts.activitySummaryModel, summaryModelAvailable: (model, env) => ctx.helpers.summaryModelAvailable(model, env), LOG_DIR: ctx.paths.LOG_DIR, SUMMARY_DIR: ctx.paths.SUMMARY_DIR, persistTask: (taskId) => ctx.helpers.persistTask(taskId), pendingLaunches: ctx.maps.pendingLaunches, providerQueues: ctx.maps.providerQueues, launchQueuedTasks: () => ctx.helpers.launchQueuedTasks(), noSuchTask, readNarrationExcerpt, opencodeExecutor }),
+    summarizeTask: (taskId, options = {}) => summarizeTaskFor(taskId, options, { ensureStateLoaded: () => ctx.helpers.ensureStateLoaded(), tasks: ctx.maps.tasks, summaryConcurrencyLimit: ctx.limits.summaryConcurrencyLimit, activityCache: ctx.activity.cache, activitySummaryModel: ctx.opts.activitySummaryModel, summaryModelAvailable: (model, env) => ctx.helpers.summaryModelAvailable(model, env), LOG_DIR: ctx.paths.LOG_DIR, SUMMARY_DIR: ctx.paths.SUMMARY_DIR, persistTask: (taskId) => ctx.helpers.persistTask(taskId), pendingLaunches: ctx.maps.pendingLaunches, providerQueues: ctx.maps.providerQueues, launchQueuedTasks: () => ctx.helpers.launchQueuedTasks(), opencodeExecutor: resolveOpencodeExecutor, noSuchTask, readNarrationExcerpt }),
     /** @returns {void} */
     launchQueuedTasks: () => { runLaunchQueuedTasks(ctx.schedulers.launchScheduler, { dispatchLimit: ctx.limits.dispatchLimit, dispatchWindow: ctx.limits.dispatchWindow, concurrencyLimit: ctx.limits.concurrencyLimit, lowerdirStagger: ctx.limits.lowerdirStagger, providerLimits: ctx.limits.providerLimits, tasks: ctx.maps.tasks, startTask: (task) => ctx.helpers.startTask(task), reschedule: () => ctx.helpers.launchQueuedTasks() }); },
     /** Spawns a queued launch's worker process. The launch's pre-parsed
@@ -5463,6 +5473,12 @@ function bootstrapManagerContext(ctx) {
   if (!ctx.opts.opencodeVariantsTable) {
     warmAndScheduleVariantsCacheRefresh(ctx.opts, ctx.env.sanitizedEnvironment);
   }
+  // Warm the opencode CLI major-version probe in the background. Same
+  // fire-and-forget rationale: a missing probe just means the first
+  // dispatch has to wait for ensureOpencodeCliMajor() to land (the
+  // in-flight Promise is shared across that stampede, so only one
+  // subprocess runs regardless of how many dispatches race it).
+  void ensureOpencodeCliMajor().catch(() => { /* stderr already logged inside probeOpencodeCliMajor */ });
 }
 
 /**
@@ -5483,6 +5499,9 @@ function warmAndScheduleVariantsCacheRefresh(opts, sanitizeEnvironment) {
   const maybeRefresh = () => {
     const env = sanitizeEnvironment(process.env);
     if (readVariantsCache({ cacheDir: opts.cacheDir, env: env }) !== null) return;
+    // opencode 2.x doesn't support --verbose, so skip the refresh entirely
+    const major = detectOpencodeCliMajor();
+    if (major !== null && major >= 2) return;
     refreshVariantsCache({ cacheDir: opts.cacheDir, env: env, listModelVariantsFn: opts.opencodeListModelVariantsFn })
       .catch((err) => process.stderr.write(`warning: opencode variants cache refresh failed: ${errMessage(err)}\n`));
   };
@@ -5533,6 +5552,14 @@ function createManagerContext(opts) {
  * @param {ResolvedTaskManagerOptions} opts
  */
 function buildTaskManagerWithOptions(opts) {
+  // Sync the configured opencode CLI major-version probe TTL into the
+  // module-level default that executor.js's ensureOpencodeCliMajor() reads
+  // when no ttlMs is supplied. Must happen *after* resolveTimeoutOptions has
+  // produced opts.opencodeVersionTtlMs and *before* any worker launch (or
+  // any background warm-up) calls into executor.js. Both createManagerContext
+  // and bootstrapManagerContext run after this setter, so any code path
+  // they take sees the configured value.
+  setOpencodeVersionTtlMs(opts.opencodeVersionTtlMs);
   const ctx = createManagerContext(opts);
   bootstrapManagerContext(ctx);
   return ctx.api;
@@ -7835,6 +7862,7 @@ function buildSummaryEnvironment(ctx, env) {
   delete result.OPENCODE_CONFIG;
   delete result.OPENCODE_CONFIG_DIR;
   delete result.OPENCODE_CONFIG_CONTENT;
+  delete result.TASKFERRY_TASK_ID;
   result.TASKFERRY_CHILD = "1";
   return result;
 }
@@ -8002,10 +8030,105 @@ async function summarizeTaskFor(taskId, options, ctx) {
  * @param {Task} task
  * @param {StartTaskContext & {pendingLaunches: Map<string, LaunchSpec>}} ctx
  */
+/**
+ * Mark a queued task as crashed before any spawn attempt and settle its
+ * waiters. Used when the executor's `prepareLaunch` hook rejects (opencode
+ * CLI major-version probe failed) -- we never silently build an argv for an
+ * unknown version, and we never block the launch queue waiting on it.
+ * @param {Task} task
+ * @param {StartTaskContext} ctx
+ * @param {Error} err
+ */
+function failTaskBeforeLaunch(task, ctx, err) {
+  task.status = "crashed";
+  task.spawnError = errMessage(err);
+  task.endedAt = new Date().toISOString();
+  ctx.persistTask(task.id);
+  ctx.flushPersist();
+  void ctx.scheduleActivity(task, { force: true }).then(() => ctx.activityCache.evictTask(task.id));
+  ctx.settleWaiters(task.id);
+}
+
+/**
+ * Spawns a queued launch's worker process. The launch's pre-parsed metadata
+ * (target dir, prompt-file routing, buildSpawnArgs output) comes from
+ * resolveStartTaskLaunch; the actual spawn + child lifecycle is delegated to
+ * spawnTaskChild. Extracted out of `createTaskManager`'s `startTask`
+ * closure; every factory binding is threaded in via `ctx`.
+ * @param {Task} task
+ * @param {StartTaskContext & {pendingLaunches: Map<string, LaunchSpec>}} ctx
+ * @returns {Promise<void>}
+ */
+/**
+ * Spawns a queued launch's worker process. The launch's pre-parsed metadata
+ * (target dir, prompt-file routing, buildSpawnArgs output) comes from
+ * resolveStartTaskLaunch; the actual spawn + child lifecycle is delegated to
+ * spawnTaskChild. Extracted out of `createTaskManager`'s `startTask`
+ * closure; every factory binding is threaded in via `ctx`.
+ *
+ * Sync when the executor's `prepareLaunch` hook resolves synchronously
+ * (the opencode CLI major-version cache is warm, the daemon's boot warm-up
+ * already populated it -- the common path). Sync dispatch is what every
+ * pre-existing test relies on: `mgr.dispatch(...); assert on captured argv`
+ * works because the launch fires inside the dispatch call.
+ *
+ * Defers via a `.then()` continuation when the hook returns one (the probe
+ * is cold -- the boot warm-up hadn't landed yet). Concurrent slow-path
+ * launches share the in-flight Promise through the executor's own
+ * `ensureCliMajorFn` memoization, so only one subprocess runs regardless
+ * of how many dispatches race it.
+ * @param {Task} task
+ * @param {StartTaskContext & {pendingLaunches: Map<string, LaunchSpec>}} ctx
+ */
 function startTaskFor(task, ctx) {
   const launch = ctx.pendingLaunches.get(task.id);
   ctx.pendingLaunches.delete(task.id);
   if (!launch) return;
+  // Per-executor pre-spawn hook (e.g. opencode's CLI major probe). The hook
+  // may return either `void` (warm cache, fully synchronous -- the launch
+  // path then proceeds without an await tick) or a Promise (cold cache; the
+  // probe is awaited). Either way, never guess an argv for an unknown
+  // executor version: a thrown / rejected result surfaces the failure as a
+  // `crashed` task with a clear `spawnError` rather than letting the
+  // watchdog reclassify a stuck task later.
+  if (launch.executor.prepareLaunch) {
+    let prepareResult;
+    try {
+      prepareResult = launch.executor.prepareLaunch({ isSummary: launch.kind === "summary" });
+    } catch (err) {
+      failTaskBeforeLaunch(task, ctx, /** @type {Error} */ (err));
+      return;
+    }
+    if (prepareResult && typeof prepareResult.then === "function") {
+      prepareResult.then(
+        () => {
+          // Re-check the cache: the probe landed, so `buildSpawnArgs` will
+          // see a non-null major. Defensive `failTaskBeforeLaunch` only
+          // fires for a still-failing probe, which the executor's hook
+          // already rejected.
+          try {
+            doStartTaskFor(task, ctx, launch);
+          } catch (err) {
+            failTaskBeforeLaunch(task, ctx, /** @type {Error} */ (err));
+          }
+        },
+        (err) => failTaskBeforeLaunch(task, ctx, /** @type {Error} */ (err)),
+      );
+      return;
+    }
+  }
+  doStartTaskFor(task, ctx, launch);
+}
+
+/**
+ * The actual launch plumbing, factored out so {@link startTaskFor} can run
+ * it both synchronously (warm-cache fast path) and from inside a Promise
+ * continuation (cold-cache deferred path).
+ * @param {Task} task
+ * @param {StartTaskContext & {pendingLaunches: Map<string, LaunchSpec>}} ctx
+ * @param {LaunchSpec} launch
+ */
+function doStartTaskFor(task, ctx, launch) {
   const launchInfo = resolveStartTaskLaunch(task, launch, ctx);
   spawnTaskChild(ctx, launchInfo, task);
 }

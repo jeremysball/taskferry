@@ -18,6 +18,7 @@ import path from "node:path";
 import { EventEmitter } from "node:events";
 import { after } from "node:test";
 import { createTaskManager, DEFAULT_SUMMARY_MODEL, parseEnvDenylist } from "./tasks.js";
+import { setOpencodeExecutorOverride, resetOpencodeExecutorOverride } from "./executor.js";
 
 const trackedTempDirs = [];
 const trackedManagers = [];
@@ -92,6 +93,10 @@ after(() => {
       // behind). Don't let one unremovable dir abort cleanup for the rest.
     }
   }
+  // Drop the opencode executor override so a later test file that does
+  // not go through makeManager() (or a different test in the same file
+  // that explicitly resets it) cannot read the previous suite's pin.
+  resetOpencodeExecutorOverride();
 });
 
 export { DEFAULT_SUMMARY_MODEL };
@@ -336,6 +341,18 @@ function pinnedManagerDefaults(options) {
 }
 
 function buildManagerOptions(options, stateDir, defaultCacheDir, defaultOverlayTmpRoot) {
+  // Pin the opencode CLI major version that any opencode executor returned
+  // by resolveExecutor() reports, so a test never shells out to a real
+  // `opencode --version` (and a test that dispatches with
+  // `executor: "opencode"` never depends on whatever opencode the host has
+  // installed). The default of 1 matches the original test-only pin; tests
+  // that want the 2.x argv pass `opencodeCliMajorFn: () => 2` (or inject
+  // their own detect/ensure via `opencodeCliMajorArgs`).
+  const cliMajor = options.opencodeCliMajorFn ?? (() => 1);
+  setOpencodeExecutorOverride({
+    detectCliMajorFn: cliMajor,
+    ensureCliMajorFn: async () => cliMajor(),
+  });
   return {
     stateDir,
     ...pinnedManagerDefaults(options),

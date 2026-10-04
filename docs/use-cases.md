@@ -88,7 +88,7 @@ be codified once and dispatched by tag.
 stored on the task for telemetry aggregation, any string, no fixed-list
 validation (`docs/cli-reference.md:64`, `src/command-specs.js:5`).
 Reasoning effort is `--variant` with the `defaultVariant` chain
-(`docs/cli-reference.md:57`, `docs/config.md`); concurrency is
+(`docs/cli-reference.md:65`, `docs/config.md`); concurrency is
 `providerLimits` (`src/config.js:105-114`).
 
 **Direction:** named tag presets. Codify model + executor + variant once

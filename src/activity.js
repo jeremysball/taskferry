@@ -393,9 +393,10 @@ export function createActivityCache({
   const lastSummarizedActivity = new Map();
   // OpenCode session id of the most recent successful summary for this source
   // task. The summarize-task spawner reads this and passes it to
-  // `opencode run --continue --session <id>` so the next turn lands in the
-  // same prompt-cached conversation instead of starting fresh. Cleared on
-  // failure so the next call retries against a brand-new session.
+  // `opencode run --session <id>` (2.x) or `opencode run --continue --session <id>`
+  // (1.x) so the next turn lands in the same prompt-cached conversation
+  // instead of starting fresh. Cleared on failure so the next call retries
+  // against a brand-new session.
   /** @type {Map<string, string>} */
   const summarySessions = new Map();
   // Source-log byte offset at the moment the most recent summary was taken.

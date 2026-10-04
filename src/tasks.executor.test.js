@@ -301,7 +301,7 @@ describe("startTask() merges executor.sandboxAuthFile().sandboxEnv into spawnEnv
     assert.ok(configHome.startsWith(sandboxedDataHome + path.sep));
   });
 
-  test("opencode's real config entries are ro-bound into the sandboxed config home, except .gitignore", () => {
+  test("opencode's real config entries are ro-bound into the sandboxed config home, except .gitignore", async () => {
     let captured = null;
     const cacheDir = mkdtempTracked("axi-tasks-cache-oc-bind-");
     const homeDir = os.homedir();
@@ -319,6 +319,8 @@ describe("startTask() merges executor.sandboxAuthFile().sandboxEnv into spawnEnv
       cacheDir,
     });
     const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), executor: "opencode" });
+    // Wait for the dispatch to start running (spawn happens after async version probe)
+    await mgr.poll(dispatched.id, { timeoutMs: 5000 });
     const sandboxedConfigDir = path.join(cacheDir, OPENCODE_DATA, dispatched.id, "config", "opencode");
     // The user's real config (custom providers live here) is still visible.
     const destIdx = captured.args.indexOf(path.join(sandboxedConfigDir, OPENCODE_JSONC));

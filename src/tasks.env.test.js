@@ -97,6 +97,8 @@ describe("caller-env union: basic dispatch and TASKFERRY_TASK_ID", () => {
     });
 
     await mgr.summarize("source", { maxWords: 150 });
+    // Wait for summary task to start (spawn happens after async version probe)
+    await new Promise((r) => setTimeout(r, 100));
 
     assert.equal("TASKFERRY_TASK_ID" in capturedOpts.env, false);
   });

@@ -46,6 +46,26 @@ describe("persistTask() durability across concurrent manager instances", () => {
       /error: could not read persisted task state/
     );
   });
+
+  test("an unreadable tasks.json skips the prompt, output-dir, and overlay boot sweeps", () => {
+    const stateDir = mkdtempTracked(AXI_TASKS_TEST_DIR);
+    const overlayTmpRoot = mkdtempTracked(AXI_TASKS_TEST_DIR);
+    fs.writeFileSync(path.join(stateDir, TASKS_STATE_FILE), "{ not valid json");
+    const promptFile = path.join(stateDir, "prompts", "oc_live.prompt.txt");
+    const outputDir = path.join(stateDir, "outputs", "oc_live");
+    const overlayDir = path.join(overlayTmpRoot, "taskferry-cow-oc_live");
+    fs.mkdirSync(path.dirname(promptFile), { recursive: true });
+    fs.writeFileSync(promptFile, "prompt");
+    fs.mkdirSync(outputDir, { recursive: true });
+    fs.writeFileSync(path.join(outputDir, "report.md"), "deliverable");
+    fs.mkdirSync(path.join(overlayDir, "upper"), { recursive: true });
+
+    trackManager(createTaskManager({ stateDir, overlayTmpRoot, sandboxEnabled: false, spawnFn: () => fakeChild(), killFn: () => {} }));
+
+    assert.ok(fs.existsSync(promptFile), "prompt file must survive a boot that could not read tasks.json");
+    assert.ok(fs.existsSync(path.join(outputDir, "report.md")), "output dir must survive a boot that could not read tasks.json");
+    assert.ok(fs.existsSync(overlayDir), "overlay must survive a boot that could not read tasks.json");
+  });
 });
 
 describe("isOutsideDirectory()", () => {

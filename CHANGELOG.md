@@ -1,5 +1,27 @@
 # Changelog
 
+## [4.5.0](https://github.com/jeremysball/taskferry/compare/taskferry-v4.4.0...taskferry-v4.5.0) (2026-10-04)
+
+
+### Features
+
+* **daemon:** reap per-task uv cache and tool dirs ([#610](https://github.com/jeremysball/taskferry/issues/610)) ([b4436bb](https://github.com/jeremysball/taskferry/commit/b4436bb4822d227cfb1e692329a3159e9f9cf8f0))
+* **tasks:** add a retention window for tasks.json ([#582](https://github.com/jeremysball/taskferry/issues/582)) ([f653a9c](https://github.com/jeremysball/taskferry/commit/f653a9c53b265832347457c95bcadaa1791506c1))
+
+
+### Bug Fixes
+
+* **dispatch:** tell read-only workers to skip the check command ([#607](https://github.com/jeremysball/taskferry/issues/607)) ([2c48e42](https://github.com/jeremysball/taskferry/commit/2c48e42307189689e3de9d9eb396dd5a04d49867))
+* **executor:** emit the opencode 2.x run argv when the installed CLI is 2.x ([#609](https://github.com/jeremysball/taskferry/issues/609)) ([b46f774](https://github.com/jeremysball/taskferry/commit/b46f77402984cda88d2b70510050bb3b1137594f))
+* **opencode:** move TERMINAL_STATUSES out of plugin entrypoint ([#562](https://github.com/jeremysball/taskferry/issues/562)) ([a199478](https://github.com/jeremysball/taskferry/commit/a1994780a37ab81f915ef4bbd2c2feb0fd6576ca))
+* **pi:** resolve symlinked catalog files so catalog providers bind ([#564](https://github.com/jeremysball/taskferry/issues/564)) ([6661b55](https://github.com/jeremysball/taskferry/commit/6661b55a281566892a8f66e2d2033181b8a1247f))
+* **pi:** ro-bind model catalog in sandbox for provider lookup ([#556](https://github.com/jeremysball/taskferry/issues/556)) ([999adb3](https://github.com/jeremysball/taskferry/commit/999adb358a093fde102e38f274abe75162906495))
+* **sandbox:** disable ambient UV inheritance, explicitly manage UV env ([#547](https://github.com/jeremysball/taskferry/issues/547)) ([1bf4111](https://github.com/jeremysball/taskferry/commit/1bf411127faaec748ea671c2eb6269e11f9e806f))
+* **skills:** link deps into new worktree instead of reinstalling ([#575](https://github.com/jeremysball/taskferry/issues/575)) ([c408a05](https://github.com/jeremysball/taskferry/commit/c408a05e27821ad9028c524dac5e799cac62e1bb))
+* **skills:** require settling every task to release its overlay ([#574](https://github.com/jeremysball/taskferry/issues/574)) ([5167eb0](https://github.com/jeremysball/taskferry/commit/5167eb03eb3cb6d41c3c9502659b4fddad4a7728))
+* **summary:** default to muse-spark-1.3 now that mimo-v2.5-free is gone ([#608](https://github.com/jeremysball/taskferry/issues/608)) ([2b4128e](https://github.com/jeremysball/taskferry/commit/2b4128e9634faaab64af5a106aa58da9e6d59d75))
+* **taskferry:** expose full prompt via result fields ([#488](https://github.com/jeremysball/taskferry/issues/488)) ([#538](https://github.com/jeremysball/taskferry/issues/538)) ([e5f02ab](https://github.com/jeremysball/taskferry/commit/e5f02ab650c7871a55598cae37ed3fa8cf56ccc6))
+
 ## [4.4.0](https://github.com/jeremysball/taskferry/compare/taskferry-v4.3.0...taskferry-v4.4.0) (2026-08-25)
 
 

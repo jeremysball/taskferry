@@ -5467,8 +5467,8 @@ function bootstrapManagerContext(ctx) {
   // cheap (one read of the state file) and gives the sweeps a record of
   // what a *different* daemon might have written to disk before this one
   // claimed the state -- the in-memory map only knows this daemon's load.
-  // An absent store degrades to an empty map, which makes every sweep's
-  // disk check a no-op. An unreadable one (stateLoadError) leaves the
+  // An absent store degrades to an empty map, so the disk check adds no
+  // protection beyond the in-memory map. An unreadable one (stateLoadError) leaves the
   // in-memory map empty too, so every record-guarded sweep below takes
   // `failClosed` and skips rather than reading every entry as an orphan.
   ctx.state.persistedTasks = readPersistedTasks(ctx.paths.TASKS_FILE);

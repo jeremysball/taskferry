@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
+import fsp from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { createTaskEvents } from "./events.js";
@@ -22,6 +23,7 @@ import { loadEnvFile, watchEnvFile } from "./env-file.js";
 import { loadProjectConfig, resolveReadOnlyProjectBinds, verificationPromptBlock } from "./project-config.js";
 import { TASKFERRY_OUTPUT_DIR_ENV, DEFAULT_MAX_OUTPUT_FILE_BYTES, MAX_SAFE_OUTPUT_FILE_BYTES, ensureTaskOutputDir, listTaskOutputFiles, outputDirPromptBlock, readTaskOutputFile, resolveOutputDirRoot, resolveTaskOutputDir } from "./output-dir.js";
 import { computeDoctorStats } from "./doctor-stats.js";
+import { isDeferredCleanupReapable, registerDeferredCleanup, runDeferredCleanup } from "./deferred-cleanup.js";
 import { DEFAULT_TASK_RETENTION_DAYS, archiveEvictedTasks, partitionByRetention } from "./retention.js";
 
 export { DEFAULT_MAX_OUTPUT_FILE_BYTES, MAX_SAFE_OUTPUT_FILE_BYTES };
@@ -86,6 +88,7 @@ export { DEFAULT_MAX_OUTPUT_FILE_BYTES, MAX_SAFE_OUTPUT_FILE_BYTES };
  * @property {string|null} [headDriftTo]
  * @property {boolean|null} [headDriftRecovered]
  * @property {string|null} [outputDir]
+ * @property {string[]} [deferredCleanup]
  * @property {NodeJS.ProcessEnv} [resumeEnv]
  * @property {string[]} [resumeAllowedDirs]
  * @property {string[]} [resumeRoBind]
@@ -784,6 +787,8 @@ export function isOutsideDirectory(directory, candidate) {
  * @property {() => void} requireOverlaySupport
  * @property {(env?: NodeJS.ProcessEnv, taskId?: string) => NodeJS.ProcessEnv} dispatchEnvironment
  * @property {(env?: NodeJS.ProcessEnv) => NodeJS.ProcessEnv} summaryEnvironment
+ * @property {(target: string) => void} [deferredRmFn]
+ * @property {string[]} [deferredAllowedRoots]
  * @property {(taskId: string) => void} settleWaiters
  * @property {() => void} launchQueuedTasks
  * @property {(taskId: string) => void} persistTask
@@ -1366,10 +1371,15 @@ function buildBwrapBinds(ctx, launchInfo, task, spawnEnv, role) {
   // same real-disk storage sandboxedDataHome uses) and rw-bind each dir at
   // that same path so bwrap sees a real, writable mount. Per-task (not
   // shared) so one task's cache can't perturb or bloat another's.
-  const uvCacheDir = path.join(ctx.cacheDir, "uv-cache", task.id);
-  const uvToolsDir = path.join(ctx.cacheDir, "uv-tools", task.id);
+  // Centralized derivation (uvDirPath) keeps the worker and the check gate
+  // in lockstep, and namespaces each dir by its owning stateDir so the boot
+  // sweep can never reach another daemon's uv dirs. Reaped at settlement
+  // via the task's deferred-cleanup list -- see src/deferred-cleanup.js.
+  const uvCacheDir = uvDirPath(ctx.cacheDir, ctx.stateDir, task.id, "uv-cache");
+  const uvToolsDir = uvDirPath(ctx.cacheDir, ctx.stateDir, task.id, "uv-tools");
   fs.mkdirSync(uvCacheDir, { recursive: true, mode: 0o700 });
   fs.mkdirSync(uvToolsDir, { recursive: true, mode: 0o700 });
+  registerDeferredCleanup(task, uvCacheDir, uvToolsDir);
   extraRwBinds.push(uvCacheDir, uvToolsDir);
   sandboxEnv.UV_CACHE_DIR = uvCacheDir;
   sandboxEnv.UV_TOOL_DIR = uvToolsDir;
@@ -1672,6 +1682,22 @@ function onChildEnd(shared) {
  */
 function finishChildSettlement(ctx, shared) {
   const task = shared.task;
+  // Second drain, for the tasks releaseOverlayForTask never sees: a
+  // sandboxed dispatch run with --no-overlay still gets per-task uv dirs,
+  // but extractChangesetForTaskRecord returns early on a task with no
+  // overlayDirs, so no accept/reject/sweep path ever fires for it. Guarded
+  // on the overlay being gone because a task still holding one owns it (a
+  // `pending` changeset, a check gate about to spawn) and its deferred
+  // paths with it -- the gate reads the very paths the worker ran with, so
+  // reaping them here would corrupt an in-flight verification run. Runs
+  // before the persist below so the terminal snapshot records an
+  // already-emptied list.
+  if (!task.overlayDirs) {
+    reportDeferredCleanup(task, runDeferredCleanup(task, {
+      rmFn: ctx.deferredRmFn,
+      allowedRoots: ctx.deferredAllowedRoots,
+    }));
+  }
   try {
     ctx.persistTask(task.id);
   } catch {
@@ -1939,6 +1965,14 @@ function spawnTaskChild(ctx, launchInfo, task) {
     // BEFORE the explicit persistTask() below ensures the durable record
     // reflects the post-extract changesetStatus.
     ctx.extractChangesetForTask(task);
+    // Drain the deferred list at the same point finishChildSettlement /
+    // onChildError do -- every settlement path must drain. A spawn failure
+    // that pre-dates overlay creation (e.g. the dispatch's own pre-overlay
+    // throw) means no deferred list either, so the drain is a no-op.
+    reportDeferredCleanup(task, runDeferredCleanup(task, {
+      rmFn: ctx.deferredRmFn,
+      allowedRoots: ctx.deferredAllowedRoots,
+    }));
     ctx.persistTask(task.id);
     void ctx.scheduleActivity(task, { force: true }).then(() => ctx.activityCache.evictTask(task.id));
     ctx.logHasEventCache.delete(task.logPath);
@@ -2004,6 +2038,80 @@ const CHECK_GATE_OUTPUT_CAP_BYTES = 256 * 1024;
 // .superpowers/specs/2026-08-03-lowerdir-launch-stagger-design.md for why a
 // per-directory gate was rejected in favor of a simpler global one.
 const DEFAULT_LOWERDIR_STAGGER_MS = 3000;
+
+// Per-task uv cache + tool dirs (<cacheDir>/uv-{cache,tools}/<taskId>)
+// accumulate without bound across a long-lived install -- each uvx run pulls
+// a full interpreter plus wheels, and a project that runs thousands of
+// ferries reaches tens of GB. Reaped at real settlement
+// (src/deferred-cleanup.js) and swept at boot. The two buckets the daemon
+// owns for cleanliness.
+export const UV_DIR_BUCKETS = ["uv-cache", "uv-tools"];
+// Hash length used to namespace new uv dirs by their owning state dir (see
+// uvDirNamespace). 12 hex chars = 48 bits: collision-safe for the thousands
+// of state dirs a developer might touch over a career, short enough not to
+// dominate the path the worker sees in $UV_CACHE_DIR.
+const UV_DIR_NAMESPACE_HASH_BYTES = 12;
+/** Pre-namespace flat uv dirs were named by bare task id (`oc_<base36>_<hex>`). */
+const LEGACY_UV_DIR_ENTRY = /^oc_[a-z0-9]+_[0-9a-f]+$/;
+// Default age floor for legacy flat uv dirs (those without a state-dir
+// namespace -- pre-#594 records whose uv dirs landed directly under
+// <cacheDir>/uv-cache/oc_*). 7 days: long enough that an active developer
+// who just upgraded is unaffected, short enough that the existing 30-100G
+// of accumulated dirts is reaped within a week.
+export const DEFAULT_UV_LEGACY_SWEEP_AGE_DAYS = 7;
+
+/**
+ * Short stable namespace derived from the owning state dir. Every new uv
+ * dir the daemon creates is rooted at `<cacheDir>/uv-{cache,tools}/<ns>/<id>`,
+ * so a daemon only ever sweeps its own namespace and a `tasks.json` (or
+ * `cacheDir`) leaked from one state dir cannot convince a different daemon
+ * to reap its in-flight tasks' uv dirs.
+ *
+ * The namespace is a deterministic prefix of a sha256 hex digest, not a
+ * reverse-DNS string -- any change to `stateDir` (a rebase to a different
+ * checkout, a parallel worktree) yields a new namespace, so two daemons
+ * sharing the same `cacheDir` never share a uv dir.
+ * @param {string} stateDir
+ * @returns {string}
+ */
+export function uvDirNamespace(stateDir) {
+  const digest = createHash("sha256").update(path.resolve(stateDir)).digest("hex");
+  return digest.slice(0, UV_DIR_NAMESPACE_HASH_BYTES);
+}
+
+/**
+ * Single source of truth for the per-task uv dir layout. Both the worker's
+ * sandbox (`buildBwrapBinds`, ~1365) and the check gate's re-mount
+ * (`startCheckGate`, ~6493) call this; the boot sweep reads it back. Returns
+ * the canonical path so callers can `mkdirSync` and `rw-bind` at exactly the
+ * path the dir lives at, never a sibling or a typo of one.
+ * @param {string} cacheDir
+ * @param {string} stateDir
+ * @param {string} taskId
+ * @param {"uv-cache"|"uv-tools"} bucket
+ */
+export function uvDirPath(cacheDir, stateDir, taskId, bucket) {
+  if (!UV_DIR_BUCKETS.includes(bucket)) {
+    throw new Error(`error: unknown uv dir bucket ${JSON.stringify(bucket)}`);
+  }
+  return path.join(cacheDir, bucket, uvDirNamespace(stateDir), taskId);
+}
+
+/**
+ * The two roots a freshly configured per-task uv dir can live under for the
+ * current daemon: `<cacheDir>/uv-cache/<ns>` and `<cacheDir>/uv-tools/<ns>`,
+ * where `<ns>` is `uvDirNamespace(stateDir)`. `confinePath` and the boot
+ * sweep's safe-realpath check use this to refuse anything outside the
+ * current daemon's own namespace -- a `tasks.json` (or hand-edited list)
+ * pointing at another state dir's uv dir is rejected before the rm fires.
+ * @param {string} cacheDir
+ * @param {string} stateDir
+ * @returns {string[]}
+ */
+export function uvDirRootsFor(cacheDir, stateDir) {
+  const ns = uvDirNamespace(stateDir);
+  return UV_DIR_BUCKETS.map((bucket) => path.join(cacheDir, bucket, ns));
+}
 
 /**
  * The subset of `createTaskManager`'s closure that `result`'s extracted
@@ -4484,6 +4592,7 @@ function resolveTimeoutOptions(rawOptions) {
     // fast-forward clock.
     opencodeVersionTtlMs: resolvePositiveIntOption(rawOptions.opencodeVersionTtlMs, process.env.TASKFERRY_OPENCODE_VERSION_TTL_MS, config.opencodeVersionTtlMs, DEFAULT_OPENCODE_VERSION_TTL_MS),
     opencodeVersionTimeoutMs: resolvePositiveIntOption(rawOptions.opencodeVersionTimeoutMs, process.env.TASKFERRY_OPENCODE_VERSION_TIMEOUT_MS, config.opencodeVersionTimeoutMs, DEFAULT_OPENCODE_VERSION_TIMEOUT_MS),
+    uvLegacySweepAgeDays: resolveNonNegativeIntOption(rawOptions.uvLegacySweepAgeDays, process.env.TASKFERRY_UV_LEGACY_SWEEP_AGE_DAYS, config.uvLegacySweepAgeDays, DEFAULT_UV_LEGACY_SWEEP_AGE_DAYS),
     maxOutputFileBytes,
   };
 }
@@ -4561,6 +4670,7 @@ function resolveFilesystemSimpleOptions(rawOptions) {
     checkOverlaySupportFn: rawOptions.checkOverlaySupportFn ?? checkOverlaySupport,
     runOverlayCommandFn: rawOptions.runOverlayCommandFn ?? defaultOverlayRunCommand,
     rmOverlayTreeFn: rawOptions.rmOverlayTreeFn,
+    rmDeferredFn: rawOptions.rmDeferredFn,
     // No default: undefined here means changeset.js's own extractGitDiff/
     // extractNonGitDiff/applyChangeset default (the real blocking sleepSync)
     // applies, same as before this option existed. Only a caller that sets
@@ -4834,6 +4944,7 @@ function initManagerLimits(opts) {
     summarizerTimeout: nonNegativeInteger(opts.summarizerTimeoutMs, DEFAULT_SUMMARIZER_TIMEOUT_MS),
     activityWords: positiveInteger(opts.activityMaxWords, 75),
     taskRetentionDays: nonNegativeInteger(opts.taskRetentionDays, DEFAULT_TASK_RETENTION_DAYS),
+    uvLegacySweepAgeMs: nonNegativeInteger(opts.uvLegacySweepAgeDays, DEFAULT_UV_LEGACY_SWEEP_AGE_DAYS) * 86_400_000,
     maxOutputFileBytes: (() => {
       const v = positiveInteger(opts.maxOutputFileBytes, DEFAULT_MAX_OUTPUT_FILE_BYTES);
       if (v > MAX_BUFFER_BYTES) {
@@ -5020,7 +5131,11 @@ function buildManagerEnvHelpers(ctx) {
    * @param {{overlayDirs?: {root:string,tmpRoot:string}|null}} task
    * @returns {boolean} whether cleanup failed
    */
-  const releaseOverlay = (task) => releaseOverlayForTask(task, { rmOverlayTreeFn: ctx.opts.rmOverlayTreeFn });
+  const releaseOverlay = (task) => releaseOverlayForTask(task, {
+    rmOverlayTreeFn: ctx.opts.rmOverlayTreeFn,
+    deferredRmFn: ctx.opts.rmDeferredFn,
+    deferredAllowedRoots: uvDirRootsFor(ctx.opts.cacheDir, ctx.opts.stateDir),
+  });
   // sanitizedEnvironment() delegates to buildSanitizedEnvironment() (module
   // scope, fully documented there) -- see that function's doc comment for
   // the three-layer env-precedence rules.
@@ -5115,6 +5230,31 @@ function buildManagerInternalHelpers(ctx) {
     hasLiveOverlay: (task) => hasLiveOverlayForTask(task, { existsFn: ctx.opts.existsFn }),
     sweepOrphanedPromptFiles: () => sweepOrphanedPromptFilesFor({ PROMPT_DIR: ctx.paths.PROMPT_DIR, tasks: ctx.maps.tasks, persistedTasks: ctx.state.persistedTasks }),
     sweepOrphanedOutputDirs: () => sweepOrphanedOutputDirsFor({ OUTPUT_DIR_ROOT: resolveOutputDirRoot(ctx.opts.stateDir), tasks: ctx.maps.tasks, persistedTasks: ctx.state.persistedTasks, readdirFn: ctx.opts.readdirFn, lstatFn: ctx.opts.lstatFn, retentionDays: ctx.limits.taskRetentionDays }),
+    sweepDeferredCleanup: () => sweepDeferredCleanupFor({
+      tasks: ctx.maps.tasks,
+      persistedTasks: ctx.state.persistedTasks,
+      failClosed: ctx.state.stateLoadError != null,
+      persistTask: (taskId) => ctx.helpers.persistTask(taskId),
+      allowedRoots: uvDirRootsFor(ctx.opts.cacheDir, ctx.opts.stateDir),
+    }),
+    sweepOrphanedUvDirs: () => sweepOrphanedUvDirsFor({
+      cacheDir: ctx.opts.cacheDir,
+      stateDir: ctx.opts.stateDir,
+      tasks: ctx.maps.tasks,
+      persistedTasks: ctx.state.persistedTasks,
+      failClosed: ctx.state.stateLoadError != null,
+      readdirFn: ctx.opts.readdirFn,
+      // Async, fire-and-forget: the rm fires after the listening socket is
+      // accepted (daemon.js's listen() promise resolves before this runs)
+      // and never blocks the event loop. Logged on failure but never
+      // propagated -- a clean shutdown must not race a transient EIO.
+      removeDirFn: (target) => {
+        fsp.rm(target, { recursive: true, force: true }).catch((err) => {
+          console.error(`taskferry: failed to remove uv dir ${target}: ${errMessage(err)}`);
+        });
+      },
+      legacySweepAgeMs: ctx.limits.uvLegacySweepAgeMs,
+    }),
     /** @param {string} model @param {NodeJS.ProcessEnv} [env] @returns {string[]} Resolves the
      * opencode variants table for a model: the test-injected
      * `opencodeVariantsTable` seam when set, otherwise the on-disk
@@ -5180,7 +5320,7 @@ function buildManagerInternalHelpers(ctx) {
      * delegated to {@link startTaskFor}, which takes every factory closure
      * dependency explicitly via `ctx`.
      * @param {Task} task */
-    startTask: (task) => startTaskFor(task, { pendingLaunches: ctx.maps.pendingLaunches, SUMMARY_DIR: ctx.paths.SUMMARY_DIR, PROMPT_DIR: ctx.paths.PROMPT_DIR, spawnFn: ctx.opts.spawnFn, runOverlayCommandFn: ctx.opts.runOverlayCommandFn, sandboxEnabled: ctx.opts.sandboxEnabled, platform: ctx.opts.platform, overlayEnabled: ctx.opts.overlayEnabled, overlayTmpRoot: ctx.opts.overlayTmpRoot, allowedDirs: ctx.opts.allowedDirs, roBind: ctx.opts.roBind, stateDir: ctx.opts.stateDir, cacheDir: ctx.opts.cacheDir, runtimeDir: ctx.opts.runtimeDir, socketPath: ctx.opts.socketPath, existsFn: ctx.opts.existsFn, statFn: ctx.opts.statFn, lstatFn: ctx.opts.lstatFn, readdirFn: ctx.opts.readdirFn, readProcStartTimeFn: ctx.opts.readProcStartTimeFn, sandboxDenylist: ctx.opts.sandboxDenylist, resolveGitCommonDirFn: ctx.opts.resolveGitCommonDirFn, resolveGitDirFn: ctx.opts.resolveGitDirFn, requireBwrap: () => ctx.env.requireBwrap(), requireOverlaySupport: () => ctx.env.requireOverlaySupport(), dispatchEnvironment: (env, taskId) => ctx.env.dispatchEnvironment(env, taskId), summaryEnvironment: (env) => ctx.env.summaryEnvironment(env), settleWaiters: (taskId) => ctx.helpers.settleWaiters(taskId), launchQueuedTasks: () => ctx.helpers.launchQueuedTasks(), persistTask: (taskId) => ctx.helpers.persistTask(taskId), flushPersist: () => ctx.helpers.flushPersist(), scheduleActivity: (task, options) => ctx.helpers.scheduleActivity(task, options), classifyTrailingLogFailure: (task, executor) => ctx.helpers.classifyTrailingLogFailure(task, executor), startRunningWatcher: (task, executor) => ctx.helpers.startRunningWatcher(task, executor), stopRunningWatcher: (taskId) => ctx.helpers.stopRunningWatcher(taskId), extractChangesetForTask: (task) => ctx.env.extractChangesetForTask(task), sendSignal: (pid, signal) => ctx.helpers.sendSignal(pid, signal), activityCache: ctx.activity.cache, logHasEventCache: ctx.maps.logHasEventCache, escalationTimers: ctx.maps.escalationTimers, tasks: ctx.maps.tasks, decRunning: (task) => { ctx.state.runningCount--; const q = ctx.maps.providerQueues.get(providerOf(task.model)); if (q) { q.runningCount--; } }, incRunning: (task) => { ctx.state.runningCount++; const q = ctx.maps.providerQueues.get(providerOf(task.model)); if (q) { q.runningCount++; } }, readSessionIdFromLog, evaluateOutputCompleteness, attemptCrashRecovery }),
+    startTask: (task) => startTaskFor(task, { pendingLaunches: ctx.maps.pendingLaunches, SUMMARY_DIR: ctx.paths.SUMMARY_DIR, PROMPT_DIR: ctx.paths.PROMPT_DIR, spawnFn: ctx.opts.spawnFn, runOverlayCommandFn: ctx.opts.runOverlayCommandFn, sandboxEnabled: ctx.opts.sandboxEnabled, platform: ctx.opts.platform, overlayEnabled: ctx.opts.overlayEnabled, overlayTmpRoot: ctx.opts.overlayTmpRoot, allowedDirs: ctx.opts.allowedDirs, roBind: ctx.opts.roBind, stateDir: ctx.opts.stateDir, cacheDir: ctx.opts.cacheDir, runtimeDir: ctx.opts.runtimeDir, socketPath: ctx.opts.socketPath, existsFn: ctx.opts.existsFn, statFn: ctx.opts.statFn, lstatFn: ctx.opts.lstatFn, readdirFn: ctx.opts.readdirFn, readProcStartTimeFn: ctx.opts.readProcStartTimeFn, sandboxDenylist: ctx.opts.sandboxDenylist, resolveGitCommonDirFn: ctx.opts.resolveGitCommonDirFn, resolveGitDirFn: ctx.opts.resolveGitDirFn, requireBwrap: () => ctx.env.requireBwrap(), requireOverlaySupport: () => ctx.env.requireOverlaySupport(), dispatchEnvironment: (env, taskId) => ctx.env.dispatchEnvironment(env, taskId), summaryEnvironment: (env) => ctx.env.summaryEnvironment(env), deferredRmFn: ctx.opts.rmDeferredFn, deferredAllowedRoots: uvDirRootsFor(ctx.opts.cacheDir, ctx.opts.stateDir), settleWaiters: (taskId) => ctx.helpers.settleWaiters(taskId), launchQueuedTasks: () => ctx.helpers.launchQueuedTasks(), persistTask: (taskId) => ctx.helpers.persistTask(taskId), flushPersist: () => ctx.helpers.flushPersist(), scheduleActivity: (task, options) => ctx.helpers.scheduleActivity(task, options), classifyTrailingLogFailure: (task, executor) => ctx.helpers.classifyTrailingLogFailure(task, executor), startRunningWatcher: (task, executor) => ctx.helpers.startRunningWatcher(task, executor), stopRunningWatcher: (taskId) => ctx.helpers.stopRunningWatcher(taskId), extractChangesetForTask: (task) => ctx.env.extractChangesetForTask(task), sendSignal: (pid, signal) => ctx.helpers.sendSignal(pid, signal), activityCache: ctx.activity.cache, logHasEventCache: ctx.maps.logHasEventCache, escalationTimers: ctx.maps.escalationTimers, tasks: ctx.maps.tasks, decRunning: (task) => { ctx.state.runningCount--; const q = ctx.maps.providerQueues.get(providerOf(task.model)); if (q) { q.runningCount--; } }, incRunning: (task) => { ctx.state.runningCount++; const q = ctx.maps.providerQueues.get(providerOf(task.model)); if (q) { q.runningCount++; } }, readSessionIdFromLog, evaluateOutputCompleteness, attemptCrashRecovery }),
     /**
      * @param {string} taskId
      * @param {{force?: boolean}} options
@@ -5439,6 +5579,23 @@ function bootstrapManagerContext(ctx) {
   // these on a real reboot for free; this only matters for a same-boot
   // daemon restart.
   ctx.helpers.sweepOrphanedOverlays();
+  // Deferred-cleanup drain, after the overlay sweep so a task whose overlay
+  // release only just succeeded is already out of the way, and before the
+  // retention sweep below so a record about to be evicted still gets its
+  // paths reaped rather than stranding them. Two directions: the record
+  // side (paths a killed daemon never got to drain) and the disk side (uv
+  // dirs that predate the deferred list, or whose owning record retention
+  // already evicted). Both refuse to touch anything outside this daemon's
+  // own state-dir namespace, and both fail closed when the persisted store
+  // was unreadable on boot. See src/deferred-cleanup.js.
+  ctx.helpers.sweepDeferredCleanup();
+  // The disk-side counterpart: reaps per-task uv-cache/uv-tools entries
+  // pre-dating the deferred list, both in this daemon's namespaced
+  // subtree and (with a configurable age floor) flat legacy dirs. Readdir
+  // + filter run synchronously; the actual rm fires async via fsp.rm so
+  // boot is not blocked (the listen() promise in daemon.js resolves
+  // before the queued rm's I/O completes).
+  ctx.helpers.sweepOrphanedUvDirs();
   // Retention sweep, deliberately *after* every companion sweep above. Those
   // sweeps discover what to clean from live task records (an overlay's
   // recorded tmpRoot, a prompt file's id), so evicting a record first would
@@ -6081,11 +6238,25 @@ const CALLER_ENV_EXCLUDED = new Set(["PATH", "HOME", ...TASKFERRY_PLUMBING_ENV_V
  * created. A failed removal leaves overlayDirs intact for the startup sweep
  * to retry. Extracted out of `createTaskManager`'s `releaseOverlay` closure;
  * `rmOverlayTreeFn` is threaded in explicitly via `ctx`.
- * @param {{overlayDirs?: {root:string,tmpRoot:string}|null}} task
- * @param {{rmOverlayTreeFn?: (path: string) => void}} ctx
+ *
+ * Also the primary drain for the task's deferred cleanup list. Every caller
+ * of this function is a point where the ferry is done with its sandbox --
+ * accept, reject, the no-changes auto-accept, an extraction failure, the
+ * orphan sweep, and a restart resume (which re-creates whatever it needs
+ * on the next launch) -- which is the same moment the paths registered
+ * against the task stop being anyone's to read. The drain runs before the
+ * overlay guard so a task whose overlay was already released still gets
+ * reaped, and runs unconditionally so `sweepOverlayEntry`'s synthetic
+ * `{ overlayDirs }` object (no id, no list) is a harmless no-op.
+ * @param {{id?: string, overlayDirs?: {root:string,tmpRoot:string}|null, deferredCleanup?: string[]}} task
+ * @param {{rmOverlayTreeFn?: (path: string) => void, deferredRmFn?: (path: string) => void, deferredAllowedRoots?: string[]}} ctx
  * @returns {boolean} whether cleanup failed
  */
 function releaseOverlayForTask(task, ctx) {
+  reportDeferredCleanup(task, runDeferredCleanup(task, {
+    rmFn: ctx.deferredRmFn,
+    allowedRoots: ctx.deferredAllowedRoots,
+  }));
   if (!task.overlayDirs) return false;
   const removal = cleanupOverlay({
     root: task.overlayDirs.root,
@@ -6094,6 +6265,29 @@ function releaseOverlayForTask(task, ctx) {
   });
   if (removal.removed) task.overlayDirs = null;
   return !removal.removed;
+}
+
+/**
+ * Logs whatever a deferred-cleanup drain could not remove. Failures are left
+ * on the task's list for the next drain (or the boot sweep) to retry, so
+ * this is a report, not an error path -- a busy mount or an EACCES here
+ * must never propagate out of a settlement handler.
+ *
+ * Refused entries (paths the operator pointed outside the cache root via a
+ * hand-edited tasks.json) are dropped from the list permanently; this is
+ * the only place a refusal is reported, so it logs the entry's reason once.
+ * @param {{id?: string}} task
+ * @param {{failed: Array<{path: string, error: string}>, refused: Array<{path: string, reason: string}>}} result
+ */
+function reportDeferredCleanup(task, result) {
+  if (result.refused.length === 0 && result.failed.length === 0) return;
+  const label = task.id ? `task ${task.id}` : "an unattributed task";
+  for (const entry of result.refused) {
+    console.error(`taskferry: deferred cleanup of ${entry.path} for ${label} refused (will not retry): ${entry.reason}`);
+  }
+  for (const failure of result.failed) {
+    console.error(`taskferry: deferred cleanup of ${failure.path} for ${label} failed, will retry: ${failure.error}`);
+  }
 }
 
 /**
@@ -6525,11 +6719,16 @@ function startCheckGate(task, ctx) {
   // read-only default UV_CACHE_DIR. Re-bind the worker's deterministic
   // per-task uv dirs and re-point the env vars at them, exactly as
   // buildBwrapBinds did for the worker, so the gate verifies the same
-  // environment the worker actually ran in.
-  const uvCacheDir = path.join(ctx.cacheDir, "uv-cache", task.id);
-  const uvToolsDir = path.join(ctx.cacheDir, "uv-tools", task.id);
+  // environment the worker actually ran in. Same `uvDirPath` derivation
+  // as the worker so both reach the same on-disk dirs; the gate's
+  // re-register is a no-op when the worker already did it, and re-adds the
+  // path when the gate was re-run by an interrupted-boot sweep that
+  // drained the task's list before this point.
+  const uvCacheDir = uvDirPath(ctx.cacheDir, ctx.stateDir, task.id, "uv-cache");
+  const uvToolsDir = uvDirPath(ctx.cacheDir, ctx.stateDir, task.id, "uv-tools");
   fs.mkdirSync(uvCacheDir, { recursive: true, mode: 0o700 });
   fs.mkdirSync(uvToolsDir, { recursive: true, mode: 0o700 });
+  registerDeferredCleanup(task, uvCacheDir, uvToolsDir);
   const spawnArgs = buildBwrapArgs({
     directory: task.directory,
     stateDir: ctx.stateDir,
@@ -7378,6 +7577,100 @@ function promptFileIsOrphan(entry, ctx) {
 }
 
 /**
+ * One per-bucket orphan sweep, shared by every "list a directory, decide
+ * which entries are orphans, remove them" entry point in this file (output
+ * dirs and uv dirs at minimum). Each caller supplies its own eligibility
+ * predicate; everything else -- readdir-then-filter-then-stat-then-rm, the
+ * ENOENT-tolerant missing-root handling, the structured error logging --
+ * lives here once.
+ *
+ * "Always filter, then process" (CLAUDE.md, taskferry#513): the cheap
+ * in-memory predicate runs first, then the expensive stat/rm fires on the
+ * survivor set. Without that ordering the rm scales with the all-time
+ * directory count; with it, only with the orphan count.
+ *
+ * Errors are not swallowed. A missing root (`ENOENT`) is benign -- the
+ * daemon's first boot on a fresh machine has no cache yet -- and is
+ * silently skipped. Anything else (an EACCES, a corrupt readdir, a stat
+ * failure on a real dir) is reported on stderr, exactly the policy the
+ * overlay and prompt sweeps already follow.
+ * @param {{
+ *   root: string,
+ *   readdirFn: (path: string) => string[],
+ *   isCandidate: (entry: string) => boolean,
+ *   lstatFn?: (path: string) => fs.Stats,
+ *   retentionMs?: number,  // entries newer than this are skipped; 0/undefined disables
+ *   keepMode?: "old"|"recent",
+ *   removeEntry: (entryPath: string) => void,
+ *   label: string,         // for log messages ("output dir", "uv-cache", ...)
+ * }} ctx
+ */
+function sweepBucket(ctx) {
+  let entries;
+  try {
+    entries = ctx.readdirFn(ctx.root);
+  } catch (err) {
+    if (errCode(err) === "ENOENT") return;
+    console.error(`taskferry: failed to read ${ctx.label} directory ${ctx.root}: ${errMessage(err)}`);
+    return;
+  }
+  for (const entry of entries) {
+    if (ctx.isCandidate(entry)) {
+      const full = path.join(ctx.root, entry);
+      if (passesRetention(full, ctx) !== false) removeEntryLogging(full, ctx);
+    }
+  }
+}
+
+/**
+ * Single-pass retention gate: returns true if `full` should be reaped.
+ * `ctx.keepMode` selects the window's semantics:
+ *   "old"    -- entries OLDER than the cutoff are kept (default; output-dir
+ *               retention, where mtime-young entries are crash debris worth
+ *               removing).
+ *   "recent" -- entries NEWER than the cutoff are kept (uv legacy flat dirs,
+ *               where mtime-young entries could belong to a daemon that's
+ *               only minutes old and we don't want to touch them).
+ * Returns undefined if the entry has no retention state (i.e. either no
+ * cutoff and no lstatFn -- always reap, or an ENOENT stat already filtered).
+ * @param {string} full
+ * @param {{retentionMs?: number, keepMode?: "old"|"recent", lstatFn?: (path: string) => fs.Stats, label: string}} ctx
+ * @returns {boolean | undefined}
+ */
+function passesRetention(full, ctx) {
+  const cutoff = ctx.retentionMs && ctx.retentionMs > 0 ? Date.now() - ctx.retentionMs : undefined;
+  if (cutoff === undefined && !ctx.lstatFn) return true;
+  const lstat = ctx.lstatFn ?? fs.lstatSync;
+  let stats;
+  try {
+    stats = lstat(full);
+  } catch (err) {
+    if (errCode(err) === "ENOENT") return undefined;
+    console.error(`taskferry: failed to stat ${ctx.label} entry ${full}: ${errMessage(err)}`);
+    return undefined;
+  }
+  if (cutoff === undefined) return true;
+  return matchesRetentionPolicy(stats.mtimeMs, cutoff, ctx.keepMode ?? "old");
+}
+
+/** @param {number} mtimeMs @param {number} cutoff @param {"old"|"recent"} keepMode @returns {boolean} */
+function matchesRetentionPolicy(mtimeMs, cutoff, keepMode) {
+  const isOlder = mtimeMs < cutoff;
+  if (keepMode === "old") return !isOlder;
+  return isOlder;
+}
+
+/** @param {string} full @param {{removeEntry: (path: string) => void, label: string}} ctx */
+function removeEntryLogging(full, ctx) {
+  try {
+    ctx.removeEntry(full);
+  } catch (err) {
+    if (errCode(err) === "ENOENT") return;
+    console.error(`taskferry: failed to remove ${ctx.label} entry ${full}: ${errMessage(err)}`);
+  }
+}
+
+/**
  * Sweeps orphaned output dirs under <stateDir>/outputs/. Each dispatch
  * reserves its output dir via ensureTaskOutputDir() before launch --
  * `bwrap --bind` needs the source path to exist on the host -- so a
@@ -7396,75 +7689,34 @@ function promptFileIsOrphan(entry, ctx) {
  * This sweep exists for crash debris, and crash debris is by definition from
  * the boot that just crashed, so bounding it to the retention window costs
  * nothing real and keeps `<stateDir>/outputs/` archival.
- * @param {{OUTPUT_DIR_ROOT: string, tasks: Map<string, Task>, persistedTasks?: Map<string, Record<string, any>>, readdirFn: (path: string) => string[], lstatFn?: (path: string) => fs.Stats, removeDirFn?: (path: string) => void, retentionDays?: number}} ctx
+ * @param {{OUTPUT_DIR_ROOT: string, tasks: Map<string, Task>, persistedTasks?: Map<string, Record<string, any>>|null, readdirFn: (path: string) => string[], lstatFn?: (path: string) => fs.Stats, removeDirFn?: (path: string) => void, retentionDays?: number}} ctx
  */
-export function sweepOrphanedOutputDirsFor(ctx) {
-  let entries;
-  try {
-    entries = ctx.readdirFn(ctx.OUTPUT_DIR_ROOT);
-  } catch {
-    return;
-  }
-  // Always filter, then process (CLAUDE.md, taskferry#513): narrow to the
-  // orphan subset via cheap in-memory tasks.has before any per-entry FS work
-  // (stat/rm). Previously this mixed readdir iteration with immediate
-  // removal, but the expensive per-entry work (lstat + rm -rf) still scaled
-  // with every historical directory even when only a handful are orphans.
-  // Collecting the eligible set first bounds FS work to that set.
-  const orphanEntries = collectOrphanOutputEntries(entries, ctx.tasks, ctx.persistedTasks);
-  if (orphanEntries.length === 0) return;
-  const lstat = ctx.lstatFn ?? fs.lstatSync;
-  const removeDir = ctx.removeDirFn ?? removeDirIfPresent;
-  const retentionDays = ctx.retentionDays ?? 0;
-  const olderThan = retentionDays > 0 ? Date.now() - retentionDays * 86_400_000 : undefined;
-  for (const entry of orphanEntries) {
-    sweepOrphanOutputEntry(path.join(ctx.OUTPUT_DIR_ROOT, entry), lstat, removeDir, olderThan);
-  }
-}
-
-/**
- * Cheap in-memory filter for the sweep: returns only entries whose id has
- * no matching task, neither in the live map nor in the boot-time disk
- * snapshot (taskferry#515 -- a stale daemon's live map has no record of a
- * different daemon's tasks, but the disk does, and deleting a live task's
- * output dir would destroy its deliverable; an unreadable store degrades
- * to an empty snapshot, i.e. exactly the pre-existing behavior). Ids this
- * daemon loaded are governed by the live map alone. No FS work here, so
- * this scales with the directory listing size but does no per-entry I/O.
- * @param {string[]} entries
+/** Cheap in-memory filter extracted to keep {@link sweepOrphanedOutputDirsFor}'s
+ * candidate predicate under the lint complexity budget.
+ * @param {string} entry
  * @param {Map<string, Task>} tasks
- * @param {Map<string, Record<string, any>>|undefined} [persistedTasks]
- * @returns {string[]}
+ * @param {Map<string, Record<string, any>>|null} persistedTasks
+ * @returns {boolean}
  */
-function collectOrphanOutputEntries(entries, tasks, persistedTasks) {
-  const orphans = [];
-  for (const entry of entries) {
-    const meaningful = entry && entry !== "." && entry !== "..";
-    if (meaningful && !tasks.has(entry) && !persistedTasks?.has(entry)) orphans.push(entry);
-  }
-  return orphans;
+function isOrphanOutputEntry(entry, tasks, persistedTasks) {
+  if (!entry || entry === "." || entry === "..") return false;
+  if (tasks.has(entry)) return false;
+  return !(persistedTasks && persistedTasks.has(entry));
 }
 
-/**
- * Expensive per-orphan FS work: stat the path then rm it. Called only for
- * the filtered orphan set, so this scales with the orphan count, not the
- * all-time directory count. The lstat is intentionally after the has-filter
- * so it is not run for retained history.
- * @param {string} full
- * @param {(path: string) => fs.Stats} lstat
- * @param {(path: string) => void} removeDir
- * @param {number} [olderThan] epoch ms; entries last modified before this are kept
- */
-function sweepOrphanOutputEntry(full, lstat, removeDir, olderThan) {
-  let stats;
-  try {
-    stats = lstat(full);
-  } catch (err) {
-    if (errCode(err) === "ENOENT") return;
-    throw err;
-  }
-  if (olderThan !== undefined && stats.mtimeMs < olderThan) return;
-  removeDir(full);
+export function sweepOrphanedOutputDirsFor(/** @type {{OUTPUT_DIR_ROOT: string, tasks: Map<string, Task>, persistedTasks?: Map<string, Record<string, any>>|null, readdirFn: (path: string) => string[], lstatFn?: (path: string) => fs.Stats, removeDirFn?: (path: string) => void, retentionDays?: number}} */ ctx) {
+  const tasks = ctx.tasks;
+  const persistedTasks = ctx.persistedTasks ?? null;
+  const retentionMs = ctx.retentionDays && ctx.retentionDays > 0 ? ctx.retentionDays * 86_400_000 : 0;
+  sweepBucket({
+    root: ctx.OUTPUT_DIR_ROOT,
+    readdirFn: ctx.readdirFn,
+    isCandidate: (entry) => isOrphanOutputEntry(entry, tasks, persistedTasks),
+    lstatFn: ctx.lstatFn,
+    removeEntry: ctx.removeDirFn ?? removeDirIfPresent,
+    label: "output dir",
+    retentionMs,
+  });
 }
 
 /** Recursively remove a directory tree, tolerating it already being gone (ENOENT).
@@ -7474,6 +7726,152 @@ function removeDirIfPresent(dirPath) {
     fs.rmSync(dirPath, { recursive: true, force: false });
   } catch (err) {
     if (errCode(err) !== "ENOENT") throw err;
+  }
+}
+
+/**
+ * The boot-side counterpart to `sweepDeferredCleanupFor`, and the one that
+ * actually reclaims: `<cacheDir>/uv-{cache,tools}/<task-id>` directories
+ * predate the deferred list entirely, so no record anywhere says to remove
+ * them. Measured on this machine before the mechanism existed: 30G across
+ * 1106 uv-cache dirs and 2934 uv-tools dirs, every one belonging to a task
+ * that finished days or weeks earlier.
+ *
+ * The sweep is namespaced by the owning state dir (`uvDirNamespace`): each
+ * daemon only ever reaps `<cacheDir>/uv-{cache,tools}/<ownNs>/...`. A legacy
+ * flat dir (`<cacheDir>/uv-{cache,tools}/<taskId>`, no namespace) only
+ * exists because the daemon that created it predated this change, so it
+ * could belong to *any* current or historical state dir. Those are gated on
+ * `legacySweepAgeMs`: any flat dir mtime-younger than the floor stays put,
+ * so a developer who just upgraded is not at risk of losing a still-active
+ * task's uv dirs. Set `legacySweepAgeDays: 0` to disable legacy cleanup
+ * entirely (the namespaced path is unaffected).
+ *
+ * The persisted-tasks disk guard (`taskferry#515`) covers the namespaced
+ * pass: an id this daemon has never seen but tasks.json records belongs to
+ * a *different*, live daemon. The legacy pass has no disk guard because
+ * there is no record anywhere of which daemon created a flat dir, and
+ * that's exactly the point of the age floor.
+ *
+ * `readdirFn` and `removeDirFn` are the test seams (the real boot uses
+ * `fs.readdirSync` and `fsp.rm` -- async, so the deletion never blocks the
+ * listening socket).
+ *
+ * @param {{
+ *   cacheDir: string,
+ *   stateDir: string,
+ *   tasks: Map<string, Task>,
+ *   persistedTasks?: Map<string, Record<string, any>>|null,
+ *   failClosed?: boolean,    // true => unreadable/corrupt persistedTasks means skip namespaced pass entirely
+ *   readdirFn?: (path: string) => string[],
+ *   removeDirFn?: (path: string) => void,
+ *   lstatFn?: (path: string) => fs.Stats,
+ *   legacySweepAgeMs?: number,
+ * }} ctx
+ */
+export function sweepOrphanedUvDirsFor(ctx) {
+  const tasks = ctx.tasks;
+  const persistedTasks = ctx.persistedTasks ?? null;
+  const ownNs = uvDirNamespace(ctx.stateDir);
+  const readdirFn = ctx.readdirFn ?? ((dir) => fs.readdirSync(dir));
+  const removeDir = ctx.removeDirFn ?? ((dir) => fs.rmSync(dir, { recursive: true, force: true }));
+  const failClosed = ctx.failClosed === true;
+  for (const bucket of UV_DIR_BUCKETS) {
+    const bucketRoot = path.join(ctx.cacheDir, bucket);
+    // 1. Namespaced pass: every entry under <ownNs>/ is governed by the task
+    // it names, just like the output-dir sweep. Persisted-tasks guard
+    // (taskferry#515) keeps another daemon's live task intact, and the
+    // `failClosed` flag extends that to "the persisted store is unreadable
+    // or corrupt, so we cannot tell whose task this is -- leave it".
+    sweepBucket({
+      root: path.join(bucketRoot, ownNs),
+      readdirFn: readdirFn,
+      removeEntry: removeDir,
+      label: `${bucket} (namespace ${ownNs})`,
+      isCandidate: (entry) => {
+        if (!entry || entry === "." || entry === "..") return false;
+        const task = tasks.get(entry);
+        if (task) return isDeferredCleanupReapable(task);
+        if (failClosed) return false;
+        return !persistedTasks || !persistedTasks.has(entry);
+      },
+    });
+    // 2. Legacy pass: flat entries directly under the bucket root, no
+    // namespace. These predate the mechanism and could belong to any
+    // daemon's state dir. Age-floor gated: anything mtime-younger than the
+    // floor stays put so a freshly upgraded install is unaffected. Set the
+    // age to 0 to disable legacy cleanup entirely.
+    const legacyAgeMs = ctx.legacySweepAgeMs ?? 0;
+    if (legacyAgeMs > 0) {
+      sweepBucket({
+        root: bucketRoot,
+        readdirFn: readdirFn,
+        removeEntry: removeDir,
+        // Only task-id-shaped entries. Every other flat entry is some daemon's
+        // namespace dir (hex, never `oc_`-prefixed); an idle foreign namespace
+        // ages past the floor too, and must never be reaped from here.
+        isCandidate: (entry) => LEGACY_UV_DIR_ENTRY.test(entry),
+        lstatFn: ctx.lstatFn,
+        retentionMs: legacyAgeMs,
+        keepMode: "recent",
+        label: `${bucket} (legacy flat)`,
+      });
+    }
+  }
+}
+
+/**
+ * Boot drain for deferred cleanup: a daemon killed between a task settling
+ * and its drain running leaves the paths on disk and the list in tasks.json.
+ * Nothing else retries them, because every in-process drain hangs off an
+ * event (a child exiting, an accept, a reject) that already fired and will
+ * not fire again.
+ *
+ * Reaps only tasks `isDeferredCleanupReapable` clears -- terminal status, and
+ * not a `pending` changeset, since a pending task still owns a live overlay
+ * and a re-runnable check gate that reads the very paths on its list.
+ *
+ * Confinement is mandatory here: tasks.json is a JSON file an operator can
+ * hand-edit, and a hand-edited entry pointing outside the daemon's own
+ * cache root would otherwise be reaped by `rm -rf`. Refused entries are
+ * reported and dropped permanently (they will never become reaped).
+ *
+ * `failClosed` extends the disk-state policy to deferred cleanup: a
+ * persisted store that could not be loaded is treated as unknown, and we
+ * skip the entire drain rather than reaping paths whose ownership we
+ * cannot prove. A fresh, never-written state dir (genuinely absent
+ * tasks.json) is fine within this daemon's own namespace, where the
+ * confinement and the namespace prefix together prove ownership.
+ *
+ * @param {{
+ *   tasks: Map<string, Task>,
+ *   persistedTasks?: Map<string, Record<string, any>>|null,
+ *   failClosed?: boolean,
+ *   persistTask: (taskId: string) => void,
+ *   rmFn?: (path: string) => void,
+ *   allowedRoots: string[],
+ * }} ctx
+ */
+export function sweepDeferredCleanupFor(ctx) {
+  const failClosed = ctx.failClosed === true;
+  if (failClosed) {
+    // The persisted store was unreadable or corrupt at boot. We have no
+    // independent record of which ids another daemon might own, so
+    // reaping *any* of the on-disk deferred-cleanup entries could delete
+    // paths belonging to a live task on a different daemon. Skip the
+    // entire drain; the next boot, when the store is healthy, will retry.
+    console.error(`taskferry: skipping deferred-cleanup boot sweep: tasks.json was unreadable; deferring to a future boot with a healthy store`);
+    return;
+  }
+  const rmFn = ctx.rmFn;
+  for (const task of ctx.tasks.values()) {
+    if (!Array.isArray(task.deferredCleanup) || task.deferredCleanup.length === 0) continue;
+    if (isDeferredCleanupReapable(task)) {
+      const before = task.deferredCleanup.length;
+      const result = runDeferredCleanup(task, { rmFn, allowedRoots: ctx.allowedRoots });
+      reportDeferredCleanup(task, result);
+      if ((task.deferredCleanup?.length ?? 0) !== before) ctx.persistTask(task.id);
+    }
   }
 }
 

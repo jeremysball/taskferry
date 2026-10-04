@@ -274,3 +274,11 @@ describe("loadConfig()", () => {
     assert.throws(() => loadConfig({ configPath }), /error: config key "defaultVariant" in .* must be a string \(got 5\)\nhelp:/);
   });
 });
+
+describe("loadConfig uvLegacySweepAgeDays", () => {
+  test("accepts a valid uvLegacySweepAgeDays value", () => {
+    const dir = tmpConfigDir();
+    const configPath = writeConfig(dir, JSON.stringify({ uvLegacySweepAgeDays: 0 }));
+    assert.deepEqual(loadConfig({ configPath }), { uvLegacySweepAgeDays: 0 });
+  });
+});

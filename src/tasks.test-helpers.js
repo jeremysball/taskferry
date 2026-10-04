@@ -435,12 +435,15 @@ function buildManagerOptions(options, stateDir, defaultCacheDir, defaultOverlayT
 
 // Builds an isolated task manager backed by a temp state dir and, unless
 // overridden, fake spawnFn/killFn so no test ever touches a real `opencode`
-// process or a real OS signal.
+// process or a real OS signal. Returns `{ mgr, stateDir, cacheDir }` so
+// tests that derive paths off those roots (e.g. the namespaced uv-dir
+// layout) don't need to know the helper's internal stateDir variable.
 export function makeManager(options = {}) {
   const { stateDir, defaultCacheDir, defaultOverlayTmpRoot } = makeTempDirs();
   seedTestFixtures(stateDir, options.tasksFixture ?? [], options.logs ?? {});
-  return trackManager(
+  const mgr = trackManager(
     createTaskManager(buildManagerOptions(options, stateDir, defaultCacheDir, defaultOverlayTmpRoot)),
     { autoModel: options.autoModel !== false }
   );
+  return Object.assign(mgr, { _stateDir: stateDir, _cacheDir: defaultCacheDir });
 }

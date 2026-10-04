@@ -100,13 +100,6 @@ after(() => {
 });
 
 /**
- * Pin the opencode CLI major every opencode executor reports, so no test
- * shells out to the host's real `opencode --version`. Applied at import
- * time below, which covers managers built with createTaskManager() directly
- * as well as through makeManager().
- * @param {() => number|null} [cliMajor]
- */
-/**
  * Polls until `get()` returns something other than `null`/`undefined`. A
  * launch spawns only after the async `prepareLaunch()` settles, so a test
  * that captures spawn state has to wait for it rather than sleep a fixed
@@ -126,6 +119,13 @@ export async function waitForCaptured(get, timeoutMs = 2000) {
   }
 }
 
+/**
+ * Pin the opencode CLI major every opencode executor reports, so no test
+ * shells out to the host's real `opencode --version`. Applied at import
+ * time below, which covers managers built with createTaskManager() directly
+ * as well as through makeManager().
+ * @param {() => number|null} [cliMajor]
+ */
 export function pinOpencodeCliMajor(cliMajor = () => 1) {
   setOpencodeExecutorOverride({
     detectCliMajorFn: cliMajor,

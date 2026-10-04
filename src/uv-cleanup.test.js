@@ -7,39 +7,26 @@ import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
-import { createTaskManager, uvDirNamespace, uvDirPath } from "./tasks.js";
-import {
-  AXI_TASKS_TEST_DIR,
-  AXI_TASKS_CACHE_DIR,
-  fakeChild,
-  mkdtempTracked,
-  trackManager,
-  TEST_DEFAULT_MODEL,
-} from "./tasks.test-helpers.js";
+import { uvDirNamespace, uvDirPath } from "./tasks.js";
+import { fakeChild, makeManager, TEST_DEFAULT_MODEL } from "./tasks.test-helpers.js";
 
-function makeManagerWithTempDirs(overrides) {
-  const stateDir = mkdtempTracked(AXI_TASKS_TEST_DIR);
-  const cacheDir = mkdtempTracked(AXI_TASKS_CACHE_DIR);
-  const mgr = trackManager(
-    createTaskManager({
-      stateDir,
-      cacheDir,
-      sandboxEnabled: true,
-      checkBwrapAvailableFn: () => ({ checked: true, available: true }),
-      platform: "linux",
-      overlayEnabled: false,
-      lowerdirStaggerMs: 0,
-      resolveGitCommonDirFn: () => null,
-      ...overrides,
-    })
-  );
-  return { mgr, stateDir, cacheDir };
+// A sandboxed manager with bwrap stubbed as available. makeManager already
+// pins overlays off, so every dispatch here is the --no-overlay path.
+function makeSandboxedManager(overrides) {
+  const mgr = makeManager({
+    sandboxEnabled: true,
+    checkBwrapAvailableFn: () => ({ checked: true, available: true }),
+    platform: "linux",
+    resolveGitCommonDirFn: () => null,
+    ...overrides,
+  });
+  return { mgr, stateDir: mgr._stateDir, cacheDir: mgr._cacheDir };
 }
 
 describe("uv dirs are registered on dispatch and reaped at settlement", () => {
   test("a no-overlay sandboxed dispatch registers both uv dirs and reaps them at child settlement", () => {
     let child = null;
-    const { mgr, stateDir, cacheDir } = makeManagerWithTempDirs({
+    const { mgr, stateDir, cacheDir } = makeSandboxedManager({
       spawnFn: () => { child = fakeChild(); return child; },
     });
 
@@ -62,20 +49,9 @@ describe("uv dirs are registered on dispatch and reaped at settlement", () => {
     // lands in spawnTaskChild's catch block. Before this change that catch
     // block did not drain the deferred list, so every sandboxed dispatch
     // that crashed at spawn left its uv dirs on disk forever.
-    const cacheDir = mkdtempTracked(AXI_TASKS_CACHE_DIR);
-    const stateDir = mkdtempTracked(AXI_TASKS_TEST_DIR);
-    const mgr = trackManager(createTaskManager({
-      stateDir,
-      cacheDir,
-      sandboxEnabled: true,
-      checkBwrapAvailableFn: () => ({ checked: true, available: true }),
-      platform: "linux",
-      overlayEnabled: false,
-      lowerdirStaggerMs: 0,
-      resolveGitCommonDirFn: () => null,
+    const { mgr, stateDir, cacheDir } = makeSandboxedManager({
       spawnFn: () => { throw new Error("sandbox spawn ENOENT"); },
-      killFn: () => {},
-    }));
+    });
 
     const dispatched = mgr.dispatch({ prompt: "hello", directory: os.tmpdir(), model: TEST_DEFAULT_MODEL });
     const uvCacheDir = uvDirPath(cacheDir, stateDir, dispatched.id, "uv-cache");

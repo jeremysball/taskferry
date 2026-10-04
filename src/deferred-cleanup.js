@@ -27,7 +27,7 @@
  * round-trips through JSON. Anything needing a genuine callback at settlement
  * still belongs on `registerScratchCleanup`.
  *
- * The confinement helper (`confinePath`) is deliberately exported here, not
+ * The confinement helper (`confinePath`) deliberately lives here, not
  * in tasks.js: every caller of `runDeferredCleanup` is also a caller of
  * confinement, and putting both pieces next to each other keeps the contract
  * -- "this function calls rm -rf on what it finds there" -- in one place,
@@ -73,15 +73,17 @@ export function registerDeferredCleanup(task, ...paths) {
  * `tasks.json` is a plain JSON file an operator can and does hand-edit, and
  * this function's whole job is calling `rm -rf` on what it finds there.
  *
- * `allowedRoots`, when provided, confines every target to one of those roots
- * before rm: any path outside is refused (dropped from the list permanently
- * and reported) rather than reaped. Refusal is the only line of defense
- * between a hand-edited `tasks.json` and `fs.rmSync`.
+ * `allowedRoots` confines every target to one of those roots before rm: any
+ * path outside is refused (dropped from the list permanently and reported)
+ * rather than reaped. Refusal is the only line of defense between a
+ * hand-edited `tasks.json` and `fs.rmSync`, so the roots are mandatory: a
+ * call without any refuses every target and leaves the list untouched for a
+ * correctly configured drain to retry, instead of reaping unconfined.
  * @param {{deferredCleanup?: string[]}} task
- * @param {{rmFn?: (target: string) => void, allowedRoots?: string[]}} [options]
+ * @param {{rmFn?: (target: string) => void, allowedRoots: string[]}} options
  * @returns {{removed: string[], failed: Array<{path: string, error: string}>, refused: Array<{path: string, reason: string}>}}
  */
-export function runDeferredCleanup(task, { rmFn = defaultRemoveTree, allowedRoots } = {}) {
+export function runDeferredCleanup(task, { rmFn = defaultRemoveTree, allowedRoots }) {
   /** @type {string[]} */
   const removed = [];
   /** @type {Array<{path: string, error: string}>} */
@@ -91,9 +93,13 @@ export function runDeferredCleanup(task, { rmFn = defaultRemoveTree, allowedRoot
   /** @type {string[]} */
   const remaining = [];
   const targets = Array.isArray(task.deferredCleanup) ? task.deferredCleanup : [];
+  if (!Array.isArray(allowedRoots) || allowedRoots.length === 0) {
+    for (const target of targets) refused.push({ path: String(target), reason: "no allowed roots configured" });
+    return { removed, failed, refused };
+  }
+  const resolvedRoots = resolveRoots(allowedRoots);
   for (const target of targets) {
-    /** @type {{ok: true, path: string} | {ok: false, reason: string}} */
-    const confinement = allowedRoots && allowedRoots.length > 0 ? confinePath(target, allowedRoots) : { ok: true, path: String(target) };
+    const confinement = confineToResolvedRoots(target, resolvedRoots);
     if (!confinement.ok) {
       refused.push({ path: String(target), reason: confinement.reason });
       continue;
@@ -142,97 +148,92 @@ function attemptRemoval(target, rmFn) {
  * strictly inside an allowed root (a `..` traversal, a symlink escape, the
  * root itself) is refused with a human-readable reason and never reaches the
  * `rm -rf` below. The check is against `fs.realpath` of the candidate when it
- * exists, falling back to lexical resolution when the path is gone (the
+ * exists, falling back to lexical resolution only when the path is gone (the
  * common case for a deferred cleanup where the dir was already removed by a
- * tmpfs reboot).
+ * tmpfs reboot). Any other realpath failure refuses: a path whose symlinks
+ * cannot be resolved cannot be proven to stay inside the root.
  *
  * This is the only line of defense between `tasks.json` and `fs.rmSync`:
  * `tasks.json` is plain JSON an operator can hand-edit, and the deferred
  * list is whatever shape survives that edit. Refuse rather than coerce.
  *
- * @param {string} candidate
+ * @param {unknown} candidate
  * @param {string[]} allowedRoots
  * @returns {{ok: true, path: string} | {ok: false, reason: string}}
  */
 export function confinePath(candidate, allowedRoots) {
+  return confineToResolvedRoots(candidate, resolveRoots(allowedRoots));
+}
+
+/**
+ * Resolves each allowed root once per drain rather than once per target.
+ * @param {string[]} allowedRoots
+ * @returns {Array<{lexical: string, resolved: string|null}>}
+ */
+function resolveRoots(allowedRoots) {
+  return allowedRoots.map((root) => {
+    const real = realpathOrMissing(root);
+    return { lexical: root, resolved: real.ok ? real.path : null };
+  });
+}
+
+/**
+ * @param {unknown} candidate
+ * @param {Array<{lexical: string, resolved: string|null}>} roots
+ * @returns {{ok: true, path: string} | {ok: false, reason: string}}
+ */
+function confineToResolvedRoots(candidate, roots) {
   if (typeof candidate !== "string" || candidate.length === 0) {
-    return { ok: false, reason: "not a string" };
+    return { ok: false, reason: "empty or not a string" };
   }
   if (!path.isAbsolute(candidate)) {
     return { ok: false, reason: "not an absolute path" };
   }
-  const resolved = safeRealpath(candidate);
+  const real = realpathOrMissing(candidate);
+  if (!real.ok) return { ok: false, reason: real.reason };
   const compared = /** @type {string[]} */ ([]);
-  for (const root of allowedRoots) {
-    const resolvedRoot = safeRealpath(root);
-    compared.push(`${resolvedRoot} (lexical=${root})`);
-    if (isStrictlyInside(resolved, resolvedRoot)) {
-      return { ok: true, path: resolved };
+  for (const root of roots) {
+    compared.push(`${root.resolved ?? "<unresolvable>"} (lexical=${root.lexical})`);
+    if (root.resolved != null && isStrictlyInside(real.path, root.resolved)) {
+      return { ok: true, path: real.path };
     }
   }
   return { ok: false, reason: `not strictly inside any allowed root (compared: ${compared.join(", ")})` };
 }
 
 /**
- * Filters a target list through {@link confinePath} and returns the kept
- * entries paired with the dropped ones. Dropped entries are reported (the
- * caller logs them) but never reaped.
- *
- * @param {string[]} targets
- * @param {string[]} allowedRoots
- * @returns {{kept: string[], dropped: Array<{path: string, reason: string}>}}
- */
-export function confinePaths(targets, allowedRoots) {
-  /** @type {string[]} */
-  const kept = [];
-  /** @type {Array<{path: string, reason: string}>} */
-  const dropped = [];
-  for (const target of targets) {
-    const result = confinePath(target, allowedRoots);
-    if (result.ok) kept.push(result.path);
-    else dropped.push({ path: String(target), reason: result.reason });
-  }
-  return { kept, dropped };
-}
-
-/**
- * Whether `inner` is strictly inside `outer`. The strict form refuses the
- * outer itself (`outer/inner` yes, `outer` no) so a removed-sibling case
- * can't slip a `rm -rf <root>` past confinement. `path.relative` returns an
- * empty string only when the paths are equal, and a string starting with
- * `..` only when `inner` escapes `outer` -- both correctly excluded.
+ * Whether `inner` is strictly inside `outer`: `outer/inner` yes, `outer`
+ * itself no, so a removed-sibling case can't slip a `rm -rf <root>` past
+ * confinement. Same escape test as `isOutsideDirectory` in tasks.js (which
+ * this module can't import without a cycle): `..` exactly or followed by a
+ * separator escapes, while a child literally named `..foo` does not.
  * @param {string} inner
  * @param {string} outer
  * @returns {boolean}
  */
 function isStrictlyInside(inner, outer) {
-  if (inner === outer) return false;
   const rel = path.relative(outer, inner);
-  if (rel === "" || rel.startsWith("..")) return false;
-  return true;
+  if (rel === "" || path.isAbsolute(rel)) return false;
+  return rel !== ".." && !rel.startsWith(`..${path.sep}`);
 }
 
 /**
- * `fs.realpathSync` on a deferred cleanup candidate. A missing path resolves
- * to its lexical form (the common case: a tmpfs reboot cleared the dir, the
- * task's list still mentions it); a non-ENOENT error falls back to lexical
- * resolution but is logged so an EACCES-on-a-symlink case does not vanish
- * from the daemon's view -- lexical resolution against `path.resolve(target)`
- * still catches `..` traversal, so the confinement verdict is correct even
- * when the realpath probe failed. Both branches produce a string
- * `confinePath` can run through `path.relative`.
+ * `fs.realpathSync`, with a missing path resolved lexically (a tmpfs reboot
+ * cleared the dir and the task's list still mentions it; the rm will find
+ * nothing either way). Any other failure -- EACCES on a parent, ELOOP -- is a
+ * refusal, not a lexical fallback: lexical resolution does not follow
+ * symlinks, so it cannot prove a path whose links it could not read stays
+ * inside a root.
  * @param {string} target
- * @returns {string}
+ * @returns {{ok: true, path: string} | {ok: false, reason: string}}
  */
-function safeRealpath(target) {
+function realpathOrMissing(target) {
   try {
-    return fs.realpathSync(target);
+    return { ok: true, path: fs.realpathSync(target) };
   } catch (err) {
-    if (errCode(err) !== "ENOENT") {
-      const message = err instanceof Error ? err.message : String(err);
-      console.error(`taskferry: realpath failed for ${target}; falling back to lexical resolution: ${message}`);
-    }
-    return path.resolve(target);
+    if (errCode(err) === "ENOENT") return { ok: true, path: path.resolve(target) };
+    const message = err instanceof Error ? err.message : String(err);
+    return { ok: false, reason: `realpath failed: ${message}` };
   }
 }
 

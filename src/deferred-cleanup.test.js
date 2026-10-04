@@ -9,7 +9,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { isDeferredCleanupReapable, registerDeferredCleanup, runDeferredCleanup, confinePath, confinePaths } from "./deferred-cleanup.js";
+import { isDeferredCleanupReapable, registerDeferredCleanup, runDeferredCleanup, confinePath } from "./deferred-cleanup.js";
 import { sweepDeferredCleanupFor, sweepOrphanedUvDirsFor, uvDirNamespace, uvDirPath, uvDirRootsFor } from "./tasks.js";
 
 const A = "/tmp/deferred-a";
@@ -18,6 +18,9 @@ const FAKE_CACHE = "/tmp/fake-cache-uv";
 const SETTLED = "settled";
 const UNKNOWN = "unknown";
 const OTHER_DAEMON = "other-daemon";
+// A and B both live directly under /tmp, so it is the root every drain in
+// the runDeferredCleanup block below confines to.
+const ROOTS = [path.dirname(A)];
 
 describe("registerDeferredCleanup", () => {
   test("creates the list lazily and dedupes repeat registrations", () => {
@@ -39,7 +42,7 @@ describe("runDeferredCleanup", () => {
     const removed = [];
     const task = {};
     registerDeferredCleanup(task, A, B);
-    const result = runDeferredCleanup(task, { rmFn: (target) => removed.push(target) });
+    const result = runDeferredCleanup(task, { rmFn: (target) => removed.push(target), allowedRoots: ROOTS });
     assert.deepEqual(removed, [A, B]);
     assert.deepEqual(result.removed, [A, B]);
     assert.equal(task.deferredCleanup, undefined);
@@ -50,13 +53,14 @@ describe("runDeferredCleanup", () => {
     registerDeferredCleanup(task, A, B);
     const result = runDeferredCleanup(task, {
       rmFn: (target) => { if (target === A) throw new Error("EBUSY: device or resource busy"); },
+      allowedRoots: ROOTS,
     });
     assert.deepEqual(task.deferredCleanup, [A]);
     assert.deepEqual(result.removed, [B]);
     assert.equal(result.failed.length, 1);
     assert.match(result.failed[0].error, /EBUSY/);
 
-    runDeferredCleanup(task, { rmFn: () => {} });
+    runDeferredCleanup(task, { rmFn: () => {}, allowedRoots: ROOTS });
     assert.equal(task.deferredCleanup, undefined);
   });
 
@@ -64,7 +68,7 @@ describe("runDeferredCleanup", () => {
     const task = {};
     registerDeferredCleanup(task, A);
     const enoent = Object.assign(new Error("ENOENT: no such file or directory"), { code: "ENOENT" });
-    const result = runDeferredCleanup(task, { rmFn: () => { throw enoent; } });
+    const result = runDeferredCleanup(task, { rmFn: () => { throw enoent; }, allowedRoots: ROOTS });
     assert.deepEqual(result.removed, [A]);
     assert.equal(task.deferredCleanup, undefined);
   });
@@ -73,15 +77,15 @@ describe("runDeferredCleanup", () => {
     // tasks.json is a plain file an operator can hand-edit, and this
     // function calls rm -rf on what it finds there.
     const task = { deferredCleanup: ["not/absolute", 42] };
-    const result = runDeferredCleanup(task, { rmFn: () => { throw new Error("must not be called"); } });
+    const result = runDeferredCleanup(task, { rmFn: () => { throw new Error("must not be called"); }, allowedRoots: ROOTS });
     assert.equal(result.removed.length, 0);
-    assert.equal(result.failed.length, 2);
+    assert.equal(result.refused.length, 2);
     assert.equal(task.deferredCleanup, undefined);
   });
 
   test("is a no-op on a task that never registered anything", () => {
     const task = { id: "t1" };
-    const result = runDeferredCleanup(task, { rmFn: () => { throw new Error("must not be called"); } });
+    const result = runDeferredCleanup(task, { rmFn: () => { throw new Error("must not be called"); }, allowedRoots: ROOTS });
     assert.deepEqual(result, { removed: [], failed: [], refused: [] });
     assert.equal("deferredCleanup" in task, false);
   });
@@ -129,14 +133,39 @@ describe("confinePath", () => {
   });
 });
 
-describe("confinePaths", () => {
-  test("partitions a list into kept and dropped", () => {
-    const root = "/tmp/confine-roots";
-    const inside = path.join(root, "a");
-    const outside = "/etc/passwd";
-    const result = confinePaths([inside, outside], [root]);
-    assert.deepEqual(result.kept, [inside]);
-    assert.deepEqual(result.dropped.map((d) => d.path), [outside]);
+describe("confinement fails closed", () => {
+  test("a drain with no allowed roots refuses everything and leaves the list for a configured drain", () => {
+    const task = {};
+    registerDeferredCleanup(task, A, B);
+    for (const allowedRoots of [undefined, []]) {
+      const result = runDeferredCleanup(task, { rmFn: () => { throw new Error("must not be called"); }, allowedRoots });
+      assert.deepEqual(result.refused.map((r) => r.path), [A, B]);
+      assert.deepEqual(task.deferredCleanup, [A, B]);
+    }
+  });
+
+  test("a realpath failure other than ENOENT refuses instead of falling back to lexical resolution", (t) => {
+    if (process.getuid?.() === 0) {
+      t.skip("root ignores directory permissions, so realpath never sees EACCES");
+      return;
+    }
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "confine-eacces-"));
+    const sealed = path.join(root, "sealed");
+    fs.mkdirSync(path.join(sealed, "inner"), { recursive: true });
+    fs.chmodSync(sealed, 0o000);
+    try {
+      const verdict = confinePath(path.join(sealed, "inner"), [root]);
+      assert.equal(verdict.ok, false);
+      assert.match(verdict.reason, /realpath failed: EACCES/);
+    } finally {
+      fs.chmodSync(sealed, 0o700);
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("a child whose name merely starts with .. is inside, not an escape", () => {
+    const root = "/tmp/confine-root";
+    assert.equal(confinePath(path.join(root, "..foo"), [root]).ok, true);
   });
 });
 
@@ -347,6 +376,22 @@ describe("sweepOrphanedUvDirsFor", () => {
         return [];
       },
       lstatFn: (_target) => ({ mtimeMs: Date.now() - 1000 }),
+      removeDirFn: (target) => removed.push(path.relative(FAKE_CACHE, target)),
+    });
+    assert.deepEqual(removed, []);
+  });
+
+  test("a legacy flat dir whose mtime cannot be read is kept, not reaped past the age floor", () => {
+    const removed = [];
+    const legacyId = `oc_mstat_${process.pid.toString(16)}`;
+    sweepOrphanedUvDirsFor({
+      cacheDir: FAKE_CACHE,
+      stateDir: "/tmp/our-state",
+      tasks: new Map(),
+      persistedTasks: new Map(),
+      legacySweepAgeMs: 10 * 86_400_000,
+      readdirFn: (dir) => (dir === path.join(FAKE_CACHE, "uv-cache") ? [legacyId] : []),
+      lstatFn: () => { throw Object.assign(new Error("EACCES: permission denied, lstat"), { code: "EACCES" }); },
       removeDirFn: (target) => removed.push(path.relative(FAKE_CACHE, target)),
     });
     assert.deepEqual(removed, []);

@@ -473,3 +473,21 @@ belongs here.
   dir's namespace dir or anything under it. Only task-id-shaped `oc_*`
   entries are legacy candidates; an idle daemon's namespace dir ages past
   the floor too, which is why the pass matches by name, not by age alone.
+- A boot sweep entry (an orphaned output dir or a legacy flat uv dir) that
+  `lstat` cannot read surviving every sweep, with a `failed to stat ...;
+  leaving it in place` line on stderr — expected. Both sweeps decide by mtime,
+  and an entry with an unreadable mtime has an unknown age, so neither the
+  output-dir retention window nor the legacy age floor can clear it
+  (`passesRetention`, `src/tasks.js`). Fix the permissions and the next boot
+  reaps it. It would be a real bug if an entry the sweep *could* stat were
+  kept for this reason, or if a stat failure ever led to a removal.
+- A deferred-cleanup path refused with `realpath failed: EACCES ...` and
+  dropped from the task's list, leaving the dir on disk — expected.
+  Confinement (`confinePath`, `src/deferred-cleanup.js`) proves a path stays
+  inside the daemon's uv roots by resolving its symlinks; a path whose
+  realpath fails for any reason but ENOENT cannot be proven safe, and lexical
+  resolution would not follow a symlink out of the root. Refusing leaks one
+  dir; guessing could `rm -rf` outside the cache. A missing path (ENOENT) is
+  still checked lexically, because the rm finds nothing there either way. It
+  would be a real bug if a path that resolves cleanly inside a root were
+  refused, or if a refused path were ever removed.

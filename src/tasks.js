@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import fsp from "node:fs/promises";
 import os from "node:os";
@@ -23,8 +23,11 @@ import { loadEnvFile, watchEnvFile } from "./env-file.js";
 import { loadProjectConfig, resolveReadOnlyProjectBinds, verificationPromptBlock } from "./project-config.js";
 import { TASKFERRY_OUTPUT_DIR_ENV, DEFAULT_MAX_OUTPUT_FILE_BYTES, MAX_SAFE_OUTPUT_FILE_BYTES, ensureTaskOutputDir, listTaskOutputFiles, outputDirPromptBlock, readTaskOutputFile, resolveOutputDirRoot, resolveTaskOutputDir } from "./output-dir.js";
 import { computeDoctorStats } from "./doctor-stats.js";
-import { isDeferredCleanupReapable, registerDeferredCleanup, runDeferredCleanup } from "./deferred-cleanup.js";
-import { DEFAULT_TASK_RETENTION_DAYS, archiveEvictedTasks, partitionByRetention } from "./retention.js";
+import { isDeferredCleanupReapable, runDeferredCleanup } from "./deferred-cleanup.js";
+import { DEFAULT_TASK_RETENTION_DAYS, MS_PER_DAY, archiveEvictedTasks, partitionByRetention } from "./retention.js";
+import { DEFAULT_UV_LEGACY_SWEEP_AGE_DAYS, LEGACY_UV_DIR_ENTRY, UV_DIR_BUCKETS, prepareUvDirs, uvDirNamespace, uvDirRootsFor } from "./uv-dirs.js";
+
+export { DEFAULT_UV_LEGACY_SWEEP_AGE_DAYS, UV_DIR_BUCKETS, uvDirNamespace, uvDirPath, uvDirRootsFor } from "./uv-dirs.js";
 
 export { DEFAULT_MAX_OUTPUT_FILE_BYTES, MAX_SAFE_OUTPUT_FILE_BYTES };
 
@@ -1371,15 +1374,11 @@ function buildBwrapBinds(ctx, launchInfo, task, spawnEnv, role) {
   // same real-disk storage sandboxedDataHome uses) and rw-bind each dir at
   // that same path so bwrap sees a real, writable mount. Per-task (not
   // shared) so one task's cache can't perturb or bloat another's.
-  // Centralized derivation (uvDirPath) keeps the worker and the check gate
+  // Centralized derivation (prepareUvDirs) keeps the worker and the check gate
   // in lockstep, and namespaces each dir by its owning stateDir so the boot
   // sweep can never reach another daemon's uv dirs. Reaped at settlement
   // via the task's deferred-cleanup list -- see src/deferred-cleanup.js.
-  const uvCacheDir = uvDirPath(ctx.cacheDir, ctx.stateDir, task.id, "uv-cache");
-  const uvToolsDir = uvDirPath(ctx.cacheDir, ctx.stateDir, task.id, "uv-tools");
-  fs.mkdirSync(uvCacheDir, { recursive: true, mode: 0o700 });
-  fs.mkdirSync(uvToolsDir, { recursive: true, mode: 0o700 });
-  registerDeferredCleanup(task, uvCacheDir, uvToolsDir);
+  const { uvCacheDir, uvToolsDir } = prepareUvDirs(task, ctx);
   extraRwBinds.push(uvCacheDir, uvToolsDir);
   sandboxEnv.UV_CACHE_DIR = uvCacheDir;
   sandboxEnv.UV_TOOL_DIR = uvToolsDir;
@@ -1693,10 +1692,7 @@ function finishChildSettlement(ctx, shared) {
   // before the persist below so the terminal snapshot records an
   // already-emptied list.
   if (!task.overlayDirs) {
-    reportDeferredCleanup(task, runDeferredCleanup(task, {
-      rmFn: ctx.deferredRmFn,
-      allowedRoots: ctx.deferredAllowedRoots,
-    }));
+    drainDeferredCleanup(task, ctx);
   }
   try {
     ctx.persistTask(task.id);
@@ -1969,10 +1965,7 @@ function spawnTaskChild(ctx, launchInfo, task) {
     // onChildError do -- every settlement path must drain. A spawn failure
     // that pre-dates overlay creation (e.g. the dispatch's own pre-overlay
     // throw) means no deferred list either, so the drain is a no-op.
-    reportDeferredCleanup(task, runDeferredCleanup(task, {
-      rmFn: ctx.deferredRmFn,
-      allowedRoots: ctx.deferredAllowedRoots,
-    }));
+    drainDeferredCleanup(task, ctx);
     ctx.persistTask(task.id);
     void ctx.scheduleActivity(task, { force: true }).then(() => ctx.activityCache.evictTask(task.id));
     ctx.logHasEventCache.delete(task.logPath);
@@ -2038,80 +2031,6 @@ const CHECK_GATE_OUTPUT_CAP_BYTES = 256 * 1024;
 // .superpowers/specs/2026-08-03-lowerdir-launch-stagger-design.md for why a
 // per-directory gate was rejected in favor of a simpler global one.
 const DEFAULT_LOWERDIR_STAGGER_MS = 3000;
-
-// Per-task uv cache + tool dirs (<cacheDir>/uv-{cache,tools}/<taskId>)
-// accumulate without bound across a long-lived install -- each uvx run pulls
-// a full interpreter plus wheels, and a project that runs thousands of
-// ferries reaches tens of GB. Reaped at real settlement
-// (src/deferred-cleanup.js) and swept at boot. The two buckets the daemon
-// owns for cleanliness.
-export const UV_DIR_BUCKETS = ["uv-cache", "uv-tools"];
-// Hash length used to namespace new uv dirs by their owning state dir (see
-// uvDirNamespace). 12 hex chars = 48 bits: collision-safe for the thousands
-// of state dirs a developer might touch over a career, short enough not to
-// dominate the path the worker sees in $UV_CACHE_DIR.
-const UV_DIR_NAMESPACE_HASH_BYTES = 12;
-/** Pre-namespace flat uv dirs were named by bare task id (`oc_<base36>_<hex>`). */
-const LEGACY_UV_DIR_ENTRY = /^oc_[a-z0-9]+_[0-9a-f]+$/;
-// Default age floor for legacy flat uv dirs (those without a state-dir
-// namespace -- pre-#594 records whose uv dirs landed directly under
-// <cacheDir>/uv-cache/oc_*). 7 days: long enough that an active developer
-// who just upgraded is unaffected, short enough that the existing 30-100G
-// of accumulated dirts is reaped within a week.
-export const DEFAULT_UV_LEGACY_SWEEP_AGE_DAYS = 7;
-
-/**
- * Short stable namespace derived from the owning state dir. Every new uv
- * dir the daemon creates is rooted at `<cacheDir>/uv-{cache,tools}/<ns>/<id>`,
- * so a daemon only ever sweeps its own namespace and a `tasks.json` (or
- * `cacheDir`) leaked from one state dir cannot convince a different daemon
- * to reap its in-flight tasks' uv dirs.
- *
- * The namespace is a deterministic prefix of a sha256 hex digest, not a
- * reverse-DNS string -- any change to `stateDir` (a rebase to a different
- * checkout, a parallel worktree) yields a new namespace, so two daemons
- * sharing the same `cacheDir` never share a uv dir.
- * @param {string} stateDir
- * @returns {string}
- */
-export function uvDirNamespace(stateDir) {
-  const digest = createHash("sha256").update(path.resolve(stateDir)).digest("hex");
-  return digest.slice(0, UV_DIR_NAMESPACE_HASH_BYTES);
-}
-
-/**
- * Single source of truth for the per-task uv dir layout. Both the worker's
- * sandbox (`buildBwrapBinds`, ~1365) and the check gate's re-mount
- * (`startCheckGate`, ~6493) call this; the boot sweep reads it back. Returns
- * the canonical path so callers can `mkdirSync` and `rw-bind` at exactly the
- * path the dir lives at, never a sibling or a typo of one.
- * @param {string} cacheDir
- * @param {string} stateDir
- * @param {string} taskId
- * @param {"uv-cache"|"uv-tools"} bucket
- */
-export function uvDirPath(cacheDir, stateDir, taskId, bucket) {
-  if (!UV_DIR_BUCKETS.includes(bucket)) {
-    throw new Error(`error: unknown uv dir bucket ${JSON.stringify(bucket)}`);
-  }
-  return path.join(cacheDir, bucket, uvDirNamespace(stateDir), taskId);
-}
-
-/**
- * The two roots a freshly configured per-task uv dir can live under for the
- * current daemon: `<cacheDir>/uv-cache/<ns>` and `<cacheDir>/uv-tools/<ns>`,
- * where `<ns>` is `uvDirNamespace(stateDir)`. `confinePath` and the boot
- * sweep's safe-realpath check use this to refuse anything outside the
- * current daemon's own namespace -- a `tasks.json` (or hand-edited list)
- * pointing at another state dir's uv dir is rejected before the rm fires.
- * @param {string} cacheDir
- * @param {string} stateDir
- * @returns {string[]}
- */
-export function uvDirRootsFor(cacheDir, stateDir) {
-  const ns = uvDirNamespace(stateDir);
-  return UV_DIR_BUCKETS.map((bucket) => path.join(cacheDir, bucket, ns));
-}
 
 /**
  * The subset of `createTaskManager`'s closure that `result`'s extracted
@@ -4944,7 +4863,7 @@ function initManagerLimits(opts) {
     summarizerTimeout: nonNegativeInteger(opts.summarizerTimeoutMs, DEFAULT_SUMMARIZER_TIMEOUT_MS),
     activityWords: positiveInteger(opts.activityMaxWords, 75),
     taskRetentionDays: nonNegativeInteger(opts.taskRetentionDays, DEFAULT_TASK_RETENTION_DAYS),
-    uvLegacySweepAgeMs: nonNegativeInteger(opts.uvLegacySweepAgeDays, DEFAULT_UV_LEGACY_SWEEP_AGE_DAYS) * 86_400_000,
+    uvLegacySweepAgeMs: nonNegativeInteger(opts.uvLegacySweepAgeDays, DEFAULT_UV_LEGACY_SWEEP_AGE_DAYS) * MS_PER_DAY,
     maxOutputFileBytes: (() => {
       const v = positiveInteger(opts.maxOutputFileBytes, DEFAULT_MAX_OUTPUT_FILE_BYTES);
       if (v > MAX_BUFFER_BYTES) {
@@ -6253,10 +6172,7 @@ const CALLER_ENV_EXCLUDED = new Set(["PATH", "HOME", ...TASKFERRY_PLUMBING_ENV_V
  * @returns {boolean} whether cleanup failed
  */
 function releaseOverlayForTask(task, ctx) {
-  reportDeferredCleanup(task, runDeferredCleanup(task, {
-    rmFn: ctx.deferredRmFn,
-    allowedRoots: ctx.deferredAllowedRoots,
-  }));
+  drainDeferredCleanup(task, ctx);
   if (!task.overlayDirs) return false;
   const removal = cleanupOverlay({
     root: task.overlayDirs.root,
@@ -6265,6 +6181,21 @@ function releaseOverlayForTask(task, ctx) {
   });
   if (removal.removed) task.overlayDirs = null;
   return !removal.removed;
+}
+
+/**
+ * Drains a task's deferred-cleanup list at a settlement point, confined to
+ * the daemon's own uv roots, and logs the outcome. Every in-process
+ * settlement path calls this one function so none of them can drain with a
+ * different rm or without confinement.
+ * @param {{id?: string, deferredCleanup?: string[]}} task
+ * @param {{deferredRmFn?: (path: string) => void, deferredAllowedRoots?: string[]}} ctx
+ */
+function drainDeferredCleanup(task, ctx) {
+  reportDeferredCleanup(task, runDeferredCleanup(task, {
+    rmFn: ctx.deferredRmFn,
+    allowedRoots: ctx.deferredAllowedRoots ?? [],
+  }));
 }
 
 /**
@@ -6719,16 +6650,9 @@ function startCheckGate(task, ctx) {
   // read-only default UV_CACHE_DIR. Re-bind the worker's deterministic
   // per-task uv dirs and re-point the env vars at them, exactly as
   // buildBwrapBinds did for the worker, so the gate verifies the same
-  // environment the worker actually ran in. Same `uvDirPath` derivation
-  // as the worker so both reach the same on-disk dirs; the gate's
-  // re-register is a no-op when the worker already did it, and re-adds the
-  // path when the gate was re-run by an interrupted-boot sweep that
-  // drained the task's list before this point.
-  const uvCacheDir = uvDirPath(ctx.cacheDir, ctx.stateDir, task.id, "uv-cache");
-  const uvToolsDir = uvDirPath(ctx.cacheDir, ctx.stateDir, task.id, "uv-tools");
-  fs.mkdirSync(uvCacheDir, { recursive: true, mode: 0o700 });
-  fs.mkdirSync(uvToolsDir, { recursive: true, mode: 0o700 });
-  registerDeferredCleanup(task, uvCacheDir, uvToolsDir);
+  // environment the worker actually ran in. prepareUvDirs is the same call
+  // the worker made, so both reach the same on-disk dirs.
+  const { uvCacheDir, uvToolsDir } = prepareUvDirs(task, ctx);
   const spawnArgs = buildBwrapArgs({
     directory: task.directory,
     stateDir: ctx.stateDir,
@@ -7617,7 +7541,7 @@ function sweepBucket(ctx) {
   for (const entry of entries) {
     if (ctx.isCandidate(entry)) {
       const full = path.join(ctx.root, entry);
-      if (passesRetention(full, ctx) !== false) removeEntryLogging(full, ctx);
+      if (passesRetention(full, ctx)) removeEntryLogging(full, ctx);
     }
   }
 }
@@ -7631,11 +7555,13 @@ function sweepBucket(ctx) {
  *   "recent" -- entries NEWER than the cutoff are kept (uv legacy flat dirs,
  *               where mtime-young entries could belong to a daemon that's
  *               only minutes old and we don't want to touch them).
- * Returns undefined if the entry has no retention state (i.e. either no
- * cutoff and no lstatFn -- always reap, or an ENOENT stat already filtered).
+ * A stat that fails returns false: an entry already gone has nothing to
+ * reap, and one we cannot stat has an unknown age, so the retention window
+ * cannot clear it. Reaping on an unreadable mtime would hand an entry the
+ * window exists to protect straight to the rm.
  * @param {string} full
  * @param {{retentionMs?: number, keepMode?: "old"|"recent", lstatFn?: (path: string) => fs.Stats, label: string}} ctx
- * @returns {boolean | undefined}
+ * @returns {boolean}
  */
 function passesRetention(full, ctx) {
   const cutoff = ctx.retentionMs && ctx.retentionMs > 0 ? Date.now() - ctx.retentionMs : undefined;
@@ -7645,9 +7571,9 @@ function passesRetention(full, ctx) {
   try {
     stats = lstat(full);
   } catch (err) {
-    if (errCode(err) === "ENOENT") return undefined;
-    console.error(`taskferry: failed to stat ${ctx.label} entry ${full}: ${errMessage(err)}`);
-    return undefined;
+    if (errCode(err) === "ENOENT") return false;
+    console.error(`taskferry: failed to stat ${ctx.label} entry ${full}; leaving it in place: ${errMessage(err)}`);
+    return false;
   }
   if (cutoff === undefined) return true;
   return matchesRetentionPolicy(stats.mtimeMs, cutoff, ctx.keepMode ?? "old");
@@ -7707,7 +7633,7 @@ function isOrphanOutputEntry(entry, tasks, persistedTasks) {
 export function sweepOrphanedOutputDirsFor(/** @type {{OUTPUT_DIR_ROOT: string, tasks: Map<string, Task>, persistedTasks?: Map<string, Record<string, any>>|null, readdirFn: (path: string) => string[], lstatFn?: (path: string) => fs.Stats, removeDirFn?: (path: string) => void, retentionDays?: number}} */ ctx) {
   const tasks = ctx.tasks;
   const persistedTasks = ctx.persistedTasks ?? null;
-  const retentionMs = ctx.retentionDays && ctx.retentionDays > 0 ? ctx.retentionDays * 86_400_000 : 0;
+  const retentionMs = ctx.retentionDays && ctx.retentionDays > 0 ? ctx.retentionDays * MS_PER_DAY : 0;
   sweepBucket({
     root: ctx.OUTPUT_DIR_ROOT,
     readdirFn: ctx.readdirFn,

@@ -15,7 +15,7 @@ import { UsageError } from "./errors.js";
  */
 export const DEFAULT_TASK_RETENTION_DAYS = 30;
 
-const MS_PER_DAY = 86_400_000;
+export const MS_PER_DAY = 86_400_000;
 
 /**
  * Statuses a retention sweep is allowed to evict. The core terminal set plus

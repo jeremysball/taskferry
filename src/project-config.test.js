@@ -105,14 +105,21 @@ describe("loadProjectConfig", () => {
 });
 
 describe("verificationPromptBlock", () => {
+  const CHECK_COMMAND = "bun x check";
+
   beforeEach(() => {
     _resetProjectConfigCache();
   });
 
   test("renders the required-verification block with the check command embedded", () => {
-    const block = verificationPromptBlock("bun x check");
+    const block = verificationPromptBlock(CHECK_COMMAND);
     assert.match(block, /## Verification \(required\)/);
     assert.match(block, /bun x check/);
-    assert.match(block, /Run it before declaring the task done/);
+    assert.match(block, /If you changed any files, run it before declaring the task done/);
+  });
+
+  test("tells read-only workers to skip the check, matching the no-diff gate skip", () => {
+    const block = verificationPromptBlock(CHECK_COMMAND);
+    assert.match(block, /If you changed no files \(a read-only review or research task\), skip/);
   });
 });

@@ -384,7 +384,7 @@ describe("Unix socket daemon: event subscription routing and teardown", () => {
     const paths = temporaryPaths(t);
     const fake = fakeManagerFactory([], {
       checkSummaryModelReady: async () => {
-        throw new Error("error: summary model is unavailable: opencode/mimo-v2.5-free\nhelp: set TASKFERRY_SUMMARY_MODEL to an installed model, then retry taskferry_summary");
+        throw new Error("error: summary model is unavailable: opencode/muse-spark-1.3-contributor-free\nhelp: set TASKFERRY_SUMMARY_MODEL to an installed model, then retry taskferry_summary");
       },
     });
     const daemon = await startDaemon({ ...paths, taskManagerFactory: fake.factory });

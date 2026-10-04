@@ -222,7 +222,7 @@ Produces a bounded report or activity summary for a task.
 | `--wait` | Wait for the task to settle before summarizing |
 
 `--mode report` starts a separate, asynchronous summary task using
-`opencode/mimo-v2.5-free` by default: wait for the returned
+`opencode/muse-spark-1.3-contributor-free` by default: wait for the returned
 `summaryTask.id`, then run `taskferry result` on that id. `--mode activity`
 returns a synchronous, cached activity snapshot instead (the same mechanism
 `taskferry watch --summaries` uses); see [security.md](security.md) for what

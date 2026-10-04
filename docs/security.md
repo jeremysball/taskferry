@@ -151,7 +151,7 @@ daemon restart, no key-slot registry.
 
 `taskferry watch --summaries` and `taskferry summary --mode activity` both
 run a bounded snapshot of a task's recent narration through a secondary
-model (`opencode/mimo-v2.5-free` by default, overridable with
+model (`opencode/muse-spark-1.3-contributor-free` by default, overridable with
 `TASKFERRY_SUMMARY_MODEL`) to produce a short human-readable status line.
 `taskferry summary --mode report` (the default `summary` mode) does the
 same thing as a full asynchronous OpenCode subtask instead of an inline
@@ -246,7 +246,7 @@ and the priority order live next to it. `--summarize-context` on
 condensation pass on top of this auto-attached text, dispatched through a
 throwaway `task.dispatch`/`task.wait`/`task.result` against an env-
 overridable model (`TASKFERRY_ADVISOR_SUMMARIZER_MODEL`,
-default `opencode/mimo-v2.5-free`) — best-effort, returns the input
+default `opencode/muse-spark-1.3-contributor-free`) — best-effort, returns the input
 unchanged on any failure so condensation can never break an otherwise-
 valid advisor call. See [Activity summaries](#activity-summaries) above
 for the same-shape concern around the model's `summary --mode report`

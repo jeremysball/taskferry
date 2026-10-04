@@ -146,7 +146,7 @@ export const FROM_CALLER = "from-caller";
 export const SRC1_LOG = "src1.ndjson";
 export const DID_THING = "did the thing";
 export const CAPTURED_DISPATCH = "captured-at-dispatch-time";
-export const MIMO_MODEL = "opencode/mimo-v2.5-free";
+export const SUMMARY_MODEL = "opencode/muse-spark-1.3-contributor-free";
 // Used only by trackManager()'s auto-fill below -- an arbitrary,
 // obviously-synthetic model string, not a real provider/model. Real
 // dispatches still require --model per Task 5; this exists purely so
@@ -227,7 +227,7 @@ export function makeFakeOpencodeExecutor(overrides = {}) {
     id: "opencode",
     taskIdPrefix: "oc",
     errorBucketPrefix: "opencode",
-    defaultSummaryModel: MIMO_MODEL,
+    defaultSummaryModel: SUMMARY_MODEL,
     binaryName: "opencode",
     ...overrides,
   });

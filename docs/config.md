@@ -23,7 +23,7 @@ message — there is no silent typo tolerance.
 {
   "maxConcurrentTasks": 8,
   "noOutputTimeoutMs": 300000,
-  "summaryModel": "opencode/mimo-v2.5-free",
+  "summaryModel": "opencode/muse-spark-1.3-contributor-free",
   "envDenylist": "PI_CODING_AGENT_DIR"
 }
 ```
@@ -38,7 +38,7 @@ message — there is no silent typo tolerance.
 | `noOutputTimeoutMs` | `TASKFERRY_NO_OUTPUT_TIMEOUT_MS` | number | `256000` |
 | `preOutputMaxMs` | `TASKFERRY_PRE_OUTPUT_MAX_MS` | number | `1024000` (4x `noOutputTimeoutMs`); see `docs/daemon.md#watchdogs` |
 | `postOutputNoOutputTimeoutMs` | `TASKFERRY_POST_OUTPUT_NO_OUTPUT_TIMEOUT_MS` | number | `400000` |
-| `summaryModel` | `TASKFERRY_SUMMARY_MODEL` | string | `"opencode/mimo-v2.5-free"` |
+| `summaryModel` | `TASKFERRY_SUMMARY_MODEL` | string | `"opencode/muse-spark-1.3-contributor-free"` |
 | `activitySummariesEnabled` | `TASKFERRY_ACTIVITY_SUMMARIES` | boolean | `true` |
 | `summarizerTimeoutMs` | `TASKFERRY_SUMMARIZER_TIMEOUT_MS` | number | `360000` |
 | `activityMaxWords` | `TASKFERRY_ACTIVITY_MAX_WORDS` | number | `75` |

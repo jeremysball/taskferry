@@ -70,10 +70,13 @@ describe("readVariantsCache()", () => {
 });
 
 describe("refreshVariantsCache()", () => {
+  // The 1.x major the daemon confirmed before refreshing.
+  const opencodeMajor = 1;
+
   test("writes the file atomically via a temp file + rename", async () => {
     const cacheDir = tmpCacheDir();
     const renamed = [];
-    await refreshVariantsCache({
+    await refreshVariantsCache({ opencodeMajor,
       cacheDir,
       listModelVariantsFn: async () => new Map([[MODEL_FOO, ["low", "high"]]]),
       writeFileFn: (p, data) => fs.writeFileSync(p, data),
@@ -91,8 +94,8 @@ describe("refreshVariantsCache()", () => {
     let calls = 0;
     const listModelVariantsFn = async () => { calls++; await new Promise((r) => setTimeout(r, 10)); return new Map(); };
     await Promise.all([
-      refreshVariantsCache({ cacheDir, listModelVariantsFn, env: {} }),
-      refreshVariantsCache({ cacheDir, listModelVariantsFn, env: {} }),
+      refreshVariantsCache({ opencodeMajor, cacheDir, listModelVariantsFn, env: {} }),
+      refreshVariantsCache({ opencodeMajor, cacheDir, listModelVariantsFn, env: {} }),
     ]);
     assert.equal(calls, 1);
   });
@@ -109,15 +112,15 @@ describe("refreshVariantsCache()", () => {
       return new Map([[MODEL_FOO, [env.OPENAI_API_KEY]]]);
     };
     await Promise.all([
-      refreshVariantsCache({ cacheDir, listModelVariantsFn, env: { OPENAI_API_KEY: "key-a" } }),
-      refreshVariantsCache({ cacheDir, listModelVariantsFn, env: { OPENAI_API_KEY: "key-b" } }),
+      refreshVariantsCache({ opencodeMajor, cacheDir, listModelVariantsFn, env: { OPENAI_API_KEY: "key-a" } }),
+      refreshVariantsCache({ opencodeMajor, cacheDir, listModelVariantsFn, env: { OPENAI_API_KEY: "key-b" } }),
     ]);
     assert.deepEqual(seenEnvs.sort(), ["key-a", "key-b"]);
   });
 
   test("never persists a raw credential value to the on-disk cache file", async () => {
     const cacheDir = tmpCacheDir();
-    await refreshVariantsCache({
+    await refreshVariantsCache({ opencodeMajor,
       cacheDir,
       listModelVariantsFn: async () => new Map([[MODEL_FOO, ["low"]]]),
       env: { OPENAI_API_KEY: "sk-super-secret-value" },
@@ -126,10 +129,26 @@ describe("refreshVariantsCache()", () => {
     assert.ok(!raw.includes("sk-super-secret-value"), "raw API key must never appear in the on-disk cache file");
   });
 
+  for (const major of [null, 2]) {
+    test(`writes nothing and never lists models when the confirmed opencode major is ${major}`, async () => {
+      const cacheDir = tmpCacheDir();
+      let listed = false;
+      await refreshVariantsCache({ cacheDir, opencodeMajor: major, listModelVariantsFn: async () => { listed = true; return new Map([[MODEL_FOO, ["low"]]]); }, env: {} });
+      assert.equal(listed, false);
+      assert.equal(fs.existsSync(path.join(cacheDir, CACHE_FILENAME)), false);
+    });
+  }
+
+  test("stamps the confirmed major into the file", async () => {
+    const cacheDir = tmpCacheDir();
+    await refreshVariantsCache({ opencodeMajor, cacheDir, listModelVariantsFn: async () => new Map([[MODEL_FOO, ["low"]]]), env: {} });
+    assert.equal(JSON.parse(fs.readFileSync(path.join(cacheDir, CACHE_FILENAME), "utf8")).opencodeMajor, 1);
+  });
+
   test("a failed refresh does not throw and leaves the previous file in place", async () => {
     const cacheDir = tmpCacheDir();
     writeCache(cacheDir, { schema: VARIANTS_CACHE_SCHEMA, generatedAt: new Date().toISOString(), fingerprint: hashFingerprint({}), models: { [MODEL_FOO]: ["low"] } });
-    await assert.doesNotReject(refreshVariantsCache({ cacheDir, listModelVariantsFn: async () => { throw new Error("boom"); }, env: {} }));
+    await assert.doesNotReject(refreshVariantsCache({ opencodeMajor, cacheDir, listModelVariantsFn: async () => { throw new Error("boom"); }, env: {} }));
     const result = readVariantsCache({ cacheDir, env: {} });
     assert.deepEqual(result.get(MODEL_FOO), ["low"]);
   });

@@ -106,6 +106,26 @@ after(() => {
  * as well as through makeManager().
  * @param {() => number|null} [cliMajor]
  */
+/**
+ * Polls until `get()` returns something other than `null`/`undefined`. A
+ * launch spawns only after the async `prepareLaunch()` settles, so a test
+ * that captures spawn state has to wait for it rather than sleep a fixed
+ * time that a loaded CI runner can outlast.
+ * @template T
+ * @param {() => T} get
+ * @param {number} [timeoutMs]
+ * @returns {Promise<NonNullable<T>>}
+ */
+export async function waitForCaptured(get, timeoutMs = 2000) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const value = get();
+    if (value !== null && value !== undefined) return value;
+    if (Date.now() >= deadline) throw new Error(`spawn was never captured within ${timeoutMs}ms`);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+}
+
 export function pinOpencodeCliMajor(cliMajor = () => 1) {
   setOpencodeExecutorOverride({
     detectCliMajorFn: cliMajor,

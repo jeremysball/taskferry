@@ -4,7 +4,7 @@ import os from "node:os";
 import { ensureOpencodeCliMajor, detectOpencodeCliMajor, resetOpencodeCliProbe } from "./opencode-version.js";
 import { opencodeExecutor } from "./opencode-executor.js";
 import { readVariantsCache, hashFingerprint, VARIANTS_CACHE_SCHEMA } from "./variants-cache.js";
-import { makeManager, fakeChild, mkdtempTracked } from "./tasks.test-helpers.js";
+import { makeManager, fakeChild, mkdtempTracked, waitForCaptured } from "./tasks.test-helpers.js";
 
 const TTL_MS = 1000;
 const V2_VERSION = "opencode v2.0.22";
@@ -77,6 +77,11 @@ describe("opencodeExecutor() version handling", () => {
     await assert.rejects(Promise.resolve(ex.prepareLaunch()), /opencode CLI major version could not be detected/);
   });
 
+  test("an explicit variant replaces a #variant suffix already on the 2.x model id instead of appending a second one", () => {
+    const args = opencodeExecutor({ detectCliMajorFn: () => 2 }).buildSpawnArgs({ ...DISPATCH_CTX, model: "openai/gpt-x#high", variant: "max" });
+    assert.equal(args[args.indexOf("-m") + 1], "openai/gpt-x#max");
+  });
+
   test("a 0.0.0-dev build (major 0) gets the 1.x argv, which those builds still accept", () => {
     const args = opencodeExecutor({ detectCliMajorFn: () => 0 }).buildSpawnArgs(DISPATCH_CTX);
     assert.ok(args.includes("--dir"), `expected the 1.x --dir flag in ${JSON.stringify(args)}`);
@@ -115,11 +120,10 @@ describe("manager-level opencode 2.x", () => {
       spawnFn: (_cmd, args) => { captured = args; return fakeChild(); },
     });
     mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), executor: "opencode", model: "openai/gpt-x", variant: "max" });
-    // The spawn waits on the async prepareLaunch(); the fake child never exits.
-    for (let i = 0; i < 100 && captured === null; i += 1) await new Promise((resolve) => setTimeout(resolve, 10));
-    assert.ok(captured.includes("--standalone"), `expected --standalone in ${JSON.stringify(captured)}`);
-    assert.ok(!captured.includes("--dir"));
-    assert.equal(captured[captured.indexOf("-m") + 1], "openai/gpt-x#max");
+    const args = await waitForCaptured(() => captured);
+    assert.ok(args.includes("--standalone"), `expected --standalone in ${JSON.stringify(args)}`);
+    assert.ok(!args.includes("--dir"));
+    assert.equal(args[args.indexOf("-m") + 1], "openai/gpt-x#max");
   });
 
   for (const [major, expectRefresh] of [[2, false], [1, true]]) {

@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { createTaskManager } from "./tasks.js";
-import { trackManager, makeManager, fakeChild, baseTask, INVESTIGATED_TEXT, SOURCE_LOG, LUNA_MODEL, MINIMAX_MODEL, READING_CONFIG, CONTINUE_FLAG, SRCA_LOG, SRCB_LOG, DID_A, DID_B, mkdtempTracked, makeFakeExecutor } from "./tasks.test-helpers.js";
+import { trackManager, makeManager, fakeChild, baseTask, INVESTIGATED_TEXT, SOURCE_LOG, LUNA_MODEL, MINIMAX_MODEL, READING_CONFIG, CONTINUE_FLAG, SRCA_LOG, SRCB_LOG, DID_A, DID_B, mkdtempTracked, makeFakeExecutor, waitForCaptured } from "./tasks.test-helpers.js";
 
 const FRESH_RETRY_SESSION_ID = "ses_fresh_retry";
 const FRESH_RETRY_OUTPUT = "fresh retry output";
@@ -53,8 +53,7 @@ describe("summarize(): spawn shape, attachment, and snapshot content", () => {
     });
 
     await mgr.summarize("source", { maxWords: 150, previousActivity: "Read the config file." });
-    // Wait for the summary task to start (spawn happens after async version probe)
-    await new Promise((r) => setTimeout(r, 100));
+    await waitForCaptured(() => capturedSnapshot);
     assert.equal(capturedSnapshot.previous_summary, "Read the config file.");
     child.emit("exit", 0, null);
   });
@@ -74,8 +73,7 @@ describe("summarize(): spawn shape, attachment, and snapshot content", () => {
     });
 
     await mgr.summarize("source", { maxWords: 150 });
-    // Wait for summary task to start (spawn happens after async version probe)
-    await new Promise((r) => setTimeout(r, 100));
+    await waitForCaptured(() => capturedSnapshot);
 
     assert.equal("previous_summary" in capturedSnapshot, false);
     child.emit("exit", 0, null);
@@ -103,8 +101,7 @@ describe("summarize(): spawn shape, attachment, and snapshot content", () => {
     });
 
     await mgr.summarize("source", { maxWords: 150 });
-    // Wait for summary task to start (spawn happens after async version probe)
-    await new Promise((r) => setTimeout(r, 100));
+    await waitForCaptured(() => capturedSnapshot);
 
     assert.match(capturedSnapshot.narration, /Checking repo state/);
     assert.match(capturedSnapshot.narration, /\[tool:bash] \{"command":"git status"} -> x+…\[truncated]/);

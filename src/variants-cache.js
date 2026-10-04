@@ -105,10 +105,17 @@ const _inFlight = new Map();
  * `readVariantsCache()` never observes a half-written file). Never throws:
  * a failed refresh logs nothing itself (the caller decides how to log) and
  * simply leaves whatever file was already on disk in place.
- * @param {{cacheDir: string, env: NodeJS.ProcessEnv, listModelVariantsFn: (env: NodeJS.ProcessEnv) => Promise<Map<string, string[]>>, writeFileFn?: (p: string, data: string) => void, renameFn?: (from: string, to: string) => void, mkdirFn?: (p: string) => void}} params
+ *
+ * `opencodeMajor` is the CLI major the caller already confirmed with a
+ * successful version probe; it is stamped into the file so a later read
+ * under a different major rejects it. Anything but a known 1.x (or a 0.x
+ * dev build) writes nothing: 2.x has no `models --verbose`, and an unknown
+ * major would stamp a file nothing vouched for.
+ * @param {{cacheDir: string, env: NodeJS.ProcessEnv, opencodeMajor: number|null, listModelVariantsFn: (env: NodeJS.ProcessEnv) => Promise<Map<string, string[]>>, writeFileFn?: (p: string, data: string) => void, renameFn?: (from: string, to: string) => void, mkdirFn?: (p: string) => void}} params
  * @returns {Promise<void>}
  */
-export async function refreshVariantsCache({ cacheDir, env, listModelVariantsFn, writeFileFn = fs.writeFileSync, renameFn = fs.renameSync, mkdirFn = (p) => fs.mkdirSync(p, { recursive: true }) }) {
+export async function refreshVariantsCache({ cacheDir, env, opencodeMajor, listModelVariantsFn, writeFileFn = fs.writeFileSync, renameFn = fs.renameSync, mkdirFn = (p) => fs.mkdirSync(p, { recursive: true }) }) {
+  if (typeof opencodeMajor !== "number" || opencodeMajor >= 2) return;
   const filePath = cacheFilePath(cacheDir);
   const fingerprint = hashFingerprint(env);
   const inFlightKey = `${filePath}::${fingerprint}`;
@@ -116,17 +123,12 @@ export async function refreshVariantsCache({ cacheDir, env, listModelVariantsFn,
   if (!inFlight) {
     inFlight = (async () => {
       try {
-        const currentMajor = detectOpencodeCliMajor();
-        // opencode 2.x has no `models --verbose`, so there is nothing to list.
-        if (currentMajor !== null && currentMajor >= 2) {
-          return;
-        }
         const models = await listModelVariantsFn(env);
         const body = {
           fingerprint,
+          opencodeMajor,
           schema: VARIANTS_CACHE_SCHEMA,
           generatedAt: new Date().toISOString(),
-          opencodeMajor: currentMajor,
           models: Object.fromEntries(models),
         };
         mkdirFn(cacheDir);

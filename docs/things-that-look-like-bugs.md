@@ -217,7 +217,19 @@ belongs here.
   didn't. Expected: 2.0 removed `--pure`, and there is no replacement flag.
   The child still runs inside the sandbox against its private snapshot.
   Plugins load regardless of `--no-sandbox`; the sandbox only affects
-  filesystem isolation, not plugin loading.
+  filesystem isolation, not plugin loading. Every 2.x run, summaries
+  included, passes `--auto` so a plugin's permission prompt is approved
+  instead of waiting on a terminal nobody is watching. A 2.x summary that
+  stalls on a permission prompt is a real bug: it means `--auto` was
+  dropped from the argv.
+- An opencode dispatch crashes before anything spawns with "opencode CLI
+  major version could not be detected" instead of falling back to the 1.x
+  argv. Expected: the 1.x and 2.x `run` flags are incompatible, so a wrong
+  guess boot-fails anyway, later and with a less useful error. The cause (missing binary,
+  timeout, unparseable `opencode --version`) is on the daemon's stderr, and
+  failed probes are not cached, so the next dispatch re-probes. It is a
+  real bug if `opencode --version` prints a parseable version and
+  dispatches still fail this way.
 - An opencode 2.x dispatch passes `--standalone`, a flag none of the 1.x
   runs had. Expected: without it, 2.x `run` attaches to a shared background
   opencode service that runs outside the bwrap sandbox and the overlay, so

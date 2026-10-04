@@ -5510,7 +5510,7 @@ function warmAndScheduleVariantsCacheRefresh(opts, sanitizeEnvironment, ensureCl
     if (major === null || major >= 2) return;
     const env = sanitizeEnvironment(process.env);
     if (readVariantsCache({ cacheDir: opts.cacheDir, env: env }) !== null) return;
-    await refreshVariantsCache({ cacheDir: opts.cacheDir, env: env, listModelVariantsFn: opts.opencodeListModelVariantsFn });
+    await refreshVariantsCache({ cacheDir: opts.cacheDir, env: env, opencodeMajor: major, listModelVariantsFn: opts.opencodeListModelVariantsFn });
   };
   const tick = () => maybeRefresh().catch((err) => process.stderr.write(`warning: opencode variants cache refresh failed: ${errMessage(err)}\n`));
   tick();

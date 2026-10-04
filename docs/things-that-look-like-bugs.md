@@ -407,16 +407,19 @@ belongs here.
   persisted), and an id this daemon itself loaded is governed by the
   in-memory record alone (its own restart reconciliation already decided the
   task's fate; the on-disk snapshot may lag by the persist debounce).
-- Orphaned prompt files, output dirs, overlays, and per-task uv dirs piling
-  up untouched across boots while `tasks.json` is unreadable — expected.
+- Orphaned prompt files, output dirs, overlays, and namespaced per-task uv
+  dirs piling up untouched across boots while `tasks.json` is unreadable —
+  expected.
   When the store fails to load (`stateLoadError`), the daemon's in-memory
   map and the disk snapshot are both empty, so every entry would read as an
   orphan, including live output dirs and the overlays of pending changesets.
   Every record-guarded boot sweep takes `failClosed` and skips instead
   (`sweepOrphanedPromptFilesFor`, `sweepOrphanedOutputDirsFor`,
   `sweepOrphanedOverlaysFor`, `sweepDeferredCleanupFor`, and the namespaced
-  pass of `sweepOrphanedUvDirsFor`), the same way the retention sweep does.
-  Repair `tasks.json` and the next boot sweeps normally. It would be a real
+  pass of `sweepOrphanedUvDirsFor`). The retention sweep is skipped too.
+  The legacy flat uv pass still runs: it never reads task records, only the
+  `uvLegacySweepAgeDays` mtime floor, so an unreadable store tells it
+  nothing new. Repair `tasks.json` and the next boot sweeps normally. It would be a real
   bug if any of these sweeps removed something on a boot where the store
   failed to load. A *missing* `tasks.json` is a fresh state dir, not a load
   failure, and still sweeps.

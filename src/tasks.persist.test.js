@@ -3,7 +3,8 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { createTaskManager, isOutsideDirectory } from "./tasks.js";
+import { setTimeout as sleep } from "node:timers/promises";
+import { createTaskManager, isOutsideDirectory, uvDirPath } from "./tasks.js";
 import { trackManager, makeManager, fakeChild, baseTask, AXI_TASKS_TEST_DIR, TASKS_STATE_FILE, LUNA_MODEL, NOT_REACHED, WS_REPO, mkdtempTracked } from "./tasks.test-helpers.js";
 
 describe("persistTask() durability across concurrent manager instances", () => {
@@ -47,9 +48,10 @@ describe("persistTask() durability across concurrent manager instances", () => {
     );
   });
 
-  test("an unreadable tasks.json skips the prompt, output-dir, and overlay boot sweeps", () => {
+  test("an unreadable tasks.json skips the prompt, output-dir, overlay, and uv-dir boot sweeps", async () => {
     const stateDir = mkdtempTracked(AXI_TASKS_TEST_DIR);
     const overlayTmpRoot = mkdtempTracked(AXI_TASKS_TEST_DIR);
+    const cacheDir = mkdtempTracked(AXI_TASKS_TEST_DIR);
     fs.writeFileSync(path.join(stateDir, TASKS_STATE_FILE), "{ not valid json");
     const promptFile = path.join(stateDir, "prompts", "oc_live.prompt.txt");
     const outputDir = path.join(stateDir, "outputs", "oc_live");
@@ -59,12 +61,18 @@ describe("persistTask() durability across concurrent manager instances", () => {
     fs.mkdirSync(outputDir, { recursive: true });
     fs.writeFileSync(path.join(outputDir, "report.md"), "deliverable");
     fs.mkdirSync(path.join(overlayDir, "upper"), { recursive: true });
+    const uvCacheDir = uvDirPath(cacheDir, stateDir, "oc_live", "uv-cache");
+    fs.mkdirSync(uvCacheDir, { recursive: true });
 
-    trackManager(createTaskManager({ stateDir, overlayTmpRoot, sandboxEnabled: false, spawnFn: () => fakeChild(), killFn: () => {} }));
+    trackManager(createTaskManager({ stateDir, overlayTmpRoot, cacheDir, sandboxEnabled: false, spawnFn: () => fakeChild(), killFn: () => {} }));
+    // The uv sweep's removal is an async fire-and-forget fsp.rm, so give it
+    // time to land before asserting the dir survived.
+    await sleep(250);
 
     assert.ok(fs.existsSync(promptFile), "prompt file must survive a boot that could not read tasks.json");
     assert.ok(fs.existsSync(path.join(outputDir, "report.md")), "output dir must survive a boot that could not read tasks.json");
     assert.ok(fs.existsSync(overlayDir), "overlay must survive a boot that could not read tasks.json");
+    assert.ok(fs.existsSync(uvCacheDir), "namespaced uv dir must survive a boot that could not read tasks.json");
   });
 });
 

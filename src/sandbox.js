@@ -121,7 +121,11 @@ export async function checkBwrapAvailableAsync(runCommand = defaultRunCommandAsy
  * gh/gnupg are pivot-capable credentials (grant outbound access to other
  * systems); `.claude` is personal instruction/context content (a global
  * CLAUDE.md carries user preferences and private context, not a credential,
- * but has no legitimate reason to be readable by a worker either). Extendable
+ * but has no legitimate reason to be readable by a worker either). The
+ * opencode/kilo entries are a third category: other harnesses' session
+ * databases. A worker has no legitimate reason to touch them, and a
+ * disk-cleanup-shaped worker is exactly what would (see "Agent log files
+ * are sacred" in the global CLAUDE.md). Extendable
  * per-install via TASKFERRY_SANDBOX_DENYLIST / config.sandboxDenylist (see
  * tasks.js) for paths beyond this fixed set — those extra paths are always
  * directories, same as this list; a file-shaped credential deny-list
@@ -130,9 +134,10 @@ export async function checkBwrapAvailableAsync(runCommand = defaultRunCommandAsy
  * separately, not covered by this function.
  * @param {string} homeDir
  * @param {string} stateDir
+ * @param {string} [dataHome] - XDG data dir; defaults to ~/.local/share
  * @returns {string[]}
  */
-export function defaultDenyList(homeDir, stateDir) {
+export function defaultDenyList(homeDir, stateDir, dataHome = path.join(homeDir, ".local", "share")) {
   return [
     stateDir,
     path.join(homeDir, ".ssh"),
@@ -141,6 +146,8 @@ export function defaultDenyList(homeDir, stateDir) {
     path.join(homeDir, ".config", "gh"),
     path.join(homeDir, ".gnupg"),
     path.join(homeDir, ".claude"),
+    path.join(dataHome, "opencode"),
+    path.join(dataHome, "kilo"),
   ];
 }
 

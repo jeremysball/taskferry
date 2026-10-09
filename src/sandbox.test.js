@@ -1,7 +1,7 @@
 import { describe, test } from "node:test";
 import assert from "node:assert/strict";
 import path from "node:path";
-import { buildBwrapArgs, buildBwrapBaseArgs, checkBwrapAvailable, checkOverlaySupport, parseBwrapVersion, platformSupportsSandbox, resolveGitCommonDir, resolveGitDir } from "./sandbox.js";
+import { buildBwrapArgs, buildBwrapBaseArgs, checkBwrapAvailable, checkOverlaySupport, defaultDenyList, parseBwrapVersion, platformSupportsSandbox, resolveGitCommonDir, resolveGitDir } from "./sandbox.js";
 
 // Repeated literals lifted to module-level constants to satisfy
 // sonarjs/no-duplicate-string in this file.
@@ -24,6 +24,8 @@ const MAIN_WORKTREE_GITDIR = "/workspace/main-repo/.git/worktrees/my-repo";
 const COW_UPPER_MAIN = "/tmp/taskferry-cow-t1/upper/main";
 const COW_WORK_MAIN = "/tmp/taskferry-cow-t1/work/main";
 const OVERLAY_SRC = "--overlay-src";
+const OPENCODE_DATA_DIR = "/home/user/.local/share/opencode";
+const KILO_DATA_DIR = "/home/user/.local/share/kilo";
 
 describe("platformSupportsSandbox()", () => {
   test("is true on linux", () => {
@@ -464,6 +466,8 @@ describe("buildBwrapArgs() byte-identical output (Task 5: post-refactor regressi
       "--tmpfs", "/home/user/.config/gh",
       "--tmpfs", "/home/user/.gnupg",
       "--tmpfs", "/home/user/.claude",
+      "--tmpfs", OPENCODE_DATA_DIR,
+      "--tmpfs", KILO_DATA_DIR,
       "--bind", MY_REPO_DIR, MY_REPO_DIR,
       "--bind", SOCKET_PATH, SOCKET_PATH,
       UNSHARE_ALL, SHARE_NET, DIE_WITH_PARENT,
@@ -488,10 +492,27 @@ describe("buildBwrapArgs() byte-identical output (Task 5: post-refactor regressi
       "--tmpfs", "/home/user/.config/gh",
       "--tmpfs", "/home/user/.gnupg",
       "--tmpfs", "/home/user/.claude",
+      "--tmpfs", OPENCODE_DATA_DIR,
+      "--tmpfs", KILO_DATA_DIR,
       OVERLAY_SRC, MY_REPO_DIR,
       "--overlay", COW_UPPER_MAIN, COW_WORK_MAIN, MY_REPO_DIR,
       "--bind", SOCKET_PATH, SOCKET_PATH,
       UNSHARE_ALL, SHARE_NET, DIE_WITH_PARENT,
     ]);
+  });
+});
+
+describe("defaultDenyList()", () => {
+  test("covers harness session databases under the default data home", () => {
+    const list = defaultDenyList(HOME_DIR, STATE_DIR);
+    assert.ok(list.includes(STATE_DIR));
+    assert.ok(list.includes(SSH_DIR));
+    assert.deepEqual(list.slice(-2), [OPENCODE_DATA_DIR, KILO_DATA_DIR]);
+  });
+
+  test("honors an explicit data home", () => {
+    const list = defaultDenyList(HOME_DIR, STATE_DIR, "/data");
+    assert.ok(list.includes("/data/opencode"));
+    assert.ok(list.includes("/data/kilo"));
   });
 });

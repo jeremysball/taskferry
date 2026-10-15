@@ -12,5 +12,5 @@
     "types": ["node"]
   },
   "//": "Check the CLI, daemon, and remaining native Kilo plugin entrypoints and their transitive imports.",
-  "include": ["src/cli.js", "src/daemon.js", "src/kilo-plugin.js"]
+  "include": ["src/cli.js", "src/daemon.js", "src/kilo-plugin.js", "src/opencode-worker.js"]
 }

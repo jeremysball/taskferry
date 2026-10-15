@@ -64,7 +64,7 @@ reversible. taskferry keeps those boundaries explicit:
 - **Durable deliverables:** `taskferry output` retrieves files from a
   per-task scratch directory even when a task ends on a tool call or is
   cancelled.
-- **Agent context:** native Claude Code, OpenCode, and Codex integrations
+- **Agent context:** native Claude Code, Kilo Code, and Codex integrations
   expose workspace task context without requiring an MCP server.
 - **Agent-oriented output:** TOON is the default output format, with NDJSON
   available for `watch` scripts.
@@ -108,9 +108,9 @@ every frontend:
 
 - [Claude Code](integrations/claude-code.md) receives session-start task
   context and the bundled worker-backend skill.
-- [OpenCode](integrations/opencode.md) receives task toasts and bounded
-  task context in the system prompt.
-- [Kilo Code](integrations/kilo.md) receives task toasts, bounded context, and live monitoring (parity with OpenCode, beyond Claude/Codex).
+- [OpenCode](integrations/opencode.md) remains a worker backend; its native
+  presentation plugin has been removed.
+- [Kilo Code](integrations/kilo.md) receives task toasts, bounded context, and live monitoring.
 - [Codex](integrations/codex.md) receives task context through its hooks.
 
 These integrations provide context and presentation. The CLI remains the
@@ -119,7 +119,7 @@ dispatch surface.
 ## As a subagent-driven-development worker backend
 
 The bundled `using-taskferry` skill (shipped inside the Claude Code,
-OpenCode, Kilo Code, and Codex plugins, or copyable to `~/.claude/skills/`) makes taskferry the
+Kilo Code, and Codex plugins, or copyable to `~/.claude/skills/`) makes taskferry the
 external-worker execution layer for a
 `subagent-driven-development`-style lifecycle: that lifecycle owns task
 briefs, worktrees, and the review loop, while taskferry owns model selection,

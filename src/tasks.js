@@ -924,8 +924,9 @@ function resolveSpawnPlan(ctx, launchInfo, taskId) {
   const spawnEnv = isSummary ? ctx.summaryEnvironment(summaryLaunch.env) : ctx.dispatchEnvironment(dispatchLaunch.env, taskId);
   applyOutputDirEnv(spawnEnv, isSummary, dispatchLaunch.outputDir ?? null);
   const noSandbox = !isSummary && dispatchLaunch.noSandbox === true;
-  const spawnCommand = executor.binaryName;
-  const spawnArgs = args;
+  const command = executor.buildSpawnCommand?.(args) ?? { command: executor.binaryName, args };
+  const spawnCommand = command.command;
+  const spawnArgs = command.args;
   // Summary/report children never get an overlay -- they don't write
   // to the target directory in any sense the changeset model cares
   // about, so the plain v1 bind is correct and unchanged for them.
@@ -1546,6 +1547,7 @@ function buildGitBinds(ctx, launchDirectory, overlayInfo, extraRwBinds, { taskId
  */
 function assembleBwrapSpawn(ctx, launchInfo, binds, task) {
   const { executor, args, launchDirectory, isSummary } = launchInfo;
+  const command = executor.buildSpawnCommand?.(args) ?? { command: executor.binaryName, args };
   const spawnArgs = buildBwrapArgs({
     directory: launchDirectory,
     stateDir: ctx.stateDir,
@@ -1563,7 +1565,7 @@ function assembleBwrapSpawn(ctx, launchInfo, binds, task) {
     // runtimeDir are no longer reachable (#453), and the stateDir deny-list is
     // no longer un-masked by a whole-runtimeDir bind (#455).
     socketPath: binds.role !== "advisor" ? ctx.socketPath : null,
-  }).concat(["--", executor.binaryName, ...args]);
+  }).concat(["--", command.command, ...command.args]);
   const spawnEnv = { ...binds.spawnEnv, ...binds.sandboxEnv };
   if (binds.overlayInfo && !isSummary) {
     // rwBinds persisted onto the task (review finding #1): settlement-time
@@ -2071,7 +2073,7 @@ function validateResultFields(full, fields) {
  * old monolithic function. `sumTokens` is module-level, so it needs no ctx.
  * @param {string} raw
  * @param {string|null} initialSessionId
- * @returns {{sessionId: string|null, tokens: unknown, cost: number|null, textByMessageId: Map<string, string[]>, textOrder: string[], finalMessageId: string|null}}
+ * @returns {{sessionId: string|null, tokens: unknown, cost: number|null, textByMessageId: Map<string, string[]>, textOrder: string[], finalMessageId: string|null, authoritativeFailure: boolean}}
  */
 function parseTaskLog(raw, initialSessionId) {
   const parsed = {
@@ -2081,6 +2083,7 @@ function parseTaskLog(raw, initialSessionId) {
     textByMessageId: new Map(),
     textOrder: [],
     finalMessageId: null,
+    authoritativeFailure: false,
   };
   for (const line of raw.split("\n")) {
     if (!line.trim()) continue;
@@ -2096,7 +2099,7 @@ function parseTaskLog(raw, initialSessionId) {
  * lines (e.g. a crash stack trace on stderr, interleaved into the same fd)
  * are skipped.
  * @param {string} line
- * @param {{sessionId: string|null, tokens: unknown, cost: number|null, textByMessageId: Map<string, string[]>, textOrder: string[], finalMessageId: string|null}} parsed
+ * @param {ReturnType<typeof parseTaskLog>} parsed
  */
 function consumeLogLine(line, parsed) {
   /** @type {any} */
@@ -2106,7 +2109,29 @@ function consumeLogLine(line, parsed) {
   } catch {
     return;
   }
+  consumeLogEvent(evt, parsed);
+}
+
+/** @param {any} evt @param {ReturnType<typeof parseTaskLog>} parsed */
+function consumeLogEvent(evt, parsed) {
   if (evt.sessionID) parsed.sessionId = evt.sessionID;
+  if (evt.type === "error" && evt.error?.name === "OpenCodeSessionResultError") parsed.authoritativeFailure = true;
+  if (evt.type === "taskferry_session_result" && Array.isArray(evt.events)) {
+    // The finalized session snapshot supersedes any partial/live projection.
+    // In particular, never add its accounting to already-streamed accounting.
+    parsed.tokens = null;
+    parsed.cost = null;
+    parsed.textByMessageId.clear();
+    parsed.textOrder.length = 0;
+    parsed.finalMessageId = null;
+    parsed.authoritativeFailure = evt.failed === true;
+    for (const event of evt.events) consumeResultEvent(event, parsed);
+  }
+  consumeResultEvent(evt, parsed);
+}
+
+/** @param {any} evt @param {ReturnType<typeof parseTaskLog>} parsed */
+function consumeResultEvent(evt, parsed) {
   if (evt.type === "text" && evt.part && typeof evt.part.text === "string") {
     accumulateTextEvent(evt, parsed);
   }
@@ -2958,6 +2983,10 @@ function dispatchAdvisorTask(ctx, params) {
  * @param {Array<{kind: "text", mid: string}|{kind: "tool", line: string}>} order
  */
 function collectNarrationLine(evt, textByMessageId, order) {
+  if (evt.type === "taskferry_session_result" && Array.isArray(evt.events)) {
+    reconcileNarrationSnapshot(evt.events, textByMessageId, order);
+    return;
+  }
   if (evt.type === "text" && typeof evt.part?.text === "string") {
     const mid = evt.part.messageID;
     if (!textByMessageId.has(mid)) {
@@ -2968,6 +2997,37 @@ function collectNarrationLine(evt, textByMessageId, order) {
   }
   if (evt.type === "tool_use" && evt.part?.type === "tool") {
     order.push({ kind: "tool", line: formatToolEventForNarration(evt.part) });
+  }
+}
+
+/**
+ * Replace live text by message ID, retaining the observed tool chronology.
+ * @param {any[]} events
+ * @param {Map<string, string[]>} textByMessageId
+ * @param {Array<{kind: "text", mid: string}|{kind: "tool", line: string}>} order
+ */
+function reconcileNarrationSnapshot(events, textByMessageId, order) {
+  const textEvents = events.filter(event => event.type === "text" && typeof event.part?.text === "string");
+  const canonicalOrder = textEvents.map(event => ({ kind: /** @type {const} */ ("text"), mid: event.part.messageID }));
+  let textIndex = 0;
+  const previousOrder = order.splice(0);
+  // Text positions follow the saved session, never the subset the stream
+  // happened to deliver. Keep tools in their observed relative order.
+  for (const entry of previousOrder) {
+    if (entry.kind === "tool") {
+      order.push(entry);
+      continue;
+    }
+    if (textIndex < canonicalOrder.length) {
+      order.push(canonicalOrder[textIndex]);
+      textIndex++;
+    }
+  }
+  order.push(...canonicalOrder.slice(textIndex));
+  textByMessageId.clear();
+  for (const event of textEvents) {
+    const mid = event.part.messageID;
+    textByMessageId.set(mid, [event.part.text]);
   }
 }
 
@@ -5797,12 +5857,55 @@ function readNarrationExcerpt(logPath) {
       narration = [narration, omission, parseNarration(lastRaw)].filter(Boolean).join("\n\n");
       inputRaw += lastRaw;
     }
+    const finalized = readFinalSessionSnapshot(logPath);
+    if (finalized) {
+      narration = boundSummaryNarration(parseNarration(`${inputRaw}\n${JSON.stringify(finalized)}`));
+      return { narration, sourceLogBytes: size, inputBytes: Buffer.byteLength(narration) };
+    }
     return { narration, sourceLogBytes: size, inputBytes: Buffer.byteLength(inputRaw) };
   } catch {
     return { narration: "", sourceLogBytes: 0, inputBytes: 0 };
   } finally {
     if (fd != null) fs.closeSync(fd);
   }
+}
+
+/** @param {string} text */
+function boundSummaryNarration(text) {
+  const bytes = Buffer.from(text);
+  if (bytes.length <= SUMMARY_INPUT_BYTES) return text;
+  const half = Math.floor((SUMMARY_INPUT_BYTES - 200) / 2);
+  return `${bytes.subarray(0, half).toString("utf8")}\n[finalized narration omitted]\n${bytes.subarray(-half).toString("utf8")}`;
+}
+
+/**
+ * Successful collectors finish with a snapshot; failures may append errors.
+ * Usually it fits the normal tail window. A large single-line snapshot needs
+ * a full read, just as result() does, before its summary can be safely clipped.
+ * @param {string} logPath
+ * @returns {any|null}
+ */
+function readFinalSessionSnapshot(logPath) {
+  const tail = readRawCaptureTail(logPath);
+  const candidate = finalSnapshotInText(tail);
+  if (candidate !== undefined) return candidate;
+  try {
+    return finalSnapshotInText(fs.readFileSync(logPath, "utf8")) ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/** @param {string} raw @returns {any|null|undefined} */
+function finalSnapshotInText(raw) {
+  const lines = raw.trim().split("\n");
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (!isParseableJson(lines[i])) continue;
+    const event = JSON.parse(lines[i]);
+    if (event.type === "taskferry_session_result" && Array.isArray(event.events)) return event;
+    if (event.type !== "error") return null;
+  }
+  return undefined;
 }
 
 /**
@@ -5939,7 +6042,7 @@ function readFinalMessageState(logPath) {
   }
   const parsed = parseTaskLog(raw, null);
   const { message } = shapeNarration(parsed, true);
-  return { message, hadExplicitStop: parsed.finalMessageId != null };
+  return { message, hadExplicitStop: parsed.finalMessageId != null && !parsed.authoritativeFailure };
 }
 
 /**
@@ -6101,6 +6204,7 @@ function readLastText(logPath) {
       const line = lines[i].trim();
       if (!line) continue;
       const evt = isParseableJson(line) ? JSON.parse(line) : null;
+      if (evt?.type === "taskferry_session_result") return shapeNarration(parseTaskLog(line, null), true).message;
       if (evt && evt.type === "text" && typeof evt.part?.text === "string") return evt.part.text;
     }
   } catch {
@@ -6108,7 +6212,9 @@ function readLastText(logPath) {
   } finally {
     if (fd != null) fs.closeSync(fd);
   }
-  return "";
+  // A finalized snapshot can exceed the bounded tail window as one NDJSON
+  // line. Fall back only when that window contained no usable text event.
+  return readFinalMessageState(logPath).message;
 }
 
 /**
@@ -6116,10 +6222,6 @@ function readLastText(logPath) {
  * @returns {string}
  */
 function readNarration(logPath) {
-  /** @type {Map<string, string[]>} */
-  const textByMessageId = new Map();
-  /** @type {string[]} */
-  const textOrder = [];
   /** @type {string} */
   let raw;
   try {
@@ -6127,27 +6229,7 @@ function readNarration(logPath) {
   } catch {
     return "";
   }
-  for (const line of raw.split("\n")) {
-    if (!line.trim()) continue;
-    /** @type {any} */
-    let evt;
-    let parsed = false;
-    try {
-      evt = JSON.parse(line);
-      parsed = true;
-    } catch {
-      // Not a text event line -- not narration.
-    }
-    if (parsed && evt.type === "text" && evt.part && typeof evt.part.text === "string") {
-      const mid = evt.part.messageID;
-      if (!textByMessageId.has(mid)) {
-        textByMessageId.set(mid, []);
-        textOrder.push(mid);
-      }
-      /** @type {string[]} */ (textByMessageId.get(mid)).push(evt.part.text);
-    }
-  }
-  return textOrder.map((mid) => /** @type {string[]} */ (textByMessageId.get(mid)).join("")).join("\n\n");
+  return shapeNarration(parseTaskLog(raw, null), true).narration;
 }
 
 const CALLER_ENV_EXCLUDED = new Set(["PATH", "HOME", ...TASKFERRY_PLUMBING_ENV_VARS]);

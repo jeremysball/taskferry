@@ -70,7 +70,7 @@ Full flags, defaults, and TOON examples for every command: [docs/cli-reference.m
 
 ## How it works
 
-A private daemon owns task processes and exposes versioned JSON-RPC over a user-scoped Unix-domain socket; the CLI validates input, auto-starts the daemon when needed, and prints TOON. For a git target, worker changes are held as a pending changeset against the pre-dispatch `HEAD`, with an optional `.taskferry.toml` check gate before `accept`. Native integrations exist for Claude Code, OpenCode, Kilo Code, and Codex; the CLI remains the dispatch surface. Full process model: [docs/daemon.md](docs/daemon.md).
+A private daemon owns task processes and exposes versioned JSON-RPC over a user-scoped Unix-domain socket; the CLI validates input, auto-starts the daemon when needed, and prints TOON. For a git target, worker changes are held as a pending changeset against the pre-dispatch `HEAD`, with an optional `.taskferry.toml` check gate before `accept`. Native integrations exist for Claude Code, Kilo Code, and Codex; OpenCode remains a worker executor. The CLI remains the dispatch surface. Full process model: [docs/daemon.md](docs/daemon.md).
 
 ## Further reading
 

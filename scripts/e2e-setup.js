@@ -8,7 +8,6 @@ import { runSetup } from "../src/setup.js";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const cliSource = path.join(repoRoot, "src", "cli.js");
-const pluginSource = path.join(repoRoot, "src", "opencode-plugin.js");
 
 const home = fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-e2e-home-"));
 const checkout = fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-e2e-checkout-"));
@@ -36,12 +35,7 @@ try {
   }
 
   const pluginLink = result.opencode.path;
-  const pluginStat = fs.lstatSync(pluginLink);
-  if (!pluginStat.isSymbolicLink()) throw new Error(`${pluginLink} is not a symlink`);
-  const pluginResolved = fs.realpathSync(pluginLink);
-  if (pluginResolved !== pluginSource) {
-    throw new Error(`plugin symlink target mismatch: got ${pluginResolved}, expected ${pluginSource}`);
-  }
+  if (fs.existsSync(pluginLink)) throw new Error(`${pluginLink} should not be installed`);
 
   const stdout = execFileSync(process.execPath, [binLink, "--version"], {
     cwd: repoRoot,
@@ -56,7 +50,7 @@ try {
   console.log(JSON.stringify({
     binLink,
     resolved,
-    pluginResolved,
+    pluginStatus: result.opencode.status,
     pluginPath: pluginLink,
     version: value,
   }, null, 2));

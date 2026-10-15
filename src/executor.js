@@ -271,6 +271,7 @@ function resolveConfigBindSource(fullPath, lstatFn, realpathFn) {
  * @property {(env: NodeJS.ProcessEnv) => Promise<string>} listModelsFn
  * @property {(env: NodeJS.ProcessEnv, options?: {execFileFn?: typeof execFileAsync}) => Promise<Map<string, string[]>>} [listModelVariantsFn]
  * @property {(ctx: SpawnLaunchContext) => string[]} buildSpawnArgs
+ * @property {(args: string[]) => {command: string, args: string[]}} [buildSpawnCommand]
  * @property {() => string} buildSummaryPrompt
  * @property {(parsed: unknown) => unknown} normalizeLogEvent
  * @property {(ctx?: {isSummary: boolean}) => void | Promise<void>} [prepareLaunch] - optional async pre-spawn hook (e.g. awaiting a one-shot CLI version probe); the default is a no-op for executors that don't need one. Throws (sync) or rejects (async) to fail the dispatch with a clear error naming the preparation failure. Returns `void` when the probe is already cached (sync fast path); returns a `Promise` when the probe has to shell out.

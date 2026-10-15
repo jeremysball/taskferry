@@ -258,11 +258,9 @@ budget.
 ## `TASKFERRY_CHILD`
 
 Every dispatched worker child (OpenCode or pi), and every summary child,
-runs with `TASKFERRY_CHILD=1` set in its environment. The native OpenCode plugin
-(`src/opencode-plugin.js`) checks this and returns an empty hook set when
-present — so a task that itself runs `opencode` (directly, or indirectly
-through a nested taskferry dispatch) doesn't load a second copy of the
-toast/context integration inside that nested process.
+runs with `TASKFERRY_CHILD=1` set in its environment. The native Kilo plugin
+checks this and skips its toast/context integration inside nested workers.
+The optional OpenCode presentation plugin has been removed.
 
 **Leak into a dispatched child's own test/build invocation (#292).** Any repo
 whose own tests or build steps branch on an "am I a spawned child

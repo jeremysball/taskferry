@@ -46,10 +46,10 @@ Evidence: `src/tasks.js:6726-6739`, `src/tasks.js:6195-6227`,
 ### Keep agent sessions aware of the workspace
 
 Native integrations provide workspace task context without requiring one
-shared MCP shape. The OpenCode plugin subscribes to daemon events, renders
+shared MCP shape. The Kilo plugin subscribes to daemon events, renders
 task toasts, and injects a bounded task block into the system prompt.
 
-Evidence: `src/opencode-plugin.js:245-318`,
+Evidence: `src/kilo-plugin.js`,
 `docs/integrations/claude-code.md:62-76`,
 `docs/integrations/codex.md:80-96`.
 

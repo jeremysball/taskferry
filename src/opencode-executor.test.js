@@ -109,6 +109,16 @@ describe("opencodeExecutor()", () => {
 });
 
 describe("opencodeExecutor() - version probe and memoization", () => {
+  test("V2 runs through the session-result collector; V1 stays unchanged", () => {
+    const args = [...V2_COMMON_HEAD];
+    const v2 = opencodeExecutor({ detectCliMajorFn: () => 2 });
+    const launch = v2.buildSpawnCommand?.(args) ?? { command: v2.binaryName, args };
+    assert.equal(launch.command, process.execPath);
+    assert.match(launch.args[0], /opencode-worker\.js$/);
+    assert.deepEqual(launch.args.slice(1), args);
+    const v1 = opencodeExecutor({ detectCliMajorFn: () => 1 });
+    assert.deepEqual(v1.buildSpawnCommand?.(args), { command: "opencode", args });
+  });
   test("detectOpencodeCliMajor parses both version formats and memoizes on a TTL", async () => {
     let calls = 0;
     let out = OPENCODE_V2_STDOUT;

@@ -377,7 +377,7 @@ export function installKilo(_checkoutDirectory, runCommand, _homeDirectory, _env
  * @param {RunSetupOptions} options
  * @returns {{
  *   cli: {path: string, source: string},
- *   opencode: {path: string, source: string},
+ *   opencode: {path: string, status: "removed"|"not-installed"|"unmanaged"},
  *   kilo: {path: string, source: string},
  *   statusline: {path: string, source: string},
  *   dependencies: string,
@@ -426,7 +426,7 @@ export function runSetup({
   const tfSlPath = path.join(homeDirectory, ".local", "bin", "tf-sl");
   const tfSlSource = path.join(checkoutDirectory, "src", "tf-sl.sh");
   replaceManagedSymlink(binPath, cliPath);
-  replaceManagedSymlink(opencodePath, opencodeSource);
+  const opencodeStatus = removeDeprecatedOpenCodePlugin(opencodePath, opencodeSource);
   replaceManagedSymlink(kiloPath, kiloSource);
   replaceManagedSymlink(tfSlPath, tfSlSource);
 
@@ -441,7 +441,7 @@ export function runSetup({
 
   return {
     cli: { path: binPath, source: cliPath },
-    opencode: { path: opencodePath, source: opencodeSource },
+    opencode: { path: opencodePath, status: opencodeStatus },
     kilo: { path: kiloPath, source: kiloSource },
     statusline: { path: tfSlPath, source: tfSlSource },
     dependencies: "installed",
@@ -454,4 +454,25 @@ export function runSetup({
     },
     playwrightMcpIsolation: { opencode: opencodeMCP, claudeCode: claudeCodeMCP },
   };
+}
+
+/**
+ * Remove only this checkout's old plugin link, including a dangling link.
+ * @param {string} destination
+ * @param {string} source
+ * @returns {"removed"|"not-installed"|"unmanaged"}
+ */
+function removeDeprecatedOpenCodePlugin(destination, source) {
+  let existing;
+  try {
+    existing = fs.lstatSync(destination);
+  } catch (error) {
+    if (errCode(error) === "ENOENT") return "not-installed";
+    throw error;
+  }
+  if (!existing.isSymbolicLink()) return "unmanaged";
+  const target = path.resolve(path.dirname(destination), fs.readlinkSync(destination));
+  if (target !== path.resolve(source)) return "unmanaged";
+  fs.unlinkSync(destination);
+  return "removed";
 }

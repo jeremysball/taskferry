@@ -27,7 +27,7 @@ as a Claude Code marketplace (if it is not already registered) and
 either installs the `taskferry@taskferry` plugin at user scope or
 updates it if it is already installed. When `claude` is not on `PATH`,
 the Claude Code leg of `setup` reports `status: "unavailable"` and the
-rest of the bootstrap (CLI symlink, OpenCode plugin symlink, Codex
+rest of the bootstrap (CLI symlink, Kilo plugin symlink, Codex
   marketplace if `codex` is present) still runs. Setup also creates
   `~/.local/bin/tf-sl` -> `<checkout>/src/tf-sl.sh`, a statusline data source
   for a Claude Code statusline configuration.

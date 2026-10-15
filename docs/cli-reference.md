@@ -517,9 +517,13 @@ install` in the checkout, then creates (or refreshes) the three managed
 symlinks Taskferry needs on disk:
 
 - `~/.local/bin/taskferry` → `<checkout>/src/cli.js`
-- `$XDG_CONFIG_HOME/opencode/plugins/taskferry.js` (default
-  `~/.config/opencode/plugins/taskferry.js`) → `<checkout>/src/opencode-plugin.js`
+- `$XDG_CONFIG_HOME/kilo/plugins/taskferry.js` (default
+  `~/.config/kilo/plugins/taskferry.js`) → `<checkout>/src/kilo-plugin.js`
 - `~/.local/bin/tf-sl` → `<checkout>/src/tf-sl.sh`
+
+The deprecated OpenCode plugin link is removed if it points into this
+checkout; unrelated files and links are preserved. OpenCode worker dispatch
+is unchanged.
 
 After that, it registers or refreshes the native agent integration for
 whichever client CLI is on `PATH` (`claude`, `codex`). The command
@@ -552,7 +556,10 @@ cli:
   source: /workspace/taskferry/src/cli.js
 opencode:
   path: /home/user/.config/opencode/plugins/taskferry.js
-  source: /workspace/taskferry/src/opencode-plugin.js
+  status: not-installed
+kilo:
+  path: /home/user/.config/kilo/plugins/taskferry.js
+  source: /workspace/taskferry/src/kilo-plugin.js
 statusline:
   path: /home/user/.local/bin/tf-sl
   source: /workspace/taskferry/src/tf-sl.sh
@@ -571,7 +578,8 @@ Field-by-field:
 | Field | Outcome |
 |---|---|
 | `cli.path`, `cli.source` | Resolved symlink destination and its target after `setup` ran |
-| `opencode.path`, `opencode.source` | Same for the OpenCode plugin symlink |
+| `opencode.path`, `opencode.status` | Deprecated plugin destination and cleanup status: `removed`, `not-installed`, or `unmanaged` |
+| `kilo.path`, `kilo.source` | Kilo plugin symlink destination and target |
 | `statusline.path`, `statusline.source` | Same for the `tf-sl` statusline symlink |
 | `dependencies` | Always `"installed"` on a successful run (the `npm install` step) |
 | `path` | `"available"` if `~/.local/bin` is already on `PATH`, otherwise `"missing"` with a sibling `pathInstruction: 'export PATH="$HOME/.local/bin:$PATH"'` field |

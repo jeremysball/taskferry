@@ -1,6 +1,6 @@
 /**
  * Shared task-status sets. Kept out of the plugin entrypoints
- * (opencode-plugin.js / kilo-plugin.js) because those loaders require every
+ * (kilo-plugin.js) because its loader requires every
  * named export to be a function; a `Set` named export breaks opencode's
  * plugin loader ("Plugin export is not a function").
  */

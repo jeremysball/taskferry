@@ -368,5 +368,5 @@ export default async function kiloPlugin(input) {
   return createKiloPlugin(input);
 }
 
-// Re-export for consumers that want named import parity with opencode-plugin
+// Named entrypoint for consumers that create the Kilo plugin directly.
 export { createKiloPlugin as createOpenCodePlugin };

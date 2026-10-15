@@ -2,7 +2,7 @@
 
 Native Kilo Code plugin: first-class, with live monitoring. No MCP server, no `kilo mcp add`. It provides a file-symlink plugin, session hooks, and a bundled skill — bringing Kilo to parity with Claude Code and beyond.
 
-Kilo Code is the successor to OpenCode (same lineage, same plugin surface with extensions). This integration replaces and supersedes the plain OpenCode plugin when running inside Kilo: it reuses the same daemon subscription model but adds Kilo-native hooks, a richer toast/status surface, and fleet-wide monitoring.
+Kilo Code shares OpenCode's V1 plugin lineage. Its integration provides Kilo-native hooks, task toasts, and fleet monitoring. The separate OpenCode presentation plugin has been removed; OpenCode worker dispatch remains supported.
 
 ## Prerequisite: `taskferry` on `PATH`
 
@@ -20,11 +20,11 @@ taskferry setup
 `$XDG_CONFIG_HOME/kilo/plugins/taskferry.js` (default
 `~/.config/kilo/plugins/taskferry.js`) that resolves to the
 checkout's `src/kilo-plugin.js`. Kilo auto-loads any module at
-that path on startup (OpenCode-compatible discovery), so the plugin symlink itself needs no `kilo.json` edit. The same command also creates the CLI symlink at `~/.local/bin/taskferry`, the OpenCode plugin symlink, and registers the Claude Code marketplace when `claude` is on `PATH` — see the [Quickstart section in the README](../../README.md#quickstart) for the full bootstrap.
+that path on startup (OpenCode-compatible discovery), so the plugin symlink itself needs no `kilo.json` edit. The same command also creates the CLI symlink at `~/.local/bin/taskferry` and registers the Claude Code marketplace when `claude` is on `PATH` — see the [Quickstart section in the README](../../README.md#quickstart) for the full bootstrap.
 
 The symlink is self-managed: `taskferry setup` only replaces the file at that path when the existing symlink's target is one it created (a `src/kilo-plugin.js` or `src/opencode-plugin.js` inside a checkout whose `package.json` is `taskferry`). An unrelated symlink, a regular file, or a directory at that path is left alone and `setup` exits with `refusing to replace unmanaged path: <path>`.
 
-The `src/kilo-plugin.js` module is also exported from the `taskferry` package's `exports` field as `taskferry/kilo` (and `taskferry/opencode` for the shared base) for direct `import` use.
+The `src/kilo-plugin.js` module can also be imported directly from the checkout.
 
 Additionally, the `integrations/kilo/` directory is a full Kilo plugin distribution:
 
@@ -60,7 +60,7 @@ On load, the plugin connects to the taskferry daemon (auto-starting it if needed
 
 - **Dynamic toasts (live monitoring).** Every `task.state` event fires `client.tui.showToast`, titled `Taskferry(<status> · <id>)` with the task's current activity as the body and a variant chosen by status (`queued`/`running` → info, `done` → success, `crashed` → error, `cancelled` → warning). Kilo's TUI renders these as transient but timestamped overlays — the closest thing to a live per-task status surface. Activity updates (`task.activity` events) refresh the row's text in-place so the next toast or context injection shows the latest activity without a new state transition.
 
-- **System-prompt context (parity with Claude Code).** The `experimental.chat.system.transform` hook (and its Kilo-native alias `chat.system.transform`) injects a `Taskferry tasks:` block (up to 5 rows, with a `+N more` suffix) listing active tasks and terminal tasks not yet surfaced to a model request, immediately before Kilo sends its system prompt. Terminal-status rows are only marked "seen" once they actually enter a request sent to a model — an event arriving while Kilo is idle doesn't consume it. This is the same contract as the Claude Code `SessionStart` hook and the OpenCode plugin, but triggered on every model turn, not just session start.
+- **System-prompt context (parity with Claude Code).** The `experimental.chat.system.transform` hook (and its Kilo-native alias `chat.system.transform`) injects a `Taskferry tasks:` block (up to 5 rows, with a `+N more` suffix) listing active tasks and terminal tasks not yet surfaced to a model request, immediately before Kilo sends its system prompt. Terminal-status rows are only marked "seen" once they actually enter a request sent to a model — an event arriving while Kilo is idle doesn't consume it. This is the same contract as the Claude Code `SessionStart` hook, but triggered on every model turn, not just session start.
 
 - **Statusline / fleet indicator.** The plugin exposes a `kilo.status` hook and a `getTaskferryState()` accessor returning `{ active, unseenTerminal, block }` for hosts that poll the plugin object directly (e.g. TUI status bar widgets). Hosts can render `TF: 1 running, 1 queued` without parsing the system-prompt block. The daemon's `task.context` response already provides `counts` by status for this purpose.
 

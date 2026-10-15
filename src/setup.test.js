@@ -139,7 +139,7 @@ function gitFailsAlreadyInstalledClients(command, args) {
   throw new Error(`unexpected client command: ${command} ${args.join(" ")}`);
 }
 
-test("installs dependencies, the CLI, the OpenCode plugin, and the statusline script", (t) => {
+test("installs dependencies, the CLI, Kilo, and the statusline without an OpenCode plugin", (t) => {
   const fixture = makeFixture(t);
   const npmCalls = [];
   const commandCalls = [];
@@ -153,7 +153,8 @@ test("installs dependencies, the CLI, the OpenCode plugin, and the statusline sc
 
   assert.deepEqual(npmCalls, [fixture.checkoutDirectory]);
   assert.equal(fs.realpathSync(result.cli.path), fixture.cliPath);
-  assert.equal(fs.realpathSync(result.opencode.path), fixture.opencodeSourcePath);
+  assert.equal(fs.existsSync(result.opencode.path), false);
+  assert.equal(result.opencode.status, "not-installed");
   assert.equal(fs.realpathSync(result.kilo.path), fixture.kiloSourcePath);
   assert.equal(fs.realpathSync(result.statusline.path), fixture.tfSlSourcePath);
   assert.equal(result.path, "available");
@@ -216,13 +217,37 @@ test("rerun replaces the existing managed symlinks without throwing", (t) => {
   const second = runSetup({ ...fixture, env, runCommand: unavailableClients });
 
   assert.equal(fs.realpathSync(second.cli.path), fixture.cliPath);
-  assert.equal(fs.realpathSync(second.opencode.path), fixture.opencodeSourcePath);
+  assert.equal(fs.existsSync(second.opencode.path), false);
   assert.equal(fs.realpathSync(second.kilo.path), fixture.kiloSourcePath);
   assert.equal(fs.realpathSync(second.statusline.path), fixture.tfSlSourcePath);
   assert.equal(second.cli.path, first.cli.path);
   assert.equal(second.opencode.path, first.opencode.path);
   assert.equal(second.kilo.path, first.kilo.path);
   assert.equal(second.statusline.path, first.statusline.path);
+});
+
+test("setup removes its deprecated OpenCode plugin even when the source is gone", (t) => {
+  const fixture = makeFixture(t);
+  const destination = path.join(fixture.env.XDG_CONFIG_HOME, "opencode", "plugins", "taskferry.js");
+  fs.mkdirSync(path.dirname(destination), { recursive: true });
+  fs.symlinkSync(fixture.opencodeSourcePath, destination);
+  fs.unlinkSync(fixture.opencodeSourcePath);
+  const result = runSetup({ ...fixture, runCommand: unavailableClients });
+  assert.throws(() => fs.lstatSync(destination), { code: "ENOENT" });
+  assert.equal(result.opencode.status, "removed");
+});
+
+test("setup preserves unrelated OpenCode plugin files and symlinks", (t) => {
+  const fixture = makeFixture(t);
+  const destination = path.join(fixture.env.XDG_CONFIG_HOME, "opencode", "plugins", "taskferry.js");
+  fs.mkdirSync(path.dirname(destination), { recursive: true });
+  fs.writeFileSync(destination, "custom plugin");
+  runSetup({ ...fixture, runCommand: unavailableClients });
+  assert.equal(fs.readFileSync(destination, "utf8"), "custom plugin");
+  fs.unlinkSync(destination);
+  fs.symlinkSync(fixture.kiloSourcePath, destination);
+  runSetup({ ...fixture, runCommand: unavailableClients });
+  assert.equal(fs.readlinkSync(destination), fixture.kiloSourcePath);
 });
 
 test("refuses to re-point a symlink already managed by a different taskferry checkout", (t) => {

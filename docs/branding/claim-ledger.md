@@ -29,7 +29,7 @@ states the platform/provider limits instead of claiming a verified demo.
 | `accept` and `reject` decide the pending changeset outcome | `src/tasks.js:6142-6192` | source-supported | support | core | included |
 | Project checks gate acceptance | `src/tasks.js:5727-5819`, `src/init.js:35-110` | source-supported | support | core | qualified by overlay/platform conditions |
 | Scratch output survives terminal task states | `src/tasks.js:6195-6227`, `src/output-dir.js:417-491` | source-supported | support | demo | included |
-| OpenCode gets toasts and prompt context from the native plugin | `src/opencode-plugin.js:245-318` | source-supported | support | demo | included |
+| Kilo gets toasts and prompt context from the native plugin | `src/kilo-plugin.js` | source-supported | support | demo | included |
 | Recursive ferry dispatch is available | `docs/evolution.md:128-141` | contradicted | conflict | core | omitted |
 | Automatic model/provider routing is available | `docs/evolution.md:128-141` | contradicted | conflict | core | omitted |
 | Existing PNG assets are successful runtime screenshots | asset paths only | unverified | unrelated | demo | omitted |

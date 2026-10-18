@@ -15,12 +15,34 @@ const ENCODING = "utf8";
 const BASH = "/bin/bash";
 const SPAWN_RECEIPT = "spawns.txt";
 const EXEC_MODE = 0o700;
+const MONITORING_GUIDE = "monitoring-progress.md";
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const skillDir = path.join(root, "skills", "using-taskferry");
 
 function readSkillFile(...parts) {
   return fs.readFileSync(path.join(skillDir, ...parts), ENCODING);
 }
+
+test("cancellation progress-check recipe inspects status and tool activity without automatically summarizing or cancelling", () => {
+  const source = readSkillFile("resources", MONITORING_GUIDE);
+  const recipe = shellBlockContaining(source, "FERRY_PROGRESS_CHECK");
+  withTempDir("taskferry-progress-guidance-", dir => {
+    const shim = path.join(dir, "taskferry");
+    fs.writeFileSync(shim, '#!/bin/sh\nprintf "%s\\n" "$*" >> "$PROGRESS_RECEIPT"\n');
+    fs.chmodSync(shim, EXEC_MODE);
+    const receipt = path.join(dir, "receipt.txt");
+    const run = spawnSync(BASH, ["-eu", "-c", recipe], { encoding: ENCODING, env: { ...process.env, PATH: `${dir}:${process.env.PATH}`, PROGRESS_RECEIPT: receipt } });
+    assert.equal(run.status, 0, run.stderr);
+    const commands = fs.readFileSync(receipt, ENCODING).trim().split("\n");
+    assert.equal(commands.length, 2);
+    assert.match(commands[0], /^status \S+ --full$/);
+    assert.match(commands[1], /^tail \S+ --chars 8000$/);
+    assert.ok(commands.every(command => !/^(cancel|summary) /.test(command)));
+  });
+  assert.match(source, /If progress remains uncertain, leave it running/);
+  assert.match(source, /Only if the task is still active and tail is insufficient/);
+  assert.match(readSkillFile("SKILL.md"), /Before cancelling a ferry/);
+});
 
 /** Pull the single ```sh fenced block containing `marker` out of a markdown file. */
 function shellBlockContaining(markdown, marker) {
@@ -59,7 +81,7 @@ function fakeTaskferryBin(dir, receiptPath) {
 const FLEET_MARKER = "FLEET_LOCK";
 
 function runFleetRecipe({ watchDir, bin, extraSetup = "" }) {
-  const recipe = shellBlockContaining(readSkillFile("resources", "monitoring-progress.md"), FLEET_MARKER);
+  const recipe = shellBlockContaining(readSkillFile("resources", MONITORING_GUIDE), FLEET_MARKER);
   // The recipe's first line assigns a placeholder; point it at the test's dir.
   const script = recipe.replace(/^WATCH_DIR=.*$/mu, `WATCH_DIR=${JSON.stringify(watchDir)}`);
   return spawnSync(BASH, ["-c", `set -u\nexport PATH=${JSON.stringify(bin)}:$PATH\n${extraSetup}\n${script}`], {
@@ -101,7 +123,7 @@ test("fleet-watch slug does not collide across paths that differ only in separat
   // the same string, so two unrelated repos shared one log and one pid file.
   assert.notEqual(fleetSlug("/tmp/a/b"), fleetSlug("/tmp/a-b"));
 
-  const recipe = shellBlockContaining(readSkillFile("resources", "monitoring-progress.md"), FLEET_MARKER);
+  const recipe = shellBlockContaining(readSkillFile("resources", MONITORING_GUIDE), FLEET_MARKER);
   assert.doesNotMatch(recipe, /tr -c/u, "slug must not be a character substitution");
   assert.match(recipe, /sha256sum/u, "slug must be a hash of the full path");
 });

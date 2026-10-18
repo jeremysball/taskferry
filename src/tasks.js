@@ -8,7 +8,7 @@ import { createTaskEvents } from "./events.js";
 import { createActivityCache, readActivitySnapshot, readDeltaNarration, DEFAULT_SUMMARIZER_TIMEOUT_MS } from "./activity.js";
 import { normalizeActivitySubscriptionKey, resolveStateDir, resolveCacheDir, resolveOverlayTmpRoot, TASKFERRY_PLUMBING_ENV_VARS } from "./paths.js";
 import { RESULT_FIELDS, encodeMessage, successResponse } from "./protocol.js";
-import { formatToolEventForNarration } from "./narration-format.js";
+import { formatToolEventForNarration, formatTailActivity } from "./narration-format.js";
 import { MAX_BUFFER_BYTES } from "./daemon-server.js";
 import { errCode } from "./errors.js";
 import { isNonNegativeInteger, isPositiveInteger } from "./numbers.js";
@@ -6087,7 +6087,7 @@ function readRawCaptureTail(logPath) {
  * @param {string} logPath
  * @returns {string}
  */
-function readLastText(logPath) {
+function readTailActivity(logPath) {
   /** @type {number|undefined} */
   let fd;
   try {
@@ -6096,19 +6096,12 @@ function readLastText(logPath) {
     const buffer = Buffer.alloc(bytes);
     fd = fs.openSync(logPath, "r");
     fs.readSync(fd, buffer, 0, bytes, size - bytes);
-    const lines = buffer.toString("utf8").split("\n");
-    for (let i = lines.length - 1; i >= 0; i--) {
-      const line = lines[i].trim();
-      if (!line) continue;
-      const evt = isParseableJson(line) ? JSON.parse(line) : null;
-      if (evt && evt.type === "text" && typeof evt.part?.text === "string") return evt.part.text;
-    }
+    return formatTailActivity(buffer.toString("utf8"));
   } catch {
     return "";
   } finally {
     if (fd != null) fs.closeSync(fd);
   }
-  return "";
 }
 
 /**
@@ -7398,9 +7391,9 @@ function statsTasks(ctx) {
 }
 
 /**
- * Returns the tail of a task's narration (with a raw-capture fallback for an
+ * Returns recent narration and tool activity (with a raw-capture fallback for an
  * eventless crashed task). Extracted out of `createTaskManager`'s `tail`
- * closure; `readLastText`/`readRawCaptureTail`/`logHasAnyEvent` are module
+ * closure; `readTailActivity`/`readRawCaptureTail`/`logHasAnyEvent` are module
  * helpers called directly.
  * @param {string} taskId
  * @param {{chars: number}} options
@@ -7413,7 +7406,7 @@ function tailTask(taskId, { chars }, ctx) {
   if (!Number.isSafeInteger(chars) || chars <= 0 || chars > 131072) {
     throw new Error("error: chars must be a positive integer no greater than 131072\nhelp: run taskferry tail with chars between 1 and 131072");
   }
-  let text = readLastText(task.logPath);
+  let text = readTailActivity(task.logPath);
   // Eventless crash: narration is never coming (the log has no parseable
   // events at all, checked over the whole log), so the raw capture IS the
   // task's output -- show it instead of "none observed yet", which reads

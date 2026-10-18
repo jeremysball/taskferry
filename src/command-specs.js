@@ -65,7 +65,7 @@ export const commandSpecs = {
   },
   tail: {
     usage: "taskferry tail <id> [--chars <number>]",
-    description: "Read the latest model text for a task.",
+    description: "Read recent narration and bounded, quoted tool activity for a task.",
     options: { "--chars <number>": "characters to return, default 1000, maximum 131072" },
     examples: ['taskferry tail <id>', 'taskferry tail <id> --chars 2000'],
   },

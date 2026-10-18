@@ -210,11 +210,37 @@ always present as `null` when unset, rather than omitted.
 
 ## `taskferry tail <id> [--chars <number>]`
 
-Returns the final `--chars` Unicode code points of the newest parsed `text`
-event for a task, reading the local task log only (never sends content to a
-model). Defaults to 1000, maximum 131072. The response includes the complete
-event length and `truncated` so callers know whether the suffix omitted
-earlier content. A crashed task whose log has no parseable events at all
+Returns the final `--chars` Unicode code points of recent narration and
+formatted tool activity in chronological order, reading the local task log
+only (never sends content to a model). Defaults to 1000, maximum 131072.
+The read window is bounded to the last 1 MiB of log bytes; incomplete or
+non-event lines are ignored. `textTotalChars` measures the formatted
+activity in that window, before the `--chars` suffix is applied, not the
+entire lifetime log. `truncated` reports that final suffix truncation.
+
+Tool calls use this format:
+
+```text
+[TOOL] shell :: args={"command":"npm test"} :: stdout="tail \"says\" this" :: stderr="warning: \"example\"" :: exit=1 :: state=completed
+```
+
+Stream tails use JSON quoting, including escaped quotes, backslashes,
+newlines and control characters. Stdout retains at most three lines and
+500 Unicode code points; stderr retains up to eight lines and 1000 code
+points. Per-stream truncation is marked inside the quoted text. Arguments
+retain the existing 500-character display prefix. These are fixed display
+safety caps, not new configuration options; the final `--chars` limit still
+applies to the complete rendered text and can cut through a tool record.
+
+Only fields supplied by the executor are shown as known. Combined output
+is labelled `combined` rather than guessed to be stdout or stderr. Missing
+streams and exit codes display `unavailable`; an empty supplied stream is
+`""`, and exit code zero remains `0`. Running tool heartbeats show
+`state=running`, not a fabricated successful result. Tool error text is
+labelled `error` rather than stderr. The existing narration format used by
+activity summaries and final results is unchanged.
+
+A crashed task whose log has no parseable events at all
 (a boot failure, or a watchdog kill before first output) never grows a
 `text` event, so `tail` falls back to the raw captured output for it
 instead of reporting `none observed yet`.

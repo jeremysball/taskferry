@@ -847,7 +847,7 @@ describe("result() diffStat field", () => {
 });
 
 describe("tail()", () => {
-  test("returns a Unicode-safe suffix of the latest text event", () => {
+  test("returns a Unicode-safe suffix of chronological activity", () => {
     const log = [
       JSON.stringify({ type: "text", part: { messageID: "m1", text: "older" } }),
       JSON.stringify({ type: "text", part: { messageID: "m2", text: "alpha😀beta" } }),
@@ -860,7 +860,7 @@ describe("tail()", () => {
       taskId: "t1",
       status: "done",
       text: "😀beta",
-      textTotalChars: 10,
+      textTotalChars: 17,
       truncated: true,
     });
   });

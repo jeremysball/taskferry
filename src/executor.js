@@ -325,7 +325,12 @@ function normalizeToolExecutionEnd(evt) {
     part: {
       type: "tool",
       tool: toolName,
-      state: { input: args, output: outputText || undefined },
+      state: {
+        status: evt.isError === true ? "error" : "completed",
+        input: args,
+        output: outputText || undefined,
+        ...(result?.details && typeof result.details === "object" && !Array.isArray(result.details) ? { metadata: result.details } : {}),
+      },
     },
   };
 }

@@ -1,0 +1,8 @@
+{
+  "taskId": "oc_mvd3cv8k_f0a0deb4",
+  "status": "done",
+  "message": "No files were changed, so `npm run check` was skipped. The source trace and a small read-only invocation confirmed one launch-time version-cache mismatch path; I’m returning it with the tracked host-specific probe path as a separate artifact concern.[\n  {\n    \"id\": \"c1\",\n    \"angle\": \"correctness\",\n    \"file\": \"src/opencode-executor.js\",\n    \"line\": 159,\n    \"summary\": \"The CLI major is detected again when building the sandbox command, after the launch arguments were already built. If the V2 cache expires in between, this falls back to a raw `opencode` command and skips credential import.\",\n    \"failure_scenario\": \"A V2 launch builds V2 arguments, then sandbox setup crosses the configured version-cache TTL. The second detection returns null, so the worker starts without importing its legacy credential and may fail authentication.\"\n  },\n  {\n    \"id\": \"c2\",\n    \"angle\": \"altitude\",\n    \"file\": \".superpowers/auth-handoff/live-probe-root.txt\",\n    \"line\": 1,\n    \"summary\": \"This tracked evidence file records a machine-specific absolute path into the author's local Taskferry state.\",\n    \"failure_scenario\": \"A different checkout or CI environment cannot follow the probe-root pointer, while the committed file also exposes the author's home path and local state-directory name.\"\n  }\n]",
+  "exitCode": 0,
+  "incomplete": null,
+  "failureReason": null
+}

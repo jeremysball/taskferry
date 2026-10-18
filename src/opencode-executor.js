@@ -156,7 +156,7 @@ export function opencodeExecutor({ detectCliMajorFn = () => detectOpencodeCliMaj
     defaultSummaryModel: "opencode/muse-spark-1.3-contributor-free",
     binaryName: "opencode",
     buildSandboxSpawn(args) {
-      return (detectCliMajorFn() ?? 1) >= 2 ? buildV2SandboxSpawn(args) : ["opencode", ...args];
+      return args[1] === "--standalone" ? buildV2SandboxSpawn(args) : ["opencode", ...args];
     },
     listModelsFn: async (env) =>
       (await execFileAsync("opencode", ["models"], { encoding: "utf8", timeout: SUMMARY_PREFLIGHT_TIMEOUT_MS, env })).stdout,

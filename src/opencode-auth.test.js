@@ -33,7 +33,8 @@ if(!importing)process.exit(Number(process.env.TEST_RUN_EXIT || 0));
     data, env, args,
     run(major = 2) {
       const executor = opencodeExecutor({ detectCliMajorFn: () => major });
-      const command = executor.buildSandboxSpawn?.(args) ?? [executor.binaryName, ...args];
+      const launchArgs = major === 1 ? ["run", "--dir", dir, "-m", "openai/gpt-6-luna", "--", "do not use tools"] : args;
+      const command = executor.buildSandboxSpawn?.(launchArgs) ?? [executor.binaryName, ...launchArgs];
       return spawnSync(command[0], command.slice(1), { env, encoding: "utf8", timeout: 10000 });
     },
     rows: () => fs.readFileSync(trace, "utf8").trim().split("\n").filter(Boolean).map(line => JSON.parse(line)),
@@ -81,4 +82,12 @@ test("V2 without a selected legacy credential still allows environment authentic
   const f = fixture(t, null);
   assert.equal(f.run().status, 0);
   assert.deepEqual(f.rows().map(row => row.args[0]), ["run"]);
+});
+
+test("V2 bootstrap stays paired with V2 argv after the version cache expires", () => {
+  let cached = 2;
+  const executor = opencodeExecutor({ detectCliMajorFn: () => cached });
+  const args = executor.buildSpawnArgs({ directory: ".", model: "openai/gpt-6-luna", prompt: "test" });
+  cached = null;
+  assert.equal(executor.buildSandboxSpawn(args)[0], process.execPath);
 });

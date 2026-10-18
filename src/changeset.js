@@ -25,7 +25,7 @@ const DIFF_MAX_BUFFER_BYTES = 200 * 1024 * 1024;
  * @returns {CommandResult}
  */
 export function defaultRunCommand(command, args) {
-  const result = spawnSync(command, args, { encoding: "utf8", timeout: 30000, maxBuffer: DIFF_MAX_BUFFER_BYTES });
+  const result = spawnSync(command, args, { encoding: "utf8", timeout: 60000, maxBuffer: DIFF_MAX_BUFFER_BYTES });
   if (result.error) return { status: null, stdout: result.stdout || "", stderr: result.stderr || "", error: result.error };
   return { status: result.status, stdout: result.stdout || "", stderr: result.stderr || "", error: result.error };
 }
@@ -62,7 +62,7 @@ function sleepSync(ms) {
 /**
  * Whether a bwrap command result carries the overlay-mount-busy signature,
  * checked against `stderr` and `error?.message` independently rather than
- * via `stderr || error?.message`: a slow/hung mount (spawnSync's 30s
+ * via `stderr || error?.message`: a slow/hung mount (spawnSync's 60s
  * timeout firing after bwrap already wrote the busy line to stderr) reports
  * `{error: ETIMEDOUT, stderr: <busy text>}`, and `error.message` ("spawn
  * bwrap ETIMEDOUT") would win a `||` fallback and hide the busy signature

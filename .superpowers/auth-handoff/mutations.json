@@ -1,0 +1,12 @@
+[
+  {
+    "mutation": "skip-import",
+    "exitCode": 1,
+    "killed": true
+  },
+  {
+    "mutation": "disconnect-sandbox-hook",
+    "exitCode": 1,
+    "killed": true
+  }
+]

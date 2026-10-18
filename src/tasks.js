@@ -1563,7 +1563,7 @@ function assembleBwrapSpawn(ctx, launchInfo, binds, task) {
     // runtimeDir are no longer reachable (#453), and the stateDir deny-list is
     // no longer un-masked by a whole-runtimeDir bind (#455).
     socketPath: binds.role !== "advisor" ? ctx.socketPath : null,
-  }).concat(["--", executor.binaryName, ...args]);
+  }).concat(["--", ...(executor.buildSandboxSpawn?.(args) ?? [executor.binaryName, ...args])]);
   const spawnEnv = { ...binds.spawnEnv, ...binds.sandboxEnv };
   if (binds.overlayInfo && !isSummary) {
     // rwBinds persisted onto the task (review finding #1): settlement-time

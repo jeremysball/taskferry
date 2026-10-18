@@ -1,0 +1,18 @@
+{
+  "command": "npm run check",
+  "lint": "passed",
+  "typecheck": "passed",
+  "generated_skill_check": "passed",
+  "unit_tests": { "total": 1512, "passed": 1508, "failed": 4 },
+  "failures_also_reproduced_on_unchanged_main": [
+    "default listModelsFn summary availability depends on installed model catalogue",
+    "statusline cold-cache refresh does not publish snapshot",
+    "statusline concurrent cold-cache refresh does not publish snapshot",
+    "statusline stale-limit fixture does not publish snapshot"
+  ],
+  "focused_auth_executor_and_sandbox_tests": "passed",
+  "real_synthetic_sandbox_import_export": "passed twice, one credential retained",
+  "real_luna_transport": "AUTH_HANDOFF_OK",
+  "shared_daemon_modified": false,
+  "deployed": false
+}

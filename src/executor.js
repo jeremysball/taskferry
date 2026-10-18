@@ -263,6 +263,7 @@ function resolveConfigBindSource(fullPath, lstatFn, realpathFn) {
 
 /**
  * @typedef {Object} WorkerExecutor
+ * @property {(args: string[]) => string[]} [buildSandboxSpawn] - optional command prefix/argv used only inside the existing sandbox; unsandboxed launches keep binaryName/buildSpawnArgs.
  * @property {"opencode"|"pi"} id
  * @property {string} taskIdPrefix
  * @property {string} errorBucketPrefix

@@ -1,0 +1,15 @@
+{
+  "task_id": "oc_mvd315t1_fe7bca1f",
+  "model": "openai/gpt-6-luna",
+  "variant": "xhigh",
+  "executor": "opencode",
+  "isolated_taskferry_state": true,
+  "manual_credential_import": false,
+  "status": "done",
+  "exit_code": 0,
+  "message": "AUTH_HANDOFF_OK",
+  "failure_reason": null,
+  "changeset_status": "rejected",
+  "changeset_error": "git diff extraction failed: unable to create temporary file: Value too large for defined data type",
+  "interpretation": "Fresh sandbox credential handoff and model response succeeded; changeset extraction separately failed. No worker changes accepted."
+}

@@ -8,6 +8,22 @@ import { makeManager, fakeChild, baseTask, AXI_GIT_COMMON_DIR, AXI_ALLOWED_DIR, 
 import { uvDirPath } from "./tasks.js";
 
 describe("bwrap sandboxing: dispatch argv shape and gitdir scoping", () => {
+  test("V2 credential bootstrap runs inside bwrap, not on the host", () => {
+    let captured;
+    const mgr = makeManager({
+      spawnFn: (cmd, args) => { captured = { cmd, args }; return fakeChild(); },
+      sandboxEnabled: true,
+      checkBwrapAvailableFn: () => ({ checked: true, available: true }),
+      opencodeCliMajorFn: () => 2,
+      platform: "linux",
+    });
+    mgr.dispatch({ prompt: "hello", directory: os.tmpdir(), model: "openai/gpt-6-luna", executor: "opencode" });
+    assert.equal(captured.cmd, "bwrap");
+    const command = captured.args.slice(captured.args.indexOf("--") + 1);
+    assert.equal(command[0], process.execPath);
+    assert.equal(command[1], "--eval");
+  });
+
   test("wraps the spawn command in bwrap when sandboxing is enabled and available", () => {
     let captured = null;
     const runtimeDir = path.join(os.tmpdir(), "axi-tasks-runtime");

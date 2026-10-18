@@ -6,6 +6,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { detectOpencodeCliMajor, ensureOpencodeCliMajor } from "./opencode-version.js";
 import { PROMPT_FILE_INSTRUCTION, SUMMARY_ISOLATION_PROMPT } from "./executor-shared.js";
+import { buildV2SandboxSpawn } from "./opencode-auth.js";
 
 const execFileAsync = promisify(execFile);
 const SUMMARY_PREFLIGHT_TIMEOUT_MS = 10000;
@@ -154,6 +155,9 @@ export function opencodeExecutor({ detectCliMajorFn = () => detectOpencodeCliMaj
     errorBucketPrefix: "opencode",
     defaultSummaryModel: "opencode/muse-spark-1.3-contributor-free",
     binaryName: "opencode",
+    buildSandboxSpawn(args) {
+      return (detectCliMajorFn() ?? 1) >= 2 ? buildV2SandboxSpawn(args) : ["opencode", ...args];
+    },
     listModelsFn: async (env) =>
       (await execFileAsync("opencode", ["models"], { encoding: "utf8", timeout: SUMMARY_PREFLIGHT_TIMEOUT_MS, env })).stdout,
     /** @param {NodeJS.ProcessEnv} env @param {{execFileFn?: typeof execFileAsync}} [options] @returns {Promise<Map<string, string[]>>} */

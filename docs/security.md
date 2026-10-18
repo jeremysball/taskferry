@@ -427,7 +427,17 @@ runs wrapped in
   otherwise hide every stored credential from the sandboxed process. To keep
   credentialed providers working, the real `auth.json` (and only that file,
   not the rest of the real data home) is ro-bound read-only into the
-  sandboxed data home when it exists on disk. For `pi`, auth and extensions
+  sandboxed data home when it exists on disk. OpenCode V2 sandbox launches
+  import the selected provider's legacy API key or OpenAI OAuth credential
+  into the per-task database through `opencode auth import --standalone`
+  before running the model. The import runs inside bwrap, receives secrets
+  through stdin, and does not copy the host database. Import failures stop
+  the worker without forwarding potentially secret-bearing CLI diagnostics.
+  A stable imported credential ID lets OpenCode skip it on session resume,
+  retaining the destination's refreshed credential and active selection.
+  Other providers' OAuth method mappings are not guessed; their existing
+  behavior is unchanged. Environment-authenticated providers need no import
+  when the selected legacy credential is absent. For `pi`, auth and extensions
   are read-only binds. When `--session-id` resumes a prior session, only that
   session file is bound **read-write** (`src/executor.js:483-486`), so pi can
   update its own session state without exposing other sessions.

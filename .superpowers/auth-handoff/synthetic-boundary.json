@@ -1,0 +1,21 @@
+{
+  "providerCalls": 0,
+  "realBwrap": true,
+  "realOpencodeImportExport": true,
+  "attempts": [
+    {
+      "attempt": 1,
+      "status": 0,
+      "importedCredentials": 1,
+      "exactOAuthFields": true,
+      "sourceReadOnly": true
+    },
+    {
+      "attempt": 2,
+      "status": 0,
+      "importedCredentials": 1,
+      "exactOAuthFields": true,
+      "sourceReadOnly": true
+    }
+  ]
+}

@@ -127,6 +127,15 @@ allowed dirs) instead of symlinking across the sandbox boundary.
 
 ## Worker Contract
 
+**Before cancelling a ferry, inspect its substantive progress.** Read
+`status --full` and `tail`; request `summary --mode activity` when tail is
+insufficient. Confirm stalled or unproductive work across observations
+separated by a reasonable interval. A timeout, empty narration, or missing
+verdict is not cancellation authority. If progress remains uncertain,
+leave it running and report the uncertainty. Follow the pre-cancellation
+check in `resources/monitoring-progress.md`; checking progress for that
+decision is required, not prohibited polling.
+
 - Select the worker model explicitly — `--model <provider/model>` is required
   for a fresh dispatch (only a `--session-id` resume may inherit the prior
   task's model). Omit `--variant` to get that model's hardest thinking
@@ -275,7 +284,7 @@ Then wait for settlement, and inspect:
 ```sh
 taskferry wait <id> --summarize   # blocks, streams progress; check the status it returns
 taskferry status <id>             # point-in-time state, including checkStatus
-taskferry tail <id> --chars 2000  # one-shot look at recent narration
+taskferry tail <id> --chars 2000  # recent narration and formatted tool activity
 taskferry result <id>             # the settled result
 taskferry output <id>             # scratch dir the worker wrote (taskferry#423); use --path <relpath> to read one file
 ```

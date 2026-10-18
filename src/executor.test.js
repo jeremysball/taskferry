@@ -486,6 +486,13 @@ describe("piExecutor().normalizeLogEvent", () => {
     );
   });
 
+  test("tool result details survive normalization for tail stream and exit reporting", () => {
+    const details = { stdout: 'tail "says" this', stderr: 'warn', exitCode: 2 };
+    const normalized = ex.normalizeLogEvent({ type: "tool_execution_end", toolName: "bash", args: { command: "test" }, result: { content: [], details } });
+    assert.deepEqual(normalized.part.state.metadata, details);
+    assert.equal(normalized.part.state.status, "completed");
+  });
+
   test("tool_execution_end maps to a single tool_use event with lowercase tool name", () => {
     const evt = {
       type: "tool_execution_end", toolCallId: "call_function_5p8j2prhbb7c_1", toolName: "bash",
@@ -495,7 +502,7 @@ describe("piExecutor().normalizeLogEvent", () => {
     };
     assert.deepEqual(ex.normalizeLogEvent(evt), {
       type: "tool_use",
-      part: { type: "tool", tool: "bash", state: { input: { command: "echo hello-from-pi-tool-test" }, output: "hello-from-pi-tool-test\n" } },
+      part: { type: "tool", tool: "bash", state: { status: "completed", input: { command: "echo hello-from-pi-tool-test" }, output: "hello-from-pi-tool-test\n" } },
     });
   });
 
@@ -544,4 +551,3 @@ describe("piExecutor().normalizeLogEvent", () => {
     assert.equal(ex.normalizeLogEvent({ type: "some_future_pi_event", data: {} }), null);
   });
 });
-

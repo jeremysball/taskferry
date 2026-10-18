@@ -7,6 +7,59 @@ other runtime" section at the end. The core `dispatch`/`wait`/`result`
 commands live in SKILL.md; this file covers everything about *watching* a
 run in flight.
 
+## Check progress before cancellation
+
+Before cancelling a ferry, inspect its substantive progress using status,
+tail, and an activity summary when tail is insufficient. Confirm stalled
+or unproductive work across observations separated by a reasonable
+interval. A timeout, empty narration, or missing verdict is not
+cancellation authority. If progress remains uncertain, leave it running
+and report the uncertainty.
+
+Start with status and tail, replacing the task ID. If status shows the
+task has already settled, no cancellation decision remains; inspect its
+result instead of requesting a progress summary.
+
+```sh
+# FERRY_PROGRESS_CHECK
+TASK_ID=replace-with-ferry-id
+taskferry status "$TASK_ID" --full
+taskferry tail "$TASK_ID" --chars 8000
+```
+
+Only if the task is still active and tail is insufficient to assess its
+progress, request an activity summary:
+
+```sh
+taskferry summary "$TASK_ID" --mode activity
+```
+
+An activity summary may invoke the configured summary model. It is not a
+free local inspection and is unnecessary when tail already establishes
+progress or the task has settled. A summary failure leaves progress
+unknown; it does not authorize cancellation.
+
+Inspect what changed: new files read, hypotheses tested, tests run, and
+intermediate results. A larger log or recent write is evidence of activity,
+not proof of useful progress; repeated identical calls need interpretation,
+not an automatic cancellation. Compare substantive observations after an
+interval appropriate to the current operation. A long-running test or
+model request may legitimately have no fresh output during that interval.
+These diagnostic checks are required before cancellation and are not a
+license for continuous polling.
+
+`tail` includes quoted, bounded tool-call output as well as narration.
+`summary --mode activity` can interpret tool events when the tail is
+insufficient, but its report is generated and may omit details. Neither
+an unavailable summary nor unavailable stream fields proves a stall. If
+the evidence cannot establish lack of progress within a reasonable margin
+of error, preserve the ferry and ask rather than cancelling it.
+
+This check would have prevented the observed cancellation of a reviewer
+whose tail had no narration while its log contained ongoing test/tool
+activity. The retained log's activity summary recovered a substantive
+investigation after cancellation; the missing verdict was not a stall.
+
 ## Waiting rules that hold in every host
 
 **`taskferry wait` is the only settlement signal — never a bare search for

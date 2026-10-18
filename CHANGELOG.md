@@ -1,6 +1,6 @@
 # Changelog
 
-## [4.5.0](https://github.com/jeremysball/taskferry/compare/taskferry-v4.4.0...taskferry-v4.5.0) (2026-10-18)
+## [5.0.0](https://github.com/jeremysball/taskferry/compare/taskferry-v4.4.0...taskferry-v5.0.0) (2026-10-18)
 
 
 ### Features

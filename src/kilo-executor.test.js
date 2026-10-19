@@ -108,6 +108,18 @@ describe("kiloExecutor()", () => {
     assert.ok(args.includes(ex.buildSummaryPrompt()));
   });
 
+  test("buildSpawnArgs: a summary run attaches the session snapshot", () => {
+    const ex = kiloExecutor();
+    const args = ex.buildSpawnArgs({
+      isSummary: true, model: MODEL, variant: null,
+      launchDirectory: "/work/dir", promptFilePath: null, prompt: "ignored", sessionId: null,
+      snapshotPath: "/state/summaries/s1.json",
+    });
+    assert.ok(args.includes("-f"), "the snapshot is attached with -f");
+    assert.ok(args.includes("/state/summaries/s1.json"), "the snapshot path is passed");
+    assert.ok(args.includes(ex.buildSummaryPrompt()), "the isolation prompt is the message");
+  });
+
   test("normalizeLogEvent is the identity: kilo's stream is opencode-shaped", () => {
     const ex = kiloExecutor();
     const parsed = { sessionId: null, tokens: null, cost: null };
@@ -141,13 +153,14 @@ describe("kiloExecutor()", () => {
       spawnEnv: { XDG_CONFIG_HOME: "/home/user/.config" },
       existsFn: (p) => [KILO_CONFIG_DIR, KILO_CONFIG_FILE, KILO_TOKEN_FILE].includes(p),
       lstatFn: () => ({ isSymbolicLink: () => false, isFile: () => true, nlink: 1 }),
-      readdirFn: () => ["kilo.jsonc", "tui.json"],
+      readdirFn: () => ["kilo.jsonc", "tui.json", ".gitignore"],
       realpathFn: (p) => p,
     });
     assert.equal(res.sandboxedDataHome, SANDBOXED_DATA_HOME);
     assert.deepEqual(res.sandboxEnv, {
       XDG_DATA_HOME: SANDBOXED_DATA_HOME,
       XDG_STATE_HOME: `${SANDBOXED_DATA_HOME}/state`,
+      XDG_CACHE_HOME: `${SANDBOXED_DATA_HOME}/cache`,
       XDG_CONFIG_HOME: SANDBOXED_CONFIG_HOME,
     });
     for (const [src, dest] of res.extraRoBinds) binds.push(`${src} -> ${dest}`);
@@ -158,6 +171,10 @@ describe("kiloExecutor()", () => {
     assert.ok(
       binds.includes(`${KILO_TOKEN_FILE} -> ${KILO_TOKEN_FILE}`),
       "the kilo gateway token is bound at its own path",
+    );
+    assert.ok(
+      !binds.some((b) => b.includes(".gitignore")),
+      `the config directory's .gitignore is not bound into the sandbox, got: ${binds.join(" | ")}`,
     );
   });
 

@@ -71,11 +71,12 @@ confirm nothing else holds that path open (`lsof <socket-path>` on macOS,
 
 ## `dispatch` fails with `spawnError`
 
-The task's worker CLI itself failed to launch — `opencode` or `pi`,
+The task's worker CLI itself failed to launch — `opencode`, `pi` or `kilo`,
 whichever the task's executor selected (explicitly via `--executor`, or the
 daemon's configured default) — usually because that binary isn't installed
 or isn't on the `PATH` the daemon was started with. Confirm with `which
-opencode`/`which pi` in the same shell/environment the daemon auto-started
+opencode`/`which pi`/`which kilo` in the same shell/environment the daemon
+auto-started
 from (remember: the daemon inherits environment from whichever command
 first triggered its auto-start, not necessarily your current shell — see
 [daemon.md](daemon.md#auto-start)). If you just installed the missing
@@ -101,7 +102,7 @@ what, if anything, the selected worker wrote before being killed — a
 common cause of the dead-spawn variant is a prompt or model that needs an
 interactive step taskferry's non-interactive invocation can't satisfy
 (`opencode run --auto` for the `opencode` executor; `pi`'s own
-non-interactive mode for `pi`). Raise the relevant timeout only if the
+non-interactive mode for `pi`; `kilo run --auto` for `kilo`). Raise the relevant timeout only if the
 task is legitimately slow, not to paper over a hung worker.
 
 There's also a separate, absolute ceiling on the pre-output phase:

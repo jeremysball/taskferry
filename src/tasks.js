@@ -1328,7 +1328,8 @@ function buildBwrapBinds(ctx, launchInfo, task, spawnEnv, role) {
   const fullDenyList = [...defaultDenyList(homeDir, ctx.stateDir), ...ctx.sandboxDenylist];
   const denyList = fullDenyList.filter(ctx.existsFn);
   // The executor decides which env var overrides point at its sandboxed data
-  // home (opencode: XDG_DATA_HOME; pi: PI_CODING_AGENT_DIR) and which
+  // home (opencode: XDG_DATA_HOME; pi: PI_CODING_AGENT_DIR; kilo:
+  // XDG_DATA_HOME) and which
   // destination to ro-bind the real auth file into, so each executor's bound
   // auth destination matches its own environment directory.
   const resumedSessionId = resolveLaunchSessionId(isSummary, /** @type {SummaryLaunch} */ (launchInfo.summaryLaunch), dispatchLaunch);
@@ -5325,7 +5326,7 @@ function buildTaskManagerApi(ctx) {
      *   top of the manager-level default (see createTaskManager's `allowedDirs` option)
      * @param {string[]} [params.roBind] - extra directories bound read-only for this dispatch only, on
      *   top of the manager-level default (see createTaskManager's `roBind` option)
-     * @param {string} [params.executor] - "opencode" | "pi". When omitted on a `sessionId` resume, inherits
+     * @param {string} [params.executor] - "opencode" | "pi" | "kilo". When omitted on a `sessionId` resume, inherits
      *   the executor that originally created the session (a different executor can't continue another CLI's
      *   session file); otherwise defaults to the manager's defaultExecutor (itself the result of
      *   `resolveExecutor(undefined)` at construction). An unknown name throws before any validation runs, so a
@@ -5401,7 +5402,7 @@ function buildTaskManagerApi(ctx) {
      * @param {string} [params.variant]
      * @param {string} [params.sessionId]
      * @param {number} [params.timeoutMs]
-     * @param {string} [params.executor] - optional "opencode" | "pi" forwarded to dispatch().
+     * @param {string} [params.executor] - optional "opencode" | "pi" | "kilo" forwarded to dispatch().
      * @param {NodeJS.ProcessEnv} [params.env] - caller environment forwarded to the worker.
      */
     advisor: (params = {}) => runAdvisor({ ensureStateLoaded: () => ctx.helpers.ensureStateLoaded(), resolveAdvisorSession: (id) => ctx.helpers.resolveAdvisorSession(id), dispatch: (params2) => self.dispatch(params2), poll: (id, options) => self.poll(id, options), maxWait: ctx.limits.maxWait, touchAdvisorSession: (id) => ctx.helpers.touchAdvisorSession(id), result: (id, options) => self.result(id, options), errMessage, readSessionIdFromLog }, params),

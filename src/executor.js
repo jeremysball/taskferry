@@ -5,7 +5,7 @@ import { promisify } from "node:util";
 import { detectOpencodeCliMajor, ensureOpencodeCliMajor, resetOpencodeCliProbe, setOpencodeVersionTtlMs, DEFAULT_OPENCODE_VERSION_TTL_MS } from "./opencode-version.js";
 import { setOpencodeExecutorOverride, resetOpencodeExecutorOverride, resolveOpencodeExecutor } from "./opencode-executor.js";
 import { kiloExecutor } from "./kilo-executor.js";
-import { PROMPT_FILE_INSTRUCTION, SUMMARY_ISOLATION_PROMPT } from "./executor-shared.js";
+import { PROMPT_FILE_INSTRUCTION, SUMMARY_ISOLATION_PROMPT, isSafeBindSource, resolveConfigBindSource } from "./executor-shared.js";
 
 const execFileAsync = promisify(execFile);
 const SUMMARY_PREFLIGHT_TIMEOUT_MS = 10000;
@@ -92,76 +92,9 @@ function listPiSessionFileMatches(realSessionsDir, sessionId, readdirFn) {
   return matches;
 }
 
-/**
- * Whether an lstat failure means "the path genuinely does not exist" -- the
- * one case worth swallowing silently (a vanished entry is an ordinary race,
- * not a problem to surface). Every other error (EACCES, EMFILE, EIO, ...)
- * indicates the path is unverifiable for a real reason the user should hear
- * about; the guard fails closed either way.
- * @param {unknown} err
- * @returns {boolean}
- */
-function isEnoentError(err) {
-  const e = /** @type {{code?: unknown, message?: unknown}} */ (err);
-  return e?.code === "ENOENT" || String(e?.message ?? "").includes("ENOENT");
-}
 
-/**
- * Whether a real host path is safe to bind into the sandbox. lstat, never
- * stat: a plain stat follows the symlink and defeats the check, while bwrap
- * resolves a symlink on the host at bind time -- so binding a symlinked
- * path would bind whatever it points at, letting a plugin-planted symlink
- * pull arbitrary host paths (e.g. ~/.ssh) into the sandbox. Paths whose
- * lstat fails outright are skipped too (fail closed: never bind what we
- * couldn't verify isn't a symlink). A skipped path warns on stderr -- a
- * symlinked config entry is often a legitimate dotfiles-repo setup, and
- * dropping it silently would be an invisible regression -- except for the
- * plain ENOENT case, which is an ordinary existsFn/lstat race, not a
- * diagnostic.
- *
- * Hardlinked files are rejected too (isFile() && nlink > 1), so this check
- * is deliberately NOT a realpath-inside-the-tree comparison: fs.realpathSync
- * only resolves symlink components, and a hardlinked entry's realpath is its
- * own path inside the tree, so that check cannot see the inode's other name.
- * nlink > 1 is the only lstat-visible evidence an entry is reachable from
- * elsewhere on the host, and on kernels without fs.protected_hardlinks
- * (default-on since 2012, but absent on some older/embedded/NFS setups) a
- * plugin with config-dir write access could otherwise hardlink a sensitive
- * host file into the tree and leak it into the next dispatch. The false
- * positive is a dropped entry plus a warning -- acceptable for a setup as
- * rare as a hardlinked config entry (dotfiles repos use symlinks, which the
- * isSymbolicLink() check already rejects on purpose) -- and directories are
- * exempt because they cannot be hardlinked and their nlink counts
- * subdirectories.
- * @param {string} fullPath
- * @param {(file: string) => {isSymbolicLink: () => boolean, isFile?: () => boolean, nlink?: number}} lstatFn
- * @returns {boolean}
- */
-function isSafeBindSource(fullPath, lstatFn) {
-  let entryStat;
-  try {
-    entryStat = lstatFn(fullPath);
-    // The isSymbolicLink() call sits inside the try on purpose: a
-    // null-returning lstatFn (matching the sibling statFn seam's
-    // null-on-failure convention) must fail closed here, not crash on a
-    // TypeError in the line below.
-    if (entryStat != null && entryStat.isSymbolicLink()) {
-      process.stderr.write(`warning: ${fullPath} is a symlink; skipping the bind (bwrap would bind the link target instead)\n`);
-      return false;
-    }
-  } catch (err) {
-    if (!isEnoentError(err)) {
-      process.stderr.write(`warning: could not verify ${fullPath} is not a symlink (${/** @type {Error} */ (err).message}); skipping the bind\n`);
-    }
-    return false;
-  }
-  if (entryStat == null) return false;
-  if (typeof entryStat.isFile === "function" && entryStat.isFile() && typeof entryStat.nlink === "number" && entryStat.nlink > 1) {
-    process.stderr.write(`warning: ${fullPath} is hardlinked (${entryStat.nlink} names for one inode); skipping the bind\n`);
-    return false;
-  }
-  return true;
-}
+
+
 
 /**
  * @param {[string, string][]} list
@@ -213,54 +146,7 @@ function resolvePiSessionRwBind({ realSessionsDir, sandboxedSessionsHome, sessio
   return [realSessionFile, path.join(sandboxedSessionsHome, safePath, path.basename(realSessionFile))];
 }
 
-/**
- * Resolve a single config entry (an opencode config file, or a pi catalog
- * file such as models.json) to a safe bind source. Dotfiles setups commonly
- * symlink individual entries (opencode.json, plugins, pi models.json) into
- * a repo, so a symlinked entry is resolved to its real target and that
- * target is bound read-only at the same sandboxed destination, instead of
- * being dropped. Dangling links fail closed (ENOENT silent, other errors
- * warn) and do not crash the dispatch. Auth files and the extensions dir
- * keep strict skip-symlink (via isSafeBindSource) as a conservative
- * default for credential and code paths, where following an unexpected
- * symlink would expose a different file's contents to the worker; the
- * read-write session bind also stays strict because resolving it would
- * hand the worker write access to the link target.
- * @param {string} fullPath
- * @param {(file: string) => {isSymbolicLink: () => boolean, isFile?: () => boolean, nlink?: number}} lstatFn
- * @param {(file: string) => string} realpathFn
- * @returns {string|null}
- */
-function resolveConfigBindSource(fullPath, lstatFn, realpathFn) {
-  let entryStat;
-  try {
-    entryStat = lstatFn(fullPath);
-  } catch (err) {
-    if (!isEnoentError(err)) {
-      process.stderr.write(`warning: could not verify ${fullPath} is not a symlink (${/** @type {Error} */ (err).message}); skipping the bind\n`);
-    }
-    return null;
-  }
-  if (entryStat == null) return null;
-  if (entryStat.isSymbolicLink?.()) {
-    let realTarget;
-    try {
-      realTarget = realpathFn(fullPath);
-    } catch (err) {
-      if (!isEnoentError(err)) {
-        process.stderr.write(`warning: could not resolve symlink ${fullPath} (${/** @type {Error} */ (err).message}); skipping the bind\n`);
-      }
-      return null;
-    }
-    if (!isSafeBindSource(realTarget, lstatFn)) return null;
-    return realTarget;
-  }
-  if (typeof entryStat.isFile === "function" && entryStat.isFile() && typeof entryStat.nlink === "number" && entryStat.nlink > 1) {
-    process.stderr.write(`warning: ${fullPath} is hardlinked (${entryStat.nlink} names for one inode); skipping the bind\n`);
-    return null;
-  }
-  return fullPath;
-}
+
 
 /**
  * @typedef {Object} WorkerExecutor

@@ -49,6 +49,14 @@ describe("resolveVariant()", () => {
 
   test("highest on opencode resolves to the model's ranked-highest key", () => {
     assert.equal(resolveVariant({ executorId: "opencode", requested: "highest", opencodeVariants: ["low", "high", "max"] }), "max");
+
+  test("kilo resolves a concrete variant straight through", () => {
+    assert.equal(resolveVariant({ executorId: "kilo", requested: "high" }), "high");
+  });
+
+  test("kilo sends no variant flag for \"highest\": its effort vocabulary is per model", () => {
+    assert.equal(resolveVariant({ executorId: "kilo", requested: "highest" }), null);
+  });
   });
 
   test("highest on opencode with no table entry sends no flag", () => {

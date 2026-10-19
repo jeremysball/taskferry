@@ -1,5 +1,18 @@
 # Changelog
 
+## [5.1.0](https://github.com/jeremysball/taskferry/compare/taskferry-v5.0.0...taskferry-v5.1.0) (2026-10-19)
+
+
+### Features
+
+* **executor:** add a kilo executor for ferries ([#618](https://github.com/jeremysball/taskferry/issues/618)) ([555ad0a](https://github.com/jeremysball/taskferry/commit/555ad0aa49815458b2ff655cb399b8eda7ed5f22))
+* **tail:** show tool activity in tail and gate cancellation on progress checks ([#617](https://github.com/jeremysball/taskferry/issues/617)) ([a910078](https://github.com/jeremysball/taskferry/commit/a910078c2de3c76d46361e233526328dc3e47bab))
+
+
+### Bug Fixes
+
+* **changeset:** allow one minute for extraction commands ([#615](https://github.com/jeremysball/taskferry/issues/615)) ([421db2d](https://github.com/jeremysball/taskferry/commit/421db2da1ed4c77ecc154f6112057288aaedbbea))
+
 ## [5.0.0](https://github.com/jeremysball/taskferry/compare/taskferry-v4.4.0...taskferry-v5.0.0) (2026-10-18)
 
 

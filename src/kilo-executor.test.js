@@ -1,0 +1,191 @@
+import { test, describe } from "node:test";
+import assert from "node:assert/strict";
+import { kiloExecutor } from "./kilo-executor.js";
+import { KNOWN_EXECUTORS, resolveExecutor } from "./executor.js";
+import { PROMPT_FILE_INSTRUCTION } from "./executor-shared.js";
+
+const MODEL = "llmgateway/glm-5.3-flash";
+const HOME_DIR = "/home/user";
+const DATA_DIR = "/state/run";
+const TASK_ID = "kilo_task1";
+const SANDBOXED_DATA_HOME = `${DATA_DIR}/kilo-data/${TASK_ID}`;
+const SANDBOXED_CONFIG_HOME = `${SANDBOXED_DATA_HOME}/config`;
+const SANDBOXED_CONFIG_DIR = `${SANDBOXED_CONFIG_HOME}/kilo`;
+const PROMPT_FILE = "/state/prompts/t1.prompt.txt";
+const DISPATCH_PROMPT = "do the thing";
+const KILO_CONFIG_DIR = "/home/user/.config/kilo";
+const KILO_CONFIG_FILE = `${KILO_CONFIG_DIR}/kilo.jsonc`;
+const KILO_TOKEN_FILE = "/home/user/.kilocode/cli/config.json";
+
+// A real `kilo run --format json` capture (2026-10-19, kilo 7.8.12, one
+// step on llmgateway/glm-5.3-flash). The shared log parser in tasks.js reads
+// `text` events for the narration and `step_finish` events for the tokens
+// and the cost, so kilo's stream has to carry those fields with those names.
+// A kilo release that renames them breaks every kilo dispatch's reported
+// usage, so the shape is pinned here.
+const KILO_EVENT_STREAM = [
+  JSON.stringify({
+    type: "step_start",
+    timestamp: 1792439025354,
+    sessionID: "ses_eaa4f1f5effestLnT4ZOBLoq55",
+    part: { id: "prt_1", sessionID: "ses_eaa4f1f5effestLnT4ZOBLoq55", messageID: "msg_1", type: "step-start" },
+  }),
+  JSON.stringify({
+    type: "text",
+    timestamp: 1792439025354,
+    sessionID: "ses_eaa4f1f5effestLnT4ZOBLoq55",
+    part: { id: "prt_2", sessionID: "ses_eaa4f1f5effestLnT4ZOBLoq55", messageID: "msg_1", type: "text", text: "OK", time: { start: 1792439025323, end: 1792439025327 } },
+  }),
+  JSON.stringify({
+    type: "step_finish",
+    timestamp: 1792439025354,
+    sessionID: "ses_eaa4f1f5effestLnT4ZOBLoq55",
+    part: {
+      id: "prt_3",
+      sessionID: "ses_eaa4f1f5effestLnT4ZOBLoq55",
+      messageID: "msg_1",
+      type: "step-finish",
+      reason: "stop",
+      cost: 0.00430876,
+      tokens: { total: 47740, input: 47676, output: 2, reasoning: 62, cache: { read: 0, write: 0 } },
+    },
+  }),
+].join("\n");
+
+describe("kiloExecutor()", () => {
+  test("identity", () => {
+    const ex = kiloExecutor();
+    assert.equal(ex.id, "kilo");
+    assert.equal(ex.taskIdPrefix, "kilo");
+    assert.equal(ex.errorBucketPrefix, "kilo");
+    assert.equal(ex.binaryName, "kilo");
+  });
+
+  test("buildSpawnArgs: plain dispatch", () => {
+    const ex = kiloExecutor();
+    const args = ex.buildSpawnArgs({
+      isSummary: false, model: MODEL, variant: null,
+      launchDirectory: "/work/dir", promptFilePath: null, prompt: DISPATCH_PROMPT, sessionId: null,
+    });
+    assert.deepEqual(args, ["run", "--auto", "--format", "json", "--model", MODEL, "--", DISPATCH_PROMPT]);
+  });
+
+  test("buildSpawnArgs: prompt file is attached, not inlined", () => {
+    const ex = kiloExecutor();
+    const args = ex.buildSpawnArgs({
+      isSummary: false, model: MODEL, variant: null,
+      launchDirectory: "/work/dir", promptFilePath: PROMPT_FILE, prompt: "ignored", sessionId: null,
+    });
+    assert.ok(args.includes("-f"), "the prompt file is attached with -f");
+    assert.ok(args.includes(PROMPT_FILE), "the prompt file path is passed");
+    assert.ok(args.includes(PROMPT_FILE_INSTRUCTION), "the attachment instruction is the message");
+    assert.ok(!args.includes("ignored"), "the inline prompt is not sent when a file carries it");
+  });
+
+  test("buildSpawnArgs: session resume, variant, and executor args", () => {
+    const ex = kiloExecutor();
+    const args = ex.buildSpawnArgs({
+      isSummary: false, model: MODEL, variant: "high",
+      launchDirectory: "/work/dir", promptFilePath: null, prompt: DISPATCH_PROMPT, sessionId: "ses_1",
+      executorArgs: ["--pure"],
+    });
+    assert.ok(args.includes("--session"));
+    assert.ok(args.includes("ses_1"));
+    assert.ok(args.includes("--variant"));
+    assert.ok(args.includes("high"));
+    assert.ok(args.includes("--pure"));
+  });
+
+  test("buildSpawnArgs: a summary run drops the variant and the executor args", () => {
+    const ex = kiloExecutor();
+    const args = ex.buildSpawnArgs({
+      isSummary: true, model: MODEL, variant: "high",
+      launchDirectory: "/work/dir", promptFilePath: null, prompt: "ignored", sessionId: null,
+      executorArgs: ["--pure"],
+    });
+    assert.ok(!args.includes("--variant"), "a summary run does not pin an effort level");
+    assert.ok(!args.includes("--pure"), "a summary run does not inherit the dispatch's executor args");
+    assert.ok(args.includes(ex.buildSummaryPrompt()));
+  });
+
+  test("normalizeLogEvent is the identity: kilo's stream is opencode-shaped", () => {
+    const ex = kiloExecutor();
+    const parsed = { sessionId: null, tokens: null, cost: null };
+    assert.equal(ex.normalizeLogEvent(parsed), parsed);
+  });
+
+  test("kilo's event stream carries the fields the shared log parser reads", () => {
+    const events = KILO_EVENT_STREAM.split("\n").map((line) => JSON.parse(line));
+    const text = events.find((e) => e.type === "text");
+    const finish = events.find((e) => e.type === "step_finish");
+    assert.ok(text, "the stream has a text event");
+    assert.equal(typeof text.part.text, "string");
+    assert.equal(typeof text.part.messageID, "string");
+    assert.ok(finish, "the stream has a step_finish event");
+    assert.equal(finish.part.reason, "stop");
+    assert.equal(typeof finish.part.cost, "number");
+    assert.equal(typeof finish.part.tokens.input, "number");
+    assert.equal(typeof finish.part.tokens.output, "number");
+    assert.equal(typeof finish.part.tokens.cache.read, "number");
+    assert.equal(typeof finish.part.tokens.cache.write, "number");
+    assert.equal(typeof events[0].sessionID, "string");
+  });
+
+  test("sandboxAuthFile: config entries and the gateway token are bound read-only", () => {
+    const ex = kiloExecutor();
+    const binds = [];
+    const res = ex.sandboxAuthFile({
+      homeDir: HOME_DIR,
+      dataDir: DATA_DIR,
+      taskId: TASK_ID,
+      spawnEnv: { XDG_CONFIG_HOME: "/home/user/.config" },
+      existsFn: (p) => [KILO_CONFIG_DIR, KILO_CONFIG_FILE, KILO_TOKEN_FILE].includes(p),
+      lstatFn: () => ({ isSymbolicLink: () => false, isFile: () => true, nlink: 1 }),
+      readdirFn: () => ["kilo.jsonc", "tui.json"],
+      realpathFn: (p) => p,
+    });
+    assert.equal(res.sandboxedDataHome, SANDBOXED_DATA_HOME);
+    assert.deepEqual(res.sandboxEnv, {
+      XDG_DATA_HOME: SANDBOXED_DATA_HOME,
+      XDG_STATE_HOME: `${SANDBOXED_DATA_HOME}/state`,
+      XDG_CONFIG_HOME: SANDBOXED_CONFIG_HOME,
+    });
+    for (const [src, dest] of res.extraRoBinds) binds.push(`${src} -> ${dest}`);
+    assert.ok(
+      binds.includes(`${KILO_CONFIG_FILE} -> ${SANDBOXED_CONFIG_DIR}/kilo.jsonc`),
+      `the fleet kilo config is bound into the sandbox, got: ${binds.join(" | ")}`,
+    );
+    assert.ok(
+      binds.includes(`${KILO_TOKEN_FILE} -> ${KILO_TOKEN_FILE}`),
+      "the kilo gateway token is bound at its own path",
+    );
+  });
+
+  test("sandboxAuthFile: a symlinked config entry resolves to its target", () => {
+    const ex = kiloExecutor();
+    const res = ex.sandboxAuthFile({
+      homeDir: HOME_DIR,
+      dataDir: DATA_DIR,
+      taskId: TASK_ID,
+      spawnEnv: {},
+      existsFn: (p) => p === KILO_CONFIG_DIR || p === KILO_CONFIG_FILE,
+      lstatFn: (p) => {
+        if (p === KILO_CONFIG_FILE) return { isSymbolicLink: () => true };
+        if (p === KILO_CONFIG_DIR) return { isSymbolicLink: () => false, isDirectory: () => true };
+        return { isSymbolicLink: () => false, isFile: () => true, nlink: 1 };
+      },
+      readdirFn: () => ["kilo.jsonc"],
+      realpathFn: () => "/home/user/.dotfiles/.config/kilo/kilo.jsonc",
+    });
+    const sources = res.extraRoBinds.map(([src]) => src);
+    assert.ok(
+      sources.includes("/home/user/.dotfiles/.config/kilo/kilo.jsonc"),
+      `a dotfiles-managed symlink resolves to its target, got: ${sources.join(" | ")}`,
+    );
+  });
+
+  test("the executor registry knows kilo", () => {
+    assert.ok(KNOWN_EXECUTORS.includes("kilo"));
+    assert.equal(resolveExecutor("kilo").id, "kilo");
+  });
+});

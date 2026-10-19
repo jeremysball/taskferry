@@ -309,7 +309,7 @@ export function opencodeExecutor({ detectCliMajorFn = () => detectOpencodeCliMaj
  * @param {(file: string) => {isSymbolicLink: () => boolean, isFile?: () => boolean, nlink?: number}} lstatFn
  * @returns {boolean}
  */
-function isSafeBindSource(fullPath, lstatFn) {
+export function isSafeBindSource(fullPath, lstatFn) {
   let entryStat;
   try {
     entryStat = lstatFn(fullPath);
@@ -363,7 +363,7 @@ function isEnoentError(err) {
  * @param {(file: string) => string} realpathFn
  * @returns {string|null}
  */
-function resolveConfigBindSource(fullPath, lstatFn, realpathFn) {
+export function resolveConfigBindSource(fullPath, lstatFn, realpathFn) {
   let entryStat;
   try {
     entryStat = lstatFn(fullPath);

@@ -57,7 +57,7 @@ export function rankOpencodeVariants(keys) {
  * of `none`/`off` all mean "send no flag" -- opencode silently ignores an
  * unrecognized `--variant`, so guessing is worse than omitting.
  *
- * @param {{executorId: "pi"|"opencode", requested: string, opencodeVariants?: string[]}} params
+ * @param {{executorId: "pi"|"opencode"|"kilo", requested: string, opencodeVariants?: string[]}} params
  * @returns {string|null}
  */
 export function resolveVariant({ executorId, requested, opencodeVariants }) {

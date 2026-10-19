@@ -4,6 +4,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { detectOpencodeCliMajor, ensureOpencodeCliMajor, resetOpencodeCliProbe, setOpencodeVersionTtlMs, DEFAULT_OPENCODE_VERSION_TTL_MS } from "./opencode-version.js";
 import { setOpencodeExecutorOverride, resetOpencodeExecutorOverride, resolveOpencodeExecutor } from "./opencode-executor.js";
+import { kiloExecutor } from "./kilo-executor.js";
 import { PROMPT_FILE_INSTRUCTION, SUMMARY_ISOLATION_PROMPT } from "./executor-shared.js";
 
 const execFileAsync = promisify(execFile);
@@ -264,7 +265,7 @@ function resolveConfigBindSource(fullPath, lstatFn, realpathFn) {
 /**
  * @typedef {Object} WorkerExecutor
  * @property {(args: string[]) => string[]} [buildSandboxSpawn] - optional command prefix/argv used only inside the existing sandbox; unsandboxed launches keep binaryName/buildSpawnArgs.
- * @property {"opencode"|"pi"} id
+ * @property {"opencode"|"pi"|"kilo"} id
  * @property {string} taskIdPrefix
  * @property {string} errorBucketPrefix
  * @property {string} defaultSummaryModel
@@ -478,11 +479,12 @@ export function piExecutor({ execFileFn = execFileAsync } = {}) {
 
 /** The full set of executor names resolveExecutor() accepts. Single source of truth for
  * every layer (CLI args, RPC protocol) that validates a user-supplied --executor value. */
-export const KNOWN_EXECUTORS = /** @type {readonly string[]} */ (["opencode", "pi"]);
+export const KNOWN_EXECUTORS = /** @type {readonly string[]} */ (["opencode", "pi", "kilo"]);
 
 /** @param {string|undefined} name @returns {import("./executor.js").WorkerExecutor} */
 export function resolveExecutor(name) {
   if (name === undefined || name === "pi") return piExecutor();
   if (name === "opencode") return resolveOpencodeExecutor();
+  if (name === "kilo") return kiloExecutor();
   throw new Error(`unknown executor: ${name}`);
 }

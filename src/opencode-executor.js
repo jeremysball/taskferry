@@ -5,7 +5,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { promisify } from "node:util";
 import { detectOpencodeCliMajor, ensureOpencodeCliMajor } from "./opencode-version.js";
-import { SUMMARY_ISOLATION_PROMPT, appendPromptFileArgs, identityLogEvent, isSafeBindSource, resolveConfigBindSource } from "./executor-shared.js";
+import { appendPromptFileArgs, buildSummaryPrompt, identityLogEvent, isSafeBindSource, resolveConfigDirBinds } from "./executor-shared.js";
 import { buildV2SandboxSpawn } from "./opencode-auth.js";
 
 const execFileAsync = promisify(execFile);
@@ -196,9 +196,6 @@ export function opencodeExecutor({ detectCliMajorFn = () => detectOpencodeCliMaj
     ensureCliMajor() {
       return ensureCliMajorFn();
     },
-    buildSummaryPrompt() {
-      return SUMMARY_ISOLATION_PROMPT;
-    },
     normalizeLogEvent: identityLogEvent,
     // dataDir must be real-disk storage (state dir), not the runtime dir's
     // small tmpfs: opencode's snapshot store under here grows unbounded
@@ -246,20 +243,16 @@ export function opencodeExecutor({ detectCliMajorFn = () => detectOpencodeCliMaj
       // an unexpected symlink would expose a different file's contents, and
       // the pi session bind is read-write, where resolving would hand the
       // worker write access to the link target.
-      if (existsFn(realConfigDir) && isSafeBindSource(realConfigDir, lstatFn)) {
-        for (const entry of readdirFn(realConfigDir)) {
-          if (entry === ".gitignore") continue;
-          const fullPath = path.join(realConfigDir, entry);
-          const bindSource = resolveConfigBindSource(fullPath, lstatFn, realpathFn);
-          if (bindSource) extraRoBinds.push([bindSource, path.join(sandboxedConfigDir, entry)]);
-        }
-      }
+      extraRoBinds.push(
+        ...resolveConfigDirBinds({ realConfigDir, sandboxedConfigDir, existsFn, lstatFn, readdirFn, realpathFn }),
+      );
       return {
         sandboxedDataHome,
         extraRoBinds,
         sandboxEnv: { XDG_DATA_HOME: sandboxedDataHome, XDG_CONFIG_HOME: sandboxedConfigHome },
       };
     },
+    buildSummaryPrompt,
   };
 }
 

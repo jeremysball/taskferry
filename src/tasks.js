@@ -1329,7 +1329,8 @@ function buildBwrapBinds(ctx, launchInfo, task, spawnEnv, role) {
   const denyList = fullDenyList.filter(ctx.existsFn);
   // The executor decides which env var overrides point at its sandboxed data
   // home (opencode: XDG_DATA_HOME; pi: PI_CODING_AGENT_DIR; kilo:
-  // XDG_DATA_HOME) and which
+  // XDG_DATA_HOME, plus its own XDG_STATE_HOME, XDG_CACHE_HOME and
+  // XDG_CONFIG_HOME) and which
   // destination to ro-bind the real auth file into, so each executor's bound
   // auth destination matches its own environment directory.
   const resumedSessionId = resolveLaunchSessionId(isSummary, /** @type {SummaryLaunch} */ (launchInfo.summaryLaunch), dispatchLaunch);

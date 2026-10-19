@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import path from "node:path";
 import { promisify } from "node:util";
 
 export const PROMPT_FILE_INSTRUCTION = "Follow the instructions in the attached prompt file exactly.";
@@ -164,8 +165,57 @@ export function identityLogEvent(parsed) {
  * @param {{execFileFn?: Function, timeout?: number}} [options]
  * @returns {Promise<string>}
  */
-export async function listModelsOutput(binary, args, env, { execFileFn, timeout } = {}) {
+export async function listModelsOutput(binary, args, env, { execFileFn } = {}) {
   const run = execFileFn ?? promisify(execFile);
-  const { stdout } = await run(binary, args, { encoding: "utf8", timeout, env });
+  const { stdout } = await run(binary, args, { encoding: "utf8", timeout: LIST_MODELS_TIMEOUT_MS, env });
   return stdout;
+}
+
+/**
+ * The timeout every "list the models" call shares. A model listing shells out
+ * to the harness's own CLI, and a hung CLI must not hold a dispatch open.
+ */
+export const LIST_MODELS_TIMEOUT_MS = 30000;
+
+/**
+ * Bind a harness's real config directory into the sandbox, entry by entry.
+ *
+ * Both harnesses that keep their config in an XDG config directory need the
+ * same walk: the directory itself is checked for a symlink first, because
+ * existsFn and readdirFn follow one, and a symlinked directory would let every
+ * entry inside pass the per-entry guard while the whole tree pointed outside.
+ * A symlinked directory is treated as absent.
+ *
+ * A symlinked entry is handled differently: dotfiles-managed setups commonly
+ * symlink individual entries into a dotfiles repo, so a symlinked entry is
+ * resolved to its real target and that target is bound read-only at the same
+ * sandboxed destination, instead of being dropped. Dangling links fail closed
+ * and do not crash the dispatch. `.gitignore` is skipped on purpose: the
+ * harnesses rewrite it on boot, so a read-only bind there would fail.
+ *
+ * @param {{realConfigDir: string, sandboxedConfigDir: string, existsFn: (file: string) => boolean, lstatFn: (file: string) => {isSymbolicLink: () => boolean, isFile?: () => boolean, nlink?: number}, readdirFn: (dir: string) => string[], realpathFn: (file: string) => string}} args
+ * @returns {[string, string][]}
+ */
+export function resolveConfigDirBinds({ realConfigDir, sandboxedConfigDir, existsFn, lstatFn, readdirFn, realpathFn }) {
+  /** @type {[string, string][]} */
+  const binds = [];
+  if (!existsFn(realConfigDir) || !isSafeBindSource(realConfigDir, lstatFn)) return binds;
+  for (const entry of readdirFn(realConfigDir)) {
+    if (entry === ".gitignore") continue;
+    const fullPath = path.join(realConfigDir, entry);
+    const bindSource = resolveConfigBindSource(fullPath, lstatFn, realpathFn);
+    if (bindSource) binds.push([bindSource, path.join(sandboxedConfigDir, entry)]);
+  }
+  return binds;
+}
+
+/**
+ * The summary prompt every executor that speaks opencode's CLI dialect
+ * sends. One definition, so the three executors cannot drift apart on what
+ * a summary is told to do.
+ *
+ * @returns {string}
+ */
+export function buildSummaryPrompt() {
+  return SUMMARY_ISOLATION_PROMPT;
 }

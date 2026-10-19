@@ -16,6 +16,8 @@ const DISPATCH_PROMPT = "do the thing";
 const KILO_CONFIG_DIR = "/home/user/.config/kilo";
 const KILO_CONFIG_FILE = `${KILO_CONFIG_DIR}/kilo.jsonc`;
 const KILO_TOKEN_FILE = "/home/user/.kilocode/cli/config.json";
+const TWO_STEP_SESSION = "ses_two_step";
+const STEP_FINISH_PART_TYPE = "step-finish";
 
 // A real `kilo run --format json` capture (2026-10-19, kilo 7.8.12, one
 // step on llmgateway/glm-5.3-flash). The shared log parser in tasks.js reads
@@ -44,10 +46,48 @@ const KILO_EVENT_STREAM = [
       id: "prt_3",
       sessionID: "ses_eaa4f1f5effestLnT4ZOBLoq55",
       messageID: "msg_1",
-      type: "step-finish",
+      type: STEP_FINISH_PART_TYPE,
       reason: "stop",
       cost: 0.00430876,
       tokens: { total: 47740, input: 47676, output: 2, reasoning: 62, cache: { read: 0, write: 0 } },
+    },
+  }),
+].join("\n");
+
+
+// A real two-step `kilo run --format json` capture (2026-10-19, kilo
+// 7.8.12, llmgateway/glm-5.3-flash, one shell tool call). Step one reports
+// the whole prompt as input with no cache read; step two reports 285 input
+// tokens and reads 17664 back from the cache. So a step's usage is that
+// request's, not a running total, and a step's context is its input plus its
+// cache read plus its cache write.
+const KILO_TWO_STEP_STREAM = [
+  JSON.stringify({
+    type: "step_finish",
+    timestamp: 1792441000000,
+    sessionID: TWO_STEP_SESSION,
+    part: {
+      id: "prt_t1",
+      sessionID: TWO_STEP_SESSION,
+      messageID: "msg_t1",
+      type: STEP_FINISH_PART_TYPE,
+      reason: "tool-calls",
+      cost: 0.00160157,
+      tokens: { total: 17631, input: 17621, output: 10, reasoning: 0, cache: { read: 0, write: 0 } },
+    },
+  }),
+  JSON.stringify({
+    type: "step_finish",
+    timestamp: 1792441005000,
+    sessionID: TWO_STEP_SESSION,
+    part: {
+      id: "prt_t2",
+      sessionID: TWO_STEP_SESSION,
+      messageID: "msg_t2",
+      type: STEP_FINISH_PART_TYPE,
+      reason: "stop",
+      cost: 0.00038397,
+      tokens: { total: 17952, input: 285, output: 3, reasoning: 0, cache: { read: 17664, write: 0 } },
     },
   }),
 ].join("\n");
@@ -118,6 +158,23 @@ describe("kiloExecutor()", () => {
     assert.ok(args.includes("-f"), "the snapshot is attached with -f");
     assert.ok(args.includes("/state/summaries/s1.json"), "the snapshot path is passed");
     assert.ok(args.includes(ex.buildSummaryPrompt()), "the isolation prompt is the message");
+  });
+
+test("kilo reports each step's own usage, so a context is measured per step", () => {
+    const steps = KILO_TWO_STEP_STREAM.split("\n").map((line) => JSON.parse(line));
+    assert.equal(steps.length, 2, "the fixture has two steps");
+    const [first, second] = steps.map((s) => s.part.tokens);
+    assert.equal(first.cache.read, 0, "the first step read nothing from the cache");
+    assert.ok(first.input > 10000, "the first step carried the whole prompt as input");
+    assert.equal(second.input, 285, "the second step's input is small");
+    assert.equal(second.cache.read, 17664, "the second step read the prompt back from the cache");
+    // The context of the last step is its input plus its cache read, which is
+    // about the size of the first step's prompt. The sum of both steps is the
+    // billed total, and it is a different number from the context.
+    const lastContext = second.input + second.cache.read + second.cache.write;
+    const billedTotal = first.input + first.cache.read + first.cache.write + second.input + second.cache.read + second.cache.write;
+    assert.ok(lastContext < billedTotal, `the context (${lastContext}) is not the billed total (${billedTotal})`);
+    assert.ok(Math.abs(lastContext - first.input) < 1000, "the last step's context matches the first step's prompt size");
   });
 
   test("normalizeLogEvent is the identity: kilo's stream is opencode-shaped", () => {

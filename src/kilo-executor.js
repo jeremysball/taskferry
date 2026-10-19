@@ -6,16 +6,15 @@ import fs from "node:fs";
 import path from "node:path";
 import { promisify } from "node:util";
 import {
-  SUMMARY_ISOLATION_PROMPT,
   appendPromptFileArgs,
+  buildSummaryPrompt,
   identityLogEvent,
   isSafeBindSource,
   listModelsOutput,
-  resolveConfigBindSource,
+  resolveConfigDirBinds,
 } from "./executor-shared.js";
 
 const execFileAsync = promisify(execFile);
-const LIST_MODELS_TIMEOUT_MS = 30000;
 
 /**
  * The kilo executor runs a ferry on the kilo CLI.
@@ -26,12 +25,34 @@ const LIST_MODELS_TIMEOUT_MS = 30000;
  * `part.cost`. So the shared log parser in tasks.js reads a kilo stream with
  * no per-executor handling, and `normalizeLogEvent` is the identity.
  *
+ * The executor object itself is not shared with the opencode executor. The
+ * two differ in the binary, the model and session flags, the version probe,
+ * the credential binds and the environment keys, so a factory over them would
+ * be a bag of hooks with no logic left in it. What is the same between them
+ * lives in executor-shared.js: the sandbox bind walk, the summary prompt,
+ * the model listing call and the log normalizer.
+ *
+ * There is no version probe here, and that is deliberate. opencode probes
+ * its CLI because opencode 1.x and 2.x take different flags and opencode
+ * ignores a flag it does not recognize, so a stale argv would run quietly
+ * wrong. kilo has one argv shape and rejects a flag it does not know, so the
+ * failure is loud and comes from kilo itself.
+ *
  * What differs from opencode is the launch surface and the credentials:
  * kilo keeps its config in `~/.config/kilo`, and every provider kilo reaches
  * through an environment variable (LLM_GATEWAY_API_KEY and friends) is
  * inherited by the sandbox from the daemon's environment. A host that keeps
  * kilo's own login in `~/.kilocode/cli/config.json` gets that file bound
  * read-only at its own path, so a dispatch cannot rewrite the credential.
+ * This host has no such file: kilo is authenticated through the environment,
+ * so the bind does nothing here and exists for the hosts that do keep one.
+ *
+ * kilo's `step_finish` event carries that request's usage, with the cache
+ * read counted separately from the input. A real two-step run on 2026-10-19
+ * reported step one as input 17621 with no cache read, and step two as input
+ * 285 with a cache read of 17664. A step's context is therefore input plus
+ * cache read plus cache write, and summing the steps gives the billed total,
+ * which is a different number from the context.
  *
  * @param {{execFileFn?: typeof execFileAsync}} [options]
  * @returns {WorkerExecutor}
@@ -49,8 +70,7 @@ export function kiloExecutor({ execFileFn = execFileAsync } = {}) {
     defaultSummaryModel: "llmgateway/glm-5.3-flash",
     binaryName: "kilo",
     /** @type {(env: NodeJS.ProcessEnv) => Promise<string>} */
-    listModelsFn: async (env) =>
-      listModelsOutput("kilo", ["models"], env, { execFileFn, timeout: LIST_MODELS_TIMEOUT_MS }),
+    listModelsFn: async (env) => listModelsOutput("kilo", ["models"], env, { execFileFn }),
     /** @param {SpawnLaunchContext} ctx @returns {string[]} */
     buildSpawnArgs(ctx) {
       const args = ["run", "--auto", "--format", "json"];
@@ -61,9 +81,6 @@ export function kiloExecutor({ execFileFn = execFileAsync } = {}) {
       // attachment. Without it the run would report on nothing at all.
       if (ctx.isSummary && ctx.snapshotPath) args.push("-f", ctx.snapshotPath);
       return appendPromptFileArgs(args, ctx);
-    },
-    buildSummaryPrompt() {
-      return SUMMARY_ISOLATION_PROMPT;
     },
     // kilo's event stream already carries opencode's event shape.
     normalizeLogEvent: identityLogEvent,
@@ -92,18 +109,12 @@ export function kiloExecutor({ execFileFn = execFileAsync } = {}) {
       }
 
       // the fleet's kilo config: provider definitions, themes, tui settings.
+      // The walk itself is shared with the opencode executor: same symlink
+      // rules, same .gitignore skip, same per-entry resolution.
       const realConfigDir = path.join(spawnEnv.XDG_CONFIG_HOME || path.join(homeDir, ".config"), "kilo");
-      if (existsFn(realConfigDir) && isSafeBindSource(realConfigDir, lstatFn)) {
-        for (const entry of readdirFn(realConfigDir)) {
-          // the same skip the opencode executor makes: the config directory
-          // holds a .gitignore for the hosts that keep their config in a
-          // repository, and it has no business inside the sandbox.
-          if (entry === ".gitignore") continue;
-          const fullPath = path.join(realConfigDir, entry);
-          const bindSource = resolveConfigBindSource(fullPath, lstatFn, realpathFn);
-          if (bindSource) extraRoBinds.push([bindSource, path.join(sandboxedConfigDir, entry)]);
-        }
-      }
+      extraRoBinds.push(
+        ...resolveConfigDirBinds({ realConfigDir, sandboxedConfigDir, existsFn, lstatFn, readdirFn, realpathFn }),
+      );
 
       return {
         sandboxedDataHome,
@@ -121,5 +132,6 @@ export function kiloExecutor({ execFileFn = execFileAsync } = {}) {
         },
       };
     },
+    buildSummaryPrompt,
   };
 }

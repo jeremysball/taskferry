@@ -57,12 +57,20 @@ export function rankOpencodeVariants(keys) {
  * of `none`/`off` all mean "send no flag" -- opencode silently ignores an
  * unrecognized `--variant`, so guessing is worse than omitting.
  *
- * @param {{executorId: "pi"|"opencode", requested: string, opencodeVariants?: string[]}} params
+ * @param {{executorId: "pi"|"opencode"|"kilo", requested: string, opencodeVariants?: string[]}} params
  * @returns {string|null}
  */
 export function resolveVariant({ executorId, requested, opencodeVariants }) {
   if (requested !== "highest") return requested;
   if (executorId === "pi") return "max";
+  // kilo's effort vocabulary is per model and provider specific, and kilo
+  // ignores an effort level a model does not have (verified 2026-10-19:
+  // llmgateway/glm-5.3-flash accepts "high" and "max", and a run with
+  // "xhigh" completes rather than failing). Guessing a level is therefore
+  // worse than leaving the choice to kilo, which asks the model for its own
+  // default. The fleet's max ban, which will pin the level for every
+  // executor, is tracked in the engineering-the-harness repo.
+  if (executorId === "kilo") return null;
   const ranked = rankOpencodeVariants(opencodeVariants ?? []);
   return ranked === "none" || ranked === "off" ? null : ranked;
 }

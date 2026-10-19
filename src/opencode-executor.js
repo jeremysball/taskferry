@@ -5,7 +5,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { promisify } from "node:util";
 import { detectOpencodeCliMajor, ensureOpencodeCliMajor } from "./opencode-version.js";
-import { PROMPT_FILE_INSTRUCTION, SUMMARY_ISOLATION_PROMPT } from "./executor-shared.js";
+import { appendPromptFileArgs, buildSummaryPrompt, identityLogEvent, isSafeBindSource, resolveConfigDirBinds } from "./executor-shared.js";
 import { buildV2SandboxSpawn } from "./opencode-auth.js";
 
 const execFileAsync = promisify(execFile);
@@ -86,7 +86,7 @@ function buildOpencodeV2SpawnArgs(ctx) {
   const args = ["run", "--standalone", "--auto", "--format", "json", "-m", model];
   if (ctx.isSummary) args.push("-f", /** @type {string} */ (ctx.snapshotPath));
   if (ctx.sessionId) args.push("--session", ctx.sessionId);
-  return appendOpencodePromptArgs(args, ctx);
+  return appendPromptFileArgs(args, ctx);
 }
 
 /**
@@ -116,24 +116,9 @@ function buildOpencodeV1SpawnArgs(ctx) {
     : ["run", "--dir", ctx.launchDirectory, "--auto", "--format", "json", "-m", ctx.model];
   if (ctx.sessionId) args.push("--continue", "--session", ctx.sessionId);
   if (!ctx.isSummary && ctx.variant) args.push("--variant", ctx.variant);
-  return appendOpencodePromptArgs(args, ctx);
+  return appendPromptFileArgs(args, ctx);
 }
 
-/**
- * The argv tail both opencode majors share: executor passthrough args, the
- * prompt file attachment, and the message itself.
- * @param {string[]} args
- * @param {SpawnLaunchContext} ctx
- * @returns {string[]}
- */
-function appendOpencodePromptArgs(args, ctx) {
-  if (!ctx.isSummary && ctx.executorArgs?.length) args.push(...ctx.executorArgs);
-  if (ctx.promptFilePath) args.push("-f", ctx.promptFilePath);
-  if (ctx.isSummary) args.push("--", SUMMARY_ISOLATION_PROMPT);
-  else if (ctx.promptFilePath) args.push("--", PROMPT_FILE_INSTRUCTION);
-  else args.push("--", ctx.prompt);
-  return args;
-}
 
 /**
  * The generic executor contract plus the opencode-only version probe, which
@@ -211,10 +196,7 @@ export function opencodeExecutor({ detectCliMajorFn = () => detectOpencodeCliMaj
     ensureCliMajor() {
       return ensureCliMajorFn();
     },
-    buildSummaryPrompt() {
-      return SUMMARY_ISOLATION_PROMPT;
-    },
-    normalizeLogEvent: (parsed) => parsed,
+    normalizeLogEvent: identityLogEvent,
     // dataDir must be real-disk storage (state dir), not the runtime dir's
     // small tmpfs: opencode's snapshot store under here grows unbounded
     // across dispatches (no gc) and previously filled the whole
@@ -261,138 +243,24 @@ export function opencodeExecutor({ detectCliMajorFn = () => detectOpencodeCliMaj
       // an unexpected symlink would expose a different file's contents, and
       // the pi session bind is read-write, where resolving would hand the
       // worker write access to the link target.
-      if (existsFn(realConfigDir) && isSafeBindSource(realConfigDir, lstatFn)) {
-        for (const entry of readdirFn(realConfigDir)) {
-          if (entry === ".gitignore") continue;
-          const fullPath = path.join(realConfigDir, entry);
-          const bindSource = resolveConfigBindSource(fullPath, lstatFn, realpathFn);
-          if (bindSource) extraRoBinds.push([bindSource, path.join(sandboxedConfigDir, entry)]);
-        }
-      }
+      extraRoBinds.push(
+        ...resolveConfigDirBinds({ realConfigDir, sandboxedConfigDir, existsFn, lstatFn, readdirFn, realpathFn }),
+      );
       return {
         sandboxedDataHome,
         extraRoBinds,
         sandboxEnv: { XDG_DATA_HOME: sandboxedDataHome, XDG_CONFIG_HOME: sandboxedConfigHome },
       };
     },
+    buildSummaryPrompt,
   };
 }
 
-/**
- * Whether a real host path is safe to bind into the sandbox. lstat, never
- * stat: a plain stat follows the symlink and defeats the check, while bwrap
- * resolves a symlink on the host at bind time -- so binding a symlinked
- * path would bind whatever it points at, letting a plugin-planted symlink
- * pull arbitrary host paths (e.g. ~/.ssh) into the sandbox. Paths whose
- * lstat fails outright are skipped too (fail closed: never bind what we
- * couldn't verify isn't a symlink). A skipped path warns on stderr -- a
- * symlinked config entry is often a legitimate dotfiles-repo setup, and
- * dropping it silently would be an invisible regression -- except for the
- * plain ENOENT case, which is an ordinary existsFn/lstat race, not a
- * diagnostic.
- *
- * Hardlinked files are rejected too (isFile() && nlink > 1), so this check
- * is deliberately NOT a realpath-inside-the-tree comparison: fs.realpathSync
- * only resolves symlink components, and a hardlinked entry's realpath is its
- * own path inside the tree, so that check cannot see the inode's other name.
- * nlink > 1 is the only lstat-visible evidence an entry is reachable from
- * elsewhere on the host, and on kernels without fs.protected_hardlinks
- * (default-on since 2012, but absent on some older/embedded/NFS setups) a
- * plugin with config-dir write access could otherwise hardlink a sensitive
- * host file into the tree and leak it into the next dispatch. The false
- * positive is a dropped entry plus a warning -- acceptable for a setup as
- * rare as a hardlinked config entry (dotfiles repos use symlinks, which the
- * isSymbolicLink() check already rejects on purpose) -- and directories are
- * exempt because they cannot be hardlinked and their nlink counts
- * subdirectories.
- * @param {string} fullPath
- * @param {(file: string) => {isSymbolicLink: () => boolean, isFile?: () => boolean, nlink?: number}} lstatFn
- * @returns {boolean}
- */
-function isSafeBindSource(fullPath, lstatFn) {
-  let entryStat;
-  try {
-    entryStat = lstatFn(fullPath);
-    if (entryStat != null && entryStat.isSymbolicLink()) {
-      process.stderr.write(`warning: ${fullPath} is a symlink; skipping the bind (bwrap would bind the link target instead)\n`);
-      return false;
-    }
-  } catch (err) {
-    if (!isEnoentError(err)) {
-      process.stderr.write(`warning: could not verify ${fullPath} is not a symlink (${/** @type {Error} */ (err).message}); skipping the bind\n`);
-    }
-    return false;
-  }
-  if (entryStat == null) return false;
-  if (typeof entryStat.isFile === "function" && entryStat.isFile() && typeof entryStat.nlink === "number" && entryStat.nlink > 1) {
-    process.stderr.write(`warning: ${fullPath} is hardlinked (${entryStat.nlink} names for one inode); skipping the bind\n`);
-    return false;
-  }
-  return true;
-}
 
-/**
- * Whether an err thrown by lstat/realpath is just an ENOENT -- the one case
- * worth swallowing silently (a vanished entry is an ordinary race, not a
- * problem to surface). Every other error (EACCES, EMFILE, EIO, ...)
- * indicates the path is unverifiable for a real reason the user should hear
- * about; the guard fails closed either way.
- * @param {unknown} err
- * @returns {boolean}
- */
-function isEnoentError(err) {
-  const e = /** @type {{code?: unknown, message?: unknown}} */ (err);
-  return e?.code === "ENOENT" || String(e?.message ?? "").includes("ENOENT");
-}
 
-/**
- * Resolve a single config entry (an opencode config file, or a pi catalog
- * file such as models.json) to a safe bind source. Dotfiles setups commonly
- * symlink individual entries (opencode.json, plugins, pi models.json) into
- * a repo, so a symlinked entry is resolved to its real target and that
- * target is bound read-only at the same sandboxed destination, instead of
- * being dropped. Dangling links fail closed (ENOENT silent, other errors
- * warn) and do not crash the dispatch. Auth files and the extensions dir
- * keep strict skip-symlink (via isSafeBindSource) as a conservative
- * default for credential and code paths, where following an unexpected
- * symlink would expose a different file's contents to the worker; the
- * read-write session bind also stays strict because resolving it would
- * hand the worker write access to the link target.
- * @param {string} fullPath
- * @param {(file: string) => {isSymbolicLink: () => boolean, isFile?: () => boolean, nlink?: number}} lstatFn
- * @param {(file: string) => string} realpathFn
- * @returns {string|null}
- */
-function resolveConfigBindSource(fullPath, lstatFn, realpathFn) {
-  let entryStat;
-  try {
-    entryStat = lstatFn(fullPath);
-  } catch (err) {
-    if (!isEnoentError(err)) {
-      process.stderr.write(`warning: could not verify ${fullPath} is not a symlink (${/** @type {Error} */ (err).message}); skipping the bind\n`);
-    }
-    return null;
-  }
-  if (entryStat == null) return null;
-  if (entryStat.isSymbolicLink?.()) {
-    let realTarget;
-    try {
-      realTarget = realpathFn(fullPath);
-    } catch (err) {
-      if (!isEnoentError(err)) {
-        process.stderr.write(`warning: could not resolve symlink ${fullPath} (${/** @type {Error} */ (err).message}); skipping the bind\n`);
-      }
-      return null;
-    }
-    if (!isSafeBindSource(realTarget, lstatFn)) return null;
-    return realTarget;
-  }
-  if (typeof entryStat.isFile === "function" && entryStat.isFile() && typeof entryStat.nlink === "number" && entryStat.nlink > 1) {
-    process.stderr.write(`warning: ${fullPath} is hardlinked (${entryStat.nlink} names for one inode); skipping the bind\n`);
-    return null;
-  }
-  return fullPath;
-}
+
+
+
 
 /**
  * Module-level override for the factory options `opencodeExecutor()` reads

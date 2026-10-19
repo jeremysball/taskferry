@@ -54,7 +54,7 @@ message — there is no silent typo tolerance.
 | `sandboxDenylist` | `TASKFERRY_SANDBOX_DENYLIST` | string (comma-separated paths) | (none) |
 | `waitDefaultTimeoutMs` | `TASKFERRY_WAIT_DEFAULT_TIMEOUT_MS` | number | `900000` (15 min); `0` disables via the env var only — a config-file value of `0` is ignored and falls back to the 15-minute default |
 | `cancelGraceMs` | `TASKFERRY_CANCEL_GRACE_MS` | number | `5000`; overridden per-call by `cancel --grace-ms` |
-| `defaultExecutor` | `TASKFERRY_DEFAULT_EXECUTOR` | string (`opencode` or `pi`) | `pi` |
+| `defaultExecutor` | `TASKFERRY_DEFAULT_EXECUTOR` | string (`opencode`, `pi` or `kilo`) | `pi` |
 | `defaultVariant` | `TASKFERRY_DEFAULT_VARIANT` | string (`highest`, or one of `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`) | `highest`. On opencode 2.x, `highest` resolves to no variant flag because 2.x has no variants listing; pass `--variant` explicitly |
 | `envFile` | `TASKFERRY_ENV_FILE` | string (path to a `.env`-style file) | (none) |
 | `profilingEnabled` | `TASKFERRY_PROFILING_ENABLED` | boolean | `false`; see `docs/daemon.md#request-latency-profiling` |

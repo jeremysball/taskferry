@@ -20,8 +20,8 @@ relying on socket-level access control.
 Every dispatched task's stdout/stderr lands in
 `<state-dir>/logs/<task-id>.ndjson`. stderr writes straight through to that
 file, byte-for-byte. stdout is parsed line-by-line and normalized through
-the dispatching executor (`opencode`'s or `pi`'s own `--format json` NDJSON
-shape both become taskferry's canonical event shape) before being
+the dispatching executor (`opencode`'s, `pi`'s or `kilo`'s own `--format json`
+NDJSON shape all become taskferry's canonical event shape) before being
 re-serialized and written — content-equivalent, not necessarily
 byte-identical to what the worker emitted; a non-JSON stdout line (e.g. a
 plain-text auth failure) is preserved verbatim, unfiltered. If a prompt or

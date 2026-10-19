@@ -266,7 +266,8 @@ CLI usage approaches.
 ## Cancellation
 
 `taskferry cancel` sends `SIGTERM` to the task's process group (the worker
-child — `opencode` or `pi`, whichever executor the task dispatched with —
+child — `opencode`, `pi` or `kilo`, whichever executor the task dispatched
+with —
 is spawned with `detached: true`, making it its own process-group leader),
 escalating to `SIGKILL` after `--grace-ms` (default 5000) if it hasn't
 exited. Signaling the group, not just the worker's own pid, reaches

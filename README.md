@@ -33,7 +33,7 @@ The loop is `dispatch`, `wait`, `result --diff`, inspect, then `accept` or `reje
 
 On Linux the worker runs sandboxed in a copy-on-write overlay by default; macOS runs without the bubblewrap layer. The daemon owns task state and child processes after the calling terminal is gone, so no MCP server, tmux wrapper, or log-grepped marker is needed.
 
-Worker CLIs ship no credentials: for `pi` run `pi` once and type `/login` (or set the provider API key), for `--executor opencode` run `opencode auth login`. The daemon accepts a task without usable credentials, then the worker fails at its provider; see why with `taskferry status <id> --full`.
+Worker CLIs ship no credentials: for `pi` run `pi` once and type `/login` (or set the provider API key), for `--executor opencode` run `opencode auth login`, for `--executor kilo` log in with the `kilo` CLI itself. The daemon accepts a task without usable credentials, then the worker fails at its provider; see why with `taskferry status <id> --full`.
 
 ## Why taskferry
 

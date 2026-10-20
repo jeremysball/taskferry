@@ -546,15 +546,18 @@ test("Kilo hooks degrade gracefully when taskferry is missing or fails", () => {
   }
 });
 
-// Belief: every manifest that carries a plugin version is listed in
-// release-please's extra-files and equals package.json. The Kilo manifest sat
-// at 4.0.0 for two majors because it was added without being registered.
+// Belief: every integrations/<platform>/.<dir>/plugin.json that carries a
+// version is listed in release-please's extra-files and equals package.json.
+// The Kilo manifest sat at 4.0.0 for two majors because it was added without
+// being registered. The scan keys on "a dot-dir holding plugin.json", not on a
+// directory-name pattern, so a new platform cannot dodge it by how it is named.
 function pluginManifestPaths(integrationsDir = path.join(root, "integrations")) {
   const found = [];
   const subdirs = (dir) => fs.readdirSync(dir, { withFileTypes: true }).filter((entry) => entry.isDirectory());
   for (const integration of subdirs(integrationsDir)) {
     for (const entry of subdirs(path.join(integrationsDir, integration.name))) {
-      if (/^\.[a-z0-9-]+-plugin$/.test(entry.name)) {
+      const manifest = path.join(integrationsDir, integration.name, entry.name, "plugin.json");
+      if (entry.name.startsWith(".") && fs.existsSync(manifest)) {
         found.push(path.posix.join("integrations", integration.name, entry.name, "plugin.json"));
       }
     }
@@ -562,19 +565,30 @@ function pluginManifestPaths(integrationsDir = path.join(root, "integrations")) 
   return found;
 }
 
-test("pluginManifestPaths finds hyphenated platform dirs and skips stray files", () => {
+test("pluginManifestPaths finds every dot-dir plugin.json whatever the platform is called", () => {
   const integrations = fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-integrations-"));
   try {
-    fs.mkdirSync(path.join(integrations, "claude", ".claude-plugin"), { recursive: true });
-    fs.mkdirSync(path.join(integrations, "open-code", ".open-code-plugin"), { recursive: true });
-    fs.mkdirSync(path.join(integrations, "v2", ".v2-plugin"), { recursive: true });
+    const manifestDirs = [
+      ["claude", ".claude-plugin"],
+      ["open-code", ".open-code-plugin"],
+      ["v2", ".v2-plugin"],
+      ["zed", ".zed_plugin"],
+      ["camel", ".openCode-plugin"],
+    ];
+    for (const [integration, dir] of manifestDirs) {
+      fs.mkdirSync(path.join(integrations, integration, dir), { recursive: true });
+      fs.writeFileSync(path.join(integrations, integration, dir, "plugin.json"), "{}\n");
+    }
+    fs.mkdirSync(path.join(integrations, "claude", ".cache"), { recursive: true });
     fs.writeFileSync(path.join(integrations, "README.md"), "stray file\n");
-    fs.writeFileSync(path.join(integrations, "claude", ".claude-plugin-notes"), "not a plugin dir\n");
+    fs.writeFileSync(path.join(integrations, "claude", ".claude-plugin-notes"), "not a directory\n");
 
     assert.deepEqual(pluginManifestPaths(integrations).sort(), [
+      "integrations/camel/.openCode-plugin/plugin.json",
       "integrations/claude/.claude-plugin/plugin.json",
       "integrations/open-code/.open-code-plugin/plugin.json",
       "integrations/v2/.v2-plugin/plugin.json",
+      "integrations/zed/.zed_plugin/plugin.json",
     ]);
   } finally {
     fs.rmSync(integrations, { recursive: true, force: true });

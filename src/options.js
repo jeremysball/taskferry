@@ -1,29 +1,88 @@
 import { isNonNegativeInteger, isPositiveInteger } from "./numbers.js";
 
+const BYTE_COUNT_HELP = "pass a byte count like 2097152";
+
 /**
- * Parse a `--flag` / `--flag=value` positive-int from argv.
- * Throws on an invalid value; returns undefined when the flag is absent.
+ * @param {string} flagName
+ * @param {string} raw
+ * @returns {number}
+ */
+function parsePositiveIntFlagValue(flagName, raw) {
+  // Digits only, the same rule as parseNumber() in args.js: Number() alone
+  // would also accept "1e3", "0x10", " 5" and "+5".
+  if (/^\d+$/.test(raw)) {
+    const parsed = Number(raw);
+    if (isPositiveInteger(parsed)) return parsed;
+  }
+  throw new Error(`error: ${flagName} must be a positive integer (got ${JSON.stringify(raw)})\nhelp: ${BYTE_COUNT_HELP}`);
+}
+
+/**
+ * Parse a `--flag value` / `--flag=value` positive-int from argv, with the
+ * same strictness as the CLI parser in args.js: the value is digits only, a
+ * flag with no value is an error, and a repeated flag is an error.
+ * Throws on any of those; returns undefined when the flag is absent.
  * @param {string[]} argv
  * @param {string} flagName e.g. "--max-response-bytes"
  * @returns {number|undefined}
  */
 export function parsePositiveIntFlag(argv, flagName) {
+  /** @type {number|undefined} */
+  let found;
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
-    if (arg === flagName && i + 1 < argv.length) {
-      const raw = argv[i + 1];
-      const parsed = Number(raw);
-      if (isPositiveInteger(parsed)) return parsed;
-      throw new Error(`error: ${flagName} must be a positive integer (got ${JSON.stringify(raw)})\nhelp: pass a byte count like 2097152`);
+    /** @type {string} */
+    let raw;
+    if (arg === flagName) {
+      const next = argv[i + 1];
+      if (next === undefined || next.startsWith("--")) {
+        const got = next === undefined ? "end of command line" : JSON.stringify(next);
+        throw new Error(`error: ${flagName} needs a value (got ${got})\nhelp: ${BYTE_COUNT_HELP}`);
+      }
+      raw = next;
+      i++;
+    } else if (arg.startsWith(`${flagName}=`)) {
+      raw = arg.slice(flagName.length + 1);
+    } else {
+      continue;
     }
-    if (arg.startsWith(`${flagName}=`)) {
-      const raw = arg.slice(flagName.length + 1);
-      const parsed = Number(raw);
-      if (isPositiveInteger(parsed)) return parsed;
-      throw new Error(`error: ${flagName} must be a positive integer (got ${JSON.stringify(raw)})\nhelp: pass a byte count like 2097152`);
+    if (found !== undefined) {
+      throw new Error(`error: duplicate flag ${flagName}\nhelp: pass ${flagName} once`);
+    }
+    found = parsePositiveIntFlagValue(flagName, raw);
+  }
+  return found;
+}
+
+/**
+ * @typedef {{isValid: (value: unknown) => boolean, noun: string, example: string}} IntKind
+ */
+
+/** @type {IntKind} */
+const POSITIVE_INT = { isValid: isPositiveInteger, noun: "a positive integer", example: "2097152" };
+/** @type {IntKind} */
+const NON_NEGATIVE_INT = { isValid: isNonNegativeInteger, noun: "a non-negative integer", example: "0" };
+
+/**
+ * @param {number|undefined} rawValue
+ * @param {string|undefined} envValue
+ * @param {number|undefined} configValue
+ * @param {number} defaultValue
+ * @param {{kind: IntKind, envVarName?: string, strictEnv?: boolean}} options
+ * @returns {number}
+ */
+function resolveIntOption(rawValue, envValue, configValue, defaultValue, options) {
+  const { kind, envVarName = "env var", strictEnv = false } = options;
+  if (rawValue !== undefined) return rawValue;
+  if (envValue !== undefined && envValue !== "") {
+    const parsed = Number(envValue);
+    if (kind.isValid(parsed)) return parsed;
+    if (strictEnv) {
+      throw new Error(`error: ${envVarName} must be ${kind.noun} (got ${JSON.stringify(envValue)})\nhelp: set a byte count like ${kind.example}`);
     }
   }
-  return undefined;
+  if (kind.isValid(configValue)) return /** @type {number} */ (configValue);
+  return defaultValue;
 }
 
 /**
@@ -41,22 +100,12 @@ export function parsePositiveIntFlag(argv, flagName) {
  * @returns {number}
  */
 export function resolvePositiveIntOption(rawValue, envValue, configValue, defaultValue, options = {}) {
-  const { envVarName = "env var", strictEnv = false } = options;
-  if (rawValue !== undefined) return rawValue;
-  if (envValue !== undefined && envValue !== "") {
-    const parsed = Number(envValue);
-    if (isPositiveInteger(parsed)) return parsed;
-    if (strictEnv) {
-      throw new Error(`error: ${envVarName} must be a positive integer (got ${JSON.stringify(envValue)})\nhelp: set a byte count like 2097152`);
-    }
-  }
-  if (isPositiveInteger(configValue)) return configValue;
-  return defaultValue;
+  return resolveIntOption(rawValue, envValue, configValue, defaultValue, { ...options, kind: POSITIVE_INT });
 }
 
 /**
  * Flag > env > config > default chain for non-negative-int options (0 allowed).
- * Mirrors resolvePositiveIntOption but allows 0 (disables throttle).
+ * Same chain as resolvePositiveIntOption but allows 0 (disables throttle).
  * @param {number|undefined} rawValue
  * @param {string|undefined} envValue
  * @param {number|undefined} configValue
@@ -65,17 +114,7 @@ export function resolvePositiveIntOption(rawValue, envValue, configValue, defaul
  * @returns {number}
  */
 export function resolveNonNegativeIntOption(rawValue, envValue, configValue, defaultValue, options = {}) {
-  const { envVarName = "env var", strictEnv = false } = options;
-  if (rawValue !== undefined) return rawValue;
-  if (envValue !== undefined && envValue !== "") {
-    const parsed = Number(envValue);
-    if (isNonNegativeInteger(parsed)) return parsed;
-    if (strictEnv) {
-      throw new Error(`error: ${envVarName} must be a non-negative integer (got ${JSON.stringify(envValue)})\nhelp: set a byte count like 0`);
-    }
-  }
-  if (isNonNegativeInteger(configValue)) return configValue;
-  return defaultValue;
+  return resolveIntOption(rawValue, envValue, configValue, defaultValue, { ...options, kind: NON_NEGATIVE_INT });
 }
 
 /**

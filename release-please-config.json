@@ -8,6 +8,7 @@
       "extra-files": [
         "integrations/claude/.claude-plugin/plugin.json",
         "integrations/codex/.codex-plugin/plugin.json",
+        "integrations/kilo/.kilo-plugin/plugin.json",
         {
           "type": "json",
           "path": ".claude-plugin/marketplace.json",

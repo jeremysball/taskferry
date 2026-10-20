@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import { contextForHook } from "./output.js";
 import { runCli } from "./cli.js";
+import { readPackageVersion } from "./commands.js";
 
 const ENCODING = "utf8";
 const HOOKS_FILE = "hooks.json";
@@ -542,5 +543,89 @@ test("Kilo hooks degrade gracefully when taskferry is missing or fails", () => {
     assert.match(command, /command -v taskferry/);
     assert.match(command, /taskferry is unavailable/);
     assert.match(command, /taskferry context failed/);
+  }
+});
+
+// Belief: every integrations/<platform>/.<dir>/plugin.json that carries a
+// version is listed in release-please's extra-files and equals package.json.
+// The Kilo manifest sat at 4.0.0 for two majors because it was added without
+// being registered. The scan keys on "a dot-dir holding plugin.json", not on a
+// directory-name pattern, so a new platform cannot dodge it by how it is named.
+function pluginManifestPaths(integrationsDir = path.join(root, "integrations")) {
+  const found = [];
+  const subdirs = (dir) => fs.readdirSync(dir, { withFileTypes: true }).filter((entry) => entry.isDirectory());
+  for (const integration of subdirs(integrationsDir)) {
+    for (const entry of subdirs(path.join(integrationsDir, integration.name))) {
+      const manifest = path.join(integrationsDir, integration.name, entry.name, "plugin.json");
+      if (entry.name.startsWith(".") && fs.existsSync(manifest)) {
+        found.push(path.posix.join("integrations", integration.name, entry.name, "plugin.json"));
+      }
+    }
+  }
+  return found;
+}
+
+test("pluginManifestPaths finds every dot-dir plugin.json whatever the platform is called", () => {
+  const integrations = fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-integrations-"));
+  try {
+    const manifestDirs = [
+      ["claude", ".claude-plugin"],
+      ["open-code", ".open-code-plugin"],
+      ["v2", ".v2-plugin"],
+      ["zed", ".zed_plugin"],
+      ["camel", ".openCode-plugin"],
+    ];
+    for (const [integration, dir] of manifestDirs) {
+      fs.mkdirSync(path.join(integrations, integration, dir), { recursive: true });
+      fs.writeFileSync(path.join(integrations, integration, dir, "plugin.json"), "{}\n");
+    }
+    fs.mkdirSync(path.join(integrations, "claude", ".cache"), { recursive: true });
+    fs.writeFileSync(path.join(integrations, "README.md"), "stray file\n");
+    fs.writeFileSync(path.join(integrations, "claude", ".claude-plugin-notes"), "not a directory\n");
+
+    assert.deepEqual(pluginManifestPaths(integrations).sort(), [
+      "integrations/camel/.openCode-plugin/plugin.json",
+      "integrations/claude/.claude-plugin/plugin.json",
+      "integrations/open-code/.open-code-plugin/plugin.json",
+      "integrations/v2/.v2-plugin/plugin.json",
+      "integrations/zed/.zed_plugin/plugin.json",
+    ]);
+  } finally {
+    fs.rmSync(integrations, { recursive: true, force: true });
+  }
+});
+
+function valueAtJsonPath(document, jsonpath) {
+  return jsonpath
+    .replace(/^\$\.?/, "")
+    .split(/[.[\]]+/)
+    .filter(Boolean)
+    .reduce((node, key) => node?.[key], document);
+}
+
+test("every plugin manifest version is bumped by release-please and equals package.json", () => {
+  const packageVersion = readPackageVersion();
+  const extraFiles = readJson("release-please-config.json").packages["."]["extra-files"].map((entry) =>
+    typeof entry === "string" ? { path: entry, jsonpath: "$.version" } : entry
+  );
+  const listedPaths = extraFiles.map((entry) => entry.path);
+
+  const manifests = pluginManifestPaths();
+  assert.ok(manifests.length >= 3, `expected the claude, codex and kilo plugin manifests, found ${manifests.join(", ")}`);
+  for (const manifest of manifests) {
+    if (valueAtJsonPath(readJson(...manifest.split("/")), "$.version") !== undefined) {
+      assert.ok(
+        listedPaths.includes(manifest),
+        `${manifest} carries a version but is missing from release-please-config.json extra-files, so releases will not bump it`
+      );
+    }
+  }
+
+  for (const entry of extraFiles) {
+    assert.equal(
+      valueAtJsonPath(readJson(...entry.path.split("/")), entry.jsonpath),
+      packageVersion,
+      `${entry.path} ${entry.jsonpath} must equal package.json version ${packageVersion}`
+    );
   }
 });

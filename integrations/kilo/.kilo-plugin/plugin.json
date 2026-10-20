@@ -1,7 +1,7 @@
 {
   "name": "taskferry",
   "description": "Background task execution through the Taskferry AXI CLI — dispatch, monitor, and retrieve Kilo worker tasks",
-  "version": "4.0.0",
+  "version": "5.1.0",
   "author": {
     "name": "Taskferry"
   },

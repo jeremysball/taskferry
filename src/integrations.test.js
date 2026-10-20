@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import { contextForHook } from "./output.js";
 import { runCli } from "./cli.js";
+import { readPackageVersion } from "./commands.js";
 
 const ENCODING = "utf8";
 const HOOKS_FILE = "hooks.json";
@@ -548,18 +549,37 @@ test("Kilo hooks degrade gracefully when taskferry is missing or fails", () => {
 // Belief: every manifest that carries a plugin version is listed in
 // release-please's extra-files and equals package.json. The Kilo manifest sat
 // at 4.0.0 for two majors because it was added without being registered.
-function pluginManifestPaths() {
-  const integrationsDir = path.join(root, "integrations");
+function pluginManifestPaths(integrationsDir = path.join(root, "integrations")) {
   const found = [];
-  for (const integration of fs.readdirSync(integrationsDir)) {
-    for (const entry of fs.readdirSync(path.join(integrationsDir, integration))) {
-      if (/^\.[a-z]+-plugin$/.test(entry)) {
-        found.push(path.posix.join("integrations", integration, entry, "plugin.json"));
+  const subdirs = (dir) => fs.readdirSync(dir, { withFileTypes: true }).filter((entry) => entry.isDirectory());
+  for (const integration of subdirs(integrationsDir)) {
+    for (const entry of subdirs(path.join(integrationsDir, integration.name))) {
+      if (/^\.[a-z0-9-]+-plugin$/.test(entry.name)) {
+        found.push(path.posix.join("integrations", integration.name, entry.name, "plugin.json"));
       }
     }
   }
   return found;
 }
+
+test("pluginManifestPaths finds hyphenated platform dirs and skips stray files", () => {
+  const integrations = fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-integrations-"));
+  try {
+    fs.mkdirSync(path.join(integrations, "claude", ".claude-plugin"), { recursive: true });
+    fs.mkdirSync(path.join(integrations, "open-code", ".open-code-plugin"), { recursive: true });
+    fs.mkdirSync(path.join(integrations, "v2", ".v2-plugin"), { recursive: true });
+    fs.writeFileSync(path.join(integrations, "README.md"), "stray file\n");
+    fs.writeFileSync(path.join(integrations, "claude", ".claude-plugin-notes"), "not a plugin dir\n");
+
+    assert.deepEqual(pluginManifestPaths(integrations).sort(), [
+      "integrations/claude/.claude-plugin/plugin.json",
+      "integrations/open-code/.open-code-plugin/plugin.json",
+      "integrations/v2/.v2-plugin/plugin.json",
+    ]);
+  } finally {
+    fs.rmSync(integrations, { recursive: true, force: true });
+  }
+});
 
 function valueAtJsonPath(document, jsonpath) {
   return jsonpath
@@ -570,7 +590,7 @@ function valueAtJsonPath(document, jsonpath) {
 }
 
 test("every plugin manifest version is bumped by release-please and equals package.json", () => {
-  const packageVersion = readJson("package.json").version;
+  const packageVersion = readPackageVersion();
   const extraFiles = readJson("release-please-config.json").packages["."]["extra-files"].map((entry) =>
     typeof entry === "string" ? { path: entry, jsonpath: "$.version" } : entry
   );

@@ -116,7 +116,7 @@ const PACKAGE_JSON_PATH = fileURLToPath(new URL("../package.json", import.meta.u
 
 // Single source of truth for the package version: read package.json rather
 // than duplicating the string here, where it can (and did) drift for months.
-function readPackageVersion() {
+export function readPackageVersion() {
   return JSON.parse(fs.readFileSync(PACKAGE_JSON_PATH, "utf8")).version;
 }
 

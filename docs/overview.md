@@ -146,6 +146,11 @@ It is not an alternative lifecycle of its own.
 for Conventional Commits and keeps a standing PR that bumps the version and
 CHANGELOG. Merging that PR is the release.
 
+The same PR bumps every plugin manifest listed under `extra-files` in
+`release-please-config.json`. `src/integrations.test.js` fails when a plugin
+manifest carries a version but is not listed there, or when a listed version
+differs from `package.json`.
+
 `PROTOCOL_VERSION` in `src/protocol.js` changes only when the daemon/CLI RPC
 contract breaks.
 

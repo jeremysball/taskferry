@@ -544,3 +544,54 @@ test("Kilo hooks degrade gracefully when taskferry is missing or fails", () => {
     assert.match(command, /taskferry context failed/);
   }
 });
+
+// Belief: every manifest that carries a plugin version is listed in
+// release-please's extra-files and equals package.json. The Kilo manifest sat
+// at 4.0.0 for two majors because it was added without being registered.
+function pluginManifestPaths() {
+  const integrationsDir = path.join(root, "integrations");
+  const found = [];
+  for (const integration of fs.readdirSync(integrationsDir)) {
+    for (const entry of fs.readdirSync(path.join(integrationsDir, integration))) {
+      if (/^\.[a-z]+-plugin$/.test(entry)) {
+        found.push(path.posix.join("integrations", integration, entry, "plugin.json"));
+      }
+    }
+  }
+  return found;
+}
+
+function valueAtJsonPath(document, jsonpath) {
+  return jsonpath
+    .replace(/^\$\.?/, "")
+    .split(/[.[\]]+/)
+    .filter(Boolean)
+    .reduce((node, key) => node?.[key], document);
+}
+
+test("every plugin manifest version is bumped by release-please and equals package.json", () => {
+  const packageVersion = readJson("package.json").version;
+  const extraFiles = readJson("release-please-config.json").packages["."]["extra-files"].map((entry) =>
+    typeof entry === "string" ? { path: entry, jsonpath: "$.version" } : entry
+  );
+  const listedPaths = extraFiles.map((entry) => entry.path);
+
+  const manifests = pluginManifestPaths();
+  assert.ok(manifests.length >= 3, `expected the claude, codex and kilo plugin manifests, found ${manifests.join(", ")}`);
+  for (const manifest of manifests) {
+    if (valueAtJsonPath(readJson(...manifest.split("/")), "$.version") !== undefined) {
+      assert.ok(
+        listedPaths.includes(manifest),
+        `${manifest} carries a version but is missing from release-please-config.json extra-files, so releases will not bump it`
+      );
+    }
+  }
+
+  for (const entry of extraFiles) {
+    assert.equal(
+      valueAtJsonPath(readJson(...entry.path.split("/")), entry.jsonpath),
+      packageVersion,
+      `${entry.path} ${entry.jsonpath} must equal package.json version ${packageVersion}`
+    );
+  }
+});

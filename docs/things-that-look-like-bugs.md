@@ -521,3 +521,24 @@ belongs here.
   error names it. A task manager built directly stays lenient. It would be a
   real bug if the error omitted the variable name, or if an empty value (a
   blank `.env` line) were rejected instead of ignored.
+- The daemon's inbound request buffer never dropping below its own default
+  while `maxResponseBytes` is lowered. Observe: `taskferry daemon --max-response-bytes 512`
+  (or a tiny `TASKFERRY_MAX_RESPONSE_BYTES`) makes every request fail as too
+  large even though the cap says 512 bytes. Deliberate: the inbound buffer is
+  a read bound on an untrusted peer, not the response budget, and shrinking
+  it to a tiny outbound test value would reject every request before
+  `invoke()` runs; raising the outbound cap does raise the inbound floor so a
+  large request can still be answered
+  (`src/daemon.js`, `maxBufferBytes: maxOutboundBytes >= MAX_BUFFER_BYTES ? ...`).
+  For this to be a real bug, an inbound request would have to be limited by
+  the outbound budget by design, or a 512-byte response cap would have to be
+  useful with requests larger than 1 MiB.
+- The client reading `config.json` before checking for a running daemon.
+  Observe: a malformed or unreadable config makes even `taskferry status`
+  fail against an already-running daemon that is perfectly healthy.
+  Deliberate: connect-time options (receive ceiling, startup defaults) come
+  from the same file, so a broken config is reported where the user can fix
+  it instead of being silently ignored for commands that happen to need no
+  config; auto-start would otherwise boot a daemon with defaults the user
+  thought they had overridden. It becomes a real bug if the client ever grows
+  an offline/local-only command that must work without a valid config.

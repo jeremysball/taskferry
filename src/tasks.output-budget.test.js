@@ -90,6 +90,21 @@ describe("response-budget guard (taskferry#508 review)", () => {
       else process.env.TASKFERRY_MAX_OUTPUT_FILE_BYTES = prev;
     }
   });
+
+  test("an invalid TASKFERRY_MAX_OUTPUT_FILE_BYTES value does not count as an explicit over-cap limit", () => {
+    const prev = process.env.TASKFERRY_MAX_OUTPUT_FILE_BYTES;
+    process.env.TASKFERRY_MAX_OUTPUT_FILE_BYTES = "abc";
+    let mgr;
+    try {
+      assert.doesNotThrow(() => {
+        mgr = createTaskManager({ maxResponseBytes: 100_000, stateDir: mkdtempTracked(AXI_TASKS_TEST_DIR + "-guard-env-invalid-"), config: {} });
+      }, "an ignored env value must clamp like an unset one, not name a value the user never used");
+    } finally {
+      if (prev === undefined) delete process.env.TASKFERRY_MAX_OUTPUT_FILE_BYTES;
+      else process.env.TASKFERRY_MAX_OUTPUT_FILE_BYTES = prev;
+    }
+    mgr.close();
+  });
 });
 
 describe("listing response-budget guard (taskferry#508 follow-up)", () => {

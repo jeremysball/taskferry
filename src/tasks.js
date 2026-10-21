@@ -4465,7 +4465,11 @@ function resolveOutputFileBytesOption(rawOptions, config, cap, safe) {
   const envValue = process.env.TASKFERRY_MAX_OUTPUT_FILE_BYTES;
   const v = resolvePositiveIntOption(rawOptions.maxOutputFileBytes, envValue, config.maxOutputFileBytes, DEFAULT_MAX_OUTPUT_FILE_BYTES);
   if (v <= cap) return v;
-  const explicit = rawOptions.maxOutputFileBytes ?? (envValue === "" ? undefined : envValue) ?? config.maxOutputFileBytes;
+  // Only a source that actually resolved to a valid positive integer counts
+  // as explicit; a malformed env/config value was ignored upstream and must
+  // clamp like an unset one instead of blaming a value the user never used.
+  const envExplicit = envValue !== undefined && /^\d+$/.test(envValue) && isPositiveInteger(Number(envValue)) ? Number(envValue) : undefined;
+  const explicit = rawOptions.maxOutputFileBytes ?? envExplicit ?? (isPositiveInteger(config.maxOutputFileBytes) ? config.maxOutputFileBytes : undefined);
   if (explicit !== undefined) {
     throw new Error(`error: maxOutputFileBytes ${v} exceeds daemon response limit ${cap} bytes\nhelp: lower TASKFERRY_MAX_OUTPUT_FILE_BYTES, config maxOutputFileBytes, or --max-output-file-bytes to ≤ ${cap} (and ≤ ${safe} for worst-case JSON escaping)`);
   }
@@ -4872,10 +4876,15 @@ function initManagerLimits(opts) {
       const cap = positiveInteger(opts.maxResponseBytes, DEFAULT_MAX_BUFFER_BYTES);
       const safe = maxSafeResponseBytes(cap);
       // Already validated/clamped upstream by resolveTimeoutOptions; this is
-      // a safety net for direct callers. A clamped-to-safe default (e.g. 0
-      // under a tiny cap) passes through instead of throwing.
-      const v = opts.maxOutputFileBytes ?? DEFAULT_MAX_OUTPUT_FILE_BYTES;
+      // a safety net for direct callers. A non-positive value is not an
+      // explicit request, so it falls back to the default and then clamps to
+      // the safe ceiling like an unset one; only a valid explicit limit above
+      // the cap throws. (Zero also arrives here from the resolver's own
+      // clamp under a tiny cap, and must pass through.)
+      const explicit = isPositiveInteger(opts.maxOutputFileBytes);
+      const v = positiveInteger(opts.maxOutputFileBytes, DEFAULT_MAX_OUTPUT_FILE_BYTES);
       if (v > cap) {
+        if (!explicit) return safe;
         throw new Error(`error: maxOutputFileBytes ${v} exceeds daemon response limit ${cap} bytes\nhelp: lower to ≤ ${safe} for worst-case JSON escaping`);
       }
       return v;

@@ -3,7 +3,6 @@ import os from "node:os";
 import { fileURLToPath } from "node:url";
 import { UsageError } from "./args.js";
 import { errCode } from "./errors.js";
-import { MAX_BUFFER_BYTES } from "./daemon-server.js";
 import { PROTOCOL_VERSION } from "./protocol.js";
 import {
   contextForHook,
@@ -572,12 +571,11 @@ async function runResult(options, { client }) {
     // narration alone has nothing to do with the target directory's tree.
     if (errCode(error) === "RESPONSE_TOO_LARGE") {
       const diffRequested = !fields || fields.includes("diff");
-      const capMiB = MAX_BUFFER_BYTES / (1024 * 1024);
       const help = diffRequested
-        ? `help: the payload includes the task's diff, which covers the whole target directory against its pre-dispatch HEAD -- unrelated uncommitted changes in that directory count toward the cap, not just the task's own edits. Commit or shelve the unrelated working-tree changes and retry, or fetch a narrower set of fields instead (e.g. "taskferry result ${options.taskId} --fields message,tokens")`
+        ? `help: the payload includes the task's diff, which covers the whole target directory against its pre-dispatch HEAD -- unrelated uncommitted changes in that directory count toward the cap, not just the task's own edits. Commit or shelve the unrelated working-tree changes and retry, or fetch a narrower set of fields instead (e.g. "taskferry result ${options.taskId} --fields message,tokens"). To raise the cap, set --max-response-bytes, TASKFERRY_MAX_RESPONSE_BYTES, or config maxResponseBytes on the daemon`
         : `help: fetch a narrower set of fields instead (e.g. "taskferry result ${options.taskId} --fields message,tokens")`;
       throw new Error(
-        `error: the result payload for task ${options.taskId} exceeds the daemon's response size cap (${capMiB} MiB)\n${help}`,
+        `error: the result payload for task ${options.taskId} exceeds the daemon's response size cap\n${help}`,
         { cause: error }
       );
     }

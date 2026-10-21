@@ -136,3 +136,20 @@ export function resolveEnvOverrideBoolean(env, envVarName, configValue) {
   if (env?.[envVarName] !== undefined) return isEnabledFlag(env[envVarName]);
   return configValue === true;
 }
+
+/**
+ * Copy-on-write env for a child daemon. A cap is carried only when the caller
+ * says to forward it, it raises the default, and no env value already
+ * settles it: a lowered cap applies to this client only, and a value already
+ * in env wins so forwarding never overrides an operator's explicit setting.
+ * @param {NodeJS.ProcessEnv} env
+ * @param {number} cap
+ * @param {number} defaultCap
+ * @param {boolean} forward
+ * @returns {NodeJS.ProcessEnv}
+ */
+export function envWithResponseCap(env, cap, defaultCap, forward) {
+  const envValue = env.TASKFERRY_MAX_RESPONSE_BYTES;
+  if (!forward || cap <= defaultCap || (envValue !== undefined && envValue !== "")) return env;
+  return { ...env, TASKFERRY_MAX_RESPONSE_BYTES: String(cap) };
+}

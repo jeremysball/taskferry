@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url";
 import { createTaskManager, emptyStatusCounts } from "./tasks.js";
 import { loadConfig } from "./config.js";
 import { withFileLock, withFileLockAsync } from "./state-lock.js";
-import { resolveEnvOverrideBoolean, resolveNonNegativeIntOption, resolvePositiveIntOption, resolveResponseCapBytes, resolveResponseCapRaw } from "./options.js";
+import { envWithResponseCap, resolveEnvOverrideBoolean, resolveNonNegativeIntOption, resolvePositiveIntOption, resolveResponseCapBytes, resolveResponseCapRaw } from "./options.js";
 import { parsePositiveIntFlag } from "./flag-parse.js";
 import { normalizeDirectory, resolveRuntimeDir, resolveStateDir, createWorkspaceRootResolver, sameWorkspace } from "./paths.js";
 import {
@@ -803,7 +803,10 @@ const DAEMON_DEFAULTS = {
  */
 function withResponseCap(taskManagerOptions, cap) {
   const copy = { ...taskManagerOptions };
-  if (resolveResponseCapRaw(copy) === undefined) copy.maxResponseBytes = cap;
+  const alias = resolveResponseCapRaw(copy);
+  // Leave an alias at or below the wire cap alone; only an alias above it
+  // needs the explicit key, which outranks the alias in resolution.
+  if (alias === undefined || alias > cap) copy.maxResponseBytes = cap;
   return copy;
 }
 
@@ -839,7 +842,6 @@ function resolveDaemonOptions(options = {}) {
     { strictEnv: true },
   );
   const taskManagerOptions = withResponseCap(/** @type {Record<string, any>} */ (merged.taskManagerOptions), maxOutboundBytes);
-  merged.taskManagerOptions = /** @type {any} */ (taskManagerOptions);
   // eslint-disable-next-line sonarjs/shorthand-property-grouping -- mixed shorthand/longhand is idiomatic for merged defaults vs explicit casts
   return {
     env,
@@ -1026,12 +1028,10 @@ export async function startDaemon(options = {}) {
     await close();
     unclaimDaemonPid();
   };
-  // Restart env carries an explicitly-resolved cap: the replacement boots via
-  // main() with no argv flags, so a flag-only raise would otherwise be dropped
-  // on self-restart. Copy-on-write — never mutate caller env.
-  const restartEnv = env.TASKFERRY_MAX_RESPONSE_BYTES !== undefined || maxOutboundBytes === MAX_BUFFER_BYTES
-    ? env
-    : { ...env, TASKFERRY_MAX_RESPONSE_BYTES: String(maxOutboundBytes) };
+  // Restart env carries a flag-resolved raise: the replacement boots via
+  // main() with no argv flags, so a flag-only raise would otherwise be
+  // dropped on self-restart. Config/env caps are re-read by the replacement.
+  const restartEnv = envWithResponseCap(env, maxOutboundBytes, MAX_BUFFER_BYTES, resolveResponseCapRaw(options) !== undefined);
   // eslint-disable-next-line sonarjs/shorthand-property-grouping -- restartEnv is computed above; longhand env must sit with the other explicit wirings
   maybeRestartRef.current = makeMaybeRestart({
     sourceDir,

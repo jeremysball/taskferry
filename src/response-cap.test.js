@@ -227,6 +227,13 @@ describe("client response cap", () => {
     assert.equal(explicit[ENV_NAME], "3145728");
   });
 
+  test("does not forward a lowered cap and treats an empty env value as unset", async (t) => {
+    const lowered = await bootEnvFor(t, { env: {}, maxBufferBytes: MAX_BUFFER_BYTES / 2 });
+    assert.equal(lowered[ENV_NAME], undefined, "a lowered cap stays this client's receive limit");
+    const empty = await bootEnvFor(t, { env: { [ENV_NAME]: "" }, maxBufferBytes: 2 * MAX_BUFFER_BYTES });
+    assert.equal(empty[ENV_NAME], String(2 * MAX_BUFFER_BYTES), "an empty env value is not an explicit setting");
+  });
+
   test("reads the cap from the config file when neither option nor env sets one", async (t) => {
     const configHome = scratch(t, "cap-config");
     fs.mkdirSync(path.join(configHome, "taskferry"));

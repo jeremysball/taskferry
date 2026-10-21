@@ -10,7 +10,7 @@ import { PROTOCOL_VERSION, encodeMessage } from "./protocol.js";
 import { MAX_BUFFER_BYTES } from "./daemon-server.js";
 import { loadConfig } from "./config.js";
 import { isObject } from "./numbers.js";
-import { resolveResponseCapBytes } from "./options.js";
+import { envWithResponseCap, resolveResponseCapBytes } from "./options.js";
 import { resolveRuntimeDir, resolveStateDir, resolveInvokedPath } from "./paths.js";
 import { errCode } from "./errors.js";
 
@@ -582,6 +582,7 @@ async function retryOpenClient(socketPath, clientOptions, retryDelayMs, deadline
  * @property {number} [startupTimeoutMs]
  * @property {number} [retryDelayMs]
  * @property {number} [maxBufferBytes]
+ * @property {number} [maxResponseBytes]
  * @property {number} [maxQueuedEvents]
  * @property {(options: {env: NodeJS.ProcessEnv, stateDir: string, runtimeDir: string, socketPath: string, startupTimeoutMs: number, retryDelayMs: number}) => Promise<void> | void} [ensureDaemonFn]
  * @property {Record<string, unknown>} [startupOptions]
@@ -628,11 +629,13 @@ export async function connectClient({
   startupTimeoutMs = 5000,
   retryDelayMs = 25,
   maxBufferBytes: rawMaxBufferBytes = undefined,
+  maxResponseBytes: rawMaxResponseBytes = undefined,
   maxQueuedEvents = 1000,
   ensureDaemonFn = startDaemonBooter,
   ...startupOptions
 } = {}) {
-  const maxBufferBytes = resolveClientMaxBufferBytes(env, rawMaxBufferBytes);
+  const rawCap = rawMaxBufferBytes ?? rawMaxResponseBytes;
+  const maxBufferBytes = resolveClientMaxBufferBytes(env, rawCap);
   return connectClientCore({
     env, stateDir, runtimeDir, socketPath, autoStart, startupTimeoutMs,
     retryDelayMs, maxBufferBytes, maxQueuedEvents, ensureDaemonFn, startupOptions,
@@ -654,12 +657,11 @@ async function connectClientCore({
     if (!autoStart) throw error;
   }
 
-  // Forward a programmatic raise to the auto-started daemon: the child boots
+  // Forward a raised resolved cap to the auto-started daemon: the child boots
   // via env/config (no argv flags), so without this a raised client ceiling
-  // hits the default daemon ceiling. Copy-on-write — never mutate caller env.
-  const bootEnv = env.TASKFERRY_MAX_RESPONSE_BYTES !== undefined || maxBufferBytes === MAX_BUFFER_BYTES
-    ? env
-    : { ...env, TASKFERRY_MAX_RESPONSE_BYTES: String(maxBufferBytes) };
+  // hits the default daemon ceiling. A lowered cap stays this client's
+  // receive limit, and an env value already set wins.
+  const bootEnv = envWithResponseCap(env, maxBufferBytes, MAX_BUFFER_BYTES, true);
   await ensureDaemonFn({ env: bootEnv, stateDir, runtimeDir, socketPath, startupTimeoutMs, retryDelayMs, ...startupOptions });
   const deadline = Date.now() + startupTimeoutMs;
   const { client, lastError } = await retryOpenClient(socketPath, clientOptions, retryDelayMs, deadline);

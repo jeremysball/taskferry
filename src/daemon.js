@@ -8,8 +8,7 @@ import { fileURLToPath } from "node:url";
 import { createTaskManager, emptyStatusCounts } from "./tasks.js";
 import { loadConfig } from "./config.js";
 import { withFileLock, withFileLockAsync } from "./state-lock.js";
-import { isNonNegativeInteger, isPositiveInteger } from "./numbers.js";
-import { parsedEnvNumber, resolveEnvOverrideBoolean } from "./options.js";
+import { resolveEnvOverrideBoolean, resolveNonNegativeIntOption, resolvePositiveIntOption } from "./options.js";
 import { normalizeDirectory, resolveRuntimeDir, resolveStateDir, createWorkspaceRootResolver, sameWorkspace } from "./paths.js";
 import {
   PROTOCOL_VERSION,
@@ -263,8 +262,8 @@ const defaultAppendLine = (filePath, line) => fs.appendFileSync(filePath, line);
 function makeRequestTimer({ stateDir, env, config, appendLine = defaultAppendLine }) {
   if (!profilingEnabled(env, config)) return null;
   const perfLogPath = path.join(stateDir, "perf.log");
-  const maxBytes = parsedEnvNumber(env?.TASKFERRY_PERF_LOG_MAX_BYTES, isPositiveInteger, DEFAULT_PERF_LOG_MAX_BYTES);
-  const slowRequestMs = parsedEnvNumber(env?.TASKFERRY_SLOW_REQUEST_MS, isNonNegativeInteger, DEFAULT_SLOW_REQUEST_MS);
+  const maxBytes = resolvePositiveIntOption(undefined, env?.TASKFERRY_PERF_LOG_MAX_BYTES, undefined, DEFAULT_PERF_LOG_MAX_BYTES);
+  const slowRequestMs = resolveNonNegativeIntOption(undefined, env?.TASKFERRY_SLOW_REQUEST_MS, undefined, DEFAULT_SLOW_REQUEST_MS);
   /**
    * @param {{method: string, durationMs: number, ok: boolean}} record
    */

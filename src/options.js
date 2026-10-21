@@ -1,59 +1,5 @@
 import { isNonNegativeInteger, isPositiveInteger } from "./numbers.js";
 
-const BYTE_COUNT_HELP = "pass a byte count like 2097152";
-
-/**
- * @param {string} flagName
- * @param {string} raw
- * @returns {number}
- */
-function parsePositiveIntFlagValue(flagName, raw) {
-  // Digits only, the same rule as parseNumber() in args.js: Number() alone
-  // would also accept "1e3", "0x10", " 5" and "+5".
-  if (/^\d+$/.test(raw)) {
-    const parsed = Number(raw);
-    if (isPositiveInteger(parsed)) return parsed;
-  }
-  throw new Error(`error: ${flagName} must be a positive integer (got ${JSON.stringify(raw)})\nhelp: ${BYTE_COUNT_HELP}`);
-}
-
-/**
- * Parse a `--flag value` / `--flag=value` positive-int from argv, with the
- * same strictness as the CLI parser in args.js: the value is digits only, a
- * flag with no value is an error, and a repeated flag is an error.
- * Throws on any of those; returns undefined when the flag is absent.
- * @param {string[]} argv
- * @param {string} flagName e.g. "--max-response-bytes"
- * @returns {number|undefined}
- */
-export function parsePositiveIntFlag(argv, flagName) {
-  /** @type {number|undefined} */
-  let found;
-  for (let i = 0; i < argv.length; i++) {
-    const arg = argv[i];
-    /** @type {string} */
-    let raw;
-    if (arg === flagName) {
-      const next = argv[i + 1];
-      if (next === undefined || next.startsWith("--")) {
-        const got = next === undefined ? "end of command line" : JSON.stringify(next);
-        throw new Error(`error: ${flagName} needs a value (got ${got})\nhelp: ${BYTE_COUNT_HELP}`);
-      }
-      raw = next;
-      i++;
-    } else if (arg.startsWith(`${flagName}=`)) {
-      raw = arg.slice(flagName.length + 1);
-    } else {
-      continue;
-    }
-    if (found !== undefined) {
-      throw new Error(`error: duplicate flag ${flagName}\nhelp: pass ${flagName} once`);
-    }
-    found = parsePositiveIntFlagValue(flagName, raw);
-  }
-  return found;
-}
-
 /**
  * @typedef {{isValid: (value: unknown) => boolean, noun: string, example: string}} IntKind
  */
@@ -156,21 +102,4 @@ export function resolveBooleanToggle(envValue, configValue, defaultValue, invert
 export function resolveEnvOverrideBoolean(env, envVarName, configValue) {
   if (env?.[envVarName] !== undefined) return isEnabledFlag(env[envVarName]);
   return configValue === true;
-}
-
-// An unset var is undefined and Number(undefined) is already NaN, but an
-// empty-string value (a blank .env line, an empty -e in Docker) is
-// Number("") === 0 -- a false "valid, explicit zero" that would otherwise
-// slip past isPositiveInteger/isNonNegativeInteger instead of falling back
-// to the default the same way a genuinely non-numeric value does.
-/**
- * @param {string|undefined} rawValue
- * @param {(value: unknown) => boolean} isValid
- * @param {number} fallback
- * @returns {number}
- */
-export function parsedEnvNumber(rawValue, isValid, fallback) {
-  if (!rawValue) return fallback;
-  const parsed = Number(rawValue);
-  return isValid(parsed) ? parsed : fallback;
 }

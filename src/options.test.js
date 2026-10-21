@@ -1,47 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { parsePositiveIntFlag, resolveNonNegativeIntOption, resolvePositiveIntOption } from "./options.js";
+import { resolveNonNegativeIntOption, resolvePositiveIntOption } from "./options.js";
 
-const FLAG = "--max-response-bytes";
 const ENV_NAME = "TASKFERRY_MAX_RESPONSE_BYTES";
-
-test("parsePositiveIntFlag reads the space and equals forms and ignores unrelated args", () => {
-  assert.equal(parsePositiveIntFlag([FLAG, "2048"], FLAG), 2048);
-  assert.equal(parsePositiveIntFlag([`${FLAG}=2048`], FLAG), 2048);
-  assert.equal(parsePositiveIntFlag(["--other", "1", FLAG, "7"], FLAG), 7);
-  assert.equal(parsePositiveIntFlag(["--other", "1"], FLAG), undefined);
-  assert.equal(parsePositiveIntFlag([], FLAG), undefined);
-});
-
-test("parsePositiveIntFlag rejects a repeated flag in either form instead of using the first value", () => {
-  assert.equal(parsePositiveIntFlag([FLAG, "10"], FLAG), 10);
-  assert.throws(() => parsePositiveIntFlag([FLAG, "10", FLAG, "20"], FLAG), /duplicate flag --max-response-bytes/);
-  assert.throws(() => parsePositiveIntFlag([`${FLAG}=10`, `${FLAG}=20`], FLAG), /duplicate flag --max-response-bytes/);
-  assert.throws(() => parsePositiveIntFlag([FLAG, "10", `${FLAG}=20`], FLAG), /duplicate flag --max-response-bytes/);
-});
-
-test("parsePositiveIntFlag rejects a flag with no value instead of treating it as absent", () => {
-  assert.equal(parsePositiveIntFlag([FLAG, "10"], FLAG), 10);
-  assert.throws(() => parsePositiveIntFlag([FLAG], FLAG), /--max-response-bytes needs a value \(got end of command line\)/);
-  assert.throws(() => parsePositiveIntFlag(["--other", FLAG], FLAG), /needs a value \(got end of command line\)/);
-  assert.throws(() => parsePositiveIntFlag([FLAG, "--other", "1"], FLAG), /needs a value \(got "--other"\)/);
-});
-
-test("parsePositiveIntFlag accepts only plain digit strings, like the CLI parser in args.js", () => {
-  assert.equal(parsePositiveIntFlag([FLAG, "1"], FLAG), 1);
-  for (const raw of ["1e3", "0x10", " 5", "5 ", "+5", "5.0", "-5", "0", "", "abc", "9007199254740993"]) {
-    assert.throws(
-      () => parsePositiveIntFlag([FLAG, raw], FLAG),
-      /--max-response-bytes must be a positive integer/,
-      `space form should reject ${JSON.stringify(raw)}`
-    );
-    assert.throws(
-      () => parsePositiveIntFlag([`${FLAG}=${raw}`], FLAG),
-      /--max-response-bytes must be a positive integer/,
-      `equals form should reject ${JSON.stringify(raw)}`
-    );
-  }
-});
 
 test("resolvePositiveIntOption applies flag > env > config > default", () => {
   assert.equal(resolvePositiveIntOption(5, "6", 7, 8), 5);

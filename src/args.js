@@ -134,7 +134,7 @@ function migrationError(name, args) {
  * @param {{min?: number, max?: number}} [opts]
  * @returns {number}
  */
-function parseNumber(value, flag, { min = 0, max = Number.MAX_SAFE_INTEGER } = {}) {
+export function parseNumber(value, flag, { min = 0, max = Number.MAX_SAFE_INTEGER } = {}) {
   if (!/^\d+$/.test(value)) throw new UsageError(`${flag} must be an integer`, `Use ${flag} with a number from ${min} through ${max}`);
   const number = Number(value);
   if (!isNonNegativeInteger(number) || number < min || number > max) {
@@ -187,7 +187,7 @@ function parseDuration(value, flag) {
  * @param {string|undefined} inlineValue
  * @returns {{value: string, nextIndex: number}}
  */
-function requireValue(argv, index, flag, inlineValue) {
+export function requireValue(argv, index, flag, inlineValue) {
   if (inlineValue !== undefined) {
     if (!inlineValue) throw new UsageError(`${flag} requires a non-empty value`, `Run ${flag} with a value`);
     return { value: inlineValue, nextIndex: index };
@@ -205,7 +205,7 @@ function requireValue(argv, index, flag, inlineValue) {
  * @param {string} command
  * @param {Set<string>} seen
  */
-function setOption(options, name, value, command, seen) {
+export function setOption(options, name, value, command, seen) {
   if (seen.has(name)) throw usageError(`duplicate flag ${name}`, command);
   seen.add(name);
   options[name] = value;
@@ -215,7 +215,7 @@ function setOption(options, name, value, command, seen) {
  * @param {string} token
  * @returns {{name: string, inlineValue: string|undefined}}
  */
-function parseLongFlag(token) {
+export function parseLongFlag(token) {
   const equals = token.indexOf("=");
   return equals === -1 ? { name: token, inlineValue: void 0 } : { name: token.slice(0, equals), inlineValue: token.slice(equals + 1) };
 }

@@ -649,3 +649,4 @@ test("--allowed-dirs still works as a deprecated alias for --rw-bind and warns",
   }
 });
 
+

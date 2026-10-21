@@ -491,3 +491,33 @@ belongs here.
   still checked lexically, because the rm finds nothing there either way. It
   would be a real bug if a path that resolves cleanly inside a root were
   refused, or if a refused path were ever removed.
+- `taskferry daemon message exceeds 1048576 bytes` from a CLI call against a
+  daemon whose response cap you raised. The daemon and every client resolve
+  `maxResponseBytes` separately (flag, env var, config key, default;
+  `resolveResponseCapBytes` in `src/options.js`), so the two caps can
+  disagree. A client that auto-starts the daemon forwards its own cap, and a
+  daemon that restarts itself forwards its own. A daemon started by hand
+  with only `--max-response-bytes` is invisible to the client, which keeps
+  the 1 MiB default and drops any longer message (`src/client.js:318`). Set
+  the env var or config key where the CLI runs. It would be a real bug if a
+  client holding a matching cap still refused a response under it, or if a
+  daemon the client started sent a response that client could not read.
+- Lowering `maxResponseBytes` under 512 KiB shrinks the default
+  `taskferry output <id> --path` limit. With the cap below the
+  `maxOutputFileBytes` default (`524288`), an unset limit clamps to
+  `floor((cap - 4096) / 6)`, the largest file whose worst-case JSON escaping
+  still fits one response (`maxSafeResponseBytes` and
+  `resolveOutputFileBytesOption` in `src/tasks.js`), rather than failing
+  startup. A limit you set yourself above the cap still throws when the task
+  manager is built, because clamping it would hide the typo. It would be a
+  real bug if an unset limit exceeded the cap, or if an explicit limit above
+  the cap were accepted.
+- A malformed `TASKFERRY_MAX_RESPONSE_BYTES` stops the daemon at boot and
+  fails the CLI, while a malformed `TASKFERRY_MAX_CONCURRENT_TASKS` falls
+  back to its default. A cap that silently reverted to 1 MiB would surface
+  later as `daemon response for this request exceeds 1048576 bytes`
+  (`src/daemon-server.js:104`) with nothing pointing at the typo, so the
+  daemon and the client resolve this one variable with `strictEnv` and the
+  error names it. A task manager built directly stays lenient. It would be a
+  real bug if the error omitted the variable name, or if an empty value (a
+  blank `.env` line) were rejected instead of ignored.

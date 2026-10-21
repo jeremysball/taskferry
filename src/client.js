@@ -9,7 +9,8 @@ import { withFileLock } from "./state-lock.js";
 import { PROTOCOL_VERSION, encodeMessage } from "./protocol.js";
 import { MAX_BUFFER_BYTES } from "./daemon-server.js";
 import { loadConfig } from "./config.js";
-import { isObject, isPositiveInteger } from "./numbers.js";
+import { isObject } from "./numbers.js";
+import { resolveResponseCapBytes } from "./options.js";
 import { resolveRuntimeDir, resolveStateDir, resolveInvokedPath } from "./paths.js";
 import { errCode } from "./errors.js";
 
@@ -595,22 +596,17 @@ async function retryOpenClient(socketPath, clientOptions, retryDelayMs, deadline
  * @returns {number}
  */
 function resolveClientMaxBufferBytes(env, rawMaxBufferBytes) {
-  if (rawMaxBufferBytes !== undefined) return rawMaxBufferBytes;
-  const envVal = env.TASKFERRY_MAX_RESPONSE_BYTES;
-  if (envVal !== undefined) {
-    const parsed = Number(envVal);
-    if (isPositiveInteger(parsed)) return parsed;
-    if (envVal !== "") {
-      throw new Error(`error: TASKFERRY_MAX_RESPONSE_BYTES must be a positive integer (got ${JSON.stringify(envVal)})\nhelp: set a byte count like 2097152`);
-    }
-  }
-  try {
-    const cfg = loadConfig({ env });
-    if (isPositiveInteger(cfg.maxResponseBytes)) return cfg.maxResponseBytes;
-  } catch {
-    // malformed config: fall through to default; daemon boot will surface via daemon-boot.err
-  }
-  return MAX_BUFFER_BYTES;
+  const envValue = env.TASKFERRY_MAX_RESPONSE_BYTES;
+  // The config file is read only when neither the flag nor the env var
+  // settles the cap, so a connect with either set never touches disk.
+  const needsConfig = rawMaxBufferBytes === undefined && (envValue === undefined || envValue === "");
+  return resolveResponseCapBytes(
+    { maxBufferBytes: rawMaxBufferBytes },
+    envValue,
+    needsConfig ? /** @type {number|undefined} */ (loadConfig({ env }).maxResponseBytes) : undefined,
+    MAX_BUFFER_BYTES,
+    { strictEnv: true },
+  );
 }
 
 /**

@@ -136,7 +136,7 @@ same connection.
 
 The daemon caps each connection's accumulated inbound buffer at `maxResponseBytes` (default 1 MiB,
 `TASKFERRY_MAX_RESPONSE_BYTES` / `maxResponseBytes` / `--max-response-bytes`, see `docs/config.md`)
-and refuses to buffer more (`REQUEST_TOO_LARGE`), and caps in-flight requests per daemon at 256
+and refuses to buffer more (`REQUEST_TOO_LARGE`); a cap below 1 MiB leaves the inbound limit at 1 MiB (`src/daemon.js:1004`). It also caps in-flight requests per daemon at 256
 (`SERVER_BUSY`) — both are abuse/backpressure limits, not something normal
 CLI usage approaches. The same `maxResponseBytes` also caps outbound responses
 (`RESPONSE_TOO_LARGE` / `REQUEST_TOO_LARGE` in `src/daemon-server.js:14`);

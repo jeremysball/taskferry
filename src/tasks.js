@@ -12,7 +12,7 @@ import { formatToolEventForNarration, formatTailActivity } from "./narration-for
 import { MAX_BUFFER_BYTES, DEFAULT_MAX_BUFFER_BYTES } from "./daemon-server.js";
 import { errCode } from "./errors.js";
 import { isNonNegativeInteger, isPositiveInteger } from "./numbers.js";
-import { resolveBooleanToggle, resolveNonNegativeIntOption, resolvePositiveIntOption, resolveResponseCapRaw } from "./options.js";
+import { resolveBooleanToggle, resolveNonNegativeIntOption, resolvePositiveIntOption, resolveResponseCapBytes } from "./options.js";
 import { buildBwrapArgs, checkBwrapAvailable, checkOverlaySupport, defaultDenyList, platformSupportsSandbox, resolveGitCommonDir, resolveGitDir } from "./sandbox.js";
 import { applyChangeset, overlayPaths, resolvePreDispatchHead, subOverlayPaths, subFilePaths, cleanupOverlay, defaultRunCommand as defaultOverlayRunCommand, extractGitDiff, extractNonGitDiff, OVERLAY_MOUNT_BUSY_PATTERN } from "./changeset.js";
 import { resolveExecutor } from "./executor.js";
@@ -4481,8 +4481,8 @@ function resolveOutputFileBytesOption(rawOptions, config, cap, safe) {
  */
 function resolveTimeoutOptions(rawOptions) {
   const config = rawOptions.config || {};
-  const maxResponseBytes = resolvePositiveIntOption(
-    resolveResponseCapRaw(rawOptions),
+  const maxResponseBytes = resolveResponseCapBytes(
+    rawOptions,
     process.env.TASKFERRY_MAX_RESPONSE_BYTES,
     config.maxResponseBytes,
     DEFAULT_MAX_BUFFER_BYTES,

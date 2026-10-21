@@ -78,6 +78,25 @@ export function resolveResponseCapRaw(rawOptions) {
 }
 
 /**
+ * The flag > env > config > default chain for the daemon response cap, in one
+ * place for the daemon, the task manager and the client. `rawOptions` must be
+ * the unmerged input (see {@link resolveResponseCapRaw}). `strictEnv` makes an
+ * invalid `TASKFERRY_MAX_RESPONSE_BYTES` throw instead of falling through.
+ * @param {{maxResponseBytes?: number, maxOutboundBytes?: number, maxBufferBytes?: number}} rawOptions
+ * @param {string|undefined} envValue
+ * @param {number|undefined} configValue
+ * @param {number} defaultValue
+ * @param {{strictEnv?: boolean}} [options]
+ * @returns {number}
+ */
+export function resolveResponseCapBytes(rawOptions, envValue, configValue, defaultValue, options = {}) {
+  return resolvePositiveIntOption(resolveResponseCapRaw(rawOptions), envValue, configValue, defaultValue, {
+    envVarName: "TASKFERRY_MAX_RESPONSE_BYTES",
+    strictEnv: options.strictEnv,
+  });
+}
+
+/**
  * Whether a string env value counts as enabled (1/true).
  * @param {string|undefined} value
  * @returns {boolean}

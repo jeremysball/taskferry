@@ -790,20 +790,33 @@ const DAEMON_DEFAULTS = {
   exitProcess: () => process.exit(0),
 };
 
-
+/**
+ * Thread the daemon's resolved response cap into the task manager so its
+ * budget checks (output file size, listing guards) agree with the wire
+ * (taskferry#506). A cap the caller already set under any alias wins.
+ * Returns a copy: `taskManagerOptions` may alias DAEMON_DEFAULTS's (a shallow
+ * spread shares the object), and mutating it would leak the cap into later
+ * in-process daemons.
+ * @param {Record<string, any>} taskManagerOptions
+ * @param {number} cap
+ * @returns {Record<string, any>}
+ */
+function withResponseCap(taskManagerOptions, cap) {
+  const copy = { ...taskManagerOptions };
+  if (resolveResponseCapRaw(copy) === undefined) copy.maxResponseBytes = cap;
+  return copy;
+}
 
 /**
  * @param {DaemonOptionsInput} [options]
  * @returns {DaemonOptions}
  */
-// eslint-disable-next-line complexity, sonarjs/cyclomatic-complexity -- flag/env/config/default chain plus taskManagerOptions threading is inherently branched; helper already extracted for the numeric chain
 function resolveDaemonOptions(options = {}) {
   /** @type {Partial<DaemonOptions>} */
   const merged = { ...DAEMON_DEFAULTS, ...options };
   for (const key of Object.keys(DAEMON_DEFAULTS)) {
     if (merged[/** @type {keyof DaemonOptions} */ (key)] === undefined) merged[/** @type {keyof DaemonOptions} */ (key)] = /** @type {any} */ (DAEMON_DEFAULTS[/** @type {keyof DaemonOptions} */ (key)]);
   }
-  // eslint-disable-next-line sonarjs/destructuring-assignment-syntax -- individual ?? defaults per field are clearer than a single destructuring with defaults
   const env = /** @type {NodeJS.ProcessEnv} */ (merged.env);
   const stateDir = merged.stateDir ?? resolveStateDir(env);
   const runtimeDir = merged.runtimeDir ?? resolveRuntimeDir({ env, stateDir });
@@ -813,39 +826,19 @@ function resolveDaemonOptions(options = {}) {
   // per-directory cache -- across every daemon started in one process,
   // e.g. multiple daemons spun up across a test file).
   const resolveWorkspaceRoot = merged.resolveWorkspaceRoot ?? createWorkspaceRootResolver();
-  // Resolve max response bytes via flag > env > config > default. Flag value
-  // comes from any explicit maxResponseBytes/maxOutboundBytes/maxBufferBytes
-  // option (startDaemon caller or --max-response-bytes CLI flag); env and
-  // config follow the same precedence as tasks.js's numeric options.
-  // NOTE: read from the raw (unmerged) input — merged carries the 1MiB
-  // default maxOutboundBytes which would shadow env/config raises.
-  const rawFlagValue = resolveResponseCapRaw(
-    /** @type {{maxResponseBytes?: number, maxOutboundBytes?: number, maxBufferBytes?: number}} */ (options),
-  );
+  // The flag value comes from the raw (unmerged) input: merged carries the
+  // 1 MiB default maxOutboundBytes, which would shadow env/config raises.
   const configForMax = /** @type {Record<string, unknown>|undefined} */ (
     /** @type {any} */ (merged.taskManagerOptions)?.config ?? /** @type {any} */ (merged).config
   );
-  const maxOutboundBytes = resolvePositiveIntOption(
-    rawFlagValue,
+  const maxOutboundBytes = resolveResponseCapBytes(
+    /** @type {{maxResponseBytes?: number, maxOutboundBytes?: number, maxBufferBytes?: number}} */ (options),
     env.TASKFERRY_MAX_RESPONSE_BYTES,
     /** @type {number|undefined} */ (configForMax?.maxResponseBytes),
     MAX_BUFFER_BYTES,
-    { envVarName: "TASKFERRY_MAX_RESPONSE_BYTES", strictEnv: true },
+    { strictEnv: true },
   );
-  // Thread the resolved cap into the task manager so its budget checks
-  // (output file size, listing guards) use the same ceiling the wire does
-  // when the cap is raised (configurable ceiling, taskferry#506). Don't thread
-  // tiny test caps (e.g. 1, 200, 512 bytes used by downgrade tests) that would
-  // otherwise make the manager's own maxOutputFileBytes validation fail at
-  // construction (512 KiB > 1 byte would throw). A raised production cap
-  // (>=1 MiB) is the only case where the manager needs to know the wire cap.
-  // Clone: merged.taskManagerOptions may alias DAEMON_DEFAULTS.taskManagerOptions
-  // (shallow spread shares the object) — mutating it would leak a raised cap
-  // into later in-process daemons.
-  const taskManagerOptions = { /** @type {Record<string, any>} */ .../** @type {any} */ (merged.taskManagerOptions) };
-  if (maxOutboundBytes >= MAX_BUFFER_BYTES && taskManagerOptions.maxResponseBytes === undefined && taskManagerOptions.maxBufferBytes === undefined && taskManagerOptions.maxOutboundBytes === undefined) {
-    taskManagerOptions.maxResponseBytes = maxOutboundBytes;
-  }
+  const taskManagerOptions = withResponseCap(/** @type {Record<string, any>} */ (merged.taskManagerOptions), maxOutboundBytes);
   merged.taskManagerOptions = /** @type {any} */ (taskManagerOptions);
   // eslint-disable-next-line sonarjs/shorthand-property-grouping -- mixed shorthand/longhand is idiomatic for merged defaults vs explicit casts
   return {

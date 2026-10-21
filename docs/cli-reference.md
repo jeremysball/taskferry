@@ -397,8 +397,8 @@ ending on a tool call instead of a final assistant message (taskferry#423).
 - Without `--path`: prints a TOON listing of `{ path, size }` for every
   file in the scratch dir, plus `bytes`, `total`, and `truncated`
   (capped at `256` files / `8 MiB`; `node_modules` and `.git` subtrees
-  are skipped). Listings are also bounded to the daemon's `1 MiB` response
-  budget (`src/daemon-server.js:14`); a directory with many control-
+  are skipped). Listings are also bounded to the daemon's response budget
+  (`maxResponseBytes`, default `1 MiB`); a directory with many control-
   character-heavy filenames that would exceed the wire budget after JSON
   escaping (`\uXXXX`, 6×) is truncated to the largest prefix that fits
   (with `truncated:true`) rather than failing with generic `RESPONSE_TOO_LARGE`
@@ -407,8 +407,8 @@ ending on a tool call instead of a final assistant message (taskferry#423).
   are capped at `512 KiB` by default; an over-cap read returns `{ content: null,
   truncated: true, error: "too_large", size }`. Any path that would
   escape the per-task dir (absolute paths, leading `/`, `..` segments)
-  is rejected. The cap is configurable: flag `--max-output-file-bytes` > env var `TASKFERRY_MAX_OUTPUT_FILE_BYTES` > config key `maxOutputFileBytes` > built-in default `524288` (512 KiB). The daemon response budget is `1 MiB` (`src/daemon-server.js:14`); worst-case JSON escaping expands control characters 6× to `\uXXXX`, so the provably safe ceiling is `174080` bytes (`(1 MiB-4096)/6`, `src/output-dir.js:25`). A file that fits the raw cap but would exceed the wire budget after escaping no longer fails with generic `RESPONSE_TOO_LARGE` — the daemon surfaces a clear `would exceed daemon response limit` error naming the knob (`--max-output-file-bytes`/`TASKFERRY_MAX_OUTPUT_FILE_BYTES`/`maxOutputFileBytes`) and the on-disk path (taskferry#508).
-  Use `--max-output-file-bytes` per-read to override the daemon's default for that single call (e.g. `taskferry output <id> --path deliverable.txt --max-output-file-bytes 1048576`; values > `1048576` are rejected, and values that would still exceed the wire budget surface the clear knob-specific error).
+  is rejected. The cap is configurable: flag `--max-output-file-bytes` > env var `TASKFERRY_MAX_OUTPUT_FILE_BYTES` > config key `maxOutputFileBytes` > built-in default `524288` (512 KiB). The daemon response budget (`maxResponseBytes`) defaults to `1 MiB` (`src/daemon-server.js:14`); worst-case JSON escaping expands control characters 6× to `\uXXXX`, so the provably safe ceiling is `(budget-4096)/6`, `174080` bytes at the default (`src/output-dir.js:25`). A file that fits the raw cap but would exceed the wire budget after escaping no longer fails with generic `RESPONSE_TOO_LARGE` — the daemon surfaces a clear `would exceed daemon response limit` error naming the knob (`--max-output-file-bytes`/`TASKFERRY_MAX_OUTPUT_FILE_BYTES`/`maxOutputFileBytes`) and the on-disk path (taskferry#508).
+  Use `--max-output-file-bytes` per-read to override the daemon's default for that single call (e.g. `taskferry output <id> --path deliverable.txt --max-output-file-bytes 1048576`; values above the daemon's `maxResponseBytes` (default `1048576`) are rejected, and values that would still exceed the wire budget surface the clear knob-specific error).
 - Works on every terminal status: `done`, `crashed`, `cancelled`, and
   even an `incomplete` task that the worker never finished — the scratch
   dir is per-task state the worker owns, not parsed-from-log output.

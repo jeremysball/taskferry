@@ -11,7 +11,8 @@ import {
   successResponse,
 } from "./protocol.js";
 
-export const MAX_BUFFER_BYTES = 1024 * 1024;
+export const DEFAULT_MAX_BUFFER_BYTES = 1024 * 1024;
+export const MAX_BUFFER_BYTES = DEFAULT_MAX_BUFFER_BYTES;
 
 /**
  * The subset of the task manager's surface that the daemon connection layer
@@ -325,9 +326,10 @@ export async function dispatchRequest({ subscriptions, manager, writeMessage, sy
  * @param {(manager: TaskManager, request: Request) => unknown} opts.invoke
  * @param {(error: unknown, requestId: string | null) => Record<string, unknown>} opts.responseError
  * @param {((timing: {method: string, durationMs: number, ok: boolean}) => void) | null | undefined} opts.onRequestTimed
+ * @param {number} [opts.maxBufferBytes]
  * @returns {import("node:net").Server}
  */
-export function createDaemonServer({ clients, subscriptions, manager, writeMessage, syncActivity, inFlightRef, maxInFlightRequests, maybeRestart, invoke, responseError, onRequestTimed }) {
+export function createDaemonServer({ clients, subscriptions, manager, writeMessage, syncActivity, inFlightRef, maxInFlightRequests, maybeRestart, invoke, responseError, onRequestTimed, maxBufferBytes = MAX_BUFFER_BYTES }) {
   /** @type {DispatchDeps} */
   const dispatchDeps = { subscriptions, manager, writeMessage, syncActivity, inFlightRef, maxInFlightRequests, maybeRestart, invoke, responseError, onRequestTimed };
   return net.createServer((socket) => {
@@ -347,9 +349,9 @@ export function createDaemonServer({ clients, subscriptions, manager, writeMessa
 
     socket.on("data", (chunk) => {
       buffer += chunk;
-      if (Buffer.byteLength(buffer) > MAX_BUFFER_BYTES) {
+      if (Buffer.byteLength(buffer) > maxBufferBytes) {
         const requestTooLargeStartedAt = onRequestTimed ? performance.now() : 0;
-        writeMessage(socket, errorResponse(null, "REQUEST_TOO_LARGE", "request exceeds 1 MiB", "Send a smaller request"));
+        writeMessage(socket, errorResponse(null, "REQUEST_TOO_LARGE", `request exceeds ${maxBufferBytes} bytes`, "Send a smaller request"));
         onRequestTimed?.({ method: "request_too_large", durationMs: performance.now() - requestTooLargeStartedAt, ok: false });
         socket.destroy();
         return;

@@ -60,6 +60,7 @@ const CONFIG_FIELD_TYPES = {
   opencodeVersionTtlMs: "number",
   opencodeVersionTimeoutMs: "number",
   uvLegacySweepAgeDays: "number",
+  maxResponseBytes: "number",
 };
 
 /** @type {Record<string, string>} */
@@ -169,6 +170,23 @@ function validateConfigFieldTypes(parsed, configPath) {
 }
 
 /**
+ * Reject byte-count knobs that are present but not positive integers. The
+ * resolvers stay lenient for programmatic callers, but a config file is
+ * user-edited: silently ignoring a value the user wrote is how a raised cap
+ * looks like it "didn't work".
+ * @param {Record<string, unknown>} parsed
+ * @param {string} configPath
+ */
+function validateByteCountConfig(parsed, configPath) {
+  for (const key of ["maxResponseBytes", "maxOutputFileBytes"]) {
+    const value = parsed[key];
+    if (value !== undefined && !isPositiveInteger(value)) {
+      throw new Error(`error: config key "${key}" in ${configPath} must be a positive integer (got ${JSON.stringify(value)})\nhelp: use a byte count greater than 0`);
+    }
+  }
+}
+
+/**
  * @param {string} configPath
  * @returns {Record<string, unknown>}
  */
@@ -188,6 +206,7 @@ function parseAndValidateConfig(configPath) {
   }
 
   validateConfigFieldTypes(parsed, configPath);
+  validateByteCountConfig(parsed, configPath);
 
   if (parsed.defaultExecutor !== undefined && !KNOWN_EXECUTORS.includes(parsed.defaultExecutor)) {
     throw new Error(`error: config key "defaultExecutor" in ${configPath} must be one of ${KNOWN_EXECUTORS.join(", ")} (got ${JSON.stringify(parsed.defaultExecutor)})\nhelp: fix the value in ${configPath}`);

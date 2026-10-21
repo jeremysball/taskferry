@@ -502,7 +502,6 @@ export function resolveInsideDir(baseDir, relativePath) {
  * @returns {{content: string|null, size: number, truncated: boolean, error?: string}}
  */
 export function readTaskOutputFile(dir, relativePath, maxBytes = MAX_OUTPUT_FILE_BYTES) {
-  if (maxBytes > MAX_BUFFER_BYTES) maxBytes = MAX_BUFFER_BYTES;
   const target = resolveInsideDir(dir, relativePath);
   const dirFd = openDirectoryNoFollow(dir);
   if (dirFd === null) return { content: null, size: 0, truncated: false, error: "not_found" };

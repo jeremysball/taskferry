@@ -491,3 +491,54 @@ belongs here.
   still checked lexically, because the rm finds nothing there either way. It
   would be a real bug if a path that resolves cleanly inside a root were
   refused, or if a refused path were ever removed.
+- `taskferry daemon message exceeds 1048576 bytes` from a CLI call against a
+  daemon whose response cap you raised. The daemon and every client resolve
+  `maxResponseBytes` separately (flag, env var, config key, default;
+  `resolveResponseCapBytes` in `src/options.js`), so the two caps can
+  disagree. A client that auto-starts the daemon forwards its own cap, and a
+  daemon that restarts itself forwards its own. A daemon started by hand
+  with only `--max-response-bytes` is invisible to the client, which keeps
+  the 1 MiB default and drops any longer message (`src/client.js:318`). Set
+  the env var or config key where the CLI runs. It would be a real bug if a
+  client holding a matching cap still refused a response under it, or if a
+  daemon the client started sent a response that client could not read.
+- Lowering `maxResponseBytes` under 512 KiB shrinks the default
+  `taskferry output <id> --path` limit. With the cap below the
+  `maxOutputFileBytes` default (`524288`), an unset limit clamps to
+  `floor((cap - 4096) / 6)`, the largest file whose worst-case JSON escaping
+  still fits one response (`maxSafeResponseBytes` and
+  `resolveOutputFileBytesOption` in `src/tasks.js`), rather than failing
+  startup. A limit you set yourself above the cap still throws when the task
+  manager is built, because clamping it would hide the typo. It would be a
+  real bug if an unset limit exceeded the cap, or if an explicit limit above
+  the cap were accepted.
+- A malformed `TASKFERRY_MAX_RESPONSE_BYTES` stops the daemon at boot and
+  fails the CLI, while a malformed `TASKFERRY_MAX_CONCURRENT_TASKS` falls
+  back to its default. A cap that silently reverted to 1 MiB would surface
+  later as `daemon response for this request exceeds 1048576 bytes`
+  (`src/daemon-server.js:104`) with nothing pointing at the typo, so the
+  daemon and the client resolve this one variable with `strictEnv` and the
+  error names it. A task manager built directly stays lenient. It would be a
+  real bug if the error omitted the variable name, or if an empty value (a
+  blank `.env` line) were rejected instead of ignored.
+- The daemon's inbound request buffer never dropping below its own default
+  while `maxResponseBytes` is lowered. Observe: `taskferry daemon --max-response-bytes 512`
+  (or a tiny `TASKFERRY_MAX_RESPONSE_BYTES`) makes every request fail as too
+  large even though the cap says 512 bytes. Deliberate: the inbound buffer is
+  a read bound on an untrusted peer, not the response budget, and shrinking
+  it to a tiny outbound test value would reject every request before
+  `invoke()` runs; raising the outbound cap does raise the inbound floor so a
+  large request can still be answered
+  (`src/daemon.js`, `maxBufferBytes: maxOutboundBytes >= MAX_BUFFER_BYTES ? ...`).
+  For this to be a real bug, an inbound request would have to be limited by
+  the outbound budget by design, or a 512-byte response cap would have to be
+  useful with requests larger than 1 MiB.
+- The client reading `config.json` before checking for a running daemon.
+  Observe: a malformed or unreadable config makes even `taskferry status`
+  fail against an already-running daemon that is perfectly healthy.
+  Deliberate: connect-time options (receive ceiling, startup defaults) come
+  from the same file, so a broken config is reported where the user can fix
+  it instead of being silently ignored for commands that happen to need no
+  config; auto-start would otherwise boot a daemon with defaults the user
+  thought they had overridden. It becomes a real bug if the client ever grows
+  an offline/local-only command that must work without a valid config.

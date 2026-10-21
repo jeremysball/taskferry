@@ -64,6 +64,39 @@ export function resolveNonNegativeIntOption(rawValue, envValue, configValue, def
 }
 
 /**
+ * Canonical raw-value pick for the response-cap aliases, shared by the
+ * daemon and task-manager chains so both resolve the same winner when
+ * several aliases are set (flag > outbound > buffer). Takes the raw
+ * (pre-defaults) options object — callers must pass the unmerged input,
+ * never a defaults-merged copy, or a default maxOutboundBytes shadows
+ * env/config (taskferry#506 review).
+ * @param {{maxResponseBytes?: number, maxOutboundBytes?: number, maxBufferBytes?: number}} rawOptions
+ * @returns {number|undefined}
+ */
+export function resolveResponseCapRaw(rawOptions) {
+  return rawOptions.maxResponseBytes ?? rawOptions.maxOutboundBytes ?? rawOptions.maxBufferBytes;
+}
+
+/**
+ * The flag > env > config > default chain for the daemon response cap, in one
+ * place for the daemon, the task manager and the client. `rawOptions` must be
+ * the unmerged input (see {@link resolveResponseCapRaw}). `strictEnv` makes an
+ * invalid `TASKFERRY_MAX_RESPONSE_BYTES` throw instead of falling through.
+ * @param {{maxResponseBytes?: number, maxOutboundBytes?: number, maxBufferBytes?: number}} rawOptions
+ * @param {string|undefined} envValue
+ * @param {number|undefined} configValue
+ * @param {number} defaultValue
+ * @param {{strictEnv?: boolean}} [options]
+ * @returns {number}
+ */
+export function resolveResponseCapBytes(rawOptions, envValue, configValue, defaultValue, options = {}) {
+  return resolvePositiveIntOption(resolveResponseCapRaw(rawOptions), envValue, configValue, defaultValue, {
+    envVarName: "TASKFERRY_MAX_RESPONSE_BYTES",
+    strictEnv: options.strictEnv,
+  });
+}
+
+/**
  * Whether a string env value counts as enabled (1/true).
  * @param {string|undefined} value
  * @returns {boolean}
@@ -102,4 +135,24 @@ export function resolveBooleanToggle(envValue, configValue, defaultValue, invert
 export function resolveEnvOverrideBoolean(env, envVarName, configValue) {
   if (env?.[envVarName] !== undefined) return isEnabledFlag(env[envVarName]);
   return configValue === true;
+}
+
+/**
+ * Copy-on-write env for a child daemon. A cap is carried only when the caller
+ * says to forward it and it raises the default, so a lowered cap applies to
+ * this client only. An env value already set wins unless `overrideEnv` is
+ * set, which a flag-resolved daemon cap does because a flag outranks env in
+ * resolution and the replacement must keep the cap it was running with.
+ * @param {NodeJS.ProcessEnv} env
+ * @param {number} cap
+ * @param {number} defaultCap
+ * @param {boolean} forward
+ * @param {boolean} [overrideEnv]
+ * @returns {NodeJS.ProcessEnv}
+ */
+export function envWithResponseCap(env, cap, defaultCap, forward, overrideEnv = false) {
+  const envValue = env.TASKFERRY_MAX_RESPONSE_BYTES;
+  if (!forward || cap <= defaultCap) return env;
+  if (!overrideEnv && envValue !== undefined && envValue !== "") return env;
+  return { ...env, TASKFERRY_MAX_RESPONSE_BYTES: String(cap) };
 }

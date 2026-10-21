@@ -1,3 +1,4 @@
+/* eslint-disable max-lines -- client.js is over the 400-line soft cap after configurable maxResponseBytes; split would be a larger refactor */
 import { spawn, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
@@ -9,6 +10,7 @@ import { PROTOCOL_VERSION, encodeMessage } from "./protocol.js";
 import { MAX_BUFFER_BYTES } from "./daemon-server.js";
 import { loadConfig } from "./config.js";
 import { isObject } from "./numbers.js";
+import { envWithResponseCap, resolveResponseCapBytes } from "./options.js";
 import { resolveRuntimeDir, resolveStateDir, resolveInvokedPath } from "./paths.js";
 import { errCode } from "./errors.js";
 
@@ -580,10 +582,33 @@ async function retryOpenClient(socketPath, clientOptions, retryDelayMs, deadline
  * @property {number} [startupTimeoutMs]
  * @property {number} [retryDelayMs]
  * @property {number} [maxBufferBytes]
+ * @property {number} [maxResponseBytes]
  * @property {number} [maxQueuedEvents]
  * @property {(options: {env: NodeJS.ProcessEnv, stateDir: string, runtimeDir: string, socketPath: string, startupTimeoutMs: number, retryDelayMs: number}) => Promise<void> | void} [ensureDaemonFn]
  * @property {Record<string, unknown>} [startupOptions]
  */
+
+/**
+ * Resolve client-side max buffer via flag > env > config > default.
+ * Extracted to keep `connectClient`'s cyclomatic/complexity under the lint
+ * ceiling (the env/config/default chain is branched by nature).
+ * @param {NodeJS.ProcessEnv} env
+ * @param {number|undefined} rawMaxBufferBytes
+ * @returns {number}
+ */
+function resolveClientMaxBufferBytes(env, rawMaxBufferBytes) {
+  const envValue = env.TASKFERRY_MAX_RESPONSE_BYTES;
+  // The config file is read only when neither the flag nor the env var
+  // settles the cap, so a connect with either set never touches disk.
+  const needsConfig = rawMaxBufferBytes === undefined && (envValue === undefined || envValue === "");
+  return resolveResponseCapBytes(
+    { maxBufferBytes: rawMaxBufferBytes },
+    envValue,
+    needsConfig ? /** @type {number|undefined} */ (loadConfig({ env }).maxResponseBytes) : undefined,
+    MAX_BUFFER_BYTES,
+    { strictEnv: true },
+  );
+}
 
 /**
  * @param {ConnectClientOptions} [options]
@@ -603,11 +628,14 @@ export async function connectClient({
   autoStart = env.TASKFERRY_AUTO_START !== "0",
   startupTimeoutMs = 5000,
   retryDelayMs = 25,
-  maxBufferBytes = MAX_BUFFER_BYTES,
+  maxBufferBytes: rawMaxBufferBytes = undefined,
+  maxResponseBytes: rawMaxResponseBytes = undefined,
   maxQueuedEvents = 1000,
   ensureDaemonFn = startDaemonBooter,
   ...startupOptions
 } = {}) {
+  const rawCap = rawMaxBufferBytes ?? rawMaxResponseBytes;
+  const maxBufferBytes = resolveClientMaxBufferBytes(env, rawCap);
   return connectClientCore({
     env, stateDir, runtimeDir, socketPath, autoStart, startupTimeoutMs,
     retryDelayMs, maxBufferBytes, maxQueuedEvents, ensureDaemonFn, startupOptions,
@@ -629,7 +657,12 @@ async function connectClientCore({
     if (!autoStart) throw error;
   }
 
-  await ensureDaemonFn({ env, stateDir, runtimeDir, socketPath, startupTimeoutMs, retryDelayMs, ...startupOptions });
+  // Forward a raised resolved cap to the auto-started daemon: the child boots
+  // via env/config (no argv flags), so without this a raised client ceiling
+  // hits the default daemon ceiling. A lowered cap stays this client's
+  // receive limit, and an env value already set wins.
+  const bootEnv = envWithResponseCap(env, maxBufferBytes, MAX_BUFFER_BYTES, true);
+  await ensureDaemonFn({ env: bootEnv, stateDir, runtimeDir, socketPath, startupTimeoutMs, retryDelayMs, ...startupOptions });
   const deadline = Date.now() + startupTimeoutMs;
   const { client, lastError } = await retryOpenClient(socketPath, clientOptions, retryDelayMs, deadline);
   if (client) return client;

@@ -275,6 +275,16 @@ describe("loadConfig()", () => {
   });
 });
 
+describe("loadConfig() byte caps", () => {
+  test("rejects a non-positive response or output byte cap", () => {
+    for (const key of ["maxResponseBytes", "maxOutputFileBytes"]) {
+      const dir = tmpConfigDir();
+      const configPath = writeConfig(dir, JSON.stringify({ [key]: 0 }));
+      assert.throws(() => loadConfig({ configPath }), new RegExp(`error: config key "${key}" .*must be a positive integer`));
+    }
+  });
+});
+
 describe("loadConfig uvLegacySweepAgeDays", () => {
   test("accepts a valid uvLegacySweepAgeDays value", () => {
     const dir = tmpConfigDir();

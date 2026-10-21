@@ -1031,7 +1031,8 @@ export async function startDaemon(options = {}) {
   // Restart env carries a flag-resolved raise: the replacement boots via
   // main() with no argv flags, so a flag-only raise would otherwise be
   // dropped on self-restart. Config/env caps are re-read by the replacement.
-  const restartEnv = envWithResponseCap(env, maxOutboundBytes, MAX_BUFFER_BYTES, resolveResponseCapRaw(options) !== undefined);
+  const capFromFlag = resolveResponseCapRaw(options) !== undefined;
+  const restartEnv = envWithResponseCap(env, maxOutboundBytes, MAX_BUFFER_BYTES, capFromFlag, capFromFlag);
   // eslint-disable-next-line sonarjs/shorthand-property-grouping -- restartEnv is computed above; longhand env must sit with the other explicit wirings
   maybeRestartRef.current = makeMaybeRestart({
     sourceDir,

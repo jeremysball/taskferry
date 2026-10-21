@@ -210,6 +210,38 @@ describe("client response cap", () => {
     return booterEnv;
   }
 
+  test("a self-restart keeps a flag-resolved cap even when env sets a lower one", async (t) => {
+    const paths = daemonPaths(t);
+    const sourceDir = scratch(t, "response-cap-src-env");
+    const entry = path.join(sourceDir, "daemon.js");
+    fs.writeFileSync(entry, "// fixture\n");
+    const spawnCalls = [];
+    const daemon = await startDaemon({
+      ...paths,
+      env: { MARKER: "kept", [ENV_NAME]: String(MAX_BUFFER_BYTES / 2) },
+      maxResponseBytes: 4 * MAX_BUFFER_BYTES,
+      taskManagerFactory: capturingFactory().factory,
+      sourceDir,
+      daemonEntry: entry,
+      spawnReplacement: (args) => spawnCalls.push(args),
+      exitProcess: () => {},
+    });
+    t.after(() => daemon.close());
+
+    const bumped = new Date(Date.now() + 60_000);
+    fs.utimesSync(entry, bumped, bumped);
+    const socket = net.createConnection(paths.socketPath);
+    await EventEmitter.once(socket, "connect");
+    socket.write(`${JSON.stringify({ version: 1, id: "health", method: "system.health", params: {} })}\n`);
+    await EventEmitter.once(socket, "data");
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    socket.destroy();
+
+    assert.equal(spawnCalls.length, 1, "the source change should trigger one restart");
+    assert.equal(spawnCalls[0].env[ENV_NAME], String(4 * MAX_BUFFER_BYTES), "the flag outranks env for the replacement too");
+    assert.equal(spawnCalls[0].env.MARKER, "kept");
+  });
+
   test("forwards a raised client cap to the auto-started daemon without mutating the caller's env", async (t) => {
     const env = Object.freeze({ MARKER: "kept" });
     const booterEnv = await bootEnvFor(t, { env, maxBufferBytes: 2 * MAX_BUFFER_BYTES });

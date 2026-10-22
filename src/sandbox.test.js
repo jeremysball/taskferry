@@ -1,7 +1,7 @@
 import { describe, test } from "node:test";
 import assert from "node:assert/strict";
 import path from "node:path";
-import { buildBwrapArgs, buildBwrapBaseArgs, checkBwrapAvailable, checkOverlaySupport, parseBwrapVersion, platformSupportsSandbox, resolveGitCommonDir, resolveGitDir } from "./sandbox.js";
+import { buildBwrapArgs, buildBwrapBaseArgs, checkBwrapAvailable, checkOverlaySupport, defaultDenyList, parseBwrapVersion, platformSupportsSandbox, resolveGitCommonDir, resolveGitDir, resolvePiAgentDir, resolveSandboxDenyList, resolveXdgDataHome } from "./sandbox.js";
 
 // Repeated literals lifted to module-level constants to satisfy
 // sonarjs/no-duplicate-string in this file.
@@ -24,6 +24,12 @@ const MAIN_WORKTREE_GITDIR = "/workspace/main-repo/.git/worktrees/my-repo";
 const COW_UPPER_MAIN = "/tmp/taskferry-cow-t1/upper/main";
 const COW_WORK_MAIN = "/tmp/taskferry-cow-t1/work/main";
 const OVERLAY_SRC = "--overlay-src";
+const OPENCODE_DATA_DIR = "/home/user/.local/share/opencode";
+const KILO_DATA_DIR = "/home/user/.local/share/kilo";
+const PI_SESSIONS_DIR = path.join(HOME_DIR, ".pi", "agent", "sessions");
+const CODEX_DIR = path.join(HOME_DIR, ".codex");
+const DEFAULT_DATA_HOME = path.join(HOME_DIR, ".local", "share");
+const DEFAULT_PI_AGENT_DIR = path.join(HOME_DIR, ".pi", "agent");
 
 describe("platformSupportsSandbox()", () => {
   test("is true on linux", () => {
@@ -213,6 +219,7 @@ describe("buildBwrapArgs()", () => {
       stateDir: STATE_DIR,
       runtimeDir: RUNTIME_DIR,
       homeDir: HOME_DIR,
+      denyList: defaultDenyList(HOME_DIR, STATE_DIR, { dataHome: DEFAULT_DATA_HOME, piAgentDir: DEFAULT_PI_AGENT_DIR }),
     });
 
     assert.deepEqual(args.slice(0, 3), ["--ro-bind", "/", "/"]);
@@ -318,14 +325,14 @@ describe("buildBwrapArgs()", () => {
       runtimeDir: RUNTIME_DIR,
       homeDir: HOME_DIR,
       extraRwBinds: [MAIN_WORKTREE_GITDIR],
-      extraRwPairBinds: [["/home/user/.pi/agent/sessions", "/home/user/.local/state/taskferry/run/pi-data/sessions"]],
+      extraRwPairBinds: [[PI_SESSIONS_DIR, path.join(RUNTIME_DIR, "pi-data", "sessions")]],
       extraRoBinds: [["/home/user/.pi/agent/auth.json", "/home/user/.local/state/taskferry/run/pi-data/auth.json"]],
     });
 
     const extraRwBindIndex = args.indexOf(MAIN_WORKTREE_GITDIR);
     const rwPairBindIndex = args.indexOf("--bind", extraRwBindIndex + 1);
     assert.notEqual(rwPairBindIndex, -1);
-    assert.equal(args[rwPairBindIndex + 1], "/home/user/.pi/agent/sessions");
+    assert.equal(args[rwPairBindIndex + 1], PI_SESSIONS_DIR);
     assert.equal(args[rwPairBindIndex + 2], "/home/user/.local/state/taskferry/run/pi-data/sessions");
     assert.ok(rwPairBindIndex > extraRwBindIndex);
 
@@ -359,6 +366,7 @@ describe("buildBwrapArgs()", () => {
       stateDir: STATE_DIR,
       runtimeDir: RUNTIME_DIR,
       homeDir: HOME_DIR,
+      denyList: defaultDenyList(HOME_DIR, STATE_DIR, { dataHome: DEFAULT_DATA_HOME, piAgentDir: DEFAULT_PI_AGENT_DIR }),
       overlay: { upperDir: COW_UPPER_MAIN, workDir: COW_WORK_MAIN },
     });
     const overlayIndex = args.indexOf(OVERLAY_SRC);
@@ -376,6 +384,7 @@ describe("buildBwrapArgs()", () => {
       stateDir: STATE_DIR,
       runtimeDir: RUNTIME_DIR,
       homeDir: HOME_DIR,
+      denyList: defaultDenyList(HOME_DIR, STATE_DIR, { dataHome: DEFAULT_DATA_HOME, piAgentDir: DEFAULT_PI_AGENT_DIR }),
     });
     assert.equal(args.includes(OVERLAY_SRC), false);
     const bindIndex = args.indexOf("--bind");
@@ -443,16 +452,19 @@ describe("buildBwrapBaseArgs() (Task 5: shared scaffolding)", () => {
 });
 
 describe("buildBwrapArgs() byte-identical output (Task 5: post-refactor regression)", () => {
-  // The two baseline arrays below were captured from the pre-refactor
-  // buildBwrapArgs() against the inputs shown. Refactoring buildBwrapArgs()
-  // to share buildBwrapBaseArgs() with buildMergedViewBwrapArgs() must not
-  // change any element of these arrays -- this is the safety net.
+  // The two baseline arrays below pin the exact current output for the
+  // inputs shown. They were captured from the pre-refactor buildBwrapArgs()
+  // and re-baselined when the default deny-list intentionally gained new
+  // entries; a diff to these arrays is the signal to review that the mount
+  // change is the one the PR claims, not a regression. Update both arrays
+  // together and call the change out in the PR.
   test("non-overlay case is byte-identical to the pre-refactor output", () => {
     const args = buildBwrapArgs({
       directory: MY_REPO_DIR,
       stateDir: STATE_DIR,
       runtimeDir: RUNTIME_DIR,
       homeDir: HOME_DIR,
+      denyList: defaultDenyList(HOME_DIR, STATE_DIR, { dataHome: DEFAULT_DATA_HOME, piAgentDir: DEFAULT_PI_AGENT_DIR }),
     });
     assert.deepEqual(args, [
       "--ro-bind", "/", "/",
@@ -464,6 +476,10 @@ describe("buildBwrapArgs() byte-identical output (Task 5: post-refactor regressi
       "--tmpfs", "/home/user/.config/gh",
       "--tmpfs", "/home/user/.gnupg",
       "--tmpfs", "/home/user/.claude",
+      "--tmpfs", CODEX_DIR,
+      "--tmpfs", OPENCODE_DATA_DIR,
+      "--tmpfs", KILO_DATA_DIR,
+      "--tmpfs", PI_SESSIONS_DIR,
       "--bind", MY_REPO_DIR, MY_REPO_DIR,
       "--bind", SOCKET_PATH, SOCKET_PATH,
       UNSHARE_ALL, SHARE_NET, DIE_WITH_PARENT,
@@ -476,6 +492,7 @@ describe("buildBwrapArgs() byte-identical output (Task 5: post-refactor regressi
       stateDir: STATE_DIR,
       runtimeDir: RUNTIME_DIR,
       homeDir: HOME_DIR,
+      denyList: defaultDenyList(HOME_DIR, STATE_DIR, { dataHome: DEFAULT_DATA_HOME, piAgentDir: DEFAULT_PI_AGENT_DIR }),
       overlay: { upperDir: COW_UPPER_MAIN, workDir: COW_WORK_MAIN },
     });
     assert.deepEqual(args, [
@@ -488,10 +505,49 @@ describe("buildBwrapArgs() byte-identical output (Task 5: post-refactor regressi
       "--tmpfs", "/home/user/.config/gh",
       "--tmpfs", "/home/user/.gnupg",
       "--tmpfs", "/home/user/.claude",
+      "--tmpfs", CODEX_DIR,
+      "--tmpfs", OPENCODE_DATA_DIR,
+      "--tmpfs", KILO_DATA_DIR,
+      "--tmpfs", PI_SESSIONS_DIR,
       OVERLAY_SRC, MY_REPO_DIR,
       "--overlay", COW_UPPER_MAIN, COW_WORK_MAIN, MY_REPO_DIR,
       "--bind", SOCKET_PATH, SOCKET_PATH,
       UNSHARE_ALL, SHARE_NET, DIE_WITH_PARENT,
     ]);
+  });
+});
+
+describe("defaultDenyList()", () => {
+  test("covers harness data under the default data home", () => {
+    const list = defaultDenyList(HOME_DIR, STATE_DIR, { dataHome: DEFAULT_DATA_HOME, piAgentDir: DEFAULT_PI_AGENT_DIR });
+    for (const expected of [STATE_DIR, SSH_DIR, OPENCODE_DATA_DIR, KILO_DATA_DIR, CODEX_DIR, PI_SESSIONS_DIR]) {
+      assert.ok(list.includes(expected), `${expected} must be denied`);
+    }
+  });
+
+  test("honors an explicit data home and pi agent dir", () => {
+    const list = defaultDenyList(HOME_DIR, STATE_DIR, { dataHome: "/data", piAgentDir: "/pi" });
+    assert.ok(list.includes("/data/opencode"));
+    assert.ok(list.includes("/data/kilo"));
+    assert.ok(list.includes("/pi/sessions"));
+  });
+
+  test("resolveXdgDataHome() honors XDG_DATA_HOME and falls back to ~/.local/share", () => {
+    assert.equal(resolveXdgDataHome({ XDG_DATA_HOME: "/xdg" }, HOME_DIR), "/xdg");
+    assert.equal(resolveXdgDataHome({}, HOME_DIR), DEFAULT_DATA_HOME);
+  });
+
+  test("resolvePiAgentDir() honors PI_CODING_AGENT_DIR and falls back to ~/.pi/agent", () => {
+    assert.equal(resolvePiAgentDir({ PI_CODING_AGENT_DIR: "/pi-agent" }, HOME_DIR), "/pi-agent");
+    assert.equal(resolvePiAgentDir({}, HOME_DIR), DEFAULT_PI_AGENT_DIR);
+  });
+
+  test("resolveSandboxDenyList() resolves from the given env and de-duplicates user entries", () => {
+    const list = resolveSandboxDenyList(HOME_DIR, STATE_DIR, [SSH_DIR, "/extra"], { XDG_DATA_HOME: "/xdg", PI_CODING_AGENT_DIR: "/pi" });
+    assert.ok(list.includes("/xdg/opencode"));
+    assert.ok(list.includes("/xdg/kilo"));
+    assert.ok(list.includes("/pi/sessions"));
+    assert.ok(list.includes("/extra"));
+    assert.equal(list.filter((entry) => entry === SSH_DIR).length, 1);
   });
 });

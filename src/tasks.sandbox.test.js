@@ -350,6 +350,33 @@ describe("bwrap sandboxing: allowedDirs and denylist", () => {
     assert.ok(captured.args.includes(path.join(os.homedir(), ".ssh")));
     assert.ok(captured.args.includes(path.join(os.homedir(), ".claude")));
   });
+
+  test("masks the daemon's harness data home, not a dispatch-supplied XDG override", () => {
+    const priorData = process.env.XDG_DATA_HOME;
+    const priorPi = process.env.PI_CODING_AGENT_DIR;
+    process.env.XDG_DATA_HOME = "/daemon-data";
+    process.env.PI_CODING_AGENT_DIR = "/daemon-pi";
+    try {
+      let captured = null;
+      const mgr = makeManager({
+        spawnFn: (cmd, args, opts) => { captured = { cmd, args, opts }; return fakeChild(); },
+        sandboxEnabled: true,
+        checkBwrapAvailableFn: () => ({ checked: true, available: true }),
+        existsFn: () => true,
+        platform: "linux",
+      });
+
+      mgr.dispatch({ prompt: "hello", directory: os.tmpdir(), env: { XDG_DATA_HOME: "/dispatch-data", PI_CODING_AGENT_DIR: "/dispatch-pi" } });
+
+      for (const expected of ["/daemon-data/opencode", "/daemon-data/kilo", "/daemon-pi/sessions"]) {
+        assert.ok(captured.args.includes(expected), `${expected} must be denied`);
+      }
+      assert.equal(captured.args.includes("/dispatch-data/opencode"), false);
+    } finally {
+      if (priorData === undefined) delete process.env.XDG_DATA_HOME; else process.env.XDG_DATA_HOME = priorData;
+      if (priorPi === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = priorPi;
+    }
+  });
 });
 
 describe("bwrap sandboxing: opencode auth and data home", () => {

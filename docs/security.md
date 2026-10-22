@@ -313,6 +313,14 @@ runs wrapped in
     OpenCode reads `CLAUDE.md` the same way it reads `AGENTS.md`, so without
     this entry a worker's context (and therefore its output) silently picks
     up the caller's personal instructions
+  - `~/.codex` and the other harness data directories:
+    `$XDG_DATA_HOME/opencode`, `$XDG_DATA_HOME/kilo`, and Pi's
+    `$PI_CODING_AGENT_DIR/sessions` (defaults `~/.local/share/...` and
+    `~/.pi/agent/sessions`). These hold prior sessions, transcripts, logs,
+    and tool output. Masking OpenCode's whole data directory also hides its
+    `auth.json`; the executor's read-only auth bind still works because
+    bwrap resolves bind sources against the host root, and the credential
+    is readable only at the sandboxed destination.
 - **Read-write access** is then re-granted only for the task's own working
   directory, the daemon's per-task `sandboxedDataHome` (`<cacheDir>/opencode-data/<taskId>` — one data home per task, so concurrent dispatches never contend on a single opencode sqlite db; see taskferry#501), and the task's scratch `outputDir`, plus **only the socket file** (`<runtimeDir>/daemon.sock`, not the whole `runtimeDir`) bound so a nested dispatch from inside the sandbox can still reach the daemon. An advisor dispatch gets no runtime-directory or socket bind, so the daemon socket is unreachable without touching the network namespace.
 - **Deny-list has a fixed base plus an optional extension.** The paths above
@@ -425,9 +433,11 @@ runs wrapped in
 - **Credential visibility.** Provider credentials normally live in
   `auth.json` under the real `XDG_DATA_HOME`, so redirecting it would
   otherwise hide every stored credential from the sandboxed process. To keep
-  credentialed providers working, the real `auth.json` (and only that file,
-  not the rest of the real data home) is ro-bound read-only into the
-  sandboxed data home when it exists on disk. OpenCode V2 sandbox launches
+  credentialed providers working, the real `auth.json` is ro-bound read-only
+  into the sandboxed data home when it exists on disk. The rest of the real
+  data directory is tmpfs-masked (see the deny-list inventory above), so
+  `auth.json` is readable only through that read-only bind, not at its real
+  host path. OpenCode V2 sandbox launches
   import the selected provider's legacy API key or OpenAI OAuth credential
   into the per-task database through `opencode auth import --standalone`
   before running the model. The import runs inside bwrap, receives secrets

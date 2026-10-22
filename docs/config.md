@@ -102,8 +102,11 @@ warning even when it also overlaps the deny-list.
 `sandboxDenylist` uses the same comma-separated grammar as `allowedDirs` —
 extra directories tmpfs-masked inside the bwrap sandbox, merged with the
 fixed default deny-list (`~/.ssh`, `~/.aws`, `~/.config/gcloud`,
-`~/.config/gh`, `~/.gnupg`, `~/.claude`) rather than replacing it; see
-`docs/security.md`.
+`~/.config/gh`, `~/.gnupg`, `~/.claude`, `~/.codex`, and the harness data
+directories `$XDG_DATA_HOME/{opencode,kilo}` plus Pi's sessions directory)
+rather than replacing it. The harness paths resolve from the daemon's
+environment (`XDG_DATA_HOME`, defaulting to `~/.local/share`;
+`PI_CODING_AGENT_DIR`, defaulting to `~/.pi/agent`). See `docs/security.md`.
 
 `envFile` points at a `.env`-style file (`NAME=VALUE` per line, blank lines
 and `#`-comment lines skipped, an optional leading `export `, values

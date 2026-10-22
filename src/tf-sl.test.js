@@ -57,7 +57,7 @@ esac
     callLog,
     env: {
       ...process.env,
-      PATH: `${bin}:/usr/bin:/bin`,
+      PATH: `${bin}:${process.env.PATH ?? "/usr/bin:/bin"}`,
       HOME: home,
       XDG_STATE_HOME: path.join(root, "xdg-state"),
       XDG_RUNTIME_DIR: path.join(root, "xdg-runtime"),

@@ -17,11 +17,14 @@ The hook also enforces the worktree rule: commits must be made from a
 dedicated worktree, not the primary checkout (`git worktree add <path> -b
 <branch>`). The gate compares `git rev-parse --git-dir` vs.
 `--git-common-dir` (equal on primary, different in a linked worktree) and
-blocks otherwise. Bypass the gate on CI or a fresh clone with
+blocks otherwise. Bypass this repo-local gate on CI or a fresh clone with
 `TASKFERRY_ALLOW_PRIMARY=1 git commit ...` or `git config
 taskferry.allowPrimary true` (local only, not committed); `git commit
---no-verify` bypasses the gate and the lint checks together. See the
-deterministic-guardrails reorientation, "What to build, in order" #3.
+--no-verify` bypasses the gate and the lint checks together. On a machine
+with the dotfiles global hook installed, that hook enforces the same rule
+independently and has no bypass, so the two repo-local disarms above cannot
+allow a primary-checkout commit there. See the deterministic-guardrails
+reorientation, "What to build, in order" #3.
 
 ### Adding a new test file
 

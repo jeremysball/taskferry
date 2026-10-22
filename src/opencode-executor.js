@@ -7,7 +7,7 @@ import { promisify } from "node:util";
 import { detectOpencodeCliMajor, ensureOpencodeCliMajor } from "./opencode-version.js";
 import { appendPromptFileArgs, buildSummaryPrompt, identityLogEvent, isSafeBindSource, resolveConfigDirBinds } from "./executor-shared.js";
 import { buildV2SandboxSpawn } from "./opencode-auth.js";
-import { resolveXdgDataHome } from "./sandbox.js";
+import { resolveHostXdgConfigHome, resolveHostXdgDataHome } from "./sandbox.js";
 
 const execFileAsync = promisify(execFile);
 const SUMMARY_PREFLIGHT_TIMEOUT_MS = 10000;
@@ -204,7 +204,11 @@ export function opencodeExecutor({ detectCliMajorFn = () => detectOpencodeCliMaj
     // XDG_RUNTIME_DIR tmpfs, starving it of space for sockets/locks too.
     /** @param {{homeDir: string, dataDir: string, taskId: string, spawnEnv: NodeJS.ProcessEnv, existsFn: (file: string) => boolean, statFn?: (file: string) => {isDirectory: () => boolean}|null, lstatFn?: (file: string) => {isSymbolicLink: () => boolean, isFile?: () => boolean, nlink?: number}, readdirFn: (dir: string) => string[], realpathFn?: (file: string) => string, sessionId?: string|null, launchDirectory?: string|null}} args @returns {{extraRoBinds: [string, string][], extraRwPairBinds?: [string, string][], sandboxedDataHome: string, sandboxEnv: Record<string, string>}} */
     sandboxAuthFile({ homeDir, dataDir, taskId, spawnEnv, existsFn, lstatFn = fs.lstatSync, readdirFn, realpathFn = fs.realpathSync }) {
-      const realDataHome = resolveXdgDataHome(spawnEnv, homeDir);
+      // Nested ferry dispatch forwards the controller's scoped XDG_* into the
+      // child (commands.js runDispatch). Those paths only hold host-side
+      // 0-byte auth placeholders; resolveHostXdg* falls back to the real host
+      // homes so the child binds the live credential (taskferry#623).
+      const realDataHome = resolveHostXdgDataHome(spawnEnv, homeDir, dataDir);
       const realAuthFile = path.join(realDataHome, "opencode", "auth.json");
       // Per-task data home: every dispatch's opencode session state (its
       // sqlite db, logs, snapshots) lands in its own directory, so concurrent
@@ -227,7 +231,7 @@ export function opencodeExecutor({ detectCliMajorFn = () => detectOpencodeCliMaj
       // the same models it would unsandboxed. .gitignore is skipped on
       // purpose: opencode rewrites it on boot, so a read-only bind there
       // would fail the same way the unredirected path did.
-      const realConfigDir = path.join(spawnEnv.XDG_CONFIG_HOME || path.join(homeDir, ".config"), "opencode");
+      const realConfigDir = path.join(resolveHostXdgConfigHome(spawnEnv, homeDir, dataDir), "opencode");
       // lstat the config dir itself before trusting it: existsFn/readdirFn
       // follow a symlink, so a symlinked realConfigDir would let every entry
       // inside pass the per-entry guard while the whole tree points outside.

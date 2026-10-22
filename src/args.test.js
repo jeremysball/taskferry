@@ -197,6 +197,7 @@ test("parses workspace, stream, and result options with their constrained values
     full: true,
     fields: ["message", "narration"],
     diff: false,
+    raw: false,
   });
   assert.ok(parseArgs([
     "result",
@@ -542,6 +543,10 @@ test("result rejects --diff combined with --full (regression: review finding #3)
   // were set, which is a confusing failure mode -- reject at parse time
   // instead so the error is loud and early.
   assert.throws(() => parseArgs(["result", "t1", "--diff", "--full"]), /--diff cannot be combined with --full/);
+});
+
+test("result rejects --raw without --diff", () => {
+  assert.throws(() => parseArgs(["result", "t1", "--raw"]), /--raw requires --diff/);
 });
 
 test("accept requires a task id", () => {

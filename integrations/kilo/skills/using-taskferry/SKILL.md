@@ -334,6 +334,12 @@ settled implementer/fixer dispatch, before treating the task as done:
 taskferry result <id> --diff
 ```
 
+For automation or saving to a file, use `taskferry result <id> --diff --raw >
+diff.patch`; it writes the diff with real newlines and intact UTF-8. The
+decoding rules for the non-raw TOON form (use JSON decoding, never
+`unicode_escape`) live in `resources/monitoring-progress.md` under "Reading
+the diff in automation".
+
 If the diff matches what the worker claims (a `Status: DONE` describing a
 specific change, matched by an actual diff doing that change), accept it:
 

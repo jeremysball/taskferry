@@ -8,6 +8,7 @@ import {
   contextForHook,
   homeView,
   leanResult,
+  writeRawDiff,
   leanStatus,
   projectContext,
   projectDoctorStats,
@@ -543,9 +544,10 @@ async function runSummary(options, { client, env }) {
  * @param {boolean} [options.diff]
  * @param {string[]} [options.fields]
  * @param {boolean} [options.full]
+ * @param {boolean} [options.raw]
  * @param {ResolvedDeps} deps
  */
-async function runResult(options, { client }) {
+async function runResult(options, { client, io }) {
   // `options.diff` and `options.full` are mutually exclusive (args.js rejects
   // the combination at parse time), so the if/else-if below is deterministic:
   // --diff takes the fields:["diff"] branch, --full takes the full:true
@@ -581,6 +583,7 @@ async function runResult(options, { client }) {
     }
     throw error;
   }
+  if (options.raw && writeRawDiff(detail, options.taskId, io)) return undefined;
   return leanResult(detail, /** @type {{full?: boolean, fields?: string[]}} */ ({ full: options.full, fields }));
 }
 

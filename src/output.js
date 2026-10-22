@@ -147,6 +147,28 @@ export function errorValue(error, { helpFallback = "Retry the command or run `ta
 }
 
 /**
+ * Write a task's diff verbatim for `result --diff --raw`, bypassing TOON
+ * string encoding so newlines and multi-byte UTF-8 survive a shell redirect.
+ * Returns false when the payload carries no `diff` field at all, letting the
+ * caller fall back to the normal TOON path.
+ * @param {ResultDetailBase} detail
+ * @param {string} taskId
+ * @param {WriteIo} io
+ * @returns {boolean}
+ */
+export function writeRawDiff(detail, taskId, io) {
+  if (detail.diff === undefined) return false;
+  if (detail.diff === null) {
+    throw new Error(
+      `error: task ${taskId} has no diff to display\n` +
+      `help: the task produced no changeset, or its diff was not retained (check changesetStatus and changesetError via taskferry status --full or taskferry result --fields changesetError,changesetStatus)`
+    );
+  }
+  io.stdout.write(detail.diff);
+  return true;
+}
+
+/**
  * @param {unknown} error
  * @param {WriteIo} [io]
  * @returns {void}
@@ -313,6 +335,7 @@ export function leanStatus(detail, { full = false } = {}) {
  * @property {boolean} [narrationTruncated]
  * @property {number} [narrationTotalChars]
  * @property {string} [next]
+ * @property {string | null} [diff]
  */
 
 /**

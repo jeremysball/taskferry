@@ -72,7 +72,7 @@ refresh_snapshot() {
 
   refresh_running=$(printf '%s\n' "$refresh_out" | awk -F': ' '/^  running:/{print $2; exit}')
   refresh_queued=$(printf '%s\n' "$refresh_out" | awk -F': ' '/^  queued:/{print $2; exit}')
-  refresh_row=$(printf '%s\n' "$refresh_out" | awk -F, '$1 ~ /^  oc_/ && $2=="running"{print;exit}')
+  refresh_row=$(printf '%s\n' "$refresh_out" | awk -F, '$1 ~ /^  [a-z]+_/ && $2=="running"{print;exit}')
   refresh_id=$(printf '%s\n' "$refresh_row" | cut -d, -f1 | sed 's/^  //')
   refresh_status=$(printf '%s\n' "$refresh_row" | cut -d, -f2)
   refresh_segment=""

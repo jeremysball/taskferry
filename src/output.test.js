@@ -203,6 +203,18 @@ describe("errorValue", () => {
     assert.equal(message, "something went wrong");
   });
 
+  test("keeps an empty body after error: instead of falling back to the raw prefix", () => {
+    const { error: message } = errorValue(new Error("error:"));
+
+    assert.equal(message, "");
+  });
+
+  test("folds details without a leading newline when the error: body is empty", () => {
+    const { error: message } = errorValue(new Error("error:\ndetail: context after an empty body"));
+
+    assert.equal(message, "detail: context after an empty body");
+  });
+
   test("uses error.help when the error object has a string help property", () => {
     const error = new Error("error: boom\nhelp: ignored");
     error.help = "prefer this hint";

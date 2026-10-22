@@ -558,3 +558,11 @@ belongs here.
   config; auto-start would otherwise boot a daemon with defaults the user
   thought they had overridden. It becomes a real bug if the client ever grows
   an offline/local-only command that must work without a valid config.
+- An empty error value when a tool returns a bare `error:` line with no message
+  body — expected. `extractErrorParts` in `src/output.js` uses nullish
+  coalescing when stripping the `error:`/`help:` prefixes, so a line that is
+  exactly `error:` is stored as `""` rather than keeping the raw prefix line.
+  Callers treat a blank value as "prefix present, no message body"; if you see
+  one in UI or logs after a tool returns only `error:`, check the producer, and
+  do not "fix" it by restoring the raw prefix as the message. It would be a
+  real bug if an empty body were replaced by the literal string `error:`.

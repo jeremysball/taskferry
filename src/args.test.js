@@ -545,6 +545,10 @@ test("result rejects --diff combined with --full (regression: review finding #3)
   assert.throws(() => parseArgs(["result", "t1", "--diff", "--full"]), /--diff cannot be combined with --full/);
 });
 
+test("result rejects --raw without --diff", () => {
+  assert.throws(() => parseArgs(["result", "t1", "--raw"]), /--raw requires --diff/);
+});
+
 test("accept requires a task id", () => {
   assert.throws(() => parseArgs(["accept"]), /task id is required/);
 });

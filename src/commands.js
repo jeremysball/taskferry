@@ -1,4 +1,3 @@
-/* eslint-disable max-lines -- result --raw adds a justified small increase over the 400-line limit; tracked for future split */
 import fs from "node:fs";
 import os from "node:os";
 import { fileURLToPath } from "node:url";
@@ -9,6 +8,7 @@ import {
   contextForHook,
   homeView,
   leanResult,
+  writeRawDiff,
   leanStatus,
   projectContext,
   projectDoctorStats,
@@ -547,7 +547,6 @@ async function runSummary(options, { client, env }) {
  * @param {boolean} [options.raw]
  * @param {ResolvedDeps} deps
  */
-// eslint-disable-next-line sonarjs/cyclomatic-complexity, sonarjs/no-inconsistent-returns -- raw branch adds one extra conditional and a void return for the raw stdout path
 async function runResult(options, { client, io }) {
   // `options.diff` and `options.full` are mutually exclusive (args.js rejects
   // the combination at parse time), so the if/else-if below is deterministic:
@@ -584,21 +583,7 @@ async function runResult(options, { client, io }) {
     }
     throw error;
   }
-  if (options.raw) {
-    const diffText = /** @type {string|null|undefined} */ (/** @type {Record<string, unknown>} */ (detail).diff);
-    if (typeof diffText === "string") {
-      const out = io ?? process;
-      out.stdout.write(diffText);
-      return;
-    }
-    if (diffText === null) {
-      throw new Error(
-        `error: task ${options.taskId} has no diff to display\n` +
-        `help: the task produced no changeset, or its diff was not retained (check changesetStatus and changesetError via taskferry status --full or taskferry result --fields changesetError,changesetStatus)`
-      );
-    }
-    // Unexpected shape (undefined or non-string): fall through to normal TOON path
-  }
+  if (options.raw && writeRawDiff(detail, options.taskId, io)) return undefined;
   return leanResult(detail, /** @type {{full?: boolean, fields?: string[]}} */ ({ full: options.full, fields }));
 }
 

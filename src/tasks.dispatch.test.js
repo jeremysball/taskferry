@@ -11,6 +11,7 @@ import { trackManager, makeManager, fakeChild, LUNA_MODEL, MIMIMAX_MODEL, MINIMA
 // Tests assert on it directly to verify the prompt was augmented; one constant
 // keeps the duplicated literal below sonarjs/no-duplicate-string's threshold.
 const PERSISTENT_OUTPUT_DIR_HEADING = "\n\n## Persistent output dir";
+const OPENAI_PROVIDER = "openai";
 
 describe("dispatch() lifecycle, driven through an injected spawnFn (no real opencode process)", () => {
   test("passes the right argv and spawn options through to spawnFn", () => {
@@ -50,6 +51,215 @@ describe("dispatch() lifecycle, driven through an injected spawnFn (no real open
     const outputsRoot = path.join(mgr.paths.STATE_DIR, "outputs");
     const leftover = fs.existsSync(outputsRoot) ? fs.readdirSync(outputsRoot) : [];
     assert.deepEqual(leftover, [], `expected no orphan output dirs, found: ${JSON.stringify(leftover)}`);
+  });
+
+  test("a dispatch that fails between output-dir creation and queueing does not orphan an output dir on disk (taskferry#510)", () => {
+    const throwingTable = { get: () => { throw new Error("injected failure between mkdir and persist"); } };
+    const mgr = makeManager({ spawnFn: () => fakeChild(), opencodeVariantsTable: throwingTable });
+    assert.throws(() => mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), model: LUNA_MODEL, executor: "opencode" }), /injected failure/);
+    const outputsRoot = path.join(mgr.paths.STATE_DIR, "outputs");
+    const leftover = fs.existsSync(outputsRoot) ? fs.readdirSync(outputsRoot) : [];
+    assert.deepEqual(leftover, [], `expected no orphan output dirs after injected failure, found: ${JSON.stringify(leftover)}`);
+    // The half-queued state must not linger in memory either -- a follow-up
+    // dispatch should succeed and create its own dir without seeing the
+    // failed id in any provider queue.
+    const second = mgr.dispatch({ prompt: "ok", directory: os.tmpdir() });
+    assert.ok(second.id);
+    assert.ok(fs.existsSync(path.join(outputsRoot, second.id)));
+  });
+
+  test("a dispatch that fails inside buildSpawnArgs after the queue shift rolls back scheduler and does not orphan output dir (taskferry#510 follow-up)", () => {
+    let builds = 0;
+    let spawns = 0;
+    const throwingExecutor = makeFakeExecutor({
+      buildSpawnArgs: () => {
+        builds++;
+        if (builds === 1) throw new Error("build failed");
+        return [];
+      },
+    });
+    const mgr = makeManager({
+      spawnFn: () => { spawns++; return fakeChild(); },
+      defaultExecutor: throwingExecutor,
+      maxDispatchesPerWindow: 1,
+      dispatchWindowMs: 60000,
+      maxConcurrentTasks: 10,
+    });
+    assert.throws(() => mgr.dispatch({ prompt: "first", directory: os.tmpdir() }), /build failed/);
+    const outputsRoot = path.join(mgr.paths.STATE_DIR, "outputs");
+    const leftover = fs.existsSync(outputsRoot) ? fs.readdirSync(outputsRoot) : [];
+    assert.deepEqual(leftover, [], `expected no orphan output dirs after buildSpawnArgs failure, found: ${JSON.stringify(leftover)}`);
+    assert.equal(builds, 1);
+    assert.equal(spawns, 0, "failed build should not have spawned");
+    // Scheduler must be rolled back: a phantom launchTimes entry would keep the
+    // next dispatch queued under maxDispatchesPerWindow: 1.
+    const second = mgr.dispatch({ prompt: "second", directory: os.tmpdir() });
+    assert.equal(mgr.status(second.id).status, "running", "second dispatch should launch immediately, not remain queued due to phantom launchTimes");
+    assert.equal(builds, 2);
+    assert.equal(spawns, 1);
+    assert.ok(fs.existsSync(path.join(outputsRoot, second.id)));
+  });
+
+  test("fs.rmSync failure during dispatch cleanup surfaces instead of being swallowed (taskferry#510)", (t) => {
+    const mgr = makeManager({ spawnFn: () => fakeChild(), opencodeVariantsTable: { get: () => { throw new Error("injected"); } } });
+    const originalRmSync = fs.rmSync;
+    t.mock.method(fs, "rmSync", (target, opts) => {
+      if (String(target).includes(`${path.sep}outputs${path.sep}`)) throw new Error("rm failed");
+      return originalRmSync(target, opts);
+    });
+    assert.throws(() => mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), model: LUNA_MODEL, executor: "opencode" }), /rm failed/);
+  });
+
+  test("failed dispatch does not strand a queued provider-rate-limited task's timer (taskferry#510 timer rollback)", async () => {
+    let spawns = 0;
+    let builds = 0;
+    const mgr = makeManager({
+      spawnFn: () => { spawns++; return fakeChild(); },
+      defaultExecutor: makeFakeExecutor({
+        buildSpawnArgs: (ctx) => {
+          builds++;
+          if (ctx.model === "other/bad") throw new Error("build failed");
+          return [];
+        },
+      }),
+      maxDispatchesPerWindow: 10,
+      dispatchWindowMs: 100,
+      maxConcurrentTasks: 10,
+      lowerdirStaggerMs: 0,
+      providerLimits: new Map([[OPENAI_PROVIDER, { maxDispatchesPerWindow: 1, maxConcurrentTasks: 10 }]]),
+    });
+    // First opencode consumes its provider window and launches immediately.
+    const first = mgr.dispatch({ prompt: "first", directory: os.tmpdir(), model: LUNA_MODEL });
+    assert.equal(mgr.status(first.id).status, "running");
+    assert.equal(spawns, 1);
+    assert.equal(builds, 1);
+    // Second opencode hits its provider dispatch window and queues, arming a timer.
+    const second = mgr.dispatch({ prompt: "second", directory: os.tmpdir(), model: LUNA_MODEL });
+    assert.equal(mgr.status(second.id).status, "queued");
+    assert.equal(spawns, 1);
+    assert.equal(builds, 1);
+    // Third dispatch from an unlimited provider would launch immediately but its
+    // build throws. runLaunchQueuedTasks clears the pre-existing timer before the
+    // throw, so rollback must re-arm it or the second task strands.
+    assert.throws(() => mgr.dispatch({ prompt: "third", directory: os.tmpdir(), model: "other/bad" }), /build failed/);
+    assert.equal(mgr.status(second.id).status, "queued");
+    assert.equal(spawns, 1);
+    assert.equal(builds, 2);
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    assert.equal(mgr.status(second.id).status, "running", "queued provider-rate-limited task should launch after timer re-armed");
+    assert.equal(spawns, 2);
+    assert.equal(builds, 3);
+    const outputsRoot = path.join(mgr.paths.STATE_DIR, "outputs");
+    const leftover = fs.existsSync(outputsRoot) ? fs.readdirSync(outputsRoot) : [];
+    assert.equal(leftover.length, 2, `expected 2 output dirs (first+second), got ${JSON.stringify(leftover)}`);
+    assert.ok(fs.existsSync(path.join(outputsRoot, first.id)));
+    assert.ok(fs.existsSync(path.join(outputsRoot, second.id)));
+  });
+
+  test("failed dispatch re-arm that immediately launches queued task persists the launched task (taskferry#510 persist order)", (t) => {
+    let mockNow = 1000;
+    t.mock.method(Date, 'now', () => mockNow);
+    const children = [];
+    const mgr = makeManager({
+      spawnFn: () => {
+        const c = fakeChild();
+        children.push(c);
+        return c;
+      },
+      killFn: () => {},
+      defaultExecutor: makeFakeExecutor({
+        buildSpawnArgs: (ctx) => {
+          if (ctx.prompt.includes("third-fail")) {
+            mockNow = 1020;
+            throw new Error("build failed");
+          }
+          return [];
+        },
+      }),
+      maxDispatchesPerWindow: 10,
+      dispatchWindowMs: 10,
+      maxConcurrentTasks: 10,
+      lowerdirStaggerMs: 0,
+      providerLimits: new Map([[OPENAI_PROVIDER, { maxDispatchesPerWindow: 1, maxConcurrentTasks: 10 }]]),
+    });
+    const first = mgr.dispatch({ prompt: "first", directory: os.tmpdir(), model: LUNA_MODEL });
+    assert.equal(mgr.status(first.id).status, "running");
+    mockNow = 1001;
+    const second = mgr.dispatch({ prompt: "second", directory: os.tmpdir(), model: LUNA_MODEL });
+    assert.equal(mgr.status(second.id).status, "queued");
+    mockNow = 1001;
+    assert.throws(() => mgr.dispatch({ prompt: "third-fail", directory: os.tmpdir(), model: "other/bad" }), /build failed/);
+    assert.equal(mgr.status(second.id).status, "running", "queued task should have launched immediately on re-arm");
+    mgr.flushPersist();
+    const onDisk = JSON.parse(fs.readFileSync(mgr.paths.TASKS_FILE, "utf8"));
+    const secondOnDisk = onDisk.find((task) => task.id === second.id);
+    assert.ok(secondOnDisk, "second task should be on disk");
+    assert.equal(secondOnDisk.status, "running", "disk should show running, not queued (persist order)");
+    // Deterministic cleanup: settle every spawned child so no watchdog,
+    // launch timer, or persist timer remains after the test. Avoids the
+    // killFn-not-injected async failure when Date.now mock restores.
+    for (const c of children) c.emit("exit", 0, null);
+    mgr.flushPersist();
+  });
+
+  test("re-arm build failure during rollback surfaces aggregate and keeps scheduler coherent (taskferry#510 re-arm failure)", (t) => {
+    let mockNow = 1000;
+    t.mock.method(Date, 'now', () => mockNow);
+    const children = [];
+    const mgr = makeManager({
+      spawnFn: () => {
+        const c = fakeChild();
+        children.push(c);
+        return c;
+      },
+      killFn: () => {},
+      defaultExecutor: makeFakeExecutor({
+        buildSpawnArgs: (ctx) => {
+          if (ctx.prompt.includes("third-fail")) {
+            // Advance time so the queued second becomes launchable only during
+            // rollback re-arm, not during the original drain. Original drain at
+            // 1001 skips second (provider window) and throws for third; re-arm
+            // at 1020 then attempts second and throws, producing AggregateError.
+            mockNow = 1020;
+            throw new Error("build failed for third");
+          }
+          if (ctx.prompt.includes("second-fail")) throw new Error("build failed for second");
+          return [];
+        },
+      }),
+      maxDispatchesPerWindow: 10,
+      dispatchWindowMs: 10,
+      maxConcurrentTasks: 10,
+      lowerdirStaggerMs: 0,
+      providerLimits: new Map([[OPENAI_PROVIDER, { maxDispatchesPerWindow: 1, maxConcurrentTasks: 10 }]]),
+    });
+    const first = mgr.dispatch({ prompt: "first", directory: os.tmpdir(), model: LUNA_MODEL });
+    assert.equal(mgr.status(first.id).status, "running");
+    mockNow = 1001;
+    const second = mgr.dispatch({ prompt: "second-fail", directory: os.tmpdir(), model: LUNA_MODEL });
+    assert.equal(mgr.status(second.id).status, "queued");
+    // Keep mockNow at 1001 so original drain skips second (window) and throws for third
+    mockNow = 1001;
+    let caught = null;
+    try {
+      mgr.dispatch({ prompt: "third-fail", directory: os.tmpdir(), model: "other/bad" });
+    } catch (e) {
+      caught = e;
+    }
+    assert.ok(caught, "should have thrown");
+    assert.ok(caught instanceof AggregateError, "should be AggregateError");
+    assert.equal(caught.errors.length, 2);
+    assert.match(caught.errors[0].message, /build failed for third/);
+    assert.match(caught.errors[1].message, /build failed for second/);
+    assert.equal(mgr.status(second.id).status, "queued", "second should remain queued after re-arm failure");
+    const fourth = mgr.dispatch({ prompt: "fourth", directory: os.tmpdir(), model: "other/bad" });
+    assert.equal(mgr.status(fourth.id).status, "running", "scheduler should remain coherent after re-arm failure");
+    // Deterministic cleanup: cancel the still-queued second and settle every
+    // spawned running child so no provider-window timer, watchdog, or persist
+    // timer remains after the test. Prevents killFn-not-injected async.
+    mgr.cancel(second.id);
+    for (const c of children) c.emit("exit", 0, null);
+    mgr.flushPersist();
   });
 
   /** @param {string[]} args @param {string} model */

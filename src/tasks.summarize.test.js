@@ -163,18 +163,20 @@ describe("summarize(): listModelsFn source-of-truth and oversized-log snapshot",
       defaultExecutor: fakePi,
       // listModelsFn intentionally omitted -- exercising the real default.
     }));
-    // On a host with opencode installed, the check will succeed (real
-    // `opencode models` output includes the default summary model). On
-    // a host without opencode, the check will fail with a "verify that
-    // opencode is installed" error -- which is itself proof that the
-    // check hit opencode, not pi. Either outcome is fine; what matters
-    // is that pi's listModelsFn was never consulted.
+    // On a host whose opencode catalog includes the default summary
+    // model, the check succeeds. It can also fail in two ways that both
+    // prove the check hit opencode, not pi: opencode is not installed
+    // ("verify that opencode is installed"), or its live catalog no
+    // longer offers the default summary model ("summary model is
+    // unavailable": pi's list does offer it, so a pi-based check would
+    // have succeeded). Either outcome is fine; what matters is that pi's
+    // listModelsFn was never consulted.
     try {
       await mgr.checkSummaryModelReady();
     } catch (err) {
       // If opencode isn't installed, the error message must still point
       // at opencode -- that's what proves we routed through opencode.
-      assert.match(/** @type {Error} */ (err).message, /verify that opencode is installed/, "the summary availability check must consult opencode's listModelsFn, not pi's");
+      assert.match(/** @type {Error} */ (err).message, /verify that opencode is installed|summary model is unavailable/, "the summary availability check must consult opencode's listModelsFn, not pi's");
     }
     assert.equal(piListModelsCalled, false, "fakePi.listModelsFn must not be used for the summary availability check (it would reject opencode-only summary models)");
   });

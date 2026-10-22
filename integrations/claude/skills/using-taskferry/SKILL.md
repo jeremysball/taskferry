@@ -593,7 +593,8 @@ Relay every summary-line notification with this exact template:
 `⛴ <emoji> <short-task-id> <NN%> — <clause>`
 
 - `<short-task-id>` — the taskferry task id, shortened to its first segment
-  (e.g. `oc_mrpxgbg8`). This always exists, unlike other context, which may
+  (e.g. `pi_mrpxgbg8`; the prefix names the executor: `oc_`, `pi_`, or
+  `kilo_`). This always exists, unlike other context, which may
   not apply to the dispatch at all. Add a human label in parens right after
   it only when one is genuinely in context, and always name what kind of
   thing it is — `issue #35`, `PR #12`, never a bare `#35` that leaves the
@@ -615,7 +616,7 @@ on that front is the default, so saying so out loud on every single update is
 pure noise. Only speak up beyond the one-line update when something genuinely
 warrants the user's attention (a blocker, a crash, settlement).
 
-Example: `⛴ 📝 oc_mrpxgbg8 (issue #35) 90% — docs updated, finishing the
+Example: `⛴ 📝 pi_mrpxgbg8 (issue #35) 90% — docs updated, finishing the
 result section, tests and lint already green.`
 
 **Inside OpenCode itself (opencode as the host running taskferry, not Claude

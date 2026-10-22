@@ -121,6 +121,7 @@ describe("dispatch() executor selection (Task 6: optional executor name resolves
     const dispatched = mgr.dispatch({ prompt: "hi", directory: process.cwd(), executor: "pi" });
     const status = mgr.status(dispatched.id);
     assert.equal(status.executorId, "pi");
+    assert.match(dispatched.id, /^pi_[0-9a-z]+_[0-9a-f]{8}$/);
   });
 
   test("dispatch() with no executor defaults to pi", () => {
@@ -128,6 +129,14 @@ describe("dispatch() executor selection (Task 6: optional executor name resolves
     const dispatched = mgr.dispatch({ prompt: "hi", directory: process.cwd() });
     const status = mgr.status(dispatched.id);
     assert.equal(status.executorId, "pi");
+    assert.match(dispatched.id, /^pi_/);
+  });
+
+  test("dispatch() with executor: \"opencode\" stamps the oc_ prefix on the id", () => {
+    const mgr = makeManager({ spawnFn: () => { throw new Error(NOT_REACHED); } });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: process.cwd(), executor: "opencode" });
+    assert.equal(mgr.status(dispatched.id).executorId, "opencode");
+    assert.match(dispatched.id, /^oc_/);
   });
 
   test("dispatch() with an unknown executor name throws", () => {

@@ -2405,6 +2405,17 @@ function validateDispatchModel({ model, priorSessionTask, sessionId }) {
 }
 
 /**
+ * Build a fresh task id from an executor's prefix. Dispatch and summary
+ * records share this template so the id's prefix and the record's
+ * `executorId` always come from the same executor.
+ * @param {string} prefix
+ * @returns {string}
+ */
+function newTaskId(prefix) {
+  return `${prefix}_${Date.now().toString(36)}_${randomUUID().slice(0, 8)}`;
+}
+
+/**
  * Resolves the dispatch target directory to its real path. Runs after the
  * prompt/finalMarker validation (preserving the original throw order) and
  * surfaces the same user-facing guidance when resolution fails.
@@ -2420,8 +2431,9 @@ function resolveDispatchDirectory(directory) {
 }
 
 /**
- * Builds the queued `Task` record for a dispatch. Task IDs retain the literal
- * `oc_` prefix for compatibility. A resume with no `--model` inherits the
+ * Builds the queued `Task` record for a dispatch. Task IDs carry the
+ * executor's own `taskIdPrefix` (`oc_` for opencode, `pi_` for pi), so the id
+ * identifies which worker CLI ran it. A resume with no `--model` inherits the
  * model the session was created under (a different model can mean a different
  * provider, breaking the whole point of resuming that exact session).
  * @param {{id: string, directory: string, prompt: string, model: string|undefined, executor: import("./executor.js").WorkerExecutor, priorSessionTask: Task|null, variant: string|undefined, sessionId: string|undefined, originSessionId: string|undefined, internal: boolean, finalMarker: string|null, role: "dispatch"|"advisor", logPath: string, class?: string|null, parentTaskId?: string|null, defaultVariant: string, resolveOpencodeVariants: (model: string, env: NodeJS.ProcessEnv|undefined) => string[], env?: NodeJS.ProcessEnv, outputDir?: string|null, originalPrompt?: string, executorArgs?: string[]}} params
@@ -2712,7 +2724,10 @@ function buildSummarySnapshot(ctx, source, taskId, { resolvedSummarySessionId, r
  */
 function launchSummaryTask(ctx, p) {
   const { taskId, source, snapshot, isDelta, capturedAt, sourceStatus, maxWords, previousActivity, resolvedSummarySessionId, queuedCallerEnv } = p;
-  const id = `oc_${Date.now().toString(36)}_${randomUUID().slice(0, 8)}`;
+  // Summaries are pinned to opencode; derive the id prefix and executorId
+  // from that one executor so the two encodings cannot drift apart.
+  const summaryExecutor = resolveOpencodeExecutor();
+  const id = newTaskId(summaryExecutor.taskIdPrefix);
   const logPath = path.join(ctx.LOG_DIR, `${id}.ndjson`);
   const snapshotPath = path.join(ctx.SUMMARY_DIR, `${id}.json`);
   /** @type {SummaryOf} */
@@ -2742,7 +2757,7 @@ function launchSummaryTask(ctx, p) {
     status: "queued",
     directory: fs.realpathSync(ctx.SUMMARY_DIR),
     model: ctx.activitySummaryModel,
-    executorId: "opencode", // summaries stay opencode-only in this issue -- see plan Verified Findings #10
+    executorId: summaryExecutor.id, // summaries stay opencode-only in this issue -- see plan Verified Findings #10
     variant: null,
     sessionId: null,
     originSessionId: null,
@@ -2768,7 +2783,7 @@ function launchSummaryTask(ctx, p) {
     model: ctx.activitySummaryModel,
     snapshotPath,
     env: queuedCallerEnv,
-    executor: resolveOpencodeExecutor(),
+    executor: summaryExecutor,
     ...(resolvedSummarySessionId ? { summarySessionId: resolvedSummarySessionId } : {}),
   });
   const provider = providerOf(task.model);
@@ -8012,8 +8027,7 @@ function dispatchTask(params, ctx) {
   validateDispatchModel({ model, priorSessionTask, sessionId });
   const normalizedDirectory = resolveDispatchDirectory(directory);
   const projectConfig = loadProjectConfig(normalizedDirectory);
-  // Task IDs retain the literal "oc_" prefix for compatibility; WorkerExecutor.taskIdPrefix is not wired in this issue.
-  const id = `oc_${Date.now().toString(36)}_${randomUUID().slice(0, 8)}`;
+  const id = newTaskId(executor.taskIdPrefix);
   const logPath = path.join(ctx.LOG_DIR, `${id}.ndjson`);
   // Per-task scratch dir: a writable, rw-bound surface the worker can use to
   // hand back deliverables whose final assistant message ended on a tool call

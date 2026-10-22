@@ -137,12 +137,11 @@ export function errorValue(error, { helpFallback = "Retry the command or run `ta
   // so the plain single-line fallback (no recognized prefixes) keeps
   // returning `lines[0]` unchanged.
   // When the error: body is empty, fold details without a leading blank line.
-  const message =
-    errorLine !== undefined && detailLines.length && foldDetailLines
-      ? primary === ""
-        ? detailLines.join("\n")
-        : `${primary}\n${detailLines.join("\n")}`
-      : primary;
+  let message = primary;
+  if (errorLine !== undefined && detailLines.length && foldDetailLines) {
+    const detail = detailLines.join("\n");
+    message = primary === "" ? detail : `${primary}\n${detail}`;
+  }
   const help = errorHelp(error, helpLine, helpFallback);
   return { error: message, help };
 }

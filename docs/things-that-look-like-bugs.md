@@ -15,6 +15,18 @@ A real bug belongs in the issue tracker; a shipped feature belongs in the
 release notes. Only working-as-designed behavior that reads as broken
 belongs here.
 
+- A sandboxed worker cannot read the host's harness session stores. Observe:
+  a worker asked to inspect prior OpenCode/Kilo/Pi sessions, or to clean up
+  `~/.local/share/opencode`, finds the directory empty or missing even
+  though the files exist on the host. Deliberate: the fixed deny-list
+  tmpfs-masks `$XDG_DATA_HOME/opencode`, `$XDG_DATA_HOME/kilo`, `~/.codex`,
+  and Pi's `$PI_CODING_AGENT_DIR/sessions`, so one worker can never read
+  another session's prompts, transcripts, or tool output; agent logs are
+  records, not cleanup targets. The worker's *own* session data lives in the
+  per-task sandboxed data home and stays readable. It becomes a real bug if
+  a legitimate dispatch needs the host's prior sessions, or if a future
+  harness data directory is treated as safe because it is not literally a
+  database.
 - The integration smoke tests never touching a real model provider — since
   PR #547 CI dispatches against `src/mock-llm.js`, a local keyless
   OpenAI-compatible endpoint wired in as a `mockllm` provider via

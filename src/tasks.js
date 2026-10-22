@@ -13,7 +13,7 @@ import { MAX_BUFFER_BYTES, DEFAULT_MAX_BUFFER_BYTES } from "./daemon-server.js";
 import { errCode } from "./errors.js";
 import { isNonNegativeInteger, isPositiveInteger } from "./numbers.js";
 import { resolveBooleanToggle, resolveNonNegativeIntOption, resolvePositiveIntOption, resolveResponseCapBytes } from "./options.js";
-import { buildBwrapArgs, checkBwrapAvailable, checkOverlaySupport, defaultDenyList, platformSupportsSandbox, resolveGitCommonDir, resolveGitDir } from "./sandbox.js";
+import { buildBwrapArgs, checkBwrapAvailable, checkOverlaySupport, platformSupportsSandbox, resolveGitCommonDir, resolveGitDir, resolveSandboxDenyList } from "./sandbox.js";
 import { applyChangeset, overlayPaths, resolvePreDispatchHead, subOverlayPaths, subFilePaths, cleanupOverlay, defaultRunCommand as defaultOverlayRunCommand, extractGitDiff, extractNonGitDiff, OVERLAY_MOUNT_BUSY_PATTERN } from "./changeset.js";
 import { resolveExecutor } from "./executor.js";
 import { resolveOpencodeExecutor } from "./opencode-executor.js";
@@ -1326,7 +1326,12 @@ function buildBwrapBinds(ctx, launchInfo, task, spawnEnv, role) {
   // exist on this particular host yet, and filtering it out here would
   // silently stop protecting $HOME-level entries on any host that hasn't
   // created those dotfiles (a fresh CI runner, a new account).
-  const fullDenyList = [...defaultDenyList(homeDir, ctx.stateDir), ...ctx.sandboxDenylist];
+  // The mask follows the daemon's own environment, not the per-dispatch
+  // spawn env: a dispatch can override XDG_DATA_HOME/PI_CODING_AGENT_DIR in
+  // its env payload, and letting that choose the masked path would let it
+  // shift the mask off the host's real store while the root bind still
+  // exposes it.
+  const fullDenyList = resolveSandboxDenyList(homeDir, ctx.stateDir, ctx.sandboxDenylist);
   const denyList = fullDenyList.filter(ctx.existsFn);
   // The executor decides which env var overrides point at its sandboxed data
   // home (opencode: XDG_DATA_HOME; pi: PI_CODING_AGENT_DIR; kilo:
@@ -4069,7 +4074,7 @@ const BLOCKING_CHECK_STATUSES = new Set(["running", "failed", "timeout", "interr
  */
 function applyAcceptedChangeset(task, _force, ctx) {
   const isGitTarget = task.preDispatchHead != null;
-  const denyList = [...defaultDenyList(os.homedir(), ctx.stateDir), ...ctx.sandboxDenylist].filter(ctx.existsFn);
+  const denyList = resolveSandboxDenyList(os.homedir(), ctx.stateDir, ctx.sandboxDenylist).filter(ctx.existsFn);
   return applyChangeset({
     isGitTarget,
     denyList,
@@ -6532,7 +6537,7 @@ function settleChangesetAfterExtraction(finishedTask, extracted, ctx, isGitTarge
  */
 function extractChangesetForTaskRecord(finishedTask, ctx) {
   if (!finishedTask.overlayDirs) return;
-  const denyList = [...defaultDenyList(os.homedir(), ctx.stateDir), ...ctx.sandboxDenylist].filter(ctx.existsFn);
+  const denyList = resolveSandboxDenyList(os.homedir(), ctx.stateDir, ctx.sandboxDenylist).filter(ctx.existsFn);
   const diffPath = path.join(ctx.stateDir, "diffs", `${finishedTask.id}.patch`);
   const isGitTarget = finishedTask.preDispatchHead != null;
   let extracted;
@@ -6660,7 +6665,7 @@ function startCheckGate(task, ctx) {
   }
   if (!projectConfig.check) return;
 
-  const fullDenyList = [...defaultDenyList(os.homedir(), ctx.stateDir), ...ctx.sandboxDenylist];
+  const fullDenyList = resolveSandboxDenyList(os.homedir(), ctx.stateDir, ctx.sandboxDenylist);
   const denyList = fullDenyList.filter(ctx.existsFn);
   // Sandbox parity (review finding): the worker's read_only_paths binds and
   // the gate's must be identical, or a check command that reads a

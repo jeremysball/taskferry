@@ -121,23 +121,31 @@ export async function checkBwrapAvailableAsync(runCommand = defaultRunCommandAsy
  * gh/gnupg are pivot-capable credentials (grant outbound access to other
  * systems); `.claude` is personal instruction/context content (a global
  * CLAUDE.md carries user preferences and private context, not a credential,
- * but has no legitimate reason to be readable by a worker either). The
- * opencode/kilo entries are a third category: other harnesses' session
- * databases. A worker has no legitimate reason to touch them, and a
- * disk-cleanup-shaped worker is exactly what would (see "Agent log files
- * are sacred" in the global CLAUDE.md). Extendable
- * per-install via TASKFERRY_SANDBOX_DENYLIST / config.sandboxDenylist (see
- * tasks.js) for paths beyond this fixed set — those extra paths are always
- * directories, same as this list; a file-shaped credential deny-list
- * (.npmrc, .netrc, .git-credentials, etc.) needs a different bwrap mechanism
- * (masking a file mount point, not a directory tmpfs) and is tracked
- * separately, not covered by this function.
+ * but has no legitimate reason to be readable by a worker either).
+ *
+ * The opencode/kilo/pi entries are a third category: other harnesses' data
+ * directories. They hold session stores, logs, tool output, and prior
+ * transcripts; opencode's also holds auth.json. A worker has no legitimate
+ * reason to touch any of it, and a disk-cleanup-shaped worker is exactly
+ * what would (see "Agent log files are sacred" in the global CLAUDE.md).
+ * Masking opencode's whole data directory also hides its auth.json from the
+ * real path, but does not break the executor's later read-only auth bind:
+ * bwrap resolves bind sources against the host root, not the already-mounted
+ * sandbox root (verified against bubblewrap 0.13.1). The credential stays
+ * readable only at the executor's sandboxed destination.
+ *
+ * Extendable per-install via TASKFERRY_SANDBOX_DENYLIST /
+ * config.sandboxDenylist (see tasks.js) for paths beyond this fixed set.
+ * Those extra paths are always directories, same as this list; a
+ * file-shaped credential deny-list (.npmrc, .netrc, .git-credentials, etc.)
+ * needs a different bwrap mechanism (masking a file mount point, not a
+ * directory tmpfs) and is tracked separately, not covered by this function.
  * @param {string} homeDir
  * @param {string} stateDir
- * @param {string} [dataHome] - XDG data dir; defaults to ~/.local/share
+ * @param {{dataHome?: string, piAgentDir?: string}} [options]
  * @returns {string[]}
  */
-export function defaultDenyList(homeDir, stateDir, dataHome = path.join(homeDir, ".local", "share")) {
+export function defaultDenyList(homeDir, stateDir, { dataHome = resolveXdgDataHome(process.env, homeDir), piAgentDir = resolvePiAgentDir(process.env, homeDir) } = {}) {
   return [
     stateDir,
     path.join(homeDir, ".ssh"),
@@ -146,9 +154,56 @@ export function defaultDenyList(homeDir, stateDir, dataHome = path.join(homeDir,
     path.join(homeDir, ".config", "gh"),
     path.join(homeDir, ".gnupg"),
     path.join(homeDir, ".claude"),
+    path.join(homeDir, ".codex"),
     path.join(dataHome, "opencode"),
     path.join(dataHome, "kilo"),
+    path.join(piAgentDir, "sessions"),
   ];
+}
+
+/**
+ * Resolves the XDG data home from an environment, defaulting to
+ * `~/.local/share`. Shared by the deny-list and the OpenCode executor so
+ * both agree on which directory holds harness state.
+ * @param {NodeJS.ProcessEnv} env
+ * @param {string} homeDir
+ * @returns {string}
+ */
+export function resolveXdgDataHome(env, homeDir) {
+  return env.XDG_DATA_HOME || path.join(homeDir, ".local", "share");
+}
+
+/**
+ * Resolves Pi's agent directory from an environment, defaulting to
+ * `~/.pi/agent`. The deny-list masks its `sessions` subtree; the Pi executor
+ * reads auth/extensions/sessions from the same directory.
+ * @param {NodeJS.ProcessEnv} env
+ * @param {string} homeDir
+ * @returns {string}
+ */
+export function resolvePiAgentDir(env, homeDir) {
+  return env.PI_CODING_AGENT_DIR || path.join(homeDir, ".pi", "agent");
+}
+
+/**
+ * Assembles the complete deny-list from the fixed base and the per-install
+ * extension, resolving the base from `env` (the daemon's environment, not a
+ * dispatch-supplied env payload: a dispatch that could choose the masked
+ * path could shift the mask off the host's real store) and de-duplicating
+ * the union. A user entry that repeats a fixed entry must not become a
+ * second `--tmpfs` for the same path or a duplicate protected-path check.
+ * @param {string} homeDir
+ * @param {string} stateDir
+ * @param {string[]} [extra]
+ * @param {NodeJS.ProcessEnv} [env]
+ * @returns {string[]}
+ */
+export function resolveSandboxDenyList(homeDir, stateDir, extra = [], env = process.env) {
+  const base = defaultDenyList(homeDir, stateDir, {
+    dataHome: resolveXdgDataHome(env, homeDir),
+    piAgentDir: resolvePiAgentDir(env, homeDir),
+  });
+  return [...new Set([...base, ...extra])];
 }
 
 /**

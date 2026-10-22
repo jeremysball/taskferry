@@ -16,7 +16,7 @@
         "authentication": "ON_INSTALL"
       },
       "category": "Development & Workflow",
-      "description": "Background OpenCode task execution through the Taskferry AXI CLI"
+      "description": "Background pi/OpenCode task execution through the Taskferry AXI CLI"
     }
   ]
 }

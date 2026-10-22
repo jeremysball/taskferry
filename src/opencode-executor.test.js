@@ -9,7 +9,9 @@ const HOME_DIR = "/home/user";
 const DATA_DIR = "/state/run";
 const TASK_ID = "oc_task1";
 const SANDBOXED_DATA_HOME = `${DATA_DIR}/opencode-data/${TASK_ID}`;
-const SANDBOXED_CONFIG_HOME = `${SANDBOXED_DATA_HOME}/config`;
+const SANDBOXED_CONFIG_HOME = `${DATA_DIR}/opencode-config/${TASK_ID}`;
+const SANDBOXED_STATE_HOME = `${DATA_DIR}/opencode-state/${TASK_ID}`;
+const SANDBOXED_CACHE_HOME = `${DATA_DIR}/opencode-cache/${TASK_ID}`;
 const SANDBOXED_CONFIG_DIR = `${SANDBOXED_CONFIG_HOME}/opencode`;
 const OPENCODE_JSONC_DEST = `${SANDBOXED_CONFIG_DIR}/opencode.jsonc`;
 const PLUGINS_DEST = `${SANDBOXED_CONFIG_DIR}/plugins`;
@@ -274,11 +276,21 @@ describe("opencodeExecutor().listModelVariantsFn", () => {
       assert.deepEqual(result, {
         extraRoBinds: [[OPENCODE_AUTH, `${SANDBOXED_DATA_HOME}/opencode/auth.json`]],
         sandboxedDataHome: SANDBOXED_DATA_HOME,
+        sandboxedConfigHome: SANDBOXED_CONFIG_HOME,
+        sandboxedStateHome: SANDBOXED_STATE_HOME,
+        sandboxedCacheHome: SANDBOXED_CACHE_HOME,
         // XDG_CONFIG_HOME is redirected unconditionally, whether or not the user
         // has a real opencode config to bind in: opencode writes its own
         // .gitignore there on boot and the real ~/.config is read-only in the
-        // sandbox.
-        sandboxEnv: { XDG_DATA_HOME: SANDBOXED_DATA_HOME, XDG_CONFIG_HOME: SANDBOXED_CONFIG_HOME },
+        // sandbox. XDG_STATE_HOME and XDG_CACHE_HOME are likewise per-task
+        // (taskferry#536) so concurrent dispatches never race on shared
+        // state/cache files.
+        sandboxEnv: {
+          XDG_DATA_HOME: SANDBOXED_DATA_HOME,
+          XDG_CONFIG_HOME: SANDBOXED_CONFIG_HOME,
+          XDG_STATE_HOME: SANDBOXED_STATE_HOME,
+          XDG_CACHE_HOME: SANDBOXED_CACHE_HOME,
+        },
       });
     });
 

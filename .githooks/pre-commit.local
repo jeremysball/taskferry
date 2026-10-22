@@ -1,19 +1,21 @@
-#!/bin/sh
+#!/usr/bin/env bash
 # Taskferry pre-commit hook: worktree gate + syntax-check + lint + typecheck.
 #
-# 0. Worktree gate — require a dedicated worktree per branch. See
+# 0. Worktree gate: require a dedicated worktree per branch. See
 #    deterministic-guardrails reorientation, "What to build, in order" #3.
 # 1. `node --check` parses every staged .js (catches malformed syntax before
 #    it ever reaches a review or CI).
-# 2. ESLint catches what parsing can't -- undefined vars (no-undef), unsafe
+# 2. ESLint catches what parsing can't: undefined vars (no-undef), unsafe
 #    finally blocks, discarded caught errors, etc. Warnings inform; only
 #    errors block the commit.
 # 3. `tsc --noEmit` type-checks src/tasks.js and src/server.js (see
 #    tsconfig.json) against their JSDoc annotations.
 #
 # Bypass lint/typecheck in a pinch with `git commit --no-verify`.
-# Bypass the worktree gate (CI/fresh clone) with `TASKFERRY_ALLOW_PRIMARY=1`
-# or `git config taskferry.allowPrimary true`.
+# TASKFERRY_ALLOW_PRIMARY=1 (or `git config taskferry.allowPrimary true`)
+# disarms ONLY this repo-local worktree gate, for CI and fresh clones. Where
+# the machine's global hook is installed, its primary-checkout gate runs
+# first and has no bypass; this gate cannot disarm that one.
 
 # --- 0. worktree gate (before the early-exit, so docs-only commits are also gated) ---
 if [ "${TASKFERRY_ALLOW_PRIMARY:-}" != "1" ] && [ "${TASKFERRY_ALLOW_PRIMARY:-}" != "true" ]; then
@@ -25,39 +27,46 @@ if [ "${TASKFERRY_ALLOW_PRIMARY:-}" != "1" ] && [ "${TASKFERRY_ALLOW_PRIMARY:-}"
       echo "✗ commit blocked: this is the primary checkout, not a worktree."
       echo "  Taskferry requires a dedicated worktree per branch (see CONTRIBUTING.md / CLAUDE.md)."
       echo "  Create one with: git worktree add <path> -b <branch>"
-      echo "  Bypass (CI/fresh clone): TASKFERRY_ALLOW_PRIMARY=1 git commit ..."
+      echo "  Bypass this repo-local gate (CI/fresh clone): TASKFERRY_ALLOW_PRIMARY=1 git commit ..."
       echo "  Or: git config taskferry.allowPrimary true  (local only, not committed)"
+      echo "  Note: the machine's global hook, when installed, still blocks a primary-checkout commit with no bypass."
       echo "  Or: git commit --no-verify  (bypasses all hooks)"
       exit 1
     fi
   fi
 fi
 
-# Staged, non-deleted .js files (newline-safe enough for this repo's paths).
-files=$(git diff --cached --name-only --diff-filter=ACM -- '*.js')
-# Do not early-exit before the gate above — but lint/typecheck still skip when no JS staged.
-no_js=0
-[ -z "$files" ] && no_js=1
-if [ "$no_js" = "1" ]; then
-  # Gate already passed; no JS to check.
-  exit 0
-fi
-
 fail=0
 
 # --- 1. parse check (validates the STAGED content) ---
+# -z plus `read -d ''` keeps paths with spaces or newlines intact; the old
+# `for f in $files` split them, and a failed `git show` was skipped, so a
+# malformed "foo bar.js" was never parsed.
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 repo="$(git rev-parse --show-toplevel)"
-for f in $files; do
+checked=0
+while IFS= read -r -d '' f; do
+  checked=1
   blob="$tmp/$(printf '%s' "$f" | tr '/' '_')"
-  git show ":$f" > "$blob" 2>/dev/null || continue
+  if ! git show ":$f" > "$blob" 2>/dev/null; then
+    echo "✗ $f: could not read the staged blob"
+    fail=1
+    continue
+  fi
   if ! err="$(node --check "$blob" 2>&1)"; then
-    echo "✗ $f — JavaScript parse error:"
+    echo "✗ $f: JavaScript parse error:"
     printf '%s\n' "$err" | sed "s#$blob#$f#g"
     fail=1
   fi
-done
+done < <(git diff --cached --name-only -z --diff-filter=ACM -z '*.js')
+
+# Do not early-exit before the gate above, but lint/typecheck still skip when
+# no JS is staged. Derived from the loop, not a parallel flag.
+if [ "$checked" -eq 0 ]; then
+  # Gate already passed; no JS to check.
+  exit 0
+fi
 
 # --- 2. eslint / tsc (the complete staged tree, not working-tree files) ---
 # Resolve eslint from this worktree or its primary (worktrees often share primary's node_modules).
@@ -87,7 +96,7 @@ if [ -x "$eslint_root/node_modules/.bin/eslint" ]; then
     fail=1
   fi
 else
-  echo "⚠ eslint and typescript are not installed — run 'npm install' to enable quality checks."
+  echo "⚠ eslint and typescript are not installed; run 'npm install' to enable quality checks."
 fi
 
 if [ "$fail" -ne 0 ]; then

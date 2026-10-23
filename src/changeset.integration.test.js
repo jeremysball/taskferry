@@ -207,6 +207,44 @@ describe("overlay round trips (real bwrap)", () => {
     cleanupOverlay({ root: overlay.root, tmpRoot });
   });
 
+  test("non-git target: an overlay root under the XDG runtime dir still extracts and applies", skip ? undefined : (t) => {
+    // Regression (taskferry#286 follow-up): the overlay root moved under
+    // XDG_RUNTIME_DIR, which is read-only inside the sandbox. The merged view
+    // must live on the sandbox's private /tmp, not under overlay.root, or
+    // --dir fails with EROFS and extraction used to return "no changes".
+    const xdgRuntime = process.env.XDG_RUNTIME_DIR;
+    if (!xdgRuntime) {
+      t.skip("XDG_RUNTIME_DIR is not set");
+      return undefined;
+    }
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "axi-int-nongit-rt-"));
+    trackedTmpDirs.push(directory);
+    const tmpRoot = fs.mkdtempSync(path.join(xdgRuntime, "axi-int-overlay-"));
+    trackedTmpDirs.push(tmpRoot);
+    const runtimeDir = fs.mkdtempSync(path.join(os.tmpdir(), RUN_ROOT_PREFIX));
+    trackedTmpDirs.push(runtimeDir);
+    fs.writeFileSync(path.join(directory, "runtime.txt"), "before\n");
+
+    const overlay = overlayPaths("int_nongit_runtime", tmpRoot);
+    fs.mkdirSync(overlay.upperDir, { recursive: true, mode: 0o700 });
+    fs.mkdirSync(overlay.workDir, { recursive: true, mode: 0o700 });
+    const ran = runInOverlay({
+      directory, overlay, runtimeDir, homeDir: os.homedir(),
+      script: `echo after > ${directory}/runtime.txt`,
+    });
+    assert.equal(ran.status, 0, `sandboxed worker script failed: ${ran.stderr}`);
+
+    const diffPath = path.join(tmpRoot, "int_nongit_runtime.patch");
+    const extracted = extractNonGitDiff({ directory, overlay, runtimeDir, diffPath, stateDir: tmpRoot, homeDir: os.homedir(), denyList: [] });
+    assert.equal(extracted.hasChanges, true);
+    assert.match(fs.readFileSync(diffPath, "utf8"), /after/);
+    const applied = applyChangeset({ directory, diffPath, overlay, runtimeDir, isGitTarget: false, stateDir: tmpRoot, homeDir: os.homedir(), denyList: [] });
+    assert.deepEqual(applied, { applied: true, reason: null });
+    assert.equal(fs.readFileSync(path.join(directory, "runtime.txt"), "utf8"), "after\n");
+    cleanupOverlay({ root: overlay.root, tmpRoot });
+    return undefined;
+  });
+
   test("non-git target: sandboxed write extracts a diff -ru, rsync-applies, cleans up", skip ? undefined : () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "axi-int-nongit-"));
     trackedTmpDirs.push(directory);

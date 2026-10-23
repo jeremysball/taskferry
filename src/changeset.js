@@ -19,6 +19,12 @@ import { buildBwrapArgs, buildBwrapBaseArgs } from "./sandbox.js";
 // otherwise-successful task (taskferry#358).
 const DIFF_MAX_BUFFER_BYTES = 200 * 1024 * 1024;
 
+// The merged overlay view is mounted at a path inside bwrap's private
+// --tmpfs /tmp, never under the host overlay root. The overlay root moved to
+// the XDG runtime dir in taskferry#286; /run/user is read-only inside the
+// sandbox, so a --dir there fails with EROFS before diff ever runs.
+const MERGED_MOUNT_POINT = "/tmp/taskferry-merged";
+
 /**
  * @param {string} command
  * @param {string[]} args
@@ -72,6 +78,24 @@ function sleepSync(ms) {
  */
 function isOverlayMountBusy(result) {
   return OVERLAY_MOUNT_BUSY_PATTERN.test(result.stderr || "") || OVERLAY_MOUNT_BUSY_PATTERN.test(result.error?.message || "");
+}
+
+/**
+ * Whether an extraction bwrap result is a failure rather than a diff that
+ * found (or did not find) changes. bwrap itself exits 1 on a setup failure
+ * (its own die() convention), colliding with diff's exit-1-for-differences-
+ * found: a surviving overlay-mount-busy failure, or any other setup failure
+ * that exits 1 with an empty stdout and a non-empty stderr (e.g. EROFS on
+ * the merged mount point), must throw or the worker's edits get silently
+ * discarded as "no changes".
+ * @param {CommandResult} result
+ * @returns {boolean}
+ */
+function isExtractionFailure(result) {
+  if (result.error) return true;
+  if (isOverlayMountBusy(result)) return true;
+  const emptyExitOne = result.status === 1 && result.stdout.length === 0 && result.stderr.trim().length > 0;
+  return emptyExitOne || (result.status !== 0 && result.status !== 1);
 }
 
 /**
@@ -332,17 +356,16 @@ export function subOverlaySlug(targetPath) {
  * only for the non-git diff -ru / non-git apply cases).
  *
  * The /tmp-shadowing question (review finding folded in here): the
- * overlay paths themselves (`overlay.upperDir`, `overlay.workDir`, and
- * the synthetic `mergedMountPoint` -- all of which live under /tmp by
- * construction) do NOT need the same explicit bind protection that
- * `directory` gets below. `upperDir`/`workDir` are host-namespace paths
- * consumed directly by the kernel's overlay mount(2) call, not by
- * user-space lookups that go through the bwrap namespace's mounts, so
- * the fresh --tmpfs /tmp never shadows them. `mergedMountPoint` is a
- * path in the new namespace (created via `--dir` *after* the `--tmpfs
- * /tmp`, so it lands on the empty tmpfs), then immediately consumed as
- * the mount point for `--overlay` -- it's intentionally empty before the
- * mount and never needs to persist on the host.
+ * overlay's `upperDir`/`workDir` are host-namespace paths consumed directly
+ * by the kernel's overlay mount(2) call, not by user-space lookups that go
+ * through the bwrap namespace's mounts, so the fresh --tmpfs /tmp never
+ * shadows them. `mergedMountPoint` is different: it is a path in the new
+ * namespace, created via `--dir` *after* the `--tmpfs /tmp`, so it must sit
+ * on that empty tmpfs (callers pass MERGED_MOUNT_POINT). It is then consumed
+ * as the overlay mount point and never needs to persist on the host. Putting
+ * it under the host overlay root would make `--dir` fail whenever that root
+ * is read-only in the sandbox, which is exactly what happened once the
+ * overlay root moved to the XDG runtime dir (taskferry#286).
  *
  * @param {object} params
  * @param {string} params.directory
@@ -399,7 +422,7 @@ export function extractNonGitDiff({
   mkdirFn = (dirPath) => fs.mkdirSync(dirPath, { recursive: true, mode: 0o700 }),
   sleepFn = sleepSync,
 }) {
-  const mergedMountPoint = path.join(overlay.root, "merged");
+  const mergedMountPoint = MERGED_MOUNT_POINT;
   const bwrapArgs = buildMergedViewBwrapArgs({ directory, overlay, stateDir, runtimeDir, homeDir, denyList, mergedMountPoint, writable: false });
   // -N (--new-file) treats files missing from one side as empty, so a file
   // created inside the overlay shows its full content (a plain -ru would
@@ -409,13 +432,8 @@ export function extractNonGitDiff({
   // diff exits 0 = identical, 1 = differences found (success for us), >=2 =
   // real trouble. A bwrap failure (bad mount, timeout, killed) must not be
   // indistinguishable from "no changes" -- throw on anything but 0/1 so the
-  // caller can record the failure and keep the overlay for recovery. bwrap
-  // itself also exits 1 on a setup failure (its own die() convention), which
-  // collides with diff's own exit-1-for-differences-found on this exact
-  // status code -- an overlay-mount-busy failure that survives every retry
-  // must still throw even though its exit code alone looks like success, or
-  // the worker's real edits get silently discarded as "no changes".
-  if (result.error || isOverlayMountBusy(result) || (result.status !== 0 && result.status !== 1)) {
+  // caller can record the failure and keep the overlay for recovery.
+  if (isExtractionFailure(result)) {
     throw new Error(`error: non-git diff extraction failed for ${directory} (exit ${result.status ?? "null"}): ${(result.stderr || result.error?.message || "unknown error").trim()}`);
   }
   mkdirFn(pathDirname(diffPath));
@@ -525,7 +543,7 @@ function applyNonGitChangeset({ directory, overlay, stateDir, runtimeDir, homeDi
   if (overlay == null) {
     throw new Error(NON_GIT_APPLY_ERROR);
   }
-  const mergedMountPoint = path.join(overlay.root, "merged");
+  const mergedMountPoint = MERGED_MOUNT_POINT;
   const bwrapArgs = buildMergedViewBwrapArgs({ directory, overlay, stateDir, runtimeDir, homeDir, denyList, mergedMountPoint, writable: true });
   // --delay-updates (review finding #9): rsync stages each updated file and
   // renames them all into place in the final update phase, so an interrupted

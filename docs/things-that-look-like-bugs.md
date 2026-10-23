@@ -594,30 +594,42 @@ belongs here.
   exit-1 result with no stdout is a setup failure or a silent bwrap death;
   treating it as "no changes" would discard the worker's edits. It would be
   a real bug if a legitimate diff could exit 1 with an empty stdout.
-- `--ro-bind` replacing the global read-only list while `--rw-bind` unions with
-  its global list. Expected, not an inconsistency. A dispatch's `--ro-bind`
-  (or, absent that, the manager option, `TASKFERRY_RO_BIND`, or config
-  `roBind`, first one set wins) is the whole read-only list, so
-  `--ro-bind /x` on a daemon whose config binds `/a,/b` leaves `/a` and `/b`
-  out of that dispatch. The read-only list can name files the worker should
-  not see by default (a global instructions file, a reference tree), and a
-  dispatch has to be able to take them away as well as add to them; a union
-  has no way to do that, which is why there is no `--ro-unbind` either. The
-  read-write list stays a union because a dispatch dropping a global
-  writable path is not something a caller should be able to do by accident.
-  Scope: only the global list is replaced. A project's `.taskferry.toml`
-  `roBind`/`read_only_paths` still binds, and the settle-time check gate
-  still sees the project's mounts. It would be a real bug if a per-dispatch
-  `--ro-bind` dropped a project entry, or if a layer below the first one set
-  still contributed a path.
-- `--ro-bind ""` (and `--ro-bind=`, `TASKFERRY_RO_BIND=`, config
-  `"roBind": ""`) being accepted as "bind none of the global list" while
-  `--rw-bind ""` is still rejected with `requires a non-empty value`.
-  Expected. An empty read-only list is the only way to say "this dispatch
-  gets none of the global binds" under replace semantics; an empty
-  read-write list means nothing, so it stays a usage error. A lone `,` is
-  rejected for both. It would be a real bug if the empty list were dropped
-  on a resume: `resumeRoBind` persists `[]` for exactly that reason.
+- `--ro-bind` and `--rw-bind` replacing their global lists instead of adding
+  to them. Expected, not an inconsistency. A dispatch's `--ro-bind` or
+  `--rw-bind` (or, absent that, the manager option, `TASKFERRY_RO_BIND` /
+  `TASKFERRY_RW_BIND`, or config `roBind` / `rwBind`, first one set wins) is
+  the whole list, so `--rw-bind /x` on a daemon whose config binds `/a,/b`
+  leaves `/a` and `/b` out of that dispatch. A global list can name paths a
+  given worker should not see or write by default (a global instructions
+  file, a reference tree, a shared scratch directory), and a dispatch has to
+  be able to take them away as well as add to them; a union has no way to do
+  that, which is why there is no `--ro-unbind` or `--rw-unbind` either.
+  Scope: only the global lists are replaced. A project's `.taskferry.toml`
+  `roBind`/`read_only_paths` still binds, the settle-time check gate still
+  sees the project's mounts, and the binds the sandbox adds on its own (a
+  worktree's git directories, the task's output directory, the executor's
+  credentials) stay. The two names of the read-write flag (`--rw-bind` and the
+  deprecated `--allowed-dirs`) union with each other inside one layer, and
+  that combined list is what replaces the global one. It would be a real bug
+  if a per-dispatch list dropped a project entry or an automatic bind, or if
+  a layer below the first one set still contributed a path.
+- `--ro-bind ""` and `--rw-bind ""` (and `--ro-bind=`, `TASKFERRY_RO_BIND=`,
+  `TASKFERRY_RW_BIND=`, config `"roBind": ""`, `"rwBind": ""`) being accepted
+  as "bind none of the global list", while `--allowed-dirs ""` is still
+  rejected with `requires a non-empty value`. Expected. An empty list is the
+  only way to say "this dispatch gets none of the global binds" under replace
+  semantics, and the deprecated name takes no new forms. A lone `,` is
+  rejected for all three. It would be a real bug if the empty list were
+  dropped on a resume: `resumeRoBind` and `resumeAllowedDirs` persist `[]` for
+  exactly that reason.
+- A non-empty `TASKFERRY_RW_BIND` or `TASKFERRY_RO_BIND` that names no path
+  (`" "`, `","`), or the same value in the config file, failing at startup with
+  `names no path`, although the empty string is accepted. Expected. The empty
+  string is a deliberate "none". Whitespace or a comma is a typo, and
+  treating it as "none" would silently shadow the layers below it; the
+  same value passed to a flag is a usage error for the same reason. It would
+  be a real bug if the empty string were rejected, or a typo were accepted
+  as an empty list.
 - An OpenCode or kilo worker not seeing the `AGENTS.md` and `CLAUDE.md` that
   sit in `~/.config/opencode` or `~/.config/kilo`, although every other entry
   in that directory is bound. Expected. The executors used to bind the whole

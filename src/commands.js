@@ -201,8 +201,8 @@ function pickDispatchOptions(options) {
     // `--allowed-dirs` is a deprecated alias for `--rw-bind`; pass both keys
     // through verbatim (as distinct wire params) rather than folding one into
     // the other here -- the daemon's own dispatchTask already unions
-    // `allowedDirs` and `rwBind` server-side (see tasks.js's `effectiveRwBind`
-    // union in dispatchTask). Collapsing them into a single wire key at this
+    // `allowedDirs` and `rwBind` into one per-dispatch list server-side (see
+    // tasks.js's `effectiveRwBind` in dispatchTask). Collapsing them into a single wire key at this
     // layer, as an earlier version of this function did, meant passing both
     // flags on one dispatch silently dropped whichever key iterated first --
     // the daemon's union could never see two distinct values to union.

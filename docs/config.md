@@ -48,7 +48,7 @@ message — there is no silent typo tolerance.
 | `envDenylist` | `TASKFERRY_ENV_DENYLIST` | string (comma-separated var names) | (none) |
 | `sandboxEnabled` | `TASKFERRY_DISABLE_SANDBOX` (inverted: `1`/`true` disables) | boolean | `true` |
 | `overlayEnabled` | `TASKFERRY_DISABLE_OVERLAY` (inverted: `1`/`true` disables) | boolean | `true` |
-| `rwBind` | `TASKFERRY_RW_BIND` | string (comma-separated paths) | (none) |
+| `rwBind` | `TASKFERRY_RW_BIND` | string (comma-separated paths) | (none); **replaces** rather than unions, see below |
 | `allowedDirs` | `TASKFERRY_ALLOWED_DIRS` | string (comma-separated paths) | (none), **deprecated alias for `rwBind`** |
 | `roBind` | `TASKFERRY_RO_BIND` | string (comma-separated paths) | (none); **replaces** rather than unions, see below |
 | `sandboxDenylist` | `TASKFERRY_SANDBOX_DENYLIST` | string (comma-separated paths) | (none) |
@@ -73,34 +73,51 @@ flat list of env var names, always stripped from every spawned child
 regardless of whether the value came from the daemon's own ambient
 environment or a caller's forwarded env; see `docs/security.md`.
 
-`allowedDirs` is a deprecated alias for `rwBind` — both bind directories
-read-write inside the sandbox for every dispatch. The two are **unioned**,
-not mutually exclusive: if both the new name and its deprecated alias are
-set, all paths from both contribute. `rwBind` (and `allowedDirs`) also union
-with the per-dispatch `--rw-bind`/`--allowed-dirs` flags and the
-`TASKFERRY_RW_BIND`/`TASKFERRY_ALLOWED_DIRS` env vars rather than any one
-layer replacing another. (`roBind`, below, is the opposite: the first layer
-that sets it is the whole list.) `allowedDirs` emits a deprecation warning whenever
-it is used and will be removed in the next major release. A `rwBind` path
-that overlaps the sandbox deny-list (e.g. `~/.ssh`) is still bound
-read-write — overriding the deny-list is the user's explicit call — but a
-loud warning is emitted at dispatch time.
+`rwBind` binds directories **read-write** (`--rw-bind`) inside the sandbox
+for every dispatch, in addition to the git directories the sandbox binds on
+its own for a worktree. It does **not** union across layers: the list you
+supply is the whole list. The first layer that sets it wins, in the order
+per-dispatch `--rw-bind` flag, then the manager option, then
+`TASKFERRY_RW_BIND`, then the config file, and the layers below it are
+ignored. `roBind`, below, follows the same rule, and this is the one place
+that order is spelled out; other docs link here.
+
+`allowedDirs` is a deprecated alias for `rwBind`. It sits in the same layer
+as the new name (`--allowed-dirs` beside `--rw-bind`, `TASKFERRY_ALLOWED_DIRS`
+beside `TASKFERRY_RW_BIND`, config `allowedDirs` beside `rwBind`), and when
+both names are set in one layer, the paths from both contribute. It emits a
+deprecation warning whenever it is set, even when a higher layer shadows it,
+and will be removed in the next major release.
+
+- An empty value (`--rw-bind ""`, `TASKFERRY_RW_BIND=`, `"rwBind": ""`) is a
+  list of nothing, so it replaces a longer list below it with no extra
+  read-write binds at all. A non-empty value that names no path (`" "`,
+  `","`) is rejected with an error instead, since it is a typo and would
+  otherwise shadow the layers below it. `--allowed-dirs ""` is still rejected
+  as a usage error; the deprecated name takes no empty form.
+- A relative entry resolves against the dispatch's launch directory
+  (`--directory`). A path listed twice is bound once. An entry that does not
+  exist on the host is skipped silently.
+- Only the global list is replaced. The binds the sandbox adds on its own (a
+  worktree's git directories, the task's output directory, the executor's
+  credentials) are not part of it and stay.
+- Only `dispatch` takes `--rw-bind`. An `advisor`, and the internal summary
+  child of a dispatch, always get the global list.
+- A `rwBind` path that overlaps the sandbox deny-list (e.g. `~/.ssh`) is still
+  bound read-write (overriding the deny-list is the user's explicit call), but
+  a loud warning is emitted at dispatch time.
 
 `roBind` is the read-only counterpart: host paths bound **read-only**
 (`--ro-bind`) into the sandbox for every dispatch, resolved through the same
 protected-mount safety check as `.taskferry.toml`'s `read_only_paths`
 (a nonexistent or protected-overlapping entry is skipped and reported, never
-bound). Unlike `rwBind`, it does **not** union: the list you supply is the
-whole list. The first layer that sets it wins, in the order per-dispatch
-`--ro-bind` flag, then the manager option, then `TASKFERRY_RO_BIND`, then the
-config file, and the layers below it are ignored. This is the one place that
-order is spelled out; other docs link here.
+bound). It replaces the same way, with the same layer order
+(`--ro-bind`, manager option, `TASKFERRY_RO_BIND`, config file).
 
 - An empty value (`--ro-bind ""`, `TASKFERRY_RO_BIND=`, `"roBind": ""`) is a
   list of nothing, so it replaces a longer list below it with no read-only
   binds at all. A non-empty value that names no path (`" "`, `","`) is
-  rejected with an error instead, since it is a typo and would otherwise
-  shadow the layers below it.
+  rejected with an error instead, for the same reason as above.
 - A relative entry resolves against the dispatch's launch directory
   (`--directory`), the same as `--rw-bind`. A path listed twice is bound once.
 - The project layer (`.taskferry.toml` `roBind`/`read_only_paths`, next

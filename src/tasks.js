@@ -1160,12 +1160,11 @@ function instructionsRoBinds(roResolved, instructionsDest, statFn) {
 
 /**
  * Resolves the user-supplied read-write and read-only dir sets for one
- * dispatch and applies the read-write-wins conflict rule. The read-write set
- * is a union of the manager-level default (flag/env/config, already folded
- * into `ctx.allowedDirs`) and the per-dispatch entries carried on
- * `dispatchLaunch`. The read-only set is NOT a union: a per-dispatch roBind
- * list (even an empty one) replaces the global `ctx.roBind`, which applies
- * only when the dispatch carries no list of its own. Read-write dirs that don't exist on the host are dropped
+ * dispatch and applies the read-write-wins conflict rule. Neither set is a
+ * union: a per-dispatch list (even an empty one) replaces the global one
+ * (`ctx.rwBind`, already resolved from flag/env/config into
+ * `ctx.allowedDirs`, and `ctx.roBind`), which applies only when the dispatch
+ * carries no list of its own. Read-write dirs that don't exist on the host are dropped
  * silently (same as the pre-existing allowedDirs behavior); read-only dirs go
  * through `resolveUserRoBind`'s protected-mount validation instead. A path in
  * both sets binds read-write with a warning naming the path -- never an
@@ -1182,7 +1181,10 @@ function instructionsRoBinds(roResolved, instructionsDest, statFn) {
 function resolveUserRwRoBind(ctx) {
   /** @type {{allowedDirs?: string[], roBind?: string[]}} */
   const perDispatch = (ctx.isSummary ? null : ctx.dispatchLaunch) || {};
-  const rwBind = [...ctx.rwBind, ...(perDispatch.allowedDirs || [])];
+  // A per-dispatch --rw-bind (even an empty one) REPLACES the global list,
+  // same as --ro-bind below. The launch carries `rwBind` folded into
+  // `allowedDirs` (see dispatchTask); a summary child carries neither.
+  const rwBind = perDispatch.allowedDirs ?? ctx.rwBind;
   const rwResolved = [];
   const denyOverridden = [];
   for (const dir of rwBind) {
@@ -1435,11 +1437,10 @@ function buildBwrapBinds(ctx, launchInfo, task, spawnEnv, role) {
   }
   const overlayInfo = createOverlayIfNeeded(ctx, launchInfo, task, role);
   const gitBinds = buildGitBinds(ctx, launchDirectory, overlayInfo, extraRwBinds, { taskId: task.id, registerScratchCleanup });
-  // Read-write/read-only dirs. The rw set is a union of the manager-level
-  // default (flag/env/config, already folded into ctx.allowedDirs) and the
-  // per-dispatch `--rw-bind` entries. The ro set is the per-dispatch
-  // `--ro-bind` list when the dispatch has one, else the global ctx.roBind
-  // (replace, not union). The rw set drops nonexistent paths silently; the ro
+  // Read-write/read-only dirs. Each set is the per-dispatch `--rw-bind` /
+  // `--ro-bind` list when the dispatch has one, else the global list
+  // (ctx.allowedDirs, already resolved from flag/env/config, and ctx.roBind;
+  // replace, not union). The rw set drops nonexistent paths silently; the ro
   // set goes through the same protected mount validation `.taskferry.toml`
   // read_only_paths uses. A path in both sets binds read-write with a warning
   // (rw wins, never an error).
@@ -2577,9 +2578,9 @@ function queueDispatchLaunch(ctx, { id, task, prompt, sessionId, env, noSandbox,
   // wipes -- a resumed task would silently relaunch with the daemon's
   // ambient defaults (no caller env, no per-dispatch binds).
   if (env !== undefined) task.resumeEnv = { ...env };
-  if (allowedDirs?.length) task.resumeAllowedDirs = allowedDirs;
   // An empty list is a real override (it replaces the global list with
   // nothing), so only `undefined` means "no per-dispatch list to persist".
+  if (allowedDirs !== undefined) task.resumeAllowedDirs = allowedDirs;
   if (roBind !== undefined) task.resumeRoBind = roBind;
   if (executorArgs?.length) { task.resumeExecutorArgs = [...executorArgs]; task.executorArgs = [...executorArgs]; }
   task.resumeNoSandbox = noSandbox === true;
@@ -4408,11 +4409,11 @@ function watchdogTick(state, ctx) {
  * @param {string[]} [options.envDenylist] - env var names stripped from every spawned child's
  *   environment, applied last (after the caller-env union), regardless of whether the value
  *   came from the daemon's own ambient environment or the caller.
- * @param {string[]} [options.allowedDirs] - deprecated alias for `rwBind`; extra directories always bound read-write inside the sandbox,
+ * @param {string[]} [options.allowedDirs] - deprecated alias for `rwBind`; shares its layer and unions with it there.
+ * @param {string[]} [options.rwBind] - the extra directories always bound read-write inside the sandbox,
  *   in addition to the auto-detected git-common-dir for a worktree dispatch directory.
- * @param {string[]} [options.rwBind] - extra directories always bound read-write inside the sandbox,
- *   in addition to the auto-detected git-common-dir for a worktree dispatch directory. Resolved as a
- *   union of this, `TASKFERRY_RW_BIND`, and config `rwBind`.
+ *   Replaces, not unions: the first defined of this, `TASKFERRY_RW_BIND`, and config `rwBind` is the
+ *   whole list.
  * @param {string[]} [options.roBind] - the directories and files always bound read-only inside the sandbox.
  *   Replaces, not unions: the first defined of this, `TASKFERRY_RO_BIND`, and config `roBind` is the
  *   whole list. A path that is also bound read-write wins read-write (with a warning).
@@ -4688,24 +4689,11 @@ function resolveFilesystemDenylists(rawOptions, config) {
   };
 }
 
-// `allowedDirs` is kept as the resolved (post-union) value so existing
-// `ctx.allowedDirs` call sites keep working; the deprecated name itself just
-// feeds the union below. It is renamed conceptually to `rwBind` for the
+// `allowedDirs` is kept as the resolved value so existing `ctx.allowedDirs`
+// call sites keep working; the deprecated name itself just feeds the same
+// layer as `rwBind`. It is renamed conceptually to `rwBind` for the
 // user-facing flags/env/config keys.
 const RW_BIND_DEPRECATION_HINT = "TASKFERRY_ALLOWED_DIRS / allowedDirs / --allowed-dirs is deprecated; use rwBind / TASKFERRY_RW_BIND / --rw-bind instead. It will be removed in the next major release.";
-
-/**
- * Unions one directory-list layer into the accumulator. Each layer is either
- * an array (a createTaskManager option / test injection) or a comma-separated
- * string (env var or config key). Returns the merged, deduplicated list.
- * @param {string[]} acc
- * @param {string[]|string|undefined} layer
- * @returns {string[]}
- */
-function unionBindLayer(acc, layer) {
-  if (layer === undefined || layer === null) return acc;
-  return [...new Set([...acc, ...parseBindLayer(layer)])];
-}
 
 /**
  * One directory-list layer as a deduplicated list: an array (a
@@ -4719,65 +4707,74 @@ function parseBindLayer(layer) {
 }
 
 /**
- * Resolves the read-write bind set as a UNION across every layer (flag, env
- * var, config) -- deliberately unlike the replace-semantics `??` chain the
- * numeric options use. `--rw-bind` does not replace `TASKFERRY_RW_BIND` or
- * config `rwBind`; they all contribute. The deprecated `allowedDirs` name
- * feeds the same union, and emits a deprecation warning whenever it
- * contributes (even when the new name is also set).
+ * Resolves a global bind list with REPLACE semantics: the first layer that
+ * sets it is the whole list, and the layers below it are ignored. A layer is
+ * one or more `[source, value]` pairs that share a priority (the deprecated
+ * `allowedDirs` name sits in the same layer as `rwBind`), and the pairs of the
+ * winning layer union with each other. An empty env var or config string is a
+ * defined empty list, not "unset". A non-empty string that parses to no path
+ * (`" "`, `","`) is a typo, not "bind none", and throws rather than silently
+ * shadowing the layers below it.
+ * @param {Array<Array<[string, string[]|string|undefined|null]>>} layers - highest priority first
+ * @param {string} listName - "read-only" or "read-write", for the error text
+ * @returns {string[]}
+ */
+function resolveReplaceBindList(layers, listName) {
+  for (const layer of layers) {
+    const defined = layer.filter(([, value]) => value !== undefined && value !== null);
+    if (!defined.length) continue;
+    const entries = defined.flatMap(([source, value]) => {
+      const parsed = parseBindLayer(/** @type {string[]|string} */ (value));
+      if (!parsed.length && typeof value === "string" && value !== "") {
+        throw new Error(`error: ${source} ${JSON.stringify(value)} names no path\nhelp: list one or more paths, or set it to an empty string to bind none of the global ${listName} list`);
+      }
+      return parsed;
+    });
+    return [...new Set(entries)];
+  }
+  return [];
+}
+
+/**
+ * Resolves the global read-write bind list: the first layer that sets it wins
+ * (createTaskManager option, then `TASKFERRY_RW_BIND`, then config `rwBind`),
+ * the same replace semantics as {@link resolveRoBind}. The deprecated
+ * `allowedDirs` name shares each layer with `rwBind` and unions with it there,
+ * and emits a deprecation warning whenever it is set anywhere (even when a
+ * higher layer shadows it). A per-dispatch `--rw-bind` replaces this list
+ * again at spawn time in resolveUserRwRoBind.
  * @param {Record<string, any>} rawOptions
  * @param {Record<string, any>} config
  * @returns {string[]}
  */
 function resolveRwBind(rawOptions, config) {
-  /** @type {string[]} */
-  let resolved = [];
-  const newNameSet = rawOptions.rwBind !== undefined || process.env.TASKFERRY_RW_BIND !== undefined || config.rwBind !== undefined;
   const oldNameSet = rawOptions.allowedDirs !== undefined || process.env.TASKFERRY_ALLOWED_DIRS !== undefined || config.allowedDirs !== undefined;
   if (oldNameSet) process.stderr.write(`warning: ${RW_BIND_DEPRECATION_HINT}\n`);
-  if (newNameSet) {
-    resolved = unionBindLayer(resolved, rawOptions.rwBind);
-    resolved = unionBindLayer(resolved, process.env.TASKFERRY_RW_BIND);
-    resolved = unionBindLayer(resolved, config.rwBind);
-  }
-  if (oldNameSet) {
-    resolved = unionBindLayer(resolved, rawOptions.allowedDirs);
-    resolved = unionBindLayer(resolved, process.env.TASKFERRY_ALLOWED_DIRS);
-    resolved = unionBindLayer(resolved, config.allowedDirs);
-  }
-  return resolved;
+  return resolveReplaceBindList([
+    [["rwBind option", rawOptions.rwBind], ["allowedDirs option", rawOptions.allowedDirs]],
+    [["TASKFERRY_RW_BIND", process.env.TASKFERRY_RW_BIND], ["TASKFERRY_ALLOWED_DIRS", process.env.TASKFERRY_ALLOWED_DIRS]],
+    [["config rwBind", config.rwBind], ["config allowedDirs", config.allowedDirs]],
+  ], "read-write");
 }
 
 /**
- * Resolves the global read-only bind list: the first defined layer wins
+ * Resolves the global read-only bind list: the first layer that sets it wins
  * (createTaskManager option, then `TASKFERRY_RO_BIND`, then config `roBind`),
- * and the layers below it are ignored. This is REPLACE semantics, the
- * opposite of {@link resolveRwBind}'s union: the list you supply is the whole
- * list, so a narrower layer can drop what a wider one would have bound. An
- * empty env var or config string is a defined empty list, not "unset". A
- * non-empty string that parses to no path (`" "`, `","`) is a typo, not
- * "bind none", and throws rather than silently shadowing the layers below it.
- * A per-dispatch `--ro-bind` replaces this list again at spawn time in
- * resolveUserRwRoBind. (The `read_only_paths` project-config alias is
- * resolved separately at spawn time and stays additive.)
+ * and the layers below it are ignored, so a narrower layer can drop what a
+ * wider one would have bound. A per-dispatch `--ro-bind` replaces this list
+ * again at spawn time in resolveUserRwRoBind. (The `read_only_paths`
+ * project-config alias is resolved separately at spawn time and stays
+ * additive.)
  * @param {Record<string, any>} rawOptions
  * @param {Record<string, any>} config
  * @returns {string[]}
  */
 function resolveRoBind(rawOptions, config) {
-  const layers = [
-    ["roBind option", rawOptions.roBind],
-    ["TASKFERRY_RO_BIND", process.env.TASKFERRY_RO_BIND],
-    ["config roBind", config.roBind],
-  ];
-  const winner = layers.find(([, candidate]) => candidate !== undefined && candidate !== null);
-  if (!winner) return [];
-  const [source, layer] = winner;
-  const entries = parseBindLayer(layer);
-  if (!entries.length && typeof layer === "string" && layer !== "") {
-    throw new Error(`error: ${source} ${JSON.stringify(layer)} names no path\nhelp: list one or more paths, or set it to an empty string to bind none of the global read-only list`);
-  }
-  return entries;
+  return resolveReplaceBindList([
+    [["roBind option", rawOptions.roBind]],
+    [["TASKFERRY_RO_BIND", process.env.TASKFERRY_RO_BIND]],
+    [["config roBind", config.roBind]],
+  ], "read-only");
 }
 
 /**
@@ -5419,10 +5416,10 @@ function buildTaskManagerApi(ctx) {
      * @param {boolean} [params.noSandbox]
      * @param {boolean} [params.noOverlay]
      * @param {"dispatch"|"advisor"} [params.role]
-     * @param {string[]} [params.allowedDirs] - deprecated alias for `rwBind`; extra directories bound read-write for this dispatch only, on
-     *   top of the manager-level default (see createTaskManager's `allowedDirs` option)
-     * @param {string[]} [params.rwBind] - extra directories bound read-write for this dispatch only, on
-     *   top of the manager-level default (see createTaskManager's `allowedDirs` option)
+     * @param {string[]} [params.allowedDirs] - deprecated alias for `rwBind`; unions with it for this dispatch
+     * @param {string[]} [params.rwBind] - the directories bound read-write for this dispatch. Replaces the
+     *   manager-level list (see createTaskManager's `rwBind` option) instead of adding to it; an empty
+     *   array binds none of it.
      * @param {string[]} [params.roBind] - the directories and files bound read-only for this dispatch. Replaces
      *   the manager-level list (see createTaskManager's `roBind` option) instead of adding to it; an empty
      *   array binds none of it.
@@ -8072,6 +8069,20 @@ function buildDispatchPrompt({ role, noOverlay, projectConfig, prompt, outputDir
 }
 
 /**
+ * Folds a dispatch's `rwBind` and its deprecated alias `allowedDirs` into the
+ * one per-dispatch read-write list the launch carries. Both names given are
+ * one list. Neither given stays `undefined`, because that, not an empty list,
+ * is what lets the global read-write list apply.
+ * @param {string[]|undefined} rwBind
+ * @param {string[]|undefined} allowedDirs
+ * @returns {string[]|undefined}
+ */
+function foldRwBind(rwBind, allowedDirs) {
+  if (rwBind === undefined && allowedDirs === undefined) return undefined;
+  return [...new Set([...(rwBind ?? []), ...(allowedDirs ?? [])])];
+}
+
+/**
  * Dispatches a new task: resolves the prior session/executor, validates and
  * normalizes the request, builds the task record, queues its launch, and
  * returns the summary plus a next-step hint. Extracted out of
@@ -8084,9 +8095,7 @@ function buildDispatchPrompt({ role, noOverlay, projectConfig, prompt, outputDir
  */
 function dispatchTask(params, ctx) {
   const { prompt, directory, model, variant, sessionId, internal = false, finalMarker = null, originSessionId, noSandbox = false, noOverlay = false, allowedDirs: dispatchAllowedDirs, rwBind: dispatchRwBind, roBind: dispatchRoBind, executor: executorName, env, role = "dispatch", class: taskClass = null, parentTaskId = null, executorArgs } = params;
-  // `allowedDirs` is the deprecated per-dispatch alias for `rwBind`; fold it
-  // into the modern name so the launch carries one concept.
-  const effectiveRwBind = [...new Set([...(dispatchRwBind ?? []), ...(dispatchAllowedDirs ?? [])])];
+  const effectiveRwBind = foldRwBind(dispatchRwBind, dispatchAllowedDirs);
   ctx.ensureStateLoaded();
   const priorSessionTask = resolvePriorSessionTask(ctx.tasks, sessionId, executorName);
   const executor = resolveDispatchExecutor(priorSessionTask, executorName, ctx.defaultExecutor);

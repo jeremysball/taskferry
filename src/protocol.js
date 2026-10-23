@@ -126,8 +126,8 @@ function isKnownExecutor(value) {
 }
 
 /**
- * An array of non-empty strings; the array itself may be empty. For `roBind`,
- * which replaces the global read-only list, `[]` means "bind none of it".
+ * An array of non-empty strings; the array itself may be empty. For `rwBind`
+ * and `roBind`, which replace the global lists, `[]` means "bind none of it".
  * @param {unknown} value @returns {value is string[]}
  */
 function isStringArray(value) {
@@ -200,7 +200,7 @@ const METHOD_PARAMS = {
       ["noSandbox", isBoolean],
       ["noOverlay", isBoolean],
       ["allowedDirs", isNonEmptyStringArray],
-      ["rwBind", isNonEmptyStringArray],
+      ["rwBind", isStringArray],
       ["roBind", isStringArray],
       ["executor", isKnownExecutor],
       ["class", isNonEmptyString],

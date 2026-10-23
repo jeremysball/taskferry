@@ -265,7 +265,7 @@ describe("bwrap sandboxing: allowedDirs and denylist", () => {
     assert.equal(captured.args[bindIndex - 1], "--bind");
   });
 
-  test("binds a per-dispatch --allowed-dirs entry read-write, in addition to the manager-level default", () => {
+  test("binds a per-dispatch --allowed-dirs entry read-write, replacing the manager-level default", () => {
     let captured = null;
     const managerDefault = mkdtempTracked(AXI_ALLOWED_DIR);
     const perDispatch = mkdtempTracked(AXI_ALLOWED_DIR);
@@ -280,13 +280,11 @@ describe("bwrap sandboxing: allowedDirs and denylist", () => {
 
     mgr.dispatch({ prompt: "hello", directory: os.tmpdir(), allowedDirs: [perDispatch] });
 
-    const managerBindIndex = captured.args.indexOf(managerDefault);
-    assert.notEqual(managerBindIndex, -1);
-    assert.equal(captured.args[managerBindIndex - 1], "--bind");
-
     const perDispatchBindIndex = captured.args.indexOf(perDispatch);
     assert.notEqual(perDispatchBindIndex, -1);
     assert.equal(captured.args[perDispatchBindIndex - 1], "--bind");
+
+    assert.equal(captured.args.indexOf(managerDefault), -1, "the manager-level list is replaced by the per-dispatch one, not added to");
   });
 
   test("silently skips an allowedDirs entry that doesn't exist on disk", () => {

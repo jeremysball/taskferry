@@ -312,6 +312,15 @@ function coerceDirList(value, name) {
 }
 
 /**
+ * A directory list that replaces a global one: the empty string is a real
+ * answer ("bind none of the global list"), anything else must name a path.
+ * @param {string} value
+ * @param {string} name
+ * @returns {string[]}
+ */
+const coerceBindList = (value, name) => (value === "" ? [] : coerceDirList(value, name));
+
+/**
  * @param {string} value
  * @param {string} name
  * @param {string} command
@@ -425,9 +434,9 @@ const FLAGS = {
   "--variant": { allow: ["dispatch", "advisor"], key: "variant" },
   "--session-id": { allow: ["dispatch", "advisor"], key: "sessionId" },
   "--require-final-marker": { allow: ["dispatch"], key: "finalMarker", coerce: coerceFinalMarker },
-  "--rw-bind": { allow: ["dispatch"], key: "rwBind", coerce: coerceDirList },
-  // --ro-bind replaces the global list, so an empty value is a real answer ("bind none of it"), not a missing one.
-  "--ro-bind": { allow: ["dispatch"], key: "roBind", allowEmpty: true, coerce: (value, name) => (value === "" ? [] : coerceDirList(value, name)) },
+  // --rw-bind and --ro-bind replace the global list, so an empty value is a real answer ("bind none of it"), not a missing one.
+  "--rw-bind": { allow: ["dispatch"], key: "rwBind", allowEmpty: true, coerce: coerceBindList },
+  "--ro-bind": { allow: ["dispatch"], key: "roBind", allowEmpty: true, coerce: coerceBindList },
   "--allowed-dirs": { allow: ["dispatch"], key: "allowedDirs", coerce: coerceDirList, deprecate: "--allowed-dirs is deprecated; use --rw-bind (same behavior). It will be removed in the next major release." },
   "--executor": { allow: ["dispatch", "advisor"], key: "executor", coerce: coerceExecutor },
   "--class": { allow: ["dispatch", "advisor"], key: "class" },

@@ -386,12 +386,15 @@ runs wrapped in
   Set it as a comma-separated list of paths — as the `rwBind`/`allowedDirs`
   config field (applies to every dispatch the daemon serves, including
   internal report-summary children) or via `--rw-bind`/`--allowed-dirs
-  <path,path,...>` on a single `taskferry dispatch` call (adds to, not
-  replaces, the config default; unlike the config-level setting,
+  <path,path,...>` on a single `taskferry dispatch` call (replaces, not
+  adds to, the config default; unlike the config-level setting,
   per-dispatch `--rw-bind`/`--allowed-dirs` does not carry over to that
-  dispatch's own summary children). All three layers (flag, env var, config)
-  **union** rather than replace, so a `--rw-bind` flag adds to — never
-  overrides — `TASKFERRY_RW_BIND` and config `rwBind`. `allowedDirs`
+  dispatch's own summary children, which get the global list). The layers
+  (flag, env var, config) do **not** union: the first one that sets the
+  list is the whole list, so a `--rw-bind` flag overrides
+  `TASKFERRY_RW_BIND` and config `rwBind`, and `--rw-bind ""` binds none of
+  the global list. The layer order and the empty-list form are in
+  [config.md](config.md). `allowedDirs`
   (flag/env/config key) still works as a deprecated alias, emits a
   deprecation warning when used, and will be removed in the next major
   release. Entries that don't exist on disk are silently skipped, the same
@@ -406,7 +409,7 @@ runs wrapped in
   same protected-mount safety check as `.taskferry.toml`'s `read_only_paths`
   — an entry that doesn't exist on the host, or that overlaps a protected
   mount (`stateDir`, `runtimeDir`, or the launch directory), is skipped and
-  reported rather than bound. Unlike `rwBind`, `roBind` does not union: the
+  reported rather than bound. Like `rwBind`, `roBind` does not union: the
   list you supply is the whole list. The layer order, the empty-list form,
   and the `AGENTS.md`/`CLAUDE.md` mapping are in
   [config.md](config.md). If the same resolved path appears in both the

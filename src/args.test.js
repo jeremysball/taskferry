@@ -638,9 +638,14 @@ test("--ro-bind accepts an empty value as an explicit empty list (it replaces th
   assert.deepEqual(parseArgs(["dispatch", "--prompt", "x", "--ro-bind="], { cwd: CWD }).options.roBind, []);
 });
 
-test("--rw-bind still rejects an empty value (the rw side unions, so an empty list would mean nothing)", () => {
-  assert.throws(() => parseArgs(["dispatch", "--prompt", "x", "--rw-bind", ""], { cwd: CWD }), /--rw-bind requires a non-empty value/);
-  assert.throws(() => parseArgs(["dispatch", "--prompt", "x", "--rw-bind="], { cwd: CWD }), /--rw-bind requires a non-empty value/);
+test("--rw-bind accepts an empty value as an explicit empty list (it replaces the global list with nothing)", () => {
+  assert.deepEqual(parseArgs(["dispatch", "--prompt", "x", "--rw-bind", ""], { cwd: CWD }).options.rwBind, []);
+  assert.deepEqual(parseArgs(["dispatch", "--prompt", "x", "--rw-bind="], { cwd: CWD }).options.rwBind, []);
+  assert.equal(parseArgs(["dispatch", "--prompt", "x"], { cwd: CWD }).options.rwBind, undefined, "an omitted flag must stay unset, or it would replace the global list with nothing");
+});
+
+test("--allowed-dirs (deprecated) still rejects an empty value: the old name takes no new forms", () => {
+  assert.throws(() => parseArgs(["dispatch", "--prompt", "x", "--allowed-dirs", ""], { cwd: CWD }), /--allowed-dirs requires a non-empty value/);
 });
 
 test("--rw-bind and --ro-bind are rejected on non-dispatch commands", () => {

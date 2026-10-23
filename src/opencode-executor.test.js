@@ -368,6 +368,26 @@ describe("opencodeExecutor().listModelVariantsFn", () => {
       ]);
     });
 
+    test("sandboxAuthFile: a config entry under another name that is a symlink to an instructions file (team.md -> CLAUDE.md) is not bound either", () => {
+      const ex = opencodeExecutor();
+      const realConfigDir = _OPENCODE_CONFIG_DIR;
+      const claudeTarget = `${HOME_DIR}/.dotfiles/claude/CLAUDE.md`;
+      const notesTarget = `${HOME_DIR}/.dotfiles/claude/notes.md`;
+      const result = ex.sandboxAuthFile({
+        homeDir: HOME_DIR, dataDir: DATA_DIR, taskId: TASK_ID, spawnEnv: {},
+        existsFn: (p) => p === realConfigDir,
+        readdirFn: (p) => (p === realConfigDir ? ["team.md", "style.md"] : []),
+        lstatFn: (p) => {
+          if (p === `${realConfigDir}/team.md` || p === `${realConfigDir}/style.md`) return { isSymbolicLink: () => true };
+          return { isSymbolicLink: () => false, isFile: () => true, nlink: 1 };
+        },
+        realpathFn: (p) => (p === `${realConfigDir}/team.md` ? claudeTarget : notesTarget),
+      });
+      // style.md -> notes.md is the control: a symlink to a differently named
+      // file must still bind, or this test would pass for a walk that binds nothing.
+      assert.deepEqual(result.extraRoBinds, [[notesTarget, `${SANDBOXED_CONFIG_DIR}/style.md`]]);
+    });
+
     test("sandboxAuthFile: symlinked config file (opencode.jsonc) resolves to its real dotfiles target", () => {
       const ex = opencodeExecutor();
       const realConfigDir = _OPENCODE_CONFIG_DIR;

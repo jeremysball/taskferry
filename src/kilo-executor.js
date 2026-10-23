@@ -9,6 +9,7 @@ import {
   appendPromptFileArgs,
   buildSummaryPrompt,
   identityLogEvent,
+  instructionsDestFor,
   isSafeBindSource,
   listModelsOutput,
   resolveConfigDirBinds,
@@ -121,7 +122,7 @@ export function kiloExecutor({ execFileFn = execFileAsync } = {}) {
         extraRoBinds,
         // Where an explicitly listed instructions file is mapped; see the
         // opencode executor for why the config walk leaves AGENTS.md unbound.
-        instructionsDest: path.join(sandboxedConfigDir, "AGENTS.md"),
+        instructionsDest: instructionsDestFor(sandboxedConfigDir),
         // kilo keeps its state under XDG_STATE_HOME, its session database
         // under XDG_DATA_HOME, and its cache under XDG_CACHE_HOME. Without
         // those set it finds the host's ~/.local/state/kilo and ~/.cache/kilo

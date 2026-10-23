@@ -93,28 +93,51 @@ protected-mount safety check as `.taskferry.toml`'s `read_only_paths`
 bound). Unlike `rwBind`, it does **not** union: the list you supply is the
 whole list. The first layer that sets it wins, in the order per-dispatch
 `--ro-bind` flag, then the manager option, then `TASKFERRY_RO_BIND`, then the
-config file, and the layers below it are ignored. An empty value
-(`--ro-bind ""`, `TASKFERRY_RO_BIND=`, `"roBind": ""`) is a list of nothing,
-so it replaces a longer list below it with no read-only binds at all. The
-project layer (`.taskferry.toml` `roBind`/`read_only_paths`, next section) is
-separate and stays additive. If a path appears in both
-`rwBind` and `roBind`, read-write wins and a warning is emitted. A `roBind`
-path that overlaps the sandbox deny-list (e.g. `~/.ssh`) is still bound
-read-only — overriding the deny-list is the user's explicit call, same as
-`rwBind` — but a loud warning is emitted at dispatch time. The structural
-mounts (`stateDir`, `runtimeDir`, the launch directory) are never
-overridable: a `roBind` path overlapping one of those is skipped with a
-warning even when it also overlaps the deny-list.
+config file, and the layers below it are ignored. This is the one place that
+order is spelled out; other docs link here.
 
-A file named exactly `AGENTS.md` or `CLAUDE.md` in the resolved `roBind` list is
-also mapped to `AGENTS.md` in an OpenCode or kilo worker's sandboxed config
-directory (`$XDG_CONFIG_HOME/opencode/AGENTS.md` or `.../kilo/AGENTS.md`), in
-addition to being bound at its own path. That is the only way a worker gets
-the host's instructions file: the executors no longer bind the real `AGENTS.md`
-and `CLAUDE.md` from `~/.config/opencode` or `~/.config/kilo` on their own. If the
-list has both names, `AGENTS.md` is used and the other is reported on stderr
-and bound at its own path only. The Pi executor has no such path, so it gets
-the own-path bind alone.
+- An empty value (`--ro-bind ""`, `TASKFERRY_RO_BIND=`, `"roBind": ""`) is a
+  list of nothing, so it replaces a longer list below it with no read-only
+  binds at all. A non-empty value that names no path (`" "`, `","`) is
+  rejected with an error instead, since it is a typo and would otherwise
+  shadow the layers below it.
+- A relative entry resolves against the dispatch's launch directory
+  (`--directory`), the same as `--rw-bind`. A path listed twice is bound once.
+- The project layer (`.taskferry.toml` `roBind`/`read_only_paths`, next
+  section) is separate and stays additive: a per-dispatch `--ro-bind` never
+  drops a project entry.
+- If a path appears in both `rwBind` and `roBind`, read-write wins and a
+  warning is emitted.
+- A `roBind` path that overlaps the sandbox deny-list (e.g. `~/.ssh`) is still
+  bound read-only. Overriding the deny-list is the user's explicit call, same
+  as `rwBind`, but a loud warning is emitted at dispatch time. The structural
+  mounts (`stateDir`, `runtimeDir`, the launch directory) are never
+  overridable: a `roBind` path overlapping one of those is skipped with a
+  warning even when it also overlaps the deny-list.
+- Only `dispatch` takes `--ro-bind`. An `advisor` always gets the global list.
+
+A regular file named exactly `AGENTS.md` or `CLAUDE.md` in that global or
+per-dispatch list is also mapped to `AGENTS.md` in an OpenCode or kilo
+worker's sandboxed config directory (`$XDG_CONFIG_HOME/opencode/AGENTS.md` or
+`.../kilo/AGENTS.md`), in addition to being bound at its own path. That is the
+only way a worker gets the host's instructions file: the executors no longer
+bind the real `AGENTS.md` and `CLAUDE.md` from `~/.config/opencode` or
+`~/.config/kilo` on their own, and the walk of that directory also skips an
+entry under any other name that is a symlink to a file named `AGENTS.md` or
+`CLAUDE.md`.
+
+- Only the global or per-dispatch list is read. A file with one of those
+  names in a project's `.taskferry.toml` `roBind`/`read_only_paths` binds at
+  its own path and is not mapped.
+- A directory, FIFO, or other non-regular file with one of those names is not
+  mapped.
+- If the list has both names, `AGENTS.md` is used and the other is reported on
+  stderr and bound at its own path only. If two files share a name, the first
+  listed is used and the other is reported the same way.
+- If the mapped file is also in the read-write set, read-write wins, so the
+  mapped copy is writable too.
+- The Pi executor has no such path and gets the own-path bind alone. Summary
+  children map nothing.
 
 `sandboxDenylist` uses the same comma-separated grammar as `allowedDirs` —
 extra directories tmpfs-masked inside the bwrap sandbox, merged with the

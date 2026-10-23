@@ -125,19 +125,18 @@ function isKnownExecutor(value) {
   return typeof value === "string" && KNOWN_EXECUTORS.includes(value);
 }
 
-/** @param {unknown} value @returns {value is string[]} */
-function isNonEmptyStringArray(value) {
-  return Array.isArray(value) && value.length > 0 && value.every(isNonEmptyString);
-}
-
 /**
- * Like {@link isNonEmptyStringArray}, but the array itself may be empty. For
- * `roBind`, which replaces the global read-only list, `[]` means "bind none
- * of it".
+ * An array of non-empty strings; the array itself may be empty. For `roBind`,
+ * which replaces the global read-only list, `[]` means "bind none of it".
  * @param {unknown} value @returns {value is string[]}
  */
 function isStringArray(value) {
   return Array.isArray(value) && value.every(isNonEmptyString);
+}
+
+/** @param {unknown} value @returns {value is string[]} */
+function isNonEmptyStringArray(value) {
+  return isStringArray(value) && value.length > 0;
 }
 
 /** @param {unknown} value @returns {value is string[]} */

@@ -314,8 +314,9 @@ runs wrapped in
     this entry a worker's context (and therefore its output) silently picks
     up the caller's personal instructions. The executors do not bind
     `AGENTS.md`/`CLAUDE.md` from `~/.config/opencode` or `~/.config/kilo`
-    either (a symlink there can resolve into `~/.claude`); a worker gets
-    global instructions only when `--ro-bind` names the file
+    either, nor a differently named entry there that is a symlink to one
+    (a symlink there can resolve into `~/.claude`); a worker gets global
+    instructions only when `--ro-bind` names the file
   - `~/.codex` and the other harness data directories:
     `$XDG_DATA_HOME/opencode`, `$XDG_DATA_HOME/kilo`, and Pi's
     `$PI_CODING_AGENT_DIR/sessions` (defaults `~/.local/share/...` and
@@ -406,11 +407,9 @@ runs wrapped in
   — an entry that doesn't exist on the host, or that overlaps a protected
   mount (`stateDir`, `runtimeDir`, or the launch directory), is skipped and
   reported rather than bound. Unlike `rwBind`, `roBind` does not union: the
-  first layer that sets it (per-dispatch `--ro-bind` flag, then the manager
-  option, then `TASKFERRY_RO_BIND`, then config `roBind`) is the whole list,
-  and `--ro-bind ""` is an explicit empty list. A file named `AGENTS.md` or
-  `CLAUDE.md` in the list is also mapped to `AGENTS.md` in an OpenCode or kilo
-  worker's sandboxed config directory. If the same resolved path appears in both the
+  list you supply is the whole list. The layer order, the empty-list form,
+  and the `AGENTS.md`/`CLAUDE.md` mapping are in
+  [config.md](config.md). If the same resolved path appears in both the
   read-write set and the read-only set, it is bound **read-write** and a
   warning is emitted naming the path (read-write wins, never an error) — so
   a `roBind`/`read_only_paths` entry can be promoted to read-write from the

@@ -5,7 +5,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { promisify } from "node:util";
 import { detectOpencodeCliMajor, ensureOpencodeCliMajor } from "./opencode-version.js";
-import { appendPromptFileArgs, buildSummaryPrompt, identityLogEvent, isSafeBindSource, resolveConfigDirBinds } from "./executor-shared.js";
+import { appendPromptFileArgs, buildSummaryPrompt, identityLogEvent, instructionsDestFor, isSafeBindSource, resolveConfigDirBinds } from "./executor-shared.js";
 import { buildV2SandboxSpawn } from "./opencode-auth.js";
 import { resolveXdgDataHome } from "./sandbox.js";
 
@@ -255,7 +255,7 @@ export function opencodeExecutor({ detectCliMajorFn = () => detectOpencodeCliMaj
         // global instructions. The config walk above leaves AGENTS.md
         // unbound; an explicit --ro-bind of an instructions file is mapped
         // here instead.
-        instructionsDest: path.join(sandboxedConfigDir, "AGENTS.md"),
+        instructionsDest: instructionsDestFor(sandboxedConfigDir),
       };
     },
     buildSummaryPrompt,

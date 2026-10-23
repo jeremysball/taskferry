@@ -782,7 +782,7 @@ export function isOutsideDirectory(directory, candidate) {
  * @property {string} runtimeDir
  * @property {string} socketPath
  * @property {(path: string) => boolean} existsFn
- * @property {(path: string) => {isDirectory: () => boolean}|null} statFn
+ * @property {(path: string) => {isDirectory: () => boolean, isFile: () => boolean}|null} statFn
  * @property {(path: string) => {isSymbolicLink: () => boolean}} lstatFn
  * @property {(path: string) => string[]} readdirFn
  * @property {string[]} sandboxDenylist
@@ -1108,7 +1108,10 @@ function overlapsDenyList(p, denyList) {
  */
 function resolveUserRoBind({ launchDirectory, roBind, denyList, stateDir, runtimeDir, existsFn, rwResolved = [] }) {
   if (!roBind.length) return [];
-  const { roBinds, missing, unsafe } = resolveReadOnlyProjectBinds(roBind, {
+  // A relative entry is relative to the dispatch's launch directory, same as
+  // the --rw-bind side, not to wherever the daemon happens to be running.
+  const absolute = [...new Set(roBind.map((entry) => (path.isAbsolute(entry) ? entry : path.resolve(launchDirectory, entry))))];
+  const { roBinds, missing, unsafe } = resolveReadOnlyProjectBinds(absolute, {
     protectedPaths: [stateDir, runtimeDir, launchDirectory],
     existsFn,
   });
@@ -1143,7 +1146,7 @@ function resolveUserRoBind({ launchDirectory, roBind, denyList, stateDir, runtim
  * match is reported and left at its own path.
  * @param {string[]} roResolved - the resolved `--ro-bind` sources
  * @param {string|undefined} instructionsDest
- * @param {(file: string) => {isDirectory: () => boolean}|null} statFn
+ * @param {(file: string) => {isFile: () => boolean}|null} statFn
  * @returns {[string, string][]}
  */
 function instructionsRoBinds(roResolved, instructionsDest, statFn) {
@@ -4422,7 +4425,7 @@ function watchdogTick(state, ctx) {
  * @param {(path: string) => void} [options.rmOverlayTreeFn]
  * @param {() => {checked: boolean, available: boolean, reason?: string}} [options.checkBwrapAvailableFn]
  * @param {(path: string) => boolean} [options.existsFn]
- * @param {(path: string) => {isDirectory: () => boolean}|null} [options.statFn]
+ * @param {(path: string) => {isDirectory: () => boolean, isFile: () => boolean}|null} [options.statFn]
  * @param {(path: string) => string[]} [options.readdirFn]
  * @param {string} [options.runtimeDir]
  * @param {string} [options.cacheDir]
@@ -4701,8 +4704,18 @@ const RW_BIND_DEPRECATION_HINT = "TASKFERRY_ALLOWED_DIRS / allowedDirs / --allow
  */
 function unionBindLayer(acc, layer) {
   if (layer === undefined || layer === null) return acc;
-  const entries = Array.isArray(layer) ? layer : parseAllowedDirs(layer);
-  return [...new Set([...acc, ...entries])];
+  return [...new Set([...acc, ...parseBindLayer(layer)])];
+}
+
+/**
+ * One directory-list layer as a deduplicated list: an array (a
+ * createTaskManager option / test injection) is taken as is, a string (env
+ * var or config key) is split on commas.
+ * @param {string[]|string} layer
+ * @returns {string[]}
+ */
+function parseBindLayer(layer) {
+  return [...new Set(Array.isArray(layer) ? layer : parseAllowedDirs(layer))];
 }
 
 /**
@@ -4741,7 +4754,9 @@ function resolveRwBind(rawOptions, config) {
  * and the layers below it are ignored. This is REPLACE semantics, the
  * opposite of {@link resolveRwBind}'s union: the list you supply is the whole
  * list, so a narrower layer can drop what a wider one would have bound. An
- * empty env var or config string is a defined empty list, not "unset".
+ * empty env var or config string is a defined empty list, not "unset". A
+ * non-empty string that parses to no path (`" "`, `","`) is a typo, not
+ * "bind none", and throws rather than silently shadowing the layers below it.
  * A per-dispatch `--ro-bind` replaces this list again at spawn time in
  * resolveUserRwRoBind. (The `read_only_paths` project-config alias is
  * resolved separately at spawn time and stays additive.)
@@ -4750,8 +4765,19 @@ function resolveRwBind(rawOptions, config) {
  * @returns {string[]}
  */
 function resolveRoBind(rawOptions, config) {
-  const layer = [rawOptions.roBind, process.env.TASKFERRY_RO_BIND, config.roBind].find((candidate) => candidate !== undefined && candidate !== null);
-  return unionBindLayer([], layer);
+  const layers = [
+    ["roBind option", rawOptions.roBind],
+    ["TASKFERRY_RO_BIND", process.env.TASKFERRY_RO_BIND],
+    ["config roBind", config.roBind],
+  ];
+  const winner = layers.find(([, candidate]) => candidate !== undefined && candidate !== null);
+  if (!winner) return [];
+  const [source, layer] = winner;
+  const entries = parseBindLayer(layer);
+  if (!entries.length && typeof layer === "string" && layer !== "") {
+    throw new Error(`error: ${source} ${JSON.stringify(layer)} names no path\nhelp: list one or more paths, or set it to an empty string to bind none of the global read-only list`);
+  }
+  return entries;
 }
 
 /**

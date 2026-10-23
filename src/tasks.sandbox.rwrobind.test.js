@@ -3,7 +3,8 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { makeManager, makeFakeExecutor, fakeChild, mkdtempTracked, preserveEnvVars } from "./tasks.test-helpers.js";
+import { execFileSync } from "node:child_process";
+import { makeManager, makeFakeExecutor, fakeChild, mkdtempTracked, preserveEnvVars, captureStderr } from "./tasks.test-helpers.js";
 
 // The dispatch directory and the bound dirs must NOT share an ancestor
 // relationship: roBind that are descendants of the launch directory are
@@ -12,6 +13,7 @@ import { makeManager, makeFakeExecutor, fakeChild, mkdtempTracked, preserveEnvVa
 // sibling subtree, so they never overlap.
 const launchDir = () => { const d = path.join(mkdtempTracked("axi-ro-dispatch-"), "work"); fs.mkdirSync(d, { recursive: true }); return d; };
 const roTarget = () => mkdtempTracked("axi-ro-target-");
+const writeProjectReadOnlyPaths = (directory, ...paths) => fs.writeFileSync(path.join(directory, ".taskferry.toml"), `read_only_paths = ${JSON.stringify(paths)}\n`);
 // Returns the list of [flag, src, dest] triples for the given bind flag in
 // the captured argv, so tests can assert directly on the constructed argv
 // (the spawn boundary is mocked, so a green run does not prove bwrap
@@ -155,7 +157,7 @@ describe("bwrap sandboxing: --rw-bind and --ro-bind -- binding and conflict reso
   test("a path listed read-only via both --ro-bind and a project's read_only_paths warns exactly once when it also collides with --rw-bind", () => {
     const conflict = roTarget();
     const directory = launchDir();
-    fs.writeFileSync(path.join(directory, ".taskferry.toml"), `read_only_paths = [${JSON.stringify(conflict)}]\n`);
+    writeProjectReadOnlyPaths(directory, conflict);
     const originalWrite = process.stderr.write;
     let warned = "";
     process.stderr.write = (chunk) => { warned += chunk; return true; };
@@ -245,12 +247,57 @@ describe("bwrap sandboxing: --ro-bind replaces the global read-only list instead
     assert.ok(!roPairs.some(([src]) => src === managerDefault), `global roBind must be replaced by the empty per-dispatch list: ${JSON.stringify(roPairs)}`);
   });
 
+  test("a relative --ro-bind path is resolved against the dispatch's launch directory, like --rw-bind", () => {
+    const target = roTarget();
+    const directory = launchDir();
+    const relative = path.relative(directory, target);
+    assert.ok(!path.isAbsolute(relative) && relative.startsWith(".."), `fixture must be a relative path: ${relative}`);
+    assert.ok(!fs.existsSync(path.resolve(relative)), "fixture must not exist relative to the process cwd, or this test proves nothing");
+    const warned = captureStderr(() => {
+      const mgr = makeManager({ ...baseManagerOpts });
+      mgr.dispatch({ prompt: "hello", roBind: [relative], directory });
+    });
+    const roPairs = pairsFor(captured.args, "--ro-bind");
+    assert.ok(roPairs.some(([src, dest]) => src === target && dest === target), `relative roBind not bound at its absolute path: ${JSON.stringify(roPairs)}`);
+    assert.doesNotMatch(warned, /not found on this host/);
+  });
+
+  test("a path listed twice in the replacing list is bound once", () => {
+    const target = roTarget();
+    const mgr = makeManager({ ...baseManagerOpts });
+    mgr.dispatch({ prompt: "hello", directory: launchDir(), roBind: [target, target] });
+    const roPairs = pairsFor(captured.args, "--ro-bind");
+    assert.equal(roPairs.filter(([src]) => src === target).length, 1, `expected a single bind: ${JSON.stringify(roPairs)}`);
+  });
+
+  test("a non-empty TASKFERRY_RO_BIND that names no path throws instead of silently binding nothing", (t) => {
+    const configDir = roTarget();
+    preserveEnvVars(t, ["TASKFERRY_RO_BIND"]);
+    for (const blank of [" ", ",", " , "]) {
+      process.env.TASKFERRY_RO_BIND = blank;
+      assert.throws(
+        () => makeManager({ ...baseManagerOpts, config: { roBind: configDir } }),
+        (err) => err.message.includes("TASKFERRY_RO_BIND") && err.message.includes("names no path"),
+        `blank ${JSON.stringify(blank)} must be rejected`,
+      );
+    }
+    process.env.TASKFERRY_RO_BIND = "";
+    assert.doesNotThrow(() => makeManager({ ...baseManagerOpts, config: { roBind: configDir } }), "an empty string stays the explicit bind-none value");
+  });
+
+  test("a non-empty config roBind string that names no path throws, naming the config key", () => {
+    assert.throws(
+      () => makeManager({ ...baseManagerOpts, config: { roBind: " , " } }),
+      (err) => err.message.includes("config roBind") && err.message.includes("names no path"),
+    );
+  });
+
   test("a per-dispatch --ro-bind does not replace the project's .taskferry.toml read_only_paths (the project layer stays additive)", () => {
     const managerDefault = roTarget();
     const projectDir = roTarget();
     const perDispatch = roTarget();
     const directory = launchDir();
-    fs.writeFileSync(path.join(directory, ".taskferry.toml"), `read_only_paths = [${JSON.stringify(projectDir)}]\n`);
+    writeProjectReadOnlyPaths(directory, projectDir);
     const mgr = makeManager({ ...baseManagerOpts, roBind: [managerDefault] });
     mgr.dispatch({ prompt: "hello", roBind: [perDispatch], directory });
     const roPairs = pairsFor(captured.args, "--ro-bind");
@@ -413,15 +460,10 @@ describe("bwrap sandboxing: an explicit --ro-bind instructions file is mapped to
   test("AGENTS.md wins over CLAUDE.md when both are listed, and the loser is reported, not mapped", () => {
     const agents = instructionsFile("AGENTS.md");
     const claude = instructionsFile("CLAUDE.md");
-    const originalWrite = process.stderr.write;
-    let warned = "";
-    process.stderr.write = (chunk) => { warned += chunk; return true; };
-    try {
+    const warned = captureStderr(() => {
       const mgr = makeManager({ ...baseManagerOpts, defaultExecutor: instructionsExecutor(dest) });
       mgr.dispatch({ prompt: "hello", directory: launchDir(), roBind: [claude, agents] });
-    } finally {
-      process.stderr.write = originalWrite;
-    }
+    });
     const roPairs = pairsFor(captured.args, "--ro-bind");
     assert.ok(roPairs.some(([src, d]) => src === agents && d === dest), `AGENTS.md not mapped: ${JSON.stringify(roPairs)}`);
     assert.ok(!roPairs.some(([src, d]) => src === claude && d === dest), `CLAUDE.md must not also be mapped: ${JSON.stringify(roPairs)}`);
@@ -440,6 +482,67 @@ describe("bwrap sandboxing: an explicit --ro-bind instructions file is mapped to
     assert.ok(roPairs.some(([src, d]) => src === notes && d === notes), `NOTES.md not bound at its own path: ${JSON.stringify(roPairs)}`);
     assert.ok(roPairs.some(([src, d]) => src === dirNamedAgents && d === dirNamedAgents), `AGENTS.md directory not bound at its own path: ${JSON.stringify(roPairs)}`);
     assert.ok(!roPairs.some(([, d]) => d === dest), `nothing should be mapped to instructionsDest: ${JSON.stringify(roPairs)}`);
+  });
+
+  test("two different files with the same name: the first listed is mapped, the other is reported and left at its own path", () => {
+    const first = instructionsFile("AGENTS.md");
+    const second = instructionsFile("AGENTS.md");
+    const warned = captureStderr(() => {
+      const mgr = makeManager({ ...baseManagerOpts, defaultExecutor: instructionsExecutor(dest) });
+      mgr.dispatch({ prompt: "hello", directory: launchDir(), roBind: [first, second] });
+    });
+    const roPairs = pairsFor(captured.args, "--ro-bind");
+    assert.ok(roPairs.some(([src, d]) => src === first && d === dest), `first-listed AGENTS.md not mapped: ${JSON.stringify(roPairs)}`);
+    assert.ok(!roPairs.some(([src, d]) => src === second && d === dest), `second AGENTS.md must not be mapped: ${JSON.stringify(roPairs)}`);
+    assert.ok(roPairs.some(([src, d]) => src === second && d === second), "the second still binds at its own path");
+    assert.ok(warned.includes(`not mapping ${second}`), `warning must name the unmapped file: ${warned}`);
+  });
+
+  test("an instructions file named only in the project's .taskferry.toml binds at its own path and is not mapped", () => {
+    const file = instructionsFile("AGENTS.md");
+    const directory = launchDir();
+    writeProjectReadOnlyPaths(directory, file);
+    const mgr = makeManager({ ...baseManagerOpts, defaultExecutor: instructionsExecutor(dest) });
+    mgr.dispatch({ prompt: "hello", directory });
+    const roPairs = pairsFor(captured.args, "--ro-bind");
+    assert.ok(roPairs.some(([src, d]) => src === file && d === file), `project-layer file must still bind at its own path: ${JSON.stringify(roPairs)}`);
+    assert.ok(!roPairs.some(([, d]) => d === dest), `project-layer file must not be mapped to instructionsDest: ${JSON.stringify(roPairs)}`);
+  });
+
+  test("the same instructions file listed twice is one file: mapped once, no rival warning", () => {
+    const file = instructionsFile("AGENTS.md");
+    const warned = captureStderr(() => {
+      const mgr = makeManager({ ...baseManagerOpts, defaultExecutor: instructionsExecutor(dest) });
+      mgr.dispatch({ prompt: "hello", directory: launchDir(), roBind: [file, file] });
+    });
+    const roPairs = pairsFor(captured.args, "--ro-bind");
+    assert.equal(roPairs.filter(([src, d]) => src === file && d === dest).length, 1, `expected exactly one mapping: ${JSON.stringify(roPairs)}`);
+    assert.equal(roPairs.filter(([src, d]) => src === file && d === file).length, 1, `expected exactly one own-path bind: ${JSON.stringify(roPairs)}`);
+    assert.doesNotMatch(warned, /only one instructions file/);
+  });
+
+  test("a FIFO named AGENTS.md is not mapped: the harness would block opening it", () => {
+    const fifo = path.join(roTarget(), "AGENTS.md");
+    execFileSync("mkfifo", [fifo]);
+    assert.ok(fs.statSync(fifo).isFIFO(), "fixture must be a real FIFO, or this test proves nothing");
+    const mgr = makeManager({ ...baseManagerOpts, defaultExecutor: instructionsExecutor(dest) });
+    mgr.dispatch({ prompt: "hello", directory: launchDir(), roBind: [fifo] });
+    const roPairs = pairsFor(captured.args, "--ro-bind");
+    assert.ok(roPairs.some(([src, d]) => src === fifo && d === fifo), `FIFO still binds at its own path: ${JSON.stringify(roPairs)}`);
+    assert.ok(!roPairs.some(([, d]) => d === dest), `a FIFO must not be mapped to instructionsDest: ${JSON.stringify(roPairs)}`);
+  });
+
+  test("an instructions file that is also --rw-bind'ed is promoted: read-write wins, and the mapped destination becomes writable too", () => {
+    const file = instructionsFile("AGENTS.md");
+    const warned = captureStderr(() => {
+      const mgr = makeManager({ ...baseManagerOpts, defaultExecutor: instructionsExecutor(dest) });
+      mgr.dispatch({ prompt: "hello", directory: launchDir(), roBind: [file], rwBind: [file] });
+    });
+    assert.match(warned, /read-write wins/);
+    const bindPairs = pairsFor(captured.args, "--bind");
+    const roPairs = pairsFor(captured.args, "--ro-bind");
+    assert.ok(bindPairs.some(([src, d]) => src === file && d === dest), `mapped destination must be writable: ${JSON.stringify(bindPairs)}`);
+    assert.ok(!roPairs.some(([src]) => src === file), `no read-only bind of the file may remain: ${JSON.stringify(roPairs)}`);
   });
 
   test("an executor with no instructionsDest (pi) gets the file at its own path only", () => {

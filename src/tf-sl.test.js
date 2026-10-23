@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { after, test } from "node:test";
 import { fileURLToPath } from "node:url";
+import { waitFor as waitForPredicate } from "./tasks.test-helpers.js";
 
 const STATUSLINE = fileURLToPath(new URL("./tf-sl.sh", import.meta.url));
 const REFRESH_DID_NOT_PUBLISH = "background refresh did not publish a snapshot";
@@ -111,14 +112,7 @@ function findSnapshot(fixture) {
   }
 }
 
-async function waitFor(predicate, message, timeoutMs = 3000) {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (predicate()) return undefined;
-    await new Promise((resolve) => setTimeout(resolve, 25));
-  }
-  return assert.fail(message);
-}
+const waitFor = (predicate, message) => waitForPredicate(predicate, message, 3000, 25);
 
 test("returns a cold statusline immediately, then the raw fields for the cached task", async () => {
   const fixture = makeFixture();

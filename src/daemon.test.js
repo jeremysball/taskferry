@@ -8,6 +8,7 @@ import path from "node:path";
 import { MAX_LIST_ROWS, prepareSocket, removeStaleSocketIfUnchanged, startDaemon } from "./daemon.js";
 import { resolveRuntimeDir } from "./paths.js";
 import { setOpencodeExecutorOverride } from "./executor.js";
+import { waitFor } from "./tasks.test-helpers.js";
 
 // A few tests below boot a real task manager; pin the opencode CLI major so
 // its background warm-up never runs the host's real `opencode --version`.
@@ -31,6 +32,20 @@ function profilingTestEnv(overrides = {}) {
   delete env.TASKFERRY_SLOW_REQUEST_MS;
   delete env.TASKFERRY_PERF_LOG_MAX_BYTES;
   return { ...env, ...overrides };
+}
+
+function readPerfLog(filePath) {
+  const text = fs.readFileSync(filePath, "utf8");
+  return text.trim().split("\n").filter(Boolean).map((line) => JSON.parse(line));
+}
+
+function readPerfLogIfExists(filePath) {
+  try {
+    return readPerfLog(filePath);
+  } catch (error) {
+    if (error.code === "ENOENT") return [];
+    throw error;
+  }
 }
 
 function temporaryPaths(t) {
@@ -675,10 +690,12 @@ describe("Unix socket daemon: profiling (request-timing edge cases)", () => {
     // arrives, so this request's promise never settles -- fire it without
     // awaiting and instead wait for the server-side write/destroy to happen.
     void peer.request("health-1", SYSTEM_HEALTH);
-    await new Promise((resolve) => setTimeout(resolve, 50));
-
     const perfLogPath = path.join(paths.stateDir, "perf.log");
-    const lines = fs.readFileSync(perfLogPath, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+    await waitFor(
+      () => readPerfLogIfExists(perfLogPath).some((line) => line.method === SYSTEM_HEALTH),
+      "expected a perf.log entry for the oversized-response request"
+    );
+    const lines = readPerfLog(perfLogPath);
     const entry = lines.find((line) => line.method === SYSTEM_HEALTH);
     assert.ok(entry, "expected a perf.log entry for the oversized-response request");
     assert.equal(entry.ok, false, "ok should be false when writeMessage could not deliver the response");
@@ -702,10 +719,15 @@ describe("Unix socket daemon: profiling (request-timing edge cases)", () => {
     assert.equal(rejected.error.code, "SERVER_BUSY");
     await slow;
     peer.socket.write("not valid json\n");
-    await new Promise((resolve) => setTimeout(resolve, 50));
-
     const perfLogPath = path.join(paths.stateDir, "perf.log");
-    const lines = fs.readFileSync(perfLogPath, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+    await waitFor(
+      () => {
+        const lines = readPerfLogIfExists(perfLogPath);
+        return lines.some((line) => line.method === SYSTEM_HEALTH && line.ok === false) && lines.some((line) => line.method === "parse_error" && line.ok === false);
+      },
+      "expected both the SERVER_BUSY rejection and the malformed request to be logged"
+    );
+    const lines = readPerfLog(perfLogPath);
     assert.ok(lines.some((line) => line.method === SYSTEM_HEALTH && line.ok === false), "expected the SERVER_BUSY rejection to be logged");
     assert.ok(lines.some((line) => line.method === "parse_error" && line.ok === false), "expected the malformed request to be logged");
   });
@@ -773,21 +795,12 @@ describe("Unix socket daemon: profiling (request-timing edge cases)", () => {
 
     peer.socket.write("x".repeat(1024 * 1024 + 1));
 
-    // Poll instead of sleeping a fixed 50ms: under a loaded full-suite run
-    // the daemon can take longer than that to create perf.log, and the read
-    // then fails with ENOENT rather than a useful assertion.
     const perfLogPath = path.join(paths.stateDir, "perf.log");
-    const deadline = Date.now() + 2000;
-    let lines = [];
-    while (Date.now() < deadline) {
-      try {
-        lines = fs.readFileSync(perfLogPath, "utf8").trim().split("\n").filter(Boolean).map((line) => JSON.parse(line));
-      } catch {
-        lines = [];
-      }
-      if (lines.some((line) => line.method === "request_too_large" && line.ok === false)) break;
-      await new Promise((resolve) => setTimeout(resolve, 10));
-    }
+    await waitFor(
+      () => readPerfLogIfExists(perfLogPath).some((line) => line.method === "request_too_large" && line.ok === false),
+      "expected the oversized buffer to be logged"
+    );
+    const lines = readPerfLog(perfLogPath);
     assert.ok(lines.some((line) => line.method === "request_too_large" && line.ok === false), "expected the oversized buffer to be logged");
   });
 });
@@ -880,7 +893,7 @@ describe("Unix socket daemon: oversized response downgrade", () => {
     t.after(() => peer.close());
 
     void peer.request("list-1", "task.list", {});
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    await waitFor(() => peer.socket.destroyed, "expected the undersized response to destroy the socket");
 
     assert.equal(peer.socket.destroyed, true);
   });

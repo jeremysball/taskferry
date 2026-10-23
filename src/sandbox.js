@@ -3,6 +3,8 @@ import path from "node:path";
 import { errCode } from "./errors.js";
 import { defaultRunCommandAsync } from "./setup.js";
 
+export const BWRAP_TMPFS_ROOT = "/tmp";
+
 /**
  * @param {NodeJS.Platform} [platform]
  * @returns {boolean}
@@ -261,7 +263,7 @@ export function resolveGitDir(directory, runCommand = defaultRunCommand) {
  */
 export function buildBwrapBaseArgs({ denyList }) {
   const args = ["--ro-bind", "/", "/"];
-  args.push("--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp");
+  args.push("--proc", "/proc", "--dev", "/dev", "--tmpfs", BWRAP_TMPFS_ROOT);
   for (const denied of denyList) {
     args.push("--tmpfs", denied);
   }

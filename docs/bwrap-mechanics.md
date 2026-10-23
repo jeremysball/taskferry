@@ -148,8 +148,10 @@ taskferry-cow-<task-id>/
 * `work/main/work` (and each `work/extra/<slug>/work`) is overlayfs-internal,
   owned by the kernel. Listing it after teardown fails with
   `Permission denied`; that is expected, not data loss.
-* `merged/` appears only transiently during non-git diff extraction
-  (`src/changeset.js:402`) and is not stored.
+* No `merged/` directory exists under the overlay root. Non-git extraction
+  and apply mount the merged view at `/tmp/taskferry-merged` inside bwrap's
+  private `--tmpfs /tmp` (`buildMergedViewBwrapArgs` in
+  `src/changeset.js`), so it never appears in the host overlay layout.
 
 Plain `--rw-bind`/`--ro-bind` entries (`runtimeDir`, user `--rw-bind` paths)
 stay ordinary binds outside this root: writes there land on the host

@@ -12,6 +12,7 @@
 // option-resolution helper functions live here too -- each kept under the
 // 15-cyclomatic / 80-line-per-function cap.
 
+import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -117,6 +118,23 @@ export async function waitForCaptured(get, timeoutMs = 2000) {
     if (Date.now() >= deadline) throw new Error(`spawn was never captured within ${timeoutMs}ms`);
     await new Promise((resolve) => setTimeout(resolve, 5));
   }
+}
+
+/**
+ * Polls a predicate until it returns true or the deadline expires.
+ * @param {() => boolean | Promise<boolean>} predicate
+ * @param {string} message
+ * @param {number} [timeoutMs]
+ * @param {number} [intervalMs]
+ * @returns {Promise<void>}
+ */
+export async function waitFor(predicate, message, timeoutMs = 2000, intervalMs = 10) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (await predicate()) return undefined;
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  }
+  return assert.fail(message);
 }
 
 /**

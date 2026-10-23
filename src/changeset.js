@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
-import { buildBwrapArgs, buildBwrapBaseArgs } from "./sandbox.js";
+import { buildBwrapArgs, buildBwrapBaseArgs, BWRAP_TMPFS_ROOT } from "./sandbox.js";
 
 /** @typedef {{status: number|null, stdout: string, stderr: string, error?: Error}} CommandResult */
 
@@ -23,7 +23,7 @@ const DIFF_MAX_BUFFER_BYTES = 200 * 1024 * 1024;
 // --tmpfs /tmp, never under the host overlay root. The overlay root moved to
 // the XDG runtime dir in taskferry#286; /run/user is read-only inside the
 // sandbox, so a --dir there fails with EROFS before diff ever runs.
-const MERGED_MOUNT_POINT = "/tmp/taskferry-merged";
+const MERGED_MOUNT_POINT = path.join(BWRAP_TMPFS_ROOT, "taskferry-merged");
 
 /**
  * @param {string} command
@@ -78,24 +78,6 @@ function sleepSync(ms) {
  */
 function isOverlayMountBusy(result) {
   return OVERLAY_MOUNT_BUSY_PATTERN.test(result.stderr || "") || OVERLAY_MOUNT_BUSY_PATTERN.test(result.error?.message || "");
-}
-
-/**
- * Whether an extraction bwrap result is a failure rather than a diff that
- * found (or did not find) changes. bwrap itself exits 1 on a setup failure
- * (its own die() convention), colliding with diff's exit-1-for-differences-
- * found: a surviving overlay-mount-busy failure, or any other setup failure
- * that exits 1 with an empty stdout and a non-empty stderr (e.g. EROFS on
- * the merged mount point), must throw or the worker's edits get silently
- * discarded as "no changes".
- * @param {CommandResult} result
- * @returns {boolean}
- */
-function isExtractionFailure(result) {
-  if (result.error) return true;
-  if (isOverlayMountBusy(result)) return true;
-  const emptyExitOne = result.status === 1 && result.stdout.length === 0 && result.stderr.trim().length > 0;
-  return emptyExitOne || (result.status !== 0 && result.status !== 1);
 }
 
 /**
@@ -349,6 +331,20 @@ export function subOverlaySlug(targetPath) {
 }
 
 /**
+ * @param {string} directory
+ * @param {string} runtimeDir
+ * @param {string} mergedMountPoint
+ */
+function assertMergedMountPointNotShadowed(directory, runtimeDir, mergedMountPoint) {
+  for (const source of [directory, runtimeDir]) {
+    const relative = path.relative(path.resolve(source), path.resolve(mergedMountPoint));
+    if (relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative))) {
+      throw new Error(`merged mount point ${mergedMountPoint} is inside ${source}; a later bind would shadow it`);
+    }
+  }
+}
+
+/**
  * Mounts directory's merged (overlay) view at a *separate* synthetic
  * mountpoint instead of at directory itself, so directory can be diffed
  * against its own merged view in the same sandbox (git targets don't need
@@ -383,6 +379,7 @@ export function subOverlaySlug(targetPath) {
  * @returns {string[]}
  */
 export function buildMergedViewBwrapArgs({ directory, overlay, runtimeDir, denyList, mergedMountPoint, writable = false, stateDir: _stateDir, homeDir: _homeDir }) {
+  assertMergedMountPointNotShadowed(directory, runtimeDir, mergedMountPoint);
   const args = buildBwrapBaseArgs({ denyList });
   args.push("--dir", mergedMountPoint);
   args.push("--overlay-src", directory, "--overlay", overlay.upperDir, overlay.workDir, mergedMountPoint);
@@ -422,18 +419,18 @@ export function extractNonGitDiff({
   mkdirFn = (dirPath) => fs.mkdirSync(dirPath, { recursive: true, mode: 0o700 }),
   sleepFn = sleepSync,
 }) {
-  const mergedMountPoint = MERGED_MOUNT_POINT;
-  const bwrapArgs = buildMergedViewBwrapArgs({ directory, overlay, stateDir, runtimeDir, homeDir, denyList, mergedMountPoint, writable: false });
+  const bwrapArgs = buildMergedViewBwrapArgs({ directory, overlay, stateDir, runtimeDir, homeDir, denyList, mergedMountPoint: MERGED_MOUNT_POINT, writable: false });
   // -N (--new-file) treats files missing from one side as empty, so a file
   // created inside the overlay shows its full content (a plain -ru would
   // collapse it to a bare "Only in ... merged" line with no content, and
   // the apply step would then lose the new file entirely).
-  const result = runExtractionBwrap(runCommand, [...bwrapArgs, "--", "diff", "-ruN", directory, mergedMountPoint], sleepFn);
-  // diff exits 0 = identical, 1 = differences found (success for us), >=2 =
-  // real trouble. A bwrap failure (bad mount, timeout, killed) must not be
-  // indistinguishable from "no changes" -- throw on anything but 0/1 so the
-  // caller can record the failure and keep the overlay for recovery.
-  if (isExtractionFailure(result)) {
+  const result = runExtractionBwrap(runCommand, [...bwrapArgs, "--", "diff", "-ruN", directory, MERGED_MOUNT_POINT], sleepFn);
+  // GNU diff writes differences to stdout and exits 1; an exit-1 result with
+  // empty stdout is a bwrap setup failure or a silent death, never a clean
+  // "no changes". Other nonzero statuses are failures too.
+  const emptyExitOne = result.status === 1 && result.stdout.length === 0;
+  const setupFailure = result.error || isOverlayMountBusy(result);
+  if (setupFailure || emptyExitOne || (result.status !== 0 && result.status !== 1)) {
     throw new Error(`error: non-git diff extraction failed for ${directory} (exit ${result.status ?? "null"}): ${(result.stderr || result.error?.message || "unknown error").trim()}`);
   }
   mkdirFn(pathDirname(diffPath));
@@ -543,15 +540,14 @@ function applyNonGitChangeset({ directory, overlay, stateDir, runtimeDir, homeDi
   if (overlay == null) {
     throw new Error(NON_GIT_APPLY_ERROR);
   }
-  const mergedMountPoint = MERGED_MOUNT_POINT;
-  const bwrapArgs = buildMergedViewBwrapArgs({ directory, overlay, stateDir, runtimeDir, homeDir, denyList, mergedMountPoint, writable: true });
+  const bwrapArgs = buildMergedViewBwrapArgs({ directory, overlay, stateDir, runtimeDir, homeDir, denyList, mergedMountPoint: MERGED_MOUNT_POINT, writable: true });
   // --delay-updates (review finding #9): rsync stages each updated file and
   // renames them all into place in the final update phase, so an interrupted
   // apply leaves old files intact rather than a half-mutated tree. Not fully
   // transactional (deletions still apply incrementally), but retryable: a
   // failed apply leaves changesetStatus "pending" and never runs cleanup
   // (spec §5.4), so the overlay survives for a second attempt.
-  const script = `rsync -a --delete --delay-updates ${shQuote(mergedMountPoint)}/ ${shQuote(directory)}/`;
+  const script = `rsync -a --delete --delay-updates ${shQuote(MERGED_MOUNT_POINT)}/ ${shQuote(directory)}/`;
   // Same overlay-mount-busy race as extraction (taskferry#326): this bwrap
   // call mounts its own overlay merged view, which can race the async
   // mount-namespace teardown of whatever bwrap just exited before this

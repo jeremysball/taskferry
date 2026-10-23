@@ -33,7 +33,7 @@ const T1_WORK = "/tmp/taskferry-cow-t1/work/main";
 const T1_MERGED = "/tmp/taskferry-cow-t1/merged";
 const MERGED_MOUNT = "/tmp/taskferry-merged";
 const RUNTIME_OVERLAY_ROOT = "/run/user/1000/taskferry/overlay/taskferry-cow-t1";
-const EROFS_STDERR = "bwrap: Can't create file /run/user/1000/taskferry/overlay/taskferry-cow-t1/merged: Read-only file system\n";
+const EROFS_STDERR = `bwrap: Can't create file ${RUNTIME_OVERLAY_ROOT}/merged: Read-only file system\n`;
 const TMP_DIR = "/tmp";
 const UPPER_DIR = "/tmp/u";
 const WORK_DIR = "/tmp/w";
@@ -150,6 +150,19 @@ describe("buildMergedViewBwrapArgs()", () => {
     assert.equal(args[bindIndex + 1], REPO_DIR);
     assert.equal(args[bindIndex + 2], REPO_DIR);
   });
+
+  test("rejects a merged mount point that a later directory or runtime bind would shadow", () => {
+    const base = {
+      overlay: { upperDir: UPPER_DIR, workDir: WORK_DIR },
+      stateDir: STATE_DIR,
+      runtimeDir: RUNTIME_DIR,
+      homeDir: HOME_DIR,
+      denyList: [],
+      mergedMountPoint: "/tmp/taskferry-merged",
+    };
+    assert.throws(() => buildMergedViewBwrapArgs({ ...base, directory: "/tmp" }), /would shadow it/);
+    assert.throws(() => buildMergedViewBwrapArgs({ ...base, directory: REPO_DIR, runtimeDir: "/tmp" }), /would shadow it/);
+  });
 });
 
 describe("buildMergedViewBwrapArgs() byte-identical output (Task 5: post-refactor regression)", () => {
@@ -214,7 +227,7 @@ describe("extractNonGitDiff()", () => {
     const written = {};
     const runCommand = (_command, args) => {
       capturedArgs = args;
-      return { status: 1, stdout: "Only in /tmp/taskferry-cow-t1/merged: newfile.txt\n", stderr: "", error: null };
+      return { status: 1, stdout: `Only in ${MERGED_MOUNT}: newfile.txt\n`, stderr: "", error: null };
     };
     const result = extractNonGitDiff({
       runCommand,
@@ -233,7 +246,7 @@ describe("extractNonGitDiff()", () => {
     assert.deepEqual(capturedArgs.slice(-4), ["diff", "-ruN", REPO_DIR, MERGED_MOUNT]);
     assert.equal(capturedArgs.at(-1), MERGED_MOUNT);
     assert.equal(result.hasChanges, true);
-    assert.equal(written[DIFF_PATCH], "Only in /tmp/taskferry-cow-t1/merged: newfile.txt\n");
+    assert.equal(written[DIFF_PATCH], `Only in ${MERGED_MOUNT}: newfile.txt\n`);
   });
 
   test("diff -ruN exit status 0 or 1 are both success (0 = no diff, 1 = differences found)", () => {
@@ -246,6 +259,20 @@ describe("extractNonGitDiff()", () => {
       diffPath: DIFF_PATCH, writeFileFn: () => {}, mkdirFn: () => {},
     });
     assert.equal(result.hasChanges, false);
+  });
+
+  test("diff -ruN exit 1 with empty stdout is a failure, not a clean no-change result", () => {
+    const runCommand = () => ({ status: 1, stdout: "", stderr: "", error: null });
+    assert.throws(
+      () => extractNonGitDiff({
+        runCommand,
+        directory: REPO_DIR,
+        overlay: { root: T1_ROOT, upperDir: UPPER_DIR, workDir: WORK_DIR },
+        stateDir: STATE_DIR, runtimeDir: RUNTIME_DIR, homeDir: HOME_DIR, denyList: [],
+        diffPath: DIFF_PATCH, writeFileFn: () => {}, mkdirFn: () => {},
+      }),
+      /non-git diff extraction failed/,
+    );
   });
 });
 

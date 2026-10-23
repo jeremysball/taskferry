@@ -772,10 +772,22 @@ describe("Unix socket daemon: profiling (request-timing edge cases)", () => {
     t.after(() => peer.close());
 
     peer.socket.write("x".repeat(1024 * 1024 + 1));
-    await new Promise((resolve) => setTimeout(resolve, 50));
 
+    // Poll instead of sleeping a fixed 50ms: under a loaded full-suite run
+    // the daemon can take longer than that to create perf.log, and the read
+    // then fails with ENOENT rather than a useful assertion.
     const perfLogPath = path.join(paths.stateDir, "perf.log");
-    const lines = fs.readFileSync(perfLogPath, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+    const deadline = Date.now() + 2000;
+    let lines = [];
+    while (Date.now() < deadline) {
+      try {
+        lines = fs.readFileSync(perfLogPath, "utf8").trim().split("\n").filter(Boolean).map((line) => JSON.parse(line));
+      } catch {
+        lines = [];
+      }
+      if (lines.some((line) => line.method === "request_too_large" && line.ok === false)) break;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
     assert.ok(lines.some((line) => line.method === "request_too_large" && line.ok === false), "expected the oversized buffer to be logged");
   });
 });

@@ -633,6 +633,16 @@ test("--rw-bind / --ro-bind require at least one path", () => {
   assert.throws(() => parseArgs(["dispatch", "--prompt", "x", "--ro-bind", ","], { cwd: CWD }), /--ro-bind must contain at least one path/);
 });
 
+test("--ro-bind accepts an empty value as an explicit empty list (it replaces the global list with nothing)", () => {
+  assert.deepEqual(parseArgs(["dispatch", "--prompt", "x", "--ro-bind", ""], { cwd: CWD }).options.roBind, []);
+  assert.deepEqual(parseArgs(["dispatch", "--prompt", "x", "--ro-bind="], { cwd: CWD }).options.roBind, []);
+});
+
+test("--rw-bind still rejects an empty value (the rw side unions, so an empty list would mean nothing)", () => {
+  assert.throws(() => parseArgs(["dispatch", "--prompt", "x", "--rw-bind", ""], { cwd: CWD }), /--rw-bind requires a non-empty value/);
+  assert.throws(() => parseArgs(["dispatch", "--prompt", "x", "--rw-bind="], { cwd: CWD }), /--rw-bind requires a non-empty value/);
+});
+
 test("--rw-bind and --ro-bind are rejected on non-dispatch commands", () => {
   assert.throws(() => parseArgs(["advisor", "--prompt", "x", "--model", "m", "--rw-bind", "/a"], { cwd: CWD }), /unknown flag --rw-bind/);
   assert.throws(() => parseArgs(["advisor", "--prompt", "x", "--model", "m", "--ro-bind", "/a"], { cwd: CWD }), /unknown flag --ro-bind/);

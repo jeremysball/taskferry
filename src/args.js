@@ -67,6 +67,7 @@ export { UsageError };
  *   allow?: string[],
  *   key?: string,
  *   bool?: boolean,
+ *   allowEmpty?: boolean,
  *   coerce?: (value: string, name: string, command: string) => unknown,
  *   deprecate?: string,
  *   mention?: string,
@@ -185,16 +186,17 @@ function parseDuration(value, flag) {
  * @param {number} index
  * @param {string} flag
  * @param {string|undefined} inlineValue
+ * @param {boolean} [allowEmpty] - accept `--flag ""` / `--flag=` as the empty string (default: reject)
  * @returns {{value: string, nextIndex: number}}
  */
-export function requireValue(argv, index, flag, inlineValue) {
+export function requireValue(argv, index, flag, inlineValue, allowEmpty = false) {
   if (inlineValue !== undefined) {
-    if (!inlineValue) throw new UsageError(`${flag} requires a non-empty value`, `Run ${flag} with a value`);
+    if (!inlineValue && !allowEmpty) throw new UsageError(`${flag} requires a non-empty value`, `Run ${flag} with a value`);
     return { value: inlineValue, nextIndex: index };
   }
   const value = argv[index + 1];
   if (value === undefined || value.startsWith("--")) throw new UsageError(`${flag} requires a value`, `Run ${flag} with a value`);
-  if (!value) throw new UsageError(`${flag} requires a non-empty value`, `Run ${flag} with a value`);
+  if (!value && !allowEmpty) throw new UsageError(`${flag} requires a non-empty value`, `Run ${flag} with a value`);
   return { value, nextIndex: index + 1 };
 }
 
@@ -424,7 +426,8 @@ const FLAGS = {
   "--session-id": { allow: ["dispatch", "advisor"], key: "sessionId" },
   "--require-final-marker": { allow: ["dispatch"], key: "finalMarker", coerce: coerceFinalMarker },
   "--rw-bind": { allow: ["dispatch"], key: "rwBind", coerce: coerceDirList },
-  "--ro-bind": { allow: ["dispatch"], key: "roBind", coerce: coerceDirList },
+  // --ro-bind replaces the global list, so an empty value is a real answer ("bind none of it"), not a missing one.
+  "--ro-bind": { allow: ["dispatch"], key: "roBind", allowEmpty: true, coerce: (value, name) => (value === "" ? [] : coerceDirList(value, name)) },
   "--allowed-dirs": { allow: ["dispatch"], key: "allowedDirs", coerce: coerceDirList, deprecate: "--allowed-dirs is deprecated; use --rw-bind (same behavior). It will be removed in the next major release." },
   "--executor": { allow: ["dispatch", "advisor"], key: "executor", coerce: coerceExecutor },
   "--class": { allow: ["dispatch", "advisor"], key: "class" },
@@ -570,7 +573,7 @@ function consumeFlag(ctx, rest, index, token) {
     }
     return handleValueFlag(ctx, name, def, { value, nextIndex });
   }
-  const required = requireValue(rest, index, name, inlineValue);
+  const required = requireValue(rest, index, name, inlineValue, def.allowEmpty);
   return handleValueFlag(ctx, name, def, required);
 }
 

@@ -178,6 +178,31 @@ export async function listModelsOutput(binary, args, env, { execFileFn } = {}) {
 export const LIST_MODELS_TIMEOUT_MS = 30000;
 
 /**
+ * The file names that count as an instructions file in a resolved `--ro-bind`
+ * list, in the order they are searched (see {@link pickInstructionsFile}). The
+ * config-dir walk never binds these on its own: a ferry gets the host's
+ * instructions file only when the dispatch lists it.
+ */
+export const INSTRUCTIONS_FILE_NAMES = ["AGENTS.md", "CLAUDE.md"];
+
+/**
+ * Pick the one file in a resolved `--ro-bind` list to map onto an executor's
+ * `instructionsDest` (its sandboxed config dir's AGENTS.md). A file counts when its basename is exactly one of
+ * {@link INSTRUCTIONS_FILE_NAMES} and it is not a directory. AGENTS.md beats
+ * CLAUDE.md; within one name the first listed wins. The rest are returned as
+ * `ignored` so the caller can say they were not mapped.
+ *
+ * @param {string[]} paths
+ * @param {(file: string) => {isDirectory: () => boolean}|null} statFn
+ * @returns {{chosen: string|null, ignored: string[]}}
+ */
+export function pickInstructionsFile(paths, statFn) {
+  const candidates = paths.filter((p) => INSTRUCTIONS_FILE_NAMES.includes(path.basename(p)) && statFn(p)?.isDirectory() === false);
+  const ranked = INSTRUCTIONS_FILE_NAMES.flatMap((name) => candidates.filter((p) => path.basename(p) === name));
+  return { chosen: ranked[0] ?? null, ignored: ranked.slice(1) };
+}
+
+/**
  * Bind a harness's real config directory into the sandbox, entry by entry.
  *
  * Both harnesses that keep their config in an XDG config directory need the
@@ -192,6 +217,10 @@ export const LIST_MODELS_TIMEOUT_MS = 30000;
  * sandboxed destination, instead of being dropped. Dangling links fail closed
  * and do not crash the dispatch. `.gitignore` is skipped on purpose: the
  * harnesses rewrite it on boot, so a read-only bind there would fail.
+ * AGENTS.md and CLAUDE.md are skipped too ({@link INSTRUCTIONS_FILE_NAMES}):
+ * global instructions reach a ferry only through an explicit `--ro-bind`, not
+ * as a side effect of the config directory having them. Only the exact names
+ * are skipped; a lookalike such as `AGENTS.md.backup` is an ordinary entry.
  *
  * @param {{realConfigDir: string, sandboxedConfigDir: string, existsFn: (file: string) => boolean, lstatFn: (file: string) => {isSymbolicLink: () => boolean, isFile?: () => boolean, nlink?: number}, readdirFn: (dir: string) => string[], realpathFn: (file: string) => string}} args
  * @returns {[string, string][]}
@@ -201,7 +230,7 @@ export function resolveConfigDirBinds({ realConfigDir, sandboxedConfigDir, exist
   const binds = [];
   if (!existsFn(realConfigDir) || !isSafeBindSource(realConfigDir, lstatFn)) return binds;
   for (const entry of readdirFn(realConfigDir)) {
-    if (entry === ".gitignore") continue;
+    if (entry === ".gitignore" || INSTRUCTIONS_FILE_NAMES.includes(entry)) continue;
     const fullPath = path.join(realConfigDir, entry);
     const bindSource = resolveConfigBindSource(fullPath, lstatFn, realpathFn);
     if (bindSource) binds.push([bindSource, path.join(sandboxedConfigDir, entry)]);

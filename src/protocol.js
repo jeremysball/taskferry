@@ -130,6 +130,16 @@ function isNonEmptyStringArray(value) {
   return Array.isArray(value) && value.length > 0 && value.every(isNonEmptyString);
 }
 
+/**
+ * Like {@link isNonEmptyStringArray}, but the array itself may be empty. For
+ * `roBind`, which replaces the global read-only list, `[]` means "bind none
+ * of it".
+ * @param {unknown} value @returns {value is string[]}
+ */
+function isStringArray(value) {
+  return Array.isArray(value) && value.every(isNonEmptyString);
+}
+
 /** @param {unknown} value @returns {value is string[]} */
 function isResultFields(value) {
   return Array.isArray(value) && value.length > 0 && value.every((field) => RESULT_FIELDS.has(field));
@@ -192,7 +202,7 @@ const METHOD_PARAMS = {
       ["noOverlay", isBoolean],
       ["allowedDirs", isNonEmptyStringArray],
       ["rwBind", isNonEmptyStringArray],
-      ["roBind", isNonEmptyStringArray],
+      ["roBind", isStringArray],
       ["executor", isKnownExecutor],
       ["class", isNonEmptyString],
       ["parentTaskId", isNonEmptyString],

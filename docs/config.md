@@ -50,7 +50,7 @@ message — there is no silent typo tolerance.
 | `overlayEnabled` | `TASKFERRY_DISABLE_OVERLAY` (inverted: `1`/`true` disables) | boolean | `true` |
 | `rwBind` | `TASKFERRY_RW_BIND` | string (comma-separated paths) | (none) |
 | `allowedDirs` | `TASKFERRY_ALLOWED_DIRS` | string (comma-separated paths) | (none), **deprecated alias for `rwBind`** |
-| `roBind` | `TASKFERRY_RO_BIND` | string (comma-separated paths) | (none) |
+| `roBind` | `TASKFERRY_RO_BIND` | string (comma-separated paths) | (none); **replaces** rather than unions, see below |
 | `sandboxDenylist` | `TASKFERRY_SANDBOX_DENYLIST` | string (comma-separated paths) | (none) |
 | `waitDefaultTimeoutMs` | `TASKFERRY_WAIT_DEFAULT_TIMEOUT_MS` | number | `900000` (15 min); `0` disables via the env var only — a config-file value of `0` is ignored and falls back to the 15-minute default |
 | `cancelGraceMs` | `TASKFERRY_CANCEL_GRACE_MS` | number | `5000`; overridden per-call by `cancel --grace-ms` |
@@ -79,7 +79,8 @@ not mutually exclusive: if both the new name and its deprecated alias are
 set, all paths from both contribute. `rwBind` (and `allowedDirs`) also union
 with the per-dispatch `--rw-bind`/`--allowed-dirs` flags and the
 `TASKFERRY_RW_BIND`/`TASKFERRY_ALLOWED_DIRS` env vars rather than any one
-layer replacing another. `allowedDirs` emits a deprecation warning whenever
+layer replacing another. (`roBind`, below, is the opposite: the first layer
+that sets it is the whole list.) `allowedDirs` emits a deprecation warning whenever
 it is used and will be removed in the next major release. A `rwBind` path
 that overlaps the sandbox deny-list (e.g. `~/.ssh`) is still bound
 read-write — overriding the deny-list is the user's explicit call — but a
@@ -89,8 +90,14 @@ loud warning is emitted at dispatch time.
 (`--ro-bind`) into the sandbox for every dispatch, resolved through the same
 protected-mount safety check as `.taskferry.toml`'s `read_only_paths`
 (a nonexistent or protected-overlapping entry is skipped and reported, never
-bound). It unions across the config file, `TASKFERRY_RO_BIND`, the manager
-option, and the per-dispatch `--ro-bind` flag. If a path appears in both
+bound). Unlike `rwBind`, it does **not** union: the list you supply is the
+whole list. The first layer that sets it wins, in the order per-dispatch
+`--ro-bind` flag, then the manager option, then `TASKFERRY_RO_BIND`, then the
+config file, and the layers below it are ignored. An empty value
+(`--ro-bind ""`, `TASKFERRY_RO_BIND=`, `"roBind": ""`) is a list of nothing,
+so it replaces a longer list below it with no read-only binds at all. The
+project layer (`.taskferry.toml` `roBind`/`read_only_paths`, next section) is
+separate and stays additive. If a path appears in both
 `rwBind` and `roBind`, read-write wins and a warning is emitted. A `roBind`
 path that overlaps the sandbox deny-list (e.g. `~/.ssh`) is still bound
 read-only — overriding the deny-list is the user's explicit call, same as
@@ -98,6 +105,16 @@ read-only — overriding the deny-list is the user's explicit call, same as
 mounts (`stateDir`, `runtimeDir`, the launch directory) are never
 overridable: a `roBind` path overlapping one of those is skipped with a
 warning even when it also overlaps the deny-list.
+
+A file named exactly `AGENTS.md` or `CLAUDE.md` in the resolved `roBind` list is
+also mapped to `AGENTS.md` in an OpenCode or kilo worker's sandboxed config
+directory (`$XDG_CONFIG_HOME/opencode/AGENTS.md` or `.../kilo/AGENTS.md`), in
+addition to being bound at its own path. That is the only way a worker gets
+the host's instructions file: the executors no longer bind the real `AGENTS.md`
+and `CLAUDE.md` from `~/.config/opencode` or `~/.config/kilo` on their own. If the
+list has both names, `AGENTS.md` is used and the other is reported on stderr
+and bound at its own path only. The Pi executor has no such path, so it gets
+the own-path bind alone.
 
 `sandboxDenylist` uses the same comma-separated grammar as `allowedDirs` —
 extra directories tmpfs-masked inside the bwrap sandbox, merged with the

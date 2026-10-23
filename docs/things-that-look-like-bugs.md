@@ -594,3 +594,45 @@ belongs here.
   exit-1 result with no stdout is a setup failure or a silent bwrap death;
   treating it as "no changes" would discard the worker's edits. It would be
   a real bug if a legitimate diff could exit 1 with an empty stdout.
+- `--ro-bind` replacing the global read-only list while `--rw-bind` unions with
+  its global list. Expected, not an inconsistency. A dispatch's `--ro-bind`
+  (or, absent that, the manager option, `TASKFERRY_RO_BIND`, or config
+  `roBind`, first one set wins) is the whole read-only list, so
+  `--ro-bind /x` on a daemon whose config binds `/a,/b` leaves `/a` and `/b`
+  out of that dispatch. The read-only list can name files the worker should
+  not see by default (a global instructions file, a reference tree), and a
+  dispatch has to be able to take them away as well as add to them; a union
+  has no way to do that, which is why there is no `--ro-unbind` either. The
+  read-write list stays a union because a dispatch dropping a global
+  writable path is not something a caller should be able to do by accident.
+  Scope: only the global list is replaced. A project's `.taskferry.toml`
+  `roBind`/`read_only_paths` still binds, and the settle-time check gate
+  still sees the project's mounts. It would be a real bug if a per-dispatch
+  `--ro-bind` dropped a project entry, or if a layer below the first one set
+  still contributed a path.
+- `--ro-bind ""` (and `--ro-bind=`, `TASKFERRY_RO_BIND=`, config
+  `"roBind": ""`) being accepted as "bind none of the global list" while
+  `--rw-bind ""` is still rejected with `requires a non-empty value`.
+  Expected. An empty read-only list is the only way to say "this dispatch
+  gets none of the global binds" under replace semantics; an empty
+  read-write list means nothing, so it stays a usage error. A lone `,` is
+  rejected for both. It would be a real bug if the empty list were dropped
+  on a resume: `resumeRoBind` persists `[]` for exactly that reason.
+- An OpenCode or kilo worker not seeing the `AGENTS.md` and `CLAUDE.md` that
+  sit in `~/.config/opencode` or `~/.config/kilo`, although every other entry
+  in that directory is bound. Expected. The executors used to bind the whole
+  config directory entry by entry, which handed every ferry the caller's global
+  instructions as a side effect (and, through a symlinked `AGENTS.md`, a path
+  under the deny-listed `~/.claude`). Those two exact names are now skipped
+  (`AGENTS.md.backup` and other lookalikes still bind) and a ferry gets
+  global instructions only when `--ro-bind` names the file.
+- A `--ro-bind` of a file named `CLAUDE.md` showing up inside the sandbox as
+  `.../AGENTS.md`, and a second instructions file in the same list being
+  reported and left at its own path. Expected. The mapping is by file name
+  (`AGENTS.md` or `CLAUDE.md`, files only, never a directory), both land on
+  `AGENTS.md` in the sandboxed config dir (where the old auto-bind put the
+  host's `AGENTS.md`), `AGENTS.md` wins a tie, and the file is bound at its
+  own path as well. Pi has no such path, so it gets the
+  own-path bind only, and summary children map nothing. It would be a real
+  bug if a file with any other name were mapped, or if two files were mapped
+  to the same destination.

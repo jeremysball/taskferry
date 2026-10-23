@@ -16,6 +16,7 @@ import { resolveBooleanToggle, resolveNonNegativeIntOption, resolvePositiveIntOp
 import { buildBwrapArgs, checkBwrapAvailable, checkOverlaySupport, platformSupportsSandbox, resolveGitCommonDir, resolveGitDir, resolveSandboxDenyList } from "./sandbox.js";
 import { applyChangeset, overlayPaths, resolvePreDispatchHead, subOverlayPaths, subFilePaths, cleanupOverlay, defaultRunCommand as defaultOverlayRunCommand, extractGitDiff, extractNonGitDiff, OVERLAY_MOUNT_BUSY_PATTERN } from "./changeset.js";
 import { resolveExecutor } from "./executor.js";
+import { pickInstructionsFile } from "./executor-shared.js";
 import { resolveOpencodeExecutor } from "./opencode-executor.js";
 import { DEFAULT_OPENCODE_VERSION_TTL_MS, DEFAULT_OPENCODE_VERSION_TIMEOUT_MS, setOpencodeVersionTtlMs, setOpencodeVersionTimeoutMs } from "./opencode-version.js";
 import { resolveVariant, KNOWN_VARIANT_LEVELS } from "./variants.js";
@@ -1089,8 +1090,8 @@ function overlapsDenyList(p, denyList) {
 }
 
 /**
- * Resolves the user-supplied `--ro-bind` set (a union of the manager-level
- * default and per-dispatch entries) against the structural protected sandbox
+ * Resolves the user-supplied `--ro-bind` set (the per-dispatch list if one was
+ * given, otherwise the global list; see {@link resolveRoBind}) against the structural protected sandbox
  * mount set (stateDir, runtimeDir, launchDirectory): a path that does not
  * exist on the host, or that overlaps one of those, is skipped with a
  * warning rather than failing silently. A path that overlaps the sandbox
@@ -1131,11 +1132,37 @@ function resolveUserRoBind({ launchDirectory, roBind, denyList, stateDir, runtim
 }
 
 /**
+ * The extra read-only pair that maps an explicitly listed instructions file
+ * (`AGENTS.md` or `CLAUDE.md`, see {@link pickInstructionsFile}) onto the
+ * executor's `instructionsDest`. The executors no longer bind their config
+ * directory's AGENTS.md on their own, so this is the one way a ferry gets the
+ * host's instructions file: the dispatch (or the global `--ro-bind` list)
+ * names it. The file still binds at its own path as well; this
+ * only adds the second destination. An executor with no `instructionsDest`
+ * (pi) maps nothing. Only one file can be the instructions, so a second
+ * match is reported and left at its own path.
+ * @param {string[]} roResolved - the resolved `--ro-bind` sources
+ * @param {string|undefined} instructionsDest
+ * @param {(file: string) => {isDirectory: () => boolean}|null} statFn
+ * @returns {[string, string][]}
+ */
+function instructionsRoBinds(roResolved, instructionsDest, statFn) {
+  if (!instructionsDest) return [];
+  const { chosen, ignored } = pickInstructionsFile(roResolved, statFn);
+  if (ignored.length) {
+    process.stderr.write(`warning: only one instructions file can be mapped to ${instructionsDest}; using ${chosen}, not mapping ${ignored.join(", ")} (still bound read-only at its own path)\n`);
+  }
+  return chosen ? [[chosen, instructionsDest]] : [];
+}
+
+/**
  * Resolves the user-supplied read-write and read-only dir sets for one
- * dispatch and applies the read-write-wins conflict rule. Both sets are a
- * union of the manager-level default (flag/env/config, already folded into
- * `ctx.allowedDirs`/`ctx.roBind`) and the per-dispatch entries carried on
- * `dispatchLaunch`. Read-write dirs that don't exist on the host are dropped
+ * dispatch and applies the read-write-wins conflict rule. The read-write set
+ * is a union of the manager-level default (flag/env/config, already folded
+ * into `ctx.allowedDirs`) and the per-dispatch entries carried on
+ * `dispatchLaunch`. The read-only set is NOT a union: a per-dispatch roBind
+ * list (even an empty one) replaces the global `ctx.roBind`, which applies
+ * only when the dispatch carries no list of its own. Read-write dirs that don't exist on the host are dropped
  * silently (same as the pre-existing allowedDirs behavior); read-only dirs go
  * through `resolveUserRoBind`'s protected-mount validation instead. A path in
  * both sets binds read-write with a warning naming the path -- never an
@@ -1150,7 +1177,8 @@ function resolveUserRoBind({ launchDirectory, roBind, denyList, stateDir, runtim
  * @returns {{rwResolved: string[], roResolved: string[]}}
  */
 function resolveUserRwRoBind(ctx) {
-  const perDispatch = (ctx.isSummary ? null : ctx.dispatchLaunch) || { allowedDirs: [], roBind: [] };
+  /** @type {{allowedDirs?: string[], roBind?: string[]}} */
+  const perDispatch = (ctx.isSummary ? null : ctx.dispatchLaunch) || {};
   const rwBind = [...ctx.rwBind, ...(perDispatch.allowedDirs || [])];
   const rwResolved = [];
   const denyOverridden = [];
@@ -1167,7 +1195,9 @@ function resolveUserRwRoBind(ctx) {
   if (denyOverridden.length) {
     process.stderr.write(`warning: --rw-bind overrides the sandbox deny-list for: ${denyOverridden.join(", ")} (bound read-write anyway; this was your explicit choice)\n`);
   }
-  const roBind = [...ctx.roBind, ...(perDispatch.roBind || [])];
+  // A per-dispatch --ro-bind (even an empty one) REPLACES the global list;
+  // it is not appended to it. A summary child carries no per-dispatch list.
+  const roBind = perDispatch.roBind ?? ctx.roBind;
   const roResolved = resolveUserRoBind({
     launchDirectory: ctx.launchDirectory,
     denyList: ctx.denyList,
@@ -1345,6 +1375,7 @@ function buildBwrapBinds(ctx, launchInfo, task, spawnEnv, role) {
     extraRwPairBinds: executorRwPairBinds = [],
     sandboxedDataHome,
     sandboxEnv,
+    instructionsDest,
   } = executor.sandboxAuthFile({
     homeDir,
     dataDir: ctx.cacheDir,
@@ -1401,12 +1432,14 @@ function buildBwrapBinds(ctx, launchInfo, task, spawnEnv, role) {
   }
   const overlayInfo = createOverlayIfNeeded(ctx, launchInfo, task, role);
   const gitBinds = buildGitBinds(ctx, launchDirectory, overlayInfo, extraRwBinds, { taskId: task.id, registerScratchCleanup });
-  // Read-write/read-only dirs: each resolves as a union of the manager-level
-  // default (flag/env/config, already folded into ctx.allowedDirs/ctx.roBind)
-  // and the per-dispatch `--rw-bind`/`--ro-bind` entries. The rw set drops
-  // nonexistent paths silently; the ro set goes through the same protected
-  // mount validation `.taskferry.toml` read_only_paths uses. A path in both
-  // sets binds read-write with a warning (rw wins, never an error).
+  // Read-write/read-only dirs. The rw set is a union of the manager-level
+  // default (flag/env/config, already folded into ctx.allowedDirs) and the
+  // per-dispatch `--rw-bind` entries. The ro set is the per-dispatch
+  // `--ro-bind` list when the dispatch has one, else the global ctx.roBind
+  // (replace, not union). The rw set drops nonexistent paths silently; the ro
+  // set goes through the same protected mount validation `.taskferry.toml`
+  // read_only_paths uses. A path in both sets binds read-write with a warning
+  // (rw wins, never an error).
   const { rwResolved, roResolved } = resolveUserRwRoBind({
     launchDirectory,
     dispatchLaunch,
@@ -1420,6 +1453,7 @@ function buildBwrapBinds(ctx, launchInfo, task, spawnEnv, role) {
   });
   extraRwBinds.push(...rwResolved);
   for (const dir of roResolved) extraRoBinds.push([dir, dir]);
+  if (!isSummary) extraRoBinds.push(...instructionsRoBinds(roResolved, instructionsDest, ctx.statFn));
   // Conflict rule, again over the accumulated ro list (which now includes the
   // `.taskferry.toml` read_only_paths pairs and the executor's own credential
   // ro-bind pairs): any ro source that is also resolved read-write is
@@ -2541,7 +2575,9 @@ function queueDispatchLaunch(ctx, { id, task, prompt, sessionId, env, noSandbox,
   // ambient defaults (no caller env, no per-dispatch binds).
   if (env !== undefined) task.resumeEnv = { ...env };
   if (allowedDirs?.length) task.resumeAllowedDirs = allowedDirs;
-  if (roBind?.length) task.resumeRoBind = roBind;
+  // An empty list is a real override (it replaces the global list with
+  // nothing), so only `undefined` means "no per-dispatch list to persist".
+  if (roBind !== undefined) task.resumeRoBind = roBind;
   if (executorArgs?.length) { task.resumeExecutorArgs = [...executorArgs]; task.executorArgs = [...executorArgs]; }
   task.resumeNoSandbox = noSandbox === true;
   task.resumeNoOverlay = noOverlay === true;
@@ -4374,9 +4410,9 @@ function watchdogTick(state, ctx) {
  * @param {string[]} [options.rwBind] - extra directories always bound read-write inside the sandbox,
  *   in addition to the auto-detected git-common-dir for a worktree dispatch directory. Resolved as a
  *   union of this, `TASKFERRY_RW_BIND`, and config `rwBind`.
- * @param {string[]} [options.roBind] - extra directories always bound read-only inside the sandbox.
- *   Resolved as a union of this, `TASKFERRY_RO_BIND`, and config `roBind`; a path that is also bound
- *   read-write wins read-write (with a warning).
+ * @param {string[]} [options.roBind] - the directories and files always bound read-only inside the sandbox.
+ *   Replaces, not unions: the first defined of this, `TASKFERRY_RO_BIND`, and config `roBind` is the
+ *   whole list. A path that is also bound read-write wins read-write (with a warning).
  * @param {(directory: string) => string|null} [options.resolveGitCommonDirFn]
  * @param {(directory: string) => string|null} [options.resolveGitDirFn]
  * @param {boolean} [options.overlayEnabled]
@@ -4700,22 +4736,22 @@ function resolveRwBind(rawOptions, config) {
 }
 
 /**
- * Resolves the read-only bind set as a UNION across the manager-level layers
- * (createTaskManager option, env, config `roBind`); per-dispatch `--ro-bind`
- * is unioned in at spawn time in buildBwrapBinds. Same union-not-replace
- * semantics as {@link resolveRwBind}. (The `read_only_paths` project-config
- * alias is resolved separately at spawn time.)
+ * Resolves the global read-only bind list: the first defined layer wins
+ * (createTaskManager option, then `TASKFERRY_RO_BIND`, then config `roBind`),
+ * and the layers below it are ignored. This is REPLACE semantics, the
+ * opposite of {@link resolveRwBind}'s union: the list you supply is the whole
+ * list, so a narrower layer can drop what a wider one would have bound. An
+ * empty env var or config string is a defined empty list, not "unset".
+ * A per-dispatch `--ro-bind` replaces this list again at spawn time in
+ * resolveUserRwRoBind. (The `read_only_paths` project-config alias is
+ * resolved separately at spawn time and stays additive.)
  * @param {Record<string, any>} rawOptions
  * @param {Record<string, any>} config
  * @returns {string[]}
  */
 function resolveRoBind(rawOptions, config) {
-  /** @type {string[]} */
-  let resolved = [];
-  resolved = unionBindLayer(resolved, rawOptions.roBind);
-  resolved = unionBindLayer(resolved, process.env.TASKFERRY_RO_BIND);
-  resolved = unionBindLayer(resolved, config.roBind);
-  return resolved;
+  const layer = [rawOptions.roBind, process.env.TASKFERRY_RO_BIND, config.roBind].find((candidate) => candidate !== undefined && candidate !== null);
+  return unionBindLayer([], layer);
 }
 
 /**
@@ -5361,8 +5397,9 @@ function buildTaskManagerApi(ctx) {
      *   top of the manager-level default (see createTaskManager's `allowedDirs` option)
      * @param {string[]} [params.rwBind] - extra directories bound read-write for this dispatch only, on
      *   top of the manager-level default (see createTaskManager's `allowedDirs` option)
-     * @param {string[]} [params.roBind] - extra directories bound read-only for this dispatch only, on
-     *   top of the manager-level default (see createTaskManager's `roBind` option)
+     * @param {string[]} [params.roBind] - the directories and files bound read-only for this dispatch. Replaces
+     *   the manager-level list (see createTaskManager's `roBind` option) instead of adding to it; an empty
+     *   array binds none of it.
      * @param {string} [params.executor] - "opencode" | "pi" | "kilo". When omitted on a `sessionId` resume, inherits
      *   the executor that originally created the session (a different executor can't continue another CLI's
      *   session file); otherwise defaults to the manager's defaultExecutor (itself the result of

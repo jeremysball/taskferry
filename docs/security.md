@@ -312,7 +312,10 @@ runs wrapped in
     (`CLAUDE.md`) with no legitimate reason to be readable by a worker;
     OpenCode reads `CLAUDE.md` the same way it reads `AGENTS.md`, so without
     this entry a worker's context (and therefore its output) silently picks
-    up the caller's personal instructions
+    up the caller's personal instructions. The executors do not bind
+    `AGENTS.md`/`CLAUDE.md` from `~/.config/opencode` or `~/.config/kilo`
+    either (a symlink there can resolve into `~/.claude`); a worker gets
+    global instructions only when `--ro-bind` names the file
   - `~/.codex` and the other harness data directories:
     `$XDG_DATA_HOME/opencode`, `$XDG_DATA_HOME/kilo`, and Pi's
     `$PI_CODING_AGENT_DIR/sessions` (defaults `~/.local/share/...` and
@@ -396,15 +399,18 @@ runs wrapped in
   user's explicit call, not something the daemon blocks — but a loud
   warning is emitted at dispatch time, since re-exposing a deny-listed
   path as writable deserves more visibility than a docs footnote.
-- **`roBind`** is the read-only counterpart to `rwBind`: extra directories
-  bound **read-only** into the sandbox for a review-only worker that should
+- **`roBind`** is the read-only counterpart to `rwBind`: directories and
+  files bound **read-only** into the sandbox for a review-only worker that should
   be able to read several repos but edit none of them. Resolved through the
   same protected-mount safety check as `.taskferry.toml`'s `read_only_paths`
   — an entry that doesn't exist on the host, or that overlaps a protected
   mount (`stateDir`, `runtimeDir`, or the launch directory), is skipped and
-  reported rather than bound. `roBind` unions across the
-  per-dispatch `--ro-bind` flag, `TASKFERRY_RO_BIND`, config `roBind`, and
-  the manager option. If the same resolved path appears in both the
+  reported rather than bound. Unlike `rwBind`, `roBind` does not union: the
+  first layer that sets it (per-dispatch `--ro-bind` flag, then the manager
+  option, then `TASKFERRY_RO_BIND`, then config `roBind`) is the whole list,
+  and `--ro-bind ""` is an explicit empty list. A file named `AGENTS.md` or
+  `CLAUDE.md` in the list is also mapped to `AGENTS.md` in an OpenCode or kilo
+  worker's sandboxed config directory. If the same resolved path appears in both the
   read-write set and the read-only set, it is bound **read-write** and a
   warning is emitted naming the path (read-write wins, never an error) — so
   a `roBind`/`read_only_paths` entry can be promoted to read-write from the

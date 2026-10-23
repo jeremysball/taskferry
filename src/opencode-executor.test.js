@@ -279,6 +279,7 @@ describe("opencodeExecutor().listModelVariantsFn", () => {
         // .gitignore there on boot and the real ~/.config is read-only in the
         // sandbox.
         sandboxEnv: { XDG_DATA_HOME: SANDBOXED_DATA_HOME, XDG_CONFIG_HOME: SANDBOXED_CONFIG_HOME },
+        instructionsDest: `${SANDBOXED_CONFIG_DIR}/AGENTS.md`,
       });
     });
 
@@ -309,6 +310,34 @@ describe("opencodeExecutor().listModelVariantsFn", () => {
         [`${realConfigDir}/${OPENCODE_JSONC}`, OPENCODE_JSONC_DEST],
         [`${realConfigDir}/plugins`, PLUGINS_DEST],
       ]);
+    });
+
+    test("sandboxAuthFile: does not auto-bind the global instructions files (AGENTS.md, CLAUDE.md); lookalike names and the rest of the config dir still bind", () => {
+      const ex = opencodeExecutor();
+      const realConfigDir = _OPENCODE_CONFIG_DIR;
+      const backup = "AGENTS.md.backup-20261017-195542-990398";
+      const result = ex.sandboxAuthFile({
+        homeDir: HOME_DIR, dataDir: DATA_DIR, taskId: TASK_ID, spawnEnv: {},
+        existsFn: (p) => p === realConfigDir,
+        readdirFn: (p) => (p === realConfigDir ? [OPENCODE_JSONC, "AGENTS.md", "CLAUDE.md", backup, "plugins"] : []),
+        lstatFn: () => ({ isSymbolicLink: () => false }),
+      });
+      assert.deepEqual(result.extraRoBinds, [
+        [`${realConfigDir}/${OPENCODE_JSONC}`, OPENCODE_JSONC_DEST],
+        [`${realConfigDir}/${backup}`, `${SANDBOXED_CONFIG_DIR}/${backup}`],
+        [`${realConfigDir}/plugins`, PLUGINS_DEST],
+      ]);
+    });
+
+    test("sandboxAuthFile: reports where the sandboxed opencode reads its global instructions (instructionsDest), so an explicit --ro-bind AGENTS.md can be mapped there", () => {
+      const ex = opencodeExecutor();
+      const result = ex.sandboxAuthFile({
+        homeDir: HOME_DIR, dataDir: DATA_DIR, taskId: TASK_ID, spawnEnv: {},
+        existsFn: () => false,
+        readdirFn: () => [],
+        lstatFn: () => ({ isSymbolicLink: () => false }),
+      });
+      assert.equal(result.instructionsDest, `${SANDBOXED_CONFIG_DIR}/AGENTS.md`);
     });
 
     test("sandboxAuthFile: resolves a symlinked config entry to its real target and ro-binds that target (dotfiles-managed setup)", () => {

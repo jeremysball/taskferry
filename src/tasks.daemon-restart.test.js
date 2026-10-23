@@ -210,6 +210,28 @@ describe("daemon restart auto-resume", () => {
     assert.deepEqual(record.resumeRoBind, ["/extra/ro"]);
   });
 
+  test("dispatch persists an explicit empty roBind (replace the global list with nothing) so a restart resume keeps it", async () => {
+    const mgr = makeManager({
+      spawnFn: () => {
+        const child = fakeChild(7778);
+        setImmediate(() => child.emit("exit", 0, null));
+        return child;
+      },
+      killFn: fakeDeadKill(),
+      cancelGraceMs: 0,
+      sandboxEnabled: false,
+      overlayEnabled: false,
+    });
+    const withEmpty = mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), noSandbox: true, noOverlay: true, roBind: [] });
+    const withoutBind = mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), noSandbox: true, noOverlay: true });
+    mgr.flushPersist();
+    const persisted = JSON.parse(fs.readFileSync(mgr.paths.TASKS_FILE, "utf8"));
+    const emptyRecord = persisted.find((t) => t.id === withEmpty.id);
+    const unsetRecord = persisted.find((t) => t.id === withoutBind.id);
+    assert.deepEqual(emptyRecord.resumeRoBind, [], "an explicit empty list must persist as [] (not be dropped as 'unset')");
+    assert.equal(unsetRecord.resumeRoBind, undefined, "no per-dispatch list must stay unset so a resume keeps using the global list");
+  });
+
   test("a pid whose start time does not match the record is not signalled (pid reuse guard)", async () => {
     const { killFn, signals } = fakeAliveKillFn();
     const { spawns, fakeSpawn } = spawnRecorder();

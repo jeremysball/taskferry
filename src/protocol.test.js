@@ -130,6 +130,21 @@ describe("protocol version, method list, and envelope", () => {
       assert.equal(parsed.params.originSessionId, "sess-abc");
     });
 
+    test("task.dispatch accepts an empty roBind array: it replaces the global read-only list with nothing", () => {
+      const parsed = parseRequestLine(request(METHOD.dispatch, { prompt: "hi", directory: TEST_DIR, roBind: [] }));
+      assert.deepEqual(parsed.params.roBind, []);
+    });
+
+    test("task.dispatch accepts a non-empty roBind array", () => {
+      const parsed = parseRequestLine(request(METHOD.dispatch, { prompt: "hi", directory: TEST_DIR, roBind: ["/a", "/b"] }));
+      assert.deepEqual(parsed.params.roBind, ["/a", "/b"]);
+    });
+
+    test("task.dispatch still rejects an empty rwBind array and empty-string roBind entries", () => {
+      assert.throws(() => parseRequestLine(request(METHOD.dispatch, { prompt: "hi", directory: TEST_DIR, rwBind: [] })), /invalid params/i);
+      assert.throws(() => parseRequestLine(request(METHOD.dispatch, { prompt: "hi", directory: TEST_DIR, roBind: [""] })), /invalid params/i);
+    });
+
     test("task.dispatch rejects a non-string originSessionId", () => {
       assert.throws(() => parseRequestLine(request(METHOD.dispatch, {
         prompt: "hi",

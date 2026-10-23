@@ -65,8 +65,9 @@ This does not stop the daemon or affect other integrations sharing it. See
 ## What it does
 
 When a sandboxed worker reads the user's OpenCode configuration, the config
-directory itself must be a safe, non-symlink path. `.gitignore` is skipped.
-Individual entries may be symlinks: taskferry resolves each target, checks it,
+directory itself must be a safe, non-symlink path. `.gitignore`, `AGENTS.md`
+and `CLAUDE.md` are skipped; a worker gets global instructions only when
+`--ro-bind` names the file (see [config.md](../config.md)). Individual entries may be symlinks: taskferry resolves each target, checks it,
 and binds the target read-only. Dangling or unsafe entries are skipped with a
 warning rather than failing the dispatch. This supports dotfiles repositories
 without exposing an arbitrary symlink target.

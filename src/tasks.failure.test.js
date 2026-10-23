@@ -3,20 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import { bucketFor } from "./tasks.js";
-import { makeManager, fakeChild, RATE_LIMIT_ERROR, RATE_LIMIT_PLAIN, UNAUTHORIZED_ERROR, UNAUTHORIZED_SHORT, USAGE_LIMIT_ERROR, QUOTA_ERROR, NO_API_KEY_FOUND, EXTENSION_CONFIG_ERROR, MINIMAX_MODEL, makeFakeExecutor } from "./tasks.test-helpers.js";
-
-// Polls a predicate instead of sleeping a fixed duration, so a test that
-// waits on a watchdog/timer effect stays correct under full-suite CPU
-// contention instead of racing an arbitrary sleep window. Mirrors the
-// same pattern already used by src/tf-sl.test.js.
-async function waitFor(predicate, message, timeoutMs = 2000) {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (predicate()) return undefined;
-    await new Promise((resolve) => setTimeout(resolve, 5));
-  }
-  return assert.fail(message);
-}
+import { makeManager, fakeChild, RATE_LIMIT_ERROR, RATE_LIMIT_PLAIN, UNAUTHORIZED_ERROR, UNAUTHORIZED_SHORT, USAGE_LIMIT_ERROR, QUOTA_ERROR, NO_API_KEY_FOUND, EXTENSION_CONFIG_ERROR, MINIMAX_MODEL, makeFakeExecutor, waitFor } from "./tasks.test-helpers.js";
 
 describe("provider-failure classification: rate limits, payment, authentication", () => {
   test("a rate-limit diagnostic in the log stops the child early with failureReason rate_limited and captures failureDetail", async () => {

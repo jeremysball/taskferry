@@ -578,3 +578,19 @@ belongs here.
   one in UI or logs after a tool returns only `error:`, check the producer, and
   do not "fix" it by restoring the raw prefix as the message. It would be a
   real bug if an empty body were replaced by the literal string `error:`.
+- Two concurrent non-git tasks sharing the literal mount name
+  `/tmp/taskferry-merged`. Observe: both extractions and applies report the
+  same merged-view path. Deliberate: each bwrap invocation gets its own
+  private `--tmpfs /tmp`, so the literal is namespace-local and never a host
+  path; the overlay root itself is still per-task. A non-git target or
+  runtime dir of exactly `/tmp` is rejected because the later bind of that
+  directory would shadow the mount point. It would be a real bug if the
+  mount point moved into a shared namespace, or if bwrap stopped creating a
+  private `/tmp` for each invocation.
+- Non-git extraction throwing on an exit-1 result with empty stdout, even
+  when stderr is also empty. Observe: a bwrap/diff ambiguity surfaces as
+  `non-git diff extraction failed` instead of `hasChanges: false`.
+  Deliberate: GNU diff writes differences to stdout before exiting 1, so an
+  exit-1 result with no stdout is a setup failure or a silent bwrap death;
+  treating it as "no changes" would discard the worker's edits. It would be
+  a real bug if a legitimate diff could exit 1 with an empty stdout.

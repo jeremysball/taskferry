@@ -7,6 +7,7 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { buildBwrapArgs, checkOverlaySupport } from "./sandbox.js";
 import { applyChangeset, cleanupOverlay, extractGitDiff, extractNonGitDiff, overlayPaths, resolveHeadDrift, resolvePreDispatchHead, subFilePaths, subOverlayPaths } from "./changeset.js";
+import { resolveOverlayTmpRoot } from "./paths.js";
 
 const trackedTmpDirs = [];
 after(() => {
@@ -41,6 +42,16 @@ if (support.supported) {
   skipReason = rsyncAvailable ? null : "rsync not installed";
 }
 const skip = skipReason ? { skip: `overlay integration skipped: ${skipReason}` } : undefined;
+
+function isWritableDirectory(dirPath) {
+  try {
+    fs.mkdirSync(dirPath, { recursive: true, mode: 0o700 });
+    fs.accessSync(dirPath, fs.constants.W_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 // Runs one real bwrap invocation against a directory mounted as a CoW
 // overlay (plus any sub-overlays), executing `script` inside.
@@ -210,7 +221,9 @@ describe("overlay round trips (real bwrap)", () => {
   test("non-git target: sandboxed write extracts a diff -ru, rsync-applies, cleans up", skip ? undefined : () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "axi-int-nongit-"));
     trackedTmpDirs.push(directory);
-    const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), TMP_ROOT_PREFIX));
+    const overlayTmpRoot = resolveOverlayTmpRoot();
+    const tmpRootParent = isWritableDirectory(overlayTmpRoot) ? overlayTmpRoot : os.tmpdir();
+    const tmpRoot = fs.mkdtempSync(path.join(tmpRootParent, TMP_ROOT_PREFIX));
     trackedTmpDirs.push(tmpRoot);
     const runtimeDir = fs.mkdtempSync(path.join(os.tmpdir(), RUN_ROOT_PREFIX));
     trackedTmpDirs.push(runtimeDir);

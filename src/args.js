@@ -437,7 +437,7 @@ const FLAGS = {
   // --rw-bind and --ro-bind replace the global list, so an empty value is a real answer ("bind none of it"), not a missing one.
   "--rw-bind": { allow: ["dispatch"], key: "rwBind", allowEmpty: true, coerce: coerceBindList },
   "--ro-bind": { allow: ["dispatch"], key: "roBind", allowEmpty: true, coerce: coerceBindList },
-  "--allowed-dirs": { allow: ["dispatch"], key: "allowedDirs", coerce: coerceDirList, deprecate: "--allowed-dirs is deprecated; use --rw-bind (same behavior). It will be removed in the next major release." },
+  "--allowed-dirs": { allow: ["dispatch"], key: "allowedDirs", coerce: coerceDirList, deprecate: "--allowed-dirs is deprecated; use --rw-bind (unlike --rw-bind it rejects an empty value). It will be removed in the next major release." },
   "--executor": { allow: ["dispatch", "advisor"], key: "executor", coerce: coerceExecutor },
   "--class": { allow: ["dispatch", "advisor"], key: "class" },
   "--parent-task": { allow: ["dispatch", "advisor"], key: "parentTaskId" },

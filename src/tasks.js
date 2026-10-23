@@ -4695,42 +4695,57 @@ function resolveFilesystemDenylists(rawOptions, config) {
 // user-facing flags/env/config keys.
 const RW_BIND_DEPRECATION_HINT = "TASKFERRY_ALLOWED_DIRS / allowedDirs / --allowed-dirs is deprecated; use rwBind / TASKFERRY_RW_BIND / --rw-bind instead. It will be removed in the next major release.";
 
+/** The names parseBindList puts in its error text for the two global bind lists. */
+const RW_LIST_NAME = "read-write";
+const RO_LIST_NAME = "read-only";
+
 /**
- * One directory-list layer as a deduplicated list: an array (a
- * createTaskManager option / test injection) is taken as is, a string (env
- * var or config key) is split on commas.
- * @param {string[]|string} layer
+ * A bind list value as a deduplicated list of paths: an array (a
+ * createTaskManager option or a per-dispatch list) is taken entry by entry, a
+ * string (env var or config key) is split on commas. Blank entries are
+ * dropped, so `"a, ,b"` is `a` and `b`. An empty value (`""`, `[]`) is a list
+ * of nothing. A non-empty value in which every entry is blank (`" "`, `","`,
+ * `[" "]`) is a typo, not "bind none", and throws rather than silently
+ * shadowing the layers below it.
+ * @param {string[]|string} value
+ * @param {string} source - names the setting in the error text
+ * @param {string} listName - "read-only" or "read-write", for the error text
  * @returns {string[]}
  */
-function parseBindLayer(layer) {
-  return [...new Set(Array.isArray(layer) ? layer : parseAllowedDirs(layer))];
+function parseBindList(value, source, listName) {
+  const parsed = Array.isArray(value) ? value.map((entry) => entry.trim()).filter(Boolean) : parseAllowedDirs(value);
+  if (!parsed.length && value.length > 0) {
+    throw new Error(`error: ${source} ${JSON.stringify(value)} names no path\nhelp: list one or more paths, or leave it empty to bind none of the global ${listName} list`);
+  }
+  return [...new Set(parsed)];
 }
+
+/**
+ * One setting that feeds a bind layer: `[source, value, deprecated]`. The
+ * `source` names it in error text; `deprecated` marks the old `allowedDirs`
+ * spelling of the read-write list.
+ * @typedef {[string, string[]|string|undefined|null, boolean?]} BindSlot
+ */
 
 /**
  * Resolves a global bind list with REPLACE semantics: the first layer that
  * sets it is the whole list, and the layers below it are ignored. A layer is
- * one or more `[source, value]` pairs that share a priority (the deprecated
- * `allowedDirs` name sits in the same layer as `rwBind`), and the pairs of the
+ * one or more {@link BindSlot}s that share a priority (the deprecated
+ * `allowedDirs` name sits in the same layer as `rwBind`), and the slots of the
  * winning layer union with each other. An empty env var or config string is a
- * defined empty list, not "unset". A non-empty string that parses to no path
- * (`" "`, `","`) is a typo, not "bind none", and throws rather than silently
- * shadowing the layers below it.
- * @param {Array<Array<[string, string[]|string|undefined|null]>>} layers - highest priority first
+ * defined empty list, not "unset", except for a deprecated slot: the old name
+ * has no empty form, so an empty value there is inert, as it was before the
+ * replace semantics, and the layer falls through. A non-empty value that names
+ * no path is rejected by {@link parseBindList}.
+ * @param {BindSlot[][]} layers - highest priority first
  * @param {string} listName - "read-only" or "read-write", for the error text
  * @returns {string[]}
  */
 function resolveReplaceBindList(layers, listName) {
   for (const layer of layers) {
-    const defined = layer.filter(([, value]) => value !== undefined && value !== null);
+    const defined = layer.filter(([, value, deprecated]) => value !== undefined && value !== null && !(deprecated && value.length === 0));
     if (!defined.length) continue;
-    const entries = defined.flatMap(([source, value]) => {
-      const parsed = parseBindLayer(/** @type {string[]|string} */ (value));
-      if (!parsed.length && typeof value === "string" && value !== "") {
-        throw new Error(`error: ${source} ${JSON.stringify(value)} names no path\nhelp: list one or more paths, or set it to an empty string to bind none of the global ${listName} list`);
-      }
-      return parsed;
-    });
-    return [...new Set(entries)];
+    return [...new Set(defined.flatMap(([source, value]) => parseBindList(/** @type {string[]|string} */ (value), source, listName)))];
   }
   return [];
 }
@@ -4748,13 +4763,15 @@ function resolveReplaceBindList(layers, listName) {
  * @returns {string[]}
  */
 function resolveRwBind(rawOptions, config) {
-  const oldNameSet = rawOptions.allowedDirs !== undefined || process.env.TASKFERRY_ALLOWED_DIRS !== undefined || config.allowedDirs !== undefined;
+  /** @type {BindSlot[][]} */
+  const layers = [
+    [["rwBind option", rawOptions.rwBind], ["allowedDirs option", rawOptions.allowedDirs, true]],
+    [["TASKFERRY_RW_BIND", process.env.TASKFERRY_RW_BIND], ["TASKFERRY_ALLOWED_DIRS", process.env.TASKFERRY_ALLOWED_DIRS, true]],
+    [["config rwBind", config.rwBind], ["config allowedDirs", config.allowedDirs, true]],
+  ];
+  const oldNameSet = layers.some((layer) => layer.some(([, value, deprecated]) => deprecated && value !== undefined));
   if (oldNameSet) process.stderr.write(`warning: ${RW_BIND_DEPRECATION_HINT}\n`);
-  return resolveReplaceBindList([
-    [["rwBind option", rawOptions.rwBind], ["allowedDirs option", rawOptions.allowedDirs]],
-    [["TASKFERRY_RW_BIND", process.env.TASKFERRY_RW_BIND], ["TASKFERRY_ALLOWED_DIRS", process.env.TASKFERRY_ALLOWED_DIRS]],
-    [["config rwBind", config.rwBind], ["config allowedDirs", config.allowedDirs]],
-  ], "read-write");
+  return resolveReplaceBindList(layers, RW_LIST_NAME);
 }
 
 /**
@@ -4774,7 +4791,7 @@ function resolveRoBind(rawOptions, config) {
     [["roBind option", rawOptions.roBind]],
     [["TASKFERRY_RO_BIND", process.env.TASKFERRY_RO_BIND]],
     [["config roBind", config.roBind]],
-  ], "read-only");
+  ], RO_LIST_NAME);
 }
 
 /**
@@ -8072,14 +8089,21 @@ function buildDispatchPrompt({ role, noOverlay, projectConfig, prompt, outputDir
  * Folds a dispatch's `rwBind` and its deprecated alias `allowedDirs` into the
  * one per-dispatch read-write list the launch carries. Both names given are
  * one list. Neither given stays `undefined`, because that, not an empty list,
- * is what lets the global read-write list apply.
+ * is what lets the global read-write list apply. An empty `allowedDirs` is
+ * the same as none, since the old name has no empty form. Entries go through
+ * {@link parseBindList}, so a list that names no path throws here instead of
+ * resolving to nothing at spawn time and silently dropping the global list.
  * @param {string[]|undefined} rwBind
  * @param {string[]|undefined} allowedDirs
  * @returns {string[]|undefined}
  */
 function foldRwBind(rwBind, allowedDirs) {
-  if (rwBind === undefined && allowedDirs === undefined) return undefined;
-  return [...new Set([...(rwBind ?? []), ...(allowedDirs ?? [])])];
+  const legacy = allowedDirs?.length ? allowedDirs : undefined;
+  if (rwBind === undefined && legacy === undefined) return undefined;
+  return [...new Set([
+    ...(rwBind === undefined ? [] : parseBindList(rwBind, "rwBind", RW_LIST_NAME)),
+    ...(legacy === undefined ? [] : parseBindList(legacy, "allowedDirs", RW_LIST_NAME)),
+  ])];
 }
 
 /**
@@ -8096,6 +8120,8 @@ function foldRwBind(rwBind, allowedDirs) {
 function dispatchTask(params, ctx) {
   const { prompt, directory, model, variant, sessionId, internal = false, finalMarker = null, originSessionId, noSandbox = false, noOverlay = false, allowedDirs: dispatchAllowedDirs, rwBind: dispatchRwBind, roBind: dispatchRoBind, executor: executorName, env, role = "dispatch", class: taskClass = null, parentTaskId = null, executorArgs } = params;
   const effectiveRwBind = foldRwBind(dispatchRwBind, dispatchAllowedDirs);
+  const effectiveRoBind = dispatchRoBind === undefined ? undefined : parseBindList(dispatchRoBind, "roBind", RO_LIST_NAME);
+  if (dispatchAllowedDirs !== undefined) process.stderr.write(`warning: ${RW_BIND_DEPRECATION_HINT}\n`);
   ctx.ensureStateLoaded();
   const priorSessionTask = resolvePriorSessionTask(ctx.tasks, sessionId, executorName);
   const executor = resolveDispatchExecutor(priorSessionTask, executorName, ctx.defaultExecutor);
@@ -8121,7 +8147,7 @@ function dispatchTask(params, ctx) {
   // eslint-disable-next-line sonarjs/shorthand-property-grouping -- dispatch objects mix renamed keys (prompt: dispatchPrompt, class: taskClass) with shorthand passthrough; reordering hurts readability
   const task = buildDispatchTask({ id, model, executor, priorSessionTask, variant, sessionId, originSessionId, internal, finalMarker, role, logPath, parentTaskId, env, prompt: dispatchPrompt, originalPrompt: prompt, directory: normalizedDirectory, defaultVariant: ctx.defaultVariant, resolveOpencodeVariants: ctx.resolveOpencodeVariants, class: taskClass, outputDir, executorArgs });
   // eslint-disable-next-line sonarjs/shorthand-property-grouping -- same mixed shorthand/renamed grouping as above
-  queueDispatchLaunch({ tasks: ctx.tasks, persistTask: ctx.persistTask, pendingLaunches: ctx.pendingLaunches, providerQueues: ctx.providerQueues, launchQueuedTasks: ctx.launchQueuedTasks }, { id, task, sessionId, env, noSandbox, noOverlay, executor, role, prompt: dispatchPrompt, allowedDirs: effectiveRwBind, roBind: dispatchRoBind, outputDir, executorArgs });
+  queueDispatchLaunch({ tasks: ctx.tasks, persistTask: ctx.persistTask, pendingLaunches: ctx.pendingLaunches, providerQueues: ctx.providerQueues, launchQueuedTasks: ctx.launchQueuedTasks }, { id, task, sessionId, env, noSandbox, noOverlay, executor, role, prompt: dispatchPrompt, allowedDirs: effectiveRwBind, roBind: effectiveRoBind, outputDir, executorArgs });
   const summary = summarize(task);
   return {
     ...summary,

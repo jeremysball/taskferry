@@ -89,12 +89,19 @@ both names are set in one layer, the paths from both contribute. It emits a
 deprecation warning whenever it is set, even when a higher layer shadows it,
 and will be removed in the next major release.
 
-- An empty value (`--rw-bind ""`, `TASKFERRY_RW_BIND=`, `"rwBind": ""`) is a
-  list of nothing, so it replaces a longer list below it with no extra
-  read-write binds at all. A non-empty value that names no path (`" "`,
-  `","`) is rejected with an error instead, since it is a typo and would
-  otherwise shadow the layers below it. `--allowed-dirs ""` is still rejected
-  as a usage error; the deprecated name takes no empty form.
+- An empty value (`--rw-bind ""`, `TASKFERRY_RW_BIND=`, `"rwBind": ""`, or an
+  empty array from the manager option or a per-dispatch call) is a list of
+  nothing, so it replaces a longer list below it with no extra read-write
+  binds at all. A non-empty value that names no path (`" "`, `","`, an array
+  of only blank entries) is rejected with an error instead, since it is a typo
+  and would otherwise shadow the layers below it. In an array, a blank entry
+  next to a real path is dropped.
+- The deprecated name has no empty form. `--allowed-dirs ""` is a usage error,
+  and an empty value of it anywhere else (`TASKFERRY_ALLOWED_DIRS=`, config
+  `"allowedDirs": ""`, an empty `allowedDirs` array) is ignored: it does not
+  empty the list, and its layer falls through to the layers below. A
+  per-dispatch `allowedDirs` (the field a `dispatch` call takes) warns that the
+  name is deprecated, the same as the flag.
 - A relative entry resolves against the dispatch's launch directory
   (`--directory`). A path listed twice is bound once. An entry that does not
   exist on the host is skipped silently.
@@ -114,12 +121,9 @@ protected-mount safety check as `.taskferry.toml`'s `read_only_paths`
 bound). It replaces the same way, with the same layer order
 (`--ro-bind`, manager option, `TASKFERRY_RO_BIND`, config file).
 
-- An empty value (`--ro-bind ""`, `TASKFERRY_RO_BIND=`, `"roBind": ""`) is a
-  list of nothing, so it replaces a longer list below it with no read-only
-  binds at all. A non-empty value that names no path (`" "`, `","`) is
-  rejected with an error instead, for the same reason as above.
-- A relative entry resolves against the dispatch's launch directory
-  (`--directory`), the same as `--rw-bind`. A path listed twice is bound once.
+- The empty-value, names-no-path, relative-path, and listed-twice rules above
+  apply to `roBind` unchanged: `--ro-bind ""`, `TASKFERRY_RO_BIND=`, and
+  `"roBind": ""` are each a list of nothing.
 - The project layer (`.taskferry.toml` `roBind`/`read_only_paths`, next
   section) is separate and stays additive: a per-dispatch `--ro-bind` never
   drops a project entry.

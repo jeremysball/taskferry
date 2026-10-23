@@ -25,7 +25,7 @@ const pairsFor = (args, flag) => {
   }
   return pairs;
 };
-// The error text a blank-but-non-empty bind list produces (see resolveReplaceBindList in tasks.js).
+// The error text a blank-but-non-empty bind list produces (see parseBindList in tasks.js).
 const NAMES_NO_PATH = "names no path";
 let captured;
 const baseManagerOpts = {
@@ -37,25 +37,6 @@ const baseManagerOpts = {
 };
 
 describe("bwrap sandboxing: --rw-bind and --ro-bind -- binding and conflict resolution", () => {
-  test("--rw-bind binds read-write (--bind), the manager option winning over env and config (replace, not union)", (t) => {
-    const managerDefault = roTarget();
-    const envDir = roTarget();
-    const configDir = roTarget();
-    preserveEnvVars(t, ["TASKFERRY_RW_BIND"]);
-    process.env.TASKFERRY_RW_BIND = envDir;
-    const mgr = makeManager({
-      ...baseManagerOpts,
-      allowedDirs: [],
-      rwBind: [managerDefault],
-      config: { rwBind: configDir },
-    });
-    mgr.dispatch({ prompt: "hello", directory: launchDir() });
-    const bindPairs = pairsFor(captured.args, "--bind");
-    assert.ok(bindPairs.some(([src]) => src === managerDefault), `manager default rwBind not bound: ${JSON.stringify(bindPairs)}`);
-    assert.ok(!bindPairs.some(([src]) => src === envDir), `TASKFERRY_RW_BIND must be replaced by the manager option: ${JSON.stringify(bindPairs)}`);
-    assert.ok(!bindPairs.some(([src]) => src === configDir), `config rwBind must be replaced by the manager option: ${JSON.stringify(bindPairs)}`);
-  });
-
   test("a path in both rw and ro sets binds read-write and warns (read-write wins)", () => {
     const conflict = roTarget();
     const originalWrite = process.stderr.write;
@@ -178,120 +159,180 @@ describe("bwrap sandboxing: --rw-bind and --ro-bind -- binding and conflict reso
   });
 });
 
-describe("bwrap sandboxing: --ro-bind replaces the global read-only list instead of adding to it", () => {
-  test("--ro-bind binds read-only (--ro-bind), the manager option winning over env and config (replace, not union)", (t) => {
-    const managerDefault = roTarget();
-    const envDir = roTarget();
-    const configDir = roTarget();
-    preserveEnvVars(t, ["TASKFERRY_RO_BIND"]);
-    process.env.TASKFERRY_RO_BIND = envDir;
-    const mgr = makeManager({
-      ...baseManagerOpts,
-      roBind: [managerDefault],
-      config: { roBind: configDir },
+// The two global bind lists, `roBind` and `rwBind`, follow one contract: the
+// first layer that sets a list is the whole list. The tests that pin it run
+// once per list so neither can drift from the other. `argvFlag` is the bwrap
+// flag the list ends up as in the captured argv.
+const BIND_LISTS = [
+  { flag: "--ro-bind", key: "roBind", env: "TASKFERRY_RO_BIND", argvFlag: "--ro-bind", listName: "read-only" },
+  { flag: "--rw-bind", key: "rwBind", env: "TASKFERRY_RW_BIND", argvFlag: "--bind", listName: "read-write" },
+];
+
+for (const { flag, key, env, argvFlag, listName } of BIND_LISTS) {
+  describe(`bwrap sandboxing: ${flag} replaces the global ${listName} list instead of adding to it`, () => {
+    // A bound path appears in the argv as `[flag, path, path]`.
+    const bound = () => pairsFor(captured.args, argvFlag);
+    const isBound = (target) => bound().some(([src, dest]) => src === target && dest === target);
+    const dump = () => JSON.stringify(bound());
+
+    test(`${flag} binds ${listName}, the manager option winning over env and config (replace, not union)`, (t) => {
+      const managerDefault = roTarget();
+      const envDir = roTarget();
+      const configDir = roTarget();
+      preserveEnvVars(t, [env]);
+      process.env[env] = envDir;
+      const mgr = makeManager({ ...baseManagerOpts, [key]: [managerDefault], config: { [key]: configDir } });
+      mgr.dispatch({ prompt: "hello", directory: launchDir() });
+      assert.ok(isBound(managerDefault), `manager default ${key} not bound: ${dump()}`);
+      assert.ok(!isBound(envDir), `${env} must be replaced by the manager option: ${dump()}`);
+      assert.ok(!isBound(configDir), `config ${key} must be replaced by the manager option: ${dump()}`);
     });
-    mgr.dispatch({ prompt: "hello", directory: launchDir() });
-    const roPairs = pairsFor(captured.args, "--ro-bind");
-    assert.ok(roPairs.some(([src, dest]) => src === managerDefault && dest === managerDefault), `manager default roBind not bound: ${JSON.stringify(roPairs)}`);
-    assert.ok(!roPairs.some(([src]) => src === envDir), `TASKFERRY_RO_BIND must be replaced by the manager option: ${JSON.stringify(roPairs)}`);
-    assert.ok(!roPairs.some(([src]) => src === configDir), `config roBind must be replaced by the manager option: ${JSON.stringify(roPairs)}`);
-  });
 
-  test("TASKFERRY_RO_BIND replaces the config roBind list", (t) => {
-    const envDir = roTarget();
-    const configDir = roTarget();
-    preserveEnvVars(t, ["TASKFERRY_RO_BIND"]);
-    process.env.TASKFERRY_RO_BIND = envDir;
-    const mgr = makeManager({ ...baseManagerOpts, config: { roBind: configDir } });
-    mgr.dispatch({ prompt: "hello", directory: launchDir() });
-    const roPairs = pairsFor(captured.args, "--ro-bind");
-    assert.ok(roPairs.some(([src]) => src === envDir), `TASKFERRY_RO_BIND not bound: ${JSON.stringify(roPairs)}`);
-    assert.ok(!roPairs.some(([src]) => src === configDir), `config roBind must be replaced by the env var: ${JSON.stringify(roPairs)}`);
-  });
-
-  test("an empty TASKFERRY_RO_BIND is an explicit empty list: it replaces the config roBind with nothing", (t) => {
-    const configDir = roTarget();
-    preserveEnvVars(t, ["TASKFERRY_RO_BIND"]);
-    process.env.TASKFERRY_RO_BIND = "";
-    const mgr = makeManager({ ...baseManagerOpts, config: { roBind: configDir } });
-    mgr.dispatch({ prompt: "hello", directory: launchDir() });
-    const roPairs = pairsFor(captured.args, "--ro-bind");
-    assert.ok(roPairs.length > 0, "sandbox must still carry its own ro binds, or this test proves nothing");
-    assert.ok(!roPairs.some(([src]) => src === configDir), `config roBind must be replaced by the empty env var: ${JSON.stringify(roPairs)}`);
-  });
-
-  test("a per-dispatch --ro-bind replaces the whole global list (manager option, env, config), it does not add to it", (t) => {
-    const managerDefault = roTarget();
-    const envDir = roTarget();
-    const configDir = roTarget();
-    const perDispatch = roTarget();
-    preserveEnvVars(t, ["TASKFERRY_RO_BIND"]);
-    process.env.TASKFERRY_RO_BIND = envDir;
-    const mgr = makeManager({
-      ...baseManagerOpts,
-      roBind: [managerDefault],
-      config: { roBind: configDir },
+    test(`${env} replaces the config ${key} list`, (t) => {
+      const envDir = roTarget();
+      const configDir = roTarget();
+      preserveEnvVars(t, [env]);
+      process.env[env] = envDir;
+      const mgr = makeManager({ ...baseManagerOpts, config: { [key]: configDir } });
+      mgr.dispatch({ prompt: "hello", directory: launchDir() });
+      assert.ok(isBound(envDir), `${env} not bound: ${dump()}`);
+      assert.ok(!isBound(configDir), `config ${key} must be replaced by the env var: ${dump()}`);
     });
-    mgr.dispatch({ prompt: "hello", directory: launchDir(), roBind: [perDispatch] });
-    const roPairs = pairsFor(captured.args, "--ro-bind");
-    assert.ok(roPairs.some(([src, dest]) => src === perDispatch && dest === perDispatch), `per-dispatch roBind not bound: ${JSON.stringify(roPairs)}`);
-    for (const replaced of [managerDefault, envDir, configDir]) {
-      assert.ok(!roPairs.some(([src]) => src === replaced), `${replaced} must be replaced by the per-dispatch list: ${JSON.stringify(roPairs)}`);
-    }
-  });
 
-  test("a per-dispatch empty --ro-bind list binds none of the global list", () => {
-    const managerDefault = roTarget();
-    const mgr = makeManager({ ...baseManagerOpts, roBind: [managerDefault] });
-    mgr.dispatch({ prompt: "hello", directory: launchDir(), roBind: [] });
-    const roPairs = pairsFor(captured.args, "--ro-bind");
-    assert.ok(roPairs.length > 0, "sandbox must still carry its own ro binds, or this test proves nothing");
-    assert.ok(!roPairs.some(([src]) => src === managerDefault), `global roBind must be replaced by the empty per-dispatch list: ${JSON.stringify(roPairs)}`);
-  });
+    test(`an empty ${env} is an explicit empty list: it replaces the config ${key} with nothing`, (t) => {
+      const configDir = roTarget();
+      preserveEnvVars(t, [env]);
+      process.env[env] = "";
+      const mgr = makeManager({ ...baseManagerOpts, config: { [key]: configDir } });
+      mgr.dispatch({ prompt: "hello", directory: launchDir() });
+      assert.ok(bound().length > 0, `sandbox must still carry its own ${listName} binds, or this test proves nothing`);
+      assert.ok(!isBound(configDir), `config ${key} must be replaced by the empty env var: ${dump()}`);
+    });
 
-  test("a relative --ro-bind path is resolved against the dispatch's launch directory, like --rw-bind", () => {
-    const target = roTarget();
-    const directory = launchDir();
-    const relative = path.relative(directory, target);
-    assert.ok(!path.isAbsolute(relative) && relative.startsWith(".."), `fixture must be a relative path: ${relative}`);
-    assert.ok(!fs.existsSync(path.resolve(relative)), "fixture must not exist relative to the process cwd, or this test proves nothing");
-    const warned = captureStderr(() => {
+    test(`a per-dispatch ${flag} replaces the whole global list (manager option, env, config), it does not add to it`, (t) => {
+      const managerDefault = roTarget();
+      const envDir = roTarget();
+      const configDir = roTarget();
+      const perDispatch = roTarget();
+      preserveEnvVars(t, [env]);
+      process.env[env] = envDir;
+      const mgr = makeManager({ ...baseManagerOpts, [key]: [managerDefault], config: { [key]: configDir } });
+      mgr.dispatch({ prompt: "hello", directory: launchDir(), [key]: [perDispatch] });
+      assert.ok(isBound(perDispatch), `per-dispatch ${key} not bound: ${dump()}`);
+      for (const replaced of [managerDefault, envDir, configDir]) {
+        assert.ok(!isBound(replaced), `${replaced} must be replaced by the per-dispatch list: ${dump()}`);
+      }
+    });
+
+    test(`a per-dispatch empty ${flag} list binds none of the global list`, () => {
+      const managerDefault = roTarget();
+      const mgr = makeManager({ ...baseManagerOpts, [key]: [managerDefault] });
+      mgr.dispatch({ prompt: "hello", directory: launchDir(), [key]: [] });
+      assert.ok(bound().length > 0, `sandbox must still carry its own ${listName} binds, or this test proves nothing`);
+      assert.ok(!isBound(managerDefault), `global ${key} must be replaced by the empty per-dispatch list: ${dump()}`);
+    });
+
+    test(`a dispatch with no ${key} of its own keeps the whole global list`, () => {
+      const managerDefault = roTarget();
+      const mgr = makeManager({ ...baseManagerOpts, [key]: [managerDefault] });
+      mgr.dispatch({ prompt: "hello", directory: launchDir() });
+      assert.ok(isBound(managerDefault), `global ${key} not bound: ${dump()}`);
+    });
+
+    test(`a per-dispatch ${flag} affects only that dispatch: the next one sees the global list again`, () => {
+      const managerDefault = roTarget();
+      const perDispatch = roTarget();
+      const mgr = makeManager({ ...baseManagerOpts, [key]: [managerDefault] });
+      mgr.dispatch({ prompt: "one", directory: launchDir(), [key]: [perDispatch] });
+      mgr.dispatch({ prompt: "two", directory: launchDir() });
+      assert.ok(isBound(managerDefault), `the next dispatch must see the global list again: ${dump()}`);
+      assert.ok(!isBound(perDispatch), `the first dispatch's list must not carry over: ${dump()}`);
+    });
+
+    test(`a relative ${flag} path is resolved against the dispatch's launch directory`, () => {
+      const target = roTarget();
+      const directory = launchDir();
+      const relative = path.relative(directory, target);
+      assert.ok(!path.isAbsolute(relative) && relative.startsWith(".."), `fixture must be a relative path: ${relative}`);
+      assert.ok(!fs.existsSync(path.resolve(relative)), "fixture must not exist relative to the process cwd, or this test proves nothing");
+      const warned = captureStderr(() => {
+        const mgr = makeManager({ ...baseManagerOpts });
+        mgr.dispatch({ prompt: "hello", [key]: [relative], directory });
+      });
+      assert.ok(isBound(target), `relative ${key} not bound at its absolute path: ${dump()}`);
+      assert.doesNotMatch(warned, /not found on this host/);
+    });
+
+    test("a path listed twice in the replacing list is bound once", () => {
+      const target = roTarget();
       const mgr = makeManager({ ...baseManagerOpts });
-      mgr.dispatch({ prompt: "hello", roBind: [relative], directory });
+      mgr.dispatch({ prompt: "hello", directory: launchDir(), [key]: [target, target] });
+      assert.equal(bound().filter(([src]) => src === target).length, 1, `expected a single bind: ${dump()}`);
     });
-    const roPairs = pairsFor(captured.args, "--ro-bind");
-    assert.ok(roPairs.some(([src, dest]) => src === target && dest === target), `relative roBind not bound at its absolute path: ${JSON.stringify(roPairs)}`);
-    assert.doesNotMatch(warned, /not found on this host/);
-  });
 
-  test("a path listed twice in the replacing list is bound once", () => {
-    const target = roTarget();
-    const mgr = makeManager({ ...baseManagerOpts });
-    mgr.dispatch({ prompt: "hello", directory: launchDir(), roBind: [target, target] });
-    const roPairs = pairsFor(captured.args, "--ro-bind");
-    assert.equal(roPairs.filter(([src]) => src === target).length, 1, `expected a single bind: ${JSON.stringify(roPairs)}`);
-  });
+    test(`a non-empty ${env} that names no path throws instead of silently binding nothing`, (t) => {
+      const configDir = roTarget();
+      preserveEnvVars(t, [env]);
+      for (const blank of [" ", ",", " , "]) {
+        process.env[env] = blank;
+        assert.throws(
+          () => makeManager({ ...baseManagerOpts, config: { [key]: configDir } }),
+          (err) => err.message.includes(env) && err.message.includes(NAMES_NO_PATH) && err.message.includes(listName),
+          `blank ${JSON.stringify(blank)} must be rejected`,
+        );
+      }
+      process.env[env] = "";
+      assert.doesNotThrow(() => makeManager({ ...baseManagerOpts, config: { [key]: configDir } }), "an empty string stays the explicit bind-none value");
+    });
 
-  test("a non-empty TASKFERRY_RO_BIND that names no path throws instead of silently binding nothing", (t) => {
-    const configDir = roTarget();
-    preserveEnvVars(t, ["TASKFERRY_RO_BIND"]);
-    for (const blank of [" ", ",", " , "]) {
-      process.env.TASKFERRY_RO_BIND = blank;
+    test(`a non-empty config ${key} string that names no path throws, naming the config key`, () => {
       assert.throws(
-        () => makeManager({ ...baseManagerOpts, config: { roBind: configDir } }),
-        (err) => err.message.includes("TASKFERRY_RO_BIND") && err.message.includes(NAMES_NO_PATH),
-        `blank ${JSON.stringify(blank)} must be rejected`,
+        () => makeManager({ ...baseManagerOpts, config: { [key]: " , " } }),
+        (err) => err.message.includes(`config ${key}`) && err.message.includes(NAMES_NO_PATH),
       );
-    }
-    process.env.TASKFERRY_RO_BIND = "";
-    assert.doesNotThrow(() => makeManager({ ...baseManagerOpts, config: { roBind: configDir } }), "an empty string stays the explicit bind-none value");
-  });
+    });
 
-  test("a non-empty config roBind string that names no path throws, naming the config key", () => {
-    assert.throws(
-      () => makeManager({ ...baseManagerOpts, config: { roBind: " , " } }),
-      (err) => err.message.includes("config roBind") && err.message.includes(NAMES_NO_PATH),
-    );
+    test(`a manager ${key} option that names no path throws; a blank entry next to a real path is dropped`, () => {
+      const configDir = roTarget();
+      const real = roTarget();
+      for (const blank of [[" "], [""], ["", " "]]) {
+        assert.throws(
+          () => makeManager({ ...baseManagerOpts, [key]: blank, config: { [key]: configDir } }),
+          (err) => err.message.includes(`${key} option`) && err.message.includes(NAMES_NO_PATH),
+          `blank ${JSON.stringify(blank)} must be rejected, not shadow the config list`,
+        );
+      }
+      const mgr = makeManager({ ...baseManagerOpts, [key]: [" ", real], config: { [key]: configDir } });
+      mgr.dispatch({ prompt: "hello", directory: launchDir() });
+      assert.ok(isBound(real), `the real entry must bind: ${dump()}`);
+      assert.ok(!isBound(configDir), `the manager option still replaces the config list: ${dump()}`);
+    });
+
+    test(`a per-dispatch ${flag} list that names no path throws instead of dropping the global list; a blank entry next to a real path is dropped`, () => {
+      const managerDefault = roTarget();
+      const real = roTarget();
+      const mgr = makeManager({ ...baseManagerOpts, [key]: [managerDefault] });
+      assert.throws(
+        () => mgr.dispatch({ prompt: "hello", directory: launchDir(), [key]: [" "] }),
+        (err) => err.message.includes(key) && err.message.includes(NAMES_NO_PATH),
+      );
+      mgr.dispatch({ prompt: "hello", directory: launchDir(), [key]: [" ", real] });
+      assert.ok(isBound(real), `the real entry must bind: ${dump()}`);
+      assert.ok(!isBound(managerDefault), `the per-dispatch list still replaces the global list: ${dump()}`);
+    });
+  });
+}
+
+describe("bwrap sandboxing: what a per-dispatch bind list does not replace", () => {
+  test("the sandbox's own rw binds survive an empty per-dispatch --rw-bind (only the global list is replaced)", () => {
+    const managerDefault = roTarget();
+    const directory = launchDir();
+    const mgr = makeManager({ ...baseManagerOpts, rwBind: [managerDefault] });
+    const dispatched = mgr.dispatch({ prompt: "hello", rwBind: [], directory });
+    const bindPairs = pairsFor(captured.args, "--bind");
+    assert.ok(bindPairs.some(([src]) => src === directory), `launch directory must stay bound: ${JSON.stringify(bindPairs)}`);
+    assert.ok(bindPairs.some(([src]) => src.endsWith(dispatched.id)), `the task's own output directory must stay bound: ${JSON.stringify(bindPairs)}`);
+    assert.ok(!bindPairs.some(([src]) => src === managerDefault));
   });
 
   test("a per-dispatch --ro-bind does not replace the project's .taskferry.toml read_only_paths (the project layer stays additive)", () => {
@@ -306,132 +347,6 @@ describe("bwrap sandboxing: --ro-bind replaces the global read-only list instead
     assert.ok(roPairs.some(([src]) => src === perDispatch), `per-dispatch roBind not bound: ${JSON.stringify(roPairs)}`);
     assert.ok(roPairs.some(([src]) => src === projectDir), `project read_only_paths must still bind: ${JSON.stringify(roPairs)}`);
     assert.ok(!roPairs.some(([src]) => src === managerDefault), `global roBind must be replaced: ${JSON.stringify(roPairs)}`);
-  });
-});
-
-describe("bwrap sandboxing: --rw-bind replaces the global read-write list instead of adding to it", () => {
-  test("TASKFERRY_RW_BIND replaces the config rwBind list", (t) => {
-    const envDir = roTarget();
-    const configDir = roTarget();
-    preserveEnvVars(t, ["TASKFERRY_RW_BIND"]);
-    process.env.TASKFERRY_RW_BIND = envDir;
-    const mgr = makeManager({ ...baseManagerOpts, config: { rwBind: configDir } });
-    mgr.dispatch({ prompt: "hello", directory: launchDir() });
-    const bindPairs = pairsFor(captured.args, "--bind");
-    assert.ok(bindPairs.some(([src]) => src === envDir), `TASKFERRY_RW_BIND not bound: ${JSON.stringify(bindPairs)}`);
-    assert.ok(!bindPairs.some(([src]) => src === configDir), `config rwBind must be replaced by the env var: ${JSON.stringify(bindPairs)}`);
-  });
-
-  test("an empty TASKFERRY_RW_BIND is an explicit empty list: it replaces the config rwBind with nothing", (t) => {
-    const configDir = roTarget();
-    preserveEnvVars(t, ["TASKFERRY_RW_BIND"]);
-    process.env.TASKFERRY_RW_BIND = "";
-    const mgr = makeManager({ ...baseManagerOpts, config: { rwBind: configDir } });
-    mgr.dispatch({ prompt: "hello", directory: launchDir() });
-    const bindPairs = pairsFor(captured.args, "--bind");
-    assert.ok(bindPairs.length > 0, "sandbox must still carry its own rw binds, or this test proves nothing");
-    assert.ok(!bindPairs.some(([src]) => src === configDir), `config rwBind must be replaced by the empty env var: ${JSON.stringify(bindPairs)}`);
-  });
-
-  test("a per-dispatch --rw-bind replaces the whole global list (manager option, env, config), it does not add to it", (t) => {
-    const managerDefault = roTarget();
-    const envDir = roTarget();
-    const configDir = roTarget();
-    const perDispatch = roTarget();
-    preserveEnvVars(t, ["TASKFERRY_RW_BIND"]);
-    process.env.TASKFERRY_RW_BIND = envDir;
-    const mgr = makeManager({
-      ...baseManagerOpts,
-      rwBind: [managerDefault],
-      config: { rwBind: configDir },
-    });
-    mgr.dispatch({ prompt: "hello", directory: launchDir(), rwBind: [perDispatch] });
-    const bindPairs = pairsFor(captured.args, "--bind");
-    assert.ok(bindPairs.some(([src]) => src === perDispatch), `per-dispatch rwBind not bound: ${JSON.stringify(bindPairs)}`);
-    for (const replaced of [managerDefault, envDir, configDir]) {
-      assert.ok(!bindPairs.some(([src]) => src === replaced), `${replaced} must be replaced by the per-dispatch list: ${JSON.stringify(bindPairs)}`);
-    }
-  });
-
-  test("a per-dispatch empty --rw-bind list binds none of the global list", () => {
-    const managerDefault = roTarget();
-    const mgr = makeManager({ ...baseManagerOpts, rwBind: [managerDefault] });
-    mgr.dispatch({ prompt: "hello", directory: launchDir(), rwBind: [] });
-    const bindPairs = pairsFor(captured.args, "--bind");
-    assert.ok(bindPairs.length > 0, "sandbox must still carry its own rw binds, or this test proves nothing");
-    assert.ok(!bindPairs.some(([src]) => src === managerDefault), `global rwBind must be replaced by the empty per-dispatch list: ${JSON.stringify(bindPairs)}`);
-  });
-
-  test("a dispatch with no rwBind of its own keeps the whole global list", () => {
-    const managerDefault = roTarget();
-    const mgr = makeManager({ ...baseManagerOpts, rwBind: [managerDefault] });
-    mgr.dispatch({ prompt: "hello", directory: launchDir() });
-    const bindPairs = pairsFor(captured.args, "--bind");
-    assert.ok(bindPairs.some(([src]) => src === managerDefault), `global rwBind not bound: ${JSON.stringify(bindPairs)}`);
-  });
-
-  test("the sandbox's own rw binds survive an empty per-dispatch --rw-bind (only the global list is replaced)", () => {
-    const managerDefault = roTarget();
-    const directory = launchDir();
-    const mgr = makeManager({ ...baseManagerOpts, rwBind: [managerDefault] });
-    const dispatched = mgr.dispatch({ prompt: "hello", rwBind: [], directory });
-    const bindPairs = pairsFor(captured.args, "--bind");
-    assert.ok(bindPairs.some(([src]) => src === directory), `launch directory must stay bound: ${JSON.stringify(bindPairs)}`);
-    assert.ok(bindPairs.some(([src]) => src.endsWith(dispatched.id)), `the task's own output directory must stay bound: ${JSON.stringify(bindPairs)}`);
-    assert.ok(!bindPairs.some(([src]) => src === managerDefault));
-  });
-
-  test("a relative --rw-bind path is resolved against the dispatch's launch directory", () => {
-    const target = roTarget();
-    const directory = launchDir();
-    const relative = path.relative(directory, target);
-    assert.ok(!path.isAbsolute(relative) && relative.startsWith(".."), `fixture must be a relative path: ${relative}`);
-    assert.ok(!fs.existsSync(path.resolve(relative)), "fixture must not exist relative to the process cwd, or this test proves nothing");
-    const mgr = makeManager({ ...baseManagerOpts });
-    mgr.dispatch({ prompt: "hello", rwBind: [relative], directory });
-    const bindPairs = pairsFor(captured.args, "--bind");
-    assert.ok(bindPairs.some(([src]) => src === target), `relative rwBind not bound at its absolute path: ${JSON.stringify(bindPairs)}`);
-  });
-
-  test("a path listed twice in the replacing list is bound once", () => {
-    const target = roTarget();
-    const mgr = makeManager({ ...baseManagerOpts });
-    mgr.dispatch({ prompt: "hello", directory: launchDir(), rwBind: [target, target] });
-    const bindPairs = pairsFor(captured.args, "--bind");
-    assert.equal(bindPairs.filter(([src]) => src === target).length, 1, `expected a single bind: ${JSON.stringify(bindPairs)}`);
-  });
-
-  test("a non-empty TASKFERRY_RW_BIND that names no path throws instead of silently binding nothing", (t) => {
-    const configDir = roTarget();
-    preserveEnvVars(t, ["TASKFERRY_RW_BIND"]);
-    for (const blank of [" ", ",", " , "]) {
-      process.env.TASKFERRY_RW_BIND = blank;
-      assert.throws(
-        () => makeManager({ ...baseManagerOpts, config: { rwBind: configDir } }),
-        (err) => err.message.includes("TASKFERRY_RW_BIND") && err.message.includes(NAMES_NO_PATH) && err.message.includes("read-write"),
-        `blank ${JSON.stringify(blank)} must be rejected`,
-      );
-    }
-    process.env.TASKFERRY_RW_BIND = "";
-    assert.doesNotThrow(() => makeManager({ ...baseManagerOpts, config: { rwBind: configDir } }), "an empty string stays the explicit bind-none value");
-  });
-
-  test("a non-empty config rwBind string that names no path throws, naming the config key", () => {
-    assert.throws(
-      () => makeManager({ ...baseManagerOpts, config: { rwBind: " , " } }),
-      (err) => err.message.includes("config rwBind") && err.message.includes(NAMES_NO_PATH),
-    );
-  });
-
-  test("a per-dispatch --rw-bind affects only that dispatch: the next one sees the global list again", () => {
-    const managerDefault = roTarget();
-    const perDispatch = roTarget();
-    const mgr = makeManager({ ...baseManagerOpts, rwBind: [managerDefault] });
-    mgr.dispatch({ prompt: "one", directory: launchDir(), rwBind: [perDispatch] });
-    mgr.dispatch({ prompt: "two", directory: launchDir() });
-    const bindPairs = pairsFor(captured.args, "--bind");
-    assert.ok(bindPairs.some(([src]) => src === managerDefault), `the next dispatch must see the global list again: ${JSON.stringify(bindPairs)}`);
-    assert.ok(!bindPairs.some(([src]) => src === perDispatch));
   });
 });
 
@@ -534,6 +449,33 @@ describe("bwrap sandboxing: --rw-bind and --ro-bind -- validation and deprecated
     const bindPairs = pairsFor(captured.args, "--bind");
     assert.ok(bindPairs.some(([src]) => src === viaConfigOld));
     assert.ok(bindPairs.some(([src]) => src === viaConfigNew));
+  });
+
+  test("an empty value of the deprecated name is inert at every level: it never empties the list, and the layer falls through", (t) => {
+    const configDir = roTarget();
+    preserveEnvVars(t, ["TASKFERRY_ALLOWED_DIRS"]);
+    const boundDirs = (opts) => {
+      captureStderr(() => makeManager({ ...baseManagerOpts, ...opts }).dispatch({ prompt: "hello", directory: launchDir() }));
+      return pairsFor(captured.args, "--bind").map(([src]) => src);
+    };
+    assert.ok(boundDirs({ config: { rwBind: configDir } }).includes(configDir), "control: the config list binds when nothing shadows it");
+    process.env.TASKFERRY_ALLOWED_DIRS = "";
+    assert.ok(boundDirs({ config: { rwBind: configDir } }).includes(configDir), "an empty TASKFERRY_ALLOWED_DIRS must not shadow config rwBind");
+    delete process.env.TASKFERRY_ALLOWED_DIRS;
+    assert.ok(boundDirs({ allowedDirs: [], config: { rwBind: configDir } }).includes(configDir), "an empty allowedDirs option must not shadow config rwBind");
+    assert.ok(boundDirs({ config: { allowedDirs: "", rwBind: configDir } }).includes(configDir), "an empty config allowedDirs must not empty its own layer");
+    assert.ok(!boundDirs({ rwBind: [], config: { rwBind: configDir } }).includes(configDir), "the new name keeps its empty form: rwBind [] does empty the list");
+  });
+
+  test("a per-dispatch allowedDirs warns that the name is deprecated, and an empty one leaves the global list alone", () => {
+    const managerDefault = roTarget();
+    const viaOld = roTarget();
+    const mgr = makeManager({ ...baseManagerOpts, rwBind: [managerDefault] });
+    const warned = captureStderr(() => mgr.dispatch({ prompt: "hello", directory: launchDir(), allowedDirs: [viaOld] }));
+    assert.ok(pairsFor(captured.args, "--bind").some(([src]) => src === viaOld), "the deprecated per-dispatch list must still bind");
+    assert.match(warned, /allowedDirs \/ --allowed-dirs is deprecated/);
+    captureStderr(() => mgr.dispatch({ prompt: "hello", directory: launchDir(), allowedDirs: [] }));
+    assert.ok(pairsFor(captured.args, "--bind").some(([src]) => src === managerDefault), "an empty allowedDirs must not replace the global list");
   });
 
   test("the deprecated config allowedDirs sits in the config layer: TASKFERRY_RW_BIND (a higher layer) replaces it, and it still warns", (t) => {

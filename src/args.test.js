@@ -628,7 +628,7 @@ test("--ro-bind parses a comma-separated path list into roBind", () => {
   assert.deepEqual(parsed.options.roBind, ["/a", "/b"]);
 });
 
-test("--rw-bind / --ro-bind require at least one path", () => {
+test("--rw-bind / --ro-bind reject a non-empty value that parses to no path", () => {
   assert.throws(() => parseArgs(["dispatch", "--prompt", "x", "--rw-bind", ","], { cwd: CWD }), /--rw-bind must contain at least one path/);
   assert.throws(() => parseArgs(["dispatch", "--prompt", "x", "--ro-bind", ","], { cwd: CWD }), /--ro-bind must contain at least one path/);
 });

@@ -57,11 +57,11 @@ function validateAndNormalize(raw, configPath) {
   }
   const deprecatedReadOnlyPathsUsed = readOnlyPaths !== undefined;
   // The deprecated `read_only_paths` key UNIONS into the new `roBind` key
-  // rather than being replaced by it, matching the union-not-replace pattern
-  // the deprecated `allowedDirs`/`rwBind` CLI-flag alias already uses (see
-  // resolveRwBind in tasks.js) -- a renamed key aliasing a still-live one is
-  // the same shape of problem whether the rename lives in one config file or
-  // across flag/env/config layers, so it gets the same answer.
+  // rather than being replaced by it, the way the deprecated `allowedDirs`
+  // alias unions with `rwBind` within one layer (see resolveRwBind in
+  // tasks.js). Only within one layer: across the flag/env/config layers the
+  // global bind lists replace, but both of these keys live in one config
+  // file, so there is no higher layer to replace the old key.
   // `deprecatedReadOnlyPaths` records whether the old key contributed at all
   // (even when the new key also did) so callers can warn either way.
   const effectiveRoBind = [...new Set([...(readOnlyPaths ?? []), ...(roBind ?? [])])];

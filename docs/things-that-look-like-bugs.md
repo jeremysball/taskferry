@@ -596,9 +596,8 @@ belongs here.
   a real bug if a legitimate diff could exit 1 with an empty stdout.
 - `--ro-bind` and `--rw-bind` replacing their global lists instead of adding
   to them. Expected, not an inconsistency. A dispatch's `--ro-bind` or
-  `--rw-bind` (or, absent that, the manager option, `TASKFERRY_RO_BIND` /
-  `TASKFERRY_RW_BIND`, or config `roBind` / `rwBind`, first one set wins) is
-  the whole list, so `--rw-bind /x` on a daemon whose config binds `/a,/b`
+  `--rw-bind` (or, absent that, the next layer down that sets one; the order
+  is in `docs/config.md`) is the whole list, so `--rw-bind /x` on a daemon whose config binds `/a,/b`
   leaves `/a` and `/b` out of that dispatch. A global list can name paths a
   given worker should not see or write by default (a global instructions
   file, a reference tree, a shared scratch directory), and a dispatch has to
@@ -618,18 +617,13 @@ belongs here.
   as "bind none of the global list", while `--allowed-dirs ""` is still
   rejected with `requires a non-empty value`. Expected. An empty list is the
   only way to say "this dispatch gets none of the global binds" under replace
-  semantics, and the deprecated name takes no new forms. A lone `,` is
-  rejected for all three. It would be a real bug if the empty list were
-  dropped on a resume: `resumeRoBind` and `resumeAllowedDirs` persist `[]` for
-  exactly that reason.
-- A non-empty `TASKFERRY_RW_BIND` or `TASKFERRY_RO_BIND` that names no path
-  (`" "`, `","`), or the same value in the config file, failing at startup with
-  `names no path`, although the empty string is accepted. Expected. The empty
-  string is a deliberate "none". Whitespace or a comma is a typo, and
-  treating it as "none" would silently shadow the layers below it; the
-  same value passed to a flag is a usage error for the same reason. It would
-  be a real bug if the empty string were rejected, or a typo were accepted
-  as an empty list.
+  semantics, and the deprecated name has no empty form: `--allowed-dirs ""` is
+  a usage error, and an empty `TASKFERRY_ALLOWED_DIRS`, config `allowedDirs`,
+  or `allowedDirs` array is ignored, so the old name can never empty a list
+  the new one set. A lone `,` is rejected for all three. It would be a real
+  bug if the empty list were dropped on a resume: `resumeRoBind` and
+  `resumeAllowedDirs` persist `[]` for exactly that reason. It would also be a
+  real bug if an empty value of the deprecated name emptied the list.
 - An OpenCode or kilo worker not seeing the `AGENTS.md` and `CLAUDE.md` that
   sit in `~/.config/opencode` or `~/.config/kilo`, although every other entry
   in that directory is bound. Expected. The executors used to bind the whole
@@ -675,10 +669,12 @@ belongs here.
   daemon's working directory is not something a caller controls or can see.
   It would be a real bug if two dispatches from different directories
   resolved one relative entry to the same host path.
-- `TASKFERRY_RO_BIND=" "` (or `","`, or the same in config) failing at
-  startup while `TASKFERRY_RO_BIND=` is accepted. Expected. The empty string
-  is the deliberate "bind none of the global list"; a non-empty value that
-  names no path is a typo that would otherwise parse to an empty list and
-  silently shadow the layers below it. It would be a real bug if a blank
-  value were accepted as an empty list, or if the empty string started to
-  throw.
+- `TASKFERRY_RO_BIND=" "` or `TASKFERRY_RW_BIND=" "` (or `","`, or the same in
+  config, or an array of only blank entries from the manager option or a
+  per-dispatch call) failing with `names no path` while the empty string is
+  accepted. Expected. The empty string is the deliberate "bind none of the
+  global list"; a non-empty value that names no path is a typo that would
+  otherwise parse to an empty list and silently shadow the layers below it.
+  The same value passed to a flag is a usage error for the same reason. It
+  would be a real bug if a blank value were accepted as an empty list, or if
+  the empty string started to throw.

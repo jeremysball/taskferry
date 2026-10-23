@@ -110,8 +110,10 @@ for that path, the file doesn't exist from the worker's point of view —
 even though it's right there on the host. Pass the containing directory via
 `--rw-bind /tmp/your-scratch-dir` any time a dispatch needs to read
 something under `/tmp` that isn't already the dispatch's `--directory`.
-(`--allowed-dirs` is the deprecated alias for `--rw-bind`; it still works
-but warns.)
+`--rw-bind` replaces the global list (`TASKFERRY_RW_BIND`, config `rwBind`)
+for that dispatch, so if the daemon binds other directories by default, list
+them in the same flag too. (`--allowed-dirs` is the deprecated alias for
+`--rw-bind`; it still works but warns.)
 
 This bit once with a batch of code-review dispatches pointed at diff files
 saved under `/tmp/pr-reviews/pr-<N>.diff`: none of the finders could read

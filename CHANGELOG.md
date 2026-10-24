@@ -1,5 +1,31 @@
 # Changelog
 
+## [6.0.0](https://github.com/jeremysball/taskferry/compare/taskferry-v5.1.0...taskferry-v6.0.0) (2026-10-24)
+
+
+### ⚠ BREAKING CHANGES
+
+* **sandbox:** --ro-bind no longer unions with TASKFERRY_RO_BIND or the roBind config key; it replaces them for that dispatch, so pass the full list. opencode and kilo no longer bind the host's AGENTS.md or CLAUDE.md automatically; pass them with --ro-bind.
+
+### Features
+
+* **sandbox:** make --ro-bind and --rw-bind replace the global lists ([#626](https://github.com/jeremysball/taskferry/issues/626)) ([f672bda](https://github.com/jeremysball/taskferry/commit/f672bda14fb83dd1b4f032ba637d12a9473d16f2))
+* **taskferry:** configurable maxResponseBytes ceiling ([#506](https://github.com/jeremysball/taskferry/issues/506)) ([#540](https://github.com/jeremysball/taskferry/issues/540)) ([4c4ae4b](https://github.com/jeremysball/taskferry/commit/4c4ae4b4b843a90ae3e92a0e5689afbf137ef5fa))
+* **taskferry:** extract option helpers to src/options.js ([#548](https://github.com/jeremysball/taskferry/issues/548)) ([7aa7511](https://github.com/jeremysball/taskferry/commit/7aa751132eded9ea1722e41d70f6f3179229eb0b))
+
+
+### Bug Fixes
+
+* **changeset:** harden non-git overlay extraction ([80ea8a9](https://github.com/jeremysball/taskferry/commit/80ea8a9feedde6e533b0b5881154d70cc05526d3))
+* **changeset:** harden non-git overlay extraction ([#625](https://github.com/jeremysball/taskferry/issues/625)) ([5e143eb](https://github.com/jeremysball/taskferry/commit/5e143eba5f84cacbb187a0663fb5243bc8861e68))
+* **changeset:** mount the non-git merged view under /tmp ([3f2487a](https://github.com/jeremysball/taskferry/commit/3f2487a04325015f591bb8cbd83580ca674e3544))
+* **daemon:** skip prompt, output-dir, and overlay boot sweeps when tasks.json is unreadable ([#611](https://github.com/jeremysball/taskferry/issues/611)) ([f5d942d](https://github.com/jeremysball/taskferry/commit/f5d942d41f9a1d67c165d5d6a0f2b541eda85f2d))
+* do not fall back to raw 'error:' when the error line body is empty ([#606](https://github.com/jeremysball/taskferry/issues/606)) ([dac1f64](https://github.com/jeremysball/taskferry/commit/dac1f64577aec4582f9e941da0151766431760e2))
+* **release:** register the kilo plugin manifest with release-please ([#619](https://github.com/jeremysball/taskferry/issues/619)) ([9e1604c](https://github.com/jeremysball/taskferry/commit/9e1604c5b27904bc7a6ff9a15ac4558145a5e0fb))
+* **sandbox:** deny-list harness session databases ([#585](https://github.com/jeremysball/taskferry/issues/585)) ([981839e](https://github.com/jeremysball/taskferry/commit/981839e6f29659992c25743ba957abc6fd4b3332))
+* **taskferry:** add --raw for diff and fix UTF-8 decode docs ([#520](https://github.com/jeremysball/taskferry/issues/520)) ([#541](https://github.com/jeremysball/taskferry/issues/541)) ([3739330](https://github.com/jeremysball/taskferry/commit/37393304ea2e841852caad313c7e04c5aa2b1679))
+* **taskferry:** wire executor taskIdPrefix for dispatch IDs ([#500](https://github.com/jeremysball/taskferry/issues/500)) ([#539](https://github.com/jeremysball/taskferry/issues/539)) ([b8c186f](https://github.com/jeremysball/taskferry/commit/b8c186ffbe051685d0e51ec2fe57b216380aaae4))
+
 ## [5.1.0](https://github.com/jeremysball/taskferry/compare/taskferry-v5.0.0...taskferry-v5.1.0) (2026-10-19)
 
 

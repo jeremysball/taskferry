@@ -1934,6 +1934,7 @@ function settleChildExit(ctx, shared, code, signal) {
   ctx.stopRunningWatcher(task.id);
   task.status = resolveChildExitStatus(task, code, signal);
   surfaceBootCrashFailure(task, code, shared.executor);
+  recordLogWriteFailure(task, shared);
   task.exitCode = code;
   task.signal = signal;
   task.endedAt = new Date().toISOString();
@@ -1944,6 +1945,20 @@ function settleChildExit(ctx, shared, code, signal) {
   if (task.status === "done" || task.status === "crashed" || task.status === "cancelled") ctx.extractChangesetForTask(task);
   carrySummarySession(ctx, task, parsedSessionId);
   finishChildSettlement(ctx, shared);
+}
+
+/**
+ * Records a live-fd log write fault on a task that otherwise exited cleanly.
+ * This is an observability failure, not a process failure: keep the status the
+ * exit earned, but say why the log is incomplete. Runs after status
+ * resolution so it cannot masquerade as the watchdog's failureReason.
+ * @param {Task} task
+ * @param {SharedChildState} shared
+ */
+function recordLogWriteFailure(task, shared) {
+  if (!shared.logWriteFailed || task.status !== "done" || task.failureReason) return;
+  task.failureReason = "log_write_failed";
+  task.failureDetail = "the daemon could not write this task's log; output after the failure is missing";
 }
 
 /**

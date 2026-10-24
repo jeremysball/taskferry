@@ -20,6 +20,7 @@ const FIRST_FINAL = "first-task-final-line";
 const SECOND_LINE = "second-task-own-line";
 const STRAGGLER = "straggler-after-settlement";
 const TAIL = "tail-without-newline";
+const TASK_NEVER_SETTLED = "task never settled";
 const GRACE_MS = 40;
 
 function readLog(task) {
@@ -151,7 +152,7 @@ describe("a stdout that never ends", () => {
 
     child.emit("exit", 0, null);
     child.stdout.end(`${FIRST_FINAL}\n`);
-    await waitFor(() => mgr.status(task.id).status === "done", "task never settled");
+    await waitFor(() => mgr.status(task.id).status === "done", TASK_NEVER_SETTLED);
     await new Promise((resolve) => setTimeout(resolve, GRACE_MS * 2));
     assert.equal(errors.filter((line) => line.includes("stdout was still open")).length, 0);
   });
@@ -196,10 +197,33 @@ describe("stdout decoding across chunk boundaries", () => {
     child.emit("exit", 0, null);
     child.stdout.end();
 
-    await waitFor(() => mgr.status(task.id).status === "done", "task never settled");
+    await waitFor(() => mgr.status(task.id).status === "done", TASK_NEVER_SETTLED);
     const log = readLog(task);
     assert.equal(countOf(log, "\u{1F600}!"), 1);
     assert.equal(countOf(log, "\uFFFD"), 0);
+  });
+});
+
+describe("a log write that fails", () => {
+  test("is recorded on the task without turning a clean exit into a crash", async (t) => {
+    const realWriteSync = fs.writeSync;
+    t.mock.method(fs, "writeSync", (fd, data, ...rest) => {
+      if (typeof data === "string" && data.includes(FIRST_FINAL)) throw new Error("ENOSPC");
+      return realWriteSync(fd, data, ...rest);
+    });
+    t.mock.method(console, "error", () => {});
+    const child = pipedChild(7141);
+    const mgr = makeManager({ spawnFn: () => child, killFn: () => {}, stdoutDrainGraceMs: 60000 });
+    const task = mgr.dispatch({ prompt: "p", directory: os.tmpdir() });
+
+    child.stdout.write(`${FIRST_FINAL}\n`);
+    child.emit("exit", 0, null);
+    child.stdout.end();
+
+    await waitFor(() => mgr.status(task.id).status === "done", TASK_NEVER_SETTLED);
+    const status = mgr.status(task.id);
+    assert.equal(status.failureReason, "log_write_failed");
+    assert.match(status.failureDetail, /could not write this task's log/);
   });
 });
 

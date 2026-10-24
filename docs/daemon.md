@@ -297,6 +297,12 @@ The same exit-before-EOF wait applies to the project check gate
 both output pipes close (or the same grace expires), not inside the
 `exit` event.
 
+A live-fd write fault (ENOSPC, EIO) is logged once; later writes to that log
+are skipped so the failure cannot repeat on every chunk. A task whose log
+write failed settles with `failureReason: "log_write_failed"` while its
+status still reflects the process exit, and its log is incomplete from that
+point.
+
 ## Cancellation
 
 `taskferry cancel` sends `SIGTERM` to the task's process group (the worker

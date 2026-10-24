@@ -699,3 +699,8 @@ belongs here.
   cancel, and overwriting a clean exit would misreport the result. It would
   be a real bug if the task stayed `running` or its descendants survived
   settlement.
+- A `done` task can carry `failureReason: "log_write_failed"`. Expected: the
+  process exited cleanly, but the daemon could not write its log (ENOSPC,
+  EIO), so the result records the observability failure without changing the
+  execution status. It would be a real bug if the log were silently
+  truncated with no task-level record.

@@ -86,6 +86,36 @@ export default [
     },
   },
 
+  // Names the belief "no write reaches a task's log fd after the task settles".
+  // Settlement closes the fd, its number is free for the next launch's
+  // openSync to reuse, and a stdout chunk read after that would land in a
+  // different task's log (and be lost from its own). writeCapturedLog is the
+  // one writer; it drops writes once shared.settled. Banning every writeSync
+  // in tasks.js, rather than one member-expression shape, keeps an aliased
+  // fd or a destructured `writeSync` from slipping past the guard. If you need
+  // one, disable the rule on that line with a comment that states why the fd
+  // is still owned.
+  {
+    files: ["src/tasks.js"],
+    rules: {
+      "no-restricted-syntax": [
+        "error",
+        {
+          selector: "CallExpression[callee.property.name='writeSync']",
+          message: "Belief broken: no write reaches a task's log fd after the task settles (the fd number is reused by the next launch). Write through writeCapturedLog(shared, text), which drops writes once shared.settled.",
+        },
+        {
+          selector: "CallExpression[callee.name='writeSync']",
+          message: "Belief broken: no write reaches a task's log fd after the task settles (the fd number is reused by the next launch). Write through writeCapturedLog(shared, text), which drops writes once shared.settled.",
+        },
+        {
+          selector: "CallExpression[callee.computed=true][callee.property.value='writeSync']",
+          message: "Belief broken: no write reaches a task's log fd after the task settles (the fd number is reused by the next launch). Write through writeCapturedLog(shared, text), which drops writes once shared.settled.",
+        },
+      ],
+    },
+  },
+
   {
     files: ["**/*.js"],
     languageOptions: {

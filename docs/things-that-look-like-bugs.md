@@ -678,3 +678,24 @@ belongs here.
   The same value passed to a flag is a usage error for the same reason. It
   would be a real bug if a blank value were accepted as an empty list, or if
   the empty string started to throw.
+- A task still `running` for up to `stdoutDrainGraceMs` (default 5 seconds)
+  after its worker process is gone, a daemon-log line saying stdout was
+  still open, and a pipe-holding descendant that dies from `SIGPIPE` at the
+  deadline. Expected: settlement waits for the worker's stdout to reach
+  end-of-file so the final output is in the log before the exit-time checks
+  read it (see `docs/daemon.md#settling-an-exited-child`). The deadline
+  closes the pipe, which drops unread bytes and gives a still-writing
+  descendant `SIGPIPE`. It would be a real bug if a task stayed `running`
+  past the grace, if a late chunk appeared in a different task's log, or if
+  the line printed for a task whose worker's stdout closed on its own.
+- A task that has already exited keeps its concurrency slot and its
+  `taskferry wait` unresolved until settlement. Expected: the drain wait is
+  part of settlement, and releasing either early would report a terminal
+  state before the final log bytes have been classified. It would be a real
+  bug if the slot were not released when the grace expires.
+- Cancelling a task whose worker has exited but whose stdout is still
+  draining returns "already exited" and settles with the recorded exit
+  status instead of `cancelled`. Expected: there is no live process left to
+  cancel, and overwriting a clean exit would misreport the result. It would
+  be a real bug if the task stayed `running` or its descendants survived
+  settlement.

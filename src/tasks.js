@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
+import { StringDecoder } from "node:string_decoder";
 import fsp from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -777,6 +778,7 @@ export function isOutsideDirectory(directory, candidate) {
  * @property {string} overlayTmpRoot
  * @property {string[]} allowedDirs
  * @property {string[]} roBind
+ * @property {number} stdoutDrainGraceMs how long an exited child's settlement waits for its stdout to reach EOF
  * @property {string} stateDir
  * @property {string} cacheDir
  * @property {string} runtimeDir
@@ -811,6 +813,7 @@ export function isOutsideDirectory(directory, candidate) {
  * @property {Set<string>} logHasEventCache
  * @property {Map<string, NodeJS.Timeout>} escalationTimers
  * @property {Map<string, Task>} tasks
+ * @property {Map<string, SharedChildState>} pendingDrains children that have exited but whose settlement is waiting on stdout
  * @property {(task: Task) => void} decRunning
  * @property {(task: Task) => void} incRunning
  * @property {(pid: number) => string|null} [readProcStartTimeFn]
@@ -823,6 +826,12 @@ export function isOutsideDirectory(directory, candidate) {
  * @typedef {object} SharedChildState
  * @property {boolean} settled
  * @property {number} capturedLogFd
+ * @property {boolean} [logWriteFailed] set after the first failed log write, so one failure logs one line
+ * @property {{code: number|null, signal: NodeJS.Signals|null}|null} [pendingExit] the child exited while its
+ *   stdout was still open; settlement is waiting for stdout EOF or the drain grace
+ * @property {NodeJS.Timeout|null} [drainTimer] the drain-grace timer armed alongside pendingExit
+ * @property {(() => void)|null} [forceSettle] settles this pending drain immediately (used by cancel and daemon close)
+ * @property {StringDecoder} decoder decodes stdout across chunk boundaries so a split multi-byte character is not replaced with U+FFFD
  * @property {string} stdoutCarry
  * @property {import("node:child_process").ChildProcess} child
  * @property {Task} task
@@ -1623,6 +1632,31 @@ function assembleBwrapSpawn(ctx, launchInfo, binds, task) {
 }
 
 /**
+ * The one place that writes to the captured log fd. A settled task's fd is
+ * closed, and its number is free for the next launch's `openSync` to reuse, so
+ * a write after settlement would land in another task's log. Dropping it here
+ * keeps that impossible; the stdout handlers are not expected to reach it
+ * because settlement waits for stdout EOF (see {@link onChildExit}).
+ * A failed write on a live fd is a real fault (disk full, EIO), reported once
+ * per task: throwing from an EventEmitter callback would crash the daemon.
+ * @param {SharedChildState} shared
+ * @param {string} text
+ */
+function writeCapturedLog(shared, text) {
+  if (shared.settled || shared.logWriteFailed) return;
+  try {
+    // The one allowed writer: the shared.settled guard above is what keeps
+    // this fd owned.
+    // eslint-disable-next-line no-restricted-syntax
+    fs.writeSync(shared.capturedLogFd, text);
+  } catch (err) {
+    if (shared.logWriteFailed) return;
+    shared.logWriteFailed = true;
+    console.error(`taskferry: failed to write the log for task ${shared.task.id}: ${errMessage(err)}`);
+  }
+}
+
+/**
  * Writes a normalized log event (or a structured ExecutorNormalizationError
  * when the executor's normalizeLogEvent throws) to the captured log fd. A
  * throw out of an EventEmitter callback is an unhandled exception that would
@@ -1646,19 +1680,11 @@ function writeNormalizedLogLine(shared, parsed, rawLine) {
         data: { message, raw: rawLine },
       },
     };
-    try {
-      fs.writeSync(shared.capturedLogFd, `${JSON.stringify(errorEvent)}\n`);
-    } catch {
-      // Log fd closed out from under us (task already settled / cleaned up)
-    }
+    writeCapturedLog(shared, `${JSON.stringify(errorEvent)}\n`);
     return;
   }
   if (normalized == null) return;
-  try {
-    fs.writeSync(shared.capturedLogFd, `${JSON.stringify(normalized)}\n`);
-  } catch {
-    // Log fd closed out from under us (task already settled / cleaned up)
-  }
+  writeCapturedLog(shared, `${JSON.stringify(normalized)}\n`);
 }
 
 /**
@@ -1669,7 +1695,7 @@ function writeNormalizedLogLine(shared, parsed, rawLine) {
  * @param {Buffer} chunk
  */
 function onChildData(shared, chunk) {
-  shared.stdoutCarry += chunk.toString("utf8");
+  shared.stdoutCarry += shared.decoder.write(chunk);
   let nl;
   while ((nl = shared.stdoutCarry.indexOf("\n")) !== -1) {
     const line = shared.stdoutCarry.slice(0, nl);
@@ -1683,11 +1709,7 @@ function onChildData(shared, chunk) {
       // Non-JSON stdout -- preserve verbatim so classifyProviderFailure has
       // the line's text even without a parseable event shape.
       isJson = false;
-      try {
-        fs.writeSync(shared.capturedLogFd, `${line}\n`);
-      } catch {
-        // Log fd closed out from under us (task already settled / cleaned up)
-      }
+      writeCapturedLog(shared, `${line}\n`);
     }
     if (isJson) writeNormalizedLogLine(shared, parsed, line);
   }
@@ -1699,6 +1721,7 @@ function onChildData(shared, chunk) {
  * @param {SharedChildState} shared
  */
 function onChildEnd(shared) {
+  shared.stdoutCarry += shared.decoder.end();
   const tail = shared.stdoutCarry;
   shared.stdoutCarry = "";
   if (!tail.trim()) return;
@@ -1707,11 +1730,7 @@ function onChildEnd(shared) {
     parsed = JSON.parse(tail);
   } catch {
     // Trailing partial / malformed line at process end -- preserve verbatim.
-    try {
-      fs.writeSync(shared.capturedLogFd, `${tail}\n`);
-    } catch {
-      // Same as the inline branch: fd may already be closed.
-    }
+    writeCapturedLog(shared, `${tail}\n`);
     return;
   }
   writeNormalizedLogLine(shared, parsed, tail);
@@ -1766,28 +1785,146 @@ function finishChildSettlement(ctx, shared) {
 }
 
 /**
- * Child exit handler: marks settled, closes the shared log fd, clears the
- * escalation timer, classifies trailing failures, computes the terminal
- * status (including boot-crash surfacing), stamps session/exit metadata, runs
- * output-completeness and changeset extraction for terminal states, carries a
- * successful summary child's session id forward, then settles the task.
+ * True while a real child's stdout pipe has not reached EOF. A bare
+ * EventEmitter stdout (the test fakes) has no `readableEnded`, so it counts as
+ * drained and its exit settles at once.
+ * @param {unknown} stdout
+ * @returns {boolean}
+ */
+function stdoutStillOpen(stdout) {
+  const stream = /** @type {{readableEnded?: boolean, destroyed?: boolean}|null|undefined} */ (stdout);
+  return stream?.readableEnded === false && stream.destroyed === false;
+}
+
+/**
+ * True while either of the gate child's output pipes still has not reached
+ * EOF. A bare EventEmitter fake has no `readableEnded`, so it counts as
+ * drained and the gate settles at exit as it always has.
+ * @param {{stdout?: unknown, stderr?: unknown}} child
+ * @returns {boolean}
+ */
+function gateStreamsStillOpen(child) {
+  return stdoutStillOpen(child.stdout) || stdoutStillOpen(child.stderr);
+}
+
+/**
+ * Child `exit` handler. The `exit` event can run before the last stdout chunks
+ * have been read (the event loop was busy, or the output was large), and those
+ * chunks carry the final message the exit-time log readers look for. So when
+ * stdout is still open, settlement waits for its EOF, bounded by
+ * `stdoutDrainGraceMs` because a descendant that outlives the child can hold
+ * the pipe open indefinitely. Settling first would close the log fd with
+ * output still in flight, and the next launch's `openSync` would then reuse
+ * that fd number for a different task's log.
  * @param {StartTaskContext} ctx
  * @param {SharedChildState} shared
  * @param {number|null} code
  * @param {NodeJS.Signals|null} signal
  */
 function onChildExit(ctx, shared, code, signal) {
-  const task = shared.task;
-  if (shared.settled) return;
-  shared.settled = true;
-  // The stdout handler and stderr (wired through stdio[2] -> logFd) share
-  // this fd; close it now that nothing else can write.
+  if (shared.settled || shared.pendingExit) return;
+  if (!stdoutStillOpen(shared.child.stdout)) {
+    settleChildExit(ctx, shared, code, signal);
+    return;
+  }
+  // The process is gone: nothing the watchdog or a cancel escalation timer
+  // could observe or signal is still alive. Clearing both here keeps a
+  // no-output tick from stamping failureReason on a clean exit, and keeps an
+  // escalation from SIGKILLing a recycled pid during the drain window.
+  ctx.stopRunningWatcher(shared.task.id);
+  const escalation = ctx.escalationTimers.get(shared.task.id);
+  if (escalation) {
+    clearTimeout(escalation);
+    ctx.escalationTimers.delete(shared.task.id);
+  }
+  shared.pendingExit = { code, signal };
+  shared.forceSettle = () => {
+    onChildEnd(shared);
+    shared.child.stdout?.destroy();
+    settleDrainedExit(ctx, shared);
+  };
+  ctx.pendingDrains.set(shared.task.id, shared);
+  shared.drainTimer = setTimeout(() => onStdoutDrainTimeout(ctx, shared), ctx.stdoutDrainGraceMs);
+  shared.drainTimer.unref();
+}
+
+/**
+ * The teardown shared by both settlement paths: stop waiting on stdout, drop
+ * the pending-exit marker, and deregister the drain. Keeping this in one place
+ * stops the exit and error paths from drifting as fields are added.
+ * @param {StartTaskContext} ctx
+ * @param {SharedChildState} shared
+ */
+function clearDrainState(ctx, shared) {
+  shared.pendingExit = null;
+  shared.forceSettle = null;
+  if (shared.drainTimer) {
+    clearTimeout(shared.drainTimer);
+    shared.drainTimer = null;
+  }
+  ctx.pendingDrains.delete(shared.task.id);
+}
+
+/**
+ * Closes the captured log fd once, swallowing the already-closed case so the
+ * exit and error handlers can both run without a double-close hazard.
+ * @param {SharedChildState} shared
+ */
+function closeCapturedLog(shared) {
   try {
     fs.closeSync(shared.capturedLogFd);
   } catch {
     // Already closed (e.g. concurrent exit/error path), or the fd table
-    // entry is gone -- nothing to clean up.
+    // entry is gone, so there is nothing to clean up.
   }
+}
+
+/**
+ * Settles an exit that was waiting on stdout, once stdout has ended or closed.
+ * Idempotent: the `end` and `close` events both call it.
+ * @param {StartTaskContext} ctx
+ * @param {SharedChildState} shared
+ */
+function settleDrainedExit(ctx, shared) {
+  const pending = shared.pendingExit;
+  if (!pending || shared.settled) return;
+  shared.pendingExit = null;
+  settleChildExit(ctx, shared, pending.code, pending.signal);
+}
+
+/**
+ * The drain grace ran out with stdout still open: something that outlived the
+ * child holds the pipe. Flush the partial tail, stop reading, and settle;
+ * output arriving after this point is dropped, never written to another fd.
+ * @param {StartTaskContext} ctx
+ * @param {SharedChildState} shared
+ */
+function onStdoutDrainTimeout(ctx, shared) {
+  if (!shared.pendingExit || shared.settled) return;
+  console.error(`taskferry: task ${shared.task.id} stdout was still open ${ctx.stdoutDrainGraceMs}ms after the child exited (a descendant may hold the pipe); settling and dropping later output`);
+  shared.forceSettle?.();
+}
+
+/**
+ * Settles a child that has exited and whose stdout is drained: marks settled,
+ * closes the shared log fd, clears the escalation timer, classifies trailing
+ * failures, computes the terminal status (including boot-crash surfacing),
+ * stamps session/exit metadata, runs output-completeness and changeset
+ * extraction for terminal states, carries a successful summary child's session
+ * id forward, then settles the task.
+ * @param {StartTaskContext} ctx
+ * @param {SharedChildState} shared
+ * @param {number|null} code
+ * @param {NodeJS.Signals|null} signal
+ */
+function settleChildExit(ctx, shared, code, signal) {
+  const task = shared.task;
+  if (shared.settled) return;
+  shared.settled = true;
+  clearDrainState(ctx, shared);
+  // The stdout handler and stderr (wired through stdio[2] -> logFd) share
+  // this fd; close it now that nothing else can write.
+  closeCapturedLog(shared);
   const timer = ctx.escalationTimers.get(task.id);
   if (timer) {
     clearTimeout(timer);
@@ -1893,14 +2030,11 @@ function onChildError(ctx, shared, err) {
   ctx.stopRunningWatcher(task.id);
   if (shared.settled) return;
   shared.settled = true;
+  clearDrainState(ctx, shared);
   // Mirrors the exit handler: the stdout handler shares this fd and stops
   // writing once settled; close it so the OS doesn't keep an entry on its fd
   // table for a task that's about to settle.
-  try {
-    fs.closeSync(shared.capturedLogFd);
-  } catch {
-    // Already closed or gone -- nothing to clean up.
-  }
+  closeCapturedLog(shared);
   task.status = "crashed";
   task.spawnError = errMessage(err);
   task.endedAt = new Date().toISOString();
@@ -1959,12 +2093,14 @@ function spawnTaskChild(ctx, launchInfo, task) {
       detached: true,
       env: sandbox.spawnEnv,
     });
-    // Capture the fd so the stdout handler can keep writing to it until the
-    // child exits; closing it here (as the pre-refactor code did) would break
-    // the handler's fs.writeSync before the child has a chance to drain.
+    // Capture the fd so the stdout handler can keep writing to it until
+    // settlement, which waits for stdout EOF (onChildExit); closing it here
+    // (as the pre-refactor code did) would break the handler's fs.writeSync
+    // before the child has a chance to drain.
     const shared = /** @type {SharedChildState} */ ({
       settled: false,
       capturedLogFd: logFd,
+      decoder: new StringDecoder("utf8"),
       stdoutCarry: "",
       child,
       task,
@@ -1976,7 +2112,16 @@ function spawnTaskChild(ctx, launchInfo, task) {
     // EventEmitter via fakeChild().
     const childStdout = /** @type {import("node:stream").Readable} */ (child.stdout);
     childStdout.on("data", (chunk) => onChildData(shared, chunk));
-    childStdout.on("end", () => onChildEnd(shared));
+    childStdout.on("end", () => {
+      onChildEnd(shared);
+      settleDrainedExit(ctx, shared);
+    });
+    // 'close' without 'end' means the pipe was destroyed (error or teardown).
+    // Flush first so a final partial line in that path is not dropped.
+    childStdout.on("close", () => {
+      onChildEnd(shared);
+      settleDrainedExit(ctx, shared);
+    });
     child.on("exit", (code, signal) => onChildExit(ctx, shared, code, signal));
     child.on("error", (err) => onChildError(ctx, shared, err));
     task.status = "running";
@@ -2057,6 +2202,7 @@ const DEFAULT_WATCHDOG_POLL_MS = positiveInteger(
   2000
 );
 const DEFAULT_WATCHDOG_GRACE_MS = 5000;
+const DEFAULT_STDOUT_DRAIN_GRACE_MS = 5000;
 const DEFAULT_CANCEL_GRACE_MS = 5000;
 // SIGTERM -> SIGKILL grace on a timed-out gate, matching cancel()'s own
 // default cancelGraceMs (src/args.js's --grace-ms default). Also the bound
@@ -4396,6 +4542,7 @@ function watchdogTick(state, ctx) {
  * @param {number} [options.preOutputMaxMs]
  * @param {number} [options.watchdogPollMs]
  * @param {number} [options.watchdogGraceMs]
+ * @param {number} [options.stdoutDrainGraceMs]
  * @param {number} [options.cancelGraceMs]
  * @param {number} [options.lowerdirStaggerMs]
  * @param {number} [options.maxWaitMs]
@@ -4563,6 +4710,7 @@ function resolveTimeoutOptions(rawOptions) {
     preOutputMaxMs: resolvePositiveIntOption(rawOptions.preOutputMaxMs, process.env.TASKFERRY_PRE_OUTPUT_MAX_MS, config.preOutputMaxMs, DEFAULT_PRE_OUTPUT_MAX_MS),
     watchdogPollMs: rawOptions.watchdogPollMs ?? DEFAULT_WATCHDOG_POLL_MS,
     watchdogGraceMs: resolvePositiveIntOption(rawOptions.watchdogGraceMs, process.env.TASKFERRY_WATCHDOG_GRACE_MS, config.watchdogGraceMs, DEFAULT_WATCHDOG_GRACE_MS),
+    stdoutDrainGraceMs: resolvePositiveIntOption(rawOptions.stdoutDrainGraceMs, process.env.TASKFERRY_STDOUT_DRAIN_GRACE_MS, config.stdoutDrainGraceMs, DEFAULT_STDOUT_DRAIN_GRACE_MS),
     cancelGraceMs: resolvePositiveIntOption(rawOptions.cancelGraceMs, process.env.TASKFERRY_CANCEL_GRACE_MS, config.cancelGraceMs, DEFAULT_CANCEL_GRACE_MS),
     lowerdirStaggerMs: resolveNonNegativeIntOption(rawOptions.lowerdirStaggerMs, process.env.TASKFERRY_LOWERDIR_STAGGER_MS, config.lowerdirStaggerMs, DEFAULT_LOWERDIR_STAGGER_MS),
     maxWaitMs: rawOptions.maxWaitMs ?? MAX_WAIT_MS,
@@ -4959,6 +5107,7 @@ function initManagerLimits(opts) {
     preOutputMax: positiveInteger(opts.preOutputMaxMs, DEFAULT_PRE_OUTPUT_MAX_MS),
     watchdogPoll: positiveInteger(opts.watchdogPollMs, DEFAULT_WATCHDOG_POLL_MS),
     watchdogGrace: positiveInteger(opts.watchdogGraceMs, DEFAULT_WATCHDOG_GRACE_MS),
+    stdoutDrainGrace: positiveInteger(opts.stdoutDrainGraceMs, DEFAULT_STDOUT_DRAIN_GRACE_MS),
     cancelGrace: positiveInteger(opts.cancelGraceMs, DEFAULT_CANCEL_GRACE_MS),
     lowerdirStagger: nonNegativeInteger(opts.lowerdirStaggerMs, DEFAULT_LOWERDIR_STAGGER_MS),
     maxWait: positiveInteger(opts.maxWaitMs, MAX_WAIT_MS),
@@ -5082,6 +5231,7 @@ function initManagerMaps() {
   return {
     tasks: new Map(),
     escalationTimers: new Map(),
+    pendingDrains: new Map(),
     runningWatchers: new Map(),
     runningWatcherState: new Map(),
     waiters: new Map(),
@@ -5202,6 +5352,7 @@ function buildManagerEnvHelpers(ctx) {
       sendSignal: (pid, signal) => ctx.helpers.sendSignal(pid, signal),
       platform: ctx.opts.platform,
       gateChildren: ctx.maps.gateChildren,
+      stdoutDrainGraceMs: ctx.limits.stdoutDrainGrace,
     }),
     /** @param {string} taskId */
     killGateAndWait: (taskId) => killGateAndWait(taskId, { gateChildren: ctx.maps.gateChildren, sendSignal: (pid, signal) => ctx.helpers.sendSignal(pid, signal) }),
@@ -5353,7 +5504,7 @@ function buildManagerInternalHelpers(ctx) {
      * delegated to {@link startTaskFor}, which takes every factory closure
      * dependency explicitly via `ctx`.
      * @param {Task} task */
-    startTask: (task) => startTaskFor(task, { pendingLaunches: ctx.maps.pendingLaunches, SUMMARY_DIR: ctx.paths.SUMMARY_DIR, PROMPT_DIR: ctx.paths.PROMPT_DIR, spawnFn: ctx.opts.spawnFn, runOverlayCommandFn: ctx.opts.runOverlayCommandFn, sandboxEnabled: ctx.opts.sandboxEnabled, platform: ctx.opts.platform, overlayEnabled: ctx.opts.overlayEnabled, overlayTmpRoot: ctx.opts.overlayTmpRoot, allowedDirs: ctx.opts.allowedDirs, roBind: ctx.opts.roBind, stateDir: ctx.opts.stateDir, cacheDir: ctx.opts.cacheDir, runtimeDir: ctx.opts.runtimeDir, socketPath: ctx.opts.socketPath, existsFn: ctx.opts.existsFn, statFn: ctx.opts.statFn, lstatFn: ctx.opts.lstatFn, readdirFn: ctx.opts.readdirFn, readProcStartTimeFn: ctx.opts.readProcStartTimeFn, sandboxDenylist: ctx.opts.sandboxDenylist, resolveGitCommonDirFn: ctx.opts.resolveGitCommonDirFn, resolveGitDirFn: ctx.opts.resolveGitDirFn, requireBwrap: () => ctx.env.requireBwrap(), requireOverlaySupport: () => ctx.env.requireOverlaySupport(), dispatchEnvironment: (env, taskId) => ctx.env.dispatchEnvironment(env, taskId), summaryEnvironment: (env) => ctx.env.summaryEnvironment(env), deferredRmFn: ctx.opts.rmDeferredFn, deferredAllowedRoots: uvDirRootsFor(ctx.opts.cacheDir, ctx.opts.stateDir), settleWaiters: (taskId) => ctx.helpers.settleWaiters(taskId), launchQueuedTasks: () => ctx.helpers.launchQueuedTasks(), persistTask: (taskId) => ctx.helpers.persistTask(taskId), flushPersist: () => ctx.helpers.flushPersist(), scheduleActivity: (task, options) => ctx.helpers.scheduleActivity(task, options), classifyTrailingLogFailure: (task, executor) => ctx.helpers.classifyTrailingLogFailure(task, executor), startRunningWatcher: (task, executor) => ctx.helpers.startRunningWatcher(task, executor), stopRunningWatcher: (taskId) => ctx.helpers.stopRunningWatcher(taskId), extractChangesetForTask: (task) => ctx.env.extractChangesetForTask(task), sendSignal: (pid, signal) => ctx.helpers.sendSignal(pid, signal), activityCache: ctx.activity.cache, logHasEventCache: ctx.maps.logHasEventCache, escalationTimers: ctx.maps.escalationTimers, tasks: ctx.maps.tasks, decRunning: (task) => { ctx.state.runningCount--; const q = ctx.maps.providerQueues.get(providerOf(task.model)); if (q) { q.runningCount--; } }, incRunning: (task) => { ctx.state.runningCount++; const q = ctx.maps.providerQueues.get(providerOf(task.model)); if (q) { q.runningCount++; } }, readSessionIdFromLog, evaluateOutputCompleteness, attemptCrashRecovery }),
+    startTask: (task) => startTaskFor(task, { pendingLaunches: ctx.maps.pendingLaunches, SUMMARY_DIR: ctx.paths.SUMMARY_DIR, PROMPT_DIR: ctx.paths.PROMPT_DIR, spawnFn: ctx.opts.spawnFn, runOverlayCommandFn: ctx.opts.runOverlayCommandFn, sandboxEnabled: ctx.opts.sandboxEnabled, platform: ctx.opts.platform, overlayEnabled: ctx.opts.overlayEnabled, overlayTmpRoot: ctx.opts.overlayTmpRoot, allowedDirs: ctx.opts.allowedDirs, roBind: ctx.opts.roBind, stdoutDrainGraceMs: ctx.limits.stdoutDrainGrace, stateDir: ctx.opts.stateDir, cacheDir: ctx.opts.cacheDir, runtimeDir: ctx.opts.runtimeDir, socketPath: ctx.opts.socketPath, existsFn: ctx.opts.existsFn, statFn: ctx.opts.statFn, lstatFn: ctx.opts.lstatFn, readdirFn: ctx.opts.readdirFn, readProcStartTimeFn: ctx.opts.readProcStartTimeFn, sandboxDenylist: ctx.opts.sandboxDenylist, resolveGitCommonDirFn: ctx.opts.resolveGitCommonDirFn, resolveGitDirFn: ctx.opts.resolveGitDirFn, requireBwrap: () => ctx.env.requireBwrap(), requireOverlaySupport: () => ctx.env.requireOverlaySupport(), dispatchEnvironment: (env, taskId) => ctx.env.dispatchEnvironment(env, taskId), summaryEnvironment: (env) => ctx.env.summaryEnvironment(env), deferredRmFn: ctx.opts.rmDeferredFn, deferredAllowedRoots: uvDirRootsFor(ctx.opts.cacheDir, ctx.opts.stateDir), settleWaiters: (taskId) => ctx.helpers.settleWaiters(taskId), launchQueuedTasks: () => ctx.helpers.launchQueuedTasks(), persistTask: (taskId) => ctx.helpers.persistTask(taskId), flushPersist: () => ctx.helpers.flushPersist(), scheduleActivity: (task, options) => ctx.helpers.scheduleActivity(task, options), classifyTrailingLogFailure: (task, executor) => ctx.helpers.classifyTrailingLogFailure(task, executor), startRunningWatcher: (task, executor) => ctx.helpers.startRunningWatcher(task, executor), stopRunningWatcher: (taskId) => ctx.helpers.stopRunningWatcher(taskId), extractChangesetForTask: (task) => ctx.env.extractChangesetForTask(task), sendSignal: (pid, signal) => ctx.helpers.sendSignal(pid, signal), activityCache: ctx.activity.cache, logHasEventCache: ctx.maps.logHasEventCache, escalationTimers: ctx.maps.escalationTimers, tasks: ctx.maps.tasks, pendingDrains: ctx.maps.pendingDrains, decRunning: (task) => { ctx.state.runningCount--; const q = ctx.maps.providerQueues.get(providerOf(task.model)); if (q) { q.runningCount--; } }, incRunning: (task) => { ctx.state.runningCount++; const q = ctx.maps.providerQueues.get(providerOf(task.model)); if (q) { q.runningCount++; } }, readSessionIdFromLog, evaluateOutputCompleteness, attemptCrashRecovery }),
     /**
      * @param {string} taskId
      * @param {{force?: boolean}} options
@@ -5378,7 +5529,7 @@ function buildManagerInternalHelpers(ctx) {
      * @param {Task} task
      * @param {string} failureReason
      * @param {string} [failureDetail] */
-    failRunningTask: (task, failureReason, failureDetail) => failRunningTaskFor(task, failureReason, { stopRunningWatcher: (taskId) => ctx.helpers.stopRunningWatcher(taskId), persistTask: (taskId) => ctx.helpers.persistTask(taskId), sendSignal: (pid, signal) => ctx.helpers.sendSignal(pid, signal), escalationTimers: ctx.maps.escalationTimers, tasks: ctx.maps.tasks, watchdogGrace: ctx.limits.watchdogGrace }, failureDetail),
+    failRunningTask: (task, failureReason, failureDetail) => failRunningTaskFor(task, failureReason, { stopRunningWatcher: (taskId) => ctx.helpers.stopRunningWatcher(taskId), persistTask: (taskId) => ctx.helpers.persistTask(taskId), sendSignal: (pid, signal) => ctx.helpers.sendSignal(pid, signal), escalationTimers: ctx.maps.escalationTimers, tasks: ctx.maps.tasks, pendingDrains: ctx.maps.pendingDrains, watchdogGrace: ctx.limits.watchdogGrace }, failureDetail),
     /** `classifyProviderFailure()` only ever runs from the watcher's interval
      * tick, so a provider-error event that lands after the last tick but
      * before/at process exit would otherwise never be classified and silently
@@ -5403,7 +5554,7 @@ function buildManagerInternalHelpers(ctx) {
     sendSignal: (pid, signal) => sendSignalToProcess(pid, signal, { killFn: ctx.opts.killFn }),
     /** @param {string} taskId
      * @param {{graceMs?: number}} [options] */
-    cancel: (taskId, { graceMs = ctx.limits.cancelGrace } = {}) => cancelTask(taskId, { graceMs }, { noSuchTask, ensureStateLoaded: () => ctx.helpers.ensureStateLoaded(), tasks: ctx.maps.tasks, launchScheduler: { get providerQueues() { return ctx.maps.providerQueues; }, get launchTimer() { return ctx.state.launchTimer; }, set launchTimer(value) { ctx.state.launchTimer = value; } }, pendingLaunches: ctx.maps.pendingLaunches, persistTask: (id) => ctx.helpers.persistTask(id), scheduleActivity: (task, options2) => ctx.helpers.scheduleActivity(task, options2), activityCache: ctx.activity.cache, logHasEventCache: ctx.maps.logHasEventCache, settleWaiters: (id) => ctx.helpers.settleWaiters(id), stopRunningWatcher: (id) => ctx.helpers.stopRunningWatcher(id), escalationTimers: ctx.maps.escalationTimers, sendSignal: (pid, signal) => ctx.helpers.sendSignal(pid, signal) }),
+    cancel: (taskId, { graceMs = ctx.limits.cancelGrace } = {}) => cancelTask(taskId, { graceMs }, { noSuchTask, ensureStateLoaded: () => ctx.helpers.ensureStateLoaded(), tasks: ctx.maps.tasks, launchScheduler: { get providerQueues() { return ctx.maps.providerQueues; }, get launchTimer() { return ctx.state.launchTimer; }, set launchTimer(value) { ctx.state.launchTimer = value; } }, pendingLaunches: ctx.maps.pendingLaunches, persistTask: (id) => ctx.helpers.persistTask(id), scheduleActivity: (task, options2) => ctx.helpers.scheduleActivity(task, options2), activityCache: ctx.activity.cache, logHasEventCache: ctx.maps.logHasEventCache, settleWaiters: (id) => ctx.helpers.settleWaiters(id), stopRunningWatcher: (id) => ctx.helpers.stopRunningWatcher(id), escalationTimers: ctx.maps.escalationTimers, pendingDrains: ctx.maps.pendingDrains, sendSignal: (pid, signal) => ctx.helpers.sendSignal(pid, signal) }),
   };
 }
 
@@ -5556,6 +5707,11 @@ function buildTaskManagerApi(ctx) {
     // Also flushes any pending debounced tasks.json write so a clean
     // shutdown never drops the last transition(s) before the timer fires.
     close: () => {
+      // A worker that exited while a descendant holds its stdout is still
+      // "running" until the drain grace expires. Settling it here keeps a
+      // graceful shutdown from persisting a dead pid as running, which the
+      // next boot would either re-run or classify as an interrupted task.
+      for (const shared of ctx.maps.pendingDrains.values()) shared.forceSettle?.();
       flushPersistRecords({ TASKS_FILE: ctx.paths.TASKS_FILE, stateDir: ctx.opts.stateDir, tasks: ctx.maps.tasks, state: ctx.state });
       ctx.state.envFileWatcher?.close();
     },
@@ -6730,7 +6886,7 @@ function appendBoundedOutput(tail, chunk) {
  * without an overlay, per the design's non-goal "Gating --no-overlay /
  * non-git dispatches."
  * @param {Task} task
- * @param {{spawnFn: typeof import("node:child_process").spawn, stateDir: string, runtimeDir: string, cacheDir: string, existsFn: (p: string) => boolean, sandboxDenylist: string[], persistTask: (taskId: string) => void, scheduleActivity: (task: Task, options?: {force?: boolean}) => Promise<unknown>, sendSignal: (pid: number, signal: NodeJS.Signals) => void, platform: NodeJS.Platform, gateChildren: Map<string, import("node:child_process").ChildProcess>}} ctx
+ * @param {{spawnFn: typeof import("node:child_process").spawn, stateDir: string, runtimeDir: string, cacheDir: string, existsFn: (p: string) => boolean, sandboxDenylist: string[], persistTask: (taskId: string) => void, scheduleActivity: (task: Task, options?: {force?: boolean}) => Promise<unknown>, sendSignal: (pid: number, signal: NodeJS.Signals) => void, platform: NodeJS.Platform, gateChildren: Map<string, import("node:child_process").ChildProcess>, stdoutDrainGraceMs: number}} ctx
  */
 function startCheckGate(task, ctx) {
   if (!task.overlayDirs || task.role !== "dispatch" || !platformSupportsSandbox(ctx.platform)) return;
@@ -6848,7 +7004,7 @@ function startCheckGate(task, ctx) {
  * alone is ~50 lines.
  * @param {import("node:child_process").ChildProcess} child
  * @param {Task} task
- * @param {{sendSignal: (pid: number, signal: NodeJS.Signals) => void, gateChildren: Map<string, import("node:child_process").ChildProcess>, persistTask: (taskId: string) => void, scheduleActivity: (task: Task, options?: {force?: boolean}) => Promise<unknown>}} ctx
+ * @param {{sendSignal: (pid: number, signal: NodeJS.Signals) => void, gateChildren: Map<string, import("node:child_process").ChildProcess>, persistTask: (taskId: string) => void, scheduleActivity: (task: Task, options?: {force?: boolean}) => Promise<unknown>, stdoutDrainGraceMs: number}} ctx
  * @param {number} timeoutSeconds
  */
 function wireCheckGateChildHandlers(child, task, ctx, timeoutSeconds) {
@@ -6860,11 +7016,17 @@ function wireCheckGateChildHandlers(child, task, ctx, timeoutSeconds) {
   // persist / double-fire scheduleActivity. The closure variable is set on
   // first entry and skipped thereafter.
   let settled = false;
+  /** @type {NodeJS.Timeout|null} */
+  let drainTimer = null;
+  /** @type {NodeJS.Timeout|null} */
+  let killTimer = null;
+  /** @type {{code: number|null, signal: NodeJS.Signals|null}|null} */
+  let exitInfo = null;
 
   const timer = setTimeout(() => {
     timedOut = true;
     if (child.pid != null) ctx.sendSignal(child.pid, "SIGTERM");
-    const killTimer = setTimeout(() => {
+    killTimer = setTimeout(() => {
       if (child.pid != null) ctx.sendSignal(child.pid, "SIGKILL");
     }, CHECK_GATE_KILL_GRACE_MS);
     killTimer.unref();
@@ -6879,6 +7041,8 @@ function wireCheckGateChildHandlers(child, task, ctx, timeoutSeconds) {
     if (settled) return;
     settled = true;
     clearTimeout(timer);
+    if (killTimer) clearTimeout(killTimer);
+    if (drainTimer) clearTimeout(drainTimer);
     ctx.gateChildren.delete(task.id);
     // A gate that finishes after an accept/reject already settled the task
     // (changesetStatus moved off "pending") must NOT overwrite the
@@ -6900,10 +7064,38 @@ function wireCheckGateChildHandlers(child, task, ctx, timeoutSeconds) {
     void ctx.scheduleActivity(task, { force: true });
   };
 
-  child.on("exit", (code, signal) => {
+  // The gate's output feeds checkOutputTail, so the tail must be snapshotted
+  // after the pipes drain, not inside the exit event: `exit` can run before
+  // the last stdout/stderr chunks are read, which would truncate the failure
+  // diagnostic. 'close' fires once both stdio streams are gone; a descendant
+  // that inherited a pipe can hold it open, so the wait is bounded by the
+  // same stdoutDrainGraceMs the worker uses.
+  const settleFromExit = () => {
+    const { code, signal } = exitInfo ?? { code: null, signal: null };
     if (timedOut) { settle("timeout", code); return; }
     if (signal) { settle("failed", code); return; }
     settle(code === 0 ? "passed" : "failed", code);
+  };
+  child.on("exit", (code, signal) => {
+    exitInfo = { code, signal };
+    if (!gateStreamsStillOpen(child)) {
+      settleFromExit();
+      return;
+    }
+    drainTimer = setTimeout(() => {
+      drainTimer = null;
+      child.stdout?.destroy?.();
+      child.stderr?.destroy?.();
+      settleFromExit();
+    }, ctx.stdoutDrainGraceMs);
+    drainTimer.unref();
+  });
+  child.on("close", () => {
+    if (drainTimer) {
+      clearTimeout(drainTimer);
+      drainTimer = null;
+    }
+    settleFromExit();
   });
   child.on("error", (err) => {
     if (settled) return;
@@ -7960,7 +8152,7 @@ async function activitySummaryFor(taskId, maxWords, ctx) {
  * `failRunningTask` closure; every factory binding is threaded in via `ctx`.
  * @param {Task} task
  * @param {string} failureReason
- * @param {{stopRunningWatcher: (taskId: string) => void, persistTask: (taskId: string) => void, sendSignal: (pid: number, signal: NodeJS.Signals) => void, escalationTimers: Map<string, NodeJS.Timeout>, tasks: Map<string, Task>, watchdogGrace: number}} ctx
+ * @param {{stopRunningWatcher: (taskId: string) => void, persistTask: (taskId: string) => void, sendSignal: (pid: number, signal: NodeJS.Signals) => void, escalationTimers: Map<string, NodeJS.Timeout>, tasks: Map<string, Task>, pendingDrains: Map<string, SharedChildState>, watchdogGrace: number}} ctx
  * @param {string} [failureDetail]
  */
 function failRunningTaskFor(task, failureReason, ctx, failureDetail) {
@@ -7974,10 +8166,15 @@ function failRunningTaskFor(task, failureReason, ctx, failureDetail) {
     // The child still needs stopping if the state directory became unwritable.
     console.error(`taskferry: failed to persist failing task ${task.id}: ${errMessage(err)}`);
   }
+  const pendingDrain = ctx.pendingDrains.get(task.id);
+  if (pendingDrain) {
+    pendingDrain.forceSettle?.();
+    return;
+  }
   ctx.sendSignal(/** @type {number} */ (task.pid), "SIGTERM");
   const timer = setTimeout(() => {
     ctx.escalationTimers.delete(task.id);
-    if (ctx.tasks.get(task.id)?.status === "running") ctx.sendSignal(/** @type {number} */ (task.pid), "SIGKILL");
+    if (ctx.tasks.get(task.id)?.status === "running" && !ctx.pendingDrains.has(task.id)) ctx.sendSignal(/** @type {number} */ (task.pid), "SIGKILL");
   }, ctx.watchdogGrace);
   ctx.escalationTimers.set(task.id, timer);
 }
@@ -8268,7 +8465,7 @@ function cancelQueuedTask(taskId, task, ctx) {
  * `ctx`. `summarize`/`removeFileIfPresent` are module-level helpers.
  * @param {string} taskId
  * @param {{graceMs: number}} options
- * @param {{ensureStateLoaded: () => void, tasks: Map<string, Task>, noSuchTask: (taskId: string) => Error, launchScheduler: {providerQueues: Map<string, ProviderQueue>, launchTimer: NodeJS.Timeout|null}, pendingLaunches: Map<string, LaunchSpec>, persistTask: (taskId: string) => void, scheduleActivity: (task: Task, options?: {force?: boolean}) => Promise<unknown>, activityCache: {evictTask: (taskId: string) => void}, logHasEventCache: Set<string>, settleWaiters: (taskId: string) => void, stopRunningWatcher: (taskId: string) => void, escalationTimers: Map<string, NodeJS.Timeout>, sendSignal: (pid: number, signal: NodeJS.Signals) => void}} ctx
+ * @param {{ensureStateLoaded: () => void, tasks: Map<string, Task>, noSuchTask: (taskId: string) => Error, launchScheduler: {providerQueues: Map<string, ProviderQueue>, launchTimer: NodeJS.Timeout|null}, pendingLaunches: Map<string, LaunchSpec>, persistTask: (taskId: string) => void, scheduleActivity: (task: Task, options?: {force?: boolean}) => Promise<unknown>, activityCache: {evictTask: (taskId: string) => void}, logHasEventCache: Set<string>, settleWaiters: (taskId: string) => void, stopRunningWatcher: (taskId: string) => void, escalationTimers: Map<string, NodeJS.Timeout>, pendingDrains: Map<string, SharedChildState>, sendSignal: (pid: number, signal: NodeJS.Signals) => void}} ctx
  * @returns {TaskSummary & {note: string}}
  */
 function cancelTask(taskId, { graceMs }, ctx) {
@@ -8280,6 +8477,16 @@ function cancelTask(taskId, { graceMs }, ctx) {
   }
   if (task.status !== "running") {
     return { ...summarize(task), note: `task is already ${task.status}; nothing to cancel` };
+  }
+  // The child already exited and only its stdout pipe is holding settlement.
+  // There is no live process left to cancel: settle the exit that was recorded
+  // instead of overwriting a clean exit with "cancelled", and do not signal a
+  // pid that may already belong to an unrelated process.
+  const pendingDrain = ctx.pendingDrains.get(taskId);
+  if (pendingDrain) {
+    ctx.stopRunningWatcher(taskId);
+    pendingDrain.forceSettle?.();
+    return { ...summarize(task), note: "task had already exited; settled with its recorded exit status" };
   }
   if (task.pid == null) {
     throw new Error(`error: task ${taskId} has no pid on record; cannot signal it\nhelp: run taskferry status to inspect its recorded state`);
@@ -8301,7 +8508,7 @@ function cancelTask(taskId, { graceMs }, ctx) {
 
   const timer = setTimeout(() => {
     ctx.escalationTimers.delete(taskId);
-    if (ctx.tasks.get(taskId)?.status === "running") {
+    if (ctx.tasks.get(taskId)?.status === "running" && !ctx.pendingDrains.has(taskId)) {
       ctx.sendSignal(/** @type {number} */ (task.pid), "SIGKILL");
     }
   }, graceMs);

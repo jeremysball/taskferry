@@ -270,6 +270,33 @@ to stay under the cap for large tasks.
   patterns above do that. Signal-killed children (external `SIGKILL`,
   OOM) are excluded too; `"boot_failure"` means the child exited itself.
 
+## Settling an exited child
+
+A task settles once the worker process has exited **and** its stdout has
+reached end-of-file, not on the `exit` event alone. The `exit` event can be
+handled before the last stdout chunks are read (the daemon's loop was busy,
+or the output was large), and those chunks hold the worker's final message,
+which the exit-time checks read from the log. Settling first would also free
+the log's file descriptor number while output was still in flight, and the
+next queued task's log can take that number.
+
+A descendant of the worker that outlives it can keep the stdout pipe open
+indefinitely, so the wait is bounded by `stdoutDrainGraceMs` (default
+`5000`; `TASKFERRY_STDOUT_DRAIN_GRACE_MS`; `--stdout-drain-grace-ms` at
+daemon start; precedence flag > env > config > default). When it runs out,
+the daemon writes one line to its own daemon log naming the task, flushes
+the partial line it had already decoded, stops reading, destroys the pipe,
+and settles. Bytes still unread in the pipe at that point are discarded,
+and a descendant that keeps writing gets `SIGPIPE`; closing the pipe is
+how the daemon stops a writer it can no longer wait for. Output that
+arrives after that point is dropped rather than written to a closed file
+descriptor that the next queued task may now own.
+
+The same exit-before-EOF wait applies to the project check gate
+(`.taskferry.toml`'s `check`): its `checkOutputTail` is snapshotted after
+both output pipes close (or the same grace expires), not inside the
+`exit` event.
+
 ## Cancellation
 
 `taskferry cancel` sends `SIGTERM` to the task's process group (the worker

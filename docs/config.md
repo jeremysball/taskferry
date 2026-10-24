@@ -45,6 +45,7 @@ message — there is no silent typo tolerance.
 | `advisorSessionTtlMs` | `TASKFERRY_ADVISOR_SESSION_TTL_MS` | number | `1800000` (30 min) |
 | `advisorContextChars` | `TASKFERRY_ADVISOR_CONTEXT_CHARS` | number | `120000` |
 | `watchdogGraceMs` | `TASKFERRY_WATCHDOG_GRACE_MS` | number | `5000` |
+| `stdoutDrainGraceMs` | `TASKFERRY_STDOUT_DRAIN_GRACE_MS` | number | `5000`; daemon start flag `--stdout-drain-grace-ms`; see `docs/daemon.md#settling-an-exited-child` |
 | `envDenylist` | `TASKFERRY_ENV_DENYLIST` | string (comma-separated var names) | (none) |
 | `sandboxEnabled` | `TASKFERRY_DISABLE_SANDBOX` (inverted: `1`/`true` disables) | boolean | `true` |
 | `overlayEnabled` | `TASKFERRY_DISABLE_OVERLAY` (inverted: `1`/`true` disables) | boolean | `true` |

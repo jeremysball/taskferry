@@ -4,6 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { EventEmitter } from "node:events";
+import { PassThrough } from "node:stream";
 import { makeManager, fakeChild } from "./tasks.test-helpers.js";
 import { uvDirPath } from "./tasks.js";
 
@@ -19,10 +20,19 @@ function fakeGateChild(pid = 9000) {
   return child;
 }
 
-function dispatchAndSettleWithChanges({ directory, spawns, cacheDir, sandboxEnabled = true }) {
+// A gate child whose output pipes behave like real streams (readableEnded
+// starts false), so settlement has to wait for 'close' to read the tail.
+function pipedGateChild(pid = 9001) {
+  const child = fakeGateChild(pid);
+  child.stdout = new PassThrough();
+  child.stderr = new PassThrough();
+  return child;
+}
+
+function dispatchAndSettleWithChanges({ directory, spawns, cacheDir, sandboxEnabled = true, gateChildFactory = fakeGateChild }) {
   const mgr = makeManager({
     spawnFn: (cmd, args, opts) => {
-      const child = spawns.length === 0 ? fakeChild() : fakeGateChild();
+      const child = spawns.length === 0 ? fakeChild() : gateChildFactory();
       spawns.push({ cmd, args, opts, child });
       return child;
     },
@@ -172,6 +182,21 @@ const dispatched = mgr.dispatch({ model: FAKE_GATE_MODEL, executor: "opencode", 
     assert.ok(spawns[1].opts.detached === true, "gate child must be spawned detached so group-kill can reach it");
     spawns[1].child.emit("exit", null, "SIGTERM");
     assert.equal(mgr.status(dispatched.id).checkStatus, "timeout");
+  });
+
+  test("the tail is snapshotted after stdout closes, not at exit, so the last failure line survives", () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "axi-gate-drain-"));
+    fs.writeFileSync(path.join(directory, TASKFERRY_CONFIG_FILENAME), FAKE_GATE_CONFIG);
+    const spawns = [];
+    const gate = pipedGateChild();
+    const { mgr, dispatched } = dispatchAndSettleWithChanges({ spawns, directory, gateChildFactory: () => gate });
+    gate.emit("exit", 1, null);
+    gate.stdout.emit("data", Buffer.from("error before exit\n"));
+    gate.stdout.emit("data", Buffer.from("error after exit\n"));
+    gate.emit("close", 1, null);
+    const detail = mgr.result(dispatched.id, { fields: ["checkStatus", "checkOutputTail"] });
+    assert.equal(detail.checkStatus, "failed");
+    assert.match(detail.checkOutputTail, /error after exit/);
   });
 
   test("a failed gate with a trailing newline captures the last 40 real lines, not 39 lines plus a trailing blank", () => {

@@ -446,6 +446,7 @@ function buildManagerOptions(options, stateDir, defaultCacheDir, defaultOverlayT
     ...passthroughIfSet({ postOutputNoOutputTimeoutMs: options.postOutputNoOutputTimeoutMs }, "postOutputNoOutputTimeoutMs", "postOutputNoOutputTimeoutMs"),
     ...passthroughIfSet({ preOutputMaxMs: options.preOutputMaxMs }, "preOutputMaxMs", "preOutputMaxMs"),
     ...passthroughIfSet({ cancelGraceMs: options.cancelGraceMs }, "cancelGraceMs", "cancelGraceMs"),
+    ...passthroughIfSet({ stdoutDrainGraceMs: options.stdoutDrainGraceMs }, "stdoutDrainGraceMs", "stdoutDrainGraceMs"),
     ...passthroughIfSet({ readProcStartTimeFn: options.readProcStartTimeFn }, "readProcStartTimeFn", "readProcStartTimeFn"),
     ...passthroughIfSet({ watchdogPollMs: options.watchdogPollMs }, "watchdogPollMs", "watchdogPollMs"),
     ...passthroughIfSet({ maxWaitMs: options.maxWaitMs }, "maxWaitMs", "maxWaitMs"),

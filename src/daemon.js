@@ -1057,9 +1057,19 @@ export async function startDaemon(options = {}) {
 
 async function main() {
   const flagBytes = parsePositiveIntFlag(process.argv.slice(2), "--max-response-bytes");
+  const flagDrain = parsePositiveIntFlag(process.argv.slice(2), "--stdout-drain-grace-ms");
+  // A flag-resolved drain grace has to survive the daemon's self-restart: the
+  // replacement boots from main() with no argv, so mirror it into the env the
+  // replacement inherits. The manager's own flag > env > config > default
+  // chain still sees the explicit option first.
+  const drainEnv = flagDrain === undefined ? {} : { TASKFERRY_STDOUT_DRAIN_GRACE_MS: String(flagDrain) };
   const daemon = await startDaemon({
     ...(flagBytes !== undefined ? { maxResponseBytes: flagBytes } : {}),
-    taskManagerOptions: { config: loadConfig() },
+    env: { ...process.env, ...drainEnv },
+    taskManagerOptions: {
+      config: loadConfig(),
+      ...(flagDrain !== undefined ? { stdoutDrainGraceMs: flagDrain } : {}),
+    },
   });
   const stop = async () => {
     try {

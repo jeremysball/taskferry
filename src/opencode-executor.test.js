@@ -1,5 +1,6 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
+import path from "node:path";
 import { opencodeExecutor } from "./opencode-executor.js";
 import { detectOpencodeCliMajor, ensureOpencodeCliMajor, resetOpencodeCliProbe } from "./opencode-version.js";
 import { PROMPT_FILE_INSTRUCTION } from "./executor-shared.js";
@@ -280,6 +281,39 @@ describe("opencodeExecutor().listModelVariantsFn", () => {
         // sandbox.
         sandboxEnv: { XDG_DATA_HOME: SANDBOXED_DATA_HOME, XDG_CONFIG_HOME: SANDBOXED_CONFIG_HOME },
       });
+    });
+
+    test("sandboxAuthFile: inherited scoped XDG_DATA_HOME still binds the host auth.json (taskferry#623)", () => {
+      // Nested dispatch forwards the controller's per-task data home. On the
+      // host that path only has a 0-byte placeholder; the live credential is
+      // still at ~/.local/share/opencode/auth.json. path.join keeps the
+      // fixture aligned with sandboxAuthFile's own joins on every platform.
+      const parentScopedHome = path.join(DATA_DIR, "opencode-data", "oc_parent");
+      const parentPlaceholder = path.join(parentScopedHome, "opencode", "auth.json");
+      const hostAuth = path.join(HOME_DIR, ".local", "share", "opencode", "auth.json");
+      const hostConfigDir = path.join(HOME_DIR, ".config", "opencode");
+      const childDataHome = path.join(DATA_DIR, "opencode-data", TASK_ID);
+      const childConfigHome = path.join(childDataHome, "config");
+      const ex = opencodeExecutor();
+      const result = ex.sandboxAuthFile({
+        homeDir: HOME_DIR,
+        dataDir: DATA_DIR,
+        taskId: TASK_ID,
+        spawnEnv: {
+          XDG_DATA_HOME: parentScopedHome,
+          XDG_CONFIG_HOME: path.join(parentScopedHome, "config"),
+        },
+        existsFn: (p) => p === hostAuth || p === parentPlaceholder || p === hostConfigDir,
+        lstatFn: () => ({ isSymbolicLink: () => false }),
+        readdirFn: (p) => (p === hostConfigDir ? [OPENCODE_JSONC] : []),
+      });
+      assert.deepEqual(result.extraRoBinds[0], [hostAuth, path.join(childDataHome, "opencode", "auth.json")]);
+      assert.equal(result.extraRoBinds.some(([src]) => src === parentPlaceholder), false);
+      assert.deepEqual(result.extraRoBinds[1], [
+        path.join(hostConfigDir, OPENCODE_JSONC),
+        path.join(childConfigHome, "opencode", OPENCODE_JSONC),
+      ]);
+      assert.deepEqual(result.sandboxEnv, { XDG_DATA_HOME: childDataHome, XDG_CONFIG_HOME: childConfigHome });
     });
 
     test("sandboxAuthFile: drops a symlinked auth.json instead of ro-binding its target", () => {

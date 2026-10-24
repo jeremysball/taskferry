@@ -58,6 +58,8 @@ export { DEFAULT_MAX_OUTPUT_FILE_BYTES, MAX_SAFE_OUTPUT_FILE_BYTES };
  * @property {string|null} endedAt
  * @property {number|null} exitCode
  * @property {NodeJS.Signals|null} signal
+ * @property {number|null} [cost]
+ * @property {unknown} [tokens]
  * @property {string} logPath
  * @property {string} prompt
  * @property {string} promptPreview
@@ -833,6 +835,8 @@ export function isOutsideDirectory(directory, candidate) {
  * @property {(() => void)|null} [forceSettle] settles this pending drain immediately (used by cancel and daemon close)
  * @property {StringDecoder} decoder decodes stdout across chunk boundaries so a split multi-byte character is not replaced with U+FFFD
  * @property {string} stdoutCarry
+ * @property {{tokens: unknown, cost: number|null}} accounting the usage totals folded in from the child's own stdout as it was written to the transcript
+ * @property {number} logBytesAtSpawn the transcript's size before this child wrote to it (0 when this child wrote all of it)
  * @property {import("node:child_process").ChildProcess} child
  * @property {Task} task
  * @property {import("./executor.js").WorkerExecutor} executor
@@ -1684,6 +1688,11 @@ function writeNormalizedLogLine(shared, parsed, rawLine) {
     return;
   }
   if (normalized == null) return;
+  // Fold the event's usage into the running totals as it is written, so the
+  // settlement can stamp them onto the record without re-reading the
+  // transcript. The accumulation is the same one the transcript parse uses,
+  // so the totals agree by construction.
+  accumulateUsageAccounting(normalized, shared.accounting);
   writeCapturedLog(shared, `${JSON.stringify(normalized)}\n`);
 }
 
@@ -1758,6 +1767,15 @@ function finishChildSettlement(ctx, shared) {
   // already-emptied list.
   if (!task.overlayDirs) {
     drainDeferredCleanup(task, ctx);
+  }
+  // Stamp the usage totals the child's own stdout produced. They cover the
+  // whole transcript only when this child wrote all of it (the file was empty
+  // when the child was spawned); a transcript that already held content has
+  // usage events this run never saw, and a stamp would undercount them, so
+  // that case is left to the reader, which derives the totals from the
+  // transcript itself.
+  if (shared.logBytesAtSpawn === 0) {
+    storeTaskAccounting(task, shared.accounting);
   }
   try {
     ctx.persistTask(task.id);
@@ -2080,6 +2098,11 @@ function spawnTaskChild(ctx, launchInfo, task) {
   try {
     if (promptFilePath) fs.writeFileSync(promptFilePath, dispatchLaunch.prompt, { mode: 0o600, flag: "wx" });
     logFd = fs.openSync(task.logPath, "a", 0o600);
+    // The transcript's size before this child writes to it. It is appended
+    // to, so a non-zero size means the file already holds another run's
+    // output: usage events this child never saw, which is why the
+    // settlement only stamps totals when this child wrote all of it.
+    const logBytesAtSpawn = fs.fstatSync(logFd).size;
     fs.chmodSync(task.logPath, 0o600);
     const plan = resolveSpawnPlan(ctx, launchInfo, task.id);
     const sandbox = buildSandboxedSpawn(ctx, launchInfo, plan, task);
@@ -2117,6 +2140,8 @@ function spawnTaskChild(ctx, launchInfo, task) {
       capturedLogFd: logFd,
       decoder: new StringDecoder("utf8"),
       stdoutCarry: "",
+      accounting: { tokens: null, cost: null },
+      logBytesAtSpawn,
       child,
       task,
       executor,
@@ -2172,6 +2197,10 @@ function spawnTaskChild(ctx, launchInfo, task) {
     // that pre-dates overlay creation (e.g. the dispatch's own pre-overlay
     // throw) means no deferred list either, so the drain is a no-op.
     drainDeferredCleanup(task, ctx);
+    // The spawn failed, so the child produced no output: there is nothing
+    // to account for. The record still says so (null, not absent), so it
+    // does not read as one that was never accounted for.
+    storeTaskAccounting(task, { tokens: null, cost: null });
     ctx.persistTask(task.id);
     void ctx.scheduleActivity(task, { force: true }).then(() => ctx.activityCache.evictTask(task.id));
     ctx.logHasEventCache.delete(task.logPath);
@@ -2250,6 +2279,7 @@ const DEFAULT_LOWERDIR_STAGGER_MS = 3000;
  * @property {(task: Task) => {failureReason: string|null, failureDetail: string|null}} failureFields
  * @property {(diffPath: string, runCommand: (command: string, args: string[]) => {status: number|null, stdout: string, stderr: string, error?: Error}) => {files: number, additions: number, deletions: number}} computeDiffStat
  * @property {(command: string, args: string[]) => {status: number|null, stdout: string, stderr: string, error?: Error}} runOverlayCommandFn
+ * @property {(taskId: string) => void} persistTask
  */
 
 /**
@@ -2267,6 +2297,22 @@ function validateResultFields(full, fields) {
     if (full && !fields.includes("narration")) {
       throw new Error("error: full requires narration in fields\nhelp: omit full or include narration in fields");
     }
+  }
+}
+
+/**
+ * Read a task's transcript, or null when it cannot be read. A missing
+ * transcript is null, not an empty transcript: "there is nothing to read"
+ * and "the transcript is empty" are different facts, and they call for
+ * different answers about a task's usage totals.
+ * @param {string} logPath
+ * @returns {string|null}
+ */
+function readTaskLog(logPath) {
+  try {
+    return fs.readFileSync(logPath, "utf8");
+  } catch {
+    return null;
   }
 }
 
@@ -2297,6 +2343,20 @@ function parseTaskLog(raw, initialSessionId) {
 }
 
 /**
+ * Parse one NDJSON log line, or null when the line is not JSON (a crash
+ * stack trace on stderr, interleaved into the same fd).
+ * @param {string} line
+ * @returns {any}
+ */
+function parseLogJsonLine(line) {
+  try {
+    return JSON.parse(line);
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Parse and dispatch a single NDJSON line into the running `parsed` state.
  * Decomposed out of the loop (which otherwise carried the bulk of `result`'s
  * cognitive/cyclomatic cost) so each event-type handler stays flat. Non-JSON
@@ -2306,13 +2366,8 @@ function parseTaskLog(raw, initialSessionId) {
  * @param {{sessionId: string|null, tokens: unknown, cost: number|null, textByMessageId: Map<string, string[]>, textOrder: string[], finalMessageId: string|null}} parsed
  */
 function consumeLogLine(line, parsed) {
-  /** @type {any} */
-  let evt;
-  try {
-    evt = JSON.parse(line);
-  } catch {
-    return;
-  }
+  const evt = parseLogJsonLine(line);
+  if (!evt) return;
   if (evt.sessionID) parsed.sessionId = evt.sessionID;
   if (evt.type === "text" && evt.part && typeof evt.part.text === "string") {
     accumulateTextEvent(evt, parsed);
@@ -2344,9 +2399,23 @@ function accumulateTextEvent(evt, parsed) {
  * @param {{tokens: unknown, cost: number|null, finalMessageId: string|null}} parsed
  */
 function accumulateStepFinishEvent(evt, parsed) {
-  if (evt.part.tokens) parsed.tokens = sumTokens(parsed.tokens, evt.part.tokens);
-  if (typeof evt.part.cost === "number") parsed.cost = (parsed.cost ?? 0) + evt.part.cost;
+  accumulateUsageAccounting(evt, parsed);
   if (evt.part.reason === "stop") parsed.finalMessageId = evt.part.messageID;
+}
+
+/**
+ * Fold one event's usage into a running total. A `step_finish` event
+ * carries the request's cost and token counts; every other event carries
+ * none, so it leaves the totals alone. An event with no cost at all leaves
+ * the cost total null ("nothing to report") rather than turning it into a
+ * zero, which would claim the run was free.
+ * @param {any} evt
+ * @param {{tokens: unknown, cost: number|null}} accounting
+ */
+function accumulateUsageAccounting(evt, accounting) {
+  if (!evt || evt.type !== "step_finish" || !evt.part) return;
+  if (evt.part.tokens) accounting.tokens = sumTokens(accounting.tokens, evt.part.tokens);
+  if (typeof evt.part.cost === "number") accounting.cost = (accounting.cost ?? 0) + evt.part.cost;
 }
 
 /**
@@ -2417,6 +2486,111 @@ function resultCheckGateFields(task, fields) {
 }
 
 /**
+ * Stamps a task's token/cost accounting onto its record, so `tasks.json`
+ * carries the numbers instead of leaving every consumer to re-parse the
+ * transcript. Runs at terminal transitions only.
+ *
+ * The stamp always assigns the accounting it is handed rather than adding to
+ * whatever the record already held: the transcript is the single source of
+ * truth, so a task whose transcript grew (a child that outlived the daemon
+ * that launched it) is re-accounted from the whole file instead of being
+ * summed twice.
+ *
+ * A stamp of null/null means the transcript was read and carried no usage to
+ * report (no `step_finish` event carried a cost). That is a different fact
+ * from the absent fields of a record written before accounting was
+ * persisted: null means "nothing to report", absent means "never
+ * accounted".
+ * @param {Task} task
+ * @param {{tokens: unknown, cost: number|null}} accounting - the totals
+ *   derived from the task's whole transcript
+ */
+function storeTaskAccounting(task, accounting) {
+  task.cost = accounting.cost;
+  task.tokens = accounting.tokens;
+}
+
+/**
+ * True when two usage readings are the same. The token totals are compared
+ * field by field rather than by identity: every parse builds a fresh object,
+ * so an identity check would report every read as a change and rewrite the
+ * record each time. Keys whose value is undefined are ignored, matching what
+ * the record looks like once it has been through JSON.
+ * @param {unknown} a
+ * @param {unknown} b
+ * @returns {boolean}
+ */
+function sameUsageValue(a, b) {
+  if (a === b) return true;
+  if (a === null || b === null || typeof a !== "object" || typeof b !== "object") return false;
+  const left = /** @type {Record<string, unknown>} */ (a);
+  const right = /** @type {Record<string, unknown>} */ (b);
+  const leftKeys = Object.keys(left).filter((key) => left[key] !== undefined);
+  const rightKeys = Object.keys(right).filter((key) => right[key] !== undefined);
+  if (leftKeys.length !== rightKeys.length) return false;
+  return leftKeys.every((key) => sameUsageValue(left[key], right[key]));
+}
+
+/**
+ * Decides which cost/tokens pair a result reports, and keeps the task
+ * record's own copy in step with it.
+ *
+ * The transcript is the source of truth for as long as it can be read: its
+ * parse already yields the totals, so using them costs nothing extra, and a
+ * transcript that grew (a child that outlived the daemon that launched it)
+ * is reported as it stands rather than as it stood at settlement. The
+ * record's own copy matters once the transcript is gone (taskferry prunes
+ * records, not logs, so that means a deleted log), which is why the
+ * settlement stamps the totals it folded in from the child's output.
+ *
+ * A record written before accounting was persisted carries neither, so the
+ * first read that can derive the totals gives them to it.
+ *
+ * Every path assigns; nothing ever adds to a stored total, so re-deriving
+ * can never double-count.
+ * @param {Task} task
+ * @param {{tokens: unknown, cost: number|null}} parsed - the accounting
+ *   derived from the transcript read in this call
+ * @param {boolean} logReadable - whether the transcript could be read
+ * @param {ResultContext} ctx
+ * @returns {{tokens: unknown, cost: number|null}}
+ */
+function resolveTaskAccounting(task, parsed, logReadable, ctx) {
+  const parsedCost = parsed.cost;
+  const parsedTokens = parsed.tokens;
+  const hasReading = parsedCost !== null || parsedTokens !== null;
+  if (logReadable && hasReading) {
+    // The transcript carries usage: it wins over the record's copy, and the
+    // record is refreshed to match it.
+    if (task.cost !== parsedCost || !sameUsageValue(task.tokens, parsedTokens)) {
+      task.cost = parsedCost;
+      task.tokens = parsedTokens;
+      try {
+        ctx.persistTask(task.id);
+      } catch {}
+    }
+    return { tokens: parsedTokens, cost: parsedCost };
+  }
+  const storedCost = task.cost;
+  const storedTokens = task.tokens;
+  if (storedCost !== undefined && storedTokens !== undefined) {
+    // The transcript is gone (a deleted log), or it holds no usage to
+    // report: the record's own totals are what is left.
+    return { tokens: storedTokens, cost: storedCost };
+  }
+  if (logReadable) {
+    // The transcript has no usage to report: account for it as such, so the
+    // record stops reading as one that was never accounted for.
+    task.cost = null;
+    task.tokens = null;
+    try {
+      ctx.persistTask(task.id);
+    } catch {}
+  }
+  return { tokens: null, cost: null };
+}
+
+/**
  * Build the full `ResultDetail` for an already-finished (not running/queued)
  * task from its parsed log, narration, and diff. The conditional extra fields
  * (`summaryOf`/`incomplete`/`finalMarker`) and the `next` guidance stay here;
@@ -2428,13 +2602,9 @@ function resultCheckGateFields(task, fields) {
  * @returns {ResultDetail}
  */
 function computeResultDetail(task, { taskId, full, fields }, ctx) {
-  let raw;
-  try {
-    raw = fs.readFileSync(task.logPath, "utf8");
-  } catch {
-    raw = "";
-  }
-  const parsed = parseTaskLog(raw, task.sessionId);
+  const raw = readTaskLog(task.logPath);
+  const parsed = parseTaskLog(raw ?? "", task.sessionId);
+  const accounting = resolveTaskAccounting(task, parsed, raw !== null, ctx);
   const narration = shapeNarration(parsed, full);
   const { diffText, diffStat } = readTaskDiff(task, ctx, fields);
   const next = resultNextAction(task, taskId, narration.narrationTruncated);
@@ -2450,8 +2620,8 @@ function computeResultDetail(task, { taskId, full, fields }, ctx) {
     changesetError: task.changesetError ?? null,
     ...resultTaskOptionalFields(task, fields),
     sessionId: parsed.sessionId,
-    tokens: parsed.tokens,
-    cost: parsed.cost,
+    tokens: accounting.tokens,
+    cost: accounting.cost,
     message: narration.message,
     narration: narration.narration,
     narrationTotalChars: narration.narrationTotalChars,
@@ -3579,6 +3749,9 @@ function handleQueuedForRestart(task, ctx, prev) {
   task.status = "unknown";
   // @ts-ignore
   delete task._persistedStatus;
+  // No usage stamp: a queued task never ran, and its transcript holds no
+  // usage events. A reader that asks for the result derives the (empty)
+  // accounting from the transcript itself.
   ctx.events.taskEvents.emitState(task, prev);
   try { ctx.helpers.persistTask(task.id); } catch {}
 }
@@ -3681,6 +3854,11 @@ function failRunningForRestart(task, ctx, prev, _sessionId, { logReadable, dirEx
   task.signal = null;
   task.pid = null;
   delete task._persistedStatus;
+  // No usage stamp: the child that wrote this transcript belonged to the
+  // previous daemon, so its usage totals are not in this process's hands.
+  // Deriving them here would mean re-reading the transcript on the restart
+  // path, which the daemon's bounded-read discipline rules out. A reader
+  // that asks for the result derives them from the transcript instead.
   ctx.events.taskEvents.emitState(task, prev);
   try { ctx.helpers.persistTask(task.id); } catch {}
 }
@@ -5668,7 +5846,7 @@ function buildTaskManagerApi(ctx) {
      * @param {{full?: boolean, fields?: string[]}} [options]
      * @returns {ResultDetail}
      */
-    result: (taskId, { full = false, fields } = {}) => resultFor(taskId, { full, fields }, { ensureStateLoaded: () => ctx.helpers.ensureStateLoaded(), tasks: ctx.maps.tasks, runOverlayCommandFn: ctx.opts.runOverlayCommandFn, noSuchTask }),
+    result: (taskId, { full = false, fields } = {}) => resultFor(taskId, { full, fields }, { ensureStateLoaded: () => ctx.helpers.ensureStateLoaded(), tasks: ctx.maps.tasks, runOverlayCommandFn: ctx.opts.runOverlayCommandFn, persistTask: (id) => ctx.helpers.persistTask(id), noSuchTask }),
     /**
      * @param {string} taskId
      * @param {{chars?: number}} [options]
@@ -8853,7 +9031,7 @@ function resultPromptFields(task) {
  * module-level helpers called directly, the rest is threaded in via `ctx`.
  * @param {string} taskId
  * @param {{full: boolean, fields?: string[]}} options
- * @param {{ensureStateLoaded: () => void, tasks: Map<string, Task>, noSuchTask: (taskId: string) => Error, runOverlayCommandFn: (command: string, args: string[]) => {status: number|null, stdout: string, stderr: string, error?: Error}}} ctx
+ * @param {{ensureStateLoaded: () => void, tasks: Map<string, Task>, noSuchTask: (taskId: string) => Error, runOverlayCommandFn: (command: string, args: string[]) => {status: number|null, stdout: string, stderr: string, error?: Error}, persistTask: (taskId: string) => void}} ctx
  * @returns {ResultDetail}
  */
 function resultFor(taskId, { full, fields }, ctx) {
@@ -8886,6 +9064,7 @@ function resultFor(taskId, { full, fields }, ctx) {
     failureFields,
     computeDiffStat,
     runOverlayCommandFn: ctx.runOverlayCommandFn,
+    persistTask: ctx.persistTask,
   };
   return projectResult(computeResultDetail(task, { taskId, full, fields }, detailCtx), fields);
 }

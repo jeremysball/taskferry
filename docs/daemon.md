@@ -303,6 +303,36 @@ write failed settles with `failureReason: "log_write_failed"` while its
 status still reflects the process exit, and its log is incomplete from that
 point.
 
+## Usage accounting in `tasks.json`
+
+A settled task's record carries the usage its run produced: `cost` (the
+provider's reported cost for the run) and `tokens` (the summed token counts).
+Both are folded in from the worker's `step_finish` events as those events are
+written to the task's log, so the totals are known when the child settles
+without the daemon re-reading a transcript that can reach tens of megabytes.
+
+Three states are distinct, and the difference matters:
+
+- `cost: 0.007`: the run cost this much.
+- `cost: null`: the transcript was read and carried no usage to report (no
+  `step_finish` event carried a cost). That is not the same as "the run was
+  free": a run whose daemon died before the worker's stdout reached the log
+  lands here too, with the cost unknowable rather than zero.
+- no `cost` field at all: the run was never accounted for. Either the task
+  has not settled yet, or the record predates accounting being persisted.
+  The first read that can derive the totals fills them in.
+
+`taskferry result` prefers the transcript over the record whenever the
+transcript can still be read: its parse already yields the totals, so using
+them costs nothing extra, and the record is refreshed when the two disagree.
+The record's own totals are what remains once the transcript is gone (the
+daemon prunes records, not logs, so this means a deleted log), which is why
+the settlement stamps them.
+
+Totals are assigned, never accumulated onto a stored total: a re-read or a
+re-derived total replaces the stored one, so a task's cost cannot be counted
+twice.
+
 ## Cancellation
 
 `taskferry cancel` sends `SIGTERM` to the task's process group (the worker

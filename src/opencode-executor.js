@@ -5,7 +5,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { promisify } from "node:util";
 import { detectOpencodeCliMajor, ensureOpencodeCliMajor } from "./opencode-version.js";
-import { appendPromptFileArgs, buildSummaryPrompt, identityLogEvent, isSafeBindSource, resolveConfigDirBinds } from "./executor-shared.js";
+import { appendPromptFileArgs, buildSummaryPrompt, identityLogEvent, instructionsDestFor, isSafeBindSource, resolveConfigDirBinds } from "./executor-shared.js";
 import { buildV2SandboxSpawn } from "./opencode-auth.js";
 import { resolveXdgDataHome } from "./sandbox.js";
 
@@ -202,7 +202,7 @@ export function opencodeExecutor({ detectCliMajorFn = () => detectOpencodeCliMaj
     // small tmpfs: opencode's snapshot store under here grows unbounded
     // across dispatches (no gc) and previously filled the whole
     // XDG_RUNTIME_DIR tmpfs, starving it of space for sockets/locks too.
-    /** @param {{homeDir: string, dataDir: string, taskId: string, spawnEnv: NodeJS.ProcessEnv, existsFn: (file: string) => boolean, statFn?: (file: string) => {isDirectory: () => boolean}|null, lstatFn?: (file: string) => {isSymbolicLink: () => boolean, isFile?: () => boolean, nlink?: number}, readdirFn: (dir: string) => string[], realpathFn?: (file: string) => string, sessionId?: string|null, launchDirectory?: string|null}} args @returns {{extraRoBinds: [string, string][], extraRwPairBinds?: [string, string][], sandboxedDataHome: string, sandboxEnv: Record<string, string>}} */
+    /** @param {{homeDir: string, dataDir: string, taskId: string, spawnEnv: NodeJS.ProcessEnv, existsFn: (file: string) => boolean, statFn?: (file: string) => {isDirectory: () => boolean}|null, lstatFn?: (file: string) => {isSymbolicLink: () => boolean, isFile?: () => boolean, nlink?: number}, readdirFn: (dir: string) => string[], realpathFn?: (file: string) => string, sessionId?: string|null, launchDirectory?: string|null}} args @returns {{extraRoBinds: [string, string][], extraRwPairBinds?: [string, string][], sandboxedDataHome: string, sandboxEnv: Record<string, string>, instructionsDest: string}} */
     sandboxAuthFile({ homeDir, dataDir, taskId, spawnEnv, existsFn, lstatFn = fs.lstatSync, readdirFn, realpathFn = fs.realpathSync }) {
       const realDataHome = resolveXdgDataHome(spawnEnv, homeDir);
       const realAuthFile = path.join(realDataHome, "opencode", "auth.json");
@@ -251,6 +251,11 @@ export function opencodeExecutor({ detectCliMajorFn = () => detectOpencodeCliMaj
         sandboxedDataHome,
         extraRoBinds,
         sandboxEnv: { XDG_DATA_HOME: sandboxedDataHome, XDG_CONFIG_HOME: sandboxedConfigHome },
+        // The sandboxed config dir's AGENTS.md, which opencode loads as its
+        // global instructions. The config walk above leaves AGENTS.md
+        // unbound; an explicit --ro-bind of an instructions file is mapped
+        // here instead.
+        instructionsDest: instructionsDestFor(sandboxedConfigDir),
       };
     },
     buildSummaryPrompt,

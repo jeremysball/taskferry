@@ -594,3 +594,87 @@ belongs here.
   exit-1 result with no stdout is a setup failure or a silent bwrap death;
   treating it as "no changes" would discard the worker's edits. It would be
   a real bug if a legitimate diff could exit 1 with an empty stdout.
+- `--ro-bind` and `--rw-bind` replacing their global lists instead of adding
+  to them. Expected, not an inconsistency. A dispatch's `--ro-bind` or
+  `--rw-bind` (or, absent that, the next layer down that sets one; the order
+  is in `docs/config.md`) is the whole list, so `--rw-bind /x` on a daemon whose config binds `/a,/b`
+  leaves `/a` and `/b` out of that dispatch. A global list can name paths a
+  given worker should not see or write by default (a global instructions
+  file, a reference tree, a shared scratch directory), and a dispatch has to
+  be able to take them away as well as add to them; a union has no way to do
+  that, which is why there is no `--ro-unbind` or `--rw-unbind` either.
+  Scope: only the global lists are replaced. A project's `.taskferry.toml`
+  `roBind`/`read_only_paths` still binds, the settle-time check gate still
+  sees the project's mounts, and the binds the sandbox adds on its own (a
+  worktree's git directories, the task's output directory, the executor's
+  credentials) stay. The two names of the read-write flag (`--rw-bind` and the
+  deprecated `--allowed-dirs`) union with each other inside one layer, and
+  that combined list is what replaces the global one. It would be a real bug
+  if a per-dispatch list dropped a project entry or an automatic bind, or if
+  a layer below the first one set still contributed a path.
+- `--ro-bind ""` and `--rw-bind ""` (and `--ro-bind=`, `TASKFERRY_RO_BIND=`,
+  `TASKFERRY_RW_BIND=`, config `"roBind": ""`, `"rwBind": ""`) being accepted
+  as "bind none of the global list", while `--allowed-dirs ""` is still
+  rejected with `requires a non-empty value`. Expected. An empty list is the
+  only way to say "this dispatch gets none of the global binds" under replace
+  semantics, and the deprecated name has no empty form: `--allowed-dirs ""` is
+  a usage error, and an empty `TASKFERRY_ALLOWED_DIRS`, config `allowedDirs`,
+  or `allowedDirs` array is ignored, so the old name can never empty a list
+  the new one set. A lone `,` is rejected for all three. It would be a real
+  bug if the empty list were dropped on a resume: `resumeRoBind` and
+  `resumeAllowedDirs` persist `[]` for exactly that reason. It would also be a
+  real bug if an empty value of the deprecated name emptied the list.
+- An OpenCode or kilo worker not seeing the `AGENTS.md` and `CLAUDE.md` that
+  sit in `~/.config/opencode` or `~/.config/kilo`, although every other entry
+  in that directory is bound. Expected. The executors used to bind the whole
+  config directory entry by entry, which handed every ferry the caller's global
+  instructions as a side effect (and, through a symlinked `AGENTS.md`, a path
+  under the deny-listed `~/.claude`). Those two exact names are now skipped
+  (`AGENTS.md.backup` and other lookalikes still bind) and a ferry gets
+  global instructions only when `--ro-bind` names the file. The walk also
+  skips an entry under any other name whose symlink target is named
+  `AGENTS.md` or `CLAUDE.md` (`team.md -> ~/.claude/CLAUDE.md`), since
+  binding it would hand over the same file under an alias; a symlink to a
+  differently named file still binds. It would be a real bug if an alias to
+  an instructions file were bound, or if a symlink to an ordinary file were
+  skipped.
+- A `--ro-bind` of a file named `CLAUDE.md` showing up inside the sandbox as
+  `.../AGENTS.md`, and a second instructions file in the same list being
+  reported and left at its own path. Expected. The mapping is by file name
+  (`AGENTS.md` or `CLAUDE.md`, regular files only: a directory, FIFO, or
+  socket is never mapped, because the worker's harness would block opening
+  it), both land on `AGENTS.md` in the sandboxed config dir (where the old
+  auto-bind put the host's `AGENTS.md`), `AGENTS.md` wins a tie, the first
+  listed wins between two files of one name, and the file is bound at its
+  own path as well. Pi has no such path, so it gets the own-path bind only,
+  and summary children map nothing. It would be a real bug if a file with
+  any other name were mapped, or if two files were mapped to the same
+  destination.
+- An instructions file named in a project's `.taskferry.toml`
+  `roBind`/`read_only_paths` binding at its own path but not showing up as
+  `AGENTS.md`. Expected. The mapping reads only the global or per-dispatch
+  list (`roResolved`, passed to `instructionsRoBinds` in `buildBwrapBinds`).
+  The mapping is for the caller's own instructions; the project layer is
+  controlled by the repo, and mapping it would let a checked-in config file
+  replace the worker's instructions. It would be a real bug if a
+  project-layer path were mapped without the dispatch or global list naming
+  it.
+- A mapped instructions file turning writable when the same file is also in
+  `--rw-bind`. Expected: read-write wins for a path in both sets, and the
+  mapped copy is the same file, so it is promoted too (`--bind` replaces the
+  `--ro-bind` pair). It would be a real bug if the own-path copy were
+  writable while the mapped copy stayed read-only, or the reverse.
+- A relative `--ro-bind` path being taken from the dispatch's `--directory`
+  rather than from where the daemon runs. Expected, same as `--rw-bind`: the
+  daemon's working directory is not something a caller controls or can see.
+  It would be a real bug if two dispatches from different directories
+  resolved one relative entry to the same host path.
+- `TASKFERRY_RO_BIND=" "` or `TASKFERRY_RW_BIND=" "` (or `","`, or the same in
+  config, or an array of only blank entries from the manager option or a
+  per-dispatch call) failing with `names no path` while the empty string is
+  accepted. Expected. The empty string is the deliberate "bind none of the
+  global list"; a non-empty value that names no path is a typo that would
+  otherwise parse to an empty list and silently shadow the layers below it.
+  The same value passed to a flag is a usage error for the same reason. It
+  would be a real bug if a blank value were accepted as an empty list, or if
+  the empty string started to throw.

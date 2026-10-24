@@ -125,9 +125,18 @@ function isKnownExecutor(value) {
   return typeof value === "string" && KNOWN_EXECUTORS.includes(value);
 }
 
+/**
+ * An array of non-empty strings; the array itself may be empty. For `rwBind`
+ * and `roBind`, which replace the global lists, `[]` means "bind none of it".
+ * @param {unknown} value @returns {value is string[]}
+ */
+function isStringArray(value) {
+  return Array.isArray(value) && value.every(isNonEmptyString);
+}
+
 /** @param {unknown} value @returns {value is string[]} */
 function isNonEmptyStringArray(value) {
-  return Array.isArray(value) && value.length > 0 && value.every(isNonEmptyString);
+  return isStringArray(value) && value.length > 0;
 }
 
 /** @param {unknown} value @returns {value is string[]} */
@@ -191,8 +200,8 @@ const METHOD_PARAMS = {
       ["noSandbox", isBoolean],
       ["noOverlay", isBoolean],
       ["allowedDirs", isNonEmptyStringArray],
-      ["rwBind", isNonEmptyStringArray],
-      ["roBind", isNonEmptyStringArray],
+      ["rwBind", isStringArray],
+      ["roBind", isStringArray],
       ["executor", isKnownExecutor],
       ["class", isNonEmptyString],
       ["parentTaskId", isNonEmptyString],

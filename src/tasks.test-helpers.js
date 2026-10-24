@@ -48,6 +48,20 @@ export function preserveEnvVars(t, names) {
   return prior;
 }
 
+// Runs `fn` with process.stderr.write swapped for a collector and returns
+// everything written to it, restoring the real write even if `fn` throws.
+export function captureStderr(fn) {
+  const originalWrite = process.stderr.write;
+  let written = "";
+  process.stderr.write = (chunk) => { written += chunk; return true; };
+  try {
+    fn();
+  } finally {
+    process.stderr.write = originalWrite;
+  }
+  return written;
+}
+
 export function mkdtempTracked(prefix) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
   trackedTempDirs.push(dir);

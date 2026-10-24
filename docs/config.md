@@ -48,9 +48,9 @@ message — there is no silent typo tolerance.
 | `envDenylist` | `TASKFERRY_ENV_DENYLIST` | string (comma-separated var names) | (none) |
 | `sandboxEnabled` | `TASKFERRY_DISABLE_SANDBOX` (inverted: `1`/`true` disables) | boolean | `true` |
 | `overlayEnabled` | `TASKFERRY_DISABLE_OVERLAY` (inverted: `1`/`true` disables) | boolean | `true` |
-| `rwBind` | `TASKFERRY_RW_BIND` | string (comma-separated paths) | (none) |
+| `rwBind` | `TASKFERRY_RW_BIND` | string (comma-separated paths) | (none); **replaces** rather than unions, see below |
 | `allowedDirs` | `TASKFERRY_ALLOWED_DIRS` | string (comma-separated paths) | (none), **deprecated alias for `rwBind`** |
-| `roBind` | `TASKFERRY_RO_BIND` | string (comma-separated paths) | (none) |
+| `roBind` | `TASKFERRY_RO_BIND` | string (comma-separated paths) | (none); **replaces** rather than unions, see below |
 | `sandboxDenylist` | `TASKFERRY_SANDBOX_DENYLIST` | string (comma-separated paths) | (none) |
 | `waitDefaultTimeoutMs` | `TASKFERRY_WAIT_DEFAULT_TIMEOUT_MS` | number | `900000` (15 min); `0` disables via the env var only — a config-file value of `0` is ignored and falls back to the 15-minute default |
 | `cancelGraceMs` | `TASKFERRY_CANCEL_GRACE_MS` | number | `5000`; overridden per-call by `cancel --grace-ms` |
@@ -73,31 +73,92 @@ flat list of env var names, always stripped from every spawned child
 regardless of whether the value came from the daemon's own ambient
 environment or a caller's forwarded env; see `docs/security.md`.
 
-`allowedDirs` is a deprecated alias for `rwBind` — both bind directories
-read-write inside the sandbox for every dispatch. The two are **unioned**,
-not mutually exclusive: if both the new name and its deprecated alias are
-set, all paths from both contribute. `rwBind` (and `allowedDirs`) also union
-with the per-dispatch `--rw-bind`/`--allowed-dirs` flags and the
-`TASKFERRY_RW_BIND`/`TASKFERRY_ALLOWED_DIRS` env vars rather than any one
-layer replacing another. `allowedDirs` emits a deprecation warning whenever
-it is used and will be removed in the next major release. A `rwBind` path
-that overlaps the sandbox deny-list (e.g. `~/.ssh`) is still bound
-read-write — overriding the deny-list is the user's explicit call — but a
-loud warning is emitted at dispatch time.
+`rwBind` binds directories **read-write** (`--rw-bind`) inside the sandbox
+for every dispatch, in addition to the git directories the sandbox binds on
+its own for a worktree. It does **not** union across layers: the list you
+supply is the whole list. The first layer that sets it wins, in the order
+per-dispatch `--rw-bind` flag, then the manager option, then
+`TASKFERRY_RW_BIND`, then the config file, and the layers below it are
+ignored. `roBind`, below, follows the same rule, and this is the one place
+that order is spelled out; other docs link here.
+
+`allowedDirs` is a deprecated alias for `rwBind`. It sits in the same layer
+as the new name (`--allowed-dirs` beside `--rw-bind`, `TASKFERRY_ALLOWED_DIRS`
+beside `TASKFERRY_RW_BIND`, config `allowedDirs` beside `rwBind`), and when
+both names are set in one layer, the paths from both contribute. It emits a
+deprecation warning whenever it is set, even when a higher layer shadows it,
+and will be removed in the next major release.
+
+- An empty value (`--rw-bind ""`, `TASKFERRY_RW_BIND=`, `"rwBind": ""`, or an
+  empty array from the manager option or a per-dispatch call) is a list of
+  nothing, so it replaces a longer list below it with no extra read-write
+  binds at all. A non-empty value that names no path (`" "`, `","`, an array
+  of only blank entries) is rejected with an error instead, since it is a typo
+  and would otherwise shadow the layers below it. In an array, a blank entry
+  next to a real path is dropped.
+- The deprecated name has no empty form. `--allowed-dirs ""` is a usage error,
+  and an empty value of it anywhere else (`TASKFERRY_ALLOWED_DIRS=`, config
+  `"allowedDirs": ""`, an empty `allowedDirs` array) is ignored: it does not
+  empty the list, and its layer falls through to the layers below. A
+  per-dispatch `allowedDirs` (the field a `dispatch` call takes) warns that the
+  name is deprecated, the same as the flag.
+- A relative entry resolves against the dispatch's launch directory
+  (`--directory`). A path listed twice is bound once. An entry that does not
+  exist on the host is skipped silently.
+- Only the global list is replaced. The binds the sandbox adds on its own (a
+  worktree's git directories, the task's output directory, the executor's
+  credentials) are not part of it and stay.
+- Only `dispatch` takes `--rw-bind`. An `advisor`, and the internal summary
+  child of a dispatch, always get the global list.
+- A `rwBind` path that overlaps the sandbox deny-list (e.g. `~/.ssh`) is still
+  bound read-write (overriding the deny-list is the user's explicit call), but
+  a loud warning is emitted at dispatch time.
 
 `roBind` is the read-only counterpart: host paths bound **read-only**
 (`--ro-bind`) into the sandbox for every dispatch, resolved through the same
 protected-mount safety check as `.taskferry.toml`'s `read_only_paths`
 (a nonexistent or protected-overlapping entry is skipped and reported, never
-bound). It unions across the config file, `TASKFERRY_RO_BIND`, the manager
-option, and the per-dispatch `--ro-bind` flag. If a path appears in both
-`rwBind` and `roBind`, read-write wins and a warning is emitted. A `roBind`
-path that overlaps the sandbox deny-list (e.g. `~/.ssh`) is still bound
-read-only — overriding the deny-list is the user's explicit call, same as
-`rwBind` — but a loud warning is emitted at dispatch time. The structural
-mounts (`stateDir`, `runtimeDir`, the launch directory) are never
-overridable: a `roBind` path overlapping one of those is skipped with a
-warning even when it also overlaps the deny-list.
+bound). It replaces the same way, with the same layer order
+(`--ro-bind`, manager option, `TASKFERRY_RO_BIND`, config file).
+
+- The empty-value, names-no-path, relative-path, and listed-twice rules above
+  apply to `roBind` unchanged: `--ro-bind ""`, `TASKFERRY_RO_BIND=`, and
+  `"roBind": ""` are each a list of nothing.
+- The project layer (`.taskferry.toml` `roBind`/`read_only_paths`, next
+  section) is separate and stays additive: a per-dispatch `--ro-bind` never
+  drops a project entry.
+- If a path appears in both `rwBind` and `roBind`, read-write wins and a
+  warning is emitted.
+- A `roBind` path that overlaps the sandbox deny-list (e.g. `~/.ssh`) is still
+  bound read-only. Overriding the deny-list is the user's explicit call, same
+  as `rwBind`, but a loud warning is emitted at dispatch time. The structural
+  mounts (`stateDir`, `runtimeDir`, the launch directory) are never
+  overridable: a `roBind` path overlapping one of those is skipped with a
+  warning even when it also overlaps the deny-list.
+- Only `dispatch` takes `--ro-bind`. An `advisor` always gets the global list.
+
+A regular file named exactly `AGENTS.md` or `CLAUDE.md` in that global or
+per-dispatch list is also mapped to `AGENTS.md` in an OpenCode or kilo
+worker's sandboxed config directory (`$XDG_CONFIG_HOME/opencode/AGENTS.md` or
+`.../kilo/AGENTS.md`), in addition to being bound at its own path. That is the
+only way a worker gets the host's instructions file: the executors no longer
+bind the real `AGENTS.md` and `CLAUDE.md` from `~/.config/opencode` or
+`~/.config/kilo` on their own, and the walk of that directory also skips an
+entry under any other name that is a symlink to a file named `AGENTS.md` or
+`CLAUDE.md`.
+
+- Only the global or per-dispatch list is read. A file with one of those
+  names in a project's `.taskferry.toml` `roBind`/`read_only_paths` binds at
+  its own path and is not mapped.
+- A directory, FIFO, or other non-regular file with one of those names is not
+  mapped.
+- If the list has both names, `AGENTS.md` is used and the other is reported on
+  stderr and bound at its own path only. If two files share a name, the first
+  listed is used and the other is reported the same way.
+- If the mapped file is also in the read-write set, read-write wins, so the
+  mapped copy is writable too.
+- The Pi executor has no such path and gets the own-path bind alone. Summary
+  children map nothing.
 
 `sandboxDenylist` uses the same comma-separated grammar as `allowedDirs` —
 extra directories tmpfs-masked inside the bwrap sandbox, merged with the

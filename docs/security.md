@@ -312,7 +312,11 @@ runs wrapped in
     (`CLAUDE.md`) with no legitimate reason to be readable by a worker;
     OpenCode reads `CLAUDE.md` the same way it reads `AGENTS.md`, so without
     this entry a worker's context (and therefore its output) silently picks
-    up the caller's personal instructions
+    up the caller's personal instructions. The executors do not bind
+    `AGENTS.md`/`CLAUDE.md` from `~/.config/opencode` or `~/.config/kilo`
+    either, nor a differently named entry there that is a symlink to one
+    (a symlink there can resolve into `~/.claude`); a worker gets global
+    instructions only when `--ro-bind` names the file
   - `~/.codex` and the other harness data directories:
     `$XDG_DATA_HOME/opencode`, `$XDG_DATA_HOME/kilo`, and Pi's
     `$PI_CODING_AGENT_DIR/sessions` (defaults `~/.local/share/...` and
@@ -382,12 +386,15 @@ runs wrapped in
   Set it as a comma-separated list of paths — as the `rwBind`/`allowedDirs`
   config field (applies to every dispatch the daemon serves, including
   internal report-summary children) or via `--rw-bind`/`--allowed-dirs
-  <path,path,...>` on a single `taskferry dispatch` call (adds to, not
-  replaces, the config default; unlike the config-level setting,
+  <path,path,...>` on a single `taskferry dispatch` call (replaces, not
+  adds to, the config default; unlike the config-level setting,
   per-dispatch `--rw-bind`/`--allowed-dirs` does not carry over to that
-  dispatch's own summary children). All three layers (flag, env var, config)
-  **union** rather than replace, so a `--rw-bind` flag adds to — never
-  overrides — `TASKFERRY_RW_BIND` and config `rwBind`. `allowedDirs`
+  dispatch's own summary children, which get the global list). The layers
+  (flag, env var, config) do **not** union: the first one that sets the
+  list is the whole list, so a `--rw-bind` flag overrides
+  `TASKFERRY_RW_BIND` and config `rwBind`, and `--rw-bind ""` binds none of
+  the global list. The layer order and the empty-list form are in
+  [config.md](config.md). `allowedDirs`
   (flag/env/config key) still works as a deprecated alias, emits a
   deprecation warning when used, and will be removed in the next major
   release. Entries that don't exist on disk are silently skipped, the same
@@ -396,15 +403,16 @@ runs wrapped in
   user's explicit call, not something the daemon blocks — but a loud
   warning is emitted at dispatch time, since re-exposing a deny-listed
   path as writable deserves more visibility than a docs footnote.
-- **`roBind`** is the read-only counterpart to `rwBind`: extra directories
-  bound **read-only** into the sandbox for a review-only worker that should
+- **`roBind`** is the read-only counterpart to `rwBind`: directories and
+  files bound **read-only** into the sandbox for a review-only worker that should
   be able to read several repos but edit none of them. Resolved through the
   same protected-mount safety check as `.taskferry.toml`'s `read_only_paths`
   — an entry that doesn't exist on the host, or that overlaps a protected
   mount (`stateDir`, `runtimeDir`, or the launch directory), is skipped and
-  reported rather than bound. `roBind` unions across the
-  per-dispatch `--ro-bind` flag, `TASKFERRY_RO_BIND`, config `roBind`, and
-  the manager option. If the same resolved path appears in both the
+  reported rather than bound. Like `rwBind`, `roBind` does not union: the
+  list you supply is the whole list. The layer order, the empty-list form,
+  and the `AGENTS.md`/`CLAUDE.md` mapping are in
+  [config.md](config.md). If the same resolved path appears in both the
   read-write set and the read-only set, it is bound **read-write** and a
   warning is emitted naming the path (read-write wins, never an error) — so
   a `roBind`/`read_only_paths` entry can be promoted to read-write from the

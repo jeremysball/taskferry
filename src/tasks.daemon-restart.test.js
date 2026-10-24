@@ -253,6 +253,40 @@ describe("daemon restart auto-resume", () => {
   });
 });
 
+// The per-dispatch list is stored on the task under a different name than the
+// option: `rwBind` is persisted as `resumeAllowedDirs` (the internal name for
+// the read-write list, see parseBindList's neighbours in tasks.js).
+const PERSISTED_BIND_LISTS = [
+  { option: "roBind", persistedAs: "resumeRoBind", pid: 7778 },
+  { option: "rwBind", persistedAs: "resumeAllowedDirs", pid: 7779 },
+];
+
+describe("dispatch persists per-dispatch bind lists for restart resume", () => {
+  for (const { option, persistedAs, pid } of PERSISTED_BIND_LISTS) {
+    test(`dispatch persists an explicit empty ${option} (replace the global list with nothing) so a restart resume keeps it`, async () => {
+      const mgr = makeManager({
+        spawnFn: () => {
+          const child = fakeChild(pid);
+          setImmediate(() => child.emit("exit", 0, null));
+          return child;
+        },
+        killFn: fakeDeadKill(),
+        cancelGraceMs: 0,
+        sandboxEnabled: false,
+        overlayEnabled: false,
+      });
+      const withEmpty = mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), noSandbox: true, noOverlay: true, [option]: [] });
+      const withoutBind = mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), noSandbox: true, noOverlay: true });
+      mgr.flushPersist();
+      const persisted = JSON.parse(fs.readFileSync(mgr.paths.TASKS_FILE, "utf8"));
+      const emptyRecord = persisted.find((t) => t.id === withEmpty.id);
+      const unsetRecord = persisted.find((t) => t.id === withoutBind.id);
+      assert.deepEqual(emptyRecord[persistedAs], [], "an explicit empty list must persist as [] (not be dropped as 'unset')");
+      assert.equal(unsetRecord[persistedAs], undefined, "no per-dispatch list must stay unset so a resume keeps using the global list");
+    });
+  }
+});
+
 // The bounded tail-window size readSessionIdFromLog scans (tasks.js's
 // SESSION_SCAN_TAIL_BYTES), hardcoded here so the byte-accounting
 // assertions below prove the bound literally.

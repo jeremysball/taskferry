@@ -14,7 +14,8 @@ const SANDBOXED_CONFIG_DIR = `${SANDBOXED_CONFIG_HOME}/kilo`;
 const PROMPT_FILE = "/state/prompts/t1.prompt.txt";
 const DISPATCH_PROMPT = "do the thing";
 const KILO_CONFIG_DIR = "/home/user/.config/kilo";
-const KILO_CONFIG_FILE = `${KILO_CONFIG_DIR}/kilo.jsonc`;
+const KILO_CONFIG_NAME = "kilo.jsonc";
+const KILO_CONFIG_FILE = `${KILO_CONFIG_DIR}/${KILO_CONFIG_NAME}`;
 const KILO_TOKEN_FILE = "/home/user/.kilocode/cli/config.json";
 const TWO_STEP_SESSION = "ses_two_step";
 const STEP_FINISH_PART_TYPE = "step-finish";
@@ -210,7 +211,7 @@ test("kilo reports each step's own usage, so a context is measured per step", ()
       spawnEnv: { XDG_CONFIG_HOME: "/home/user/.config" },
       existsFn: (p) => [KILO_CONFIG_DIR, KILO_CONFIG_FILE, KILO_TOKEN_FILE].includes(p),
       lstatFn: () => ({ isSymbolicLink: () => false, isFile: () => true, nlink: 1 }),
-      readdirFn: () => ["kilo.jsonc", "tui.json", ".gitignore"],
+      readdirFn: () => [KILO_CONFIG_NAME, "tui.json", ".gitignore"],
       realpathFn: (p) => p,
     });
     assert.equal(res.sandboxedDataHome, SANDBOXED_DATA_HOME);
@@ -248,7 +249,7 @@ test("kilo reports each step's own usage, so a context is measured per step", ()
         if (p === KILO_CONFIG_DIR) return { isSymbolicLink: () => false, isDirectory: () => true };
         return { isSymbolicLink: () => false, isFile: () => true, nlink: 1 };
       },
-      readdirFn: () => ["kilo.jsonc"],
+      readdirFn: () => [KILO_CONFIG_NAME],
       realpathFn: () => "/home/user/.dotfiles/.config/kilo/kilo.jsonc",
     });
     const sources = res.extraRoBinds.map(([src]) => src);
@@ -256,6 +257,25 @@ test("kilo reports each step's own usage, so a context is measured per step", ()
       sources.includes("/home/user/.dotfiles/.config/kilo/kilo.jsonc"),
       `a dotfiles-managed symlink resolves to its target, got: ${sources.join(" | ")}`,
     );
+  });
+
+  test("sandboxAuthFile: does not auto-bind the global instructions files (AGENTS.md, CLAUDE.md), and reports instructionsDest for an explicit --ro-bind mapping", () => {
+    const ex = kiloExecutor();
+    const res = ex.sandboxAuthFile({
+      homeDir: HOME_DIR,
+      dataDir: DATA_DIR,
+      taskId: TASK_ID,
+      spawnEnv: {},
+      existsFn: (p) => p === KILO_CONFIG_DIR,
+      lstatFn: () => ({ isSymbolicLink: () => false, isFile: () => true, nlink: 1 }),
+      readdirFn: () => [KILO_CONFIG_NAME, "AGENTS.md", "CLAUDE.md", "tui.json"],
+      realpathFn: (p) => p,
+    });
+    assert.deepEqual(res.extraRoBinds.map(([, dest]) => dest), [
+      `${SANDBOXED_CONFIG_DIR}/kilo.jsonc`,
+      `${SANDBOXED_CONFIG_DIR}/tui.json`,
+    ]);
+    assert.equal(res.instructionsDest, `${SANDBOXED_CONFIG_DIR}/AGENTS.md`);
   });
 
   test("the executor registry knows kilo", () => {

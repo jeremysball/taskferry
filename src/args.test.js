@@ -628,9 +628,24 @@ test("--ro-bind parses a comma-separated path list into roBind", () => {
   assert.deepEqual(parsed.options.roBind, ["/a", "/b"]);
 });
 
-test("--rw-bind / --ro-bind require at least one path", () => {
+test("--rw-bind / --ro-bind reject a non-empty value that parses to no path", () => {
   assert.throws(() => parseArgs(["dispatch", "--prompt", "x", "--rw-bind", ","], { cwd: CWD }), /--rw-bind must contain at least one path/);
   assert.throws(() => parseArgs(["dispatch", "--prompt", "x", "--ro-bind", ","], { cwd: CWD }), /--ro-bind must contain at least one path/);
+});
+
+test("--ro-bind accepts an empty value as an explicit empty list (it replaces the global list with nothing)", () => {
+  assert.deepEqual(parseArgs(["dispatch", "--prompt", "x", "--ro-bind", ""], { cwd: CWD }).options.roBind, []);
+  assert.deepEqual(parseArgs(["dispatch", "--prompt", "x", "--ro-bind="], { cwd: CWD }).options.roBind, []);
+});
+
+test("--rw-bind accepts an empty value as an explicit empty list (it replaces the global list with nothing)", () => {
+  assert.deepEqual(parseArgs(["dispatch", "--prompt", "x", "--rw-bind", ""], { cwd: CWD }).options.rwBind, []);
+  assert.deepEqual(parseArgs(["dispatch", "--prompt", "x", "--rw-bind="], { cwd: CWD }).options.rwBind, []);
+  assert.equal(parseArgs(["dispatch", "--prompt", "x"], { cwd: CWD }).options.rwBind, undefined, "an omitted flag must stay unset, or it would replace the global list with nothing");
+});
+
+test("--allowed-dirs (deprecated) still rejects an empty value: the old name takes no new forms", () => {
+  assert.throws(() => parseArgs(["dispatch", "--prompt", "x", "--allowed-dirs", ""], { cwd: CWD }), /--allowed-dirs requires a non-empty value/);
 });
 
 test("--rw-bind and --ro-bind are rejected on non-dispatch commands", () => {

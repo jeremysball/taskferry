@@ -324,6 +324,34 @@ describe("protocol version, method list, and envelope", () => {
     });
   });
 
+  describe("task.dispatch bind-list params", () => {
+    test("task.dispatch accepts an empty roBind array: it replaces the global read-only list with nothing", () => {
+      const parsed = parseRequestLine(request(METHOD.dispatch, { prompt: "hi", directory: TEST_DIR, roBind: [] }));
+      assert.deepEqual(parsed.params.roBind, []);
+    });
+
+    test("task.dispatch accepts a non-empty roBind array", () => {
+      const parsed = parseRequestLine(request(METHOD.dispatch, { prompt: "hi", directory: TEST_DIR, roBind: ["/a", "/b"] }));
+      assert.deepEqual(parsed.params.roBind, ["/a", "/b"]);
+    });
+
+    test("task.dispatch accepts an empty rwBind array (replace the global read-write list with nothing)", () => {
+      const parsed = parseRequestLine(request(METHOD.dispatch, { prompt: "hi", directory: TEST_DIR, rwBind: [] }));
+      assert.deepEqual(parsed.params.rwBind, []);
+    });
+
+    test("task.dispatch accepts a non-empty rwBind array", () => {
+      const parsed = parseRequestLine(request(METHOD.dispatch, { prompt: "hi", directory: TEST_DIR, rwBind: ["/a", "/b"] }));
+      assert.deepEqual(parsed.params.rwBind, ["/a", "/b"]);
+    });
+
+    test("task.dispatch still rejects an empty allowedDirs array and empty-string rwBind/roBind entries", () => {
+      assert.throws(() => parseRequestLine(request(METHOD.dispatch, { prompt: "hi", directory: TEST_DIR, allowedDirs: [] })), /invalid params/i);
+      assert.throws(() => parseRequestLine(request(METHOD.dispatch, { prompt: "hi", directory: TEST_DIR, rwBind: [""] })), /invalid params/i);
+      assert.throws(() => parseRequestLine(request(METHOD.dispatch, { prompt: "hi", directory: TEST_DIR, roBind: [""] })), /invalid params/i);
+    });
+  });
+
   describe("task.summary params", () => {
     test("task.summary accepts an optional env object", () => {
       const parsed = parseRequestLine(request(METHOD.summary, {

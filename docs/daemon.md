@@ -308,8 +308,9 @@ point.
 A settled task's record carries the usage its run produced: `cost` (the
 provider's reported cost for the run) and `tokens` (the summed token counts).
 Both are folded in from the worker's `step_finish` events as those events are
-written to the task's log, so the totals are known when the child settles
-without the daemon re-reading a transcript that can reach tens of megabytes.
+written to the task's log, so for a run that owned its transcript the totals
+are known when the child settles without the daemon re-reading a transcript
+that can reach tens of megabytes.
 A total is folded only after its event has actually reached the transcript,
 so the folded totals never claim more than a reader would find in the log.
 
@@ -322,21 +323,22 @@ Three states are distinct, and the difference matters:
   provider-reported cost of exactly zero, which reads as `cost: 0`.
 - no `cost` field at all: the daemon cannot vouch for the run's usage. The
   task has not settled yet; the record predates accounting being persisted;
-  the transcript already held another run's events (a task resumed after a
-  daemon restart, where this run's totals would undercount the transcript's);
   the log write failed part way through, so the totals folded so far
-  describe only what reached the transcript; or the daemon restarted while
-  the task was running and the session could not be resumed
+  describe only what reached the transcript; the transcript could not be read
+  when the run ended; or the daemon restarted while the task was running and
+  the session could not be resumed
   (`failureReason: daemon_restarted_session_lost`), in which case the
   transcript belongs to the previous daemon's child and this daemon does not
   vouch for it.
 
-A task resumed onto a transcript that already holds another run's events is
-never stamped: this run's totals would undercount the transcript's, and the
-previous run's totals are not this run's to claim. The cost of that choice
-is that the totals live only in the transcript. If that transcript is later
-deleted, the accounting goes with it, and the record stays unaccounted for
-rather than carrying a total the daemon cannot vouch for.
+A task resumed after a daemon restart starts on a transcript that already
+holds the previous attempt's events, so the totals it folds as its output
+streams cover that attempt alone. The record is stamped with the session's
+totals instead: when the run ends, the daemon derives them from the
+transcript in one pass, so the record carries what the whole session cost,
+the same total a reader parses out of the file. A run that ends with its
+transcript unreadable is left unaccounted for instead, because the daemon
+cannot read the session's totals out of it.
 
 `taskferry result` prefers the transcript over the record whenever the
 transcript can still be read and carries usage: its parse already yields the
@@ -354,8 +356,9 @@ launch failure path), so a read cannot replace a total the daemon vouched for
 with one it merely derived.
 
 Totals are assigned, never accumulated onto a stored total: the settlement
-stamps the totals it folded from the whole transcript, so a task's cost can
-never be counted twice.
+stamps one total, either the totals it folded from the transcript it owned or
+the totals it read out of a transcript another attempt had already written
+to, so a task's cost can never be counted twice.
 
 The accounting is reported by `taskferry result`, and by the full status
 detail (`taskferry status --full`, `taskferry wait --full`, and the raw

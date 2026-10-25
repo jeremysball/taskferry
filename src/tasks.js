@@ -1701,7 +1701,7 @@ function writeNormalizedLogLine(shared, parsed, rawLine) {
   const written = writeCapturedLog(shared, `${JSON.stringify(normalized)}\n`);
   if (!written) return;
   const evt = /** @type {any} */ (normalized);
-  if (evt.type === "step_finish" && evt.part) {
+  if (isUsageEvent(evt)) {
     accumulateUsageAccounting(evt, shared.accounting);
   }
 }
@@ -1773,13 +1773,14 @@ function finishChildSettlement(ctx, shared) {
   if (!task.overlayDirs) {
     drainDeferredCleanup(task, ctx);
   }
-  // Stamp the usage totals the child's own stdout produced. The rule for
-  // when a total may be stamped lives in storeTaskAccounting: this child
-  // wrote the whole transcript only when the file was empty at spawn, and
-  // its totals cover the transcript only when no log write was dropped.
-  if (shared.logBytesAtSpawn === 0 && !shared.logWriteFailed) {
-    storeTaskAccounting(task, shared.accounting);
-  }
+  // Stamp the usage totals this run leaves behind. The rule for when a total
+  // may be stamped, and which totals a terminal transition stamps, live in
+  // storeTaskAccounting.
+  stampRunAccounting(task, {
+    ownsTranscript: shared.logBytesAtSpawn === 0,
+    logWriteFailed: shared.logWriteFailed,
+    folded: shared.accounting,
+  });
   try {
     ctx.persistTask(task.id);
   } catch {
@@ -2206,16 +2207,13 @@ function spawnTaskChild(ctx, launchInfo, task) {
     // that pre-dates overlay creation (e.g. the dispatch's own pre-overlay
     // throw) means no deferred list either, so the drain is a no-op.
     drainDeferredCleanup(task, ctx);
-    // The spawn failed, so the child produced no output: there is nothing to
-    // account for. The record still says so (null, not absent), so it does
-    // not read as one that was never accounted for. The stamp follows the
-    // settlement's rule, which applies only when this child owned the whole
-    // transcript, so a spawn failure on a resumed run (whose transcript
-    // already holds the previous run's events) leaves the record alone
-    // instead of claiming this run used nothing.
-    if (logBytesAtSpawn === 0) {
-      storeTaskAccounting(task, { tokens: null, cost: null });
-    }
+    // The spawn failed, so the child produced no output. The stamp follows
+    // the settlement's rule, which lives in storeTaskAccounting: a run that
+    // owned the whole transcript used nothing (null, not absent, so the
+    // record does not read as one that was never accounted for), while a run
+    // that started on a transcript another attempt had already written to
+    // carries that session's totals.
+    stampRunAccounting(task, { ownsTranscript: logBytesAtSpawn === 0 });
     ctx.persistTask(task.id);
     void ctx.scheduleActivity(task, { force: true }).then(() => ctx.activityCache.evictTask(task.id));
     ctx.logHasEventCache.delete(task.logPath);
@@ -2361,6 +2359,27 @@ function parseTaskLog(raw, initialSessionId) {
 }
 
 /**
+ * The usage totals a transcript holds, derived the way a reader derives them:
+ * one pass over its lines, the same parse, the same accumulation, so the
+ * total is the one the log actually holds rather than a second opinion about
+ * it. Null when the transcript cannot be read, which is a different fact from
+ * a transcript that holds no usage at all.
+ * @param {string} logPath
+ * @returns {{tokens: unknown, cost: number|null}|null}
+ */
+function transcriptUsageAccounting(logPath) {
+  const raw = readTaskLog(logPath);
+  if (raw === null) return null;
+  const accounting = { tokens: null, cost: null };
+  for (const line of raw.split("\n")) {
+    const evt = line.trim() ? parseLogJsonLine(line) : NOT_JSON;
+    if (evt === NOT_JSON || !evt) continue;
+    if (isUsageEvent(evt)) accumulateUsageAccounting(evt, accounting);
+  }
+  return accounting;
+}
+
+/**
  * The value a line parses to when it is not JSON at all. It is distinct from
  * the JSON literal `null`, which a line can legitimately hold, so a caller
  * that has to tell "not JSON" from "JSON null" compares against this
@@ -2398,7 +2417,7 @@ function consumeLogLine(line, parsed) {
   if (evt.type === "text" && evt.part && typeof evt.part.text === "string") {
     accumulateTextEvent(evt, parsed);
   }
-  if (evt.type === "step_finish" && evt.part) {
+  if (isUsageEvent(evt)) {
     accumulateStepFinishEvent(evt, parsed);
   }
 }
@@ -2419,7 +2438,19 @@ function accumulateTextEvent(evt, parsed) {
 }
 
 /**
- * Accumulate a step_finish event's usage/token/cost deltas and record the
+ * True when an event carries usage accounting. A finished step is the only
+ * event type that reports tokens and cost, so this is the one place that
+ * says so: the capture path, the read path, and the derivation path all ask
+ * it rather than repeating the shape check.
+ * @param {any} evt
+ * @returns {boolean}
+ */
+function isUsageEvent(evt) {
+  return evt.type === "step_finish" && Boolean(evt.part);
+}
+
+/**
+ * Fold one `step_finish` event's usage/token/cost deltas and record the
  * messageID whose step ended in reason "stop" as the final turn.
  * @param {any} evt
  * @param {{tokens: unknown, cost: number|null, finalMessageId: string|null}} parsed
@@ -2535,6 +2566,16 @@ function resultCheckGateFields(task, fields) {
  * (a run whose transcript the daemon cannot account for, or a record written
  * before accounting was persisted): null means "nothing was used", absent
  * means "nothing is known".
+ *
+ * Which totals a terminal transition stamps: a run that owned the whole
+ * transcript (it started on an empty file) stamps the totals it folded as
+ * its output streamed, because those are the transcript's totals. A run that
+ * started on a transcript another attempt had already written to (a task
+ * resumed after a daemon restart) cannot fold the earlier attempt's usage,
+ * so it stamps the totals the transcript holds, derived in one pass when the
+ * run ends: the same total a reader parses out of the file. A dropped log
+ * write means the transcript is missing events, so neither total is the
+ * session's total and nothing is stamped.
  * @param {Task} task
  * @param {{tokens: unknown, cost: number|null}} accounting - the totals the
  *   daemon vouched for
@@ -2542,6 +2583,30 @@ function resultCheckGateFields(task, fields) {
 function storeTaskAccounting(task, accounting) {
   task.cost = accounting.cost;
   task.tokens = accounting.tokens;
+}
+
+/**
+ * Stamp the usage totals of a run that has ended. Which totals a terminal
+ * transition stamps is the rule in storeTaskAccounting; this carries that
+ * rule out from the facts each caller has.
+ * @param {Task} task
+ * @param {object} run
+ * @param {boolean} run.ownsTranscript - this run wrote the whole transcript,
+ *   so the totals folded from its output are the transcript's totals
+ * @param {boolean} [run.logWriteFailed] - a write to the transcript was
+ *   dropped, so the transcript is missing events
+ * @param {{tokens: unknown, cost: number|null}} [run.folded] - the totals
+ *   folded from this run's own output
+ */
+function stampRunAccounting(task, run) {
+  if (run.logWriteFailed) return;
+  if (run.ownsTranscript) {
+    storeTaskAccounting(task, run.folded ?? { tokens: null, cost: null });
+    return;
+  }
+  const derived = transcriptUsageAccounting(task.logPath);
+  if (derived === null) return;
+  storeTaskAccounting(task, derived);
 }
 
 /**
@@ -2562,12 +2627,10 @@ function transcriptIsEmpty(logPath) {
 /**
  * Decides which cost/tokens pair a result reports.
  *
- * The transcript is the source of truth for as long as it can be read: its
- * parse already yields the totals, so using them costs nothing extra, and a
- * transcript that grew (a child that outlived the daemon that launched it)
- * is reported as it stands rather than as it stood at settlement. The
- * record's own copy is what is left once the transcript is gone, which is
- * why the settlement stamps the totals (see storeTaskAccounting).
+ * The transcript wins while it can be read and carries usage: its parse
+ * already yields the totals, so using them costs nothing extra. What the
+ * record holds is what is left once the transcript is gone, and why the
+ * settlement stamps it at all is the rule in storeTaskAccounting.
  *
  * A readable transcript that carries no usage at all means the run used
  * nothing, so the result says so (null) rather than claiming a number.
@@ -2576,9 +2639,6 @@ function transcriptIsEmpty(logPath) {
  * paths; a read that mutated state would make `taskferry result` a writer,
  * and a record rewritten by a read could only ever hold a total the read
  * path derived, not one the daemon vouched for at settlement.
- *
- * Every path assigns; nothing ever adds to a stored total, so re-deriving
- * can never double-count.
  * @param {Task} task
  * @param {{tokens: unknown, cost: number|null}} parsed - the accounting
  *   derived from the transcript read in this call
@@ -8948,14 +9008,12 @@ function failTaskBeforeLaunch(task, ctx, err) {
   task.status = "crashed";
   task.spawnError = errMessage(err);
   task.endedAt = new Date().toISOString();
-  // This attempt never ran, so the daemon knows it used nothing. The
-  // transcript is what the record's accounting speaks for, though: when it
-  // already holds a previous attempt's usage (a task resumed after a daemon
-  // restart), the daemon cannot vouch for the run's total and leaves the
-  // record unaccounted for, exactly as the spawn-failure path does.
-  if (transcriptIsEmpty(task.logPath)) {
-    storeTaskAccounting(task, { tokens: null, cost: null });
-  }
+  // This attempt never ran, so the daemon knows it used nothing. The stamp
+  // follows the settlement's rule, which lives in storeTaskAccounting: a run
+  // that owned the whole transcript used nothing (null, not absent), while a
+  // run that started on a transcript another attempt had already written to
+  // carries that session's totals.
+  stampRunAccounting(task, { ownsTranscript: transcriptIsEmpty(task.logPath) });
   ctx.persistTask(task.id);
   ctx.flushPersist();
   void ctx.scheduleActivity(task, { force: true }).then(() => ctx.activityCache.evictTask(task.id));

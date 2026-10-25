@@ -240,7 +240,21 @@ describe("accounting in results", () => {
     assert.equal(record.tokens, null);
   });
 
-  test("a resumed run whose launch preparation failed leaves the record unaccounted for", () => {
+  test("a task whose spawn failed is accounted for as having used nothing", () => {
+    const mgr = makeManager({
+      spawnFn: () => { throw new Error("spawn ENOENT"); },
+      defaultExecutor: makeFakeOpencodeExecutor({ buildSpawnArgs: () => ["run", "--format", "json"] }),
+    });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+
+    const record = readPersistedTask(mgr, dispatched.id);
+    assert.equal(record.cost, null, "the child never ran, so the daemon knows the run used nothing");
+    assert.equal(record.tokens, null);
+  });
+});
+
+describe("accounting for a resumed run", () => {
+  test("a resumed run whose launch preparation failed carries the session's totals", () => {
     const mgr = makeManager({
       tasksFixture: (logDir) => [baseTask({
         id: "oc_resume_prepare",
@@ -264,23 +278,11 @@ describe("accounting in results", () => {
     });
 
     const record = readPersistedTask(mgr, "oc_resume_prepare");
-    assert.equal(record.cost, undefined, "the transcript holds the previous run's usage, so this run's failure says nothing about the usage");
-    assert.equal(record.tokens, undefined);
+    assert.equal(record.cost, 0.5, "the transcript holds the session's usage, so the record carries it");
+    assert.deepEqual(record.tokens, { total: 10 });
   });
 
-  test("a task whose spawn failed is accounted for as having used nothing", () => {
-    const mgr = makeManager({
-      spawnFn: () => { throw new Error("spawn ENOENT"); },
-      defaultExecutor: makeFakeOpencodeExecutor({ buildSpawnArgs: () => ["run", "--format", "json"] }),
-    });
-    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
-
-    const record = readPersistedTask(mgr, dispatched.id);
-    assert.equal(record.cost, null, "the child never ran, so the daemon knows the run used nothing");
-    assert.equal(record.tokens, null);
-  });
-
-  test("a resumed run whose spawn failed leaves the record unaccounted for", async () => {
+  test("a resumed run whose spawn failed carries the session's totals", async () => {
     const logDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-accounting-resume-"));
     const mgr = makeManager({
       tasksFixture: (dir) => [baseTask({
@@ -306,9 +308,86 @@ describe("accounting in results", () => {
     await waitFor(() => mgr.status("oc_resume_acct").status === "crashed", "the resumed spawn never failed");
 
     const record = readPersistedTask(mgr, "oc_resume_acct");
-    assert.equal(record.cost, undefined, "the transcript holds the previous run's events, so this run's failure says nothing about the usage");
-    assert.equal(record.tokens, undefined);
+    assert.equal(record.cost, 0.5, "the transcript holds the session's usage, so the record carries it");
+    assert.deepEqual(record.tokens, { total: 10 });
     assert.equal(mgr.result("oc_resume_acct").cost, 0.5, "the transcript still reports the earlier run's usage");
     fs.rmSync(logDir, { recursive: true, force: true });
+  });
+
+  test("a resumed run's settlement stamps the session's totals from the transcript", async () => {
+    const child = fakeChild();
+    const mgr = makeManager({
+      tasksFixture: (logDir) => [baseTask({
+        id: "oc_resume_settle",
+        status: "running",
+        directory: fs.realpathSync(os.tmpdir()),
+        model: LUNA_MODEL,
+        sessionId: null,
+        logPath: path.join(logDir, "oc_resume_settle.ndjson"),
+        promptPreview: "resume me",
+      })],
+      logs: {
+        "oc_resume_settle.ndjson": [
+          JSON.stringify({ sessionID: "ses_resume_settle" }),
+          stepFinishEvent({ cost: 0.5 }),
+        ].join("\n") + "\n",
+      },
+      spawnFn: () => child,
+      defaultExecutor: makeFakeOpencodeExecutor({ buildSpawnArgs: () => ["run", "--format", "json"] }),
+      killFn: () => { const err = new Error("ESRCH"); err.code = "ESRCH"; throw err; },
+      cancelGraceMs: 0,
+    });
+
+    await waitFor(() => mgr.status("oc_resume_settle").status === "running", "the resumed run never started");
+    child.stdout.emit("data", Buffer.from(`${stepFinishEvent({ messageID: "m2", cost: 0.25 })}\n`));
+    child.emit("exit", 0, null);
+
+    await waitFor(() => mgr.status("oc_resume_settle").status === "done", "the resumed run never settled");
+
+    const record = readPersistedTask(mgr, "oc_resume_settle");
+    assert.equal(record.cost, 0.75, "the record carries the session's totals: the earlier attempt plus this one");
+    assert.deepEqual(record.tokens, { total: 20 });
+  });
+
+  test("a resumed run whose log write failed leaves the record unaccounted for", async (t) => {
+    const realWriteSync = fs.writeSync;
+    t.mock.method(fs, "writeSync", (fd, data, ...rest) => {
+      if (typeof data === "string" && data.includes("step_finish")) throw new Error("ENOSPC");
+      return realWriteSync(fd, data, ...rest);
+    });
+    t.mock.method(console, "error", () => {});
+    const child = fakeChild();
+    const mgr = makeManager({
+      tasksFixture: (logDir) => [baseTask({
+        id: "oc_resume_write_failed",
+        status: "running",
+        directory: fs.realpathSync(os.tmpdir()),
+        model: LUNA_MODEL,
+        sessionId: null,
+        logPath: path.join(logDir, "oc_resume_write_failed.ndjson"),
+        promptPreview: "resume me",
+      })],
+      logs: {
+        "oc_resume_write_failed.ndjson": [
+          JSON.stringify({ sessionID: "ses_resume_write_failed" }),
+          stepFinishEvent({ cost: 0.5 }),
+        ].join("\n") + "\n",
+      },
+      spawnFn: () => child,
+      defaultExecutor: makeFakeOpencodeExecutor({ buildSpawnArgs: () => ["run", "--format", "json"] }),
+      killFn: () => { const err = new Error("ESRCH"); err.code = "ESRCH"; throw err; },
+      cancelGraceMs: 0,
+      stdoutDrainGraceMs: 60000,
+    });
+
+    await waitFor(() => mgr.status("oc_resume_write_failed").status === "running", "the resumed run never started");
+    child.stdout.emit("data", Buffer.from(`${stepFinishEvent({ messageID: "m2", cost: 0.25 })}\n`));
+    child.emit("exit", 0, null);
+
+    await waitFor(() => mgr.status("oc_resume_write_failed").status === "done", "the resumed run never settled");
+
+    const record = readPersistedTask(mgr, "oc_resume_write_failed");
+    assert.equal(record.cost, undefined, "the transcript lost events, so no total is the session's total");
+    assert.equal(record.tokens, undefined);
   });
 });

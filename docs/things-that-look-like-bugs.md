@@ -730,14 +730,16 @@ belongs here.
   totals from the transcript instead. It would be a real bug if the
   restarted daemon claimed a total it had not folded, or if a reader of the
   result got no totals while the transcript still held them.
-- A task resumed onto a transcript that already holds another run's events
-  is never stamped, so its accounting disappears with the transcript.
-  Observe: the record has no `cost` field while the transcript holds two
-  runs' usage, and once the transcript is deleted the totals are gone for
-  good. Deliberate: this run's totals would undercount the transcript's,
-  and the previous run's totals are not this run's to claim. It would be a
-  real bug if the record carried a total that undercounted the transcript,
-  or if a resumed task reported one run's totals as the other's.
+- A task resumed after a daemon restart carries the whole session's cost, not
+  just what its last attempt spent. Observe: the record's `cost` covers usage
+  an earlier attempt produced under a previous daemon, so the number does not
+  line up with the events the last attempt emitted. Deliberate: the totals
+  are the session's, taken from the transcript when the run ends, so the
+  record agrees with what a reader parses out of the log (the policy lives in
+  `docs/daemon.md`, "Usage accounting in `tasks.json`"). It would be a real
+  bug if the record carried one attempt's totals while the transcript held
+  the session's, or if the resumed run's own usage were dropped from the
+  record altogether.
 - `taskferry list` rows carry `cost` but not `tokens`, while
   `taskferry status --full` carries both. Observe: the row's `cost` is
   there but no token counts are, so the two surfaces disagree about how
@@ -757,7 +759,8 @@ belongs here.
   worker's stdout reached the log), or one that grew after the settlement,
   is accounted for when it is read. The record holds the totals the daemon
   vouched for at settlement, which is what remains once the transcript is
-  gone (the daemon prunes records, not logs, so this means a deleted log).
+  gone (the daemon prunes records, not logs, so a deleted log takes the
+  totals with it).
   A read never writes the record, so the record's totals are a snapshot of
   what the daemon knew when the task settled, not a copy of the transcript.
   It would be a real bug if a total were ever added to a stored one instead

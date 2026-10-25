@@ -96,6 +96,29 @@ The scheduler also waits `TASKFERRY_LOWERDIR_STAGGER_MS` between launches
 (default `3000` ms; `lowerdirStaggerMs` in config, `0` disables it) to avoid
 overlapping lower-directory setup work.
 
+When `--session-id` matches a retained task in the same directory, the new
+task's output directory includes `resume-context/manifest.json` and one prompt
+file for the earliest retained request in that session, executor, and directory.
+This restores the original assignment, including candidate IDs and output
+requirements, if that request is still retained. The worker receives the
+manifest path, not another inline copy of the prompt. Its existing agent
+conversation resumes normally; the packet contains no conversation transcript
+or accumulated continuation prompts.
+
+Each packet contains one independent prompt copy written from the retained task record.
+Taskferry does not reuse worker-writable files from earlier packets or add
+cache files to earlier output directories. Repeated resumes copy that one
+prompt again, without growing the packet to include every intervening request.
+
+The resume instructions give the current continuation precedence over the
+recorded prompt. A manifest entry with `complete: false` is a partial record, not a
+recovered assignment. `complete` describes the recorded text, not whether it was
+the original assignment: after pruning, the earliest retained request may be a
+continuation. Task status is not verified progress. Unknown sessions
+have no packet. Taskferry does not reconstruct pruned history from archives.
+Inspect prior deliverables before relying on them, and include any missing
+assignment details in the continuation.
+
 ## `taskferry wait <id> [options]`
 
 Blocks until the task's real `exit` event fires. A 15-minute default

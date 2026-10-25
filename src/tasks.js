@@ -25,6 +25,7 @@ import { readVariantsCache, refreshVariantsCache } from "./variants-cache.js";
 import { loadEnvFile, watchEnvFile } from "./env-file.js";
 import { loadProjectConfig, resolveReadOnlyProjectBinds, verificationPromptBlock } from "./project-config.js";
 import { TASKFERRY_OUTPUT_DIR_ENV, DEFAULT_MAX_OUTPUT_FILE_BYTES, MAX_SAFE_OUTPUT_FILE_BYTES, ensureTaskOutputDir, listTaskOutputFiles, outputDirPromptBlock, readTaskOutputFile, resolveOutputDirRoot, resolveTaskOutputDir } from "./output-dir.js";
+import { resolveSessionTasks, writeResumeContext } from "./resume-context.js";
 import { computeDoctorStats } from "./doctor-stats.js";
 import { isDeferredCleanupReapable, runDeferredCleanup } from "./deferred-cleanup.js";
 import { DEFAULT_TASK_RETENTION_DAYS, MS_PER_DAY, archiveEvictedTasks, partitionByRetention } from "./retention.js";
@@ -65,6 +66,7 @@ export { DEFAULT_MAX_OUTPUT_FILE_BYTES, MAX_SAFE_OUTPUT_FILE_BYTES };
  * @property {string} promptPreview
  * @property {number|null} promptTotalChars
  * @property {string} [originalPrompt]
+ * @property {boolean} [originalPromptComplete]
  * @property {string|null} spawnError
  * @property {boolean} cancelRequested
  * @property {boolean} internal
@@ -2758,36 +2760,6 @@ function resultNextAction(task, taskId, narrationTruncated) {
 }
 
 /**
- * On a `sessionId` resume, finds the most recent matching prior task so the
- * dispatch can inherit the executor (and, downstream, the model) the session
- * was actually created under instead of silently falling back to the
- * manager's default. When `--executor` is given explicitly the lookup is
- * scoped to tasks that match it too: session ids are only unique per
- * executor, so an explicit `--executor pi` alongside a sessionId that
- * collides with an unrelated opencode task must not let that opencode task's
- * model leak into this pi dispatch. Equivalent to the original compound
- * condition, decomposed per-field so the expression stays under the
- * expression-complexity ceiling.
- * @param {Map<string, Task>} tasks
- * @param {string|undefined} sessionId
- * @param {string|undefined} executorName
- * @returns {Task|null}
- */
-function resolvePriorSessionTask(tasks, sessionId, executorName) {
-  /** @type {Task|null} */
-  let priorSessionTask = null;
-  if (sessionId) {
-    for (const t of tasks.values()) {
-      if (t.sessionId !== sessionId || (executorName !== undefined && t.executorId !== executorName)) continue;
-      if (!priorSessionTask || t.startedAt > priorSessionTask.startedAt) {
-        priorSessionTask = t;
-      }
-    }
-  }
-  return priorSessionTask;
-}
-
-/**
  * Reuses the manager's single pre-built defaultExecutor instance when the
  * inherited/explicit executor matches it, instead of allocating a fresh
  * WorkerExecutor on every session-inheriting resume.
@@ -2925,6 +2897,7 @@ function buildDispatchTask({ id, directory, prompt, model, executor, priorSessio
     // literal user prompt so display surfaces don't show the injection tail.
     prompt,
     originalPrompt,
+    originalPromptComplete: true,
     status: "queued",
     model: resolvedModel,
     executorId: executor.id,
@@ -3657,6 +3630,7 @@ function loadPersistedTask(ctx, t) {
     // blocks into the exposed `prompt` field for legacy records whose full
     // original is irrecoverable.
     t.originalPrompt = t.promptPreview ?? t.prompt ?? "";
+    t.originalPromptComplete = false;
   }
   if (previousStatus === "running" || previousStatus === "queued") {
     /** @type {any} */ (t)._persistedStatus = previousStatus;
@@ -8602,12 +8576,12 @@ function dispatchTask(params, ctx) {
   const effectiveRoBind = dispatchRoBind === undefined ? undefined : parseBindList(dispatchRoBind, "roBind", RO_LIST_NAME);
   if (dispatchAllowedDirs !== undefined) process.stderr.write(`warning: ${RW_BIND_DEPRECATION_HINT}\n`);
   ctx.ensureStateLoaded();
-  const priorSessionTask = resolvePriorSessionTask(ctx.tasks, sessionId, executorName);
-  const executor = resolveDispatchExecutor(priorSessionTask, executorName, ctx.defaultExecutor);
   validateDispatchParameters({ prompt, directory });
   validateDispatchFinalMarker(finalMarker);
-  validateDispatchModel({ model, priorSessionTask, sessionId });
   const normalizedDirectory = resolveDispatchDirectory(directory);
+  const { priorSessionTask, requests } = resolveSessionTasks(ctx.tasks, sessionId, executorName, normalizedDirectory);
+  const executor = resolveDispatchExecutor(priorSessionTask, executorName, ctx.defaultExecutor);
+  validateDispatchModel({ model, priorSessionTask, sessionId });
   const projectConfig = loadProjectConfig(normalizedDirectory);
   const id = newTaskId(executor.taskIdPrefix);
   const logPath = path.join(ctx.LOG_DIR, `${id}.ndjson`);
@@ -8622,7 +8596,8 @@ function dispatchTask(params, ctx) {
   // back the same way. taskferry#423.
   const outputDir = resolveTaskOutputDir(ctx.STATE_DIR, id);
   ensureTaskOutputDir(outputDir);
-  const dispatchPrompt = buildDispatchPrompt({ role, noOverlay, projectConfig, prompt, outputDir, noSandbox });
+  const resumeContext = writeResumeContext(requests, outputDir);
+  const dispatchPrompt = buildDispatchPrompt({ role, noOverlay, projectConfig, outputDir, noSandbox, prompt: prompt + resumeContext });
   // eslint-disable-next-line sonarjs/shorthand-property-grouping -- dispatch objects mix renamed keys (prompt: dispatchPrompt, class: taskClass) with shorthand passthrough; reordering hurts readability
   const task = buildDispatchTask({ id, model, executor, priorSessionTask, variant, sessionId, originSessionId, internal, finalMarker, role, logPath, parentTaskId, env, prompt: dispatchPrompt, originalPrompt: prompt, directory: normalizedDirectory, defaultVariant: ctx.defaultVariant, resolveOpencodeVariants: ctx.resolveOpencodeVariants, class: taskClass, outputDir, executorArgs });
   // eslint-disable-next-line sonarjs/shorthand-property-grouping -- same mixed shorthand/renamed grouping as above

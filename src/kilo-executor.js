@@ -10,8 +10,9 @@ import {
   buildSummaryPrompt,
   identityLogEvent,
   instructionsDestFor,
-  isSafeBindSource,
   listModelsOutput,
+  pushSafeRoBind,
+  pushXdgAuthBind,
   resolveConfigDirBinds,
 } from "./executor-shared.js";
 
@@ -45,8 +46,8 @@ const execFileAsync = promisify(execFile);
  * inherited by the sandbox from the daemon's environment. A host that keeps
  * kilo's own login in `~/.kilocode/cli/config.json` gets that file bound
  * read-only at its own path, so a dispatch cannot rewrite the credential.
- * This host has no such file: kilo is authenticated through the environment,
- * so the bind does nothing here and exists for the hosts that do keep one.
+ * Stored provider credentials are mapped from the host data home into the
+ * task's redirected data home through the same read-only bind mechanism.
  *
  * kilo's `step_finish` event carries that request's usage, with the cache
  * read counted separately from the input. A real two-step run on 2026-10-19
@@ -88,7 +89,7 @@ export function kiloExecutor({ execFileFn = execFileAsync } = {}) {
     /**
      * Bind what a sandboxed kilo needs to resolve the same models it would
      * unsandboxed: its config directory (read-only, so a dispatch cannot
-     * rewrite the fleet's provider definitions) and the kilo gateway token.
+     * rewrite the fleet's provider definitions), provider auth and gateway token.
      * kilo's session database, logs and storage land in the per-task data
      * home, so two concurrent dispatches never share one kilo.db.
      * @param {{homeDir: string, dataDir: string, taskId: string, spawnEnv: NodeJS.ProcessEnv, existsFn: (file: string) => boolean, lstatFn?: (file: string) => {isSymbolicLink: () => boolean, isFile?: () => boolean, nlink?: number}, readdirFn: (dir: string) => string[], realpathFn?: (file: string) => string, sessionId?: string|null, launchDirectory?: string|null}} args
@@ -100,14 +101,14 @@ export function kiloExecutor({ execFileFn = execFileAsync } = {}) {
       /** @type {[string, string][]} */
       const extraRoBinds = [];
 
+      pushXdgAuthBind(extraRoBinds, "kilo", homeDir, sandboxedDataHome, { existsFn, lstatFn });
+
       // kilo's own login, on the hosts that keep one. A credential path, so
       // the symlink guard applies: a link here would hand the worker a
       // different file's contents. It is bound read-only at its own path, so
       // a dispatch cannot rewrite the credential.
       const realKiloToken = path.join(homeDir, ".kilocode", "cli", "config.json");
-      if (existsFn(realKiloToken) && isSafeBindSource(realKiloToken, lstatFn)) {
-        extraRoBinds.push([realKiloToken, realKiloToken]);
-      }
+      pushSafeRoBind(extraRoBinds, realKiloToken, realKiloToken, existsFn, lstatFn);
 
       // the fleet's kilo config: provider definitions, themes, tui settings.
       // The walk itself is shared with the opencode executor: same symlink

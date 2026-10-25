@@ -264,7 +264,11 @@ describe("opencodeExecutor().listModelVariantsFn", () => {
   });
 
   describe("opencodeExecutor().sandboxAuthFile (auth and config binds)", () => {
-    test("sandboxAuthFile: binds real auth.json when present", () => {
+    test("sandboxAuthFile: binds real auth.json when present", (t) => {
+      const previousEnv = process.env;
+      t.after(() => { process.env = previousEnv; });
+      process.env = { ...previousEnv };
+      delete process.env.XDG_DATA_HOME;
       const ex = opencodeExecutor();
       const result = ex.sandboxAuthFile({
         homeDir: HOME_DIR, dataDir: DATA_DIR, taskId: TASK_ID, spawnEnv: {},

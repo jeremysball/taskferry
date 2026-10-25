@@ -127,10 +127,10 @@ export async function checkBwrapAvailableAsync(runCommand = defaultRunCommandAsy
  *
  * The opencode/kilo/pi entries are a third category: other harnesses' data
  * directories. They hold session stores, logs, tool output, and prior
- * transcripts; opencode's also holds auth.json. A worker has no legitimate
+ * transcripts; OpenCode and Kilo also hold auth.json. A worker has no legitimate
  * reason to touch any of it, and a disk-cleanup-shaped worker is exactly
  * what would (see "Agent log files are sacred" in the global CLAUDE.md).
- * Masking opencode's whole data directory also hides its auth.json from the
+ * Masking OpenCode's and Kilo's data directories also hides auth.json from the
  * real path, but does not break the executor's later read-only auth bind:
  * bwrap resolves bind sources against the host root, not the already-mounted
  * sandbox root (verified against bubblewrap 0.13.1). The credential stays
@@ -165,8 +165,8 @@ export function defaultDenyList(homeDir, stateDir, { dataHome = resolveXdgDataHo
 
 /**
  * Resolves the XDG data home from an environment, defaulting to
- * `~/.local/share`. Shared by the deny-list and the OpenCode executor so
- * both agree on which directory holds harness state.
+ * `~/.local/share`. Shared by the deny-list and the OpenCode/Kilo auth mapping
+ * so they agree on which directory holds harness state.
  * @param {NodeJS.ProcessEnv} env
  * @param {string} homeDir
  * @returns {string}

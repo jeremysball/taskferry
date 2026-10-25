@@ -5,9 +5,8 @@ import fs from "node:fs";
 import path from "node:path";
 import { promisify } from "node:util";
 import { detectOpencodeCliMajor, ensureOpencodeCliMajor } from "./opencode-version.js";
-import { appendPromptFileArgs, buildSummaryPrompt, identityLogEvent, instructionsDestFor, isSafeBindSource, resolveConfigDirBinds } from "./executor-shared.js";
+import { appendPromptFileArgs, buildSummaryPrompt, identityLogEvent, instructionsDestFor, pushXdgAuthBind, resolveConfigDirBinds } from "./executor-shared.js";
 import { buildV2SandboxSpawn } from "./opencode-auth.js";
-import { resolveXdgDataHome } from "./sandbox.js";
 
 const execFileAsync = promisify(execFile);
 const SUMMARY_PREFLIGHT_TIMEOUT_MS = 10000;
@@ -204,8 +203,6 @@ export function opencodeExecutor({ detectCliMajorFn = () => detectOpencodeCliMaj
     // XDG_RUNTIME_DIR tmpfs, starving it of space for sockets/locks too.
     /** @param {{homeDir: string, dataDir: string, taskId: string, spawnEnv: NodeJS.ProcessEnv, existsFn: (file: string) => boolean, statFn?: (file: string) => {isDirectory: () => boolean}|null, lstatFn?: (file: string) => {isSymbolicLink: () => boolean, isFile?: () => boolean, nlink?: number}, readdirFn: (dir: string) => string[], realpathFn?: (file: string) => string, sessionId?: string|null, launchDirectory?: string|null}} args @returns {{extraRoBinds: [string, string][], extraRwPairBinds?: [string, string][], sandboxedDataHome: string, sandboxEnv: Record<string, string>, instructionsDest: string}} */
     sandboxAuthFile({ homeDir, dataDir, taskId, spawnEnv, existsFn, lstatFn = fs.lstatSync, readdirFn, realpathFn = fs.realpathSync }) {
-      const realDataHome = resolveXdgDataHome(spawnEnv, homeDir);
-      const realAuthFile = path.join(realDataHome, "opencode", "auth.json");
       // Per-task data home: every dispatch's opencode session state (its
       // sqlite db, logs, snapshots) lands in its own directory, so concurrent
       // dispatches never contend on one shared opencode.db (issue #501).
@@ -221,7 +218,8 @@ export function opencodeExecutor({ detectCliMajorFn = () => detectOpencodeCliMaj
       const sandboxedConfigHome = path.join(sandboxedDataHome, "config");
       const sandboxedConfigDir = path.join(sandboxedConfigHome, "opencode");
       /** @type {[string, string][]} */
-      const extraRoBinds = existsFn(realAuthFile) && isSafeBindSource(realAuthFile, lstatFn) ? [[realAuthFile, path.join(sandboxedDataHome, "opencode", "auth.json")]] : [];
+      const extraRoBinds = [];
+      pushXdgAuthBind(extraRoBinds, "opencode", homeDir, sandboxedDataHome, { existsFn, lstatFn });
       // Bind the user's real config entries (custom provider definitions,
       // plugins, agents) in read-only so a sandboxed dispatch still resolves
       // the same models it would unsandboxed. .gitignore is skipped on

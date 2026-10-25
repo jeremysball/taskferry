@@ -5,7 +5,7 @@ import { promisify } from "node:util";
 import { detectOpencodeCliMajor, ensureOpencodeCliMajor, resetOpencodeCliProbe, setOpencodeVersionTtlMs, DEFAULT_OPENCODE_VERSION_TTL_MS } from "./opencode-version.js";
 import { setOpencodeExecutorOverride, resetOpencodeExecutorOverride, resolveOpencodeExecutor } from "./opencode-executor.js";
 import { kiloExecutor } from "./kilo-executor.js";
-import { PROMPT_FILE_INSTRUCTION, SUMMARY_ISOLATION_PROMPT, isSafeBindSource, resolveConfigBindSource } from "./executor-shared.js";
+import { PROMPT_FILE_INSTRUCTION, SUMMARY_ISOLATION_PROMPT, isSafeBindSource, pushSafeRoBind, resolveConfigBindSource } from "./executor-shared.js";
 
 const execFileAsync = promisify(execFile);
 const SUMMARY_PREFLIGHT_TIMEOUT_MS = 10000;
@@ -95,17 +95,6 @@ function listPiSessionFileMatches(realSessionsDir, sessionId, readdirFn) {
 
 
 
-
-/**
- * @param {[string, string][]} list
- * @param {string} src
- * @param {string} dest
- * @param {(file: string) => boolean} existsFn
- * @param {(file: string) => {isSymbolicLink: () => boolean, isFile?: () => boolean, nlink?: number}} lstatFn
- */
-function pushSafeRoBind(list, src, dest, existsFn, lstatFn) {
-  if (existsFn(src) && isSafeBindSource(src, lstatFn)) list.push([src, dest]);
-}
 
 /**
  * @param {[string, string][]} list

@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process";
 import path from "node:path";
 import { promisify } from "node:util";
+import { resolveXdgDataHome } from "./sandbox.js";
 
 export const PROMPT_FILE_INSTRUCTION = "Follow the instructions in the attached prompt file exactly.";
 
@@ -61,6 +62,30 @@ export function isSafeBindSource(fullPath, lstatFn) {
     return false;
   }
   return true;
+}
+
+/**
+ * @param {[string, string][]} list
+ * @param {string} src
+ * @param {string} dest
+ * @param {(file: string) => boolean} existsFn
+ * @param {(file: string) => {isSymbolicLink: () => boolean, isFile?: () => boolean, nlink?: number}} lstatFn
+ */
+export function pushSafeRoBind(list, src, dest, existsFn, lstatFn) {
+  if (existsFn(src) && isSafeBindSource(src, lstatFn)) list.push([src, dest]);
+}
+
+/**
+ * @param {[string, string][]} list
+ * @param {string} harness
+ * @param {string} homeDir
+ * @param {string} sandboxedDataHome
+ * @param {{existsFn: (file: string) => boolean, lstatFn: (file: string) => {isSymbolicLink: () => boolean, isFile?: () => boolean, nlink?: number}}} fsFns
+ */
+export function pushXdgAuthBind(list, harness, homeDir, sandboxedDataHome, { existsFn, lstatFn }) {
+  // Match the deny-list's daemon environment, not a dispatch-selected source.
+  const src = path.join(resolveXdgDataHome(process.env, homeDir), harness, "auth.json");
+  pushSafeRoBind(list, src, path.join(sandboxedDataHome, harness, "auth.json"), existsFn, lstatFn);
 }
 /**
  * Resolve a single config entry (an opencode config file, or a pi catalog

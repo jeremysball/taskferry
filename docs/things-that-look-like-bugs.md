@@ -27,6 +27,13 @@ belongs here.
   a legitimate dispatch needs the host's prior sessions, or if a future
   harness data directory is treated as safe because it is not literally a
   database.
+- A dispatch's `XDG_DATA_HOME` does not select its OpenCode or Kilo credential
+  file. Both executors read `auth.json` from the daemon's data home and bind it
+  read-only into the task's redirected data home. This prevents a dispatch
+  from using an automatic credential bind to expose a file in a denied
+  directory. Set `XDG_DATA_HOME` when starting the daemon to use a custom
+  credential store. It is a bug if that daemon setting is ignored or a
+  dispatch override changes the automatically bound credential source.
 - The integration smoke tests never touching a real model provider — since
   PR #547 CI dispatches against `src/mock-llm.js`, a local keyless
   OpenAI-compatible endpoint wired in as a `mockllm` provider via

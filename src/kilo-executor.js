@@ -10,11 +10,11 @@ import {
   buildSummaryPrompt,
   identityLogEvent,
   instructionsDestFor,
-  isSafeBindSource,
   listModelsOutput,
+  pushSafeRoBind,
+  pushXdgAuthBind,
   resolveConfigDirBinds,
 } from "./executor-shared.js";
-import { resolveXdgDataHome } from "./sandbox.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -101,19 +101,14 @@ export function kiloExecutor({ execFileFn = execFileAsync } = {}) {
       /** @type {[string, string][]} */
       const extraRoBinds = [];
 
-      const realAuthFile = path.join(resolveXdgDataHome(spawnEnv, homeDir), "kilo", "auth.json");
-      if (existsFn(realAuthFile) && isSafeBindSource(realAuthFile, lstatFn)) {
-        extraRoBinds.push([realAuthFile, path.join(sandboxedDataHome, "kilo", "auth.json")]);
-      }
+      pushXdgAuthBind(extraRoBinds, "kilo", homeDir, sandboxedDataHome, { existsFn, lstatFn });
 
       // kilo's own login, on the hosts that keep one. A credential path, so
       // the symlink guard applies: a link here would hand the worker a
       // different file's contents. It is bound read-only at its own path, so
       // a dispatch cannot rewrite the credential.
       const realKiloToken = path.join(homeDir, ".kilocode", "cli", "config.json");
-      if (existsFn(realKiloToken) && isSafeBindSource(realKiloToken, lstatFn)) {
-        extraRoBinds.push([realKiloToken, realKiloToken]);
-      }
+      pushSafeRoBind(extraRoBinds, realKiloToken, realKiloToken, existsFn, lstatFn);
 
       // the fleet's kilo config: provider definitions, themes, tui settings.
       // The walk itself is shared with the opencode executor: same symlink

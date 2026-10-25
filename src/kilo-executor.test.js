@@ -1,6 +1,7 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { kiloExecutor } from "./kilo-executor.js";
+import { opencodeExecutor } from "./opencode-executor.js";
 import { KNOWN_EXECUTORS, resolveExecutor } from "./executor.js";
 import { PROMPT_FILE_INSTRUCTION } from "./executor-shared.js";
 
@@ -286,7 +287,12 @@ test("kilo reports each step's own usage, so a context is measured per step", ()
 
 describe("kilo provider auth mapping", () => {
   for (const xdgDataHome of [undefined, "/custom/share"]) {
-    test(`sandboxAuthFile: maps provider auth from ${xdgDataHome || "the default data home"}`, () => {
+    test(`sandboxAuthFile: maps provider auth from ${xdgDataHome || "the default data home"}`, (t) => {
+      const previousEnv = process.env;
+      t.after(() => { process.env = previousEnv; });
+      process.env = { ...previousEnv };
+      if (xdgDataHome) process.env.XDG_DATA_HOME = xdgDataHome;
+      else delete process.env.XDG_DATA_HOME;
       const dataHome = xdgDataHome || `${HOME_DIR}/.local/share`;
       const authFile = `${dataHome}/kilo/auth.json`;
       const res = kiloExecutor().sandboxAuthFile({
@@ -304,8 +310,34 @@ describe("kilo provider auth mapping", () => {
     });
   }
 
+  for (const ex of [kiloExecutor(), opencodeExecutor()]) {
+    for (const dataHome of [undefined, "/custom/daemon-data"]) {
+      test(`${ex.id} auth mapping ignores dispatch XDG_DATA_HOME with ${dataHome || "default daemon data home"}`, (t) => {
+        const previousEnv = process.env;
+        t.after(() => { process.env = previousEnv; });
+        process.env = { ...previousEnv };
+        if (dataHome) process.env.XDG_DATA_HOME = dataHome;
+        else delete process.env.XDG_DATA_HOME;
+        const daemonDataHome = dataHome || `${HOME_DIR}/.local/share`;
+        const authFile = `${daemonDataHome}/${ex.id}/auth.json`;
+        const result = ex.sandboxAuthFile({
+          homeDir: HOME_DIR, dataDir: DATA_DIR, taskId: TASK_ID,
+          spawnEnv: { XDG_DATA_HOME: `${HOME_DIR}/.claude` },
+          existsFn: (p) => p === authFile || p === `${HOME_DIR}/.claude/${ex.id}/auth.json`,
+          lstatFn: () => ({ isSymbolicLink: () => false, isFile: () => true, nlink: 1 }),
+          readdirFn: () => [],
+        });
+        assert.deepEqual(result.extraRoBinds, [[authFile, `${result.sandboxedDataHome}/${ex.id}/auth.json`]]);
+      });
+    }
+  }
+
   for (const kind of ["missing", "symlink", "hardlink", "unreadable"]) {
-    test(`sandboxAuthFile: skips provider auth when ${kind}`, () => {
+    test(`sandboxAuthFile: skips provider auth when ${kind}`, (t) => {
+      const previousEnv = process.env;
+      t.after(() => { process.env = previousEnv; });
+      process.env = { ...previousEnv };
+      delete process.env.XDG_DATA_HOME;
       const authFile = `${HOME_DIR}/.local/share/kilo/auth.json`;
       let checkUnsafe = false;
       const args = {

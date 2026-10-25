@@ -210,20 +210,17 @@ belongs here.
 - A model dispatches with no `--variant` flag even though `defaultVariant`
   is `highest`, until up to 24h after that model first became available
   through opencode. Expected: the opencode variants cache
-  (`<cacheDir>/opencode-variants.json`) refreshes once at daemon startup and
-  once every 24h afterward, never synchronously on the dispatch path (a
-  fresh `opencode models --verbose` shell-out costs ~3-4s, which would
-  otherwise block the daemon's single thread on every affected dispatch).
+  (`<cacheDir>/opencode-variants.json`) starts warming at daemon startup when
+  OpenCode is the default executor, or on the first OpenCode variant lookup
+  otherwise. It
+  checks hourly afterward, refreshing when the cache is older than 24h,
+  never synchronously on the dispatch path. Discovery uses `opencode models
+  --verbose` on 1.x or `opencode api --standalone GET /api/model` on 2.x.
   A model absent from the cache resolves to no variant flag, not an error.
-- On opencode 2.x, a dispatch that omits `--variant` runs at the model's
-  default effort, not its highest. Expected: 2.0's `opencode
-  models` has no `--verbose` and prints no per-model variant list, so the
-  cache can't be built and `highest` resolves to no variant, the same as a
-  model missing from the cache. A concrete `--variant xhigh` still works;
-  it is sent as `-m <model>#xhigh`. This becomes a bug once opencode 2.x
-  exposes per-model variants again and taskferry doesn't read them.
-  The variants cache refresh is skipped entirely on 2.x (since `opencode models --verbose`
-  is unavailable), so no warning is logged at startup.
+  A catalog built for a different or not-yet-confirmed CLI major is ignored;
+  a cold lookup can therefore omit the override while discovery runs.
+  A fresh matching cache that contains the model but still fails to select
+  its highest reasoning variant is a bug.
 - After upgrading or downgrading opencode, the next few minutes of opencode
   dispatches can still use the old version's argv and crash with
   `boot_failure` on an unknown flag. Expected: the installed major version

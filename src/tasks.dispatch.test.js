@@ -1,11 +1,12 @@
-import { test, describe } from "node:test";
+import { test, describe, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { createTaskManager } from "./tasks.js";
 import { hashFingerprint, VARIANTS_CACHE_SCHEMA } from "./variants-cache.js";
-import { trackManager, makeManager, fakeChild, LUNA_MODEL, MIMIMAX_MODEL, MINIMAX_MODEL, SOL_MODEL, SPAWN_OPENCODE_ENOENT, preserveEnvVars, mkdtempTracked, AXI_TASKS_TEST_DIR, AXI_TASKS_CACHE_DIR, AXI_TASKS_OVERLAY_DIR, makeFakeExecutor } from "./tasks.test-helpers.js";
+import { ensureOpencodeCliMajor, resetOpencodeCliProbe } from "./opencode-version.js";
+import { trackManager, makeManager, fakeChild, LUNA_MODEL, MIMIMAX_MODEL, MINIMAX_MODEL, SOL_MODEL, SPAWN_OPENCODE_ENOENT, preserveEnvVars, mkdtempTracked, AXI_TASKS_TEST_DIR, AXI_TASKS_CACHE_DIR, AXI_TASKS_OVERLAY_DIR, makeFakeExecutor, pinOpencodeCliMajor } from "./tasks.test-helpers.js";
 
 // The literal suffix appended to every dispatch prompt by outputDirPromptBlock.
 // Tests assert on it directly to verify the prompt was augmented; one constant
@@ -1055,6 +1056,22 @@ describe("dispatch() omitted --variant resolution (defaultVariant: highest)", ()
 });
 
 describe("defaultVariant validation applies to TASKFERRY_DEFAULT_VARIANT and rawOptions too, not just config.json", () => {
+  test("a concrete none default reaches OpenCode 2.x as #none", (t) => {
+    t.after(() => pinOpencodeCliMajor());
+    let captured;
+    let mgr;
+    assert.doesNotThrow(() => {
+      mgr = makeManager({
+        defaultVariant: "none",
+        opencodeCliMajorFn: () => 2,
+        opencodeVariantsTable: new Map(),
+        spawnFn: (_cmd, args) => { captured = args; return fakeChild(); },
+      });
+    });
+    mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), model: LUNA_MODEL, executor: "opencode" });
+    assert.equal(captured[captured.indexOf("-m") + 1], `${LUNA_MODEL}#none`);
+  });
+
   // Regression: config.json's defaultVariant field is validated during
   // loadConfig()'s parseAndValidateConfig(), but createTaskManager()'s own
   // rawOptions.defaultVariant/TASKFERRY_DEFAULT_VARIANT resolution used to
@@ -1074,7 +1091,7 @@ describe("defaultVariant validation applies to TASKFERRY_DEFAULT_VARIANT and raw
       lowerdirStaggerMs: 0,
       spawnFn: () => fakeChild(),
       killFn: () => {},
-    }), /error: defaultVariant must be one of highest, off, minimal, low, medium, high, xhigh, max \(got "medium-plus"\)/);
+    }), /error: defaultVariant must be one of highest, off, none, minimal, low, medium, high, xhigh, max \(got "medium-plus"\)/);
   });
 
   test("an invalid rawOptions.defaultVariant (a programmatic caller) throws too", () => {
@@ -1089,11 +1106,15 @@ describe("defaultVariant validation applies to TASKFERRY_DEFAULT_VARIANT and raw
       spawnFn: () => fakeChild(),
       killFn: () => {},
       defaultVariant: "bogus-level",
-    }), /error: defaultVariant must be one of highest, off, minimal, low, medium, high, xhigh, max \(got "bogus-level"\)/);
+    }), /error: defaultVariant must be one of highest, off, none, minimal, low, medium, high, xhigh, max \(got "bogus-level"\)/);
   });
 });
 
 describe("opencode variants cache lookup uses the per-dispatch caller env, not the daemon's own process.env", () => {
+  beforeEach(async () => {
+    resetOpencodeCliProbe();
+    await ensureOpencodeCliMajor({ execFileFn: async () => ({ stdout: "1.0.0" }) });
+  });
   // Regression: resolveOpencodeVariants() used to read process.env directly,
   // so a caller-forwarded env override (a different credential/base URL for
   // this one dispatch) had no effect on which cached model catalog was
@@ -1156,65 +1177,5 @@ describe("opencode variants cache lookup uses the per-dispatch caller env, not t
     // never has FAKE_TF_TEST_API_KEY set, so the fingerprint can't match.
     mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), model: LUNA_MODEL, executor: "opencode" });
     assert.equal(captured.includes("--variant"), false);
-  });
-});
-
-describe("opencode variants cache warm-up", () => {
-  test("createTaskManager() triggers a refresh when the cache is stale, using the opencode executor's listModelVariantsFn", async () => {
-    let called = 0;
-    const stateDir = mkdtempTracked(AXI_TASKS_TEST_DIR);
-    const defaultCacheDir = mkdtempTracked(AXI_TASKS_CACHE_DIR);
-    trackManager(createTaskManager({
-      stateDir,
-      cacheDir: defaultCacheDir,
-      sandboxEnabled: false,
-      overlayEnabled: false,
-      overlayTmpRoot: mkdtempTracked(AXI_TASKS_OVERLAY_DIR),
-      lowerdirStaggerMs: 0,
-      spawnFn: () => fakeChild(),
-      killFn: () => {},
-      listModelsFn: async () => "",
-      opencodeListModelVariantsFn: async () => { called++; return new Map(); },
-    }));
-    await new Promise((resolve) => setImmediate(resolve));
-    await new Promise((resolve) => setImmediate(resolve));
-    assert.equal(called, 1);
-  });
-
-  test("warm-up writes the cache under the daemon's effective env (envFileVars included), so an omitted --variant resolves the model's cached highest", async () => {
-    // Regression: warmAndScheduleVariantsCacheRefresh() fingerprinted the
-    // cache against raw process.env, but resolveOpencodeVariants() reads it
-    // under the sanitized merge (process.env + envFileVars + caller env).
-    // When envFileVars overrides a fingerprint-relevant var, the warm's file
-    // never matched a dispatch's read -- every dispatch was a cache miss and
-    // the highest-thinking default silently never applied. FAKE_TF_TEST_API_KEY
-    // is unlikely to already be set on any real host's env.
-    const FAKE_KEY_NAME = "FAKE_TF_TEST_API_KEY";
-    const stateDir = mkdtempTracked(AXI_TASKS_TEST_DIR);
-    const defaultCacheDir = mkdtempTracked(AXI_TASKS_CACHE_DIR);
-    const cacheFile = path.join(defaultCacheDir, "opencode-variants.json");
-    let captured = null;
-    const mgr = trackManager(createTaskManager({
-      stateDir,
-      cacheDir: defaultCacheDir,
-      sandboxEnabled: false,
-      overlayEnabled: false,
-      overlayTmpRoot: mkdtempTracked(AXI_TASKS_OVERLAY_DIR),
-      lowerdirStaggerMs: 0,
-      spawnFn: (_cmd, args) => { captured = args; return fakeChild(); },
-      killFn: () => {},
-      // envFile config whose contents override a credential var the
-      // fingerprint reads (the effective spawn env for every dispatch).
-      envFileVars: { [FAKE_KEY_NAME]: "from-env-file" },
-      opencodeListModelVariantsFn: async () => new Map([[LUNA_MODEL, ["low", "high", "max"]]]),
-    }));
-    // The daemon warms the cache in the background; wait for the file rather
-    // than racing the async refresh.
-    for (let i = 0; i < 100 && !fs.existsSync(cacheFile); i++) {
-      await new Promise((resolve) => setTimeout(resolve, 10));
-    }
-    assert.equal(fs.existsSync(cacheFile), true, "warm should have written the variants cache");
-    mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), model: LUNA_MODEL, executor: "opencode" });
-    assert.equal(captured[captured.indexOf("--variant") + 1], "max");
   });
 });

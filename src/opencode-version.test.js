@@ -4,7 +4,7 @@ import os from "node:os";
 import { ensureOpencodeCliMajor, detectOpencodeCliMajor, resetOpencodeCliProbe } from "./opencode-version.js";
 import { opencodeExecutor } from "./opencode-executor.js";
 import { readVariantsCache, hashFingerprint, VARIANTS_CACHE_SCHEMA } from "./variants-cache.js";
-import { makeManager, fakeChild, mkdtempTracked, waitForCaptured } from "./tasks.test-helpers.js";
+import { makeManager, fakeChild, mkdtempTracked, waitForCaptured, makeFakeExecutor } from "./tasks.test-helpers.js";
 
 const TTL_MS = 1000;
 const V2_VERSION = "opencode v2.0.22";
@@ -126,16 +126,17 @@ describe("manager-level opencode 2.x", () => {
     assert.equal(args[args.indexOf("-m") + 1], "openai/gpt-x#max");
   });
 
-  for (const [major, expectRefresh] of [[2, false], [1, true]]) {
-    test(`the boot variants refresh ${expectRefresh ? "runs" : "is skipped"} on a pinned ${major}.x CLI`, async () => {
+  for (const major of [2, 1]) {
+    test(`the boot variants refresh runs on a pinned ${major}.x CLI`, async () => {
       let refreshed = false;
       makeManager({
+        defaultExecutor: makeFakeExecutor({ id: "opencode" }),
         opencodeCliMajorFn: () => major,
         cacheDir: mkdtempTracked("axi-tasks-variants-boot-"),
         opencodeListModelVariantsFn: async () => { refreshed = true; return new Map(); },
       });
       await new Promise((resolve) => setTimeout(resolve, 50));
-      assert.equal(refreshed, expectRefresh);
+      assert.equal(refreshed, true);
     });
   }
 });

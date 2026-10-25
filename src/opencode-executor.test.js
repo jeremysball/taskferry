@@ -200,28 +200,6 @@ describe("opencodeExecutor() - version probe: error handling", () => {
     });
 });
 
-describe("opencodeExecutor() - variants cache skipped on 2.x", () => {
-  test("variants cache refresh is skipped when opencode major >= 2", async () => {
-    resetOpencodeCliProbe();
-    // Mock detectOpencodeCliMajor to return 2 (simulating opencode 2.x)
-    const ex = opencodeExecutor({
-      detectCliMajorFn: () => 2,
-      ensureCliMajorFn: async () => 2,
-    });
-    // The warmAndScheduleVariantsCacheRefresh function checks detectOpencodeCliMajor()
-    // and skips refresh on 2.x. We can't directly test the internal function,
-    // but we can verify that the executor's detectCliMajorFn returns 2.
-    const major = ex.buildSpawnArgs({ isSummary: false, model: "test/model", variant: null, launchDirectory: "/wd", promptFilePath: null, prompt: "hi", sessionId: null });
-    // Should use 2.x argv (--standalone, --auto, -m with #variant)
-    assert.ok(major.includes("--standalone"), "major 2 should use 2.x argv with --standalone");
-    assert.ok(major.includes("--auto"), "major 2 should use 2.x argv with --auto");
-    // Also verify that the executor's prepareLaunch returns undefined (probe is "warm")
-    const prepareResult = ex.prepareLaunch({ isSummary: false });
-    assert.equal(prepareResult, undefined, "prepareLaunch should return undefined when probe is warm");
-    resetOpencodeCliProbe();
-  });
-});
-
 describe("opencodeExecutor().listModelVariantsFn", () => {
     const FLASH_FREE_MODEL = "opencode/deepseek-v4-flash-free";
     const FIXTURE = [
@@ -234,6 +212,26 @@ describe("opencodeExecutor().listModelVariantsFn", () => {
       "openrouter/openai/gpt-5.6-luna",
       '{"id":"gpt-5.6-luna","variants":{"low":{"reasoningEffort":"low"},"high":{"reasoningEffort":"high"}}}',
     ].join("\n");
+
+    test("2.x reads the standalone catalog and extracts only ordered variant ids", async () => {
+      const ex = opencodeExecutor({ detectCliMajorFn: () => 2 });
+      const calls = [];
+      const env = { TEST_API_KEY: "fixture-secret" };
+      const result = await ex.listModelVariantsFn(env, { execFileFn: async (cmd, args, options) => {
+        calls.push({ cmd, args, options });
+        return { stdout: JSON.stringify({ data: [
+          { providerID: "llmgateway", id: "deepseek", settings: { apiKey: "fixture-secret" }, variants: [{ id: "none" }, { id: "high" }, { id: "max" }] },
+          { providerID: "openrouter", id: "openai/test", variants: [{ id: "medium" }, { id: "xhigh" }] },
+          { providerID: "test", id: "empty", variants: [] },
+        ] }), stderr: "" };
+      } });
+      assert.deepEqual([...result], [["llmgateway/deepseek", ["none", "high", "max"]], ["openrouter/openai/test", ["medium", "xhigh"]]]);
+      assert.equal(calls.length, 1);
+      assert.equal(calls[0].cmd, "opencode");
+      assert.deepEqual(calls[0].args, ["api", "--standalone", "GET", "/api/model"]);
+      assert.equal(calls[0].options.env, env);
+      assert.ok(calls[0].options.timeout >= 60000, "standalone discovery gets a larger cold-start budget");
+    });
 
     test("parses provider/model blocks into an ordered variant-key map", async () => {
       const ex = opencodeExecutor();

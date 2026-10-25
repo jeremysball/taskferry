@@ -146,7 +146,7 @@ function resolvePiSessionRwBind({ realSessionsDir, sandboxedSessionsHome, sessio
  * @property {string} defaultSummaryModel
  * @property {string} binaryName
  * @property {(env: NodeJS.ProcessEnv) => Promise<string>} listModelsFn
- * @property {(env: NodeJS.ProcessEnv, options?: {execFileFn?: typeof execFileAsync}) => Promise<Map<string, string[]>>} [listModelVariantsFn]
+ * @property {(env: NodeJS.ProcessEnv, options?: {execFileFn?: typeof execFileAsync, major?: number|null}) => Promise<Map<string, string[]>>} [listModelVariantsFn]
  * @property {(ctx: SpawnLaunchContext) => string[]} buildSpawnArgs
  * @property {() => string} buildSummaryPrompt
  * @property {(parsed: unknown) => unknown} normalizeLogEvent

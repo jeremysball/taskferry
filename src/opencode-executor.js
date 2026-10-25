@@ -11,6 +11,8 @@ import { buildV2SandboxSpawn } from "./opencode-auth.js";
 const execFileAsync = promisify(execFile);
 const SUMMARY_PREFLIGHT_TIMEOUT_MS = 10000;
 const LIST_MODEL_VARIANTS_TIMEOUT_MS = 30000;
+const STANDALONE_MODEL_VARIANTS_TIMEOUT_MS = 60000;
+const STANDALONE_FLAG = "--standalone";
 
 // `opencode models --verbose` prints one model per block: a `provider/model`
 // line at column 0 with no leading whitespace, followed by that model's
@@ -22,6 +24,11 @@ const LIST_MODEL_VARIANTS_TIMEOUT_MS = 30000;
 // JSON.parse is skipped rather than aborting the whole listing; one
 // malformed model must not cost every other model's variant data.
 const OPENCODE_MODEL_ID_LINE = /^([^\s/]+\/.*)$/;
+
+/** @param {Iterable<[string, string[]]>} entries @returns {Map<string, string[]>} */
+function nonemptyModelVariants(entries) {
+  return new Map([...entries].filter(([, keys]) => keys.length > 0));
+}
 
 /**
  * @param {string} verboseOutput - raw stdout of `opencode models --verbose`
@@ -40,7 +47,7 @@ function parseOpencodeModelVariants(verboseOutput) {
     try {
       const parsed = JSON.parse(currentBlockLines.join("\n"));
       const keys = Object.keys(parsed.variants ?? {});
-      if (keys.length > 0) result.set(currentModel, keys);
+      result.set(currentModel, keys);
     } catch {
       // Malformed block for this one model -- skip it, keep going.
     }
@@ -58,7 +65,7 @@ function parseOpencodeModelVariants(verboseOutput) {
     }
   }
   flush();
-  return result;
+  return nonemptyModelVariants(result);
 }
 
 /**
@@ -83,7 +90,7 @@ function buildOpencodeV2SpawnArgs(ctx) {
   // the child. 1.x had `--pure` for the same job; 2.x removed it with no
   // replacement, so plugins always load and would block without `--auto`.
   // The summary child needs it for the same reason.
-  const args = ["run", "--standalone", "--auto", "--format", "json", "-m", model];
+  const args = ["run", STANDALONE_FLAG, "--auto", "--format", "json", "-m", model];
   if (ctx.isSummary) args.push("-f", /** @type {string} */ (ctx.snapshotPath));
   if (ctx.sessionId) args.push("--session", ctx.sessionId);
   return appendPromptFileArgs(args, ctx);
@@ -141,13 +148,23 @@ export function opencodeExecutor({ detectCliMajorFn = () => detectOpencodeCliMaj
     defaultSummaryModel: "opencode/muse-spark-1.3-contributor-free",
     binaryName: "opencode",
     buildSandboxSpawn(args) {
-      return args[1] === "--standalone" ? buildV2SandboxSpawn(args) : ["opencode", ...args];
+      return args[1] === STANDALONE_FLAG ? buildV2SandboxSpawn(args) : ["opencode", ...args];
     },
     listModelsFn: async (env) =>
       (await execFileAsync("opencode", ["models"], { encoding: "utf8", timeout: SUMMARY_PREFLIGHT_TIMEOUT_MS, env })).stdout,
-    /** @param {NodeJS.ProcessEnv} env @param {{execFileFn?: typeof execFileAsync}} [options] @returns {Promise<Map<string, string[]>>} */
-    listModelVariantsFn: async (env, { execFileFn = execFileAsync } = {}) => {
-      const { stdout } = await execFileFn("opencode", ["models", "--verbose"], { encoding: "utf8", timeout: LIST_MODEL_VARIANTS_TIMEOUT_MS, maxBuffer: 32 * 1024 * 1024, env });
+    /** @param {NodeJS.ProcessEnv} env @param {{execFileFn?: typeof execFileAsync, major?: number|null}} [options] @returns {Promise<Map<string, string[]>>} */
+    listModelVariantsFn: async (env, { execFileFn = execFileAsync, major = detectCliMajorFn() } = {}) => {
+      const standalone = (major ?? 1) >= 2;
+      const args = standalone ? ["api", STANDALONE_FLAG, "GET", "/api/model"] : ["models", "--verbose"];
+      const timeout = standalone ? STANDALONE_MODEL_VARIANTS_TIMEOUT_MS : LIST_MODEL_VARIANTS_TIMEOUT_MS;
+      const { stdout } = await execFileFn("opencode", args, { encoding: "utf8", maxBuffer: 32 * 1024 * 1024, timeout, env });
+      if (standalone) {
+        /** @type {{data: {providerID: string, id: string, variants: {id: string}[]}[]}} */
+        const { data } = JSON.parse(stdout);
+        return nonemptyModelVariants(data.map(model => [
+          `${model.providerID}/${model.id}`, (model.variants ?? []).map(variant => variant.id),
+        ]));
+      }
       return parseOpencodeModelVariants(stdout);
     },
     /** @param {SpawnLaunchContext} ctx @returns {string[]} */

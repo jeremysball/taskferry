@@ -303,6 +303,72 @@ write failed settles with `failureReason: "log_write_failed"` while its
 status still reflects the process exit, and its log is incomplete from that
 point.
 
+## Usage accounting in `tasks.json`
+
+A settled task's record carries the usage its run produced: `cost` (the
+provider's reported cost for the run) and `tokens` (the summed token counts).
+Both are folded in from the worker's `step_finish` events as those events are
+written to the task's log, so for a run that owned its transcript the totals
+are known when the child settles without the daemon re-reading a transcript
+that can reach tens of megabytes.
+A total is folded only after its event has actually reached the transcript,
+so the folded totals never claim more than a reader would find in the log.
+
+Three states are distinct, and the difference matters:
+
+- `cost: 0.007`: the run cost this much.
+- `cost: null`: the daemon knows the run used nothing. Either the worker
+  produced no usage event, or it never ran at all (a spawn or launch
+  failure). That is not the same as "the run was free": a free run is a
+  provider-reported cost of exactly zero, which reads as `cost: 0`.
+- no `cost` field at all: the daemon cannot vouch for the run's usage. The
+  task has not settled yet; the record predates accounting being persisted;
+  the log write failed part way through, so the totals folded so far
+  describe only what reached the transcript; the transcript could not be read
+  when the run ended; or the daemon restarted while the task was running and
+  the session could not be resumed
+  (`failureReason: daemon_restarted_session_lost`), in which case the
+  transcript belongs to the previous daemon's child and this daemon does not
+  vouch for it.
+
+A task resumed after a daemon restart starts on a transcript that already
+holds the previous attempt's events, so the totals it folds as its output
+streams cover that attempt alone. The record is stamped with the session's
+totals instead: when the run ends, the daemon derives them from the
+transcript in one pass, so the record carries what the whole session cost,
+the same total a reader parses out of the file. A run that ends with its
+transcript unreadable is left unaccounted for instead, because the daemon
+cannot read the session's totals out of it.
+
+`taskferry result` prefers the transcript over the record whenever the
+transcript can still be read and carries usage: its parse already yields the
+totals, so using them costs nothing extra. A readable transcript that
+carries no usage at all means the run used nothing, so the result reports
+`null`. The record's own totals are what remains once the transcript is gone
+(the daemon prunes records, not logs, so this means a deleted log), which is
+why the settlement stamps them. When neither the transcript nor the record
+knows anything, the result reports no `cost`/`tokens` at all rather than a
+number or a "nothing was used" the daemon cannot vouch for.
+
+Reading a result never writes the record. The record is written by the
+daemon's own lifecycle paths (the settlement, the spawn failure path, the
+launch failure path), so a read cannot replace a total the daemon vouched for
+with one it merely derived.
+
+Totals are assigned, never accumulated onto a stored total: the settlement
+stamps one total, either the totals it folded from the transcript it owned or
+the totals it read out of a transcript another attempt had already written
+to, so a task's cost can never be counted twice.
+
+The accounting is reported by `taskferry result`, and by the full status
+detail (`taskferry status --full`, `taskferry wait --full`, and the raw
+`task.status` RPC), which carry `cost` and `tokens` on the task. The lean
+status forms (`taskferry status`, `taskferry wait`) keep the narrow shape
+they had. The compact task row (`taskferry list`) carries `cost` only, so a
+caller scanning the list can see what each run cost without a
+`task.result` round trip per task; a cost the daemon cannot vouch for is
+left out of the row entirely rather than shown as zero.
+
 ## Cancellation
 
 `taskferry cancel` sends `SIGTERM` to the task's process group (the worker

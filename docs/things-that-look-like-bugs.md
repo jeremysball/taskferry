@@ -704,3 +704,67 @@ belongs here.
   EIO), so the result records the observability failure without changing the
   execution status. It would be a real bug if the log were silently
   truncated with no task-level record.
+- A task's `cost` in `tasks.json` is `null`, `0`, or absent, and which one
+  it is depends on facts the record itself does not show. Observe: a task
+  that clearly ran shows `cost: null`, or the record has no `cost` field at
+  all, or a run that was free shows `cost: 0`, and nothing in the record
+  tells the reader which state a given task is in. Deliberate: the three are
+  different facts. `null` means the daemon knows the run used nothing, `0`
+  is a real reading (the provider reported a cost of exactly zero), and a
+  missing field means the daemon cannot vouch for the run's usage. The
+  policy, and the full list of causes behind a missing field, live in
+  `docs/daemon.md` ("Usage accounting in `tasks.json`"); this file records
+  only that the three states are deliberately distinct. It would be a real
+  bug if a consumer treated a missing field and an explicit `null` as the
+  same thing, if a zero cost were coerced into `null`, or if a record the
+  daemon could not vouch for reported `null` as though it had.
+- A task the daemon restarted on shows `crashed` with
+  `failureReason: "daemon_restarted_session_lost"` and no `cost` field,
+  even though its transcript holds usage. Observe: the transcript has
+  `step_finish` events with a cost, the record says the run used nothing
+  knowable, and there is no stamp to compare against. Deliberate: the child
+  that wrote that transcript belonged to the previous daemon, so its usage
+  totals are not the restarted daemon's to vouch for, and stamping them
+  would mean re-reading a transcript the restart path's bounded-read
+  discipline rules out. A reader that asks for the result derives the
+  totals from the transcript instead. It would be a real bug if the
+  restarted daemon claimed a total it had not folded, or if a reader of the
+  result got no totals while the transcript still held them.
+- A task resumed after a daemon restart carries the whole session's cost, not
+  just what its last attempt spent. Observe: the record's `cost` covers usage
+  an earlier attempt produced under a previous daemon, so the number does not
+  line up with the events the last attempt emitted. Deliberate: the totals
+  are the session's, taken from the transcript when the run ends, so the
+  record agrees with what a reader parses out of the log (the policy lives in
+  `docs/daemon.md`, "Usage accounting in `tasks.json`"). It would be a real
+  bug if the record carried one attempt's totals while the transcript held
+  the session's, or if the resumed run's own usage were dropped from the
+  record altogether.
+- `taskferry list` rows carry `cost` but not `tokens`, while
+  `taskferry status --full` carries both. Observe: the row's `cost` is
+  there but no token counts are, so the two surfaces disagree about how
+  much they report. Deliberate: the compact row is a scan surface (what
+  did this run cost), the full detail is the accounting surface (what did
+  it cost and how many tokens), and a token total is a nested object that
+  does not belong in a row a caller reads in bulk. A cost the daemon cannot
+  vouch for is left out of the row entirely rather than shown as zero. It
+  would be a real bug if the row showed a cost the record did not carry,
+  showed zero for a run the daemon could not vouch for, or if the two
+  surfaces reported different costs for the same task.
+- A task's stored `cost` can disagree with its transcript. Observe:
+  `tasks.json` shows one cost and `taskferry result` reports another, with
+  the two never reconciling in the record. Deliberate: the transcript on
+  disk is the authority for a result, so a transcript that holds usage the
+  daemon's own capture never saw (a run whose daemon died before the
+  worker's stdout reached the log), or one that grew after the settlement,
+  is accounted for when it is read. The record holds the totals the daemon
+  vouched for at settlement, which is what remains once the transcript is
+  gone (the daemon prunes records, not logs, so a deleted log takes the
+  totals with it).
+  A read never writes the record, so the record's totals are a snapshot of
+  what the daemon knew when the task settled, not a copy of the transcript.
+  It would be a real bug if a total were ever added to a stored one instead
+  of replacing it (a task's cost could be counted twice), if a read
+  reported totals the transcript does not support, if a read rewrote the
+  record, or if the record's copy were dropped at the moment the transcript
+  is gone.

@@ -367,10 +367,11 @@ export function leanResult(detail, { full = false, fields } = {}) {
  * @property {string} model
  * @property {string} startedAt
  * @property {string|null} [failureReason]
+ * @property {number|null} [cost]
  */
 
 /**
- * @typedef {{id: string, status: string, model: string, startedAt: string, failureReason?: string}} ListRow
+ * @typedef {{id: string, status: string, model: string, startedAt: string, failureReason?: string, cost?: number|null}} ListRow
  */
 
 /**
@@ -384,6 +385,7 @@ function listRow(row) {
     model: row.model,
     startedAt: row.startedAt,
     ...(row.failureReason ? { failureReason: row.failureReason } : {}),
+    ...(row.cost === undefined ? {} : { cost: row.cost }),
   };
 }
 

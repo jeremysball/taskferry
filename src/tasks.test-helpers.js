@@ -472,12 +472,58 @@ function buildManagerOptions(options, stateDir, defaultCacheDir, defaultOverlayT
 // `_cacheDir` attached, so tests that derive paths off those roots (e.g. the
 // namespaced uv-dir layout) don't need to know the helper's internal temp
 // dirs.
+//
+// A caller-supplied `stateDir` is used as it stands: nothing is seeded into
+// it, because the caller owns its contents. That is what a restart test
+// needs, pointing a second manager at the state dir the first one left
+// behind. `cacheDir` and `overlayTmpRoot` still default to fresh temp dirs.
 export function makeManager(options = {}) {
-  const { stateDir, defaultCacheDir, defaultOverlayTmpRoot } = makeTempDirs();
-  seedTestFixtures(stateDir, options.tasksFixture ?? [], options.logs ?? {});
+  const tempDirs = options.stateDir
+    ? {
+        stateDir: options.stateDir,
+        defaultCacheDir: options.cacheDir ?? mkdtempTracked(AXI_TASKS_CACHE_DIR),
+        defaultOverlayTmpRoot: options.overlayTmpRoot ?? mkdtempTracked(AXI_TASKS_OVERLAY_DIR),
+      }
+    : makeTempDirs();
+  if (!options.stateDir) {
+    seedTestFixtures(tempDirs.stateDir, options.tasksFixture ?? [], options.logs ?? {});
+  }
   const mgr = trackManager(
-    createTaskManager(buildManagerOptions(options, stateDir, defaultCacheDir, defaultOverlayTmpRoot)),
+    createTaskManager(buildManagerOptions(options, tempDirs.stateDir, tempDirs.defaultCacheDir, tempDirs.defaultOverlayTmpRoot)),
     { autoModel: options.autoModel !== false }
   );
-  return Object.assign(mgr, { _stateDir: stateDir, _cacheDir: defaultCacheDir });
+  return Object.assign(mgr, {
+    _stateDir: tempDirs.stateDir,
+    _cacheDir: options.cacheDir ?? tempDirs.defaultCacheDir,
+  });
+}
+
+/**
+ * Read one task's record off disk. The manager's pending write is flushed
+ * first, so the record read back is the one the daemon would have persisted,
+ * not a stale file.
+ * @param {{flushPersist: () => void, paths: {TASKS_FILE: string}}} mgr
+ * @param {string} taskId
+ * @returns {any} the persisted record, or undefined when the task is not on
+ *   disk
+ */
+export function readPersistedTask(mgr, taskId) {
+  mgr.flushPersist();
+  const tasks = JSON.parse(fs.readFileSync(mgr.paths.TASKS_FILE, "utf8"));
+  return tasks.find((t) => t.id === taskId);
+}
+
+/**
+ * One `step_finish` transcript line, as the JSON string the worker's stdout
+ * carries it: the event type, the message id, the reason, the token counts,
+ * and the cost.
+ * @param {object} [fields]
+ * @param {string} [fields.messageID]
+ * @param {string} [fields.reason]
+ * @param {Record<string, number>} [fields.tokens]
+ * @param {number} [fields.cost]
+ * @returns {string}
+ */
+export function stepFinishEvent({ messageID = "m1", reason = "stop", tokens = { total: 10 }, cost = 0.001 } = {}) {
+  return JSON.stringify({ type: "step_finish", part: { messageID, reason, tokens, cost } });
 }

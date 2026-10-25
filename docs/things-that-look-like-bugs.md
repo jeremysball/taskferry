@@ -709,27 +709,30 @@ belongs here.
   that clearly ran shows `cost: null`, or the record has no `cost` field at
   all, or a run that was free shows `cost: 0`, and nothing in the record
   tells the reader which state a given task is in. Deliberate: the three are
-  different facts. `null` means the transcript was read and carried no usage
-  to report (no `step_finish` event carried a cost), which is not the same
-  as the run having been free. A missing field means the run was never
-  accounted for: either the task has not settled yet, or the record predates
-  accounting being persisted. `0` is a real reading (the provider reported a
+  different facts. `null` means the daemon knows the run used nothing (no
+  `step_finish` event carried a cost, or the worker never ran), which is not
+  the same as the run having been free. A missing field means the daemon
+  cannot vouch for the run's usage: the task has not settled, the record
+  predates accounting being persisted, the transcript already held another
+  run's events (a task resumed after a daemon restart), or the log write
+  failed part way through. `0` is a real reading (the provider reported a
   cost of exactly zero) and must not be folded into "nothing to report". It
   would be a real bug if a consumer treated a missing field and an explicit
   `null` as the same thing, if a zero cost were coerced into `null`, or if a
-  record that was never accounted for reported `null` as though it had been.
-- A task's stored `cost` can disagree with its transcript until someone reads
-  the result, and the two agree only afterwards. Observe: `tasks.json` shows
-  one cost and `taskferry result` reports another, with the record catching
-  up only after a read. Deliberate: the totals folded in at settlement come
-  from the worker's output as the daemon captured it, while the transcript on
-  disk is the authority; a transcript that holds usage the daemon's own
-  capture never saw (a run whose daemon died before the worker's stdout
-  reached the log), or one that grew after the settlement, is accounted for
-  when it is next read, and the record is refreshed then. The record's own
-  totals are what remains once the transcript is gone (the daemon prunes
-  records, not logs, so this means a deleted log), which is why the
-  settlement stamps them. It would be a real bug if a total were ever added
-  to a stored one instead of replacing it (a task's cost could be counted
-  twice), if a read reported totals the transcript does not support, or if
-  the record's copy were dropped at the moment the transcript is gone.
+  record the daemon could not vouch for reported `null` as though it had.
+- A task's stored `cost` can disagree with its transcript. Observe:
+  `tasks.json` shows one cost and `taskferry result` reports another, with
+  the two never reconciling in the record. Deliberate: the transcript on
+  disk is the authority for a result, so a transcript that holds usage the
+  daemon's own capture never saw (a run whose daemon died before the
+  worker's stdout reached the log), or one that grew after the settlement,
+  is accounted for when it is read. The record holds the totals the daemon
+  vouched for at settlement, which is what remains once the transcript is
+  gone (the daemon prunes records, not logs, so this means a deleted log).
+  A read never writes the record, so the record's totals are a snapshot of
+  what the daemon knew when the task settled, not a copy of the transcript.
+  It would be a real bug if a total were ever added to a stored one instead
+  of replacing it (a task's cost could be counted twice), if a read
+  reported totals the transcript does not support, if a read rewrote the
+  record, or if the record's copy were dropped at the moment the transcript
+  is gone.

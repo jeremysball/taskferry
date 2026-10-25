@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { EventEmitter } from "node:events";
-import { makeManager, fakeChild, baseTask, DIFF_LINE, OVERLAY_DIR_PENDING, EBUSY_ERROR, SPAWN_BWRAP_TIMEOUT, TOOL_CALLS, NONE_OBSERVED, FINAL_ANSWER, mkdtempTracked } from "./tasks.test-helpers.js";
+import { makeManager, fakeChild, baseTask, readPersistedTask, DIFF_LINE, OVERLAY_DIR_PENDING, EBUSY_ERROR, SPAWN_BWRAP_TIMEOUT, TOOL_CALLS, NONE_OBSERVED, FINAL_ANSWER, mkdtempTracked } from "./tasks.test-helpers.js";
 import { defaultRunCommand as changesetDefaultRunCommand } from "./changeset.js";
 
 const USER_MODEL = "user-model";
@@ -313,12 +313,6 @@ describe("accept()/reject()", () => {
   // has overlayDirs populated even though the overlay is gone -- the
   // startup sweep would still clean it up (rm -rf on a missing path is
   // idempotent), but the record lies until the sweep runs.
-  function readPersistedTask(mgr, taskId) {
-    mgr.flushPersist();
-    const tasks = JSON.parse(fs.readFileSync(mgr.paths.TASKS_FILE, "utf8"));
-    return tasks.find((t) => t.id === taskId);
-  }
-
   test("accept() persists the cleared overlay metadata after successful cleanup (regression: review followup #1)", async () => {
     const mgr = makeManager({
       tasksFixture: [pendingTaskFixture()],

@@ -310,28 +310,45 @@ provider's reported cost for the run) and `tokens` (the summed token counts).
 Both are folded in from the worker's `step_finish` events as those events are
 written to the task's log, so the totals are known when the child settles
 without the daemon re-reading a transcript that can reach tens of megabytes.
+A total is folded only after its event has actually reached the transcript,
+so the folded totals never claim more than a reader would find in the log.
 
 Three states are distinct, and the difference matters:
 
 - `cost: 0.007`: the run cost this much.
-- `cost: null`: the transcript was read and carried no usage to report (no
-  `step_finish` event carried a cost). That is not the same as "the run was
-  free": a run whose daemon died before the worker's stdout reached the log
-  lands here too, with the cost unknowable rather than zero.
-- no `cost` field at all: the run was never accounted for. Either the task
-  has not settled yet, or the record predates accounting being persisted.
-  The first read that can derive the totals fills them in.
+- `cost: null`: the daemon knows the run used nothing. Either the worker
+  produced no usage event, or it never ran at all (a spawn or launch
+  failure). That is not the same as "the run was free": a free run is a
+  provider-reported cost of exactly zero, which reads as `cost: 0`.
+- no `cost` field at all: the daemon cannot vouch for the run's usage. The
+  task has not settled yet; the record predates accounting being persisted;
+  the transcript already held another run's events (a task resumed after a
+  daemon restart, where this run's totals would undercount the transcript's);
+  or the log write failed part way through, so the totals folded so far
+  describe only what reached the transcript.
 
 `taskferry result` prefers the transcript over the record whenever the
-transcript can still be read: its parse already yields the totals, so using
-them costs nothing extra, and the record is refreshed when the two disagree.
-The record's own totals are what remains once the transcript is gone (the
-daemon prunes records, not logs, so this means a deleted log), which is why
-the settlement stamps them.
+transcript can still be read and carries usage: its parse already yields the
+totals, so using them costs nothing extra. A readable transcript that
+carries no usage at all means the run used nothing, so the result reports
+`null`. The record's own totals are what remains once the transcript is gone
+(the daemon prunes records, not logs, so this means a deleted log), which is
+why the settlement stamps them. When neither the transcript nor the record
+knows anything, the result reports no `cost`/`tokens` at all rather than a
+number or a "nothing was used" the daemon cannot vouch for.
 
-Totals are assigned, never accumulated onto a stored total: a re-read or a
-re-derived total replaces the stored one, so a task's cost cannot be counted
-twice.
+Reading a result never writes the record. The record is written by the
+daemon's own lifecycle paths (the settlement, the spawn failure path, the
+launch failure path), so a read cannot replace a total the daemon vouched for
+with one it merely derived.
+
+Totals are assigned, never accumulated onto a stored total: the settlement
+stamps the totals it folded from the whole transcript, so a task's cost can
+never be counted twice.
+
+The accounting is reported by `taskferry result`. The compact status
+surfaces (`taskferry status`, `taskferry wait`, `taskferry tasks`) are
+unchanged and carry no `cost`/`tokens`.
 
 ## Cancellation
 

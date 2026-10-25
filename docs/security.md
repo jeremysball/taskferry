@@ -140,7 +140,9 @@ the old restart-required behavior for that one field.
 
 ```bash
 export OPENCODE_GO_API_KEY="..."
-taskferry dispatch --prompt "review this diff" --directory /repo
+taskferry dispatch \
+  --prompt "review this diff" \
+  --directory /repo
 ```
 
 The exported key above is visible to `taskferry dispatch` because it's

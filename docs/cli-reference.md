@@ -75,7 +75,11 @@ major version (`opencode --version`, re-probed every 5 minutes):
 | `--no-overlay` | Run this dispatch without the copy-on-write overlay: writes land directly in the target directory and no `accept`/`reject` gate applies. The flag is not accepted for `advisor`; the advisor role always requires an overlay (see [security.md](security.md) and [daemon.md](daemon.md)). |
 
 ```
-$ taskferry dispatch --prompt "Fix the failing tests" --directory /workspace/my-repo --executor opencode --model opencode-go/minimax-m3
+$ taskferry dispatch \
+  --prompt "Fix the failing tests" \
+  --directory /workspace/my-repo \
+  --executor opencode \
+  --model opencode-go/minimax-m3
 id: oc_mrn4ipkp_19450105
 status: running
 directory: /workspace/my-repo
@@ -430,7 +434,9 @@ Example:
 ```sh
 taskferry output oc_mssiwul9_b23e173c
 taskferry output oc_mssiwul9_b23e173c --path deliverable.txt
-taskferry output oc_mssiwul9_b23e173c --path deliverable.txt --max-output-file-bytes 1048576
+taskferry output oc_mssiwul9_b23e173c \
+  --path deliverable.txt \
+  --max-output-file-bytes 1048576
 ```
 
 ## `taskferry list [options]`

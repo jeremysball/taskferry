@@ -215,7 +215,10 @@ worktree the original ran in -- on the `pi` executor the session lookup is
 keyed by that launch directory:
 
 ```sh
-taskferry dispatch --prompt - --directory "<same worktree>" --session-id <sessionId> <<'PROMPT_EOF'
+taskferry dispatch \
+  --prompt - \
+  --directory "<same worktree>" \
+  --session-id <sessionId> <<'PROMPT_EOF'
 <the delta only: what changed since that worker's last turn, and what to do now>
 PROMPT_EOF
 ```
@@ -274,7 +277,11 @@ Dispatch with an explicit workspace, feeding the prompt straight over stdin
 with a quoted heredoc — `--prompt -` reads until EOF:
 
 ```sh
-taskferry dispatch --prompt - --directory "<worktree>" --model <provider/model> --variant <name> <<'PROMPT_EOF'
+taskferry dispatch \
+  --prompt - \
+  --directory "<worktree>" \
+  --model <provider/model> \
+  --variant <name> <<'PROMPT_EOF'
 <full prompt text>
 PROMPT_EOF
 ```
@@ -667,7 +674,10 @@ Read the final result and request an independent review when needed:
 
 ```sh
 taskferry result <id>
-taskferry advisor --prompt - --model <provider/model> --directory "<worktree>" <<'PROMPT_EOF'
+taskferry advisor \
+  --prompt - \
+  --model <provider/model> \
+  --directory "<worktree>" <<'PROMPT_EOF'
 <full prompt text>
 PROMPT_EOF
 taskferry init

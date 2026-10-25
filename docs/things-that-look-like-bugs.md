@@ -15,6 +15,23 @@ A real bug belongs in the issue tracker; a shipped feature belongs in the
 release notes. Only working-as-designed behavior that reads as broken
 belongs here.
 
+- A resumed task lists one recorded prompt under `resume-context/`, rather
+  than repeating the original assignment inline. Deliberate: temporary launch
+  files disappear on settlement, and the worker may have lost its earlier
+  context. Each resume copies only the earliest retained prompt for the same
+  session, executor, and directory, not the conversation or intervening
+  continuations. The recorded prompt does not override
+  the current continuation; partial legacy records and task statuses are not
+  verified assignments or progress. A complete record may be a continuation
+  if earlier requests were pruned; text completeness does not certify its origin.
+  The earliest retained prompt missing from
+  the packet, or a prompt from another session, executor, or directory appearing
+  in it, would be a real bug. Missing pruned history is not reconstructed.
+- A resumed packet has independent request files. Deliberate: hard links would
+  let a worker editing its own packet change another packet's assignment.
+  Taskferry writes the retained request text directly on every platform. This
+  preserves recovery when older output directories are removed or worker-edited.
+  One packet's edits changing another packet would be a real bug.
 - A sandboxed worker cannot read the host's harness session stores. Observe:
   a worker asked to inspect prior OpenCode/Kilo/Pi sessions, or to clean up
   `~/.local/share/opencode`, finds the directory empty or missing even

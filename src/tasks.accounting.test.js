@@ -45,6 +45,64 @@ describe("accounting persistence", () => {
     assert.deepEqual(record.tokens, { total: 300, input: 30, output: 270 });
   });
 
+  test("the stamped totals match an independent parse of the transcript", () => {
+    const child = fakeChild();
+    const mgr = makeManager({ spawnFn: () => child, defaultExecutor: fakeExecutor() });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+
+    child.stdout.emit("data", Buffer.from(
+      [
+        stepFinishEvent({ messageID: "m1", tokens: { total: 100, input: 10, output: 90 }, cost: 0.001 }),
+        stepFinishEvent({ messageID: "m2", tokens: { total: 200, input: 20, output: 180 }, cost: 0.002 }),
+      ].join("\n") + "\n"
+    ));
+    child.emit("exit", 0, null);
+
+    const record = readPersistedTask(mgr, dispatched.id);
+
+    // The transcript is parsed here rather than through the daemon's own
+    // parser, so this check names the belief the stamp rests on: the totals
+    // on the record are the ones a reader finds in the log. A change that
+    // let the folded totals drift from the transcript would fail here even
+    // though every other test in this file still passed.
+    const events = fs.readFileSync(path.join(mgr._stateDir, "logs", `${dispatched.id}.ndjson`), "utf8")
+      .split("\n")
+      .filter((line) => line.trim())
+      .map((line) => JSON.parse(line));
+    const loggedCost = events.reduce((sum, evt) => sum + (evt.part?.cost ?? 0), 0);
+    const loggedTokens = events.reduce((sum, evt) => {
+      if (!evt.part?.tokens) return sum;
+      const next = { ...sum };
+      for (const [key, value] of Object.entries(evt.part.tokens)) next[key] = (next[key] ?? 0) + value;
+      return next;
+    }, {});
+
+    assert.equal(record.cost, loggedCost);
+    assert.deepEqual(record.tokens, loggedTokens);
+  });
+
+  test("a failed log write leaves the record unaccounted for", async (t) => {
+    const realWriteSync = fs.writeSync;
+    t.mock.method(fs, "writeSync", (fd, data, ...rest) => {
+      if (typeof data === "string" && data.includes("step_finish")) throw new Error("ENOSPC");
+      return realWriteSync(fd, data, ...rest);
+    });
+    t.mock.method(console, "error", () => {});
+    const child = fakeChild();
+    const mgr = makeManager({ spawnFn: () => child, defaultExecutor: fakeExecutor(), stdoutDrainGraceMs: 60000 });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+
+    child.stdout.emit("data", Buffer.from(stepFinishEvent({ cost: 0.001 }) + "\n"));
+    child.emit("exit", 0, null);
+
+    await waitFor(() => mgr.status(dispatched.id).status === "done", "the task never settled");
+    assert.equal(mgr.status(dispatched.id).failureReason, "log_write_failed");
+
+    const record = readPersistedTask(mgr, dispatched.id);
+    assert.equal(record.cost, undefined, "the daemon cannot vouch for a run whose totals only partly reached the transcript");
+    assert.equal(record.tokens, undefined);
+  });
+
   test("a task whose log has no step_finish stores null cost/tokens", () => {
     const child = fakeChild();
     const mgr = makeManager({ spawnFn: () => child, defaultExecutor: fakeExecutor() });
@@ -73,6 +131,9 @@ describe("accounting persistence", () => {
     assert.notEqual(record.cost, null);
   });
 
+});
+
+describe("accounting in results", () => {
   test("result() reads persisted accounting even when the log is gone", () => {
     const mgr = makeManager({
       tasksFixture: (logDir) => [baseTask({ id: "t1", status: "done", logPath: path.join(logDir, MISSING_LOG), cost: 0.007, tokens: { total: 42 } })],

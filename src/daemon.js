@@ -684,8 +684,10 @@ function filteredList(manager, directory, resolveWorkspaceRootFn) {
   // Keep `directory` on each row (summarizeRow already includes it) so
   // task.list {} and task.list {directory} ship structurally identical
   // rows -- a non-CLI RPC consumer shouldn't see the field appear/disappear
-  // depending on which branch answered the request.
-  const rows = details.tasks.map(({ id, status, model, startedAt, directory, failureReason }) => ({ id, status, model, startedAt, directory, failureReason: failureReason ?? null }));
+  // depending on which branch answered the request. The row carries the
+  // run's cost when the daemon vouched for it, so a consumer of the list
+  // does not have to ask each task separately.
+  const rows = details.tasks.map(({ id, status, model, startedAt, directory, failureReason, cost }) => ({ id, status, model, startedAt, directory, failureReason: failureReason ?? null, ...(cost === undefined ? {} : { cost }) }));
   return { counts, tasks: rows.length ? rows : "none found in this workspace" };
 }
 

@@ -8,64 +8,49 @@ import {
   makeFakeOpencodeExecutor,
   fakeChild,
   baseTask,
+  dispatchFakeTask,
   readPersistedTask,
   stepFinishEvent,
   waitFor,
   LUNA_MODEL,
 } from "./tasks.test-helpers.js";
 
-// The worker this test drives emits one `step_finish` event per turn, and
-// the daemon folds those into the running totals it stamps on the record.
-function fakeExecutor() {
-  return makeFakeOpencodeExecutor({ buildSpawnArgs: () => ["run", "--format", "json"] });
-}
-
 const MISSING_LOG = "missing.ndjson";
 const READ_NEVER_WRITES = "a read must not write a total onto the record";
 
 describe("accounting persistence", () => {
   test("a settled task's summed cost/tokens are stored on its tasks.json record", () => {
-    const child = fakeChild();
-    const mgr = makeManager({ spawnFn: () => child, defaultExecutor: fakeExecutor() });
-    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
-
-    child.stdout.emit("data", Buffer.from(
-      [
+    const { mgr, task } = dispatchFakeTask({
+      stdout: [
         JSON.stringify({ type: "text", part: { messageID: "m1", text: "one" } }),
         stepFinishEvent({ messageID: "m1", tokens: { total: 100, input: 10, output: 90 }, cost: 0.001 }),
         stepFinishEvent({ messageID: "m2", tokens: { total: 200, input: 20, output: 180 }, cost: 0.002 }),
-      ].join("\n") + "\n"
-    ));
-    child.emit("exit", 0, null);
+      ],
+    });
 
-    assert.equal(mgr.status(dispatched.id).status, "done");
+    assert.equal(mgr.status(task.id).status, "done");
 
-    const record = readPersistedTask(mgr, dispatched.id);
+    const record = readPersistedTask(mgr, task.id);
     assert.equal(record.cost, 0.003);
     assert.deepEqual(record.tokens, { total: 300, input: 30, output: 270 });
   });
 
   test("the stamped totals match an independent parse of the transcript", () => {
-    const child = fakeChild();
-    const mgr = makeManager({ spawnFn: () => child, defaultExecutor: fakeExecutor() });
-    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
-
-    child.stdout.emit("data", Buffer.from(
-      [
+    const { mgr, task } = dispatchFakeTask({
+      stdout: [
         stepFinishEvent({ messageID: "m1", tokens: { total: 100, input: 10, output: 90 }, cost: 0.001 }),
         stepFinishEvent({ messageID: "m2", tokens: { total: 200, input: 20, output: 180 }, cost: 0.002 }),
-      ].join("\n") + "\n"
-    ));
-    child.emit("exit", 0, null);
+      ],
+    });
 
-    const record = readPersistedTask(mgr, dispatched.id);
+    const record = readPersistedTask(mgr, task.id);
 
     // The transcript is parsed here rather than through the daemon's own
     // parser, so this check names the belief the stamp rests on: the totals
     // on the record are the ones a reader finds in the log. A change that
     // let the folded totals drift from the transcript would fail here even
     // though every other test in this file still passed.
-    const events = fs.readFileSync(path.join(mgr._stateDir, "logs", `${dispatched.id}.ndjson`), "utf8")
+    const events = fs.readFileSync(path.join(mgr._stateDir, "logs", `${task.id}.ndjson`), "utf8")
       .split("\n")
       .filter((line) => line.trim())
       .map((line) => JSON.parse(line));
@@ -88,49 +73,38 @@ describe("accounting persistence", () => {
       return realWriteSync(fd, data, ...rest);
     });
     t.mock.method(console, "error", () => {});
-    const child = fakeChild();
-    const mgr = makeManager({ spawnFn: () => child, defaultExecutor: fakeExecutor(), stdoutDrainGraceMs: 60000 });
-    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+    const { mgr, task } = dispatchFakeTask({
+      stdout: [stepFinishEvent({ cost: 0.001 })],
+      managerOptions: { stdoutDrainGraceMs: 60000 },
+    });
 
-    child.stdout.emit("data", Buffer.from(stepFinishEvent({ cost: 0.001 }) + "\n"));
-    child.emit("exit", 0, null);
+    await waitFor(() => mgr.status(task.id).status === "done", "the task never settled");
+    assert.equal(mgr.status(task.id).failureReason, "log_write_failed");
 
-    await waitFor(() => mgr.status(dispatched.id).status === "done", "the task never settled");
-    assert.equal(mgr.status(dispatched.id).failureReason, "log_write_failed");
-
-    const record = readPersistedTask(mgr, dispatched.id);
+    const record = readPersistedTask(mgr, task.id);
     assert.equal(record.cost, undefined, "the daemon cannot vouch for a run whose totals only partly reached the transcript");
     assert.equal(record.tokens, undefined);
   });
 
   test("a task whose log has no step_finish stores null cost/tokens", () => {
-    const child = fakeChild();
-    const mgr = makeManager({ spawnFn: () => child, defaultExecutor: fakeExecutor() });
-    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+    const { mgr, task } = dispatchFakeTask({
+      stdout: [JSON.stringify({ type: "text", part: { messageID: "m1", text: "partial" } })],
+    });
 
-    child.stdout.emit("data", Buffer.from(JSON.stringify({ type: "text", part: { messageID: "m1", text: "partial" } }) + "\n"));
-    child.emit("exit", 0, null);
+    assert.equal(mgr.status(task.id).status, "done");
 
-    assert.equal(mgr.status(dispatched.id).status, "done");
-
-    const record = readPersistedTask(mgr, dispatched.id);
+    const record = readPersistedTask(mgr, task.id);
     assert.equal(record.cost, null);
     assert.equal(record.tokens, null);
   });
 
   test("an explicit zero cost is stored as zero, not as an absent value", () => {
-    const child = fakeChild();
-    const mgr = makeManager({ spawnFn: () => child, defaultExecutor: fakeExecutor() });
-    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+    const { mgr, task } = dispatchFakeTask({ stdout: [stepFinishEvent({ cost: 0 })] });
 
-    child.stdout.emit("data", Buffer.from(stepFinishEvent({ cost: 0 }) + "\n"));
-    child.emit("exit", 0, null);
-
-    const record = readPersistedTask(mgr, dispatched.id);
+    const record = readPersistedTask(mgr, task.id);
     assert.equal(record.cost, 0);
     assert.notEqual(record.cost, null);
   });
-
 });
 
 describe("accounting in results", () => {
@@ -179,20 +153,15 @@ describe("accounting in results", () => {
   });
 
   test("a transcript that grew after the record was stamped is reported from the transcript", () => {
-    const child = fakeChild();
-    const mgr = makeManager({ spawnFn: () => child, defaultExecutor: fakeExecutor() });
-    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
-
-    child.stdout.emit("data", Buffer.from(stepFinishEvent({ cost: 0.001 }) + "\n"));
-    child.emit("exit", 0, null);
-    assert.equal(readPersistedTask(mgr, dispatched.id).cost, 0.001);
+    const { mgr, task } = dispatchFakeTask({ stdout: [stepFinishEvent({ cost: 0.001 })] });
+    assert.equal(readPersistedTask(mgr, task.id).cost, 0.001);
 
     // A child that outlived its daemon keeps writing to the same transcript.
-    fs.appendFileSync(path.join(mgr._stateDir, "logs", `${dispatched.id}.ndjson`), stepFinishEvent({ messageID: "m2", cost: 0.005 }) + "\n");
+    fs.appendFileSync(path.join(mgr._stateDir, "logs", `${task.id}.ndjson`), stepFinishEvent({ messageID: "m2", cost: 0.005 }) + "\n");
 
-    assert.equal(mgr.result(dispatched.id).cost, 0.006);
+    assert.equal(mgr.result(task.id).cost, 0.006);
     assert.equal(
-      readPersistedTask(mgr, dispatched.id).cost,
+      readPersistedTask(mgr, task.id).cost,
       0.001,
       "the record keeps the total the daemon vouched for at settlement",
     );
@@ -239,17 +208,12 @@ describe("accounting in results", () => {
   });
 
   test("a settled task's accounting survives a daemon restart", () => {
-    const child = fakeChild();
-    const mgr = makeManager({ spawnFn: () => child, defaultExecutor: fakeExecutor() });
-    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
-
-    child.stdout.emit("data", Buffer.from(stepFinishEvent({ cost: 0.001 }) + "\n"));
-    child.emit("exit", 0, null);
-    assert.equal(readPersistedTask(mgr, dispatched.id).cost, 0.001);
+    const { mgr, task } = dispatchFakeTask({ stdout: [stepFinishEvent({ cost: 0.001 })] });
+    assert.equal(readPersistedTask(mgr, task.id).cost, 0.001);
 
     // The transcript is gone (deleted from disk); only the record's own
     // accounting remains, which is what the restarted daemon has to report.
-    fs.rmSync(path.join(mgr._stateDir, "logs", `${dispatched.id}.ndjson`), { force: true });
+    fs.rmSync(path.join(mgr._stateDir, "logs", `${task.id}.ndjson`), { force: true });
 
     const restarted = makeManager({
       stateDir: mgr._stateDir,
@@ -258,13 +222,56 @@ describe("accounting in results", () => {
       killFn: () => {},
     });
 
-    assert.equal(restarted.result(dispatched.id).cost, 0.001);
+    assert.equal(restarted.result(task.id).cost, 0.001);
+  });
+
+  test("a task whose launch preparation failed is accounted for as having used nothing", () => {
+    const mgr = makeManager({
+      defaultExecutor: makeFakeOpencodeExecutor({
+        buildSpawnArgs: () => ["run", "--format", "json"],
+        prepareLaunch: () => { throw new Error("opencode --version failed"); },
+      }),
+    });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+
+    const record = readPersistedTask(mgr, dispatched.id);
+    assert.equal(record.status, "crashed");
+    assert.equal(record.cost, null, "the child never ran, so the daemon knows the run used nothing");
+    assert.equal(record.tokens, null);
+  });
+
+  test("a resumed run whose launch preparation failed leaves the record unaccounted for", () => {
+    const mgr = makeManager({
+      tasksFixture: (logDir) => [baseTask({
+        id: "oc_resume_prepare",
+        status: "running",
+        directory: fs.realpathSync(os.tmpdir()),
+        model: LUNA_MODEL,
+        sessionId: null,
+        logPath: path.join(logDir, "oc_resume_prepare.ndjson"),
+        promptPreview: "resume me",
+      })],
+      logs: {
+        "oc_resume_prepare.ndjson": [
+          JSON.stringify({ sessionID: "ses_resume_prepare" }),
+          stepFinishEvent({ cost: 0.5 }),
+        ].join("\n") + "\n",
+      },
+      defaultExecutor: makeFakeOpencodeExecutor({
+        buildSpawnArgs: () => ["run", "--format", "json"],
+        prepareLaunch: () => { throw new Error("opencode --version failed"); },
+      }),
+    });
+
+    const record = readPersistedTask(mgr, "oc_resume_prepare");
+    assert.equal(record.cost, undefined, "the transcript holds the previous run's usage, so this run's failure says nothing about the usage");
+    assert.equal(record.tokens, undefined);
   });
 
   test("a task whose spawn failed is accounted for as having used nothing", () => {
     const mgr = makeManager({
       spawnFn: () => { throw new Error("spawn ENOENT"); },
-      defaultExecutor: fakeExecutor(),
+      defaultExecutor: makeFakeOpencodeExecutor({ buildSpawnArgs: () => ["run", "--format", "json"] }),
     });
     const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
 

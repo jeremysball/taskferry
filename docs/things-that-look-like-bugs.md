@@ -709,17 +709,46 @@ belongs here.
   that clearly ran shows `cost: null`, or the record has no `cost` field at
   all, or a run that was free shows `cost: 0`, and nothing in the record
   tells the reader which state a given task is in. Deliberate: the three are
-  different facts. `null` means the daemon knows the run used nothing (no
-  `step_finish` event carried a cost, or the worker never ran), which is not
-  the same as the run having been free. A missing field means the daemon
-  cannot vouch for the run's usage: the task has not settled, the record
-  predates accounting being persisted, the transcript already held another
-  run's events (a task resumed after a daemon restart), or the log write
-  failed part way through. `0` is a real reading (the provider reported a
-  cost of exactly zero) and must not be folded into "nothing to report". It
-  would be a real bug if a consumer treated a missing field and an explicit
-  `null` as the same thing, if a zero cost were coerced into `null`, or if a
-  record the daemon could not vouch for reported `null` as though it had.
+  different facts. `null` means the daemon knows the run used nothing, `0`
+  is a real reading (the provider reported a cost of exactly zero), and a
+  missing field means the daemon cannot vouch for the run's usage. The
+  policy, and the full list of causes behind a missing field, live in
+  `docs/daemon.md` ("Usage accounting in `tasks.json`"); this file records
+  only that the three states are deliberately distinct. It would be a real
+  bug if a consumer treated a missing field and an explicit `null` as the
+  same thing, if a zero cost were coerced into `null`, or if a record the
+  daemon could not vouch for reported `null` as though it had.
+- A task the daemon restarted on shows `crashed` with
+  `failureReason: "daemon_restarted_session_lost"` and no `cost` field,
+  even though its transcript holds usage. Observe: the transcript has
+  `step_finish` events with a cost, the record says the run used nothing
+  knowable, and there is no stamp to compare against. Deliberate: the child
+  that wrote that transcript belonged to the previous daemon, so its usage
+  totals are not the restarted daemon's to vouch for, and stamping them
+  would mean re-reading a transcript the restart path's bounded-read
+  discipline rules out. A reader that asks for the result derives the
+  totals from the transcript instead. It would be a real bug if the
+  restarted daemon claimed a total it had not folded, or if a reader of the
+  result got no totals while the transcript still held them.
+- A task resumed onto a transcript that already holds another run's events
+  is never stamped, so its accounting disappears with the transcript.
+  Observe: the record has no `cost` field while the transcript holds two
+  runs' usage, and once the transcript is deleted the totals are gone for
+  good. Deliberate: this run's totals would undercount the transcript's,
+  and the previous run's totals are not this run's to claim. It would be a
+  real bug if the record carried a total that undercounted the transcript,
+  or if a resumed task reported one run's totals as the other's.
+- `taskferry list` rows carry `cost` but not `tokens`, while
+  `taskferry status --full` carries both. Observe: the row's `cost` is
+  there but no token counts are, so the two surfaces disagree about how
+  much they report. Deliberate: the compact row is a scan surface (what
+  did this run cost), the full detail is the accounting surface (what did
+  it cost and how many tokens), and a token total is a nested object that
+  does not belong in a row a caller reads in bulk. A cost the daemon cannot
+  vouch for is left out of the row entirely rather than shown as zero. It
+  would be a real bug if the row showed a cost the record did not carry,
+  showed zero for a run the daemon could not vouch for, or if the two
+  surfaces reported different costs for the same task.
 - A task's stored `cost` can disagree with its transcript. Observe:
   `tasks.json` shows one cost and `taskferry result` reports another, with
   the two never reconciling in the record. Deliberate: the transcript on

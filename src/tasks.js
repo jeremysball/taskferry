@@ -152,6 +152,8 @@ export { DEFAULT_MAX_OUTPUT_FILE_BYTES, MAX_SAFE_OUTPUT_FILE_BYTES };
  * @property {string|null} [headDriftTo]
  * @property {boolean|null} [headDriftRecovered]
  * @property {string|null} [outputDir]
+ * @property {number|null} [cost]
+ * @property {unknown} [tokens]
  */
 
 /**
@@ -318,12 +320,7 @@ function capDetail(text) {
 
 /** @param {string} text @returns {boolean} */
 function isParseableJson(text) {
-  try {
-    JSON.parse(text);
-    return true;
-  } catch {
-    return false;
-  }
+  return parseLogJsonLine(text) !== NOT_JSON;
 }
 
 /** Unlink a file, tolerating it already being gone (ENOENT). @param {string} filePath */
@@ -494,6 +491,22 @@ function classifyProviderFailure(lines, errorBucketPrefix) {
 }
 
 /**
+ * Matches a line against the provider's curated failure buckets. Returns the
+ * bucket the line names, or null when it names none.
+ * @param {string} line
+ * @param {string} errorBucketPrefix
+ * @returns {{bucket: string, detail: string}|null}
+ */
+function matchProviderFailureBucket(line, errorBucketPrefix) {
+  for (const [bucket, patterns] of PROVIDER_FAILURE_BUCKETS) {
+    if (patterns.some((pattern) => pattern.test(line))) {
+      return { bucket: bucketFor(errorBucketPrefix, bucket), detail: capDetail(line) };
+    }
+  }
+  return null;
+}
+
+/**
  * Classify a single log line into a failure bucket, or null when the line
  * is not boot-crash evidence. Parseable `type:"text"` events and unknown
  * non-JSON stderr lines yield null (skip); everything else yields a failure
@@ -503,19 +516,13 @@ function classifyProviderFailure(lines, errorBucketPrefix) {
  * @returns {{failure: {bucket: string, detail: string} | null, hasParseableLine: boolean} | null}
  */
 function classifyProviderLine(line, errorBucketPrefix) {
-  let evt;
-  try {
-    evt = JSON.parse(line);
-  } catch {
+  const evt = parseLogJsonLine(line);
+  if (evt === NOT_JSON) {
     // Non-JSON output: boot-failure evidence if it matches a curated bucket.
-    for (const [bucket, patterns] of PROVIDER_FAILURE_BUCKETS) {
-      if (patterns.some((pattern) => pattern.test(line))) {
-        return { failure: { bucket: bucketFor(errorBucketPrefix, bucket), detail: capDetail(line) }, hasParseableLine: false };
-      }
-    }
-    return null;
+    const match = matchProviderFailureBucket(line, errorBucketPrefix);
+    return match ? { failure: match, hasParseableLine: false } : null;
   }
-  if (evt.type !== "error") return { failure: null, hasParseableLine: true };
+  if (!evt || evt.type !== "error") return { failure: null, hasParseableLine: true };
   const text = typeof evt.message === "string" ? evt.message : JSON.stringify(evt);
   for (const [bucket, patterns] of PROVIDER_FAILURE_BUCKETS) {
     if (patterns.some((pattern) => pattern.test(text))) {
@@ -1713,17 +1720,14 @@ function onChildData(shared, chunk) {
     const line = shared.stdoutCarry.slice(0, nl);
     shared.stdoutCarry = shared.stdoutCarry.slice(nl + 1);
     if (!line.trim()) continue;
-    let parsed;
-    let isJson = true;
-    try {
-      parsed = JSON.parse(line);
-    } catch {
+    const parsed = parseLogJsonLine(line);
+    if (parsed === NOT_JSON) {
       // Non-JSON stdout -- preserve verbatim so classifyProviderFailure has
       // the line's text even without a parseable event shape.
-      isJson = false;
       writeCapturedLog(shared, `${line}\n`);
+    } else {
+      writeNormalizedLogLine(shared, parsed, line);
     }
-    if (isJson) writeNormalizedLogLine(shared, parsed, line);
   }
 }
 
@@ -1737,10 +1741,8 @@ function onChildEnd(shared) {
   const tail = shared.stdoutCarry;
   shared.stdoutCarry = "";
   if (!tail.trim()) return;
-  let parsed;
-  try {
-    parsed = JSON.parse(tail);
-  } catch {
+  const parsed = parseLogJsonLine(tail);
+  if (parsed === NOT_JSON) {
     // Trailing partial / malformed line at process end -- preserve verbatim.
     writeCapturedLog(shared, `${tail}\n`);
     return;
@@ -1771,15 +1773,10 @@ function finishChildSettlement(ctx, shared) {
   if (!task.overlayDirs) {
     drainDeferredCleanup(task, ctx);
   }
-  // Stamp the usage totals the child's own stdout produced. They cover the
-  // whole transcript only when this child wrote all of it (the file was empty
-  // when the child was spawned); a transcript that already held content has
-  // usage events this run never saw, and a stamp would undercount them, so
-  // that case is left to the reader, which derives the totals from the
-  // transcript itself. A failed log write makes the same call: the totals
-  // folded so far describe only what reached the transcript, so the daemon
-  // cannot vouch for the run's usage and leaves the record unaccounted for
-  // rather than stamping a total it knows to be incomplete.
+  // Stamp the usage totals the child's own stdout produced. The rule for
+  // when a total may be stamped lives in storeTaskAccounting: this child
+  // wrote the whole transcript only when the file was empty at spawn, and
+  // its totals cover the transcript only when no log write was dropped.
   if (shared.logBytesAtSpawn === 0 && !shared.logWriteFailed) {
     storeTaskAccounting(task, shared.accounting);
   }
@@ -2364,8 +2361,18 @@ function parseTaskLog(raw, initialSessionId) {
 }
 
 /**
- * Parse one NDJSON log line, or null when the line is not JSON (a crash
- * stack trace on stderr, interleaved into the same fd).
+ * The value a line parses to when it is not JSON at all. It is distinct from
+ * the JSON literal `null`, which a line can legitimately hold, so a caller
+ * that has to tell "not JSON" from "JSON null" compares against this
+ * instead of against `null`.
+ */
+const NOT_JSON = Symbol("not-json");
+
+/**
+ * Parse one NDJSON log line, or NOT_JSON when the line is not JSON (a crash
+ * stack trace on stderr, interleaved into the same fd). Every reader of a
+ * transcript line goes through here, so "what counts as an event line" is
+ * decided in one place rather than in a copy per reader.
  * @param {string} line
  * @returns {any}
  */
@@ -2373,7 +2380,7 @@ function parseLogJsonLine(line) {
   try {
     return JSON.parse(line);
   } catch {
-    return null;
+    return NOT_JSON;
   }
 }
 
@@ -2386,7 +2393,7 @@ function parseLogJsonLine(line) {
  */
 function consumeLogLine(line, parsed) {
   const evt = parseLogJsonLine(line);
-  if (!evt) return;
+  if (evt === NOT_JSON || !evt) return;
   if (evt.sessionID) parsed.sessionId = evt.sessionID;
   if (evt.type === "text" && evt.part && typeof evt.part.text === "string") {
     accumulateTextEvent(evt, parsed);
@@ -2507,11 +2514,20 @@ function resultCheckGateFields(task, fields) {
  * carries the numbers instead of leaving every consumer to re-parse the
  * transcript. Runs at terminal transitions only.
  *
- * The stamp always assigns the accounting it is handed rather than adding to
- * whatever the record already held: the transcript is the single source of
- * truth, so a task whose transcript grew (a child that outlived the daemon
- * that launched it) is re-accounted from the whole file instead of being
- * summed twice.
+ * This is the one place the accounting policy lives. The rule the callers
+ * follow: a total is stamped only when the daemon can vouch for it, and the
+ * stamp always assigns what it is handed rather than adding to whatever the
+ * record already held (the transcript is the single source of truth, so a
+ * task whose transcript grew is re-accounted from the whole file instead of
+ * being summed twice).
+ *
+ * Why the stamp exists: the daemon prunes records, not logs, so a record
+ * outlives its transcript, and a consumer of `tasks.json` should never have
+ * to parse a transcript to learn a run's cost. Folding the totals as the
+ * child's output streams is what makes that cheap; deriving them at
+ * settlement instead would mean re-reading a transcript that can reach tens
+ * of megabytes. The result path still prefers the transcript, because it is
+ * the authority for a transcript that grew after the settlement.
  *
  * A stamp of null/null means the daemon knows the run used nothing: the
  * child produced no usage event, or it never ran at all. That is a different
@@ -2529,15 +2545,29 @@ function storeTaskAccounting(task, accounting) {
 }
 
 /**
+ * True when a task's transcript is absent or holds nothing yet. The paths
+ * that account for a run which never started use it: they can vouch that the
+ * run used nothing only while the transcript holds no other run's usage.
+ * @param {string} logPath
+ * @returns {boolean}
+ */
+function transcriptIsEmpty(logPath) {
+  try {
+    return fs.statSync(logPath).size === 0;
+  } catch {
+    return true;
+  }
+}
+
+/**
  * Decides which cost/tokens pair a result reports.
  *
  * The transcript is the source of truth for as long as it can be read: its
  * parse already yields the totals, so using them costs nothing extra, and a
  * transcript that grew (a child that outlived the daemon that launched it)
  * is reported as it stands rather than as it stood at settlement. The
- * record's own copy matters once the transcript is gone (taskferry prunes
- * records, not logs, so that means a deleted log), which is why the
- * settlement stamps the totals it folded in from the child's output.
+ * record's own copy is what is left once the transcript is gone, which is
+ * why the settlement stamps the totals (see storeTaskAccounting).
  *
  * A readable transcript that carries no usage at all means the run used
  * nothing, so the result says so (null) rather than claiming a number.
@@ -3736,9 +3766,11 @@ function handleQueuedForRestart(task, ctx, prev) {
   task.status = "unknown";
   // @ts-ignore
   delete task._persistedStatus;
-  // No usage stamp: a queued task never ran, and its transcript holds no
-  // usage events. A reader that asks for the result derives the (empty)
-  // accounting from the transcript itself.
+  // No usage stamp. A task queued when the daemon died may be one this
+  // daemon is about to resume, whose transcript already holds the previous
+  // attempt's usage, and the daemon cannot vouch for a total it never saw. A
+  // reader that asks for the result derives the accounting from the
+  // transcript itself.
   ctx.events.taskEvents.emitState(task, prev);
   try { ctx.helpers.persistTask(task.id); } catch {}
 }
@@ -6207,17 +6239,9 @@ function parseNarration(raw) {
   /** @type {Array<{kind: "text", mid: string}|{kind: "tool", line: string}>} */
   const order = [];
   for (const line of raw.split("\n")) {
-    if (!line.trim()) continue;
-    /** @type {any} */
-    let evt;
-    let parsed = false;
-    try {
-      evt = JSON.parse(line);
-      parsed = true;
-    } catch {
-      // Not a parseable event line -- not narration.
-    }
-    if (parsed) collectNarrationLine(evt, textByMessageId, order);
+    const evt = line.trim() ? parseLogJsonLine(line) : NOT_JSON;
+    if (evt === NOT_JSON || typeof evt !== "object" || evt === null) continue;
+    collectNarrationLine(evt, textByMessageId, order);
   }
   return order
     .map((entry) => (entry.kind === "text" ? /** @type {string[]} */ (textByMessageId.get(entry.mid)).join("") : entry.line))
@@ -6344,11 +6368,39 @@ function noOutputDir(taskId, relativePath) {
 // workspace before calling manager.status() per task (taskferry#287).
 /**
  * @param {Task} task
- * @returns {{id: string, status: string, model: string, startedAt: string, failureReason: string|null, directory: string}}
+ * @returns {{id: string, status: string, model: string, startedAt: string, failureReason: string|null, directory: string, cost?: number|null}}
  */
 function summarizeRow(task) {
   const { id, status, model, startedAt, failureReason, directory } = task;
-  return { id, status, model, startedAt, directory, failureReason: failureReason ?? null };
+  return { id, status, model, startedAt, directory, failureReason: failureReason ?? null, ...summarizeCostField(task) };
+}
+
+/**
+ * The cost a task's record carries, when the daemon vouched for it. A cost
+ * the daemon could not vouch for is left out entirely, which is a different
+ * fact from a run that used nothing (null): absent means the daemon knows
+ * nothing about the run's usage, null means it knows the run used none.
+ * @param {Task} task
+ * @returns {{cost?: number|null}}
+ */
+function summarizeCostField(task) {
+  return task.cost === undefined ? {} : { cost: task.cost };
+}
+
+/**
+ * The usage totals a task's record carries, when the daemon vouched for
+ * them. A field the daemon could not vouch for is left out entirely, which
+ * is a different fact from a run that used nothing (null): absent means the
+ * daemon knows nothing about the run's usage, null means it knows the run
+ * used none.
+ * @param {Task} task
+ * @returns {{cost?: number|null, tokens?: unknown}}
+ */
+function summarizeAccountingFields(task) {
+  return {
+    ...summarizeCostField(task),
+    ...(task.tokens === undefined ? {} : { tokens: task.tokens }),
+  };
 }
 
 /**
@@ -6360,6 +6412,7 @@ function summarize(task) {
   return {
     id, status, directory, model, sessionId, originSessionId, pid, startedAt, endedAt, exitCode, signal, logPath,
     ...failureFields(task),
+    ...summarizeAccountingFields(task),
     spawnError: spawnError ?? null,
     promptPreview,
     ...summarizeOptionalFields(task),
@@ -8895,10 +8948,14 @@ function failTaskBeforeLaunch(task, ctx, err) {
   task.status = "crashed";
   task.spawnError = errMessage(err);
   task.endedAt = new Date().toISOString();
-  // The task never ran, so the daemon knows it used nothing: account for it
-  // as such instead of leaving the record looking like one that was never
-  // accounted for.
-  storeTaskAccounting(task, { tokens: null, cost: null });
+  // This attempt never ran, so the daemon knows it used nothing. The
+  // transcript is what the record's accounting speaks for, though: when it
+  // already holds a previous attempt's usage (a task resumed after a daemon
+  // restart), the daemon cannot vouch for the run's total and leaves the
+  // record unaccounted for, exactly as the spawn-failure path does.
+  if (transcriptIsEmpty(task.logPath)) {
+    storeTaskAccounting(task, { tokens: null, cost: null });
+  }
   ctx.persistTask(task.id);
   ctx.flushPersist();
   void ctx.scheduleActivity(task, { force: true }).then(() => ctx.activityCache.evictTask(task.id));

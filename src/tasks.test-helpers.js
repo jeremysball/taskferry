@@ -514,6 +514,33 @@ export function readPersistedTask(mgr, taskId) {
 }
 
 /**
+ * Dispatch one task against a fake child, feed it the given transcript
+ * lines, and let it settle. This is the shape the accounting tests need:
+ * a manager whose spawn returns a fake child, one dispatch, the child's
+ * stdout, and the exit that settles it.
+ * @param {object} [fields]
+ * @param {string[]} [fields.stdout] - the transcript lines the child's stdout
+ *   carries
+ * @param {number} [fields.exitCode]
+ * @param {NodeJS.Signals|null} [fields.signal]
+ * @param {object} [fields.managerOptions] - extra options for makeManager
+ * @returns {{mgr: any, task: any, child: any}} the manager, the dispatched
+ *   task, and the fake child
+ */
+export function dispatchFakeTask({ stdout = [], exitCode = 0, signal = null, managerOptions = {} } = {}) {
+  const child = fakeChild();
+  const mgr = makeManager({
+    spawnFn: () => child,
+    defaultExecutor: makeFakeOpencodeExecutor({ buildSpawnArgs: () => ["run", "--format", "json"] }),
+    ...managerOptions,
+  });
+  const task = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+  if (stdout.length) child.stdout.emit("data", Buffer.from(`${stdout.join("\n")}\n`));
+  child.emit("exit", exitCode, signal);
+  return { mgr, task, child };
+}
+
+/**
  * One `step_finish` transcript line, as the JSON string the worker's stdout
  * carries it: the event type, the message id, the reason, the token counts,
  * and the cost.

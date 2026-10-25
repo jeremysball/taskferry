@@ -324,8 +324,19 @@ Three states are distinct, and the difference matters:
   task has not settled yet; the record predates accounting being persisted;
   the transcript already held another run's events (a task resumed after a
   daemon restart, where this run's totals would undercount the transcript's);
-  or the log write failed part way through, so the totals folded so far
-  describe only what reached the transcript.
+  the log write failed part way through, so the totals folded so far
+  describe only what reached the transcript; or the daemon restarted while
+  the task was running and the session could not be resumed
+  (`failureReason: daemon_restarted_session_lost`), in which case the
+  transcript belongs to the previous daemon's child and this daemon does not
+  vouch for it.
+
+A task resumed onto a transcript that already holds another run's events is
+never stamped: this run's totals would undercount the transcript's, and the
+previous run's totals are not this run's to claim. The cost of that choice
+is that the totals live only in the transcript. If that transcript is later
+deleted, the accounting goes with it, and the record stays unaccounted for
+rather than carrying a total the daemon cannot vouch for.
 
 `taskferry result` prefers the transcript over the record whenever the
 transcript can still be read and carries usage: its parse already yields the
@@ -346,9 +357,14 @@ Totals are assigned, never accumulated onto a stored total: the settlement
 stamps the totals it folded from the whole transcript, so a task's cost can
 never be counted twice.
 
-The accounting is reported by `taskferry result`. The compact status
-surfaces (`taskferry status`, `taskferry wait`, `taskferry tasks`) are
-unchanged and carry no `cost`/`tokens`.
+The accounting is reported by `taskferry result`, and by the full status
+detail (`taskferry status --full`, `taskferry wait --full`, and the raw
+`task.status` RPC), which carry `cost` and `tokens` on the task. The lean
+status forms (`taskferry status`, `taskferry wait`) keep the narrow shape
+they had. The compact task row (`taskferry list`) carries `cost` only, so a
+caller scanning the list can see what each run cost without a
+`task.result` round trip per task; a cost the daemon cannot vouch for is
+left out of the row entirely rather than shown as zero.
 
 ## Cancellation
 

@@ -1,7 +1,7 @@
 import { describe, test } from "node:test";
 import assert from "node:assert/strict";
 import path from "node:path";
-import { buildBwrapArgs, buildBwrapBaseArgs, checkBwrapAvailable, checkOverlaySupport, defaultDenyList, parseBwrapVersion, platformSupportsSandbox, resolveGitCommonDir, resolveGitDir, resolvePiAgentDir, resolveSandboxDenyList, resolveXdgDataHome } from "./sandbox.js";
+import { buildBwrapArgs, buildBwrapBaseArgs, checkBwrapAvailable, checkOverlaySupport, defaultDenyList, isTaskferryScopedOpencodePath, parseBwrapVersion, platformSupportsSandbox, resolveGitCommonDir, resolveGitDir, resolveHostXdgConfigHome, resolveHostXdgDataHome, resolvePiAgentDir, resolveSandboxDenyList, resolveXdgDataHome } from "./sandbox.js";
 
 // Repeated literals lifted to module-level constants to satisfy
 // sonarjs/no-duplicate-string in this file.
@@ -30,6 +30,9 @@ const PI_SESSIONS_DIR = path.join(HOME_DIR, ".pi", "agent", "sessions");
 const CODEX_DIR = path.join(HOME_DIR, ".codex");
 const DEFAULT_DATA_HOME = path.join(HOME_DIR, ".local", "share");
 const DEFAULT_PI_AGENT_DIR = path.join(HOME_DIR, ".pi", "agent");
+const CACHE_TASKFERRY_DIR = "/home/user/.cache/taskferry";
+const CUSTOM_XDG = "/custom/xdg";
+const DEFAULT_CONFIG_HOME = path.join(HOME_DIR, ".config");
 
 describe("platformSupportsSandbox()", () => {
   test("is true on linux", () => {
@@ -535,6 +538,25 @@ describe("defaultDenyList()", () => {
   test("resolveXdgDataHome() honors XDG_DATA_HOME and falls back to ~/.local/share", () => {
     assert.equal(resolveXdgDataHome({ XDG_DATA_HOME: "/xdg" }, HOME_DIR), "/xdg");
     assert.equal(resolveXdgDataHome({}, HOME_DIR), DEFAULT_DATA_HOME);
+  });
+
+  test("resolveHostXdgDataHome() ignores TaskFerry per-task scoped paths (taskferry#623)", () => {
+    const dataDir = CACHE_TASKFERRY_DIR;
+    const scoped = `${dataDir}/opencode-data/oc_parent`;
+    assert.equal(resolveHostXdgDataHome({ XDG_DATA_HOME: scoped }, HOME_DIR, dataDir), DEFAULT_DATA_HOME);
+    assert.equal(resolveHostXdgDataHome({ XDG_DATA_HOME: CUSTOM_XDG }, HOME_DIR, dataDir), CUSTOM_XDG);
+    assert.equal(resolveHostXdgDataHome({}, HOME_DIR, dataDir), DEFAULT_DATA_HOME);
+    assert.equal(isTaskferryScopedOpencodePath(`${scoped}/config`, dataDir), true);
+    assert.equal(isTaskferryScopedOpencodePath(CUSTOM_XDG, dataDir), false);
+  });
+
+  test("resolveHostXdgConfigHome() ignores TaskFerry per-task scoped paths (taskferry#623)", () => {
+    const dataDir = CACHE_TASKFERRY_DIR;
+    const scopedConfig = `${dataDir}/opencode-data/oc_parent/config`;
+    const customConfig = "/custom/config";
+    assert.equal(resolveHostXdgConfigHome({ XDG_CONFIG_HOME: scopedConfig }, HOME_DIR, dataDir), DEFAULT_CONFIG_HOME);
+    assert.equal(resolveHostXdgConfigHome({ XDG_CONFIG_HOME: customConfig }, HOME_DIR, dataDir), customConfig);
+    assert.equal(resolveHostXdgConfigHome({}, HOME_DIR, dataDir), DEFAULT_CONFIG_HOME);
   });
 
   test("resolvePiAgentDir() honors PI_CODING_AGENT_DIR and falls back to ~/.pi/agent", () => {

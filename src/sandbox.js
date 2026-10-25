@@ -176,6 +176,65 @@ export function resolveXdgDataHome(env, homeDir) {
 }
 
 /**
+ * True when `candidate` sits under TaskFerry's per-task opencode data home
+ * (`<dataDir>/opencode-data/...`). A nested ferry inherits the controller's
+ * scoped `XDG_*` values; on the host those paths only hold 0-byte auth
+ * placeholders, so credential/config resolution must ignore them
+ * (taskferry#623).
+ * @param {string|undefined} candidate
+ * @param {string} dataDir
+ * @returns {boolean}
+ */
+export function isTaskferryScopedOpencodePath(candidate, dataDir) {
+  if (typeof candidate !== "string" || candidate.length === 0) return false;
+  const root = path.join(dataDir, "opencode-data");
+  // Normalize separators so POSIX fixtures still match on Windows unit runs.
+  /** @param {string} p */
+  const norm = (p) => {
+    let s = p.replaceAll("\\", "/");
+    while (s.endsWith("/")) s = s.slice(0, -1);
+    return s;
+  };
+  const c = norm(candidate);
+  const r = norm(root);
+  return c === r || c.startsWith(`${r}/`);
+}
+
+/**
+ * Resolves the host XDG data home for credential binds. Honors a caller's
+ * `XDG_DATA_HOME` unless it points into TaskFerry's per-task opencode cache,
+ * in which case it falls back to `~/.local/share` (taskferry#623).
+ * @param {NodeJS.ProcessEnv} env
+ * @param {string} homeDir
+ * @param {string} dataDir
+ * @returns {string}
+ */
+export function resolveHostXdgDataHome(env, homeDir, dataDir) {
+  const candidate = env.XDG_DATA_HOME;
+  if (typeof candidate === "string" && candidate.length > 0 && !isTaskferryScopedOpencodePath(candidate, dataDir)) {
+    return candidate;
+  }
+  return path.join(homeDir, ".local", "share");
+}
+
+/**
+ * Resolves the host XDG config home for read-only config binds. Honors a
+ * caller's `XDG_CONFIG_HOME` unless it points into TaskFerry's per-task
+ * opencode cache, in which case it falls back to `~/.config` (taskferry#623).
+ * @param {NodeJS.ProcessEnv} env
+ * @param {string} homeDir
+ * @param {string} dataDir
+ * @returns {string}
+ */
+export function resolveHostXdgConfigHome(env, homeDir, dataDir) {
+  const candidate = env.XDG_CONFIG_HOME;
+  if (typeof candidate === "string" && candidate.length > 0 && !isTaskferryScopedOpencodePath(candidate, dataDir)) {
+    return candidate;
+  }
+  return path.join(homeDir, ".config");
+}
+
+/**
  * Resolves Pi's agent directory from an environment, defaulting to
  * `~/.pi/agent`. The deny-list masks its `sessions` subtree; the Pi executor
  * reads auth/extensions/sessions from the same directory.

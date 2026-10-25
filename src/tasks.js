@@ -5724,6 +5724,7 @@ function buildManagerInternalHelpers(ctx) {
      * known" -- resolveVariant() then sends no flag rather than guessing. */
     resolveOpencodeVariants: (model, env) => {
       if (ctx.opts.opencodeVariantsTable) return ctx.opts.opencodeVariantsTable.get(model) ?? [];
+      warmAndScheduleVariantsCacheRefresh(ctx.opts, ctx.env.sanitizedEnvironment, () => resolveOpencodeExecutor().ensureCliMajor());
       const table = readVariantsCache({ cacheDir: ctx.opts.cacheDir, env: ctx.env.sanitizedEnvironment(env) });
       return table?.get(model) ?? [];
     },
@@ -6098,20 +6099,24 @@ function bootstrapManagerContext(ctx) {
   // probe just means the first dispatch waits for it to land (the in-flight
   // Promise is shared, so only one subprocess runs however many dispatches
   // race it).
-  const opencode = resolveOpencodeExecutor();
-  if (!ctx.opts.opencodeVariantsTable) {
-    warmAndScheduleVariantsCacheRefresh(ctx.opts, ctx.env.sanitizedEnvironment, () => opencode.ensureCliMajor());
-  } else {
-    void opencode.ensureCliMajor();
+  if (ctx.opts.defaultExecutor.id === "opencode") {
+    const opencode = resolveOpencodeExecutor();
+    if (!ctx.opts.opencodeVariantsTable) {
+      warmAndScheduleVariantsCacheRefresh(ctx.opts, ctx.env.sanitizedEnvironment, () => opencode.ensureCliMajor());
+    } else {
+      void opencode.ensureCliMajor();
+    }
   }
 }
+
+const variantsRefreshSchedules = new WeakSet();
 
 /**
  * Refreshes the opencode variants cache once now (if stale) and schedules
  * an hourly, `unref()`'d recheck for as long as the process lives. The
  * hourly tick is cheap when the cache is fresh (a single `statSync` inside
- * `readVariantsCache()`); it only pays for the ~3s `opencode models
- * --verbose` shell-out once every `DEFAULT_VARIANT_CACHE_TTL_MS` (24h).
+ * `readVariantsCache()`); it only runs catalog discovery once every
+ * `DEFAULT_VARIANT_CACHE_TTL_MS` (24h).
  * @param {ResolvedTaskManagerOptions} opts
  * @param {(env?: NodeJS.ProcessEnv) => NodeJS.ProcessEnv} sanitizeEnvironment The same
  * env merge dispatch() fingerprints the cache against (process.env +
@@ -6120,15 +6125,16 @@ function bootstrapManagerContext(ctx) {
  * envFile/denylist change to a credential var made the cache a permanent
  * miss -- the highest-thinking default silently never applied.
  * @param {() => Promise<number|null>} ensureCliMajor The opencode executor's
- * version probe; the refresh runs only once it reports 1.x.
+ * version probe; discovery uses the confirmed major's catalog command.
  */
 function warmAndScheduleVariantsCacheRefresh(opts, sanitizeEnvironment, ensureCliMajor) {
+  if (variantsRefreshSchedules.has(opts)) return;
+  variantsRefreshSchedules.add(opts);
   const maybeRefresh = async () => {
-    // Wait for the version probe first: 2.x has no `models --verbose`, and
-    // an unknown version (failed probe, already logged) can't say which
+    // Wait for the version probe first: an unknown version can't say which
     // major the cache would be built for. The next hourly tick re-probes.
     const major = await ensureCliMajor();
-    if (major === null || major >= 2) return;
+    if (major === null) return;
     const env = sanitizeEnvironment(process.env);
     if (readVariantsCache({ cacheDir: opts.cacheDir, env: env }) !== null) return;
     await refreshVariantsCache({ cacheDir: opts.cacheDir, env: env, opencodeMajor: major, listModelVariantsFn: opts.opencodeListModelVariantsFn });

@@ -46,8 +46,7 @@ export function readVariantsCache({ cacheDir, env, ttlMs = DEFAULT_VARIANT_CACHE
     return null;
   }
   if (parsed.schema !== VARIANTS_CACHE_SCHEMA || typeof parsed.models !== "object" || parsed.models === null) return null;
-  // A cache file written before the field existed was necessarily built on
-  // 1.x: 2.x has no `models --verbose` to build one from.
+  // Legacy cache files without a major stamp were built on 1.x.
   const builtMajor = typeof parsed.opencodeMajor === "number" ? parsed.opencodeMajor : 1;
   const result = { fingerprint: parsed.fingerprint, models: new Map(Object.entries(parsed.models)) };
   _memo.set(filePath, { mtimeMs, result, builtMajor });
@@ -56,17 +55,17 @@ export function readVariantsCache({ cacheDir, env, ttlMs = DEFAULT_VARIANT_CACHE
 
 /**
  * A cache built under one opencode major must not be read under another:
- * 2.x has no per-model variants listing, so a 1.x cache would hand 2.x
- * dispatches variant names nothing on 2.x vouched for. Checked on the memo
+ * Each major has its own catalog format, so a 1.x cache must not hand 2.x
+ * dispatches names its current catalog never vouched for. Checked on the memo
  * path too, since the memo outlives an opencode upgrade. An unknown current
- * major (no probe has succeeded yet) does not reject; `prepareLaunch` fails
- * the dispatch on that case before anything spawns.
+ * major also rejects: launch preparation may discover a different major
+ * after dispatch has already resolved its variant.
  * @param {number} builtMajor
  * @returns {boolean}
  */
 function builtForCurrentMajor(builtMajor) {
   const currentMajor = detectOpencodeCliMajor();
-  return currentMajor === null || currentMajor === builtMajor;
+  return currentMajor === builtMajor;
 }
 
 /**
@@ -89,7 +88,7 @@ function checkFingerprint(result, env) {
   return result.fingerprint === hashFingerprint(env) ? result.models : null;
 }
 
-// Single-flight per (cacheDir, env fingerprint): a daemon startup warm and
+// Single-flight per (cacheDir, env fingerprint, major): a daemon startup warm and
 // its first 24h interval tick landing at the same moment must not shell out
 // twice, but two refreshes for the *same* cacheDir under two different
 // caller envs (different credentials/base URLs) are genuinely different
@@ -108,22 +107,20 @@ const _inFlight = new Map();
  *
  * `opencodeMajor` is the CLI major the caller already confirmed with a
  * successful version probe; it is stamped into the file so a later read
- * under a different major rejects it. Anything but a known 1.x (or a 0.x
- * dev build) writes nothing: 2.x has no `models --verbose`, and an unknown
- * major would stamp a file nothing vouched for.
- * @param {{cacheDir: string, env: NodeJS.ProcessEnv, opencodeMajor: number|null, listModelVariantsFn: (env: NodeJS.ProcessEnv) => Promise<Map<string, string[]>>, writeFileFn?: (p: string, data: string) => void, renameFn?: (from: string, to: string) => void, mkdirFn?: (p: string) => void}} params
+ * under a different major rejects it. An unknown major writes nothing.
+ * @param {{cacheDir: string, env: NodeJS.ProcessEnv, opencodeMajor: number|null, listModelVariantsFn: (env: NodeJS.ProcessEnv, options: {major: number}) => Promise<Map<string, string[]>>, writeFileFn?: (p: string, data: string) => void, renameFn?: (from: string, to: string) => void, mkdirFn?: (p: string) => void}} params
  * @returns {Promise<void>}
  */
 export async function refreshVariantsCache({ cacheDir, env, opencodeMajor, listModelVariantsFn, writeFileFn = fs.writeFileSync, renameFn = fs.renameSync, mkdirFn = (p) => fs.mkdirSync(p, { recursive: true }) }) {
-  if (typeof opencodeMajor !== "number" || opencodeMajor >= 2) return;
+  if (typeof opencodeMajor !== "number") return;
   const filePath = cacheFilePath(cacheDir);
   const fingerprint = hashFingerprint(env);
-  const inFlightKey = `${filePath}::${fingerprint}`;
+  const inFlightKey = `${filePath}::${fingerprint}::${opencodeMajor}`;
   let inFlight = _inFlight.get(inFlightKey);
   if (!inFlight) {
     inFlight = (async () => {
       try {
-        const models = await listModelVariantsFn(env);
+        const models = await listModelVariantsFn(env, { major: opencodeMajor });
         const body = {
           fingerprint,
           opencodeMajor,

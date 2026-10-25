@@ -35,6 +35,11 @@ describe("rankOpencodeVariants()", () => {
 });
 
 describe("resolveVariant()", () => {
+  test("none means off on pi but retains the provider's concrete none on opencode and kilo", () => {
+    assert.equal(resolveVariant({ executorId: "pi", requested: "none" }), "off");
+    assert.equal(resolveVariant({ executorId: "opencode", requested: "none" }), "none");
+    assert.equal(resolveVariant({ executorId: "kilo", requested: "none" }), "none");
+  });
   test("a concrete requested level passes through untouched for pi", () => {
     assert.equal(resolveVariant({ executorId: "pi", requested: "medium" }), "medium");
   });

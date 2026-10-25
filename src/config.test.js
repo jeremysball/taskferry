@@ -259,7 +259,7 @@ describe("loadConfig()", () => {
   test("rejects an unrecognized defaultVariant string", () => {
     const dir = tmpConfigDir();
     const configPath = writeConfig(dir, JSON.stringify({ defaultVariant: "medium-plus" }));
-    assert.throws(() => loadConfig({ configPath }), /error: config key "defaultVariant" in .* must be one of highest, off, minimal, low, medium, high, xhigh, max \(got "medium-plus"\)\nhelp:/);
+    assert.throws(() => loadConfig({ configPath }), /error: config key "defaultVariant" in .* must be one of highest, off, none, minimal, low, medium, high, xhigh, max \(got "medium-plus"\)\nhelp:/);
   });
 
   test("rejects an empty or whitespace-only defaultVariant", () => {

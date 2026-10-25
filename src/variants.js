@@ -3,7 +3,7 @@
 // Lives here (not config.js) so tasks.js -- whose in-repo type-check root the
 // build's tsconfig.json scopes to `src/tasks.js` -- can import it without
 // pulling config.js's own (separately tracked) type errors into that check.
-export const KNOWN_VARIANT_LEVELS = /** @type {readonly string[]} */ (["highest", "off", "minimal", "low", "medium", "high", "xhigh", "max"]);
+export const KNOWN_VARIANT_LEVELS = /** @type {readonly string[]} */ (["highest", "off", "none", "minimal", "low", "medium", "high", "xhigh", "max"]);
 
 // Rank table for opencode's known variant vocabulary, observed across the
 // installed catalog (`opencode models --verbose`): none/off < minimal <
@@ -43,8 +43,7 @@ export function rankOpencodeVariants(keys) {
  * dispatch, given the level the caller requested (a concrete level, or the
  * `"highest"` sentinel from `defaultVariant`).
  *
- * A concrete `requested` value is never reinterpreted on either executor --
- * the worker CLI is the backstop for an invalid one.
+ * Concrete values pass through, except `none` becomes Pi's `off` spelling.
  *
  * `"highest"` on pi always becomes `"max"`: pi's own `clampThinkingLevel`
  * walks up-then-down over its ordered level list at runtime, so requesting
@@ -52,7 +51,7 @@ export function rankOpencodeVariants(keys) {
  * including on extension providers taskferry cannot see the registry for.
  *
  * `"highest"` on opencode looks up `opencodeVariants` (that model's variant
- * keys from the cached `opencode models --verbose` table, in declaration
+ * keys from the cached model catalog, in declaration
  * order) and ranks them. No table entry, an empty list, or a ranked result
  * of `none`/`off` all mean "send no flag" -- opencode silently ignores an
  * unrecognized `--variant`, so guessing is worse than omitting.
@@ -61,6 +60,7 @@ export function rankOpencodeVariants(keys) {
  * @returns {string|null}
  */
 export function resolveVariant({ executorId, requested, opencodeVariants }) {
+  if (executorId === "pi" && requested === "none") return "off";
   if (requested !== "highest") return requested;
   if (executorId === "pi") return "max";
   // kilo's effort vocabulary is per model and provider specific, and kilo

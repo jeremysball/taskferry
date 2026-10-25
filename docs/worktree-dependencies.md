@@ -24,7 +24,10 @@ The supported flow is **host-side, before dispatch**:
 
 ```bash
 cd <worktree> && mise run setup          # symlink or npm ci, ms in common case
-taskferry dispatch --directory <worktree> --prompt "..." --model ...
+taskferry dispatch \
+  --directory <worktree> \
+  --prompt "..." \
+  --model ...
 # or: alias tfd='mise run setup && taskferry dispatch'
 ```
 
@@ -49,7 +52,10 @@ A worktree that has never had its deps installed will fail with `Cannot find mod
 git -C <worktree> status --short   # confirm which worktree
 mise run setup                     # Node
 uv sync --locked                   # Python
-taskferry dispatch --directory <worktree> --prompt "..." --model ...
+taskferry dispatch \
+  --directory <worktree> \
+  --prompt "..." \
+  --model ...
 ```
 
 ## Does git have a hook that fires on worktree creation?

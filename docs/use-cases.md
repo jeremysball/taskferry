@@ -21,7 +21,10 @@ Settlement is the point: a task is `done`, `crashed`, or `cancelled` by
 process event, and every later step keys off that state.
 
 ```bash
-taskferry dispatch --prompt "Fix the failing tests" --directory /workspace/my-repo --model opencode-go/minimax-m3
+taskferry dispatch \
+  --prompt "Fix the failing tests" \
+  --directory /workspace/my-repo \
+  --model opencode-go/minimax-m3
 taskferry wait <id>
 taskferry result <id> --diff
 taskferry accept <id>   # or: taskferry reject <id>

@@ -303,7 +303,10 @@ FLEET_PID="/tmp/taskferry-fleet-watch-${SLUG}.pid"
 FLEET_LOCK="/tmp/taskferry-fleet-watch-${SLUG}.lock"
 if mkdir "$FLEET_LOCK" 2>/dev/null; then
   if ! kill -0 "$(cat "$FLEET_PID" 2>/dev/null)" 2>/dev/null; then
-    taskferry watch --summaries --flush-interval 15m --directory "$WATCH_DIR" > "$FLEET_LOG" 2>&1 &
+    taskferry watch \
+      --summaries \
+      --flush-interval 15m \
+      --directory "$WATCH_DIR" > "$FLEET_LOG" 2>&1 &
     disown
     echo $! > "$FLEET_PID"
   fi
@@ -356,7 +359,9 @@ so the correct way to recover real newlines is JSON decoding, not
 the diff with real newlines and intact UTF-8 directly:
 
 ```sh
-taskferry result <id> --diff --raw > diff.patch
+taskferry result <id> \
+  --diff \
+  --raw > diff.patch
 git apply --check diff.patch   # or inspect, then taskferry accept <id>
 ```
 

@@ -283,3 +283,47 @@ test("kilo reports each step's own usage, so a context is measured per step", ()
     assert.equal(resolveExecutor("kilo").id, "kilo");
   });
 });
+
+describe("kilo provider auth mapping", () => {
+  for (const xdgDataHome of [undefined, "/custom/share"]) {
+    test(`sandboxAuthFile: maps provider auth from ${xdgDataHome || "the default data home"}`, () => {
+      const dataHome = xdgDataHome || `${HOME_DIR}/.local/share`;
+      const authFile = `${dataHome}/kilo/auth.json`;
+      const res = kiloExecutor().sandboxAuthFile({
+        homeDir: HOME_DIR,
+        dataDir: DATA_DIR,
+        taskId: TASK_ID,
+        spawnEnv: { XDG_DATA_HOME: xdgDataHome },
+        existsFn: (p) => p === authFile,
+        lstatFn: () => ({ isSymbolicLink: () => false, isFile: () => true, nlink: 1 }),
+        readdirFn: () => [],
+      });
+      assert.deepEqual(res.extraRoBinds, [[authFile, `${SANDBOXED_DATA_HOME}/kilo/auth.json`]]);
+      assert.equal(res.sandboxEnv.XDG_DATA_HOME, SANDBOXED_DATA_HOME);
+      assert.equal(res.instructionsDest, `${SANDBOXED_CONFIG_DIR}/AGENTS.md`);
+    });
+  }
+
+  for (const kind of ["missing", "symlink", "hardlink", "unreadable"]) {
+    test(`sandboxAuthFile: skips provider auth when ${kind}`, () => {
+      const authFile = `${HOME_DIR}/.local/share/kilo/auth.json`;
+      let checkUnsafe = false;
+      const args = {
+        homeDir: HOME_DIR,
+        dataDir: DATA_DIR,
+        taskId: TASK_ID,
+        spawnEnv: {},
+        existsFn: (p) => p === authFile && (!checkUnsafe || kind !== "missing"),
+        lstatFn: () => {
+          if (checkUnsafe && kind === "unreadable") throw new Error("EACCES");
+          return { isSymbolicLink: () => checkUnsafe && kind === "symlink", isFile: () => true, nlink: checkUnsafe && kind === "hardlink" ? 2 : 1 };
+        },
+        readdirFn: () => [],
+      };
+      const ex = kiloExecutor();
+      assert.deepEqual(ex.sandboxAuthFile(args).extraRoBinds, [[authFile, `${SANDBOXED_DATA_HOME}/kilo/auth.json`]]);
+      checkUnsafe = true;
+      assert.deepEqual(ex.sandboxAuthFile(args).extraRoBinds, []);
+    });
+  }
+});

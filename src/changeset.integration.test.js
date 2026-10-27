@@ -392,7 +392,7 @@ describe("unmapped ownership diagnostics (real bwrap)", () => {
       const overlay = overlayPaths("int_owner", tmpRoot);
       fs.mkdirSync(overlay.upperDir, { recursive: true, mode: 0o700 });
       fs.mkdirSync(overlay.workDir, { recursive: true, mode: 0o700 });
-  
+
       const ran = runInOverlay({
         directory, overlay, runtimeDir, homeDir: os.homedir(),
         script: `echo changed >> ${directory}/${TRACKED_FILE}`,
@@ -400,7 +400,7 @@ describe("unmapped ownership diagnostics (real bwrap)", () => {
       assert.equal(ran.status, 0, `sandboxed worker write failed: ${ran.stderr}`);
       const upperFile = path.join(overlay.upperDir, TRACKED_FILE);
       assert.equal(fs.readFileSync(upperFile, "utf8"), CHANGED_CONTENT);
-  
+
       // Assign ownership outside the child mapping before production extraction.
       // The object case targets the fanout Git will use for the changed blob.
       let affectedPath = path.join(directory, ".git");

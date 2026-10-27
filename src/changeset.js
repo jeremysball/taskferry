@@ -223,6 +223,167 @@ export function resolvePreDispatchHead(directory, runCommand = defaultRunCommand
   return null;
 }
 
+const EOVERFLOW_STDERR_PATTERN = /Value too large for defined data type/;
+const LOCK_CREATE_PATH_PATTERN = /Unable to create '([^']+)'/;
+const OBJECT_TEMP_EOVERFLOW_PATTERN = /unable to create temporary file: Value too large for defined data type/;
+const OBJECT_FANOUT_PATTERN = /^[0-9a-f]{2}$/;
+const MAX_REPORTED_AFFECTED_PATHS = 4;
+const DAEMON_UID = typeof process.geteuid === "function" ? process.geteuid() : undefined;
+const DAEMON_GID = typeof process.getegid === "function" ? process.getegid() : undefined;
+
+/**
+ * The bwrap sandbox represents only the daemon's uid/gid. Ownership outside
+ * that pair cannot be copied up into the overlay, and the kernel reports
+ * EOVERFLOW before git can create its lockfile or object tempfile. This
+ * diagnostic runs only after that failure, stats the narrow affected path,
+ * and names the owner that has no representation. It deliberately does not
+ * resolve numeric IDs to names: an outer namespace may itself expose an
+ * overflow ID, which is not evidence of the host-side owner name.
+ *
+ * @param {string} target
+ * @param {(p: string) => fs.Stats} statFn
+ * @returns {{uid: number, gid: number}|null}
+ */
+function readOwnership(target, statFn) {
+  try {
+    const { uid, gid } = statFn(target);
+    return { uid, gid };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * @param {{uid: number, gid: number}|null} owners
+ * @param {number|undefined} daemonUid
+ * @param {number|undefined} daemonGid
+ * @returns {string[]}
+ */
+function ownershipLabels(owners, daemonUid, daemonGid) {
+  if (!owners) return [];
+  const labels = [];
+  if (typeof daemonUid === "number" && owners.uid !== daemonUid) {
+    labels.push(`user owner ${owners.uid}`);
+  }
+  if (typeof daemonGid === "number" && owners.gid !== daemonGid) {
+    labels.push(`group owner ${owners.gid}`);
+  }
+  return labels;
+}
+
+/**
+ * @param {string} directory
+ * @param {typeof defaultRunCommand} runCommand
+ * @returns {string}
+ */
+function resolveGitObjectsDir(directory, runCommand) {
+  try {
+    const result = runCommand("git", ["-C", directory, "rev-parse", "--git-common-dir"]);
+    const common = result.status === 0 && !result.error ? result.stdout.trim() : "";
+    if (common) {
+      const commonDir = path.isAbsolute(common) ? common : path.resolve(directory, common);
+      return path.join(commonDir, "objects");
+    }
+  } catch {
+    // Fall back to the conventional path; this diagnostic must not mask the
+    // original extraction failure with a secondary git error.
+  }
+  return path.join(directory, ".git", "objects");
+}
+
+/**
+ * Object tempfile failures omit the path, so look one level deep at the
+ * shared object store's two-hex-digit fanout directories. This is bounded
+ * (256 entries) and only runs after an EOVERFLOW failure.
+ *
+ * @param {string} objectsDir
+ * @param {(p: string) => fs.Stats} statFn
+ * @param {number|undefined} daemonUid
+ * @param {number|undefined} daemonGid
+ * @returns {string[]}
+ */
+function unmappableObjectPaths(objectsDir, statFn, daemonUid, daemonGid) {
+  if (ownershipLabels(readOwnership(objectsDir, statFn), daemonUid, daemonGid).length > 0) {
+    return [objectsDir];
+  }
+  let entries;
+  try {
+    entries = fs.readdirSync(objectsDir, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+  const affected = [];
+  for (const entry of entries) {
+    if (!entry.isDirectory() || !OBJECT_FANOUT_PATTERN.test(entry.name)) continue;
+    const fanout = path.join(objectsDir, entry.name);
+    if (ownershipLabels(readOwnership(fanout, statFn), daemonUid, daemonGid).length > 0) {
+      affected.push(fanout);
+    }
+  }
+  return affected;
+}
+
+/**
+ * @param {string[]} affectedPaths
+ * @returns {string}
+ */
+function formatAffectedPaths(affectedPaths) {
+  if (affectedPaths.length <= MAX_REPORTED_AFFECTED_PATHS) return affectedPaths.join(", ");
+  const remaining = affectedPaths.length - MAX_REPORTED_AFFECTED_PATHS;
+  return `${affectedPaths.slice(0, MAX_REPORTED_AFFECTED_PATHS).join(", ")} and ${remaining} more`;
+}
+
+/**
+ * @param {object} params
+ * @param {string} params.directory
+ * @param {string} params.stderr
+ * @param {typeof defaultRunCommand} params.runCommand
+ * @param {(p: string) => fs.Stats} params.statFn
+ * @param {number|undefined} params.daemonUid
+ * @param {number|undefined} params.daemonGid
+ * @returns {string|null}
+ */
+function unmappableOwnershipDiagnostic({ directory, stderr, runCommand, statFn, daemonUid, daemonGid }) {
+  if (!EOVERFLOW_STDERR_PATTERN.test(stderr)) return null;
+  const lockPath = stderr.match(LOCK_CREATE_PATH_PATTERN)?.[1];
+  let affectedPaths;
+  if (lockPath) {
+    affectedPaths = [path.dirname(lockPath)];
+  } else if (OBJECT_TEMP_EOVERFLOW_PATTERN.test(stderr)) {
+    const objectsDir = resolveGitObjectsDir(directory, runCommand);
+    affectedPaths = unmappableObjectPaths(objectsDir, statFn, daemonUid, daemonGid);
+  } else {
+    return null;
+  }
+  const affected = affectedPaths.filter((target) => ownershipLabels(readOwnership(target, statFn), daemonUid, daemonGid).length > 0);
+  if (affected.length === 0) return null;
+  const labels = new Set();
+  for (const target of affected) {
+    for (const label of ownershipLabels(readOwnership(target, statFn), daemonUid, daemonGid)) {
+      labels.add(label);
+    }
+  }
+  return `Unable to extract changeset: ${[...labels].join(" and ")} cannot be represented in the sandbox. Set ownership of ${formatAffectedPaths(affected)} to the user/group running the TaskFerry daemon.`;
+}
+
+/**
+ * @param {object} params
+ * @param {string} params.directory
+ * @param {CommandResult} params.result
+ * @param {typeof defaultRunCommand} params.runCommand
+ * @param {(p: string) => fs.Stats} params.statFn
+ * @param {number|undefined} params.daemonUid
+ * @param {number|undefined} params.daemonGid
+ */
+function throwExtractionFailure({ directory, result, runCommand, statFn, daemonUid, daemonGid }) {
+  const detail = (result.stderr || result.error?.message || "unknown error").trim();
+  const ownershipDiagnostic = unmappableOwnershipDiagnostic({ stderr: detail, directory, runCommand, statFn, daemonUid, daemonGid });
+  if (ownershipDiagnostic) {
+    throw new Error(`${ownershipDiagnostic}\nUnderlying error (exit ${result.status ?? "null"}): ${detail}`);
+  }
+  throw new Error(`error: git diff extraction failed for ${directory} (exit ${result.status ?? "null"}): ${detail}`);
+}
+
 /**
  * Extracts the overlay's upper into a single diff, anchored on the real
  * pre-dispatch HEAD (not whatever HEAD ends up at inside the overlay --
@@ -246,6 +407,9 @@ export function resolvePreDispatchHead(directory, runCommand = defaultRunCommand
  * @param {(dirPath: string) => void} [params.mkdirFn]
  * @param {(ms: number) => void} [params.sleepFn] - injectable for tests; real callers get a blocking sleep between retries
  * @param {() => string} [params.scratchDirFn]
+ * @param {(p: string) => fs.Stats} [params.statFn]
+ * @param {number} [params.daemonUid]
+ * @param {number} [params.daemonGid]
  * @returns {{diffPath: string, hasChanges: boolean, headDrift: null | {from: string, to: string, recovered: boolean|null, conflictDetail: string|null}}}
  * @throws {Error} when the bwrap extraction fails to start or exits non-zero
  */
@@ -265,6 +429,9 @@ export function extractGitDiff({
   mkdirFn = (dirPath) => fs.mkdirSync(dirPath, { recursive: true, mode: 0o700 }),
   sleepFn = sleepSync,
   scratchDirFn = () => path.join(os.tmpdir(), `taskferry-stale-base-${crypto.randomUUID()}`),
+  statFn = fs.statSync,
+  daemonUid = DAEMON_UID,
+  daemonGid = DAEMON_GID,
 }) {
   // socketPath: null -- this is a daemon-internal changeset extraction, not a
   // worker sandbox; it never calls back to the daemon, so no socket bind. The
@@ -280,7 +447,7 @@ export function extractGitDiff({
   const script = `git -C ${shQuote(directory)} add -A && { git -C ${shQuote(directory)} diff --cached ${shQuote(preDispatchHead)}; rc=$?; git -C ${shQuote(directory)} reset > /dev/null 2>&1; exit $rc; }`;
   const result = runExtractionBwrap(runCommand, [...bwrapArgs, "--", "sh", "-c", script], sleepFn);
   if (result.error || result.status !== 0) {
-    throw new Error(`error: git diff extraction failed for ${directory} (exit ${result.status ?? "null"}): ${(result.stderr || result.error?.message || "unknown error").trim()}`);
+    throwExtractionFailure({ directory, result, runCommand, statFn, daemonUid, daemonGid });
   }
   mkdirFn(pathDirname(diffPath));
   writeFileFn(diffPath, result.stdout);

@@ -21,6 +21,7 @@ after(() => {
 const TMP_ROOT_PREFIX = "axi-int-tmp-";
 const RUN_ROOT_PREFIX = "axi-int-run-";
 const TRACKED_FILE = "tracked.txt";
+const CHANGED_CONTENT = "base\nchanged\n";
 const GIT_EMAIL = "user.email=t@t";
 const GIT_NAME = "user.name=t";
 const DRIFT_TEST_FILE = "line2.txt";
@@ -50,6 +51,38 @@ function isWritableDirectory(dirPath) {
     return true;
   } catch {
     return false;
+  }
+}
+
+// bwrap maps only the daemon's effective gid into the sandbox. Any other gid
+// that the outer test process can chown to is therefore genuinely
+// unrepresentable inside the extraction namespace -- the real #630 trigger.
+function findChownableSupplementaryGid() {
+  if (typeof process.getgid !== "function" || typeof process.getgroups !== "function") return null;
+  const egid = process.getgid();
+  const probe = fs.mkdtempSync(path.join(os.tmpdir(), "axi-gid-probe-"));
+  try {
+    for (const gid of process.getgroups()) {
+      if (gid === egid) continue;
+      try {
+        fs.chownSync(probe, -1, gid);
+        return gid;
+      } catch {
+        // Not chownable here; try the next supplementary group.
+      }
+    }
+    if (typeof process.getuid === "function" && process.getuid() === 0) {
+      const rootOnlyGid = egid === 1 ? 2 : 1;
+      try {
+        fs.chownSync(probe, -1, rootOnlyGid);
+        return rootOnlyGid;
+      } catch {
+        // Fall through to the skip below.
+      }
+    }
+    return null;
+  } finally {
+    fs.rmSync(probe, { recursive: true, force: true });
   }
 }
 
@@ -100,7 +133,7 @@ describe("overlay round trips (real bwrap)", () => {
 
     const applied = applyChangeset({ directory, diffPath, isGitTarget: true });
     assert.deepEqual(applied, { applied: true, reason: null });
-    assert.equal(fs.readFileSync(path.join(directory, TRACKED_FILE), "utf8"), "base\nchanged\n");
+    assert.equal(fs.readFileSync(path.join(directory, TRACKED_FILE), "utf8"), CHANGED_CONTENT);
     assert.equal(fs.existsSync(path.join(directory, "added.txt")), true);
     // Applied as a working-tree diff, NOT replayed as the worker's commit.
     const log = spawnSync("git", ["-C", directory, "log", "--oneline"], { encoding: "utf8" }).stdout;
@@ -327,4 +360,74 @@ describe("resolveHeadDrift() (real git, no bwrap required)", () => {
     assert.ok(result.conflictDetail);
     assert.equal(fs.existsSync(scratchDir), false, "the scratch worktree must be removed even after a conflict");
   });
+});
+
+describe("unmapped ownership diagnostics (real bwrap)", () => {
+  for (const failure of ["index.lock", "object tempfile"]) {
+    test(`real userns/OverlayFS: unmappable group at ${failure} reports ownership and preserves changes`, (t) => {
+      const required = process.env.TASKFERRY_REQUIRE_OWNERSHIP_REGRESSION === "1";
+      if (skipReason) {
+        assert.equal(required, false, `ownership regression requires working overlays: ${skipReason}`);
+        t.skip(skipReason);
+        return;
+      }
+      const unmappableGid = findChownableSupplementaryGid();
+      if (unmappableGid === null) {
+        assert.equal(required, false, "ownership regression requires a chownable group outside the sandbox map");
+        t.skip("no chownable supplementary gid outside the sandbox's single-gid map");
+        return;
+      }
+      const directory = fs.mkdtempSync(path.join(os.tmpdir(), "axi-int-owner-"));
+      trackedTmpDirs.push(directory);
+      spawnSync("git", ["init", "-q", directory]);
+      fs.writeFileSync(path.join(directory, TRACKED_FILE), "base\n");
+      spawnSync("git", ["-C", directory, "add", "-A"]);
+      spawnSync("git", ["-C", directory, "-c", GIT_EMAIL, "-c", GIT_NAME, "commit", "-qm", "base", NO_VERIFY]);
+      const preDispatchHead = resolvePreDispatchHead(directory);
+      assert.ok(preDispatchHead, "fixture repo must have a HEAD");
+      const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), TMP_ROOT_PREFIX));
+      trackedTmpDirs.push(tmpRoot);
+      const runtimeDir = fs.mkdtempSync(path.join(os.tmpdir(), RUN_ROOT_PREFIX));
+      trackedTmpDirs.push(runtimeDir);
+      const overlay = overlayPaths("int_owner", tmpRoot);
+      fs.mkdirSync(overlay.upperDir, { recursive: true, mode: 0o700 });
+      fs.mkdirSync(overlay.workDir, { recursive: true, mode: 0o700 });
+
+      const ran = runInOverlay({
+        directory, overlay, runtimeDir, homeDir: os.homedir(),
+        script: `echo changed >> ${directory}/${TRACKED_FILE}`,
+      });
+      assert.equal(ran.status, 0, `sandboxed worker write failed: ${ran.stderr}`);
+      const upperFile = path.join(overlay.upperDir, TRACKED_FILE);
+      assert.equal(fs.readFileSync(upperFile, "utf8"), CHANGED_CONTENT);
+
+      // Assign ownership outside the child mapping before production extraction.
+      // The object case targets the fanout Git will use for the changed blob.
+      let affectedPath = path.join(directory, ".git");
+      if (failure === "object tempfile") {
+        const hash = spawnSync("git", ["-C", directory, "hash-object", "--stdin"], { input: CHANGED_CONTENT, encoding: "utf8" });
+        assert.equal(hash.status, 0, hash.stderr);
+        assert.match(hash.stdout.trim(), /^[0-9a-f]{40,64}$/);
+        affectedPath = path.join(directory, ".git", "objects", hash.stdout.trim().slice(0, 2));
+        fs.mkdirSync(affectedPath, { recursive: true });
+      }
+      fs.chownSync(affectedPath, -1, unmappableGid);
+      const diffPath = path.join(tmpRoot, "int_owner.patch");
+      assert.throws(
+        () => extractGitDiff({ directory, overlay, preDispatchHead, runtimeDir, diffPath, overlayRwBinds: [], stateDir: tmpRoot, homeDir: os.homedir(), denyList: [] }),
+        (err) => {
+          assert.match(err.message, /^Unable to extract changeset:/);
+          assert.ok(err.message.includes(`group owner ${unmappableGid} cannot be represented in the sandbox`));
+          assert.ok(err.message.includes(`Set ownership of ${affectedPath}`));
+          assert.match(err.message, /Value too large for defined data type/);
+          return true;
+        }
+      );
+      assert.equal(fs.existsSync(diffPath), false, "failed extraction must not write a partial patch");
+      assert.equal(fs.readFileSync(upperFile, "utf8"), CHANGED_CONTENT, "failure must preserve the worker's CoW changes");
+      assert.equal(fs.readFileSync(path.join(directory, TRACKED_FILE), "utf8"), "base\n", "the lower checkout must stay untouched");
+      cleanupOverlay({ root: overlay.root, tmpRoot });
+  });
+  }
+
 });

@@ -79,6 +79,57 @@ describe("readMemoryUsage() metric parsing", () => {
     assert.equal(usage.percent, 50);
   });
 
+  test("honors a finite limit on an ancestor cgroup when the leaf reports max", () => {
+    const usage = readMemoryUsage({
+      readFileFn: readerFor({
+        [MEMINFO]: meminfo({ totalGb: 16, availableGb: 8 }),
+        [SELF_CGROUP]: "0::/user.slice/session-1.scope\n",
+        [`${CGROUP}/memory.max`]: "max",
+        [`${CGROUP}/user.slice/memory.max`]: String(4 * GB),
+        [`${CGROUP}/user.slice/memory.current`]: String(3 * GB),
+        [`${CGROUP}/user.slice/session-1.scope/memory.max`]: "max",
+        [`${CGROUP}/user.slice/session-1.scope/memory.current`]: String(3 * GB),
+      }),
+    });
+    assert.equal(usage.limitBytes, 4 * GB);
+    assert.equal(usage.availableBytes, 1 * GB);
+    assert.equal(usage.percent, 75);
+    assert.equal(usage.cgroupLimited, true);
+  });
+
+  test("honors a finite v1 limit on an ancestor cgroup", () => {
+    const usage = readMemoryUsage({
+      readFileFn: readerFor({
+        [MEMINFO]: meminfo({ totalGb: 16, availableGb: 8 }),
+        [SELF_CGROUP]: "5:cpu,memory:/lxc/taskferry\n",
+        [`${CGROUP}/memory/memory.limit_in_bytes`]: "9223372036854771712",
+        [`${CGROUP}/memory/lxc/memory.limit_in_bytes`]: String(3 * GB),
+        [`${CGROUP}/memory/lxc/memory.usage_in_bytes`]: String(2 * GB),
+        [`${CGROUP}/memory/lxc/taskferry/memory.limit_in_bytes`]: "9223372036854771712",
+      }),
+    });
+    assert.equal(usage.limitBytes, 3 * GB);
+    assert.equal(usage.availableBytes, 1 * GB);
+    assert.ok(Math.abs(usage.percent - 66.66666666666666) < 1e-9);
+    assert.equal(usage.cgroupLimited, true);
+  });
+
+  test("does not let the v1 memory root shadow a v2 ancestor named memory", () => {
+    const usage = readMemoryUsage({
+      readFileFn: readerFor({
+        [MEMINFO]: meminfo({ totalGb: 16, availableGb: 8 }),
+        [SELF_CGROUP]: "0::/memory/taskferry\n",
+        [`${CGROUP}/memory/memory.max`]: String(4 * GB),
+        [`${CGROUP}/memory/memory.current`]: String(3 * GB),
+        [`${CGROUP}/memory/taskferry/memory.max`]: "max",
+      }),
+    });
+    assert.equal(usage.limitBytes, 4 * GB);
+    assert.equal(usage.availableBytes, 1 * GB);
+    assert.equal(usage.percent, 75);
+    assert.equal(usage.cgroupLimited, true);
+  });
+
   test("uses a finite cgroup v1 limit at a nested memory-controller path", () => {
     const usage = readMemoryUsage({
       readFileFn: readerFor({
@@ -214,6 +265,32 @@ describe("readMemoryUsage() malformed metric boundary", () => {
         }),
       }),
       /not a usable byte count/
+    );
+  });
+
+  test("throws when a cgroup limit is non-empty but not a byte count", () => {
+    assert.throws(
+      () => readMemoryUsage({
+        readFileFn: readerFor({
+          [MEMINFO]: meminfo(),
+          [SELF_CGROUP]: "0::/\n",
+          ...v2("2G", "1"),
+        }),
+      }),
+      /memory\.max is not a usable byte count/
+    );
+  });
+
+  test("throws when a cgroup current value is empty instead of treating it as zero", () => {
+    assert.throws(
+      () => readMemoryUsage({
+        readFileFn: readerFor({
+          [MEMINFO]: meminfo(),
+          [SELF_CGROUP]: "0::/\n",
+          ...v2(String(2 * GB), "  \n"),
+        }),
+      }),
+      /memory\.current is not a usable byte count/
     );
   });
 });

@@ -1,7 +1,7 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import os from "node:os";
-import { makeManager, fakeChild, preserveEnvVars } from "./tasks.test-helpers.js";
+import { makeManager, fakeChild, preserveEnvVars, captureStderr } from "./tasks.test-helpers.js";
 
 const WIDE_OPEN = {
   maxConcurrentTasks: 10,
@@ -24,9 +24,16 @@ function usage(percent) {
   return { percent, limitBytes: 1, availableBytes: 1, cgroupLimited: false };
 }
 
+/** @param {import("node:test").TestContext} t */
+function clearMemoryAdmissionEnv(t) {
+  preserveEnvVars(t, ["TASKFERRY_MEMORY_ADMISSION_PERCENT"]);
+  delete process.env.TASKFERRY_MEMORY_ADMISSION_PERCENT;
+}
+
 describe("memory admission gate", () => {
   test("queues new launches at the default 85% threshold and recovers automatically after memory falls", (t) => {
     t.mock.timers.enable({ apis: ["setTimeout", "setInterval", "Date"] });
+    clearMemoryAdmissionEnv(t);
     try {
       const children = [];
       let percent = 84;
@@ -83,6 +90,7 @@ describe("memory admission gate", () => {
 
   test("reads the threshold from config when no option or env override is set", (t) => {
     t.mock.timers.enable({ apis: ["setTimeout", "setInterval", "Date"] });
+    clearMemoryAdmissionEnv(t);
     try {
       const children = [];
       const mgr = makeManager({
@@ -101,6 +109,7 @@ describe("memory admission gate", () => {
 
   test("never stops an already-running worker when memory crosses the threshold", (t) => {
     t.mock.timers.enable({ apis: ["setTimeout", "setInterval", "Date"] });
+    clearMemoryAdmissionEnv(t);
     try {
       const children = [];
       let percent = 10;
@@ -132,6 +141,7 @@ describe("memory admission gate", () => {
 
   test("preserves FIFO ordering when blocked launches resume", (t) => {
     t.mock.timers.enable({ apis: ["setTimeout", "setInterval", "Date"] });
+    clearMemoryAdmissionEnv(t);
     try {
       const children = [];
       let percent = 99;
@@ -169,6 +179,7 @@ describe("memory admission gate", () => {
 
   test("cancelling a queued task while memory-blocked leaves the surviving queue intact", (t) => {
     t.mock.timers.enable({ apis: ["setTimeout", "setInterval", "Date"] });
+    clearMemoryAdmissionEnv(t);
     try {
       const children = [];
       let percent = 99;
@@ -195,6 +206,9 @@ describe("memory admission gate", () => {
     }
   });
 
+});
+
+describe("memory admission gate failure handling", () => {
   test("fails open when the metric read throws, so queued work is not stranded", () => {
     const children = [];
     const mgr = makeManager({
@@ -208,6 +222,30 @@ describe("memory admission gate", () => {
     assert.equal(mgr.status(second.id).status, "running", "a broken metric must not block subsequent launches");
     children[0].emit("exit", 0, null);
     children[1].emit("exit", 0, null);
+  });
+
+  test("warns at most once per minute on a persistent metric failure", (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout", "setInterval", "Date"] });
+    clearMemoryAdmissionEnv(t);
+    try {
+      const children = [];
+      const stderr = captureStderr(() => {
+        const mgr = makeManager({
+          ...WIDE_OPEN,
+          maxConcurrentTasks: 1,
+          readMemoryUsageFn: () => { throw new Error("metric unavailable"); },
+          spawnFn: recordingSpawn(children),
+        });
+        mgr.dispatch({ prompt: "first", directory: os.tmpdir() });
+        mgr.dispatch({ prompt: "second", directory: os.tmpdir() });
+        t.mock.timers.tick(1000);
+        t.mock.timers.tick(59_000);
+        children[0].emit("exit", 0, null);
+      });
+      assert.equal(stderr.match(/memory admission metric read failed/g)?.length, 2, "one warning at first failure and one after 60s, not one per poll");
+    } finally {
+      t.mock.timers.reset();
+    }
   });
 
   test("TASKFERRY_MEMORY_ADMISSION_PERCENT overrides the config-file threshold", (t) => {

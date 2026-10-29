@@ -5604,8 +5604,9 @@ function initManagerSchedulers(state, maps) {
       cursor: 0,
       // Last memory-admission observation for this scheduler tick. Sampling
       // once per tick (rather than once per queued task) keeps /proc and
-      // cgroup reads off the hot path; startTask's synchronous re-entry
-      // still re-samples before it can launch anything else.
+      // cgroup reads off the hot path. One tick can therefore launch several
+      // queued tasks before the next sample; the lowerdir stagger and
+      // concurrency limits normally space those launches out.
       memoryBlocked: false,
     },
     // Mutable bindings the extracted activity-schedule helper needs
@@ -6225,7 +6226,7 @@ const MEMORY_METRIC_WARN_INTERVAL_MS = 60_000;
  * @returns {{pollMs: number, shouldBlock: () => boolean}}
  */
 function initMemoryAdmission(opts, limits) {
-  let lastWarningAt = 0;
+  let lastWarningAt = Number.NEGATIVE_INFINITY;
   return {
     pollMs: MEMORY_ADMISSION_POLL_MS,
     shouldBlock: () => {

@@ -95,8 +95,9 @@ function parseSelfCgroup(text) {
 /**
  * Builds the cgroup directories to inspect, deduplicated by path. The mount
  * root is always tried because a cgroup namespace can present the container's
- * own limit at `/`; the `/proc/self/cgroup` path is also tried so a
- * non-namespaced host cgroup with a nested limit is not missed.
+ * own limit at `/`; every ancestor of the `/proc/self/cgroup` leaf is also
+ * tried, because a systemd slice or LXC parent can hold the finite limit while
+ * the leaf itself reports `max`.
  * @param {string} cgroupRoot
  * @param {{v2Path: string|null, v1Path: string|null}} paths
  * @returns {Array<{dir: string, version: 1|2}>}
@@ -107,33 +108,54 @@ function cgroupDirectories(cgroupRoot, paths) {
     { dir: cgroupRoot, version: 2 },
     { dir: `${cgroupRoot}/memory`, version: 1 },
   ];
-  if (paths.v2Path) candidates.push({ dir: `${cgroupRoot}${paths.v2Path}`, version: 2 });
-  if (paths.v1Path) candidates.push({ dir: `${cgroupRoot}/memory${paths.v1Path}`, version: 1 });
+  if (paths.v2Path) candidates.push(...cgroupAncestors(cgroupRoot, paths.v2Path, 2));
+  if (paths.v1Path) candidates.push(...cgroupAncestors(`${cgroupRoot}/memory`, paths.v1Path, 1));
 
   /** @type {Array<{dir: string, version: 1|2}>} */
   const unique = [];
   for (const candidate of candidates) {
-    if (unique.some((seen) => seen.dir === candidate.dir)) continue;
+    if (unique.some((seen) => seen.dir === candidate.dir && seen.version === candidate.version)) continue;
     unique.push(candidate);
   }
   return unique;
 }
 
 /**
+ * Every directory from the mount root down to the leaf, in ancestor-first
+ * order, under `base`.
+ * @param {string} base
+ * @param {string} cgroupPath
+ * @param {1|2} version
+ * @returns {Array<{dir: string, version: 1|2}>}
+ */
+function cgroupAncestors(base, cgroupPath, version) {
+  const parts = cgroupPath.split("/").filter(Boolean);
+  return parts.map((_, index) => ({ dir: [base, ...parts.slice(0, index + 1)].join("/"), version }));
+}
+
+/**
  * Parses a cgroup limit file. `null` (missing), `max`, the v1 unlimited
- * sentinel, and any malformed/non-positive value all mean "not constrained"
- * rather than a malformed metric: kernels and container runtimes express an
- * absent ceiling in each of these ways.
+ * sentinel, and any non-positive value mean "not constrained"; a non-empty
+ * value that is not a usable byte count is a malformed metric and throws so
+ * the scheduler's fail-open warning fires instead of silently dropping a
+ * real ceiling.
  * @param {string|null} rawLimit
+ * @param {string} limitPath
  * @returns {number|null}
  */
-function parseFiniteCgroupLimit(rawLimit) {
+function parseFiniteCgroupLimit(rawLimit, limitPath) {
   if (rawLimit === null) return null;
   const trimmed = rawLimit.trim();
   if (trimmed === "max") return null;
   const limitBytes = Number(trimmed);
-  const isFiniteLimit = Number.isSafeInteger(limitBytes) && limitBytes > 0 && limitBytes < UNLIMITED_CGROUP_LIMIT_FLOOR;
-  return isFiniteLimit ? limitBytes : null;
+  if (trimmed === "" || !Number.isFinite(limitBytes)) {
+    throw new Error(`error: ${limitPath} is not a usable byte count`);
+  }
+  if (limitBytes <= 0 || limitBytes >= UNLIMITED_CGROUP_LIMIT_FLOOR) return null;
+  if (!Number.isSafeInteger(limitBytes)) {
+    throw new Error(`error: ${limitPath} is not a usable byte count`);
+  }
+  return limitBytes;
 }
 
 /**
@@ -146,8 +168,9 @@ function parseCgroupCurrent(rawCurrent, currentPath) {
   if (rawCurrent === null) {
     throw new Error(`error: ${currentPath} is missing for a finite cgroup memory limit`);
   }
-  const currentBytes = Number(rawCurrent.trim());
-  if (!Number.isSafeInteger(currentBytes) || currentBytes < 0) {
+  const trimmed = rawCurrent.trim();
+  const currentBytes = Number(trimmed);
+  if (trimmed === "" || !Number.isSafeInteger(currentBytes) || currentBytes < 0) {
     throw new Error(`error: ${currentPath} is not a usable byte count`);
   }
   return currentBytes;
@@ -165,7 +188,8 @@ function parseCgroupCurrent(rawCurrent, currentPath) {
 function readCgroupMemory(readFileFn, candidate) {
   const limitFile = candidate.version === 2 ? "memory.max" : "memory.limit_in_bytes";
   const currentFile = candidate.version === 2 ? "memory.current" : "memory.usage_in_bytes";
-  const limitBytes = parseFiniteCgroupLimit(readOptional(readFileFn, `${candidate.dir}/${limitFile}`));
+  const limitPath = `${candidate.dir}/${limitFile}`;
+  const limitBytes = parseFiniteCgroupLimit(readOptional(readFileFn, limitPath), limitPath);
   if (limitBytes === null) return null;
   const currentPath = `${candidate.dir}/${currentFile}`;
   const currentBytes = parseCgroupCurrent(readOptional(readFileFn, currentPath), currentPath);

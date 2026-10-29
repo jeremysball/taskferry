@@ -398,12 +398,17 @@ function passthroughIfSet(options, inputKey, outputKey, transform) {
 //   out from under tests that have nothing to do with retention. baseTask()
 //   pins startedAt to a fixed date, so the real default would also make the
 //   suite start failing on its own once that date aged past the window.
+// - readMemoryUsageFn: the memory-admission gate defaults on at 85% and would
+//   otherwise read the real /proc + cgroup state for every dispatch test. A
+//   loaded or constrained CI host could queue launches in tests that never
+//   mention memory, so pin the metric to idle unless the test supplies one.
 function pinnedManagerDefaults(options) {
   return {
     sandboxEnabled: options.sandboxEnabled ?? false,
     overlayEnabled: options.overlayEnabled ?? false,
     lowerdirStaggerMs: options.lowerdirStaggerMs ?? 0,
     taskRetentionDays: options.taskRetentionDays ?? 0,
+    readMemoryUsageFn: options.readMemoryUsageFn ?? (() => ({ percent: 0, limitBytes: 1, availableBytes: 1, cgroupLimited: false })),
   };
 }
 
@@ -443,7 +448,6 @@ function buildManagerOptions(options, stateDir, defaultCacheDir, defaultOverlayT
     ...passthroughIfSet({ advisorSessionTtlMs: options.advisorSessionTtlMs }, "advisorSessionTtlMs", "advisorSessionTtlMs"),
     ...passthroughIfSet({ maxConcurrentTasks: options.maxConcurrentTasks }, "maxConcurrentTasks", "maxConcurrentTasks"),
     ...passthroughIfSet({ memoryAdmissionPercent: options.memoryAdmissionPercent }, "memoryAdmissionPercent", "memoryAdmissionPercent"),
-    ...passthroughIfSet({ readMemoryUsageFn: options.readMemoryUsageFn }, "readMemoryUsageFn", "readMemoryUsageFn"),
     ...passthroughIfSet({ noOutputTimeoutMs: options.noOutputTimeoutMs }, "noOutputTimeoutMs", "noOutputTimeoutMs"),
     ...passthroughIfSet({ postOutputNoOutputTimeoutMs: options.postOutputNoOutputTimeoutMs }, "postOutputNoOutputTimeoutMs", "postOutputNoOutputTimeoutMs"),
     ...passthroughIfSet({ preOutputMaxMs: options.preOutputMaxMs }, "preOutputMaxMs", "preOutputMaxMs"),

@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
-import { makeManager, fakeChild } from "./tasks.test-helpers.js";
+import { makeManager, fakeChild, preserveEnvVars, baseTask, mkdtempTracked, TASKS_STATE_FILE } from "./tasks.test-helpers.js";
 import { uvDirPath } from "./tasks.js";
 
 // A bwrap-shaped fake child with separate stdout/stderr streams and a real
@@ -29,11 +29,12 @@ function pipedGateChild(pid = 9001) {
   return child;
 }
 
-function dispatchAndSettleWithChanges({ directory, spawns, cacheDir, sandboxEnabled = true, gateChildFactory = fakeGateChild }) {
+function dispatchAndSettleWithChanges({ directory, spawns, cacheDir, sandboxEnabled = true, gateChildFactory = fakeGateChild, env, managerOptions = {}, onWorkerSpawn }) {
   const mgr = makeManager({
     spawnFn: (cmd, args, opts) => {
       const child = spawns.length === 0 ? fakeChild() : gateChildFactory();
       spawns.push({ cmd, args, opts, child });
+      if (spawns.length === 1) onWorkerSpawn?.();
       return child;
     },
     // buildManagerOptions() defaults overlayEnabled to false -- without this,
@@ -64,8 +65,9 @@ function dispatchAndSettleWithChanges({ directory, spawns, cacheDir, sandboxEnab
     },
     cacheDir,
     sandboxEnabled,
+    ...managerOptions,
   });
-  const dispatched = mgr.dispatch({ model: FAKE_GATE_MODEL, executor: "opencode", prompt: "hello", directory });
+  const dispatched = mgr.dispatch({ model: FAKE_GATE_MODEL, executor: "opencode", prompt: "hello", directory, env });
   spawns[0].child.emit("exit", 0, null); // settles the worker; extraction + startCheckGate run synchronously off this
   return { mgr, dispatched };
 }
@@ -74,6 +76,9 @@ const FAKE_GATE_DIFF = "diff --git a/f b/f\n+changed\n";
 const FAKE_GATE_MODEL = "opencode-go/minimax-m3";
 const FAKE_GATE_CONFIG = `check = "npm test"\n`;
 const TASKFERRY_CONFIG_FILENAME = ".taskferry.toml";
+const ROTATED_ENV_VAR = "AXI_GATE_ROTATED";
+const ROTATED_ENV_BEFORE = "before-rotation";
+const ROTATED_ENV_AFTER = "after-rotation";
 
 describe("startCheckGate", () => {
   test("no .taskferry.toml: checkStatus stays 'none', no second spawn", () => {
@@ -94,7 +99,340 @@ describe("startCheckGate", () => {
     assert.ok(spawns[1].args.includes("npm test"));
     assert.equal(mgr.status(dispatched.id).checkStatus, "running");
   });
+});
 
+describe("startCheckGate environment parity", () => {
+  test("the gate inherits the worker's caller-forwarded PATH and tool config", () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "axi-gate-caller-env-"));
+    fs.writeFileSync(path.join(directory, TASKFERRY_CONFIG_FILENAME), "check = \"fake-check-tool\"\n");
+    const fakeBin = path.join(directory, "caller-tool-bin");
+    // Only the caller's shell knows where its tool shims live (mise, uv,
+    // nvm, ...). The worker must find the fake tool through that PATH, and
+    // the later check gate must see the same PATH rather than falling back
+    // to the daemon's ambient one.
+    const callerPath = `${fakeBin}${path.delimiter}${process.env.PATH}`;
+    const spawns = [];
+    const { mgr, dispatched } = dispatchAndSettleWithChanges({
+      spawns,
+      directory,
+      env: { PATH: callerPath, AXI_GATE_TOOL_DIR: fakeBin },
+    });
+
+    assert.equal(spawns.length, 2);
+    assert.equal(spawns[0].opts.env.PATH, callerPath, "worker spawn must use the caller-forwarded PATH");
+    assert.equal(spawns[1].opts.env.PATH, callerPath, "check gate must use the same caller-forwarded PATH as the worker");
+    assert.equal(spawns[1].opts.env.AXI_GATE_TOOL_DIR, fakeBin, "check gate must inherit the caller's tool config");
+    assert.equal(mgr.status(dispatched.id).checkStatus, "running");
+  });
+
+  test("the gate applies the same env denylist as the worker", () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "axi-gate-denylist-"));
+    fs.writeFileSync(path.join(directory, TASKFERRY_CONFIG_FILENAME), FAKE_GATE_CONFIG);
+    const spawns = [];
+    dispatchAndSettleWithChanges({
+      spawns,
+      directory,
+      env: { AXI_GATE_DENIED: "must-not-reach-child", AXI_GATE_ALLOWED: "ok" },
+      managerOptions: { envDenylistSpec: "AXI_GATE_DENIED" },
+    });
+
+    for (const spawn of spawns) {
+      assert.equal("AXI_GATE_DENIED" in spawn.opts.env, false, `${spawn.cmd} spawn must not receive a denylisted var`);
+      assert.equal(spawn.opts.env.AXI_GATE_ALLOWED, "ok");
+    }
+  });
+
+  test("the gate strips TASKFERRY_* control vars while the worker keeps its own markers", () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "axi-gate-control-"));
+    fs.writeFileSync(path.join(directory, TASKFERRY_CONFIG_FILENAME), FAKE_GATE_CONFIG);
+    const spawns = [];
+    const { dispatched } = dispatchAndSettleWithChanges({
+      spawns,
+      directory,
+      env: {
+        TASKFERRY_CHILD: "caller-child",
+        TASKFERRY_TASK_ID: "caller-task-id",
+        TASKFERRY_OUTPUT_DIR: "/tmp/caller-output",
+        AXI_GATE_KEEP: "yes",
+      },
+    });
+
+    assert.equal(spawns[0].opts.env.TASKFERRY_CHILD, "1");
+    assert.equal(spawns[0].opts.env.TASKFERRY_TASK_ID, dispatched.id);
+    assert.equal(spawns[1].opts.env.AXI_GATE_KEEP, "yes");
+    assert.deepEqual(
+      Object.keys(spawns[1].opts.env).filter((key) => key.startsWith("TASKFERRY_")),
+      [],
+      "the gate is an internal verification spawn, not a dispatched ferry: no TASKFERRY_* control marker may leak into it",
+    );
+  });
+});
+
+describe("startCheckGate environment precedence", () => {
+  test("the gate keeps envFile below daemon ambient below caller precedence", (t) => {
+    preserveEnvVars(t, ["AXI_GATE_AMBIENT", "AXI_GATE_CALLER", "AXI_GATE_FILE_ONLY"]);
+    process.env.AXI_GATE_AMBIENT = "ambient";
+    process.env.AXI_GATE_CALLER = "ambient";
+    delete process.env.AXI_GATE_FILE_ONLY;
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "axi-gate-precedence-"));
+    fs.writeFileSync(path.join(directory, TASKFERRY_CONFIG_FILENAME), FAKE_GATE_CONFIG);
+    const spawns = [];
+    dispatchAndSettleWithChanges({
+      spawns,
+      directory,
+      env: { AXI_GATE_CALLER: "caller" },
+      managerOptions: {
+        envFileVars: {
+          AXI_GATE_AMBIENT: "file",
+          AXI_GATE_CALLER: "file",
+          AXI_GATE_FILE_ONLY: "file",
+        },
+      },
+    });
+
+    for (const spawn of spawns) {
+      assert.equal(spawn.opts.env.AXI_GATE_AMBIENT, "ambient", `${spawn.cmd} must see daemon ambient above the env file`);
+      assert.equal(spawn.opts.env.AXI_GATE_CALLER, "caller", `${spawn.cmd} must see caller above daemon ambient`);
+      assert.equal(spawn.opts.env.AXI_GATE_FILE_ONLY, "file", `${spawn.cmd} must see env-file-only values`);
+    }
+  });
+
+  test("the gate still overrides caller/ambient UV dirs with the per-task check dirs", () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "axi-gate-uv-caller-"));
+    fs.writeFileSync(path.join(directory, TASKFERRY_CONFIG_FILENAME), "check = \"uv run pytest\"\n");
+    const cacheDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-gate-uv-caller-cache-"));
+    const spawns = [];
+    const { mgr, dispatched } = dispatchAndSettleWithChanges({
+      spawns,
+      directory,
+      cacheDir,
+      env: { UV_CACHE_DIR: "/tmp/caller-uv-cache", UV_TOOL_DIR: "/tmp/caller-uv-tools" },
+    });
+    const uvCacheDir = uvDirPath(cacheDir, mgr.paths.STATE_DIR, dispatched.id, "uv-cache");
+    const uvToolsDir = uvDirPath(cacheDir, mgr.paths.STATE_DIR, dispatched.id, "uv-tools");
+
+    assert.equal(spawns[1].opts.env.UV_CACHE_DIR, uvCacheDir);
+    assert.equal(spawns[1].opts.env.UV_TOOL_DIR, uvToolsDir);
+  });
+
+  test("the gate's caller-env snapshot is not persisted as a new task field", () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "axi-gate-no-persist-"));
+    fs.writeFileSync(path.join(directory, TASKFERRY_CONFIG_FILENAME), FAKE_GATE_CONFIG);
+    const secret = `s3cr3t-${Date.now()}`;
+    const spawns = [];
+    const { mgr } = dispatchAndSettleWithChanges({
+      spawns,
+      directory,
+      env: { AXI_GATE_SECRET: secret },
+    });
+    mgr.flushPersist();
+    const persisted = JSON.parse(fs.readFileSync(path.join(mgr.paths.STATE_DIR, TASKS_STATE_FILE), "utf8"));
+    const record = persisted.find((task) => task.checkStatus === "running");
+    assert.ok(record, "expected the dispatching task to be persisted");
+    // The pre-existing resumeEnv field is the only caller-env copy tasks.json
+    // has ever carried; the same-process launch snapshot must stay in memory
+    // and add no second on-disk copy.
+    const envFields = Object.keys(record).filter((key) => /env/i.test(key)).sort();
+    assert.deepEqual(envFields, ["resumeEnv"]);
+    assert.equal(record.resumeEnv.AXI_GATE_SECRET, secret);
+  });
+
+});
+
+describe("startCheckGate launcher identity", () => {
+  test("uses daemon-resolved absolute bwrap and sh even when the caller's PATH shadows both", () => {
+    const directory = mkdtempTracked("axi-gate-launcher-");
+    fs.writeFileSync(path.join(directory, TASKFERRY_CONFIG_FILENAME), "check = \"printf trusted\"\n");
+    const trustedBin = mkdtempTracked("axi-gate-trusted-bin-");
+    const callerBin = mkdtempTracked("axi-gate-caller-bin-");
+    const trustedBwrap = path.join(trustedBin, "bwrap");
+    const trustedSh = path.join(trustedBin, "sh");
+    const callerBwrap = path.join(callerBin, "bwrap");
+    const callerSh = path.join(callerBin, "sh");
+    for (const file of [trustedBwrap, trustedSh, callerBwrap, callerSh]) {
+      fs.writeFileSync(file, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+    }
+    const spawns = [];
+    const resolverCalls = [];
+    dispatchAndSettleWithChanges({
+      spawns,
+      directory,
+      env: { PATH: `${callerBin}${path.delimiter}${process.env.PATH}` },
+      managerOptions: {
+        resolveSandboxLaunchersFn: (...args) => {
+          resolverCalls.push(args);
+          return {
+            bwrapPath: fs.realpathSync(trustedBwrap),
+            shellPath: fs.realpathSync(trustedSh),
+          };
+        },
+      },
+    });
+
+    assert.ok(resolverCalls.length >= 1, "the launch path must resolve launchers");
+    for (const args of resolverCalls) {
+      assert.deepEqual(args, [], "the launcher resolver must never receive caller-controlled arguments");
+    }
+
+    assert.equal(spawns.length, 2);
+    assert.equal(spawns[0].cmd, fs.realpathSync(trustedBwrap), "the worker must spawn the daemon-resolved bwrap, not a caller-PATH shim");
+    assert.equal(spawns[1].cmd, fs.realpathSync(trustedBwrap), "the gate must spawn the daemon-resolved bwrap, not a caller-PATH shim");
+    const separator = spawns[1].args.lastIndexOf("--");
+    assert.notEqual(separator, -1, "expected the gate bwrap argv to contain the command separator");
+    assert.equal(spawns[1].args[separator + 1], fs.realpathSync(trustedSh), "the gate must execute the daemon-resolved absolute sh, not a caller-PATH shim");
+    assert.equal(spawns[1].args[separator + 2], "-c");
+  });
+});
+
+describe("startCheckGate launch-env lifetime", () => {
+  test("a no-overlay/non-gate settle drops the launch-env snapshot on the shared settle path", () => {
+    const directory = mkdtempTracked("axi-gate-no-overlay-");
+    fs.writeFileSync(path.join(directory, TASKFERRY_CONFIG_FILENAME), FAKE_GATE_CONFIG);
+    const spawns = [];
+    const originalWeakMap = globalThis.WeakMap;
+    const operations = [];
+    class TrackingWeakMap extends originalWeakMap {
+      set(key, value) {
+        operations.push({ op: "set", key });
+        return super.set(key, value);
+      }
+      delete(key) {
+        operations.push({ op: "delete", key });
+        return super.delete(key);
+      }
+    }
+    globalThis.WeakMap = TrackingWeakMap;
+    let mgr;
+    try {
+      // No sandbox/overlay: extraction returns before its own cleanup, so
+      // only finishChildSettlement can drain this entry.
+      mgr = makeManager({
+        spawnFn: (cmd, args, opts) => {
+          const child = fakeChild();
+          spawns.push({ cmd, args, opts, child });
+          return child;
+        },
+        sandboxEnabled: false,
+        overlayEnabled: false,
+        platform: "linux",
+      });
+      const dispatched = mgr.dispatch({
+        model: FAKE_GATE_MODEL,
+        executor: "opencode",
+        prompt: "hello",
+        env: { AXI_NO_CHANGE_SECRET: "must-not-linger" },
+        directory,
+      });
+      const setKeys = operations.filter((entry) => entry.op === "set").map((entry) => entry.key);
+      assert.equal(setKeys.length > 0, true, "the worker launch must record its launch env");
+      spawns[0].child.emit("exit", 0, null);
+      assert.equal(spawns.length, 1, "a no-overlay settle must not start a gate");
+      assert.notEqual(mgr.status(dispatched.id).checkStatus, "running");
+      const deleted = operations.some((entry) => entry.op === "delete" && setKeys.includes(entry.key));
+      assert.equal(deleted, true, "the shared settle path must delete the launch-env entry to avoid retaining caller secrets");
+    } finally {
+      mgr?.close();
+      globalThis.WeakMap = originalWeakMap;
+    }
+  });
+});
+
+describe("startCheckGate restart parity", () => {
+  test("a gate re-run after daemon restart reuses the persisted caller env", () => {
+    const directory = mkdtempTracked("axi-gate-restart-dir-");
+    fs.writeFileSync(path.join(directory, TASKFERRY_CONFIG_FILENAME), "check = \"true\"\n");
+    const overlayTmpRoot = mkdtempTracked("axi-gate-restart-overlay-");
+    const overlayRoot = path.join(overlayTmpRoot, "taskferry-cow-oc_gate_restart");
+    fs.mkdirSync(path.join(overlayRoot, "upper", "main"), { recursive: true });
+    fs.mkdirSync(path.join(overlayRoot, "work", "main"), { recursive: true });
+    const callerPath = `/caller/restart-bin${path.delimiter}${process.env.PATH}`;
+    const secret = `restart-secret-${Date.now()}`;
+    const spawns = [];
+    const mgr = makeManager({
+      tasksFixture: [{
+        ...baseTask({ id: "oc_gate_restart", directory }),
+        role: "dispatch",
+        changesetStatus: "pending",
+        preDispatchHead: "abc123",
+        checkStatus: "running",
+        checkCommand: "true",
+        overlayDirs: {
+          root: overlayRoot,
+          tmpRoot: overlayTmpRoot,
+          upperDir: path.join(overlayRoot, "upper", "main"),
+          workDir: path.join(overlayRoot, "work", "main"),
+          rwBinds: [],
+        },
+        resumeEnv: { PATH: callerPath, AXI_GATE_RESTART_SECRET: secret },
+      }],
+      spawnFn: (cmd, args, opts) => {
+        const child = fakeGateChild();
+        spawns.push({ cmd, args, opts, child });
+        return child;
+      },
+      sandboxEnabled: true,
+      overlayEnabled: true,
+      checkBwrapAvailableFn: () => ({ checked: true, available: true }),
+      checkOverlaySupportFn: () => ({ supported: true }),
+      platform: "linux",
+    });
+
+    assert.equal(spawns.length, 1, "the interrupted gate must auto-rerun exactly once");
+    assert.equal(spawns[0].opts.env.PATH, callerPath, "restart gate must use the caller PATH persisted in resumeEnv");
+    assert.equal(spawns[0].opts.env.AXI_GATE_RESTART_SECRET, secret, "restart gate must use the caller secrets persisted in resumeEnv");
+    assert.equal(mgr.status("oc_gate_restart").checkStatus, "running");
+  });
+});
+
+describe("startCheckGate launch-time environment immutability", () => {
+  test("the gate keeps the env-file values captured at worker launch even if the file reloads before extraction", () => {
+    const directory = mkdtempTracked("axi-gate-envfile-frozen-");
+    fs.writeFileSync(path.join(directory, TASKFERRY_CONFIG_FILENAME), FAKE_GATE_CONFIG);
+    let reload;
+    const spawns = [];
+    dispatchAndSettleWithChanges({
+      spawns,
+      directory,
+      managerOptions: {
+        envFilePath: "/nonexistent/caller-secrets.env",
+        loadEnvFileFn: () => ({ [ROTATED_ENV_VAR]: ROTATED_ENV_BEFORE }),
+        watchEnvFileFn: (_envFilePath, { onReload }) => {
+          reload = onReload;
+          return { close() {} };
+        },
+      },
+      onWorkerSpawn: () => reload({ [ROTATED_ENV_VAR]: ROTATED_ENV_AFTER }),
+    });
+
+    assert.equal(spawns.length, 2);
+    assert.equal(spawns[0].opts.env[ROTATED_ENV_VAR], ROTATED_ENV_BEFORE, "the worker must use the launch-time env-file values");
+    assert.equal(spawns[1].opts.env[ROTATED_ENV_VAR], ROTATED_ENV_BEFORE, "the gate must not silently rebuild from the reloaded env file");
+  });
+
+  test("a caller mutating its env object after dispatch cannot change the gate's frozen snapshot", () => {
+    const directory = mkdtempTracked("axi-gate-env-mutation-");
+    fs.writeFileSync(path.join(directory, TASKFERRY_CONFIG_FILENAME), FAKE_GATE_CONFIG);
+    const originalPath = `/original/bin${path.delimiter}${process.env.PATH}`;
+    const callerEnv = { PATH: originalPath, AXI_GATE_MUTABLE_SECRET: "original" };
+    const spawns = [];
+    dispatchAndSettleWithChanges({
+      spawns,
+      directory,
+      env: callerEnv,
+      onWorkerSpawn: () => {
+        callerEnv.PATH = "/mutated/bin";
+        callerEnv.AXI_GATE_MUTABLE_SECRET = "mutated";
+      },
+    });
+
+    assert.equal(spawns.length, 2);
+    assert.equal(spawns[0].opts.env.PATH, originalPath);
+    assert.equal(spawns[1].opts.env.PATH, originalPath, "the gate must see the queued env snapshot, not the caller's later mutation");
+    assert.equal(spawns[1].opts.env.AXI_GATE_MUTABLE_SECRET, "original", "the gate must not see caller mutations made after dispatch");
+  });
+});
+
+describe("startCheckGate uv dirs", () => {
   test("the gate's bwrap re-binds the worker's per-task uv cache/tool dirs and re-points the env at them (taskferry#426)", () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "axi-gate-uv-"));
     fs.writeFileSync(path.join(directory, TASKFERRY_CONFIG_FILENAME), "check = \"uv run pytest\"\n");
@@ -117,6 +455,9 @@ describe("startCheckGate", () => {
     assert.equal(gate.opts.env.UV_TOOL_DIR, uvToolsDir);
   });
 
+});
+
+describe("startCheckGate settlement", () => {
   test("exit 0 settles checkStatus 'passed' with exit code recorded", () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "axi-gate-pass-"));
     fs.writeFileSync(path.join(directory, TASKFERRY_CONFIG_FILENAME), FAKE_GATE_CONFIG);
@@ -184,6 +525,9 @@ const dispatched = mgr.dispatch({ model: FAKE_GATE_MODEL, executor: "opencode", 
     assert.equal(mgr.status(dispatched.id).checkStatus, "timeout");
   });
 
+});
+
+describe("startCheckGate output capture", () => {
   test("the tail is snapshotted after stdout closes, not at exit, so the last failure line survives", () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "axi-gate-drain-"));
     fs.writeFileSync(path.join(directory, TASKFERRY_CONFIG_FILENAME), FAKE_GATE_CONFIG);

@@ -425,6 +425,11 @@ function buildManagerOptions(options, stateDir, defaultCacheDir, defaultOverlayT
     killFn: options.killFn ?? defaultKillFn(),
     listModelsFn: options.listModelsFn ?? defaultListModelsFn(),
     opencodeListModelVariantsFn: options.opencodeListModelVariantsFn ?? defaultOpenCodeListModelVariantsFn(),
+    // Sandbox tests model bwrap truthfully in argv but never execute it;
+    // default the launcher seam to the historical bare names so they do not
+    // depend on a real bubblewrap install on the test host. Tests for the
+    // absolute-path wiring pass their own resolver.
+    resolveSandboxLaunchersFn: options.resolveSandboxLaunchersFn ?? (() => ({ bwrapPath: "bwrap", shellPath: "sh" })),
     ...passthroughIfSet({ defaultExecutor: options.defaultExecutor }, "defaultExecutor", "defaultExecutor"),
     ...passthroughIfSet({ defaultVariant: options.defaultVariant }, "defaultVariant", "defaultVariant"),
     ...passthroughIfSet({ opencodeVariantsTable: options.opencodeVariantsTable }, "opencodeVariantsTable", "opencodeVariantsTable"),
@@ -452,6 +457,9 @@ function buildManagerOptions(options, stateDir, defaultCacheDir, defaultOverlayT
     ...passthroughIfSet({ maxWaitMs: options.maxWaitMs }, "maxWaitMs", "maxWaitMs"),
     ...passthroughIfSet({ envDenylistSpec: options.envDenylistSpec }, "envDenylistSpec", "envDenylist", (spec) => parseEnvDenylist(spec)),
     ...passthroughIfSet({ envFileVars: options.envFileVars }, "envFileVars", "envFileVars"),
+    ...passthroughIfSet({ envFilePath: options.envFilePath }, "envFilePath", "envFilePath"),
+    ...passthroughIfSet({ loadEnvFileFn: options.loadEnvFileFn }, "loadEnvFileFn", "loadEnvFileFn"),
+    ...passthroughIfSet({ watchEnvFileFn: options.watchEnvFileFn }, "watchEnvFileFn", "watchEnvFileFn"),
     ...passthroughIfSet({ sandboxDenylist: options.sandboxDenylist }, "sandboxDenylist", "sandboxDenylist"),
     ...passthroughIfSet({ allowedDirs: options.allowedDirs }, "allowedDirs", "allowedDirs"),
     ...passthroughIfSet({ rwBind: options.rwBind }, "rwBind", "rwBind"),

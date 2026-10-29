@@ -1,7 +1,9 @@
 import { describe, test } from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
-import { buildBwrapArgs, buildBwrapBaseArgs, checkBwrapAvailable, checkOverlaySupport, defaultDenyList, parseBwrapVersion, platformSupportsSandbox, resolveGitCommonDir, resolveGitDir, resolvePiAgentDir, resolveSandboxDenyList, resolveXdgDataHome } from "./sandbox.js";
+import { buildBwrapArgs, buildBwrapBaseArgs, checkBwrapAvailable, checkOverlaySupport, defaultDenyList, parseBwrapVersion, platformSupportsSandbox, resolveGitCommonDir, resolveGitDir, resolvePiAgentDir, resolveSandboxDenyList, resolveSandboxLaunchers, resolveXdgDataHome } from "./sandbox.js";
 
 // Repeated literals lifted to module-level constants to satisfy
 // sonarjs/no-duplicate-string in this file.
@@ -540,6 +542,41 @@ describe("defaultDenyList()", () => {
   test("resolvePiAgentDir() honors PI_CODING_AGENT_DIR and falls back to ~/.pi/agent", () => {
     assert.equal(resolvePiAgentDir({ PI_CODING_AGENT_DIR: "/pi-agent" }, HOME_DIR), "/pi-agent");
     assert.equal(resolvePiAgentDir({}, HOME_DIR), DEFAULT_PI_AGENT_DIR);
+  });
+
+  test("resolveSandboxLaunchers() resolves absolute bwrap and sh paths from the daemon PATH only", (t) => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "tf-launchers-"));
+    t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+    const ambientBin = path.join(root, "ambient-bin");
+    const callerBin = path.join(root, "caller-bin");
+    for (const dir of [ambientBin, callerBin]) fs.mkdirSync(dir, { recursive: true });
+    for (const dir of [ambientBin, callerBin]) {
+      for (const name of ["bwrap", "sh"]) {
+        const file = path.join(dir, name);
+        fs.writeFileSync(file, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+      }
+    }
+    const originalPath = process.env.PATH;
+    // Ambient process.env points only at the caller's shadowing bin. Pass the
+    // daemon PATH explicitly: a resolver that ignored this env and fell back
+    // to process.env would select caller-bin/bwrap and fail below.
+    process.env.PATH = `${callerBin}${path.delimiter}relative-bin`;
+    t.after(() => { process.env.PATH = originalPath; });
+    const launchers = resolveSandboxLaunchers({
+      env: { PATH: `${ambientBin}${path.delimiter}relative-bin` },
+    });
+    assert.equal(launchers.bwrapPath, fs.realpathSync(path.join(ambientBin, "bwrap")));
+    assert.equal(launchers.shellPath, fs.realpathSync(path.join(ambientBin, "sh")));
+    assert.ok(path.isAbsolute(launchers.bwrapPath));
+    assert.ok(path.isAbsolute(launchers.shellPath));
+    assert.doesNotMatch(launchers.bwrapPath, /caller-bin|relative-bin/);
+  });
+
+  test("resolveSandboxLaunchers() fails closed when bwrap is absent from the daemon PATH", () => {
+    assert.throws(
+      () => resolveSandboxLaunchers({ env: { PATH: "/nonexistent/taskferry-test-bin" } }),
+      /bwrap.*not found/i,
+    );
   });
 
   test("resolveSandboxDenyList() resolves from the given env and de-duplicates user entries", () => {

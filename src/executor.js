@@ -150,7 +150,7 @@ function resolvePiSessionRwBind({ realSessionsDir, sandboxedSessionsHome, sessio
  * @property {(ctx: SpawnLaunchContext) => string[]} buildSpawnArgs
  * @property {() => string} buildSummaryPrompt
  * @property {(parsed: unknown) => unknown} normalizeLogEvent
- * @property {(ctx?: {isSummary: boolean}) => void | Promise<void>} [prepareLaunch] - optional async pre-spawn hook (e.g. awaiting a one-shot CLI version probe); the default is a no-op for executors that don't need one. Throws (sync) or rejects (async) to fail the dispatch with a clear error naming the preparation failure. Returns `void` when the probe is already cached (sync fast path); returns a `Promise` when the probe has to shell out.
+ * @property {(ctx?: {isSummary: boolean, env?: NodeJS.ProcessEnv}) => void | Promise<void>} [prepareLaunch] - optional async pre-spawn hook (e.g. awaiting a one-shot CLI version probe); the default is a no-op for executors that don't need one. `env` is the same sanitized launch env the worker spawn will use, so PATH-resolved probes and argv selection share one executable identity. Throws (sync) or rejects (async) to fail the dispatch with a clear error naming the preparation failure. Returns `void` when the probe is already cached (sync fast path); returns a `Promise` when the probe has to shell out.
  * @property {(args: {homeDir: string, dataDir: string, taskId: string, spawnEnv: NodeJS.ProcessEnv, existsFn: (file: string) => boolean, statFn?: (file: string) => {isDirectory: () => boolean}|null, lstatFn?: (file: string) => {isSymbolicLink: () => boolean, isFile?: () => boolean, nlink?: number}, readdirFn: (dir: string) => string[], realpathFn?: (file: string) => string, sessionId?: string|null, launchDirectory?: string|null}) => {extraRoBinds: [string, string][], extraRwPairBinds?: [string, string][], sandboxedDataHome: string, sandboxEnv: Record<string, string>, instructionsDest?: string}} sandboxAuthFile
  */
 
@@ -165,6 +165,7 @@ function resolvePiSessionRwBind({ realSessionsDir, sandboxedSessionsHome, sessio
  * @property {string} [snapshotPath]
  * @property {string|null} [variant]
  * @property {string[]} [executorArgs]
+ * @property {NodeJS.ProcessEnv} [env] sanitized launch env, already resolved before the version probe
  */
 
 /**

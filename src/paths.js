@@ -6,7 +6,7 @@ import { resolveGitCommonDir, defaultRunCommand } from "./sandbox.js";
 
 // Names of the TASKFERRY_* plumbing env vars paths.js owns -- the state /
 // runtime / cache dirs and the explicit socket override. tasks.js builds
-// its caller-env exclusion set from this export plus PATH and HOME, so a
+// its caller-env exclusion set from this export plus HOME, so a
 // new plumbing var added here is excluded automatically without a parallel
 // edit in tasks.js (review fix: the exclusion set was duplicated between
 // paths.js and tasks.js, so the two could silently drift apart).

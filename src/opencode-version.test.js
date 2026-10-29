@@ -1,7 +1,7 @@
 import { describe, test, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import os from "node:os";
-import { ensureOpencodeCliMajor, detectOpencodeCliMajor, resetOpencodeCliProbe } from "./opencode-version.js";
+import { ensureOpencodeCliMajor, detectOpencodeCliMajor, resetOpencodeCliProbe, MAX_OPENCODE_VERSION_IDENTITIES, _opencodeVersionMemoSize } from "./opencode-version.js";
 import { opencodeExecutor } from "./opencode-executor.js";
 import { readVariantsCache, hashFingerprint, VARIANTS_CACHE_SCHEMA } from "./variants-cache.js";
 import { makeManager, fakeChild, mkdtempTracked, waitForCaptured, makeFakeExecutor } from "./tasks.test-helpers.js";
@@ -63,11 +63,45 @@ describe("ensureOpencodeCliMajor()", () => {
     assert.equal(probe.calls(), 2);
   });
 
+  test("the per-PATH memo is bounded, and an evicted identity is probed again", async () => {
+    let calls = 0;
+    const execFileFn = /** @type {any} */ (async () => {
+      calls += 1;
+      return { stdout: "1.2.3", stderr: "" };
+    });
+    const firstPath = "/caller/identity-0";
+    for (let i = 0; i < MAX_OPENCODE_VERSION_IDENTITIES + 8; i++) {
+      await ensureOpencodeCliMajor({ execFileFn, env: { PATH: i === 0 ? firstPath : `/caller/identity-${i}` } });
+    }
+    assert.ok(
+      _opencodeVersionMemoSize() <= MAX_OPENCODE_VERSION_IDENTITIES,
+      `memo size ${_opencodeVersionMemoSize()} exceeded ${MAX_OPENCODE_VERSION_IDENTITIES}`,
+    );
+    const before = calls;
+    assert.equal(await ensureOpencodeCliMajor({ execFileFn, env: { PATH: firstPath } }), 1);
+    assert.equal(calls, before + 1, "the oldest identity must have been evicted and re-probed");
+  });
+
   test("concurrent callers share one in-flight probe", async () => {
     const probe = versionPrints(V2_VERSION);
     const results = await Promise.all([1, 2, 3].map(() => ensureOpencodeCliMajor({ execFileFn: probe.execFileFn })));
     assert.deepEqual(results, [2, 2, 2]);
     assert.equal(probe.calls(), 1);
+  });
+
+  test("the memo is keyed by the sanitized PATH identity and the probe receives that env", async () => {
+    const probeEnvs = [];
+    const execFileFn = /** @type {any} */ (async (_command, _args, opts) => {
+      probeEnvs.push(opts.env);
+      return { stdout: opts.env.PATH === "/caller/a" ? "1.2.3" : "2.0.0", stderr: "" };
+    });
+    assert.equal(await ensureOpencodeCliMajor({ execFileFn, env: { PATH: "/caller/a" } }), 1);
+    assert.equal(detectOpencodeCliMajor({ env: { PATH: "/caller/a" } }), 1);
+    assert.equal(detectOpencodeCliMajor({ env: { PATH: "/caller/b" } }), null, "a different PATH must not read another executable's cached major");
+    assert.equal(await ensureOpencodeCliMajor({ execFileFn, env: { PATH: "/caller/b" } }), 2);
+    assert.equal(probeEnvs.length, 2, "each PATH identity must get its own probe");
+    assert.equal(probeEnvs[0].PATH, "/caller/a");
+    assert.equal(probeEnvs[1].PATH, "/caller/b");
   });
 });
 
@@ -86,6 +120,21 @@ describe("opencodeExecutor() version handling", () => {
     const args = opencodeExecutor({ detectCliMajorFn: () => 0 }).buildSpawnArgs(DISPATCH_CTX);
     assert.ok(args.includes("--dir"), `expected the 1.x --dir flag in ${JSON.stringify(args)}`);
     assert.ok(!args.includes("--standalone"));
+  });
+
+  test("prepareLaunch and buildSpawnArgs use the same launch env for version detection", async () => {
+    const seen = [];
+    const env = { PATH: "/caller/bin" };
+    const ex = opencodeExecutor({
+      detectCliMajorFn: (received) => { seen.push(received); return null; },
+      ensureCliMajorFn: async (received) => { seen.push(received); return 2; },
+    });
+    await ex.prepareLaunch({ isSummary: false, env });
+    ex.buildSpawnArgs({ ...DISPATCH_CTX, env });
+    assert.equal(seen.length, 3, "prepareLaunch detects once, ensures once, and buildSpawnArgs detects once");
+    for (const received of seen) {
+      assert.equal(received, env, "version detection must receive the launch's sanitized environment");
+    }
   });
 });
 

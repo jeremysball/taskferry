@@ -17,34 +17,79 @@ export const DEFAULT_OPENCODE_VERSION_TTL_MS = 5 * 60 * 1000;
 // exposes the 1.x argv) all return a real number, while a parse failure
 // stays a parse failure rather than being fished out of arbitrary output.
 const OPENCODE_VERSION_PARSE_RE = /^(?:opencode\s+)?v?(\d+)\.\d+/m;
+// Bound the per-identity memo: a long-lived daemon can see an unbounded
+// stream of caller PATH values (one per shell/tool-manager combination).
+// Each entry is small, but it must not grow forever. Evict finished entries
+// FIFO; an entry with an in-flight probe is never dropped mid-probe.
+export const MAX_OPENCODE_VERSION_IDENTITIES = 64;
 
 /**
- * Memo for the detected opencode CLI major version: `{major, at}` from the
- * last successful probe (`major` is a real number) and the most recent
- * `inFlight` Promise<number|null> (still pending or settled). Failed
- * probes never overwrite this -- a `null` is only stored here because no
- * probe has ever succeeded yet.
+ * Per-executable-identity memos for the detected opencode CLI major version:
+ * `{major, at}` from the last successful probe (`major` is a real number)
+ * and the most recent `inFlight` Promise<number|null>. The map key is the
+ * sanitized env's PATH, because a caller-forwarded PATH can select a
+ * different `opencode` binary than the daemon's ambient one; sharing one
+ * memo across those identities would build the wrong argv for one of them.
+ * Failed probes never overwrite a successful entry.
  *
- * @type {{major: number|null, at: number, inFlight: Promise<number|null>|null}}
+ * @type {Map<string, {major: number|null, at: number, inFlight: Promise<number|null>|null}>}
  */
-let opencodeVersionMemo = { major: null, at: 0, inFlight: null };
+let opencodeVersionMemos = new Map();
+
+/** @param {NodeJS.ProcessEnv|undefined} env @returns {string} */
+function opencodeExecutableIdentity(env) {
+  // `env` is the already-sanitized launch env. With no env, use the ambient
+  // PATH the default execFile probe would resolve. An absent PATH is still a
+  // distinct (empty) identity rather than collapsing into another key.
+  return env?.PATH ?? process.env.PATH ?? "";
+}
+
+/**
+ * Drops the oldest finished memo entry, if any. Entries with an in-flight
+ * probe are skipped so eviction can never orphan a probe's result.
+ */
+function evictFinishedMemo() {
+  for (const [identity, memo] of opencodeVersionMemos) {
+    if (memo.inFlight === null) {
+      opencodeVersionMemos.delete(identity);
+      return;
+    }
+  }
+}
+
+/**
+ * Returns the memo entry for an executable identity, creating an empty one
+ * on first use. Callers mutate the returned object for the same identity.
+ * @param {string} identity
+ */
+function memoFor(identity) {
+  let memo = opencodeVersionMemos.get(identity);
+  if (!memo) {
+    if (opencodeVersionMemos.size >= MAX_OPENCODE_VERSION_IDENTITIES) evictFinishedMemo();
+    memo = { major: null, at: 0, inFlight: null };
+    opencodeVersionMemos.set(identity, memo);
+  }
+  return memo;
+}
 
 /**
  * Synchronously returns the most recently successfully probed opencode CLI
- * major version, or `null` when (a) no probe has succeeded yet, (b) the
- * last successful probe is older than `OPENCODE_VERSION_TTL_MS`, or
- * (c) the caller is using a test-injected `now` whose monotonic value
- * says the memo is stale. A `null` here is *not* a guess at 1.x: callers
- * who need a major to build the argv must `await ensureOpencodeCliMajor()`
- * first, and treat a still-null result as a probe failure.
- * @param {{now?: () => number, ttlMs?: number}} [options]
+ * major version for the given executable identity, or `null` when (a) no
+ * probe has succeeded yet, (b) the last successful probe is older than
+ * `OPENCODE_VERSION_TTL_MS`, or (c) the caller is using a test-injected
+ * `now` whose monotonic value says the memo is stale. A `null` here is
+ * *not* a guess at 1.x: callers who need a major to build the argv must
+ * `await ensureOpencodeCliMajor()` first, and treat a still-null result as
+ * a probe failure.
+ * @param {{now?: () => number, ttlMs?: number, env?: NodeJS.ProcessEnv}} [options]
  * @returns {number|null}
  */
-export function detectOpencodeCliMajor({ now = () => performance.now(), ttlMs = defaultTtlMs() } = {}) {
-  if (opencodeVersionMemo.major === null) return null;
+export function detectOpencodeCliMajor({ now = () => performance.now(), ttlMs = defaultTtlMs(), env } = {}) {
+  const memo = opencodeVersionMemos.get(opencodeExecutableIdentity(env));
+  if (!memo || memo.major === null) return null;
   const at = now();
-  if (at - opencodeVersionMemo.at >= ttlMs) return null;
-  return opencodeVersionMemo.major;
+  if (at - memo.at >= ttlMs) return null;
+  return memo.major;
 }
 
 /**
@@ -75,11 +120,17 @@ function probeErrorDetail(err) {
  * the result, so a failed probe can't poison a previously cached good
  * value.
  * @param {typeof execFileAsync} execFileFn
+ * @param {NodeJS.ProcessEnv} [env] sanitized launch env; `env.PATH` selects
+ *   the same executable the worker's spawn will resolve
  * @returns {Promise<number|null>}
  */
-async function probeOpencodeCliMajor(execFileFn) {
+async function probeOpencodeCliMajor(execFileFn, env) {
   try {
-    const { stdout } = await execFileFn("opencode", ["--version"], { encoding: "utf8", timeout: opencodeVersionTimeoutOverride });
+    const { stdout } = await execFileFn("opencode", ["--version"], {
+      encoding: "utf8",
+      timeout: opencodeVersionTimeoutOverride,
+      ...(env === undefined ? {} : { env }),
+    });
     const trimmed = String(stdout).trim();
     const match = OPENCODE_VERSION_PARSE_RE.exec(trimmed);
     if (!match) {
@@ -153,23 +204,34 @@ export function setOpencodeVersionTimeoutMs(timeoutMs) {
  * (a previous good value survives, a never-probed value stays `null`).
  * Callers that need a non-null major to build the argv must treat a still-
  * `null` resolved value as a hard probe failure.
- * @param {{execFileFn?: typeof execFileAsync, now?: () => number, ttlMs?: number}} [options]
+ * @param {{execFileFn?: typeof execFileAsync, now?: () => number, ttlMs?: number, env?: NodeJS.ProcessEnv}} [options]
  * @returns {Promise<number|null>}
  */
-export function ensureOpencodeCliMajor({ execFileFn = execFileAsync, now = () => performance.now(), ttlMs = defaultTtlMs() } = {}) {
-  const cached = detectOpencodeCliMajor({ now, ttlMs });
+export function ensureOpencodeCliMajor({ execFileFn = execFileAsync, now = () => performance.now(), ttlMs = defaultTtlMs(), env } = {}) {
+  const identity = opencodeExecutableIdentity(env);
+  const cached = detectOpencodeCliMajor({ now, ttlMs, env });
   if (cached !== null) return Promise.resolve(cached);
-  if (opencodeVersionMemo.inFlight) return opencodeVersionMemo.inFlight;
-  const probeP = probeOpencodeCliMajor(execFileFn).then((major) => {
-    if (major !== null) opencodeVersionMemo = { major, at: now(), inFlight: null };
-    else opencodeVersionMemo = { ...opencodeVersionMemo, inFlight: null };
+  const memo = memoFor(identity);
+  if (memo.inFlight) return memo.inFlight;
+  const probeP = probeOpencodeCliMajor(execFileFn, env).then((major) => {
+    const current = memoFor(identity);
+    if (major !== null) {
+      current.major = major;
+      current.at = now();
+    }
+    current.inFlight = null;
     return major;
   });
-  opencodeVersionMemo = { ...opencodeVersionMemo, inFlight: probeP };
+  memo.inFlight = probeP;
   return probeP;
 }
 
-/** Test-only: forget the memoized opencode version and any in-flight probe. */
+/** Test-only: forget every memoized opencode version and in-flight probe. */
 export function resetOpencodeCliProbe() {
-  opencodeVersionMemo = { major: null, at: 0, inFlight: null };
+  opencodeVersionMemos = new Map();
+}
+
+/** Test-only: current number of memoized executable identities. */
+export function _opencodeVersionMemoSize() {
+  return opencodeVersionMemos.size;
 }

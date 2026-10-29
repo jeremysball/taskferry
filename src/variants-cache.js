@@ -38,7 +38,7 @@ export function readVariantsCache({ cacheDir, env, ttlMs = DEFAULT_VARIANT_CACHE
   }
   if (Date.now() - mtimeMs > ttlMs) return null;
   const cached = _memo.get(filePath);
-  if (cached && cached.mtimeMs === mtimeMs) return builtForCurrentMajor(cached.builtMajor) ? checkFingerprint(cached.result, env) : null;
+  if (cached && cached.mtimeMs === mtimeMs) return builtForCurrentMajor(cached.builtMajor, env) ? checkFingerprint(cached.result, env) : null;
   let parsed;
   try {
     parsed = JSON.parse(readFileFn(filePath));
@@ -50,7 +50,7 @@ export function readVariantsCache({ cacheDir, env, ttlMs = DEFAULT_VARIANT_CACHE
   const builtMajor = typeof parsed.opencodeMajor === "number" ? parsed.opencodeMajor : 1;
   const result = { fingerprint: parsed.fingerprint, models: new Map(Object.entries(parsed.models)) };
   _memo.set(filePath, { mtimeMs, result, builtMajor });
-  return builtForCurrentMajor(builtMajor) ? checkFingerprint(result, env) : null;
+  return builtForCurrentMajor(builtMajor, env) ? checkFingerprint(result, env) : null;
 }
 
 /**
@@ -61,10 +61,11 @@ export function readVariantsCache({ cacheDir, env, ttlMs = DEFAULT_VARIANT_CACHE
  * major also rejects: launch preparation may discover a different major
  * after dispatch has already resolved its variant.
  * @param {number} builtMajor
+ * @param {NodeJS.ProcessEnv} env the dispatch's effective env; PATH selects the same opencode identity the version probe used
  * @returns {boolean}
  */
-function builtForCurrentMajor(builtMajor) {
-  const currentMajor = detectOpencodeCliMajor();
+function builtForCurrentMajor(builtMajor, env) {
+  const currentMajor = detectOpencodeCliMajor({ env });
   return currentMajor === builtMajor;
 }
 

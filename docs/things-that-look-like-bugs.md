@@ -56,6 +56,19 @@ belongs here.
   `execFileSync`, which blocks the event loop for exactly as long as a worker
   waits for its reply -- an in-process server would be frozen when the
   response is due, and the task would hang looking like a sandbox bug.
+- A daemon with free `maxConcurrentTasks` slots and `queued` ferries can stop
+  launching them while `memoryAdmissionPercent` (default `85`) is exceeded.
+  Observe: `taskferry status` shows `queued` tasks that never spawn, while
+  already-running tasks keep running. Deliberate: the memory gate is a
+  separate global admission limit ahead of the existing queue, so launching
+  more workers under memory pressure risks the OOM killer taking down the
+  daemon and every in-flight ferry. It is a real bug if a running worker is
+  stopped by this gate, or if queued work never resumes once memory falls.
+  The same gate is deliberately **fail-open** when `/proc/meminfo` or a
+  required cgroup file cannot be read: launches are admitted with a warning
+  at most once per minute. A broken metric must not strand every queued
+  ferry, and the warning (not a silent pass) is what makes the outage
+  visible.
 - The Claude statusline showing no Taskferry segment on its first poll, or
   lagging a task transition by one poll — expected. `tf-sl` never runs the CLI
   in its foreground render path: it reads a per-workspace snapshot under

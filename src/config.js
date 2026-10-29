@@ -27,6 +27,7 @@ export function _resetConfigCache() {
 /** @type {Record<string, string>} */
 const CONFIG_FIELD_TYPES = {
   maxConcurrentTasks: "number",
+  memoryAdmissionPercent: "number",
   maxDispatchesPerWindow: "number",
   dispatchWindowMs: "number",
   noOutputTimeoutMs: "number",
@@ -188,6 +189,21 @@ function validateByteCountConfig(parsed, configPath) {
 }
 
 /**
+ * Rejects an out-of-range memory-admission percentage at daemon startup. The
+ * runtime resolver is lenient for env/programmatic callers, but a config file
+ * is user-edited and a typo like 850 should fail loudly instead of silently
+ * becoming the default.
+ * @param {Record<string, unknown>} parsed
+ * @param {string} configPath
+ */
+function validateMemoryAdmissionPercent(parsed, configPath) {
+  const value = parsed.memoryAdmissionPercent;
+  if (value !== undefined && (!Number.isInteger(value) || /** @type {number} */ (value) < 1 || /** @type {number} */ (value) > 100)) {
+    throw new Error(`error: config key "memoryAdmissionPercent" in ${configPath} must be an integer from 1 to 100 (got ${JSON.stringify(value)})\nhelp: use a percentage such as 85, or 100 to effectively disable the gate`);
+  }
+}
+
+/**
  * @param {string} configPath
  * @returns {Record<string, unknown>}
  */
@@ -208,6 +224,7 @@ function parseAndValidateConfig(configPath) {
 
   validateConfigFieldTypes(parsed, configPath);
   validateByteCountConfig(parsed, configPath);
+  validateMemoryAdmissionPercent(parsed, configPath);
 
   if (parsed.defaultExecutor !== undefined && !KNOWN_EXECUTORS.includes(parsed.defaultExecutor)) {
     throw new Error(`error: config key "defaultExecutor" in ${configPath} must be one of ${KNOWN_EXECUTORS.join(", ")} (got ${JSON.stringify(parsed.defaultExecutor)})\nhelp: fix the value in ${configPath}`);

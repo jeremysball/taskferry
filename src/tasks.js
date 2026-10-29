@@ -29,6 +29,7 @@ import { computeDoctorStats } from "./doctor-stats.js";
 import { isDeferredCleanupReapable, runDeferredCleanup } from "./deferred-cleanup.js";
 import { DEFAULT_TASK_RETENTION_DAYS, MS_PER_DAY, archiveEvictedTasks, partitionByRetention } from "./retention.js";
 import { DEFAULT_UV_LEGACY_SWEEP_AGE_DAYS, LEGACY_UV_DIR_ENTRY, UV_DIR_BUCKETS, prepareUvDirs, uvDirNamespace, uvDirRootsFor } from "./uv-dirs.js";
+import { DEFAULT_MEMORY_ADMISSION_PERCENT, MEMORY_ADMISSION_POLL_MS, readMemoryUsage } from "./memory.js";
 
 export { DEFAULT_UV_LEGACY_SWEEP_AGE_DAYS, UV_DIR_BUCKETS, uvDirNamespace, uvDirPath, uvDirRootsFor } from "./uv-dirs.js";
 
@@ -4305,7 +4306,7 @@ function pruneStaleLaunchTimes(launchTimes, dispatchWindow) {
  * empty or capped). A stale queue entry (task vanished from `tasks`, or is
  * no longer `queued`) is dropped and doesn't count as a pass's launch. See
  * the design spec's sections 2-3 for the rationale.
- * @param {{launchTimes: number[], providerQueues: Map<string, ProviderQueue>, runningCount: number, lastLaunchAt: number, cursor: number}} sched
+ * @param {{launchTimes: number[], providerQueues: Map<string, ProviderQueue>, runningCount: number, lastLaunchAt: number, cursor: number, memoryBlocked: boolean}} sched
  * @param {{dispatchLimit: number, concurrencyLimit: number, lowerdirStagger: number, providerLimits: Map<string, {concurrencyLimit: number, dispatchLimit: number}>, tasks: Map<string, Task>, startTask: (task: Task) => void}} ctx
  */
 function drainLaunchQueue(sched, ctx) {
@@ -4322,13 +4323,15 @@ function drainLaunchQueue(sched, ctx) {
 
 /**
  * Whether the global (all-provider) gates rule out launching anything right
- * now: the rate window is full, the concurrency ceiling is reached, or the
- * lowerdir stagger hasn't elapsed since the last launch.
- * @param {{launchTimes: number[], runningCount: number, lastLaunchAt: number}} sched
+ * now: the rate window is full, the concurrency ceiling is reached, the
+ * memory-admission gate is blocking, or the lowerdir stagger hasn't elapsed
+ * since the last launch.
+ * @param {{launchTimes: number[], runningCount: number, lastLaunchAt: number, memoryBlocked: boolean}} sched
  * @param {{dispatchLimit: number, concurrencyLimit: number, lowerdirStagger: number}} ctx
  * @returns {boolean}
  */
 function globalLaunchBlocked(sched, ctx) {
+  if (sched.memoryBlocked) return true;
   if (sched.launchTimes.length >= ctx.dispatchLimit) return true;
   if (sched.runningCount >= ctx.concurrencyLimit) return true;
   return Date.now() - sched.lastLaunchAt < ctx.lowerdirStagger;
@@ -4409,10 +4412,11 @@ function anyProviderHasQueuedWork(providerQueues) {
  * Arms the next launch tick when any provider queue is non-empty and no
  * timer is already pending, backing off for the longest of: the global
  * rate-window delay, the soonest provider-specific rate-window delay
- * among providers still queued, a fixed 250ms concurrency-poll delay, or
- * the remaining lowerdir stagger delay (design spec section 3).
- * @param {{launchTimer: NodeJS.Timeout|null, launchTimes: number[], providerQueues: Map<string, ProviderQueue>, runningCount: number, lastLaunchAt: number}} sched
- * @param {{dispatchLimit: number, dispatchWindow: number, concurrencyLimit: number, lowerdirStagger: number, providerLimits: Map<string, {concurrencyLimit: number, dispatchLimit: number}>, reschedule: () => void}} ctx
+ * among providers still queued, a fixed 250ms concurrency-poll delay, the
+ * remaining lowerdir stagger delay, or the memory-admission poll interval
+ * when memory is above its threshold (design spec section 3).
+ * @param {{launchTimer: NodeJS.Timeout|null, launchTimes: number[], providerQueues: Map<string, ProviderQueue>, runningCount: number, lastLaunchAt: number, memoryBlocked: boolean}} sched
+ * @param {{dispatchLimit: number, dispatchWindow: number, concurrencyLimit: number, lowerdirStagger: number, providerLimits: Map<string, {concurrencyLimit: number, dispatchLimit: number}>, memoryAdmission: {pollMs: number}|undefined, reschedule: () => void}} ctx
  */
 function scheduleNextLaunch(sched, ctx) {
   const hasQueued = anyProviderHasQueuedWork(sched.providerQueues);
@@ -4421,7 +4425,8 @@ function scheduleNextLaunch(sched, ctx) {
   const concurrencyDelay = sched.runningCount >= ctx.concurrencyLimit ? CONCURRENCY_POLL_MS : 0;
   const staggerDelay = Math.max(0, sched.lastLaunchAt + ctx.lowerdirStagger - Date.now());
   const providerDelay = soonestProviderDelay(sched.providerQueues, ctx.providerLimits, ctx.dispatchWindow);
-  sched.launchTimer = setTimeout(ctx.reschedule, Math.max(1, rateDelay, concurrencyDelay, staggerDelay, providerDelay));
+  const memoryDelay = sched.memoryBlocked && ctx.memoryAdmission ? ctx.memoryAdmission.pollMs : 0;
+  sched.launchTimer = setTimeout(ctx.reschedule, Math.max(1, rateDelay, concurrencyDelay, staggerDelay, providerDelay, memoryDelay));
 }
 
 /**
@@ -4467,8 +4472,8 @@ function providerQueueDelay(provider, queue, providerLimits, dispatchWindow) {
  * has work. Threads the factory's mutable scheduler state via `sched` so the
  * module-level helpers can read/write `launchTimer` and `runningCount`
  * without closing over the factory.
- * @param {{launchTimer: NodeJS.Timeout|null, launchTimes: number[], providerQueues: Map<string, ProviderQueue>, runningCount: number, lastLaunchAt: number, cursor: number}} sched
- * @param {{dispatchLimit: number, dispatchWindow: number, concurrencyLimit: number, lowerdirStagger: number, providerLimits: Map<string, {concurrencyLimit: number, dispatchLimit: number}>, tasks: Map<string, Task>, startTask: (task: Task) => void, reschedule: () => void}} ctx
+ * @param {{launchTimer: NodeJS.Timeout|null, launchTimes: number[], providerQueues: Map<string, ProviderQueue>, runningCount: number, lastLaunchAt: number, cursor: number, memoryBlocked: boolean}} sched
+ * @param {{dispatchLimit: number, dispatchWindow: number, concurrencyLimit: number, lowerdirStagger: number, providerLimits: Map<string, {concurrencyLimit: number, dispatchLimit: number}>, memoryAdmission: {pollMs: number, shouldBlock: () => boolean}|undefined, tasks: Map<string, Task>, startTask: (task: Task) => void, reschedule: () => void}} ctx
  */
 function runLaunchQueuedTasks(sched, ctx) {
   if (sched.launchTimer) {
@@ -4480,6 +4485,11 @@ function runLaunchQueuedTasks(sched, ctx) {
     if (queue.launchTimes.length === 0) continue;
     pruneStaleLaunchTimes(queue.launchTimes, ctx.dispatchWindow);
   }
+  // Withhold only new launches; running workers are never touched. The
+  // sample is skipped when nothing is queued so an idle daemon does no
+  // metric I/O at all.
+  const hasQueued = anyProviderHasQueuedWork(sched.providerQueues);
+  sched.memoryBlocked = hasQueued && ctx.memoryAdmission ? ctx.memoryAdmission.shouldBlock() : false;
   drainLaunchQueue(sched, ctx);
   scheduleNextLaunch(sched, ctx);
 }
@@ -4808,6 +4818,10 @@ function watchdogTick(state, ctx) {
  * @param {number} [options.maxDispatchesPerWindow]
  * @param {number} [options.dispatchWindowMs]
  * @param {number} [options.maxConcurrentTasks]
+ * @param {number} [options.memoryAdmissionPercent] - percentage of effective
+ *   memory usage at or above which new launches queue (1..100, default 85).
+ * @param {() => {percent: number}} [options.readMemoryUsageFn] - test seam for
+ *   the /proc + cgroup memory metric; defaults to `readMemoryUsage`.
  * @param {number} [options.advisorSessionTtlMs]
  * @param {number} [options.noOutputTimeoutMs]
  * @param {number} [options.postOutputNoOutputTimeoutMs]
@@ -4866,6 +4880,15 @@ function watchdogTick(state, ctx) {
  */
 
 /**
+ * The memory-metric seam, split out so adding it doesn't push
+ * {@link resolveCoreOptions} past the family's complexity ceiling.
+ * @param {Record<string, any>} rawOptions
+ */
+function resolveMemoryOptions(rawOptions) {
+  return { readMemoryUsageFn: rawOptions.readMemoryUsageFn ?? readMemoryUsage };
+}
+
+/**
  * The subset of `createTaskManager`'s options whose resolution doesn't read
  * `process.env` env vars at all (or only inside the executor
  * sub-resolution): the constructor's option-bag defaults and the
@@ -4893,6 +4916,7 @@ function resolveCoreOptions(rawOptions) {
     // manager passes undefined here and resolves the table per-dispatch
     // from disk instead (see dispatchTask's ctx.readOpencodeVariants).
     opencodeVariantsTable: rawOptions.opencodeVariantsTable,
+    ...resolveMemoryOptions(rawOptions),
     platform: rawOptions.platform ?? process.platform,
     onEvent: rawOptions.onEvent,
     config,
@@ -4926,6 +4950,35 @@ function resolveWorkspaceRootFnOption(rawOptions) {
  */
 function maxSafeResponseBytes(cap) {
   return Math.max(0, Math.floor((cap - 4096) / 6));
+}
+
+/**
+ * The memory-admission threshold is a percentage, so the shared positive-int
+ * resolver would accept 101 and cannot express the 1..100 bound. Config-file
+ * values are already range-checked by `loadConfig()`; this resolver keeps the
+ * env-var fallback lenient like its sibling options, falling through to the
+ * config value or default rather than failing daemon startup on a typo.
+ * @param {Record<string, any>} rawOptions
+ * @param {Record<string, any>} config
+ * @returns {number}
+ */
+function resolveMemoryAdmissionPercentOption(rawOptions, config) {
+  if (isValidMemoryAdmissionPercent(rawOptions.memoryAdmissionPercent)) return rawOptions.memoryAdmissionPercent;
+  const envValue = process.env.TASKFERRY_MEMORY_ADMISSION_PERCENT;
+  if (envValue !== undefined && envValue !== "") {
+    const parsed = Number(envValue);
+    if (isValidMemoryAdmissionPercent(parsed)) return parsed;
+  }
+  if (isValidMemoryAdmissionPercent(config.memoryAdmissionPercent)) return config.memoryAdmissionPercent;
+  return DEFAULT_MEMORY_ADMISSION_PERCENT;
+}
+
+/**
+ * @param {unknown} value
+ * @returns {boolean}
+ */
+function isValidMemoryAdmissionPercent(value) {
+  return Number.isInteger(value) && /** @type {number} */ (value) >= 1 && /** @type {number} */ (value) <= 100;
 }
 
 /**
@@ -4976,6 +5029,7 @@ function resolveTimeoutOptions(rawOptions) {
     maxDispatchesPerWindow: resolvePositiveIntOption(rawOptions.maxDispatchesPerWindow, process.env.TASKFERRY_MAX_DISPATCHES_PER_WINDOW, config.maxDispatchesPerWindow, DEFAULT_MAX_DISPATCHES_PER_WINDOW),
     dispatchWindowMs: resolvePositiveIntOption(rawOptions.dispatchWindowMs, process.env.TASKFERRY_DISPATCH_WINDOW_MS, config.dispatchWindowMs, DEFAULT_DISPATCH_WINDOW_MS),
     maxConcurrentTasks: resolvePositiveIntOption(rawOptions.maxConcurrentTasks, process.env.TASKFERRY_MAX_CONCURRENT_TASKS, config.maxConcurrentTasks, DEFAULT_MAX_CONCURRENT_TASKS),
+    memoryAdmissionPercent: resolveMemoryAdmissionPercentOption(rawOptions, config),
     advisorSessionTtlMs: resolvePositiveIntOption(rawOptions.advisorSessionTtlMs, process.env.TASKFERRY_ADVISOR_SESSION_TTL_MS, config.advisorSessionTtlMs, DEFAULT_ADVISOR_SESSION_TTL_MS),
     noOutputTimeoutMs: resolvePositiveIntOption(rawOptions.noOutputTimeoutMs, process.env.TASKFERRY_NO_OUTPUT_TIMEOUT_MS, config.noOutputTimeoutMs, DEFAULT_NO_OUTPUT_TIMEOUT_MS),
     postOutputNoOutputTimeoutMs: resolvePositiveIntOption(rawOptions.postOutputNoOutputTimeoutMs, process.env.TASKFERRY_POST_OUTPUT_NO_OUTPUT_TIMEOUT_MS, config.postOutputNoOutputTimeoutMs, DEFAULT_POST_OUTPUT_NO_OUTPUT_TIMEOUT_MS),
@@ -5323,6 +5377,7 @@ export function createTaskManager(options = {}) {
  * @property {ReturnType<typeof initManagerEvents>} events
  * @property {ReturnType<typeof initManagerMaps>} maps
  * @property {ReturnType<typeof initManagerSchedulers>} schedulers
+ * @property {{pollMs: number, shouldBlock: () => boolean}} memory
  * @property {ReturnType<typeof buildManagerEnvHelpers>} env
  * @property {ReturnType<typeof buildManagerActivity>} activity
  * @property {ReturnType<typeof buildManagerInternalHelpers>} helpers
@@ -5371,6 +5426,9 @@ function initManagerLimits(opts) {
     dispatchLimit: positiveInteger(opts.maxDispatchesPerWindow, DEFAULT_MAX_DISPATCHES_PER_WINDOW),
     dispatchWindow: positiveInteger(opts.dispatchWindowMs, DEFAULT_DISPATCH_WINDOW_MS),
     concurrencyLimit: positiveInteger(opts.maxConcurrentTasks, DEFAULT_MAX_CONCURRENT_TASKS),
+    memoryAdmissionPercent: isValidMemoryAdmissionPercent(opts.memoryAdmissionPercent)
+      ? opts.memoryAdmissionPercent
+      : DEFAULT_MEMORY_ADMISSION_PERCENT,
     providerLimits: opts.providerLimits,
     summaryConcurrencyLimit: Math.max(1, Math.floor(positiveInteger(opts.maxConcurrentTasks, DEFAULT_MAX_CONCURRENT_TASKS) / 2)),
     advisorTtl: positiveInteger(opts.advisorSessionTtlMs, DEFAULT_ADVISOR_SESSION_TTL_MS),
@@ -5544,6 +5602,11 @@ function initManagerSchedulers(state, maps) {
       // per manager and lives for the daemon's lifetime, so it needs no
       // getter/setter indirection the way `state`'s `let` bindings do.
       cursor: 0,
+      // Last memory-admission observation for this scheduler tick. Sampling
+      // once per tick (rather than once per queued task) keeps /proc and
+      // cgroup reads off the hot path; startTask's synchronous re-entry
+      // still re-samples before it can launch anything else.
+      memoryBlocked: false,
     },
     // Mutable bindings the extracted activity-schedule helper needs
     // read/write access to (the monotonic event sequence and the
@@ -5770,7 +5833,7 @@ function buildManagerInternalHelpers(ctx) {
      */
     summarizeTask: (taskId, options = {}) => summarizeTaskFor(taskId, options, { ensureStateLoaded: () => ctx.helpers.ensureStateLoaded(), tasks: ctx.maps.tasks, summaryConcurrencyLimit: ctx.limits.summaryConcurrencyLimit, activityCache: ctx.activity.cache, activitySummaryModel: ctx.opts.activitySummaryModel, summaryModelAvailable: (model, env) => ctx.helpers.summaryModelAvailable(model, env), LOG_DIR: ctx.paths.LOG_DIR, SUMMARY_DIR: ctx.paths.SUMMARY_DIR, persistTask: (taskId) => ctx.helpers.persistTask(taskId), pendingLaunches: ctx.maps.pendingLaunches, providerQueues: ctx.maps.providerQueues, launchQueuedTasks: () => ctx.helpers.launchQueuedTasks(), opencodeExecutor: resolveOpencodeExecutor, noSuchTask, readNarrationExcerpt }),
     /** @returns {void} */
-    launchQueuedTasks: () => { runLaunchQueuedTasks(ctx.schedulers.launchScheduler, { dispatchLimit: ctx.limits.dispatchLimit, dispatchWindow: ctx.limits.dispatchWindow, concurrencyLimit: ctx.limits.concurrencyLimit, lowerdirStagger: ctx.limits.lowerdirStagger, providerLimits: ctx.limits.providerLimits, tasks: ctx.maps.tasks, startTask: (task) => ctx.helpers.startTask(task), reschedule: () => ctx.helpers.launchQueuedTasks() }); },
+    launchQueuedTasks: () => { runLaunchQueuedTasks(ctx.schedulers.launchScheduler, { dispatchLimit: ctx.limits.dispatchLimit, dispatchWindow: ctx.limits.dispatchWindow, concurrencyLimit: ctx.limits.concurrencyLimit, lowerdirStagger: ctx.limits.lowerdirStagger, providerLimits: ctx.limits.providerLimits, memoryAdmission: ctx.memory, tasks: ctx.maps.tasks, startTask: (task) => ctx.helpers.startTask(task), reschedule: () => ctx.helpers.launchQueuedTasks() }); },
     /** Spawns a queued launch's worker process. The launch's pre-parsed
      * metadata (target dir, prompt-file routing, buildSpawnArgs output) comes
      * from resolveStartTaskLaunch; the actual spawn + child lifecycle is
@@ -6145,6 +6208,47 @@ function warmAndScheduleVariantsCacheRefresh(opts, sanitizeEnvironment, ensureCl
 }
 
 /**
+ * Rate limit for the fail-open warning. The scheduler may re-read a broken
+ * metric every memory poll; writing the same warning each time would flood
+ * the daemon's stderr while doing nothing to help recovery.
+ */
+const MEMORY_METRIC_WARN_INTERVAL_MS = 60_000;
+
+/**
+ * Builds the launch scheduler's memory-admission guard. A metric read
+ * failure is deliberately fail-open: the alternative (staying blocked until
+ * the metric is readable) would strand every queued ferry on a host whose
+ * cgroup/proc layout this build does not understand. The warning is
+ * rate-limited so a persistent failure is visible without flooding stderr.
+ * @param {ResolvedTaskManagerOptions} opts
+ * @param {ReturnType<typeof initManagerLimits>} limits
+ * @returns {{pollMs: number, shouldBlock: () => boolean}}
+ */
+function initMemoryAdmission(opts, limits) {
+  let lastWarningAt = 0;
+  return {
+    pollMs: MEMORY_ADMISSION_POLL_MS,
+    shouldBlock: () => {
+      try {
+        return /** @type {{percent: number}} */ (opts.readMemoryUsageFn()).percent >= limits.memoryAdmissionPercent;
+      } catch (error) {
+        const now = Date.now();
+        if (now - lastWarningAt >= MEMORY_METRIC_WARN_INTERVAL_MS) {
+          lastWarningAt = now;
+          try {
+            process.stderr.write(`warning: memory admission metric read failed (${errMessage(error)}); admitting new launches until the metric recovers\n`);
+          } catch {
+            // A closed stderr (EPIPE) must not turn a metric failure into a
+            // daemon crash; the scheduler's fail-open decision still stands.
+          }
+        }
+        return false;
+      }
+    },
+  };
+}
+
+/**
  * @param {ResolvedTaskManagerOptions} opts
  * @returns {ManagerContext}
  */
@@ -6156,6 +6260,7 @@ function createManagerContext(opts) {
   const events = initManagerEvents(opts, state);
   const maps = initManagerMaps();
   const schedulers = initManagerSchedulers(state, maps);
+  const memory = initMemoryAdmission(opts, limits);
   // The env/activity/helpers/api layers each take a `ctx` matching
   // `ManagerContext`. They're built in dependency order: env first (it
   // only needs paths/maps/state), then activity (which may invoke
@@ -6174,7 +6279,7 @@ function createManagerContext(opts) {
   // them changes what TypeScript attaches the cast to, it's not a
   // stylistic redundancy.
   // eslint-disable-next-line sonarjs/no-redundant-parentheses
-  const ctx = /** @type {ManagerContext} */ (/** @type {unknown} */ ({ opts, paths, limits, state, events, maps, schedulers }));
+  const ctx = /** @type {ManagerContext} */ (/** @type {unknown} */ ({ opts, paths, limits, state, events, maps, schedulers, memory }));
   ctx.env = buildManagerEnvHelpers(ctx);
   ctx.activity = buildManagerActivity(ctx);
   ctx.api = /** @type {ManagerContext["api"]} */ ({});

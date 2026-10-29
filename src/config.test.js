@@ -275,6 +275,25 @@ describe("loadConfig()", () => {
   });
 });
 
+describe("loadConfig() memory admission", () => {
+  test("accepts memoryAdmissionPercent in 1..100", () => {
+    const dir = tmpConfigDir();
+    const configPath = writeConfig(dir, JSON.stringify({ memoryAdmissionPercent: 90 }));
+    assert.deepEqual(loadConfig({ configPath }), { memoryAdmissionPercent: 90 });
+  });
+
+  test("rejects an out-of-range memoryAdmissionPercent instead of silently clamping", () => {
+    const dir = tmpConfigDir();
+    for (const value of [0, 101, 85.5]) {
+      const configPath = writeConfig(dir, JSON.stringify({ memoryAdmissionPercent: value }));
+      assert.throws(
+        () => loadConfig({ configPath }),
+        /error: config key "memoryAdmissionPercent".*must be an integer from 1 to 100.*\nhelp:/s
+      );
+    }
+  });
+});
+
 describe("loadConfig() byte caps", () => {
   test("rejects a non-positive response or output byte cap", () => {
     for (const key of ["maxResponseBytes", "maxOutputFileBytes"]) {

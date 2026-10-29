@@ -95,6 +95,13 @@ At most `TASKFERRY_MAX_DISPATCHES_PER_WINDOW` launches (default 2) are admitted 
 The scheduler also waits `TASKFERRY_LOWERDIR_STAGGER_MS` between launches
 (default `3000` ms; `lowerdirStaggerMs` in config, `0` disables it) to avoid
 overlapping lower-directory setup work.
+A separate global gate queues new launches when effective memory usage reaches
+`memoryAdmissionPercent` (default `85`; env
+`TASKFERRY_MEMORY_ADMISSION_PERCENT`, config `memoryAdmissionPercent`). Running
+workers keep running; queued work starts automatically once usage falls. The
+metric accounts for the LXC/cgroup memory limit and Linux `MemAvailable`, not
+just physical host total; `100` effectively disables the gate. See
+[daemon.md](daemon.md#concurrency-queueing-and-rate-limiting).
 
 ## `taskferry wait <id> [options]`
 

@@ -152,6 +152,21 @@ to stay under the cap for large tasks.
   allows to be `running` at once. Extra dispatches queue and start FIFO within
   each provider queue. The scheduler selects providers round-robin, subject
   to the global and provider-specific limits below.
+- `TASKFERRY_MEMORY_ADMISSION_PERCENT` / config `memoryAdmissionPercent`
+  (default `85`, valid `1-100`): one global admission gate on **effective**
+  memory usage. At or above the threshold, new launches stay `queued`; already
+  running workers are never signalled or stopped. Usage is
+  `(limit - available) / limit`, where the limit is the smaller of
+  `/proc/meminfo` `MemTotal` and any finite cgroup v1/v2 memory limit (so an
+  LXC container limit below the host total is honored), and availability is
+  the smaller of `MemAvailable` and each constrained cgroup's
+  `limit - current`. The scheduler re-reads the metric on the same poll path
+  it uses for a concurrency slot (every `1000` ms while blocked), so queued
+  work starts automatically once usage falls back below the threshold without
+  a restart. `100` effectively disables the gate. If `/proc/meminfo` or a
+  required cgroup file cannot be read or parsed, the gate **fails open**:
+  launches are admitted and a warning is written to stderr at most once per
+  minute rather than stranding every queued ferry behind a broken metric.
 - `TASKFERRY_MAX_DISPATCHES_PER_WINDOW` / `TASKFERRY_DISPATCH_WINDOW_MS`
   (defaults `2` per `5000`ms): an independent, optional burst-rate control
   on *launches*, not a concurrency cap.

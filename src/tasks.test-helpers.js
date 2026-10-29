@@ -442,6 +442,8 @@ function buildManagerOptions(options, stateDir, defaultCacheDir, defaultOverlayT
     ...passthroughIfSet({ dispatchWindowMs: options.dispatchWindowMs }, "dispatchWindowMs", "dispatchWindowMs"),
     ...passthroughIfSet({ advisorSessionTtlMs: options.advisorSessionTtlMs }, "advisorSessionTtlMs", "advisorSessionTtlMs"),
     ...passthroughIfSet({ maxConcurrentTasks: options.maxConcurrentTasks }, "maxConcurrentTasks", "maxConcurrentTasks"),
+    ...passthroughIfSet({ memoryAdmissionPercent: options.memoryAdmissionPercent }, "memoryAdmissionPercent", "memoryAdmissionPercent"),
+    ...passthroughIfSet({ readMemoryUsageFn: options.readMemoryUsageFn }, "readMemoryUsageFn", "readMemoryUsageFn"),
     ...passthroughIfSet({ noOutputTimeoutMs: options.noOutputTimeoutMs }, "noOutputTimeoutMs", "noOutputTimeoutMs"),
     ...passthroughIfSet({ postOutputNoOutputTimeoutMs: options.postOutputNoOutputTimeoutMs }, "postOutputNoOutputTimeoutMs", "postOutputNoOutputTimeoutMs"),
     ...passthroughIfSet({ preOutputMaxMs: options.preOutputMaxMs }, "preOutputMaxMs", "preOutputMaxMs"),

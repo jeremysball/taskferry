@@ -161,11 +161,11 @@ to stay under the cap for large tasks.
   LXC container limit below the host total is honored), and availability is
   the smaller of `MemAvailable` and each constrained cgroup's
   `limit - current`. The scheduler re-samples the metric on the same poll path
-  it uses for a concurrency slot: the memory poll is `1000` ms, but the timer
-  also waits out any longer concurrency, lowerdir-stagger, or rate-window
-  delay, so the next sample can be later than one second. Queued work starts
+  it uses for a concurrency slot. While the gate is blocking, it arms the next
+  sample after `1000` ms, or later if a concurrency, lowerdir-stagger,
+  provider-cap, or rate-window delay is longer. Queued work starts
   automatically once usage falls back below the threshold without a restart.
-  `100` effectively disables the gate. If `/proc/meminfo` or a
+  `100` disables the gate. If `/proc/meminfo` or a
   required cgroup value cannot be read or parsed, the gate **fails open**:
   launches are admitted and a warning is written to stderr at most once per
   minute rather than stranding every queued ferry behind a broken metric.

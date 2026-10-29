@@ -107,6 +107,23 @@ describe("memory admission gate", () => {
     }
   });
 
+  test("100 disables the gate instead of blocking only at total exhaustion", (t) => {
+    clearMemoryAdmissionEnv(t);
+    const children = [];
+    let reads = 0;
+    const mgr = makeManager({
+      ...WIDE_OPEN,
+      memoryAdmissionPercent: 100,
+      readMemoryUsageFn: () => { reads++; return usage(100); },
+      spawnFn: recordingSpawn(children),
+    });
+    const launched = mgr.dispatch({ prompt: "launch", directory: os.tmpdir() });
+    assert.equal(mgr.status(launched.id).status, "running");
+    assert.equal(children.length, 1);
+    assert.equal(reads, 0, "a disabled gate must not read or warn about the metric");
+    children[0].emit("exit", 0, null);
+  });
+
   test("never stops an already-running worker when memory crosses the threshold", (t) => {
     t.mock.timers.enable({ apis: ["setTimeout", "setInterval", "Date"] });
     clearMemoryAdmissionEnv(t);

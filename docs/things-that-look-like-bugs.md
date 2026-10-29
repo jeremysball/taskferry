@@ -57,7 +57,7 @@ belongs here.
   waits for its reply -- an in-process server would be frozen when the
   response is due, and the task would hang looking like a sandbox bug.
 - A daemon with free `maxConcurrentTasks` slots and `queued` ferries can stop
-  launching them while `memoryAdmissionPercent` (default `85`) is exceeded.
+  launching them while `memoryAdmissionPercent` (default `85`) is reached or exceeded.
   Observe: `taskferry status` shows `queued` tasks that never spawn, while
   already-running tasks keep running. Deliberate: the memory gate is a
   separate global admission limit ahead of the existing queue, so launching

@@ -199,7 +199,7 @@ function validateByteCountConfig(parsed, configPath) {
 function validateMemoryAdmissionPercent(parsed, configPath) {
   const value = parsed.memoryAdmissionPercent;
   if (value !== undefined && (!Number.isInteger(value) || /** @type {number} */ (value) < 1 || /** @type {number} */ (value) > 100)) {
-    throw new Error(`error: config key "memoryAdmissionPercent" in ${configPath} must be an integer from 1 to 100 (got ${JSON.stringify(value)})\nhelp: use a percentage such as 85, or 100 to effectively disable the gate`);
+    throw new Error(`error: config key "memoryAdmissionPercent" in ${configPath} must be an integer from 1 to 100 (got ${JSON.stringify(value)})\nhelp: use a percentage such as 85, or 100 to disable the gate`);
   }
 }
 

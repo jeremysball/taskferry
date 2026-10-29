@@ -33,7 +33,7 @@ message — there is no silent typo tolerance.
 | Config key | Env var (still works, takes precedence) | Type | Default |
 |---|---|---|---|
 | `maxConcurrentTasks` | `TASKFERRY_MAX_CONCURRENT_TASKS` | number | `4` |
-| `memoryAdmissionPercent` | `TASKFERRY_MEMORY_ADMISSION_PERCENT` | number (1-100) | `85`; when effective memory usage reaches this percentage, new launches stay `queued` while running workers continue. The metric is `MemAvailable` against the smaller of `MemTotal` and any finite LXC/cgroup v1/v2 memory limit. `100` effectively disables the gate. If the metric cannot be read, launches are admitted (fail-open) with a rate-limited warning: see `docs/daemon.md#concurrency-queueing-and-rate-limiting`. |
+| `memoryAdmissionPercent` | `TASKFERRY_MEMORY_ADMISSION_PERCENT` | number (1-100) | `85`; when effective memory usage reaches this percentage, new launches stay `queued` while running workers continue. The metric is `MemAvailable` against the smaller of `MemTotal` and any finite LXC/cgroup v1/v2 memory limit. `100` disables the gate. If the metric cannot be read, launches are admitted (fail-open) with a rate-limited warning: see `docs/daemon.md#concurrency-queueing-and-rate-limiting`. |
 | `maxDispatchesPerWindow` | `TASKFERRY_MAX_DISPATCHES_PER_WINDOW` | number | `2` |
 | `dispatchWindowMs` | `TASKFERRY_DISPATCH_WINDOW_MS` | number | `5000` |
 | `noOutputTimeoutMs` | `TASKFERRY_NO_OUTPUT_TIMEOUT_MS` | number | `256000` |

@@ -2,8 +2,8 @@ import fs from "node:fs";
 
 /**
  * Percentage of effective memory usage at or above which the launch
- * scheduler stops admitting new ferries. A value of 100 effectively disables
- * the gate; the default leaves a little headroom below an OOM.
+ * scheduler stops admitting new ferries. A value of 100 disables the gate;
+ * the default leaves a little headroom below an OOM.
  */
 export const DEFAULT_MEMORY_ADMISSION_PERCENT = 85;
 

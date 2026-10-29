@@ -6230,6 +6230,10 @@ function initMemoryAdmission(opts, limits) {
   return {
     pollMs: MEMORY_ADMISSION_POLL_MS,
     shouldBlock: () => {
+      // 100 is documented as the explicit off switch, not a threshold that
+      // blocks only at total exhaustion. Skip the metric read entirely so a
+      // disabled gate cannot warn or do /proc/cgroup I/O either.
+      if (limits.memoryAdmissionPercent >= 100) return false;
       try {
         return /** @type {{percent: number}} */ (opts.readMemoryUsageFn()).percent >= limits.memoryAdmissionPercent;
       } catch (error) {

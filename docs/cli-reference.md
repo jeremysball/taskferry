@@ -100,7 +100,7 @@ A separate global gate queues new launches when effective memory usage reaches
 `TASKFERRY_MEMORY_ADMISSION_PERCENT`, config `memoryAdmissionPercent`). Running
 workers keep running; queued work starts automatically once usage falls. The
 metric accounts for the LXC/cgroup memory limit and Linux `MemAvailable`, not
-just physical host total; `100` effectively disables the gate. See
+just physical host total; `100` disables the gate. See
 [daemon.md](daemon.md#concurrency-queueing-and-rate-limiting).
 
 ## `taskferry wait <id> [options]`

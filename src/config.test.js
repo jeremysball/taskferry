@@ -277,9 +277,11 @@ describe("loadConfig()", () => {
 
 describe("loadConfig() memory admission", () => {
   test("accepts memoryAdmissionPercent in 1..100", () => {
-    const dir = tmpConfigDir();
-    const configPath = writeConfig(dir, JSON.stringify({ memoryAdmissionPercent: 90 }));
-    assert.deepEqual(loadConfig({ configPath }), { memoryAdmissionPercent: 90 });
+    for (const value of [1, 90, 100]) {
+      const dir = tmpConfigDir();
+      const configPath = writeConfig(dir, JSON.stringify({ memoryAdmissionPercent: value }));
+      assert.deepEqual(loadConfig({ configPath }), { memoryAdmissionPercent: value });
+    }
   });
 
   test("rejects an out-of-range memoryAdmissionPercent instead of silently clamping", () => {

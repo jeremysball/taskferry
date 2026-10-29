@@ -30,7 +30,7 @@
     "start": "node src/cli.js",
     "test": "npm run test:unit",
     "test:unit": "env -u TASKFERRY_CHILD TASKFERRY_MEMORY_ADMISSION_PERCENT=100 node --test \"src/**/*.test.js\"",
-    "test:integration": "node src/smoke-test.js && node src/cancel-smoke-test.js && node src/poll-smoke-test.js",
+    "test:integration": "env TASKFERRY_MEMORY_ADMISSION_PERCENT=100 node src/smoke-test.js && env TASKFERRY_MEMORY_ADMISSION_PERCENT=100 node src/cancel-smoke-test.js && env TASKFERRY_MEMORY_ADMISSION_PERCENT=100 node src/poll-smoke-test.js",
     "skill:generate": "node scripts/generate-skill.js",
     "skill:check": "node scripts/generate-skill.js --check",
     "lint": "npm exec --no -- eslint .",

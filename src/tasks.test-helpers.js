@@ -21,6 +21,14 @@ import { after } from "node:test";
 import { createTaskManager, DEFAULT_SUMMARY_MODEL, parseEnvDenylist } from "./tasks.js";
 import { setOpencodeExecutorOverride } from "./executor.js";
 
+// `npm test` sets this too. Setting it here as well keeps a single test file
+// deterministic when run directly with `node --test`: the gate defaults on at
+// 85% and a loaded host would otherwise queue dispatches these tests expect
+// to launch synchronously. Memory-gate tests clear it themselves.
+if (process.env.TASKFERRY_MEMORY_ADMISSION_PERCENT === undefined) {
+  process.env.TASKFERRY_MEMORY_ADMISSION_PERCENT = "100";
+}
+
 const trackedTempDirs = [];
 const trackedManagers = [];
 

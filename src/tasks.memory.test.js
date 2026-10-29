@@ -124,6 +124,22 @@ describe("memory admission gate", () => {
     children[0].emit("exit", 0, null);
   });
 
+  test("does not read the metric when no launch is queued", (t) => {
+    clearMemoryAdmissionEnv(t);
+    const children = [];
+    let reads = 0;
+    const mgr = makeManager({
+      ...WIDE_OPEN,
+      readMemoryUsageFn: () => { reads++; return usage(0); },
+      spawnFn: recordingSpawn(children),
+    });
+    const launched = mgr.dispatch({ prompt: "launch", directory: os.tmpdir() });
+    const readsAfterLaunch = reads;
+    children[0].emit("exit", 0, null);
+    assert.equal(mgr.status(launched.id).status, "done");
+    assert.equal(reads, readsAfterLaunch, "an empty queue must not trigger metric I/O when a worker exits");
+  });
+
   test("never stops an already-running worker when memory crosses the threshold", (t) => {
     t.mock.timers.enable({ apis: ["setTimeout", "setInterval", "Date"] });
     clearMemoryAdmissionEnv(t);
@@ -226,19 +242,23 @@ describe("memory admission gate", () => {
 });
 
 describe("memory admission gate failure handling", () => {
-  test("fails open when the metric read throws, so queued work is not stranded", () => {
+  test("fails open when the metric read throws, so queued work is not stranded", (t) => {
+    clearMemoryAdmissionEnv(t);
     const children = [];
-    const mgr = makeManager({
-      ...WIDE_OPEN,
-      readMemoryUsageFn: () => { throw new Error("metric unavailable"); },
-      spawnFn: recordingSpawn(children),
+    const stderr = captureStderr(() => {
+      const mgr = makeManager({
+        ...WIDE_OPEN,
+        readMemoryUsageFn: () => { throw new Error("metric unavailable"); },
+        spawnFn: recordingSpawn(children),
+      });
+      const first = mgr.dispatch({ prompt: "first", directory: os.tmpdir() });
+      const second = mgr.dispatch({ prompt: "second", directory: os.tmpdir() });
+      assert.equal(mgr.status(first.id).status, "running", "a broken metric must not block the first launch");
+      assert.equal(mgr.status(second.id).status, "running", "a broken metric must not block subsequent launches");
+      children[0].emit("exit", 0, null);
+      children[1].emit("exit", 0, null);
     });
-    const first = mgr.dispatch({ prompt: "first", directory: os.tmpdir() });
-    const second = mgr.dispatch({ prompt: "second", directory: os.tmpdir() });
-    assert.equal(mgr.status(first.id).status, "running", "a broken metric must not block the first launch");
-    assert.equal(mgr.status(second.id).status, "running", "a broken metric must not block subsequent launches");
-    children[0].emit("exit", 0, null);
-    children[1].emit("exit", 0, null);
+    assert.match(stderr, /memory admission metric read failed/);
   });
 
   test("warns at most once per minute on a persistent metric failure", (t) => {
@@ -279,6 +299,26 @@ describe("memory admission gate failure handling", () => {
       });
       const queued = mgr.dispatch({ prompt: "queued", directory: os.tmpdir() });
       assert.equal(mgr.status(queued.id).status, "queued", "the env override (30) wins over config (90)");
+      assert.equal(children.length, 0);
+    } finally {
+      t.mock.timers.reset();
+    }
+  });
+
+  test("ignores an out-of-range env value and uses the config threshold", (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout", "setInterval", "Date"] });
+    preserveEnvVars(t, ["TASKFERRY_MEMORY_ADMISSION_PERCENT"]);
+    process.env.TASKFERRY_MEMORY_ADMISSION_PERCENT = "101";
+    try {
+      const children = [];
+      const mgr = makeManager({
+        ...WIDE_OPEN,
+        config: { memoryAdmissionPercent: 60 },
+        readMemoryUsageFn: () => usage(60),
+        spawnFn: recordingSpawn(children),
+      });
+      const queued = mgr.dispatch({ prompt: "queued", directory: os.tmpdir() });
+      assert.equal(mgr.status(queued.id).status, "queued", "invalid env 101 must fall back to config 60, not disable the gate");
       assert.equal(children.length, 0);
     } finally {
       t.mock.timers.reset();

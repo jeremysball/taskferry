@@ -296,8 +296,8 @@ describe("readMemoryUsage() malformed metric boundary", () => {
 });
 
 describe("memory admission constants", () => {
-  test("document the 85% default and a bounded poll interval", () => {
+  test("document the 85% default and the documented 1000 ms poll interval", () => {
     assert.equal(DEFAULT_MEMORY_ADMISSION_PERCENT, 85);
-    assert.ok(MEMORY_ADMISSION_POLL_MS > 0);
+    assert.equal(MEMORY_ADMISSION_POLL_MS, 1000);
   });
 });

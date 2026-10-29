@@ -556,6 +556,12 @@ describe("defaultDenyList()", () => {
         fs.writeFileSync(file, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
       }
     }
+    const originalPath = process.env.PATH;
+    // Ambient process.env points only at the caller's shadowing bin. Pass the
+    // daemon PATH explicitly: a resolver that ignored this env and fell back
+    // to process.env would select caller-bin/bwrap and fail below.
+    process.env.PATH = `${callerBin}${path.delimiter}relative-bin`;
+    t.after(() => { process.env.PATH = originalPath; });
     const launchers = resolveSandboxLaunchers({
       env: { PATH: `${ambientBin}${path.delimiter}relative-bin` },
     });

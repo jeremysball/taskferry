@@ -253,17 +253,26 @@ describe("startCheckGate launcher identity", () => {
       fs.writeFileSync(file, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
     }
     const spawns = [];
+    const resolverCalls = [];
     dispatchAndSettleWithChanges({
       spawns,
       directory,
       env: { PATH: `${callerBin}${path.delimiter}${process.env.PATH}` },
       managerOptions: {
-        resolveSandboxLaunchersFn: () => ({
-          bwrapPath: fs.realpathSync(trustedBwrap),
-          shellPath: fs.realpathSync(trustedSh),
-        }),
+        resolveSandboxLaunchersFn: (...args) => {
+          resolverCalls.push(args);
+          return {
+            bwrapPath: fs.realpathSync(trustedBwrap),
+            shellPath: fs.realpathSync(trustedSh),
+          };
+        },
       },
     });
+
+    assert.ok(resolverCalls.length >= 1, "the launch path must resolve launchers");
+    for (const args of resolverCalls) {
+      assert.deepEqual(args, [], "the launcher resolver must never receive caller-controlled arguments");
+    }
 
     assert.equal(spawns.length, 2);
     assert.equal(spawns[0].cmd, fs.realpathSync(trustedBwrap), "the worker must spawn the daemon-resolved bwrap, not a caller-PATH shim");

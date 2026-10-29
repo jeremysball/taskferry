@@ -17,6 +17,11 @@ export const DEFAULT_OPENCODE_VERSION_TTL_MS = 5 * 60 * 1000;
 // exposes the 1.x argv) all return a real number, while a parse failure
 // stays a parse failure rather than being fished out of arbitrary output.
 const OPENCODE_VERSION_PARSE_RE = /^(?:opencode\s+)?v?(\d+)\.\d+/m;
+// Bound the per-identity memo: a long-lived daemon can see an unbounded
+// stream of caller PATH values (one per shell/tool-manager combination).
+// Each entry is small, but it must not grow forever. Evict finished entries
+// FIFO; an entry with an in-flight probe is never dropped mid-probe.
+export const MAX_OPENCODE_VERSION_IDENTITIES = 64;
 
 /**
  * Per-executable-identity memos for the detected opencode CLI major version:
@@ -40,6 +45,19 @@ function opencodeExecutableIdentity(env) {
 }
 
 /**
+ * Drops the oldest finished memo entry, if any. Entries with an in-flight
+ * probe are skipped so eviction can never orphan a probe's result.
+ */
+function evictFinishedMemo() {
+  for (const [identity, memo] of opencodeVersionMemos) {
+    if (memo.inFlight === null) {
+      opencodeVersionMemos.delete(identity);
+      return;
+    }
+  }
+}
+
+/**
  * Returns the memo entry for an executable identity, creating an empty one
  * on first use. Callers mutate the returned object for the same identity.
  * @param {string} identity
@@ -47,6 +65,7 @@ function opencodeExecutableIdentity(env) {
 function memoFor(identity) {
   let memo = opencodeVersionMemos.get(identity);
   if (!memo) {
+    if (opencodeVersionMemos.size >= MAX_OPENCODE_VERSION_IDENTITIES) evictFinishedMemo();
     memo = { major: null, at: 0, inFlight: null };
     opencodeVersionMemos.set(identity, memo);
   }
@@ -210,4 +229,9 @@ export function ensureOpencodeCliMajor({ execFileFn = execFileAsync, now = () =>
 /** Test-only: forget every memoized opencode version and in-flight probe. */
 export function resetOpencodeCliProbe() {
   opencodeVersionMemos = new Map();
+}
+
+/** Test-only: current number of memoized executable identities. */
+export function _opencodeVersionMemoSize() {
+  return opencodeVersionMemos.size;
 }

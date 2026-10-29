@@ -678,9 +678,11 @@ describe("summarize(): per-caller-env listModels cache (Fix 1)", () => {
   });
 
   test("summary cache ignores cosmetic env differences that don't change which models a provider exposes (no per-call fragmentation)", async () => {
-    // Fix 1: the fingerprint deliberately excludes high-churn unrelated
-    // caller vars (PATH, LANG, USER, ...) so a caller changing cosmetic
-    // vars doesn't trigger a fresh listModelsFn shell-out within the TTL.
+    // Fix 1: the fingerprint deliberately includes PATH (it selects which
+    // opencode binary the probe and worker resolve) while excluding other
+    // high-churn cosmetic caller vars (LANG, USER, ...), so a caller changing
+    // only those vars doesn't trigger a fresh listModelsFn shell-out within
+    // the TTL.
     /** @type {Array<EventEmitter>} */
     const spawned = [];
     let listModelsCalls = 0;

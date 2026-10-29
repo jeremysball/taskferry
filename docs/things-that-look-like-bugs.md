@@ -94,7 +94,7 @@ belongs here.
   gate-supervisor because the gate was technically still "running".
 - A check gate re-run after a daemon restart using the *current* env-file
   values instead of the value that was live when the worker ran, expected
-  for that one re-run. A normal same-process gate uses the exact base
+  for that one re-run. A normal same-process gate uses the launch-time base
   environment captured at worker launch (env file + ambient + caller), so a
   reload during the worker's run cannot silently change the gate's
   configuration. That launch snapshot is deliberately kept in memory by
@@ -105,6 +105,15 @@ belongs here.
   This is a real bug if a same-process gate stops seeing its worker's
   launch-time file/caller values, or if the restart gate ignores
   `resumeEnv` while it is available.
+- A check gate that does not see the worker's *final* executor environment or
+  every per-dispatch bind, expected, and a known limitation rather than a
+  regression. The gate reuses the launch base env (before executor
+  `sandboxEnv` overrides such as `XDG_*`, `PI_CODING_AGENT_DIR`, and Kilo's
+  data-home overrides), and it replays `.taskferry.toml`'s `read_only_paths`
+  but not per-dispatch `--ro-bind`/`--rw-bind`, global allowed dirs, the
+  sandboxed data-home bind, or the task output dir. A project check that
+  depends on those should be made explicit in the repository config; the
+  limitation is tracked for a follow-up if a real check hits it.
 - A caller's `PATH` changing which `opencode`/`pi`/`kilo` or workload tool a
   worker resolves, expected. `PATH` is forwarded from the caller (above the
   daemon's ambient value) so tool-manager shims are visible to the worker

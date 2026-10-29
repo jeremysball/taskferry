@@ -7208,11 +7208,14 @@ function appendBoundedOutput(tail, chunk) {
 
 /**
  * Builds the check gate's child environment from an already-resolved base
- * env. Same-process gates pass the exact launch-time env object the worker
- * used (kept by reference in `launchEnvironments`, not cloned), so a
+ * env. Same-process gates pass the launch-time base env object the worker was
+ * built from (kept by reference in `launchEnvironments`, not cloned), so a
  * caller-forwarded PATH or other tool config cannot disappear between the
  * worker and its post-run check, and an env-file reload during the run
- * cannot silently give the gate a different configuration.
+ * cannot silently give the gate a different configuration. This is the base
+ * env before executor-specific `sandboxEnv` overrides (XDG_*, pi/kilo data
+ * homes), which are not persisted for the gate to replay; see the known-gap
+ * note in startCheckGate.
  *
  * The helper strips TASKFERRY_* control markers (the gate is an internal
  * verification spawn, not a ferry: an ambient TASKFERRY_CHILD left over from
@@ -7323,14 +7326,18 @@ function startCheckGate(task, ctx) {
     socketPath: null,
     denyList,
   }).concat(["--", shellPath, "-c", projectConfig.check]);
-  // Known gap, not fixed in this pass: unlike the worker's spawn
+  // Known gaps, not fixed in this pass: (1) unlike the worker's spawn
   // (buildBwrapBinds), the gate does not forward the worker's
   // extraRwBinds/extraRwPairBinds (executor auth binds, allowedDirs, the
-  // sandboxed data home) -- those aren't currently persisted anywhere on
-  // `task` for the gate to reuse. A check command that specifically needs
-  // one of those (rather than read_only_paths, which IS threaded above)
-  // will diverge from the worker's view. Flagged for a follow-up if a real
-  // check command hits it; not blocking this plan.
+  // sandboxed data home) or its per-dispatch `--ro-bind`/`--rw-bind` lists
+  // and output dir; those aren't currently persisted anywhere on `task` for
+  // the gate to reuse. (2) The env above is the launch base env, not the
+  // worker's final executor `sandboxEnv` (XDG_*, PI_CODING_AGENT_DIR), so a
+  // check that depends on an executor-specific override can diverge. A check
+  // command that specifically needs one of these (rather than
+  // read_only_paths, which IS threaded above) will diverge from the worker's
+  // view. Flagged for a follow-up if a real check command hits it; not
+  // blocking this plan.
 
   task.checkStatus = "running";
   task.checkCommand = projectConfig.check;

@@ -1,7 +1,7 @@
 import { describe, test, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import os from "node:os";
-import { ensureOpencodeCliMajor, detectOpencodeCliMajor, resetOpencodeCliProbe } from "./opencode-version.js";
+import { ensureOpencodeCliMajor, detectOpencodeCliMajor, resetOpencodeCliProbe, MAX_OPENCODE_VERSION_IDENTITIES, _opencodeVersionMemoSize } from "./opencode-version.js";
 import { opencodeExecutor } from "./opencode-executor.js";
 import { readVariantsCache, hashFingerprint, VARIANTS_CACHE_SCHEMA } from "./variants-cache.js";
 import { makeManager, fakeChild, mkdtempTracked, waitForCaptured, makeFakeExecutor } from "./tasks.test-helpers.js";
@@ -61,6 +61,25 @@ describe("ensureOpencodeCliMajor()", () => {
     t = TTL_MS;
     await ensureOpencodeCliMajor(opts);
     assert.equal(probe.calls(), 2);
+  });
+
+  test("the per-PATH memo is bounded, and an evicted identity is probed again", async () => {
+    let calls = 0;
+    const execFileFn = /** @type {any} */ (async () => {
+      calls += 1;
+      return { stdout: "1.2.3", stderr: "" };
+    });
+    const firstPath = "/caller/identity-0";
+    for (let i = 0; i < MAX_OPENCODE_VERSION_IDENTITIES + 8; i++) {
+      await ensureOpencodeCliMajor({ execFileFn, env: { PATH: i === 0 ? firstPath : `/caller/identity-${i}` } });
+    }
+    assert.ok(
+      _opencodeVersionMemoSize() <= MAX_OPENCODE_VERSION_IDENTITIES,
+      `memo size ${_opencodeVersionMemoSize()} exceeded ${MAX_OPENCODE_VERSION_IDENTITIES}`,
+    );
+    const before = calls;
+    assert.equal(await ensureOpencodeCliMajor({ execFileFn, env: { PATH: firstPath } }), 1);
+    assert.equal(calls, before + 1, "the oldest identity must have been evicted and re-probed");
   });
 
   test("concurrent callers share one in-flight probe", async () => {

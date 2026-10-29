@@ -96,22 +96,38 @@ the old restart-required behavior for that one field.
   Modes such as `0400`, `0600`, and `0700` pass. `loadEnvFile()` fails
   daemon startup on any file readable by group or other, the same
   fail-loud stance as a missing/malformed file (see `docs/config.md`).
-- The fixed set of daemon-controlled plumbing variables below (`PATH`,
-  `HOME`, and the `TASKFERRY_*` names in `TASKFERRY_PLUMBING_ENV_VARS`) is
-  excluded from the env-file layer exactly the same way it's excluded from
-  the caller layer — a value for `TASKFERRY_SOCKET_PATH` (for instance) set
-  in the env file can never reach a spawned child, even when the daemon's
-  own ambient environment happens not to have that variable set (in which
-  case a naive union would otherwise let the file's value through
-  unopposed).
+- The fixed set of daemon-controlled plumbing variables below (`HOME` and
+  the `TASKFERRY_*` names in `TASKFERRY_PLUMBING_ENV_VARS`) is excluded from
+  the env-file layer exactly the same way it's excluded from the caller
+  layer, a value for `TASKFERRY_SOCKET_PATH` (for instance) set in the env
+  file can never reach a spawned child, even when the daemon's own ambient
+  environment happens not to have that variable set (in which case a naive
+  union would otherwise let the file's value through unopposed).
+- `PATH` is deliberately forwarded from the caller and overlays the daemon's
+  ambient `PATH` in the caller layer. A caller's shell is where tool managers
+  (mise shims, uv, nvm, …) install binaries, and both the worker and its
+  settle-time check gate resolve workload tools through that same
+  environment. The env file's `PATH` still sits below the daemon's ambient
+  `PATH` under the normal envFile < ambient < caller precedence, so a
+  file-only value cannot override an ambient one. Adding `PATH` to
+  `TASKFERRY_ENV_DENYLIST` is not a caller-only filter: the denylist is
+  applied last to every spawned child, so it strips `PATH` from the worker
+  and gate too. There is no per-layer caller filter; the forwarding boundary
+  assumes the local caller is the same trusted user as the daemon.
+- The sandbox's `bwrap` launcher and the gate's command shell are not
+  workload tools. The daemon resolves both to validated absolute paths from
+  its own ambient `PATH` (never the caller-forwarded path) and executes those
+  absolute paths directly. A caller can set `PATH` for the tools the
+  workload invokes, but cannot substitute the process that enforces the
+  sandbox or the shell that runs the project's check command.
 - The daemon and every caller run as the same local user over a `0600`
   socket (see "Filesystem and socket permissions" above) — there's no
   trust boundary being crossed by a live caller handing over its own
   environment, since a caller can already read the daemon's own ambient
   env via `/proc` and run arbitrary code via dispatch prompts.
 - A fixed set of daemon-controlled plumbing variables can never be
-  overridden by a caller's env, regardless of what it sets: `PATH`,
-  `HOME`, `TASKFERRY_STATE_DIR`, `TASKFERRY_RUNTIME_DIR`,
+  overridden by a caller's env, regardless of what it sets: `HOME`,
+  `TASKFERRY_STATE_DIR`, `TASKFERRY_RUNTIME_DIR`,
   `TASKFERRY_CACHE_DIR`, `TASKFERRY_SOCKET_PATH`, `TASKFERRY_OVERLAY_TMP_DIR`.
   These are resolved once
   at the daemon's own startup; letting a caller override any of them (most

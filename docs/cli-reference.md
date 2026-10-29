@@ -361,8 +361,9 @@ survived, or starting fresh against the same `--directory` otherwise):
   true` on the task.
 - `checkStatus: "interrupted"` — refuse with the fix-forward message
   (rendered as a re-run notice rather than a dead-looking `exit: null`).
-  The gate was killed by a daemon restart; on the next daemon boot the
-  gate auto-re-runs whenever the task's overlay survived. Override with
+  The gate was killed by a daemon restart after its running status became
+  durable; on the next daemon boot the gate auto-re-runs whenever the
+  task's overlay survived. Override with
   `--force` only if you do not want the auto re-run to gate this
   changeset.
 - `checkStatus: "running"` — refuse with `error: check gate still

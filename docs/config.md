@@ -402,15 +402,19 @@ today the message is the same in both cases.
                is gone and the task is rejected)
 ```
 
-When a daemon restart lands mid-gate, every `checkStatus: "running"`
-task with `changesetStatus: "pending"` is reclassified as
-`"interrupted"`. If its overlay is still live, the gate is re-invoked
-automatically (which flips `checkStatus` back to `"running"`); if the
-overlay was swept away between the daemon's death and its restart, the
-task is left at `"interrupted"` and `accept` keeps refusing it without
-`--force`. The "interrupted" failure message renders the auto re-run
-path explicitly, so a user landing on a stuck task understands why the
-gate is not yet decided and what they can do about it.
+When a daemon restart lands mid-gate, every task whose last durable
+`tasks.json` write recorded `checkStatus: "running"` with
+`changesetStatus: "pending"` is reclassified as `"interrupted"`. If its
+overlay is still live, the gate is re-invoked automatically (which flips
+`checkStatus` back to `"running"`); if the overlay was swept away between
+the daemon's death and its restart, the task is left at `"interrupted"`
+and `accept` keeps refusing it without `--force`. Task-state persistence
+is debounced, so a crash in the narrow window after gate start but before
+that first running-status write is durable leaves the prior record (often
+`"none"`); that task is not auto-rerun because there is no durable
+evidence a gate was running. The "interrupted" failure message renders the
+auto re-run path explicitly, so a user landing on a stuck task understands
+why the gate is not yet decided and what they can do about it.
 
 The recorded fields on the task record (visible via
 `taskferry status <id> --full` / `taskferry result <id> --fields ...`)
@@ -434,7 +438,7 @@ verbatim so the docs and the implementation cannot drift:
 |---|---|
 | no `.taskferry.toml` / no `check` key | gate skipped, `checkStatus: none`; an accepted changeset produces the CLI's no-check warning, while lean status/result omit the neutral gate fields |
 | check run exceeds timeout | killed, `checkStatus: timeout`, treated as failure |
-| daemon crashes mid-gate | task settles with `checkStatus: interrupted`; gate re-runnable; never silently passed |
+| daemon crashes mid-gate after the running status is durably persisted | task settles with `checkStatus: interrupted`; gate re-runnable when its overlay survives; never silently passed |
 | `.taskferry.toml` unparseable | dispatch proceeds, gate skipped (`checkStatus: none`), and the parse error is attached as `projectConfigWarning` when sandbox bind or gate processing runs |
 | `read_only_paths`/`roBind` entry doesn't exist on host | dispatch proceeds without that binding, warning surfaced in `status --full` (paths may legitimately differ between machines) |
 | check command itself not found at runtime | `checkStatus: failed` with the spawn error in `checkOutputTail` |

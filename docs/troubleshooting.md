@@ -74,14 +74,19 @@ confirm nothing else holds that path open (`lsof <socket-path>` on macOS,
 The task's worker CLI itself failed to launch — `opencode`, `pi` or `kilo`,
 whichever the task's executor selected (explicitly via `--executor`, or the
 daemon's configured default) — usually because that binary isn't installed
-or isn't on the `PATH` the daemon was started with. Confirm with `which
-opencode`/`which pi`/`which kilo` in the same shell/environment the daemon
-auto-started
-from (remember: the daemon inherits environment from whichever command
-first triggered its auto-start, not necessarily your current shell — see
+or isn't on the `PATH` used for that launch. For a CLI `dispatch`/`advisor`/
+`summary`, the caller's `PATH` is forwarded and wins over the daemon's
+ambient `PATH`. For requests that carry no caller env (notably the MCP
+bridge's `task.dispatch`), only the env-file and daemon-ambient layers are
+available. Confirm with `which opencode`/`which pi`/`which kilo` in the
+caller shell **and** in the shell/environment the daemon auto-started from
+(remember: the daemon inherits environment from whichever command first
+triggered its auto-start, not necessarily your current shell, see
 [daemon.md](daemon.md#auto-start)). If you just installed the missing
-binary, stop the existing daemon (it started before that binary was on
-`PATH`) and let the next command spawn a fresh one.
+binary, either put it on `PATH` for the caller (CLI) or the env file/daemon
+environment (MCP), then re-dispatch. A caller `PATH` cannot choose the
+daemon's `bwrap` or the gate shell; those are resolved from the daemon's
+ambient `PATH`.
 
 ## A task is stuck `crashed` with `failureReason: "no_output_timeout_dead_spawn"` or `"no_output_timeout_stalled"`
 

@@ -81,13 +81,41 @@ belongs here.
    itself — resume always uses a fresh overlay and a new spawn with the
    recovered `sessionId`.
 - `checkStatus: "interrupted"` on a task after a daemon restart that killed
-  the previous daemon mid-gate — expected (Task 7); the only way out is to
-  re-run the gate (auto re-run if the overlay survived, or accept with
-  `--force` after manual verification if the gate is the wrong gate to
-  re-run). The pre-fix alternative was `checkStatus: "running"` forever,
-  with no settle path and no error message, and `accept --force` blocked
-  by Task 6's gate-supervisor because the gate was technically still
-  "running".
+  the previous daemon mid-gate, expected (Task 7) **when `tasks.json`
+  already recorded `checkStatus: "running"` and the overlay survived**; the
+  only way out is to re-run the gate (auto re-run in the latter case, or
+  accept with `--force` after manual verification if the gate is the wrong
+  gate to re-run). Task-state persistence is debounced, so a crash in the
+  narrow window after gate start but before that running status is durably
+  written can leave the last record at `checkStatus: "none"`; that task is
+  not auto-rerun (there is no durable evidence a gate was running). The
+  pre-fix alternative was `checkStatus: "running"` forever, with no settle
+  path and no error message, and `accept --force` blocked by Task 6's
+  gate-supervisor because the gate was technically still "running".
+- A check gate re-run after a daemon restart using the *current* env-file
+  values instead of the value that was live when the worker ran, expected
+  for that one re-run. A normal same-process gate uses the exact base
+  environment captured at worker launch (env file + ambient + caller), so a
+  reload during the worker's run cannot silently change the gate's
+  configuration. That launch snapshot is deliberately kept in memory by
+  reference and not persisted; after a restart the gate rebuilds from the
+  pre-existing persisted `resumeEnv` caller snapshot plus the current
+  env-file/ambient layers. If a check genuinely depends on an env-file value
+  that rotated across the restart, fix the file forward and re-dispatch.
+  This is a real bug if a same-process gate stops seeing its worker's
+  launch-time file/caller values, or if the restart gate ignores
+  `resumeEnv` while it is available.
+- A caller's `PATH` changing which `opencode`/`pi`/`kilo` or workload tool a
+  worker resolves, expected. `PATH` is forwarded from the caller (above the
+  daemon's ambient value) so tool-manager shims are visible to the worker
+  and its check gate; `HOME` and the daemon plumbing vars remain
+  daemon-controlled. This does not let the caller choose the sandbox itself:
+  the daemon resolves `bwrap` and the gate's shell to absolute paths from its
+  own ambient `PATH`. It becomes a real bug if a caller's `PATH` can select
+  either of those daemon executables, or if a worker and its same-process
+  gate resolve different `PATH` identities for one launch. Do not add `PATH`
+  to `TASKFERRY_ENV_DENYLIST` as a caller-only workaround; the denylist
+  applies to every child and would strip the worker too.
 - `taskferry wait` returning with `status: "running"` and a `note` about
   timing out — expected when the 15-minute default timeout (or an explicit
   `--timeout`) elapses before the task settles; re-run `taskferry wait`

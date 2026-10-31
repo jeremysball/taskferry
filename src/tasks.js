@@ -14,7 +14,7 @@ import { MAX_BUFFER_BYTES, DEFAULT_MAX_BUFFER_BYTES } from "./daemon-server.js";
 import { errCode } from "./errors.js";
 import { isNonNegativeInteger, isPositiveInteger } from "./numbers.js";
 import { resolveBooleanToggle, resolveNonNegativeIntOption, resolvePositiveIntOption, resolveResponseCapBytes } from "./options.js";
-import { buildBwrapArgs, checkBwrapAvailable, checkOverlaySupport, platformSupportsSandbox, resolveGitCommonDir, resolveGitDir, resolveSandboxDenyList } from "./sandbox.js";
+import { buildBwrapArgs, checkBwrapAvailable, checkOverlaySupport, platformSupportsSandbox, resolveGitCommonDir, resolveGitDir, resolveSandboxDenyList, resolveSandboxLaunchers } from "./sandbox.js";
 import { applyChangeset, overlayPaths, resolvePreDispatchHead, subOverlayPaths, subFilePaths, cleanupOverlay, defaultRunCommand as defaultOverlayRunCommand, extractGitDiff, extractNonGitDiff, OVERLAY_MOUNT_BUSY_PATTERN } from "./changeset.js";
 import { resolveExecutor } from "./executor.js";
 import { pickInstructionsFile } from "./executor-shared.js";
@@ -822,6 +822,8 @@ export function isOutsideDirectory(directory, candidate) {
  * @property {(task: Task) => void} decRunning
  * @property {(task: Task) => void} incRunning
  * @property {(pid: number) => string|null} [readProcStartTimeFn]
+ * @property {WeakMap<Task, NodeJS.ProcessEnv>} launchEnvironments worker launch-time base env, keyed by task identity
+ * @property {() => {bwrapPath: string, shellPath: string}} resolveSandboxLaunchers daemon-ambient absolute launcher/shell resolver
  */
 
 /**
@@ -856,10 +858,10 @@ export function isOutsideDirectory(directory, candidate) {
  * (e.g. opencode's CLI major-version probe) via `prepareLaunch`; we never
  * reach for an `executor.id` switch in this generic code.
  * @param {import("./executor.js").WorkerExecutor} executor
- * @param {{isSummary: boolean, summaryLaunch: SummaryLaunch, dispatchLaunch: DispatchLaunch, launchDirectory: string, promptFilePath: string|null}} p
+ * @param {{isSummary: boolean, summaryLaunch: SummaryLaunch, dispatchLaunch: DispatchLaunch, launchDirectory: string, promptFilePath: string|null, launchEnv: NodeJS.ProcessEnv}} p
  * @returns {string[]}
  */
-function buildLaunchSpawnArgs(executor, { isSummary, summaryLaunch, dispatchLaunch, launchDirectory, promptFilePath }) {
+function buildLaunchSpawnArgs(executor, { isSummary, summaryLaunch, dispatchLaunch, launchDirectory, promptFilePath, launchEnv }) {
   return executor.buildSpawnArgs({
     isSummary,
     launchDirectory,
@@ -870,6 +872,7 @@ function buildLaunchSpawnArgs(executor, { isSummary, summaryLaunch, dispatchLaun
     prompt: isSummary ? "" : dispatchLaunch.prompt,
     sessionId: resolveLaunchSessionId(isSummary, summaryLaunch, dispatchLaunch),
     executorArgs: isSummary ? undefined : dispatchLaunch.executorArgs,
+    env: launchEnv,
   });
 }
 
@@ -897,9 +900,10 @@ function resolveLaunchSessionId(isSummary, summaryLaunch, dispatchLaunch) {
  * @param {Task} task
  * @param {LaunchSpec} launch
  * @param {{SUMMARY_DIR: string, PROMPT_DIR: string}} ctx
- * @returns {{isSummary: boolean, summaryLaunch: SummaryLaunch, dispatchLaunch: DispatchLaunch, executor: import("./executor.js").WorkerExecutor, launchDirectory: string, promptFilePath: string|null, args: string[], cleanUpScratchFiles: () => void, registerScratchCleanup: (cleanup: () => void) => void}}
+ * @param {NodeJS.ProcessEnv} launchEnv base sanitized env resolved once at launch
+ * @returns {{isSummary: boolean, summaryLaunch: SummaryLaunch, dispatchLaunch: DispatchLaunch, executor: import("./executor.js").WorkerExecutor, launchDirectory: string, promptFilePath: string|null, args: string[], launchEnv: NodeJS.ProcessEnv, cleanUpScratchFiles: () => void, registerScratchCleanup: (cleanup: () => void) => void}}
  */
-function resolveStartTaskLaunch(task, launch, ctx) {
+function resolveStartTaskLaunch(task, launch, ctx, launchEnv) {
   const isSummary = launch.kind === "summary";
   const summaryLaunch = /** @type {SummaryLaunch} */ (launch);
   const dispatchLaunch = /** @type {DispatchLaunch} */ (launch);
@@ -912,7 +916,7 @@ function resolveStartTaskLaunch(task, launch, ctx) {
   const promptFilePath = !isSummary && Buffer.byteLength(dispatchLaunch.prompt, "utf8") > PROMPT_ARGV_SAFE_BYTES
     ? path.join(ctx.PROMPT_DIR, `${task.id}.prompt.txt`)
     : null;
-  const args = buildLaunchSpawnArgs(executor, { isSummary, summaryLaunch, dispatchLaunch, launchDirectory, promptFilePath });
+  const args = buildLaunchSpawnArgs(executor, { isSummary, summaryLaunch, dispatchLaunch, launchDirectory, promptFilePath, launchEnv });
   /** @type {Array<() => void>} */
   const scratchCleanups = [];
   const cleanUpScratchFiles = () => {
@@ -922,7 +926,7 @@ function resolveStartTaskLaunch(task, launch, ctx) {
   };
   /** @param {() => void} cleanup */
   const registerScratchCleanup = (cleanup) => { scratchCleanups.push(cleanup); };
-  return { isSummary, summaryLaunch, dispatchLaunch, executor, launchDirectory, promptFilePath, args, cleanUpScratchFiles, registerScratchCleanup };
+  return { isSummary, summaryLaunch, dispatchLaunch, executor, launchDirectory, promptFilePath, args, launchEnv, cleanUpScratchFiles, registerScratchCleanup };
 }
 
 /**
@@ -934,12 +938,14 @@ function resolveStartTaskLaunch(task, launch, ctx) {
  * unavailable it throws here instead of degrading to unsandboxed writes.
  * @param {StartTaskContext} ctx
  * @param {ReturnType<typeof resolveStartTaskLaunch>} launchInfo
- * @param {string} taskId
  * @returns {{noSandbox: boolean, spawnCommand: string, spawnArgs: string[], spawnEnv: NodeJS.ProcessEnv, role: "dispatch"|"advisor"|null}}
  */
-function resolveSpawnPlan(ctx, launchInfo, taskId) {
-  const { isSummary, summaryLaunch, dispatchLaunch, executor, args } = launchInfo;
-  const spawnEnv = isSummary ? ctx.summaryEnvironment(summaryLaunch.env) : ctx.dispatchEnvironment(dispatchLaunch.env, taskId);
+function resolveSpawnPlan(ctx, launchInfo) {
+  const { isSummary, dispatchLaunch, executor, args, launchEnv } = launchInfo;
+  // Reuse the env resolved once before the executor's version probe: the
+  // worker and the probe must resolve the same PATH/executable identity,
+  // and an env-file reload during an async probe must not split them.
+  const spawnEnv = launchEnv;
   applyOutputDirEnv(spawnEnv, isSummary, dispatchLaunch.outputDir ?? null);
   const noSandbox = !isSummary && dispatchLaunch.noSandbox === true;
   const spawnCommand = executor.binaryName;
@@ -1012,10 +1018,14 @@ function buildSandboxedSpawn(ctx, launchInfo, plan, task) {
   }
   const binds = buildBwrapBinds(ctx, launchInfo, task, spawnEnv, role);
   const assembled = assembleBwrapSpawn(ctx, launchInfo, binds, task);
+  // Resolve bwrap from the daemon's ambient PATH, never the caller-forwarded
+  // one: bwrap is the security boundary itself, so a caller-selected shim
+  // could record a fake diff or skip the gate entirely.
+  const { bwrapPath } = ctx.resolveSandboxLaunchers();
   // bwrap owns the process group: the child is spawned through bwrap with the
   // sandboxed argv it assembled, so cancellation/signalling still targets the
   // whole group.
-  return { spawnCommand: "bwrap", spawnArgs: assembled.spawnArgs, spawnEnv: assembled.spawnEnv };
+  return { spawnCommand: bwrapPath, spawnArgs: assembled.spawnArgs, spawnEnv: assembled.spawnEnv };
 }
 
 /**
@@ -1761,6 +1771,10 @@ function onChildEnd(shared) {
  */
 function finishChildSettlement(ctx, shared) {
   const task = shared.task;
+  // Extraction (and its synchronous startCheckGate call) has already run by
+  // the time settlement reaches here. Drop the launch-env reference on every
+  // path, including no-change/non-git settles that never start a gate.
+  ctx.launchEnvironments.delete(task);
   // Second drain, for the tasks releaseOverlayForTask never sees: a
   // sandboxed dispatch run with --no-overlay still gets per-task uv dirs,
   // but extractChangesetForTaskRecord returns early on a task with no
@@ -2115,7 +2129,13 @@ function spawnTaskChild(ctx, launchInfo, task) {
     // wrote all of it.
     logBytesAtSpawn = fs.fstatSync(logFd).size;
     fs.chmodSync(task.logPath, 0o600);
-    const plan = resolveSpawnPlan(ctx, launchInfo, task.id);
+    const plan = resolveSpawnPlan(ctx, launchInfo);
+    // Keep the exact launch-time base env by reference. The same-process
+    // gate consumes it after extraction; no clone is made because the
+    // worker spawn below already uses this object. finishChildSettlement
+    // deletes the entry on every settle path, including no-change settles
+    // where startCheckGate would otherwise no-op.
+    ctx.launchEnvironments.set(task, plan.spawnEnv);
     const sandbox = buildSandboxedSpawn(ctx, launchInfo, plan, task);
     // taskferry#346: buildSandboxedSpawn (via assembleBwrapSpawn) has already
     // created the on-disk overlay and set task.overlayDirs/changesetStatus
@@ -2203,6 +2223,7 @@ function spawnTaskChild(ctx, launchInfo, task) {
     // BEFORE the explicit persistTask() below ensures the durable record
     // reflects the post-extract changesetStatus.
     ctx.extractChangesetForTask(task);
+    ctx.launchEnvironments.delete(task);
     // Drain the deferred list at the same point finishChildSettlement /
     // onChildError do -- every settlement path must drain. A spawn failure
     // that pre-dates overlay creation (e.g. the dispatch's own pre-overlay
@@ -2990,7 +3011,9 @@ function queueDispatchLaunch(ctx, { id, task, prompt, sessionId, env, noSandbox,
   // Otherwise those values live only in `pendingLaunches`, which a restart
   // wipes -- a resumed task would silently relaunch with the daemon's
   // ambient defaults (no caller env, no per-dispatch binds).
-  if (env !== undefined) task.resumeEnv = { ...env };
+  if (env !== undefined) {
+    task.resumeEnv = { ...env };
+  }
   // An empty list is a real override (it replaces the global list with
   // nothing), so only `undefined` means "no per-dispatch list to persist".
   if (allowedDirs !== undefined) task.resumeAllowedDirs = allowedDirs;
@@ -4853,11 +4876,13 @@ function watchdogTick(state, ctx) {
  * @param {(directory: string) => string|null} [options.resolveGitCommonDirFn]
  * @param {(directory: string) => string|null} [options.resolveGitDirFn]
  * @param {boolean} [options.overlayEnabled]
- * @param {() => {supported: boolean, reason?: string}} [options.checkOverlaySupportFn]
+ * @param {(bwrapPath?: string) => {supported: boolean, reason?: string}} [options.checkOverlaySupportFn]
+ * @param {() => {bwrapPath: string, shellPath: string}} [options.resolveSandboxLaunchersFn] - test seam for the daemon-ambient absolute bwrap/shell resolver.
+
   * @param {string} [options.overlayTmpRoot]
  * @param {(command: string, args: string[]) => {status: number|null, stdout: string, stderr: string, error?: Error}} [options.runOverlayCommandFn]
  * @param {(path: string) => void} [options.rmOverlayTreeFn]
- * @param {() => {checked: boolean, available: boolean, reason?: string}} [options.checkBwrapAvailableFn]
+ * @param {(bwrapPath?: string) => {checked: boolean, available: boolean, reason?: string}} [options.checkBwrapAvailableFn]
  * @param {(path: string) => boolean} [options.existsFn]
  * @param {(path: string) => {isDirectory: () => boolean, isFile: () => boolean}|null} [options.statFn]
  * @param {(path: string) => string[]} [options.readdirFn]
@@ -5126,7 +5151,8 @@ function resolveFilesystemFnSeams(rawOptions) {
  */
 function resolveFilesystemSimpleOptions(rawOptions) {
   return {
-    checkOverlaySupportFn: rawOptions.checkOverlaySupportFn ?? checkOverlaySupport,
+    checkOverlaySupportFn: rawOptions.checkOverlaySupportFn ?? ((/** @type {string|undefined} */ bwrapPath) => checkOverlaySupport(undefined, bwrapPath)),
+    resolveSandboxLaunchersFn: rawOptions.resolveSandboxLaunchersFn ?? resolveSandboxLaunchers,
     runOverlayCommandFn: rawOptions.runOverlayCommandFn ?? defaultOverlayRunCommand,
     rmOverlayTreeFn: rawOptions.rmOverlayTreeFn,
     rmDeferredFn: rawOptions.rmDeferredFn,
@@ -5145,7 +5171,7 @@ function resolveFilesystemSimpleOptions(rawOptions) {
     overlaySleepFn: rawOptions.overlaySleepFn ?? undefined,
     resolveGitCommonDirFn: rawOptions.resolveGitCommonDirFn ?? resolveGitCommonDir,
     resolveGitDirFn: rawOptions.resolveGitDirFn ?? resolveGitDir,
-    checkBwrapAvailableFn: rawOptions.checkBwrapAvailableFn ?? checkBwrapAvailable,
+    checkBwrapAvailableFn: rawOptions.checkBwrapAvailableFn ?? ((/** @type {string|undefined} */ bwrapPath) => checkBwrapAvailable(undefined, bwrapPath)),
     ...resolveFilesystemFnSeams(rawOptions),
   };
 }
@@ -5574,6 +5600,12 @@ function initManagerMaps() {
     activitySubscriptions: new Map(),
     logHasEventCache: new Set(),
     gateChildren: new Map(),
+    // The base env built at worker launch, kept by reference (no clone) so
+    // the same-process gate sees exactly the env-file/caller/ambient union
+    // the worker got even if the env file reloads during the run. Entry is
+    // deleted on every settle path; after a daemon restart the map is empty
+    // and the gate falls back to task.resumeEnv + the current env file.
+    launchEnvironments: new WeakMap(),
   };
 }
 
@@ -5646,6 +5678,16 @@ const LOG_ACTIVITY_SCAN_BYTES = 64 * 1024;
 function buildManagerEnvHelpers(ctx) {
   const bwrapState = { available: null };
   const overlayState = { support: null };
+  /** @type {{value: {bwrapPath: string, shellPath: string}|null}} */
+  const launcherState = { value: null };
+  const resolveSandboxLaunchers = () => {
+    if (launcherState.value == null) {
+      const resolved = ctx.opts.resolveSandboxLaunchersFn();
+      launcherState.value = resolved;
+      return resolved;
+    }
+    return launcherState.value;
+  };
   /**
    * @param {{overlayDirs?: {root:string,tmpRoot:string}|null}} task
    * @returns {boolean} whether cleanup failed
@@ -5667,8 +5709,9 @@ function buildManagerEnvHelpers(ctx) {
     overlayState,
     releaseOverlay,
     sanitizedEnvironment,
-    requireBwrap: () => requireBwrapCapability(bwrapState, { checkBwrapAvailableFn: ctx.opts.checkBwrapAvailableFn }),
-    requireOverlaySupport: () => requireOverlayCapability(overlayState, { checkOverlaySupportFn: ctx.opts.checkOverlaySupportFn, OVERLAY_SUPPORT_TTL_MS }),
+    resolveSandboxLaunchers,
+    requireBwrap: () => requireBwrapCapability(bwrapState, { checkBwrapAvailableFn: ctx.opts.checkBwrapAvailableFn, resolveSandboxLaunchersFn: resolveSandboxLaunchers }),
+    requireOverlaySupport: () => requireOverlayCapability(overlayState, { checkOverlaySupportFn: ctx.opts.checkOverlaySupportFn, resolveSandboxLaunchersFn: resolveSandboxLaunchers, OVERLAY_SUPPORT_TTL_MS }),
     /** @param {Task} finishedTask */
     extractChangesetForTask: (finishedTask) => extractChangesetForTaskRecord(finishedTask, { stateDir: ctx.opts.stateDir, runtimeDir: ctx.opts.runtimeDir, existsFn: ctx.opts.existsFn, sandboxDenylist: ctx.opts.sandboxDenylist, runOverlayCommandFn: ctx.opts.runOverlayCommandFn, overlaySleepFn: ctx.opts.overlaySleepFn, persistTask: (taskId) => ctx.helpers.persistTask(taskId), startCheckGate: (task) => ctx.env.startCheckGate(task), releaseOverlay }),
     /** @param {NodeJS.ProcessEnv} [env] @param {string} [taskId] */
@@ -5677,6 +5720,9 @@ function buildManagerEnvHelpers(ctx) {
     summaryEnvironment: (env) => buildSummaryEnvironment({ sanitizedEnvironment }, env),
     /** @param {Task} task */
     startCheckGate: (task) => startCheckGate(task, {
+      sanitizedEnvironment,
+      resolveSandboxLaunchers,
+      launchEnvironments: ctx.maps.launchEnvironments,
       spawnFn: ctx.opts.spawnFn,
       stateDir: ctx.opts.stateDir,
       runtimeDir: ctx.opts.runtimeDir,
@@ -5841,7 +5887,7 @@ function buildManagerInternalHelpers(ctx) {
      * delegated to {@link startTaskFor}, which takes every factory closure
      * dependency explicitly via `ctx`.
      * @param {Task} task */
-    startTask: (task) => startTaskFor(task, { pendingLaunches: ctx.maps.pendingLaunches, SUMMARY_DIR: ctx.paths.SUMMARY_DIR, PROMPT_DIR: ctx.paths.PROMPT_DIR, spawnFn: ctx.opts.spawnFn, runOverlayCommandFn: ctx.opts.runOverlayCommandFn, sandboxEnabled: ctx.opts.sandboxEnabled, platform: ctx.opts.platform, overlayEnabled: ctx.opts.overlayEnabled, overlayTmpRoot: ctx.opts.overlayTmpRoot, allowedDirs: ctx.opts.allowedDirs, roBind: ctx.opts.roBind, stdoutDrainGraceMs: ctx.limits.stdoutDrainGrace, stateDir: ctx.opts.stateDir, cacheDir: ctx.opts.cacheDir, runtimeDir: ctx.opts.runtimeDir, socketPath: ctx.opts.socketPath, existsFn: ctx.opts.existsFn, statFn: ctx.opts.statFn, lstatFn: ctx.opts.lstatFn, readdirFn: ctx.opts.readdirFn, readProcStartTimeFn: ctx.opts.readProcStartTimeFn, sandboxDenylist: ctx.opts.sandboxDenylist, resolveGitCommonDirFn: ctx.opts.resolveGitCommonDirFn, resolveGitDirFn: ctx.opts.resolveGitDirFn, requireBwrap: () => ctx.env.requireBwrap(), requireOverlaySupport: () => ctx.env.requireOverlaySupport(), dispatchEnvironment: (env, taskId) => ctx.env.dispatchEnvironment(env, taskId), summaryEnvironment: (env) => ctx.env.summaryEnvironment(env), deferredRmFn: ctx.opts.rmDeferredFn, deferredAllowedRoots: uvDirRootsFor(ctx.opts.cacheDir, ctx.opts.stateDir), settleWaiters: (taskId) => ctx.helpers.settleWaiters(taskId), launchQueuedTasks: () => ctx.helpers.launchQueuedTasks(), persistTask: (taskId) => ctx.helpers.persistTask(taskId), flushPersist: () => ctx.helpers.flushPersist(), scheduleActivity: (task, options) => ctx.helpers.scheduleActivity(task, options), classifyTrailingLogFailure: (task, executor) => ctx.helpers.classifyTrailingLogFailure(task, executor), startRunningWatcher: (task, executor) => ctx.helpers.startRunningWatcher(task, executor), stopRunningWatcher: (taskId) => ctx.helpers.stopRunningWatcher(taskId), extractChangesetForTask: (task) => ctx.env.extractChangesetForTask(task), sendSignal: (pid, signal) => ctx.helpers.sendSignal(pid, signal), activityCache: ctx.activity.cache, logHasEventCache: ctx.maps.logHasEventCache, escalationTimers: ctx.maps.escalationTimers, tasks: ctx.maps.tasks, pendingDrains: ctx.maps.pendingDrains, decRunning: (task) => { ctx.state.runningCount--; const q = ctx.maps.providerQueues.get(providerOf(task.model)); if (q) { q.runningCount--; } }, incRunning: (task) => { ctx.state.runningCount++; const q = ctx.maps.providerQueues.get(providerOf(task.model)); if (q) { q.runningCount++; } }, readSessionIdFromLog, evaluateOutputCompleteness, attemptCrashRecovery }),
+    startTask: (task) => startTaskFor(task, { pendingLaunches: ctx.maps.pendingLaunches, SUMMARY_DIR: ctx.paths.SUMMARY_DIR, PROMPT_DIR: ctx.paths.PROMPT_DIR, spawnFn: ctx.opts.spawnFn, runOverlayCommandFn: ctx.opts.runOverlayCommandFn, sandboxEnabled: ctx.opts.sandboxEnabled, platform: ctx.opts.platform, overlayEnabled: ctx.opts.overlayEnabled, overlayTmpRoot: ctx.opts.overlayTmpRoot, allowedDirs: ctx.opts.allowedDirs, roBind: ctx.opts.roBind, stdoutDrainGraceMs: ctx.limits.stdoutDrainGrace, stateDir: ctx.opts.stateDir, cacheDir: ctx.opts.cacheDir, runtimeDir: ctx.opts.runtimeDir, socketPath: ctx.opts.socketPath, existsFn: ctx.opts.existsFn, statFn: ctx.opts.statFn, lstatFn: ctx.opts.lstatFn, readdirFn: ctx.opts.readdirFn, readProcStartTimeFn: ctx.opts.readProcStartTimeFn, sandboxDenylist: ctx.opts.sandboxDenylist, resolveGitCommonDirFn: ctx.opts.resolveGitCommonDirFn, resolveGitDirFn: ctx.opts.resolveGitDirFn, requireBwrap: () => ctx.env.requireBwrap(), requireOverlaySupport: () => ctx.env.requireOverlaySupport(), resolveSandboxLaunchers: () => ctx.env.resolveSandboxLaunchers(), launchEnvironments: ctx.maps.launchEnvironments, dispatchEnvironment: (env, taskId) => ctx.env.dispatchEnvironment(env, taskId), summaryEnvironment: (env) => ctx.env.summaryEnvironment(env), deferredRmFn: ctx.opts.rmDeferredFn, deferredAllowedRoots: uvDirRootsFor(ctx.opts.cacheDir, ctx.opts.stateDir), settleWaiters: (taskId) => ctx.helpers.settleWaiters(taskId), launchQueuedTasks: () => ctx.helpers.launchQueuedTasks(), persistTask: (taskId) => ctx.helpers.persistTask(taskId), flushPersist: () => ctx.helpers.flushPersist(), scheduleActivity: (task, options) => ctx.helpers.scheduleActivity(task, options), classifyTrailingLogFailure: (task, executor) => ctx.helpers.classifyTrailingLogFailure(task, executor), startRunningWatcher: (task, executor) => ctx.helpers.startRunningWatcher(task, executor), stopRunningWatcher: (taskId) => ctx.helpers.stopRunningWatcher(taskId), extractChangesetForTask: (task) => ctx.env.extractChangesetForTask(task), sendSignal: (pid, signal) => ctx.helpers.sendSignal(pid, signal), activityCache: ctx.activity.cache, logHasEventCache: ctx.maps.logHasEventCache, escalationTimers: ctx.maps.escalationTimers, tasks: ctx.maps.tasks, pendingDrains: ctx.maps.pendingDrains, decRunning: (task) => { ctx.state.runningCount--; const q = ctx.maps.providerQueues.get(providerOf(task.model)); if (q) { q.runningCount--; } }, incRunning: (task) => { ctx.state.runningCount++; const q = ctx.maps.providerQueues.get(providerOf(task.model)); if (q) { q.runningCount++; } }, readSessionIdFromLog, evaluateOutputCompleteness, attemptCrashRecovery }),
     /**
      * @param {string} taskId
      * @param {{force?: boolean}} options
@@ -6469,17 +6515,20 @@ function readNarrationExcerpt(logPath) {
  * `OPENCODE_MODELS_PATH`, `OPENCODE_MODELS_URL` -- the latter three
  * each verified to change `opencode models` output), and
  * `PI_CODING_AGENT_DIR` (the per-user pi state root whose auth.json
- * gates which providers pi can list). Known gaps: provider vars with
- * no suffix pattern (e.g. `OLLAMA_HOST`, Vertex location/project vars).
- * Intentionally excludes unrelated caller vars -- PATH, LANG, USER,
- * ... -- so trivial cosmetic differences don't fragment the cache into
- * per-call entries.
+ * gates which providers pi can list). PATH is included because it selects
+ * which `opencode`/`pi` executable runs, so two callers with different
+ * tool-manager shims can see different model catalogs even with identical
+ * credentials. Known gaps: provider vars with no suffix pattern (e.g.
+ * `OLLAMA_HOST`, Vertex location/project vars). Other unrelated caller
+ * vars (LANG, USER, ...) stay excluded so cosmetic differences don't
+ * fragment the cache.
  * @param {NodeJS.ProcessEnv} env
  * @returns {string}
  */
 export function modelsCacheFingerprint(env = {}) {
   const suffixNames = ["_API_KEY", "_BASE_URL"];
   const exactNames = [
+    "PATH",
     "OPENCODE_CONFIG",
     "OPENCODE_CONFIG_DIR",
     "OPENCODE_CONFIG_CONTENT",
@@ -6808,7 +6857,12 @@ function readNarration(logPath) {
   return textOrder.map((mid) => /** @type {string[]} */ (textByMessageId.get(mid)).join("")).join("\n\n");
 }
 
-const CALLER_ENV_EXCLUDED = new Set(["PATH", "HOME", ...TASKFERRY_PLUMBING_ENV_VARS]);
+// PATH is deliberately NOT excluded: a caller's shell is where tool managers
+// (mise shims, uv, nvm, ...) put their binaries, and the worker and its
+// settle-time check gate must resolve the same tools. HOME and taskferry's
+// own plumbing stay daemon-controlled so a forwarded env cannot redirect the
+// daemon/socket/state or a nested `taskferry` call's home.
+const CALLER_ENV_EXCLUDED = new Set(["HOME", ...TASKFERRY_PLUMBING_ENV_VARS]);
 
 /**
  * Removes a task's overlay using the tmp root recorded when that overlay was
@@ -7263,6 +7317,40 @@ function appendBoundedOutput(tail, chunk) {
 }
 
 /**
+ * Builds the check gate's child environment from an already-resolved base
+ * env. Same-process gates pass the exact launch-time env object the worker
+ * used (kept by reference in `launchEnvironments`, not cloned), so a
+ * caller-forwarded PATH or other tool config cannot disappear between the
+ * worker and its post-run check, and an env-file reload during the run
+ * cannot silently give the gate a different configuration.
+ *
+ * The helper strips TASKFERRY_* control markers (the gate is an internal
+ * verification spawn, not a ferry: an ambient TASKFERRY_CHILD left over from
+ * a daemon started inside a ferry must not make a repo's `npm test` take the
+ * nested-child branch per taskferry#292) and re-points the two uv dirs at the
+ * gate's writable per-task bindings (taskferry#426). The copy is
+ * short-lived: it exists only to strip/override keys without mutating the
+ * worker's env object.
+ *
+ * After a daemon restart there is no launch environment; startCheckGate
+ * builds the fallback from `task.resumeEnv` (the persisted caller-env
+ * snapshot) plus the current env-file/ambient layers.
+ * @param {NodeJS.ProcessEnv} baseEnv
+ * @param {string} uvCacheDir
+ * @param {string} uvToolsDir
+ * @returns {NodeJS.ProcessEnv}
+ */
+function buildCheckGateEnvironment(baseEnv, uvCacheDir, uvToolsDir) {
+  const gateEnv = { ...baseEnv };
+  for (const key of Object.keys(gateEnv)) {
+    if (key.startsWith("TASKFERRY_")) delete gateEnv[key];
+  }
+  gateEnv.UV_CACHE_DIR = uvCacheDir;
+  gateEnv.UV_TOOL_DIR = uvToolsDir;
+  return gateEnv;
+}
+
+/**
  * Starts the verification gate for a task whose changeset just extracted
  * with real changes: spawns the project's declared check command inside the
  * SAME bwrap overlay mount the worker ran with (task.overlayDirs), so gate
@@ -7278,7 +7366,7 @@ function appendBoundedOutput(tail, chunk) {
  * without an overlay, per the design's non-goal "Gating --no-overlay /
  * non-git dispatches."
  * @param {Task} task
- * @param {{spawnFn: typeof import("node:child_process").spawn, stateDir: string, runtimeDir: string, cacheDir: string, existsFn: (p: string) => boolean, sandboxDenylist: string[], persistTask: (taskId: string) => void, scheduleActivity: (task: Task, options?: {force?: boolean}) => Promise<unknown>, sendSignal: (pid: number, signal: NodeJS.Signals) => void, platform: NodeJS.Platform, gateChildren: Map<string, import("node:child_process").ChildProcess>, stdoutDrainGraceMs: number}} ctx
+ * @param {{sanitizedEnvironment: (env?: NodeJS.ProcessEnv) => NodeJS.ProcessEnv, launchEnvironments: WeakMap<Task, NodeJS.ProcessEnv>, resolveSandboxLaunchers: () => {bwrapPath: string, shellPath: string}, spawnFn: typeof import("node:child_process").spawn, stateDir: string, runtimeDir: string, cacheDir: string, existsFn: (p: string) => boolean, sandboxDenylist: string[], persistTask: (taskId: string) => void, scheduleActivity: (task: Task, options?: {force?: boolean}) => Promise<unknown>, sendSignal: (pid: number, signal: NodeJS.Signals) => void, platform: NodeJS.Platform, gateChildren: Map<string, import("node:child_process").ChildProcess>, stdoutDrainGraceMs: number}} ctx
  */
 function startCheckGate(task, ctx) {
   if (!task.overlayDirs || task.role !== "dispatch" || !platformSupportsSandbox(ctx.platform)) return;
@@ -7311,6 +7399,19 @@ function startCheckGate(task, ctx) {
   // environment the worker actually ran in. prepareUvDirs is the same call
   // the worker made, so both reach the same on-disk dirs.
   const { uvCacheDir, uvToolsDir } = prepareUvDirs(task, ctx);
+  // bwrap and sh are daemon executables, not workload tools. Resolve both
+  // to validated absolute paths from the daemon's ambient PATH; otherwise a
+  // caller-forwarded PATH containing fake bwrap/sh shims could forge the
+  // gate result or skip the sandbox entirely. The caller PATH still reaches
+  // the check command *inside* the sandbox through gateEnv.
+  let bwrapPath;
+  let shellPath;
+  try {
+    ({ bwrapPath, shellPath } = ctx.resolveSandboxLaunchers());
+  } catch (err) {
+    markCheckGateFailedWithError(task, /** @type {Error} */ (err), ctx);
+    return;
+  }
   const spawnArgs = buildBwrapArgs({
     directory: task.directory,
     stateDir: ctx.stateDir,
@@ -7331,7 +7432,7 @@ function startCheckGate(task, ctx) {
     // as any other untrusted sandboxed process.
     socketPath: null,
     denyList,
-  }).concat(["--", "sh", "-c", projectConfig.check]);
+  }).concat(["--", shellPath, "-c", projectConfig.check]);
   // Known gap, not fixed in this pass: unlike the worker's spawn
   // (buildBwrapBinds), the gate does not forward the worker's
   // extraRwBinds/extraRwPairBinds (executor auth binds, allowedDirs, the
@@ -7351,21 +7452,17 @@ function startCheckGate(task, ctx) {
   ctx.persistTask(task.id);
   void ctx.scheduleActivity(task, { force: true });
 
-  // Strip every TASKFERRY_* env var from the daemon's ambient before handing
-  // it to the gate's bwrap child. This is the narrowest fix for the #292
-  // leak class when the daemon itself was auto-started by a dispatched ferry
-  // (the daemon's ambient carries TASKFERRY_CHILD=1, and a repo's gate
-  // command -- e.g. `npm test` -- sees that and branches on it). The gate
-  // is an internal spawn, not a dispatched worker, so it doesn't need the
-  // envFileVars/caller-denylist machinery sanitizedEnvironment applies to a
-  // dispatch's payload env; a per-key filter is sufficient and local to this
-  // function.
-  const gateEnv = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith("TASKFERRY_")));
-  // taskferry#426: same redirection the worker got -- the gate's uv/uvx
-  // invocations must write to the same per-task writable dirs, not the
-  // read-only default cache under the ro-bind root.
-  gateEnv.UV_CACHE_DIR = uvCacheDir;
-  gateEnv.UV_TOOL_DIR = uvToolsDir;
+  // Same-process: use the exact base env captured at worker launch, so an
+  // env-file reload while the worker ran cannot change what the gate sees.
+  // Restart: the launch map died with the old daemon; rebuild from the
+  // persisted caller snapshot (resumeEnv) plus current env-file/ambient.
+  const launchEnv = ctx.launchEnvironments.get(task);
+  const gateEnv = buildCheckGateEnvironment(
+    launchEnv ?? ctx.sanitizedEnvironment(task.resumeEnv),
+    uvCacheDir,
+    uvToolsDir,
+  );
+  ctx.launchEnvironments.delete(task);
 
   let child;
   try {
@@ -7374,7 +7471,7 @@ function startCheckGate(task, ctx) {
     // leader, the same way spawnTaskChild() already does for workers
     // (src/tasks.js:1294), so sendSignalToProcess's group-kill actually
     // reaches the sandboxed workload instead of only the bwrap monitor.
-    child = ctx.spawnFn("bwrap", spawnArgs, { cwd: task.directory, env: gateEnv, stdio: ["ignore", "pipe", "pipe"], detached: true });
+    child = ctx.spawnFn(bwrapPath, spawnArgs, { cwd: task.directory, env: gateEnv, stdio: ["ignore", "pipe", "pipe"], detached: true });
   } catch (err) {
     markCheckGateFailedWithError(task, err, ctx);
     return;
@@ -7691,11 +7788,12 @@ function computeLogActivity(logPath, ctx) {
  * result in the shared `state` holder so a follow-up dispatch doesn't re-run
  * the check. Extracted out of `createTaskManager`'s `requireBwrap` closure.
  * @param {{available: ({checked: boolean, available: boolean, reason?: string}|null)}} state
- * @param {{checkBwrapAvailableFn: () => {checked: boolean, available: boolean, reason?: string}}} ctx
+ * @param {{checkBwrapAvailableFn: (bwrapPath?: string) => {checked: boolean, available: boolean, reason?: string}, resolveSandboxLaunchersFn: () => {bwrapPath: string, shellPath: string}}} ctx
  */
 function requireBwrapCapability(state, ctx) {
   if (state.available == null) {
-    state.available = ctx.checkBwrapAvailableFn();
+    const { bwrapPath } = ctx.resolveSandboxLaunchersFn();
+    state.available = ctx.checkBwrapAvailableFn(bwrapPath);
   }
   if (!state.available.available) {
     throw new Error(
@@ -7712,12 +7810,13 @@ function requireBwrapCapability(state, ctx) {
  * cached forever. Extracted out of `createTaskManager`'s
  * `requireOverlaySupport` closure.
  * @param {{support: ({supported: boolean, reason?: string, checkedAt: number}|null)}} state
- * @param {{checkOverlaySupportFn: () => {supported: boolean, reason?: string}, OVERLAY_SUPPORT_TTL_MS: number}} ctx
+ * @param {{checkOverlaySupportFn: (bwrapPath?: string) => {supported: boolean, reason?: string}, resolveSandboxLaunchersFn: () => {bwrapPath: string, shellPath: string}, OVERLAY_SUPPORT_TTL_MS: number}} ctx
  */
 function requireOverlayCapability(state, ctx) {
   const now = Date.now();
   if (state.support == null || (!state.support.supported && now - state.support.checkedAt >= ctx.OVERLAY_SUPPORT_TTL_MS)) {
-    state.support = { ...ctx.checkOverlaySupportFn(), checkedAt: now };
+    const { bwrapPath } = ctx.resolveSandboxLaunchersFn();
+    state.support = { ...ctx.checkOverlaySupportFn(bwrapPath), checkedAt: now };
   }
   const result = /** @type {{supported: boolean, reason?: string}} */ (state.support);
   if (!result.supported) {
@@ -9171,6 +9270,19 @@ function startTaskFor(task, ctx) {
   const launch = ctx.pendingLaunches.get(task.id);
   ctx.pendingLaunches.delete(task.id);
   if (!launch) return;
+  // Resolve the base env once, before the executor's version probe. The
+  // worker spawn and that probe must use the same sanitized env (same PATH
+  // identity), and an env-file reload during an async probe must not make
+  // the argv-selection probe disagree with the process it describes.
+  let launchEnv;
+  try {
+    launchEnv = launch.kind === "summary"
+      ? ctx.summaryEnvironment(launch.env)
+      : ctx.dispatchEnvironment(launch.env, task.id);
+  } catch (err) {
+    failTaskBeforeLaunch(task, ctx, /** @type {Error} */ (err));
+    return;
+  }
   // Per-executor pre-spawn hook (e.g. opencode's CLI major probe). The hook
   // may return either `void` (warm cache, fully synchronous -- the launch
   // path then proceeds without an await tick) or a Promise (cold cache; the
@@ -9181,7 +9293,7 @@ function startTaskFor(task, ctx) {
   if (launch.executor.prepareLaunch) {
     let prepareResult;
     try {
-      prepareResult = launch.executor.prepareLaunch({ isSummary: launch.kind === "summary" });
+      prepareResult = launch.executor.prepareLaunch({ isSummary: launch.kind === "summary", env: launchEnv });
     } catch (err) {
       failTaskBeforeLaunch(task, ctx, /** @type {Error} */ (err));
       return;
@@ -9194,7 +9306,7 @@ function startTaskFor(task, ctx) {
           // fires for a still-failing probe, which the executor's hook
           // already rejected.
           try {
-            doStartTaskFor(task, ctx, launch);
+            doStartTaskFor(task, ctx, launch, launchEnv);
           } catch (err) {
             failTaskBeforeLaunch(task, ctx, /** @type {Error} */ (err));
           }
@@ -9204,7 +9316,7 @@ function startTaskFor(task, ctx) {
       return;
     }
   }
-  doStartTaskFor(task, ctx, launch);
+  doStartTaskFor(task, ctx, launch, launchEnv);
 }
 
 /**
@@ -9214,9 +9326,10 @@ function startTaskFor(task, ctx) {
  * @param {Task} task
  * @param {StartTaskContext & {pendingLaunches: Map<string, LaunchSpec>}} ctx
  * @param {LaunchSpec} launch
+ * @param {NodeJS.ProcessEnv} launchEnv
  */
-function doStartTaskFor(task, ctx, launch) {
-  const launchInfo = resolveStartTaskLaunch(task, launch, ctx);
+function doStartTaskFor(task, ctx, launch, launchEnv) {
+  const launchInfo = resolveStartTaskLaunch(task, launch, ctx, launchEnv);
   spawnTaskChild(ctx, launchInfo, task);
 }
 

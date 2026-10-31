@@ -69,6 +69,21 @@ describe("ensureOpencodeCliMajor()", () => {
     assert.deepEqual(results, [2, 2, 2]);
     assert.equal(probe.calls(), 1);
   });
+
+  test("the memo is keyed by the sanitized PATH identity and the probe receives that env", async () => {
+    const probeEnvs = [];
+    const execFileFn = /** @type {any} */ (async (_command, _args, opts) => {
+      probeEnvs.push(opts.env);
+      return { stdout: opts.env.PATH === "/caller/a" ? "1.2.3" : "2.0.0", stderr: "" };
+    });
+    assert.equal(await ensureOpencodeCliMajor({ execFileFn, env: { PATH: "/caller/a" } }), 1);
+    assert.equal(detectOpencodeCliMajor({ env: { PATH: "/caller/a" } }), 1);
+    assert.equal(detectOpencodeCliMajor({ env: { PATH: "/caller/b" } }), null, "a different PATH must not read another executable's cached major");
+    assert.equal(await ensureOpencodeCliMajor({ execFileFn, env: { PATH: "/caller/b" } }), 2);
+    assert.equal(probeEnvs.length, 2, "each PATH identity must get its own probe");
+    assert.equal(probeEnvs[0].PATH, "/caller/a");
+    assert.equal(probeEnvs[1].PATH, "/caller/b");
+  });
 });
 
 describe("opencodeExecutor() version handling", () => {
@@ -86,6 +101,21 @@ describe("opencodeExecutor() version handling", () => {
     const args = opencodeExecutor({ detectCliMajorFn: () => 0 }).buildSpawnArgs(DISPATCH_CTX);
     assert.ok(args.includes("--dir"), `expected the 1.x --dir flag in ${JSON.stringify(args)}`);
     assert.ok(!args.includes("--standalone"));
+  });
+
+  test("prepareLaunch and buildSpawnArgs use the same launch env for version detection", async () => {
+    const seen = [];
+    const env = { PATH: "/caller/bin" };
+    const ex = opencodeExecutor({
+      detectCliMajorFn: (received) => { seen.push(received); return null; },
+      ensureCliMajorFn: async (received) => { seen.push(received); return 2; },
+    });
+    await ex.prepareLaunch({ isSummary: false, env });
+    ex.buildSpawnArgs({ ...DISPATCH_CTX, env });
+    assert.equal(seen.length, 3, "prepareLaunch detects once, ensures once, and buildSpawnArgs detects once");
+    for (const received of seen) {
+      assert.equal(received, env, "version detection must receive the launch's sanitized environment");
+    }
   });
 });
 

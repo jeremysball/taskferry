@@ -3,8 +3,8 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { createTaskManager } from "./tasks.js";
-import { trackManager, makeManager, fakeChild, baseTask, AMBIENT_VALUE, FAKE_SECRETS_ENV_PATH, AXI_TASKS_TEST_DIR, AXI_TASKS_CACHE_DIR, AXI_TASKS_OVERLAY_DIR, TASKS_STATE_FILE, FROM_CALLER, OCCUPYING_TASK, CAPTURED_DISPATCH, SRC1_LOG, DID_THING, SOL_MODEL, mkdtempTracked, preserveEnvVars, waitForCaptured } from "./tasks.test-helpers.js";
+import { createTaskManager, modelsCacheFingerprint } from "./tasks.js";
+import { trackManager, makeManager, fakeChild, baseTask, makeFakeOpencodeExecutor, AMBIENT_VALUE, FAKE_SECRETS_ENV_PATH, AXI_TASKS_TEST_DIR, AXI_TASKS_CACHE_DIR, AXI_TASKS_OVERLAY_DIR, TASKS_STATE_FILE, FROM_CALLER, OCCUPYING_TASK, CAPTURED_DISPATCH, SRC1_LOG, DID_THING, SOL_MODEL, mkdtempTracked, preserveEnvVars, waitForCaptured } from "./tasks.test-helpers.js";
 import { DEFAULT_SUMMARY_MODEL } from "./tasks.js";
 import { TASKFERRY_PLUMBING_ENV_VARS } from "./paths.js";
 
@@ -21,11 +21,11 @@ describe("caller-env union: basic dispatch and TASKFERRY_TASK_ID", () => {
   });
 
   test("caller env cannot override the fixed excluded set of daemon-controlled vars", (t) => {
-    // Build the excluded set from paths.js's shared export (plus PATH/HOME,
-    // which tasks.js's CALLER_ENV_EXCLUDED also prepends) so this list cannot
+    // Build the excluded set from paths.js's shared export (plus HOME, which
+    // tasks.js's CALLER_ENV_EXCLUDED also prepends) so this list cannot
     // drift from the daemon's real derivation again. preserveEnvVars restores
     // each var exactly as found in t.after.
-    const excluded = ["PATH", "HOME", ...TASKFERRY_PLUMBING_ENV_VARS];
+    const excluded = ["HOME", ...TASKFERRY_PLUMBING_ENV_VARS];
     preserveEnvVars(t, excluded);
     for (const name of excluded) process.env[name] = `real-${name}`;
     let capturedOpts = null;
@@ -37,6 +37,21 @@ describe("caller-env union: basic dispatch and TASKFERRY_TASK_ID", () => {
     for (const name of excluded) {
       assert.equal(capturedOpts.env[name], `real-${name}`, `${name} must keep the daemon's own ambient value`);
     }
+  });
+
+  test("a caller-forwarded PATH overlays the daemon's ambient PATH so caller tool shims reach the worker", (t) => {
+    // PATH is not a daemon-controlled plumbing var: the caller's own shell is
+    // where tool managers (mise shims, uv, nvm, ...) install binaries, and the
+    // worker plus its settle-time check gate must resolve the same tools.
+    preserveEnvVars(t, ["PATH"]);
+    process.env.PATH = "/usr/local/bin:/usr/bin";
+    let capturedOpts = null;
+    const mgr = makeManager({ spawnFn: (_cmd, _args, opts) => { capturedOpts = opts; return fakeChild(); } });
+    const callerPath = "/tmp/axi-caller-shims:/usr/local/bin:/usr/bin";
+
+    mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), env: { PATH: callerPath } });
+
+    assert.equal(capturedOpts.env.PATH, callerPath);
   });
 
   test("a denylisted name is stripped even when the caller's env explicitly sets it", (_t) => {
@@ -698,13 +713,13 @@ describe("caller-env union: single-pass merge and key validation", () => {
 
   test("the exclusion set is sourced from paths.js's plumbing export -- any new TASKFERRY_* plumbing var added there lands here automatically", (t) => {
     // Single-source review fix: the excluded list used to be hardcoded
-    // literally in tasks.js (["PATH", "HOME", "TASKFERRY_STATE_DIR", ...]).
+    // literally in tasks.js (["HOME", "TASKFERRY_STATE_DIR", ...]).
     // If a future plumbing var was added to paths.js without also editing
     // tasks.js, a caller could override it from their forwarded env and
     // misroute a nested taskferry call (e.g. via TASKFERRY_SOCKET_PATH). The
     // set is now built from paths.js's TASKFERRY_PLUMBING_ENV_VARS export
-    // plus PATH and HOME; this test exercises every name in that export to
-    // pin the derivation. preserveEnvVars restores each var exactly as found.
+    // plus HOME; this test exercises every name in that export to pin the
+    // derivation. preserveEnvVars restores each var exactly as found.
     preserveEnvVars(t, TASKFERRY_PLUMBING_ENV_VARS);
     for (const name of TASKFERRY_PLUMBING_ENV_VARS) {
       process.env[name] = `real-${name}`;
@@ -775,5 +790,35 @@ describe("caller-env union: single-pass merge and key validation", () => {
     assert.equal(mgr.status(dispatched.id).status, "crashed");
     assert.match(mgr.status(dispatched.id).spawnError, /env value for "AXI_TEST_UNDEFINED" must be a string, got undefined/);
     assert.equal(spawnCalled, false);
+  });
+});
+
+describe("executor version probing uses the worker's env identity", () => {
+  test("prepareLaunch and buildSpawnArgs receive the same sanitized caller env as the worker spawn", () => {
+    const callerPath = `/caller/version/bin${path.delimiter}${process.env.PATH}`;
+    const seen = [];
+    let spawnOpts = null;
+    const executor = makeFakeOpencodeExecutor({
+      prepareLaunch: ({ env }) => { seen.push(env); },
+      buildSpawnArgs: (ctx) => { seen.push(ctx.env); return ["run"]; },
+    });
+    const mgr = makeManager({
+      defaultExecutor: executor,
+      spawnFn: (_cmd, _args, opts) => { spawnOpts = opts; return fakeChild(); },
+    });
+
+    mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), env: { PATH: callerPath } });
+
+    assert.equal(seen.length, 2, "prepareLaunch and buildSpawnArgs must both run");
+    assert.equal(seen[0].PATH, callerPath, "the version probe must see the caller PATH the worker will get");
+    assert.equal(seen[1].PATH, callerPath, "argv version selection must use the same PATH identity as the probe");
+    assert.equal(spawnOpts.env.PATH, callerPath);
+  });
+
+  test("the models-cache fingerprint changes with PATH, so two executables never share a model list", () => {
+    assert.notEqual(
+      modelsCacheFingerprint({ PATH: "/caller/a", OPENCODE_CONFIG: "/cfg/a" }),
+      modelsCacheFingerprint({ PATH: "/caller/b", OPENCODE_CONFIG: "/cfg/a" }),
+    );
   });
 });

@@ -136,11 +136,11 @@ function buildOpencodeV1SpawnArgs(ctx) {
 
 /**
  * @param {object} [options]
- * @param {() => number|null} [options.detectCliMajorFn] - synchronous cache read; defaults to detectOpencodeCliMajor() (uses the module-level memo + performance.now()). Returns null when no probe has succeeded yet or the cache is stale.
- * @param {() => Promise<number|null>} [options.ensureCliMajorFn] - async cache-or-probe; defaults to ensureOpencodeCliMajor({ execFileFn }). Returns null only when the probe failed (then `prepareLaunch` rejects with a clear error naming the failure).
+ * @param {(env?: NodeJS.ProcessEnv) => number|null} [options.detectCliMajorFn] - synchronous cache read; defaults to detectOpencodeCliMajor({ env }) (per-PATH memo + performance.now()). Returns null when no probe has succeeded for that PATH or the cache is stale.
+ * @param {(env?: NodeJS.ProcessEnv) => Promise<number|null>} [options.ensureCliMajorFn] - async cache-or-probe; defaults to ensureOpencodeCliMajor({ execFileFn, env }). Returns null only when the probe failed (then `prepareLaunch` rejects with a clear error naming the failure).
  * @returns {OpencodeWorkerExecutor}
  */
-export function opencodeExecutor({ detectCliMajorFn = () => detectOpencodeCliMajor(), ensureCliMajorFn = () => ensureOpencodeCliMajor() } = {}) {
+export function opencodeExecutor({ detectCliMajorFn = (env) => detectOpencodeCliMajor({ env }), ensureCliMajorFn = (env) => ensureOpencodeCliMajor({ env }) } = {}) {
   return {
     id: "opencode",
     taskIdPrefix: "oc",
@@ -153,7 +153,7 @@ export function opencodeExecutor({ detectCliMajorFn = () => detectOpencodeCliMaj
     listModelsFn: async (env) =>
       (await execFileAsync("opencode", ["models"], { encoding: "utf8", timeout: SUMMARY_PREFLIGHT_TIMEOUT_MS, env })).stdout,
     /** @param {NodeJS.ProcessEnv} env @param {{execFileFn?: typeof execFileAsync, major?: number|null}} [options] @returns {Promise<Map<string, string[]>>} */
-    listModelVariantsFn: async (env, { execFileFn = execFileAsync, major = detectCliMajorFn() } = {}) => {
+    listModelVariantsFn: async (env, { execFileFn = execFileAsync, major = detectCliMajorFn(env) } = {}) => {
       const standalone = (major ?? 1) >= 2;
       const args = standalone ? ["api", STANDALONE_FLAG, "GET", "/api/model"] : ["models", "--verbose"];
       const timeout = standalone ? STANDALONE_MODEL_VARIANTS_TIMEOUT_MS : LIST_MODEL_VARIANTS_TIMEOUT_MS;
@@ -169,7 +169,7 @@ export function opencodeExecutor({ detectCliMajorFn = () => detectOpencodeCliMaj
     },
     /** @param {SpawnLaunchContext} ctx @returns {string[]} */
     buildSpawnArgs(ctx) {
-      const major = detectCliMajorFn();
+      const major = detectCliMajorFn(ctx.env);
       // `null` means no successful probe yet (the launch path's
       // `prepareLaunch` would have rejected with a clear error first, so a
       // buildSpawnArgs call here with `null` is only possible from tests
@@ -192,12 +192,13 @@ export function opencodeExecutor({ detectCliMajorFn = () => detectOpencodeCliMaj
      * etc.), throws/rejects with an error naming the failure so the
      * launch path can fail the dispatch with `crashed` instead of
      * silently guessing an argv.
+     * @param {{isSummary?: boolean, env?: NodeJS.ProcessEnv}} [ctx]
      * @returns {void | Promise<void>}
      */
-    prepareLaunch() {
-      const cached = detectCliMajorFn();
+    prepareLaunch({ env } = {}) {
+      const cached = detectCliMajorFn(env);
       if (cached !== null) return undefined;
-      return ensureCliMajorFn().then((major) => {
+      return ensureCliMajorFn(env).then((major) => {
         if (major === null) {
           throw new Error("opencode CLI major version could not be detected (`opencode --version` failed or its output did not parse; the cause is on the daemon's stderr); fix the opencode install, then re-dispatch (failed probes are not cached)");
         }

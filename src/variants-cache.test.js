@@ -33,6 +33,16 @@ describe("readVariantsCache()", () => {
     writeCache(coldCacheDir, { schema: VARIANTS_CACHE_SCHEMA, fingerprint: hashFingerprint({}), opencodeMajor: 1, models: { [MODEL_FOO]: ["high"] } });
     assert.equal(readVariantsCache({ cacheDir: coldCacheDir, env: {} }), null);
   });
+  test("checks the cached major against the caller's PATH identity, not the daemon ambient one", async () => {
+    const cacheDir = tmpCacheDir();
+    const callerPath = "/caller/opencode-2/bin";
+    await ensureOpencodeCliMajor({ execFileFn: async () => ({ stdout: "2.0.0" }), env: { PATH: callerPath } });
+    writeCache(cacheDir, { schema: VARIANTS_CACHE_SCHEMA, fingerprint: hashFingerprint({ PATH: callerPath }), opencodeMajor: 1, models: { [MODEL_FOO]: ["high"] } });
+    assert.equal(readVariantsCache({ cacheDir, env: { PATH: callerPath } }), null, "a cache built under the ambient 1.x install must not be read for a caller whose PATH selects 2.x");
+    writeCache(cacheDir, { schema: VARIANTS_CACHE_SCHEMA, fingerprint: hashFingerprint({ PATH: callerPath }), opencodeMajor: 2, models: { [MODEL_FOO]: ["low"] } });
+    assert.deepEqual(readVariantsCache({ cacheDir, env: { PATH: callerPath } }).get(MODEL_FOO), ["low"]);
+  });
+
   test("returns null when the file is absent", () => {
     assert.equal(readVariantsCache({ cacheDir: tmpCacheDir(), env: {} }), null);
   });

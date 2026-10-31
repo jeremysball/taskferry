@@ -1,4 +1,5 @@
 import { spawnSync } from "node:child_process";
+import fs from "node:fs";
 import path from "node:path";
 import { errCode } from "./errors.js";
 import { defaultRunCommandAsync } from "./setup.js";
@@ -24,6 +25,77 @@ export function defaultRunCommand(command, args) {
     return { status: null, stdout: result.stdout || "", stderr: result.stderr || "", error: result.error };
   }
   return { status: result.status, stdout: result.stdout || "", stderr: result.stderr || "", error: result.error };
+}
+
+const DEFAULT_DAEMON_EXECUTABLE_PATH = "/usr/local/bin:/usr/bin:/bin";
+
+/**
+ * Resolves an executable name to a validated absolute path using only the
+ * daemon's own ambient PATH (or the supplied `env`). Relative PATH entries
+ * are deliberately ignored: POSIX resolves an empty entry to the current
+ * working directory, which a caller can influence, and the daemon must not
+ * execute a caller-selected `bwrap` or `sh`. The returned path is the
+ * canonical realpath, so a later bind/mount or spawn cannot be redirected
+ * through a symlink planted after resolution.
+ * @param {string} name
+ * @param {{env?: NodeJS.ProcessEnv, accessFn?: (file: string) => void, statFn?: (file: string) => {isFile: () => boolean}, realpathFn?: (file: string) => string}} [options]
+ * @returns {string}
+ */
+export function resolveExecutablePath(name, {
+  env = process.env,
+  accessFn = (file) => fs.accessSync(file, fs.constants.X_OK),
+  statFn = (file) => fs.statSync(file),
+  realpathFn = (file) => fs.realpathSync(file),
+} = {}) {
+  if (!name || name.includes(path.sep)) {
+    throw new Error(`error: invalid executable name ${JSON.stringify(name)}`);
+  }
+  const pathEnv = typeof env.PATH === "string" && env.PATH.length > 0 ? env.PATH : DEFAULT_DAEMON_EXECUTABLE_PATH;
+  for (const directory of pathEnv.split(path.delimiter)) {
+    if (directory && path.isAbsolute(directory)) {
+      const resolved = tryResolveInDirectory(directory, name, { accessFn, statFn, realpathFn });
+      if (resolved !== null) return resolved;
+    }
+  }
+  throw new Error(
+    `error: required executable "${name}" was not found on the daemon's PATH\n` +
+    "help: install it for the user that started the daemon, then restart the daemon (the lookup deliberately ignores caller-supplied PATH entries)"
+  );
+}
+
+/**
+ * One PATH-directory probe for {@link resolveExecutablePath}. Kept separate
+ * so the public resolver stays under the complexity ceiling; any failure in
+ * this directory just means "not a candidate here".
+ * @param {string} directory
+ * @param {string} name
+ * @param {{accessFn: (file: string) => void, statFn: (file: string) => {isFile: () => boolean}, realpathFn: (file: string) => string}} seams
+ * @returns {string|null}
+ */
+function tryResolveInDirectory(directory, name, { accessFn, statFn, realpathFn }) {
+  const candidate = path.join(directory, name);
+  try {
+    accessFn(candidate);
+    const resolved = realpathFn(candidate);
+    return path.isAbsolute(resolved) && statFn(resolved).isFile() ? resolved : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Resolves the bwrap launcher and the shell used by the check gate at the
+ * daemon boundary. Both are absolute paths selected from the daemon's own
+ * PATH; a caller-forwarded PATH is forwarded to the workload inside the
+ * sandbox but can never choose these two daemon executables.
+ * @param {{env?: NodeJS.ProcessEnv, accessFn?: (file: string) => void, statFn?: (file: string) => {isFile: () => boolean}, realpathFn?: (file: string) => string}} [options]
+ * @returns {{bwrapPath: string, shellPath: string}}
+ */
+export function resolveSandboxLaunchers(options = {}) {
+  return {
+    bwrapPath: resolveExecutablePath("bwrap", options),
+    shellPath: resolveExecutablePath("sh", options),
+  };
 }
 
 /**
@@ -62,10 +134,12 @@ function getBwrapAvailabilityResult(result) {
 
 /**
  * @param {import("./setup.js").RunCommandFn} [runCommand]
+ * @param {string} [bwrapPath] daemon-resolved absolute launcher; tests pass
+ *   the short name and injected runCommand.
  * @returns {{checked: boolean, available: boolean, reason?: string, raw?: string}}
  */
-export function checkBwrapAvailable(runCommand = defaultRunCommand) {
-  const result = runCommand("bwrap", ["--version"]);
+export function checkBwrapAvailable(runCommand = defaultRunCommand, bwrapPath = "bwrap") {
+  const result = runCommand(bwrapPath, ["--version"]);
   return getBwrapAvailabilityResult(result);
 }
 
@@ -88,10 +162,11 @@ export function parseBwrapVersion(stdout) {
  * requires -- overlay only raises the version floor, it adds no new
  * namespace dependency.
  * @param {(command: string, args: readonly string[]) => {status: number|null, stdout: string, stderr: string, error?: NodeJS.ErrnoException}} [runCommand]
+ * @param {string} [bwrapPath]
  * @returns {{supported: boolean, reason?: string}}
  */
-export function checkOverlaySupport(runCommand = defaultRunCommand) {
-  const probe = checkBwrapAvailable(runCommand);
+export function checkOverlaySupport(runCommand = defaultRunCommand, bwrapPath = "bwrap") {
+  const probe = checkBwrapAvailable(runCommand, bwrapPath);
   if (!probe.available) return { supported: false, reason: probe.reason };
   const version = parseBwrapVersion(probe.raw ?? "");
   if (!version) return { supported: false, reason: "could not parse bwrap version" };
@@ -106,11 +181,12 @@ export function checkOverlaySupport(runCommand = defaultRunCommand) {
  * checkBwrapAvailable so both variants share the same probe invocation and
  * classification logic.
  * @param {(command: string, args: readonly string[]) => Promise<import("./setup.js").CommandResult>} [runCommand]
+ * @param {string} [bwrapPath]
  * @returns {Promise<{checked: boolean, available: boolean, reason?: string, raw?: string}>}
  */
-export async function checkBwrapAvailableAsync(runCommand = defaultRunCommandAsync) {
-  const result = await runCommand("bwrap", ["--version"]);
-  return checkBwrapAvailable(() => result);
+export async function checkBwrapAvailableAsync(runCommand = defaultRunCommandAsync, bwrapPath = "bwrap") {
+  const result = await runCommand(bwrapPath, ["--version"]);
+  return checkBwrapAvailable(() => result, bwrapPath);
 }
 
 /**

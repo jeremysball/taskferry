@@ -1,4 +1,5 @@
 import { emptyStatusCounts } from "./tasks.js";
+import { formatBytes } from "./overlay-space.js";
 
 /**
  * @typedef {import("./tasks.js").Counts} Counts
@@ -237,4 +238,17 @@ export function computeDoctorStats(rows, { now = Date.now() } = {}) {
     },
     trend: computeTrend(rows, last24h, now),
   };
+}
+
+/**
+ * Doctor warning text for a low overlay filesystem, or null when the check
+ * passed, was disabled, or could not measure. Lives here with the other
+ * doctor output; the byte rendering stays in `overlay-space.js`.
+ * @param {{checked?: boolean, ok?: boolean, root?: string, freeBytes?: number, totalBytes?: number, minFreeBytes?: number, pendingChangesets?: number}|null|undefined} storage
+ * @returns {string|null}
+ */
+export function formatOverlayStorageWarning(storage) {
+  if (!storage || storage.checked !== true || storage.ok !== false) return null;
+  const pending = storage.pendingChangesets ? ` ${storage.pendingChangesets} task(s) hold pending changesets.` : "";
+  return `Overlay storage is low at ${storage.root}: ${formatBytes(storage.freeBytes ?? 0)} free of ${formatBytes(storage.totalBytes ?? 0)}, below the ${formatBytes(storage.minFreeBytes ?? 0)} reserve. Dispatches that create an overlay are refused until pending changesets are settled (taskferry accept/reject) or overlayMinFreeBytes is lowered; \`--no-overlay\` and \`--no-sandbox\` dispatches still run.${pending}`;
 }

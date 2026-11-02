@@ -20,8 +20,14 @@ const NON_NEGATIVE_INT = { isValid: isNonNegativeInteger, noun: "a non-negative 
 function resolveIntOption(rawValue, envValue, configValue, defaultValue, options) {
   const { kind, envVarName = "env var", strictEnv = false } = options;
   if (rawValue !== undefined) return rawValue;
-  if (envValue !== undefined && envValue !== "") {
-    const parsed = Number(envValue);
+  // Trim before parsing: `Number(" ")` is 0, so an untrimmed whitespace-only
+  // value would look like an explicit zero. For a non-negative knob (e.g.
+  // TASKFERRY_OVERLAY_MIN_FREE_BYTES) that silently disables protection.
+  // Treat whitespace like the empty string instead: fall through to config
+  // or the default, exactly as an unset value does.
+  const trimmedEnvValue = envValue?.trim();
+  if (trimmedEnvValue !== undefined && trimmedEnvValue !== "") {
+    const parsed = Number(trimmedEnvValue);
     if (kind.isValid(parsed)) return parsed;
     if (strictEnv) {
       throw new Error(`error: ${envVarName} must be ${kind.noun} (got ${JSON.stringify(envValue)})\nhelp: set a byte count like ${kind.example}`);

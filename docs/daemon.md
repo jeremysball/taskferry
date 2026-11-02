@@ -169,6 +169,19 @@ to stay under the cap for large tasks.
   required cgroup value cannot be read or parsed, the gate **fails open**:
   launches are admitted and a warning is written to stderr at most once per
   minute rather than stranding every queued ferry behind a broken metric.
+- `TASKFERRY_OVERLAY_MIN_FREE_BYTES` / config `overlayMinFreeBytes`
+  (default `268435456`, 256 MiB): free space required on the filesystem that
+  holds the COW overlays (`<runtimeDir>/overlay`, or
+  `TASKFERRY_OVERLAY_TMP_DIR`). A dispatch whose overlay would land below the
+  reserve is refused before it creates a task or output directory; a queued
+  task whose launch races a full filesystem settles as `crashed` with
+  `failureReason: "OVERLAY_SPACE_LOW"`. The effective reserve is capped at
+  half the filesystem total, and `0` disables the check. A whitespace-only env
+  value is treated as unset and falls through to the config value or default,
+  never as an implicit `0`. `statfs` failure is
+  **fail-open** (a missing measurement must not stop every dispatch). The
+  measurement is also reported by `system.health` as `overlayStorage` and
+  surfaces as a `taskferry doctor` warning.
 - `TASKFERRY_MAX_DISPATCHES_PER_WINDOW` / `TASKFERRY_DISPATCH_WINDOW_MS`
   (defaults `2` per `5000`ms): an independent, optional burst-rate control
   on *launches*, not a concurrency cap.

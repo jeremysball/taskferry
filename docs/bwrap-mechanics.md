@@ -108,9 +108,16 @@ before dispatching, or run the controller with `--no-sandbox`, or pass
 (`src/paths.js:95`, overridable with `TASKFERRY_OVERLAY_TMP_DIR`). On a typical
 box that is `/run/user/<uid>`, often 1-2G. Every unsettled task holds its overlay
 indefinitely, because the daemon's startup sweep deliberately skips a `pending`
-changeset (`sweepOverlayEntry`, `src/tasks.js:3570`). Enough of them fill the
-tmpfs and the daemon dies with `ENOSPC`, taking every in-flight ferry with it.
-Settle each task with `accept` or `reject`.
+changeset (`sweepOverlayEntry`). Enough of them fill the tmpfs, and the next
+overlay `mkdir` fails with `ENOSPC`.
+
+That failure does not kill the daemon. `spawnTaskChild` wraps overlay creation
+and the spawn in one `try/catch`; the task settles as `crashed` with a
+`spawnError` and its changeset is extracted/cleaned up as usual. A dispatch is
+also refused up front when the overlay filesystem has less free space than
+`overlayMinFreeBytes` (default 256 MiB), and the check runs again immediately
+before overlay creation for a queued task. Settle each task with `accept` or
+`reject` to release its overlay.
 
 ## Overlay root layout
 

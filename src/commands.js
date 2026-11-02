@@ -19,7 +19,7 @@ import { checkClaudeCodePlaywrightIsolation, checkOpencodePlaywrightIsolation } 
 import { checkBwrapAvailableAsync } from "./sandbox.js";
 import { normalizeDirectory, resolveWorkspaceRoot } from "./paths.js";
 import { loadConfig } from "./config.js";
-import { computeDoctorStats } from "./doctor-stats.js";
+import { computeDoctorStats, formatOverlayStorageWarning } from "./doctor-stats.js";
 import { streamTaskEvents, watchCommand } from "./commands-stream.js";
 import { ADVISOR_CANNED_PROMPT, gatherAdvisorContext } from "./advisor-context.js";
 import { validatePruneOptions } from "./retention.js";
@@ -706,7 +706,7 @@ function collectDoctorDiagnostics(checked, platform) {
   const warnings = [
     opencodeMcpWarning(checked.opencodeMCP),
     claudeCodeMcpWarning(checked.claudeCodeMCP),
-    bwrapWarning(checked.bwrap),
+    bwrapWarning(checked.bwrap), formatOverlayStorageWarning(/** @type {any} */ (checked).health?.overlayStorage),
   ].filter((message) => message !== null);
   const info = platform !== "linux"
     ? ["Filesystem sandboxing (bwrap) is only available on Linux; dispatched tasks on this platform run unconfined."]
@@ -716,7 +716,7 @@ function collectDoctorDiagnostics(checked, platform) {
 
 /**
  * @typedef {object} DoctorChecks
- * @property {object} health
+ * @property {Record<string, any>} health
  * @property {{installed: boolean, reason?: string}} claude
  * @property {{checked: boolean, isolated?: boolean, path?: string, reason?: string}} opencodeMCP
  * @property {{checked: boolean, isolated?: boolean, path?: string, reason?: string}} claudeCodeMCP

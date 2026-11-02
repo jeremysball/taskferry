@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { KNOWN_EXECUTORS } from "./executor.js";
 import { errCode } from "./errors.js";
-import { isObject, isPositiveInteger } from "./numbers.js";
+import { isNonNegativeInteger, isObject, isPositiveInteger } from "./numbers.js";
 import { KNOWN_VARIANT_LEVELS } from "./variants.js";
 
 // Per-path cache so repeated loadConfig() calls in the same process only
@@ -63,6 +63,7 @@ const CONFIG_FIELD_TYPES = {
   opencodeVersionTimeoutMs: "number",
   uvLegacySweepAgeDays: "number",
   maxResponseBytes: "number",
+  overlayMinFreeBytes: "number",
 };
 
 /** @type {Record<string, string>} */
@@ -204,6 +205,20 @@ function validateMemoryAdmissionPercent(parsed, configPath) {
 }
 
 /**
+ * The overlay free-space reserve accepts 0 to disable the preflight, unlike
+ * the strictly positive byte-count knobs above, and is rejected at config
+ * load time so a typo does not silently fall back to the default reserve.
+ * @param {Record<string, unknown>} parsed
+ * @param {string} configPath
+ */
+function validateOverlayMinFreeBytes(parsed, configPath) {
+  const value = parsed.overlayMinFreeBytes;
+  if (value !== undefined && !isNonNegativeInteger(value)) {
+    throw new Error(`error: config key "overlayMinFreeBytes" in ${configPath} must be a non-negative integer (got ${JSON.stringify(value)})\nhelp: use a byte count, or 0 to disable the overlay free-space preflight`);
+  }
+}
+
+/**
  * @param {string} configPath
  * @returns {Record<string, unknown>}
  */
@@ -225,6 +240,7 @@ function parseAndValidateConfig(configPath) {
   validateConfigFieldTypes(parsed, configPath);
   validateByteCountConfig(parsed, configPath);
   validateMemoryAdmissionPercent(parsed, configPath);
+  validateOverlayMinFreeBytes(parsed, configPath);
 
   if (parsed.defaultExecutor !== undefined && !KNOWN_EXECUTORS.includes(parsed.defaultExecutor)) {
     throw new Error(`error: config key "defaultExecutor" in ${configPath} must be one of ${KNOWN_EXECUTORS.join(", ")} (got ${JSON.stringify(parsed.defaultExecutor)})\nhelp: fix the value in ${configPath}`);

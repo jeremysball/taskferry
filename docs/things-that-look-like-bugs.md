@@ -69,6 +69,20 @@ belongs here.
   at most once per minute. A broken metric must not strand every queued
   ferry, and the warning (not a silent pass) is what makes the outage
   visible.
+- A dispatch refused for low overlay space even though the task is small and
+  its diff would obviously fit. Observe: `taskferry dispatch` exits with
+  `overlay storage is low`, while plenty of space remains for one file.
+  Deliberate: the reserve is a fixed headroom, not a per-task size estimate;
+  the point is to stop a long-running or unexpectedly large worker from
+  filling a shared tmpfs and taking every overlay with it. It is a real bug if
+  the check refuses when free space is above the reserve, or if it stops a
+  task that already holds a live overlay from using that overlay.
+- The overlay free-space preflight passing on a host where `statfs` is broken
+  or missing. Observe: `overlayMinFreeBytes` is set, but dispatches are
+  admitted and no warning appears. Deliberate: the measurement fails **open**,
+  because a broken metric must not strand every dispatch; `system.health`
+  reports `checked: false` with a reason so the condition is visible. It is a
+  real bug if a successful measurement below the reserve is treated as a pass.
 - The Claude statusline showing no Taskferry segment on its first poll, or
   lagging a task transition by one poll — expected. `tf-sl` never runs the CLI
   in its foreground render path: it reads a per-workspace snapshot under

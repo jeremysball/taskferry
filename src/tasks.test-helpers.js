@@ -473,6 +473,8 @@ function buildManagerOptions(options, stateDir, defaultCacheDir, defaultOverlayT
     ...passthroughIfSet({ providerLimits: options.providerLimits }, "providerLimits", "providerLimits"),
     ...passthroughIfSet({ resolveGitCommonDirFn: options.resolveGitCommonDirFn }, "resolveGitCommonDirFn", "resolveGitCommonDirFn"),
     ...passthroughIfSet({ resolveGitDirFn: options.resolveGitDirFn }, "resolveGitDirFn", "resolveGitDirFn"),
+    ...passthroughIfSet({ overlayMinFreeBytes: options.overlayMinFreeBytes }, "overlayMinFreeBytes", "overlayMinFreeBytes"),
+    ...passthroughIfSet({ statfsFn: options.statfsFn }, "statfsFn", "statfsFn"),
     ...passthroughIfSet({ checkOverlaySupportFn: options.checkOverlaySupportFn }, "checkOverlaySupportFn", "checkOverlaySupportFn"),
     ...passthroughIfSet({ runOverlayCommandFn: options.runOverlayCommandFn }, "runOverlayCommandFn", "runOverlayCommandFn"),
     ...passthroughIfSet({ rmOverlayTreeFn: options.rmOverlayTreeFn }, "rmOverlayTreeFn", "rmOverlayTreeFn"),

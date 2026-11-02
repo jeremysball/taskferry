@@ -743,9 +743,23 @@ export function responseError(error, requestId) {
  *   resolveWorkspaceRootFn: (startDir: string) => string
  * ) => unknown} InvokeHandler
  */
+/**
+ * @param {TaskManager} manager
+ */
+function healthResponse(manager) {
+  const base = { healthy: true, pid: process.pid, version: PROTOCOL_VERSION };
+  try {
+    // Overlay storage is advisory: statfs failure is reported inside the
+    // object as checked:false, never as an unhealthy daemon.
+    return { ...base, overlayStorage: manager.overlayStorage() };
+  } catch {
+    return base;
+  }
+}
+
 /** @type {Record<string, InvokeHandler>} */
 const invokeHandlers = {
-  "system.health": () => ({ healthy: true, pid: process.pid, version: PROTOCOL_VERSION }),
+  "system.health": (manager) => healthResponse(manager),
   "task.dispatch": (manager, params) => manager.dispatch(/** @type {any} */ (params)),
   "task.cancel": (manager, params) => manager.cancel(/** @type {string} */ (params.taskId), params.graceMs === undefined ? undefined : { graceMs: /** @type {number} */ (params.graceMs) }),
   "task.status": (manager, params) => manager.status(/** @type {string} */ (params.taskId)),

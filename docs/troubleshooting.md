@@ -160,6 +160,26 @@ buckets.
 
 A worker can settle with `done` or `crashed` while its last assistant turn was still a tool call. The final `message` is then empty but the worker's deliverable was written to its scratch directory at `$TASKFERRY_OUTPUT_DIR` (`<stateDir>/outputs/<id>/`). Read it with `taskferry output <id>` (or `--path <file>`). This directory survives every terminal task status, including `done`, `crashed`, and `cancelled`, and it remains available for a `done` task whose `incomplete` flag is true. It is never consumed by `accept`/`reject`. See [daemon.md](daemon.md#scratch-output-dir-survives-across-every-terminal-status-taskferry423) and `taskferry output --help`.
 
+## A dispatch is refused because overlay storage is low
+
+Dispatcher:
+
+```
+error: overlay storage is low at /run/user/1000/taskferry/overlay: 12.0 MiB free
+of 1.6 GiB, below the 256.0 MiB reserve
+```
+
+The COW overlays live on a small tmpfs. The daemon refuses a dispatch when free
+space there is below `overlayMinFreeBytes` (default 256 MiB) rather than let
+overlay creation fill the filesystem. Settle pending tasks with
+`taskferry accept <id>` or `taskferry reject <id>` to release their overlays,
+prune stale overlays, or raise the tmpfs size. `taskferry doctor` warns while
+the condition holds, and the `overlayStorage` health field in `taskferry doctor`
+output carries the live measurement. A dispatch already queued when space runs out
+settles as `crashed` with `failureReason: "OVERLAY_SPACE_LOW"`; retry it after
+freeing space. `0` disables the preflight, and if `statfs` is unavailable the
+check fails open.
+
 ## A task reports `overlay_mount_busy`
 
 The daemon saw bubblewrap fail while mounting or remounting the overlay. It

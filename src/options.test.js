@@ -44,3 +44,19 @@ test("resolveNonNegativeIntOption lets an empty or invalid env value fall throug
     /error: TASKFERRY_MAX_RESPONSE_BYTES must be a non-negative integer \(got "-1"\)\nhelp: set a byte count like 0/
   );
 });
+
+test("whitespace-only env values fall through instead of parsing as an explicit zero", () => {
+  // `Number(" ")` is 0. Before trimming, a whitespace-only value for a
+  // non-negative knob silently meant 0, e.g. TASKFERRY_OVERLAY_MIN_FREE_BYTES
+  // disabled the overlay free-space preflight. Treat it like an unset value
+  // (and, under strictEnv, like the empty string that already falls through).
+  for (const envValue of [" ", "\t", "\n", "\r\n", " \t\n "]) {
+    assert.equal(resolveNonNegativeIntOption(undefined, envValue, 7, 8), 7);
+    assert.equal(resolveNonNegativeIntOption(undefined, envValue, undefined, 8), 8);
+    assert.equal(resolvePositiveIntOption(undefined, envValue, 7, 8), 7);
+    assert.equal(resolveNonNegativeIntOption(undefined, envValue, 7, 8, { envVarName: ENV_NAME, strictEnv: true }), 7);
+  }
+  // Surrounding whitespace around a real value is harmless.
+  assert.equal(resolveNonNegativeIntOption(undefined, " 0 ", 7, 8), 0);
+  assert.equal(resolveNonNegativeIntOption(undefined, "\t42\n", 7, 8), 42);
+});

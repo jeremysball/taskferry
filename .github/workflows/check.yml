@@ -76,6 +76,13 @@ jobs:
           sudo ninja -C build install
           bwrap --help | grep -q -- --overlay-src
 
+      # This runs after building overlay-capable bwrap. Unlike ordinary local
+      # runs, CI must fail if ownership fixtures or overlays are unavailable.
+      - name: Regress unmapped ownership (real user namespace and OverlayFS)
+        env:
+          TASKFERRY_REQUIRE_OWNERSHIP_REGRESSION: "1"
+        run: node --test --test-name-pattern='real userns/OverlayFS' src/changeset.integration.test.js
+
       - name: Install opencode CLI
         run: npm install -g opencode-ai
 

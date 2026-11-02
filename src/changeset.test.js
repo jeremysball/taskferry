@@ -967,3 +967,178 @@ describe("cleanupOverlay()", () => {
     assert.equal(fs.existsSync(root), false);
   });
 });
+
+describe("extraction ownership diagnostic", () => {
+  const params = {
+    directory: REPO_DIR,
+    overlay: { upperDir: T1_UPPER, workDir: T1_WORK },
+    overlayRwBinds: [],
+    preDispatchHead: PRE_DISPATCH_HEAD,
+    stateDir: STATE_DIR,
+    runtimeDir: RUNTIME_DIR,
+    homeDir: HOME_DIR,
+    denyList: [],
+    diffPath: DIFF_PATCH,
+  };
+  const daemonUid = 1000;
+  const daemonGid = 1000;
+  const OBJECT_TEMP_EOVERFLOW = "error: unable to create temporary file: Value too large for defined data type\nfatal: failed to insert into database\n";
+  const indexLockEOVERFLOW = (target) => `fatal: Unable to create '${target}/.git/index.lock': Value too large for defined data type\n`;
+
+  function failingRunCommand(failureDetail) {
+    return (command) => command === "git"
+      ? { status: 0, stdout: "abc123\n", stderr: "", error: null }
+      : { status: 1, stdout: "", error: null, stderr: failureDetail };
+  }
+
+  function objectRunCommand(gitDir, failureDetail) {
+    return (command, args) => {
+      if (command === "git" && args.includes("--git-common-dir")) {
+        return { status: 0, stdout: `${gitDir}\n`, stderr: "", error: null };
+      }
+      return { status: 1, stdout: "", error: null, stderr: failureDetail };
+    };
+  }
+
+  test("names an unmappable group behind an index.lock EOVERFLOW", () => {
+    let written = null;
+    const statFn = (target) => {
+      if (target === `${REPO_DIR}/.git`) return { uid: 1000, gid: 65534 };
+      throw Object.assign(new Error(`ENOENT: ${target}`), { code: "ENOENT" });
+    };
+    assert.throws(
+      () => extractGitDiff({
+        ...params,
+        writeFileFn: (p) => { written = p; },
+        runCommand: failingRunCommand(indexLockEOVERFLOW(REPO_DIR)),
+        statFn,
+        daemonUid,
+        daemonGid,
+      }),
+      (err) => {
+        assert.match(err.message, /^Unable to extract changeset:/);
+        assert.match(err.message, /group owner 65534 cannot be represented in the sandbox/);
+        assert.match(err.message, /cannot be represented in the sandbox/);
+        assert.ok(err.message.includes(`Set ownership of ${REPO_DIR}/.git to the user/group running the TaskFerry daemon.`));
+        assert.match(err.message, /Underlying error \(exit 1\): fatal: Unable to create/);
+        assert.doesNotMatch(err.message, /nobody/);
+        return true;
+      }
+    );
+    assert.equal(written, null);
+  });
+
+  test("names an unmappable numeric user owner without inventing a group", () => {
+    const statFn = (target) => {
+      if (target === `${REPO_DIR}/.git`) return { uid: 1234, gid: 1000 };
+      throw Object.assign(new Error(`ENOENT: ${target}`), { code: "ENOENT" });
+    };
+    assert.throws(
+      () => extractGitDiff({
+        ...params,
+        runCommand: failingRunCommand(indexLockEOVERFLOW(REPO_DIR)),
+        statFn,
+        daemonUid,
+        daemonGid,
+      }),
+      (err) => {
+        assert.match(err.message, /user owner 1234 cannot be represented in the sandbox/);
+        assert.doesNotMatch(err.message, /group owner/);
+        return true;
+      }
+    );
+  });
+
+  test("names a numeric group owner when the daemon can see it", () => {
+    const statFn = (target) => {
+      if (target === `${REPO_DIR}/.git`) return { uid: 1000, gid: 4242 };
+      throw Object.assign(new Error(`ENOENT: ${target}`), { code: "ENOENT" });
+    };
+    assert.throws(
+      () => extractGitDiff({
+        ...params,
+        runCommand: failingRunCommand(indexLockEOVERFLOW(REPO_DIR)),
+        statFn,
+        daemonUid,
+        daemonGid,
+      }),
+      (err) => {
+        assert.match(err.message, /group owner 4242 cannot be represented in the sandbox/);
+        assert.doesNotMatch(err.message, /unmapped sandbox ID/);
+        return true;
+      }
+    );
+  });
+
+  test("names unmappable shared object fanout directories on object-temp EOVERFLOW", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "axi-owner-objects-"));
+    trackedTmpDirs.push(root);
+    const gitDir = path.join(root, ".git");
+    const objectsDir = path.join(gitDir, "objects");
+    const fanout = path.join(objectsDir, "ab");
+    fs.mkdirSync(fanout, { recursive: true });
+    const statFn = (target) => target === fanout
+      ? { uid: 1000, gid: 65534 }
+      : { uid: 1000, gid: 1000 };
+    let written = null;
+    assert.throws(
+      () => extractGitDiff({
+        ...params,
+        directory: root,
+        writeFileFn: (p) => { written = p; },
+        runCommand: objectRunCommand(gitDir, OBJECT_TEMP_EOVERFLOW),
+        statFn,
+        daemonUid,
+        daemonGid,
+      }),
+      (err) => {
+        assert.match(err.message, /group owner 65534 cannot be represented in the sandbox/);
+        assert.ok(err.message.includes(`Set ownership of ${fanout}`));
+        assert.match(err.message, /Underlying error \(exit 1\): error: unable to create temporary file/);
+        assert.match(err.message, /failed to insert into database/);
+        return true;
+      }
+    );
+    assert.equal(written, null);
+  });
+
+  test("leaves an unrelated EOVERFLOW unclassified when the owners are representable", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "axi-owner-mapped-"));
+    trackedTmpDirs.push(root);
+    const gitDir = path.join(root, ".git");
+    fs.mkdirSync(path.join(gitDir, "objects", "ab"), { recursive: true });
+    assert.throws(
+      () => extractGitDiff({
+        ...params,
+        directory: root,
+        statFn: () => ({ uid: 1000, gid: 1000 }),
+        runCommand: objectRunCommand(gitDir, OBJECT_TEMP_EOVERFLOW),
+        daemonUid,
+        daemonGid,
+      }),
+      (err) => {
+        assert.match(err.message, /git diff extraction failed/);
+        assert.doesNotMatch(err.message, /Set ownership|represented in the sandbox/);
+        return true;
+      }
+    );
+  });
+
+  test("does not classify EOVERFLOW from a non-create failure", () => {
+    const stderr = "fatal: unable to read object: Value too large for defined data type\n";
+    assert.throws(
+      () => extractGitDiff({
+        ...params,
+        statFn: () => ({ uid: 1000, gid: 65534 }),
+        runCommand: failingRunCommand(stderr),
+        daemonUid,
+        daemonGid,
+      }),
+      (err) => {
+        assert.match(err.message, /git diff extraction failed/);
+        assert.doesNotMatch(err.message, /Set ownership|represented in the sandbox/);
+        return true;
+      }
+    );
+  });
+});

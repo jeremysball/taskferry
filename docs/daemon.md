@@ -45,6 +45,12 @@ gives up. `startDaemonBooter()` also `unlink`s any stale
 booter, so a caller that times out sees diagnostics from the boot it
 actually waited on, not from an earlier one.
 
+The daemon's stderr is written to `<runtime-dir>/daemon-stderr.log` (mode
+600) rather than discarded, and a failed boot folds the tail of that file
+into the timeout error so "the daemon never came up" arrives with its actual
+reason. A booter that dies before reaching its own error handler writes
+`<runtime-dir>/daemon-boot-stderr.log` instead.
+
 The spawned daemon inherits the booter's environment, which in turn
 inherits the original caller's environment. Any `TASKFERRY_*` variable
 set when a command first triggers the auto-start takes effect for the
@@ -58,6 +64,77 @@ command start a fresh one. A provider credential is different: `dispatch`/
 environment on every call, so exporting a fresh key before dispatching
 takes effect immediately, with no restart — see
 [security.md](security.md#caller-env-forwarding).
+
+## Supervised mode (`systemd --user`)
+
+Auto-start above is the fallback for a machine with no unit installed. Where
+a supervisor is available, the daemon runs as a real `systemd --user` service
+instead, which gives it a cgroup, restart limits, and durable logs that
+outlive the daemon process.
+
+- **Installing.** `scripts/install-systemd-unit.sh` (a wrapper around
+  `scripts/install-systemd-unit.js`) renders
+  `deploy/systemd/taskferry-daemon.service.in` into
+  `$XDG_CONFIG_HOME/systemd/user/taskferry-daemon.service`, substituting the
+  absolute `node` path, the repo root, and the installing shell's `PATH`. The
+  unit's default `PATH` is only `/usr/local/bin:/usr/bin`, so the baked-in
+  `PATH` is what lets dispatched workers find `opencode`, `pi`, `kilo`,
+  `bwrap`, and `git`. Run `--dry-run` to print the render without writing
+  anything. Pass `--enable` to enable and start it; without that flag the
+  script only writes the unit and reloads the manager.
+- **The checkout must support supervision.** Before writing anything the
+  installer checks that the checkout the unit will point at contains the
+  supervisor code (`TASKFERRY_DAEMON_SUPERVISOR` handling in `src/client.js`
+  and `src/daemon.js`). A unit rendered from a linked worktree points at that
+  worktree, not the primary checkout. Pointing a unit at a pre-merge checkout
+  is exactly how an earlier install produced a disabled unit whose
+  `ExecStart` named a daemon that ignored `TASKFERRY_DAEMON_SUPERVISOR`:
+  systemd started it, nothing restarted it, and clients believed the socket
+  was supervised. The installer now refuses that render and names the missing
+  file.
+- **Logging.** `--log-target auto` uses journald when it is persistent
+  (`Storage=persistent`, or `auto` with `/var/log/journal` present), which is
+  durable across boots and bounded by journald's `SystemMaxUse` / `MaxFiles`
+  / `MaxFileSec` limits. On a host with only a volatile journal it falls back
+  to `StandardOutput=append:` into
+  `~/.local/state/taskferry/logs/daemon.log`, with a daily
+  `taskferry-daemon-logrotate.timer` running
+  `scripts/rotate-daemon-logs.sh` (copy-truncate, 5 generations of 10 MiB).
+  `--log-target file` forces the file, `--log-target journal` forces the
+  journal. No global journald configuration is changed.
+- **Readiness and timeouts.** `Type=exec` means the start job fails if the
+  daemon cannot be exec'd. `systemctl start` returning only means the process
+  was started; readiness is still the socket appearing, which clients poll
+  for with `startupTimeoutMs`. `TimeoutStartSec=60` bounds `ExecStartPre`, and
+  `TimeoutStopSec=30` bounds a clean shutdown. `--enable` refuses while a
+  detached daemon still holds the socket, so a cutover cannot leave two
+  owners or an inactive unit that clients keep asking to start.
+- **How a client knows.** The unit's `ExecStartPre` touches
+  `<runtime-dir>/systemd-supervised` and sets
+  `TASKFERRY_DAEMON_SUPERVISOR=systemd` for the daemon. On a cold socket, the
+  client sees that marker (or the env var, checked first) and runs
+  `systemctl --user start taskferry-daemon.service` instead of spawning a
+  detached process. There is deliberately **no fallback** to a detached spawn
+  when `systemctl` fails: two owners of one socket is the failure being
+  prevented. The error names `systemctl --user status` and
+  `journalctl --user -u taskferry-daemon.service`. The marker lives in the
+  runtime dir, which is wiped at reboot, so it can never outlive its boot.
+- **Restarting on source change.** A supervised daemon does not spawn a
+  replacement: a detached child would land outside the unit's cgroup, leaving
+  systemd reporting the unit dead while an unsupervised daemon held the
+  socket. Instead it closes and exits `75`, and `Restart=on-failure` boots a
+  fresh supervised daemon (`docs/things-that-look-like-bugs.md`).
+- **Stopping.** `systemctl --user stop taskferry-daemon.service` sends
+  `SIGTERM` to the main process only (`KillMode=process`), so running tasks
+  keep running, the same contract as killing a detached daemon by hand.
+- **Environment knobs.** `TASKFERRY_DAEMON_SUPERVISOR` (`systemd` | `spawn`)
+  pins the decision explicitly; `TASKFERRY_DAEMON_UNIT` overrides the unit
+  name. Neither has a CLI flag because they describe the host, not one
+  command's behavior.
+- **Bridge.** The MCP bridge opens one connection per request and retries its
+  event stream with exponential backoff, so a supervised restart is a short
+  burst of `ECONNREFUSED` rather than a broken bridge; it needs no
+  restart of its own.
 
 ## Stopping the daemon
 

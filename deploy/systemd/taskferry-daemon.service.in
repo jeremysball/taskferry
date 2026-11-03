@@ -1,0 +1,51 @@
+[Unit]
+Description=TaskFerry daemon
+Documentation=file://@REPO@/docs/daemon.md
+# A malformed config.json or a busy socket must not become an infinite
+# restart loop. Five attempts in a minute is plenty for a slow-mount race.
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+# Type=exec reports a failure to exec as a failed unit; Type=simple reports the
+# job as complete before the fork/exec has even been attempted.
+Type=exec
+WorkingDirectory=@REPO@
+Environment=TASKFERRY_STATE_DIR=%h/.local/state/taskferry
+Environment=TASKFERRY_RUNTIME_DIR=%t/taskferry
+Environment=TASKFERRY_SOCKET_PATH=%t/taskferry/daemon.sock
+Environment=TASKFERRY_DAEMON_SUPERVISOR=systemd
+# The daemon spawns worker CLIs (opencode, pi, kilo, bwrap, git). A systemd
+# user unit's default PATH is only /usr/local/bin:/usr/bin, so the installer
+# bakes the installing shell's PATH in here; without it, dispatches fail to
+# find their executor.
+Environment=PATH=@PATH@
+# Clients read this marker to decide who owns the daemon. It lives in the
+# runtime dir, which is wiped at reboot, so a marker can never outlive the
+# boot that created it.
+ExecStartPre=/usr/bin/mkdir -p %t/taskferry
+ExecStartPre=/usr/bin/touch %t/taskferry/systemd-supervised
+@LOG_PREP@
+ExecStart=@NODE@ @REPO@/src/daemon.js
+# The daemon exits 75 when it wants a restart onto new source; `on-failure`
+# turns that into a supervised restart instead of a detached replacement.
+Restart=on-failure
+RestartSec=2
+# ExecStartPre and the exec itself are fast; anything slower is a real stall
+# (a mount, a wedged tasks.json read) and should become a visible failure.
+TimeoutStartSec=60
+# SIGTERM the main process only. Workers are spawned detached and deliberately
+# survive a daemon stop (docs/daemon.md "Stopping the daemon"); the default
+# control-group mode would kill them with the service.
+KillMode=process
+KillSignal=SIGTERM
+TimeoutStopSec=30
+# Readiness is the socket appearing, which clients poll for with
+# startupTimeoutMs; `systemctl start` completing only means the process was
+# exec'd. One of the next two pairs is selected by the installer.
+@LOG_STDOUT@
+@LOG_STDERR@
+SyslogIdentifier=taskferry-daemon
+
+[Install]
+WantedBy=default.target

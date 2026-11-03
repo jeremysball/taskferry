@@ -813,3 +813,44 @@ belongs here.
   `spawnSync`, so the absence of a warning there is not a PATH safety check.
   Test and harness filename patterns in `eslint.config.mjs` also exempt files
   matching those patterns; production code must not be placed under them.
+- `systemctl --user stop taskferry-daemon.service` does not stop running
+  tasks. Observe: the service goes inactive while `taskferry list` still
+  shows a `running` worker. Deliberate: workers are spawned `detached: true`
+  and the unit sets `KillMode=process`, so the stop signal reaches only the
+  daemon's main process. That matches the long-standing contract that
+  killing the daemon by hand never kills dispatched work
+  (`docs/daemon.md#stopping-the-daemon`). It would be a real bug if stopping
+  the service killed workers, or if a stopped service's workers could not be
+  reconciled by the next supervised boot.
+- A supervised daemon that notices a source change exits with status `75`
+  instead of starting a replacement. Observe: `systemctl --user status`
+  shows `status=75` for one `RestartSec` window and then `active (running)`
+  with a new `MainPID`; `taskferry` commands issued in that window get
+  `daemon is restarting ... retry`. Deliberate: a `detached: true`
+  replacement would live outside the unit's cgroup, so systemd would report
+  the unit dead while an unsupervised daemon owned the socket. `75` is a
+  failure code because the unit asks for `Restart=on-failure`; exiting `0`
+  would leave the service inactive with no daemon at all. It would be a real
+  bug if a clean `systemctl stop` exited `75` (it exits `0`), or if a
+  dormant daemon could exit `75` without a replacement being started.
+- A client with a supervised unit installed refuses to start a daemon of its
+  own when `systemctl --user start` fails, instead of falling back to the
+  detached spawn. Observe: `taskferry doctor` fails with a `systemctl`/
+  `journalctl` help line even though "starting one directly" looks trivial.
+  Deliberate: the fallback is how a second daemon ends up fighting the
+  supervised one over the socket and `daemon.pid`, and the supervised daemon
+  is the one that would be orphaned. It would be a real bug if a *successful*
+  `systemctl start` were followed by an unsupervised daemon spawn, or if a
+  machine with no marker (the marker is touched by the unit's
+  `ExecStartPre`) lost its auto-start behavior.
+- The file-log rotation timer can drop a few lines written during the copy.
+  Observe: `~/.local/state/taskferry/logs/daemon.log.1` is a snapshot, and a
+  line emitted in the window between `cp` and the in-place truncation is in
+  neither file. Deliberate: the unit opens the log with `O_APPEND`
+  (`StandardOutput=append:`), so renaming the live file would leave the
+  daemon writing to the renamed inode while the next `systemctl start`
+  created a new, permanently empty `daemon.log`. Copy-truncate is the only
+  rotation that keeps the live fd correct, and its race is bounded to one
+  copy. It would be a real bug if a rotation left the live log pointing at a
+  stale inode, if the retained generation count grew without bound, or if
+  rotation ran while the unit was stopped and lost the whole file.

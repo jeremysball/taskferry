@@ -113,7 +113,8 @@ import { errorValue } from "./output.js";
  * @property {string} [sourceDir]
  * @property {string} [daemonEntry]
  * @property {SpawnReplacement} [spawnReplacement]
- * @property {() => void} [exitProcess]
+ * @property {(code?: number) => void} [exitProcess]
+ * @property {(code?: number) => void} [exitForRestart]
  * @property {ProfilingConfig} [config]
  */
 
@@ -133,7 +134,8 @@ import { errorValue } from "./output.js";
  * @property {string} sourceDir
  * @property {string} daemonEntry
  * @property {SpawnReplacement} spawnReplacement
- * @property {() => void} exitProcess
+ * @property {(code?: number) => void} exitProcess
+ * @property {(code?: number) => void} exitForRestart
  */
 
 /**
@@ -791,6 +793,25 @@ function invoke(manager, request, resolveWorkspaceRootFn) {
   return handler(manager, request.params, resolveWorkspaceRootFn);
 }
 
+// Exit status the daemon uses when it wants its supervisor to restart it onto
+// new code. 75 (EX_TEMPFAIL) is a failure code on purpose: the unit asks for
+// `Restart=on-failure`, so a clean exit 0 would leave the service inactive
+// with no daemon at all. `systemctl stop` is unaffected: that path closes
+// and exits 0.
+export const SUPERVISED_RESTART_EXIT_CODE = 75;
+
+/**
+ * Whether systemd --user owns this daemon process. Set by the unit's
+ * `Environment=TASKFERRY_DAEMON_SUPERVISOR=systemd`; unset everywhere else,
+ * including the detached launch-on-use path the client uses when no unit is
+ * installed.
+ * @param {NodeJS.ProcessEnv} [env]
+ * @returns {boolean}
+ */
+export function isSupervisedBySystemd(env = process.env) {
+  return env.TASKFERRY_DAEMON_SUPERVISOR === "systemd";
+}
+
 /** @type {Partial<DaemonOptions>} */
 const DAEMON_DEFAULTS = {
   platform: process.platform,
@@ -803,7 +824,7 @@ const DAEMON_DEFAULTS = {
   sourceDir: SOURCE_DIR,
   daemonEntry: DAEMON_ENTRY,
   spawnReplacement: defaultSpawnReplacement,
-  exitProcess: () => process.exit(0),
+  exitProcess: (code = 0) => process.exit(code),
 };
 
 /**
@@ -824,6 +845,60 @@ function withResponseCap(taskManagerOptions, cap) {
   // needs the explicit key, which outranks the alias in resolution.
   if (alias === undefined || alias > cap) copy.maxResponseBytes = cap;
   return copy;
+}
+
+/**
+ * @param {net.Server} server
+ * @param {string} stateDir
+ * @param {() => TaskManager} createManager
+ * @returns {Promise<TaskManager>}
+ */
+async function createManagerAfterBind(server, stateDir, createManager) {
+  try {
+    return createManager();
+  } catch (error) {
+    await new Promise((resolve) => server.close(resolve));
+    makeUnclaimDaemonPid(stateDir)();
+    throw error;
+  }
+}
+
+/**
+ * Decide who restarts the daemon, and with which exit status.
+ *
+ * Under systemd the unit *is* the restart mechanism: a replacement spawned
+ * with `detached: true` would live outside the service cgroup, so systemd
+ * would report the unit dead while an unsupervised daemon kept the socket.
+ * Instead the restart path exits with SUPERVISED_RESTART_EXIT_CODE and lets
+ * `Restart=on-failure` boot a supervised replacement.
+ *
+ * The singleton-refusal path (`enforceDaemonSingleton`) keeps the plain
+ * `exitProcess`: exiting 75 there would restart-hammer against a daemon this
+ * process must not duplicate, and the socket/pid gate already refuses the
+ * boot. An explicit `spawnReplacement`/`exitForRestart` from the caller
+ * (tests, embedders) always wins.
+ *
+ * @param {object} args
+ * @param {DaemonOptionsInput} args.options
+ * @param {NodeJS.ProcessEnv} args.env
+ * @param {(code?: number) => void} args.defaultExitProcess
+ * @returns {{spawnReplacement: SpawnReplacement, exitProcess: (code?: number) => void, exitForRestart: (code?: number) => void}}
+ */
+function resolveRestartPolicy({ options, env, defaultExitProcess }) {
+  const spawnReplacement = /** @type {SpawnReplacement} */ (
+    options.spawnReplacement ?? defaultSpawnReplacement
+  );
+  if (options.exitForRestart) {
+    return { spawnReplacement, exitProcess: defaultExitProcess, exitForRestart: options.exitForRestart };
+  }
+  if (!isSupervisedBySystemd(env)) {
+    return { spawnReplacement, exitProcess: defaultExitProcess, exitForRestart: defaultExitProcess };
+  }
+  return {
+    spawnReplacement: options.spawnReplacement ?? (() => {}),
+    exitProcess: defaultExitProcess,
+    exitForRestart: () => defaultExitProcess(SUPERVISED_RESTART_EXIT_CODE),
+  };
 }
 
 /**
@@ -858,6 +933,11 @@ function resolveDaemonOptions(options = {}) {
     { strictEnv: true },
   );
   const taskManagerOptions = withResponseCap(/** @type {Record<string, any>} */ (merged.taskManagerOptions), maxOutboundBytes);
+  const { spawnReplacement, exitProcess, exitForRestart } = resolveRestartPolicy({
+    options,
+    env,
+    defaultExitProcess: /** @type {(code?: number) => void} */ (merged.exitProcess),
+  });
   // eslint-disable-next-line sonarjs/shorthand-property-grouping -- mixed shorthand/longhand is idiomatic for merged defaults vs explicit casts
   return {
     env,
@@ -873,8 +953,9 @@ function resolveDaemonOptions(options = {}) {
     taskManagerOptions,
     sourceDir: /** @type {string} */ (merged.sourceDir),
     daemonEntry: /** @type {string} */ (merged.daemonEntry),
-    spawnReplacement: /** @type {SpawnReplacement} */ (merged.spawnReplacement),
-    exitProcess: /** @type {() => void} */ (merged.exitProcess),
+    spawnReplacement,
+    exitProcess,
+    exitForRestart,
   };
 }
 
@@ -958,7 +1039,7 @@ export async function startDaemon(options = {}) {
     sourceDir,
     daemonEntry,
     spawnReplacement,
-    exitProcess,
+    exitProcess, exitForRestart,
   } = resolveDaemonOptions(options);
 
   if (platform !== "linux" && platform !== "darwin") {
@@ -993,7 +1074,9 @@ export async function startDaemon(options = {}) {
    * @param {DaemonEvent} event
    */
   const onEvent = (event) => deliverEvent(subscriptions, writeMessage, event, resolveWorkspaceRoot);
-  const manager = taskManagerFactory({ ...taskManagerOptions, onEvent, stateDir, runtimeDir, socketPath, resolveWorkspaceRootFn: resolveWorkspaceRoot });
+  const manager = await createManagerAfterBind(boundServer, stateDir, () => taskManagerFactory({
+    ...taskManagerOptions, onEvent, stateDir, runtimeDir, socketPath, resolveWorkspaceRootFn: resolveWorkspaceRoot,
+  }));
   // The manager is a Record<string, any> by construction (see the TaskManager
   // typedef above). daemon-server.js states the narrow contract it depends on;
   // assert it once here so every hand-off below carries it, instead of casting
@@ -1056,7 +1139,7 @@ export async function startDaemon(options = {}) {
     startupSourceSignature,
     daemonEntry,
     env: restartEnv,
-    exitProcess,
+    exitProcess: exitForRestart,
     spawnReplacement,
     restart,
     close: closeWithUnclaim,

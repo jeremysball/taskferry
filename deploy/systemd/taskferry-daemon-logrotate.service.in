@@ -1,0 +1,10 @@
+[Unit]
+Description=Rotate the TaskFerry daemon log files
+
+[Service]
+Type=oneshot
+Environment=TASKFERRY_LOG_DIR=%h/.local/state/taskferry/logs
+Environment=TASKFERRY_LOG_MAX_BYTES=@MAX_BYTES@
+Environment=TASKFERRY_LOG_KEEP=@KEEP@
+ExecStart=@REPO@/scripts/rotate-daemon-logs.sh
+Nice=10

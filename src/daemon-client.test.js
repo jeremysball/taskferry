@@ -7,12 +7,14 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { startDaemon } from "./daemon.js";
-import { connectClient, ensureDaemonStarted, startDaemonBooter } from "./client.js";
+import { connectClient, ensureDaemonStarted, resolveDaemonSupervisor, startDaemonBooter, startDaemonViaSystemd } from "./client.js";
 import { withFileLock } from "./state-lock.js";
 
 const TEST_MODEL = "test/model";
 const TASK_STATE = "task.state";
 const DAEMON_BOOT_ERR = "daemon-boot.err";
+const DAEMON_STDERR_LOG = "daemon-stderr.log";
+const DAEMON_PID = "daemon.pid";
 const TEST_STARTED_AT = "2026-07-15T00:00:00.000Z";
 const TASK_WAIT = "task.wait";
 const SYSTEM_HEALTH = "system.health";
@@ -352,6 +354,97 @@ describe("multiplexed daemon client: request correlation, subscriptions, and aut
 });
 
 describe("multiplexed daemon client: boot-failure reporting and malformed messages", () => {
+  test("manager construction failure releases the bound socket and ownership record", async (t) => {
+    const paths = temporaryPaths(t);
+    const servers = [];
+    const createServer = net.createServer;
+    t.mock.method(net, "createServer", (...args) => {
+      const server = createServer(...args);
+      servers.push(server);
+      t.after(() => new Promise((resolve) => server.close(resolve)));
+      return server;
+    });
+    await assert.rejects(
+      () => startDaemon({ ...paths, taskManagerFactory: () => { throw new Error("manager initialization failed"); } }),
+      /manager initialization failed/
+    );
+    assert.equal(servers.length, 1);
+    assert.equal(servers[0].listening, false);
+    assert.equal(fs.existsSync(path.join(paths.stateDir, DAEMON_PID)), false);
+    assert.equal(fs.existsSync(paths.socketPath), false);
+
+    t.mock.restoreAll();
+    const fake = fakeManagerFactory();
+    const daemon = await startDaemon({ ...paths, taskManagerFactory: fake.factory });
+    t.after(() => daemon.close());
+    const client = await connectClient({ ...paths, autoStart: false });
+    t.after(() => client.close());
+    assert.equal((await client.request(SYSTEM_HEALTH)).healthy, true);
+  });
+
+  test("real launcher preserves and surfaces daemon initialization stderr", (t) => {
+    const paths = temporaryPaths(t);
+    fs.mkdirSync(paths.runtimeDir, { recursive: true });
+    const log = path.join(paths.runtimeDir, DAEMON_STDERR_LOG);
+    fs.writeFileSync(log, "old daemon diagnostic", { mode: 0o644 });
+    const env = {
+      ...process.env,
+      XDG_CONFIG_HOME: path.join(paths.root, "config"),
+      TASKFERRY_STATE_DIR: paths.stateDir,
+      TASKFERRY_RUNTIME_DIR: paths.runtimeDir,
+      TASKFERRY_CACHE_DIR: path.join(paths.root, "cache"),
+      TASKFERRY_SOCKET_PATH: paths.socketPath,
+      TASKFERRY_ENV_FILE: path.join(paths.root, "missing-secrets.env"),
+    };
+    const script = `import {ensureDaemonStarted} from ${JSON.stringify(new URL("./client.js", import.meta.url).href)};
+      try { ensureDaemonStarted({startupTimeoutMs: 1500, retryDelayMs: 10}); }
+      catch (error) { console.error(error.message); process.exitCode = 1; }`;
+    try {
+      assert.throws(
+        () => execFileSync(process.execPath, ["--input-type=module", "-e", script], { env, timeout: 10000, stdio: "pipe" }),
+        (error) => {
+          assert.equal(error.status, 1);
+          assert.match(String(error.stderr), /env file not found: .*missing-secrets\.env/);
+          return true;
+        }
+      );
+      assert.equal(fs.existsSync(path.join(paths.stateDir, DAEMON_PID)), false);
+      assert.equal(fs.existsSync(paths.socketPath), false);
+    } finally {
+      const pidFile = path.join(paths.stateDir, DAEMON_PID);
+      if (fs.existsSync(pidFile)) process.kill(Number(fs.readFileSync(pidFile, "utf8").split(" ")[0]), "SIGTERM");
+    }
+    assert.match(fs.readFileSync(log, "utf8"), /env file not found/);
+    assert.doesNotMatch(fs.readFileSync(log, "utf8"), /old daemon diagnostic/);
+    assert.equal(fs.statSync(log).mode & 0o777, 0o600);
+  });
+
+  test("startup errors include only the bounded tail of daemon stderr", async (t) => {
+    const paths = temporaryPaths(t);
+    fs.mkdirSync(paths.runtimeDir, { recursive: true });
+    fs.writeFileSync(path.join(paths.runtimeDir, DAEMON_STDERR_LOG), `old diagnostic\n${"x".repeat(20000)}\nlatest startup failure`);
+    await assert.rejects(
+      () => connectClient({ ...paths, startupTimeoutMs: 20, retryDelayMs: 5, ensureDaemonFn: () => {} }),
+      (error) => {
+        assert.match(error.message, /latest startup failure/);
+        assert.doesNotMatch(error.message, /old diagnostic/);
+        assert.ok(error.message.length < 17000);
+        return true;
+      }
+    );
+  });
+
+  test("includes daemon stderr even when a generic booter error is present", async (t) => {
+    const paths = temporaryPaths(t);
+    fs.mkdirSync(paths.runtimeDir, { recursive: true });
+    fs.writeFileSync(path.join(paths.runtimeDir, DAEMON_BOOT_ERR), "generic startup timeout");
+    fs.writeFileSync(path.join(paths.runtimeDir, DAEMON_STDERR_LOG), "Error: required secrets unavailable");
+    await assert.rejects(
+      () => connectClient({ ...paths, startupTimeoutMs: 20, retryDelayMs: 5, ensureDaemonFn: () => {} }),
+      /daemon subprocess failed: Error: required secrets unavailable/
+    );
+  });
+
   test("reports bounded startup failures with actionable help", async (t) => {
     const paths = temporaryPaths(t);
     await assert.rejects(
@@ -447,5 +540,108 @@ describe("multiplexed daemon client: boot-failure reporting and malformed messag
     t.after(() => client.close());
 
     await assert.rejects(() => client.request(SYSTEM_HEALTH), /invalid daemon message/);
+  });
+});
+
+describe("supervised daemon startup (systemd --user)", () => {
+  test("asks systemd to start the unit instead of spawning a detached daemon", (t) => {
+    const paths = temporaryPaths(t);
+    fs.mkdirSync(paths.runtimeDir, { recursive: true });
+    const started = [];
+    let ready = false;
+    const result = ensureDaemonStarted({
+      ...paths,
+      env: { ...process.env, TASKFERRY_DAEMON_SUPERVISOR: "systemd" },
+      startupTimeoutMs: 200,
+      retryDelayMs: 1,
+      isDaemonReadySync: () => ready,
+      spawnDaemonFn: () => { throw new Error("a supervised client must never spawn a detached daemon"); },
+      systemdStartFn: ({ unit }) => {
+        started.push(unit);
+        ready = true;
+      },
+    });
+
+    assert.equal(result, true);
+    assert.deepEqual(started, ["taskferry-daemon.service"]);
+  });
+
+  test("the unit's runtime marker selects supervision without an env var", (t) => {
+    const paths = temporaryPaths(t);
+    fs.mkdirSync(paths.runtimeDir, { recursive: true });
+    fs.writeFileSync(path.join(paths.runtimeDir, "systemd-supervised"), "");
+    const started = [];
+    let ready = false;
+
+    assert.equal(ensureDaemonStarted({
+      ...paths,
+      env: { ...process.env, TASKFERRY_DAEMON_SUPERVISOR: "" },
+      startupTimeoutMs: 200,
+      retryDelayMs: 1,
+      isDaemonReadySync: () => ready,
+      spawnDaemonFn: () => { throw new Error("marker should have selected systemd"); },
+      systemdStartFn: () => { started.push("systemd"); ready = true; },
+    }), true);
+    assert.deepEqual(started, ["systemd"]);
+  });
+
+  test("an explicit spawn override wins over the marker", (t) => {
+    const paths = temporaryPaths(t);
+    fs.mkdirSync(paths.runtimeDir, { recursive: true });
+    fs.writeFileSync(path.join(paths.runtimeDir, "systemd-supervised"), "");
+
+    assert.equal(resolveDaemonSupervisor({ env: { ...process.env, TASKFERRY_DAEMON_SUPERVISOR: "spawn" }, runtimeDir: paths.runtimeDir }), "spawn");
+    assert.equal(resolveDaemonSupervisor({ env: { ...process.env, TASKFERRY_DAEMON_SUPERVISOR: "" }, runtimeDir: paths.runtimeDir }), "systemd");
+    assert.equal(resolveDaemonSupervisor({ env: { ...process.env, TASKFERRY_DAEMON_SUPERVISOR: "" }, runtimeDir: path.join(paths.root, "nope") }), "spawn");
+  });
+
+  test("systemctl invocation is user-scoped and names the unit", () => {
+    const calls = [];
+    startDaemonViaSystemd({
+      env: { TASKFERRY_DAEMON_UNIT: "custom-daemon.service" },
+      runFn: (command, args, options) => {
+        calls.push([command, args, options.timeout]);
+        return { status: 0 };
+      },
+    });
+
+    assert.deepEqual(calls, [["systemctl", ["--user", "start", "custom-daemon.service"], 10000]]);
+  });
+
+  test("the start lock outlasts the systemctl timeout and the readiness poll", (t) => {
+    const paths = temporaryPaths(t);
+    fs.mkdirSync(paths.runtimeDir, { recursive: true });
+    let observed;
+    const result = ensureDaemonStarted({
+      ...paths,
+      env: { ...process.env, TASKFERRY_DAEMON_SUPERVISOR: "systemd" },
+      startupTimeoutMs: 500,
+      retryDelayMs: 1,
+      isDaemonReadySync: () => true,
+      withLockFn: (_lockPath, callback, options) => {
+        observed = options;
+        return callback();
+      },
+    });
+
+    assert.equal(result, false);
+    assert.ok(observed.timeoutMs >= 500 + 10000, "lock must outlast a systemctl timeout plus the readiness poll");
+    assert.equal(observed.timeoutMs, observed.staleMs);
+  });
+
+  test("a failed systemctl start surfaces journal guidance instead of spawning", () => {
+    assert.throws(
+      () => startDaemonViaSystemd({ env: {}, runFn: () => ({ status: 5 }) }),
+      (error) => {
+        assert.match(error.message, /systemctl --user start taskferry-daemon\.service exited 5/);
+        assert.match(error.message, /journalctl --user -u taskferry-daemon\.service/);
+        assert.match(error.message, /TASKFERRY_DAEMON_SUPERVISOR=spawn/);
+        return true;
+      }
+    );
+    assert.throws(
+      () => startDaemonViaSystemd({ env: {}, runFn: () => ({ error: new Error("spawn systemctl ENOENT") }) }),
+      /exited unknown/
+    );
   });
 });

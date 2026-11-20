@@ -1,0 +1,10 @@
+[Unit]
+Description=Start the TaskFerry daemon once its env file exists
+Documentation=file://@REPO@/docs/daemon.md
+
+[Path]
+PathExists=@ENV_FILE@
+Unit=taskferry-daemon.service
+
+[Install]
+WantedBy=default.target

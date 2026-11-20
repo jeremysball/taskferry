@@ -59,6 +59,128 @@ environment on every call, so exporting a fresh key before dispatching
 takes effect immediately, with no restart — see
 [security.md](security.md#caller-env-forwarding).
 
+## Supervised mode (`systemd --user`)
+
+Auto-start above is the fallback for a machine with no unit installed. Where
+a supervisor is available, the daemon runs as a real `systemd --user` service
+instead, which gives it a cgroup, restart limits, and durable logs that
+outlive the daemon process.
+
+- **Installing.** `scripts/install-systemd-unit.sh` (a wrapper around
+  `scripts/install-systemd-unit.js`) renders
+  `deploy/systemd/taskferry-daemon.service.in` into
+  `$XDG_CONFIG_HOME/systemd/user/taskferry-daemon.service`, substituting the
+  absolute `node` path, the repo root, and the installing shell's `PATH`. The
+  unit's default `PATH` is only `/usr/local/bin:/usr/bin`, so the baked-in
+  `PATH` is what lets dispatched workers find `opencode`, `pi`, `kilo`,
+  `bwrap`, and `git`. Run `--dry-run` to print the render without writing
+  anything. Pass `--enable` to enable and start it; without that flag the
+  script only writes the unit and reloads the manager.
+  For host operations the installer uses `/usr/bin/git`,
+  `/usr/bin/systemctl`, and, for `--log-target auto`,
+  `/usr/bin/systemd-analyze`, not the shell's `PATH`. It fails if a required
+  executable is unavailable at that location. Explicit `file` and `journal`
+  log targets do not require the journald probe.
+  Client supervisor discovery and startup likewise use `/usr/bin/systemctl`.
+  The default unit directory follows the user manager's `XDG_CONFIG_HOME`;
+  `--enable` refuses an alternate `--unit-dir` because the manager would not
+  necessarily load those files.
+  The installer uses the user manager's state, runtime and socket paths;
+  `--enable` refuses mismatched paths or any existing socket. Stop the daemon
+  and wait for its socket to disappear before reinstalling, even when it is
+  already supervised. An install without `--enable` only writes units;
+  perform the cutover by re-running the guarded installer with `--enable`,
+  not by enabling the path unit by hand.
+- **The checkout must support supervision.** Before writing anything the
+  installer checks that the checkout the unit will point at contains the
+  supervisor code (`TASKFERRY_DAEMON_SUPERVISOR` handling in `src/client.js`
+  and `src/daemon.js`). A unit rendered from a linked worktree points at that
+  worktree, not the primary checkout. Pointing a unit at a pre-merge checkout
+  is exactly how an earlier install produced a disabled unit whose
+  `ExecStart` named a daemon that ignored `TASKFERRY_DAEMON_SUPERVISOR`:
+  systemd started it, nothing restarted it, and clients believed the socket
+  was supervised. The installer now refuses that render and names the missing
+  file.
+- **Env-file-gated startup.** The installer reads the user manager's
+  environment, then its effective config (`XDG_CONFIG_HOME` or
+  `$HOME/.config`) and `TASKFERRY_ENV_FILE` override. If the effective env
+  file is set, it requires an absolute path and installs
+  `taskferry-daemon.path` to start the service when that file exists. The
+  path unit, not the service, is enabled at boot. The service pins that
+  config location and env-file path so later manager environment changes
+  cannot silently move it away from the gate. Re-run the installer after
+  changing the config's `envFile` or the manager's environment: until then,
+  the service still reads the old env file and the path unit watches it.
+  On gated `--enable`, the installer stops an already-active path unit,
+  rechecks that no service or socket appeared, then reloads and re-enables
+  the path so it watches the new file. If this sequence fails after stopping
+  the path, resolve the reported error and re-run the installer.
+  The installer warns when the shell's settings differ from the manager's.
+  An ungated installation is not pinned: if a later manager environment or
+  config change introduces an env file, it will still start at boot without
+  a path gate until the installer is re-run.
+  Write the file atomically and completely; even an empty file satisfies
+  the gate and starts a daemon without secrets. Removing the file does not stop a running
+  daemon, which retains its last good environment.
+  If switching back to no `envFile`, the installer only warns about an old
+  path unit; it remains enabled and can trigger the service until explicitly
+  disabled with `systemctl --user disable --now taskferry-daemon.path` and
+  its unit file is deleted. If a start limit is hit, after both units are
+  loaded recover with `systemctl --user reset-failed taskferry-daemon.service taskferry-daemon.path`.
+- **Logging.** `--log-target auto` uses journald when it is persistent
+  (`Storage=persistent`, or `auto` with `/var/log/journal` present). On a host
+  with only a volatile journal it falls back to `StandardOutput=append:` into
+  `~/.local/state/taskferry/logs/daemon.log`. File logging never truncates or
+  rotates the log, so it can grow without bound. The installer creates its
+  parent directory before enabling the service, since systemd opens the log
+  before running service commands. `--log-target file` forces the file;
+  `--log-target journal` forces journald. No global journald configuration
+  is changed.
+  If an obsolete TaskFerry log-rotation timer unit is still installed, the
+  installer refuses to proceed until it is disabled and removed explicitly;
+  it never removes or truncates existing log files.
+- **Readiness and timeouts.** `Type=exec` means the start job fails if the
+  daemon cannot be exec'd. `systemctl start` returning only means the process
+  was started; readiness is still the socket appearing, which clients poll
+  for with `startupTimeoutMs`. `TimeoutStartSec=60` bounds `ExecStartPre`, and
+  `TimeoutStopSec=30` bounds a clean shutdown. `--enable` refuses while a
+  detached daemon still holds the socket, so a cutover cannot leave two
+  owners or an inactive unit that clients keep asking to start.
+- **How a client knows.** The unit's `ExecStartPre` touches
+  `<runtime-dir>/systemd-supervised` and sets
+  `TASKFERRY_DAEMON_SUPERVISOR=systemd` for the daemon. On a cold socket, the
+  client checks the marker and whether the service or path unit is enabled,
+  including before the first start after boot. It then runs
+  `systemctl --user start taskferry-daemon.service` instead of spawning a
+  detached process. A gated service also has `ConditionPathExists`, so direct
+  starts do not consume the restart limit while the env file is missing.
+  If the unit start fails, the client does not fall back to a detached spawn.
+  If `systemctl` is missing, the user manager is unreachable, or unit state
+  is otherwise uncertain, discovery also fails closed. This changes
+  auto-start on non-systemd hosts: when no supervisor is intended, set
+  `TASKFERRY_DAEMON_SUPERVISOR=spawn` in the client environment to retain
+  detached auto-start. Do not use that override while a systemd unit can own
+  the same socket.
+- **Restarting on source change.** A supervised daemon does not spawn a
+  replacement: a detached child would land outside the unit's cgroup, leaving
+  systemd reporting the unit dead while an unsupervised daemon held the
+  socket. Instead it closes and exits `75`, and `Restart=on-failure` boots a
+  fresh supervised daemon (`docs/things-that-look-like-bugs.md`).
+- **Stopping.** In gated mode run
+  `systemctl --user stop taskferry-daemon.path taskferry-daemon.service`;
+  stopping only the service lets the path unit start it again. Without a gate,
+  stop `taskferry-daemon.service` alone. The service sends `SIGTERM` to the
+  main process only (`KillMode=process`), so running tasks keep running, the
+  same contract as killing a detached daemon by hand.
+- **Environment knobs.** `TASKFERRY_DAEMON_SUPERVISOR` (`systemd` | `spawn`)
+  pins the decision explicitly; `TASKFERRY_DAEMON_UNIT` overrides the unit
+  name. Neither has a CLI flag because they describe the host, not one
+  command's behavior.
+- **Bridge.** The MCP bridge opens one connection per request and retries its
+  event stream with exponential backoff, so a supervised restart is a short
+  burst of `ECONNREFUSED` rather than a broken bridge; it needs no
+  restart of its own.
+
 ## Stopping the daemon
 
 There is no `taskferry stop` command. Find the pid with `taskferry doctor

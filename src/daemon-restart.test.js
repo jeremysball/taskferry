@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { startDaemon } from "./daemon.js";
+import { startDaemon, SUPERVISED_RESTART_EXIT_CODE } from "./daemon.js";
 
 function temporaryPaths(t) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-daemon-restart-test-"));
@@ -50,6 +50,54 @@ function sourceFixture(t) {
 }
 
 describe("daemon source-change restart behavior", () => {
+  test("when supervised by systemd, requests a supervisor restart instead of spawning a replacement", async (t) => {
+    const paths = temporaryPaths(t);
+    const { dir, entry } = sourceFixture(t);
+    const fake = fakeManagerFactory([]);
+    const exitCodes = [];
+    const daemon = await startDaemon({
+      ...paths,
+      env: { ...process.env, TASKFERRY_DAEMON_SUPERVISOR: "systemd" },
+      taskManagerFactory: fake.factory,
+      sourceDir: dir,
+      daemonEntry: entry,
+      // Deliberately no spawnReplacement: the supervised default must be a
+      // no-op so systemd, not a detached child, owns the replacement.
+      exitProcess: (code) => { exitCodes.push(code); },
+    });
+    t.after(() => daemon.close());
+
+    const bumped = new Date(Date.now() + 60_000);
+    fs.utimesSync(entry, bumped, bumped);
+
+    const net = await import("node:net");
+    const { EventEmitter } = await import("node:events");
+    const socket = net.createConnection(paths.socketPath);
+    await EventEmitter.once(socket, "connect");
+    socket.setEncoding("utf8");
+    let buffer = "";
+    const pending = new Map();
+    socket.on("data", (chunk) => {
+      buffer += chunk;
+      for (;;) {
+        const nl = buffer.indexOf("\n");
+        if (nl === -1) break;
+        const line = buffer.slice(0, nl);
+        buffer = buffer.slice(nl + 1);
+        if (!line) continue;
+        const msg = JSON.parse(line);
+        pending.get(msg.id)?.(msg);
+        pending.delete(msg.id);
+      }
+    });
+    const request = (id, method, params = {}) => new Promise((resolve) => { pending.set(id, resolve); socket.write(`${JSON.stringify({ version: 1, id, method, params })}\n`); });
+    await request("health", "system.health");
+    await new Promise((r) => setTimeout(r, 30));
+    socket.destroy();
+
+    assert.deepEqual(exitCodes, [SUPERVISED_RESTART_EXIT_CODE], "a supervised restart must exit for systemd, not exit cleanly");
+  });
+
   test("restarts immediately by default even when tasks are running (no wait-for-idle)", async (t) => {
     const paths = temporaryPaths(t);
     const { dir, entry } = sourceFixture(t);

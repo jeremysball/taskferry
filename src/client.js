@@ -17,6 +17,23 @@ import { errCode } from "./errors.js";
 const DAEMON_ENTRY = fileURLToPath(new URL("./daemon.js", import.meta.url));
 const CLIENT_ENTRY = fileURLToPath(import.meta.url);
 const SOCKET_FILENAME = "daemon.sock";
+const DEFAULT_DAEMON_UNIT = "taskferry-daemon.service";
+const SYSTEMCTL_PATH = "/usr/bin/systemctl";
+// Written by the unit's ExecStartPre, so a client can tell "systemd owns this
+// daemon" without shelling out to systemctl on every cold start. It lives in
+// the runtime dir (not the state dir) because supervision is per-boot: after a
+// reboot the unit recreates it as it starts the daemon.
+const SUPERVISOR_MARKER_FILENAME = "systemd-supervised";
+const SYSTEMD_START_TIMEOUT_MS = 10_000;
+const SYSTEMD_DETECT_TIMEOUT_MS = 1_000;
+
+/**
+ * @param {NodeJS.ProcessEnv} env
+ * @returns {string}
+ */
+function daemonUnitName(env) {
+  return env.TASKFERRY_DAEMON_UNIT || DEFAULT_DAEMON_UNIT;
+}
 
 /**
  * @typedef {object} DaemonBooterOptions
@@ -46,6 +63,8 @@ const SOCKET_FILENAME = "daemon.sock";
  * @property {<T>(lockPath: string, callback: () => T, options: {timeoutMs: number, staleMs: number, retryMs: number}) => T} [withLockFn]
  * @property {(socketPath: string) => boolean} [isDaemonReadySync]
  * @property {(options: DaemonBooterOptions) => unknown} [spawnDaemonFn]
+ * @property {(options: {env: NodeJS.ProcessEnv, runtimeDir: string}) => "systemd" | "spawn"} [supervisorFn]
+ * @property {(options: {env: NodeJS.ProcessEnv, unit?: string}) => void} [systemdStartFn]
  * @property {({env}: {env: NodeJS.ProcessEnv}) => unknown} [loadConfigFn]
  */
 
@@ -120,6 +139,87 @@ function spawnDaemon({ env, stateDir, runtimeDir, socketPath }) {
   });
   child.unref();
   return child;
+}
+
+/** @param {string} name @param {NodeJS.ProcessEnv} env @param {typeof spawnSync} runFn */
+function supervisorUnitEnabled(name, env, runFn) {
+  const result = runFn(SYSTEMCTL_PATH, ["--user", "is-enabled", name], {
+    env: { ...env, LC_ALL: "C" }, encoding: "utf8", timeout: SYSTEMD_DETECT_TIMEOUT_MS,
+  });
+  if (!result.error && result.status === 0) return true;
+  const state = String(result.stdout || "").trim();
+  const diagnostic = String(result.stderr || "");
+  const missing = /Failed to get unit file state.*No such file or directory/u.test(diagnostic);
+  if (!result.error && (state === "disabled" || state === "not-found" || missing)) return false;
+  throw new Error(`error: cannot determine whether ${name} is supervised using ${SYSTEMCTL_PATH}\nhelp: check the systemd user manager, or set TASKFERRY_DAEMON_SUPERVISOR=spawn if you do not use supervision`, { cause: result.error });
+}
+
+/**
+ * Who is responsible for starting the daemon for this runtime dir.
+ *
+ * "systemd" means a systemd --user unit owns the process: the client must ask
+ * the supervisor to start it and never spawn a detached daemon of its own
+ * (two owners would race over the socket and the pid file). "spawn" is the
+ * historical detached launch-on-use.
+ *
+ * `TASKFERRY_DAEMON_SUPERVISOR` (`systemd` | `spawn`) is the explicit
+ * override, which also lets a caller pin the answer in tests. Otherwise the
+ * marker or an enabled user unit selects supervision, including before the
+ * first gated start after boot.
+ *
+ * @param {{env?: NodeJS.ProcessEnv, runtimeDir: string, pathExistsFn?: (candidate: string) => boolean, runFn?: typeof spawnSync}} options
+ * @returns {"systemd" | "spawn"}
+ */
+export function resolveDaemonSupervisor({ env = process.env, runtimeDir, pathExistsFn = fs.existsSync, runFn = spawnSync }) {
+  const explicit = env.TASKFERRY_DAEMON_SUPERVISOR;
+  if (explicit === "systemd" || explicit === "spawn") return explicit;
+  if (pathExistsFn(path.join(runtimeDir, SUPERVISOR_MARKER_FILENAME))) return "systemd";
+  const unit = daemonUnitName(env);
+  const pathUnit = unit.endsWith(".service") ? `${unit.slice(0, -8)}.path` : `${unit}.path`;
+  for (const name of [pathUnit, unit]) {
+    if (supervisorUnitEnabled(name, env, runFn)) return "systemd";
+  }
+  return "spawn";
+}
+
+/**
+ * Ask systemd to start the daemon unit and fail loudly when it cannot.
+ *
+ * Deliberately no fallback to a detached spawn: if the unit is installed but
+ * broken, silently starting an unsupervised daemon is exactly how a second
+ * daemon ends up fighting the supervised one over the socket and pid file.
+ * `systemctl --user start` returns once the unit's start job completes, so
+ * the caller's readiness poll still runs afterward.
+ *
+ * @param {object} options
+ * @param {NodeJS.ProcessEnv} options.env
+ * @param {string} [options.unit]
+ * @param {typeof spawnSync} [options.runFn]
+ * @param {number} [options.timeoutMs]
+ * @returns {void}
+ */
+export function startDaemonViaSystemd({
+  env,
+  unit = daemonUnitName(env),
+  runFn = spawnSync,
+  timeoutMs = SYSTEMD_START_TIMEOUT_MS,
+}) {
+  const result = runFn(SYSTEMCTL_PATH, ["--user", "start", unit], {
+    env,
+    stdio: "ignore",
+    timeout: timeoutMs,
+  });
+  if (result?.error) {
+    throw new Error(`error: cannot execute ${SYSTEMCTL_PATH}\nhelp: install systemd at that path or set TASKFERRY_DAEMON_SUPERVISOR=spawn if you do not use supervision`, { cause: result.error });
+  }
+  if (result?.status !== 0) {
+    const code = result?.status ?? "unknown";
+    throw new Error(
+      `error: the supervised taskferry daemon did not start (systemctl --user start ${unit} exited ${code})\n`
+      + `help: run \`systemctl --user status ${unit}\` and \`journalctl --user -u ${unit} -n 50\`; `
+      + "if the unit is not installed, install it or set TASKFERRY_DAEMON_SUPERVISOR=spawn"
+    );
+  }
 }
 
 /**
@@ -210,6 +310,8 @@ export function ensureDaemonStarted({
   withLockFn = withFileLock,
   isDaemonReadySync = daemonReadySync,
   spawnDaemonFn = spawnDaemon,
+  supervisorFn = resolveDaemonSupervisor,
+  systemdStartFn = startDaemonViaSystemd,
   loadConfigFn = loadConfig,
 } = {}) {
   fs.mkdirSync(runtimeDir, { recursive: true, mode: 0o700 });
@@ -218,7 +320,12 @@ export function ensureDaemonStarted({
   return withLockFn(lockPath, () => {
     if (isDaemonReadySync(socketPath)) return false;
     loadConfigFn({ env });
-    spawnDaemonFn({ env, stateDir, runtimeDir, socketPath });
+    const supervised = supervisorFn({ env, runtimeDir }) === "systemd";
+    if (supervised) {
+      systemdStartFn({ env, unit: daemonUnitName(env) });
+    } else {
+      spawnDaemonFn({ env, stateDir, runtimeDir, socketPath });
+    }
     const deadline = Date.now() + startupTimeoutMs;
     while (Date.now() < deadline) {
       if (isDaemonReadySync(socketPath)) return true;
@@ -226,11 +333,17 @@ export function ensureDaemonStarted({
     }
     throw new Error(
       `error: taskferry daemon did not become ready within ${startupTimeoutMs}ms\n`
-      + `help: check ${runtimeDir} permissions and daemon startup diagnostics, then retry`
+      + (supervised
+        ? `help: run \`systemctl --user status ${daemonUnitName(env)}\` and `
+          + `\`journalctl --user -u ${daemonUnitName(env)} -n 50\`, then retry`
+        : `help: check ${runtimeDir} permissions and daemon startup diagnostics, then retry`)
     );
   }, {
-    timeoutMs: startupTimeoutMs + 1000,
-    staleMs: startupTimeoutMs + 1000,
+    // A supervised start spends up to SYSTEMD_START_TIMEOUT_MS in systemctl
+    // before the readiness poll even begins, so the lock must outlast both or
+    // a second client steals a lock from a starter that is still working.
+    timeoutMs: startupTimeoutMs + SYSTEMD_START_TIMEOUT_MS + 2 * SYSTEMD_DETECT_TIMEOUT_MS + 1000,
+    staleMs: startupTimeoutMs + SYSTEMD_START_TIMEOUT_MS + 2 * SYSTEMD_DETECT_TIMEOUT_MS + 1000,
     retryMs: retryDelayMs,
   });
 }

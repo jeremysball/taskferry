@@ -7,8 +7,12 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { startDaemon } from "./daemon.js";
-import { connectClient, ensureDaemonStarted, startDaemonBooter } from "./client.js";
+import { connectClient, ensureDaemonStarted, resolveDaemonSupervisor, startDaemonBooter, startDaemonViaSystemd } from "./client.js";
 import { withFileLock } from "./state-lock.js";
+
+// These tests exercise detached startup in isolated directories; never let a
+// host's enabled user unit take ownership of a test daemon.
+process.env.TASKFERRY_DAEMON_SUPERVISOR = "spawn";
 
 const TEST_MODEL = "test/model";
 const TASK_STATE = "task.state";
@@ -352,6 +356,7 @@ describe("multiplexed daemon client: request correlation, subscriptions, and aut
 });
 
 describe("multiplexed daemon client: boot-failure reporting and malformed messages", () => {
+
   test("reports bounded startup failures with actionable help", async (t) => {
     const paths = temporaryPaths(t);
     await assert.rejects(
@@ -447,5 +452,142 @@ describe("multiplexed daemon client: boot-failure reporting and malformed messag
     t.after(() => client.close());
 
     await assert.rejects(() => client.request(SYSTEM_HEALTH), /invalid daemon message/);
+  });
+});
+
+describe("supervised daemon startup (systemd --user)", () => {
+  test("asks systemd to start the unit instead of spawning a detached daemon", (t) => {
+    const paths = temporaryPaths(t);
+    fs.mkdirSync(paths.runtimeDir, { recursive: true });
+    const started = [];
+    let ready = false;
+    const result = ensureDaemonStarted({
+      ...paths,
+      env: { ...process.env, TASKFERRY_DAEMON_SUPERVISOR: "systemd" },
+      startupTimeoutMs: 200,
+      retryDelayMs: 1,
+      isDaemonReadySync: () => ready,
+      spawnDaemonFn: () => { throw new Error("a supervised client must never spawn a detached daemon"); },
+      systemdStartFn: ({ unit }) => {
+        started.push(unit);
+        ready = true;
+      },
+    });
+
+    assert.equal(result, true);
+    assert.deepEqual(started, ["taskferry-daemon.service"]);
+  });
+
+  test("the unit's runtime marker selects supervision without an env var", (t) => {
+    const paths = temporaryPaths(t);
+    fs.mkdirSync(paths.runtimeDir, { recursive: true });
+    fs.writeFileSync(path.join(paths.runtimeDir, "systemd-supervised"), "");
+    const started = [];
+    let ready = false;
+
+    assert.equal(ensureDaemonStarted({
+      ...paths,
+      env: { ...process.env, TASKFERRY_DAEMON_SUPERVISOR: "" },
+      startupTimeoutMs: 200,
+      retryDelayMs: 1,
+      isDaemonReadySync: () => ready,
+      spawnDaemonFn: () => { throw new Error("marker should have selected systemd"); },
+      systemdStartFn: () => { started.push("systemd"); ready = true; },
+    }), true);
+    assert.deepEqual(started, ["systemd"]);
+  });
+
+  test("an explicit spawn override wins over the marker", (t) => {
+    const paths = temporaryPaths(t);
+    fs.mkdirSync(paths.runtimeDir, { recursive: true });
+    fs.writeFileSync(path.join(paths.runtimeDir, "systemd-supervised"), "");
+
+    assert.equal(resolveDaemonSupervisor({ env: { ...process.env, TASKFERRY_DAEMON_SUPERVISOR: "spawn" }, runtimeDir: paths.runtimeDir }), "spawn");
+    assert.equal(resolveDaemonSupervisor({ env: { ...process.env, TASKFERRY_DAEMON_SUPERVISOR: "" }, runtimeDir: paths.runtimeDir }), "systemd");
+    assert.equal(resolveDaemonSupervisor({ env: { ...process.env, TASKFERRY_DAEMON_SUPERVISOR: "" }, runtimeDir: path.join(paths.root, "nope"), runFn: () => ({ status: 1, stdout: "disabled\n" }) }), "spawn");
+  });
+
+  test("an enabled path unit selects supervision before the first service start", (t) => {
+    const paths = temporaryPaths(t);
+    const calls = [];
+    const supervisor = resolveDaemonSupervisor({
+      env: { TASKFERRY_DAEMON_SUPERVISOR: "", PATH: "/untrusted/bin" },
+      runtimeDir: paths.runtimeDir,
+      runFn: (command, args) => { calls.push([command, args]); return { status: 0 }; },
+    });
+    assert.equal(supervisor, "systemd");
+    assert.deepEqual(calls, [["/usr/bin/systemctl", ["--user", "is-enabled", "taskferry-daemon.path"]]]);
+  });
+
+  test("a user manager failure does not select an unsupervised daemon", (t) => {
+    const paths = temporaryPaths(t);
+    assert.throws(() => resolveDaemonSupervisor({
+      env: {}, runtimeDir: paths.runtimeDir,
+      runFn: () => ({ status: 1, stderr: "Failed to connect to bus: No such file or directory" }),
+    }), /cannot determine whether/u);
+    assert.equal(resolveDaemonSupervisor({
+      env: {}, runtimeDir: paths.runtimeDir,
+      runFn: () => ({ status: 1, stderr: "Failed to get unit file state for example: No such file or directory" }),
+    }), "spawn");
+    assert.throws(() => resolveDaemonSupervisor({
+      env: {}, runtimeDir: paths.runtimeDir, runFn: () => ({ status: 1, stdout: "", stderr: "" }),
+    }), /cannot determine whether/u);
+    assert.throws(() => resolveDaemonSupervisor({
+      env: {}, runtimeDir: paths.runtimeDir, runFn: () => ({ error: Object.assign(new Error("missing"), { code: "ENOENT" }) }),
+    }), /TASKFERRY_DAEMON_SUPERVISOR=spawn/u);
+    assert.equal(resolveDaemonSupervisor({
+      env: { TASKFERRY_DAEMON_SUPERVISOR: "spawn" }, runtimeDir: paths.runtimeDir,
+      runFn: () => { throw new Error("spawn override must skip discovery"); },
+    }), "spawn");
+  });
+
+  test("systemctl invocation is user-scoped and names the unit", () => {
+    const calls = [];
+    startDaemonViaSystemd({
+      env: { TASKFERRY_DAEMON_UNIT: "custom-daemon.service", PATH: "/untrusted/bin" },
+      runFn: (command, args, options) => {
+        calls.push([command, args, options.timeout]);
+        return { status: 0 };
+      },
+    });
+
+    assert.deepEqual(calls, [["/usr/bin/systemctl", ["--user", "start", "custom-daemon.service"], 10000]]);
+  });
+
+  test("the start lock outlasts the systemctl timeout and the readiness poll", (t) => {
+    const paths = temporaryPaths(t);
+    fs.mkdirSync(paths.runtimeDir, { recursive: true });
+    let observed;
+    const result = ensureDaemonStarted({
+      ...paths,
+      env: { ...process.env, TASKFERRY_DAEMON_SUPERVISOR: "systemd" },
+      startupTimeoutMs: 500,
+      retryDelayMs: 1,
+      isDaemonReadySync: () => true,
+      withLockFn: (_lockPath, callback, options) => {
+        observed = options;
+        return callback();
+      },
+    });
+
+    assert.equal(result, false);
+    assert.ok(observed.timeoutMs >= 500 + 10000, "lock must outlast a systemctl timeout plus the readiness poll");
+    assert.equal(observed.timeoutMs, observed.staleMs);
+  });
+
+  test("a failed systemctl start surfaces journal guidance instead of spawning", () => {
+    assert.throws(
+      () => startDaemonViaSystemd({ env: {}, runFn: () => ({ status: 5 }) }),
+      (error) => {
+        assert.match(error.message, /systemctl --user start taskferry-daemon\.service exited 5/);
+        assert.match(error.message, /journalctl --user -u taskferry-daemon\.service/);
+        assert.match(error.message, /TASKFERRY_DAEMON_SUPERVISOR=spawn/);
+        return true;
+      }
+    );
+    assert.throws(
+      () => startDaemonViaSystemd({ env: {}, runFn: () => ({ error: new Error("spawn systemctl ENOENT") }) }),
+      /cannot execute \/usr\/bin\/systemctl/
+    );
   });
 });

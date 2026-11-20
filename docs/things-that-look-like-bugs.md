@@ -813,3 +813,57 @@ belongs here.
   `spawnSync`, so the absence of a warning there is not a PATH safety check.
   Test and harness filename patterns in `eslint.config.mjs` also exempt files
   matching those patterns; production code must not be placed under them.
+- `systemctl --user stop taskferry-daemon.service` does not stop running
+  tasks. Observe: the service goes inactive while `taskferry list` still
+  shows a `running` worker. Deliberate: workers are spawned `detached: true`
+  and the unit sets `KillMode=process`, so the stop signal reaches only the
+  daemon's main process. That matches the long-standing contract that
+  killing the daemon by hand never kills dispatched work
+  (`docs/daemon.md#stopping-the-daemon`). It would be a real bug if stopping
+  the service killed workers, or if a stopped service's workers could not be
+  reconciled by the next supervised boot.
+- A supervised daemon that notices a source change exits with status `75`
+  instead of starting a replacement. Observe: `systemctl --user status`
+  shows `status=75` for one `RestartSec` window and then `active (running)`
+  with a new `MainPID`; `taskferry` commands issued in that window get
+  `daemon is restarting ... retry`. Deliberate: a `detached: true`
+  replacement would live outside the unit's cgroup, so systemd would report
+  the unit dead while an unsupervised daemon owned the socket. `75` is a
+  failure code because the unit asks for `Restart=on-failure`; exiting `0`
+  would leave the service inactive with no daemon at all. It would be a real
+  bug if a clean `systemctl stop` exited `75` (it exits `0`), or if a
+  dormant daemon could exit `75` without a replacement being started.
+- A client with a supervised unit installed refuses to start a daemon of its
+  own when `systemctl --user start` fails, instead of falling back to the
+  detached spawn. Observe: `taskferry doctor` fails with a `systemctl`/
+  `journalctl` help line even though "starting one directly" looks trivial.
+  Deliberate: the fallback is how a second daemon ends up fighting the
+  supervised one over the socket and `daemon.pid`, and the supervised daemon
+  is the one that would be orphaned. It would be a real bug if a *successful*
+  `systemctl start` were followed by an unsupervised daemon spawn.
+- On a host without a usable user manager, automatic daemon startup may fail
+  even when systemd is not intended. This deliberately fails closed when
+  supervision cannot be determined; set `TASKFERRY_DAEMON_SUPERVISOR=spawn`
+  only when no systemd unit can own that socket. It would be a bug if the
+  explicit spawn override still queried systemd or could not start a daemon.
+- The installer refuses `--enable` when the socket already exists, even if
+  the service appears to own it. The pathname can refer to a different
+  listener than the PID suggests, so stop the daemon before reinstalling.
+  It would be a bug if the installer ignored an occupied socket or refused
+  after the socket disappeared and the other ownership checks passed.
+- A gated service starts again after stopping only the service. The enabled
+  path unit deliberately starts it while the env file exists; stop both
+  `taskferry-daemon.path` and `taskferry-daemon.service` to keep it stopped.
+  It would be a bug if stopping both restarted the daemon.
+- A gated service is inactive after boot until its env file exists. This
+  prevents exhausting the restart limit before secrets are unlocked; it is a
+  bug if the enabled path unit does not start it after the file appears.
+- Before the first supervised start in a boot, the runtime marker is absent.
+  Clients consult enabled service and path units to detect supervision rather
+  than spawning another daemon. It would be a bug if an enabled path unit
+  were ignored when deciding how to start.
+- The systemd installer rejects a relative `envFile` even though the daemon
+  loader accepts one: a path unit requires an absolute path, and the unit's
+  working directory would otherwise determine its meaning. It is a bug if
+  the installer rejects a representable absolute path.
+

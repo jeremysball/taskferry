@@ -76,6 +76,12 @@ outlive the daemon process.
   `bwrap`, and `git`. Run `--dry-run` to print the render without writing
   anything. Pass `--enable` to enable and start it; without that flag the
   script only writes the unit and reloads the manager.
+  For host operations the installer uses `/usr/bin/git`,
+  `/usr/bin/systemctl`, and, for `--log-target auto`,
+  `/usr/bin/systemd-analyze`, not the shell's `PATH`. It fails if a required
+  executable is unavailable at that location. Explicit `file` and `journal`
+  log targets do not require the journald probe.
+  Client supervisor discovery and startup likewise use `/usr/bin/systemctl`.
   The default unit directory follows the user manager's `XDG_CONFIG_HOME`;
   `--enable` refuses an alternate `--unit-dir` because the manager would not
   necessarily load those files.

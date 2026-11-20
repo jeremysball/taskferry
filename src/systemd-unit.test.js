@@ -6,6 +6,7 @@ import path from "node:path";
 import { describe, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { resolveConfigPath } from "./config.js";
+import { runInstaller as runInstallerProgrammatically } from "../scripts/install-systemd-unit.js";
 import {
   DAEMON_LOG_FILE,
   UNIT_NAME,
@@ -38,7 +39,26 @@ const CONFIG_FILE = "config.json";
 const ACTIVE_STATE_CALL = "--user show taskferry-daemon.service --property=ActiveState --value";
 const ENABLE_PATH_CALL = "--user enable --now taskferry-daemon.path";
 const RELOAD_CALL = "--user daemon-reload";
-const INSTALLER = path.join(REPO_ROOT, "scripts", "install-systemd-unit.js");
+const SYSTEMCTL_PATH = "/usr/bin/systemctl";
+const SYSTEMD_ANALYZE_PATH = "/usr/bin/systemd-analyze";
+const GIT_PATH = "/usr/bin/git";
+const LOG_TARGET_ARG = "--log-target";
+const TEST_INSTALLER_RUNNER = `
+import { spawnSync } from "node:child_process";
+import { runInstaller } from ${JSON.stringify(new URL("../scripts/install-systemd-unit.js", import.meta.url).href)};
+const shim = process.argv[1];
+const runFn = (file, args, options) => {
+  if (file === ${JSON.stringify(SYSTEMCTL_PATH)}) return spawnSync(shim, args, options);
+  if (file === ${JSON.stringify(SYSTEMD_ANALYZE_PATH)}) {
+    if (process.env.TASKFERRY_TEST_FAIL_ANALYZE) return { error: new Error("unavailable"), stderr: "" };
+    return { status: 0, stdout: "Storage=persistent\\n", stderr: "" };
+  }
+  if (file === ${JSON.stringify(GIT_PATH)}) return spawnSync(file, args, options);
+  throw new Error("unexpected command: " + file);
+};
+try { runInstaller(process.argv.slice(2), { runFn }); }
+catch (error) { console.error(error.message); process.exitCode = 1; }
+`;
 
 // Synthetic paths for render fixtures, built at runtime so no developer path
 // is baked into the test.
@@ -93,7 +113,7 @@ function runInstaller(t, args, env = {}) {
   const cleanEnv = Object.fromEntries(Object.entries(process.env).filter(([key]) => !/^(TASKFERRY_|XDG_|GIT_)/u.test(key)));
   const shim = temporaryDir(t);
   fs.writeFileSync(path.join(shim, "systemctl"), "#!/bin/sh\nprintf 'HOME=%s\\n' \"$HOME\"\n", { mode: 0o755 });
-  return spawnSync(process.execPath, [INSTALLER, ...args], { encoding: "utf8", env: { ...cleanEnv, HOME: temporaryDir(t), PATH: `${shim}${path.delimiter}${process.env.PATH}`, ...env } });
+  return spawnSync(process.execPath, ["--input-type=module", "-e", TEST_INSTALLER_RUNNER, path.join(shim, "systemctl"), ...args], { encoding: "utf8", env: { ...cleanEnv, HOME: temporaryDir(t), PATH: `${shim}${path.delimiter}${process.env.PATH}`, ...env } });
 }
 
 function isolatedInstaller(t, { gated = false, stalePath = false, staleRotation = false, occupiedSocket = false, extraEnv = {}, managerEnv = "", args = [], repo = supervisorFixture(t) } = {}) {
@@ -118,9 +138,40 @@ function isolatedInstaller(t, { gated = false, stalePath = false, staleRotation 
     fs.writeFileSync(path.join(runtime, APP_NAME, "daemon.sock"), "occupied");
   }
   Object.assign(env, { HOME: home, XDG_RUNTIME_DIR: runtime, PATH: `${shim}${path.delimiter}${process.env.PATH}`, CALLS: calls, MANAGER_ENV: managerEnv }, extraEnv);
-  const result = spawnSync(process.execPath, [INSTALLER, "--repo", repo, "--unit-dir", unitDir, "--log-target", "journal", ...args], { encoding: "utf8", env });
+  const result = spawnSync(process.execPath, ["--input-type=module", "-e", TEST_INSTALLER_RUNNER, path.join(shim, "systemctl"), "--repo", repo, "--unit-dir", unitDir, LOG_TARGET_ARG, "journal", ...args], { encoding: "utf8", env });
   return { result, envFile, home, runtime, unitDir, calls: fs.existsSync(calls) ? fs.readFileSync(calls, "utf8").trim().split("\n") : [] };
 }
+
+test("installer uses fixed executables and reports a missing binary", (t) => {
+  const home = temporaryDir(t);
+  const calls = [];
+  assert.throws(() => runInstallerProgrammatically(["--dry-run"], {
+    runFn: (file) => {
+      calls.push(file);
+      if (file === SYSTEMCTL_PATH) return { status: 0, stdout: `HOME=${home}\n`, stderr: "" };
+      if (file === GIT_PATH) return { status: 0, stdout: `${REPO_ROOT}\n`, stderr: "" };
+      return { error: new Error("not installed"), stderr: "" };
+    },
+  }), /cannot execute \/usr\/bin\/systemd-analyze/u);
+  assert.deepEqual(calls, [SYSTEMCTL_PATH, GIT_PATH, SYSTEMD_ANALYZE_PATH]);
+});
+
+test("explicit log targets do not invoke systemd-analyze", (t) => {
+  for (const target of ["file", "journal"]) {
+    const result = isolatedInstaller(t, {
+      args: ["--dry-run", LOG_TARGET_ARG, target],
+      extraEnv: { TASKFERRY_TEST_FAIL_ANALYZE: "1" },
+    });
+    assert.equal(result.result.status, 0, result.result.stderr);
+    assert.match(result.result.stdout, new RegExp(`^log target: ${target}$`, "mu"));
+  }
+  const automatic = isolatedInstaller(t, {
+    args: ["--dry-run", LOG_TARGET_ARG, "auto"],
+    extraEnv: { TASKFERRY_TEST_FAIL_ANALYZE: "1" },
+  });
+  assert.notEqual(automatic.result.status, 0);
+  assert.match(automatic.result.stderr, /cannot execute \/usr\/bin\/systemd-analyze/u);
+});
 
 describe("env-file gated start", () => {
   test("daemon config path matches the default config resolver", () => {
@@ -225,7 +276,7 @@ describe("env-file gated start", () => {
   });
 
   test("file logging creates its parent before asking systemd to start", (t) => {
-    const result = isolatedInstaller(t, { args: ["--enable", "--log-target", "file"] });
+    const result = isolatedInstaller(t, { args: ["--enable", LOG_TARGET_ARG, "file"] });
     assert.equal(result.result.status, 0, result.result.stderr);
     assert.ok(fs.statSync(path.join(result.home, ".local", "state", APP_NAME, "logs")).isDirectory());
     assert.match(fs.readFileSync(path.join(result.unitDir, UNIT_NAME), "utf8"), /^StandardOutput=append:/mu);
@@ -317,7 +368,7 @@ describe("env-file gated start", () => {
   });
 
   test("systemd-analyze accepts the rendered gated pair", (t) => {
-    const probe = spawnSync("systemd-analyze", ["--version"], { encoding: "utf8" });
+    const probe = spawnSync(SYSTEMD_ANALYZE_PATH, ["--version"], { encoding: "utf8" });
     if (probe.error?.code === "ENOENT") {
       t.skip("systemd-analyze is not installed");
       return;
@@ -327,7 +378,7 @@ describe("env-file gated start", () => {
     const unitPath = path.join(dir, PATH_UNIT_NAME);
     fs.writeFileSync(service, render({ repo: REPO_ROOT, nodePath: process.execPath, pathEnv: process.env.PATH, gated: true }));
     fs.writeFileSync(unitPath, renderPathUnit({ repo: REPO_ROOT, envFile: path.join(dir, "env"), template: fs.readFileSync(path.join(REPO_ROOT, PATH_TEMPLATE), "utf8") }));
-    const result = spawnSync("systemd-analyze", ["--user", "verify", service, unitPath], { encoding: "utf8" });
+    const result = spawnSync(SYSTEMD_ANALYZE_PATH, ["--user", "verify", service, unitPath], { encoding: "utf8" });
     assert.equal(result.status, 0, result.stderr);
   });
 });
@@ -416,7 +467,7 @@ describe("checkout guard for the installed unit", () => {
     const xdgConfig = temporaryDir(t);
     const result = runInstaller(t, ["--dry-run"], { XDG_CONFIG_HOME: xdgConfig });
     assert.equal(result.status, 0, result.stderr);
-    const topLevel = execFileSync("git", ["-C", REPO_ROOT, "rev-parse", "--show-toplevel"], { encoding: "utf8" }).trim();
+    const topLevel = execFileSync(GIT_PATH, ["-C", REPO_ROOT, "rev-parse", "--show-toplevel"], { encoding: "utf8" }).trim();
     assert.match(result.stdout, new RegExp(`^repo: ${escapeRegExp(topLevel)}$`, "mu"));
     assert.match(result.stdout, new RegExp(`^ExecStart=.* ${escapeRegExp(topLevel)}/src/daemon\\.js$`, "mu"));
     assert.equal(fs.existsSync(path.join(xdgConfig, SYSTEMD_NAME, "user", UNIT_NAME)), false, "dry run must not write the unit");

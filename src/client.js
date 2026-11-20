@@ -18,6 +18,7 @@ const DAEMON_ENTRY = fileURLToPath(new URL("./daemon.js", import.meta.url));
 const CLIENT_ENTRY = fileURLToPath(import.meta.url);
 const SOCKET_FILENAME = "daemon.sock";
 const DEFAULT_DAEMON_UNIT = "taskferry-daemon.service";
+const SYSTEMCTL_PATH = "/usr/bin/systemctl";
 // Written by the unit's ExecStartPre, so a client can tell "systemd owns this
 // daemon" without shelling out to systemctl on every cold start. It lives in
 // the runtime dir (not the state dir) because supervision is per-boot: after a
@@ -142,7 +143,7 @@ function spawnDaemon({ env, stateDir, runtimeDir, socketPath }) {
 
 /** @param {string} name @param {NodeJS.ProcessEnv} env @param {typeof spawnSync} runFn */
 function supervisorUnitEnabled(name, env, runFn) {
-  const result = runFn("systemctl", ["--user", "is-enabled", name], {
+  const result = runFn(SYSTEMCTL_PATH, ["--user", "is-enabled", name], {
     env: { ...env, LC_ALL: "C" }, encoding: "utf8", timeout: SYSTEMD_DETECT_TIMEOUT_MS,
   });
   if (!result.error && result.status === 0) return true;
@@ -150,7 +151,7 @@ function supervisorUnitEnabled(name, env, runFn) {
   const diagnostic = String(result.stderr || "");
   const missing = /Failed to get unit file state.*No such file or directory/u.test(diagnostic);
   if (!result.error && (state === "disabled" || state === "not-found" || missing)) return false;
-  throw new Error(`error: cannot determine whether ${name} is supervised\nhelp: check the systemd user manager, or set TASKFERRY_DAEMON_SUPERVISOR=spawn if you do not use supervision`, { cause: result.error });
+  throw new Error(`error: cannot determine whether ${name} is supervised using ${SYSTEMCTL_PATH}\nhelp: check the systemd user manager, or set TASKFERRY_DAEMON_SUPERVISOR=spawn if you do not use supervision`, { cause: result.error });
 }
 
 /**
@@ -203,12 +204,15 @@ export function startDaemonViaSystemd({
   runFn = spawnSync,
   timeoutMs = SYSTEMD_START_TIMEOUT_MS,
 }) {
-  const result = runFn("systemctl", ["--user", "start", unit], {
+  const result = runFn(SYSTEMCTL_PATH, ["--user", "start", unit], {
     env,
     stdio: "ignore",
     timeout: timeoutMs,
   });
-  if (result?.error || result?.status !== 0) {
+  if (result?.error) {
+    throw new Error(`error: cannot execute ${SYSTEMCTL_PATH}\nhelp: install systemd at that path or set TASKFERRY_DAEMON_SUPERVISOR=spawn if you do not use supervision`, { cause: result.error });
+  }
+  if (result?.status !== 0) {
     const code = result?.status ?? "unknown";
     throw new Error(
       `error: the supervised taskferry daemon did not start (systemctl --user start ${unit} exited ${code})\n`

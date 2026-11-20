@@ -511,12 +511,12 @@ describe("supervised daemon startup (systemd --user)", () => {
     const paths = temporaryPaths(t);
     const calls = [];
     const supervisor = resolveDaemonSupervisor({
-      env: { TASKFERRY_DAEMON_SUPERVISOR: "" },
+      env: { TASKFERRY_DAEMON_SUPERVISOR: "", PATH: "/untrusted/bin" },
       runtimeDir: paths.runtimeDir,
       runFn: (command, args) => { calls.push([command, args]); return { status: 0 }; },
     });
     assert.equal(supervisor, "systemd");
-    assert.deepEqual(calls, [["systemctl", ["--user", "is-enabled", "taskferry-daemon.path"]]]);
+    assert.deepEqual(calls, [["/usr/bin/systemctl", ["--user", "is-enabled", "taskferry-daemon.path"]]]);
   });
 
   test("a user manager failure does not select an unsupervised daemon", (t) => {
@@ -544,14 +544,14 @@ describe("supervised daemon startup (systemd --user)", () => {
   test("systemctl invocation is user-scoped and names the unit", () => {
     const calls = [];
     startDaemonViaSystemd({
-      env: { TASKFERRY_DAEMON_UNIT: "custom-daemon.service" },
+      env: { TASKFERRY_DAEMON_UNIT: "custom-daemon.service", PATH: "/untrusted/bin" },
       runFn: (command, args, options) => {
         calls.push([command, args, options.timeout]);
         return { status: 0 };
       },
     });
 
-    assert.deepEqual(calls, [["systemctl", ["--user", "start", "custom-daemon.service"], 10000]]);
+    assert.deepEqual(calls, [["/usr/bin/systemctl", ["--user", "start", "custom-daemon.service"], 10000]]);
   });
 
   test("the start lock outlasts the systemctl timeout and the readiness poll", (t) => {
@@ -587,7 +587,7 @@ describe("supervised daemon startup (systemd --user)", () => {
     );
     assert.throws(
       () => startDaemonViaSystemd({ env: {}, runFn: () => ({ error: new Error("spawn systemctl ENOENT") }) }),
-      /exited unknown/
+      /cannot execute \/usr\/bin\/systemctl/
     );
   });
 });

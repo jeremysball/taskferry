@@ -10,7 +10,7 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { resolveConfigPath } from "../src/config.js";
-import { resolveRuntimeDir, resolveStateDir } from "../src/paths.js";
+import { resolveInvokedPath, resolveRuntimeDir, resolveStateDir } from "../src/paths.js";
 import {
   PATH_TEMPLATE,
   PATH_UNIT_NAME,
@@ -32,6 +32,11 @@ const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const TEMPLATE = path.join("deploy", "systemd", "taskferry-daemon.service.in");
 const JOURNAL_DIR = "/var/log/journal";
 const SOCKET_FILENAME = "daemon.sock";
+const GIT = "/usr/bin/git";
+const SYSTEMCTL = "/usr/bin/systemctl";
+const SYSTEMD_ANALYZE = "/usr/bin/systemd-analyze";
+/** @type {typeof spawnSync} */
+let runCommand = spawnSync;
 
 const HELP = `Render and install the TaskFerry systemd --user unit.
 
@@ -99,8 +104,8 @@ function takeValue(argv, index, flag) {
  * @returns {string}
  */
 function gitTopLevel(directory) {
-  const result = spawnSync("git", ["-C", directory, "rev-parse", "--show-toplevel"], { encoding: "utf8" });
-  if (result.error) throw result.error;
+  const result = runCommand(GIT, ["-C", directory, "rev-parse", "--show-toplevel"], { encoding: "utf8" });
+  if (result.error) throw new Error(`error: cannot execute ${GIT}\nhelp: install git at that path`, { cause: result.error });
   if (result.status !== 0) {
     throw new Error(`error: cannot resolve the repository for ${directory}: ${(result.stderr || "").trim()}`);
   }
@@ -111,8 +116,9 @@ function gitTopLevel(directory) {
  * @returns {string | undefined}
  */
 function journalStorage() {
-  const result = spawnSync("systemd-analyze", ["cat-config", "systemd/journald.conf"], { encoding: "utf8" });
-  if (result.error || result.status !== 0) return undefined;
+  const result = runCommand(SYSTEMD_ANALYZE, ["cat-config", "systemd/journald.conf"], { encoding: "utf8" });
+  if (result.error) throw new Error(`error: cannot execute ${SYSTEMD_ANALYZE}\nhelp: install systemd at that path`, { cause: result.error });
+  if (result.status !== 0) return undefined;
   return parseJournaldStorage(result.stdout || "");
 }
 
@@ -134,14 +140,14 @@ function writeAtomic(file, content) {
  * @returns {void}
  */
 function systemctlUser(args) {
-  const result = spawnSync("systemctl", ["--user", ...args], { stdio: "inherit" });
+  const result = runCommand(SYSTEMCTL, ["--user", ...args], { stdio: "inherit" });
   if (result.error) throw result.error;
   if (result.status !== 0) throw new Error(`error: systemctl --user ${args.join(" ")} exited ${result.status}`);
 }
 
 /** @returns {NodeJS.ProcessEnv} */
 function managerEnvironment() {
-  const result = spawnSync("systemctl", ["--user", "show-environment"], { encoding: "utf8" });
+  const result = runCommand(SYSTEMCTL, ["--user", "show-environment"], { encoding: "utf8" });
   if (result.error || result.status !== 0) {
     const detail = result.error?.message || result.stderr.trim() || String(result.status);
     throw new Error(`error: cannot read the systemd user manager environment: ${detail}\nhelp: start the user manager and re-run the installer`);
@@ -210,7 +216,7 @@ function enableUnit(gated, enabled) {
   process.stdout.write(`\nenabled and started ${enabled}\n`);
   systemctlUser(["--no-pager", "status", enabled]);
   if (gated) {
-    const result = spawnSync("systemctl", ["--user", "is-active", UNIT_NAME], { encoding: "utf8" });
+    const result = runCommand(SYSTEMCTL, ["--user", "is-active", UNIT_NAME], { encoding: "utf8" });
     if (result.error) throw result.error;
     process.stdout.write(`${UNIT_NAME}: ${(result.stdout || "").trim() || "unknown"}\n`);
   }
@@ -223,7 +229,7 @@ function enableUnit(gated, enabled) {
  * @returns {void}
  */
 function refuseDetachedOwner(stateDir, runtimeDir, gated) {
-  const result = spawnSync("systemctl", ["--user", "show", UNIT_NAME, "--property=MainPID", "--value"], { encoding: "utf8", env: { ...process.env, LC_ALL: "C" } });
+  const result = runCommand(SYSTEMCTL, ["--user", "show", UNIT_NAME, "--property=MainPID", "--value"], { encoding: "utf8", env: { ...process.env, LC_ALL: "C" } });
   if (result.error) throw result.error;
   const missing = result.status !== 0 && /Unit .* (?:could not be found|not found)/u.test(result.stderr);
   if (!missing && (result.status !== 0 || !/^\d+$/u.test(result.stdout.trim()))) {
@@ -243,7 +249,7 @@ function refuseDetachedOwner(stateDir, runtimeDir, gated) {
 
 /** @param {number} supervisedPid */
 function refuseActiveService(supervisedPid) {
-  const result = spawnSync("systemctl", ["--user", "show", UNIT_NAME, "--property=ActiveState", "--value"], { encoding: "utf8" });
+  const result = runCommand(SYSTEMCTL, ["--user", "show", UNIT_NAME, "--property=ActiveState", "--value"], { encoding: "utf8" });
   if (result.error) throw result.error;
   if (result.status !== 0 || !["inactive", "failed"].includes(result.stdout.trim())) {
     throw new Error("error: the service is running or its state is uncertain; stop it before enabling gated startup");
@@ -278,7 +284,7 @@ function checkEnableSafety(stateDir, runtimeDir, socketPath, gated) {
 
 /** @param {string} stateDir @param {string} runtimeDir @param {string} socketPath */
 function stopExistingPath(stateDir, runtimeDir, socketPath) {
-  const result = spawnSync("systemctl", ["--user", "is-active", PATH_UNIT_NAME], { encoding: "utf8" });
+  const result = runCommand(SYSTEMCTL, ["--user", "is-active", PATH_UNIT_NAME], { encoding: "utf8" });
   if (result.error) throw result.error;
   if (result.status === 3 && ["inactive", "failed"].includes(result.stdout.trim())) return false;
   if (result.status === 4 && ["inactive", "unknown"].includes(result.stdout.trim()) && !result.stderr.trim()) return false;
@@ -353,7 +359,7 @@ function main(argv) {
   assertRepoSupportsSupervisor({ repo, gated });
 
 
-  const journalPersistent = isJournalPersistent({
+  const journalPersistent = options.logTarget === "auto" && isJournalPersistent({
     storageValue: journalStorage(),
     journalDirExists: fs.existsSync(JOURNAL_DIR),
   });
@@ -374,9 +380,27 @@ function main(argv) {
   finishInstall({ enable: options.enable, gated, stateDir, runtimeDir, socketPath, logTarget, logDir, unitDir, unitText, pathUnitText });
 }
 
-try {
-  main(process.argv.slice(2));
-} catch (error) {
-  process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
-  process.exitCode = 1;
+/**
+ * Programmatic entry point. Only callers with code execution can inject a
+ * runner; the CLI always uses the real spawnSync and fixed executable paths.
+ * @param {string[]} argv
+ * @param {{runFn?: typeof spawnSync}} [options]
+ */
+export function runInstaller(argv, { runFn = spawnSync } = {}) {
+  const previous = runCommand;
+  runCommand = runFn;
+  try {
+    main(argv);
+  } finally {
+    runCommand = previous;
+  }
+}
+
+if (process.argv[1] && resolveInvokedPath(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  try {
+    runInstaller(process.argv.slice(2));
+  } catch (error) {
+    process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
+    process.exitCode = 1;
+  }
 }

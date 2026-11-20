@@ -1,5 +1,23 @@
 # Changelog
 
+## [7.0.0](https://github.com/jeremysball/taskferry/compare/taskferry-v6.0.0...taskferry-v7.0.0) (2026-11-20)
+
+
+### ⚠ BREAKING CHANGES
+
+* **changeset:** retain non-git overlays for manual recovery ([#649](https://github.com/jeremysball/taskferry/issues/649))
+
+### Features
+
+* **daemon:** support guarded systemd user supervision ([#650](https://github.com/jeremysball/taskferry/issues/650)) ([50d75d0](https://github.com/jeremysball/taskferry/commit/50d75d0f6f6b728465e01208c20697119824f352))
+
+
+### Bug Fixes
+
+* **changeset:** diagnose unmapped ownership failures ([#647](https://github.com/jeremysball/taskferry/issues/647)) ([13eb43e](https://github.com/jeremysball/taskferry/commit/13eb43e7cba893d68c2c56a38ab04b6ce8195743))
+* **changeset:** retain non-git overlays for manual recovery ([#649](https://github.com/jeremysball/taskferry/issues/649)) ([e888bf5](https://github.com/jeremysball/taskferry/commit/e888bf500363f4cf8bb52892aaf32b9a26847fc3))
+* **daemon:** preserve sockets when connection times out ([edd9236](https://github.com/jeremysball/taskferry/commit/edd923635f7fd18874f52788bda90b646ea9dfff))
+
 ## [6.0.0](https://github.com/jeremysball/taskferry/compare/taskferry-v5.1.0...taskferry-v6.0.0) (2026-11-20)
 
 

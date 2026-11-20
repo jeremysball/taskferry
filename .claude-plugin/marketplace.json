@@ -9,7 +9,7 @@
     {
       "name": "taskferry",
       "description": "Background pi, OpenCode, and Kilo task execution through the Taskferry AXI CLI",
-      "version": "6.0.0",
+      "version": "7.0.0",
       "source": "./integrations/claude",
       "author": {
         "name": "Taskferry"

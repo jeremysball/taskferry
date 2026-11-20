@@ -221,7 +221,7 @@ is designed to be shared across users on a multi-user host.
 
 `prepareSocket()` runs before the daemon binds: if a socket file already
 exists at the target path, it sends that address a `system.health` probe
-(250ms timeout by default). Three outcomes:
+(250ms timeout by default). Four outcomes:
 
 - **Another live taskferry daemon answers** → the new daemon refuses to
   start (`error: taskferry daemon is already listening on <path>`); reuse
@@ -230,8 +230,11 @@ exists at the target path, it sends that address a `system.health` probe
   refuses to start with a different message, since taking over an unknown
   listener's socket path could route two unrelated services onto the same
   file.
-- **Nothing answers** (a stale socket file left by a daemon that crashed or
-  was killed without cleanup) → the daemon removes it, but only after
+- **The connection times out before it is established** → the new daemon
+  refuses to start and leaves the socket path untouched; a timeout does not
+  establish whether another process is listening.
+- **The connection is refused or the path is not a socket** (a stale path
+  left by a crashed daemon) → the daemon removes it, but only after
   re-`stat`ing the path under a file lock and confirming the device, inode,
   and ctime it just health-checked are still the same file at that path. This closes the
   race where a second daemon starts between the health check and the

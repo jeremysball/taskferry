@@ -966,6 +966,21 @@ describe("Unix socket daemon: stale sockets", () => {
     peer.close();
   });
 
+  test("preserves an incumbent socket when connection establishment times out", async (t) => {
+    const paths = temporaryPaths(t);
+    fs.mkdirSync(paths.runtimeDir, { recursive: true });
+    const incumbent = net.createServer();
+    await new Promise((resolve, reject) => incumbent.listen(paths.socketPath, (error) => error ? reject(error) : resolve()));
+    t.after(() => new Promise((resolve) => incumbent.close(resolve)));
+    const socket = new EventEmitter();
+    socket.setEncoding = () => socket;
+    socket.destroy = () => socket;
+    t.mock.method(net, "createConnection", () => socket);
+
+    await assert.rejects(() => prepareSocket(paths.runtimeDir, paths.socketPath, 5), /timed out/);
+    assert.equal(fs.statSync(paths.socketPath).isSocket(), true);
+  });
+
   test("does not unlink a socket path replaced after the health check", (t) => {
     const paths = temporaryPaths(t);
     fs.mkdirSync(paths.runtimeDir, { recursive: true });

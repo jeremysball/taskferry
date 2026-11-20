@@ -316,7 +316,15 @@ function socketHealth(socketPath, timeoutMs) {
       socket.destroy();
       resolve(result);
     };
-    const timer = setTimeout(() => finish({ listening: connected, healthy: false }), timeoutMs);
+    const timer = setTimeout(() => {
+      if (connected) {
+        finish({ listening: true, healthy: false });
+        return;
+      }
+      settled = true;
+      socket.destroy();
+      reject(new Error(`error: timed out checking daemon socket ${socketPath}\nhelp: retry after checking the existing daemon; the socket was not removed`));
+    }, timeoutMs);
 
     socket.setEncoding("utf8");
     socket.on("connect", () => {

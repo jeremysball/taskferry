@@ -33,6 +33,7 @@ function runWithImportedCredentials() {
   const value = credentialValue();
   if (value) {
     const entry = { id: `cred_taskferry_${Buffer.from(provider).toString("hex")}`, integrationID: provider, label: "Taskferry", active: true, value };
+    // eslint-disable-next-line sonarjs/no-os-command-from-path -- use the caller's active opencode installation.
     const imported = spawnSync("opencode", ["auth", "import", "--standalone"], {
       input: JSON.stringify([entry]), stdio: ["pipe", "ignore", "pipe"], timeout: 30000,
     });
@@ -42,6 +43,7 @@ function runWithImportedCredentials() {
       process.exit(1);
     }
   }
+  // eslint-disable-next-line sonarjs/no-os-command-from-path -- use the same PATH-resolved opencode as the import above.
   const result = spawnSync("opencode", args, { stdio: "inherit" });
   if (result.signal) process.kill(process.pid, result.signal);
   process.exit(result.status ?? 1);

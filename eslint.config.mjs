@@ -7,6 +7,16 @@ import sonarjs from "eslint-plugin-sonarjs";
 // (src/tasks.js), node:test test files, and standalone smoke-test
 // scripts run directly with `node`. Everything runs under Node, so one
 // language-options block covers the whole tree.
+// Test fixtures and standalone smoke/evaluation harnesses intentionally use
+// temporary directories and PATH-resolved tools.
+const TEST_SURFACE = [
+  "**/*.test.js",
+  "**/*-test.js",
+  "**/*.test-helpers.js",
+  "src/smoke-test-support.js",
+  "evals/**",
+];
+
 export default [
   { ignores: ["node_modules/**", ".claude/**", ".worktrees/**"] },
 
@@ -14,11 +24,11 @@ export default [
 
   // Project-wide rule tuning: keep the high-signal bug catchers as errors
   // (no-undef, no-redeclare, no-const-assign, no-dupe-keys, no-unreachable…
-  // — these block the commit), demote stylistic noise to warnings so it
-  // informs without halting work.
+  // — these block the commit). Deliberately unused arguments and bindings
+  // may use the underscore prefix.
   {
     rules: {
-      "no-unused-vars": ["warn", { caughtErrors: "none", argsIgnorePattern: "^_", varsIgnorePattern: "^_" }],
+      "no-unused-vars": ["error", { caughtErrors: "none", argsIgnorePattern: "^_", varsIgnorePattern: "^_" }],
       "no-empty": ["error", { allowEmptyCatch: true }],
     },
   },
@@ -58,10 +68,14 @@ export default [
       // Wants a license header block on every file; this project doesn't
       // use one.
       "sonarjs/file-header": "off",
-      // Taskferry's whole job is sandboxing: os.tmpdir()/`/tmp` use and
-      // PATH-resolved spawns of bwrap/git/opencode/pi are expected,
-      // reviewed patterns here, not accidental exposure -- disabled rather
-      // than generating permanent noise no fix can resolve.
+    },
+  },
+
+  // Keep these checks enabled outside the test and harness surface. Literal
+  // production spawns that deliberately use PATH are documented in place.
+  {
+    files: TEST_SURFACE,
+    rules: {
       "sonarjs/publicly-writable-directories": "off",
       "sonarjs/no-os-command-from-path": "off",
     },

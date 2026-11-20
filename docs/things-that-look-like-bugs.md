@@ -799,3 +799,9 @@ belongs here.
   reported totals the transcript does not support, if a read rewrote the
   record, or if the record's copy were dropped at the moment the transcript
   is gone.
+- Enabling `sonarjs/no-os-command-from-path` outside the test surface does
+  not validate every executable taskferry runs. The rule detects statically
+  resolvable command strings; `src/sandbox.js` passes a command variable to
+  `spawnSync`, so the absence of a warning there is not a PATH safety check.
+  Test and harness filename patterns in `eslint.config.mjs` also exempt files
+  matching those patterns; production code must not be placed under them.

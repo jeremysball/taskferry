@@ -174,21 +174,12 @@ belongs here.
    which cannot detect reuse) and passes open for legacy records with no
    recorded start time, which are signalled anyway. See
    `docs/daemon.md#recovery`.
-- A fresh dispatch's opencode session/db state not being visible to
-   `taskferry dispatch --session-id` on an *earlier* task — expected, by
-   design (taskferry#501). Every sandboxed dispatch gets its own
-   per-task data home (`<cacheDir>/opencode-data/<taskId>`, a separate
-   opencode.sqlite/session store per task) so concurrent dispatches never
-   contend on one shared `opencode.db` — which crashed workers with
-   `opencode_unknownerror`/`"Failed to execute statement"` under
-   concurrent dispatch. The resume surface that actually matters is
-   preserved: a task's own later calls (its summary-generation child, a
-   daemon-restart auto-resume of the same task, an advisor follow-up
-   resuming that same advisor task's session) all reuse the *same* task's
-   data home, so the `--session <id>` resume still resolves. Cross-task
-   session resumption of a sandboxed session was never a supported
-   feature — it only worked as a side effect of the shared data home — so
-   only the accidental sharing is gone.
+- Sandboxed tasks normally have separate executor data homes so independent
+  sessions do not contend on a shared database (taskferry#501). A launch
+  resuming a retained session instead inherits the earliest matching task's
+  data-home scope, so it can find that session; summary children use their
+  source task's scope. If the owner or its data has been pruned, the request
+  packet alone cannot restore the executor's session.
 - A resumed worker starting under a different pid than the one recorded for
    the task — expected; resume is a fresh spawn (fresh overlay, fresh pid),
    not a re-attachment to the old orphaned process. The pid persisted on the

@@ -108,9 +108,9 @@ task's output directory includes `resume-context/manifest.json` and one prompt
 file for the earliest retained request in that session, executor, and directory.
 This restores the original assignment, including candidate IDs and output
 requirements, if that request is still retained. The worker receives the
-manifest path, not another inline copy of the prompt. Its existing agent
-conversation resumes normally; the packet contains no conversation transcript
-or accumulated continuation prompts.
+manifest path, not another inline copy of the prompt. The packet contains no
+conversation transcript or accumulated continuation prompts; it does not
+guarantee that the executor's session data remains available.
 
 Each packet contains one independent prompt copy written from the retained task record.
 Taskferry does not reuse worker-writable files from earlier packets or add
@@ -209,8 +209,9 @@ status becomes `"cancelled"` once its exit event lands, distinct from
 
 Returns `{ status: "queued" | "running" | "done" | "crashed" | "cancelled" |
 "unknown", exitCode, signal, ... }`. `status` comes from the child process's
-actual exit event, not from parsing output. `"unknown"` appears only if the
-daemon restarted while the task was still running; see
+actual exit event, not from parsing output. On daemon restart, queued tasks and
+internal summarizers become `"unknown"`; eligible running tasks resume, while
+those without a recoverable session or an existing directory crash. See
 [daemon.md](daemon.md#recovery).
 
 Lean fields by default; pass `--full` for directory, model, session id, log

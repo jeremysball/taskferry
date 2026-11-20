@@ -13,6 +13,12 @@ const MANIFEST_FILE = "manifest.json";
 const REQUEST_C17 = "Verify C17.";
 const REQUEST_FILE = "request-1.txt";
 const NEXT_CANDIDATE = "C17 is finished. Check C21 next.";
+// This test uses a plain sandbox, not an overlay. Only a missing executable
+// justifies skipping; a broken probe, namespace failure, or launch regression
+// must remain a test failure.
+const bwrapProbe = process.platform === "linux" ? spawnSync("bwrap", ["--version"], { encoding: "utf8" }) : null;
+const sandboxSkip = process.platform !== "linux" ? "not linux" : bwrapProbe?.error?.code === "ENOENT" ? "bwrap not installed" : false;
+
 
 test("session resume preserves the full recorded assignment after its temporary prompt file is removed", () => {
   const launches = [];
@@ -240,7 +246,7 @@ test("fresh and unknown sessions do not claim recovered context", () => {
   child.emit("exit", 0, null);
 });
 
-test("a real sandboxed child can read a resumed assignment without access to the task ledger", { skip: process.platform !== "linux" }, async (t) => {
+test("a real sandboxed child can read a resumed assignment without access to the task ledger", { skip: sandboxSkip }, async (t) => {
   const directory = mkdtempTracked("resume-sandbox-project-");
   const socketPath = path.join(mkdtempTracked("resume-socket-"), "daemon.sock");
   const server = net.createServer();
@@ -266,7 +272,7 @@ test("a real sandboxed child can read a resumed assignment without access to the
   assert.equal(fs.existsSync(path.join(mgr.paths.STATE_DIR, "tasks.json")), true);
   const resumed = mgr.dispatch({ directory, prompt: CONTINUATION, sessionId: "ses_real" });
   const settled = await mgr.poll(resumed.id, { timeoutMs: 10000 });
-  assert.equal(settled.status, "done", fs.readFileSync(settled.logPath, "utf8"));
+  assert.equal(settled.status, "done", `spawnError: ${settled.spawnError}\n${fs.readFileSync(settled.logPath, "utf8")}`);
   const check = mgr.output(resumed.id, { path: "sandbox-check.json" });
   assert.deepEqual(JSON.parse(check.file.content), { request: "Verify C17 and C21.", ledgerVisible: false, taskId: "sandbox-original" });
 });

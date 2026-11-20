@@ -118,9 +118,11 @@ cache files to earlier output directories. Repeated resumes copy that one
 prompt again, without growing the packet to include every intervening request.
 
 The resume instructions give the current continuation precedence over the
-recorded prompt. A manifest entry with `complete: false` is a partial record, not a
-recovered assignment. `complete` describes the recorded text, not whether it was
-the original assignment: after pruning, the earliest retained request may be a
+recorded prompt. A manifest entry with `complete: false` is partial or has
+unknown completeness, not a verified recovered assignment. Older records may
+contain a backfilled preview without provenance, even when the entire original
+text happens to survive. `complete` describes the recorded text, not whether it
+was the original assignment: after pruning, the earliest retained request may be a
 continuation. Task status is not verified progress. Unknown sessions
 have no packet. Taskferry does not reconstruct pruned history from archives.
 Inspect prior deliverables before relying on them, and include any missing

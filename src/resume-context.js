@@ -37,7 +37,8 @@ export function writeResumeContext(recorded, outputDir) {
     const file = `request-${index + 1}.txt`;
     const hasFullLength = prompt.length >= (task.promptTotalChars ?? 0);
     const originalRecorded = task.originalPrompt !== undefined;
-    const knownComplete = task.originalPromptComplete ?? originalRecorded;
+    // Older daemons persisted backfilled previews without recording provenance.
+    const knownComplete = task.originalPromptComplete === true;
     fs.writeFileSync(path.join(contextDir, file), prompt, { flag: "wx", mode: 0o600 });
     return {
       file,
@@ -57,5 +58,5 @@ export function writeResumeContext(recorded, outputDir) {
     sessionId: priorTask.sessionId,
     previousTaskId: priorTask.id,
   }, null, 2) + "\n", { flag: "wx", mode: 0o600 });
-  return `\n\n## Recorded request context\nThe earliest retained request for this session, executor, and directory is indexed at \`${manifestPath}\`, with its prompt in the file beside it. This restores the original assignment if still retained; it does not replay the conversation or accumulated continuations. Text completeness does not prove this is the original assignment; earlier requests may have been pruned. Use it only if you need the assignment, candidate IDs, constraints, or output contract. Read the prompt in bounded chunks through its end; a truncated tool response is not the complete request. An entry marked complete: false is a partial record, not a recovered assignment. The current continuation takes precedence. Task status is not verified progress; inspect prior deliverables with \`taskferry output <taskId>\` before relying on them. If required context is missing or the original request was pruned, report it instead of inventing candidate IDs or substituting another assignment.`;
+  return `\n\n## Recorded request context\nThe earliest retained request for this session, executor, and directory is indexed at \`${manifestPath}\`, with its prompt in the file beside it. This restores the original assignment if still retained; it does not replay the conversation or accumulated continuations. Text completeness does not prove this is the original assignment; earlier requests may have been pruned. Use it only if you need the assignment, candidate IDs, constraints, or output contract. Read the prompt in bounded chunks through its end; a truncated tool response is not the complete request. An entry marked complete: false is not known to be complete and must not be treated as a recovered assignment. The current continuation takes precedence. Task status is not verified progress; inspect prior deliverables with \`taskferry output <taskId>\` before relying on them. If required context is missing or the original request was pruned, report it instead of inventing candidate IDs or substituting another assignment.`;
 }

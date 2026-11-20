@@ -17,7 +17,9 @@ const NEXT_CANDIDATE = "C17 is finished. Check C21 next.";
 // justifies skipping; a broken probe, namespace failure, or launch regression
 // must remain a test failure.
 const bwrapProbe = process.platform === "linux" ? spawnSync("bwrap", ["--version"], { encoding: "utf8" }) : null;
-const sandboxSkip = process.platform !== "linux" ? "not linux" : bwrapProbe?.error?.code === "ENOENT" ? "bwrap not installed" : false;
+let sandboxSkip = false;
+if (process.platform !== "linux") sandboxSkip = "not linux";
+if (bwrapProbe?.error?.code === "ENOENT") sandboxSkip = "bwrap not installed";
 
 
 test("session resume preserves the full recorded assignment after its temporary prompt file is removed", () => {
@@ -119,7 +121,7 @@ test("a surviving continuation is not certified as the original assignment after
   const child = fakeChild();
   const mgr = makeManager({
     spawnFn: (_cmd, args) => { launches.push(args); return child; },
-    tasksFixture: [baseTask({ directory: os.tmpdir(), sessionId: "ses_pruned", originalPrompt: NEXT_CANDIDATE })],
+    tasksFixture: [baseTask({ directory: os.tmpdir(), sessionId: "ses_pruned", originalPrompt: NEXT_CANDIDATE, originalPromptComplete: true })],
   });
   const resumed = mgr.dispatch({ prompt: CONTINUATION, directory: os.tmpdir(), sessionId: "ses_pruned", executor: "opencode" });
   const contextDir = path.join(mgr.output(resumed.id).outputDir, CONTEXT_DIR);
@@ -130,7 +132,7 @@ test("a surviving continuation is not certified as the original assignment after
   child.emit("exit", 0, null);
 });
 
-test("a retained pre-upgrade original ending with an ellipsis is complete", () => {
+test("a pre-upgrade original ending with an ellipsis has unknown completeness", () => {
   const child = fakeChild();
   const prompt = "Check the output\u2026";
   const mgr = makeManager({ spawnFn: () => child, tasksFixture: [baseTask({
@@ -138,7 +140,7 @@ test("a retained pre-upgrade original ending with an ellipsis is complete", () =
   })] });
   const resumed = mgr.dispatch({ prompt: CONTINUATION, directory: os.tmpdir(), sessionId: "ses_old_ellipsis", executor: "opencode" });
   const manifest = JSON.parse(fs.readFileSync(path.join(mgr.output(resumed.id).outputDir, CONTEXT_DIR, MANIFEST_FILE), "utf8"));
-  assert.equal(manifest.requests[0].complete, true);
+  assert.equal(manifest.requests[0].complete, false);
   child.emit("exit", 0, null);
 });
 
@@ -214,6 +216,24 @@ test("legacy prompts without length metadata stay partial after persistence and 
   const resumed = reloaded.dispatch({ prompt: CONTINUATION, directory: os.tmpdir(), sessionId: "ses_legacy_unknown", executor: "opencode" });
   const manifest = JSON.parse(fs.readFileSync(path.join(reloaded.output(resumed.id).outputDir, CONTEXT_DIR, MANIFEST_FILE), "utf8"));
   assert.equal(manifest.requests[0].complete, false, "a backfilled preview is not evidence that the full assignment survived");
+  child.emit("exit", 0, null);
+});
+
+test("a previously persisted legacy preview is not certified as a complete original", () => {
+  const child = fakeChild();
+  const preview = "Only the beginning was retained";
+  const mgr = makeManager({ spawnFn: () => child, tasksFixture: [baseTask({
+    directory: os.tmpdir(),
+    sessionId: "ses_preupgrade_backfill",
+    originalPrompt: preview,
+    promptPreview: preview,
+    promptTotalChars: null,
+  })] });
+  const resumed = mgr.dispatch({ prompt: CONTINUATION, directory: os.tmpdir(), sessionId: "ses_preupgrade_backfill", executor: "opencode" });
+  const contextDir = path.join(mgr.output(resumed.id).outputDir, CONTEXT_DIR);
+  const manifest = JSON.parse(fs.readFileSync(path.join(contextDir, MANIFEST_FILE), "utf8"));
+  assert.equal(fs.readFileSync(path.join(contextDir, REQUEST_FILE), "utf8"), preview);
+  assert.equal(manifest.requests[0].complete, false);
   child.emit("exit", 0, null);
 });
 

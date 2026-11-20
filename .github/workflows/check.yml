@@ -83,7 +83,7 @@ jobs:
           sudo groupadd --system taskferry-ownership-regression
           sudo usermod -a -G taskferry-ownership-regression "$(id -un)"
           sudo -u "$(id -un)" env "PATH=$PATH" LC_ALL=C TASKFERRY_REQUIRE_OWNERSHIP_REGRESSION=1 \
-            node --test --test-name-pattern='unmapped ownership extraction' src/changeset.integration.test.js
+            "$(mise which node)" --test --test-name-pattern='unmapped ownership extraction' src/changeset.integration.test.js
 
       # Unit tests run before bubblewrap is installed on a fresh runner. Run
       # this real-sandbox regression again after provisioning it, so a

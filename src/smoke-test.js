@@ -15,6 +15,7 @@ const mock = await startMockLlmProcess();
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-smoke-"));
 const env = {
   ...process.env,
+  TASKFERRY_DAEMON_SUPERVISOR: "spawn",
   TASKFERRY_STATE_DIR: path.join(root, "state"),
   TASKFERRY_RUNTIME_DIR: path.join(root, "run"),
   OPENCODE_CONFIG_CONTENT: mockLlmConfigContent(mock.port),

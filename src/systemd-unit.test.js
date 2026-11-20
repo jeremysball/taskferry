@@ -19,7 +19,6 @@ import {
   findMissingSupervisorSupport,
   isJournalPersistent,
   parseJournaldStorage,
-  renderRotateService,
   renderPathUnit,
   renderSystemdUnit,
   resolveLogTarget,
@@ -30,18 +29,24 @@ import {
 } from "./systemd-unit.js";
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const UNIT_TEMPLATE = path.join(REPO_ROOT, "deploy", "systemd", "taskferry-daemon.service.in");
-const ROTATE_TEMPLATE = path.join(REPO_ROOT, "deploy", "systemd", "taskferry-daemon-logrotate.service.in");
+const SYSTEMD_NAME = "systemd";
+const APP_NAME = "taskferry";
+const SYSTEMD_DIR = path.join("deploy", SYSTEMD_NAME);
+const SERVICE_TEMPLATE = path.join(SYSTEMD_DIR, "taskferry-daemon.service.in");
+const UNIT_TEMPLATE = path.join(REPO_ROOT, SERVICE_TEMPLATE);
+const CONFIG_FILE = "config.json";
+const ACTIVE_STATE_CALL = "--user show taskferry-daemon.service --property=ActiveState --value";
+const ENABLE_PATH_CALL = "--user enable --now taskferry-daemon.path";
+const RELOAD_CALL = "--user daemon-reload";
 const INSTALLER = path.join(REPO_ROOT, "scripts", "install-systemd-unit.js");
-const ROTATE_SCRIPT = path.join(REPO_ROOT, "scripts", "rotate-daemon-logs.sh");
 
 // Synthetic paths for render fixtures, built at runtime so no developer path
 // is baked into the test.
 const FIXTURE_HOME = path.join(os.tmpdir(), "taskferry-fixture-home");
-const FIXTURE_REPO = path.join(FIXTURE_HOME, "taskferry");
+const FIXTURE_REPO = path.join(FIXTURE_HOME, APP_NAME);
 const FIXTURE_NODE = path.join(FIXTURE_HOME, ".local", "share", "mise", "installs", "node", "26.5.1", "bin", "node");
 const FIXTURE_PATH = [path.join(FIXTURE_HOME, ".local", "bin"), path.join(path.sep, "usr", "bin")].join(path.delimiter);
-const OTHER_REPO = path.join(path.sep, "workspace", "taskferry");
+const OTHER_REPO = path.join(path.sep, "workspace", APP_NAME);
 const NODE_BINARY = path.join(path.sep, "usr", "bin", "node");
 
 function temporaryDir(t) {
@@ -61,10 +66,10 @@ function templateText() {
 function supervisorFixture(t) {
   const repo = temporaryDir(t);
   fs.mkdirSync(path.join(repo, "src"), { recursive: true });
-  fs.mkdirSync(path.join(repo, "deploy", "systemd"), { recursive: true });
+  fs.mkdirSync(path.join(repo, SYSTEMD_DIR), { recursive: true });
   fs.writeFileSync(path.join(repo, "src", "client.js"), "TASKFERRY_DAEMON_SUPERVISOR startDaemonViaSystemd\n");
   fs.writeFileSync(path.join(repo, "src", "daemon.js"), "SUPERVISED_RESTART_EXIT_CODE TASKFERRY_DAEMON_SUPERVISOR\n");
-  fs.writeFileSync(path.join(repo, "deploy", "systemd", "taskferry-daemon.service.in"), templateText());
+  fs.writeFileSync(path.join(repo, SERVICE_TEMPLATE), templateText());
   fs.copyFileSync(path.join(REPO_ROOT, PATH_TEMPLATE), path.join(repo, PATH_TEMPLATE));
   return repo;
 }
@@ -74,6 +79,9 @@ function render(options = {}) {
     repo: FIXTURE_REPO,
     nodePath: FIXTURE_NODE,
     pathEnv: FIXTURE_PATH,
+    stateDir: path.join(FIXTURE_HOME, "state"),
+    runtimeDir: path.join(FIXTURE_HOME, "run"),
+    socketPath: path.join(FIXTURE_HOME, "run", "daemon.sock"),
     gateConfigHome: path.join(FIXTURE_HOME, ".config"),
     gateEnvFile: path.join(FIXTURE_HOME, "secrets"),
     template: templateText(),
@@ -88,23 +96,30 @@ function runInstaller(t, args, env = {}) {
   return spawnSync(process.execPath, [INSTALLER, ...args], { encoding: "utf8", env: { ...cleanEnv, HOME: temporaryDir(t), PATH: `${shim}${path.delimiter}${process.env.PATH}`, ...env } });
 }
 
-function isolatedInstaller(t, { gated = false, stalePath = false, extraEnv = {}, managerEnv = "", args = [], repo = supervisorFixture(t) } = {}) {
+function isolatedInstaller(t, { gated = false, stalePath = false, staleRotation = false, occupiedSocket = false, extraEnv = {}, managerEnv = "", args = [], repo = supervisorFixture(t) } = {}) {
   const home = temporaryDir(t);
-  const unitDir = temporaryDir(t);
+  const unitDir = path.join(home, ".config", SYSTEMD_NAME, "user");
+  fs.mkdirSync(unitDir, { recursive: true });
   const shim = temporaryDir(t);
   const calls = path.join(shim, "calls");
   const envFile = path.join(home, "secrets", "env");
   if (stalePath) fs.writeFileSync(path.join(unitDir, PATH_UNIT_NAME), "old path unit\n");
+  if (staleRotation) fs.writeFileSync(path.join(unitDir, "taskferry-daemon-logrotate.timer"), "old timer\n");
   if (gated) {
-    const config = path.join(home, ".config", "taskferry");
+    const config = path.join(home, ".config", APP_NAME);
     fs.mkdirSync(config, { recursive: true });
-    fs.writeFileSync(path.join(config, "config.json"), JSON.stringify({ envFile }));
+    fs.writeFileSync(path.join(config, CONFIG_FILE), JSON.stringify({ envFile }));
   }
-  fs.writeFileSync(path.join(shim, "systemctl"), `#!/bin/sh\nprintf '%s\\n' "$*" >> "$CALLS"\ncase "$*" in *show-environment*) printf 'HOME=%s\\n' "$HOME"; printf '%s' "$MANAGER_ENV"; exit 0;; *is-active*) echo inactive; exit 3;; esac\nexit 0\n`, { mode: 0o755 });
+  fs.writeFileSync(path.join(shim, "systemctl"), `#!/bin/sh\nprintf '%s\\n' "$*" >> "$CALLS"\ncase "$*" in *show-environment*) printf 'HOME=%s\\nXDG_RUNTIME_DIR=%s\\n' "$HOME" "$XDG_RUNTIME_DIR"; printf '%s' "$MANAGER_ENV"; exit 0;; *is-active*taskferry-daemon.path*) if [ "\${PATH_STATE:-inactive}" = missing ]; then echo inactive; exit 4; fi; if [ "\${PATH_STATE:-inactive}" = active ]; then echo active; exit 0; fi; echo inactive; exit 3;; *stop*taskferry-daemon.path*) touch "$CALLS.stopped"; exit 0;; *is-active*) echo inactive; exit 3;; *--property=MainPID*) if [ "\${MISSING_SERVICE:-0}" = 1 ]; then echo 'Unit taskferry-daemon.service could not be found.' >&2; exit 1; fi; echo "\${MAIN_PID:-0}"; exit 0;; *--property=ActiveState*) if [ -f "$CALLS.stopped" ] && [ "\${START_AFTER_STOP:-0}" = 1 ]; then echo active; else echo "\${ACTIVE_STATE:-inactive}"; fi; exit 0;; esac\nexit 0\n`, { mode: 0o755 });
   const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !/^(TASKFERRY_|XDG_|GIT_)/u.test(key)));
-  Object.assign(env, { HOME: home, XDG_RUNTIME_DIR: temporaryDir(t), PATH: `${shim}${path.delimiter}${process.env.PATH}`, CALLS: calls, MANAGER_ENV: managerEnv }, extraEnv);
+  const runtime = temporaryDir(t);
+  if (occupiedSocket) {
+    fs.mkdirSync(path.join(runtime, APP_NAME));
+    fs.writeFileSync(path.join(runtime, APP_NAME, "daemon.sock"), "occupied");
+  }
+  Object.assign(env, { HOME: home, XDG_RUNTIME_DIR: runtime, PATH: `${shim}${path.delimiter}${process.env.PATH}`, CALLS: calls, MANAGER_ENV: managerEnv }, extraEnv);
   const result = spawnSync(process.execPath, [INSTALLER, "--repo", repo, "--unit-dir", unitDir, "--log-target", "journal", ...args], { encoding: "utf8", env });
-  return { result, envFile, unitDir, calls: fs.existsSync(calls) ? fs.readFileSync(calls, "utf8").trim().split("\n") : [] };
+  return { result, envFile, home, runtime, unitDir, calls: fs.existsSync(calls) ? fs.readFileSync(calls, "utf8").trim().split("\n") : [] };
 }
 
 describe("env-file gated start", () => {
@@ -114,8 +129,8 @@ describe("env-file gated start", () => {
 
   test("resolves the gate and rejects invalid configuration", (t) => {
     const homeDir = temporaryDir(t);
-    const dir = path.join(homeDir, ".config", "taskferry");
-    const config = path.join(dir, "config.json");
+    const dir = path.join(homeDir, ".config", APP_NAME);
+    const config = path.join(dir, CONFIG_FILE);
     assert.equal(resolveEnvFileGate({ homeDir }), null);
     fs.mkdirSync(dir, { recursive: true });
     fs.writeFileSync(config, JSON.stringify({ envFile: path.join(homeDir, "secret") }));
@@ -149,7 +164,7 @@ describe("env-file gated start", () => {
     assert.deepEqual(findMissingSupervisorSupport({ repo }), []);
     assert.throws(() => assertRepoSupportsSupervisor({ repo, gated: true }), /is missing/u);
     fs.copyFileSync(path.join(REPO_ROOT, PATH_TEMPLATE), path.join(repo, PATH_TEMPLATE));
-    const service = path.join(repo, "deploy", "systemd", "taskferry-daemon.service.in");
+    const service = path.join(repo, SERVICE_TEMPLATE);
     fs.writeFileSync(service, templateText().replace("@INSTALL_SECTION@", ""));
     assert.deepEqual(findMissingSupervisorSupport({ repo }), []);
     assert.throws(() => assertRepoSupportsSupervisor({ repo, gated: true }), /lacks @INSTALL_SECTION@/u);
@@ -158,14 +173,99 @@ describe("env-file gated start", () => {
   test("installer enables the path in order and tolerates an inactive service", (t) => {
     const gated = isolatedInstaller(t, { gated: true, args: ["--enable"] });
     assert.equal(gated.result.status, 0, gated.result.stderr);
-    assert.deepEqual(gated.calls, ["--user show-environment", "--user daemon-reload", "--user disable taskferry-daemon.service", "--user reset-failed taskferry-daemon.service taskferry-daemon.path", "--user enable --now taskferry-daemon.path", "--user --no-pager status taskferry-daemon.path", "--user is-active taskferry-daemon.service"]);
+    assert.deepEqual(gated.calls, ["--user show-environment", "--user show taskferry-daemon.service --property=MainPID --value", ACTIVE_STATE_CALL, "--user is-active taskferry-daemon.path", RELOAD_CALL, "--user disable taskferry-daemon.service", "--user reset-failed taskferry-daemon.service taskferry-daemon.path", ENABLE_PATH_CALL, "--user --no-pager status taskferry-daemon.path", "--user is-active taskferry-daemon.service"]);
     assert.match(gated.result.stdout, /taskferry-daemon.service: inactive/u);
     assert.match(fs.readFileSync(path.join(gated.unitDir, PATH_UNIT_NAME), "utf8"), /PathExists=/u);
+    assert.match(fs.readFileSync(path.join(gated.unitDir, UNIT_NAME), "utf8"), /^ConditionPathExists=/mu);
     assert.doesNotMatch(fs.readFileSync(path.join(gated.unitDir, UNIT_NAME), "utf8"), /^\[Install\]$/mu);
     const plain = isolatedInstaller(t, { args: ["--enable"] });
     assert.equal(plain.result.status, 0, plain.result.stderr);
     assert.ok(plain.calls.includes("--user enable --now taskferry-daemon.service"));
     assert.ok(plain.calls.every((call) => !call.includes(PATH_UNIT_NAME)));
+  });
+
+  test("gated enable refuses an already-running service without writing units", (t) => {
+    const gated = isolatedInstaller(t, { gated: true, args: ["--enable"], extraEnv: { MAIN_PID: "123" } });
+    assert.notEqual(gated.result.status, 0);
+    assert.match(gated.result.stderr, /already running/u);
+    assert.equal(fs.existsSync(path.join(gated.unitDir, UNIT_NAME)), false);
+    const activating = isolatedInstaller(t, { gated: true, args: ["--enable"], extraEnv: { ACTIVE_STATE: "activating" } });
+    assert.notEqual(activating.result.status, 0);
+    assert.match(activating.result.stderr, /state is uncertain/u);
+  });
+
+  test("a not-yet-installed service can be enabled after checking the pid file", (t) => {
+    const result = isolatedInstaller(t, { gated: true, args: ["--enable"], extraEnv: { MISSING_SERVICE: "1" } });
+    assert.equal(result.result.status, 0, result.result.stderr);
+    assert.ok(result.calls.includes(ENABLE_PATH_CALL));
+  });
+
+  test("an unloaded path reported inactive with exit 4 can be installed", (t) => {
+    const result = isolatedInstaller(t, { gated: true, args: ["--enable"], extraEnv: { PATH_STATE: "missing" } });
+    assert.equal(result.result.status, 0, result.result.stderr);
+    assert.ok(result.calls.includes(ENABLE_PATH_CALL));
+  });
+
+  test("re-arms an active path after stopping it and rechecking the service", (t) => {
+    const result = isolatedInstaller(t, { gated: true, args: ["--enable"], extraEnv: { PATH_STATE: "active" } });
+    assert.equal(result.result.status, 0, result.result.stderr);
+    const stop = result.calls.indexOf("--user stop taskferry-daemon.path");
+    const reload = result.calls.indexOf(RELOAD_CALL);
+    assert.ok(stop >= 0 && stop < reload);
+    assert.ok(result.calls.slice(stop + 1, reload).includes(ACTIVE_STATE_CALL));
+    assert.ok(result.calls.includes(ENABLE_PATH_CALL));
+  });
+
+  test("rearming stops if the old path starts the service during handover", (t) => {
+    const result = isolatedInstaller(t, { gated: true, args: ["--enable"], extraEnv: { PATH_STATE: "active", START_AFTER_STOP: "1" } });
+    assert.notEqual(result.result.status, 0);
+    assert.match(result.result.stderr, /was stopped/u);
+    assert.ok(result.calls.includes("--user stop taskferry-daemon.path"));
+    assert.ok(!result.calls.includes(RELOAD_CALL));
+  });
+
+  test("file logging creates its parent before asking systemd to start", (t) => {
+    const result = isolatedInstaller(t, { args: ["--enable", "--log-target", "file"] });
+    assert.equal(result.result.status, 0, result.result.stderr);
+    assert.ok(fs.statSync(path.join(result.home, ".local", "state", APP_NAME, "logs")).isDirectory());
+    assert.match(fs.readFileSync(path.join(result.unitDir, UNIT_NAME), "utf8"), /^StandardOutput=append:/mu);
+  });
+
+  test("install without enable directs cutover through the guarded installer", (t) => {
+    const result = isolatedInstaller(t, { gated: true });
+    assert.equal(result.result.status, 0, result.result.stderr);
+    assert.match(result.result.stdout, /re-run.*--enable/u);
+    assert.doesNotMatch(result.result.stdout, /systemctl --user enable --now/u);
+    assert.ok(result.calls.includes(RELOAD_CALL));
+  });
+
+  test("manager and shell daemon path mismatches refuse enable", (t) => {
+    const stateDir = temporaryDir(t);
+    const result = isolatedInstaller(t, { args: ["--enable"], managerEnv: `TASKFERRY_STATE_DIR=${stateDir}\n` });
+    assert.notEqual(result.result.status, 0);
+    assert.match(result.result.stderr, /resolve different daemon state/u);
+    assert.equal(fs.existsSync(path.join(result.unitDir, UNIT_NAME)), false);
+  });
+
+  test("an existing socket blocks takeover even without a matching pid file", (t) => {
+    const result = isolatedInstaller(t, { occupiedSocket: true, args: ["--enable"] });
+    assert.notEqual(result.result.status, 0);
+    assert.match(result.result.stderr, /socket.*exists/u);
+    assert.equal(fs.existsSync(path.join(result.unitDir, UNIT_NAME)), false);
+  });
+
+  test("an existing socket blocks reinstall even when systemd reports a MainPID", (t) => {
+    const result = isolatedInstaller(t, { occupiedSocket: true, args: ["--enable"], extraEnv: { MAIN_PID: String(process.pid) } });
+    assert.notEqual(result.result.status, 0);
+    assert.match(result.result.stderr, /socket.*exists/u);
+    assert.equal(fs.existsSync(path.join(result.unitDir, UNIT_NAME)), false);
+  });
+
+  test("refuses to install over an obsolete log-rotation timer", (t) => {
+    const result = isolatedInstaller(t, { staleRotation: true, args: ["--dry-run"] });
+    assert.notEqual(result.result.status, 0);
+    assert.match(result.result.stderr, /obsolete automatic log rotation/u);
+    assert.equal(fs.readFileSync(path.join(result.unitDir, "taskferry-daemon-logrotate.timer"), "utf8"), "old timer\n");
   });
 
   test("dry run follows manager config and warns about shell overrides", (t) => {
@@ -184,9 +284,9 @@ describe("env-file gated start", () => {
   test("manager overrides select and pin the effective gate", (t) => {
     const configHome = temporaryDir(t);
     const envFile = path.join(configHome, "manager-secret");
-    const configDir = path.join(configHome, "taskferry");
+    const configDir = path.join(configHome, APP_NAME);
     fs.mkdirSync(configDir);
-    fs.writeFileSync(path.join(configDir, "config.json"), JSON.stringify({ envFile: path.join(configHome, "other") }));
+    fs.writeFileSync(path.join(configDir, CONFIG_FILE), JSON.stringify({ envFile: path.join(configHome, "other") }));
     const result = isolatedInstaller(t, { args: ["--dry-run"], managerEnv: `XDG_CONFIG_HOME=${configHome}\nTASKFERRY_ENV_FILE=${envFile}\n` });
     assert.equal(result.result.status, 0, result.result.stderr);
     assert.match(result.result.stdout, new RegExp(`PathExists=${escapeRegExp(envFile)}`, "u"));
@@ -244,23 +344,26 @@ describe("systemd unit rendering", () => {
     assert.match(unit, /^TimeoutStopSec=30$/mu);
     assert.match(unit, /^KillMode=process$/mu);
     assert.match(unit, /^Environment=TASKFERRY_DAEMON_SUPERVISOR=systemd$/mu);
-    assert.match(unit, /^ExecStartPre=.*touch %t\/taskferry\/systemd-supervised$/mu);
+    assert.match(unit, new RegExp(`^ExecStartPre=.*touch ${escapeRegExp(path.join(FIXTURE_HOME, "run", "systemd-supervised"))}$`, "mu"));
     assert.match(unit, /^StandardOutput=journal$/mu);
     assert.match(unit, /^StandardError=journal$/mu);
     assert.doesNotMatch(unit, /client\.js/u, "the unit must exec the daemon, not the client that could spawn a second one");
   });
 
-  test("file logging appends to a durable path and installs the rotation pieces", () => {
+  test("file logging appends without installing automatic rotation", () => {
     const unit = render({ logTarget: "file" });
     assert.match(unit, new RegExp(`^StandardOutput=append:${escapeRegExp(DAEMON_LOG_FILE)}$`, "mu"));
     assert.match(unit, /^StandardError=inherit$/mu);
-    assert.match(unit, /^ExecStartPre=\/usr\/bin\/mkdir -p %h\/\.local\/state\/taskferry\/logs$/mu);
+    assert.doesNotMatch(unit, /^ExecStartPre=.*mkdir.*logs$/mu);
     assert.doesNotMatch(unit, /^StandardOutput=journal$/mu);
 
-    const service = renderRotateService({ repo: FIXTURE_REPO, template: fs.readFileSync(ROTATE_TEMPLATE, "utf8") });
-    assert.match(service, new RegExp(`^ExecStart=${escapeRegExp(FIXTURE_REPO)}/scripts/rotate-daemon-logs\\.sh$`, "mu"));
-    assert.match(service, /^Environment=TASKFERRY_LOG_MAX_BYTES=10485760$/mu);
-    assert.match(service, /^Environment=TASKFERRY_LOG_KEEP=5$/mu);
+  });
+
+  test("file log paths escape systemd specifiers and reject unit escapes", () => {
+    const file = path.join(FIXTURE_HOME, "100%home", "daemon.log");
+    const unit = render({ logTarget: "file", logFile: file });
+    assert.match(unit, new RegExp(`^StandardOutput=append:${escapeRegExp(file.replaceAll("%", "%%"))}$`, "mu"));
+    assert.throws(() => render({ logTarget: "file", logFile: `${file}\\n` }), /unit syntax/u);
   });
 
   test("escapes unit specifiers in substituted values", () => {
@@ -279,6 +382,10 @@ describe("systemd unit rendering", () => {
     assert.throws(() => assertUnitValue("repo root", "/tmp/with space"), /contains whitespace/u);
     assert.throws(() => assertUnitValue("repo root", "/tmp/line\nbreak"), /control character/u);
     assert.throws(() => render({ pathEnv: "" }), /PATH is empty/u);
+    for (const value of [`${FIXTURE_REPO}"quote`, `${FIXTURE_REPO}\\escape`, `${FIXTURE_REPO}'quote`]) {
+      assert.throws(() => render({ repo: value }), /unit syntax/u);
+    }
+    assert.throws(() => render({ repo: path.join(FIXTURE_HOME, "${HOME}") }), /systemd would expand/u);
     assert.throws(() => substituteTemplate("ExecStart=@MISSING@", {}), /left @MISSING@ unrendered/u);
   });
 });
@@ -312,7 +419,7 @@ describe("checkout guard for the installed unit", () => {
     const topLevel = execFileSync("git", ["-C", REPO_ROOT, "rev-parse", "--show-toplevel"], { encoding: "utf8" }).trim();
     assert.match(result.stdout, new RegExp(`^repo: ${escapeRegExp(topLevel)}$`, "mu"));
     assert.match(result.stdout, new RegExp(`^ExecStart=.* ${escapeRegExp(topLevel)}/src/daemon\\.js$`, "mu"));
-    assert.equal(fs.existsSync(path.join(xdgConfig, "systemd", "user", UNIT_NAME)), false, "dry run must not write the unit");
+    assert.equal(fs.existsSync(path.join(xdgConfig, SYSTEMD_NAME, "user", UNIT_NAME)), false, "dry run must not write the unit");
   });
 
   test("the installer refuses --repo for an unsupported checkout", (t) => {
@@ -338,7 +445,7 @@ describe("checkout guard for the installed unit", () => {
 });
 
 describe("log target selection and detached-daemon takeover guard", () => {
-  test("auto prefers persistent journald and falls back to a bounded file", () => {
+  test("auto prefers persistent journald and falls back to a file", () => {
     assert.equal(resolveLogTarget({ requested: "auto", journalPersistent: true }), "journal");
     assert.equal(resolveLogTarget({ requested: "auto", journalPersistent: false }), "file");
     assert.equal(resolveLogTarget({ requested: "file", journalPersistent: true }), "file");
@@ -355,48 +462,19 @@ describe("log target selection and detached-daemon takeover guard", () => {
     assert.equal(isJournalPersistent({ storageValue: "auto", journalDirExists: false }), false);
   });
 
-  test("a live pid without the supervisor marker blocks the takeover", () => {
+  test("a stale marker cannot hide a detached daemon", () => {
     const stateDir = path.join(path.sep, "state");
-    const runtimeDir = path.join(path.sep, "run");
-    assert.equal(findDetachedDaemon({ stateDir, runtimeDir, existsFn: () => true, readLivePidFn: () => 42 }), undefined);
-    assert.equal(findDetachedDaemon({ stateDir, runtimeDir, existsFn: () => false, readLivePidFn: () => 42 }), 42);
-    assert.equal(findDetachedDaemon({ stateDir, runtimeDir, existsFn: () => false, readLivePidFn: () => undefined }), undefined);
+    assert.equal(findDetachedDaemon({ stateDir, supervisedPid: 42, readLivePidFn: () => 42 }), undefined);
+    assert.equal(findDetachedDaemon({ stateDir, supervisedPid: 17, readLivePidFn: () => 42 }), 42);
+    assert.equal(findDetachedDaemon({ stateDir, supervisedPid: 0, readLivePidFn: () => 42 }), 42);
+    assert.equal(findDetachedDaemon({ stateDir, supervisedPid: 0, readLivePidFn: () => undefined }), undefined);
   });
+
 
   test("the unit directory honors XDG_CONFIG_HOME", () => {
     const xdgConfig = path.join(path.sep, "xdg", "config");
-    assert.equal(resolveUnitDir({ env: { XDG_CONFIG_HOME: xdgConfig }, home: FIXTURE_HOME }), path.join(xdgConfig, "systemd", "user"));
-    assert.equal(resolveUnitDir({ env: {}, home: FIXTURE_HOME }), path.join(FIXTURE_HOME, ".config", "systemd", "user"));
+    assert.equal(resolveUnitDir({ env: { XDG_CONFIG_HOME: xdgConfig }, home: FIXTURE_HOME }), path.join(xdgConfig, SYSTEMD_NAME, "user"));
+    assert.equal(resolveUnitDir({ env: {}, home: FIXTURE_HOME }), path.join(FIXTURE_HOME, ".config", SYSTEMD_NAME, "user"));
   });
 });
 
-describe("bounded log rotation", () => {
-  test("copy-truncates the live log and keeps only the requested generations", (t) => {
-    const dir = temporaryDir(t);
-    const log = path.join(dir, "daemon.log");
-    fs.writeFileSync(log, "x".repeat(2048));
-    const rotate = () => spawnSync("bash", [ROTATE_SCRIPT, "--log-dir", dir, "--max-bytes", "512", "--keep", "2"], { encoding: "utf8" });
-
-    const first = rotate();
-    assert.equal(first.status, 0, first.stderr);
-    assert.equal(fs.readFileSync(log, "utf8"), "");
-    assert.equal(fs.readFileSync(`${log}.1`, "utf8").length, 2048);
-
-    fs.appendFileSync(log, "y".repeat(600));
-    assert.equal(rotate().status, 0);
-    fs.appendFileSync(log, "z".repeat(600));
-    assert.equal(rotate().status, 0);
-    assert.equal(fs.existsSync(`${log}.2`), true);
-    assert.equal(fs.existsSync(`${log}.3`), false, "retention must be bounded");
-    assert.equal(fs.readFileSync(log, "utf8"), "");
-  });
-
-  test("leaves a log below the threshold alone", (t) => {
-    const dir = temporaryDir(t);
-    const log = path.join(dir, "daemon.log");
-    fs.writeFileSync(log, "small");
-    const result = spawnSync("bash", [ROTATE_SCRIPT, "--log-dir", dir, "--max-bytes", "1024"], { encoding: "utf8" });
-    assert.equal(result.status, 0, result.stderr);
-    assert.equal(fs.readFileSync(log, "utf8"), "small");
-  });
-});

@@ -6,13 +6,9 @@ import { loadConfig } from "./config.js";
 export const UNIT_NAME = "taskferry-daemon.service";
 export const PATH_UNIT_NAME = "taskferry-daemon.path";
 export const PATH_TEMPLATE = path.join("deploy", "systemd", "taskferry-daemon.path.in");
-export const ROTATE_SERVICE_NAME = "taskferry-daemon-logrotate.service";
-export const ROTATE_TIMER_NAME = "taskferry-daemon-logrotate.timer";
 export const DAEMON_LOG_BASENAME = "daemon.log";
 export const DAEMON_LOG_FILE = "%h/.local/state/taskferry/logs/daemon.log";
 export const DAEMON_ENTRY_RELATIVE = path.join("src", "daemon.js");
-export const DEFAULT_LOG_MAX_BYTES = 10 * 1024 * 1024;
-export const DEFAULT_LOG_KEEP = 5;
 
 // Evidence that the checkout the unit will point at actually implements
 // supervised mode. Static text, not a module import: importing the target
@@ -30,7 +26,7 @@ const SUPERVISOR_SUPPORT = [
   },
   {
     file: path.join("deploy", "systemd", "taskferry-daemon.service.in"),
-    markers: ["ExecStart"],
+    markers: ["ExecStart", "@STATE_DIR@", "@RUNTIME_DIR@", "@SOCKET_PATH@"],
   },
 ];
 
@@ -53,7 +49,7 @@ export function findMissingSupervisorSupport({ repo, gated = false, readFileFn =
   const missing = [];
   const checks = gated ? [...SUPERVISOR_SUPPORT, { file: PATH_TEMPLATE, markers: ["@ENV_FILE@"] }, {
     file: path.join("deploy", "systemd", "taskferry-daemon.service.in"),
-    markers: ["@INSTALL_SECTION@", "@GATE_ENVIRONMENT@"],
+    markers: ["@INSTALL_SECTION@", "@GATE_ENVIRONMENT@", "@GATE_CONDITION@"],
   }] : SUPERVISOR_SUPPORT;
   for (const { file, markers } of checks) {
     let text;
@@ -129,6 +125,9 @@ export function assertUnitValue(label, value, { allowWhitespace = false } = {}) 
   }
   if (!allowWhitespace && /\s/.test(value)) {
     throw new Error(`error: ${label} contains whitespace (${JSON.stringify(value)}); systemd cannot represent it in ExecStart`);
+  }
+  if (/['"\\]/u.test(value)) {
+    throw new Error(`error: ${label} contains quotes or backslashes; refusing ambiguous unit syntax`);
   }
 }
 
@@ -236,17 +235,15 @@ export function resolveLogTarget({ requested = "auto", journalPersistent }) {
 /**
  * @param {"journal" | "file"} logTarget
  * @param {string} logFile
- * @returns {{prep: string, stdout: string, stderr: string}}
+ * @returns {{stdout: string, stderr: string}}
  */
 function renderLogging({ logTarget, logFile }) {
   if (logTarget === "file") {
-    return {
-      prep: `ExecStartPre=/usr/bin/mkdir -p ${path.posix.dirname(logFile)}`,
-      stdout: `StandardOutput=append:${logFile}`,
-      stderr: "StandardError=inherit",
-    };
+    assertUnitValue("daemon log path", logFile);
+    const escaped = logFile === DAEMON_LOG_FILE ? logFile : escapeUnitSpecifiers(logFile);
+    return { stdout: `StandardOutput=append:${escaped}`, stderr: "StandardError=inherit" };
   }
-  return { prep: "", stdout: "StandardOutput=journal", stderr: "StandardError=journal" };
+  return { stdout: "StandardOutput=journal", stderr: "StandardError=journal" };
 }
 
 /**
@@ -264,6 +261,29 @@ export function substituteTemplate(template, values) {
   return rendered;
 }
 
+
+/** @param {{repo: string, nodePath: string, runtimeDir: string, stateDir: string, socketPath: string, pathEnv: string}} values */
+function validateRenderPaths({ repo, nodePath, runtimeDir, stateDir, socketPath, pathEnv }) {
+  for (const [label, value] of [["repo root", repo], ["node path", nodePath], ["runtime directory", runtimeDir]]) {
+    assertUnitValue(label, value);
+    if (value.includes("$")) throw new Error(`error: ${label} contains $; systemd would expand it in ExecStart`);
+  }
+  assertUnitValue("state directory", stateDir);
+  assertUnitValue("socket path", socketPath);
+  assertUnitValue("PATH", pathEnv);
+  for (const value of [stateDir, runtimeDir, socketPath]) {
+    if (!path.isAbsolute(value)) throw new Error("error: daemon state, runtime, and socket paths must be absolute");
+  }
+}
+
+/** @param {boolean} gated @param {string} configHome @param {string} envFile */
+function renderGateEnvironment(gated, configHome, envFile) {
+  if (!gated) return "";
+  assertUnitValue("manager config home", configHome);
+  assertUnitValue("envFile", envFile);
+  if (!path.isAbsolute(configHome) || !path.isAbsolute(envFile)) throw new Error("error: gate paths must be absolute");
+  return `Environment=XDG_CONFIG_HOME=${escapeUnitSpecifiers(configHome)}\nEnvironment=TASKFERRY_ENV_FILE=${escapeUnitSpecifiers(envFile)}`;
+}
 /**
  * @param {object} options
  * @param {string} options.repo
@@ -275,48 +295,30 @@ export function substituteTemplate(template, values) {
  * @param {boolean} [options.gated]
  * @param {string} [options.gateConfigHome]
  * @param {string} [options.gateEnvFile]
+ * @param {string} options.stateDir
+ * @param {string} options.runtimeDir
+ * @param {string} options.socketPath
  * @returns {string}
  */
-export function renderSystemdUnit({ repo, nodePath, pathEnv, template, logTarget = "journal", logFile = DAEMON_LOG_FILE, gated = false, gateConfigHome = "", gateEnvFile = "" }) {
-  assertUnitValue("repo root", repo);
-  assertUnitValue("node path", nodePath);
-  assertUnitValue("PATH", pathEnv);
-  if (gated) {
-    assertUnitValue("manager config home", gateConfigHome);
-    assertUnitValue("envFile", gateEnvFile);
-    if (!path.isAbsolute(gateConfigHome) || !path.isAbsolute(gateEnvFile)) throw new Error("error: gate paths must be absolute");
-  }
+export function renderSystemdUnit({ repo, nodePath, pathEnv, template, stateDir, runtimeDir, socketPath, logTarget = "journal", logFile = DAEMON_LOG_FILE, gated = false, gateConfigHome = "", gateEnvFile = "" }) {
+  validateRenderPaths({ repo, nodePath, runtimeDir, stateDir, socketPath, pathEnv });
+  const gateEnvironment = renderGateEnvironment(gated, gateConfigHome, gateEnvFile);
   const logging = renderLogging({ logTarget, logFile });
   return substituteTemplate(template, {
     "@NODE@": escapeUnitSpecifiers(nodePath),
     "@REPO@": escapeUnitSpecifiers(repo),
     "@PATH@": escapeUnitSpecifiers(pathEnv),
-    "@LOG_PREP@": logging.prep,
+    "@STATE_DIR@": escapeUnitSpecifiers(stateDir),
+    "@RUNTIME_DIR@": escapeUnitSpecifiers(runtimeDir),
+    "@SOCKET_PATH@": escapeUnitSpecifiers(socketPath),
+    "@GATE_CONDITION@": gated ? `ConditionPathExists=${escapeUnitSpecifiers(gateEnvFile)}` : "",
     "@LOG_STDOUT@": logging.stdout,
     "@LOG_STDERR@": logging.stderr,
-    "@GATE_ENVIRONMENT@": gated
-      ? `Environment=XDG_CONFIG_HOME=${escapeUnitSpecifiers(gateConfigHome)}\nEnvironment=TASKFERRY_ENV_FILE=${escapeUnitSpecifiers(gateEnvFile)}`
-      : "",
+    "@GATE_ENVIRONMENT@": gateEnvironment,
     "@INSTALL_SECTION@": gated ? "" : "[Install]\nWantedBy=default.target",
   });
 }
 
-/**
- * @param {object} options
- * @param {string} options.repo
- * @param {string} options.template
- * @param {number} [options.maxBytes]
- * @param {number} [options.keep]
- * @returns {string}
- */
-export function renderRotateService({ repo, template, maxBytes = DEFAULT_LOG_MAX_BYTES, keep = DEFAULT_LOG_KEEP }) {
-  assertUnitValue("repo root", repo);
-  return substituteTemplate(template, {
-    "@REPO@": escapeUnitSpecifiers(repo),
-    "@MAX_BYTES@": String(maxBytes),
-    "@KEEP@": String(keep),
-  });
-}
 
 /**
  * @param {{env?: NodeJS.ProcessEnv, home?: string}} [options]
@@ -367,25 +369,17 @@ export function readLivePid(file, { killFn = process.kill } = {}) {
   }
 }
 
+
 /**
- * The pid of a detached (not systemd-supervised) daemon still holding this
- * state directory, if there is one. The marker check comes first because a
- * supervised daemon also writes the pid file, and that is not a conflict.
+ * state directory, if there is one. A runtime marker does not prove ownership:
+ * only the service manager's current MainPID can identify the supervised pid.
  * @param {object} options
  * @param {string} options.stateDir
- * @param {string} options.runtimeDir
- * @param {string} [options.markerName]
- * @param {(candidate: string) => boolean} [options.existsFn]
+ * @param {number} options.supervisedPid
  * @param {(file: string) => number | undefined} [options.readLivePidFn]
  * @returns {number | undefined}
  */
-export function findDetachedDaemon({
-  stateDir,
-  runtimeDir,
-  markerName = "systemd-supervised",
-  existsFn = fs.existsSync,
-  readLivePidFn = readLivePid,
-}) {
-  if (existsFn(path.join(runtimeDir, markerName))) return undefined;
-  return readLivePidFn(path.join(stateDir, "daemon.pid"));
+export function findDetachedDaemon({ stateDir, supervisedPid, readLivePidFn = readLivePid }) {
+  const pid = readLivePidFn(path.join(stateDir, "daemon.pid"));
+  return pid === supervisedPid ? undefined : pid;
 }

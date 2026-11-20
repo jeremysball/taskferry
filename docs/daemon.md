@@ -45,12 +45,6 @@ gives up. `startDaemonBooter()` also `unlink`s any stale
 booter, so a caller that times out sees diagnostics from the boot it
 actually waited on, not from an earlier one.
 
-The daemon's stderr is written to `<runtime-dir>/daemon-stderr.log` (mode
-600) rather than discarded, and a failed boot folds the tail of that file
-into the timeout error so "the daemon never came up" arrives with its actual
-reason. A booter that dies before reaching its own error handler writes
-`<runtime-dir>/daemon-boot-stderr.log` instead.
-
 The spawned daemon inherits the booter's environment, which in turn
 inherits the original caller's environment. Any `TASKFERRY_*` variable
 set when a command first triggers the auto-start takes effect for the
@@ -82,6 +76,15 @@ outlive the daemon process.
   `bwrap`, and `git`. Run `--dry-run` to print the render without writing
   anything. Pass `--enable` to enable and start it; without that flag the
   script only writes the unit and reloads the manager.
+  The default unit directory follows the user manager's `XDG_CONFIG_HOME`;
+  `--enable` refuses an alternate `--unit-dir` because the manager would not
+  necessarily load those files.
+  The installer uses the user manager's state, runtime and socket paths;
+  `--enable` refuses mismatched paths or any existing socket. Stop the daemon
+  and wait for its socket to disappear before reinstalling, even when it is
+  already supervised. An install without `--enable` only writes units;
+  perform the cutover by re-running the guarded installer with `--enable`,
+  not by enabling the path unit by hand.
 - **The checkout must support supervision.** Before writing anything the
   installer checks that the checkout the unit will point at contains the
   supervisor code (`TASKFERRY_DAEMON_SUPERVISOR` handling in `src/client.js`
@@ -102,6 +105,10 @@ outlive the daemon process.
   cannot silently move it away from the gate. Re-run the installer after
   changing the config's `envFile` or the manager's environment: until then,
   the service still reads the old env file and the path unit watches it.
+  On gated `--enable`, the installer stops an already-active path unit,
+  rechecks that no service or socket appeared, then reloads and re-enables
+  the path so it watches the new file. If this sequence fails after stopping
+  the path, resolve the reported error and re-run the installer.
   The installer warns when the shell's settings differ from the manager's.
   An ungated installation is not pinned: if a later manager environment or
   config change introduces an env file, it will still start at boot without
@@ -115,15 +122,17 @@ outlive the daemon process.
   its unit file is deleted. If a start limit is hit, after both units are
   loaded recover with `systemctl --user reset-failed taskferry-daemon.service taskferry-daemon.path`.
 - **Logging.** `--log-target auto` uses journald when it is persistent
-  (`Storage=persistent`, or `auto` with `/var/log/journal` present), which is
-  durable across boots and bounded by journald's `SystemMaxUse` / `MaxFiles`
-  / `MaxFileSec` limits. On a host with only a volatile journal it falls back
-  to `StandardOutput=append:` into
-  `~/.local/state/taskferry/logs/daemon.log`, with a daily
-  `taskferry-daemon-logrotate.timer` running
-  `scripts/rotate-daemon-logs.sh` (copy-truncate, 5 generations of 10 MiB).
-  `--log-target file` forces the file, `--log-target journal` forces the
-  journal. No global journald configuration is changed.
+  (`Storage=persistent`, or `auto` with `/var/log/journal` present). On a host
+  with only a volatile journal it falls back to `StandardOutput=append:` into
+  `~/.local/state/taskferry/logs/daemon.log`. File logging never truncates or
+  rotates the log, so it can grow without bound. The installer creates its
+  parent directory before enabling the service, since systemd opens the log
+  before running service commands. `--log-target file` forces the file;
+  `--log-target journal` forces journald. No global journald configuration
+  is changed.
+  If an obsolete TaskFerry log-rotation timer unit is still installed, the
+  installer refuses to proceed until it is disabled and removed explicitly;
+  it never removes or truncates existing log files.
 - **Readiness and timeouts.** `Type=exec` means the start job fails if the
   daemon cannot be exec'd. `systemctl start` returning only means the process
   was started; readiness is still the socket appearing, which clients poll
@@ -134,13 +143,18 @@ outlive the daemon process.
 - **How a client knows.** The unit's `ExecStartPre` touches
   `<runtime-dir>/systemd-supervised` and sets
   `TASKFERRY_DAEMON_SUPERVISOR=systemd` for the daemon. On a cold socket, the
-  client sees that marker (or the env var, checked first) and runs
+  client checks the marker and whether the service or path unit is enabled,
+  including before the first start after boot. It then runs
   `systemctl --user start taskferry-daemon.service` instead of spawning a
-  detached process. There is deliberately **no fallback** to a detached spawn
-  when `systemctl` fails: two owners of one socket is the failure being
-  prevented. The error names `systemctl --user status` and
-  `journalctl --user -u taskferry-daemon.service`. The marker lives in the
-  runtime dir, which is wiped at reboot, so it can never outlive its boot.
+  detached process. A gated service also has `ConditionPathExists`, so direct
+  starts do not consume the restart limit while the env file is missing.
+  If the unit start fails, the client does not fall back to a detached spawn.
+  If `systemctl` is missing, the user manager is unreachable, or unit state
+  is otherwise uncertain, discovery also fails closed. This changes
+  auto-start on non-systemd hosts: when no supervisor is intended, set
+  `TASKFERRY_DAEMON_SUPERVISOR=spawn` in the client environment to retain
+  detached auto-start. Do not use that override while a systemd unit can own
+  the same socket.
 - **Restarting on source change.** A supervised daemon does not spawn a
   replacement: a detached child would land outside the unit's cgroup, leaving
   systemd reporting the unit dead while an unsupervised daemon held the

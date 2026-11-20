@@ -17,7 +17,6 @@ import { errCode } from "./errors.js";
 const DAEMON_ENTRY = fileURLToPath(new URL("./daemon.js", import.meta.url));
 const CLIENT_ENTRY = fileURLToPath(import.meta.url);
 const SOCKET_FILENAME = "daemon.sock";
-const DAEMON_STDERR_FILENAME = "daemon-stderr.log";
 const DEFAULT_DAEMON_UNIT = "taskferry-daemon.service";
 // Written by the unit's ExecStartPre, so a client can tell "systemd owns this
 // daemon" without shelling out to systemctl on every cold start. It lives in
@@ -25,6 +24,7 @@ const DEFAULT_DAEMON_UNIT = "taskferry-daemon.service";
 // reboot the unit recreates it as it starts the daemon.
 const SUPERVISOR_MARKER_FILENAME = "systemd-supervised";
 const SYSTEMD_START_TIMEOUT_MS = 10_000;
+const SYSTEMD_DETECT_TIMEOUT_MS = 1_000;
 
 /**
  * @param {NodeJS.ProcessEnv} env
@@ -126,7 +126,31 @@ function daemonReadySync(socketPath) {
  * @returns {import("node:child_process").ChildProcess}
  */
 function spawnDaemon({ env, stateDir, runtimeDir, socketPath }) {
-  return spawnWithStderr(DAEMON_ENTRY, { env, stateDir, runtimeDir, socketPath }, path.join(runtimeDir, DAEMON_STDERR_FILENAME));
+  const child = spawn(process.execPath, [DAEMON_ENTRY], {
+    detached: true,
+    stdio: "ignore",
+    env: {
+      ...env,
+      TASKFERRY_STATE_DIR: stateDir,
+      TASKFERRY_RUNTIME_DIR: runtimeDir,
+      TASKFERRY_SOCKET_PATH: socketPath,
+    },
+  });
+  child.unref();
+  return child;
+}
+
+/** @param {string} name @param {NodeJS.ProcessEnv} env @param {typeof spawnSync} runFn */
+function supervisorUnitEnabled(name, env, runFn) {
+  const result = runFn("systemctl", ["--user", "is-enabled", name], {
+    env: { ...env, LC_ALL: "C" }, encoding: "utf8", timeout: SYSTEMD_DETECT_TIMEOUT_MS,
+  });
+  if (!result.error && result.status === 0) return true;
+  const state = String(result.stdout || "").trim();
+  const diagnostic = String(result.stderr || "");
+  const missing = /Failed to get unit file state.*No such file or directory/u.test(diagnostic);
+  if (!result.error && (state === "disabled" || state === "not-found" || missing)) return false;
+  throw new Error(`error: cannot determine whether ${name} is supervised\nhelp: check the systemd user manager, or set TASKFERRY_DAEMON_SUPERVISOR=spawn if you do not use supervision`, { cause: result.error });
 }
 
 /**
@@ -139,16 +163,22 @@ function spawnDaemon({ env, stateDir, runtimeDir, socketPath }) {
  *
  * `TASKFERRY_DAEMON_SUPERVISOR` (`systemd` | `spawn`) is the explicit
  * override, which also lets a caller pin the answer in tests. Otherwise the
- * marker the unit's ExecStartPre leaves behind decides, so a machine with no
- * installed unit keeps the old behavior with no extra process per boot.
+ * marker or an enabled user unit selects supervision, including before the
+ * first gated start after boot.
  *
- * @param {{env?: NodeJS.ProcessEnv, runtimeDir: string, pathExistsFn?: (candidate: string) => boolean}} options
+ * @param {{env?: NodeJS.ProcessEnv, runtimeDir: string, pathExistsFn?: (candidate: string) => boolean, runFn?: typeof spawnSync}} options
  * @returns {"systemd" | "spawn"}
  */
-export function resolveDaemonSupervisor({ env = process.env, runtimeDir, pathExistsFn = fs.existsSync }) {
+export function resolveDaemonSupervisor({ env = process.env, runtimeDir, pathExistsFn = fs.existsSync, runFn = spawnSync }) {
   const explicit = env.TASKFERRY_DAEMON_SUPERVISOR;
   if (explicit === "systemd" || explicit === "spawn") return explicit;
-  return pathExistsFn(path.join(runtimeDir, SUPERVISOR_MARKER_FILENAME)) ? "systemd" : "spawn";
+  if (pathExistsFn(path.join(runtimeDir, SUPERVISOR_MARKER_FILENAME))) return "systemd";
+  const unit = daemonUnitName(env);
+  const pathUnit = unit.endsWith(".service") ? `${unit.slice(0, -8)}.path` : `${unit}.path`;
+  for (const name of [pathUnit, unit]) {
+    if (supervisorUnitEnabled(name, env, runFn)) return "systemd";
+  }
+  return "spawn";
 }
 
 /**
@@ -214,28 +244,15 @@ function bootStderrPath(runtimeDir) {
  * @returns {import("node:child_process").ChildProcess}
  */
 function spawnDaemonBooter({ env, stateDir, runtimeDir, socketPath }) {
-  return spawnWithStderr(CLIENT_ENTRY, { env, stateDir, runtimeDir, socketPath }, bootStderrPath(runtimeDir));
-}
-
-/**
- * @param {string} entry
- * @param {DaemonBooterOptions} options
- * @param {string} stderrPath
- * @returns {import("node:child_process").ChildProcess}
- */
-function spawnWithStderr(entry, { env, stateDir, runtimeDir, socketPath }, stderrPath) {
   /** @type {number | undefined} */
   let stderrFd;
   try {
-    stderrFd = fs.openSync(stderrPath, "w", 0o600);
-    // The mode passed to openSync only applies when the file is created; an
-    // escalated file from an older boot keeps its loose mode otherwise.
-    fs.fchmodSync(stderrFd, 0o600);
+    stderrFd = fs.openSync(bootStderrPath(runtimeDir), "w", 0o600);
   } catch {
-    // Best-effort: an unwritable log path must not block the boot. Stderr is
-    // discarded instead, exactly as it was before this file existed.
+    // Best-effort: if the file can't be opened, discard stderr instead of
+    // blocking the booter from spawning.
   }
-  const child = spawn(process.execPath, [entry], {
+  const child = spawn(process.execPath, [CLIENT_ENTRY], {
     detached: true,
     stdio: ["ignore", "ignore", stderrFd ?? "ignore"],
     env: {
@@ -245,9 +262,7 @@ function spawnWithStderr(entry, { env, stateDir, runtimeDir, socketPath }, stder
       TASKFERRY_SOCKET_PATH: socketPath,
     },
   });
-  // The child holds its own descriptor, so the parent's copy closes now
-  // rather than leaking for the life of this process.
-  if (stderrFd != null) fs.closeSync(stderrFd);
+  if (stderrFd != null) child.once("exit", () => fs.closeSync(stderrFd));
   child.unref();
   return child;
 }
@@ -268,7 +283,6 @@ export async function startDaemonBooter({
   socketPath = env.TASKFERRY_SOCKET_PATH || path.join(runtimeDir, SOCKET_FILENAME),
   spawnBooterFn = spawnDaemonBooter,
 } = {}) {
-  fs.mkdirSync(runtimeDir, { recursive: true, mode: 0o700 });
   try {
     fs.unlinkSync(bootErrorPath(runtimeDir));
   } catch {
@@ -313,10 +327,8 @@ export function ensureDaemonStarted({
       if (isDaemonReadySync(socketPath)) return true;
       Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, retryDelayMs);
     }
-    const daemonStderr = readStartupDiagnostic(path.join(runtimeDir, DAEMON_STDERR_FILENAME));
     throw new Error(
       `error: taskferry daemon did not become ready within ${startupTimeoutMs}ms\n`
-      + (daemonStderr ? `daemon subprocess failed: ${daemonStderr}\n` : "")
       + (supervised
         ? `help: run \`systemctl --user status ${daemonUnitName(env)}\` and `
           + `\`journalctl --user -u ${daemonUnitName(env)} -n 50\`, then retry`
@@ -326,8 +338,8 @@ export function ensureDaemonStarted({
     // A supervised start spends up to SYSTEMD_START_TIMEOUT_MS in systemctl
     // before the readiness poll even begins, so the lock must outlast both or
     // a second client steals a lock from a starter that is still working.
-    timeoutMs: startupTimeoutMs + SYSTEMD_START_TIMEOUT_MS + 1000,
-    staleMs: startupTimeoutMs + SYSTEMD_START_TIMEOUT_MS + 1000,
+    timeoutMs: startupTimeoutMs + SYSTEMD_START_TIMEOUT_MS + 2 * SYSTEMD_DETECT_TIMEOUT_MS + 1000,
+    staleMs: startupTimeoutMs + SYSTEMD_START_TIMEOUT_MS + 2 * SYSTEMD_DETECT_TIMEOUT_MS + 1000,
     retryMs: retryDelayMs,
   });
 }
@@ -624,32 +636,24 @@ function delay(ms) {
  */
 function readStartupDiagnostic(file) {
   try {
-    const fd = fs.openSync(file, "r");
-    try {
-      const size = fs.fstatSync(fd).size;
-      const tail = Buffer.alloc(Math.min(size, 16 * 1024));
-      const bytes = fs.readSync(fd, tail, 0, tail.length, size - tail.length);
-      return tail.toString("utf8", 0, bytes).trim();
-    } finally {
-      fs.closeSync(fd);
-    }
+    return fs.readFileSync(file, "utf8").trim();
   } catch (err) {
     if (errCode(err) !== "ENOENT") throw err;
     return undefined;
   }
 }
 
-// The daemon can fail independently of the booter, so its stderr is read
-// even when the booter recorded a timeout.
+// Capture both startup diagnostics, but read the stderr log only when
+// bootError is absent: the booter subprocess failed at import time, before
+// reaching the try/catch that writes bootError above.
 /**
  * @param {string} runtimeDir
- * @returns {{bootError: string | undefined, bootStderr: string | undefined, daemonStderr: string | undefined}}
+ * @returns {{bootError: string | undefined, bootStderr: string | undefined}}
  */
 function readStartupDiagnostics(runtimeDir) {
   const bootError = readStartupDiagnostic(bootErrorPath(runtimeDir));
   const bootStderr = bootError ? "" : readStartupDiagnostic(bootStderrPath(runtimeDir));
-  const daemonStderr = readStartupDiagnostic(path.join(runtimeDir, DAEMON_STDERR_FILENAME));
-  return { bootError, bootStderr, daemonStderr };
+  return { bootError, bootStderr };
 }
 
 // Retry connecting to the socket until the deadline passes. Returns the first
@@ -772,14 +776,13 @@ async function connectClientCore({
   const { client, lastError } = await retryOpenClient(socketPath, clientOptions, retryDelayMs, deadline);
   if (client) return client;
 
-  const { bootError, bootStderr, daemonStderr } = readStartupDiagnostics(runtimeDir);
+  const { bootError, bootStderr } = readStartupDiagnostics(runtimeDir);
   /** @type {{message?: string} | undefined} */
   const lastErrorTyped = /** @type {{message?: string} | undefined} */ (lastError);
   throw new Error(
     `error: taskferry daemon did not become ready within ${startupTimeoutMs}ms: ${lastErrorTyped?.message || "connection failed"}\n`
     + (bootError ? `daemon boot failed: ${bootError}\n` : "")
     + (bootStderr ? `booter subprocess failed before startup: ${bootStderr}\n` : "")
-    + (daemonStderr ? `daemon subprocess failed: ${daemonStderr}\n` : "")
     + `help: check ${runtimeDir} permissions and daemon startup diagnostics, then retry`
   );
 }
@@ -788,7 +791,6 @@ if (process.argv[1] && resolveInvokedPath(process.argv[1]) === fileURLToPath(imp
   try {
     ensureDaemonStarted();
   } catch (err) {
-    process.stderr.write(`${err instanceof Error ? err.message : String(err)}\n`);
     const bootEnv = process.env;
     const bootStateDir = resolveStateDir(bootEnv);
     const bootRuntimeDir = resolveRuntimeDir({ env: bootEnv, stateDir: bootStateDir });

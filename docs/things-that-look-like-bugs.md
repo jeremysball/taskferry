@@ -840,9 +840,17 @@ belongs here.
   Deliberate: the fallback is how a second daemon ends up fighting the
   supervised one over the socket and `daemon.pid`, and the supervised daemon
   is the one that would be orphaned. It would be a real bug if a *successful*
-  `systemctl start` were followed by an unsupervised daemon spawn, or if a
-  machine with no marker (the marker is touched by the unit's
-  `ExecStartPre`) lost its auto-start behavior.
+  `systemctl start` were followed by an unsupervised daemon spawn.
+- On a host without a usable user manager, automatic daemon startup may fail
+  even when systemd is not intended. This deliberately fails closed when
+  supervision cannot be determined; set `TASKFERRY_DAEMON_SUPERVISOR=spawn`
+  only when no systemd unit can own that socket. It would be a bug if the
+  explicit spawn override still queried systemd or could not start a daemon.
+- The installer refuses `--enable` when the socket already exists, even if
+  the service appears to own it. The pathname can refer to a different
+  listener than the PID suggests, so stop the daemon before reinstalling.
+  It would be a bug if the installer ignored an occupied socket or refused
+  after the socket disappeared and the other ownership checks passed.
 - A gated service starts again after stopping only the service. The enabled
   path unit deliberately starts it while the env file exists; stop both
   `taskferry-daemon.path` and `taskferry-daemon.service` to keep it stopped.
@@ -850,23 +858,12 @@ belongs here.
 - A gated service is inactive after boot until its env file exists. This
   prevents exhausting the restart limit before secrets are unlocked; it is a
   bug if the enabled path unit does not start it after the file appears.
-- Before the first supervised start in a boot, a cold client may spawn a
-  detached daemon because the runtime marker does not exist. It will fail if
-  the configured env file is missing; a narrow race after the file appears
-  can let it win the socket. It is a bug if a client ignores an existing
-  supervisor marker and spawns a detached daemon.
+- Before the first supervised start in a boot, the runtime marker is absent.
+  Clients consult enabled service and path units to detect supervision rather
+  than spawning another daemon. It would be a bug if an enabled path unit
+  were ignored when deciding how to start.
 - The systemd installer rejects a relative `envFile` even though the daemon
   loader accepts one: a path unit requires an absolute path, and the unit's
   working directory would otherwise determine its meaning. It is a bug if
   the installer rejects a representable absolute path.
-- The file-log rotation timer can drop a few lines written during the copy.
-  Observe: `~/.local/state/taskferry/logs/daemon.log.1` is a snapshot, and a
-  line emitted in the window between `cp` and the in-place truncation is in
-  neither file. Deliberate: the unit opens the log with `O_APPEND`
-  (`StandardOutput=append:`), so renaming the live file would leave the
-  daemon writing to the renamed inode while the next `systemctl start`
-  created a new, permanently empty `daemon.log`. Copy-truncate is the only
-  rotation that keeps the live fd correct, and its race is bounded to one
-  copy. It would be a real bug if a rotation left the live log pointing at a
-  stale inode, if the retained generation count grew without bound, or if
-  rotation ran while the unit was stopped and lost the whole file.
+

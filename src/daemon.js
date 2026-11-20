@@ -847,21 +847,6 @@ function withResponseCap(taskManagerOptions, cap) {
   return copy;
 }
 
-/**
- * @param {net.Server} server
- * @param {string} stateDir
- * @param {() => TaskManager} createManager
- * @returns {Promise<TaskManager>}
- */
-async function createManagerAfterBind(server, stateDir, createManager) {
-  try {
-    return createManager();
-  } catch (error) {
-    await new Promise((resolve) => server.close(resolve));
-    makeUnclaimDaemonPid(stateDir)();
-    throw error;
-  }
-}
 
 /**
  * Decide who restarts the daemon, and with which exit status.
@@ -1074,9 +1059,9 @@ export async function startDaemon(options = {}) {
    * @param {DaemonEvent} event
    */
   const onEvent = (event) => deliverEvent(subscriptions, writeMessage, event, resolveWorkspaceRoot);
-  const manager = await createManagerAfterBind(boundServer, stateDir, () => taskManagerFactory({
+  const manager = taskManagerFactory({
     ...taskManagerOptions, onEvent, stateDir, runtimeDir, socketPath, resolveWorkspaceRootFn: resolveWorkspaceRoot,
-  }));
+  });
   // The manager is a Record<string, any> by construction (see the TaskManager
   // typedef above). daemon-server.js states the narrow contract it depends on;
   // assert it once here so every hand-off below carries it, instead of casting

@@ -967,3 +967,167 @@ describe("cleanupOverlay()", () => {
     assert.equal(fs.existsSync(root), false);
   });
 });
+
+describe("git extraction ownership hints", () => {
+  const params = {
+    directory: REPO_DIR, overlay: { upperDir: T1_UPPER, workDir: T1_WORK },
+    overlayRwBinds: [], preDispatchHead: PRE_DISPATCH_HEAD, stateDir: STATE_DIR,
+    runtimeDir: RUNTIME_DIR, homeDir: HOME_DIR, denyList: [], diffPath: DIFF_PATCH,
+    daemonUid: 1000, daemonGid: 1000,
+  };
+  const overflow = "Value too large for defined data type";
+  const objectsError = `error: unable to create temporary file: ${overflow}\nfatal: failed to insert into database`;
+  const runFailure = (stderr, objectsPath = "") => (command) => command === "git"
+    ? { status: 0, stdout: objectsPath, stderr: "" }
+    : { status: 1, stdout: "", stderr };
+
+  test("identifies the index lock parent as a possible ownership cause", () => {
+    const stderr = `fatal: Unable to create '${REPO_DIR}/.git/index.lock': ${overflow}`;
+    assert.throws(() => extractGitDiff({
+      ...params, runCommand: runFailure(stderr), statFn: () => ({ uid: 1000, gid: 4242 }),
+    }), (err) => {
+      assert.match(err.message, /possible.*ownership/i);
+      assert.match(err.message, /group.*4242/);
+      assert.ok(err.message.includes(`${REPO_DIR}/.git`));
+      assert.ok(err.message.includes(stderr));
+      return true;
+    });
+  });
+
+  test("identifies inspected owners as host observations, not the merged overlay view", () => {
+    const stderr = `fatal: Unable to create '${REPO_DIR}/.git/index.lock': ${overflow}`;
+    assert.throws(() => extractGitDiff({
+      ...params, runCommand: runFailure(stderr),
+      statFn: (p) => ({ uid: 1000, gid: p === `${REPO_DIR}/.git` ? 4242 : 1000 }),
+    }), (err) => {
+      assert.ok(err.message.includes(stderr));
+      assert.match(err.message, /host.*group 4242/i);
+      assert.match(err.message, /overlay.*may differ/i);
+      return true;
+    });
+  });
+
+  test("handles apostrophes in Git's quoted index lock path", () => {
+    const gitDir = path.join(os.tmpdir(), "alice's repo", ".git");
+    const stderr = `fatal: Unable to create '${gitDir}/index.lock': ${overflow}`;
+    assert.throws(() => extractGitDiff({
+      ...params, runCommand: runFailure(stderr),
+      statFn: (p) => {
+        assert.equal(p, gitDir);
+        return { uid: 1000, gid: 4242 };
+      },
+    }), (err) => {
+      assert.ok(err.message.includes(stderr));
+      assert.ok(err.message.includes(`${gitDir} (group 4242)`));
+      return true;
+    });
+  });
+
+  test("inspects the bound snapshot rather than the live linked-worktree gitdir", () => {
+    const gitDir = MY_REPO_WT;
+    const snapshot = path.join(os.tmpdir(), "taskferry-cow-t1", "files", "topic");
+    const stderr = `fatal: Unable to create '${gitDir}/index.lock': ${overflow}`;
+    assert.throws(() => extractGitDiff({
+      ...params, overlayRwFileBinds: [{ path: gitDir, bindSrc: snapshot }],
+      runCommand: runFailure(stderr),
+      statFn: (p) => ({ uid: 1000, gid: p === snapshot ? 4242 : 1000 }),
+    }), (err) => {
+      assert.ok(err.message.includes(stderr));
+      assert.ok(err.message.includes(snapshot));
+      assert.match(err.message, /group 4242/);
+      return true;
+    });
+    assert.throws(() => extractGitDiff({
+      ...params, overlayRwFileBinds: [{ path: gitDir, bindSrc: snapshot }],
+      runCommand: runFailure(stderr),
+      statFn: (p) => ({ uid: 1000, gid: p === snapshot ? 1000 : 4242 }),
+    }), (err) => {
+      assert.ok(err.message.includes(stderr));
+      assert.doesNotMatch(err.message, /possible.*ownership/i);
+      return true;
+    });
+  });
+
+  test("inspects object fanouts inside a bound gitdir snapshot", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "axi-owner-snapshot-"));
+    trackedTmpDirs.push(root);
+    const snapshot = path.join(root, "snapshot");
+    fs.mkdirSync(path.join(snapshot, "objects", "ab"), { recursive: true });
+    const gitDir = path.dirname(path.dirname(MY_REPO_WT));
+    assert.throws(() => extractGitDiff({
+      ...params, overlayRwFileBinds: [{ path: gitDir, bindSrc: snapshot }],
+      runCommand: runFailure(objectsError, `${gitDir}/objects\n`),
+      statFn: (p) => ({ uid: 1000, gid: p === path.join(snapshot, "objects", "ab") ? 4242 : 1000 }),
+    }), (err) => {
+      assert.ok(err.message.includes(path.join(snapshot, "objects", "ab")));
+      assert.ok(err.message.includes(objectsError));
+      return true;
+    });
+  });
+
+  test("includes symlinked object fanout directories", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "axi-owner-symlink-"));
+    trackedTmpDirs.push(root);
+    const objects = path.join(root, "objects");
+    const destination = path.join(root, "fanout");
+    fs.mkdirSync(objects);
+    fs.mkdirSync(destination);
+    fs.symlinkSync(destination, path.join(objects, "ab"));
+    assert.throws(() => extractGitDiff({
+      ...params, runCommand: runFailure(objectsError, `${objects}\n`),
+      statFn: (p) => ({ uid: 1000, gid: p === path.join(objects, "ab") ? 4242 : 1000 }),
+    }), (err) => {
+      assert.ok(err.message.includes(path.join(objects, "ab")));
+      assert.match(err.message, /group 4242/);
+      assert.ok(err.message.includes(objectsError));
+      return true;
+    });
+  });
+
+  test("reports object fanout directories as candidates, not confirmed causes", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "axi-ownership-"));
+    trackedTmpDirs.push(root);
+    const objects = path.join(root, "objects");
+    fs.mkdirSync(path.join(objects, "ab"), { recursive: true });
+    fs.mkdirSync(path.join(objects, "cd"));
+    assert.throws(() => extractGitDiff({
+      ...params, runCommand: runFailure(objectsError, `${objects}\n`),
+      statFn: (p) => ({ uid: p === path.join(objects, "ab") ? 1234 : 1000, gid: 1000 }),
+    }), (err) => {
+      assert.match(err.message, /possible.*ownership/i);
+      assert.match(err.message, /user.*1234/);
+      assert.ok(err.message.includes(path.join(objects, "ab")));
+      assert.ok(err.message.includes(objectsError));
+      assert.doesNotMatch(err.message, /Set ownership of/);
+      return true;
+    });
+  });
+
+  test("preserves unrelated, localized, and spawn errors without ownership claims", () => {
+    for (const result of [
+      { status: 1, stdout: "", stderr: "fatal: unable to read object: Value too large for defined data type" },
+      { status: 1, stdout: "", stderr: `fatal: Unable to create '${REPO_DIR}/.git/index.lock': Valeur trop grande` },
+      { status: null, stdout: "", stderr: `fatal: Unable to create '${REPO_DIR}/.git/index.lock': ${overflow}`, error: new Error("spawn timed out") },
+    ]) {
+      assert.throws(() => extractGitDiff({
+        ...params, runCommand: () => result, statFn: () => ({ uid: 1000, gid: 4242 }),
+      }), (err) => {
+        assert.match(err.message, /git diff extraction failed/);
+        assert.doesNotMatch(err.message, /possible.*ownership/i);
+        assert.ok(err.message.includes(result.stderr));
+        return true;
+      });
+    }
+  });
+
+  test("does not replace the extraction error if ownership inspection fails", () => {
+    const stderr = `fatal: Unable to create '${REPO_DIR}/.git/index.lock': ${overflow}`;
+    assert.throws(() => extractGitDiff({
+      ...params, runCommand: runFailure(stderr), statFn: () => { throw new Error("inspection failed"); },
+    }), (err) => {
+      assert.ok(err.message.includes(stderr));
+      assert.doesNotMatch(err.message, /inspection failed|possible.*ownership/i);
+      return true;
+    });
+  });
+});

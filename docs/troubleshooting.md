@@ -189,6 +189,30 @@ exhausted. Inspect `failureDetail` and retry the dispatch after other overlay
 or worktree operations finish. `taskferry doctor --full` checks the host's
 bubblewrap and overlay prerequisites.
 
+## Git changeset extraction reports an ownership hint
+
+Git can fail to create an index lock or object temporary file with `Value too
+large for defined data type` when a directory's owner or group cannot be
+represented in bubblewrap's user namespace. Taskferry may report differing
+numeric owners as **possible** candidates. For object temporary files Git does
+not identify the failing fanout, so listed directories are not proof of the
+cause. Inspect the paths and their ownership against the daemon's effective
+user and group; adjust ownership only where appropriate. Numeric IDs seen from
+another namespace need not identify the original host owner. Taskferry does
+not change ownership automatically.
+For a linked worktree or a separately mounted Git directory, a candidate may
+refer to Taskferry's scratch snapshot rather than the live repository path.
+Symlinked object fanouts are inspected through their targets.
+The reported paths and owners are host observations, not a listing of the
+merged overlay: copy-up or later host changes can make that view differ, and
+some candidates visible only in the overlay may not be reported.
+
+The hint recognizes English Git/system error text only; localized errors and
+failed path inspection can leave only the original extraction error. The
+underlying error is retained. For non-advisor tasks an extraction failure
+leaves the changeset pending and its overlay in place; advisor overlays are
+released on settlement.
+
 ## A changeset stays pending or reports `directory is missing`
 
 Inspect a pending changeset with `taskferry result <id> --diff`. Use

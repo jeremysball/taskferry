@@ -248,8 +248,8 @@ export function resolveGitDir(directory, runCommand = defaultRunCommand) {
 
 /**
  * Shared prefix both `buildBwrapArgs()` (sandboxed dispatch) and
- * `buildMergedViewBwrapArgs()` (changeset extraction/apply over a CoW
- * overlay) start from: the read-only root bind, the standard
+ * `buildMergedViewBwrapArgs()` (changeset extraction over a CoW overlay)
+ * start from: the read-only root bind, the standard
  * `/proc`/`/dev`/`/tmp` scaffolding, and the per-deny-list tmpfs mounts.
  * bwrap applies mounts in argument order and a later mount on a parent
  * directory shadows an earlier mount nested inside it, so --tmpfs /tmp

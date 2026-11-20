@@ -357,7 +357,7 @@ next: Run taskferry result --full or --fields narration with task id "oc_mrn4ipk
 
 Applies a dispatch task's extracted changeset to its target directory.
 `accept` requires `changesetStatus: "pending"`; a task without a pending
-changeset returns an error. A zero-change task auto-resolves to `accepted`
+changeset returns an error. A zero-change git task auto-resolves to `accepted`
 and cannot be accepted again. Inspect the
 change with `taskferry result <id> --diff` first. The diff can
 include files the worker never touched: git-target extraction stages the
@@ -365,10 +365,16 @@ overlay's whole merged view, so files already untracked in the dispatch
 directory at dispatch time appear as new-file entries, and the plain
 `git apply --3way` fails if they still exist on disk (see
 [things-that-look-like-bugs.md](things-that-look-like-bugs.md)). For a git target, the
-apply is `git -C <directory> apply --3way` against the real pre-dispatch `HEAD`; for a non-git
-target, it runs an in-sandbox `rsync --delay-updates` that needs the
-live overlay, so a non-git changeset left pending across a reboot fails
-loudly and can only be rejected, never applied. A successful apply
+apply is `git -C <directory> apply --3way` against the real pre-dispatch `HEAD`.
+Non-git changesets have no dispatch baseline, so automatic application is
+refused to avoid overwriting concurrent edits. The diff compares against the
+live target at extraction time and can omit binary contents and metadata; it
+is not a complete recovery artifact. Non-git dispatches remain pending even
+when the diff is empty. Find the retained overlay's `root` using
+`taskferry status <id> --full`; its `upper/main` holds the overlay upper
+layer. Preserve it until the needed data has been recovered. The lower tree
+is live and may have changed; whiteouts and opaque directories require care.
+A successful apply
 transitions the task to `changesetStatus: "accepted"` and frees the CoW
 overlay. A failed apply leaves the task pending so a retry or reject can
 follow and makes the CLI exit nonzero. The RPC response still includes
@@ -406,11 +412,10 @@ survived, or starting fresh against the same `--directory` otherwise):
   `CHECK_GATE_KILL_GRACE_MS`, escalate to SIGKILL, wait another
   `CHECK_GATE_KILL_GRACE_MS`, then resolve anyway rather than hang
   `accept` forever) before applying the changeset.
-- `checkStatus: "passed"`, `checkStatus: "none"` (no `check` declared in
-  `.taskferry.toml`), or non-git/overlay-only targets (the gate is
-  deliberately skipped for those — see the design spec's "Gating
-  `--no-overlay` dispatches" non-goal) — `accept` proceeds normally. A
-  one-line `warning: changeset applied, but this repo declares no check
+- `checkStatus: "passed"` or `checkStatus: "none"` (no `check` declared in
+  `.taskferry.toml`): `accept` proceeds subject to the normal apply rules.
+  Non-git targets skip the gate and cannot be applied automatically.
+  A one-line `warning: changeset applied, but this repo declares no check
   command in .taskferry.toml -- nothing was verified before landing`
   prints to stderr when `checkStatus` is `"none"`, so an accidental
   missing `.taskferry.toml` is loud rather than silent.
@@ -424,10 +429,12 @@ down an in-flight gate before releasing the overlay.
 
 ## `taskferry reject <id>`
 
-Discards a task's pending changeset without applying it. `reject` requires
-`changesetStatus: "pending"`; an accepted, rejected, or zero-change task has
-no pending changeset and returns an error. A successful rejection frees the
-CoW overlay.
+Discards a task's pending changeset without applying it and frees its overlay.
+It also explicitly discards an accepted legacy non-git task's retained
+overlay after inspection, while retaining the `accepted` status because the
+historical apply outcome cannot be inferred from the overlay. Accepted git
+tasks and already-rejected tasks still return an error. If a restarted worker
+process may still be alive, rejection refuses until it has exited.
 
 ## `taskferry output <id> [--path <relpath>]`
 

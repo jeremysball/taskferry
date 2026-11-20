@@ -271,8 +271,7 @@ describe("accept()/reject()", () => {
   });
 
   test("accept() on a non-git target whose overlay vanished errors instead of applying nothing (regression: review finding #7)", async () => {
-    // A reboot clears the tmpfs overlay; the pending changeset can never be
-    // re-applied. Fail loudly rather than rsyncing a missing tree.
+    // A reboot clears the tmpfs overlay; report the missing recovery data.
     const mgr = makeManager({
       tasksFixture: [pendingTaskFixture({
         preDispatchHead: null, // non-git target
@@ -359,53 +358,48 @@ describe("accept()/reject()", () => {
   });
 });
 
-// taskferry#328: overlaySleepFn threads through TWO independent call paths
-// -- extraction at settlement (covered by tasks.changeset.test.js's
-// overlay-mount-busy reclassification tests) and accept/apply
-// (acceptTaskChangeset -> applyChangeset -> applyNonGitChangeset ->
-// runExtractionBwrap). Before this test, only the extraction path had
-// coverage proving the injected sleep actually fires through the manager
-// API -- a regression that broke overlaySleepFn forwarding specifically in
-// the accept closure would have gone undetected (code review finding on PR
-// #333). A standalone describe block (own fixture, not the "accept()/
-// reject()" block's shared pendingTaskFixture()) so this one addition
-// doesn't push that block's line count over the sonarjs function-length cap.
-describe("accept(): overlaySleepFn threading (taskferry#328)", () => {
-  test("accept() on a non-git target threads overlaySleepFn through applyChangeset's overlay-mount-busy retry", async () => {
-    const tmpRoot = mkdtempTracked("axi-accept-sleepfn-");
+test("reject discards a retained legacy non-git overlay without rewriting accepted history", async () => {
+  const tmpRoot = mkdtempTracked("axi-legacy-discard-");
+  const root = path.join(tmpRoot, "taskferry-cow-t_legacy");
+  fs.mkdirSync(path.join(root, "upper", "main"), { recursive: true });
+  const overlayDirs = { root, tmpRoot, upperDir: path.join(root, "upper", "main"), workDir: path.join(root, "work", "main"), rwBinds: [] };
+  const task = { ...baseTask({ id: "t_legacy" }), role: "dispatch", changesetStatus: "accepted", preDispatchHead: null, overlayDirs };
+  const legacy = makeManager({ tasksFixture: [task], overlayTmpRoot: tmpRoot });
+  const result = await legacy.reject(task.id);
+  assert.equal(result.changesetStatus, "accepted");
+  assert.equal(fs.existsSync(root), false);
+  assert.equal(readPersistedTask(legacy, task.id).changesetStatus, "accepted");
+  const git = makeManager({ tasksFixture: [{ ...task, preDispatchHead: "abc123", overlayDirs: null }] });
+  await assert.rejects(() => git.reject(task.id), /no pending changeset/);
+});
+
+describe("accept(): non-git changesets without a baseline", () => {
+  test("keeps the diff and overlay pending without writing to the target", async () => {
+    const tmpRoot = mkdtempTracked("axi-accept-nongit-");
     const overlayRoot = path.join(tmpRoot, "overlay");
     fs.mkdirSync(path.join(overlayRoot, "upper", "main"), { recursive: true });
     fs.mkdirSync(path.join(overlayRoot, "work", "main"), { recursive: true });
     const diffPath = path.join(tmpRoot, "t_pending.patch");
     fs.writeFileSync(diffPath, DIFF_LINE);
-    const bwrapMessage =
-      "bwrap: Can't make overlay mount on /newroot/workspace with options " +
-      "upperdir=/tmp/upper,workdir=/tmp/work,lowerdir=/oldroot/workspace,userxattr: Device or resource busy";
-    let bwrapAttempts = 0;
-    const sleeps = [];
     const mgr = makeManager({
       tasksFixture: [{
         ...baseTask({ id: "t_pending", status: "done" }),
         role: "dispatch",
         changesetStatus: "pending",
         diffPath,
-        preDispatchHead: null, // non-git target -> applyNonGitChangeset
+        preDispatchHead: null,
         overlayDirs: { tmpRoot, root: overlayRoot, upperDir: path.join(overlayRoot, "upper", "main"), workDir: path.join(overlayRoot, "work", "main"), rwBinds: [] },
       }],
-      runOverlayCommandFn: () => {
-        bwrapAttempts += 1;
-        if (bwrapAttempts < 3) return { status: 1, stdout: "", stderr: bwrapMessage };
-        return { status: 0, stdout: "", stderr: "" };
-      },
-      rmOverlayTreeFn: () => {},
-      overlaySleepFn: (ms) => sleeps.push(ms),
+      runOverlayCommandFn: () => { throw new Error("must not apply"); },
+      rmOverlayTreeFn: () => { throw new Error("must not discard overlay"); },
     });
-
     const result = await mgr.accept("t_pending");
-
-    assert.equal(result.applied, true, "the apply must succeed once the retry clears the busy mount");
-    assert.equal(bwrapAttempts, 3, "must retry the apply bwrap through the same busy-race backoff extraction uses");
-    assert.deepEqual(sleeps, [100, 300], "overlaySleepFn must be invoked for each retry, proving it reaches applyNonGitChangeset via acceptTaskChangeset, not just extraction");
+    assert.equal(result.applied, false);
+    assert.match(result.reason, /baseline/i);
+    const task = readPersistedTask(mgr, "t_pending");
+    assert.equal(task.changesetStatus, "pending");
+    assert.equal(task.diffPath, diffPath);
+    assert.equal(task.overlayDirs.root, overlayRoot);
   });
 });
 

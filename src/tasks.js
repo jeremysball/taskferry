@@ -3769,6 +3769,22 @@ function isPidAlive(pid, killFn) {
 }
 
 /**
+ * Treat every probe failure except ESRCH as potentially live.
+ * @param {number|null|undefined} pid
+ * @param {(pid: number, signal: NodeJS.Signals|number) => void} killFn
+ * @returns {boolean}
+ */
+function processMayBeAlive(pid, killFn) {
+  if (pid == null) return false;
+  try {
+    killFn(pid, 0);
+    return true;
+  } catch (err) {
+    return errCode(err) !== "ESRCH";
+  }
+}
+
+/**
  * Blocks the current thread for `ms` milliseconds. The daemon-restart
  * resume path is synchronous (it runs inside boot, before the event loop
  * owns any per-task timers), so a synchronous sleep is the only way to
@@ -3862,6 +3878,26 @@ function resumeSessionState(task) {
   return { sessionId: result.sessionId ?? task.sessionId ?? null, logReadable: true };
 }
 
+/** @param {any} task @param {any} ctx @param {string} prev @param {string|null} sessionId @param {number|null|undefined} pid */
+function preserveInterruptedNonGit(task, ctx, prev, sessionId, pid) {
+  if (task.role === "advisor" || !task.overlayDirs || task.preDispatchHead != null) return false;
+  task.status = "crashed";
+  task.failureReason = "daemon_restarted_overlay_preserved";
+  task.failureDetail = "daemon restarted while a non-git overlay was active; automatic resume was stopped to preserve its contents";
+  task.changesetStatus = "pending";
+  task.changesetError = "daemon restarted before changeset extraction; inspect the retained overlay";
+  task.endedAt = new Date().toISOString();
+  task.exitCode = null;
+  task.signal = null;
+  if (!processMayBeAlive(pid, ctx.opts.killFn)) task.pid = null;
+  task.sessionId = sessionId;
+  delete task._persistedStatus;
+  ctx.events.taskEvents.emitState(task, prev);
+  ctx.helpers.persistTask(task.id);
+  ctx.helpers.flushPersist();
+  return true;
+}
+
 // @ts-ignore
 function handleRunningForRestart(task, ctx, prev) {
   const { sessionId, logReadable } = resumeSessionState(task);
@@ -3886,6 +3922,7 @@ function handleRunningForRestart(task, ctx, prev) {
     try { ctx.helpers.sendSignal(pid, "SIGTERM"); } catch {}
     waitForPidExit(pid, ctx.limits.cancelGrace, ctx.opts.killFn);
   }
+  if (preserveInterruptedNonGit(task, ctx, prev, sessionId, pid)) return;
   if (!canResume) {
     failRunningForRestart(task, ctx, prev, sessionId, { logReadable, dirExists });
     return;
@@ -4089,11 +4126,22 @@ function sweepOverlayTmpRoot(ctx, tmpRoot) {
   for (const entry of entries) sweepOverlayEntry(ctx, entry, tmpRoot);
 }
 
+/** @param {Task} task */
+function isAmbiguousLegacyOverlay(task) {
+  return task.role !== "advisor" && task.preDispatchHead == null &&
+    task.changesetStatus === "accepted" && task.overlayDirs != null;
+}
+
+/** @param {Task|undefined} task @param {string} root */
+function shouldPreserveOverlay(task, root) {
+  if (!task || task.overlayDirs?.root !== root) return false;
+  return task.changesetStatus === "pending" || isAmbiguousLegacyOverlay(task);
+}
+
 /**
  * Decides whether a single tmp-root entry is an orphaned overlay and cleans
- * it up if so. A task whose changesetStatus is still "pending" owns its
- * overlay and must never be swept; only unknown ids and already-resolved
- * tasks with a leftover overlayDirs are orphans.
+ * it up if so. Pending changesets and accepted non-git records with an
+ * ambiguous retained overlay must not be swept.
  * @param {{tasks: Map<string, Task>, persistedTasks: Map<string, Record<string, any>>, releaseOverlay: (task: {overlayDirs?: {root: string, tmpRoot: string}|null}) => boolean, persistTask: (taskId: string) => void}} ctx
  * @param {string} entry
  * @param {string} tmpRoot
@@ -4103,8 +4151,7 @@ function sweepOverlayEntry(ctx, entry, tmpRoot) {
   const task = taskId ? ctx.tasks.get(taskId) : undefined;
   const root = path.join(tmpRoot, entry);
   const ownsThisOverlay = task?.overlayDirs?.root === root;
-  const isOwnedPending = ownsThisOverlay && task.changesetStatus === "pending";
-  if (!taskId || isOwnedPending) return;
+  if (!taskId || shouldPreserveOverlay(task, root)) return;
   // A daemon sweeping against a stale in-memory map (taskferry#515) must not
   // delete an overlay whose id the on-disk tasks.json records: an id absent
   // from this daemon's map but present on disk was written by a *different*
@@ -4539,26 +4586,17 @@ const BLOCKING_CHECK_STATUSES = new Set(["running", "failed", "timeout", "interr
 
 /**
  * @param {Task} task
- * @param {boolean} _force
- * @param {{stateDir: string, runtimeDir: string, sandboxDenylist: string[], runOverlayCommandFn: (command: string, args: string[]) => {status: number|null, stdout: string, stderr: string, error?: Error}, overlaySleepFn?: (ms: number) => void, existsFn: (path: string) => boolean}} ctx
+ * @param {{runOverlayCommandFn: (command: string, args: string[]) => {status: number|null, stdout: string, stderr: string, error?: Error}}} ctx
  * @returns {{applied: boolean, reason?: string|null}}
  */
-function applyAcceptedChangeset(task, _force, ctx) {
-  const isGitTarget = task.preDispatchHead != null;
-  const denyList = resolveSandboxDenyList(os.homedir(), ctx.stateDir, ctx.sandboxDenylist).filter(ctx.existsFn);
+function applyAcceptedChangeset(task, ctx) {
   return applyChangeset({
-    isGitTarget,
-    denyList,
-    stateDir: ctx.stateDir,
-    runtimeDir: ctx.runtimeDir,
+    isGitTarget: task.preDispatchHead != null,
     directory: task.directory,
     // validateAcceptable() threw above if diffPath were null, but that
     // narrowing lives inside the helper, so assert the invariant here.
     diffPath: /** @type {string} */ (task.diffPath),
-    overlay: task.overlayDirs ?? undefined,
-    homeDir: os.homedir(),
     runCommand: ctx.runOverlayCommandFn,
-    sleepFn: ctx.overlaySleepFn,
   });
 }
 
@@ -5855,12 +5893,12 @@ startTask: (task) => startTaskFor(task, { pendingLaunches: ctx.maps.pendingLaunc
      * @param {{force?: boolean}} options
      * @returns {Promise<{taskId: string, changesetStatus: string, applied: boolean, reason?: string|null, checkStatus?: string, cleanupFailed?: boolean}>}
      */
-    accept: (taskId, options) => acceptTaskChangeset(taskId, options, { ensureStateLoaded: () => ctx.helpers.ensureStateLoaded(), tasks: ctx.maps.tasks, existsFn: ctx.opts.existsFn, hasLiveOverlay: (task) => ctx.helpers.hasLiveOverlay(task), stateDir: ctx.opts.stateDir, runtimeDir: ctx.opts.runtimeDir, sandboxDenylist: ctx.opts.sandboxDenylist, runOverlayCommandFn: ctx.opts.runOverlayCommandFn, overlaySleepFn: ctx.opts.overlaySleepFn, persistTask: (taskId2) => ctx.helpers.persistTask(taskId2), releaseOverlay: (task) => ctx.env.releaseOverlay(task), killGateAndWait: (taskId2) => ctx.env.killGateAndWait(taskId2), noSuchTask }),
+    accept: (taskId, options) => acceptTaskChangeset(taskId, options, { ensureStateLoaded: () => ctx.helpers.ensureStateLoaded(), tasks: ctx.maps.tasks, existsFn: ctx.opts.existsFn, hasLiveOverlay: (task) => ctx.helpers.hasLiveOverlay(task), runOverlayCommandFn: ctx.opts.runOverlayCommandFn, persistTask: (taskId2) => ctx.helpers.persistTask(taskId2), releaseOverlay: (task) => ctx.env.releaseOverlay(task), killGateAndWait: (taskId2) => ctx.env.killGateAndWait(taskId2), noSuchTask }),
     /**
      * @param {string} taskId
      * @returns {Promise<{taskId: string, changesetStatus: string, cleanupFailed?: boolean}>}
      */
-    reject: (taskId) => rejectTaskChangeset(taskId, { ensureStateLoaded: () => ctx.helpers.ensureStateLoaded(), tasks: ctx.maps.tasks, persistTask: (taskId) => ctx.helpers.persistTask(taskId), releaseOverlay: (task) => ctx.env.releaseOverlay(task), killGateAndWait: (taskId2) => ctx.env.killGateAndWait(taskId2), noSuchTask }),
+    reject: (taskId) => rejectTaskChangeset(taskId, { ensureStateLoaded: () => ctx.helpers.ensureStateLoaded(), tasks: ctx.maps.tasks, persistTask: (taskId) => ctx.helpers.persistTask(taskId), releaseOverlay: (task) => ctx.env.releaseOverlay(task), killGateAndWait: (taskId2) => ctx.env.killGateAndWait(taskId2), killFn: ctx.opts.killFn, noSuchTask }),
     /** @param {string} taskId @param {{path?: string}} [options] */
     output: (taskId, options) => outputFor(taskId, { ...ctx, noSuchTask, noSuchOutputFile, noOutputDir }, options),
     /** @param {string} taskId */
@@ -7140,8 +7178,7 @@ function persistTaskRecord(taskId, ctx) {
 /**
  * Applies the post-extraction settlement decision to `finishedTask` based on
  * the just-extracted `extracted` payload: stamps `headDrift` audit fields
- * when present, then walks the precedence chain (advisor → recovered:false
- * conflict → recovered:null inconclusive → normal hasChanges / no-changes).
+ * when present, then walks advisor, drift, and target-specific settlement.
  * Split out of `extractChangesetForTaskRecord` to keep that function's
  * cognitive complexity under the file cap; the per-branch settlement logic
  * is the only thing that grows with each new headDrift classification.
@@ -7176,9 +7213,9 @@ function settleChangesetAfterExtraction(finishedTask, extracted, ctx, isGitTarge
     // exactly what taskferry accept already knows how to report.
     finishedTask.changesetStatus = "pending";
     finishedTask.changesetError = extracted.headDrift.conflictDetail;
-  } else if (extracted.hasChanges) {
+  } else if (!isGitTarget || extracted.hasChanges) {
     finishedTask.changesetStatus = "pending";
-    maybeStartCheckGate(ctx, finishedTask, isGitTarget);
+    if (isGitTarget) maybeStartCheckGate(ctx, finishedTask, isGitTarget);
   } else {
     finishedTask.changesetStatus = "accepted";
     ctx.releaseOverlay(finishedTask);
@@ -7762,7 +7799,7 @@ function requireOverlayCapability(state, ctx) {
 }
 
 /**
- * Applies a task's pending changeset (git or non-git), persisting the status
+ * Applies a task's pending git changeset, persisting the status
  * before cleanup and re-persisting after a successful cleanup so the durable
  * record reflects the cleared overlay. Extracted out of `createTaskManager`'s
  * `accept` closure; every factory binding is threaded in via `ctx`.
@@ -7775,7 +7812,7 @@ function requireOverlayCapability(state, ctx) {
  * by the body destructure.
  * @param {string} taskId
  * @param {{force?: boolean}} options
- * @param {{ensureStateLoaded: () => void, tasks: Map<string, Task>, noSuchTask: (taskId: string) => Error, existsFn: (path: string) => boolean, hasLiveOverlay: (task: Task) => boolean, stateDir: string, runtimeDir: string, sandboxDenylist: string[], runOverlayCommandFn: (command: string, args: string[]) => {status: number|null, stdout: string, stderr: string, error?: Error}, overlaySleepFn?: (ms: number) => void, persistTask: (taskId: string) => void, releaseOverlay: (task: {overlayDirs?: {root:string,tmpRoot:string}|null}) => boolean, killGateAndWait: (taskId: string) => Promise<void>}} ctx
+ * @param {{ensureStateLoaded: () => void, tasks: Map<string, Task>, noSuchTask: (taskId: string) => Error, existsFn: (path: string) => boolean, hasLiveOverlay: (task: Task) => boolean, runOverlayCommandFn: (command: string, args: string[]) => {status: number|null, stdout: string, stderr: string, error?: Error}, persistTask: (taskId: string) => void, releaseOverlay: (task: {overlayDirs?: {root:string,tmpRoot:string}|null}) => boolean, killGateAndWait: (taskId: string) => Promise<void>}} ctx
  * @returns {Promise<{taskId: string, changesetStatus: string, applied: boolean, reason?: string|null, checkStatus?: string, cleanupFailed?: boolean}>}
  */
 async function acceptTaskChangeset(taskId, options, ctx) {
@@ -7787,7 +7824,7 @@ async function acceptTaskChangeset(taskId, options, ctx) {
   if (task.checkStatus === "running") {
     await ctx.killGateAndWait(taskId);
   }
-  const applied = applyAcceptedChangeset(task, force, ctx);
+  const applied = applyAcceptedChangeset(task, ctx);
   if (!applied.applied) {
     // validateAcceptable() threw above if changesetStatus weren't pending,
     // so it is non-undefined here; assert it for the type checker.
@@ -7797,21 +7834,32 @@ async function acceptTaskChangeset(taskId, options, ctx) {
 }
 
 /**
+ * @param {Task} task
+ * @param {(pid: number, signal: NodeJS.Signals|number) => void} killFn
+ */
+function assertRetainedWorkerStopped(task, killFn) {
+  if (task.failureReason === "daemon_restarted_overlay_preserved" && processMayBeAlive(task.pid, killFn)) {
+    throw new Error(`error: task ${task.id}'s restarted worker process may still be alive\nhelp: wait for it to exit before discarding its overlay`);
+  }
+}
+
+/**
  * Marks a task's pending changeset as rejected, persisting before cleanup
  * (parallel to accept()). Extracted out of `createTaskManager`'s `reject`
  * closure.
  * @param {string} taskId
- * @param {{ensureStateLoaded: () => void, tasks: Map<string, Task>, noSuchTask: (taskId: string) => Error, persistTask: (taskId: string) => void, releaseOverlay: (task: {overlayDirs?: {root:string,tmpRoot:string}|null}) => boolean, killGateAndWait: (taskId: string) => Promise<void>}} ctx
+ * @param {{ensureStateLoaded: () => void, tasks: Map<string, Task>, noSuchTask: (taskId: string) => Error, persistTask: (taskId: string) => void, releaseOverlay: (task: {overlayDirs?: {root:string,tmpRoot:string}|null}) => boolean, killGateAndWait: (taskId: string) => Promise<void>, killFn: (pid: number, signal: NodeJS.Signals|number) => void}} ctx
  * @returns {Promise<{taskId: string, changesetStatus: string, cleanupFailed?: boolean}>}
  */
 async function rejectTaskChangeset(taskId, ctx) {
   ctx.ensureStateLoaded();
   const task = ctx.tasks.get(taskId);
   if (!task) throw ctx.noSuchTask(taskId);
-  if (task.changesetStatus !== "pending") {
-    throw new Error(`error: task ${taskId} has no pending changeset (changesetStatus: ${task.changesetStatus ?? "none"})\nhelp: only a task with changesetStatus "pending" can be rejected`);
+  if (task.changesetStatus !== "pending" && !isAmbiguousLegacyOverlay(task)) {
+    throw new Error(`error: task ${taskId} has no pending changeset (changesetStatus: ${task.changesetStatus ?? "none"})\nhelp: only pending changesets or retained legacy non-git overlays can be rejected`);
   }
-  task.changesetStatus = "rejected";
+  assertRetainedWorkerStopped(task, ctx.killFn);
+  if (task.changesetStatus === "pending") task.changesetStatus = "rejected";
   if (task.checkStatus === "running") {
     await ctx.killGateAndWait(taskId);
   }
@@ -7828,7 +7876,7 @@ async function rejectTaskChangeset(taskId, ctx) {
   // persist once more so the durable task record reflects the cleared
   // overlay metadata (parallel to accept()).
   if (!cleanupFailed) ctx.persistTask(task.id);
-  return { taskId, changesetStatus: task.changesetStatus, ...(cleanupFailed ? { cleanupFailed: true } : {}) };
+  return { taskId, changesetStatus: /** @type {string} */ (task.changesetStatus), ...(cleanupFailed ? { cleanupFailed: true } : {}) };
 }
 
 /**

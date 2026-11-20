@@ -246,7 +246,7 @@ async function runCancel(options, { client }) {
  * @param {{cleanupFailed?: boolean, taskId: string}} result
  */
 function warnIfCleanupFailed(label, result) {
-  if (result.cleanupFailed) process.stderr.write(`warning: ${label}, but overlay cleanup failed -- ${result.taskId}'s overlay dir remains on disk (a daemon restart will sweep it)\n`);
+  if (result.cleanupFailed) process.stderr.write(`warning: ${label}, but overlay cleanup failed -- ${result.taskId}'s overlay dir remains on disk\n`);
 }
 
 /**
@@ -288,8 +288,8 @@ async function runAccept(options, { client }) {
  * @param {ResolvedDeps} deps
  */
 async function runReject(options, { client }) {
-  const rejected = /** @type {{cleanupFailed?: boolean, taskId: string}} */ (await client.request("task.reject", { taskId: options.taskId }));
-  warnIfCleanupFailed("changeset rejected", rejected);
+  const rejected = /** @type {{cleanupFailed?: boolean, taskId: string, changesetStatus?: string}} */ (await client.request("task.reject", { taskId: options.taskId }));
+  warnIfCleanupFailed(rejected.changesetStatus === "accepted" ? "legacy overlay discard requested" : "changeset rejected", rejected);
   return rejected;
 }
 

@@ -156,7 +156,7 @@ taskferry-cow-<task-id>/
   owned by the kernel. Listing it after teardown fails with
   `Permission denied`; that is expected, not data loss.
 * No `merged/` directory exists under the overlay root. Non-git extraction
-  and apply mount the merged view at `/tmp/taskferry-merged` inside bwrap's
+  mounts the merged view at `/tmp/taskferry-merged` inside bwrap's
   private `--tmpfs /tmp` (`buildMergedViewBwrapArgs` in
   `src/changeset.js`), so it never appears in the host overlay layout.
 

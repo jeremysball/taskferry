@@ -60,7 +60,7 @@ function parseEnvFileLine(trimmed, sourcePath, lineNo) {
   const name = withoutExport.slice(0, eq).trim();
   const rawValue = withoutExport.slice(eq + 1).trim();
   if (!KEY_RE.test(name)) {
-    throw new Error(`error: ${sourcePath}:${lineNo}: invalid env var name ${JSON.stringify(name)}\nhelp: names must match [A-Za-z_][A-Za-z0-9_]*`);
+    throw new Error(`error: ${sourcePath}:${lineNo}: invalid env var name\nhelp: names must match [A-Za-z_][A-Za-z0-9_]*`);
   }
   return [name, unquote(rawValue, sourcePath, lineNo)];
 }

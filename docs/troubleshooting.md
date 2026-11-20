@@ -20,6 +20,15 @@ The CLI's daemon auto-start waits up to 5 seconds for a health check before
 giving up with `error: taskferry daemon did not become ready within
 5000ms`. Causes, roughly in likelihood order:
 
+Detached starts preserve stdout and stderr in a private
+`daemon-<attempt-id>.log` under the runtime directory; the detached startup
+helper writes `booter-<attempt-id>.log` there too. A timeout includes available
+output from that command's own attempt, not older logs. Files are retained
+without automatic rotation or deletion, so check disk usage and remove logs
+yourself when no longer needed. These diagnostics can contain sensitive data.
+Runtime directories may be cleared at logout or reboot. For systemd-supervised
+daemons, use `journalctl --user -u taskferry-daemon.service` instead.
+
 1. **Permission problem on the runtime directory.** The daemon needs to
    `mkdir`/`chmod` `TASKFERRY_RUNTIME_DIR` (falls back, in priority order,
    to `$XDG_RUNTIME_DIR/taskferry`, then `/run/user/<uid>/taskferry` if it

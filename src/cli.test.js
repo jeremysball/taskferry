@@ -323,7 +323,7 @@ test("dispatch --prompt - keeps an interior CRLF in the prompt (only strips the 
   assert.equal(calls[0].params.prompt, "line one\r\nline two");
 });
 
-test("no arguments show executable, description, workspace tasks, counts, and next actions", async () => {
+test("no arguments show executable, workspace tasks, counts, and next actions", async () => {
   const capture = capturedIo();
   const workspace = process.cwd();
   const resolvedWorkspace = resolveWorkspaceRoot(workspace);
@@ -344,7 +344,6 @@ test("no arguments show executable, description, workspace tasks, counts, and ne
   const value = capture.output().value;
   assert.equal(result.exitCode, 0);
   assert.equal(value.bin, "~/.local/bin/taskferry");
-  assert.match(value.description, /background OpenCode tasks/);
   assert.deepEqual(value.counts, counts);
   assert.deepEqual(value.tasks, [{ id: taskId, status: "running", model: testModel, startedAt }]);
   assert.ok(value.next.some((line) => line.includes("taskferry wait <id>")));

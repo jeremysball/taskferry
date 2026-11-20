@@ -1,7 +1,7 @@
 {
   "name": "taskferry",
   "version": "5.1.0",
-  "description": "AXI CLI and local daemon for dispatching background pi/OpenCode tasks from any frontend harness",
+  "description": "AXI CLI and local daemon for dispatching background pi, OpenCode, and Kilo tasks from any frontend harness",
   "license": "MIT",
   "author": "Jeremy Ball",
   "homepage": "https://github.com/jeremysball/taskferry#readme",
@@ -38,7 +38,18 @@
     "check": "git ls-files '*.js' | xargs -P4 -I{} node --check {} && npm run lint && npm run typecheck && npm run skill:check && npm test",
     "prepare": "git config core.hooksPath .githooks || true"
   },
-  "keywords": [],
+  "keywords": [
+    "cli",
+    "daemon",
+    "ai-agents",
+    "background-jobs",
+    "pi",
+    "opencode",
+    "kilo",
+    "sandbox",
+    "developer-tools",
+    "task-dispatch"
+  ],
   "type": "module",
   "engines": {
     "node": ">=18"

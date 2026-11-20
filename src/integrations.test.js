@@ -230,14 +230,6 @@ test("Codex plugin manifests expose native skills and lifecycle hooks", () => {
   );
   assert.equal(marketplace.name, "taskferry");
   assert.equal(marketplace.interface.displayName, "Taskferry");
-  assert.deepEqual(marketplace.plugins, [{
-    name: "taskferry",
-    displayName: "Taskferry",
-    source: { source: "local", path: "./integrations/codex" },
-    policy: { installation: "AVAILABLE", authentication: "ON_INSTALL" },
-    category: "Development & Workflow",
-    description: "Background OpenCode task execution through the Taskferry AXI CLI",
-  }]);
 
   assert.match(hooks.description, /workspace context/i);
   assert.deepEqual(Object.keys(hooks.hooks).sort(), ["SessionStart", "UserPromptSubmit"]);

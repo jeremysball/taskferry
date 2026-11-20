@@ -356,16 +356,19 @@ function chownableUnmappedGid() {
 describe("unmapped ownership extraction (real bwrap)", () => {
   for (const failure of ["index.lock", "object tempfile"]) {
     test(`reports candidate ownership for ${failure} and retains worker changes`, (t) => {
-      if (process.env.TASKFERRY_TEST_UNMAPPED_OWNERSHIP !== "1") {
+      const required = process.env.TASKFERRY_REQUIRE_OWNERSHIP_REGRESSION === "1";
+      if (!required && process.env.TASKFERRY_TEST_UNMAPPED_OWNERSHIP !== "1") {
         t.skip("set TASKFERRY_TEST_UNMAPPED_OWNERSHIP=1 on a host with working user namespaces and OverlayFS");
         return;
       }
       if (!support.supported) {
+        assert.equal(required, false, `ownership regression requires overlay support: ${support.reason}`);
         t.skip(`overlay integration skipped: ${support.reason}`);
         return;
       }
       const gid = chownableUnmappedGid();
       if (gid === null) {
+        assert.equal(required, false, "ownership regression requires a chownable unmapped group");
         t.skip("no chownable group outside the sandbox's gid map");
         return;
       }

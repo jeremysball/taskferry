@@ -378,18 +378,9 @@ real changeset over a live copy-on-write overlay mounted on a
 git-tracked directory (`task.overlayDirs` set, `preDispatchHead` not
 null, `changesetStatus` about to become `"pending"`). Advisor dispatches,
 `--no-overlay` dispatches, and zero-change auto-accepts deliberately
-skip the gate. For non-git / overlay-only targets the gate would have
-side effects (test caches, build artifacts) that `applyNonGitChangeset`
-would rsync onto the real directory on `accept`, so the gate is skipped
-entirely and `checkStatus` stays at its default `"none"` — the CLI's
-`runAccept()` stderr warning "this repo declares no check command"
-still fires for these tasks today (the warning condition is purely
-`accepted.applied && (checkStatus == null || checkStatus === "none")`,
-without distinguishing "absent" from "ignored for a non-git target"),
-so it should be read as "nothing was verified before landing," not "you
-forgot to declare a check command." A future revision may split the
-two paths (a separate "ignored, not absent" warning for non-git) but
-today the message is the same in both cases.
+skip the gate. Non-git targets also skip it and retain `checkStatus: "none"`;
+their changesets cannot be applied automatically because no dispatch baseline
+is available for conflict detection.
 
 `checkStatus` is the gate's state machine:
 

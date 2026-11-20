@@ -210,12 +210,8 @@ export function resolvePreDispatchHead(directory, runCommand = defaultRunCommand
     const head = result.stdout.trim();
     if (head) return head;
   }
-  // A git repo with an unborn HEAD (zero commits) is still a git target.
-  // Anchor the diff on the empty tree so extraction stays on the git path:
-  // misclassifying it as a non-git target would make a later accept rsync
-  // the overlay's merged view -- .git included -- over the real directory,
-  // replaying the worker's commits as real commits, which the design
-  // forbids (commits flatten into a working-tree-style diff instead).
+  // An unborn repository still needs the git extraction path, anchored on
+  // the empty tree, so its changeset preserves git semantics.
   const gitDirCheck = runCommand("git", ["-C", directory, "rev-parse", "--git-dir"]);
   if (!gitDirCheck.error && gitDirCheck.status === 0) {
     return "4b825dc642cb6eb9a060e54bf8d69288fbee4904"; // git's empty tree object
@@ -455,9 +451,8 @@ function assertMergedMountPointNotShadowed(directory, runtimeDir, mergedMountPoi
 /**
  * Mounts directory's merged (overlay) view at a *separate* synthetic
  * mountpoint instead of at directory itself, so directory can be diffed
- * against its own merged view in the same sandbox (git targets don't need
- * this -- git diff only needs the merged tree at the real path -- this is
- * only for the non-git diff -ru / non-git apply cases).
+ * against its own merged view in the same sandbox. Git extraction instead
+ * uses the merged tree at the real path.
  *
  * The /tmp-shadowing question (review finding folded in here): the
  * overlay's `upperDir`/`workDir` are host-namespace paths consumed directly
@@ -480,19 +475,16 @@ function assertMergedMountPointNotShadowed(directory, runtimeDir, mergedMountPoi
  * @param {string} params.homeDir - unused by this function; kept for scaffolding symmetry with buildBwrapArgs().
  * @param {string[]} params.denyList
  * @param {string} params.mergedMountPoint
- * @param {boolean} [params.writable] - also rw-bind directory itself, for the apply step (Task 7); omit for
- *   pure extraction, where directory is bound read-only. The explicit bind (read-only or read-write)
- *   is always needed because the earlier --tmpfs /tmp can shadow directory when directory (or an
- *   ancestor) is under /tmp.
+ * The explicit read-only bind is needed because the earlier --tmpfs /tmp
+ * can shadow directory when directory (or an ancestor) is under /tmp.
  * @returns {string[]}
  */
-export function buildMergedViewBwrapArgs({ directory, overlay, runtimeDir, denyList, mergedMountPoint, writable = false, stateDir: _stateDir, homeDir: _homeDir }) {
+export function buildMergedViewBwrapArgs({ directory, overlay, runtimeDir, denyList, mergedMountPoint, stateDir: _stateDir, homeDir: _homeDir }) {
   assertMergedMountPointNotShadowed(directory, runtimeDir, mergedMountPoint);
   const args = buildBwrapBaseArgs({ denyList });
   args.push("--dir", mergedMountPoint);
   args.push("--overlay-src", directory, "--overlay", overlay.upperDir, overlay.workDir, mergedMountPoint);
-  if (writable) args.push("--bind", directory, directory);
-  else args.push("--ro-bind", directory, directory);
+  args.push("--ro-bind", directory, directory);
   args.push("--bind", runtimeDir, runtimeDir);
   args.push("--unshare-all", "--unshare-net", "--die-with-parent");
   return args;
@@ -527,11 +519,8 @@ export function extractNonGitDiff({
   mkdirFn = (dirPath) => fs.mkdirSync(dirPath, { recursive: true, mode: 0o700 }),
   sleepFn = sleepSync,
 }) {
-  const bwrapArgs = buildMergedViewBwrapArgs({ directory, overlay, stateDir, runtimeDir, homeDir, denyList, mergedMountPoint: MERGED_MOUNT_POINT, writable: false });
-  // -N (--new-file) treats files missing from one side as empty, so a file
-  // created inside the overlay shows its full content (a plain -ru would
-  // collapse it to a bare "Only in ... merged" line with no content, and
-  // the apply step would then lose the new file entirely).
+  const bwrapArgs = buildMergedViewBwrapArgs({ directory, overlay, stateDir, runtimeDir, homeDir, denyList, mergedMountPoint: MERGED_MOUNT_POINT });
+  // -N (--new-file) includes the contents of files present on only one side.
   const result = runExtractionBwrap(runCommand, [...bwrapArgs, "--", "diff", "-ruN", directory, MERGED_MOUNT_POINT], sleepFn);
   // GNU diff writes differences to stdout and exits 1; an exit-1 result with
   // empty stdout is a bwrap setup failure or a silent death, never a clean
@@ -575,27 +564,16 @@ export function subFilePaths(root, targetPath) {
  * @param {string} params.directory
  * @param {string} params.diffPath
  * @param {boolean} params.isGitTarget
- * @param {{root: string, upperDir: string, workDir: string}} [params.overlay] - required when isGitTarget is false
- * @param {string} [params.stateDir]
- * @param {string} [params.runtimeDir]
- * @param {string} [params.homeDir]
- * @param {string[]} [params.denyList]
  * @param {typeof defaultRunCommand} [params.runCommand]
- * @param {(ms: number) => void} [params.sleepFn] - injectable for tests; real callers get a blocking sleep between retries (non-git apply only -- applyGitChangeset uses `git apply`, not bwrap, so it never hits the overlay-mount race)
  * @returns {{applied: boolean, reason: string|null}}
  */
-export function applyChangeset({ directory, diffPath, isGitTarget, overlay, stateDir, runtimeDir, homeDir, denyList, runCommand = defaultRunCommand, sleepFn = sleepSync }) {
+export function applyChangeset({ directory, diffPath, isGitTarget, runCommand = defaultRunCommand }) {
   if (isGitTarget) {
     return applyGitChangeset({ directory, diffPath, runCommand });
   }
-  return applyNonGitChangeset({ directory, overlay, stateDir, runtimeDir, homeDir, denyList, runCommand, sleepFn });
+  return { applied: false, reason: "Cannot safely apply a non-git changeset without a dispatch baseline. The pending overlay is preserved until rejection; its informational diff can omit binary contents and metadata. Preserve the overlay for recovery." };
 }
 
-// Shared by the two live-overlay-input guard clauses below (thrown from two
-// places, so lifted to one module constant to keep no-duplicate-string quiet).
-const NON_GIT_APPLY_ERROR =
-  "error: non-git changeset apply requires a live overlay, stateDir, runtimeDir, homeDir, and denyList\n" +
-  "help: preserve the pending overlay and retry through taskferry accept with a complete task record";
 
 /**
  * Applies a git-target changeset via `git apply`. Mirrors the original
@@ -622,60 +600,6 @@ function gitApplyFailureReason(result) {
   return `git apply exited with status ${result.status}`;
 }
 
-/**
- * Applies a non-git-target changeset by rsyncing the merged overlay view
- * onto directory inside one writable remount. Split out of applyChangeset
- * (which routes to this or applyGitChangeset) to keep branching shallow.
- * @param {object} params
- * @param {string} params.directory
- * @param {{root: string, upperDir: string, workDir: string}} [params.overlay]
- * @param {string} [params.stateDir]
- * @param {string} [params.runtimeDir]
- * @param {string} [params.homeDir]
- * @param {string[]} [params.denyList]
- * @param {typeof defaultRunCommand} params.runCommand
- * @param {(ms: number) => void} [params.sleepFn]
- * @returns {{applied: boolean, reason: string|null}}
- */
-function applyNonGitChangeset({ directory, overlay, stateDir, runtimeDir, homeDir, denyList, runCommand, sleepFn = sleepSync }) {
-  // Guard clauses (split so each stays under the expression-complexity cap)
-  // double as the TS narrowing the rsync remount below needs: a missing input
-  // means a partial/tampered task record, which must surface as a hard error
-  // rather than a silent mis-apply.
-  if (stateDir == null || runtimeDir == null || homeDir == null || denyList == null) {
-    throw new Error(NON_GIT_APPLY_ERROR);
-  }
-  if (overlay == null) {
-    throw new Error(NON_GIT_APPLY_ERROR);
-  }
-  const bwrapArgs = buildMergedViewBwrapArgs({ directory, overlay, stateDir, runtimeDir, homeDir, denyList, mergedMountPoint: MERGED_MOUNT_POINT, writable: true });
-  // --delay-updates (review finding #9): rsync stages each updated file and
-  // renames them all into place in the final update phase, so an interrupted
-  // apply leaves old files intact rather than a half-mutated tree. Not fully
-  // transactional (deletions still apply incrementally), but retryable: a
-  // failed apply leaves changesetStatus "pending" and never runs cleanup
-  // (spec §5.4), so the overlay survives for a second attempt.
-  const script = `rsync -a --delete --delay-updates ${shQuote(MERGED_MOUNT_POINT)}/ ${shQuote(directory)}/`;
-  // Same overlay-mount-busy race as extraction (taskferry#326): this bwrap
-  // call mounts its own overlay merged view, which can race the async
-  // mount-namespace teardown of whatever bwrap just exited before this
-  // accept() ran. Routed through the same bounded retry-with-backoff rather
-  // than a bespoke copy -- unlike extractNonGitDiff, no fail-open guard is
-  // needed here: rsync doesn't share diff's "non-zero exit can mean success"
-  // convention, so a persistent busy failure (exit 1) already falls through
-  // to the existing `status !== 0` branch as a real failure.
-  const result = runExtractionBwrap(runCommand, [...bwrapArgs, "--", "sh", "-c", script], sleepFn);
-  if (result.status !== 0) {
-    return { applied: false, reason: copyApplyFailureReason(result) };
-  }
-  return { applied: true, reason: null };
-}
-
-/** @param {{status: number|null, stderr: string}} result */
-function copyApplyFailureReason(result) {
-  if (result.stderr.trim()) return result.stderr.trim();
-  return `apply copy exited with status ${result.status}`;
-}
 
 /**
  * Overlay upper/work dirs come back owned by the invoking (daemon's own)

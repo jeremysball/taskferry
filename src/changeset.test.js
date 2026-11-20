@@ -51,9 +51,7 @@ const BIND_FLAG = "--bind";
 const RO_BIND_FLAG = "--ro-bind";
 const ROOT_BIND = "/";
 const SH_CMD = "sh";
-// Shared by both the extraction and non-git-apply overlay-mount-busy retry
-// tests (taskferry#326/#327) -- hoisted to module scope, like the fixtures
-// above, so both describe blocks pin the exact same bwrap wording.
+// Shared by overlay-mount-busy extraction retry tests.
 const OVERLAY_BUSY_STDERR =
   "bwrap: Can't make overlay mount on /newroot/repo with options " +
   "upperdir=/tmp/u,workdir=/tmp/w,lowerdir=/oldroot/repo,userxattr: Device or resource busy\n";
@@ -135,21 +133,6 @@ describe("buildMergedViewBwrapArgs()", () => {
     assert.equal(bindForDir, 0, "directory stays read-only (part of the root ro-bind) when writable is not set");
   });
 
-  test("also rw-binds directory itself when writable: true", () => {
-    const args = buildMergedViewBwrapArgs({
-      directory: REPO_DIR,
-      overlay: { upperDir: UPPER_DIR, workDir: WORK_DIR },
-      stateDir: STATE_DIR,
-      runtimeDir: RUNTIME_DIR,
-      homeDir: HOME_DIR,
-      denyList: [],
-      mergedMountPoint: "/tmp/merged",
-      writable: true,
-    });
-    const bindIndex = args.indexOf(BIND_FLAG);
-    assert.equal(args[bindIndex + 1], REPO_DIR);
-    assert.equal(args[bindIndex + 2], REPO_DIR);
-  });
 
   test("rejects a merged mount point that a later directory or runtime bind would shadow", () => {
     const base = {
@@ -166,7 +149,7 @@ describe("buildMergedViewBwrapArgs()", () => {
 });
 
 describe("buildMergedViewBwrapArgs() byte-identical output (Task 5: post-refactor regression)", () => {
-  // The two baseline arrays below were captured from the pre-refactor
+  // The baseline array below was captured from the pre-refactor
   // buildMergedViewBwrapArgs() against the inputs shown. Refactoring it to
   // share buildBwrapBaseArgs() with buildBwrapArgs() must not change any
   // element of these arrays -- this is the safety net. The overlay paths
@@ -197,28 +180,6 @@ describe("buildMergedViewBwrapArgs() byte-identical output (Task 5: post-refacto
     ]);
   });
 
-  test("writable: true (apply) case is byte-identical to the pre-refactor output", () => {
-    const args = buildMergedViewBwrapArgs({
-      directory: REPO_DIR,
-      overlay: { upperDir: T1_UPPER, workDir: T1_WORK },
-      stateDir: STATE_DIR,
-      runtimeDir: RUNTIME_DIR,
-      homeDir: HOME_DIR,
-      denyList: [],
-      mergedMountPoint: T1_MERGED,
-      writable: true,
-    });
-    assert.deepEqual(args, [
-      RO_BIND_FLAG, ROOT_BIND, ROOT_BIND,
-      "--proc", "/proc", "--dev", "/dev", "--tmpfs", TMP_DIR,
-      DIR_FLAG, T1_MERGED,
-      OVERLAY_SRC_FLAG, REPO_DIR,
-      OVERLAY_FLAG, T1_UPPER, T1_WORK, T1_MERGED,
-      BIND_FLAG, REPO_DIR, REPO_DIR,
-      BIND_FLAG, RUNTIME_DIR, RUNTIME_DIR,
-      "--unshare-all", "--unshare-net", "--die-with-parent",
-    ]);
-  });
 });
 
 describe("extractNonGitDiff()", () => {
@@ -569,8 +530,7 @@ describe("extraction fail-closed behavior", () => {
   // bwrap's own mount-namespace teardown and lose with the same
   // "Device or resource busy" overlay-mount error #318 already surfaces.
   // These pin the bounded retry-with-backoff that absorbs that transient
-  // race instead of throwing on the first hit. (OVERLAY_BUSY_STDERR is
-  // module-scoped above, shared with the non-git-apply retry tests below.)
+  // race instead of throwing on the first hit.
 
   test("extractGitDiff retries a transient overlay-mount-busy bwrap failure and succeeds once it clears", () => {
     let bwrapAttempts = 0;
@@ -805,92 +765,16 @@ describe("applyChangeset()", () => {
     assert.match(result.reason, /patch does not apply/);
   });
 
-  test("non-git target: rsyncs the merged overlay view onto directory inside one writable remount", () => {
-    let capturedArgs = null;
-    const runCommand = (_command, args) => {
-      capturedArgs = args;
-      return { status: 0, stdout: "", stderr: "", error: null };
-    };
+  test("non-git target: refuses to apply without a dispatch baseline", () => {
     const result = applyChangeset({
       directory: SCRATCH_DIR,
       diffPath: DIFF_PATCH,
       isGitTarget: false,
-      overlay: { root: T1_ROOT, upperDir: T1_UPPER, workDir: T1_WORK },
-      stateDir: STATE_DIR,
-      runtimeDir: RUNTIME_DIR,
-      homeDir: HOME_DIR,
-      denyList: [],
-      runCommand,
+      runCommand: () => { throw new Error("must not run an unsafe apply"); },
     });
-    assert.ok(capturedArgs.includes(DIR_FLAG));
-    assert.ok(capturedArgs.includes(SCRATCH_DIR), "directory must be rw-bound for the apply's writable remount");
-    const shIndex = capturedArgs.indexOf(SH_CMD);
-    const script = capturedArgs[shIndex + 2];
-    assert.match(script, /rsync -a --delete --delay-updates '\/tmp\/taskferry-merged'\/ '\/workspace\/scratch'\//);
-    assert.deepEqual(result, { applied: true, reason: null });
-  });
-
-  test("non-git target: errors usefully when required overlay inputs are missing", () => {
-    assert.throws(
-      () => applyChangeset({ directory: SCRATCH_DIR, diffPath: DIFF_PATCH, isGitTarget: false }),
-      /non-git changeset apply requires a live overlay, stateDir, runtimeDir, homeDir, and denyList/
-    );
-  });
-
-  // Regression (taskferry#327 review finding): applyNonGitChangeset mounts
-  // its own overlay merged view via bwrap, the same race extraction hits
-  // (taskferry#326) -- a bwrap that just exited from a prior dispatch/accept
-  // can still be tearing down its mount namespace when this one starts.
-  // Unlike extraction, no fail-open guard is needed: rsync's exit codes
-  // don't share diff's "non-zero can mean success" convention, so a
-  // persistent busy failure already falls through to the existing
-  // `status !== 0` branch as a real failure -- these two just pin the retry.
-  test("non-git target: retries a transient overlay-mount-busy bwrap failure and succeeds once it clears", () => {
-    let attempts = 0;
-    const sleeps = [];
-    const runCommand = () => {
-      attempts += 1;
-      if (attempts < 2) return { status: 1, stdout: "", stderr: OVERLAY_BUSY_STDERR, error: null };
-      return { status: 0, stdout: "", stderr: "", error: null };
-    };
-    const result = applyChangeset({
-      directory: SCRATCH_DIR,
-      diffPath: DIFF_PATCH,
-      isGitTarget: false,
-      overlay: { root: T1_ROOT, upperDir: T1_UPPER, workDir: T1_WORK },
-      stateDir: STATE_DIR,
-      runtimeDir: RUNTIME_DIR,
-      homeDir: HOME_DIR,
-      denyList: [],
-      sleepFn: (ms) => sleeps.push(ms),
-      runCommand,
-    });
-    assert.equal(attempts, 2, "must retry until the overlay-busy race clears");
-    assert.deepEqual(sleeps, [100]);
-    assert.deepEqual(result, { applied: true, reason: null });
-  });
-
-  test("non-git target: gives up after exhausting retries and surfaces the last overlay-busy error as the failure reason", () => {
-    let attempts = 0;
-    const runCommand = () => {
-      attempts += 1;
-      return { status: 1, stdout: "", stderr: OVERLAY_BUSY_STDERR, error: null };
-    };
-    const result = applyChangeset({
-      directory: SCRATCH_DIR,
-      diffPath: DIFF_PATCH,
-      isGitTarget: false,
-      overlay: { root: T1_ROOT, upperDir: T1_UPPER, workDir: T1_WORK },
-      stateDir: STATE_DIR,
-      runtimeDir: RUNTIME_DIR,
-      homeDir: HOME_DIR,
-      denyList: [],
-      sleepFn: () => {},
-      runCommand,
-    });
-    assert.equal(attempts, 4, RETRIES_EXHAUSTED_MSG);
     assert.equal(result.applied, false);
-    assert.match(result.reason, /Device or resource busy/);
+    assert.match(result.reason, /baseline/i);
+    assert.match(result.reason, /diff/i);
   });
 });
 

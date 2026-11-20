@@ -13,6 +13,7 @@ const CHECK_GATE_HEAD = "abc123\n";
 const CHECK_GATE_DIFF = "diff --git a/f b/f\n+changed\n";
 const CHECK_GATE_SESSION_ID = "ses_gate_fix";
 const CHECK_GATE_FAILED_OUTPUT = "2 tests failed";
+const LEGACY_OVERLAY_NAME = "taskferry-cow-t_legacy";
 
 function fakeGateChild(pid = 9000) {
   const child = new EventEmitter();
@@ -193,6 +194,31 @@ describe("changeset extraction at settlement", () => {
     assert.ok(overlaySrcCount >= 2);
     assert.ok(extractArgs.includes(gitWorktreeAdminDir));
     assert.equal(mgr.status(result.id).changesetStatus, "pending");
+  });
+
+  test("keeps a non-git dispatch pending even when its informational diff is empty", () => {
+    const directory = mkdtempTracked("axi-empty-nongit-");
+    const overlayTmpRoot = mkdtempTracked("axi-empty-nongit-overlay-");
+    let child;
+    const mgr = makeManager({
+      spawnFn: () => { child = fakeChild(); return child; },
+      sandboxEnabled: true,
+      checkBwrapAvailableFn: () => ({ checked: true, available: true }),
+      overlayEnabled: true,
+      checkOverlaySupportFn: () => ({ supported: true }),
+      platform: "linux",
+      runOverlayCommandFn: (command) => command === "git"
+        ? { status: 128, stdout: "", stderr: "fatal: not a git repository\n" }
+        : { status: 0, stdout: "", stderr: "" },
+      rmOverlayTreeFn: () => { throw new Error("must retain overlay"); },
+      overlayTmpRoot,
+    });
+    const result = mgr.dispatch({ prompt: "hello", directory });
+    child.emit("exit", 0, null);
+    const status = mgr.status(result.id);
+    assert.equal(status.changesetStatus, "pending");
+    assert.ok(status.overlayDirs);
+    assert.equal(mgr.result(result.id, { fields: ["diff"] }).diff, "");
   });
 
   test("auto-resolves a zero-change extraction to accepted and cleans up immediately", () => {
@@ -879,7 +905,7 @@ describe("sweepOrphanedOverlays()", () => {
     // 04d5e48's "stop overlay tests from scanning and acting on real host
     // /tmp".
     const overlayTmpRoot = mkdtempTracked("axi-legacy-new-root-");
-    const legacyRoot = path.join(os.tmpdir(), "taskferry-cow-t_legacy");
+    const legacyRoot = path.join(os.tmpdir(), LEGACY_OVERLAY_NAME);
     const cleanedRoots = [];
     const mgr = makeManager({
       overlayTmpRoot,
@@ -887,6 +913,7 @@ describe("sweepOrphanedOverlays()", () => {
         ...baseTask({ id: "t_legacy" }),
         role: "dispatch",
         changesetStatus: "accepted",
+        preDispatchHead: "abc123",
         overlayDirs: {
           root: legacyRoot,
           // tmpRoot deliberately omitted: simulates a legacy record that
@@ -898,7 +925,7 @@ describe("sweepOrphanedOverlays()", () => {
       }],
       readdirFn: (p) => {
         if (p === overlayTmpRoot) return [];
-        if (p === os.tmpdir()) return ["taskferry-cow-t_legacy"];
+        if (p === os.tmpdir()) return [LEGACY_OVERLAY_NAME];
         throw Object.assign(new Error(`ENOENT: ${p}`), { code: "ENOENT" });
       },
       rmOverlayTreeFn: (p) => { cleanedRoots.push(p); },
@@ -940,6 +967,7 @@ describe("sweepOrphanedOverlays()", () => {
       ...baseTask({ id: "t_resolved", directory: os.tmpdir() }),
       role: "dispatch",
       changesetStatus: "accepted",
+      preDispatchHead: "abc123",
       overlayDirs: {
         root: overlayRoot,
         tmpRoot: overlayTmpRoot,
@@ -968,6 +996,22 @@ describe("sweepOrphanedOverlays()", () => {
     mgr.flushPersist();
     const persisted = JSON.parse(fs.readFileSync(tasksFile, "utf8"));
     assert.equal(persisted[0].overlayDirs, null);
+  });
+
+  test("does not sweep an accepted non-git overlay with ambiguous legacy contents", () => {
+    const tmpRoot = mkdtempTracked("axi-legacy-overlay-");
+    const root = path.join(tmpRoot, LEGACY_OVERLAY_NAME);
+    fs.mkdirSync(root, { recursive: true });
+    const task = { ...baseTask({ id: "t_legacy" }), role: "dispatch", changesetStatus: "accepted", preDispatchHead: null, overlayDirs: { root, tmpRoot } };
+    sweepOrphanedOverlaysFor({
+      tasks: new Map([[task.id, task]]),
+      persistedTasks: new Map(),
+      overlayTmpRoot: tmpRoot,
+      releaseOverlay: () => { throw new Error("must not discard ambiguous overlay"); },
+      persistTask: () => {},
+      readdirFn: (dir) => fs.readdirSync(dir),
+    });
+    assert.equal(fs.existsSync(root), true);
   });
 
   test("does not sweep an overlay whose id exists on disk (taskferry#515): a stale daemon with no in-memory record of a live task must not delete its overlay", () => {

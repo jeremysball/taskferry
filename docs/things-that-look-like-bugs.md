@@ -618,7 +618,7 @@ belongs here.
   do not "fix" it by restoring the raw prefix as the message. It would be a
   real bug if an empty body were replaced by the literal string `error:`.
 - Two concurrent non-git tasks sharing the literal mount name
-  `/tmp/taskferry-merged`. Observe: both extractions and applies report the
+  `/tmp/taskferry-merged`. Observe: both extractions use the
   same merged-view path. Deliberate: each bwrap invocation gets its own
   private `--tmpfs /tmp`, so the literal is namespace-local and never a host
   path; the overlay root itself is still per-task. A non-git target or

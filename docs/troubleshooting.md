@@ -217,9 +217,15 @@ released on settlement.
 
 Inspect a pending changeset with `taskferry result <id> --diff`. Use
 `taskferry accept <id>` to apply it or `taskferry reject <id>` to discard it.
-An apply conflict leaves the changeset pending so you can resolve the target
-conflict and retry. A non-git changeset whose live overlay disappeared after
-a reboot can only be rejected.
+An apply conflict leaves a git changeset pending so you can resolve the target
+conflict and retry. Non-git changesets cannot be applied automatically without
+a dispatch baseline. Their informational diff can omit binary contents and
+metadata. Locate the overlay root with `taskferry status <id> --full` and
+preserve it until needed data has been recovered; its `upper/main` is not a
+complete copy (it can contain whiteouts), and the live lower may have changed.
+If the daemon restarts while a non-git dispatch is running, it marks the task
+crashed with `daemon_restarted_overlay_preserved` rather than replacing its
+overlay. The overlay uses temporary storage and may be lost on reboot.
 
 A linked-worktree dispatch can report `directory is missing` when another
 process is changing the repository's `.git/worktrees` administration tree.

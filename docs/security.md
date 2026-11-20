@@ -527,18 +527,19 @@ runs wrapped in
   the real pre-dispatch `HEAD`, survives into `accept`.
 - **Diff-gated writes.** A dispatch's changeset is extracted once at
   process exit and held as `changesetStatus: "pending"` until
-  `taskferry accept <id>` (applies it: `git apply --3way` for a git target, an
-  in-sandbox `rsync` for a non-git one) or `taskferry reject <id>`
-  (discards it). A dispatch whose extraction finds zero changes
-  auto-resolves to `accepted` immediately (a no-op needs no gate).
+  `taskferry accept <id>` (applies a git changeset with `git apply --3way`) or
+  `taskferry reject <id>`
+  (discards it). A git dispatch whose extraction finds zero changes
+  auto-resolves to `accepted` immediately; non-git dispatches remain pending.
   `taskferry result <id> --diff` inspects the pending
   changeset read-only. An advisor-role dispatch (`taskferry advisor`)
   never gets an accept path -- its changeset is always auto-rejected right
-  after extraction. Note the reboot asymmetry for non-git targets: a git
-  changeset's patch is persisted under the state dir and survives a reboot,
-  but a non-git `accept` needs the live overlay to rebuild its merged view,
-  so a non-git changeset left pending across a reboot fails loudly and can
-  only be rejected, never applied. Cleanup has the same persistence
+  after extraction. Automatic application of non-git changesets is refused:
+  no dispatch baseline is available to detect conflicting edits. Locate the
+  pending overlay via `taskferry status <id> --full` and preserve it for
+  recovery: its informational diff can omit binary contents and metadata,
+  and its live lower tree may have changed. Overlay upper layers include
+  whiteouts and opaque directories and are not ordinary full copies. Cleanup has the same persistence
   boundary: each overlay records the tmp root in effect at creation, so
   removal keeps working across daemon restarts even when `TMPDIR` changes,
   but records persisted before that field existed get the old plain

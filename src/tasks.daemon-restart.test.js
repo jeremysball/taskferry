@@ -3,7 +3,10 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { makeManager, fakeChild, baseTask, LUNA_MODEL } from "./tasks.test-helpers.js";
+import { makeManager, fakeChild, baseTask, LUNA_MODEL, mkdtempTracked } from "./tasks.test-helpers.js";
+
+const RESUME_SESSION = "ses_resume_abc";
+const LIVE_TASK = "oc_live";
 
 // A killFn that reports every positive pid as alive (the process.kill(pid, 0)
 // probe never throws) but records which signals were sent -- lets a test
@@ -67,13 +70,72 @@ function runningFixtureTask({ id, logDir, pid, pidStartTime = null }) {
   });
 }
 
+describe("daemon restart non-git overlay retention", () => {
+  test("preserves a running non-git dispatch overlay instead of resuming over it", () => {
+    const tmpRoot = mkdtempTracked("axi-restart-nongit-");
+    const root = path.join(tmpRoot, "taskferry-cow-oc_retained");
+    const upperDir = path.join(root, "upper", "main");
+    fs.mkdirSync(upperDir, { recursive: true });
+    fs.writeFileSync(path.join(upperDir, "worker"), "unrecovered");
+    const { spawns, fakeSpawn } = spawnRecorder();
+    const mgr = makeManager({
+      tasksFixture: (logDir) => [{
+        ...runningFixtureTask({ id: "oc_retained", pid: 12345, logDir }),
+        role: "dispatch",
+        preDispatchHead: null,
+        changesetStatus: "pending",
+        overlayDirs: { root, tmpRoot, upperDir, workDir: path.join(root, "work", "main"), rwBinds: [] },
+      }],
+      logs: { "oc_retained.ndjson": `${JSON.stringify({ sessionID: RESUME_SESSION })}\n` },
+      spawnFn: fakeSpawn,
+      killFn: fakeDeadKill(),
+      cancelGraceMs: 0,
+      overlayTmpRoot: tmpRoot,
+    });
+    const status = mgr.status("oc_retained");
+    assert.equal(status.status, "crashed");
+    assert.equal(status.changesetStatus, "pending");
+    assert.equal(status.overlayDirs.root, root);
+    assert.equal(fs.readFileSync(path.join(upperDir, "worker"), "utf8"), "unrecovered");
+    assert.equal(spawns.length, 0);
+  });
+
+  test("preserves an unkillable restarted worker's pid and refuses to discard its overlay", async () => {
+    const tmpRoot = mkdtempTracked("axi-restart-live-");
+    const root = path.join(tmpRoot, "taskferry-cow-oc_live");
+    const upperDir = path.join(root, "upper", "main");
+    fs.mkdirSync(upperDir, { recursive: true });
+    const mgr = makeManager({
+      tasksFixture: (logDir) => [{
+        ...runningFixtureTask({ id: LIVE_TASK, pid: 12345, logDir }),
+        role: "dispatch",
+        preDispatchHead: null,
+        changesetStatus: "pending",
+        overlayDirs: { root, tmpRoot, upperDir, workDir: path.join(root, "work", "main"), rwBinds: [] },
+      }],
+      logs: { "oc_live.ndjson": `${JSON.stringify({ sessionID: RESUME_SESSION })}\n` },
+      killFn: () => {},
+      cancelGraceMs: 0,
+      overlayTmpRoot: tmpRoot,
+    });
+    const status = mgr.status(LIVE_TASK);
+    assert.equal(status.changesetStatus, "pending");
+    const persisted = JSON.parse(fs.readFileSync(mgr.paths.TASKS_FILE, "utf8"));
+    assert.equal(persisted[0].pid, 12345);
+    assert.equal(persisted[0].changesetStatus, "pending");
+    await assert.rejects(() => mgr.reject(LIVE_TASK), /process.*alive/i);
+    assert.equal(fs.existsSync(upperDir), true);
+  });
+});
+
 describe("daemon restart auto-resume", () => {
+
   test("a task marked running with a valid sessionId in its log is resumed on restart (fresh overlay, sessionId reused)", async () => {
     const { spawns, fakeSpawn } = spawnRecorder();
     const mgr = makeManager({
       tasksFixture: (logDir) => [runningFixtureTask({ id: "oc_resume_1", pid: 12345, logDir })],
       logs: {
-        "oc_resume_1.ndjson": [JSON.stringify({ sessionID: "ses_resume_abc" }), JSON.stringify({ type: "text", part: { text: "hello", messageID: "m1" } })].join("\n") + "\n",
+        "oc_resume_1.ndjson": [JSON.stringify({ sessionID: RESUME_SESSION }), JSON.stringify({ type: "text", part: { text: "hello", messageID: "m1" } })].join("\n") + "\n",
       },
       spawnFn: fakeSpawn,
       killFn: fakeDeadKill(),

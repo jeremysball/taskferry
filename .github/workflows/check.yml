@@ -76,6 +76,12 @@ jobs:
           sudo ninja -C build install
           bwrap --help | grep -q -- --overlay-src
 
+      # Unit tests run before bubblewrap is installed on a fresh runner. Run
+      # this real-sandbox regression again after provisioning it, so a
+      # missing executable cannot silently remove CI coverage.
+      - name: Run resume-context sandbox regression
+        run: env -u TASKFERRY_CHILD node --test src/tasks.resume-context.test.js
+
       - name: Install opencode CLI
         run: npm install -g opencode-ai
 

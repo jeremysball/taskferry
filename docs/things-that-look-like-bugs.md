@@ -15,6 +15,23 @@ A real bug belongs in the issue tracker; a shipped feature belongs in the
 release notes. Only working-as-designed behavior that reads as broken
 belongs here.
 
+- A resumed task lists one recorded prompt under `resume-context/`, rather
+  than repeating the original assignment inline. Deliberate: temporary launch
+  files disappear on settlement, and the worker may have lost its earlier
+  context. Each resume copies only the earliest retained prompt for the same
+  session, executor, and directory, not the conversation or intervening
+  continuations. The recorded prompt does not override
+  the current continuation; partial legacy records and task statuses are not
+  verified assignments or progress. A complete record may be a continuation
+  if earlier requests were pruned; text completeness does not certify its origin.
+  The earliest retained prompt missing from
+  the packet, or a prompt from another session, executor, or directory appearing
+  in it, would be a real bug. Missing pruned history is not reconstructed.
+- A resumed packet has independent request files. Deliberate: hard links would
+  let a worker editing its own packet change another packet's assignment.
+  Taskferry writes the retained request text directly on every platform. This
+  preserves recovery when older output directories are removed or worker-edited.
+  One packet's edits changing another packet would be a real bug.
 - A sandboxed worker cannot read the host's harness session stores. Observe:
   a worker asked to inspect prior OpenCode/Kilo/Pi sessions, or to clean up
   `~/.local/share/opencode`, finds the directory empty or missing even
@@ -157,21 +174,12 @@ belongs here.
    which cannot detect reuse) and passes open for legacy records with no
    recorded start time, which are signalled anyway. See
    `docs/daemon.md#recovery`.
-- A fresh dispatch's opencode session/db state not being visible to
-   `taskferry dispatch --session-id` on an *earlier* task — expected, by
-   design (taskferry#501). Every sandboxed dispatch gets its own
-   per-task data home (`<cacheDir>/opencode-data/<taskId>`, a separate
-   opencode.sqlite/session store per task) so concurrent dispatches never
-   contend on one shared `opencode.db` — which crashed workers with
-   `opencode_unknownerror`/`"Failed to execute statement"` under
-   concurrent dispatch. The resume surface that actually matters is
-   preserved: a task's own later calls (its summary-generation child, a
-   daemon-restart auto-resume of the same task, an advisor follow-up
-   resuming that same advisor task's session) all reuse the *same* task's
-   data home, so the `--session <id>` resume still resolves. Cross-task
-   session resumption of a sandboxed session was never a supported
-   feature — it only worked as a side effect of the shared data home — so
-   only the accidental sharing is gone.
+- Sandboxed tasks normally have separate executor data homes so independent
+  sessions do not contend on a shared database (taskferry#501). A launch
+  resuming a retained session instead inherits the earliest matching task's
+  data-home scope, so it can find that session; summary children use their
+  source task's scope. If the owner or its data has been pruned, the request
+  packet alone cannot restore the executor's session.
 - A resumed worker starting under a different pid than the one recorded for
    the task — expected; resume is a fresh spawn (fresh overlay, fresh pid),
    not a re-attachment to the old orphaned process. The pid persisted on the

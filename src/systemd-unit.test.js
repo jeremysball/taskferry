@@ -5,9 +5,12 @@ import os from "node:os";
 import path from "node:path";
 import { describe, test } from "node:test";
 import { fileURLToPath } from "node:url";
+import { resolveConfigPath } from "./config.js";
 import {
   DAEMON_LOG_FILE,
   UNIT_NAME,
+  PATH_UNIT_NAME,
+  PATH_TEMPLATE,
   assertRepoSupportsSupervisor,
   assertUnitValue,
   escapeUnitSpecifiers,
@@ -17,8 +20,11 @@ import {
   isJournalPersistent,
   parseJournaldStorage,
   renderRotateService,
+  renderPathUnit,
   renderSystemdUnit,
   resolveLogTarget,
+  resolveDaemonConfigPath,
+  resolveEnvFileGate,
   resolveUnitDir,
   substituteTemplate,
 } from "./systemd-unit.js";
@@ -59,6 +65,7 @@ function supervisorFixture(t) {
   fs.writeFileSync(path.join(repo, "src", "client.js"), "TASKFERRY_DAEMON_SUPERVISOR startDaemonViaSystemd\n");
   fs.writeFileSync(path.join(repo, "src", "daemon.js"), "SUPERVISED_RESTART_EXIT_CODE TASKFERRY_DAEMON_SUPERVISOR\n");
   fs.writeFileSync(path.join(repo, "deploy", "systemd", "taskferry-daemon.service.in"), templateText());
+  fs.copyFileSync(path.join(REPO_ROOT, PATH_TEMPLATE), path.join(repo, PATH_TEMPLATE));
   return repo;
 }
 
@@ -67,14 +74,163 @@ function render(options = {}) {
     repo: FIXTURE_REPO,
     nodePath: FIXTURE_NODE,
     pathEnv: FIXTURE_PATH,
+    gateConfigHome: path.join(FIXTURE_HOME, ".config"),
+    gateEnvFile: path.join(FIXTURE_HOME, "secrets"),
     template: templateText(),
     ...options,
   });
 }
 
-function runInstaller(args, env = {}) {
-  return spawnSync(process.execPath, [INSTALLER, ...args], { encoding: "utf8", env: { ...process.env, ...env } });
+function runInstaller(t, args, env = {}) {
+  const cleanEnv = Object.fromEntries(Object.entries(process.env).filter(([key]) => !/^(TASKFERRY_|XDG_|GIT_)/u.test(key)));
+  const shim = temporaryDir(t);
+  fs.writeFileSync(path.join(shim, "systemctl"), "#!/bin/sh\nprintf 'HOME=%s\\n' \"$HOME\"\n", { mode: 0o755 });
+  return spawnSync(process.execPath, [INSTALLER, ...args], { encoding: "utf8", env: { ...cleanEnv, HOME: temporaryDir(t), PATH: `${shim}${path.delimiter}${process.env.PATH}`, ...env } });
 }
+
+function isolatedInstaller(t, { gated = false, stalePath = false, extraEnv = {}, managerEnv = "", args = [], repo = supervisorFixture(t) } = {}) {
+  const home = temporaryDir(t);
+  const unitDir = temporaryDir(t);
+  const shim = temporaryDir(t);
+  const calls = path.join(shim, "calls");
+  const envFile = path.join(home, "secrets", "env");
+  if (stalePath) fs.writeFileSync(path.join(unitDir, PATH_UNIT_NAME), "old path unit\n");
+  if (gated) {
+    const config = path.join(home, ".config", "taskferry");
+    fs.mkdirSync(config, { recursive: true });
+    fs.writeFileSync(path.join(config, "config.json"), JSON.stringify({ envFile }));
+  }
+  fs.writeFileSync(path.join(shim, "systemctl"), `#!/bin/sh\nprintf '%s\\n' "$*" >> "$CALLS"\ncase "$*" in *show-environment*) printf 'HOME=%s\\n' "$HOME"; printf '%s' "$MANAGER_ENV"; exit 0;; *is-active*) echo inactive; exit 3;; esac\nexit 0\n`, { mode: 0o755 });
+  const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !/^(TASKFERRY_|XDG_|GIT_)/u.test(key)));
+  Object.assign(env, { HOME: home, XDG_RUNTIME_DIR: temporaryDir(t), PATH: `${shim}${path.delimiter}${process.env.PATH}`, CALLS: calls, MANAGER_ENV: managerEnv }, extraEnv);
+  const result = spawnSync(process.execPath, [INSTALLER, "--repo", repo, "--unit-dir", unitDir, "--log-target", "journal", ...args], { encoding: "utf8", env });
+  return { result, envFile, unitDir, calls: fs.existsSync(calls) ? fs.readFileSync(calls, "utf8").trim().split("\n") : [] };
+}
+
+describe("env-file gated start", () => {
+  test("daemon config path matches the default config resolver", () => {
+    assert.equal(resolveDaemonConfigPath(), resolveConfigPath({}));
+  });
+
+  test("resolves the gate and rejects invalid configuration", (t) => {
+    const homeDir = temporaryDir(t);
+    const dir = path.join(homeDir, ".config", "taskferry");
+    const config = path.join(dir, "config.json");
+    assert.equal(resolveEnvFileGate({ homeDir }), null);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(config, JSON.stringify({ envFile: path.join(homeDir, "secret") }));
+    assert.equal(resolveEnvFileGate({ homeDir }), path.join(homeDir, "secret"));
+    fs.writeFileSync(config, JSON.stringify({ envFile: "relative" }));
+    assert.throws(() => resolveEnvFileGate({ homeDir }), /envFile.*absolute/u);
+    fs.writeFileSync(config, "{");
+    assert.throws(() => resolveEnvFileGate({ homeDir }), /help:/u);
+    fs.rmSync(config);
+    fs.mkdirSync(config);
+    assert.throws(() => resolveEnvFileGate({ homeDir }), (error) => /help:/u.test(error.message) && Boolean(error.cause));
+  });
+
+  test("renders a path unit and removes service installation only when gated", () => {
+    const template = fs.readFileSync(path.join(REPO_ROOT, PATH_TEMPLATE), "utf8");
+    const envFile = path.join(FIXTURE_HOME, "100%secret");
+    const unit = renderPathUnit({ repo: FIXTURE_REPO, envFile, template });
+    assert.match(unit, new RegExp(`^PathExists=${escapeRegExp(envFile.replaceAll("%", "%%"))}$`, "mu"));
+    assert.match(unit, /^Unit=taskferry-daemon\.service$/mu);
+    assert.match(unit, /^WantedBy=default.target$/mu);
+    for (const invalid of ["", "relative", "/with space", "/line\nbreak"]) {
+      assert.throws(() => renderPathUnit({ repo: FIXTURE_REPO, envFile: invalid, template }));
+    }
+    assert.match(render(), /^\[Install\]$/mu);
+    assert.doesNotMatch(render({ gated: true }), /^\[Install\]$/mu);
+  });
+
+  test("gated support requires the path template and service marker", (t) => {
+    const repo = supervisorFixture(t);
+    fs.rmSync(path.join(repo, PATH_TEMPLATE));
+    assert.deepEqual(findMissingSupervisorSupport({ repo }), []);
+    assert.throws(() => assertRepoSupportsSupervisor({ repo, gated: true }), /is missing/u);
+    fs.copyFileSync(path.join(REPO_ROOT, PATH_TEMPLATE), path.join(repo, PATH_TEMPLATE));
+    const service = path.join(repo, "deploy", "systemd", "taskferry-daemon.service.in");
+    fs.writeFileSync(service, templateText().replace("@INSTALL_SECTION@", ""));
+    assert.deepEqual(findMissingSupervisorSupport({ repo }), []);
+    assert.throws(() => assertRepoSupportsSupervisor({ repo, gated: true }), /lacks @INSTALL_SECTION@/u);
+  });
+
+  test("installer enables the path in order and tolerates an inactive service", (t) => {
+    const gated = isolatedInstaller(t, { gated: true, args: ["--enable"] });
+    assert.equal(gated.result.status, 0, gated.result.stderr);
+    assert.deepEqual(gated.calls, ["--user show-environment", "--user daemon-reload", "--user disable taskferry-daemon.service", "--user reset-failed taskferry-daemon.service taskferry-daemon.path", "--user enable --now taskferry-daemon.path", "--user --no-pager status taskferry-daemon.path", "--user is-active taskferry-daemon.service"]);
+    assert.match(gated.result.stdout, /taskferry-daemon.service: inactive/u);
+    assert.match(fs.readFileSync(path.join(gated.unitDir, PATH_UNIT_NAME), "utf8"), /PathExists=/u);
+    assert.doesNotMatch(fs.readFileSync(path.join(gated.unitDir, UNIT_NAME), "utf8"), /^\[Install\]$/mu);
+    const plain = isolatedInstaller(t, { args: ["--enable"] });
+    assert.equal(plain.result.status, 0, plain.result.stderr);
+    assert.ok(plain.calls.includes("--user enable --now taskferry-daemon.service"));
+    assert.ok(plain.calls.every((call) => !call.includes(PATH_UNIT_NAME)));
+  });
+
+  test("dry run follows manager config and warns about shell overrides", (t) => {
+    const other = temporaryDir(t);
+    const gated = isolatedInstaller(t, { gated: true, args: ["--dry-run"], extraEnv: { TASKFERRY_ENV_FILE: "/ignored", XDG_CONFIG_HOME: other } });
+    assert.equal(gated.result.status, 0, gated.result.stderr);
+    assert.match(gated.result.stdout, new RegExp(`PathExists=${escapeRegExp(gated.envFile)}`, "u"));
+    assert.match(gated.result.stderr, /TASKFERRY_ENV_FILE/u);
+    assert.match(gated.result.stderr, /gate follows/u);
+    const plain = isolatedInstaller(t, { args: ["--dry-run"] });
+    assert.equal(plain.result.status, 0, plain.result.stderr);
+    assert.match(plain.result.stdout, /^\[Install\]$/mu);
+    assert.doesNotMatch(plain.result.stdout, /PathExists=/u);
+  });
+
+  test("manager overrides select and pin the effective gate", (t) => {
+    const configHome = temporaryDir(t);
+    const envFile = path.join(configHome, "manager-secret");
+    const configDir = path.join(configHome, "taskferry");
+    fs.mkdirSync(configDir);
+    fs.writeFileSync(path.join(configDir, "config.json"), JSON.stringify({ envFile: path.join(configHome, "other") }));
+    const result = isolatedInstaller(t, { args: ["--dry-run"], managerEnv: `XDG_CONFIG_HOME=${configHome}\nTASKFERRY_ENV_FILE=${envFile}\n` });
+    assert.equal(result.result.status, 0, result.result.stderr);
+    assert.match(result.result.stdout, new RegExp(`PathExists=${escapeRegExp(envFile)}`, "u"));
+    assert.match(result.result.stdout, new RegExp(`Environment=TASKFERRY_ENV_FILE=${escapeRegExp(envFile)}`, "u"));
+    assert.match(result.result.stdout, new RegExp(`Environment=XDG_CONFIG_HOME=${escapeRegExp(configHome)}`, "u"));
+    const empty = isolatedInstaller(t, { gated: true, args: ["--dry-run"], managerEnv: "TASKFERRY_ENV_FILE=\n" });
+    assert.equal(empty.result.status, 0, empty.result.stderr);
+    assert.doesNotMatch(empty.result.stdout, /PathExists=/u);
+  });
+
+  test("ungated installation warns about but leaves an old path unit", (t) => {
+    const plain = isolatedInstaller(t, { stalePath: true, args: ["--dry-run"] });
+    assert.equal(plain.result.status, 0, plain.result.stderr);
+    assert.match(plain.result.stderr, /disable --now taskferry-daemon\.path/u);
+    assert.equal(fs.readFileSync(path.join(plain.unitDir, PATH_UNIT_NAME), "utf8"), "old path unit\n");
+    const gated = isolatedInstaller(t, { gated: true, args: ["--dry-run"] });
+    assert.match(gated.result.stdout, /PathExists=/u);
+  });
+
+  test("installer checks gated template support without requiring it ungated", (t) => {
+    const repo = supervisorFixture(t);
+    fs.rmSync(path.join(repo, PATH_TEMPLATE));
+    const gated = isolatedInstaller(t, { repo, gated: true, args: ["--dry-run"] });
+    assert.notEqual(gated.result.status, 0);
+    assert.match(gated.result.stderr, /is missing/u);
+    const plain = isolatedInstaller(t, { repo, args: ["--dry-run"] });
+    assert.equal(plain.result.status, 0, plain.result.stderr);
+  });
+
+  test("systemd-analyze accepts the rendered gated pair", (t) => {
+    const probe = spawnSync("systemd-analyze", ["--version"], { encoding: "utf8" });
+    if (probe.error?.code === "ENOENT") {
+      t.skip("systemd-analyze is not installed");
+      return;
+    }
+    const dir = temporaryDir(t);
+    const service = path.join(dir, UNIT_NAME);
+    const unitPath = path.join(dir, PATH_UNIT_NAME);
+    fs.writeFileSync(service, render({ repo: REPO_ROOT, nodePath: process.execPath, pathEnv: process.env.PATH, gated: true }));
+    fs.writeFileSync(unitPath, renderPathUnit({ repo: REPO_ROOT, envFile: path.join(dir, "env"), template: fs.readFileSync(path.join(REPO_ROOT, PATH_TEMPLATE), "utf8") }));
+    const result = spawnSync("systemd-analyze", ["--user", "verify", service, unitPath], { encoding: "utf8" });
+    assert.equal(result.status, 0, result.stderr);
+  });
+});
 
 describe("systemd unit rendering", () => {
   test("renders a supervised unit that points at the checkout's daemon entry", () => {
@@ -151,7 +307,7 @@ describe("checkout guard for the installed unit", () => {
 
   test("the installer's dry run renders this checkout, not the primary checkout", (t) => {
     const xdgConfig = temporaryDir(t);
-    const result = runInstaller(["--dry-run"], { XDG_CONFIG_HOME: xdgConfig });
+    const result = runInstaller(t, ["--dry-run"], { XDG_CONFIG_HOME: xdgConfig });
     assert.equal(result.status, 0, result.stderr);
     const topLevel = execFileSync("git", ["-C", REPO_ROOT, "rev-parse", "--show-toplevel"], { encoding: "utf8" }).trim();
     assert.match(result.stdout, new RegExp(`^repo: ${escapeRegExp(topLevel)}$`, "mu"));
@@ -162,7 +318,7 @@ describe("checkout guard for the installed unit", () => {
   test("the installer refuses --repo for an unsupported checkout", (t) => {
     const fixture = supervisorFixture(t);
     fs.rmSync(path.join(fixture, "src", "daemon.js"));
-    const result = runInstaller(["--dry-run", "--repo", fixture]);
+    const result = runInstaller(t, ["--dry-run", "--repo", fixture]);
     assert.equal(result.status, 1);
     assert.match(result.stderr, /refusing to install a unit pointing at/u);
     assert.match(result.stderr, /src\/daemon\.js is missing/u);
@@ -174,7 +330,7 @@ describe("checkout guard for the installed unit", () => {
     const repo = supervisorFixture(t);
     const unitDir = temporaryDir(t);
     fs.writeFileSync(path.join(unitDir, UNIT_NAME), `ExecStart=${NODE_BINARY} ${OTHER_REPO}/src/daemon.js\n`);
-    const result = runInstaller(["--dry-run", "--repo", repo, "--unit-dir", unitDir]);
+    const result = runInstaller(t, ["--dry-run", "--repo", repo, "--unit-dir", unitDir]);
     assert.equal(result.status, 0, result.stderr);
     assert.match(result.stderr, new RegExp(`currently points at ${escapeRegExp(OTHER_REPO)}`, "u"));
     assert.match(result.stdout, new RegExp(`^repo: ${escapeRegExp(repo)}$`, "mu"));

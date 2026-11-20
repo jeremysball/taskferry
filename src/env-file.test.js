@@ -93,6 +93,7 @@ describe("parseEnvFile()", () => {
 
   test("returns {} for empty input", () => {
     assert.deepEqual(parseEnvFile(""), {});
+    assert.deepEqual(parseEnvFile("# comment only\n"), {});
   });
 
   test("throws on a line with no '='", () => {

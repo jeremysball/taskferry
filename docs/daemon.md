@@ -92,6 +92,28 @@ outlive the daemon process.
   systemd started it, nothing restarted it, and clients believed the socket
   was supervised. The installer now refuses that render and names the missing
   file.
+- **Env-file-gated startup.** The installer reads the user manager's
+  environment, then its effective config (`XDG_CONFIG_HOME` or
+  `$HOME/.config`) and `TASKFERRY_ENV_FILE` override. If the effective env
+  file is set, it requires an absolute path and installs
+  `taskferry-daemon.path` to start the service when that file exists. The
+  path unit, not the service, is enabled at boot. The service pins that
+  config location and env-file path so later manager environment changes
+  cannot silently move it away from the gate. Re-run the installer after
+  changing the config's `envFile` or the manager's environment: until then,
+  the service still reads the old env file and the path unit watches it.
+  The installer warns when the shell's settings differ from the manager's.
+  An ungated installation is not pinned: if a later manager environment or
+  config change introduces an env file, it will still start at boot without
+  a path gate until the installer is re-run.
+  Write the file atomically and completely; even an empty file satisfies
+  the gate and starts a daemon without secrets. Removing the file does not stop a running
+  daemon, which retains its last good environment.
+  If switching back to no `envFile`, the installer only warns about an old
+  path unit; it remains enabled and can trigger the service until explicitly
+  disabled with `systemctl --user disable --now taskferry-daemon.path` and
+  its unit file is deleted. If a start limit is hit, after both units are
+  loaded recover with `systemctl --user reset-failed taskferry-daemon.service taskferry-daemon.path`.
 - **Logging.** `--log-target auto` uses journald when it is persistent
   (`Storage=persistent`, or `auto` with `/var/log/journal` present), which is
   durable across boots and bounded by journald's `SystemMaxUse` / `MaxFiles`
@@ -124,9 +146,12 @@ outlive the daemon process.
   systemd reporting the unit dead while an unsupervised daemon held the
   socket. Instead it closes and exits `75`, and `Restart=on-failure` boots a
   fresh supervised daemon (`docs/things-that-look-like-bugs.md`).
-- **Stopping.** `systemctl --user stop taskferry-daemon.service` sends
-  `SIGTERM` to the main process only (`KillMode=process`), so running tasks
-  keep running, the same contract as killing a detached daemon by hand.
+- **Stopping.** In gated mode run
+  `systemctl --user stop taskferry-daemon.path taskferry-daemon.service`;
+  stopping only the service lets the path unit start it again. Without a gate,
+  stop `taskferry-daemon.service` alone. The service sends `SIGTERM` to the
+  main process only (`KillMode=process`), so running tasks keep running, the
+  same contract as killing a detached daemon by hand.
 - **Environment knobs.** `TASKFERRY_DAEMON_SUPERVISOR` (`systemd` | `spawn`)
   pins the decision explicitly; `TASKFERRY_DAEMON_UNIT` overrides the unit
   name. Neither has a CLI flag because they describe the host, not one

@@ -10,10 +10,13 @@ import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { resolveConfigPath } from "../src/config.js";
 import {
   DAEMON_LOG_BASENAME,
   DEFAULT_LOG_KEEP,
   DEFAULT_LOG_MAX_BYTES,
+  PATH_TEMPLATE,
+  PATH_UNIT_NAME,
   ROTATE_SERVICE_NAME,
   ROTATE_TIMER_NAME,
   UNIT_NAME,
@@ -22,8 +25,11 @@ import {
   findDetachedDaemon,
   isJournalPersistent,
   parseJournaldStorage,
+  renderPathUnit,
   renderRotateService,
   renderSystemdUnit,
+  resolveDaemonConfigPath,
+  resolveEnvFileGate,
   resolveLogTarget,
   resolveUnitDir,
 } from "../src/systemd-unit.js";
@@ -55,7 +61,9 @@ Options:
   -h, --help             Show this help.
 
 The installer never starts a systemd unit unless --enable is passed, and never
-spawns a detached daemon.`;
+spawns a detached daemon. When config.envFile is set, a path unit starts the
+service when the file exists. Stop both units in gated mode:
+  systemctl --user stop taskferry-daemon.path taskferry-daemon.service`;
 
 /**
  * @param {string[]} argv
@@ -141,6 +149,24 @@ function systemctlUser(args) {
   if (result.status !== 0) throw new Error(`error: systemctl --user ${args.join(" ")} exited ${result.status}`);
 }
 
+/** @returns {NodeJS.ProcessEnv} */
+function managerEnvironment() {
+  const result = spawnSync("systemctl", ["--user", "show-environment"], { encoding: "utf8" });
+  if (result.error || result.status !== 0) {
+    throw new Error(`error: cannot read the systemd user manager environment: ${result.error?.message || result.stderr.trim() || `exit ${result.status}`}\nhelp: start the user manager and re-run the installer`);
+  }
+  /** @type {NodeJS.ProcessEnv} */
+  const env = {};
+  for (const line of result.stdout.split("\n")) {
+    const index = line.indexOf("=");
+    if (index > 0) env[line.slice(0, index)] = line.slice(index + 1);
+  }
+  if (!env.HOME || !path.isAbsolute(env.HOME)) {
+    throw new Error("error: systemd user manager HOME is missing or not absolute\nhelp: set an absolute HOME in the user manager and re-run the installer");
+  }
+  return env;
+}
+
 /**
  * @param {string} unitText
  * @param {string} repo
@@ -174,13 +200,17 @@ function buildRotation({ repo, logTarget }) {
 }
 
 /**
- * @param {{unitDir: string, unitText: string, rotation: {service: string, timer: string} | undefined, enable: boolean}} plan
+ * @param {{unitDir: string, unitText: string, pathUnitText: string | null, rotation: {service: string, timer: string} | undefined, enable: boolean}} plan
  * @returns {void}
  */
-function install({ unitDir, unitText, rotation, enable }) {
+function install({ unitDir, unitText, pathUnitText, rotation, enable }) {
   fs.mkdirSync(unitDir, { recursive: true });
   writeAtomic(path.join(unitDir, UNIT_NAME), unitText);
   process.stdout.write(`wrote ${path.join(unitDir, UNIT_NAME)}\n`);
+  if (pathUnitText !== null) {
+    writeAtomic(path.join(unitDir, PATH_UNIT_NAME), pathUnitText);
+    process.stdout.write(`wrote ${path.join(unitDir, PATH_UNIT_NAME)}\n`);
+  }
   if (rotation) {
     fs.mkdirSync(LOG_DIR, { recursive: true, mode: 0o700 });
     writeAtomic(path.join(unitDir, ROTATE_SERVICE_NAME), rotation.service);
@@ -189,14 +219,28 @@ function install({ unitDir, unitText, rotation, enable }) {
   }
   systemctlUser(["daemon-reload"]);
   if (!enable) {
-    process.stdout.write(`\nnext steps (after stopping any detached daemon):\n  systemctl --user enable --now ${UNIT_NAME}\n`);
+    process.stdout.write("\nnext steps (after stopping any detached daemon):\n");
+    if (pathUnitText !== null) process.stdout.write(`  systemctl --user disable ${UNIT_NAME}\n`);
+    process.stdout.write(`  systemctl --user enable --now ${pathUnitText === null ? UNIT_NAME : PATH_UNIT_NAME}\n`);
     if (rotation) process.stdout.write(`  systemctl --user enable --now ${ROTATE_TIMER_NAME}\n`);
     return;
   }
-  systemctlUser(["enable", "--now", UNIT_NAME]);
+  if (pathUnitText !== null) {
+    systemctlUser(["disable", UNIT_NAME]);
+    systemctlUser(["reset-failed", UNIT_NAME, PATH_UNIT_NAME]);
+    systemctlUser(["enable", "--now", PATH_UNIT_NAME]);
+  } else {
+    systemctlUser(["enable", "--now", UNIT_NAME]);
+  }
   if (rotation) systemctlUser(["enable", "--now", ROTATE_TIMER_NAME]);
-  process.stdout.write(`\nenabled and started ${UNIT_NAME}\n`);
-  systemctlUser(["--no-pager", "status", UNIT_NAME]);
+  const enabled = pathUnitText === null ? UNIT_NAME : PATH_UNIT_NAME;
+  process.stdout.write(`\nenabled and started ${enabled}\n`);
+  systemctlUser(["--no-pager", "status", enabled]);
+  if (pathUnitText !== null) {
+    const result = spawnSync("systemctl", ["--user", "is-active", UNIT_NAME], { encoding: "utf8" });
+    if (result.error) throw result.error;
+    process.stdout.write(`${UNIT_NAME}: ${(result.stdout || "").trim() || "unknown"}\n`);
+  }
 }
 
 /**
@@ -225,8 +269,19 @@ function main(argv) {
     process.stdout.write(`${HELP}\n`);
     return;
   }
+  const managerEnv = managerEnvironment();
+  const daemonConfig = resolveDaemonConfigPath({ homeDir: managerEnv.HOME, env: managerEnv });
+  const envFile = resolveEnvFileGate({ homeDir: managerEnv.HOME, env: managerEnv });
+  const gated = envFile !== null;
+  const shellConfig = resolveConfigPath(process.env);
+  if (process.env.TASKFERRY_ENV_FILE !== undefined && process.env.TASKFERRY_ENV_FILE !== managerEnv.TASKFERRY_ENV_FILE) {
+    process.stderr.write("warning: shell TASKFERRY_ENV_FILE differs from the user manager; the gate follows the manager\n");
+  }
+  if (shellConfig !== daemonConfig) {
+    process.stderr.write(`warning: shell config is ${shellConfig}, but the gate follows daemon config ${daemonConfig}\n`);
+  }
   const repo = path.resolve(options.repo ?? gitTopLevel(SCRIPT_DIR));
-  assertRepoSupportsSupervisor({ repo });
+  assertRepoSupportsSupervisor({ repo, gated });
   const template = fs.readFileSync(path.join(repo, TEMPLATE), "utf8");
 
   const journalPersistent = isJournalPersistent({
@@ -235,7 +290,11 @@ function main(argv) {
   });
   const logTarget = resolveLogTarget({ requested: options.logTarget, journalPersistent });
   const unitDir = options.unitDir === null ? resolveUnitDir({ env: process.env }) : path.resolve(options.unitDir);
-  const unitText = renderSystemdUnit({ nodePath: process.execPath, pathEnv: process.env.PATH || "", repo, template, logTarget });
+  const unitText = renderSystemdUnit({ nodePath: process.execPath, pathEnv: process.env.PATH || "", repo, template, logTarget, gated, gateConfigHome: path.dirname(path.dirname(daemonConfig)), gateEnvFile: envFile || "" });
+  const pathUnitText = envFile === null ? null : renderPathUnit({ repo, envFile, template: fs.readFileSync(path.join(repo, PATH_TEMPLATE), "utf8") });
+  if (!gated && fs.existsSync(path.join(unitDir, PATH_UNIT_NAME))) {
+    process.stderr.write(`warning: existing ${path.join(unitDir, PATH_UNIT_NAME)} can still trigger the service; run systemctl --user disable --now ${PATH_UNIT_NAME} and delete that file if no longer needed\n`);
+  }
   const rotation = buildRotation({ repo, logTarget });
 
   process.stdout.write(`repo: ${repo}\nnode: ${process.execPath}\nunit dir: ${unitDir}\nlog target: ${logTarget}\n`);
@@ -243,6 +302,7 @@ function main(argv) {
 
   if (options.dryRun) {
     process.stdout.write(`\n--- ${path.join(unitDir, UNIT_NAME)} ---\n${unitText}`);
+    if (pathUnitText !== null) process.stdout.write(`\n--- ${path.join(unitDir, PATH_UNIT_NAME)} ---\n${pathUnitText}`);
     if (rotation) {
       process.stdout.write(`\n--- ${path.join(unitDir, ROTATE_SERVICE_NAME)} ---\n${rotation.service}`);
       process.stdout.write(`\n--- ${path.join(unitDir, ROTATE_TIMER_NAME)} ---\n${rotation.timer}`);
@@ -252,7 +312,7 @@ function main(argv) {
 
   if (options.enable) refuseDetachedOwner();
   process.stdout.write(`log file name: ${DAEMON_LOG_BASENAME}, max ${DEFAULT_LOG_MAX_BYTES} bytes, keep ${DEFAULT_LOG_KEEP}\n`);
-  install({ unitDir, unitText, rotation, enable: options.enable });
+  install({ unitDir, unitText, pathUnitText, rotation, enable: options.enable });
 }
 
 try {

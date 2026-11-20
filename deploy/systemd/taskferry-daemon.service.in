@@ -2,7 +2,7 @@
 Description=TaskFerry daemon
 Documentation=file://@REPO@/docs/daemon.md
 # A malformed config.json or a busy socket must not become an infinite
-# restart loop. Five attempts in a minute is plenty for a slow-mount race.
+# restart loop. Limit repeated attempts for a bad config or busy socket.
 StartLimitIntervalSec=60
 StartLimitBurst=5
 
@@ -15,6 +15,7 @@ Environment=TASKFERRY_STATE_DIR=%h/.local/state/taskferry
 Environment=TASKFERRY_RUNTIME_DIR=%t/taskferry
 Environment=TASKFERRY_SOCKET_PATH=%t/taskferry/daemon.sock
 Environment=TASKFERRY_DAEMON_SUPERVISOR=systemd
+@GATE_ENVIRONMENT@
 # The daemon spawns worker CLIs (opencode, pi, kilo, bwrap, git). A systemd
 # user unit's default PATH is only /usr/local/bin:/usr/bin, so the installer
 # bakes the installing shell's PATH in here; without it, dispatches fail to
@@ -47,5 +48,4 @@ TimeoutStopSec=30
 @LOG_STDERR@
 SyslogIdentifier=taskferry-daemon
 
-[Install]
-WantedBy=default.target
+@INSTALL_SECTION@

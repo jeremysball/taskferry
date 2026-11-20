@@ -843,6 +843,22 @@ belongs here.
   `systemctl start` were followed by an unsupervised daemon spawn, or if a
   machine with no marker (the marker is touched by the unit's
   `ExecStartPre`) lost its auto-start behavior.
+- A gated service starts again after stopping only the service. The enabled
+  path unit deliberately starts it while the env file exists; stop both
+  `taskferry-daemon.path` and `taskferry-daemon.service` to keep it stopped.
+  It would be a bug if stopping both restarted the daemon.
+- A gated service is inactive after boot until its env file exists. This
+  prevents exhausting the restart limit before secrets are unlocked; it is a
+  bug if the enabled path unit does not start it after the file appears.
+- Before the first supervised start in a boot, a cold client may spawn a
+  detached daemon because the runtime marker does not exist. It will fail if
+  the configured env file is missing; a narrow race after the file appears
+  can let it win the socket. It is a bug if a client ignores an existing
+  supervisor marker and spawns a detached daemon.
+- The systemd installer rejects a relative `envFile` even though the daemon
+  loader accepts one: a path unit requires an absolute path, and the unit's
+  working directory would otherwise determine its meaning. It is a bug if
+  the installer rejects a representable absolute path.
 - The file-log rotation timer can drop a few lines written during the copy.
   Observe: `~/.local/state/taskferry/logs/daemon.log.1` is a snapshot, and a
   line emitted in the window between `cp` and the in-place truncation is in

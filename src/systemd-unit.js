@@ -1,8 +1,11 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { loadConfig } from "./config.js";
 
 export const UNIT_NAME = "taskferry-daemon.service";
+export const PATH_UNIT_NAME = "taskferry-daemon.path";
+export const PATH_TEMPLATE = path.join("deploy", "systemd", "taskferry-daemon.path.in");
 export const ROTATE_SERVICE_NAME = "taskferry-daemon-logrotate.service";
 export const ROTATE_TIMER_NAME = "taskferry-daemon-logrotate.timer";
 export const DAEMON_LOG_BASENAME = "daemon.log";
@@ -42,12 +45,17 @@ function readUtf8(file) {
 /**
  * @param {object} options
  * @param {string} options.repo
+ * @param {boolean} [options.gated]
  * @param {(file: string) => string} [options.readFileFn]
  * @returns {Array<{file: string, marker: string | null}>}
  */
-export function findMissingSupervisorSupport({ repo, readFileFn = readUtf8 }) {
+export function findMissingSupervisorSupport({ repo, gated = false, readFileFn = readUtf8 }) {
   const missing = [];
-  for (const { file, markers } of SUPERVISOR_SUPPORT) {
+  const checks = gated ? [...SUPERVISOR_SUPPORT, { file: PATH_TEMPLATE, markers: ["@ENV_FILE@"] }, {
+    file: path.join("deploy", "systemd", "taskferry-daemon.service.in"),
+    markers: ["@INSTALL_SECTION@", "@GATE_ENVIRONMENT@"],
+  }] : SUPERVISOR_SUPPORT;
+  for (const { file, markers } of checks) {
     let text;
     try {
       text = readFileFn(path.join(repo, file));
@@ -74,10 +82,11 @@ export function findMissingSupervisorSupport({ repo, readFileFn = readUtf8 }) {
  * @param {object} options
  * @param {string} options.repo
  * @param {(file: string) => string} [options.readFileFn]
+ * @param {boolean} [options.gated]
  * @returns {void}
  */
-export function assertRepoSupportsSupervisor({ repo, readFileFn = readUtf8 }) {
-  const missing = findMissingSupervisorSupport({ repo, readFileFn });
+export function assertRepoSupportsSupervisor({ repo, gated = false, readFileFn = readUtf8 }) {
+  const missing = findMissingSupervisorSupport({ repo, gated, readFileFn });
   if (missing.length === 0) return;
   const detail = missing
     .map(({ file, marker }) => (marker ? `${file} lacks ${marker}` : `${file} is missing`))
@@ -131,6 +140,44 @@ export function assertUnitValue(label, value, { allowWhitespace = false } = {}) 
  */
 export function escapeUnitSpecifiers(value) {
   return value.replaceAll("%", "%%");
+}
+
+/** @param {{homeDir?: string, env?: NodeJS.ProcessEnv}} [options] */
+export function resolveDaemonConfigPath({ homeDir = os.homedir(), env = {} } = {}) {
+  const configHome = env.XDG_CONFIG_HOME || path.join(homeDir, ".config");
+  if (!path.isAbsolute(configHome)) {
+    throw new Error("error: user manager XDG_CONFIG_HOME must be an absolute path\nhelp: set an absolute XDG_CONFIG_HOME in the user manager");
+  }
+  return path.join(configHome, "taskferry", "config.json");
+}
+
+/** @param {{homeDir?: string, env?: NodeJS.ProcessEnv}} [options] @returns {string | null} */
+export function resolveEnvFileGate({ homeDir = os.homedir(), env = {} } = {}) {
+  const configPath = resolveDaemonConfigPath({ homeDir, env });
+  let config;
+  try {
+    config = loadConfig({ configPath });
+  } catch (error) {
+    if (error instanceof Error && error.message.includes("help:")) throw error;
+    throw new Error(`error: could not read ${configPath}: ${error instanceof Error ? error.message : String(error)}\nhelp: fix or remove the file; the installer only needs it to find "envFile"`, { cause: error });
+  }
+  const envFile = env.TASKFERRY_ENV_FILE !== undefined ? env.TASKFERRY_ENV_FILE : config.envFile;
+  if (envFile === undefined || envFile === "") return null;
+  if (typeof envFile !== "string" || !path.isAbsolute(envFile)) {
+    throw new Error(`error: envFile for ${configPath} must be an absolute path for systemd\nhelp: use an absolute envFile path`);
+  }
+  return envFile;
+}
+
+/** @param {{repo: string, envFile: string, template: string}} options */
+export function renderPathUnit({ repo, envFile, template }) {
+  assertUnitValue("repo root", repo);
+  assertUnitValue("envFile", envFile);
+  if (!path.isAbsolute(envFile)) throw new Error("error: envFile must be an absolute path");
+  return substituteTemplate(template, {
+    "@REPO@": escapeUnitSpecifiers(repo),
+    "@ENV_FILE@": escapeUnitSpecifiers(envFile),
+  });
 }
 
 /**
@@ -225,12 +272,20 @@ export function substituteTemplate(template, values) {
  * @param {string} options.template
  * @param {"journal" | "file"} [options.logTarget]
  * @param {string} [options.logFile]
+ * @param {boolean} [options.gated]
+ * @param {string} [options.gateConfigHome]
+ * @param {string} [options.gateEnvFile]
  * @returns {string}
  */
-export function renderSystemdUnit({ repo, nodePath, pathEnv, template, logTarget = "journal", logFile = DAEMON_LOG_FILE }) {
+export function renderSystemdUnit({ repo, nodePath, pathEnv, template, logTarget = "journal", logFile = DAEMON_LOG_FILE, gated = false, gateConfigHome = "", gateEnvFile = "" }) {
   assertUnitValue("repo root", repo);
   assertUnitValue("node path", nodePath);
   assertUnitValue("PATH", pathEnv);
+  if (gated) {
+    assertUnitValue("manager config home", gateConfigHome);
+    assertUnitValue("envFile", gateEnvFile);
+    if (!path.isAbsolute(gateConfigHome) || !path.isAbsolute(gateEnvFile)) throw new Error("error: gate paths must be absolute");
+  }
   const logging = renderLogging({ logTarget, logFile });
   return substituteTemplate(template, {
     "@NODE@": escapeUnitSpecifiers(nodePath),
@@ -239,6 +294,10 @@ export function renderSystemdUnit({ repo, nodePath, pathEnv, template, logTarget
     "@LOG_PREP@": logging.prep,
     "@LOG_STDOUT@": logging.stdout,
     "@LOG_STDERR@": logging.stderr,
+    "@GATE_ENVIRONMENT@": gated
+      ? `Environment=XDG_CONFIG_HOME=${escapeUnitSpecifiers(gateConfigHome)}\nEnvironment=TASKFERRY_ENV_FILE=${escapeUnitSpecifiers(gateEnvFile)}`
+      : "",
+    "@INSTALL_SECTION@": gated ? "" : "[Install]\nWantedBy=default.target",
   });
 }
 

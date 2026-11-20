@@ -223,6 +223,108 @@ export function resolvePreDispatchHead(directory, runCommand = defaultRunCommand
   return null;
 }
 
+// Git/libc messages are localized. These hints are deliberately limited to
+// the English EOVERFLOW signatures; the original error remains authoritative.
+const LOCK_OVERFLOW = /Unable to create '([^\n]+)': Value too large for defined data type/;
+const OBJECT_OVERFLOW = /unable to create temporary file: Value too large for defined data type/;
+const OBJECT_FANOUT = /^[0-9a-f]{2}$/;
+
+/**
+ * @param {string} target
+ * @param {(p: string) => {uid: number, gid: number}} statFn
+ * @param {number|undefined} uid
+ * @param {number|undefined} gid
+ * @returns {string|null}
+ */
+function ownershipCandidate(target, statFn, uid, gid) {
+  try {
+    const owners = statFn(target);
+    const labels = [];
+    if (uid !== undefined && owners.uid !== uid) labels.push(`user ${owners.uid}`);
+    if (gid !== undefined && owners.gid !== gid) labels.push(`group ${owners.gid}`);
+    return labels.length ? `${target} (${labels.join(", ")})` : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Scratch snapshots are bound after the directory overlays, so the live
+ * gitdir is not the filesystem Git saw. Resolve the last matching bind.
+ * @param {string} target
+ * @param {Array<{path: string, bindSrc: string}>} binds
+ * @returns {string}
+ */
+function snapshotSource(target, binds) {
+  for (let i = binds.length - 1; i >= 0; i--) {
+    const relative = path.relative(binds[i].path, target);
+    if (relative === "" || (!relative.startsWith(`..${path.sep}`) && relative !== ".." && !path.isAbsolute(relative))) {
+      return path.join(binds[i].bindSrc, relative);
+    }
+  }
+  return target;
+}
+/**
+ * @param {string} objects
+ * @returns {string[]}
+ */
+function objectFanoutPaths(objects) {
+  try {
+    return fs.readdirSync(objects, { withFileTypes: true })
+      .filter((entry) => (entry.isDirectory() || entry.isSymbolicLink()) && OBJECT_FANOUT.test(entry.name))
+      .map((entry) => path.join(objects, entry.name));
+  } catch {
+    return [];
+  }
+}
+
+
+/**
+ * Git does not report the failing object fanout. Inspect the object store and
+ * its fanouts as candidates, not as proof that any one caused the failure.
+ * @param {string} directory
+ * @param {typeof defaultRunCommand} runCommand
+ * @param {Array<{path: string, bindSrc: string}>} binds
+ * @returns {string[]}
+ */
+function objectOwnershipCandidates(directory, runCommand, binds) {
+  try {
+    const result = runCommand("git", ["-C", directory, "rev-parse", "--git-path", "objects"]);
+    if (result.error || result.status !== 0 || !result.stdout.trim()) return [];
+    const objects = snapshotSource(path.resolve(directory, result.stdout.trim()), binds);
+    return [objects, ...objectFanoutPaths(objects)];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * @param {object} params
+ * @param {string} params.directory
+ * @param {CommandResult} params.result
+ * @param {typeof defaultRunCommand} params.runCommand
+ * @param {(p: string) => {uid: number, gid: number}} params.statFn
+ * @param {number|undefined} params.uid
+ * @param {number|undefined} params.gid
+ * @param {Array<{path: string, bindSrc: string}>} params.binds
+ * @returns {string}
+ */
+function extractionFailure({ directory, result, runCommand, statFn, uid, gid, binds }) {
+  const detail = (result.stderr || result.error?.message || "unknown error").trim();
+  const original = `error: git diff extraction failed for ${directory} (exit ${result.status ?? "null"}): ${detail}`;
+  if (result.error) return original;
+  const lock = detail.match(LOCK_OVERFLOW);
+  /** @type {string[]} */
+  let targets = [];
+  if (lock) targets = [snapshotSource(path.resolve(directory, path.dirname(lock[1])), binds)];
+  if (!lock && OBJECT_OVERFLOW.test(detail)) targets = objectOwnershipCandidates(directory, runCommand, binds);
+  const candidates = targets.map((target) => ownershipCandidate(target, statFn, uid, gid)).filter((candidate) => candidate !== null);
+  if (!candidates.length) return original;
+  const shown = candidates.slice(0, 4).join(", ");
+  const remainder = candidates.length > 4 ? ` and ${candidates.length - 4} more` : "";
+  return `${original}\nPossible unmapped ownership in the sandbox. Host observations: ${shown}${remainder}. The merged overlay view may differ, and these paths may not be the cause. Inspect ownership relative to the TaskFerry daemon's user and group; change ownership only if appropriate.`;
+}
+
 /**
  * Extracts the overlay's upper into a single diff, anchored on the real
  * pre-dispatch HEAD (not whatever HEAD ends up at inside the overlay --
@@ -246,6 +348,9 @@ export function resolvePreDispatchHead(directory, runCommand = defaultRunCommand
  * @param {(dirPath: string) => void} [params.mkdirFn]
  * @param {(ms: number) => void} [params.sleepFn] - injectable for tests; real callers get a blocking sleep between retries
  * @param {() => string} [params.scratchDirFn]
+ * @param {(p: string) => {uid: number, gid: number}} [params.statFn]
+ * @param {number} [params.daemonUid]
+ * @param {number} [params.daemonGid]
  * @returns {{diffPath: string, hasChanges: boolean, headDrift: null | {from: string, to: string, recovered: boolean|null, conflictDetail: string|null}}}
  * @throws {Error} when the bwrap extraction fails to start or exits non-zero
  */
@@ -265,6 +370,9 @@ export function extractGitDiff({
   mkdirFn = (dirPath) => fs.mkdirSync(dirPath, { recursive: true, mode: 0o700 }),
   sleepFn = sleepSync,
   scratchDirFn = () => path.join(os.tmpdir(), `taskferry-stale-base-${crypto.randomUUID()}`),
+  statFn = fs.statSync,
+  daemonUid = typeof process.geteuid === "function" ? process.geteuid() : undefined,
+  daemonGid = typeof process.getegid === "function" ? process.getegid() : undefined,
 }) {
   // socketPath: null -- this is a daemon-internal changeset extraction, not a
   // worker sandbox; it never calls back to the daemon, so no socket bind. The
@@ -280,7 +388,7 @@ export function extractGitDiff({
   const script = `git -C ${shQuote(directory)} add -A && { git -C ${shQuote(directory)} diff --cached ${shQuote(preDispatchHead)}; rc=$?; git -C ${shQuote(directory)} reset > /dev/null 2>&1; exit $rc; }`;
   const result = runExtractionBwrap(runCommand, [...bwrapArgs, "--", "sh", "-c", script], sleepFn);
   if (result.error || result.status !== 0) {
-    throw new Error(`error: git diff extraction failed for ${directory} (exit ${result.status ?? "null"}): ${(result.stderr || result.error?.message || "unknown error").trim()}`);
+    throw new Error(extractionFailure({ directory, result, runCommand, statFn, uid: daemonUid, gid: daemonGid, binds: overlayRwFileBinds }));
   }
   mkdirFn(pathDirname(diffPath));
   writeFileFn(diffPath, result.stdout);

@@ -76,6 +76,15 @@ jobs:
           sudo ninja -C build install
           bwrap --help | grep -q -- --overlay-src
 
+      # A fresh login is needed to acquire the newly added supplementary group.
+      # Provision it only on this disposable runner, never on a developer host.
+      - name: Run real unmapped ownership regressions
+        run: |
+          sudo groupadd --system taskferry-ownership-regression
+          sudo usermod -a -G taskferry-ownership-regression "$(id -un)"
+          sudo -u "$(id -un)" env "PATH=$PATH" LC_ALL=C TASKFERRY_REQUIRE_OWNERSHIP_REGRESSION=1 \
+            "$(mise which node)" --test --test-name-pattern='unmapped ownership extraction' src/changeset.integration.test.js
+
       # Unit tests run before bubblewrap is installed on a fresh runner. Run
       # this real-sandbox regression again after provisioning it, so a
       # missing executable cannot silently remove CI coverage.

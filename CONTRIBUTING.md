@@ -32,6 +32,18 @@ reorientation, "What to build, in order" #3.
 runner glob. A new test file is included in CI automatically; name it
 `src/foo.test.js` and no `package.json` change is needed.
 
+The real unmapped-ownership extraction cases require Linux, working bubblewrap
+user namespaces and OverlayFS, and a chownable supplementary group outside
+the sandbox's gid map. On a suitably configured host, run them with:
+
+```sh
+LC_ALL=C TASKFERRY_REQUIRE_OWNERSHIP_REGRESSION=1 node --test --test-name-pattern='unmapped ownership extraction' src/changeset.integration.test.js
+```
+
+Required mode fails instead of skipping when prerequisites are missing. CI
+provisions a supplementary group on its disposable runner before running it;
+do not change host group membership merely to run these cases locally.
+
 ### Changed the CLI surface?
 
 If a PR changes a command, flag, default, or output shape, regenerate the

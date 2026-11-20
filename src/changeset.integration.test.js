@@ -21,6 +21,7 @@ after(() => {
 const TMP_ROOT_PREFIX = "axi-int-tmp-";
 const RUN_ROOT_PREFIX = "axi-int-run-";
 const TRACKED_FILE = "tracked.txt";
+const CHANGED_CONTENT = "base\nchanged\n";
 const GIT_EMAIL = "user.email=t@t";
 const GIT_NAME = "user.name=t";
 const DRIFT_TEST_FILE = "line2.txt";
@@ -100,7 +101,7 @@ describe("overlay round trips (real bwrap)", () => {
 
     const applied = applyChangeset({ directory, diffPath, isGitTarget: true });
     assert.deepEqual(applied, { applied: true, reason: null });
-    assert.equal(fs.readFileSync(path.join(directory, TRACKED_FILE), "utf8"), "base\nchanged\n");
+    assert.equal(fs.readFileSync(path.join(directory, TRACKED_FILE), "utf8"), CHANGED_CONTENT);
     assert.equal(fs.existsSync(path.join(directory, "added.txt")), true);
     // Applied as a working-tree diff, NOT replayed as the worker's commit.
     const log = spawnSync("git", ["-C", directory, "log", "--oneline"], { encoding: "utf8" }).stdout;
@@ -327,4 +328,90 @@ describe("resolveHeadDrift() (real git, no bwrap required)", () => {
     assert.ok(result.conflictDetail);
     assert.equal(fs.existsSync(scratchDir), false, "the scratch worktree must be removed even after a conflict");
   });
+});
+
+// An outer supplementary group is not mapped by bwrap's single-gid user
+// namespace. Many hosts have no such group, so this fixture is conditional.
+function chownableUnmappedGid() {
+  if (typeof process.getegid !== "function" || typeof process.getgroups !== "function") return null;
+  const probe = fs.mkdtempSync(path.join(os.tmpdir(), "axi-gid-probe-"));
+  try {
+    const egid = process.getegid();
+    const gids = process.getgroups().filter((gid) => gid !== egid);
+    if (process.geteuid?.() === 0) gids.push(egid === 1 ? 2 : 1);
+    for (const gid of gids) {
+      try {
+        fs.chownSync(probe, -1, gid);
+        return gid;
+      } catch {
+        // Try another group.
+      }
+    }
+    return null;
+  } finally {
+    fs.rmSync(probe, { recursive: true, force: true });
+  }
+}
+
+describe("unmapped ownership extraction (real bwrap)", () => {
+  for (const failure of ["index.lock", "object tempfile"]) {
+    test(`reports candidate ownership for ${failure} and retains worker changes`, (t) => {
+      const required = process.env.TASKFERRY_REQUIRE_OWNERSHIP_REGRESSION === "1";
+      if (!required && process.env.TASKFERRY_TEST_UNMAPPED_OWNERSHIP !== "1") {
+        t.skip("set TASKFERRY_TEST_UNMAPPED_OWNERSHIP=1 on a host with working user namespaces and OverlayFS");
+        return;
+      }
+      if (!support.supported) {
+        assert.equal(required, false, `ownership regression requires overlay support: ${support.reason}`);
+        t.skip(`overlay integration skipped: ${support.reason}`);
+        return;
+      }
+      const gid = chownableUnmappedGid();
+      if (gid === null) {
+        assert.equal(required, false, "ownership regression requires a chownable unmapped group");
+        t.skip("no chownable group outside the sandbox's gid map");
+        return;
+      }
+      const directory = fs.mkdtempSync(path.join(os.tmpdir(), "axi-int-owner-"));
+      const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), TMP_ROOT_PREFIX));
+      const runtimeDir = fs.mkdtempSync(path.join(os.tmpdir(), RUN_ROOT_PREFIX));
+      trackedTmpDirs.push(directory, tmpRoot, runtimeDir);
+      spawnSync("git", ["init", "-q", directory]);
+      fs.writeFileSync(path.join(directory, TRACKED_FILE), "base\n");
+      spawnSync("git", ["-C", directory, "add", "-A"]);
+      spawnSync("git", ["-C", directory, "-c", GIT_EMAIL, "-c", GIT_NAME, "commit", "-qm", "base", NO_VERIFY]);
+      const preDispatchHead = resolvePreDispatchHead(directory);
+      assert.ok(preDispatchHead);
+      const overlay = overlayPaths("int_owner", tmpRoot);
+      fs.mkdirSync(overlay.upperDir, { recursive: true, mode: 0o700 });
+      fs.mkdirSync(overlay.workDir, { recursive: true, mode: 0o700 });
+      const ran = runInOverlay({ directory, overlay, runtimeDir, homeDir: os.homedir(), script: `echo changed >> ${directory}/${TRACKED_FILE}` });
+      assert.equal(ran.status, 0, `sandboxed worker write failed: ${ran.stderr}`);
+      const upperFile = path.join(overlay.upperDir, TRACKED_FILE);
+      let affected = path.join(directory, ".git");
+      if (failure === "object tempfile") {
+        const hash = spawnSync("git", ["-C", directory, "hash-object", "--stdin"], { input: CHANGED_CONTENT, encoding: "utf8" });
+        assert.equal(hash.status, 0, hash.stderr);
+        assert.match(hash.stdout.trim(), /^[0-9a-f]{40,64}$/);
+        affected = path.join(directory, ".git", "objects", hash.stdout.trim().slice(0, 2));
+        fs.mkdirSync(affected, { recursive: true });
+      }
+      fs.chownSync(affected, -1, gid);
+      const diffPath = path.join(tmpRoot, "int_owner.patch");
+      assert.throws(() => extractGitDiff({
+        directory, overlay, preDispatchHead, runtimeDir, diffPath,
+        overlayRwBinds: [], stateDir: tmpRoot, homeDir: os.homedir(), denyList: [],
+      }), (err) => {
+        assert.match(err.message, /Value too large for defined data type/);
+        assert.match(err.message, /Possible unmapped ownership/);
+        assert.ok(err.message.includes(affected));
+        assert.ok(err.message.includes(`group ${gid}`));
+        return true;
+      });
+      assert.equal(fs.existsSync(diffPath), false);
+      assert.equal(fs.readFileSync(upperFile, "utf8"), CHANGED_CONTENT);
+      assert.equal(fs.readFileSync(path.join(directory, TRACKED_FILE), "utf8"), "base\n");
+      cleanupOverlay({ root: overlay.root, tmpRoot });
+    });
+  }
 });

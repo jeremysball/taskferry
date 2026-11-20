@@ -1,6 +1,7 @@
 import os from "node:os";
 import path from "node:path";
 import { encode } from "@toon-format/toon";
+import { helpText } from "./args.js";
 import { renderPretty } from "./pretty.js";
 
 const ANSI_RESET = "\x1b[0m";
@@ -503,7 +504,7 @@ export function homeView(value, { executablePath, workspace }) {
   return {
     workspace,
     bin: displayPath,
-    description: "Manage background OpenCode tasks in the current workspace.",
+    description: helpText().description,
     counts: value.counts,
     tasks: Array.isArray(value.tasks) ? rows : value.tasks,
     next: truncated ? [...next, `Run taskferry list --limit ${total} for all ${total} tasks`] : next,

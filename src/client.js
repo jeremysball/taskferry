@@ -723,6 +723,27 @@ function resolveClientMaxBufferBytes(env, rawMaxBufferBytes) {
   );
 }
 
+// Precedence: an explicit caller value (the --auto-start / --no-auto-start
+// flags) > TASKFERRY_AUTO_START > the autoStart config key > true. Any set env
+// value other than "0" enables, as before the config key existed.
+//
+// General-purpose escape hatch: turning it off makes a client fail fast on a
+// missing daemon instead of spawning one (e.g. a script that should never have
+// side effects, or a host where systemd owns the daemon). Not needed for lock
+// safety: the detached booter (startDaemonBooter, above) never blocks the
+// caller on the lock regardless of autoStart, so a short-timeout poller no
+// longer has to opt out just to avoid the old inline-boot livelock.
+/**
+ * @param {NodeJS.ProcessEnv} env
+ * @param {boolean|undefined} requested
+ * @returns {boolean}
+ */
+function resolveClientAutoStart(env, requested) {
+  if (requested !== undefined) return requested;
+  if (env.TASKFERRY_AUTO_START !== undefined) return env.TASKFERRY_AUTO_START !== "0";
+  return /** @type {boolean|undefined} */ (loadConfig({ env }).autoStart) ?? true;
+}
+
 /**
  * @param {ConnectClientOptions} [options]
  * @returns {Promise<DaemonClient>}
@@ -732,13 +753,7 @@ export async function connectClient({
   stateDir = resolveStateDir(env),
   runtimeDir = resolveRuntimeDir({ env, stateDir }),
   socketPath = env.TASKFERRY_SOCKET_PATH || path.join(runtimeDir, SOCKET_FILENAME),
-  // General-purpose escape hatch: a caller can set TASKFERRY_AUTO_START=0 to
-  // fail fast on a missing daemon instead of spawning one (e.g. a script that
-  // should never have side effects). Not needed for lock safety — the
-  // detached booter (startDaemonBooter, above) never blocks the caller on
-  // the lock regardless of autoStart, so a short-timeout poller no longer
-  // has to opt out just to avoid the old inline-boot livelock.
-  autoStart = env.TASKFERRY_AUTO_START !== "0",
+  autoStart: requestedAutoStart = undefined,
   startupTimeoutMs = 5000,
   retryDelayMs = 25,
   maxBufferBytes: rawMaxBufferBytes = undefined,
@@ -749,6 +764,7 @@ export async function connectClient({
 } = {}) {
   const rawCap = rawMaxBufferBytes ?? rawMaxResponseBytes;
   const maxBufferBytes = resolveClientMaxBufferBytes(env, rawCap);
+  const autoStart = resolveClientAutoStart(env, requestedAutoStart);
   return connectClientCore({
     env, stateDir, runtimeDir, socketPath, autoStart, startupTimeoutMs,
     retryDelayMs, maxBufferBytes, maxQueuedEvents, ensureDaemonFn, startupOptions,

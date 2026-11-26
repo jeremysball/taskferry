@@ -29,6 +29,7 @@ test("parses dispatch and applies its argument defaults", () => {
   assert.deepEqual(parseArgs(["dispatch", "--prompt", "do it"], { cwd: CWD }), {
     command: "dispatch",
     options: {
+      autoStart: void 0,
       prompt: "do it",
       directory: CWD,
       model: void 0,
@@ -52,7 +53,7 @@ test("parses dispatch and applies its argument defaults", () => {
 test("parses each command's required arguments and defaults", () => {
   const cwd = CWD;
   assert.equal(parseArgs(["cancel", "oc_1"]).options.taskId, "oc_1");
-  assert.deepEqual(parseArgs(["wait", "oc_1"]).options, { taskId: "oc_1", timeoutMs: void 0, tailChars: void 0, full: false, summarize: false });
+  assert.deepEqual(parseArgs(["wait", "oc_1"]).options, { taskId: "oc_1", autoStart: void 0, timeoutMs: void 0, tailChars: void 0, full: false, summarize: false });
   assert.equal(parseArgs(["advisor", "--prompt", "help", "--model", "test/model"], { cwd }).options.directory, undefined);
   assert.equal(parseArgs(["status", "oc_1"]).options.full, false);
   assert.equal(parseArgs(["tail", "oc_1"]).options.chars, undefined);
@@ -193,6 +194,7 @@ test("parses workspace, stream, and result options with their constrained values
     "--fields",
     "message,narration",
   ]).options, {
+    autoStart: void 0,
     taskId: "oc_1",
     full: true,
     fields: ["message", "narration"],
@@ -213,6 +215,7 @@ test("parses workspace, stream, and result options with their constrained values
     "ndjson",
     SUMMARIES_FLAG,
   ]).options, {
+    autoStart: void 0,
     directory: "/tmp/project",
     format: "ndjson",
     summaries: true,
@@ -221,6 +224,7 @@ test("parses workspace, stream, and result options with their constrained values
     all: false,
   });
   assert.deepEqual(parseArgs(["list", "--all", "--limit", "10"]).options, {
+    autoStart: void 0,
     directory: void 0,
     all: true,
     limit: 10,
@@ -229,6 +233,7 @@ test("parses workspace, stream, and result options with their constrained values
 
 test("watch --all parses like list --all: directory cleared, all: true, and rejects combining with --directory or --task-id (taskferry#315)", () => {
   assert.deepEqual(parseArgs(["watch", "--all"]).options, {
+    autoStart: void 0,
     directory: void 0,
     all: true,
     format: "toon",
@@ -285,6 +290,7 @@ test("does not offer the --rw-bind/--ro-bind rename hint on commands that don't 
 
 test("parses watch --task-id and rejects it for commands that don't take it", () => {
   assert.deepEqual(parseArgs(["watch", "--task-id", "oc_1"], { cwd: CWD }).options, {
+    autoStart: void 0,
     directory: void 0,
     format: "toon",
     summaries: false,
@@ -303,6 +309,7 @@ test("rejects empty option values and trailing global arguments as usage errors"
 
 test("parses wait --summarize and rejects it combined with --timeout or --tail-chars", () => {
   assert.deepEqual(parseArgs(["wait", "oc_1", SUMMARIZE_FLAG]).options, {
+    autoStart: void 0,
     taskId: "oc_1",
     timeoutMs: void 0,
     tailChars: void 0,

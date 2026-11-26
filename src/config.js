@@ -26,6 +26,7 @@ export function _resetConfigCache() {
 
 /** @type {Record<string, string>} */
 const CONFIG_FIELD_TYPES = {
+  autoStart: "boolean",
   maxConcurrentTasks: "number",
   memoryAdmissionPercent: "number",
   maxDispatchesPerWindow: "number",

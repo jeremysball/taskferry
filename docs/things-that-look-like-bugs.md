@@ -609,6 +609,15 @@ belongs here.
   config; auto-start would otherwise boot a daemon with defaults the user
   thought they had overridden. It becomes a real bug if the client ever grows
   an offline/local-only command that must work without a valid config.
+- A daemon still starting itself on a host whose config says
+  `"autoStart": false`. Observe: with auto-start off, a client such as
+  `taskferry status` fails fast while no daemon is running, yet a daemon that
+  is already running comes back by itself after a source change. Deliberate:
+  `autoStart` only decides whether a client may start a missing daemon. The
+  daemon's restart onto new source spawns its replacement directly (or exits
+  for its systemd unit to restart it) and never reads the setting;
+  `src/autostart.test.js` fails if daemon code starts to. It would be a real
+  bug if a client with auto-start off spawned a daemon.
 - An empty error value when a tool returns a bare `error:` line with no message
   body — expected. `extractErrorParts` in `src/output.js` uses nullish
   coalescing when stripping the `error:`/`help:` prefixes, so a line that is

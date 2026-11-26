@@ -7,9 +7,16 @@ recovery behavior.
 
 ## Auto-start
 
-No command ever requires starting the daemon by hand. Auto-start is split
-between two processes, so a caller that's killed mid-boot never holds
-`daemon-start.lock` itself:
+By default a client starts the daemon when its socket is unavailable, so no
+command requires starting it by hand. To turn that off, set `"autoStart": false`
+in the user config or `TASKFERRY_AUTO_START=0`. `taskferry <command>
+--auto-start` and `--no-auto-start` override both, and the environment
+overrides the config. Any set environment value other than `0` enables
+auto-start. With auto-start off, start the daemon yourself, for example with
+its systemd user service (see Supervised mode below).
+
+Auto-start is split between two processes, so a caller that's killed
+mid-boot never holds `daemon-start.lock` itself:
 
 - `connectClient()` (in `src/client.js`) tries to open the socket first. On
   failure, it fires a detached, unref'd booter subprocess via
@@ -18,8 +25,8 @@ between two processes, so a caller that's killed mid-boot never holds
   and isn't tied to its lifetime. `connectClient()` then runs its own
   connect-retry loop against the socket (polling every `retryDelayMs`,
   up to `startupTimeoutMs`); it does not take the lock or wait on the
-  booter. Set `TASKFERRY_AUTO_START=0` to skip both the booter and the
-  retry loop and fail fast on a missing daemon instead.
+  booter. When auto-start is off, it skips both the booter and the
+  retry loop and fails fast on a missing daemon instead.
 - The detached booter (the re-exec'd `src/client.js`) runs
   `ensureDaemonStarted()`: it takes the exclusive file lock
   (`daemon-start.lock` in the runtime directory), re-checks the socket in
@@ -186,7 +193,8 @@ outlive the daemon process.
 There is no `taskferry stop` command. Find the pid with `taskferry doctor
 --full` and send it `SIGTERM` or `SIGINT`; either triggers a clean shutdown
 that closes all client sockets, closes the server, and removes the socket
-file. The next `taskferry` invocation auto-starts a replacement.
+file. The next `taskferry` invocation starts a replacement if auto-start is
+enabled; with it off, start the daemon yourself.
 
 Stopping the daemon does not stop tasks it has already dispatched — see
 [Recovery](#recovery).

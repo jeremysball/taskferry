@@ -1,3 +1,5 @@
+// The auto-start flags pushed this flat flag table past the 400-line soft cap.
+/* eslint-disable max-lines */
 import { RESULT_FIELDS } from "./protocol.js";
 import { UsageError } from "./errors.js";
 import { KNOWN_EXECUTORS } from "./executor.js";
@@ -15,6 +17,14 @@ import { isNonNegativeInteger } from "./numbers.js";
 
 /** @type {Record<string, CommandSpec>} */
 const COMMAND_SPECS = commandSpecs;
+
+// Every command that talks to the daemon takes the auto-start override pair;
+// only the two local-only commands (setup, init) never connect.
+const AUTO_START_COMMANDS = Object.keys(COMMAND_SPECS).filter((name) => name !== "setup" && name !== "init");
+const AUTO_START_FLAG_HELP = {
+  "--auto-start": "start the daemon if it is not running (overrides TASKFERRY_AUTO_START and the autoStart config key)",
+  "--no-auto-start": "fail instead of starting the daemon (overrides TASKFERRY_AUTO_START and the autoStart config key)",
+};
 
 const POSITIONAL_TASK_COMMANDS = ["cancel", "wait", "status", "tail", "summary", "result", "accept", "reject", "output"];
 const PROMPT_REQUIRED_COMMANDS = ["dispatch"];
@@ -67,6 +77,7 @@ export { UsageError };
  *   allow?: string[],
  *   key?: string,
  *   bool?: boolean,
+ *   value?: boolean,
  *   allowEmpty?: boolean,
  *   coerce?: (value: string, name: string, command: string) => unknown,
  *   deprecate?: string,
@@ -74,6 +85,16 @@ export { UsageError };
  *   target?: string,
  * }} FlagDef
  */
+
+/**
+ * A command's documented flags: its own spec plus the shared auto-start pair.
+ * @param {string} command
+ * @returns {Record<string, string>}
+ */
+function commandOptions(command) {
+  const { options } = COMMAND_SPECS[command];
+  return AUTO_START_COMMANDS.includes(command) ? { ...options, ...AUTO_START_FLAG_HELP } : options;
+}
 
 /**
  * @param {string} [command]
@@ -91,7 +112,7 @@ export function helpText(command) {
     };
   }
   const spec = COMMAND_SPECS[command];
-  return { command, usage: spec.usage, description: spec.description, options: spec.options, examples: spec.examples };
+  return { command, usage: spec.usage, description: spec.description, options: commandOptions(command), examples: spec.examples };
 }
 
 /**
@@ -101,7 +122,7 @@ export function helpText(command) {
  */
 function usageError(message, command) {
   if (command && COMMAND_SPECS[command]) {
-    const validFlags = Object.keys(COMMAND_SPECS[command].options).join(", ") || "none";
+    const validFlags = Object.keys(commandOptions(command)).join(", ") || "none";
     return new UsageError(message, `Valid flags for ${command}: ${validFlags}. Run \`taskferry ${command} --help\` for details`);
   }
   return new UsageError(message, "Run `taskferry --help` for usage");
@@ -247,7 +268,8 @@ function flagKeyName(flagName, def) {
 }
 
 // Every flag command allows gets its default here: bare booleans default
-// false, everything else defaults to undefined (omitted from the RPC
+// false, everything else (including a bare flag with a fixed `value`, whose
+// unset state must stay distinguishable) defaults to undefined (omitted from the RPC
 // payload -- see isSet() in commands.js) until the caller sets it. Derived
 // from FLAGS' own per-command allow-lists so a command's default-option
 // shape can't drift out of sync with which flags it actually accepts.
@@ -261,7 +283,7 @@ function flagDefaultsFor(command) {
   const defaults = {};
   for (const [flagName, def] of Object.entries(FLAGS)) {
     if (def.mention || !def.allow?.includes(command)) continue;
-    defaults[flagKeyName(flagName, def)] = def.bool ? false : void 0;
+    defaults[flagKeyName(flagName, def)] = def.bool && def.value === undefined ? false : void 0;
   }
   return defaults;
 }
@@ -462,6 +484,9 @@ const FLAGS = {
   "--summarize": { allow: ["wait"], bool: true },
   "--summarize-context": { allow: ["advisor"], bool: true, key: "summarizeContext" },
   "--stats": { allow: ["doctor"], bool: true },
+  // The pair shares one key and leaves it undefined when neither is given, so the environment and config decide.
+  "--auto-start": { allow: AUTO_START_COMMANDS, key: "autoStart", bool: true, value: true },
+  "--no-auto-start": { allow: AUTO_START_COMMANDS, key: "autoStart", bool: true, value: false },
   "--keep-days": { allow: ["prune"], key: "keepDays", coerce: (v, n) => parseNumber(v, n, { min: 0 }) },
   "--dry-run": { allow: ["prune"], key: "dryRun", bool: true },
   "--no-sandbox": { allow: ["dispatch"], bool: true, key: "noSandbox" },
@@ -532,7 +557,7 @@ function handleMigrationFlag(ctx, name, def) {
  */
 function handleBooleanFlag(ctx, name, def, inlineValue, index) {
   if (inlineValue !== undefined) throw usageError(`${name} does not take a value`, ctx.command);
-  setOption(ctx.options, flagKeyName(name, def), true, ctx.command, ctx.seen);
+  setOption(ctx.options, flagKeyName(name, def), def.value ?? true, ctx.command, ctx.seen);
   return index + 1;
 }
 

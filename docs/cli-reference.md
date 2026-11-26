@@ -15,6 +15,12 @@ Exit codes distinguish three outcomes:
 Run `taskferry --help` for the command list, or `taskferry <command> --help`
 for a single command's usage, options, and examples as TOON.
 
+Every command that talks to the daemon (all but `setup` and `init`) also takes
+`--auto-start` or `--no-auto-start`, which decides whether the client may start
+a missing daemon. The flag beats `TASKFERRY_AUTO_START`, which beats the
+`autoStart` config key, which defaults to on. Giving both flags is a usage
+error. See [daemon.md](daemon.md#auto-start).
+
 ## `taskferry` (no arguments)
 
 Shows a live view of the current workspace: task counts by status, the task

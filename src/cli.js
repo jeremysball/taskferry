@@ -27,7 +27,7 @@ import { resolveInvokedPath } from "./paths.js";
  *   cwd?: string,
  *   env?: NodeJS.ProcessEnv,
  *   executablePath?: string,
- *   connectClient?: (opts: {env: NodeJS.ProcessEnv}) => Promise<import("./commands.js").Client>,
+ *   connectClient?: (opts: {env: NodeJS.ProcessEnv, autoStart?: boolean}) => Promise<import("./commands.js").Client>,
  *   setup?: (opts: {checkoutDirectory: string, cliPath: string, homeDirectory: string, env: NodeJS.ProcessEnv}) => unknown,
  *   init?: (directory: string, deps?: {io?: Io}) => Promise<unknown>,
  *   signal?: AbortSignal,
@@ -172,7 +172,7 @@ async function runDaemonCommand(parsed, { io, cwd, env, executablePath, connectC
     if (readsPromptFromStdin(parsed)) {
       parsed.options.prompt = await readPromptFromStdin(io.stdin || process.stdin, parsed.command, signal);
     }
-    client = await connectClient({ env });
+    client = await connectClient({ env, autoStart: /** @type {boolean|undefined} */ (parsed.options.autoStart) });
     const value = await runCommand(parsed.command, parsed.options, {
       client,
       io,

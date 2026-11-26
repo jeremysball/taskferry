@@ -32,6 +32,7 @@ message — there is no silent typo tolerance.
 
 | Config key | Env var (still works, takes precedence) | Type | Default |
 |---|---|---|---|
+| `autoStart` | `TASKFERRY_AUTO_START` | boolean | `true`; clients start the daemon when its socket is unavailable. `--auto-start` or `--no-auto-start` after any daemon command overrides both the environment and the config. Any set env value other than `0` enables it. Clients only: the daemon's own restart onto new source is unaffected ([things-that-look-like-bugs.md](things-that-look-like-bugs.md)). |
 | `maxConcurrentTasks` | `TASKFERRY_MAX_CONCURRENT_TASKS` | number | `4` |
 | `memoryAdmissionPercent` | `TASKFERRY_MEMORY_ADMISSION_PERCENT` | number (1-100) | `85`; when effective memory usage reaches this percentage, new launches stay `queued` while running workers continue. Usage is `(limit - available) / limit`, where `limit` is the smaller of `MemTotal` and any finite LXC/cgroup v1/v2 memory limit, and `available` is the smaller of `MemAvailable` and each constrained cgroup's `limit - current`. `100` disables the gate. A malformed env value falls through to the config value or default, like the other env overrides. If the metric cannot be read, launches are admitted (fail-open) with a rate-limited warning: see `docs/daemon.md#concurrency-queueing-and-rate-limiting`. |
 | `overlayMinFreeBytes` | `TASKFERRY_OVERLAY_MIN_FREE_BYTES` | number (non-negative) | `268435456` (256 MiB); free space required on the overlay filesystem before a dispatch or overlay creation. The effective reserve is capped at half the filesystem total, so a small tmpfs is never permanently unusable. `0` disables the preflight. A whitespace-only env value is treated as unset and falls through to the config value or default, so a stray space can never silently disable the check. The check runs before a dispatch creates its task/output dir and again immediately before an overlay is created, so a queued task that outlived the free space fails as `crashed` with `failureReason: "OVERLAY_SPACE_LOW"` instead of filling the tmpfs. If `statfs` is unavailable or fails, the check fails open. See `docs/troubleshooting.md#a-dispatch-is-refused-because-overlay-storage-is-low`. |
@@ -245,11 +246,10 @@ remove a config value to fall back to the old env-var-only behavior.
 ## What's not in the config file
 
 `TASKFERRY_STATE_DIR`, `TASKFERRY_RUNTIME_DIR`, `TASKFERRY_SOCKET_PATH`,
-`TASKFERRY_CACHE_DIR`, `TASKFERRY_WATCHDOG_POLL_MS`, `TASKFERRY_CHILD`, and
-`TASKFERRY_AUTO_START` stay env-var-only — they're process plumbing (where
-state and sandboxed-worker cache data live, how fast the watchdog polls, an
-internal marker, the daemon auto-spawn escape hatch), not something most
-users tune for behavior.
+`TASKFERRY_CACHE_DIR`, `TASKFERRY_WATCHDOG_POLL_MS`, and `TASKFERRY_CHILD`
+stay env-var-only. They are process plumbing (where state and sandboxed-worker
+cache data live, how fast the watchdog polls, an internal marker), not
+something most users tune for behavior.
 
 ## No hot-reload
 

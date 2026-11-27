@@ -962,7 +962,31 @@ describe("git extraction ownership hints (object store)", () => {
       assert.match(err.message, /only inspected loose-object directory/);
       assert.match(err.message, /so it is the likely affected path/);
       assert.doesNotMatch(err.message, /is the likely cause/);
-      assert.ok(err.message.includes(`Set the group owner of ${fanout} to the group running the Taskferry daemon`));
+      assert.ok(err.message.includes(fanout));
+      assert.ok(err.message.includes(`Set the group owner of ${path.join(gitDir, "objects", "ab")} to the group running the Taskferry daemon`));
+      return true;
+    });
+  });
+
+  test("maps multiple snapshot candidates including the root to live paths", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "axi-owner-mapped-"));
+    trackedTmpDirs.push(root);
+    const snapshot = path.join(root, "snapshot");
+    const objects = path.join(snapshot, "objects");
+    const gitDir = path.join(root, "live");
+    fs.mkdirSync(path.join(objects, "ab"), { recursive: true });
+    assert.throws(() => extractGitDiff({
+      ...params, overlayRwFileBinds: [{ path: gitDir, bindSrc: snapshot }],
+      runCommand: runFailure(objectsError, `${gitDir}/objects\n`),
+      statFn: (p) => ({ uid: 1000, gid: p === objects || p === path.join(objects, "ab") ? 4242 : 1000 }),
+    }), (err) => {
+      assert.match(err.message, /exact path is unresolved/);
+      for (const suffix of ["", "ab"]) {
+        assert.ok(err.message.includes(path.join(objects, suffix)));
+        assert.ok(err.message.includes(path.join(gitDir, "objects", suffix)));
+      }
+      assert.match(err.message, /live/i);
+      assert.match(err.message, /snapshot/i);
       return true;
     });
   });

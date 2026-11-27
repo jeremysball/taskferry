@@ -1,6 +1,6 @@
 {
   "name": "taskferry",
-  "version": "6.0.0",
+  "version": "7.0.0",
   "description": "AXI CLI and local daemon for dispatching background pi, OpenCode, and Kilo tasks from any frontend harness",
   "license": "MIT",
   "author": "Jeremy Ball",

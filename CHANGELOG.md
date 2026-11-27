@@ -1,5 +1,25 @@
 # Changelog
 
+## [7.0.0](https://github.com/jeremysball/taskferry/compare/taskferry-v6.0.0...taskferry-v7.0.0) (2026-11-27)
+
+
+### ⚠ BREAKING CHANGES
+
+* **changeset:** retain non-git overlays for manual recovery ([#649](https://github.com/jeremysball/taskferry/issues/649))
+
+### Features
+
+* **config:** add autoStart config key and auto-start flags ([#653](https://github.com/jeremysball/taskferry/issues/653)) ([f1d52ae](https://github.com/jeremysball/taskferry/commit/f1d52ae7e8d8f9b9a0634dcc8c62095130bfc796))
+* **daemon:** support guarded systemd user supervision ([#650](https://github.com/jeremysball/taskferry/issues/650)) ([50d75d0](https://github.com/jeremysball/taskferry/commit/50d75d0f6f6b728465e01208c20697119824f352))
+
+
+### Bug Fixes
+
+* **changeset:** diagnose unmapped ownership failures ([#647](https://github.com/jeremysball/taskferry/issues/647)) ([13eb43e](https://github.com/jeremysball/taskferry/commit/13eb43e7cba893d68c2c56a38ab04b6ce8195743))
+* **changeset:** retain non-git overlays for manual recovery ([#649](https://github.com/jeremysball/taskferry/issues/649)) ([e888bf5](https://github.com/jeremysball/taskferry/commit/e888bf500363f4cf8bb52892aaf32b9a26847fc3))
+* **changeset:** scope ownership diagnostic claims to inspected paths ([#654](https://github.com/jeremysball/taskferry/issues/654)) ([58f75ed](https://github.com/jeremysball/taskferry/commit/58f75edefbca9fd1b3c0ccdc2eb31aa00fb37949))
+* **daemon:** preserve sockets when connection times out ([edd9236](https://github.com/jeremysball/taskferry/commit/edd923635f7fd18874f52788bda90b646ea9dfff))
+
 ## [6.0.0](https://github.com/jeremysball/taskferry/compare/taskferry-v5.1.0...taskferry-v6.0.0) (2026-11-20)
 
 

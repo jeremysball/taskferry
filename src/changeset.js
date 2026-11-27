@@ -230,17 +230,17 @@ const OBJECT_FANOUT = /^[0-9a-f]{2}$/;
  * @param {(p: string) => {uid: number, gid: number}} statFn
  * @param {number|undefined} uid
  * @param {number|undefined} gid
- * @returns {string|null}
+ * @returns {string[]} the owner axes that differ from the daemon's identity
  */
-function ownershipCandidate(target, statFn, uid, gid) {
+function ownershipLabels(target, statFn, uid, gid) {
   try {
     const owners = statFn(target);
     const labels = [];
-    if (uid !== undefined && owners.uid !== uid) labels.push(`user ${owners.uid}`);
-    if (gid !== undefined && owners.gid !== gid) labels.push(`group ${owners.gid}`);
-    return labels.length ? `${target} (${labels.join(", ")})` : null;
+    if (uid !== undefined && owners.uid !== uid) labels.push(`user owner ${owners.uid}`);
+    if (gid !== undefined && owners.gid !== gid) labels.push(`group owner ${owners.gid}`);
+    return labels;
   } catch {
-    return null;
+    return [];
   }
 }
 
@@ -277,7 +277,8 @@ function objectFanoutPaths(objects) {
 
 /**
  * Git does not report the failing object fanout. Inspect the object store and
- * its fanouts as candidates, not as proof that any one caused the failure.
+ * its fanouts; one unrepresentable path is reported as the affected path,
+ * while several are reported as an unresolved candidate set.
  * @param {string} directory
  * @param {typeof defaultRunCommand} runCommand
  * @param {Array<{path: string, bindSrc: string}>} binds
@@ -295,6 +296,54 @@ function objectOwnershipCandidates(directory, runCommand, binds) {
 }
 
 /**
+ * @param {string} detail
+ * @param {string} directory
+ * @param {typeof defaultRunCommand} runCommand
+ * @param {Array<{path: string, bindSrc: string}>} binds
+ * @returns {{targets: string[], gitNamedTarget: boolean}}
+ */
+function ownershipTargets(detail, directory, runCommand, binds) {
+  const lock = detail.match(LOCK_OVERFLOW);
+  // Git names the index lock it could not create, so that path is exact. An
+  // object tempfile error names no directory, so those are candidates only.
+  if (lock) return { targets: [snapshotSource(path.resolve(directory, path.dirname(lock[1])), binds)], gitNamedTarget: true };
+  if (OBJECT_OVERFLOW.test(detail)) return { targets: objectOwnershipCandidates(directory, runCommand, binds), gitNamedTarget: false };
+  return { targets: [], gitNamedTarget: false };
+}
+
+/**
+ * @param {string[]} targets
+ * @param {(p: string) => {uid: number, gid: number}} statFn
+ * @param {number|undefined} uid
+ * @param {number|undefined} gid
+ * @returns {{affected: Array<{target: string, labels: string[]}>, summary: string}|null}
+ */
+function describeAffected(targets, statFn, uid, gid) {
+  const affected = targets
+    .map((target) => ({ target, labels: ownershipLabels(target, statFn, uid, gid) }))
+    .filter((candidate) => candidate.labels.length > 0);
+  if (!affected.length) return null;
+  const labels = [...new Set(affected.flatMap((candidate) => candidate.labels))];
+  return { affected, summary: `Unable to extract changeset: ${labels.join(" and ")} cannot be represented in the sandbox.` };
+}
+
+/**
+ * @param {{affected: Array<{target: string, labels: string[]}>, summary: string, gitNamedTarget: boolean}} params
+ * @returns {string}
+ */
+function ownershipRemedy({ affected, summary, gitNamedTarget }) {
+  const guidance = "Set ownership of";
+  const advice = "to the user/group running the TaskFerry daemon.";
+  if (gitNamedTarget) return `${summary} ${guidance} ${affected[0].target} ${advice}`;
+  if (affected.length === 1) {
+    return `${summary} Git did not name the failing object directory; ${affected[0].target} is the only loose-object directory Taskferry inspected whose ownership the sandbox cannot represent, so it is the likely cause. ${guidance} ${affected[0].target} ${advice}`;
+  }
+  const shown = affected.slice(0, 4).map((candidate) => `${candidate.target} (${candidate.labels.join(", ")})`).join(", ");
+  const remainder = affected.length > 4 ? ` and ${affected.length - 4} more` : "";
+  return `${summary} Git did not name the failing object directory, and ${affected.length} object-store paths have owners the sandbox cannot represent, so the exact path is unresolved: ${shown}${remainder}. Inspect their ownership and set it to the user/group running the TaskFerry daemon where appropriate.`;
+}
+
+/**
  * @param {object} params
  * @param {string} params.directory
  * @param {CommandResult} params.result
@@ -309,16 +358,10 @@ function extractionFailure({ directory, result, runCommand, statFn, uid, gid, bi
   const detail = (result.stderr || result.error?.message || "unknown error").trim();
   const original = `error: git diff extraction failed for ${directory} (exit ${result.status ?? "null"}): ${detail}`;
   if (result.error) return original;
-  const lock = detail.match(LOCK_OVERFLOW);
-  /** @type {string[]} */
-  let targets = [];
-  if (lock) targets = [snapshotSource(path.resolve(directory, path.dirname(lock[1])), binds)];
-  if (!lock && OBJECT_OVERFLOW.test(detail)) targets = objectOwnershipCandidates(directory, runCommand, binds);
-  const candidates = targets.map((target) => ownershipCandidate(target, statFn, uid, gid)).filter((candidate) => candidate !== null);
-  if (!candidates.length) return original;
-  const shown = candidates.slice(0, 4).join(", ");
-  const remainder = candidates.length > 4 ? ` and ${candidates.length - 4} more` : "";
-  return `${original}\nPossible unmapped ownership in the sandbox. Host observations: ${shown}${remainder}. The merged overlay view may differ, and these paths may not be the cause. Inspect ownership relative to the TaskFerry daemon's user and group; change ownership only if appropriate.`;
+  const { targets, gitNamedTarget } = ownershipTargets(detail, directory, runCommand, binds);
+  const described = describeAffected(targets, statFn, uid, gid);
+  if (!described) return original;
+  return `${original}\n${ownershipRemedy({ ...described, gitNamedTarget })}`;
 }
 
 /**

@@ -865,28 +865,32 @@ describe("git extraction ownership hints", () => {
     ? { status: 0, stdout: objectsPath, stderr: "" }
     : { status: 1, stdout: "", stderr };
 
-  test("identifies the index lock parent as a possible ownership cause", () => {
+  test("names the index lock parent Git reported and makes the fix actionable", () => {
     const stderr = `fatal: Unable to create '${REPO_DIR}/.git/index.lock': ${overflow}`;
     assert.throws(() => extractGitDiff({
       ...params, runCommand: runFailure(stderr), statFn: () => ({ uid: 1000, gid: 4242 }),
     }), (err) => {
-      assert.match(err.message, /possible.*ownership/i);
-      assert.match(err.message, /group.*4242/);
-      assert.ok(err.message.includes(`${REPO_DIR}/.git`));
+      assert.match(err.message, /Unable to extract changeset: group owner 4242 cannot be represented in the sandbox/);
+      assert.ok(err.message.includes(`Set ownership of ${REPO_DIR}/.git to the user/group running the TaskFerry daemon`));
       assert.ok(err.message.includes(stderr));
+      assert.doesNotMatch(err.message, /may not be the cause|possible/i);
       return true;
     });
   });
 
-  test("identifies inspected owners as host observations, not the merged overlay view", () => {
+  test("distinguishes the user owner, the group owner, or both", () => {
     const stderr = `fatal: Unable to create '${REPO_DIR}/.git/index.lock': ${overflow}`;
     assert.throws(() => extractGitDiff({
-      ...params, runCommand: runFailure(stderr),
-      statFn: (p) => ({ uid: 1000, gid: p === `${REPO_DIR}/.git` ? 4242 : 1000 }),
+      ...params, runCommand: runFailure(stderr), statFn: () => ({ uid: 1234, gid: 4242 }),
     }), (err) => {
-      assert.ok(err.message.includes(stderr));
-      assert.match(err.message, /host.*group 4242/i);
-      assert.match(err.message, /overlay.*may differ/i);
+      assert.match(err.message, /user owner 1234 and group owner 4242/);
+      return true;
+    });
+    assert.throws(() => extractGitDiff({
+      ...params, runCommand: runFailure(stderr), statFn: () => ({ uid: 1234, gid: 1000 }),
+    }), (err) => {
+      assert.match(err.message, /user owner 1234/);
+      assert.doesNotMatch(err.message, /group owner/);
       return true;
     });
   });
@@ -902,7 +906,7 @@ describe("git extraction ownership hints", () => {
       },
     }), (err) => {
       assert.ok(err.message.includes(stderr));
-      assert.ok(err.message.includes(`${gitDir} (group 4242)`));
+      assert.ok(err.message.includes(`Set ownership of ${gitDir} to`));
       return true;
     });
   });
@@ -917,8 +921,8 @@ describe("git extraction ownership hints", () => {
       statFn: (p) => ({ uid: 1000, gid: p === snapshot ? 4242 : 1000 }),
     }), (err) => {
       assert.ok(err.message.includes(stderr));
-      assert.ok(err.message.includes(snapshot));
-      assert.match(err.message, /group 4242/);
+      assert.ok(err.message.includes(`Set ownership of ${snapshot} to`));
+      assert.match(err.message, /group owner 4242/);
       return true;
     });
     assert.throws(() => extractGitDiff({
@@ -927,24 +931,28 @@ describe("git extraction ownership hints", () => {
       statFn: (p) => ({ uid: 1000, gid: p === snapshot ? 1000 : 4242 }),
     }), (err) => {
       assert.ok(err.message.includes(stderr));
-      assert.doesNotMatch(err.message, /possible.*ownership/i);
+      assert.doesNotMatch(err.message, /Unable to extract changeset/);
       return true;
     });
   });
 
-  test("inspects object fanouts inside a bound gitdir snapshot", () => {
+  test("names the only unrepresentable object directory as the affected path", () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "axi-owner-snapshot-"));
     trackedTmpDirs.push(root);
     const snapshot = path.join(root, "snapshot");
     fs.mkdirSync(path.join(snapshot, "objects", "ab"), { recursive: true });
     const gitDir = path.dirname(path.dirname(MY_REPO_WT));
+    const fanout = path.join(snapshot, "objects", "ab");
     assert.throws(() => extractGitDiff({
       ...params, overlayRwFileBinds: [{ path: gitDir, bindSrc: snapshot }],
       runCommand: runFailure(objectsError, `${gitDir}/objects\n`),
-      statFn: (p) => ({ uid: 1000, gid: p === path.join(snapshot, "objects", "ab") ? 4242 : 1000 }),
+      statFn: (p) => ({ uid: 1000, gid: p === fanout ? 4242 : 1000 }),
     }), (err) => {
-      assert.ok(err.message.includes(path.join(snapshot, "objects", "ab")));
       assert.ok(err.message.includes(objectsError));
+      assert.match(err.message, /Git did not name the failing object directory/);
+      assert.match(err.message, /only loose-object directory Taskferry inspected/);
+      assert.match(err.message, /so it is the likely cause/);
+      assert.ok(err.message.includes(`Set ownership of ${fanout} to`));
       return true;
     });
   });
@@ -962,13 +970,13 @@ describe("git extraction ownership hints", () => {
       statFn: (p) => ({ uid: 1000, gid: p === path.join(objects, "ab") ? 4242 : 1000 }),
     }), (err) => {
       assert.ok(err.message.includes(path.join(objects, "ab")));
-      assert.match(err.message, /group 4242/);
+      assert.match(err.message, /group owner 4242/);
       assert.ok(err.message.includes(objectsError));
       return true;
     });
   });
 
-  test("reports object fanout directories as candidates, not confirmed causes", () => {
+  test("reports an unresolved path when several object directories are unrepresentable", () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "axi-ownership-"));
     trackedTmpDirs.push(root);
     const objects = path.join(root, "objects");
@@ -976,13 +984,30 @@ describe("git extraction ownership hints", () => {
     fs.mkdirSync(path.join(objects, "cd"));
     assert.throws(() => extractGitDiff({
       ...params, runCommand: runFailure(objectsError, `${objects}\n`),
-      statFn: (p) => ({ uid: p === path.join(objects, "ab") ? 1234 : 1000, gid: 1000 }),
+      statFn: (p) => ({
+        uid: p === path.join(objects, "cd") ? 1234 : 1000,
+        gid: p === path.join(objects, "ab") ? 4242 : 1000,
+      }),
     }), (err) => {
-      assert.match(err.message, /possible.*ownership/i);
-      assert.match(err.message, /user.*1234/);
-      assert.ok(err.message.includes(path.join(objects, "ab")));
+      assert.match(err.message, /Unable to extract changeset: group owner 4242 and user owner 1234/);
+      assert.match(err.message, /exact path is unresolved/);
+      assert.ok(err.message.includes(`${path.join(objects, "ab")} (group owner 4242)`));
+      assert.ok(err.message.includes(`${path.join(objects, "cd")} (user owner 1234)`));
       assert.ok(err.message.includes(objectsError));
-      assert.doesNotMatch(err.message, /Set ownership of/);
+      return true;
+    });
+  });
+
+  test("names the object store itself when no fanout is unrepresentable", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "axi-ownership-store-"));
+    trackedTmpDirs.push(root);
+    const objects = path.join(root, "objects");
+    fs.mkdirSync(path.join(objects, "ab"), { recursive: true });
+    assert.throws(() => extractGitDiff({
+      ...params, runCommand: runFailure(objectsError, `${objects}\n`),
+      statFn: (p) => ({ uid: 1000, gid: p === objects ? 4242 : 1000 }),
+    }), (err) => {
+      assert.ok(err.message.includes(`Set ownership of ${objects} to`));
       return true;
     });
   });
@@ -997,7 +1022,7 @@ describe("git extraction ownership hints", () => {
         ...params, runCommand: () => result, statFn: () => ({ uid: 1000, gid: 4242 }),
       }), (err) => {
         assert.match(err.message, /git diff extraction failed/);
-        assert.doesNotMatch(err.message, /possible.*ownership/i);
+        assert.doesNotMatch(err.message, /Unable to extract changeset/);
         assert.ok(err.message.includes(result.stderr));
         return true;
       });
@@ -1010,7 +1035,7 @@ describe("git extraction ownership hints", () => {
       ...params, runCommand: runFailure(stderr), statFn: () => { throw new Error("inspection failed"); },
     }), (err) => {
       assert.ok(err.message.includes(stderr));
-      assert.doesNotMatch(err.message, /inspection failed|possible.*ownership/i);
+      assert.doesNotMatch(err.message, /inspection failed|Unable to extract changeset/);
       return true;
     });
   });

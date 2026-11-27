@@ -193,25 +193,33 @@ bubblewrap and overlay prerequisites.
 
 Git can fail to create an index lock or object temporary file with `Value too
 large for defined data type` when a directory's owner or group cannot be
-represented in bubblewrap's user namespace. Taskferry may report differing
-numeric owners as **possible** candidates. For object temporary files Git does
-not identify the failing fanout, so listed directories are not proof of the
-cause. Inspect the paths and their ownership against the daemon's effective
-user and group; adjust ownership only where appropriate. Numeric IDs seen from
-another namespace need not identify the original host owner. Taskferry does
-not change ownership automatically.
-For a linked worktree or a separately mounted Git directory, a candidate may
-refer to Taskferry's scratch snapshot rather than the live repository path.
-Symlinked object fanouts are inspected through their targets.
-The reported paths and owners are host observations, not a listing of the
-merged overlay: copy-up or later host changes can make that view differ, and
-some candidates visible only in the overlay may not be reported.
+represented in bubblewrap's user namespace. Taskferry reports which owner
+differs from the daemon's own user or group, using numeric IDs.
+
+- **Index lock:** Git names the lock file, so Taskferry names the exact
+  directory it could not write, and the error is directly actionable.
+- **Object temporary file:** Git does not name the failing object directory.
+  Taskferry inspects the loose-object store root and its two-character fanouts.
+  If exactly one of those has an owner the sandbox cannot represent, Taskferry
+  names it as the likely affected path. If several do, the error says the exact
+  path is unresolved, names up to four, and counts the rest, because any of
+  them could have failed.
+
+Set the reported path's owner or group to the user/group running the TaskFerry
+daemon. Inspect ownership before changing it; Taskferry never changes
+ownership automatically. Numeric IDs come from the host or the bound scratch
+snapshot and are not evidence of a name: do not treat an unmapped-ID
+placeholder such as `nobody` in the sandbox as the host owner's name.
+For a linked worktree or a separately mounted Git directory, the reported path
+may be Taskferry's scratch snapshot rather than the live repository path.
+Reported owners are host observations; the sandbox's merged overlay view can
+differ. Symlinked object fanouts are inspected through their targets.
 
 The hint recognizes English Git/system error text only; localized errors and
 failed path inspection can leave only the original extraction error. The
-underlying error is retained. For non-advisor tasks an extraction failure
-leaves the changeset pending and its overlay in place; advisor overlays are
-released on settlement.
+underlying error is always retained. For non-advisor tasks an extraction
+failure leaves the changeset pending and its overlay in place; advisor overlays
+are released on settlement.
 
 ## A changeset stays pending or reports `directory is missing`
 

@@ -27,6 +27,7 @@ after(() => {
 const TMP_ROOT_PREFIX = "axi-int-tmp-";
 const RUN_ROOT_PREFIX = "axi-int-run-";
 const TRACKED_FILE = "tracked.txt";
+const OBJECT_TEMPFILE = "object tempfile";
 const CHANGED_CONTENT = "base\nchanged\n";
 const GIT_EMAIL = "user.email=t@t";
 const GIT_NAME = "user.name=t";
@@ -400,7 +401,7 @@ function chownableUnmappedGid() {
 }
 
 describe("unmapped ownership extraction (real bwrap)", () => {
-  for (const failure of ["index.lock", "object tempfile"]) {
+  for (const failure of ["index.lock", OBJECT_TEMPFILE]) {
     test(`reports candidate ownership for ${failure} and retains worker changes`, (t) => {
       const required = process.env.TASKFERRY_REQUIRE_OWNERSHIP_REGRESSION === "1";
       if (!required && process.env.TASKFERRY_TEST_UNMAPPED_OWNERSHIP !== "1") {
@@ -435,7 +436,7 @@ describe("unmapped ownership extraction (real bwrap)", () => {
       assert.equal(ran.status, 0, `sandboxed worker write failed: ${ran.stderr}`);
       const upperFile = path.join(overlay.upperDir, TRACKED_FILE);
       let affected = path.join(directory, ".git");
-      if (failure === "object tempfile") {
+      if (failure === OBJECT_TEMPFILE) {
         const hash = spawnSync("git", ["-C", directory, "hash-object", "--stdin"], { input: CHANGED_CONTENT, encoding: "utf8" });
         assert.equal(hash.status, 0, hash.stderr);
         assert.match(hash.stdout.trim(), /^[0-9a-f]{40,64}$/);
@@ -449,9 +450,11 @@ describe("unmapped ownership extraction (real bwrap)", () => {
         overlayRwBinds: [], stateDir: tmpRoot, homeDir: os.homedir(), denyList: [],
       }), (err) => {
         assert.match(err.message, /Value too large for defined data type/);
-        assert.match(err.message, /Possible unmapped ownership/);
-        assert.ok(err.message.includes(affected));
-        assert.ok(err.message.includes(`group ${gid}`));
+        assert.match(err.message, /Unable to extract changeset: group owner \d+ cannot be represented in the sandbox/);
+        assert.ok(err.message.includes(`Set ownership of ${affected} to`));
+        if (failure === OBJECT_TEMPFILE) {
+          assert.match(err.message, /Git did not name the failing object directory/);
+        }
         return true;
       });
       assert.equal(fs.existsSync(diffPath), false);

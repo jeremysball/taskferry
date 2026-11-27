@@ -150,7 +150,7 @@ describe("formatWatchEvent toon format for activity/state events", () => {
 describe("errorValue", () => {
   test("preserves the boot-failure detail line from connectClient's timeout error", () => {
     // Shape mirrors the three-line error connectClient() throws when a
-    // booter writes a daemon-boot.err diagnostic before its health-check
+    // booter writes a diagnostic before its health-check
     // timeout: an `error:` line, a `daemon boot failed: ...` detail line
     // (no recognized prefix), and a `help:` line.
     const error = new Error(

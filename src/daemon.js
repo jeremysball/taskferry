@@ -292,7 +292,7 @@ function makeRequestTimer({ stateDir, env, config, appendLine = defaultAppendLin
  * @param {SpawnReplacementArgs} args
  */
 function defaultSpawnReplacement({ daemonEntry, env }) {
-  spawn(process.execPath, [daemonEntry], { detached: true, stdio: "ignore", env }).unref();
+  spawn(process.execPath, [daemonEntry], { detached: true, stdio: ["ignore", 1, 2], env }).unref();
 }
 
 /**
@@ -1012,6 +1012,31 @@ async function bindDaemonSocket({ server, runtimeDir, socketPath, healthCheckTim
   fs.chmodSync(socketPath, 0o600);
 }
 
+// A boot that fails after binding must release the socket it just bound. The
+// socket stays bound but can never answer a request, so every client that
+// connects hangs until its own startup timeout instead of seeing the real
+// startup error, and the next boot has to wait for a health-check timeout to
+// conclude the silent listener is stale.
+/**
+ * @template T
+ * @param {() => T} build
+ * @param {{server: import("node:net").Server, socketPath: string}} bound
+ * @returns {Promise<T>}
+ */
+async function bootManagerOrReleaseSocket(build, { server, socketPath }) {
+  try {
+    return build();
+  } catch (error) {
+    await new Promise((resolve) => server.close(resolve));
+    try {
+      if (fs.lstatSync(socketPath).isSocket()) fs.unlinkSync(socketPath);
+    } catch {
+      // Nothing left to release; the boot error is the useful diagnostic.
+    }
+    throw error;
+  }
+}
+
 /**
  * @param {DaemonOptionsInput} [options]
  * @returns {Promise<{socketPath: string, close: () => Promise<void>, stats: () => {connections: number, subscriptions: number}}>}
@@ -1067,9 +1092,9 @@ export async function startDaemon(options = {}) {
    * @param {DaemonEvent} event
    */
   const onEvent = (event) => deliverEvent(subscriptions, writeMessage, event, resolveWorkspaceRoot);
-  const manager = taskManagerFactory({
+  const manager = await bootManagerOrReleaseSocket(() => taskManagerFactory({
     ...taskManagerOptions, onEvent, stateDir, runtimeDir, socketPath, resolveWorkspaceRootFn: resolveWorkspaceRoot,
-  });
+  }), { server: boundServer, socketPath });
   // The manager is a Record<string, any> by construction (see the TaskManager
   // typedef above). daemon-server.js states the narrow contract it depends on;
   // assert it once here so every hand-off below carries it, instead of casting

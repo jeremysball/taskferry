@@ -12,7 +12,6 @@ import { loadConfig } from "./config.js";
 import { isObject } from "./numbers.js";
 import { envWithResponseCap, resolveResponseCapBytes } from "./options.js";
 import { resolveRuntimeDir, resolveStateDir, resolveInvokedPath } from "./paths.js";
-import { errCode } from "./errors.js";
 
 const DAEMON_ENTRY = fileURLToPath(new URL("./daemon.js", import.meta.url));
 const CLIENT_ENTRY = fileURLToPath(import.meta.url);
@@ -127,18 +126,24 @@ function daemonReadySync(socketPath) {
  * @returns {import("node:child_process").ChildProcess}
  */
 function spawnDaemon({ env, stateDir, runtimeDir, socketPath }) {
-  const child = spawn(process.execPath, [DAEMON_ENTRY], {
-    detached: true,
-    stdio: "ignore",
-    env: {
-      ...env,
-      TASKFERRY_STATE_DIR: stateDir,
-      TASKFERRY_RUNTIME_DIR: runtimeDir,
-      TASKFERRY_SOCKET_PATH: socketPath,
-    },
-  });
-  child.unref();
-  return child;
+  const fd = fs.openSync(attemptLogPath(runtimeDir, "daemon", attemptId(env)), "wx", 0o600);
+  try {
+    const child = spawn(process.execPath, [DAEMON_ENTRY], {
+      detached: true,
+      stdio: ["ignore", fd, fd],
+      env: {
+        ...env,
+        TASKFERRY_STATE_DIR: stateDir,
+        TASKFERRY_RUNTIME_DIR: runtimeDir,
+        TASKFERRY_SOCKET_PATH: socketPath,
+      },
+    });
+    child.on("error", () => {});
+    child.unref();
+    return child;
+  } finally {
+    fs.closeSync(fd);
+  }
 }
 
 /** @param {string} name @param {NodeJS.ProcessEnv} env @param {typeof spawnSync} runFn */
@@ -222,25 +227,17 @@ export function startDaemonViaSystemd({
   }
 }
 
-/**
- * @param {string} runtimeDir
- * @returns {string}
- */
-function bootErrorPath(runtimeDir) {
-  return path.join(runtimeDir, "daemon-boot.err");
+// Fresh identifiers keep concurrent booters and previous attempts separate.
+/** @param {NodeJS.ProcessEnv} env */
+function attemptId(env) {
+  const id = env.TASKFERRY_BOOT_ATTEMPT;
+  return id && /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u.test(id)
+    ? id : randomUUID();
 }
 
-// The direct-execution guard below catches errors from ensureDaemonStarted(),
-// but the booter subprocess can fail before reaching it (a syntax error, a
-// missing import dependency). Node then prints to stderr, and with
-// `stdio: "ignore"` discards the message. Piping stderr to a file next to
-// daemon-boot.err preserves it.
-/**
- * @param {string} runtimeDir
- * @returns {string}
- */
-function bootStderrPath(runtimeDir) {
-  return path.join(runtimeDir, "daemon-boot-stderr.log");
+/** @param {string} runtimeDir @param {string} kind @param {string} id */
+function attemptLogPath(runtimeDir, kind, id) {
+  return path.join(runtimeDir, `${kind}-${id}.log`);
 }
 
 /**
@@ -248,27 +245,26 @@ function bootStderrPath(runtimeDir) {
  * @returns {import("node:child_process").ChildProcess}
  */
 function spawnDaemonBooter({ env, stateDir, runtimeDir, socketPath }) {
-  /** @type {number | undefined} */
-  let stderrFd;
+  fs.mkdirSync(runtimeDir, { recursive: true, mode: 0o700 });
+  fs.chmodSync(runtimeDir, 0o700);
+  const stderrFd = fs.openSync(attemptLogPath(runtimeDir, "booter", attemptId(env)), "wx", 0o600);
   try {
-    stderrFd = fs.openSync(bootStderrPath(runtimeDir), "w", 0o600);
-  } catch {
-    // Best-effort: if the file can't be opened, discard stderr instead of
-    // blocking the booter from spawning.
+    const child = spawn(process.execPath, [CLIENT_ENTRY], {
+      detached: true,
+      stdio: ["ignore", "ignore", stderrFd],
+      env: {
+        ...env,
+        TASKFERRY_STATE_DIR: stateDir,
+        TASKFERRY_RUNTIME_DIR: runtimeDir,
+        TASKFERRY_SOCKET_PATH: socketPath,
+      },
+    });
+    child.on("error", () => {});
+    child.unref();
+    return child;
+  } finally {
+    fs.closeSync(stderrFd);
   }
-  const child = spawn(process.execPath, [CLIENT_ENTRY], {
-    detached: true,
-    stdio: ["ignore", "ignore", stderrFd ?? "ignore"],
-    env: {
-      ...env,
-      TASKFERRY_STATE_DIR: stateDir,
-      TASKFERRY_RUNTIME_DIR: runtimeDir,
-      TASKFERRY_SOCKET_PATH: socketPath,
-    },
-  });
-  if (stderrFd != null) child.once("exit", () => fs.closeSync(stderrFd));
-  child.unref();
-  return child;
 }
 
 // Fires a detached, unref'd subprocess to run ensureDaemonStarted's
@@ -287,13 +283,7 @@ export async function startDaemonBooter({
   socketPath = env.TASKFERRY_SOCKET_PATH || path.join(runtimeDir, SOCKET_FILENAME),
   spawnBooterFn = spawnDaemonBooter,
 } = {}) {
-  try {
-    fs.unlinkSync(bootErrorPath(runtimeDir));
-  } catch {
-    // Best-effort: clearing a stale diagnostic file must never block the
-    // booter itself from spawning (e.g. EACCES on a file left by another uid).
-  }
-  spawnBooterFn({ env, stateDir, runtimeDir, socketPath });
+  spawnBooterFn({ env: { ...env, TASKFERRY_BOOT_ATTEMPT: attemptId(env) }, stateDir, runtimeDir, socketPath });
 }
 
 /**
@@ -321,18 +311,21 @@ export function ensureDaemonStarted({
     if (isDaemonReadySync(socketPath)) return false;
     loadConfigFn({ env });
     const supervised = supervisorFn({ env, runtimeDir }) === "systemd";
+    const daemonEnv = { ...env, TASKFERRY_BOOT_ATTEMPT: attemptId(env) };
     if (supervised) {
       systemdStartFn({ env, unit: daemonUnitName(env) });
     } else {
-      spawnDaemonFn({ env, stateDir, runtimeDir, socketPath });
+      spawnDaemonFn({ env: daemonEnv, stateDir, runtimeDir, socketPath });
     }
     const deadline = Date.now() + startupTimeoutMs;
     while (Date.now() < deadline) {
       if (isDaemonReadySync(socketPath)) return true;
       Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, retryDelayMs);
     }
+    const daemonLog = supervised ? "" : readStartupDiagnostic(attemptLogPath(runtimeDir, "daemon", daemonEnv.TASKFERRY_BOOT_ATTEMPT));
     throw new Error(
       `error: taskferry daemon did not become ready within ${startupTimeoutMs}ms\n`
+      + (daemonLog ? `daemon startup output: ${daemonLog}\n` : "")
       + (supervised
         ? `help: run \`systemctl --user status ${daemonUnitName(env)}\` and `
           + `\`journalctl --user -u ${daemonUnitName(env)} -n 50\`, then retry`
@@ -632,32 +625,23 @@ function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-// Read a daemon diagnostic file, tolerating a missing file (ENOENT) as "no
-// diagnostics". Any other read error is real and must propagate.
-/**
- * @param {string} file
- * @returns {string | undefined}
- */
+// Read only a bounded tail of a regular file, without following a symlink.
+/** @param {string} file @returns {string} */
 function readStartupDiagnostic(file) {
+  let fd;
   try {
-    return fs.readFileSync(file, "utf8").trim();
-  } catch (err) {
-    if (errCode(err) !== "ENOENT") throw err;
-    return undefined;
+    fd = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
+    const stat = fs.fstatSync(fd);
+    if (!stat.isFile()) return "";
+    const size = Math.min(stat.size, 16384);
+    const buffer = Buffer.alloc(size);
+    const bytes = fs.readSync(fd, buffer, 0, size, stat.size - size);
+    return buffer.subarray(0, bytes).toString("utf8").trim();
+  } catch {
+    return "";
+  } finally {
+    if (fd !== undefined) fs.closeSync(fd);
   }
-}
-
-// Capture both startup diagnostics, but read the stderr log only when
-// bootError is absent: the booter subprocess failed at import time, before
-// reaching the try/catch that writes bootError above.
-/**
- * @param {string} runtimeDir
- * @returns {{bootError: string | undefined, bootStderr: string | undefined}}
- */
-function readStartupDiagnostics(runtimeDir) {
-  const bootError = readStartupDiagnostic(bootErrorPath(runtimeDir));
-  const bootStderr = bootError ? "" : readStartupDiagnostic(bootStderrPath(runtimeDir));
-  return { bootError, bootStderr };
 }
 
 // Retry connecting to the socket until the deadline passes. Returns the first
@@ -790,19 +774,20 @@ async function connectClientCore({
   // via env/config (no argv flags), so without this a raised client ceiling
   // hits the default daemon ceiling. A lowered cap stays this client's
   // receive limit, and an env value already set wins.
-  const bootEnv = envWithResponseCap(env, maxBufferBytes, MAX_BUFFER_BYTES, true);
+  const bootEnv = { ...envWithResponseCap(env, maxBufferBytes, MAX_BUFFER_BYTES, true), TASKFERRY_BOOT_ATTEMPT: randomUUID() };
   await ensureDaemonFn({ env: bootEnv, stateDir, runtimeDir, socketPath, startupTimeoutMs, retryDelayMs, ...startupOptions });
   const deadline = Date.now() + startupTimeoutMs;
   const { client, lastError } = await retryOpenClient(socketPath, clientOptions, retryDelayMs, deadline);
   if (client) return client;
 
-  const { bootError, bootStderr } = readStartupDiagnostics(runtimeDir);
+  const bootStderr = readStartupDiagnostic(attemptLogPath(runtimeDir, "booter", bootEnv.TASKFERRY_BOOT_ATTEMPT));
+  const daemonLog = readStartupDiagnostic(attemptLogPath(runtimeDir, "daemon", bootEnv.TASKFERRY_BOOT_ATTEMPT));
   /** @type {{message?: string} | undefined} */
   const lastErrorTyped = /** @type {{message?: string} | undefined} */ (lastError);
   throw new Error(
     `error: taskferry daemon did not become ready within ${startupTimeoutMs}ms: ${lastErrorTyped?.message || "connection failed"}\n`
-    + (bootError ? `daemon boot failed: ${bootError}\n` : "")
-    + (bootStderr ? `booter subprocess failed before startup: ${bootStderr}\n` : "")
+    + (bootStderr ? `daemon boot failed: ${bootStderr}\n` : "")
+    + (daemonLog ? `daemon startup output: ${daemonLog}\n` : "")
     + `help: check ${runtimeDir} permissions and daemon startup diagnostics, then retry`
   );
 }
@@ -811,16 +796,7 @@ if (process.argv[1] && resolveInvokedPath(process.argv[1]) === fileURLToPath(imp
   try {
     ensureDaemonStarted();
   } catch (err) {
-    const bootEnv = process.env;
-    const bootStateDir = resolveStateDir(bootEnv);
-    const bootRuntimeDir = resolveRuntimeDir({ env: bootEnv, stateDir: bootStateDir });
-    try {
-      fs.mkdirSync(bootRuntimeDir, { recursive: true, mode: 0o700 });
-      fs.writeFileSync(bootErrorPath(bootRuntimeDir), err instanceof Error ? err.message : String(err));
-    } catch {
-      // Best-effort diagnostics only — connectClient's own generic timeout
-      // error still surfaces to the user even if this write fails.
-    }
+    process.stderr.write(`${err instanceof Error ? err.message : String(err)}\n`);
     process.exitCode = 1;
   }
 }

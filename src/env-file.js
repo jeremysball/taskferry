@@ -52,16 +52,15 @@ function parseEnvFileLine(trimmed, sourcePath, lineNo) {
     // file exists to hold secrets, and a malformed line's content
     // (e.g. a bare API key pasted without "NAME=") must never end up
     // embedded in an Error whose .message this same module's caller
-    // (tasks.js's createTaskManager()) lets propagate into
-    // daemon-boot.err -- a file callers/cron routinely capture into
-    // their own logs on a boot failure. Naming the line number is
-    // enough to fix the file without echoing its contents anywhere.
+    // (tasks.js's createTaskManager()) lets propagate into daemon startup
+    // diagnostics, which callers may capture in their own logs. Naming the line
+    // number is enough to fix the file without echoing its contents anywhere.
     throw new Error(`error: ${sourcePath}:${lineNo}: expected NAME=VALUE (line has no '=')\nhelp: each non-comment, non-blank line must be "NAME=VALUE" (optionally prefixed with "export ")`);
   }
   const name = withoutExport.slice(0, eq).trim();
   const rawValue = withoutExport.slice(eq + 1).trim();
   if (!KEY_RE.test(name)) {
-    throw new Error(`error: ${sourcePath}:${lineNo}: invalid env var name ${JSON.stringify(name)}\nhelp: names must match [A-Za-z_][A-Za-z0-9_]*`);
+    throw new Error(`error: ${sourcePath}:${lineNo}: invalid env var name\nhelp: names must match [A-Za-z_][A-Za-z0-9_]*`);
   }
   return [name, unquote(rawValue, sourcePath, lineNo)];
 }

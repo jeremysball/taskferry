@@ -1,6 +1,6 @@
 import { describe, test } from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import fs from "node:fs";
 import net from "node:net";
 import os from "node:os";
@@ -17,6 +17,7 @@ process.env.TASKFERRY_DAEMON_SUPERVISOR = "spawn";
 const TEST_MODEL = "test/model";
 const TASK_STATE = "task.state";
 const DAEMON_BOOT_ERR = "daemon-boot.err";
+const PRESERVED_LOG_CONTENT = "preserve me";
 const TEST_STARTED_AT = "2026-07-15T00:00:00.000Z";
 const TASK_WAIT = "task.wait";
 const SYSTEM_HEALTH = "system.health";
@@ -197,6 +198,9 @@ describe("multiplexed daemon client: request correlation, subscriptions, and aut
     assert.deepEqual(thereEvents.map((event) => event.taskId), ["there"]);
   });
 
+});
+
+describe("multiplexed daemon client: daemon launch diagnostics", () => {
   test("startDaemonBooter fires the injected spawn function once and returns without waiting on it", async (t) => {
     const paths = temporaryPaths(t);
     const spawnCalls = [];
@@ -210,15 +214,40 @@ describe("multiplexed daemon client: request correlation, subscriptions, and aut
     assert.equal(spawnCalls[0].socketPath, paths.socketPath);
   });
 
-  test("startDaemonBooter clears a stale boot-error file before spawning", async (t) => {
+  test("startDaemonBooter preserves a stale boot-error file", async (t) => {
     const paths = temporaryPaths(t);
     fs.mkdirSync(paths.runtimeDir, { recursive: true });
     const errorPath = path.join(paths.runtimeDir, DAEMON_BOOT_ERR);
     fs.writeFileSync(errorPath, "stale failure from a previous boot attempt");
-
     await startDaemonBooter({ ...paths, spawnBooterFn: () => {} });
+    assert.equal(fs.readFileSync(errorPath, "utf8"), "stale failure from a previous boot attempt");
+  });
 
-    assert.equal(fs.existsSync(errorPath), false);
+  test("refuses to replace a symlink at the booter log path", async (t) => {
+    const paths = temporaryPaths(t);
+    fs.mkdirSync(paths.runtimeDir, { recursive: true });
+    const target = path.join(paths.root, "user-log");
+    fs.writeFileSync(target, PRESERVED_LOG_CONTENT);
+    const id = "12345678-1234-4234-8234-123456789abc";
+    fs.symlinkSync(target, path.join(paths.runtimeDir, `booter-${id}.log`));
+    await assert.rejects(() => startDaemonBooter({
+      ...paths, env: { ...process.env, TASKFERRY_BOOT_ATTEMPT: id },
+    }), /EEXIST/);
+    assert.equal(fs.readFileSync(target, "utf8"), PRESERVED_LOG_CONTENT);
+  });
+
+  test("refuses to replace a symlink at the daemon log path", (t) => {
+    const paths = temporaryPaths(t);
+    fs.mkdirSync(paths.runtimeDir, { recursive: true });
+    const target = path.join(paths.root, "user-log");
+    fs.writeFileSync(target, PRESERVED_LOG_CONTENT);
+    const id = "12345678-1234-4234-8234-123456789abc";
+    fs.symlinkSync(target, path.join(paths.runtimeDir, `daemon-${id}.log`));
+    assert.throws(() => ensureDaemonStarted({
+      ...paths, env: { ...process.env, TASKFERRY_BOOT_ATTEMPT: id },
+      isDaemonReadySync: () => false, supervisorFn: () => "spawn", loadConfigFn: () => ({}),
+    }), /EEXIST/);
+    assert.equal(fs.readFileSync(target, "utf8"), PRESERVED_LOG_CONTENT);
   });
 
   test("client.js's direct-execution guard runs ensureDaemonStarted() when invoked through a symlink", (t) => {
@@ -236,19 +265,18 @@ describe("multiplexed daemon client: request correlation, subscriptions, and aut
     fs.writeFileSync(path.join(configHome, "taskferry", "config.json"), "{ not valid json");
     const runtimeDir = path.join(root, "run");
 
-    // The guard sets process.exitCode = 1 on this forced failure, so a
-    // non-zero subprocess exit is the expected outcome, not a test failure.
-    try {
-      execFileSync(process.execPath, [link], {
-        env: { ...process.env, XDG_CONFIG_HOME: configHome, TASKFERRY_RUNTIME_DIR: runtimeDir },
-        encoding: "utf8",
-      });
-    } catch {
-      // expected: see comment above.
-    }
-
-    const bootError = fs.readFileSync(path.join(runtimeDir, DAEMON_BOOT_ERR), "utf8");
-    assert.match(bootError, /could not parse/);
+    const result = (() => {
+      try {
+        execFileSync(process.execPath, [link], {
+          env: { ...process.env, XDG_CONFIG_HOME: configHome, TASKFERRY_RUNTIME_DIR: runtimeDir },
+          encoding: "utf8", stdio: "pipe",
+        });
+      } catch (error) {
+        return error;
+      }
+      return undefined;
+    })();
+    assert.match(String(result?.stderr), /could not parse/);
   });
 
   test("auto-starts after an initial connection failure and retries", async (t) => {
@@ -372,46 +400,67 @@ describe("multiplexed daemon client: boot-failure reporting and malformed messag
     );
   });
 
-  test("includes a boot-error file's contents in the timeout error", async (t) => {
+  test("never reports diagnostics from earlier startup attempts", async (t) => {
     const paths = temporaryPaths(t);
     fs.mkdirSync(paths.runtimeDir, { recursive: true });
-    fs.writeFileSync(
-      path.join(paths.runtimeDir, DAEMON_BOOT_ERR),
-      "error: could not parse /fake/config.json: bad json\nhelp: fix it"
-    );
-
-    await assert.rejects(
-      () => connectClient({
-        socketPath: paths.socketPath,
-        stateDir: paths.stateDir,
-        runtimeDir: paths.runtimeDir,
-        startupTimeoutMs: 20,
-        retryDelayMs: 5,
-        ensureDaemonFn: () => {},
-      }),
-      /daemon boot failed: error: could not parse \/fake\/config\.json/
-    );
+    fs.writeFileSync(path.join(paths.runtimeDir, DAEMON_BOOT_ERR), "old boot error");
+    fs.writeFileSync(path.join(paths.runtimeDir, "daemon-boot-stderr.log"), "old stderr");
+    await assert.rejects(() => connectClient({
+      ...paths, startupTimeoutMs: 20, retryDelayMs: 5, ensureDaemonFn: () => {},
+    }), (error) => {
+      assert.doesNotMatch(error.message, /old boot error|old stderr/);
+      return true;
+    });
   });
 
-  test("includes a booter-stderr log's contents in the timeout error when no boot-error file exists", async (t) => {
+  test("reports diagnostics from the current detached daemon attempt", async (t) => {
+    const paths = temporaryPaths(t);
+    const missing = path.join(paths.root, "missing.env");
+    await assert.rejects(() => connectClient({
+      ...paths,
+      env: { ...process.env, XDG_CONFIG_HOME: path.join(paths.root, "config"), TASKFERRY_DAEMON_SUPERVISOR: "spawn", TASKFERRY_ENV_FILE: missing },
+      startupTimeoutMs: 6500, retryDelayMs: 20,
+    }), (error) => {
+      assert.match(error.message, /missing\.env/);
+      return true;
+    });
+    const logs = fs.readdirSync(paths.runtimeDir).filter((name) => /^daemon-.*\.log$/.test(name));
+    const daemonLog = logs.find((name) => fs.readFileSync(path.join(paths.runtimeDir, name), "utf8").includes(missing));
+    assert.ok(daemonLog);
+    assert.equal(fs.statSync(path.join(paths.runtimeDir, daemonLog)).mode & 0o777, 0o600);
+  });
+
+  test("does not follow a substituted diagnostic symlink", async (t) => {
+    const paths = temporaryPaths(t);
+    const target = path.join(paths.root, "private");
+    fs.writeFileSync(target, "not a daemon diagnostic");
+    await assert.rejects(() => connectClient({
+      ...paths, startupTimeoutMs: 20, retryDelayMs: 5,
+      ensureDaemonFn: ({ env }) => {
+        fs.mkdirSync(paths.runtimeDir, { recursive: true });
+        fs.symlinkSync(target, path.join(paths.runtimeDir, `daemon-${env.TASKFERRY_BOOT_ATTEMPT}.log`));
+      },
+    }), (error) => {
+      assert.doesNotMatch(error.message, /not a daemon diagnostic/);
+      return true;
+    });
+    assert.equal(fs.readFileSync(target, "utf8"), "not a daemon diagnostic");
+  });
+
+  test("concurrent startup attempts report only their own diagnostics", async (t) => {
     const paths = temporaryPaths(t);
     fs.mkdirSync(paths.runtimeDir, { recursive: true });
-    fs.writeFileSync(
-      path.join(paths.runtimeDir, "daemon-boot-stderr.log"),
-      "SyntaxError: Unexpected token 'x' in client.js\n    at Module._compile"
-    );
-
-    await assert.rejects(
-      () => connectClient({
-        socketPath: paths.socketPath,
-        stateDir: paths.stateDir,
-        runtimeDir: paths.runtimeDir,
-        startupTimeoutMs: 20,
-        retryDelayMs: 5,
-        ensureDaemonFn: () => {},
-      }),
-      /booter subprocess failed before startup: SyntaxError: Unexpected token 'x' in client\.js/
-    );
+    const attempt = (message) => connectClient({
+      ...paths, startupTimeoutMs: 40, retryDelayMs: 5,
+      ensureDaemonFn: ({ env }) => {
+        fs.writeFileSync(path.join(paths.runtimeDir, `booter-${env.TASKFERRY_BOOT_ATTEMPT}.log`), message);
+      },
+    }).then(() => "", (error) => error.message);
+    const [first, second] = await Promise.all([attempt("first failure"), attempt("second failure")]);
+    assert.match(first, /first failure/);
+    assert.doesNotMatch(first, /second failure/);
+    assert.match(second, /second failure/);
+    assert.doesNotMatch(second, /first failure/);
   });
 
   test("rejects oversized unterminated daemon messages", async (t) => {
@@ -589,5 +638,44 @@ describe("supervised daemon startup (systemd --user)", () => {
       () => startDaemonViaSystemd({ env: {}, runFn: () => ({ error: new Error("spawn systemctl ENOENT") }) }),
       /cannot execute \/usr\/bin\/systemctl/
     );
+  });
+});
+
+describe("daemon boot failure after bind", () => {
+  test("a manager construction failure releases the bound socket and exits instead of serving", async (t) => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-boot-failure-"));
+    t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+    const stateDir = path.join(root, "state");
+    const runtimeDir = path.join(root, "run");
+    const socketPath = path.join(runtimeDir, "daemon.sock");
+    const configHome = path.join(root, "config");
+    fs.mkdirSync(configHome, { recursive: true });
+    const child = spawn(process.execPath, [fileURLToPath(new URL("./daemon.js", import.meta.url))], {
+      env: {
+        ...process.env,
+        XDG_CONFIG_HOME: configHome,
+        TASKFERRY_STATE_DIR: stateDir,
+        TASKFERRY_RUNTIME_DIR: runtimeDir,
+        TASKFERRY_SOCKET_PATH: socketPath,
+        TASKFERRY_ENV_FILE: path.join(root, "missing.env"),
+      },
+      stdio: ["ignore", "ignore", "pipe"],
+    });
+    t.after(() => child.kill("SIGKILL"));
+    let stderr = "";
+    child.stderr.on("data", (chunk) => { stderr += chunk; });
+    const code = await new Promise((resolve, reject) => {
+      const timer = setTimeout(
+        () => reject(new Error(`daemon stayed alive after a boot failure; stderr: ${stderr}`)),
+        10000
+      );
+      child.once("exit", (exitCode) => {
+        clearTimeout(timer);
+        resolve(exitCode);
+      });
+    });
+    assert.notEqual(code, 0);
+    assert.match(stderr, /env file not found/);
+    assert.equal(fs.existsSync(socketPath), false);
   });
 });

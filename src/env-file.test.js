@@ -113,6 +113,14 @@ describe("parseEnvFile()", () => {
     assert.throws(() => parseEnvFile("1FOO=bar\n", X_ENV_PATH), /\/tmp\/x\.env:1:.*invalid env var name/);
     assert.throws(() => parseEnvFile("FOO-BAR=bar\n"), /invalid env var name/);
   });
+
+  test("does not expose a padded secret mistaken for an invalid name", () => {
+    assert.throws(() => parseEnvFile("abc/secret==\n", X_ENV_PATH), (error) => {
+      assert.match(error.message, /\/tmp\/x\.env:1:.*invalid env var name/);
+      assert.doesNotMatch(error.message, /abc\/secret/);
+      return true;
+    });
+  });
 });
 
 describe("loadEnvFile()", () => {

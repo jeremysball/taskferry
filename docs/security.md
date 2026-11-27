@@ -92,6 +92,10 @@ is likewise logged and non-fatal: the mandatory initial load has already
 succeeded by that point, so the daemon still starts, it just falls back to
 the old restart-required behavior for that one field.
 
+Malformed-line diagnostics include the file path and line number, but not the
+invalid name or value: a pasted credential can itself look like a malformed
+assignment.
+
 - The file itself must have no group or other permission bits (`(mode & 0o077) == 0`).
   Modes such as `0400`, `0600`, and `0700` pass. `loadEnvFile()` fails
   daemon startup on any file readable by group or other, the same

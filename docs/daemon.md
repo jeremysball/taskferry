@@ -31,26 +31,23 @@ mid-boot never holds `daemon-start.lock` itself:
   `ensureDaemonStarted()`: it takes the exclusive file lock
   (`daemon-start.lock` in the runtime directory), re-checks the socket in
   case a racing process just started one, and if not, spawns `src/daemon.js`
-  detached with `stdio: "ignore"` and polls every 25ms (up to 5000ms) for a
-  health check to succeed. The lock means concurrent `taskferry`
-  invocations racing to start the daemon converge on a single instance
-  rather than each spawning their own. If the booter itself fails (e.g.
-  `loadConfig` throws on a malformed `config.json`), it writes its error
-  message to `<runtime-dir>/daemon-boot.err` and exits with a non-zero code.
-  An import-time failure can instead write
-  `<runtime-dir>/daemon-boot-stderr.log`. The caller checks both files and
-  folds the available contents into the `daemon boot failed: ...` detail of
-  the timeout error it surfaces.
+  detached and polls every 25ms (up to 5000ms) for a health check to succeed.
+  The lock means concurrent invocations converge on one daemon. Each attempt
+  gets a unique `booter-<id>.log` for the helper's stderr and
+  `daemon-<id>.log` for the daemon's stdout and stderr, created exclusively
+  with mode `0600` in the runtime directory. When the caller times out, it
+  reports available output only from its own attempt. A concurrent caller
+  waiting on the lock may have no diagnostic output of its own.
 
 Because the lock lives entirely in the detached booter rather than in
 `connectClient()`, a caller that's killed mid-boot (a short-timeout
 statusline poll, an `exec` that races against the booter's health-check
 window) no longer orphans `daemon-start.lock` — the booter keeps running
 and either starts the daemon successfully or releases the lock when it
-gives up. `startDaemonBooter()` also `unlink`s any stale
-`daemon-boot.err` from a previous failed boot before firing the new
-booter, so a caller that times out sees diagnostics from the boot it
-actually waited on, not from an earlier one.
+gives up. Existing logs are neither truncated nor deleted; they may contain
+sensitive data and require manual retention management. A daemon replacement
+inherits the original daemon's output descriptors. Supervised daemons instead
+write to the service's standard output and error (normally the journal).
 
 The spawned daemon inherits the booter's environment, which in turn
 inherits the original caller's environment. Any `TASKFERRY_*` variable
@@ -248,6 +245,13 @@ exists at the target path, it sends that address a `system.health` probe
   race where a second daemon starts between the health check and the
   unlink: whichever one wins the lock removes the stale file it actually
   checked, not whatever now happens to live at that path.
+
+A daemon that binds the socket and then fails to finish booting (an env file
+that cannot be loaded, for example) closes its listener and unlinks the
+socket before it exits. Without that, the path would keep a listener that can
+never answer a request: every client connecting to it would hang until its
+own startup timeout, and the next boot could only reclaim the path after
+concluding the silent socket was stale.
 
 ## Protocol
 

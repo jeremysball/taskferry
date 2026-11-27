@@ -230,17 +230,17 @@ const OBJECT_FANOUT = /^[0-9a-f]{2}$/;
  * @param {(p: string) => {uid: number, gid: number}} statFn
  * @param {number|undefined} uid
  * @param {number|undefined} gid
- * @returns {string|null}
+ * @returns {string[]} the owner axes that differ from the daemon's identity
  */
-function ownershipCandidate(target, statFn, uid, gid) {
+function ownershipLabels(target, statFn, uid, gid) {
   try {
     const owners = statFn(target);
     const labels = [];
-    if (uid !== undefined && owners.uid !== uid) labels.push(`user ${owners.uid}`);
-    if (gid !== undefined && owners.gid !== gid) labels.push(`group ${owners.gid}`);
-    return labels.length ? `${target} (${labels.join(", ")})` : null;
+    if (uid !== undefined && owners.uid !== uid) labels.push(`user owner ${owners.uid}`);
+    if (gid !== undefined && owners.gid !== gid) labels.push(`group owner ${owners.gid}`);
+    return labels;
   } catch {
-    return null;
+    return [];
   }
 }
 
@@ -262,36 +262,145 @@ function snapshotSource(target, binds) {
 }
 /**
  * @param {string} objects
- * @returns {string[]}
+ * @returns {string[]|null} sorted fanout paths, or null when the listing failed
  */
 function objectFanoutPaths(objects) {
   try {
     return fs.readdirSync(objects, { withFileTypes: true })
       .filter((entry) => (entry.isDirectory() || entry.isSymbolicLink()) && OBJECT_FANOUT.test(entry.name))
-      .map((entry) => path.join(objects, entry.name));
+      .map((entry) => path.join(objects, entry.name))
+      .sort();
   } catch {
-    return [];
+    return null;
   }
 }
 
 
 /**
  * Git does not report the failing object fanout. Inspect the object store and
- * its fanouts as candidates, not as proof that any one caused the failure.
+ * its fanouts; one unrepresentable path is reported as the affected path,
+ * while several are reported as an unresolved candidate set.
  * @param {string} directory
  * @param {typeof defaultRunCommand} runCommand
  * @param {Array<{path: string, bindSrc: string}>} binds
- * @returns {string[]}
+ * @returns {{paths: Array<{target: string, liveTarget: string}>, listingFailed: boolean}}
  */
 function objectOwnershipCandidates(directory, runCommand, binds) {
   try {
     const result = runCommand("git", ["-C", directory, "rev-parse", "--git-path", "objects"]);
-    if (result.error || result.status !== 0 || !result.stdout.trim()) return [];
-    const objects = snapshotSource(path.resolve(directory, result.stdout.trim()), binds);
-    return [objects, ...objectFanoutPaths(objects)];
+    if (result.error || result.status !== 0 || !result.stdout.trim()) return { paths: [], listingFailed: false };
+    const liveObjects = path.resolve(directory, result.stdout.trim());
+    const objects = snapshotSource(liveObjects, binds);
+    const fanouts = objectFanoutPaths(objects);
+    const paths = [objects, ...(fanouts || [])].map((target) => ({
+      target, liveTarget: path.join(liveObjects, path.relative(objects, target)),
+    }));
+    return { paths, listingFailed: fanouts === null };
   } catch {
-    return [];
+    return { paths: [], listingFailed: false };
   }
+}
+
+/**
+ * @param {string} detail
+ * @param {string} directory
+ * @param {typeof defaultRunCommand} runCommand
+ * @param {Array<{path: string, bindSrc: string}>} binds
+ * @returns {{targets: Array<{target: string, liveTarget: string}>, listingFailed: boolean, gitNamedTarget: boolean}}
+ */
+function ownershipTargets(detail, directory, runCommand, binds) {
+  const lock = detail.match(LOCK_OVERFLOW);
+  // Git names the index lock it could not create, so that path is exact. An
+  // object tempfile error names no directory, so those are candidates only.
+  if (lock) {
+    const liveTarget = path.resolve(directory, path.dirname(lock[1]));
+    return { targets: [{ target: snapshotSource(liveTarget, binds), liveTarget }], listingFailed: false, gitNamedTarget: true };
+  }
+  if (OBJECT_OVERFLOW.test(detail)) {
+    const { paths, listingFailed } = objectOwnershipCandidates(directory, runCommand, binds);
+    return { listingFailed, targets: paths, gitNamedTarget: false };
+  }
+  return { targets: [], listingFailed: false, gitNamedTarget: false };
+}
+
+/**
+ * @param {Array<{target: string, liveTarget: string}>} targets
+ * @param {(p: string) => {uid: number, gid: number}} statFn
+ * @param {number|undefined} uid
+ * @param {number|undefined} gid
+ * @returns {{affected: Array<{target: string, liveTarget: string, labels: string[]}>, summary: string}|null}
+ */
+function describeAffected(targets, statFn, uid, gid) {
+  const affected = targets
+    .map((candidate) => ({ ...candidate, labels: ownershipLabels(candidate.target, statFn, uid, gid) }))
+    .filter((candidate) => candidate.labels.length > 0);
+  if (!affected.length) return null;
+  return { affected, summary: summarizeAffected(affected) };
+}
+
+/**
+ * Hedge deliberately: differing owner identity is a heuristic, not proof of
+ * what the sandbox can represent, so the claim stops at "may be".
+ * @param {Array<{target: string, labels: string[]}>} affected
+ * @returns {string}
+ */
+function summarizeAffected(affected) {
+  if (affected.length > 1) {
+    return `Unable to extract changeset: owners at ${affected.length} inspected paths differ from the daemon's identity and may be unrepresentable in the sandbox.`;
+  }
+  const labels = affected[0].labels.join(" and ");
+  const verb = affected[0].labels.length > 1 ? "differ" : "differs";
+  return `Unable to extract changeset: ${labels} ${verb} from the daemon's identity and may be unrepresentable in the sandbox.`;
+}
+
+/**
+ * @param {string[]} labels
+ * @returns {{owners: string, principals: string}}
+ */
+function axisWording(labels) {
+  const userDiffers = labels.some((label) => label.startsWith("user owner"));
+  const groupDiffers = labels.some((label) => label.startsWith("group owner"));
+  if (userDiffers && groupDiffers) return { owners: "user and group owners", principals: "user and group running" };
+  if (userDiffers) return { owners: "user owner", principals: "user running" };
+  return { owners: "group owner", principals: "group running" };
+}
+
+/**
+ * @param {string} owners
+ * @param {string} principals
+ * @param {string} target
+ * @returns {string}
+ */
+function ownershipAdvice(owners, principals, target) {
+  return `Set the ${owners} of ${target} to the ${principals} the Taskferry daemon`;
+}
+
+/**
+ * @param {{affected: Array<{target: string, liveTarget: string, labels: string[]}>, summary: string, gitNamedTarget: boolean, listingFailed: boolean}} params
+ * @returns {string}
+ */
+function ownershipRemedy({ affected, summary, gitNamedTarget, listingFailed }) {
+  const first = affected[0];
+  const { owners, principals } = axisWording(first.labels);
+  const hedge = "Inspect ownership before changing it.";
+  if (gitNamedTarget) {
+    const target = first.liveTarget;
+    const snapshotNote = target !== first.target
+      ? ` Ownership was inspected on the bound scratch snapshot at ${first.target}, not the live path.`
+      : "";
+    return `${summary} ${ownershipAdvice(owners, principals, target)}.${snapshotNote} ${hedge}`;
+  }
+  if (affected.length === 1) {
+    const partial = listingFailed ? " The fanout listing failed, so some loose-object directories may be uninspected." : "";
+    const snapshotNote = first.liveTarget !== first.target ? ` Ownership was inspected on the bound scratch snapshot at ${first.target}, not the live path.` : "";
+    return `${summary} Git did not name the failing object directory; ${first.target} is the only inspected loose-object directory whose owner differs from the daemon's identity, so it is the likely affected path.${partial} ${ownershipAdvice(owners, principals, first.liveTarget)}.${snapshotNote} ${hedge}`;
+  }
+  const shown = affected.slice(0, 4).map((candidate) => {
+    const mapping = candidate.target !== candidate.liveTarget ? ` [snapshot; corresponding live path: ${candidate.liveTarget}]` : "";
+    return `${candidate.target} (${candidate.labels.join(", ")})${mapping}`;
+  }).join(", ");
+  const remainder = affected.length > 4 ? ` and ${affected.length - 4} more` : "";
+  return `${summary} Git did not name the failing object directory, and ${affected.length} object-store paths have owners that differ from the daemon's identity, so the exact path is unresolved: ${shown}${remainder}. Inspect the live paths' ownership and set it to the user/group running the Taskferry daemon where appropriate. ${hedge}`;
 }
 
 /**
@@ -309,16 +418,10 @@ function extractionFailure({ directory, result, runCommand, statFn, uid, gid, bi
   const detail = (result.stderr || result.error?.message || "unknown error").trim();
   const original = `error: git diff extraction failed for ${directory} (exit ${result.status ?? "null"}): ${detail}`;
   if (result.error) return original;
-  const lock = detail.match(LOCK_OVERFLOW);
-  /** @type {string[]} */
-  let targets = [];
-  if (lock) targets = [snapshotSource(path.resolve(directory, path.dirname(lock[1])), binds)];
-  if (!lock && OBJECT_OVERFLOW.test(detail)) targets = objectOwnershipCandidates(directory, runCommand, binds);
-  const candidates = targets.map((target) => ownershipCandidate(target, statFn, uid, gid)).filter((candidate) => candidate !== null);
-  if (!candidates.length) return original;
-  const shown = candidates.slice(0, 4).join(", ");
-  const remainder = candidates.length > 4 ? ` and ${candidates.length - 4} more` : "";
-  return `${original}\nPossible unmapped ownership in the sandbox. Host observations: ${shown}${remainder}. The merged overlay view may differ, and these paths may not be the cause. Inspect ownership relative to the TaskFerry daemon's user and group; change ownership only if appropriate.`;
+  const { targets, listingFailed, gitNamedTarget } = ownershipTargets(detail, directory, runCommand, binds);
+  const described = describeAffected(targets, statFn, uid, gid);
+  if (!described) return original;
+  return `${original}\n${ownershipRemedy({ ...described, gitNamedTarget, listingFailed })}`;
 }
 
 /**

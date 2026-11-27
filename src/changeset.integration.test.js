@@ -27,6 +27,7 @@ after(() => {
 const TMP_ROOT_PREFIX = "axi-int-tmp-";
 const RUN_ROOT_PREFIX = "axi-int-run-";
 const TRACKED_FILE = "tracked.txt";
+const INDEX_LOCK = "index.lock";
 const OBJECT_TEMPFILE = "object tempfile";
 const CHANGED_CONTENT = "base\nchanged\n";
 const GIT_EMAIL = "user.email=t@t";
@@ -401,8 +402,8 @@ function chownableUnmappedGid() {
 }
 
 describe("unmapped ownership extraction (real bwrap)", () => {
-  for (const failure of ["index.lock", OBJECT_TEMPFILE]) {
-    test(`reports candidate ownership for ${failure} and retains worker changes`, (t) => {
+  for (const failure of [INDEX_LOCK, OBJECT_TEMPFILE]) {
+    test(`reports affected ownership for ${failure} and retains worker changes`, (t) => {
       const required = process.env.TASKFERRY_REQUIRE_OWNERSHIP_REGRESSION === "1";
       if (!required && process.env.TASKFERRY_TEST_UNMAPPED_OWNERSHIP !== "1") {
         t.skip("set TASKFERRY_TEST_UNMAPPED_OWNERSHIP=1 on a host with working user namespaces and OverlayFS");
@@ -450,8 +451,8 @@ describe("unmapped ownership extraction (real bwrap)", () => {
         overlayRwBinds: [], stateDir: tmpRoot, homeDir: os.homedir(), denyList: [],
       }), (err) => {
         assert.match(err.message, /Value too large for defined data type/);
-        assert.match(err.message, /Unable to extract changeset: group owner \d+ cannot be represented in the sandbox/);
-        assert.ok(err.message.includes(`Set ownership of ${affected} to`));
+        assert.match(err.message, /Unable to extract changeset: group owner \d+ differs from the daemon's identity and may be unrepresentable in the sandbox/);
+        assert.ok(err.message.includes(`Set the group owner of ${affected} to the group running the Taskferry daemon`));
         if (failure === OBJECT_TEMPFILE) {
           assert.match(err.message, /Git did not name the failing object directory/);
         }

@@ -852,28 +852,29 @@ describe("cleanupOverlay()", () => {
   });
 });
 
-describe("git extraction ownership hints", () => {
-  const params = {
-    directory: REPO_DIR, overlay: { upperDir: T1_UPPER, workDir: T1_WORK },
-    overlayRwBinds: [], preDispatchHead: PRE_DISPATCH_HEAD, stateDir: STATE_DIR,
-    runtimeDir: RUNTIME_DIR, homeDir: HOME_DIR, denyList: [], diffPath: DIFF_PATCH,
-    daemonUid: 1000, daemonGid: 1000,
-  };
-  const overflow = "Value too large for defined data type";
-  const objectsError = `error: unable to create temporary file: ${overflow}\nfatal: failed to insert into database`;
-  const runFailure = (stderr, objectsPath = "") => (command) => command === "git"
-    ? { status: 0, stdout: objectsPath, stderr: "" }
-    : { status: 1, stdout: "", stderr };
+const overflow = "Value too large for defined data type";
+const objectsError = `error: unable to create temporary file: ${overflow}\nfatal: failed to insert into database`;
+const params = {
+  directory: REPO_DIR, overlay: { upperDir: T1_UPPER, workDir: T1_WORK },
+  overlayRwBinds: [], preDispatchHead: PRE_DISPATCH_HEAD, stateDir: STATE_DIR,
+  runtimeDir: RUNTIME_DIR, homeDir: HOME_DIR, denyList: [], diffPath: DIFF_PATCH,
+  daemonUid: 1000, daemonGid: 1000,
+};
+const runFailure = (stderr, objectsPath = "") => (command) => command === "git"
+  ? { status: 0, stdout: objectsPath, stderr: "" }
+  : { status: 1, stdout: "", stderr };
 
+describe("git extraction ownership hints (Git-named paths)", () => {
   test("names the index lock parent Git reported and makes the fix actionable", () => {
     const stderr = `fatal: Unable to create '${REPO_DIR}/.git/index.lock': ${overflow}`;
     assert.throws(() => extractGitDiff({
       ...params, runCommand: runFailure(stderr), statFn: () => ({ uid: 1000, gid: 4242 }),
     }), (err) => {
-      assert.match(err.message, /Unable to extract changeset: group owner 4242 cannot be represented in the sandbox/);
-      assert.ok(err.message.includes(`Set ownership of ${REPO_DIR}/.git to the user/group running the TaskFerry daemon`));
+      assert.match(err.message, /Unable to extract changeset: group owner 4242 differs from the daemon's identity and may be unrepresentable in the sandbox/);
+      assert.ok(err.message.includes(`Set the group owner of ${REPO_DIR}/.git to the group running the Taskferry daemon`));
+      assert.match(err.message, /inspect ownership before changing it/i);
       assert.ok(err.message.includes(stderr));
-      assert.doesNotMatch(err.message, /may not be the cause|possible/i);
+      assert.doesNotMatch(err.message, /may not be the cause|possible|cannot be represented/i);
       return true;
     });
   });
@@ -883,7 +884,8 @@ describe("git extraction ownership hints", () => {
     assert.throws(() => extractGitDiff({
       ...params, runCommand: runFailure(stderr), statFn: () => ({ uid: 1234, gid: 4242 }),
     }), (err) => {
-      assert.match(err.message, /user owner 1234 and group owner 4242/);
+      assert.match(err.message, /user owner 1234 and group owner 4242 differ from the daemon's identity/);
+      assert.ok(err.message.includes(`Set the user and group owners of ${REPO_DIR}/.git to the user and group running the Taskferry daemon`));
       return true;
     });
     assert.throws(() => extractGitDiff({
@@ -891,6 +893,8 @@ describe("git extraction ownership hints", () => {
     }), (err) => {
       assert.match(err.message, /user owner 1234/);
       assert.doesNotMatch(err.message, /group owner/);
+      assert.ok(err.message.includes(`Set the user owner of ${REPO_DIR}/.git to the user running the Taskferry daemon`));
+      assert.doesNotMatch(err.message, /user\/group/);
       return true;
     });
   });
@@ -906,7 +910,7 @@ describe("git extraction ownership hints", () => {
       },
     }), (err) => {
       assert.ok(err.message.includes(stderr));
-      assert.ok(err.message.includes(`Set ownership of ${gitDir} to`));
+      assert.ok(err.message.includes(`Set the group owner of ${gitDir} to the group running the Taskferry daemon`));
       return true;
     });
   });
@@ -921,7 +925,9 @@ describe("git extraction ownership hints", () => {
       statFn: (p) => ({ uid: 1000, gid: p === snapshot ? 4242 : 1000 }),
     }), (err) => {
       assert.ok(err.message.includes(stderr));
-      assert.ok(err.message.includes(`Set ownership of ${snapshot} to`));
+      assert.match(err.message, /bound scratch snapshot/);
+      assert.ok(err.message.includes(snapshot));
+      assert.ok(err.message.includes(`Set the group owner of ${gitDir} to the group running the Taskferry daemon`));
       assert.match(err.message, /group owner 4242/);
       return true;
     });
@@ -936,6 +942,9 @@ describe("git extraction ownership hints", () => {
     });
   });
 
+  });
+
+describe("git extraction ownership hints (object store)", () => {
   test("names the only unrepresentable object directory as the affected path", () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "axi-owner-snapshot-"));
     trackedTmpDirs.push(root);
@@ -950,9 +959,25 @@ describe("git extraction ownership hints", () => {
     }), (err) => {
       assert.ok(err.message.includes(objectsError));
       assert.match(err.message, /Git did not name the failing object directory/);
-      assert.match(err.message, /only loose-object directory Taskferry inspected/);
-      assert.match(err.message, /so it is the likely cause/);
-      assert.ok(err.message.includes(`Set ownership of ${fanout} to`));
+      assert.match(err.message, /only inspected loose-object directory/);
+      assert.match(err.message, /so it is the likely affected path/);
+      assert.doesNotMatch(err.message, /is the likely cause/);
+      assert.ok(err.message.includes(`Set the group owner of ${fanout} to the group running the Taskferry daemon`));
+      return true;
+    });
+  });
+
+  test("discloses when the fanout listing failed instead of claiming a full scan", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "axi-ownership-partial-"));
+    trackedTmpDirs.push(root);
+    const objects = path.join(root, "objects");
+    fs.writeFileSync(objects, "");
+    assert.throws(() => extractGitDiff({
+      ...params, runCommand: runFailure(objectsError, `${objects}\n`),
+      statFn: (p) => ({ uid: 1000, gid: p === objects ? 4242 : 1000 }),
+    }), (err) => {
+      assert.match(err.message, /fanout listing failed/i);
+      assert.match(err.message, /may be uninspected/i);
       return true;
     });
   });
@@ -989,10 +1014,15 @@ describe("git extraction ownership hints", () => {
         gid: p === path.join(objects, "ab") ? 4242 : 1000,
       }),
     }), (err) => {
-      assert.match(err.message, /Unable to extract changeset: group owner 4242 and user owner 1234/);
+      assert.doesNotMatch(err.message, /group owner 4242 and user owner 1234/);
+      assert.match(err.message, /Unable to extract changeset: owners at 2 inspected paths differ from the daemon's identity/);
       assert.match(err.message, /exact path is unresolved/);
       assert.ok(err.message.includes(`${path.join(objects, "ab")} (group owner 4242)`));
       assert.ok(err.message.includes(`${path.join(objects, "cd")} (user owner 1234)`));
+      assert.ok(
+        err.message.indexOf(`${path.join(objects, "ab")} (`) < err.message.indexOf(`${path.join(objects, "cd")} (`),
+        "candidate paths must be listed in sorted order",
+      );
       assert.ok(err.message.includes(objectsError));
       return true;
     });
@@ -1007,11 +1037,14 @@ describe("git extraction ownership hints", () => {
       ...params, runCommand: runFailure(objectsError, `${objects}\n`),
       statFn: (p) => ({ uid: 1000, gid: p === objects ? 4242 : 1000 }),
     }), (err) => {
-      assert.ok(err.message.includes(`Set ownership of ${objects} to`));
+      assert.ok(err.message.includes(`Set the group owner of ${objects} to the group running the Taskferry daemon`));
       return true;
     });
   });
 
+  });
+
+describe("git extraction ownership hints (failure preservation)", () => {
   test("preserves unrelated, localized, and spawn errors without ownership claims", () => {
     for (const result of [
       { status: 1, stdout: "", stderr: "fatal: unable to read object: Value too large for defined data type" },

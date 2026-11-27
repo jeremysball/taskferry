@@ -262,15 +262,16 @@ function snapshotSource(target, binds) {
 }
 /**
  * @param {string} objects
- * @returns {string[]}
+ * @returns {string[]|null} sorted fanout paths, or null when the listing failed
  */
 function objectFanoutPaths(objects) {
   try {
     return fs.readdirSync(objects, { withFileTypes: true })
       .filter((entry) => (entry.isDirectory() || entry.isSymbolicLink()) && OBJECT_FANOUT.test(entry.name))
-      .map((entry) => path.join(objects, entry.name));
+      .map((entry) => path.join(objects, entry.name))
+      .sort();
   } catch {
-    return [];
+    return null;
   }
 }
 
@@ -282,16 +283,17 @@ function objectFanoutPaths(objects) {
  * @param {string} directory
  * @param {typeof defaultRunCommand} runCommand
  * @param {Array<{path: string, bindSrc: string}>} binds
- * @returns {string[]}
+ * @returns {{paths: string[], listingFailed: boolean}}
  */
 function objectOwnershipCandidates(directory, runCommand, binds) {
   try {
     const result = runCommand("git", ["-C", directory, "rev-parse", "--git-path", "objects"]);
-    if (result.error || result.status !== 0 || !result.stdout.trim()) return [];
+    if (result.error || result.status !== 0 || !result.stdout.trim()) return { paths: [], listingFailed: false };
     const objects = snapshotSource(path.resolve(directory, result.stdout.trim()), binds);
-    return [objects, ...objectFanoutPaths(objects)];
+    const fanouts = objectFanoutPaths(objects);
+    return { paths: [objects, ...(fanouts || [])], listingFailed: fanouts === null };
   } catch {
-    return [];
+    return { paths: [], listingFailed: false };
   }
 }
 
@@ -300,15 +302,21 @@ function objectOwnershipCandidates(directory, runCommand, binds) {
  * @param {string} directory
  * @param {typeof defaultRunCommand} runCommand
  * @param {Array<{path: string, bindSrc: string}>} binds
- * @returns {{targets: string[], gitNamedTarget: boolean}}
+ * @returns {{targets: string[], liveTarget: string|null, listingFailed: boolean, gitNamedTarget: boolean}}
  */
 function ownershipTargets(detail, directory, runCommand, binds) {
   const lock = detail.match(LOCK_OVERFLOW);
   // Git names the index lock it could not create, so that path is exact. An
   // object tempfile error names no directory, so those are candidates only.
-  if (lock) return { targets: [snapshotSource(path.resolve(directory, path.dirname(lock[1])), binds)], gitNamedTarget: true };
-  if (OBJECT_OVERFLOW.test(detail)) return { targets: objectOwnershipCandidates(directory, runCommand, binds), gitNamedTarget: false };
-  return { targets: [], gitNamedTarget: false };
+  if (lock) {
+    const liveTarget = path.resolve(directory, path.dirname(lock[1]));
+    return { liveTarget, targets: [snapshotSource(liveTarget, binds)], listingFailed: false, gitNamedTarget: true };
+  }
+  if (OBJECT_OVERFLOW.test(detail)) {
+    const { paths, listingFailed } = objectOwnershipCandidates(directory, runCommand, binds);
+    return { listingFailed, targets: paths, liveTarget: null, gitNamedTarget: false };
+  }
+  return { targets: [], liveTarget: null, listingFailed: false, gitNamedTarget: false };
 }
 
 /**
@@ -323,24 +331,68 @@ function describeAffected(targets, statFn, uid, gid) {
     .map((target) => ({ target, labels: ownershipLabels(target, statFn, uid, gid) }))
     .filter((candidate) => candidate.labels.length > 0);
   if (!affected.length) return null;
-  const labels = [...new Set(affected.flatMap((candidate) => candidate.labels))];
-  return { affected, summary: `Unable to extract changeset: ${labels.join(" and ")} cannot be represented in the sandbox.` };
+  return { affected, summary: summarizeAffected(affected) };
 }
 
 /**
- * @param {{affected: Array<{target: string, labels: string[]}>, summary: string, gitNamedTarget: boolean}} params
+ * Hedge deliberately: differing owner identity is a heuristic, not proof of
+ * what the sandbox can represent, so the claim stops at "may be".
+ * @param {Array<{target: string, labels: string[]}>} affected
  * @returns {string}
  */
-function ownershipRemedy({ affected, summary, gitNamedTarget }) {
-  const guidance = "Set ownership of";
-  const advice = "to the user/group running the TaskFerry daemon.";
-  if (gitNamedTarget) return `${summary} ${guidance} ${affected[0].target} ${advice}`;
+function summarizeAffected(affected) {
+  if (affected.length > 1) {
+    return `Unable to extract changeset: owners at ${affected.length} inspected paths differ from the daemon's identity and may be unrepresentable in the sandbox.`;
+  }
+  const labels = affected[0].labels.join(" and ");
+  const verb = affected[0].labels.length > 1 ? "differ" : "differs";
+  return `Unable to extract changeset: ${labels} ${verb} from the daemon's identity and may be unrepresentable in the sandbox.`;
+}
+
+/**
+ * @param {string[]} labels
+ * @returns {{owners: string, principals: string}}
+ */
+function axisWording(labels) {
+  const userDiffers = labels.some((label) => label.startsWith("user owner"));
+  const groupDiffers = labels.some((label) => label.startsWith("group owner"));
+  if (userDiffers && groupDiffers) return { owners: "user and group owners", principals: "user and group running" };
+  if (userDiffers) return { owners: "user owner", principals: "user running" };
+  return { owners: "group owner", principals: "group running" };
+}
+
+/**
+ * @param {string} owners
+ * @param {string} principals
+ * @param {string} target
+ * @returns {string}
+ */
+function ownershipAdvice(owners, principals, target) {
+  return `Set the ${owners} of ${target} to the ${principals} the Taskferry daemon`;
+}
+
+/**
+ * @param {{affected: Array<{target: string, labels: string[]}>, summary: string, gitNamedTarget: boolean, liveTarget: string|null, listingFailed: boolean}} params
+ * @returns {string}
+ */
+function ownershipRemedy({ affected, summary, gitNamedTarget, liveTarget, listingFailed }) {
+  const first = affected[0];
+  const { owners, principals } = axisWording(first.labels);
+  const hedge = "Inspect ownership before changing it.";
+  if (gitNamedTarget) {
+    const target = liveTarget ?? first.target;
+    const snapshotNote = liveTarget && liveTarget !== first.target
+      ? ` Ownership was inspected on the bound scratch snapshot at ${first.target}, not the live path.`
+      : "";
+    return `${summary} ${ownershipAdvice(owners, principals, target)}.${snapshotNote} ${hedge}`;
+  }
   if (affected.length === 1) {
-    return `${summary} Git did not name the failing object directory; ${affected[0].target} is the only loose-object directory Taskferry inspected whose ownership the sandbox cannot represent, so it is the likely cause. ${guidance} ${affected[0].target} ${advice}`;
+    const partial = listingFailed ? " The fanout listing failed, so some loose-object directories may be uninspected." : "";
+    return `${summary} Git did not name the failing object directory; ${first.target} is the only inspected loose-object directory whose owner differs from the daemon's identity, so it is the likely affected path.${partial} ${ownershipAdvice(owners, principals, first.target)}.${hedge}`;
   }
   const shown = affected.slice(0, 4).map((candidate) => `${candidate.target} (${candidate.labels.join(", ")})`).join(", ");
   const remainder = affected.length > 4 ? ` and ${affected.length - 4} more` : "";
-  return `${summary} Git did not name the failing object directory, and ${affected.length} object-store paths have owners the sandbox cannot represent, so the exact path is unresolved: ${shown}${remainder}. Inspect their ownership and set it to the user/group running the TaskFerry daemon where appropriate.`;
+  return `${summary} Git did not name the failing object directory, and ${affected.length} object-store paths have owners that differ from the daemon's identity, so the exact path is unresolved: ${shown}${remainder}. Inspect their ownership and set it to the user/group running the Taskferry daemon where appropriate. ${hedge}`;
 }
 
 /**
@@ -358,10 +410,10 @@ function extractionFailure({ directory, result, runCommand, statFn, uid, gid, bi
   const detail = (result.stderr || result.error?.message || "unknown error").trim();
   const original = `error: git diff extraction failed for ${directory} (exit ${result.status ?? "null"}): ${detail}`;
   if (result.error) return original;
-  const { targets, gitNamedTarget } = ownershipTargets(detail, directory, runCommand, binds);
+  const { targets, liveTarget, listingFailed, gitNamedTarget } = ownershipTargets(detail, directory, runCommand, binds);
   const described = describeAffected(targets, statFn, uid, gid);
   if (!described) return original;
-  return `${original}\n${ownershipRemedy({ ...described, gitNamedTarget })}`;
+  return `${original}\n${ownershipRemedy({ ...described, gitNamedTarget, liveTarget, listingFailed })}`;
 }
 
 /**

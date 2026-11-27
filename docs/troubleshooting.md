@@ -194,24 +194,30 @@ bubblewrap and overlay prerequisites.
 Git can fail to create an index lock or object temporary file with `Value too
 large for defined data type` when a directory's owner or group cannot be
 represented in bubblewrap's user namespace. Taskferry reports which owner
-differs from the daemon's own user or group, using numeric IDs.
+differs from the daemon's own user or group, using numeric IDs. A differing
+owner is a strong hint about the cause, not proof: Taskferry does not read the
+sandbox's ID map.
 
 - **Index lock:** Git names the lock file, so Taskferry names the exact
   directory it could not write, and the error is directly actionable.
 - **Object temporary file:** Git does not name the failing object directory.
   Taskferry inspects the loose-object store root and its two-character fanouts.
-  If exactly one of those has an owner the sandbox cannot represent, Taskferry
-  names it as the likely affected path. If several do, the error says the exact
-  path is unresolved, names up to four, and counts the rest, because any of
-  them could have failed.
+  If exactly one of those has an owner that differs from the daemon's identity,
+  Taskferry names it as the likely affected path. If several do, the error says
+  the exact path is unresolved, names up to four, and counts the rest, because
+  any of them could have failed. If the fanout listing fails, only the store
+  root is inspected and the error says so, because some loose-object
+  directories may then be uninspected.
 
-Set the reported path's owner or group to the user/group running the TaskFerry
-daemon. Inspect ownership before changing it; Taskferry never changes
-ownership automatically. Numeric IDs come from the host or the bound scratch
-snapshot and are not evidence of a name: do not treat an unmapped-ID
+Change the owner or group that differs to the user or group running the
+Taskferry daemon; when several candidates are listed, change ownership only
+where appropriate. Inspect ownership before changing it; Taskferry never
+changes ownership automatically. Numeric IDs come from the host or the bound
+scratch snapshot and are not evidence of a name: do not treat an unmapped-ID
 placeholder such as `nobody` in the sandbox as the host owner's name.
-For a linked worktree or a separately mounted Git directory, the reported path
-may be Taskferry's scratch snapshot rather than the live repository path.
+For a linked worktree or a separately mounted Git directory, ownership is
+inspected on Taskferry's bound scratch snapshot; the remedy names the live
+path and notes the snapshot path it inspected.
 Reported owners are host observations; the sandbox's merged overlay view can
 differ. Symlinked object fanouts are inspected through their targets.
 
